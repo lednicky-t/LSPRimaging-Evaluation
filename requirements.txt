@@ -1,0 +1,9 @@
+PyQt6
+pyqtgraph
+numpy
+Pillow
+scipy
+tifffile
+scikit-image
+tabler-icons
+lucide
