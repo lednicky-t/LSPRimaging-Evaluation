@@ -78,7 +78,7 @@ def chromatic_subpixel_precision_value(current_data, default: int = 4) -> int:
 
 
 def display_length_suffix(use_micrometers: bool) -> str:
-    return " Âµm" if use_micrometers else " px"
+    return " \u00b5m" if use_micrometers else " px"
 
 
 def length_px_to_display(use_micrometers: bool, microns_per_pixel: float, value_px: float) -> float:
@@ -101,8 +101,8 @@ def circle_area_text(use_micrometers: bool, microns_per_pixel: float, diameter_p
     radius_px = max(float(diameter_px) / 2.0, 0.0)
     if use_micrometers:
         radius_um = radius_px * float(microns_per_pixel)
-        return f"{np.pi * radius_um * radius_um:.0f} ÂµmÂ²"
-    return f"{np.pi * radius_px * radius_px:.0f} pxÂ²"
+        return f"{np.pi * radius_um * radius_um:.0f} \u00b5m\u00b2"
+    return f"{np.pi * radius_px * radius_px:.0f} px\u00b2"
 
 
 def ring_area_text(use_micrometers: bool, microns_per_pixel: float, inner_diameter_px: float, outer_diameter_px: float) -> str:
@@ -112,8 +112,8 @@ def ring_area_text(use_micrometers: bool, microns_per_pixel: float, inner_diamet
         scale = float(microns_per_pixel)
         inner_radius_um = inner_radius_px * scale
         outer_radius_um = outer_radius_px * scale
-        return f"{np.pi * max(outer_radius_um * outer_radius_um - inner_radius_um * inner_radius_um, 0.0):.0f} ÂµmÂ²"
-    return f"{np.pi * max(outer_radius_px * outer_radius_px - inner_radius_px * inner_radius_px, 0.0):.0f} pxÂ²"
+        return f"{np.pi * max(outer_radius_um * outer_radius_um - inner_radius_um * inner_radius_um, 0.0):.0f} \u00b5m\u00b2"
+    return f"{np.pi * max(outer_radius_px * outer_radius_px - inner_radius_px * inner_radius_px, 0.0):.0f} px\u00b2"
 
 
 def area_value_text(use_micrometers: bool, microns_per_pixel: float, area_px2: float) -> str:
