@@ -131,6 +131,8 @@ class ChromaticController:
             window._set_status_text("Reference image is missing from the dataset.")
             return
         mode = str(window._state.preprocessing.chromatic_registration_mode or "landmark_radial")
+        sample_keys = window._chromatic_sample_image_keys()
+        feature_ids = window._expected_chromatic_feature_ids()
         landmarks_payload = [
             (
                 int(mark.landmark_id),
@@ -142,14 +144,38 @@ class ChromaticController:
             for mark in window._state.chromatic_landmarks
         ]
         if mode == "landmark_radial":
-            reference_landmark_ids = {
-                landmark_id
-                for landmark_id, frame, wavelength, _x, _y in landmarks_payload
-                if (frame, wavelength) == reference_key
-            }
-            if len(reference_landmark_ids) < 2:
-                window._set_status_text("Mark at least two reference points before estimating landmark-based chromatic transforms.")
+            marks_by_sample: dict[tuple[int, float], set[int]] = {sample_key: set() for sample_key in sample_keys}
+            for landmark_id, frame, wavelength, _x, _y in landmarks_payload:
+                sample_key = (int(frame), float(wavelength))
+                if sample_key in marks_by_sample:
+                    marks_by_sample[sample_key].add(int(landmark_id))
+            complete_samples = [
+                sample_key
+                for sample_key in sample_keys
+                if all(feature_id in marks_by_sample[sample_key] for feature_id in feature_ids)
+            ]
+            if not complete_samples:
+                best_sample_key = None
+                best_count = -1
+                best_missing: list[int] = []
+                for sample_key in sample_keys:
+                    missing = [feature_id for feature_id in feature_ids if feature_id not in marks_by_sample[sample_key]]
+                    complete_count = len(feature_ids) - len(missing)
+                    if complete_count > best_count:
+                        best_count = complete_count
+                        best_sample_key = sample_key
+                        best_missing = missing
+                missing_text = ", ".join(str(feature_id) for feature_id in best_missing[:6]) if best_missing else "unknown"
+                if best_sample_key is None:
+                    window._set_status_text("No chromatic reference points are available for the sampled images.")
+                else:
+                    window._set_status_text(
+                        f"Mark all {len(feature_ids)} reference points on at least one sampled wavelength image before estimating "
+                        f"chromatic transforms. Missing on the best sample: {missing_text}."
+                    )
                 return
+            if reference_key not in complete_samples:
+                reference_key = complete_samples[0]
         window._push_undo_point("Chromatic correction")
         window._chromatic_registration_request_id += 1
         request_id = window._chromatic_registration_request_id

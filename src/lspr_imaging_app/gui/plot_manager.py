@@ -57,7 +57,8 @@ class PlotManager:
 
     def histogram_log_y_max(self) -> float:
         window = self._window
-        candidates: list[float] = [window.HISTOGRAM_LOG_Y_FLOOR]
+        log_floor = float(np.log10(window.HISTOGRAM_LOG_Y_FLOOR))
+        candidates: list[float] = [log_floor]
         for curve in (
             getattr(window, "histogram_curve", None),
             getattr(window, "spot_histogram_curve", None),
@@ -73,7 +74,7 @@ class PlotManager:
             y_array = y_array[np.isfinite(y_array)]
             if y_array.size:
                 candidates.append(float(np.max(y_array)))
-        return max(max(candidates), window.HISTOGRAM_LOG_Y_FLOOR)
+        return max(candidates)
 
     def clamp_histogram_log_range(self) -> None:
         window = self._window
@@ -83,7 +84,7 @@ class PlotManager:
             return
         window._histogram_log_range_guard = True
         try:
-            y_min = window.HISTOGRAM_LOG_Y_FLOOR
+            y_min = float(np.log10(window.HISTOGRAM_LOG_Y_FLOOR))
             y_max = self.histogram_log_y_max()
             view_box = window.histogram_plot.getViewBox()
             view_box.disableAutoRange(axis=view_box.YAxis)
@@ -106,7 +107,7 @@ class PlotManager:
         current_y = view_box.viewRange()[1] if view_box is not None else None
         if not current_y or len(current_y) < 2:
             return
-        target_y_min = window.HISTOGRAM_LOG_Y_FLOOR
+        target_y_min = float(np.log10(window.HISTOGRAM_LOG_Y_FLOOR))
         target_y_max = self.histogram_log_y_max()
         if (
             abs(float(current_y[0]) - target_y_min) < 1e-9
@@ -318,9 +319,9 @@ class PlotManager:
         if window._histogram_log_y_enabled:
             total_counts_display = np.clip(total_counts_display, y_floor, None)
         window.histogram_curve.setData(centers, total_counts_display)
-        max_value = float(np.max(total_counts_display)) if total_counts_display.size else 1.0
-        max_value = max(
-            max_value,
+        histogram_peak = float(np.max(total_counts_display)) if total_counts_display.size else 1.0
+        histogram_peak = max(
+            histogram_peak,
             self.update_area_histogram_curves(
                 edges=edges,
                 spot_values=spot_values,
@@ -331,11 +332,12 @@ class PlotManager:
             ),
         )
         if window._histogram_log_y_enabled:
-            y_max = max(float(values.size), window.HISTOGRAM_LOG_Y_FLOOR)
-            window.histogram_plot.setLimits(yMin=window.HISTOGRAM_LOG_Y_FLOOR, yMax=y_max)
-            view_box.setRange(yRange=(window.HISTOGRAM_LOG_Y_FLOOR, y_max), padding=0.0, disableAutoRange=True)
+            y_min = float(np.log10(window.HISTOGRAM_LOG_Y_FLOOR))
+            y_max = max(float(np.log10(histogram_peak)), y_min)
+            window.histogram_plot.setLimits(yMin=y_min, yMax=y_max)
+            view_box.setRange(yRange=(y_min, y_max), padding=0.0, disableAutoRange=True)
         else:
-            window.histogram_plot.setYRange(y_floor, max(max_value * 1.05, 1.0), padding=0.0)
+            window.histogram_plot.setYRange(y_floor, max(histogram_peak * 1.05, 1.0), padding=0.0)
         window.histogram_plot.setXRange(float(edges[0]), float(edges[-1]), padding=0.0)
         min_value = window.HISTOGRAM_MIN_INTENSITY if window._state.spot_detection.intensity_min_value is None else float(window._state.spot_detection.intensity_min_value)
         max_value = window.HISTOGRAM_MAX_INTENSITY if window._state.spot_detection.intensity_max_value is None else float(window._state.spot_detection.intensity_max_value)

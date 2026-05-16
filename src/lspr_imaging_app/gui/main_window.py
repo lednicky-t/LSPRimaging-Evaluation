@@ -36,7 +36,7 @@ from PyQt6.QtCore import (
     QTimer,
     pyqtSignal,
 )
-from PyQt6.QtGui import QAction, QActionGroup, QBrush, QColor, QFont, QGuiApplication, QIcon, QKeyEvent, QKeySequence, QPainter, QPainterPath, QPalette, QPen, QPixmap, QTextCursor
+from PyQt6.QtGui import QAction, QActionGroup, QBrush, QColor, QFont, QGuiApplication, QIcon, QKeyEvent, QKeySequence, QLinearGradient, QPainter, QPainterPath, QPalette, QPen, QPixmap, QTextCursor
 from PyQt6.QtSvg import QSvgRenderer
 from PyQt6.QtWidgets import (
     QApplication,
@@ -72,6 +72,7 @@ from PyQt6.QtWidgets import (
     QSplitter,
     QSlider,
     QStyle,
+    QStyleOptionProgressBar,
     QTableWidget,
     QTableWidgetItem,
     QToolButton,
@@ -83,17 +84,17 @@ from PyQt6.QtWidgets import (
 )
 from scipy import ndimage
 
-from lspr_imaging_app.gui.theme import (
+from lspr_ui import (
     APP_THEME,
     BLUE_DARK_THEME,
     GRAY_DARK_THEME,
     collapsible_pin_stylesheet,
     collapsible_toggle_stylesheet,
     dark_image_toolbar_stylesheet,
-    icon_accent_colors,
     get_active_theme,
-    set_active_theme,
+    icon_accent_colors,
     section_header_label_stylesheet,
+    set_active_theme,
     standard_push_button_stylesheet,
     transparent_icon_button_stylesheet,
 )
@@ -136,6 +137,13 @@ from lspr_imaging_app.gui.spot_overlay_helpers import resolved_ring_color, resol
 from lspr_imaging_app.gui.analysis_controller import AnalysisController
 from lspr_imaging_app.gui.dataset_controller import DatasetController
 from lspr_imaging_app.gui.image_controller import ImageController
+from lspr_imaging_app.domain.roi_editor_tools import (
+    create_rois_from_template,
+    create_rois_from_template_grid,
+    move_roi_from_template,
+    roi_top_left_from_center,
+)
+from lspr_imaging_app.version import version_string
 from lspr_imaging_app.domain.models import (
     AnalysisState,
     AbsorbanceSpectrumResult,
@@ -188,6 +196,8 @@ from lspr_imaging_app.storage.workspace import (
     save_processing_profile,
 )
 
+
+from .main_window_icons import MainWindowIcons
 SUCCESS_LOG_LEVEL = 25
 logging.addLevelName(SUCCESS_LOG_LEVEL, "SUCCESS")
 
@@ -260,7 +270,7 @@ class CollapsibleSection(QWidget):
             self._apply_button.setCheckable(True)
             self._apply_button.setChecked(bool(applied))
             self._apply_button.setAutoRaise(True)
-            self._apply_button.setIcon(PanelContainer._make_apply_icon(self, bool(applied)))
+            self._apply_button.setIcon(self._make_apply_icon(bool(applied)))
             self._apply_button.setIconSize(QSize(18, 18))
             self._apply_button.setFixedSize(22, 22)
             self._apply_button.setToolTip(apply_tooltip or "Toggle whether this panel's calculations are applied.")
@@ -759,6 +769,91 @@ class BusySpinner(QWidget):
             start_angle = 90 * 16
             span_angle = int(-360.0 * fraction * 16)
             painter.drawArc(rect, start_angle, span_angle)
+        painter.end()
+
+
+class ShineProgressBar(QProgressBar):
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._shine_phase = 0.0
+        self._shine_timer = QTimer(self)
+        self._shine_timer.setInterval(30)
+        self._shine_timer.timeout.connect(self._advance_shine)
+
+    def setRange(self, minimum: int, maximum: int) -> None:  # type: ignore[override]
+        super().setRange(minimum, maximum)
+        self._sync_shine_timer()
+
+    def setValue(self, value: int) -> None:  # type: ignore[override]
+        super().setValue(value)
+        self._sync_shine_timer()
+
+    def _sync_shine_timer(self) -> None:
+        if self.maximum() > self.minimum() and self.value() > self.minimum() and self.value() < self.maximum() and self.isVisible():
+            if not self._shine_timer.isActive():
+                self._shine_timer.start()
+        else:
+            self._shine_timer.stop()
+
+    def showEvent(self, event) -> None:  # type: ignore[override]
+        super().showEvent(event)
+        self._sync_shine_timer()
+
+    def hideEvent(self, event) -> None:  # type: ignore[override]
+        super().hideEvent(event)
+        self._shine_timer.stop()
+
+    def _advance_shine(self) -> None:
+        self._shine_phase = (self._shine_phase + 0.028) % 1.0
+        self.update()
+
+    def paintEvent(self, _event) -> None:
+        option = QStyleOptionProgressBar()
+        self.initStyleOption(option)
+
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+
+        rect = QRectF(self.rect()).adjusted(1.0, 1.0, -1.0, -1.0)
+        radius = min(rect.height(), 9.0) / 2.0
+        track_color = QColor("#1f2937")
+        track_border = QColor("#475569")
+        fill_color = QColor("#38bdf8")
+        text_color = QColor("#f8fafc")
+        shine_color = QColor(255, 255, 255, 120)
+
+        painter.setPen(QPen(track_border, 1.0))
+        painter.setBrush(track_color)
+        painter.drawRoundedRect(rect, radius, radius)
+
+        span = max(option.maximum - option.minimum, 1)
+        fraction = float(np.clip((option.progress - option.minimum) / span, 0.0, 1.0))
+        fill_width = rect.width() * fraction
+        if fill_width > 0.0:
+            fill_rect = QRectF(rect.left(), rect.top(), fill_width, rect.height())
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(fill_color)
+            painter.drawRoundedRect(fill_rect, radius, radius)
+
+            sheen_width = max(rect.width() * 0.28, 18.0)
+            sheen_x = fill_rect.left() - sheen_width + (fill_rect.width() + sheen_width * 2.0) * self._shine_phase
+            sheen_rect = QRectF(sheen_x, fill_rect.top(), sheen_width, fill_rect.height())
+            painter.save()
+            painter.setClipRect(fill_rect)
+            gradient = QLinearGradient(sheen_rect.left(), sheen_rect.top(), sheen_rect.right(), sheen_rect.top())
+            gradient.setColorAt(0.0, QColor(255, 255, 255, 0))
+            gradient.setColorAt(0.45, shine_color)
+            gradient.setColorAt(0.55, shine_color)
+            gradient.setColorAt(1.0, QColor(255, 255, 255, 0))
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(gradient)
+            painter.drawRoundedRect(sheen_rect, radius, radius)
+            painter.restore()
+
+        if option.textVisible:
+            painter.setPen(QPen(text_color))
+            painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, option.text)
+
         painter.end()
 
 
@@ -1880,7 +1975,7 @@ def _estimate_chromatic_models_task(
     return models
 
 
-class MainWindow(QMainWindow):
+class MainWindow(MainWindowIcons, QMainWindow):
     SETTINGS_ORG = "LSPR"
     SETTINGS_APP = "LSPRImaging"
     HISTOGRAM_MIN_INTENSITY = 0.0
@@ -1933,12 +2028,20 @@ class MainWindow(QMainWindow):
         self._thread_pool.setMaxThreadCount(max(4, min(6, os.cpu_count() or 4)))
         self._current_record_path: Path | None = None
         self._crop_roi: pg.RectROI | None = None
+        self._rectangle_roi: pg.RectROI | None = None
+        self._rectangle_stamp_items: list[pg.RectROI] = []
+        self._selected_rectangle_roi_ids: set[str] = set()
         self._crop_overlay_item: QGraphicsPathItem | None = None
         self._active_tool: str | None = None
         self._suspend_crop_sync = False
+        self._suspend_rectangle_sync = False
+        self._dragging_rectangle_rois = False
+        self._rectangle_drag_anchor: tuple[float, float] | None = None
+        self._rectangle_drag_original_positions: dict[str, tuple[float, float]] = {}
         self._dragging_crop = False
         self._crop_drag_anchor: tuple[float, float] | None = None
         self._crop_drag_origin: tuple[float, float] | None = None
+        self._roi_editor_mode = "circles"
         self._panning_image = False
         self._pan_anchor_view: tuple[float, float] | None = None
         self._pan_anchor_ranges: tuple[tuple[float, float], tuple[float, float]] | None = None
@@ -2001,6 +2104,10 @@ class MainWindow(QMainWindow):
         self._spot_selection_pressed_spot_id: int | None = None
         self._spot_selection_drag_modifiers: Qt.KeyboardModifier = Qt.KeyboardModifier.NoModifier
         self._spot_edit_refresh_pending = False
+        self._spot_overlay_refresh_timer = QTimer(self)
+        self._spot_overlay_refresh_timer.setSingleShot(True)
+        self._spot_overlay_refresh_timer.setInterval(16)
+        self._spot_overlay_refresh_timer.timeout.connect(self._refresh_spot_overlays_during_drag)
         self._processed_image_cache: OrderedDict[tuple[object, ...], np.ndarray] = OrderedDict()
         self._processed_shape_cache: dict[tuple[object, ...], tuple[int, int]] = {}
         self._reference_contrast_cache: dict[str, float] = {}
@@ -2042,6 +2149,8 @@ class MainWindow(QMainWindow):
         self._spot_absorbance_cache: OrderedDict[tuple[object, ...], AbsorbanceSpectrumResult] = OrderedDict()
         self._analysis_live_preview_enabled = self._settings_bool("analysis/live_preview", False)
         self._histogram_log_y_enabled = self._settings_bool("histogram/log_y", False)
+        self._histogram_startup_autoscale_pending = False
+        self._histogram_startup_autoscale_attempts = 0
         self._startup_ready = False
         self._startup_restore_in_progress = False
         self._startup_progress_callback: Callable[[int, str], None] | None = None
@@ -2137,7 +2246,7 @@ class MainWindow(QMainWindow):
         self._spot_list_refresh_timer.setInterval(25)
         self._spot_list_refresh_timer.timeout.connect(self._spot_table_controller.update_table)
 
-        self.setWindowTitle("LSPR Imaging")
+        self.setWindowTitle(version_string())
 
         last_folder = self._load_last_folder(default_folder)
         self.folder_edit = QLineEdit(str(last_folder), self)
@@ -2234,7 +2343,7 @@ class MainWindow(QMainWindow):
         self.dataset_ome_zarr_export_status_label = QLabel("Progress", self)
         self.dataset_ome_zarr_export_status_label.setObjectName("toolbarMiniLabel")
         self.dataset_ome_zarr_export_status_label.setToolTip("Current Zarr export progress.")
-        self.dataset_ome_zarr_export_progress_bar = QProgressBar(self)
+        self.dataset_ome_zarr_export_progress_bar = ShineProgressBar(self)
         self.dataset_ome_zarr_export_progress_bar.setRange(0, 100)
         self.dataset_ome_zarr_export_progress_bar.setValue(0)
         self.dataset_ome_zarr_export_progress_bar.setFormat("%p%")
@@ -2356,14 +2465,16 @@ class MainWindow(QMainWindow):
         self.chromatic_subpixel_precision_combo.setToolTip(
             "Sub.px: choose the chromatic reference-point refinement level. 1 = pixel, 4 = moderate, 9 = finer."
         )
-        self.chromatic_start_button = FreeStandingToggleIconLabel(self)
-        self.chromatic_start_button.setFixedSize(28, 28)
-        self.chromatic_start_button.setIconSize(QSize(APP_THEME.compact_icon_inner, APP_THEME.compact_icon_inner))
-        self.chromatic_start_button.setIcon(self._make_spot_edit_icon())
-        self.chromatic_start_button.setToolTip(
-            "Edit: enter chromatic reference-point editing mode on the current sampled image."
+        self.chromatic_start_button = self._free_standing_toggle_icon_label(
+            self._make_spot_edit_icon(False),
+            False,
+            "Edit: enter chromatic reference-point editing mode on the current sampled image.",
+            size=24,
+            parent=self,
         )
-        self.chromatic_start_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.chromatic_start_button.toggled.connect(
+            lambda checked: self.chromatic_start_button.setIcon(self._make_spot_edit_icon(bool(checked)))
+        )
         self.chromatic_auto_button = QToolButton(self)
         self.chromatic_auto_button.setAutoRaise(True)
         self.chromatic_auto_button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly)
@@ -2496,6 +2607,24 @@ class MainWindow(QMainWindow):
         self.spot_diameter_spin = ResponsiveDoubleSpinBox(self)
         self.ring_inner_diameter_spin = ResponsiveDoubleSpinBox(self)
         self.ring_outer_diameter_spin = ResponsiveDoubleSpinBox(self)
+        self.rectangle_name_edit = QLineEdit(self)
+        self.rectangle_width_spin = ResponsiveDoubleSpinBox(self)
+        self.rectangle_height_spin = ResponsiveDoubleSpinBox(self)
+        self.rectangle_padding_spin = ResponsiveDoubleSpinBox(self)
+        self.rectangle_background_width_spin = ResponsiveDoubleSpinBox(self)
+        self.rectangle_summary_label = QLabel("No rectangle ROI yet.", self)
+        self._rectangle_template = RoiDefinition(
+            roi_id="rectangle_template",
+            name="Rectangle ROI",
+            shape="rectangle",
+            center_x=0.0,
+            center_y=0.0,
+            size_x=80.0,
+            size_y=60.0,
+            background_padding_px=10.0,
+            background_width_px=12.0,
+            enabled=True,
+        )
         self.spot_geometry_scope_button = self._make_relation_scope_button(True, "Apply spot diameter to all spots when on, or only selected spots when off.")
         self.ring_geometry_scope_button = self._make_relation_scope_button(True, "Apply ring diameters to all spots when on, or only selected spots when off.")
         self.spot_geometry_area_label = QLabel("A_s = -, A_r = -, A_diff = -", self)
@@ -3033,26 +3162,34 @@ class MainWindow(QMainWindow):
 
         self.spot_edit_action = QAction(self._make_spot_edit_icon(), "Manual edit", self)
         self.spot_edit_action.setCheckable(True)
-        self.spot_edit_action.setToolTip("Left-click or right-click to select spots. Ctrl-click for group selection. Left-drag in Move mode to correct spots.")
+        self.spot_edit_action.setToolTip("Left-click or right-click to select ROIs in the active ROI tab. Ctrl-click for group selection. Left-drag in Move mode to correct ROIs.")
         self.spot_edit_action.setShortcut(QKeySequence("Ctrl+E"))
         self.spot_add_action = QAction(self._make_add_icon(), "Add", self)
         self.spot_add_action.setCheckable(True)
         self.spot_add_action.setEnabled(False)
-        self.spot_add_action.setToolTip("Left-click in the image to add a new spot using the current spot diameter.")
+        self.spot_add_action.setToolTip("Left-click in the image to add a new ROI stamp using the active shape template.")
         self.spot_add_action.setShortcut(QKeySequence("Ctrl+Shift+A"))
         self.spot_move_action = QAction(self._make_move_icon(), "Move", self)
         self.spot_move_action.setCheckable(True)
         self.spot_move_action.setEnabled(False)
-        self.spot_move_action.setToolTip("Move selected spots by dragging or arrow keys while spot edit mode is active.")
+        self.spot_move_action.setToolTip("Move selected ROIs by dragging or arrow keys while ROI edit mode is active.")
         self.spot_move_action.setShortcut(QKeySequence("Ctrl+Shift+M"))
+        self.roi_array_action = QAction(self._tabler_icon("layout-grid"), "Array", self)
+        self.roi_array_action.setCheckable(True)
+        self.roi_array_action.setEnabled(False)
+        self.roi_array_action.setToolTip("Stamp a grid of ROIs using the active ROI tab template.")
         self.remove_spots_action = QAction(self._make_remove_icon(), "Remove", self)
         self.remove_spots_action.setEnabled(False)
-        self.remove_spots_action.setToolTip("Remove the selected spots and renumber the remaining array.")
+        self.remove_spots_action.setToolTip("Remove the selected ROIs and renumber the remaining array.")
         self.remove_spots_action.setShortcut(QKeySequence("Delete"))
         self.group_spots_action = QAction(self._make_group_icon(), "Group", self)
         self.group_spots_action.setEnabled(False)
         self.group_spots_action.setToolTip("Create or update a named group from the current selection.")
-        self.group_spots_action.setShortcut(QKeySequence("Ctrl+Shift+G"))
+        self.group_spots_action.setShortcut(QKeySequence("Ctrl+G"))
+        self.ungroup_spots_action = QAction("Ungroup", self)
+        self.ungroup_spots_action.setEnabled(False)
+        self.ungroup_spots_action.setToolTip("Remove the selected spots from their current groups.")
+        self.ungroup_spots_action.setShortcut(QKeySequence("Ctrl+Shift+G"))
         self.spot_list_action = QAction(self._make_spot_list_icon(), "Spot list", self)
         self.spot_list_action.setCheckable(True)
         self.spot_list_action.setToolTip("Show or hide the spot list table.")
@@ -3316,6 +3453,11 @@ class MainWindow(QMainWindow):
         self.ring_inner_diameter_spin.editingFinished.connect(self._commit_spot_geometry_edits)
         self.ring_outer_diameter_spin.valueChanged.connect(self._on_ring_outer_diameter_spin_changed)
         self.ring_outer_diameter_spin.editingFinished.connect(self._commit_spot_geometry_edits)
+        self.rectangle_name_edit.editingFinished.connect(self._commit_rectangle_roi_edits)
+        self.rectangle_width_spin.valueChanged.connect(lambda *_args: self._commit_rectangle_roi_edits())
+        self.rectangle_height_spin.valueChanged.connect(lambda *_args: self._commit_rectangle_roi_edits())
+        self.rectangle_padding_spin.valueChanged.connect(lambda *_args: self._commit_rectangle_roi_edits())
+        self.rectangle_background_width_spin.valueChanged.connect(lambda *_args: self._commit_rectangle_roi_edits())
         self.array_rows_spin.valueChanged.connect(self._update_spot_detection_settings)
         self.array_cols_spin.valueChanged.connect(self._update_spot_detection_settings)
         self.array_spacing_spin.valueChanged.connect(self._update_spot_detection_settings)
@@ -3332,15 +3474,21 @@ class MainWindow(QMainWindow):
         self.spot_edit_action.toggled.connect(self._on_spot_edit_tool_toggled)
         self.spot_add_action.toggled.connect(self._on_spot_add_toggled)
         self.spot_move_action.toggled.connect(self._on_spot_move_toggled)
+        self.roi_array_action.toggled.connect(self._on_roi_array_toggled)
         self.spot_list_action.toggled.connect(self._spot_table_controller.on_toggled)
         self.spot_list_panel.visibilityChanged.connect(self._on_spot_list_panel_visibility_changed)
         self.spot_list_table.itemSelectionChanged.connect(self._spot_table_controller.on_selection_changed)
         self.spot_list_table.itemChanged.connect(self._spot_table_controller.on_item_changed)
         self.spot_list_table.cellDoubleClicked.connect(self._spot_table_controller.on_cell_double_clicked)
+        self.spot_list_table.viewport().setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.spot_list_table.viewport().customContextMenuRequested.connect(self._spot_table_controller.show_context_menu)
         self.spot_list_export_button.clicked.connect(self._spot_table_controller.export_csv)
         self.spot_list_import_button.clicked.connect(self._spot_table_controller.import_csv)
         self.remove_spots_action.triggered.connect(self._remove_selected_spots)
         self.group_spots_action.triggered.connect(self._group_selected_spots)
+        self.ungroup_spots_action.triggered.connect(self._ungroup_selected_spots)
+        self.addAction(self.group_spots_action)
+        self.addAction(self.ungroup_spots_action)
         self.show_spots_check.toggled.connect(self._on_show_spots_toggled)
         self.bottom_spot_labels_button.toggled.connect(self._on_show_spot_labels_toggled)
         self.spot_editor_labels_button.toggled.connect(self._on_spot_editor_show_labels_toggled)
@@ -4138,6 +4286,7 @@ class MainWindow(QMainWindow):
         self.spectrum_cursor_line.setPen(pg.mkPen(cursor_color, width=2.2))
         self.spectrum_cursor_line.blockSignals(False)
         self.sensorgram_cursor_line.blockSignals(False)
+        self._update_sensorgram_current_point()
 
     def _sync_analysis_plots(self) -> None:
         self._sync_analysis_plot_axes()
@@ -4716,6 +4865,16 @@ class MainWindow(QMainWindow):
 
     def _update_status_hint(self) -> None:
         if self._active_tool == "spots":
+            if self._roi_editor_mode in {"circles", "rectangles"}:
+                if self.spot_move_action.isChecked():
+                    self._set_status_hint("Left-click selects ROIs, right-drag moves them, Delete removes selected ROIs.")
+                elif self.spot_add_action.isChecked():
+                    self._set_status_hint("Left-click adds an ROI stamp from the active ROI template.")
+                elif self.roi_array_action.isChecked():
+                    self._set_status_hint("Left-click stamps an ROI array from the active template.")
+                else:
+                    self._set_status_hint("Left-click selects ROIs. Shift adds to the selection, Delete removes them.")
+                return
             if self.spot_move_action.isChecked():
                 self._set_status_hint("Left-click selects, Shift adds, left-drag boxes, right-drag moves, middle-drag pans.")
             elif self.spot_add_action.isChecked():
@@ -4880,9 +5039,11 @@ class MainWindow(QMainWindow):
             self._current_file_mask = None if snapshot.file_mask is None else snapshot.file_mask.copy()
             self._current_file_mask_path = None if snapshot.file_mask_path is None else Path(snapshot.file_mask_path)
             self._external_mask_revision = int(snapshot.file_mask_revision)
+            self._selected_rectangle_roi_ids.clear()
             self._processed_image_cache.clear()
             self._invalidate_image_analysis_caches()
             self._invalidate_background_profile_cache()
+            self._sync_rectangle_stamp_overlays()
 
             dataset = self._state.dataset
             self._record_map = dataset_record_map(dataset) if dataset is not None else {}
@@ -5063,8 +5224,9 @@ class MainWindow(QMainWindow):
         if elapsed is not None:
             elapsed_text = self._format_elapsed_seconds(elapsed)
             eta_text = "--:--"
-            if current_percent > 0:
-                eta_seconds = max((elapsed * (100.0 - current_percent)) / max(current_percent, 1), 0.0)
+            eta_percent = max(current_percent, 1)
+            if current_percent > 0 or elapsed >= 1.0:
+                eta_seconds = max((elapsed * (100.0 - eta_percent)) / max(eta_percent, 1), 0.0)
                 eta_text = self._format_elapsed_seconds(eta_seconds) or "0:00"
             self._status_bar_busy_detail.setText(f"{elapsed_text} | ETA {eta_text} | {current_percent:d}%")
         if text:
@@ -5492,6 +5654,33 @@ class MainWindow(QMainWindow):
             self._adjust_rotation(step)
             event.accept()
             return
+        if self._active_tool == "spots" and self._roi_editor_mode in {"circles", "rectangles"}:
+            if event.key() in {Qt.Key.Key_Delete, Qt.Key.Key_Backspace}:
+                self._remove_selected_rectangle_rois()
+                event.accept()
+                return
+            if event.key() in {
+                Qt.Key.Key_Left,
+                Qt.Key.Key_Right,
+                Qt.Key.Key_Up,
+                Qt.Key.Key_Down,
+            } and self.spot_move_action.isChecked() and self._selected_rectangle_roi_ids:
+                step = 1.0
+                if event.modifiers() & Qt.KeyboardModifier.ControlModifier:
+                    step = 5.0
+                dx = 0.0
+                dy = 0.0
+                if event.key() == Qt.Key.Key_Left:
+                    dx = -step
+                elif event.key() == Qt.Key.Key_Right:
+                    dx = step
+                elif event.key() == Qt.Key.Key_Up:
+                    dy = -step
+                elif event.key() == Qt.Key.Key_Down:
+                    dy = step
+                self._move_selected_rectangle_rois(dx, dy)
+                event.accept()
+                return
         if self._active_tool == "spots" and event.key() in {
             Qt.Key.Key_Left,
             Qt.Key.Key_Right,
@@ -6635,13 +6824,28 @@ class MainWindow(QMainWindow):
         self._select_chromatic_feature(feature_id, center_view=True)
 
     def _on_chromatic_landmark_tool_toggled(self, checked: bool) -> None:
+        self.chromatic_start_button.setIcon(self._make_spot_edit_icon(bool(checked)))
         if checked:
             if not self._is_chromatic_sample_image_key(self._current_image_key):
-                self.chromatic_landmark_mark_button.blockSignals(True)
-                self.chromatic_landmark_mark_button.setChecked(False)
-                self.chromatic_landmark_mark_button.blockSignals(False)
-                self._set_status_text("Use Edit and navigate to a sampled wavelength image before editing chromatic reference points.")
-                return
+                sample_keys = self._chromatic_sample_image_keys()
+                if sample_keys:
+                    self._set_current_frame_and_wavelength(int(sample_keys[0][0]), float(sample_keys[0][1]))
+                    self._set_status_text("Chromatic edit activated. Navigating to the first sampled wavelength image.")
+                    self._append_workflow_log(
+                        "Chromatic edit activated | navigated to first sampled wavelength image",
+                        level="info",
+                    )
+                else:
+                    self._set_status_text("Start the radial workflow before editing chromatic reference points.")
+                    self._append_workflow_log(
+                        "Chromatic edit rejected | no sampled chromatic images available",
+                        level="warning",
+                    )
+                    self.chromatic_start_button.blockSignals(True)
+                    self.chromatic_start_button.setChecked(False)
+                    self.chromatic_start_button.blockSignals(False)
+                    self.chromatic_start_button.setIcon(self._make_spot_edit_icon(False))
+                    return
             self.rotate_action.blockSignals(True)
             self.rotate_action.setChecked(False)
             self.rotate_action.blockSignals(False)
@@ -6667,8 +6871,10 @@ class MainWindow(QMainWindow):
                 f"Chromatic reference point editor active. Click to place point {self._chromatic_landmark_marker_id}, "
                 "drag to adjust, PageUp/PageDown to switch reference points."
             )
+            self._append_workflow_log("Chromatic edit activated", level="info")
         elif self._active_tool == "chromatic_landmark":
             self._active_tool = None
+            self._append_workflow_log("Chromatic edit deactivated", level="info")
         self._update_landmark_overlays()
 
     def _expected_chromatic_feature_ids(self) -> list[int]:
@@ -7263,8 +7469,8 @@ class MainWindow(QMainWindow):
     def _show_about_dialog(self) -> None:
         QMessageBox.information(
             self,
-            "About LSPR Imaging",
-            "LSPR Imaging\n\nDataset browsing, chromatic correction, masking, spot editing, and spectral analysis.",
+            f"About {version_string()}",
+            f"{version_string()}\n\nDataset browsing, chromatic correction, masking, ROI editing, and spectral analysis.",
         )
 
     def _reset_layout_to_defaults(self) -> None:
@@ -7420,9 +7626,9 @@ class MainWindow(QMainWindow):
         self._set_help(self.spot_diameter_spin, "Spot diameter in pixels.")
         self._set_help(self.ring_inner_diameter_spin, "Inner diameter of the reference ring in pixels.")
         self._set_help(self.ring_outer_diameter_spin, "Outer diameter of the reference ring in pixels.")
-        self._set_help(self.array_rows_spin, "Expected number of spot rows in the array.")
-        self._set_help(self.array_cols_spin, "Expected number of spot columns in the array.")
-        self._set_help(self.array_spacing_spin, "Expected spacing between neighboring array spots in pixels.")
+        self._set_help(self.array_rows_spin, "Expected number of ROI rows in the array.")
+        self._set_help(self.array_cols_spin, "Expected number of ROI columns in the array.")
+        self._set_help(self.array_spacing_spin, "Expected spacing between neighboring array ROIs in pixels.")
         self._set_help(self.ignore_marked_check, "Ignore pixels defined by the current mask controls and any loaded mask image.")
         self._set_help(self.detect_spots_button, "Mode A: automatically detect array spots on the current reference image.")
         self._set_help(self.spot_corner_select_button, "Mode B: select the four array corners first, then fill the grid. Coming later.")
@@ -7472,24 +7678,25 @@ class MainWindow(QMainWindow):
         self._set_help(self.measurement_apply_button, "Apply the entered micrometer distances to calibrate the image in memory.")
         self._set_help(
             self.spot_edit_action,
-            "Enable manual spot editing mode.",
+            "Enable manual ROI editing mode.",
             "Spot edit mode:\n"
-            "Left-click: select a spot\n"
-            "Shift+Left-click: add a spot to the selection\n"
-            "Double-left-click outside a spot: clear the selection\n"
+            "Left-click: select a spot or ROI\n"
+            "Shift+Left-click: add a spot or ROI to the selection\n"
+            "Double-left-click outside a spot or ROI: clear the selection\n"
             "Left-drag: draw a selection box\n"
             "Right-drag: move selected spots when Move is active\n"
             "Middle-drag: pan the image view\n"
             "Arrow keys: move selected spots while Move is active\n"
             "Shift+Arrow: select neighboring spot in the array\n"
             "Ctrl+Arrow: move selected spots faster\n"
-            "Ctrl+Shift+A: Add mode\n"
+            "Ctrl+Shift+A: Add mode for the active shape template\n"
             "Ctrl+Shift+M: Move mode",
         )
-        self._set_help(self.spot_add_action, "Add mode: click the image to place a new spot.")
+        self._set_help(self.spot_add_action, "Add mode: click the image to place a new ROI from the active shape template.")
         self._set_help(self.spot_move_action, "Move selected spots by dragging or arrow keys.")
         self._set_help(self.remove_spots_action, "Remove the selected spots.")
         self._set_help(self.group_spots_action, "Group selected spots.")
+        self._set_help(self.ungroup_spots_action, "Ungroup selected spots.")
         self._set_help(self.spot_list_cached_button, "Show only the spots that already have cached absorbance data.")
         self._set_help(self.analysis_preview_button, "Live preview: update the spectrum and sensorgram automatically when spot selection changes.")
         self._set_help(self.shortcuts_action, "Show the main keyboard shortcuts.", shortcuts_text())
@@ -7912,7 +8119,9 @@ class MainWindow(QMainWindow):
             if button is not None:
                 self._update_view_toggle_icon(button, kind, visible)
         if hasattr(self, "histogram_y_scale_button"):
+            self.histogram_y_scale_button.blockSignals(True)
             self.histogram_y_scale_button.setChecked(self._histogram_log_y_enabled)
+            self.histogram_y_scale_button.blockSignals(False)
 
     def _make_mask_toggle_icon(self, visible: bool, *, size: int = 24) -> QIcon:
         color = QColor("#22c55e" if visible else "#94a3b8")
@@ -7983,7 +8192,8 @@ class MainWindow(QMainWindow):
         button.setObjectName("toolbarPlainIconButton")
         button.setAutoRaise(True)
         button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
-        button.setText(self._display_unit_text())
+        self._normalize_display_units()
+        button.setText("µm" if str(self._state.preprocessing.display_units or "px") == "um" else "px")
         button.setToolTip("Switch between pixel and micrometer display units.")
         button.setCursor(Qt.CursorShape.PointingHandCursor)
         button.setMinimumWidth(34)
@@ -8009,8 +8219,9 @@ class MainWindow(QMainWindow):
         target = self.measurement_unit_button if button is None else button
         if target is None:
             return
+        self._normalize_display_units()
         is_um = str(self._state.preprocessing.display_units or "px") == "um"
-        target.setText(self._display_unit_text())
+        target.setText("µm" if is_um else "px")
         target.setStyleSheet(
             f"""
             QToolButton {{
@@ -8178,6 +8389,7 @@ class MainWindow(QMainWindow):
             (self.spot_list_action, {"accent": "orange"}),
             (self.spot_edit_action, {"primary": True}),
             (self.spot_add_action, {"accent": "green"}),
+            (self.roi_array_action, {"accent": "green"}),
             (self.spot_move_action, {"accent": "blue"}),
             (self.remove_spots_action, {"accent": "red"}),
         ]
@@ -8390,6 +8602,9 @@ class MainWindow(QMainWindow):
             self.spot_edit_action.blockSignals(True)
             self.spot_edit_action.setChecked(False)
             self.spot_edit_action.blockSignals(False)
+            self.roi_array_action.blockSignals(True)
+            self.roi_array_action.setChecked(False)
+            self.roi_array_action.blockSignals(False)
             self._active_tool = "rotate"
         elif self._active_tool == "rotate":
             self._active_tool = None
@@ -8420,6 +8635,9 @@ class MainWindow(QMainWindow):
             self.spot_edit_action.blockSignals(True)
             self.spot_edit_action.setChecked(False)
             self.spot_edit_action.blockSignals(False)
+            self.roi_array_action.blockSignals(True)
+            self.roi_array_action.setChecked(False)
+            self.roi_array_action.blockSignals(False)
             self._active_tool = "crop"
             self._state.preprocessing.crop.enabled = True
             self._save_processing_state_for_dataset()
@@ -8453,6 +8671,9 @@ class MainWindow(QMainWindow):
             self.spot_edit_action.blockSignals(True)
             self.spot_edit_action.setChecked(False)
             self.spot_edit_action.blockSignals(False)
+            self.roi_array_action.blockSignals(True)
+            self.roi_array_action.setChecked(False)
+            self.roi_array_action.blockSignals(False)
             self._active_tool = "measure"
             self._set_status_text("Measurement tool active. Drag the two crosses, enter the real Δx/Δy in µm, then apply calibration.")
         elif self._active_tool == "measure":
@@ -8476,6 +8697,9 @@ class MainWindow(QMainWindow):
             self.crop_action.blockSignals(True)
             self.crop_action.setChecked(False)
             self.crop_action.blockSignals(False)
+            self.roi_array_action.blockSignals(True)
+            self.roi_array_action.setChecked(False)
+            self.roi_array_action.blockSignals(False)
             if not self._spots_visible:
                 self.show_spots_check.blockSignals(True)
                 self.show_spots_check.setChecked(True)
@@ -8486,9 +8710,9 @@ class MainWindow(QMainWindow):
             self._active_tool = "spots"
             self._sync_spot_edit_capabilities()
             if self._is_current_reference_image():
-                self._set_status_text("Spot editor active.")
+                self._set_status_text("ROI editor active.")
             else:
-                self._set_status_text("Spot inspect mode active.")
+                self._set_status_text("ROI inspect mode active.")
         elif self._active_tool == "spots":
             self._active_tool = None
             self.spot_add_action.blockSignals(True)
@@ -8499,8 +8723,13 @@ class MainWindow(QMainWindow):
             self.spot_move_action.setChecked(False)
             self.spot_move_action.blockSignals(False)
             self.spot_move_action.setEnabled(False)
+            self.roi_array_action.blockSignals(True)
+            self.roi_array_action.setChecked(False)
+            self.roi_array_action.blockSignals(False)
+            self.roi_array_action.setEnabled(False)
             self.remove_spots_action.setEnabled(False)
             self.group_spots_action.setEnabled(False)
+            self.ungroup_spots_action.setEnabled(False)
             self._finalize_spot_edit_refresh()
         self._dragging_spots = False
         self._drag_anchor = None
@@ -8560,8 +8789,10 @@ class MainWindow(QMainWindow):
         editable = self._active_tool == "spots" and self._is_current_reference_image()
         self.spot_add_action.setEnabled(editable)
         self.spot_move_action.setEnabled(editable)
+        self.roi_array_action.setEnabled(editable)
         self.remove_spots_action.setEnabled(editable)
         self.group_spots_action.setEnabled(editable)
+        self.ungroup_spots_action.setEnabled(editable)
         if not editable:
             self.spot_add_action.blockSignals(True)
             self.spot_add_action.setChecked(False)
@@ -8569,6 +8800,9 @@ class MainWindow(QMainWindow):
             self.spot_move_action.blockSignals(True)
             self.spot_move_action.setChecked(False)
             self.spot_move_action.blockSignals(False)
+            self.roi_array_action.blockSignals(True)
+            self.roi_array_action.setChecked(False)
+            self.roi_array_action.blockSignals(False)
         self._sync_rotation_visibility()
         self._sync_crop_visibility()
         self._update_status_hint()
@@ -8578,6 +8812,9 @@ class MainWindow(QMainWindow):
             self.spot_move_action.blockSignals(True)
             self.spot_move_action.setChecked(False)
             self.spot_move_action.blockSignals(False)
+            self.roi_array_action.blockSignals(True)
+            self.roi_array_action.setChecked(False)
+            self.roi_array_action.blockSignals(False)
         self._update_spot_overlays()
         self._update_status_hint()
 
@@ -8586,6 +8823,9 @@ class MainWindow(QMainWindow):
             self.spot_add_action.blockSignals(True)
             self.spot_add_action.setChecked(False)
             self.spot_add_action.blockSignals(False)
+            self.roi_array_action.blockSignals(True)
+            self.roi_array_action.setChecked(False)
+            self.roi_array_action.blockSignals(False)
         if hasattr(self, "image_panel"):
             self.image_panel.raise_()
             if hasattr(self, "image_view") and self.image_view is not None:
@@ -8593,6 +8833,17 @@ class MainWindow(QMainWindow):
                 viewport = self.image_view.viewport()
                 if viewport is not None:
                     viewport.setFocus(Qt.FocusReason.ActiveWindowFocusReason)
+        self._update_spot_overlays()
+        self._update_status_hint()
+
+    def _on_roi_array_toggled(self, checked: bool) -> None:
+        if checked:
+            self.spot_add_action.blockSignals(True)
+            self.spot_add_action.setChecked(False)
+            self.spot_add_action.blockSignals(False)
+            self.spot_move_action.blockSignals(True)
+            self.spot_move_action.setChecked(False)
+            self.spot_move_action.blockSignals(False)
         self._update_spot_overlays()
         self._update_status_hint()
 
@@ -8706,6 +8957,7 @@ class MainWindow(QMainWindow):
         self._schedule_processing_state_save()
 
     def _toggle_display_units(self) -> None:
+        self._normalize_display_units()
         current = str(self._state.preprocessing.display_units or "px")
         if current == "px":
             if not self._can_display_micrometers():
@@ -8977,7 +9229,95 @@ class MainWindow(QMainWindow):
                 self._finalize_mask_edit()
                 return True
 
-        selection_mode_active = self._active_tool == "spots" or (self._analysis_enabled and self._state.dataset is not None)
+        if watched is self.image_view.viewport() and self._active_tool == "spots" and self._roi_editor_mode in {"circles", "rectangles"}:
+            allow_roi_add = self.spot_add_action.isChecked()
+            allow_roi_array = self.roi_array_action.isChecked()
+            allow_roi_move = self.spot_move_action.isChecked()
+            if event.type() == QEvent.Type.MouseButtonPress and event.button() == Qt.MouseButton.LeftButton:
+                point = self._image_point_from_mouse_event(event)
+                if point is None:
+                    return False
+                if allow_roi_array:
+                    self._add_roi_array_at(point)
+                    return True
+                if allow_roi_add:
+                    self._add_rectangle_roi_at(point)
+                    return True
+                hit_roi = self._rectangle_stamp_at(point)
+                if hit_roi is None:
+                    self._clear_rectangle_roi_selection()
+                    return True
+                additive = bool(event.modifiers() & Qt.KeyboardModifier.ShiftModifier)
+                if additive:
+                    self._select_rectangle_rois({hit_roi.roi_id}, additive=True)
+                else:
+                    self._select_rectangle_rois({hit_roi.roi_id}, additive=False)
+                self._spot_selection_drag_start = point
+                self._spot_selection_drag_button = Qt.MouseButton.LeftButton
+                self._spot_selection_pressed_spot_id = None
+                self._spot_selection_drag_modifiers = event.modifiers()
+                return True
+            if event.type() == QEvent.Type.MouseButtonPress and event.button() == Qt.MouseButton.RightButton:
+                point = self._image_point_from_mouse_event(event)
+                if point is None:
+                    return False
+                hit_roi = self._rectangle_stamp_at(point)
+                if allow_roi_move and self._selected_rectangle_roi_ids and hit_roi is not None:
+                    if hit_roi.roi_id not in self._selected_rectangle_roi_ids:
+                        self._select_rectangle_rois({hit_roi.roi_id}, additive=False)
+                    self._dragging_rectangle_rois = True
+                    self._rectangle_drag_anchor = point
+                    self._rectangle_drag_original_positions = {
+                        roi.roi_id: (roi.center_x, roi.center_y)
+                        for roi in self._state.rois
+                        if roi.roi_id in self._selected_rectangle_roi_ids
+                    }
+                    self._spot_selection_drag_button = Qt.MouseButton.RightButton
+                    self._spot_selection_drag_start = None
+                    self._spot_selection_pressed_spot_id = None
+                    self._spot_selection_drag_modifiers = Qt.KeyboardModifier.NoModifier
+                    return True
+                return True
+            if event.type() == QEvent.Type.MouseMove and self._dragging_rectangle_rois and self._rectangle_drag_anchor is not None:
+                point = self._image_point_from_mouse_event(event)
+                if point is None:
+                    return True
+                dx = point[0] - self._rectangle_drag_anchor[0]
+                dy = point[1] - self._rectangle_drag_anchor[1]
+                for roi in self._state.rois:
+                    if roi.roi_id not in self._selected_rectangle_roi_ids or roi.roi_id not in self._rectangle_drag_original_positions:
+                        continue
+                    base_x, base_y = self._rectangle_drag_original_positions[roi.roi_id]
+                    moved = move_roi_from_template(
+                        roi,
+                        center_x=base_x + dx,
+                        center_y=base_y + dy,
+                        image_shape=self._current_processed_image.shape if self._current_processed_image is not None else None,
+                    )
+                    roi.center_x = moved.center_x
+                    roi.center_y = moved.center_y
+                self._sync_rectangle_stamp_overlays()
+                return True
+            if event.type() == QEvent.Type.MouseButtonRelease and event.button() == Qt.MouseButton.RightButton and self._dragging_rectangle_rois:
+                self._dragging_rectangle_rois = False
+                self._rectangle_drag_anchor = None
+                self._rectangle_drag_original_positions.clear()
+                self._sync_rectangle_stamp_overlays()
+                self._save_processing_state_for_dataset()
+                self._schedule_processing_state_save()
+                self.status_label.setText(f"Moved {len(self._selected_rectangle_roi_ids)} selected rectangle ROI(s).")
+                return True
+            if event.type() == QEvent.Type.MouseButtonRelease and event.button() == Qt.MouseButton.LeftButton and self._spot_selection_drag_start is not None:
+                self._spot_selection_drag_start = None
+                self._spot_selection_drag_button = None
+                self._spot_selection_pressed_spot_id = None
+                self._spot_selection_drag_modifiers = Qt.KeyboardModifier.NoModifier
+                return True
+
+        selection_mode_active = (
+            (self._active_tool == "spots" and self._roi_editor_mode not in {"circles", "rectangles"})
+            or (self._analysis_enabled and self._state.dataset is not None)
+        )
         if watched is self.image_view.viewport() and selection_mode_active:
             allow_spot_add = self._active_tool == "spots" and self.spot_add_action.isChecked()
             allow_spot_move = self._active_tool == "spots" and self.spot_move_action.isChecked()
@@ -8986,7 +9326,10 @@ class MainWindow(QMainWindow):
                 if point is None:
                     return False
                 if allow_spot_add:
-                    self._add_spot_at(point)
+                    if self._roi_editor_mode in {"circles", "rectangles"}:
+                        self._add_rectangle_roi_at(point)
+                    else:
+                        self._add_spot_at(point)
                     return True
                 spot_id = self._find_spot_id_at(point)
                 modifiers = event.modifiers()
@@ -9073,7 +9416,7 @@ class MainWindow(QMainWindow):
                         continue
                     base_x, base_y = self._drag_original_positions[spot.spot_id]
                     spot.center_x, spot.center_y = self._clamp_spot_position(spot, base_x + dx, base_y + dy)
-                self._update_spot_overlays()
+                self._schedule_spot_overlay_refresh()
                 return True
 
             if (
@@ -9109,6 +9452,7 @@ class MainWindow(QMainWindow):
                 self._drag_anchor = None
                 self._drag_original_positions.clear()
                 self._spot_selection_drag_button = None
+                self._spot_overlay_refresh_timer.stop()
                 self._update_spot_overlays()
                 self._mark_spot_edit_refresh_pending()
                 self._save_processing_state_for_dataset()
@@ -9495,6 +9839,28 @@ class MainWindow(QMainWindow):
 
     def _apply_histogram_log_mode(self, *, refresh: bool = True) -> None:
         self._plot_manager.apply_histogram_log_mode(refresh=refresh)
+
+    def _autoscale_histogram_after_startup(self) -> None:
+        if self._current_processed_image is None or not hasattr(self, "histogram_plot"):
+            return
+        if not self._histogram_startup_autoscale_pending:
+            return
+        if self.histogram_plot.width() < 20 or self.histogram_plot.height() < 20:
+            self._histogram_startup_autoscale_attempts += 1
+            if self._histogram_startup_autoscale_attempts <= 10:
+                QTimer.singleShot(100, self._autoscale_histogram_after_startup)
+            return
+        view_box = self.histogram_plot.getViewBox()
+        if view_box is None:
+            return
+        self._histogram_startup_autoscale_pending = False
+        self._histogram_startup_autoscale_attempts = 0
+        self._plot_manager.refresh_histogram_if_available()
+        plot_item = self.histogram_plot.getPlotItem()
+        if plot_item is not None:
+            plot_item.autoBtnClicked()
+        if self._histogram_log_y_enabled:
+            self._clamp_histogram_log_range()
 
     def _on_histogram_y_scale_toggled(self, checked: bool) -> None:
         self._plot_manager.on_histogram_y_scale_toggled(checked)
@@ -10943,6 +11309,429 @@ class MainWindow(QMainWindow):
         self._update_crop_overlay()
         self._update_guide_overlays()
 
+    def _active_rectangle_template(self) -> RoiDefinition:
+        if self._roi_editor_mode == "circles":
+            spot_diameter = max(float(self._length_display_to_px(float(self.spot_diameter_spin.value()))), 2.0)
+            ring_inner_diameter = max(float(self._length_display_to_px(float(self.ring_inner_diameter_spin.value()))), 0.0)
+            ring_outer_diameter = max(
+                float(self._length_display_to_px(float(self.ring_outer_diameter_spin.value()))),
+                ring_inner_diameter,
+            )
+            padding = max((ring_inner_diameter - spot_diameter) / 2.0, 0.0)
+            width = max((ring_outer_diameter - ring_inner_diameter) / 2.0, 0.0)
+            return RoiDefinition(
+                roi_id="circle_template",
+                name="Circle ROI",
+                shape="circle",
+                center_x=float(self._rectangle_template.center_x),
+                center_y=float(self._rectangle_template.center_y),
+                size_x=spot_diameter,
+                size_y=spot_diameter,
+                background_padding_px=padding,
+                background_width_px=width,
+                enabled=True,
+            )
+        self._rectangle_template.shape = "rectangle"
+        return self._rectangle_template
+
+    def _ensure_rectangle_roi(self) -> pg.RectROI | None:
+        if self._current_processed_image is None:
+            return None
+        roi = self._active_rectangle_template()
+        image_height, image_width = self._current_processed_image.shape[:2]
+        width = max(float(roi.size_x), 2.0)
+        height = max(float(roi.size_y), 2.0)
+        x = float(np.clip(float(roi.center_x) - width / 2.0, 0.0, max(float(image_width) - width, 0.0)))
+        y = float(np.clip(float(roi.center_y) - height / 2.0, 0.0, max(float(image_height) - height, 0.0)))
+        if self._rectangle_roi is None:
+            if str(roi.shape).lower() in {"circle", "ellipse"}:
+                self._rectangle_roi = pg.EllipseROI(
+                    [x, y],
+                    [width, height],
+                    pen=pg.mkPen("#f59e0b", width=2),
+                    movable=True,
+                    resizable=True,
+                    rotatable=False,
+                    sideScalers=True,
+                )
+            else:
+                self._rectangle_roi = pg.RectROI(
+                    [x, y],
+                    [width, height],
+                    pen=pg.mkPen("#f59e0b", width=2),
+                    movable=True,
+                    resizable=True,
+                    rotatable=False,
+                    sideScalers=True,
+                )
+            self._rectangle_roi.handleSize = 10
+            self._rectangle_roi.sigRegionChanged.connect(lambda *_args: self._rectangle_roi_changed(finished=False))
+            self._rectangle_roi.sigRegionChangeFinished.connect(lambda *_args: self._rectangle_roi_changed(finished=True))
+            self.image_plot.addItem(self._rectangle_roi)
+            self._rectangle_roi.setZValue(1.2)
+        self._suspend_rectangle_sync = True
+        self._rectangle_roi.setPos((x, y))
+        self._rectangle_roi.setSize((width, height))
+        self._suspend_rectangle_sync = False
+        return self._rectangle_roi
+
+    def _sync_rectangle_roi_visibility(self) -> None:
+        if self._rectangle_roi is None:
+            self._ensure_rectangle_roi()
+        if self._rectangle_roi is not None:
+            self._rectangle_roi.setVisible(
+                self._roi_editor_mode in {"circles", "rectangles"}
+                and not self._showing_background_profile_main
+                and self._current_processed_image is not None
+            )
+        self._update_guide_overlays()
+
+    def _sync_rectangle_roi_from_definition(self) -> None:
+        roi = self._active_rectangle_template()
+        if self._rectangle_roi is None:
+            self._ensure_rectangle_roi()
+        if self._rectangle_roi is None:
+            return
+        image_height, image_width = self._current_processed_image.shape[:2] if self._current_processed_image is not None else (0, 0)
+        width = max(float(roi.size_x), 2.0)
+        height = max(float(roi.size_y), 2.0)
+        x = float(np.clip(float(roi.center_x) - width / 2.0, 0.0, max(float(image_width) - width, 0.0)))
+        y = float(np.clip(float(roi.center_y) - height / 2.0, 0.0, max(float(image_height) - height, 0.0)))
+        self._suspend_rectangle_sync = True
+        self._rectangle_roi.setPos((x, y))
+        self._rectangle_roi.setSize((width, height))
+        self._suspend_rectangle_sync = False
+        self._update_rectangle_roi_summary()
+
+    def _rectangle_roi_changed(self, *, finished: bool) -> None:
+        if self._suspend_rectangle_sync or self._rectangle_roi is None:
+            return
+        pos = self._rectangle_roi.pos()
+        size = self._rectangle_roi.size()
+        roi = self._active_rectangle_template()
+        roi.shape = str(roi.shape or "rectangle")
+        roi.center_x = float(pos.x() + size.x() / 2.0)
+        roi.center_y = float(pos.y() + size.y() / 2.0)
+        roi.size_x = max(float(size.x()), 2.0)
+        roi.size_y = max(float(size.y()), 2.0)
+        if self._roi_editor_mode == "circles":
+            self.spot_diameter_spin.blockSignals(True)
+            self.spot_diameter_spin.setValue(self._length_px_to_display(float(max(roi.size_x, roi.size_y))))
+            self.spot_diameter_spin.blockSignals(False)
+            self._state.spot_detection.spot_radius_px = max(float(roi.size_x), 1.0) / 2.0
+            self._state.spot_detection.ring_inner_radius_px = max(
+                float(roi.size_x) / 2.0 + float(roi.background_padding_px),
+                float(roi.size_x) / 2.0,
+            )
+            self._state.spot_detection.ring_outer_radius_px = max(
+                float(self._state.spot_detection.ring_inner_radius_px) + float(roi.background_width_px),
+                float(self._state.spot_detection.ring_inner_radius_px),
+            )
+        if finished:
+            self._push_undo_point("Rectangle ROI")
+            self._save_processing_state_for_dataset()
+        if self._roi_editor_mode == "circles":
+            self._update_spot_detection_labels(sync_controls=False)
+        else:
+            self._update_rectangle_roi_controls(sync_roi=False)
+        self._update_rectangle_roi_summary()
+
+    def _update_rectangle_roi_controls(self, *, sync_roi: bool = True) -> None:
+        roi = self._active_rectangle_template()
+        if sync_roi:
+            self._sync_rectangle_roi_from_definition()
+        self.rectangle_name_edit.blockSignals(True)
+        self.rectangle_name_edit.setText(roi.name)
+        self.rectangle_name_edit.blockSignals(False)
+        self.rectangle_width_spin.blockSignals(True)
+        self.rectangle_height_spin.blockSignals(True)
+        self.rectangle_padding_spin.blockSignals(True)
+        self.rectangle_background_width_spin.blockSignals(True)
+        self.rectangle_width_spin.setValue(self._length_px_to_display(float(roi.size_x)))
+        self.rectangle_height_spin.setValue(self._length_px_to_display(float(roi.size_y)))
+        self.rectangle_padding_spin.setValue(self._length_px_to_display(float(roi.background_padding_px)))
+        self.rectangle_background_width_spin.setValue(self._length_px_to_display(float(roi.background_width_px)))
+        self.rectangle_width_spin.blockSignals(False)
+        self.rectangle_height_spin.blockSignals(False)
+        self.rectangle_padding_spin.blockSignals(False)
+        self.rectangle_background_width_spin.blockSignals(False)
+
+    def _update_rectangle_roi_summary(self) -> None:
+        roi = self._active_rectangle_template()
+        if self._roi_editor_mode == "circles":
+            self.rectangle_summary_label.setText(
+                (
+                    f"Template center=({self._length_px_to_display(float(roi.center_x)):.1f}, "
+                    f"{self._length_px_to_display(float(roi.center_y)):.1f}) "
+                    f"Spot D={self._length_px_to_display(float(roi.size_x)):.1f} "
+                    f"Ring pad={self._length_px_to_display(float(roi.background_padding_px)):.1f} "
+                    f"Ring width={self._length_px_to_display(float(roi.background_width_px)):.1f}"
+                )
+            )
+        else:
+            self.rectangle_summary_label.setText(
+                (
+                    f"Center=({self._length_px_to_display(float(roi.center_x)):.1f}, "
+                    f"{self._length_px_to_display(float(roi.center_y)):.1f}) "
+                    f"Size={self._length_px_to_display(float(roi.size_x)):.1f}x{self._length_px_to_display(float(roi.size_y)):.1f}"
+                )
+            )
+
+    def _commit_rectangle_roi_edits(self) -> None:
+        roi = self._active_rectangle_template()
+        if self._roi_editor_mode == "circles":
+            roi.name = roi.name.strip() or "Circle ROI"
+            roi.size_x = max(float(self._length_display_to_px(float(self.spot_diameter_spin.value()))), 2.0)
+            roi.size_y = float(roi.size_x)
+            roi.background_padding_px = max(
+                float(self._length_display_to_px(float(self.ring_inner_diameter_spin.value()))) - float(roi.size_x),
+                0.0,
+            ) / 2.0
+            roi.background_width_px = max(
+                float(self._length_display_to_px(float(self.ring_outer_diameter_spin.value())))
+                - float(self._length_display_to_px(float(self.ring_inner_diameter_spin.value()))),
+                0.0,
+            ) / 2.0
+            self._update_spot_detection_labels(sync_controls=False)
+        else:
+            roi.name = self.rectangle_name_edit.text().strip() or roi.name
+            roi.size_x = max(float(self._length_display_to_px(float(self.rectangle_width_spin.value()))), 2.0)
+            roi.size_y = max(float(self._length_display_to_px(float(self.rectangle_height_spin.value()))), 2.0)
+            roi.background_padding_px = max(float(self._length_display_to_px(float(self.rectangle_padding_spin.value()))), 0.0)
+            roi.background_width_px = max(float(self._length_display_to_px(float(self.rectangle_background_width_spin.value()))), 0.0)
+        self._sync_rectangle_roi_from_definition()
+        self._save_processing_state_for_dataset()
+
+    def _create_rectangle_stamp(self, roi: RoiDefinition) -> pg.RectROI | None:
+        if self._current_processed_image is None:
+            return None
+        image_height, image_width = self._current_processed_image.shape[:2]
+        width = max(float(roi.size_x), 2.0)
+        height = max(float(roi.size_y), 2.0)
+        x = float(np.clip(float(roi.center_x) - width / 2.0, 0.0, max(float(image_width) - width, 0.0)))
+        y = float(np.clip(float(roi.center_y) - height / 2.0, 0.0, max(float(image_height) - height, 0.0)))
+        if str(roi.shape).lower() in {"circle", "ellipse"}:
+            item = pg.EllipseROI(
+                [x, y],
+                [width, height],
+                pen=pg.mkPen("#f59e0b", width=2),
+                movable=True,
+                resizable=True,
+                rotatable=False,
+                sideScalers=True,
+            )
+        else:
+            item = pg.RectROI(
+                [x, y],
+                [width, height],
+                pen=pg.mkPen("#f59e0b", width=2),
+                movable=True,
+                resizable=True,
+                rotatable=False,
+                sideScalers=True,
+            )
+        item.handleSize = 10
+        item.sigRegionChanged.connect(lambda *_args, roi=roi: self._rectangle_stamp_changed(roi, finished=False))
+        item.sigRegionChangeFinished.connect(lambda *_args, roi=roi: self._rectangle_stamp_changed(roi, finished=True))
+        self.image_plot.addItem(item)
+        item.setZValue(1.15)
+        return item
+
+    def _sync_rectangle_stamp_overlays(self) -> None:
+        for item in self._rectangle_stamp_items:
+            self.image_plot.removeItem(item)
+        self._rectangle_stamp_items.clear()
+        if self._current_processed_image is None:
+            return
+        for roi in self._state.rois:
+            if str(roi.shape) not in {"rectangle", "circle", "ellipse"}:
+                continue
+            item = self._create_rectangle_stamp(roi)
+            if item is None:
+                continue
+            setattr(item, "roi_id", roi.roi_id)
+            self._rectangle_stamp_items.append(item)
+        self._update_rectangle_stamp_visuals()
+
+    def _update_rectangle_stamp_visuals(self) -> None:
+        selected_pen = pg.mkPen("#fbbf24", width=2.8)
+        normal_pen = pg.mkPen("#f59e0b", width=2)
+        for item in self._rectangle_stamp_items:
+            roi_id = str(getattr(item, "roi_id", ""))
+            item.setPen(selected_pen if roi_id in self._selected_rectangle_roi_ids else normal_pen)
+
+    def _rectangle_stamp_at(self, point: tuple[float, float]) -> RoiDefinition | None:
+        x = float(point[0])
+        y = float(point[1])
+        for roi in reversed(self._state.rois):
+            if str(roi.shape) not in {"rectangle", "circle", "ellipse"}:
+                continue
+            left, top = roi_top_left_from_center(
+                float(roi.center_x),
+                float(roi.center_y),
+                float(roi.size_x),
+                float(roi.size_y),
+                self._current_processed_image.shape if self._current_processed_image is not None else None,
+            )
+            right = left + float(roi.size_x)
+            bottom = top + float(roi.size_y)
+            if left <= x <= right and top <= y <= bottom:
+                return roi
+        return None
+
+    def _select_rectangle_rois(self, roi_ids: set[str], *, additive: bool = False) -> None:
+        if additive:
+            self._selected_rectangle_roi_ids.update(roi_ids)
+        else:
+            self._selected_rectangle_roi_ids.clear()
+            self._selected_rectangle_roi_ids.update(roi_ids)
+        self._update_rectangle_stamp_visuals()
+
+    def _clear_rectangle_roi_selection(self) -> None:
+        if not self._selected_rectangle_roi_ids:
+            return
+        self._selected_rectangle_roi_ids.clear()
+        self._update_rectangle_stamp_visuals()
+
+    def _move_selected_rectangle_rois(self, dx: float, dy: float) -> None:
+        if not self._selected_rectangle_roi_ids:
+            return
+        self._push_undo_point("Move ROIs")
+        updated = False
+        for roi in self._state.rois:
+            if roi.roi_id not in self._selected_rectangle_roi_ids:
+                continue
+            moved = move_roi_from_template(
+                roi,
+                center_x=float(roi.center_x) + float(dx),
+                center_y=float(roi.center_y) + float(dy),
+                image_shape=self._current_processed_image.shape if self._current_processed_image is not None else None,
+            )
+            roi.center_x = moved.center_x
+            roi.center_y = moved.center_y
+            updated = True
+        if updated:
+            self._sync_rectangle_stamp_overlays()
+            self._save_processing_state_for_dataset()
+            self._schedule_processing_state_save()
+
+    def _remove_selected_rectangle_rois(self) -> None:
+        if not self._selected_rectangle_roi_ids:
+            self.status_label.setText("Select ROI(s) first to remove them.")
+            return
+        self._push_undo_point("Remove ROIs")
+        removed_count = len(self._selected_rectangle_roi_ids)
+        self._state.rois = [
+            roi for roi in self._state.rois if roi.roi_id not in self._selected_rectangle_roi_ids
+        ]
+        self._selected_rectangle_roi_ids.clear()
+        self._sync_rectangle_stamp_overlays()
+        self._save_processing_state_for_dataset()
+        self._schedule_processing_state_save()
+        self.status_label.setText(f"Removed {removed_count} selected rectangle ROI(s).")
+
+    def _rectangle_stamp_changed(self, roi: RoiDefinition, *, finished: bool) -> None:
+        item = next((stamp for stamp in self._rectangle_stamp_items if getattr(stamp, "roi_id", None) == roi.roi_id), None)
+        if item is None:
+            return
+        pos = item.pos()
+        size = item.size()
+        updated = move_roi_from_template(
+            roi,
+            center_x=float(pos.x() + size.x() / 2.0),
+            center_y=float(pos.y() + size.y() / 2.0),
+            image_shape=self._current_processed_image.shape if self._current_processed_image is not None else None,
+        )
+        roi.center_x = updated.center_x
+        roi.center_y = updated.center_y
+        roi.size_x = updated.size_x
+        roi.size_y = updated.size_y
+        if finished:
+            self._push_undo_point("ROI")
+            self._save_processing_state_for_dataset()
+        if self._roi_editor_mode == "circles":
+            self._update_spot_detection_labels(sync_controls=False)
+        else:
+            self._update_rectangle_roi_controls(sync_roi=False)
+
+    def _add_rectangle_roi_at(self, point: tuple[float, float]) -> None:
+        if self._current_processed_image is None:
+            self.status_label.setText("No image available for adding ROIs.")
+            return
+        template = self._active_rectangle_template()
+        if self._roi_editor_mode == "freehand":
+            self.status_label.setText("Freehand ROI tools are not implemented yet.")
+            return
+        roi_id = f"roi_{len(self._state.rois) + 1}"
+        if self._roi_editor_mode == "circles":
+            template_name = template.name.strip() or f"Circle ROI {len(self._state.rois) + 1}"
+        else:
+            template_name = template.name.strip() or f"Rectangle ROI {len(self._state.rois) + 1}"
+        clone = create_rois_from_template(
+            template,
+            roi_id=roi_id,
+            name=template_name,
+            center_x=float(point[0]),
+            center_y=float(point[1]),
+            image_shape=self._current_processed_image.shape,
+        )
+        self._push_undo_point("Add ROI")
+        self._state.rois.append(clone)
+        self._select_rectangle_rois({clone.roi_id}, additive=False)
+        self._sync_rectangle_stamp_overlays()
+        self._update_rectangle_roi_summary()
+        self._save_processing_state_for_dataset()
+        self._schedule_processing_state_save()
+        self.status_label.setText(f"Added ROI {clone.roi_id}.")
+
+    def _add_roi_array_at(self, point: tuple[float, float]) -> None:
+        if self._current_processed_image is None:
+            self.status_label.setText("No image available for adding ROI arrays.")
+            return
+        template = self._active_rectangle_template()
+        if self._roi_editor_mode == "freehand":
+            self.status_label.setText("Freehand ROI arrays are not implemented yet.")
+            return
+        rows = int(self.array_rows_spin.value())
+        cols = int(self.array_cols_spin.value())
+        spacing = max(float(self._length_display_to_px(float(self.array_spacing_spin.value()))), 0.0)
+        if rows <= 0 or cols <= 0 or spacing <= 0.0:
+            self.status_label.setText("Set array rows, columns, and spacing before stamping an ROI array.")
+            return
+        start_index = len(self._state.rois) + 1
+        clones = create_rois_from_template_grid(
+            template,
+            rows=rows,
+            cols=cols,
+            spacing_x=spacing,
+            spacing_y=spacing,
+            anchor_center_x=float(point[0]),
+            anchor_center_y=float(point[1]),
+            start_index=start_index,
+            image_shape=self._current_processed_image.shape,
+            roi_id_factory=lambda index: f"roi_{index}",
+        )
+        if not clones:
+            return
+        self._push_undo_point("Add ROI array")
+        self._state.rois.extend(clones)
+        self._select_rectangle_rois({roi.roi_id for roi in clones}, additive=False)
+        self._sync_rectangle_stamp_overlays()
+        self._update_rectangle_roi_summary()
+        self._save_processing_state_for_dataset()
+        self._schedule_processing_state_save()
+        self.status_label.setText(f"Added ROI array with {len(clones)} ROI(s).")
+
+    def _on_roi_editor_tab_changed(self, index: int) -> None:
+        modes = ("circles", "rectangles", "freehand")
+        self._roi_editor_mode = modes[index] if 0 <= index < len(modes) else "circles"
+        if self._roi_editor_mode == "circles":
+            self._update_spot_detection_labels(sync_controls=True)
+        elif self._roi_editor_mode == "rectangles":
+            self._update_rectangle_roi_controls(sync_roi=True)
+        self._sync_rectangle_roi_visibility()
+        self._update_guide_overlays()
+
     def _crop_roi_changed(self) -> None:
         if self._suspend_crop_sync or self._crop_roi is None:
             return
@@ -11104,6 +11893,40 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.ring_outer_diameter_spin, 0, 4)
         return row
 
+    def _build_rectangle_row(self) -> QWidget:
+        row = QWidget(self)
+        layout = QGridLayout(row)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setHorizontalSpacing(6)
+        layout.setVerticalSpacing(0)
+        for spinbox in (
+            self.rectangle_width_spin,
+            self.rectangle_height_spin,
+            self.rectangle_padding_spin,
+            self.rectangle_background_width_spin,
+        ):
+            spinbox.setDecimals(2)
+            spinbox.setSingleStep(0.5)
+            spinbox.setButtonSymbols(QSpinBox.ButtonSymbols.UpDownArrows)
+            spinbox.setFocusPolicy(Qt.FocusPolicy.WheelFocus)
+            spinbox.setAccelerated(True)
+            spinbox.setKeyboardTracking(False)
+            spinbox.setMaximumWidth(84)
+        self.rectangle_name_edit.setPlaceholderText("Rectangle ROI name")
+        self.rectangle_name_edit.setMaximumWidth(160)
+        layout.addWidget(QLabel("Name"), 0, 0)
+        layout.addWidget(self.rectangle_name_edit, 0, 1, 1, 4)
+        layout.addWidget(QLabel("W"), 1, 0)
+        layout.addWidget(self.rectangle_width_spin, 1, 1)
+        layout.addWidget(QLabel("H"), 1, 2)
+        layout.addWidget(self.rectangle_height_spin, 1, 3)
+        layout.addWidget(QLabel("Pad"), 2, 0)
+        layout.addWidget(self.rectangle_padding_spin, 2, 1)
+        layout.addWidget(QLabel("BG"), 2, 2)
+        layout.addWidget(self.rectangle_background_width_spin, 2, 3)
+        layout.addWidget(self.rectangle_summary_label, 3, 0, 1, 5)
+        return row
+
     def _build_array_row(self) -> QWidget:
         row = QWidget(self)
         layout = QVBoxLayout(row)
@@ -11111,7 +11934,7 @@ class MainWindow(QMainWindow):
         layout.setSpacing(4)
         rows_label = self._make_array_marker_label("rows", "Array rows")
         cols_label = self._make_array_marker_label("columns", "Array columns")
-        spacing_label = self._make_array_marker_label("distance", "Spacing between neighboring spots")
+        spacing_label = self._make_array_marker_label("distance", "Spacing between neighboring ROIs")
         sizes_row = QHBoxLayout()
         sizes_row.setContentsMargins(0, 0, 0, 0)
         sizes_row.setSpacing(4)
@@ -11391,6 +12214,13 @@ class MainWindow(QMainWindow):
         self.spot_diameter_spin.setMaximum(display_max)
         self.ring_inner_diameter_spin.setMaximum(display_max)
         self.ring_outer_diameter_spin.setMaximum(display_max)
+        for spinbox in (
+            self.rectangle_width_spin,
+            self.rectangle_height_spin,
+            self.rectangle_padding_spin,
+            self.rectangle_background_width_spin,
+        ):
+            spinbox.setMaximum(display_max)
         self.array_spacing_spin.setMaximum(display_max)
 
     def _update_spot_detection_settings(self) -> None:
@@ -11899,6 +12729,9 @@ class MainWindow(QMainWindow):
         self._state.spot_groups = updated_groups
 
     def _remove_selected_spots(self) -> None:
+        if self._roi_editor_mode in {"circles", "rectangles"} and self._selected_rectangle_roi_ids:
+            self._remove_selected_rectangle_rois()
+            return
         if not self._selected_spot_ids:
             self.status_label.setText("Select spot(s) first to remove them.")
             return
@@ -11975,7 +12808,14 @@ class MainWindow(QMainWindow):
         self._update_selection_dependent_plots(force=True)
         self.status_label.setText("Cleared spot selection.")
 
-    def _update_spot_overlays(self) -> None:
+    def _schedule_spot_overlay_refresh(self) -> None:
+        if not self._spot_overlay_refresh_timer.isActive():
+            self._spot_overlay_refresh_timer.start()
+
+    def _refresh_spot_overlays_during_drag(self) -> None:
+        self._update_spot_overlays(update_hidden_details=False)
+
+    def _update_spot_overlays(self, *, update_hidden_details: bool = True) -> None:
         display_spots = self._display_spots()
         source_spot_map = {spot.spot_id: spot for spot in self._state.detected_spots}
         if self._showing_background_profile_main:
@@ -12005,7 +12845,7 @@ class MainWindow(QMainWindow):
             if bundle is None:
                 curve = pg.PlotCurveItem()
                 curve.setSkipFiniteCheck(True)
-                self.image_plot.addItem(curve)
+                self.image_plot.addItem(curve, ignoreBounds=True)
                 bundle = SpotOverlayBundle(curve=curve)
                 self._spot_overlay_items[spot.spot_id] = bundle
             xs, ys = self._spot_curve_points(source_spot, spot, source_spot.radius_px)
@@ -12067,7 +12907,7 @@ class MainWindow(QMainWindow):
                     if bundle.inner_curve is None:
                         bundle.inner_curve = pg.PlotCurveItem()
                         bundle.inner_curve.setSkipFiniteCheck(True)
-                        self.image_plot.addItem(bundle.inner_curve)
+                        self.image_plot.addItem(bundle.inner_curve, ignoreBounds=True)
                     inner_xs, inner_ys = self._spot_curve_points(source_spot, spot, ring_inner_radius)
                     bundle.inner_curve.setData(inner_xs, inner_ys)
                     bundle.inner_curve.setPen(inner_pen)
@@ -12076,7 +12916,7 @@ class MainWindow(QMainWindow):
                     bundle.inner_curve.setVisible(False)
                 if bundle.ring_fill is None:
                     bundle.ring_fill = QGraphicsPathItem()
-                    self.image_plot.addItem(bundle.ring_fill)
+                    self.image_plot.addItem(bundle.ring_fill, ignoreBounds=True)
                 bundle.ring_fill.setPath(
                     self._create_ring_fill_path(
                         spot.center_x,
@@ -12091,12 +12931,12 @@ class MainWindow(QMainWindow):
                 if bundle.outer_curve is None:
                     bundle.outer_curve = pg.PlotCurveItem()
                     bundle.outer_curve.setSkipFiniteCheck(True)
-                    self.image_plot.addItem(bundle.outer_curve)
+                    self.image_plot.addItem(bundle.outer_curve, ignoreBounds=True)
                 outer_xs, outer_ys = self._spot_curve_points(source_spot, spot, ring_outer_radius)
                 bundle.outer_curve.setData(outer_xs, outer_ys)
                 bundle.outer_curve.setPen(outer_pen)
                 bundle.outer_curve.setVisible(True)
-            else:
+            elif update_hidden_details:
                 if bundle.inner_curve is not None:
                     bundle.inner_curve.setVisible(False)
                 if bundle.ring_fill is not None:
@@ -12118,7 +12958,7 @@ class MainWindow(QMainWindow):
                     label_text = f"{label}<br><span style='font-size:8.5pt; font-weight:600;'>x={spot.center_x:.1f}, y={spot.center_y:.1f}</span>"
                 if bundle.label is None:
                     bundle.label = pg.TextItem(anchor=(0.0, 1.0))
-                    self.image_plot.addItem(bundle.label)
+                    self.image_plot.addItem(bundle.label, ignoreBounds=True)
                 bundle.label.setHtml(
                     "<span style="
                     f"'color:{label_color}; "
@@ -12132,7 +12972,7 @@ class MainWindow(QMainWindow):
                 )
                 bundle.label.setPos(spot.center_x + spot.radius_px + 4.0, spot.center_y - spot.radius_px - 2.0)
                 bundle.label.setVisible(self._spots_visible and self._spot_labels_visible)
-            elif bundle.label is not None:
+            elif update_hidden_details and bundle.label is not None:
                 bundle.label.setVisible(False)
         self._update_guide_overlays()
         if self.spot_list_table.isVisible():
@@ -12197,9 +13037,9 @@ class MainWindow(QMainWindow):
             if bundle is None:
                 curve = pg.PlotCurveItem()
                 curve.setSkipFiniteCheck(True)
-                self.image_plot.addItem(curve)
+                self.image_plot.addItem(curve, ignoreBounds=True)
                 label = pg.TextItem(anchor=(0.0, 1.0))
-                self.image_plot.addItem(label)
+                self.image_plot.addItem(label, ignoreBounds=True)
                 bundle = LandmarkOverlayBundle(curve=curve, label=label)
                 self._landmark_overlay_items[landmark_id] = bundle
             cross_size = 7.0
@@ -12344,14 +13184,14 @@ class MainWindow(QMainWindow):
             if bundle is None:
                 points = pg.ScatterPlotItem(pxMode=True)
                 points.setZValue(42)
-                self.image_plot.addItem(points)
+                self.image_plot.addItem(points, ignoreBounds=True)
                 active_cross = pg.PlotCurveItem()
                 active_cross.setSkipFiniteCheck(True)
                 active_cross.setZValue(44)
-                self.image_plot.addItem(active_cross)
+                self.image_plot.addItem(active_cross, ignoreBounds=True)
                 label = pg.TextItem(anchor=(0.0, 1.0))
                 label.setZValue(43)
-                self.image_plot.addItem(label)
+                self.image_plot.addItem(label, ignoreBounds=True)
                 bundle = ChromaticLandmarkAllOverlayBundle(points=points, active_cross=active_cross, label=label)
                 self._chromatic_all_landmark_overlay_items[landmark_id] = bundle
             xs: list[float] = []
@@ -12504,9 +13344,9 @@ class MainWindow(QMainWindow):
         horizontal = pg.PlotCurveItem(pen=pg.mkPen(QColor(56, 189, 248, 120), width=1.2))
         marker.sigPositionChanged.connect(self._on_image_tool_guide_moved)
         marker.sigPositionChangeFinished.connect(self._on_image_tool_guide_moved)
-        self.image_plot.addItem(vertical)
-        self.image_plot.addItem(horizontal)
-        self.image_plot.addItem(marker)
+        self.image_plot.addItem(vertical, ignoreBounds=True)
+        self.image_plot.addItem(horizontal, ignoreBounds=True)
+        self.image_plot.addItem(marker, ignoreBounds=True)
         guide = GuideOverlayBundle(vertical=vertical, horizontal=horizontal, marker=marker)
         self._guide_overlay_items[0] = guide
         return guide
@@ -12533,12 +13373,12 @@ class MainWindow(QMainWindow):
         for x in range(chunk_size, max(int(image_width), 1), chunk_size):
             line = pg.InfiniteLine(angle=90, pos=float(x), pen=pen, movable=False)
             line.setZValue(14)
-            self.image_plot.addItem(line)
+            self.image_plot.addItem(line, ignoreBounds=True)
             self._ome_zarr_chunk_overlay_items.append(line)
         for y in range(chunk_size, max(int(image_height), 1), chunk_size):
             line = pg.InfiniteLine(angle=0, pos=float(y), pen=pen, movable=False)
             line.setZValue(14)
-            self.image_plot.addItem(line)
+            self.image_plot.addItem(line, ignoreBounds=True)
             self._ome_zarr_chunk_overlay_items.append(line)
 
     def _hide_measurement_overlay(self) -> None:
@@ -12577,10 +13417,10 @@ class MainWindow(QMainWindow):
         marker_b.sigPositionChanged.connect(self._on_measurement_marker_moved)
         marker_a.sigPositionChangeFinished.connect(self._on_measurement_marker_moved)
         marker_b.sigPositionChangeFinished.connect(self._on_measurement_marker_moved)
-        self.image_plot.addItem(connector)
-        self.image_plot.addItem(marker_a)
-        self.image_plot.addItem(marker_b)
-        self.image_plot.addItem(label)
+        self.image_plot.addItem(connector, ignoreBounds=True)
+        self.image_plot.addItem(marker_a, ignoreBounds=True)
+        self.image_plot.addItem(marker_b, ignoreBounds=True)
+        self.image_plot.addItem(label, ignoreBounds=True)
         self._measurement_overlay = MeasurementOverlayBundle(
             connector=connector,
             marker_a=marker_a,
@@ -12618,11 +13458,20 @@ class MainWindow(QMainWindow):
         overlay.connector.setData([ax, bx], [ay, by])
         overlay.connector.setVisible(True)
         dx, dy, distance = self._measurement_delta_components_px()
+        self._normalize_display_units()
+        if self._can_display_micrometers():
+            distance_um = self._microns_per_pixel_scalar() * distance
+            if self._display_uses_micrometers():
+                bar_label = f"{distance_um:.1f} µm | {distance:.1f} px"
+            else:
+                bar_label = f"{distance:.1f} px | {distance_um:.1f} µm"
+        else:
+            bar_label = f"{distance:.1f} px"
         overlay.label.setHtml(
             "<span style="
             "'color:#22c55e; font-size:10pt; font-weight:700; background:#0f172a; "
             "border:1px solid #22c55e; border-radius:4px; padding:2px 5px;'"
-            f">{distance:.1f} px</span>"
+            f">{bar_label}</span>"
         )
         overlay.label.setPos((ax + bx) * 0.5, min(ay, by) - 8.0)
         overlay.label.setVisible(True)
@@ -12649,14 +13498,19 @@ class MainWindow(QMainWindow):
     ) -> None:
         if dx_px is None or dy_px is None or distance_px is None:
             dx_px, dy_px, distance_px = self._measurement_delta_components_px()
-        suffix = ""
         if self._can_display_micrometers():
-            suffix = (
-                f" | calib {self._state.preprocessing.microns_per_pixel_x:.4f}/{self._state.preprocessing.microns_per_pixel_y:.4f} µm/px"
+            dx_um = abs(self._microns_per_pixel_scalar() * dx_px)
+            dy_um = abs(self._microns_per_pixel_scalar() * dy_px)
+            distance_um = self._microns_per_pixel_scalar() * distance_px
+            self.measurement_status_label.setText(
+                f"Δx {abs(dx_px):.1f} px / {dx_um:.1f} µm | "
+                f"Δy {abs(dy_px):.1f} px / {dy_um:.1f} µm | "
+                f"d {distance_px:.1f} px / {distance_um:.1f} µm"
             )
-        self.measurement_status_label.setText(
-            f"Δx {abs(dx_px):.1f} px | Δy {abs(dy_px):.1f} px | d {distance_px:.1f} px{suffix}"
-        )
+        else:
+            self.measurement_status_label.setText(
+                f"Δx {abs(dx_px):.1f} px | Δy {abs(dy_px):.1f} px | d {distance_px:.1f} px"
+            )
 
     def _apply_measurement_calibration(self) -> None:
         dx_px, dy_px, _distance_px = self._measurement_delta_components_px()
@@ -12704,14 +13558,14 @@ class MainWindow(QMainWindow):
         right_tick = pg.PlotCurveItem(pen=pg.mkPen(self._scale_bar_visual_color, width=2.0))
         outline_label = pg.TextItem(anchor=(0.5, 1.0))
         label = pg.TextItem(anchor=(0.5, 1.0))
-        self.image_plot.addItem(outline_line)
-        self.image_plot.addItem(line)
-        self.image_plot.addItem(outline_left_tick)
-        self.image_plot.addItem(left_tick)
-        self.image_plot.addItem(outline_right_tick)
-        self.image_plot.addItem(right_tick)
-        self.image_plot.addItem(outline_label)
-        self.image_plot.addItem(label)
+        self.image_plot.addItem(outline_line, ignoreBounds=True)
+        self.image_plot.addItem(line, ignoreBounds=True)
+        self.image_plot.addItem(outline_left_tick, ignoreBounds=True)
+        self.image_plot.addItem(left_tick, ignoreBounds=True)
+        self.image_plot.addItem(outline_right_tick, ignoreBounds=True)
+        self.image_plot.addItem(right_tick, ignoreBounds=True)
+        self.image_plot.addItem(outline_label, ignoreBounds=True)
+        self.image_plot.addItem(label, ignoreBounds=True)
         self._scale_bar_overlay = ScaleBarOverlayBundle(
             outline_line=outline_line,
             line=line,
@@ -13936,7 +14790,7 @@ class MainWindow(QMainWindow):
             min_interval=1.0,
         )
         self._state.spot_detection.spot_radius_px = max(float(diameter_px / 2.0), 1.0)
-        self._update_geometry_settings(save=True, recalculate=False)
+        self._update_geometry_settings(save=False, recalculate=False)
 
     def _on_ring_inner_diameter_spin_changed(self, value: int) -> None:
         _inner = max(float(value), 0.0)
@@ -13947,7 +14801,7 @@ class MainWindow(QMainWindow):
             min_interval=1.0,
         )
         self._update_geometry_settings(
-            save=True,
+            save=False,
             recalculate=False,
             normalize_relation=True,
         )
@@ -13961,7 +14815,7 @@ class MainWindow(QMainWindow):
             min_interval=1.0,
         )
         self._update_geometry_settings(
-            save=True,
+            save=False,
             recalculate=False,
             normalize_relation=True,
         )
@@ -14013,6 +14867,10 @@ class MainWindow(QMainWindow):
         settings = self._state.preprocessing
         return bool(getattr(settings, "calibration_enabled", False)) and float(getattr(settings, "microns_per_pixel_x", 0.0)) > 0.0 and float(getattr(settings, "microns_per_pixel_y", 0.0)) > 0.0
 
+    def _normalize_display_units(self) -> None:
+        if str(self._state.preprocessing.display_units or "px") == "um" and not self._can_display_micrometers():
+            self._state.preprocessing.display_units = "px"
+
     def _display_uses_micrometers(self) -> bool:
         return str(self._state.preprocessing.display_units or "px") == "um" and self._can_display_micrometers()
 
@@ -14038,6 +14896,7 @@ class MainWindow(QMainWindow):
         return dx, dy, hypot(dx, dy)
 
     def _update_display_unit_controls(self) -> None:
+        self._normalize_display_units()
         suffix = self._display_length_suffix()
         use_um = self._display_uses_micrometers()
         decimals = 0
@@ -14090,985 +14949,3 @@ class MainWindow(QMainWindow):
             area_value *= self._microns_per_pixel_scalar() ** 2
             return f"{area_value:.0f} \u00b5m\u00b2"
         return f"{area_value:.0f} px\u00b2"
-
-    @staticmethod
-    def _icon_from_candidates(*candidates: str) -> QIcon:
-        for candidate in candidates:
-            path = Path(candidate)
-            if path.exists():
-                return QIcon(str(path))
-        return QIcon()
-
-    @staticmethod
-    def _svg_icon_from_markup(svg_markup: str, size: int = 24) -> QIcon:
-        if not svg_markup:
-            return QIcon()
-        renderer = QSvgRenderer(QByteArray(svg_markup.encode("utf-8")))
-        if not renderer.isValid():
-            return QIcon()
-        pixmap = QPixmap(size, size)
-        pixmap.fill(Qt.GlobalColor.transparent)
-        painter = QPainter(pixmap)
-        renderer.render(painter, QRectF(0.0, 0.0, float(size), float(size)))
-        painter.end()
-        return QIcon(pixmap)
-
-    def _make_array_marker_icon(self, kind: str, *, color: str = "#f8fafc", size: int = 24) -> QIcon:
-        if kind == "columns":
-            svg = f"""<svg xmlns="http://www.w3.org/2000/svg" width="{size}" height="{size}" viewBox="0 0 24 24" fill="none">
-  <circle cx="9" cy="12" r="1.2" fill="{color}" />
-  <circle cx="12" cy="12" r="1.2" fill="{color}" />
-  <circle cx="15" cy="12" r="1.2" fill="{color}" />
-</svg>"""
-            return self._svg_icon_from_markup(svg, size=size)
-        if kind == "rows":
-            svg = f"""<svg xmlns="http://www.w3.org/2000/svg" width="{size}" height="{size}" viewBox="0 0 24 24" fill="none">
-  <g transform="rotate(90 12 12)">
-    <circle cx="9" cy="12" r="1.2" fill="{color}" />
-    <circle cx="12" cy="12" r="1.2" fill="{color}" />
-    <circle cx="15" cy="12" r="1.2" fill="{color}" />
-  </g>
-</svg>"""
-            return self._svg_icon_from_markup(svg, size=size)
-        if kind == "distance":
-            svg = f"""<svg xmlns="http://www.w3.org/2000/svg" width="{size}" height="{size}" viewBox="0 0 24 24" fill="none" stroke="{color}" stroke-linecap="round" stroke-linejoin="round">
-  <circle cx="7" cy="14" r="1.5" fill="{color}" stroke="none" />
-  <circle cx="17" cy="14" r="1.5" fill="{color}" stroke="none" />
-  <g stroke-width="1.4">
-    <line x1="7" y1="10" x2="17" y2="10" />
-    <line x1="7" y1="9" x2="7" y2="11" />
-    <line x1="17" y1="9" x2="17" y2="11" />
-  </g>
-</svg>"""
-            return self._svg_icon_from_markup(svg, size=size)
-        return QIcon()
-
-    def _make_array_marker_label(self, kind: str, tooltip: str) -> QLabel:
-        label = QLabel(self)
-        label.setPixmap(self._make_array_marker_icon(kind, size=32).pixmap(32, 32))
-        label.setFixedSize(32, 32)
-        label.setAlignment(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignHCenter)
-        label.setToolTip(tooltip)
-        return label
-
-    @staticmethod
-    def _make_corner_seed_icon(color: str = "#f8fafc", size: int = 24) -> QIcon:
-        svg = f"""<svg xmlns="http://www.w3.org/2000/svg" width="{size}" height="{size}" viewBox="0 0 24 24" fill="none" stroke="{color}" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
-  <path d="M5 9V5h4" />
-  <path d="M15 5h4v4" />
-  <path d="M19 15v4h-4" />
-  <path d="M9 19H5v-4" />
-</svg>"""
-        return MainWindow._svg_icon_from_markup(svg, size=size)
-
-    @staticmethod
-    def _tabler_icon(
-        name: str,
-        color: str = "#f8fafc",
-        size: int = 24,
-        *,
-        stroke_width: float = 2.2,
-        fill: str = "none",
-    ) -> QIcon:
-        if tabler_icons is None:
-            return QIcon()
-        try:
-            svg = str(
-                tabler_icons.get_icon(
-                    name,
-                    size=size,
-                    stroke=color,
-                    fill=fill,
-                    stroke_width=stroke_width,
-                    stroke_linecap="round",
-                    stroke_linejoin="round",
-                )
-            )
-        except Exception:
-            return QIcon()
-        return MainWindow._svg_icon_from_markup(svg, size=size)
-
-    @staticmethod
-    def _lucide_icon(name: str, color: str = "#f8fafc", size: int = 24, *, stroke_width: float = 2.2) -> QIcon:
-        if lucide is None:
-            return QIcon()
-        try:
-            svg = lucide._render_icon(  # type: ignore[attr-defined]
-                name,
-                size,
-                stroke=color,
-                fill="none",
-                stroke_width=stroke_width,
-                stroke_linecap="round",
-                stroke_linejoin="round",
-            )
-        except Exception:
-            return QIcon()
-        return MainWindow._svg_icon_from_markup(svg, size=size)
-
-    @staticmethod
-    def _make_help_icon() -> QIcon:
-        icon = MainWindow._lucide_icon("circle-help", "#f8fafc", 24, stroke_width=2.2)
-        if not icon.isNull():
-            return icon
-        pixmap = QPixmap(24, 24)
-        pixmap.fill(Qt.GlobalColor.transparent)
-        painter = QPainter(pixmap)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        painter.setPen(QPen(QColor("#f8fafc"), 2.2))
-        painter.setBrush(Qt.BrushStyle.NoBrush)
-        painter.drawEllipse(QRectF(3.5, 3.5, 17.0, 17.0))
-        painter.setFont(QFont("Sans Serif", 10, QFont.Weight.Bold))
-        painter.drawText(QRectF(7.0, 4.6, 10.0, 12.0), Qt.AlignmentFlag.AlignCenter, "?")
-        painter.end()
-        return QIcon(pixmap)
-
-    @staticmethod
-    def _dataset_stack_icon_pixmap(size: int = 36, *, ome_zarr: bool = False) -> QPixmap:
-        icon_name = "box" if ome_zarr else "stack-3"
-        icon = MainWindow._tabler_icon(icon_name, "#f8fafc", size=size, stroke_width=2.1)
-        if not icon.isNull():
-            return icon.pixmap(size, size)
-        pixmap = QPixmap(size, size)
-        pixmap.fill(Qt.GlobalColor.transparent)
-        painter = QPainter(pixmap)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        pen = QPen(QColor("#f8fafc"), max(2.0, size / 18.0))
-        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
-        pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
-        painter.setPen(pen)
-        painter.setBrush(Qt.BrushStyle.NoBrush)
-        margin = size * 0.18
-        gap = size * 0.18
-        width = size - 2 * margin
-        height = (size - 3 * margin - 2 * gap) / 3.0
-        for idx in range(3):
-            top = margin + idx * (height + gap)
-            painter.drawRoundedRect(QRectF(margin, top, width, height), 3.0, 3.0)
-        painter.end()
-        return pixmap
-
-    def _update_dataset_stack_indicator(self, dataset=None) -> None:
-        dataset = self._state.dataset if dataset is None else dataset
-        ome_zarr = dataset_is_ome_zarr(dataset)
-        self.dataset_stack_icon.setPixmap(self._dataset_stack_icon_pixmap(36, ome_zarr=ome_zarr))
-        if ome_zarr:
-            self.dataset_stack_icon.setToolTip("OME-Zarr stack loaded from the selected dataset folder.")
-            self.dataset_stack_label.setText("OME-Zarr")
-            self.dataset_stack_label.setToolTip("The loaded dataset is stored as an OME-Zarr image stack.")
-        else:
-            self.dataset_stack_icon.setToolTip("Image stack loaded from the selected dataset folder.")
-            self.dataset_stack_label.setText("ImageStack")
-            self.dataset_stack_label.setToolTip("The loaded dataset is treated as an image stack.")
-
-    def _ome_zarr_chunk_candidates(self) -> list[int]:
-        return [64, 128, 256, 512]
-
-    def _current_ome_zarr_chunk_size(self) -> int:
-        mode = str(self.ome_zarr_chunk_mode_combo.currentData() or "auto")
-        return current_ome_zarr_chunk_size(mode, lambda: self._suggest_ome_zarr_chunk_size())
-
-    def _current_ome_zarr_compression_enabled(self) -> bool:
-        return current_ome_zarr_compression_enabled(self.ome_zarr_compression_button.isChecked())
-
-    def _suggest_ome_zarr_chunk_size(self, image_shape: tuple[int, int] | None = None) -> int:
-        if image_shape is None and self._current_processed_image is not None:
-            image_shape = tuple(int(v) for v in self._current_processed_image.shape[:2])
-        if image_shape is None and self._current_record_path is not None:
-            try:
-                image_shape = load_image_shape(str(self._current_record_path))
-            except Exception:
-                image_shape = None
-        if image_shape is None:
-            return int(self._settings_int("ome_zarr/chunk_size_px", 256, minimum=64, maximum=512))
-        height, width = int(image_shape[0]), int(image_shape[1])
-        limit = max(min(height, width), 64)
-        candidates = [size for size in self._ome_zarr_chunk_candidates() if size <= limit]
-        if not candidates:
-            candidates = [64]
-        exact = [size for size in candidates if height % size == 0 and width % size == 0]
-        if exact:
-            return max(exact)
-        return min(
-            candidates,
-            key=lambda size: (
-                abs((height % size) / max(float(size), 1.0)) + abs((width % size) / max(float(size), 1.0)),
-                abs(float(size) - min(float(height), float(width)) / 4.0),
-                -float(size),
-            ),
-        )
-
-    def _sync_ome_zarr_chunk_controls(self) -> None:
-        self._ui_state_manager.sync_ome_zarr_chunk_controls()
-
-    def _on_ome_zarr_chunk_mode_changed(self, _index: int) -> None:
-        self._sync_ome_zarr_chunk_controls()
-        self._save_layout_preferences()
-
-    def _ome_zarr_grid_icon(self, active: bool) -> QIcon:
-        color = "#22c55e" if active else "#94a3b8"
-        icon = self._tabler_icon("grid-4x4", color, 24, stroke_width=2.1)
-        if not icon.isNull():
-            return icon
-        pixmap = QPixmap(24, 24)
-        pixmap.fill(Qt.GlobalColor.transparent)
-        painter = QPainter(pixmap)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        pen = QPen(QColor(color), 2.0)
-        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
-        pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
-        painter.setPen(pen)
-        for row in range(4):
-            for col in range(4):
-                x = 4 + col * 4
-                y = 4 + row * 4
-                painter.drawRect(x, y, 2, 2)
-        painter.end()
-        return QIcon(pixmap)
-
-    def _on_ome_zarr_chunk_guide_toggled(self, checked: bool) -> None:
-        self.ome_zarr_chunk_guide_button.setIcon(self._ome_zarr_grid_icon(bool(checked)))
-        self._update_ome_zarr_chunk_guide_overlay()
-
-    def _on_ome_zarr_compression_toggled(self, checked: bool) -> None:
-        self.ome_zarr_compression_button.setIcon(self._ome_zarr_compression_icon(bool(checked)))
-        self._sync_ome_zarr_chunk_controls()
-
-    def _ome_zarr_compression_icon(self, active: bool) -> QIcon:
-        color = "#22c55e" if active else "#94a3b8"
-        icon = self._tabler_icon("archive", color, 24, stroke_width=2.1)
-        if not icon.isNull():
-            return icon
-        pixmap = QPixmap(24, 24)
-        pixmap.fill(Qt.GlobalColor.transparent)
-        painter = QPainter(pixmap)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        pen = QPen(QColor(color), 2.0)
-        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
-        pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
-        painter.setPen(pen)
-        painter.setBrush(Qt.BrushStyle.NoBrush)
-        painter.drawRoundedRect(QRectF(4.0, 6.0, 16.0, 10.0), 2.5, 2.5)
-        painter.drawLine(QPointF(6.0, 10.0), QPointF(18.0, 10.0))
-        painter.drawLine(QPointF(8.0, 6.0), QPointF(8.0, 16.0))
-        painter.drawLine(QPointF(16.0, 6.0), QPointF(16.0, 16.0))
-        painter.end()
-        return QIcon(pixmap)
-
-    def _ome_zarr_stop_icon(self, *, size: int = 24) -> QIcon:
-        icon = self._tabler_icon("player-stop-filled", "#ef4444", size, stroke_width=2.1, fill="#ef4444")
-        if not icon.isNull():
-            return icon
-        pixmap = QPixmap(size, size)
-        pixmap.fill(Qt.GlobalColor.transparent)
-        painter = QPainter(pixmap)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(QColor("#ef4444"))
-        scale = size / 24.0
-        painter.drawRoundedRect(QRectF(6.0 * scale, 6.0 * scale, 12.0 * scale, 12.0 * scale), 2.8 * scale, 2.8 * scale)
-        painter.end()
-        return QIcon(pixmap)
-
-    @staticmethod
-    def _folder_size_bytes(path: Path) -> int:
-        total = 0
-        if not path.exists():
-            return total
-        if path.is_file():
-            try:
-                return int(path.stat().st_size)
-            except Exception:
-                return total
-        for root, _dirs, files in os.walk(path):
-            for name in files:
-                file_path = Path(root) / name
-                try:
-                    total += int(file_path.stat().st_size)
-                except Exception:
-                    continue
-        return total
-
-    @staticmethod
-    def _format_bytes(num_bytes: int) -> str:
-        value = float(max(int(num_bytes), 0))
-        units = ["B", "KB", "MB", "GB", "TB"]
-        for unit in units:
-            if value < 1024.0 or unit == units[-1]:
-                if unit == "B":
-                    return f"{int(value)} {unit}"
-                return f"{value:.1f} {unit}"
-            value /= 1024.0
-        return f"{value:.1f} TB"
-
-    @staticmethod
-    def _format_duration(seconds: float) -> str:
-        total_seconds = max(int(round(float(seconds))), 0)
-        hours, remainder = divmod(total_seconds, 3600)
-        minutes, seconds = divmod(remainder, 60)
-        if hours > 0:
-            return f"{hours:d}:{minutes:02d}:{seconds:02d}"
-        return f"{minutes:02d}:{seconds:02d}"
-
-    def _set_ome_zarr_export_ui_running(self, running: bool) -> None:
-        self._ome_zarr_export_running = bool(running)
-        self.dataset_ome_zarr_export_progress_row.setVisible(bool(running))
-        self.dataset_ome_zarr_export_progress_bar.setValue(0 if running else 0)
-        self.dataset_ome_zarr_export_progress_bar.setFormat("%p%")
-        self.dataset_ome_zarr_export_eta_label.setText("ETA: --:--")
-        self.dataset_ome_zarr_export_stop_button.setVisible(bool(running))
-        self.dataset_ome_zarr_export_stop_button.setEnabled(bool(running))
-        self.dataset_ome_zarr_export_button.setEnabled(not running and self._state.dataset is not None)
-        self.ome_zarr_chunk_mode_combo.setEnabled(not running)
-        self.ome_zarr_chunk_guide_button.setEnabled(not running)
-        self.ome_zarr_compression_button.setEnabled(not running)
-        self.dataset_ome_zarr_controls_row.setEnabled(not running)
-        self.dataset_ome_zarr_options_row.setEnabled(not running)
-        self.dataset_ome_zarr_info_row.setEnabled(not running)
-        if running:
-            self.dataset_ome_zarr_export_status_label.setText("Progress")
-        self._sync_ome_zarr_chunk_controls()
-
-    def _start_ome_zarr_export(self, destination: Path, chunk_size_px: int, *, compression_enabled: bool = True) -> None:
-        dataset = self._state.dataset
-        if dataset is None:
-            self._set_status_text("Load a dataset before exporting Stack to Zarr.")
-            return
-        if self._ome_zarr_export_running:
-            self._set_status_text("Stack to Zarr export is already running.")
-            return
-        self._ome_zarr_export_request_id += 1
-        request_id = self._ome_zarr_export_request_id
-        self._ome_zarr_export_cancel_event = threading.Event()
-        self._ome_zarr_export_destination = destination
-        self._ome_zarr_export_started_at = time.perf_counter()
-        self._set_ome_zarr_export_ui_running(True)
-        self._set_status_text(f"Exporting Stack to Zarr to {destination.name}...")
-        self._begin_busy("Exporting Stack to Zarr...", determinate=True)
-        worker = FunctionWorker(
-            _ome_zarr_export_task,
-            dataset,
-            destination,
-            int(chunk_size_px),
-            bool(compression_enabled),
-            cancel_event=self._ome_zarr_export_cancel_event,
-            supports_progress=True,
-        )
-        self._append_workflow_log(
-            f"OME-Zarr export start | chunks {chunk_size_px}px | compression {'on' if compression_enabled else 'off'}",
-            level="info",
-        )
-        worker.signals.progress.connect(self._update_busy_progress)
-        worker.signals.progress.connect(
-            lambda percent, text, request_id=request_id: self._on_ome_zarr_export_progress(request_id, percent, text)
-        )
-        worker.signals.result.connect(lambda result, request_id=request_id: self._on_ome_zarr_export_finished(request_id, result))
-        worker.signals.error.connect(lambda message, request_id=request_id: self._on_ome_zarr_export_failed(request_id, message))
-        self._thread_pool.start(worker)
-
-    def _stop_ome_zarr_export(self) -> None:
-        if not self._ome_zarr_export_running or self._ome_zarr_export_cancel_event is None:
-            return
-        self._ome_zarr_export_cancel_event.set()
-        self._set_status_text("Stopping Stack to Zarr export...")
-        self.dataset_ome_zarr_export_eta_label.setText("ETA: stopping...")
-
-    def _on_ome_zarr_export_progress(self, request_id: int, percent: int, text: str) -> None:
-        if request_id != self._ome_zarr_export_request_id or not self._ome_zarr_export_running:
-            return
-        current_percent = int(np.clip(percent, 0, 100))
-        self.dataset_ome_zarr_export_progress_bar.setValue(current_percent)
-        self.dataset_ome_zarr_export_progress_bar.setFormat(f"{current_percent}%")
-        eta_text = "ETA: --:--"
-        if self._ome_zarr_export_started_at is not None and current_percent > 0:
-            elapsed = max(time.perf_counter() - self._ome_zarr_export_started_at, 1e-6)
-            remaining = max((elapsed * (100.0 - current_percent)) / max(float(current_percent), 1.0), 0.0)
-            eta_text = f"ETA: {self._format_elapsed_seconds(remaining) or '0:00'}"
-        self.dataset_ome_zarr_export_eta_label.setText(eta_text)
-        self._set_status_text(text)
-
-    def _finish_ome_zarr_export(self, request_id: int, message: str | None = None, *, failed: bool = False) -> None:
-        if request_id != self._ome_zarr_export_request_id:
-            return
-        elapsed_text = ""
-        if self._ome_zarr_export_started_at is not None:
-            elapsed_text = f" in {self._format_duration(time.perf_counter() - self._ome_zarr_export_started_at)}"
-        self._ome_zarr_export_running = False
-        self._end_busy()
-        self._ome_zarr_export_started_at = None
-        self._ome_zarr_export_cancel_event = None
-        self.dataset_ome_zarr_export_progress_bar.setValue(0)
-        self.dataset_ome_zarr_export_progress_bar.setFormat("%p%")
-        self.dataset_ome_zarr_export_eta_label.setText("ETA: --:--")
-        self.dataset_ome_zarr_export_progress_row.hide()
-        self.dataset_ome_zarr_export_stop_button.setVisible(False)
-        self.dataset_ome_zarr_export_stop_button.setEnabled(False)
-        self.dataset_ome_zarr_export_button.setEnabled(self._state.dataset is not None)
-        self.ome_zarr_chunk_mode_combo.setEnabled(True)
-        self.ome_zarr_chunk_guide_button.setEnabled(True)
-        self.ome_zarr_compression_button.setEnabled(True)
-        self.dataset_ome_zarr_controls_row.setEnabled(True)
-        self.dataset_ome_zarr_options_row.setEnabled(True)
-        self.dataset_ome_zarr_info_row.setEnabled(True)
-        self._sync_ome_zarr_chunk_controls()
-        self._append_workflow_log(
-            f"OME-Zarr export {'failed' if failed else 'done'}{elapsed_text}",
-            level="warning" if failed else "success",
-        )
-        if message:
-            self._set_status_text(f"{message}{elapsed_text}")
-        if failed and self._ome_zarr_export_destination is not None:
-            try:
-                if self._ome_zarr_export_destination.exists():
-                    shutil.rmtree(self._ome_zarr_export_destination, ignore_errors=True)
-            except Exception:
-                pass
-        self._ome_zarr_export_destination = None
-
-    def _on_ome_zarr_export_finished(self, request_id: int, result: Path) -> None:
-        if request_id != self._ome_zarr_export_request_id:
-            return
-        destination = Path(result)
-        size_text = self._format_bytes(self._folder_size_bytes(destination))
-        self._finish_ome_zarr_export(request_id, f"Done. Exported {destination.name} ({size_text}).")
-
-    def _on_ome_zarr_export_failed(self, request_id: int, message: str) -> None:
-        if request_id != self._ome_zarr_export_request_id:
-            return
-        if "cancelled" in message.lower():
-            self._finish_ome_zarr_export(request_id, "Stack to Zarr export cancelled.", failed=True)
-            return
-        self._finish_ome_zarr_export(request_id, f"Stack to Zarr export failed: {message}", failed=True)
-        QMessageBox.critical(self, "Stack to Zarr export failed", message)
-
-    @staticmethod
-    def _dataset_transfer_icon(action: str, color: str = "#f8fafc", size: int = 24) -> QIcon:
-        icon_name = "database-import" if str(action).lower() == "import" else "database-export"
-        icon = MainWindow._tabler_icon(icon_name, color, size, stroke_width=2.1)
-        if not icon.isNull():
-            return icon
-        fallback = MainWindow._tabler_icon("database", color, size, stroke_width=2.1)
-        if not fallback.isNull():
-            return fallback
-        pixmap = QPixmap(size, size)
-        pixmap.fill(Qt.GlobalColor.transparent)
-        painter = QPainter(pixmap)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        pen = QPen(QColor(color), max(1.8, size / 12.0))
-        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
-        pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
-        painter.setPen(pen)
-        painter.setBrush(Qt.BrushStyle.NoBrush)
-        painter.drawRoundedRect(QRectF(size * 0.18, size * 0.2, size * 0.64, size * 0.52), size * 0.18, size * 0.18)
-        painter.drawLine(QLineF(size * 0.26, size * 0.35, size * 0.74, size * 0.35))
-        painter.drawLine(QLineF(size * 0.26, size * 0.53, size * 0.74, size * 0.53))
-        if str(action).lower() == "import":
-            painter.drawLine(QLineF(size * 0.50, size * 0.72, size * 0.50, size * 0.88))
-            painter.drawLine(QLineF(size * 0.50, size * 0.72, size * 0.40, size * 0.82))
-            painter.drawLine(QLineF(size * 0.50, size * 0.72, size * 0.60, size * 0.82))
-        else:
-            painter.drawLine(QLineF(size * 0.50, size * 0.12, size * 0.50, size * 0.28))
-            painter.drawLine(QLineF(size * 0.50, size * 0.12, size * 0.40, size * 0.22))
-            painter.drawLine(QLineF(size * 0.50, size * 0.12, size * 0.60, size * 0.22))
-        painter.end()
-        return QIcon(pixmap)
-
-    @staticmethod
-    def _free_standing_icon_label(
-        icon: QIcon,
-        tooltip: str,
-        *,
-        size: int = 24,
-        parent: QWidget | None = None,
-    ) -> ClickableIconLabel:
-        label = ClickableIconLabel(parent)
-        label.setPixmap(icon.pixmap(size, size))
-        label.setToolTip(tooltip)
-        label.setFixedSize(size + 4, size + 4)
-        label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        label.setCursor(Qt.CursorShape.PointingHandCursor)
-        return label
-
-    def _free_standing_toggle_text_label(
-        self,
-        checked: bool,
-        tooltip: str,
-        *,
-        unchecked_text: str,
-        checked_text: str,
-        size: int = 24,
-        parent: QWidget | None = None,
-    ) -> FreeStandingToggleTextLabel:
-        label = FreeStandingToggleTextLabel(parent)
-        label.setTexts(unchecked_text, checked_text)
-        label.setChecked(bool(checked))
-        label.setToolTip(tooltip)
-        label.setFixedSize(max(size + 6, 28), max(size + 6, 28))
-        label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        label.setCursor(Qt.CursorShape.PointingHandCursor)
-        label.setObjectName("histogramScaleToggle")
-        label.setStyleSheet(
-            "QLabel#histogramScaleToggle {"
-            "  background: transparent;"
-            "  border: none;"
-            "  padding: 0;"
-            "  margin: 0;"
-            "  font-size: 12px;"
-            "  font-weight: 700;"
-            "  color: #94a3b8;"
-            "}"
-            "QLabel#histogramScaleToggle:hover {"
-            "  color: #38bdf8;"
-            "  background: rgba(56, 189, 248, 0.12);"
-            "  border-radius: 9px;"
-            "}"
-            "QLabel#histogramScaleToggle[checked=\"true\"] {"
-            "  color: #22c55e;"
-            "  background: rgba(34, 197, 94, 0.10);"
-            "  border-radius: 9px;"
-            "}"
-        )
-        return label
-
-    def _free_standing_toggle_icon_label(
-        self,
-        icon: QIcon,
-        checked: bool,
-        tooltip: str,
-        *,
-        size: int = 24,
-        parent: QWidget | None = None,
-    ) -> FreeStandingToggleIconLabel:
-        label = FreeStandingToggleIconLabel(parent)
-        label.setIcon(icon)
-        label.setIconSize(QSize(size, size))
-        label.setChecked(bool(checked))
-        label.setToolTip(tooltip)
-        label.setFixedSize(size + 8, size + 8)
-        label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        label.setCursor(Qt.CursorShape.PointingHandCursor)
-        label.setObjectName("histogramScaleToggle")
-        label.setStyleSheet(
-            "QLabel#histogramScaleToggle {"
-            "  background: transparent;"
-            "  border: none;"
-            "  padding: 0;"
-            "  margin: 0;"
-            "}"
-            "QLabel#histogramScaleToggle:hover {"
-            "  background: rgba(56, 189, 248, 0.14);"
-            "  border-radius: 9px;"
-            "}"
-        )
-        return label
-
-    @staticmethod
-    def _navigation_chevron_icon(direction: str, color: str = "#f8fafc", size: int = 24) -> QIcon:
-        icon_name = "chevron-left" if str(direction).lower() == "left" else "chevron-right"
-        icon = MainWindow._tabler_icon(icon_name, color, size, stroke_width=2.2)
-        if not icon.isNull():
-            return icon
-        pixmap = QPixmap(size, size)
-        pixmap.fill(Qt.GlobalColor.transparent)
-        painter = QPainter(pixmap)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        pen = QPen(QColor(color), max(1.8, size / 12.0))
-        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
-        pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
-        painter.setPen(pen)
-        center_y = size / 2.0
-        if icon_name == "chevron-left":
-            painter.drawLine(QLineF(size * 0.62, size * 0.25, size * 0.38, center_y))
-            painter.drawLine(QLineF(size * 0.38, center_y, size * 0.62, size * 0.75))
-        else:
-            painter.drawLine(QLineF(size * 0.38, size * 0.25, size * 0.62, center_y))
-            painter.drawLine(QLineF(size * 0.62, center_y, size * 0.38, size * 0.75))
-        painter.end()
-        return QIcon(pixmap)
-
-    @staticmethod
-    def _dataset_folder_icon(color: str = "#38bdf8", size: int = 24) -> QIcon:
-        icon = MainWindow._tabler_icon("folder-search", color, size, stroke_width=2.1)
-        if not icon.isNull():
-            return icon
-        icon = MainWindow._tabler_icon("folder", color, size, stroke_width=2.1)
-        if not icon.isNull():
-            return icon
-        pixmap = QPixmap(size, size)
-        pixmap.fill(Qt.GlobalColor.transparent)
-        painter = QPainter(pixmap)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        pen = QPen(QColor(color), max(1.8, size / 12.0))
-        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
-        pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
-        painter.setPen(pen)
-        painter.setBrush(Qt.BrushStyle.NoBrush)
-        scale = size / 24.0
-        painter.drawRoundedRect(QRectF(4.0 * scale, 6.0 * scale, 16.0 * scale, 11.0 * scale), 2.2 * scale, 2.2 * scale)
-        painter.drawLine(QPointF(7.0 * scale, 10.0 * scale), QPointF(12.0 * scale, 10.0 * scale))
-        painter.drawLine(QPointF(12.0 * scale, 10.0 * scale), QPointF(14.0 * scale, 8.0 * scale))
-        painter.drawLine(QPointF(12.0 * scale, 10.0 * scale), QPointF(14.0 * scale, 12.0 * scale))
-        painter.drawEllipse(QRectF(13.5 * scale, 12.0 * scale, 2.5 * scale, 2.5 * scale))
-        painter.end()
-        return QIcon(pixmap)
-
-    @staticmethod
-    def _make_rotate_icon(active: bool = False) -> QIcon:
-        color = "#fbbf24" if active else "#f8fafc"
-        icon = MainWindow._tabler_icon("rotate-clockwise-2", color, 24, stroke_width=2.1)
-        if not icon.isNull():
-            return icon
-        pixmap = QPixmap(24, 24)
-        pixmap.fill(Qt.GlobalColor.transparent)
-        painter = QPainter(pixmap)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        pen = QPen(QColor(color), 2.3)
-        painter.setPen(pen)
-        painter.drawArc(4, 4, 14, 14, 40 * 16, 260 * 16)
-        painter.drawLine(15, 3, 20, 3)
-        painter.drawLine(20, 3, 20, 8)
-        painter.end()
-        return QIcon(pixmap)
-
-    @staticmethod
-    def _make_crop_icon(active: bool = False) -> QIcon:
-        color = "#38bdf8" if active else "#f8fafc"
-        icon = MainWindow._tabler_icon("crop", color, 24, stroke_width=2.1)
-        if not icon.isNull():
-            return icon
-        pixmap = QPixmap(24, 24)
-        pixmap.fill(Qt.GlobalColor.transparent)
-        painter = QPainter(pixmap)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        pen = QPen(QColor(color), 2.2)
-        painter.setPen(pen)
-        painter.drawLine(6, 4, 6, 18)
-        painter.drawLine(6, 18, 16, 18)
-        painter.drawLine(10, 6, 18, 6)
-        painter.drawLine(18, 6, 18, 14)
-        painter.end()
-        return QIcon(pixmap)
-
-    @staticmethod
-    def _make_flip_horizontal_icon(active: bool = False) -> QIcon:
-        color = "#22c55e" if active else "#f8fafc"
-        icon = MainWindow._tabler_icon("flip-horizontal", color, 24, stroke_width=2.1)
-        if not icon.isNull():
-            return icon
-        pixmap = QPixmap(24, 24)
-        pixmap.fill(Qt.GlobalColor.transparent)
-        painter = QPainter(pixmap)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        painter.setPen(QPen(QColor(color), 2.3))
-        painter.drawLine(12, 4, 12, 20)
-        painter.drawLine(5, 8, 9, 12)
-        painter.drawLine(9, 12, 5, 16)
-        painter.drawLine(19, 8, 15, 12)
-        painter.drawLine(15, 12, 19, 16)
-        painter.end()
-        return QIcon(pixmap)
-
-    @staticmethod
-    def _make_flip_vertical_icon(active: bool = False) -> QIcon:
-        color = "#2dd4bf" if active else "#f8fafc"
-        icon = MainWindow._tabler_icon("flip-vertical", color, 24, stroke_width=2.1)
-        if not icon.isNull():
-            return icon
-        pixmap = QPixmap(24, 24)
-        pixmap.fill(Qt.GlobalColor.transparent)
-        painter = QPainter(pixmap)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        painter.setPen(QPen(QColor(color), 2.3))
-        painter.drawLine(4, 12, 20, 12)
-        painter.drawLine(8, 5, 12, 9)
-        painter.drawLine(12, 9, 16, 5)
-        painter.drawLine(8, 19, 12, 15)
-        painter.drawLine(12, 15, 16, 19)
-        painter.end()
-        return QIcon(pixmap)
-
-    @staticmethod
-    def _make_measure_icon(active: bool = False) -> QIcon:
-        color = "#22c55e" if active else "#f8fafc"
-        icon = MainWindow._tabler_icon("ruler-measure", color, 24, stroke_width=2.1)
-        if not icon.isNull():
-            return icon
-        pixmap = QPixmap(24, 24)
-        pixmap.fill(Qt.GlobalColor.transparent)
-        painter = QPainter(pixmap)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        pen = QPen(QColor(color), 2.2)
-        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
-        painter.setPen(pen)
-        painter.drawLine(QPointF(5.0, 17.5), QPointF(19.0, 17.5))
-        painter.drawLine(QPointF(5.0, 8.0), QPointF(5.0, 20.0))
-        painter.drawLine(QPointF(19.0, 8.0), QPointF(19.0, 20.0))
-        painter.drawLine(QPointF(9.0, 12.0), QPointF(9.0, 17.5))
-        painter.drawLine(QPointF(13.0, 10.0), QPointF(13.0, 17.5))
-        painter.drawLine(QPointF(9.0, 6.0), QPointF(13.0, 6.0))
-        painter.drawLine(QPointF(11.0, 4.0), QPointF(11.0, 8.0))
-        painter.end()
-        return QIcon(pixmap)
-
-    @staticmethod
-    def _make_undo_icon() -> QIcon:
-        icon = MainWindow._lucide_icon("undo", "#f8fafc", 24, stroke_width=2.25)
-        if not icon.isNull():
-            return icon
-        pixmap = QPixmap(24, 24)
-        pixmap.fill(Qt.GlobalColor.transparent)
-        painter = QPainter(pixmap)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        pen = QPen(QColor("#f8fafc"), 2.1)
-        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
-        pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
-        painter.setPen(pen)
-        painter.drawArc(5, 5, 14, 14, 35 * 16, 250 * 16)
-        painter.drawLine(QLineF(8.5, 7.2, 4.8, 8.2))
-        painter.drawLine(QLineF(8.5, 7.2, 7.2, 3.6))
-        painter.end()
-        return QIcon(pixmap)
-
-    @staticmethod
-    def _make_redo_icon() -> QIcon:
-        icon = MainWindow._lucide_icon("redo", "#f8fafc", 24, stroke_width=2.25)
-        if not icon.isNull():
-            return icon
-        pixmap = QPixmap(24, 24)
-        pixmap.fill(Qt.GlobalColor.transparent)
-        painter = QPainter(pixmap)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        pen = QPen(QColor("#f8fafc"), 2.1)
-        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
-        pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
-        painter.setPen(pen)
-        painter.drawArc(5, 5, 14, 14, -105 * 16, 250 * 16)
-        painter.drawLine(QLineF(15.5, 7.2, 19.2, 8.2))
-        painter.drawLine(QLineF(15.5, 7.2, 16.8, 3.6))
-        painter.end()
-        return QIcon(pixmap)
-
-    @staticmethod
-    def _make_spot_edit_icon() -> QIcon:
-        icon = MainWindow._lucide_icon("square-pen", "#f8fafc", 24, stroke_width=2.3)
-        if not icon.isNull():
-            return icon
-        pixmap = QPixmap(24, 24)
-        pixmap.fill(Qt.GlobalColor.transparent)
-        painter = QPainter(pixmap)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        pen = QPen(QColor("#f8fafc"), 2.5)
-        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
-        pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
-        painter.setPen(pen)
-        painter.setBrush(Qt.BrushStyle.NoBrush)
-        painter.drawEllipse(QRectF(4.2, 10.2, 7.2, 7.2))
-        painter.setPen(QPen(QColor("#60a5fa"), 2.6, cap=Qt.PenCapStyle.RoundCap, join=Qt.PenJoinStyle.RoundJoin))
-        painter.drawLine(QLineF(10.2, 16.0, 17.8, 8.4))
-        painter.drawLine(QLineF(16.2, 6.8, 19.4, 10.0))
-        painter.setPen(QPen(QColor("#f8fafc"), 2.2, cap=Qt.PenCapStyle.RoundCap, join=Qt.PenJoinStyle.RoundJoin))
-        painter.drawLine(QLineF(9.3, 17.0, 12.8, 16.2))
-        painter.end()
-        return QIcon(pixmap)
-
-    @staticmethod
-    def _make_spot_list_icon(active: bool = False) -> QIcon:
-        color = "#f59e0b" if active else "#f8fafc"
-        icon = MainWindow._lucide_icon("table", color, 24, stroke_width=2.3)
-        if not icon.isNull():
-            return icon
-        pixmap = QPixmap(24, 24)
-        pixmap.fill(Qt.GlobalColor.transparent)
-        painter = QPainter(pixmap)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        pen = QPen(QColor(color), 2.5)
-        painter.setPen(pen)
-        painter.drawRect(3, 3, 18, 18)
-        painter.drawLine(QLineF(3, 11, 21, 11))
-        painter.drawLine(QLineF(11, 3, 11, 21))
-        painter.end()
-        return QIcon(pixmap)
-
-    @staticmethod
-    def _make_color_swatch_icon(color: QColor, size: int = 16) -> QIcon:
-        swatch = QPixmap(size, size)
-        swatch.fill(Qt.GlobalColor.transparent)
-        painter = QPainter(swatch)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        painter.setPen(QPen(QColor("#e2e8f0"), 1.1))
-        painter.setBrush(QBrush(QColor(color)))
-        painter.drawRoundedRect(QRectF(1.5, 1.5, size - 3.0, size - 3.0), 3.0, 3.0)
-        painter.end()
-        return QIcon(swatch)
-
-    def _make_relation_scope_button(self, active: bool, tooltip: str) -> QToolButton:
-        button = QToolButton(self)
-        button.setAutoRaise(True)
-        button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly)
-        button.setCheckable(True)
-        button.setChecked(active)
-        button.setIcon(self._make_relation_scope_icon(active))
-        button.setIconSize(QSize(APP_THEME.plain_icon_inner, APP_THEME.plain_icon_inner))
-        button.setFixedSize(APP_THEME.plain_icon_outer, APP_THEME.plain_icon_outer)
-        button.setStyleSheet(transparent_icon_button_stylesheet())
-        button.setToolTip(tooltip)
-        button.toggled.connect(lambda checked, btn=button: btn.setIcon(self._make_relation_scope_icon(checked)))
-        return button
-
-    def _make_relation_scope_icon(self, active: bool = False) -> QIcon:
-        color = "#22c55e" if active else "#f8fafc"
-        icon = MainWindow._tabler_icon("relation-one-to-many", color, 24, stroke_width=2.1)
-        if not icon.isNull():
-            return icon
-        pixmap = QPixmap(24, 24)
-        pixmap.fill(Qt.GlobalColor.transparent)
-        painter = QPainter(pixmap)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        pen = QPen(QColor(color), 2.2)
-        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
-        painter.setPen(pen)
-        painter.drawLine(QLineF(6, 12, 13, 12))
-        painter.drawLine(QLineF(13, 12, 18, 7))
-        painter.drawLine(QLineF(13, 12, 18, 12))
-        painter.drawLine(QLineF(13, 12, 18, 17))
-        if active:
-            painter.setBrush(QColor("#22c55e"))
-        painter.drawEllipse(QRectF(3.5, 9.5, 5.0, 5.0))
-        painter.drawEllipse(QRectF(18.0, 5.5, 3.5, 3.5))
-        painter.drawEllipse(QRectF(18.0, 10.25, 3.5, 3.5))
-        painter.drawEllipse(QRectF(18.0, 15.0, 3.5, 3.5))
-        painter.end()
-        return QIcon(pixmap)
-
-    @staticmethod
-    def _make_add_icon() -> QIcon:
-        icon = MainWindow._lucide_icon("plus", "#22c55e", 24, stroke_width=2.8)
-        if not icon.isNull():
-            return icon
-        pixmap = QPixmap(24, 24)
-        pixmap.fill(Qt.GlobalColor.transparent)
-        painter = QPainter(pixmap)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        pen = QPen(QColor("#22c55e"), 2.8)
-        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
-        painter.setPen(pen)
-        painter.drawEllipse(QRectF(4.6, 4.6, 14.8, 14.8))
-        painter.drawLine(QLineF(12.0, 7.3, 12.0, 16.7))
-        painter.drawLine(QLineF(7.3, 12.0, 16.7, 12.0))
-        painter.end()
-        return QIcon(pixmap)
-
-    @staticmethod
-    def _make_move_icon() -> QIcon:
-        icon = MainWindow._tabler_icon("arrows-move", "#38bdf8", 24, stroke_width=2.2)
-        if not icon.isNull():
-            return icon
-        pixmap = QPixmap(24, 24)
-        pixmap.fill(Qt.GlobalColor.transparent)
-        painter = QPainter(pixmap)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        pen = QPen(QColor("#38bdf8"), 2.6)
-        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
-        pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
-        painter.setPen(pen)
-        painter.drawLine(QLineF(12.0, 4.6, 12.0, 19.4))
-        painter.drawLine(QLineF(4.6, 12.0, 19.4, 12.0))
-        painter.drawLine(QLineF(12.0, 4.6, 9.0, 7.6))
-        painter.drawLine(QLineF(12.0, 4.6, 15.0, 7.6))
-        painter.drawLine(QLineF(12.0, 19.4, 9.0, 16.4))
-        painter.drawLine(QLineF(12.0, 19.4, 15.0, 16.4))
-        painter.drawLine(QLineF(4.6, 12.0, 7.6, 9.0))
-        painter.drawLine(QLineF(4.6, 12.0, 7.6, 15.0))
-        painter.drawLine(QLineF(19.4, 12.0, 16.4, 9.0))
-        painter.drawLine(QLineF(19.4, 12.0, 16.4, 15.0))
-        painter.setPen(QPen(QColor("#e0f2fe"), 2.0, cap=Qt.PenCapStyle.RoundCap, join=Qt.PenJoinStyle.RoundJoin))
-        painter.drawEllipse(QRectF(9.5, 9.5, 5.0, 5.0))
-        painter.end()
-        return QIcon(pixmap)
-
-    @staticmethod
-    def _make_remove_icon() -> QIcon:
-        icon = MainWindow._lucide_icon("trash-2", "#ef4444", 24, stroke_width=2.2)
-        if not icon.isNull():
-            return icon
-        pixmap = QPixmap(24, 24)
-        pixmap.fill(Qt.GlobalColor.transparent)
-        painter = QPainter(pixmap)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        pen = QPen(QColor("#ef4444"), 2.5)
-        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
-        pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
-        painter.setPen(pen)
-        painter.drawLine(QLineF(7.0, 7.0, 17.0, 7.0))
-        painter.drawLine(QLineF(9.5, 4.9, 14.5, 4.9))
-        painter.drawLine(QLineF(8.4, 7.9, 9.4, 18.3))
-        painter.drawLine(QLineF(15.6, 7.9, 14.6, 18.3))
-        painter.drawLine(QLineF(9.6, 18.4, 14.4, 18.4))
-        painter.drawLine(QLineF(11.0, 10.0, 11.0, 16.0))
-        painter.drawLine(QLineF(13.0, 10.0, 13.0, 16.0))
-        painter.end()
-        return QIcon(pixmap)
-
-    @staticmethod
-    def _make_group_icon() -> QIcon:
-        icon = MainWindow._lucide_icon("group", "#a855f7", 24, stroke_width=2.2)
-        if not icon.isNull():
-            return icon
-        pixmap = QPixmap(24, 24)
-        pixmap.fill(Qt.GlobalColor.transparent)
-        painter = QPainter(pixmap)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        painter.setPen(QPen(QColor("#a855f7"), 2))
-        painter.setBrush(QColor("#a855f7"))
-        painter.drawEllipse(4, 9, 5, 5)
-        painter.drawEllipse(10, 5, 5, 5)
-        painter.drawEllipse(15, 11, 5, 5)
-        painter.setBrush(Qt.BrushStyle.NoBrush)
-        painter.drawLine(8, 11, 12, 8)
-        painter.drawLine(14, 9, 17, 12)
-        painter.end()
-        return QIcon(pixmap)
-
-    def _reference_mode_icon(self, mode: str, active: bool) -> QIcon:
-        color = "#84cc16" if active else "#f8fafc"
-        if mode == "manual":
-            icon = self._tabler_icon(
-                "manual-gearbox",
-                color=color,
-                size=24,
-                stroke_width=2.1,
-                fill=color if active else "none",
-            )
-            if not icon.isNull():
-                return icon
-            return self._tabler_icon("manual-gearbox", color=color, size=24, stroke_width=2.1)
-        return self._robot_icon(active)
-
-    def _robot_icon(self, active: bool) -> QIcon:
-        color = "#84cc16" if active else "#f8fafc"
-        icon = self._tabler_icon("robot", color=color, size=24, stroke_width=2.1)
-        if not icon.isNull():
-            return icon
-        return self._tabler_icon("robot", color=color, size=24, stroke_width=2.1)
-
-    def _chromatic_auto_icon(self, active: bool) -> QIcon:
-        return self._robot_icon(active)
-
-    def _sync_reference_selection_from_settings(self) -> None:
-        combo_index = max(self.reference_mode_combo.findData(str(self._state.preprocessing.reference_mode or "auto")), 0)
-        self.reference_mode_combo.blockSignals(True)
-        self.reference_mode_combo.setCurrentIndex(combo_index)
-        self.reference_mode_combo.blockSignals(False)
-        if not self._frame_values or not self._wavelength_values:
-            self._update_reference_controls()
-            self._update_reference_summary()
-            return
-        frame_index, wavelength_index = self._initial_reference_indices()
-        self.frame_slider.blockSignals(True)
-        self.wavelength_slider.blockSignals(True)
-        self.frame_slider.setValue(frame_index)
-        self.wavelength_slider.setValue(wavelength_index)
-        self.frame_slider.blockSignals(False)
-        self.wavelength_slider.blockSignals(False)
-        self._update_reference_controls()
-        self._update_reference_summary()

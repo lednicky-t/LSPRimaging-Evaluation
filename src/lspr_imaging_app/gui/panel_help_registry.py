@@ -61,12 +61,12 @@ PANEL_HELP: dict[str, PanelHelpEntry] = {
         ),
         shortcut_keys=("measure",),
     ),
-    "spot_editor": PanelHelpEntry(
-        title="Spot editor",
+    "roi_editor": PanelHelpEntry(
+        title="ROI editor",
         description=(
-            "Control manual spot selection, move/add/remove, grouping, and the array-based ordering tools."
+            "Control circular ROI detection, rectangle ROI editing, move/add/remove, grouping, and the array-based ordering tools."
         ),
-        shortcut_keys=("spot_editor", "array_detect"),
+        shortcut_keys=("roi_editor", "array_detect"),
     ),
     "array_detect": PanelHelpEntry(
         title="Array detect",

@@ -7,7 +7,7 @@ from pathlib import Path
 
 from PyQt6.QtCore import QItemSelectionModel, Qt
 from PyQt6.QtGui import QBrush, QColor
-from PyQt6.QtWidgets import QFileDialog, QMessageBox, QTableWidgetItem
+from PyQt6.QtWidgets import QFileDialog, QMenu, QMessageBox, QTableWidgetItem
 
 from lspr_imaging_app.domain.models import SpotGroup
 from lspr_imaging_app.gui.spot_table_helpers import append_spot_table_row, format_xy_value, spot_table_headers, SpotTableRowData
@@ -266,6 +266,39 @@ class SpotTableController:
             self.edit_spot_geometry(spot_id)
         elif column == 5:
             self.edit_ring_geometry(spot_id)
+
+    def show_context_menu(self, pos) -> None:
+        table = self.window.spot_list_table
+        item = table.itemAt(pos)
+        if item is None:
+            return
+        row = item.row()
+        spot_id = self.spot_id_for_row(row)
+        if spot_id is None:
+            return
+        menu = QMenu(table)
+        group_action = menu.addAction("Group...")
+        select_group_action = None
+        ungroup_action = None
+        destroy_group_action = None
+        groups = self.window._groups_for_spot(spot_id)
+        if groups:
+            select_group_action = menu.addAction("Select group members")
+            ungroup_action = menu.addAction("Ungroup")
+            destroy_group_action = menu.addAction("Destroy group")
+            menu.addSeparator()
+        action = menu.exec(table.viewport().mapToGlobal(pos))
+        if action is None:
+            return
+        if action is group_action:
+            self.window._group_selected_spots()
+        elif select_group_action is not None and action is select_group_action:
+            if self.window._select_group_members_for_spot(spot_id):
+                self.window.status_label.setText(f"Selected group members for spot {spot_id}.")
+        elif ungroup_action is not None and action is ungroup_action:
+            self.window._ungroup_selected_spots()
+        elif destroy_group_action is not None and action is destroy_group_action:
+            self.window._destroy_groups_for_spot(spot_id)
 
     def update_table(self) -> None:
         logger = logging.getLogger("lspr_imaging_app.workflow")

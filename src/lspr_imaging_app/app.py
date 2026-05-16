@@ -11,7 +11,15 @@ from PyQt6.QtCore import Qt, QSettings, QTimer
 from PyQt6.QtGui import QColor, QFont, QPainter, QPalette, QPen, QPixmap
 from PyQt6.QtWidgets import QApplication, QMainWindow, QSplashScreen
 
-from lspr_imaging_app.gui.theme import get_active_theme, startup_app_stylesheet
+from lspr_ui import (
+    GRAY_DARK_THEME,
+    app_icon,
+    apply_base_app_theme,
+    get_active_theme,
+    set_active_theme,
+    startup_app_stylesheet,
+)
+from lspr_imaging_app.version import APP_NAME, APP_VERSION, version_string
 
 
 def _configure_logging() -> Path:
@@ -96,7 +104,7 @@ def _render_splash_pixmap(progress: int, message: str) -> QPixmap:
     body_font = QFont("Segoe UI", 9)
     progress_font = QFont("Segoe UI", 10, QFont.Weight.DemiBold)
     painter.setFont(title_font)
-    painter.drawText(40, 92, "LSPR Imaging")
+    painter.drawText(40, 92, version_string())
     painter.setFont(body_font)
     painter.setPen(QColor(theme.control_border_hover))
     painter.drawText(40, 120, "Fast ROI-first workflow for hyperspectral image review")
@@ -195,15 +203,17 @@ def _resolve_default_dataset_folder() -> Path:
 def main() -> None:
     log_path = _configure_logging()
     app = QApplication(sys.argv)
-    app.setApplicationDisplayName("LSPR Imaging")
+    app.setApplicationName(APP_NAME)
+    app.setApplicationDisplayName(version_string())
+    app.setApplicationVersion(APP_VERSION)
     app.setQuitOnLastWindowClosed(False)
+    app.setWindowIcon(app_icon())
     settings = QSettings("LSPR", "LSPRImaging")
     if str(settings.value("ui/theme", "blue")) == "gray":
-        from lspr_imaging_app.gui.theme import GRAY_DARK_THEME, set_active_theme
-
         set_active_theme(GRAY_DARK_THEME)
     fast_startup = _fast_startup_enabled(settings)
     logging.getLogger("lspr_imaging_app.startup").info("Session log file: %s", log_path)
+    apply_base_app_theme(app, get_active_theme())
     _apply_active_palette(app)
     _apply_dark_theme(app)
     splash = _build_splash()

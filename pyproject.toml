@@ -1,0 +1,37 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "lspr-imaging-evaluation"
+description = "LSPR imaging offline evaluation application."
+readme = "README.md"
+requires-python = ">=3.12"
+dynamic = ["version"]
+dependencies = [
+    "h5py",
+    "numpy",
+    "pydantic>=2",
+    "Pillow",
+    "PyQt6",
+    "pyqtgraph",
+    "scikit-image",
+    "scipy",
+    "tifffile",
+    "tabler-icons",
+    "lucide",
+    "lspr-ui>=0.1.0",
+    "lspr-core>=0.1.0",
+]
+
+[project.scripts]
+lspri-evaluation = "lspr_imaging_app.app:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.dynamic]
+version = {attr = "lspr_imaging_app.version.APP_VERSION"}

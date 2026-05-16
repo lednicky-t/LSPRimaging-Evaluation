@@ -24,6 +24,9 @@ dist/
 logs/
 .tmp/
 *.log
+.git_backup/
+**/.git_backup/
+_refs/
 
 # Editor and IDE state
 .vscode/

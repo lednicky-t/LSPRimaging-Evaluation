@@ -1,0 +1,6 @@
+from __future__ import annotations
+
+WORKSPACE_SCHEMA_VERSION = 1
+PROCESSING_PROFILE_VERSION = 1
+ROI_EXPORT_VERSION = 1
+

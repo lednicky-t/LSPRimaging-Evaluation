@@ -4,7 +4,7 @@ import json
 
 from PyQt6.QtGui import QColor
 
-from lspr_imaging_app.gui.theme import APP_THEME
+from lspr_ui import APP_THEME
 
 
 class UIStateManager:
@@ -278,7 +278,7 @@ class UIStateManager:
         feature_ids = window._expected_chromatic_feature_ids() if has_dataset else []
         has_samples = bool(sample_keys)
         can_navigate = has_samples and current_index is not None and len(sample_keys) > 1
-        can_edit = has_samples and window._is_chromatic_sample_image_key(window._current_image_key)
+        can_edit = has_samples
         controls_enabled = has_dataset and not window._chromatic_auto_running
 
         window.chromatic_sample_count_spin.setEnabled(controls_enabled)

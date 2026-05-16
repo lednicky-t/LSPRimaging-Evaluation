@@ -172,23 +172,17 @@ def build_layout(window) -> None:
     chromatic_layout.addRow("Status", window.chromatic_summary)
     chromatic_layout.addRow("Progress", window.chromatic_progress_label)
 
-    spot_editor_group = QWidget(window)
-    spot_editor_layout = QFormLayout(spot_editor_group)
-    spot_editor_layout.setContentsMargins(8, 8, 8, 8)
-    spot_editor_layout.setHorizontalSpacing(6)
-    spot_editor_layout.setVerticalSpacing(4)
-    spot_editor_layout.setLabelAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
-    window.left_spot_editor_row = QWidget(spot_editor_group)
-    window.left_spot_editor_layout = QHBoxLayout(window.left_spot_editor_row)
-    window.left_spot_editor_layout.setContentsMargins(0, 0, 0, 0)
-    window.left_spot_editor_layout.setSpacing(8)
-    spot_editor_layout.addRow("", window._make_section_separator())
-    spot_editor_layout.addRow("Tools", window.left_spot_editor_row)
-    spot_editor_layout.addRow("Spot diameter", window._build_spot_geometry_row())
-    spot_editor_layout.addRow("Reference ring", window._build_ring_row())
-    spot_editor_layout.addRow("Areas", window.spot_geometry_area_label)
-    spot_editor_layout.addRow("", window._make_section_separator())
-    spot_editor_layout.addRow("Array", window._build_array_row())
+    circle_editor_group = QWidget(window)
+    circle_editor_layout = QFormLayout(circle_editor_group)
+    circle_editor_layout.setContentsMargins(8, 8, 8, 8)
+    circle_editor_layout.setHorizontalSpacing(6)
+    circle_editor_layout.setVerticalSpacing(4)
+    circle_editor_layout.setLabelAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+    circle_editor_layout.addRow("", window._make_section_separator())
+    circle_editor_layout.addRow("Spot diameter", window._build_spot_geometry_row())
+    circle_editor_layout.addRow("Reference ring", window._build_ring_row())
+    circle_editor_layout.addRow("Areas", window.spot_geometry_area_label)
+    circle_editor_layout.addRow("", window._make_section_separator())
     detection_buttons = QHBoxLayout()
     detection_buttons.setContentsMargins(0, 0, 0, 0)
     detection_buttons.setSpacing(4)
@@ -197,8 +191,50 @@ def build_layout(window) -> None:
     detection_buttons.addWidget(window.reorder_spots_button)
     detection_buttons.addWidget(window.clear_spots_button)
     detection_buttons.addStretch(1)
-    spot_editor_layout.addRow("", detection_buttons)
-    spot_editor_layout.addRow("Result", window.spot_summary)
+    circle_editor_layout.addRow("", detection_buttons)
+    circle_editor_layout.addRow("Result", window.spot_summary)
+
+    rectangle_editor_group = QWidget(window)
+    rectangle_editor_layout = QFormLayout(rectangle_editor_group)
+    rectangle_editor_layout.setContentsMargins(8, 8, 8, 8)
+    rectangle_editor_layout.setHorizontalSpacing(6)
+    rectangle_editor_layout.setVerticalSpacing(4)
+    rectangle_editor_layout.setLabelAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+    rectangle_editor_layout.addRow("", window._make_section_separator())
+    rectangle_editor_layout.addRow("Rectangle", window._build_rectangle_row())
+    rectangle_editor_layout.addRow("Status", window.rectangle_summary_label)
+    rectangle_editor_layout.addRow("", window._make_section_separator())
+    rectangle_editor_layout.addRow("", QLabel("Rectangle ROI editing is the first custom-shape path."))
+
+    freehand_editor_group = QWidget(window)
+    freehand_editor_layout = QFormLayout(freehand_editor_group)
+    freehand_editor_layout.setContentsMargins(8, 8, 8, 8)
+    freehand_editor_layout.setHorizontalSpacing(6)
+    freehand_editor_layout.setVerticalSpacing(4)
+    freehand_editor_layout.setLabelAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+    freehand_editor_layout.addRow("", QLabel("Polygon/freehand ROI tools will be added here later."))
+
+    window.roi_editor_tabs = QTabWidget(window)
+    window.roi_editor_tabs.setTabPosition(QTabWidget.TabPosition.North)
+    window.roi_editor_tabs.setDocumentMode(True)
+    window.roi_editor_tabs.setMovable(False)
+    window.roi_editor_tabs.addTab(circle_editor_group, "Circles")
+    window.roi_editor_tabs.addTab(rectangle_editor_group, "Rectangles")
+    window.roi_editor_tabs.addTab(freehand_editor_group, "Freehand")
+    window.roi_editor_tabs.currentChanged.connect(window._on_roi_editor_tab_changed)
+    window.roi_editor_tabs.setCurrentIndex(0)
+
+    roi_editor_content = QWidget(window)
+    roi_editor_content_layout = QVBoxLayout(roi_editor_content)
+    roi_editor_content_layout.setContentsMargins(4, 2, 4, 2)
+    roi_editor_content_layout.setSpacing(4)
+    window.left_spot_editor_row = QWidget(roi_editor_content)
+    window.left_spot_editor_layout = QHBoxLayout(window.left_spot_editor_row)
+    window.left_spot_editor_layout.setContentsMargins(0, 0, 0, 0)
+    window.left_spot_editor_layout.setSpacing(8)
+    roi_editor_content_layout.addWidget(window.left_spot_editor_row)
+    roi_editor_content_layout.addWidget(window._build_array_row())
+    roi_editor_content_layout.addWidget(window.roi_editor_tabs)
 
     background_group = QWidget(window)
     background_layout = QFormLayout(background_group)
@@ -297,12 +333,12 @@ def build_layout(window) -> None:
         parent=window,
     )
     window.spot_editor_section = CollapsibleSection(
-        "Spot editor",
-        spot_editor_group,
+        "ROI editor",
+        roi_editor_content,
         expanded=True,
         applied=bool(window._read_bool_setting("controls/live_geometry", False)),
         apply_tooltip="Apply live spot-geometry recalculation while editing.",
-        help_text=panel_help_text("spot_editor"),
+        help_text=panel_help_text("roi_editor"),
         parent=window,
     )
     window.background_section = CollapsibleSection(
@@ -355,7 +391,7 @@ def build_layout(window) -> None:
             window.background_section,
             window.analysis_section,
         ),
-        "Controls",
+        "ROI controls",
     )
     window.left_tabs.tabBar().hide()
     window.left_tabs.currentChanged.connect(window._save_layout_preferences)

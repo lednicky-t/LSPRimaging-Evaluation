@@ -58,6 +58,8 @@ class SessionStateManager:
         window._set_section_applied(window.analysis_section, False)
         window._settings.setValue("analysis_section_applied", False)
         window._settings.setValue("analysis/live_preview", False)
+        if window._histogram_log_y_enabled:
+            window._histogram_startup_autoscale_pending = True
         window._refresh_image()
         window._report_startup_progress(92, "Finalizing workspace...")
         if show_window:
@@ -67,6 +69,8 @@ class SessionStateManager:
             window._sync_panel_visibility_after_show()
         window._startup_restore_in_progress = False
         window._startup_ready = True
+        if window._histogram_startup_autoscale_pending and window._histogram_log_y_enabled and show_window:
+            QTimer.singleShot(300, window._autoscale_histogram_after_startup)
         window._report_startup_progress(100, "Workspace ready.")
         window._append_workflow_log("Startup | workspace ready", level="success")
         window._startup_progress_callback = None
@@ -91,6 +95,7 @@ class SessionStateManager:
                     spot_detection,
                     detected_spots,
                     spot_groups,
+                    rois,
                     chromatic_models,
                     chromatic_landmarks,
                     analysis_cache,
@@ -102,6 +107,7 @@ class SessionStateManager:
                 window._state.mask = mask_settings
                 window._state.detected_spots = detected_spots
                 window._state.spot_groups = spot_groups
+                window._state.rois = rois
                 window._current_file_mask = None
                 window._current_file_mask_path = None
                 window._current_file_mask_session_source_path = None
@@ -122,6 +128,8 @@ class SessionStateManager:
                 window._state.chromatic_models = chromatic_models
                 window._state.chromatic_landmarks = chromatic_landmarks
                 window._restore_analysis_caches(analysis_cache)
+                window._selected_rectangle_roi_ids.clear()
+                window._sync_rectangle_stamp_overlays()
                 window._append_workflow_log(
                     f"Mask settings restore | histogram={bool(mask_settings.histogram_enabled)} figure={bool(mask_settings.figure_enabled)}",
                     level="debug",
@@ -152,11 +160,14 @@ class SessionStateManager:
                 window._state.mask = MaskSettings()
                 window._state.detected_spots.clear()
                 window._state.spot_groups.clear()
+                window._state.rois.clear()
                 window._state.chromatic_models.clear()
                 window._state.chromatic_landmarks.clear()
                 window._current_file_mask = None
                 window._current_file_mask_path = None
                 window._current_file_mask_session_source_path = None
+                window._selected_rectangle_roi_ids.clear()
+                window._sync_rectangle_stamp_overlays()
                 window._update_spot_list_table()
                 window._normalize_mask_application_state()
                 return
@@ -185,11 +196,14 @@ class SessionStateManager:
         window._state.mask = MaskSettings()
         window._state.detected_spots.clear()
         window._state.spot_groups.clear()
+        window._state.rois.clear()
         window._state.chromatic_models.clear()
         window._state.chromatic_landmarks.clear()
         window._current_file_mask = None
         window._current_file_mask_path = None
         window._current_file_mask_session_source_path = None
+        window._selected_rectangle_roi_ids.clear()
+        window._sync_rectangle_stamp_overlays()
         window._update_spot_list_table()
 
     def save_processing_state_for_dataset(self, *, force: bool = False, reason: str | None = None) -> None:
@@ -229,6 +243,7 @@ class SessionStateManager:
                 window._state.spot_detection,
                 window._state.detected_spots,
                 window._state.spot_groups,
+                window._state.rois,
                 window._state.chromatic_models,
                 window._state.chromatic_landmarks,
                 window._analysis_cache_payload(),
@@ -282,6 +297,7 @@ class SessionStateManager:
                 window._state.spot_detection,
                 window._state.detected_spots,
                 window._state.spot_groups,
+                window._state.rois,
                 window._state.chromatic_models,
                 window._state.chromatic_landmarks,
                 window._analysis_cache_payload(),
@@ -325,6 +341,7 @@ class SessionStateManager:
                 spot_detection,
                 detected_spots,
                 spot_groups,
+                rois,
                 chromatic_models,
                 chromatic_landmarks,
                 analysis_cache,
@@ -335,6 +352,7 @@ class SessionStateManager:
             window._state.spot_detection = spot_detection
             window._state.detected_spots = detected_spots
             window._state.spot_groups = spot_groups
+            window._state.rois = rois
             window._state.chromatic_models = chromatic_models
             window._state.chromatic_landmarks = chromatic_landmarks
             window._state.mask = mask_settings

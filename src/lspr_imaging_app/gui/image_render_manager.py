@@ -195,6 +195,8 @@ class ImageRenderManager:
             window.mask_pencil_check.setChecked(False)
             window.mask_pencil_check.blockSignals(False)
         window._sync_spot_edit_capabilities()
+        window._sync_rectangle_roi_from_definition()
+        window._sync_rectangle_roi_visibility()
         if hasattr(window, "flip_horizontal_action"):
             window.flip_horizontal_action.blockSignals(True)
             window.flip_horizontal_action.setChecked(window._state.preprocessing.flip_horizontal)
@@ -250,5 +252,4 @@ class ImageRenderManager:
             window._request_spot_metrics_refresh(
                 save_after=False,
                 refresh_histogram=False,
-                reason="reference image refresh",
             )

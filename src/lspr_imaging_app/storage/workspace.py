@@ -7,6 +7,7 @@ from pathlib import Path
 
 import numpy as np
 
+from lspr_imaging_app.format_versions import PROCESSING_PROFILE_VERSION, ROI_EXPORT_VERSION, WORKSPACE_SCHEMA_VERSION
 from lspr_imaging_app.domain.models import (
     ChromaticLandmarkObservation,
     ChromaticTransformModel,
@@ -95,12 +96,21 @@ def _decode_mask_settings(payload: dict) -> MaskSettings:
 
 def save_rois(path: Path, rois: list[RoiDefinition]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    payload = {"rois": [asdict(roi) for roi in rois]}
+    payload = {
+        "format_type": "lspr_imaging_roi_export",
+        "format_version": ROI_EXPORT_VERSION,
+        "schema_version": ROI_EXPORT_VERSION,
+        "rois": [asdict(roi) for roi in rois],
+    }
     path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
 
 def load_rois(path: Path) -> list[RoiDefinition]:
     payload = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        raise ValueError("Invalid ROI export format.")
+    _format_version = int(payload.get("format_version", ROI_EXPORT_VERSION))
+    _schema_version = int(payload.get("schema_version", ROI_EXPORT_VERSION))
     rois_raw = payload.get("rois", [])
     rois: list[RoiDefinition] = []
     for raw in rois_raw:
@@ -211,6 +221,7 @@ def save_processing_profile(
     spot_detection: SpotDetectionSettings,
     detected_spots: list[DetectedSpot],
     spot_groups: list[SpotGroup] | None = None,
+    rois: list[RoiDefinition] | None = None,
     chromatic_models: list[ChromaticTransformModel] | None = None,
     chromatic_landmarks: list[ChromaticLandmarkObservation] | None = None,
     analysis_cache: dict | None = None,
@@ -220,7 +231,7 @@ def save_processing_profile(
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = {
         "profile_type": "lspr_imaging_processing",
-        "profile_version": 1,
+        "profile_version": PROCESSING_PROFILE_VERSION,
         "preprocessing": {
             "image_tools_enabled": bool(getattr(preprocessing, "image_tools_enabled", True)),
             "rotation_angle_deg": float(preprocessing.rotation_angle_deg),
@@ -257,6 +268,7 @@ def save_processing_profile(
         "spot_detection": asdict(spot_detection),
         "detected_spots": [asdict(spot) for spot in detected_spots],
         "spot_groups": [asdict(group) for group in (spot_groups or [])],
+        "rois": [asdict(roi) for roi in (rois or [])],
         "chromatic_models": [asdict(model) for model in (chromatic_models or [])],
         "chromatic_landmarks": [asdict(mark) for mark in (chromatic_landmarks or [])],
     }
@@ -282,6 +294,7 @@ def load_processing_profile(
     SpotDetectionSettings,
     list[DetectedSpot],
     list[SpotGroup],
+    list[RoiDefinition],
     list[ChromaticTransformModel],
     list[ChromaticLandmarkObservation],
     dict,
@@ -458,6 +471,27 @@ def load_processing_profile(
                 )
             )
 
+    raw_rois = payload.get("rois", [])
+    rois: list[RoiDefinition] = []
+    if isinstance(raw_rois, list):
+        for raw in raw_rois:
+            if not isinstance(raw, dict):
+                continue
+            rois.append(
+                RoiDefinition(
+                    roi_id=str(raw.get("roi_id", f"roi_{len(rois) + 1}")),
+                    name=str(raw.get("name", f"ROI {len(rois) + 1}")),
+                    shape=str(raw.get("shape", "ellipse")),
+                    center_x=float(raw.get("center_x", 0.0)),
+                    center_y=float(raw.get("center_y", 0.0)),
+                    size_x=float(raw.get("size_x", 10.0)),
+                    size_y=float(raw.get("size_y", 10.0)),
+                    background_padding_px=float(raw.get("background_padding_px", 10.0)),
+                    background_width_px=float(raw.get("background_width_px", 12.0)),
+                    enabled=bool(raw.get("enabled", True)),
+                )
+            )
+
     raw_models = payload.get("chromatic_models", [])
     chromatic_models: list[ChromaticTransformModel] = []
     if isinstance(raw_models, list):
@@ -518,4 +552,4 @@ def load_processing_profile(
                 "mask": decoded_mask,
             }
 
-    return preprocessing, detection, spots, groups, chromatic_models, chromatic_landmarks, analysis_cache, session_mask, mask_settings
+    return preprocessing, detection, spots, groups, rois, chromatic_models, chromatic_landmarks, analysis_cache, session_mask, mask_settings
