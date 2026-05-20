@@ -1,0 +1,4 @@
+[submodule "_refs/mika"]
+	path = _refs/mika
+	url = https://example.invalid/mika.git
+	update = none
