@@ -14,14 +14,19 @@ dependencies = [
     "pydantic>=2",
     "Pillow",
     "PyQt6",
+    "imagecodecs",
+    "ome-zarr",
+    "numcodecs",
     "pyqtgraph",
     "scikit-image",
     "scipy",
     "tifffile",
     "tabler-icons",
+    "tabler-qicon",
     "lucide",
     "lspr-ui>=0.1.0",
     "lspr-core>=0.1.0",
+    "zarr",
 ]
 
 [project.scripts]

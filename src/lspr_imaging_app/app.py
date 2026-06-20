@@ -220,7 +220,17 @@ def main() -> None:
     splash.show()
     _update_splash(app, splash, 10, "Opening workspace...")
     _update_splash(app, splash, 20, "Loading application modules...")
-    from lspr_imaging_app.gui.main_window import MainWindow
+    try:
+        from lspr_imaging_app.gui.main_window import MainWindow
+    except ModuleNotFoundError as exc:
+        missing = getattr(exc, "name", "")
+        if missing in {"zarr", "numcodecs", "ome_zarr"}:
+            logging.getLogger("lspr_imaging_app.startup").critical(
+                "Missing imaging dependency '%s'. Install the imaging app dependencies before launching.",
+                missing,
+                exc_info=True,
+            )
+        raise
     default_folder = _resolve_default_dataset_folder()
     _update_splash(app, splash, 40, "Building workspace...")
     window = MainWindow(default_folder=default_folder, fast_startup=fast_startup)

@@ -2,8 +2,17 @@ PyQt6
 pyqtgraph
 numpy
 Pillow
+h5py
+pydantic>=2
+imagecodecs
 scipy
 tifffile
 scikit-image
 tabler-icons
+tabler-qicon
 lucide
+lspr-ui>=0.1.0
+lspr-core>=0.1.0
+numcodecs
+zarr
+ome-zarr

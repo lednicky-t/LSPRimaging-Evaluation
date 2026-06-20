@@ -153,6 +153,7 @@ from lspr_imaging_app.domain.models import (
     DetectedSpot,
     FitResult,
     MaskSettings,
+    RoiDefinition,
     SpotDetectionSettings,
     SpotGroup,
 )
@@ -8524,7 +8525,7 @@ class MainWindow(MainWindowIcons, QMainWindow):
         return row
 
     def _set_spinbox_width(self, spinbox: QSpinBox | QDoubleSpinBox, text: str, *, minimum: int = 46) -> None:
-        width = spinbox.fontMetrics().horizontalAdvance(text) + 12
+        width = spinbox.fontMetrics().horizontalAdvance(text) + 28
         spinbox.setFixedWidth(max(minimum, width))
 
     def _set_combo_width(self, combo: QComboBox, texts: list[str], *, minimum: int = 58) -> None:
@@ -11352,7 +11353,6 @@ class MainWindow(MainWindowIcons, QMainWindow):
                     movable=True,
                     resizable=True,
                     rotatable=False,
-                    sideScalers=True,
                 )
             else:
                 self._rectangle_roi = pg.RectROI(
@@ -11518,7 +11518,6 @@ class MainWindow(MainWindowIcons, QMainWindow):
                 movable=True,
                 resizable=True,
                 rotatable=False,
-                sideScalers=True,
             )
         else:
             item = pg.RectROI(

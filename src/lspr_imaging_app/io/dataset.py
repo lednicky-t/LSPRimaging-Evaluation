@@ -13,10 +13,6 @@ import os
 
 import numpy as np
 from PIL import Image
-import zarr
-from numcodecs import Blosc
-import numcodecs.blosc as _blosc
-from ome_zarr.writer import write_multiscales_metadata
 
 try:
     from tifffile import imread as _tifffile_imread
@@ -34,6 +30,22 @@ OME_ZARR_GROUP_FILENAME = ".zgroup"
 OME_ZARR_ARRAY_DIRNAME = "0"
 OME_ZARR_ARRAY_META_FILENAME = ".zarray"
 OME_ZARR_LSPR_KEY = "lspr"
+_OME_ZARR_IMPORT_ERROR: ImportError | None = None
+
+
+def _require_ome_zarr_support():
+    global _OME_ZARR_IMPORT_ERROR
+    try:
+        import zarr
+        from numcodecs import Blosc
+        import numcodecs.blosc as _blosc
+        from ome_zarr.writer import write_multiscales_metadata
+    except ImportError as exc:  # pragma: no cover - depends on environment
+        _OME_ZARR_IMPORT_ERROR = exc
+        raise ImportError(
+            "OME-Zarr support requires zarr, numcodecs, and ome-zarr."
+        ) from exc
+    return zarr, Blosc, _blosc, write_multiscales_metadata
 
 _LOGGER = logging.getLogger("lspr_imaging_app.workflow")
 
@@ -111,6 +123,7 @@ def _ome_zarr_array_dir(root: Path) -> Path:
 
 @lru_cache(maxsize=16)
 def _ome_zarr_group_cached(root_str: str):
+    zarr, _, _, _ = _require_ome_zarr_support()
     return zarr.open_group(str(root_str), mode="r")
 
 
@@ -193,6 +206,7 @@ def export_ome_zarr_dataset(
     progress_callback: Callable[[int, str], None] | None = None,
     cancel_event: threading.Event | None = None,
 ) -> Path:
+    zarr, Blosc, _blosc, write_multiscales_metadata = _require_ome_zarr_support()
     destination = destination if destination.suffix == ".zarr" or destination.name.endswith(".ome.zarr") else destination.with_suffix(".ome.zarr")
     records = sorted(dataset.records, key=lambda record: (int(record.key.frame_index), float(record.key.wavelength_nm)))
     if not records:
