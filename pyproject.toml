@@ -21,7 +21,6 @@ dependencies = [
     "scikit-image",
     "scipy",
     "tifffile",
-    "tabler-icons",
     "tabler-qicon",
     "lucide",
     "lspr-ui>=0.1.0",
