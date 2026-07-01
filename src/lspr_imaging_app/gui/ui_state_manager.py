@@ -20,6 +20,7 @@ class UIStateManager:
         window.flatten_background_binning_combo.blockSignals(True)
         window.background_ignore_spot_button.blockSignals(True)
         window.background_ignore_mask_button.blockSignals(True)
+        window.background_local_ring_check.blockSignals(True)
         window.chromatic_apply_check.blockSignals(True)
         window.chromatic_sample_count_spin.blockSignals(True)
         window.chromatic_feature_count_spin.blockSignals(True)
@@ -33,8 +34,9 @@ class UIStateManager:
         binning_value = max(int(getattr(settings, "flatten_background_binning", 2)), 1)
         binning_index = max(window.background_smoothing_binning_combo.findData(binning_value), 0)
         window.background_smoothing_binning_combo.setCurrentIndex(binning_index)
-        window.background_ignore_spot_button.setChecked(settings.flatten_background_exclude_spots)
+        window.background_ignore_spot_button.setChecked(settings.flatten_background_exclude_area_rois)
         window.background_ignore_mask_button.setChecked(settings.flatten_background_exclude_mask)
+        window.background_local_ring_check.setChecked(bool(getattr(settings, "local_ring_normalization_enabled", False)))
         window.chromatic_apply_check.setChecked(bool(settings.chromatic_correction_enabled))
         sample_minimum = 1 if len(window._wavelength_values) <= 1 else 3
         sample_maximum = min(max(len(window._wavelength_values), sample_minimum), 7)
@@ -59,7 +61,7 @@ class UIStateManager:
         window._state.preprocessing.chromatic_feature_count = int(window.chromatic_feature_count_spin.currentData() or 15)
         window.chromatic_landmark_id_spin.setValue(max(int(window._chromatic_landmark_marker_id), 1))
         window._set_section_applied(window.image_tools_section, bool(getattr(settings, "image_tools_enabled", True)))
-        window._set_section_applied(window.spot_editor_section, bool(window._read_bool_setting("controls/live_geometry", False)))
+        window._set_section_applied(window.roi_editor_section, bool(window._read_bool_setting("controls/live_geometry", False)))
         window._set_section_applied(window.background_section, bool(settings.flatten_background_enabled))
         window._set_section_applied(window.chromatic_section, bool(settings.chromatic_correction_enabled))
         highlight_min = getattr(settings, "histogram_highlight_min_value", None)
@@ -76,6 +78,7 @@ class UIStateManager:
         window.background_smoothing_binning_combo.blockSignals(False)
         window.background_ignore_spot_button.blockSignals(False)
         window.background_ignore_mask_button.blockSignals(False)
+        window.background_local_ring_check.blockSignals(False)
         window._sync_background_exclusion_buttons()
         window.chromatic_apply_check.blockSignals(False)
         window.chromatic_sample_count_spin.blockSignals(False)
@@ -83,7 +86,7 @@ class UIStateManager:
         window.chromatic_subpixel_precision_combo.blockSignals(False)
         window.chromatic_landmark_id_spin.blockSignals(False)
         window.hist_region.blockSignals(False)
-        detection = window._state.spot_detection
+        detection = window._state.area_roi_settings
         window._normalize_mask_application_state()
         window.ignore_marked_check.blockSignals(True)
         window.mask_mode_combo.blockSignals(True)
@@ -125,28 +128,28 @@ class UIStateManager:
     def restore_visual_preferences(self) -> None:
         window = self._window
         mask_color = QColor(str(window._settings.value("visual/mask_color", window._mask_visual_color.name())))
-        spot_color = QColor(str(window._settings.value("visual/spot_color", window._spot_visual_color.name())))
-        ring_color = QColor(str(window._settings.value("visual/ring_color", window._ring_visual_color.name())))
+        spot_color = QColor(str(window._settings.value("visual/spot_color", window._sample_visual_color.name())))
+        ring_color = QColor(str(window._settings.value("visual/ring_color", window._reference_visual_color.name())))
         highlight_color = QColor(str(window._settings.value("visual/highlight_color", window._highlight_visual_color.name())))
         scale_bar_color = QColor(str(window._settings.value("visual/scale_bar_color", window._scale_bar_visual_color.name())))
         if mask_color.isValid():
             window._mask_visual_color = mask_color
         if spot_color.isValid():
-            window._spot_visual_color = spot_color
+            window._sample_visual_color = spot_color
         if ring_color.isValid():
-            window._ring_visual_color = ring_color
+            window._reference_visual_color = ring_color
         if highlight_color.isValid():
             window._highlight_visual_color = highlight_color
         if scale_bar_color.isValid():
             window._scale_bar_visual_color = scale_bar_color
         window._mask_alpha = window._alpha01(window._read_float_setting("visual/mask_alpha", window._mask_alpha))
-        window._spot_alpha = window._alpha01(window._read_float_setting("visual/spot_alpha", window._spot_alpha))
-        window._ring_alpha = window._alpha01(window._read_float_setting("visual/ring_alpha", window._ring_alpha))
+        window._roi_alpha = window._alpha01(window._read_float_setting("visual/spot_alpha", window._roi_alpha))
+        window._reference_alpha = window._alpha01(window._read_float_setting("visual/ring_alpha", window._reference_alpha))
         window._highlight_alpha = window._alpha01(window._read_float_setting("visual/highlight_alpha", window._highlight_alpha))
-        window._spots_visible = window._read_bool_setting("visual/spots_visible", window._spots_visible)
-        window._spot_labels_visible = window._read_bool_setting("visual/spot_labels_visible", window._spot_labels_visible)
+        window._rois_visible = window._read_bool_setting("visual/spots_visible", window._rois_visible)
+        window._roi_labels_visible = window._read_bool_setting("visual/spot_labels_visible", window._roi_labels_visible)
         window._mask_visible = window._read_bool_setting("visual/mask_visible", window._mask_visible)
-        window._rings_visible = window._read_bool_setting("visual/rings_visible", window._rings_visible)
+        window._reference_visible = window._read_bool_setting("visual/rings_visible", window._reference_visible)
         window._highlight_visible = window._read_bool_setting("visual/highlight_visible", window._highlight_visible)
         window._reference_points_visible = window._read_bool_setting("visual/reference_points_visible", window._reference_points_visible)
         window._chromatic_reference_points_all_visible = window._read_bool_setting(
@@ -163,18 +166,18 @@ class UIStateManager:
     def save_visual_preferences(self) -> None:
         window = self._window
         window._settings.setValue("visual/mask_color", window._mask_visual_color.name())
-        window._settings.setValue("visual/spot_color", window._spot_visual_color.name())
-        window._settings.setValue("visual/ring_color", window._ring_visual_color.name())
+        window._settings.setValue("visual/spot_color", window._sample_visual_color.name())
+        window._settings.setValue("visual/ring_color", window._reference_visual_color.name())
         window._settings.setValue("visual/highlight_color", window._highlight_visual_color.name())
         window._settings.setValue("visual/scale_bar_color", window._scale_bar_visual_color.name())
         window._settings.setValue("visual/mask_alpha", float(window._mask_alpha))
-        window._settings.setValue("visual/spot_alpha", float(window._spot_alpha))
-        window._settings.setValue("visual/ring_alpha", float(window._ring_alpha))
+        window._settings.setValue("visual/spot_alpha", float(window._roi_alpha))
+        window._settings.setValue("visual/ring_alpha", float(window._reference_alpha))
         window._settings.setValue("visual/highlight_alpha", float(window._highlight_alpha))
-        window._settings.setValue("visual/spots_visible", window._spots_visible)
-        window._settings.setValue("visual/spot_labels_visible", window._spot_labels_visible)
+        window._settings.setValue("visual/spots_visible", window._rois_visible)
+        window._settings.setValue("visual/spot_labels_visible", window._roi_labels_visible)
         window._settings.setValue("visual/mask_visible", window._mask_visible)
-        window._settings.setValue("visual/rings_visible", window._rings_visible)
+        window._settings.setValue("visual/rings_visible", window._reference_visible)
         window._settings.setValue("visual/highlight_visible", window._highlight_visible)
         window._settings.setValue("visual/reference_points_visible", window._reference_points_visible)
         window._settings.setValue("visual/chromatic_reference_points_all_visible", window._chromatic_reference_points_all_visible)
@@ -188,7 +191,7 @@ class UIStateManager:
 
     def save_control_preferences(self) -> None:
         window = self._window
-        window._settings.setValue("controls/live_geometry", bool(window.spot_editor_section.is_applied()))
+        window._settings.setValue("controls/live_geometry", bool(window.roi_editor_section.is_applied()))
         window._settings.setValue("histogram_bin_size", int(window.histogram_bins_spin.value()))
         window._settings.setValue("analysis/poly_order", int(window.analysis_poly_order_spin.value()))
         window._settings.setValue("analysis/metric", str(window.analysis_metric_combo.currentData() or "centroid"))
@@ -201,7 +204,7 @@ class UIStateManager:
             lower, upper = upper, lower
         window._settings.setValue("histogram/highlight_min", float(lower))
         window._settings.setValue("histogram/highlight_max", float(upper))
-        window._settings.setValue("selection/spot_ids", json.dumps(sorted(int(spot_id) for spot_id in window._selected_spot_ids)))
+        window._settings.setValue("selection/area_roi_ids", json.dumps(sorted(int(area_roi_id) for area_roi_id in window._selected_roi_ids)))
         window._settings.setValue("mask_tools/relative_sigma_px", int(window.mask_relative_profile_sigma_spin.value()))
         window._settings.setValue("mask_tools/relative_threshold_percent", float(window.mask_relative_threshold_spin.value()))
         window._settings.setValue("mask_tools/local_sigma_px", int(window.mask_local_contrast_sigma_spin.value()))
@@ -213,7 +216,7 @@ class UIStateManager:
         window._apply_histogram_log_mode(refresh=not window._startup_restore_in_progress)
         window._sync_reference_selection_from_settings()
         window._sync_image_processing_controls()
-        window._sync_spot_detection_controls()
+        window._sync_roi_detection_controls()
 
     def update_reference_controls(self) -> None:
         window = self._window
@@ -268,7 +271,7 @@ class UIStateManager:
         window.analysis_stop_button.setPixmap(
             window._make_analysis_stop_icon(enabled and window._sensorgram_running).pixmap(APP_THEME.compact_icon_inner, APP_THEME.compact_icon_inner)
         )
-        window.analysis_spot_table_button.setEnabled(enabled and has_dataset)
+        window.analysis_roi_table_button.setEnabled(enabled and has_dataset)
 
     def update_chromatic_control_state(self) -> None:
         window = self._window
@@ -299,21 +302,21 @@ class UIStateManager:
         window.chromatic_progress_label.setVisible(has_dataset)
         window._update_chromatic_summary()
 
-    def sync_spot_detection_controls(self) -> None:
+    def sync_roi_detection_controls(self) -> None:
         window = self._window
-        settings = window._state.spot_detection
+        settings = window._state.area_roi_settings
         window._update_geometry_control_ranges(window._current_processed_image.shape if window._current_processed_image is not None else None)
-        window.spot_diameter_spin.blockSignals(True)
-        window.ring_inner_diameter_spin.blockSignals(True)
-        window.ring_outer_diameter_spin.blockSignals(True)
+        window.sample_diameter_spin.blockSignals(True)
+        window.reference_inner_diameter_spin.blockSignals(True)
+        window.reference_outer_diameter_spin.blockSignals(True)
         window.array_rows_spin.blockSignals(True)
         window.array_cols_spin.blockSignals(True)
         window.array_spacing_spin.blockSignals(True)
         window.ignore_marked_check.blockSignals(True)
         window.ignore_region.blockSignals(True)
-        window.spot_diameter_spin.setValue(max(0.0, window._format_length_display_value(2 * settings.spot_radius_px)))
-        window.ring_inner_diameter_spin.setValue(max(0.0, window._format_length_display_value(2 * settings.ring_inner_radius_px)))
-        window.ring_outer_diameter_spin.setValue(max(0.0, window._format_length_display_value(2 * settings.ring_outer_radius_px)))
+        window.sample_diameter_spin.setValue(max(0.0, window._format_length_display_value(2 * settings.sample_radius_px)))
+        window.reference_inner_diameter_spin.setValue(max(0.0, window._format_length_display_value(2 * settings.reference_inner_radius_px)))
+        window.reference_outer_diameter_spin.setValue(max(0.0, window._format_length_display_value(2 * settings.reference_outer_radius_px)))
         window.array_rows_spin.setValue(max(0, settings.array_rows))
         window.array_cols_spin.setValue(max(0, settings.array_cols))
         window.array_spacing_spin.setValue(max(0.0, window._length_px_to_display(settings.array_spacing_px)))
@@ -326,9 +329,9 @@ class UIStateManager:
             if lower > upper:
                 lower, upper = upper, lower
             window.ignore_region.setRegion((lower, upper))
-        window.spot_diameter_spin.blockSignals(False)
-        window.ring_inner_diameter_spin.blockSignals(False)
-        window.ring_outer_diameter_spin.blockSignals(False)
+        window.sample_diameter_spin.blockSignals(False)
+        window.reference_inner_diameter_spin.blockSignals(False)
+        window.reference_outer_diameter_spin.blockSignals(False)
         window.array_rows_spin.blockSignals(False)
         window.array_cols_spin.blockSignals(False)
         window.array_spacing_spin.blockSignals(False)
@@ -336,8 +339,8 @@ class UIStateManager:
         window.ignore_region.blockSignals(False)
         window._update_mask_file_button_state()
         window._update_display_unit_controls()
-        window._update_spot_detection_labels()
-        window._update_spot_summary()
+        window._update_roi_detection_labels()
+        window._update_roi_summary()
         window._update_ignore_mask_overlay()
         window._update_histogram_region_labels()
         window._update_apply_button_labels()

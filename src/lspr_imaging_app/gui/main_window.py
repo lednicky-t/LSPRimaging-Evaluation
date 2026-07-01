@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 import csv
 import logging
+import subprocess
+import sys
 from html import escape
 import os
 import shutil
@@ -98,15 +100,16 @@ from lspr_ui import (
     standard_push_button_stylesheet,
     transparent_icon_button_stylesheet,
 )
-from lspr_imaging_app.gui.spot_table_helpers import (
-    SpotTableRowData,
-    append_spot_table_row,
+from lspr_imaging_app.gui.roi_table_helpers import (
+    RoiTableRowData,
+    append_roi_table_row,
     format_xy_value,
     make_color_swatch_icon,
-    spot_table_headers,
+    roi_table_headers,
 )
-from lspr_imaging_app.gui.spot_table_controller import SpotTableController
+from lspr_imaging_app.gui.roi_table_controller import RoiTableController
 from lspr_imaging_app.gui.mask_controller import MaskController
+from lspr_imaging_app.gui.background_profile_controller import BackgroundProfileController
 from lspr_imaging_app.gui.chromatic_controller import ChromaticController
 from lspr_imaging_app.gui.shortcut_manager import ShortcutManager
 from lspr_imaging_app.gui.session_state_manager import SessionStateManager
@@ -133,10 +136,12 @@ from lspr_imaging_app.gui.ui_helpers import (
     settings_bool,
     settings_int,
 )
-from lspr_imaging_app.gui.spot_overlay_helpers import resolved_ring_color, resolved_spot_color
+from lspr_imaging_app.gui.roi_overlay_helpers import resolved_reference_color, resolved_roi_color
 from lspr_imaging_app.gui.analysis_controller import AnalysisController
 from lspr_imaging_app.gui.dataset_controller import DatasetController
 from lspr_imaging_app.gui.image_controller import ImageController
+from lspr_imaging_app.gui.image_interaction_controller import ImageInteractionController
+from lspr_imaging_app.gui.overlay_manager import OverlayManager
 from lspr_imaging_app.domain.roi_editor_tools import (
     create_rois_from_template,
     create_rois_from_template_grid,
@@ -150,16 +155,17 @@ from lspr_imaging_app.domain.models import (
     ChromaticLandmarkObservation,
     ChromaticTransformModel,
     CropDefinition,
-    DetectedSpot,
+    AreaRoi,
+    AreaRoiDetectionSettings,
+    AreaRoiGroup,
     FitResult,
     MaskSettings,
     RoiDefinition,
-    SpotDetectionSettings,
-    SpotGroup,
 )
 from lspr_imaging_app.io.dataset import (
     dataset_record_map,
     dataset_is_ome_zarr,
+    dataset_load_plane_roi,
     export_ome_zarr_dataset,
     load_dataset,
     load_image_array,
@@ -189,7 +195,7 @@ from lspr_imaging_app.processing.preprocess import (
     spatial_output_shape,
     spatial_coordinate_maps,
 )
-from lspr_imaging_app.processing.spot_detection import detect_spots, ignored_pixel_mask, refresh_spot_metrics
+from lspr_imaging_app.processing.spot_detection import detect_spots, ignored_pixel_mask, refresh_roi_metrics
 from lspr_imaging_app.storage.workspace import (
     load_preprocessing,
     load_processing_profile,
@@ -199,6 +205,49 @@ from lspr_imaging_app.storage.workspace import (
 
 
 from .main_window_icons import MainWindowIcons
+from .widgets import (
+    BusySpinner,
+    ClickableIconLabel,
+    CollapsibleSection,
+    CompactWedgeSlider,
+    FreeStandingToggleIconLabel,
+    FreeStandingToggleTextLabel,
+    PanelContainer,
+    ResponsiveDoubleSpinBox,
+    ShineProgressBar,
+)
+from .worker import (
+    ChromaticLandmarkAllOverlayBundle,
+    FunctionWorker,
+    GuideOverlayBundle,
+    LandmarkOverlayBundle,
+    MeasurementOverlayBundle,
+    ScaleBarOverlayBundle,
+    SensorgramComputationResult,
+    SensorgramPointResult,
+    RoiOverlayBundle,
+    UndoSnapshot,
+    WorkerSignals,
+    WorkflowLogBridge,
+    WorkflowLogHandler,
+)
+from .analysis_tasks import (
+    _absorbance_roi_mask_cache_key,
+    _absorbance_spectrum_fast_task,
+    _absorbance_spectrum_task,
+    _auto_chromatic_landmarks_task,
+    _background_profile_task,
+    _detect_spots_task,
+    _estimate_chromatic_models_task,
+    _normalized_odd_count,
+    _ome_zarr_export_task,
+    _process_image_task,
+    _refresh_roi_metrics_task,
+    _sampled_wavelengths,
+    _selected_roi_masks_for_spectrum,
+    _roi_absorbance_signature,
+)
+
 SUCCESS_LOG_LEVEL = 25
 logging.addLevelName(SUCCESS_LOG_LEVEL, "SUCCESS")
 
@@ -211,1770 +260,6 @@ try:
     import lucide
 except Exception:  # pragma: no cover - optional dependency
     lucide = None
-
-
-class ResponsiveDoubleSpinBox(QDoubleSpinBox):
-    def stepBy(self, steps: int) -> None:  # type: ignore[override]
-        step = float(self.singleStep()) if float(self.singleStep()) > 0 else 1.0
-        target = float(self.value()) + float(steps) * step
-        minimum = float(self.minimum())
-        maximum = float(self.maximum())
-        self.setValue(float(np.clip(target, minimum, maximum)))
-
-
-class CollapsibleSection(QWidget):
-    expanded_changed = pyqtSignal(bool)
-    pin_changed = pyqtSignal(bool)
-    apply_changed = pyqtSignal(bool)
-
-    def __init__(
-        self,
-        title: str,
-        content: QWidget,
-        *,
-        expanded: bool = True,
-        applied: bool | None = None,
-        apply_tooltip: str | None = None,
-        help_text: str | None = None,
-        parent: QWidget | None = None,
-    ) -> None:
-        super().__init__(parent)
-        self._toggle = QToolButton(self)
-        self._toggle.setText(title)
-        self._toggle.setCheckable(True)
-        self._toggle.setChecked(expanded)
-        self._toggle.setAutoRaise(True)
-        self._toggle.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
-        self._toggle.setArrowType(Qt.ArrowType.NoArrow)
-        self._toggle.setIcon(PanelContainer._make_chevron_icon(self, expanded))
-        self._toggle.setIconSize(QSize(12, 12))
-        self._toggle.setStyleSheet(collapsible_toggle_stylesheet())
-        self._toggle.toggled.connect(self._set_expanded)
-
-        self._pin_button = QToolButton(self)
-        self._pin_button.setText("")
-        self._pin_button.setCheckable(True)
-        self._pin_button.setChecked(False)
-        self._pin_button.setAutoRaise(True)
-        self._pin_button.setIcon(PanelContainer._make_pin_icon(self, False))
-        self._pin_button.setIconSize(QSize(16, 16))
-        self._pin_button.setFixedSize(22, 22)
-        self._pin_button.setToolTip("Pin this panel open so it is not auto-collapsed by the accordion.")
-        self._pin_button.setStyleSheet(collapsible_pin_stylesheet())
-        self._pin_button.toggled.connect(self.pin_changed.emit)
-        self._pin_button.toggled.connect(self._update_pin_icon)
-
-        self._apply_button: QToolButton | None = None
-        if applied is not None:
-            self._apply_button = QToolButton(self)
-            self._apply_button.setText("")
-            self._apply_button.setCheckable(True)
-            self._apply_button.setChecked(bool(applied))
-            self._apply_button.setAutoRaise(True)
-            self._apply_button.setIcon(self._make_apply_icon(bool(applied)))
-            self._apply_button.setIconSize(QSize(18, 18))
-            self._apply_button.setFixedSize(22, 22)
-            self._apply_button.setToolTip(apply_tooltip or "Toggle whether this panel's calculations are applied.")
-            self._apply_button.setStyleSheet(transparent_icon_button_stylesheet())
-            self._apply_button.toggled.connect(self._set_applied)
-
-        self._help_button = QToolButton(self)
-        self._help_button.setText("")
-        self._help_button.setAutoRaise(True)
-        self._help_button.setCheckable(False)
-        self._help_button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly)
-        self._help_button.setIcon(MainWindow._make_help_icon())
-        self._help_button.setIconSize(QSize(16, 16))
-        self._help_button.setFixedSize(22, 22)
-        self._help_button.setToolTip("Show panel shortcuts and help.")
-        self._help_button.setStyleSheet(transparent_icon_button_stylesheet())
-        help_message = help_text or "No additional panel help is available yet."
-        self._help_button.clicked.connect(lambda *_: QMessageBox.information(self, self._toggle.text(), help_message))
-
-        self._content = content
-        self._content.setParent(self)
-        self._content.setVisible(expanded)
-
-        header = QWidget(self)
-        header_layout = QHBoxLayout(header)
-        header_layout.setContentsMargins(0, 0, 0, 0)
-        header_layout.setSpacing(4)
-        header_layout.addWidget(self._toggle, 1)
-        right_controls = QWidget(header)
-        right_layout = QHBoxLayout(right_controls)
-        right_layout.setContentsMargins(0, 0, 0, 0)
-        right_layout.setSpacing(2)
-        right_layout.addWidget(self._help_button, 0, Qt.AlignmentFlag.AlignVCenter)
-        if self._apply_button is not None:
-            right_layout.addWidget(self._apply_button, 0, Qt.AlignmentFlag.AlignVCenter)
-        right_layout.addWidget(self._pin_button, 0, Qt.AlignmentFlag.AlignVCenter)
-        header_layout.addWidget(right_controls, 0, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(4)
-        layout.addWidget(header)
-        layout.addWidget(self._content)
-
-    def _set_expanded(self, expanded: bool) -> None:
-        self._toggle.setIcon(self._make_chevron_icon(expanded))
-        self._content.setVisible(expanded)
-        self.expanded_changed.emit(expanded)
-
-    def _update_pin_icon(self, pinned: bool) -> None:
-        self._pin_button.setIcon(self._make_pin_icon(pinned))
-
-    def _set_applied(self, applied: bool) -> None:
-        if self._apply_button is None:
-            return
-        self._apply_button.setIcon(self._make_apply_icon(applied))
-        self.apply_changed.emit(applied)
-
-    def _make_chevron_icon(self, expanded: bool) -> QIcon:
-        return PanelContainer._make_chevron_icon(self, expanded)
-
-    def _make_pin_icon(self, pinned: bool) -> QIcon:
-        return PanelContainer._make_pin_icon(self, pinned)
-
-    def _make_apply_icon(self, applied: bool) -> QIcon:
-        return PanelContainer._make_apply_icon(self, applied)
-
-    def is_expanded(self) -> bool:
-        return self._toggle.isChecked()
-
-    def set_expanded(self, expanded: bool) -> None:
-        self._toggle.setChecked(bool(expanded))
-
-    def is_pinned(self) -> bool:
-        return self._pin_button.isChecked()
-
-    def set_pinned(self, pinned: bool) -> None:
-        self._pin_button.setChecked(bool(pinned))
-
-    def has_apply_toggle(self) -> bool:
-        return self._apply_button is not None
-
-    def is_applied(self) -> bool:
-        return True if self._apply_button is None else self._apply_button.isChecked()
-
-    def set_applied(self, applied: bool) -> None:
-        if self._apply_button is None:
-            return
-        self._apply_button.setChecked(bool(applied))
-
-    def set_apply_enabled(self, enabled: bool) -> None:
-        if self._apply_button is None:
-            return
-        self._apply_button.setEnabled(bool(enabled))
-
-
-class PanelContainer(QWidget):
-    visibilityChanged = pyqtSignal(bool)
-
-    def __init__(self, title: str, content: QWidget, parent: QWidget | None = None) -> None:
-        super().__init__(parent)
-        self._title = title
-        self._toggle_action = QAction(title, self)
-        self._toggle_action.setCheckable(True)
-        self._toggle_action.setChecked(True)
-        self._toggle_action.toggled.connect(self._set_visible_from_action)
-        self._content = content
-        self._content.setParent(self)
-
-        self.setObjectName(f"{title.replace(' ', '')}Panel")
-        outer_layout = QVBoxLayout(self)
-        outer_layout.setContentsMargins(0, 0, 0, 0)
-        outer_layout.setSpacing(0)
-
-        header = QFrame(self)
-        header.setObjectName("panelHeader")
-        header_layout = QHBoxLayout(header)
-        header_layout.setContentsMargins(8, 4, 8, 4)
-        header_layout.setSpacing(4)
-        title_label = QLabel(title, header)
-        title_label.setObjectName("toolbarMiniLabel")
-        title_label.setStyleSheet("font-weight: 600;")
-        header_layout.addWidget(title_label)
-        header_layout.addStretch(1)
-
-        outer_layout.addWidget(header)
-        outer_layout.addWidget(self._content, 1)
-        self.setStyleSheet(
-            f"""
-            QFrame#panelHeader {{
-                background: {get_active_theme().window_bg};
-                border-bottom: 1px solid {get_active_theme().toolbar_border};
-            }}
-            """
-        )
-
-    def toggleViewAction(self) -> QAction:
-        return self._toggle_action
-
-    def _set_visible_from_action(self, checked: bool) -> None:
-        QWidget.setVisible(self, bool(checked))
-
-    def setVisible(self, visible: bool) -> None:  # type: ignore[override]
-        visible = bool(visible)
-        changed = visible != QWidget.isVisible(self)
-        QWidget.setVisible(self, visible)
-        previous = self._toggle_action.blockSignals(True)
-        try:
-            self._toggle_action.setChecked(visible)
-        finally:
-            self._toggle_action.blockSignals(previous)
-        if changed:
-            self.visibilityChanged.emit(visible)
-
-    def raise_(self) -> None:  # type: ignore[override]
-        QWidget.raise_(self)
-
-    def setFloating(self, _floating: bool) -> None:
-        return
-
-    def isFloating(self) -> bool:
-        return False
-
-    def setAllowedAreas(self, _areas) -> None:
-        return
-
-    def setFeatures(self, _features) -> None:
-        return
-
-    def _set_expanded(self, expanded: bool) -> None:
-        self._toggle.setIcon(self._make_chevron_icon(expanded))
-        self._content.setVisible(expanded)
-        self.expanded_changed.emit(expanded)
-
-    def is_expanded(self) -> bool:
-        return self._toggle.isChecked()
-
-    def set_expanded(self, expanded: bool) -> None:
-        self._toggle.setChecked(expanded)
-
-    def is_pinned(self) -> bool:
-        return self._pin_button.isChecked()
-
-    def set_pinned(self, pinned: bool) -> None:
-        self._pin_button.setChecked(pinned)
-
-    def has_apply_toggle(self) -> bool:
-        return self._apply_button is not None
-
-    def is_applied(self) -> bool:
-        return True if self._apply_button is None else self._apply_button.isChecked()
-
-    def set_applied(self, applied: bool) -> None:
-        if self._apply_button is None:
-            return
-        self._apply_button.setChecked(bool(applied))
-
-    def set_apply_enabled(self, enabled: bool) -> None:
-        if self._apply_button is None:
-            return
-        self._apply_button.setEnabled(bool(enabled))
-
-    def _update_pin_icon(self, pinned: bool) -> None:
-        self._pin_button.setIcon(PanelContainer._make_pin_icon(self, pinned))
-
-    def _set_applied(self, applied: bool) -> None:
-        if self._apply_button is None:
-            return
-        self._apply_button.setIcon(PanelContainer._make_apply_icon(self, applied))
-        self.apply_changed.emit(applied)
-
-    def _make_chevron_icon(self, expanded: bool) -> QIcon:
-        pixmap = QPixmap(14, 14)
-        pixmap.fill(Qt.GlobalColor.transparent)
-        painter = QPainter(pixmap)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        pen = QPen(QColor("#cbd5e1"), 2.0)
-        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
-        pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
-        painter.setPen(pen)
-        path = QPainterPath()
-        if expanded:
-            path.moveTo(3.5, 5.0)
-            path.lineTo(7.0, 8.5)
-            path.lineTo(10.5, 5.0)
-        else:
-            path.moveTo(5.0, 3.5)
-            path.lineTo(8.5, 7.0)
-            path.lineTo(5.0, 10.5)
-        painter.drawPath(path)
-        painter.end()
-        return QIcon(pixmap)
-
-    def _make_pin_icon(self, pinned: bool) -> QIcon:
-        color = QColor("#22c55e" if pinned else "#f8fafc")
-        themed_icon = PanelContainer._tinted_icon_from_candidates(
-            color,
-            16,
-            r"C:\Program Files\Inkscape\share\icons\Adwaita\symbolic\actions\view-pin-symbolic.svg",
-            r"C:\Program Files\Inkscape\share\inkscape\icons\hicolor\symbolic\actions\object-tweak-push-symbolic.svg",
-            r"C:\Program Files\Inkscape\share\inkscape\icons\Dash\symbolic\actions\object-tweak-push-symbolic.svg",
-            r"C:\Program Files\Inkscape\share\inkscape\icons\hicolor\symbolic\actions\markers-symbolic.svg",
-            r"C:\Program Files\Inkscape\share\inkscape\icons\Dash\symbolic\actions\markers-symbolic.svg",
-            r"C:\Program Files\Inkscape\share\inkscape\icons\multicolor\symbolic\actions\markers-symbolic.svg",
-        )
-        if not themed_icon.isNull():
-            return themed_icon
-
-        pixmap = QPixmap(16, 16)
-        pixmap.fill(Qt.GlobalColor.transparent)
-        painter = QPainter(pixmap)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        pen = QPen(color, 1.6)
-        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
-        pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
-        painter.setPen(pen)
-        painter.setBrush(color if pinned else QColor(0, 0, 0, 0))
-        painter.drawRoundedRect(QRectF(4.2, 1.8, 7.0, 3.4), 1.7, 1.7)
-        painter.drawLine(QPointF(7.7, 5.2), QPointF(7.7, 10.2))
-        painter.drawLine(QPointF(5.0, 6.0), QPointF(10.4, 6.0))
-        painter.drawLine(QPointF(7.7, 10.2), QPointF(6.0, 13.2))
-        painter.end()
-        return QIcon(pixmap)
-
-    def _make_apply_icon(self, applied: bool) -> QIcon:
-        icon_name = "link" if applied else "link-off"
-        stroke = "#22c55e" if applied else "#ef4444"
-        if tabler_icons is not None:
-            try:
-                svg = str(
-                    tabler_icons.get_icon(
-                        icon_name,
-                        size=24,
-                        stroke=stroke,
-                        fill="none",
-                        stroke_width=2.2,
-                        stroke_linecap="round",
-                        stroke_linejoin="round",
-                    )
-                )
-            except Exception:
-                svg = ""
-            if svg:
-                renderer = QSvgRenderer(QByteArray(svg.encode("utf-8")))
-                if renderer.isValid():
-                    pixmap = QPixmap(20, 20)
-                    pixmap.fill(Qt.GlobalColor.transparent)
-                    painter = QPainter(pixmap)
-                    renderer.render(painter, QRectF(0.0, 1.0, 20.0, 18.0))
-                    painter.end()
-                    return QIcon(pixmap)
-
-        pixmap = QPixmap(20, 20)
-        pixmap.fill(Qt.GlobalColor.transparent)
-        painter = QPainter(pixmap)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        pen = QPen(QColor(stroke), 1.8)
-        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
-        pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
-        painter.setPen(pen)
-        painter.setBrush(Qt.BrushStyle.NoBrush)
-        painter.drawPath(QPainterPath())
-        painter.drawEllipse(QRectF(3.0, 3.0, 7.5, 7.5))
-        painter.drawEllipse(QRectF(9.5, 9.5, 7.5, 7.5))
-        painter.drawLine(QPointF(8.2, 8.2), QPointF(11.8, 11.8))
-        if not applied:
-            painter.drawLine(QPointF(4.0, 15.0), QPointF(16.0, 5.0))
-        painter.end()
-        return QIcon(pixmap)
-
-    @staticmethod
-    def _tinted_icon_from_candidates(color: QColor, size: int, *candidates: str) -> QIcon:
-        for candidate in candidates:
-            path = Path(candidate)
-            if not path.exists():
-                continue
-            base_icon = QIcon(str(path))
-            base_pixmap = base_icon.pixmap(size, size)
-            if base_pixmap.isNull():
-                continue
-            tinted = QPixmap(base_pixmap.size())
-            tinted.fill(Qt.GlobalColor.transparent)
-            painter = QPainter(tinted)
-            painter.drawPixmap(0, 0, base_pixmap)
-            painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceIn)
-            painter.fillRect(tinted.rect(), color)
-            painter.end()
-            return QIcon(tinted)
-        return QIcon()
-
-
-class CompactWedgeSlider(QWidget):
-    valueChanged = pyqtSignal(int)
-
-    def __init__(self, orientation: Qt.Orientation = Qt.Orientation.Horizontal, parent: QWidget | None = None) -> None:
-        super().__init__(parent)
-        self._orientation = orientation
-        self._minimum = 0
-        self._maximum = 100
-        self._value = 0
-        self.setMinimumSize(24, 12)
-        self.setMaximumHeight(12)
-        self.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.setToolTip("Opacity")
-
-    def setRange(self, minimum: int, maximum: int) -> None:
-        self._minimum = int(minimum)
-        self._maximum = max(int(maximum), self._minimum + 1)
-        self.setValue(self._value)
-
-    def setValue(self, value: int) -> None:
-        clamped = int(np.clip(int(value), self._minimum, self._maximum))
-        if clamped == self._value:
-            self.update()
-            return
-        self._value = clamped
-        self.valueChanged.emit(self._value)
-        self.update()
-
-    def value(self) -> int:
-        return int(self._value)
-
-    def sizeHint(self) -> QSize:
-        return QSize(24, 12)
-
-    def mousePressEvent(self, event) -> None:
-        if event.button() == Qt.MouseButton.LeftButton:
-            self._set_value_from_pos(event.position())
-            event.accept()
-            return
-        super().mousePressEvent(event)
-
-    def mouseMoveEvent(self, event) -> None:
-        if event.buttons() & Qt.MouseButton.LeftButton:
-            self._set_value_from_pos(event.position())
-            event.accept()
-            return
-        super().mouseMoveEvent(event)
-
-    def paintEvent(self, _event) -> None:
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        rect = QRectF(self.rect()).adjusted(1.0, 1.0, -1.0, -1.0)
-
-        base_path = QPainterPath()
-        base_path.moveTo(rect.left(), rect.bottom())
-        base_path.lineTo(rect.right(), rect.top())
-        base_path.lineTo(rect.right(), rect.bottom())
-        base_path.closeSubpath()
-        painter.setPen(QPen(QColor("#475569"), 1.0))
-        painter.setBrush(QColor("#0f172a"))
-        painter.drawPath(base_path)
-
-        fraction = 0.0 if self._maximum <= self._minimum else (self._value - self._minimum) / float(self._maximum - self._minimum)
-        fraction = float(np.clip(fraction, 0.0, 1.0))
-        fill_right = rect.left() + rect.width() * fraction
-        if fill_right > rect.left() + 0.5:
-            fill_path = QPainterPath()
-            fill_path.moveTo(rect.left(), rect.bottom())
-            fill_path.lineTo(fill_right, rect.bottom())
-            fill_path.lineTo(fill_right, rect.bottom() - rect.height() * fraction)
-            fill_path.closeSubpath()
-            painter.setPen(Qt.PenStyle.NoPen)
-            painter.setBrush(QColor("#38bdf8"))
-            painter.drawPath(fill_path)
-
-        handle_x = rect.left() + rect.width() * fraction
-        painter.setPen(QPen(QColor("#f8fafc"), 1.4))
-        painter.drawLine(QPointF(handle_x, rect.bottom()), QPointF(handle_x, rect.bottom() - rect.height() * max(fraction, 0.18)))
-        painter.end()
-
-    def _set_value_from_pos(self, position) -> None:
-        rect = QRectF(self.rect()).adjusted(1.0, 1.0, -1.0, -1.0)
-        if rect.width() <= 1.0:
-            return
-        fraction = (float(position.x()) - rect.left()) / rect.width()
-        fraction = float(np.clip(fraction, 0.0, 1.0))
-        value = int(round(self._minimum + fraction * (self._maximum - self._minimum)))
-        self.setValue(value)
-
-
-class BusySpinner(QWidget):
-    def __init__(self, parent: QWidget | None = None) -> None:
-        super().__init__(parent)
-        self._minimum = 0
-        self._maximum = 0
-        self._value = 0
-        self._text_visible = False
-        self._phase = 0
-        self._timer = QTimer(self)
-        self._timer.setInterval(90)
-        self._timer.timeout.connect(self._advance)
-        self.setFixedSize(22, 22)
-        self.hide()
-
-    def setRange(self, minimum: int, maximum: int) -> None:
-        self._minimum = int(minimum)
-        self._maximum = int(maximum)
-        if self._maximum <= self._minimum:
-            if not self._timer.isActive():
-                self._timer.start()
-        else:
-            self._timer.stop()
-        self.update()
-
-    def minimum(self) -> int:
-        return self._minimum
-
-    def maximum(self) -> int:
-        return self._maximum
-
-    def value(self) -> int:
-        return self._value
-
-    def setValue(self, value: int) -> None:
-        self._value = int(value)
-        self.update()
-
-    def setTextVisible(self, visible: bool) -> None:
-        self._text_visible = bool(visible)
-        self.update()
-
-    def _advance(self) -> None:
-        self._phase = (self._phase + 1) % 12
-        self.update()
-
-    def paintEvent(self, _event) -> None:
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        rect = QRectF(self.rect()).adjusted(2.0, 2.0, -2.0, -2.0)
-        cx = rect.center().x()
-        cy = rect.center().y()
-        radius = min(rect.width(), rect.height()) * 0.32
-        segment_count = 12
-        if self._maximum <= self._minimum:
-            base_color = QColor("#38bdf8")
-            for index in range(segment_count):
-                progress = (index - self._phase) % segment_count
-                alpha = int(40 + (215 * (segment_count - progress - 1) / max(segment_count - 1, 1)))
-                color = QColor(base_color)
-                color.setAlpha(alpha)
-                painter.setPen(Qt.PenStyle.NoPen)
-                painter.setBrush(color)
-                angle = (360.0 / segment_count) * index
-                radians = np.deg2rad(angle)
-                x = cx + np.cos(radians) * radius
-                y = cy + np.sin(radians) * radius
-                painter.drawEllipse(QRectF(x - 1.8, y - 1.8, 3.6, 3.6))
-        else:
-            span = max(self._maximum - self._minimum, 1)
-            fraction = float(np.clip((self._value - self._minimum) / span, 0.0, 1.0))
-            painter.setPen(QPen(QColor("#334155"), 2.0))
-            painter.setBrush(Qt.BrushStyle.NoBrush)
-            painter.drawEllipse(rect)
-            painter.setPen(QPen(QColor("#38bdf8"), 2.4))
-            start_angle = 90 * 16
-            span_angle = int(-360.0 * fraction * 16)
-            painter.drawArc(rect, start_angle, span_angle)
-        painter.end()
-
-
-class ShineProgressBar(QProgressBar):
-    def __init__(self, parent: QWidget | None = None) -> None:
-        super().__init__(parent)
-        self._shine_phase = 0.0
-        self._shine_timer = QTimer(self)
-        self._shine_timer.setInterval(30)
-        self._shine_timer.timeout.connect(self._advance_shine)
-
-    def setRange(self, minimum: int, maximum: int) -> None:  # type: ignore[override]
-        super().setRange(minimum, maximum)
-        self._sync_shine_timer()
-
-    def setValue(self, value: int) -> None:  # type: ignore[override]
-        super().setValue(value)
-        self._sync_shine_timer()
-
-    def _sync_shine_timer(self) -> None:
-        if self.maximum() > self.minimum() and self.value() > self.minimum() and self.value() < self.maximum() and self.isVisible():
-            if not self._shine_timer.isActive():
-                self._shine_timer.start()
-        else:
-            self._shine_timer.stop()
-
-    def showEvent(self, event) -> None:  # type: ignore[override]
-        super().showEvent(event)
-        self._sync_shine_timer()
-
-    def hideEvent(self, event) -> None:  # type: ignore[override]
-        super().hideEvent(event)
-        self._shine_timer.stop()
-
-    def _advance_shine(self) -> None:
-        self._shine_phase = (self._shine_phase + 0.028) % 1.0
-        self.update()
-
-    def paintEvent(self, _event) -> None:
-        option = QStyleOptionProgressBar()
-        self.initStyleOption(option)
-
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-
-        rect = QRectF(self.rect()).adjusted(1.0, 1.0, -1.0, -1.0)
-        radius = min(rect.height(), 9.0) / 2.0
-        track_color = QColor("#1f2937")
-        track_border = QColor("#475569")
-        fill_color = QColor("#38bdf8")
-        text_color = QColor("#f8fafc")
-        shine_color = QColor(255, 255, 255, 120)
-
-        painter.setPen(QPen(track_border, 1.0))
-        painter.setBrush(track_color)
-        painter.drawRoundedRect(rect, radius, radius)
-
-        span = max(option.maximum - option.minimum, 1)
-        fraction = float(np.clip((option.progress - option.minimum) / span, 0.0, 1.0))
-        fill_width = rect.width() * fraction
-        if fill_width > 0.0:
-            fill_rect = QRectF(rect.left(), rect.top(), fill_width, rect.height())
-            painter.setPen(Qt.PenStyle.NoPen)
-            painter.setBrush(fill_color)
-            painter.drawRoundedRect(fill_rect, radius, radius)
-
-            sheen_width = max(rect.width() * 0.28, 18.0)
-            sheen_x = fill_rect.left() - sheen_width + (fill_rect.width() + sheen_width * 2.0) * self._shine_phase
-            sheen_rect = QRectF(sheen_x, fill_rect.top(), sheen_width, fill_rect.height())
-            painter.save()
-            painter.setClipRect(fill_rect)
-            gradient = QLinearGradient(sheen_rect.left(), sheen_rect.top(), sheen_rect.right(), sheen_rect.top())
-            gradient.setColorAt(0.0, QColor(255, 255, 255, 0))
-            gradient.setColorAt(0.45, shine_color)
-            gradient.setColorAt(0.55, shine_color)
-            gradient.setColorAt(1.0, QColor(255, 255, 255, 0))
-            painter.setPen(Qt.PenStyle.NoPen)
-            painter.setBrush(gradient)
-            painter.drawRoundedRect(sheen_rect, radius, radius)
-            painter.restore()
-
-        if option.textVisible:
-            painter.setPen(QPen(text_color))
-            painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, option.text)
-
-        painter.end()
-
-
-class ClickableIconLabel(QLabel):
-    clicked = pyqtSignal()
-
-    def __init__(self, parent: QWidget | None = None) -> None:
-        super().__init__(parent)
-        self.setCursor(Qt.CursorShape.PointingHandCursor)
-
-    def mousePressEvent(self, event) -> None:  # type: ignore[override]
-        if event.button() == Qt.MouseButton.LeftButton:
-            self.clicked.emit()
-            event.accept()
-            return
-        super().mousePressEvent(event)
-
-
-class FreeStandingToggleIconLabel(ClickableIconLabel):
-    toggled = pyqtSignal(bool)
-
-    def __init__(self, parent: QWidget | None = None) -> None:
-        super().__init__(parent)
-        self._checked = False
-        self._icon: QIcon = QIcon()
-        self._icon_size = QSize(24, 24)
-
-    def setIcon(self, icon: QIcon) -> None:
-        self._icon = icon
-        self._refresh_pixmap()
-
-    def setIconSize(self, size: QSize) -> None:
-        self._icon_size = QSize(size)
-        self._refresh_pixmap()
-
-    def setChecked(self, checked: bool) -> None:
-        checked = bool(checked)
-        if self._checked == checked:
-            return
-        self._checked = checked
-        self._refresh_pixmap()
-        self.toggled.emit(self._checked)
-
-    def isChecked(self) -> bool:
-        return self._checked
-
-    def mousePressEvent(self, event) -> None:  # type: ignore[override]
-        if event.button() == Qt.MouseButton.LeftButton:
-            self.setChecked(not self._checked)
-            self.clicked.emit()
-            event.accept()
-            return
-        super().mousePressEvent(event)
-
-    def _refresh_pixmap(self) -> None:
-        if self._icon.isNull():
-            self.setPixmap(QPixmap())
-            return
-        self.setPixmap(self._icon.pixmap(self._icon_size))
-
-
-class FreeStandingToggleTextLabel(ClickableIconLabel):
-    toggled = pyqtSignal(bool)
-
-    def __init__(self, parent: QWidget | None = None) -> None:
-        super().__init__(parent)
-        self._checked = False
-        self._checked_text = ""
-        self._unchecked_text = ""
-        self.setAlignment(Qt.AlignmentFlag.AlignCenter)
-
-    def setTexts(self, unchecked_text: str, checked_text: str) -> None:
-        self._unchecked_text = str(unchecked_text)
-        self._checked_text = str(checked_text)
-        self._refresh_text()
-
-    def setChecked(self, checked: bool) -> None:
-        checked = bool(checked)
-        if self._checked == checked:
-            self._refresh_text()
-            return
-        self._checked = checked
-        self._refresh_text()
-        self.toggled.emit(self._checked)
-
-    def isChecked(self) -> bool:
-        return self._checked
-
-    def mousePressEvent(self, event) -> None:  # type: ignore[override]
-        if event.button() == Qt.MouseButton.LeftButton:
-            self.setChecked(not self._checked)
-            self.clicked.emit()
-            event.accept()
-            return
-        super().mousePressEvent(event)
-
-    def _refresh_text(self) -> None:
-        self.setText(self._checked_text if self._checked else self._unchecked_text)
-        self.setProperty("checked", self._checked)
-        self.style().unpolish(self)
-        self.style().polish(self)
-        self.update()
-
-
-class WorkflowLogBridge(QObject):
-    record_received = pyqtSignal(int, str)
-    records_flushed = pyqtSignal(int, list)
-
-
-class WorkflowLogHandler(logging.Handler):
-    def __init__(self, bridge: WorkflowLogBridge) -> None:
-        super().__init__()
-        self._bridge = bridge
-
-    def emit(self, record: logging.LogRecord) -> None:
-        try:
-            message = self.format(record)
-        except Exception:
-            self.handleError(record)
-            return
-        self._bridge.record_received.emit(int(record.levelno), message)
-
-
-@dataclass(slots=True)
-class SpotOverlayBundle:
-    curve: pg.PlotCurveItem
-    ring_fill: QGraphicsPathItem | None = None
-    inner_curve: pg.PlotCurveItem | None = None
-    outer_curve: pg.PlotCurveItem | None = None
-    label: pg.TextItem | None = None
-
-
-@dataclass(slots=True)
-class GuideOverlayBundle:
-    vertical: pg.PlotCurveItem
-    horizontal: pg.PlotCurveItem
-    marker: pg.TargetItem
-
-
-@dataclass(slots=True)
-class MeasurementOverlayBundle:
-    connector: pg.PlotCurveItem
-    marker_a: pg.TargetItem
-    marker_b: pg.TargetItem
-    label: pg.TextItem
-
-
-@dataclass(slots=True)
-class ScaleBarOverlayBundle:
-    outline_line: pg.PlotCurveItem
-    line: pg.PlotCurveItem
-    outline_left_tick: pg.PlotCurveItem
-    left_tick: pg.PlotCurveItem
-    outline_right_tick: pg.PlotCurveItem
-    right_tick: pg.PlotCurveItem
-    outline_label: pg.TextItem
-    label: pg.TextItem
-
-
-@dataclass(slots=True)
-class LandmarkOverlayBundle:
-    curve: pg.PlotCurveItem
-    label: pg.TextItem
-
-
-@dataclass(slots=True)
-class ChromaticLandmarkAllOverlayBundle:
-    points: pg.ScatterPlotItem
-    active_cross: pg.PlotCurveItem | None
-    label: pg.TextItem
-
-
-@dataclass(slots=True)
-class UndoSnapshot:
-    label: str
-    state: AnalysisState
-    folder_text: str
-    frame_slider_value: int
-    wavelength_slider_value: int
-    selected_spot_ids: set[int]
-    spot_visual_color: str
-    ring_visual_color: str
-    mask_visual_color: str
-    histogram_mask_visual_color: str
-    figure_mask_visual_color: str
-    highlight_visual_color: str
-    spot_alpha: float
-    ring_alpha: float
-    mask_alpha: float
-    histogram_mask_alpha: float
-    figure_mask_alpha: float
-    highlight_alpha: float
-    spots_visible: bool
-    rings_visible: bool
-    mask_visible: bool
-    reference_points_visible: bool
-    histogram_mask_visible: bool
-    figure_mask_visible: bool
-    highlight_visible: bool
-    file_mask: np.ndarray | None
-    file_mask_path: str | None
-    file_mask_revision: int
-
-
-@dataclass(slots=True)
-class SensorgramPointResult:
-    frame_index: int
-    metric_value: float | None
-    metric_signal: float | None
-
-
-@dataclass(slots=True)
-class SensorgramComputationResult:
-    frame_indices: np.ndarray
-    metric_values: np.ndarray
-    metric_signal: np.ndarray
-    completed_count: int
-    total_count: int
-    prep_seconds: float = 0.0
-    fit_seconds: float = 0.0
-    total_seconds: float = 0.0
-    cancelled: bool = False
-
-
-class WorkerSignals(QObject):
-    result = pyqtSignal(object)
-    error = pyqtSignal(str)
-    progress = pyqtSignal(int, str)
-    partial = pyqtSignal(object)
-
-
-class FunctionWorker(QRunnable):
-    def __init__(self, fn, *args, supports_progress: bool = False, supports_partial: bool = False, **kwargs) -> None:
-        super().__init__()
-        self._fn = fn
-        self._args = args
-        self._kwargs = kwargs
-        self._supports_progress = supports_progress
-        self._supports_partial = supports_partial
-        self.signals = WorkerSignals()
-
-    def run(self) -> None:
-        try:
-            kwargs = dict(self._kwargs)
-            if self._supports_progress:
-                kwargs["progress_callback"] = self.signals.progress.emit
-            if self._supports_partial:
-                kwargs["partial_callback"] = self.signals.partial.emit
-            result = self._fn(*self._args, **kwargs)
-        except Exception as exc:  # pragma: no cover - worker thread error path
-            self.signals.error.emit(str(exc))
-            return
-        self.signals.result.emit(result)
-
-
-def _process_image_task(path_str: str, preprocessing, spots, external_mask: np.ndarray | None, mask_state) -> np.ndarray:
-    raw_image = load_image_array(path_str)
-    mask_settings = preprocessing[1] if isinstance(preprocessing, tuple) else None
-    external_mask_processed = bool(preprocessing[2]) if isinstance(preprocessing, tuple) and len(preprocessing) > 2 else False
-    preprocessing_settings = preprocessing[0] if isinstance(preprocessing, tuple) else preprocessing
-    return apply_preprocessing(
-        raw_image,
-        preprocessing_settings,
-        spots=spots,
-        mask_settings=mask_settings,
-        external_mask=external_mask,
-        external_mask_processed=external_mask_processed,
-        mask_state=mask_state,
-    )
-
-
-def _refresh_spot_metrics_task(
-    image: np.ndarray,
-    settings,
-    spots,
-    external_mask: np.ndarray | None,
-) -> list[DetectedSpot]:
-    return refresh_spot_metrics(image, settings, spots, external_mask=external_mask)
-
-
-def _detect_spots_task(
-    image: np.ndarray,
-    settings,
-    external_mask: np.ndarray | None,
-    progress_callback=None,
-) -> list[DetectedSpot]:
-    return detect_spots(image, settings, external_mask=external_mask, progress_callback=progress_callback)
-
-
-def _background_profile_task(
-    path_str: str,
-    preprocessing,
-    sigma_px: float,
-    spots,
-    external_mask: np.ndarray | None,
-    progress_callback=None,
-) -> np.ndarray:
-    if progress_callback is not None:
-        progress_callback(5, "Background profile: loading image...")
-    raw_image = load_image_array(path_str)
-    mask_settings = preprocessing[1] if isinstance(preprocessing, tuple) else None
-    external_mask_processed = bool(preprocessing[2]) if isinstance(preprocessing, tuple) and len(preprocessing) > 2 else False
-    preprocessing_settings = preprocessing[0] if isinstance(preprocessing, tuple) else preprocessing
-    if progress_callback is not None:
-        progress_callback(25, "Background profile: applying spatial transforms...")
-    spatial = apply_spatial_preprocessing(raw_image, preprocessing_settings)
-    if external_mask is None:
-        processed_external_mask = None
-    elif external_mask_processed:
-        processed_external_mask = external_mask.astype(bool, copy=False)
-    else:
-        processed_external_mask = apply_spatial_mask(external_mask, preprocessing_settings)
-    if progress_callback is not None:
-        progress_callback(55, "Background profile: estimating smooth surface...")
-    return estimate_background_profile(
-        spatial,
-        sigma_px=sigma_px,
-        binning=max(int(getattr(preprocessing_settings, "flatten_background_binning", 2)), 1),
-        spots=spots,
-        mask_settings=mask_settings,
-        external_mask=processed_external_mask,
-    )
-
-
-def _ome_zarr_export_task(
-    dataset,
-    destination: Path,
-    chunk_size_px: int,
-    compression_enabled: bool,
-    *,
-    cancel_event: threading.Event | None = None,
-    progress_callback=None,
-) -> Path:
-    return export_ome_zarr_dataset(
-        dataset,
-        destination,
-        chunk_size_px=chunk_size_px,
-        compression_enabled=compression_enabled,
-        progress_callback=progress_callback,
-        cancel_event=cancel_event,
-    )
-
-
-def _selected_roi_masks_for_spectrum(
-    image_shape: tuple[int, int],
-    source_spots: list[DetectedSpot],
-    selected_spot_ids: tuple[int, ...],
-    ring_inner_radius_px: float,
-    ring_outer_radius_px: float,
-    affine_matrix: np.ndarray | None,
-) -> tuple[np.ndarray, np.ndarray]:
-    image_height, image_width = image_shape[:2]
-    spot_mask = np.zeros((image_height, image_width), dtype=bool)
-    ring_mask = np.zeros((image_height, image_width), dtype=bool)
-    if not source_spots:
-        return spot_mask, ring_mask
-
-    selected_ids = set(int(spot_id) for spot_id in selected_spot_ids) if selected_spot_ids else None
-    effective_spots = [spot for spot in source_spots if selected_ids is None or spot.spot_id in selected_ids]
-    if not effective_spots:
-        return spot_mask, ring_mask
-
-    ring_inner_radius = float(max(ring_inner_radius_px, 0.0))
-    ring_outer_radius = float(max(ring_outer_radius_px, ring_inner_radius))
-    use_affine = affine_matrix is not None and not np.allclose(
-        np.asarray(affine_matrix, dtype=np.float64),
-        identity_affine_matrix(),
-        atol=1e-9,
-    )
-    if not use_affine:
-        yy, xx = np.indices((image_height, image_width), dtype=np.float32)
-        for spot in effective_spots:
-            distance_sq = (xx - float(spot.center_x)) ** 2 + (yy - float(spot.center_y)) ** 2
-            spot_mask |= distance_sq <= float(spot.radius_px) ** 2
-            if ring_outer_radius > 0.0:
-                outer_mask = distance_sq <= ring_outer_radius**2
-                inner_mask = distance_sq < ring_inner_radius**2 if ring_inner_radius > 0.0 else np.zeros_like(outer_mask)
-                ring_mask |= outer_mask & ~inner_mask
-        ring_mask &= ~spot_mask
-        return spot_mask, ring_mask
-
-    for spot in effective_spots:
-        spot_mask |= transformed_disk_mask(
-            (image_height, image_width),
-            (float(spot.center_x), float(spot.center_y)),
-            float(spot.radius_px),
-            affine_matrix,
-        )
-        if ring_outer_radius > 0.0:
-            ring_mask |= transformed_annulus_mask(
-                (image_height, image_width),
-                (float(spot.center_x), float(spot.center_y)),
-                float(ring_inner_radius),
-                float(ring_outer_radius),
-                affine_matrix,
-            )
-    ring_mask &= ~spot_mask
-    return spot_mask, ring_mask
-
-
-def _spot_absorbance_signature(
-    frame: int,
-    wavelength_values: tuple[float, ...],
-    spot: DetectedSpot,
-    chromatic_signatures: tuple[object, ...],
-) -> tuple[object, ...]:
-    return (
-        int(frame),
-        tuple(round(float(value), 6) for value in wavelength_values),
-        int(spot.spot_id),
-        round(float(spot.center_x), 3),
-        round(float(spot.center_y), 3),
-        round(float(spot.radius_px), 3),
-        round(float(spot.ring_inner_diameter_px or 0.0), 3),
-        round(float(spot.ring_outer_diameter_px or 0.0), 3),
-        chromatic_signatures,
-    )
-
-
-def _absorbance_roi_mask_cache_key(
-    image_shape: tuple[int, int],
-    selected_spots: list[DetectedSpot],
-    selected_spot_ids: tuple[int, ...],
-    affine_matrix: np.ndarray | None,
-    ring_inner_radius_px: float,
-    ring_outer_radius_px: float,
-) -> tuple[object, ...]:
-    affine_signature = None
-    if affine_matrix is not None:
-        affine_signature = tuple(round(float(value), 6) for value in np.asarray(affine_matrix, dtype=np.float64).ravel())
-    return (
-        tuple(int(value) for value in image_shape[:2]),
-        tuple(int(spot_id) for spot_id in selected_spot_ids),
-        tuple(
-            (
-                int(spot.spot_id),
-                round(float(spot.center_x), 3),
-                round(float(spot.center_y), 3),
-                round(float(spot.radius_px), 3),
-                round(float(spot.ring_inner_diameter_px or 0.0), 3),
-                round(float(spot.ring_outer_diameter_px or 0.0), 3),
-                spot.spot_color_hex or "",
-                spot.ring_color_hex or "",
-            )
-            for spot in selected_spots
-        ),
-        affine_signature,
-        round(float(ring_inner_radius_px), 3),
-        round(float(ring_outer_radius_px), 3),
-    )
-
-
-def _absorbance_spectrum_task(
-    measurement_payload: list[tuple[float, str, list[DetectedSpot], np.ndarray | None, bool, np.ndarray | None]],
-    preprocessing,
-    flatten_mask_settings,
-    measurement_settings,
-    roi_mask_cache,
-    roi_mask_cache_lock,
-    roi_mask_cache_max_size: int,
-    source_spots: list[DetectedSpot],
-    selected_spot_ids: tuple[int, ...],
-    ring_inner_radius_px: float,
-    ring_outer_radius_px: float,
-    mask_state,
-    cancel_event: threading.Event | None = None,
-    progress_callback=None,
-) -> AbsorbanceSpectrumResult:
-    task_started = time.perf_counter()
-    load_seconds = 0.0
-    roi_seconds = 0.0
-    cache_stats = {
-        "image_hits": 0,
-        "image_builds": 0,
-        "roi_hits": 0,
-        "roi_builds": 0,
-    }
-    selected_spot_id_set = set(selected_spot_ids)
-    selected_spots = [spot for spot in source_spots if spot.spot_id in selected_spot_id_set]
-    spot_accumulators: dict[int, dict[str, list[float] | list[int]]] = {
-        int(spot.spot_id): {
-            "wavelengths": [],
-            "absorbance": [],
-            "spot_mean": [],
-            "ring_mean": [],
-            "spot_pixel_count": [],
-            "ring_pixel_count": [],
-        }
-        for spot in selected_spots
-    }
-    wavelengths: list[float] = []
-    absorbance_values: list[float] = []
-    spot_mean_values: list[float] = []
-    ring_mean_values: list[float] = []
-    spot_pixel_counts: list[int] = []
-    ring_pixel_counts: list[int] = []
-    total = max(len(measurement_payload), 1)
-
-    def _build_roi_mask_cache(
-        image_shape: tuple[int, int],
-        selected_spots_local: list[DetectedSpot],
-        selected_ids_local: tuple[int, ...],
-        affine_matrix_local: np.ndarray | None,
-    ) -> dict[str, object]:
-        logger = logging.getLogger("lspr_imaging_app.workflow")
-        cache_key = _absorbance_roi_mask_cache_key(
-            image_shape,
-            selected_spots_local,
-            selected_ids_local,
-            affine_matrix_local,
-            ring_inner_radius_px,
-            ring_outer_radius_px,
-        )
-        with roi_mask_cache_lock:
-            cached_value = roi_mask_cache.get(cache_key) if hasattr(roi_mask_cache, "get") else None
-            if cached_value is not None:
-                try:
-                    roi_mask_cache.move_to_end(cache_key)
-                except Exception:
-                    pass
-                cache_stats["roi_hits"] += 1
-                logger.debug(
-                    "ROI cache hit | shape=%sx%s spots=%s",
-                    int(image_shape[0]),
-                    int(image_shape[1]),
-                    len(selected_spots_local),
-                )
-                return cached_value
-        combined_spot_mask, combined_ring_mask = _selected_roi_masks_for_spectrum(
-            image_shape,
-            source_spots,
-            selected_ids_local,
-            ring_inner_radius_px,
-            ring_outer_radius_px,
-            affine_matrix_local,
-        )
-        per_spot_masks: dict[int, tuple[np.ndarray, np.ndarray]] = {}
-        for spot in selected_spots_local:
-            per_spot_masks[int(spot.spot_id)] = _selected_roi_masks_for_spectrum(
-                image_shape,
-                [spot],
-                (int(spot.spot_id),),
-                ring_inner_radius_px,
-                ring_outer_radius_px,
-                affine_matrix_local,
-            )
-        cached_value = {
-            "shape": tuple(int(value) for value in image_shape[:2]),
-            "combined": (combined_spot_mask, combined_ring_mask),
-            "per_spot": per_spot_masks,
-        }
-        with roi_mask_cache_lock:
-            roi_mask_cache[cache_key] = cached_value
-            try:
-                roi_mask_cache.move_to_end(cache_key)
-            except Exception:
-                pass
-            while len(roi_mask_cache) > max(int(roi_mask_cache_max_size), 1):
-                roi_mask_cache.popitem(last=False)
-        cache_stats["roi_builds"] += 1
-        logger.debug(
-            "ROI cache built | shape=%sx%s spots=%s",
-            int(image_shape[0]),
-            int(image_shape[1]),
-            len(selected_spots_local),
-        )
-        return cached_value
-
-    def _load_and_preprocess_measurement(
-        item: tuple[int, tuple[float, str, list[DetectedSpot], np.ndarray | None, bool, np.ndarray | None]]
-    ) -> tuple[int, float, np.ndarray, np.ndarray | None, np.ndarray | None, float]:
-        index, (wavelength_nm, path_str, preprocessing_spots, affine_matrix, external_mask_processed, external_mask) = item
-        load_started = time.perf_counter()
-        cache_info_before = getattr(load_image_array, "cache_info", None)
-        before_hits = cache_info_before().hits if callable(cache_info_before) else None
-        before_misses = cache_info_before().misses if callable(cache_info_before) else None
-        raw_image = load_image_array(path_str)
-        if callable(cache_info_before):
-            cache_info_after = cache_info_before()
-            if before_hits is not None and cache_info_after.hits > before_hits:
-                cache_stats["image_hits"] += int(cache_info_after.hits - before_hits)
-            if before_misses is not None and cache_info_after.misses > before_misses:
-                cache_stats["image_builds"] += int(cache_info_after.misses - before_misses)
-        processed = apply_preprocessing(
-            raw_image,
-            preprocessing,
-            spots=preprocessing_spots,
-            mask_settings=flatten_mask_settings,
-            external_mask=external_mask,
-            external_mask_processed=external_mask_processed,
-            mask_state=mask_state,
-        ).astype(np.float32, copy=False)
-        load_duration = time.perf_counter() - load_started
-        return int(index), float(wavelength_nm), processed, affine_matrix, external_mask, load_duration
-
-    worker_count = max(1, min(int(os.cpu_count() or 1), 4, len(measurement_payload)))
-    prepared_measurements: list[tuple[int, float, np.ndarray, np.ndarray | None, np.ndarray | None, float]] = []
-    if worker_count <= 1:
-        for index, item in enumerate(measurement_payload, start=1):
-            prepared_measurements.append(_load_and_preprocess_measurement((index, item)))
-    else:
-        with ThreadPoolExecutor(max_workers=worker_count) as executor:
-            futures = [executor.submit(_load_and_preprocess_measurement, (index, item)) for index, item in enumerate(measurement_payload, start=1)]
-            for future in as_completed(futures):
-                prepared_measurements.append(future.result())
-        prepared_measurements.sort(key=lambda item: item[0])
-
-    for index, wavelength_nm, processed, affine_matrix, external_mask, load_duration in prepared_measurements:
-        if cancel_event is not None and cancel_event.is_set():
-            return AbsorbanceSpectrumResult(
-                wavelengths_nm=np.asarray([], dtype=np.float64),
-                absorbance=np.asarray([], dtype=np.float64),
-                spot_mean=np.asarray([], dtype=np.float64),
-                ring_mean=np.asarray([], dtype=np.float64),
-                spot_pixel_count=np.asarray([], dtype=np.int32),
-                ring_pixel_count=np.asarray([], dtype=np.int32),
-                load_seconds=load_seconds,
-                roi_seconds=roi_seconds,
-                total_seconds=time.perf_counter() - task_started,
-            )
-        load_seconds += float(load_duration)
-
-        roi_started = time.perf_counter()
-        current_shape = tuple(int(value) for value in processed.shape[:2])
-        roi_mask_cache_entry = _build_roi_mask_cache(current_shape, selected_spots, selected_spot_ids, affine_matrix)
-        ignored_mask = ignored_pixel_mask(processed, measurement_settings, external_mask=external_mask)
-        combined_spot_mask, combined_ring_mask = roi_mask_cache_entry["combined"]  # type: ignore[index]
-        spot_mask = np.array(combined_spot_mask, dtype=bool, copy=True)
-        ring_mask = np.array(combined_ring_mask, dtype=bool, copy=True)
-        spot_mask &= ~ignored_mask
-        ring_mask &= ~ignored_mask
-        ring_mask &= ~spot_mask
-
-        spot_pixels = processed[spot_mask]
-        ring_pixels = processed[ring_mask]
-        if spot_pixels.size == 0 or ring_pixels.size == 0:
-            spot_mean = float("nan")
-            ring_mean = float("nan")
-            absorbance = float("nan")
-        else:
-            spot_mean = float(np.mean(spot_pixels))
-            ring_mean = float(np.mean(ring_pixels))
-            absorbance = absorbance_from_means(spot_mean, ring_mean)
-
-        wavelengths.append(float(wavelength_nm))
-        absorbance_values.append(absorbance)
-        spot_mean_values.append(spot_mean)
-        ring_mean_values.append(ring_mean)
-        spot_pixel_counts.append(int(spot_pixels.size))
-        ring_pixel_counts.append(int(ring_pixels.size))
-
-        for spot in selected_spots:
-            per_spot_masks = roi_mask_cache_entry["per_spot"]  # type: ignore[index]
-            spot_mask_template, ring_mask_template = per_spot_masks[int(spot.spot_id)]
-            spot_mask_single = np.array(spot_mask_template, dtype=bool, copy=True)
-            ring_mask_single = np.array(ring_mask_template, dtype=bool, copy=True)
-            spot_mask_single &= ~ignored_mask
-            ring_mask_single &= ~ignored_mask
-            ring_mask_single &= ~spot_mask_single
-
-            spot_pixels_single = processed[spot_mask_single]
-            ring_pixels_single = processed[ring_mask_single]
-            if spot_pixels_single.size == 0 or ring_pixels_single.size == 0:
-                spot_mean_single = float("nan")
-                ring_mean_single = float("nan")
-                absorbance_single = float("nan")
-            else:
-                spot_mean_single = float(np.mean(spot_pixels_single))
-                ring_mean_single = float(np.mean(ring_pixels_single))
-                absorbance_single = absorbance_from_means(spot_mean_single, ring_mean_single)
-
-            accumulator = spot_accumulators[int(spot.spot_id)]
-            accumulator["wavelengths"].append(float(wavelength_nm))
-            accumulator["absorbance"].append(absorbance_single)
-            accumulator["spot_mean"].append(spot_mean_single)
-            accumulator["ring_mean"].append(ring_mean_single)
-            accumulator["spot_pixel_count"].append(int(spot_pixels_single.size))
-            accumulator["ring_pixel_count"].append(int(ring_pixels_single.size))
-        roi_seconds += time.perf_counter() - roi_started
-
-        if progress_callback is not None:
-            progress_callback(
-                int(round(index / total * 100.0)),
-                f"Spectral absorbance {index}/{total}: {float(wavelength_nm):g} nm",
-            )
-
-    spot_results: dict[int, AbsorbanceSpectrumResult] = {}
-    for spot in selected_spots:
-        data = spot_accumulators[int(spot.spot_id)]
-        spot_results[int(spot.spot_id)] = AbsorbanceSpectrumResult(
-            wavelengths_nm=np.asarray(data["wavelengths"], dtype=np.float64),
-            absorbance=np.asarray(data["absorbance"], dtype=np.float64),
-            spot_mean=np.asarray(data["spot_mean"], dtype=np.float64),
-            ring_mean=np.asarray(data["ring_mean"], dtype=np.float64),
-            spot_pixel_count=np.asarray(data["spot_pixel_count"], dtype=np.int32),
-            ring_pixel_count=np.asarray(data["ring_pixel_count"], dtype=np.int32),
-        )
-
-    result = AbsorbanceSpectrumResult(
-        wavelengths_nm=np.asarray(wavelengths, dtype=np.float64),
-        absorbance=np.asarray(absorbance_values, dtype=np.float64),
-        spot_mean=np.asarray(spot_mean_values, dtype=np.float64),
-        ring_mean=np.asarray(ring_mean_values, dtype=np.float64),
-        spot_pixel_count=np.asarray(spot_pixel_counts, dtype=np.int32),
-        ring_pixel_count=np.asarray(ring_pixel_counts, dtype=np.int32),
-        load_seconds=load_seconds,
-        roi_seconds=roi_seconds,
-        total_seconds=time.perf_counter() - task_started,
-        spot_results=spot_results,
-    )
-    logging.getLogger("lspr_imaging_app.workflow").debug(
-        "Spec cache summary | img hit=%s build=%s | roi hit=%s build=%s",
-        int(cache_stats["image_hits"]),
-        int(cache_stats["image_builds"]),
-        int(cache_stats["roi_hits"]),
-        int(cache_stats["roi_builds"]),
-    )
-    return result
-
-
-def _sensorgram_metric_task(
-    frame_payloads_or_frames,
-    poly_order: int,
-    metric_key: str,
-    cancel_event: threading.Event | None = None,
-    progress_callback=None,
-    partial_callback=None,
-    frame_payload_builder=None,
-) -> SensorgramComputationResult:
-    task_started = time.perf_counter()
-    frame_payloads: list[tuple[int, tuple[object, ...]]] = []
-    total_input_count = len(frame_payloads_or_frames) if hasattr(frame_payloads_or_frames, "__len__") else 0
-    prep_seconds = 0.0
-    fit_seconds = 0.0
-    if frame_payload_builder is not None:
-        frames = [int(frame) for frame in frame_payloads_or_frames]
-        total_input_count = len(frames)
-        if not frames:
-            return SensorgramComputationResult(
-                frame_indices=np.asarray([], dtype=np.int32),
-                metric_values=np.asarray([], dtype=np.float64),
-                metric_signal=np.asarray([], dtype=np.float64),
-                completed_count=0,
-                total_count=0,
-                prep_seconds=0.0,
-                fit_seconds=0.0,
-                total_seconds=time.perf_counter() - task_started,
-                cancelled=False,
-            )
-        prep_started = time.perf_counter()
-        completed = 0
-        built_payloads: list[tuple[int, tuple[object, ...]]] = []
-        worker_count = max(2, min(4, os.cpu_count() or 2))
-        with ThreadPoolExecutor(max_workers=worker_count) as executor:
-            future_map = {executor.submit(frame_payload_builder, int(frame)): int(frame) for frame in frames}
-            for future in as_completed(future_map):
-                frame_index = int(future_map[future])
-                if cancel_event is not None and cancel_event.is_set():
-                    return SensorgramComputationResult(
-                        frame_indices=np.asarray([], dtype=np.int32),
-                        metric_values=np.asarray([], dtype=np.float64),
-                        metric_signal=np.asarray([], dtype=np.float64),
-                        completed_count=len(built_payloads),
-                        total_count=total_input_count,
-                        cancelled=True,
-                    )
-                payload = future.result()
-                if payload is not None:
-                    built_payloads.append((frame_index, payload))
-                completed += 1
-                if progress_callback is not None:
-                    progress_callback(
-                        int(round((completed / max(total_input_count, 1)) * 20.0)),
-                        f"Preparing sensorgram {completed}/{total_input_count} frames",
-                    )
-        prep_seconds = time.perf_counter() - prep_started
-        frame_payloads = sorted(built_payloads, key=lambda item: item[0])
-    else:
-        frame_payloads = list(frame_payloads_or_frames)
-    frame_indices: list[int] = []
-    metric_values: list[float] = []
-    metric_signals: list[float] = []
-    total = max(len(frame_payloads), 1)
-    compute_base = 20.0 if frame_payload_builder is not None else 0.0
-    compute_span = 80.0 if frame_payload_builder is not None else 100.0
-    compute_started = time.perf_counter()
-
-    for index, (frame_index, payload) in enumerate(frame_payloads, start=1):
-        if cancel_event is not None and cancel_event.is_set():
-            return SensorgramComputationResult(
-                frame_indices=np.asarray(frame_indices, dtype=np.int32),
-                metric_values=np.asarray(metric_values, dtype=np.float64),
-                metric_signal=np.asarray(metric_signals, dtype=np.float64),
-                completed_count=len(frame_indices),
-                total_count=len(frame_payloads),
-                prep_seconds=prep_seconds,
-                fit_seconds=fit_seconds,
-                total_seconds=time.perf_counter() - task_started,
-                cancelled=True,
-            )
-
-        def frame_progress_callback(percent: int, text: str | None = None, *, frame_number: int = int(frame_index), position: int = index) -> None:
-            if progress_callback is None:
-                return
-            inner_percent = float(np.clip(float(percent), 0.0, 100.0))
-            overall = compute_base + (((position - 1) + (inner_percent / 100.0)) / total) * compute_span
-            progress_callback(
-                int(round(overall)),
-                text or f"Sensorgram {position}/{total}: frame {frame_number}",
-            )
-
-        spectrum = _absorbance_spectrum_task(
-            *payload,
-            cancel_event=cancel_event,
-            progress_callback=frame_progress_callback,
-        )
-        if cancel_event is not None and cancel_event.is_set():
-            return SensorgramComputationResult(
-                frame_indices=np.asarray(frame_indices, dtype=np.int32),
-                metric_values=np.asarray(metric_values, dtype=np.float64),
-                metric_signal=np.asarray(metric_signals, dtype=np.float64),
-                completed_count=len(frame_indices),
-                total_count=len(frame_payloads),
-                cancelled=True,
-            )
-
-        fit = fit_absorbance_curve(
-            spectrum.wavelengths_nm,
-            spectrum.absorbance,
-            poly_order=poly_order,
-        )
-        metric_value, metric_signal = metric_value_from_fit(fit, metric_key)
-        metric_float = float(metric_value) if metric_value is not None and np.isfinite(metric_value) else float("nan")
-        signal_float = float(metric_signal) if metric_signal is not None and np.isfinite(metric_signal) else float("nan")
-
-        frame_indices.append(int(frame_index))
-        metric_values.append(metric_float)
-        metric_signals.append(signal_float)
-
-        if partial_callback is not None:
-            partial_callback(
-                SensorgramPointResult(
-                    frame_index=int(frame_index),
-                    metric_value=None if not np.isfinite(metric_float) else metric_float,
-                    metric_signal=None if not np.isfinite(signal_float) else signal_float,
-                )
-            )
-        if progress_callback is not None:
-            progress_callback(
-                int(round(compute_base + (index / total) * compute_span)),
-                f"Sensorgram {index}/{total}: frame {int(frame_index)}",
-            )
-    fit_seconds = time.perf_counter() - compute_started
-
-    return SensorgramComputationResult(
-        frame_indices=np.asarray(frame_indices, dtype=np.int32),
-        metric_values=np.asarray(metric_values, dtype=np.float64),
-        metric_signal=np.asarray(metric_signals, dtype=np.float64),
-        completed_count=len(frame_indices),
-        total_count=len(frame_payloads),
-        prep_seconds=prep_seconds,
-        fit_seconds=fit_seconds,
-        total_seconds=time.perf_counter() - task_started,
-        cancelled=False,
-    )
-
-
-def _auto_chromatic_landmarks_task(
-    sample_payload: list[tuple[int, float, str]],
-    preprocessing,
-    feature_count: int,
-    subpixel_precision: int,
-    progress_callback=None,
-) -> list[tuple[int, int, float, float, float]]:
-    if not sample_payload:
-        return []
-    preprocessing_settings = deepcopy(preprocessing)
-    preprocessing_settings.flatten_background_enabled = False
-    preprocessing_settings.chromatic_correction_enabled = False
-    processed_images: list[tuple[int, float, np.ndarray]] = []
-    total = max(len(sample_payload), 1)
-    for index, (frame, wavelength, path_str) in enumerate(sample_payload, start=1):
-        raw_image = load_image_array(path_str)
-        processed = apply_spatial_preprocessing(raw_image, preprocessing_settings)
-        processed_images.append((int(frame), float(wavelength), processed))
-        if progress_callback is not None:
-            progress_callback(
-                int(round((index / total) * 40)),
-                f"Loading sampled chromatic image {index}/{total}...",
-            )
-    first_frame, first_wavelength, first_image = processed_images[0]
-    current_landmarks = detect_regional_landmarks(
-        first_image,
-        int(feature_count),
-        subpixel_precision=int(subpixel_precision),
-    )
-    observations: list[tuple[int, int, float, float, float]] = [
-        (int(feature_id), int(first_frame), float(first_wavelength), float(point[0]), float(point[1]))
-        for feature_id, point in sorted(current_landmarks.items())
-    ]
-    if progress_callback is not None:
-        progress_callback(50, f"Detected reference points on sampled image 1/{total}.")
-    previous_image = first_image
-    for index, (frame, wavelength, image) in enumerate(processed_images[1:], start=2):
-        current_landmarks = track_landmarks(
-            previous_image,
-            image,
-            current_landmarks,
-            subpixel_precision=int(subpixel_precision),
-        )
-        for feature_id, point in sorted(current_landmarks.items()):
-            observations.append((int(feature_id), int(frame), float(wavelength), float(point[0]), float(point[1])))
-        previous_image = image
-        if progress_callback is not None:
-            progress_callback(
-                int(round(50 + ((index - 1) / max(total - 1, 1)) * 50)),
-                f"Tracked reference points on sampled image {index}/{total}...",
-            )
-    return observations
-
-
-def _normalized_odd_count(value: int, minimum: int, maximum: int) -> int:
-    normalized = max(int(value), int(minimum))
-    if normalized % 2 == 0:
-        normalized += 1
-    if normalized > int(maximum):
-        normalized = int(maximum)
-        if normalized % 2 == 0:
-            normalized = max(int(minimum), normalized - 1)
-    return max(normalized, int(minimum))
-
-
-def _sampled_wavelengths(wavelengths_nm: list[float], sample_count: int) -> list[float]:
-    if not wavelengths_nm:
-        return []
-    maximum = len(wavelengths_nm)
-    minimum = 1 if maximum == 1 else min(3, maximum)
-    count = min(_normalized_odd_count(sample_count, minimum, maximum), maximum)
-    if count % 2 == 0:
-        count = max(1, count - 1)
-    if count == 1:
-        return [float(wavelengths_nm[len(wavelengths_nm) // 2])]
-    indices = [int(round(index * (maximum - 1) / (count - 1))) for index in range(count)]
-    indices = sorted(dict.fromkeys(indices))
-    return [float(wavelengths_nm[index]) for index in indices]
-
-
-def _estimate_chromatic_models_task(
-    record_specs: list[tuple[int, float, str]],
-    preprocessing,
-    reference_key: tuple[int, float],
-    landmarks_payload: list[tuple[int, int, float, float, float]] | None = None,
-    progress_callback=None,
-) -> list[ChromaticTransformModel]:
-    mode = str(getattr(preprocessing, "chromatic_registration_mode", "landmark_radial") or "landmark_radial")
-    models: list[ChromaticTransformModel] = []
-    if mode == "landmark_radial":
-        if not landmarks_payload:
-            raise ValueError("No chromatic reference points are available. Start the radial workflow and mark reference points first.")
-        reference_frame, reference_wavelength = int(reference_key[0]), float(reference_key[1])
-        all_wavelengths = sorted({float(wavelength) for _frame, wavelength, _path in record_specs})
-        sampled_wavelengths = _sampled_wavelengths(
-            all_wavelengths,
-            int(getattr(preprocessing, "chromatic_sample_image_count", 5)),
-        )
-        feature_count = max(int(getattr(preprocessing, "chromatic_feature_count", 5)), 1)
-        expected_feature_ids = list(range(1, feature_count + 1))
-
-        landmarks_by_wavelength: dict[float, dict[int, tuple[float, float]]] = {}
-        for landmark_id, frame, wavelength, x_px, y_px in landmarks_payload:
-            if int(frame) != reference_frame:
-                continue
-            marks = landmarks_by_wavelength.setdefault(float(wavelength), {})
-            marks[int(landmark_id)] = (float(x_px), float(y_px))
-
-        reference_landmarks = landmarks_by_wavelength.get(reference_wavelength, {})
-        missing_reference = [feature_id for feature_id in expected_feature_ids if feature_id not in reference_landmarks]
-        if missing_reference:
-            raise ValueError(
-                f"Reference wavelength {reference_wavelength:g} nm is missing reference point(s): "
-                + ", ".join(str(feature_id) for feature_id in missing_reference)
-            )
-
-        sample_matrices: dict[float, np.ndarray] = {}
-        sample_rmse: dict[float, float] = {}
-        direct_feature_counts: dict[float, int] = {}
-        total = max(len(sampled_wavelengths), 1)
-        reference_points = np.asarray(
-            [reference_landmarks[feature_id] for feature_id in expected_feature_ids],
-            dtype=np.float64,
-        )
-        for index, wavelength in enumerate(sampled_wavelengths, start=1):
-            marks = landmarks_by_wavelength.get(float(wavelength), {})
-            missing = [feature_id for feature_id in expected_feature_ids if feature_id not in marks]
-            if missing:
-                raise ValueError(
-                    f"Sample wavelength {wavelength:g} nm is missing reference point(s): "
-                    + ", ".join(str(feature_id) for feature_id in missing)
-                )
-            if abs(float(wavelength) - reference_wavelength) < 1e-6:
-                matrix = identity_affine_matrix()
-                rmse = 0.0
-            else:
-                target_points = np.asarray([marks[feature_id] for feature_id in expected_feature_ids], dtype=np.float64)
-                matrix = fit_affine_matrix(reference_points, target_points)
-                residuals = np.sqrt(np.sum((apply_affine_to_points(reference_points, matrix) - target_points) ** 2, axis=1))
-                rmse = float(np.sqrt(np.mean(residuals**2))) if residuals.size else 0.0
-            sample_matrices[float(wavelength)] = matrix
-            sample_rmse[float(wavelength)] = rmse
-            direct_feature_counts[float(wavelength)] = len(expected_feature_ids)
-            if progress_callback is not None:
-                progress_callback(
-                    int(round(index / total * 100.0)),
-                    f"Chromatic correction {index}/{total}: {wavelength:g} nm",
-                )
-
-        sorted_sample_wavelengths = sorted(sample_matrices)
-        matrix_values = []
-        rmse_values = []
-        for wavelength in sorted_sample_wavelengths:
-            matrix_values.append(np.asarray(sample_matrices[wavelength], dtype=np.float64))
-            rmse_values.append(sample_rmse[wavelength])
-        sample_axis = np.asarray(sorted_sample_wavelengths, dtype=np.float64)
-        matrix_values_array = np.asarray(matrix_values, dtype=np.float64)
-
-        matrices_by_wavelength: dict[float, np.ndarray] = {}
-        rmse_by_wavelength: dict[float, float] = {}
-        feature_counts_by_wavelength: dict[float, int] = {}
-        for wavelength in all_wavelengths:
-            wavelength_f64 = float(wavelength)
-            if wavelength_f64 in sample_matrices:
-                matrices_by_wavelength[wavelength_f64] = sample_matrices[wavelength_f64]
-                rmse_by_wavelength[wavelength_f64] = sample_rmse[wavelength_f64]
-                feature_counts_by_wavelength[wavelength_f64] = direct_feature_counts[wavelength_f64]
-                continue
-            interpolated_matrix = np.empty((2, 3), dtype=np.float64)
-            for row in range(2):
-                for col in range(3):
-                    interpolated_matrix[row, col] = float(
-                        np.interp(
-                            wavelength_f64,
-                            sample_axis,
-                            matrix_values_array[:, row, col],
-                        )
-                    )
-            matrices_by_wavelength[wavelength_f64] = interpolated_matrix
-            rmse_by_wavelength[wavelength_f64] = float(np.interp(wavelength_f64, sample_axis, np.asarray(rmse_values, dtype=np.float64)))
-            feature_counts_by_wavelength[wavelength_f64] = len(expected_feature_ids)
-
-        for frame, wavelength, _path_str in record_specs:
-            matrix = matrices_by_wavelength[float(wavelength)]
-            models.append(
-                ChromaticTransformModel(
-                    frame_index=int(frame),
-                    wavelength_nm=float(wavelength),
-                    model_kind="landmark_affine",
-                    affine_matrix=[[float(value) for value in row] for row in matrix.tolist()],
-                    global_shift_x_px=float(matrix[0, 2]),
-                    global_shift_y_px=float(matrix[1, 2]),
-                    rmse_px=float(rmse_by_wavelength[float(wavelength)]),
-                    mean_score=1.0,
-                    min_score=1.0,
-                    tile_count=int(feature_counts_by_wavelength[float(wavelength)]),
-                    inlier_count=int(feature_counts_by_wavelength[float(wavelength)]),
-                )
-            )
-        return models
-
-    reference_path = next((path_str for frame, wavelength, path_str in record_specs if (frame, wavelength) == reference_key), None)
-    if reference_path is None:
-        raise ValueError("Reference image is missing from the dataset.")
-    reference_raw = load_image_array(reference_path)
-    reference_processed = apply_spatial_preprocessing(reference_raw, preprocessing)
-    tile_size = int(max(preprocessing.chromatic_tile_size_px, 24))
-    search_radius = int(max(preprocessing.chromatic_search_radius_px, 6))
-    for index, (frame, wavelength, path_str) in enumerate(record_specs, start=1):
-        if (frame, wavelength) == reference_key:
-            result = ChromaticRegistrationResult(
-                affine_matrix=identity_affine_matrix(),
-                global_shift_x_px=0.0,
-                global_shift_y_px=0.0,
-                rmse_px=0.0,
-                mean_score=0.0,
-                min_score=0.0,
-                tile_count=0,
-                inlier_count=0,
-            )
-        else:
-            target_raw = load_image_array(path_str)
-            target_processed = apply_spatial_preprocessing(target_raw, preprocessing)
-            result = estimate_affine_chromatic_transform(
-                reference_processed,
-                target_processed,
-                mode=mode,
-                tile_size_px=tile_size,
-                search_radius_px=search_radius,
-                subpixel_precision=int(getattr(preprocessing, "chromatic_subpixel_precision", 4)),
-            )
-        models.append(
-            ChromaticTransformModel(
-                frame_index=int(frame),
-                wavelength_nm=float(wavelength),
-                model_kind="image_affine",
-                affine_matrix=[[float(value) for value in row] for row in result.affine_matrix.tolist()],
-                global_shift_x_px=float(result.global_shift_x_px),
-                global_shift_y_px=float(result.global_shift_y_px),
-                rmse_px=float(result.rmse_px),
-                mean_score=float(result.mean_score),
-                min_score=float(result.min_score),
-                tile_count=int(result.tile_count),
-                inlier_count=int(result.inlier_count),
-            )
-        )
-        if progress_callback is not None:
-            progress_callback(
-                int(round(index / total * 100.0)),
-                f"Chromatic correction {index}/{total}: {wavelength:g} nm frame {frame}",
-            )
-    return models
-
 
 class MainWindow(MainWindowIcons, QMainWindow):
     SETTINGS_ORG = "LSPR"
@@ -1992,8 +277,8 @@ class MainWindow(MainWindowIcons, QMainWindow):
     UNDO_STACK_LIMIT = 5
     # Quick navigation:
     # - layout and signal wiring: _build_layout, _create_toolbar, _connect_signals
-    # - spot list table: _on_spot_list_toggled, _update_spot_list_table, CSV helpers
-    # - image refresh pipeline: _refresh_image, _apply_loaded_image, _update_spot_overlays
+    # - roi list table: _on_roi_list_toggled, _update_roi_table, CSV helpers
+    # - image refresh pipeline: _refresh_image, _apply_loaded_image, _update_roi_overlays
     # - persistence/session: _restore_layout_preferences, _save_layout_preferences, session save/load
     # - analysis: _update_sensorgram_plot, analysis batch helpers
 
@@ -2001,12 +286,28 @@ class MainWindow(MainWindowIcons, QMainWindow):
         super().__init__()
         self._fast_startup = bool(fast_startup)
         self._state = AnalysisState()
+        self._roi_id_counter: int = 0
         self._record_map: dict[tuple[int, float], object] = {}
         self._record_key_by_path: dict[Path, tuple[int, float]] = {}
         self._settings = QSettings(self.SETTINGS_ORG, self.SETTINGS_APP)
+        self._init_controllers()
+        self._init_state()
+        self._init_widgets(default_folder)
+        self._build_layout()
+        self._create_toolbar()
+        self._connect_signals()
+        self._update_mask_file_button_state()
+        self._apply_dark_plot_theme()
+        self._update_reference_controls()
+        self._update_reference_summary()
+        self._update_apply_button_labels()
+        self._update_chromatic_summary()
+        self._setup_workflow_logging()
+
+    def _init_controllers(self) -> None:
         self._dataset_controller = DatasetController(self)
         self._image_controller = ImageController(self)
-        self._spot_table_controller = SpotTableController(self)
+        self._roi_table_controller = RoiTableController(self)
         self._mask_controller = MaskController(self)
         self._chromatic_controller = ChromaticController(self)
         self._analysis_controller = AnalysisController(self)
@@ -2014,6 +315,11 @@ class MainWindow(MainWindowIcons, QMainWindow):
         self._ui_state_manager = UIStateManager(self)
         self._session_state_manager = SessionStateManager(self)
         self._shortcut_manager = ShortcutManager(self)
+        self._image_interaction = ImageInteractionController(self)
+        self._bg_profile = BackgroundProfileController(self)
+        self._overlay_manager = OverlayManager(self)
+
+    def _init_state(self) -> None:
         self._analysis_enabled = self._settings_bool("analysis_section_applied", True)
         self._window_geometry_restored = False
         self._layout_preferences_ready = False
@@ -2031,6 +337,7 @@ class MainWindow(MainWindowIcons, QMainWindow):
         self._crop_roi: pg.RectROI | None = None
         self._rectangle_roi: pg.RectROI | None = None
         self._rectangle_stamp_items: list[pg.RectROI] = []
+        self._rectangle_stamp_ring_items: dict[str, tuple[pg.PlotCurveItem | None, pg.PlotCurveItem | None]] = {}
         self._selected_rectangle_roi_ids: set[str] = set()
         self._crop_overlay_item: QGraphicsPathItem | None = None
         self._active_tool: str | None = None
@@ -2061,18 +368,18 @@ class MainWindow(MainWindowIcons, QMainWindow):
         self._processed_to_raw_map_signature: tuple[object, ...] | None = None
         self._processed_to_raw_x_map: np.ndarray | None = None
         self._processed_to_raw_y_map: np.ndarray | None = None
-        self._spot_overlay_items: dict[int, SpotOverlayBundle] = {}
+        self._roi_overlay_items: dict[int, RoiOverlayBundle] = {}
         self._guide_overlay_items: dict[int, GuideOverlayBundle] = {}
         self._ome_zarr_chunk_overlay_items: list[pg.InfiniteLine] = []
         self._landmark_overlay_items: dict[int, LandmarkOverlayBundle] = {}
         self._chromatic_all_landmark_overlay_items: dict[int, ChromaticLandmarkAllOverlayBundle] = {}
         self._measurement_overlay: MeasurementOverlayBundle | None = None
         self._scale_bar_overlay: ScaleBarOverlayBundle | None = None
-        self._spot_list_selection_syncing = False
-        self._spot_list_range_anchor_row: int | None = None
-        self._spot_list_table_updating = False
+        self._roi_list_selection_syncing = False
+        self._roi_list_range_anchor_row: int | None = None
+        self._roi_table_updating = False
         self._spot_clipboard: dict[str, object] | None = None
-        self._selected_spot_ids: set[int] = set()
+        self._selected_roi_ids: set[int] = set()
         self._selection_plot_highlight_signature: tuple[int, ...] | None = None
         self._sensorgram_selection_highlight_signature: tuple[int, ...] | None = None
         self._live_preview_prompt_selection_signature: tuple[int, ...] | None = None
@@ -2099,12 +406,12 @@ class MainWindow(MainWindowIcons, QMainWindow):
         self._dragging_spots = False
         self._drag_anchor: tuple[float, float] | None = None
         self._drag_original_positions: dict[int, tuple[float, float]] = {}
-        self._spot_selection_rubber_band: QRubberBand | None = None
-        self._spot_selection_drag_start: tuple[float, float] | None = None
-        self._spot_selection_drag_button: Qt.MouseButton | None = None
-        self._spot_selection_pressed_spot_id: int | None = None
-        self._spot_selection_drag_modifiers: Qt.KeyboardModifier = Qt.KeyboardModifier.NoModifier
-        self._spot_edit_refresh_pending = False
+        self._roi_selection_rubber_band: QRubberBand | None = None
+        self._roi_selection_drag_start: tuple[float, float] | None = None
+        self._roi_selection_drag_button: Qt.MouseButton | None = None
+        self._roi_selection_pressed_id: int | None = None
+        self._roi_selection_drag_modifiers: Qt.KeyboardModifier = Qt.KeyboardModifier.NoModifier
+        self._roi_edit_refresh_pending = False
         self._spot_overlay_refresh_timer = QTimer(self)
         self._spot_overlay_refresh_timer.setSingleShot(True)
         self._spot_overlay_refresh_timer.setInterval(16)
@@ -2163,7 +470,7 @@ class MainWindow(MainWindowIcons, QMainWindow):
             tuple[object, ...],
             list[int],
             tuple[int, ...],
-            list[DetectedSpot],
+            list[AreaRoi],
         ] | None = None
         self._ome_zarr_export_running = False
         self._ome_zarr_export_cancel_event: threading.Event | None = None
@@ -2180,9 +487,9 @@ class MainWindow(MainWindowIcons, QMainWindow):
         self._sensorgram_metric_values = np.asarray([], dtype=np.float64)
         self._sensorgram_metric_signal = np.asarray([], dtype=np.float64)
         self._display_spot_cache_signature: tuple[object, ...] | None = None
-        self._display_spot_cache_value: list[DetectedSpot] | None = None
-        self._selected_source_spots_cache_signature: tuple[object, ...] | None = None
-        self._selected_source_spots_cache_value: tuple[DetectedSpot, ...] = tuple()
+        self._display_spot_cache_value: list[AreaRoi] | None = None
+        self._selected_source_rois_cache_signature: tuple[object, ...] | None = None
+        self._selected_source_rois_cache_value: tuple[AreaRoi, ...] = tuple()
         self._processed_mask_view_cache_signature: tuple[object, ...] | None = None
         self._processed_mask_view_cache_value: np.ndarray | None = None
         self._background_profile_cache_signature: tuple[object, ...] | None = None
@@ -2196,27 +503,28 @@ class MainWindow(MainWindowIcons, QMainWindow):
         self._restoring_undo = False
         self._spot_overlay_theta = np.linspace(0.0, 2.0 * np.pi, 48)
         self._image_tools_preview_only = False
+        self._image_tools_pre_preview_enabled: bool = True
         self._ome_zarr_chunk_controls_syncing = False
         theme = get_active_theme()
-        self._spot_visual_color = QColor(theme.spot_color)
+        self._sample_visual_color = QColor(theme.spot_color)
         self._mask_visual_color = QColor(theme.mask_color)
         self._histogram_mask_visual_color = QColor(theme.histogram_mask_color)
         self._figure_mask_visual_color = QColor(theme.figure_mask_color)
-        self._ring_visual_color = QColor(theme.ring_color)
+        self._reference_visual_color = QColor(theme.ring_color)
         self._highlight_visual_color = QColor(theme.highlight_color)
         self._scale_bar_visual_color = QColor(theme.scale_bar_color)
-        self._spot_alpha = 0.8
-        self._ring_alpha = 0.22
+        self._roi_alpha = 0.8
+        self._reference_alpha = 0.22
         self._mask_alpha = 0.5
         self._highlight_alpha = 0.42
-        self._spots_visible = True
-        self._spot_labels_visible = True
+        self._rois_visible = True
+        self._roi_labels_visible = True
         self._mask_visible = True
-        self._rings_visible = True
+        self._reference_visible = True
         self._highlight_visible = True
         self._reference_points_visible = True
         self._chromatic_reference_points_all_visible = False
-        self._cached_spots_only_visible = self._settings_bool("layout/cached_spots_only_visible", False)
+        self._cached_rois_only_visible = self._settings_bool("layout/cached_rois_only_visible", False)
         self._restore_visual_preferences()
         self._image_refresh_timer = QTimer(self)
         self._image_refresh_timer.setSingleShot(True)
@@ -2242,13 +550,21 @@ class MainWindow(MainWindowIcons, QMainWindow):
         self._spot_state_save_timer.setSingleShot(True)
         self._spot_state_save_timer.setInterval(250)
         self._spot_state_save_timer.timeout.connect(self._save_processing_state_for_dataset)
-        self._spot_list_refresh_timer = QTimer(self)
-        self._spot_list_refresh_timer.setSingleShot(True)
-        self._spot_list_refresh_timer.setInterval(25)
-        self._spot_list_refresh_timer.timeout.connect(self._spot_table_controller.update_table)
+        self._roi_refresh_timer = QTimer(self)
+        self._roi_refresh_timer.setSingleShot(True)
+        self._roi_refresh_timer.setInterval(25)
+        self._roi_refresh_timer.timeout.connect(self._roi_table_controller.update_table)
 
-        self.setWindowTitle(version_string())
 
+    def _init_widgets(self, default_folder: Path) -> None:
+        self._init_dataset_widgets(default_folder)
+        self._init_chromatic_widgets()
+        self._init_status_and_histogram_widgets()
+        self._init_spot_and_background_widgets()
+        self._init_mask_widgets()
+        self._init_analysis_and_view_widgets()
+
+    def _init_dataset_widgets(self, default_folder: Path) -> None:
         last_folder = self._load_last_folder(default_folder)
         self.folder_edit = QLineEdit(str(last_folder), self)
         self.browse_button = self._free_standing_icon_label(
@@ -2433,6 +749,8 @@ class MainWindow(MainWindowIcons, QMainWindow):
         self.set_reference_button = QPushButton("Use current", self)
         self.set_reference_button.hide()
         self.startup_restore_timeout_actions: dict[int, QAction] = {}
+
+    def _init_chromatic_widgets(self) -> None:
         self.chromatic_summary = QLabel("Idle.", self)
         self.chromatic_summary.setWordWrap(True)
         self.chromatic_apply_check = QPushButton("Apply radial transforms", self)
@@ -2484,7 +802,7 @@ class MainWindow(MainWindowIcons, QMainWindow):
         self.chromatic_auto_button.setStyleSheet(transparent_icon_button_stylesheet())
         self.chromatic_auto_button.setIcon(self._chromatic_auto_icon(False))
         self.chromatic_auto_button.setToolTip(
-            "Automatic spot detection: detect the chromatic reference points on the first sampled image and track them across the other sampled wavelengths."
+            "Automatic ROI detection: detect the chromatic reference points on the first sampled image and track them across the other sampled wavelengths."
         )
         self.chromatic_reference_points_all_button = self._create_view_toggle_button(
             "reference_points_all",
@@ -2524,8 +842,10 @@ class MainWindow(MainWindowIcons, QMainWindow):
         )
         self.chromatic_estimate_button = self.chromatic_transform_button
         self.chromatic_clear_button = self.chromatic_transform_button
-        self.spot_summary = QLabel("No spots detected.", self)
-        self.spot_summary.setWordWrap(True)
+
+    def _init_status_and_histogram_widgets(self) -> None:
+        self.roi_summary = QLabel("No ROIs detected.", self)
+        self.roi_summary.setWordWrap(True)
         self.status_label = QLabel("Ready.", self)
         self.status_label.setWordWrap(True)
         self._status_bar_message = QLabel("Ready.", self)
@@ -2566,8 +886,8 @@ class MainWindow(MainWindowIcons, QMainWindow):
                 button.hide()
         self.histogram_legend = self.histogram_plot.addLegend(offset=(8, 8), labelTextColor="#e5edf7")
         self.histogram_curve = self.histogram_plot.plot(name="All pixels", pen=pg.mkPen("#ffffff", width=2.2))
-        self.spot_histogram_curve = self.histogram_plot.plot(name="Spots")
-        self.ring_histogram_curve = self.histogram_plot.plot(name="Ref. rings")
+        self.roi_histogram_curve = self.histogram_plot.plot(name="ROIs")
+        self.reference_histogram_curve = self.histogram_plot.plot(name="Ref. rings")
         self.mask_histogram_curve = self.histogram_plot.plot(name="Mask")
         self.residual_histogram_curve = self.histogram_plot.plot(name="Residual")
         self.residual_fill_item = pg.FillBetweenItem(self.histogram_curve.curve, self.residual_histogram_curve.curve)
@@ -2586,14 +906,14 @@ class MainWindow(MainWindowIcons, QMainWindow):
         self.ignore_region_label = pg.TextItem(anchor=(0.5, 1.0))
         self.ignore_region_label.setZValue(14)
         self.histogram_plot.addItem(self.ignore_region_label)
-        self.spot_histogram_label = pg.TextItem(anchor=(0.5, 1.0))
-        self.spot_histogram_label.setZValue(12)
-        self.spot_histogram_label.hide()
-        self.histogram_plot.addItem(self.spot_histogram_label)
-        self.ring_histogram_label = pg.TextItem(anchor=(0.5, 1.0))
-        self.ring_histogram_label.setZValue(12)
-        self.ring_histogram_label.hide()
-        self.histogram_plot.addItem(self.ring_histogram_label)
+        self.roi_histogram_label = pg.TextItem(anchor=(0.5, 1.0))
+        self.roi_histogram_label.setZValue(12)
+        self.roi_histogram_label.hide()
+        self.histogram_plot.addItem(self.roi_histogram_label)
+        self.reference_histogram_label = pg.TextItem(anchor=(0.5, 1.0))
+        self.reference_histogram_label.setZValue(12)
+        self.reference_histogram_label.hide()
+        self.histogram_plot.addItem(self.reference_histogram_label)
         self.histogram_y_scale_button = self._free_standing_toggle_text_label(
             self._histogram_log_y_enabled,
             "Toggle histogram Y axis between linear and logarithmic scale.",
@@ -2605,9 +925,11 @@ class MainWindow(MainWindowIcons, QMainWindow):
         self.histogram_y_scale_button.setObjectName("histogramScaleToggle")
         self.histogram_y_scale_button.setToolTip("Toggle histogram Y axis between linear and logarithmic scale.")
         self.histogram_y_scale_button.toggled.connect(self._on_histogram_y_scale_toggled)
-        self.spot_diameter_spin = ResponsiveDoubleSpinBox(self)
-        self.ring_inner_diameter_spin = ResponsiveDoubleSpinBox(self)
-        self.ring_outer_diameter_spin = ResponsiveDoubleSpinBox(self)
+
+    def _init_spot_and_background_widgets(self) -> None:
+        self.sample_diameter_spin = ResponsiveDoubleSpinBox(self)
+        self.reference_inner_diameter_spin = ResponsiveDoubleSpinBox(self)
+        self.reference_outer_diameter_spin = ResponsiveDoubleSpinBox(self)
         self.rectangle_name_edit = QLineEdit(self)
         self.rectangle_width_spin = ResponsiveDoubleSpinBox(self)
         self.rectangle_height_spin = ResponsiveDoubleSpinBox(self)
@@ -2626,9 +948,9 @@ class MainWindow(MainWindowIcons, QMainWindow):
             background_width_px=12.0,
             enabled=True,
         )
-        self.spot_geometry_scope_button = self._make_relation_scope_button(True, "Apply spot diameter to all spots when on, or only selected spots when off.")
-        self.ring_geometry_scope_button = self._make_relation_scope_button(True, "Apply ring diameters to all spots when on, or only selected spots when off.")
-        self.spot_geometry_area_label = QLabel("A_s = -, A_r = -, A_diff = -", self)
+        self.roi_geometry_scope_button = self._make_relation_scope_button(True, "Apply sample diameter to all ROIs when on, or only selected ROIs when off.")
+        self.reference_geometry_scope_button = self._make_relation_scope_button(True, "Apply reference diameters to all ROIs when on, or only selected ROIs when off.")
+        self.roi_geometry_area_label = QLabel("A_s = -, A_r = -, A_diff = -", self)
         self.flatten_background_check = QPushButton("Apply background removal", self)
         self.flatten_background_check.setCheckable(True)
         self.flatten_background_check.setIcon(self._make_link_toggle_icon(False))
@@ -2636,7 +958,7 @@ class MainWindow(MainWindowIcons, QMainWindow):
         self.flatten_ignore_spot_area_check = self._make_icon_tool_button(
             "current-location-off",
             "#94a3b8",
-            "Ignore the detected spot area while estimating the illumination background.",
+            "Ignore the detected ROI area while estimating the illumination background.",
             checkable=True,
             icon=self._background_exclusion_icon("current-location-off", False, size=APP_THEME.compact_icon_inner),
         )
@@ -2658,6 +980,14 @@ class MainWindow(MainWindowIcons, QMainWindow):
             lambda checked: self.flatten_ignore_mask_check.setIcon(
                 self._background_exclusion_icon("mask-off", checked, size=APP_THEME.compact_icon_inner)
             )
+        )
+        self.background_local_ring_check = self._make_icon_tool_button(
+            "focus-2",
+            "#94a3b8",
+            "Local ring normalization (circle+ring geometry only): use the reference ring area as "
+            "per-ROI background. Enables fast spatial reads for OME-Zarr datasets — "
+            "global background flattening is skipped during ROI analysis.",
+            checkable=True,
         )
         self.background_profile_hold_button = QToolButton(self)
         self.background_profile_hold_button.setText("")
@@ -2714,8 +1044,11 @@ class MainWindow(MainWindowIcons, QMainWindow):
         self.background_removal_link = self.flatten_background_check
         self.background_ignore_spot_button = self.flatten_ignore_spot_area_check
         self.background_ignore_mask_button = self.flatten_ignore_mask_check
+        self.background_local_ring_button = self.background_local_ring_check
         self.background_smoothing_sigma_spin = self.flatten_background_sigma_spin
         self.background_smoothing_binning_combo = self.flatten_background_binning_combo
+
+    def _init_mask_widgets(self) -> None:
         self.mask_mode_combo = QComboBox(self)
         self.mask_mode_combo.addItem("Absolute", "absolute")
         self.mask_mode_combo.addItem("Relative", "relative")
@@ -2874,16 +1207,17 @@ class MainWindow(MainWindowIcons, QMainWindow):
         self.spot_detection_auto_button = self._make_icon_tool_button(
             "grid-dots",
             "#22c55e",
-            "Mode A: automatically detect spots from the known array grid and spacing.",
+            "Mode A: automatically detect ROIs from the known array grid and spacing.",
         )
-        self.spot_corner_select_button = self._make_icon_tool_button(
+        self.roi_corner_select_button = self._make_icon_tool_button(
             "layout-grid",
             "#94a3b8",
             "Mode B: corner-seeded detection (coming later).",
             icon=self._make_corner_seed_icon("#94a3b8"),
         )
-        self.spot_corner_select_button.setEnabled(False)
+        self.roi_corner_select_button.setEnabled(False)
 
+    def _init_analysis_and_view_widgets(self) -> None:
         self.histogram_bins_spin = QSpinBox(self)
         self.histogram_bins_spin.setRange(1, 8192)
         self.histogram_bins_spin.setSingleStep(16)
@@ -2899,7 +1233,7 @@ class MainWindow(MainWindowIcons, QMainWindow):
         self.analysis_refresh_button.setCursor(Qt.CursorShape.PointingHandCursor)
         self.analysis_preview_button = self._free_standing_icon_label(
             self._make_analysis_preview_icon(self._analysis_live_preview_enabled),
-            "Live preview: update the spectrum and sensorgram when spot selection changes.",
+            "Live preview: update the spectrum and sensorgram when ROI selection changes.",
             size=APP_THEME.compact_icon_inner,
             parent=self,
         )
@@ -2918,13 +1252,13 @@ class MainWindow(MainWindowIcons, QMainWindow):
             parent=self,
         )
         self.analysis_stop_button.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.analysis_spot_table_button = self._free_standing_icon_label(
-            self._make_spot_list_icon(False),
-            "Show or hide the spot list table.",
+        self.analysis_roi_table_button = self._free_standing_icon_label(
+            self._make_roi_list_icon(False),
+            "Show or hide the ROI table.",
             size=APP_THEME.compact_icon_inner,
             parent=self,
         )
-        self.analysis_spot_table_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.analysis_roi_table_button.setCursor(Qt.CursorShape.PointingHandCursor)
         self.analysis_poly_order_spin = QSpinBox(self)
         self.analysis_poly_order_spin.setRange(1, 12)
         self.analysis_poly_order_spin.setValue(self._settings_int("analysis/poly_order", 3, minimum=1, maximum=12))
@@ -2944,9 +1278,9 @@ class MainWindow(MainWindowIcons, QMainWindow):
         self.analysis_end_frame_spin.setKeyboardTracking(False)
         self.analysis_formula_label = QLabel("A = log10(Iref. ring / Ispot)", self)
         self.analysis_formula_label.setWordWrap(True)
-        self.analysis_summary_label = QLabel("Select spots to show absorbance spectrum.", self)
+        self.analysis_summary_label = QLabel("Select ROIs to show absorbance spectrum.", self)
         self.analysis_summary_label.setWordWrap(True)
-        self.spectrum_summary_label = QLabel("Select spots to show absorbance spectrum.", self)
+        self.spectrum_summary_label = QLabel("Select ROIs to show absorbance spectrum.", self)
         self.spectrum_summary_label.setWordWrap(True)
         self.spectrum_plot = pg.PlotWidget(parent=self)
         self.spectrum_plot.setMinimumHeight(120)
@@ -3024,24 +1358,24 @@ class MainWindow(MainWindowIcons, QMainWindow):
         self.array_spacing_spin.setRange(0, 1000)
         self.array_spacing_spin.setDecimals(2)
         self.array_spacing_spin.setSingleStep(0.5)
-        self.ring_inner_diameter_spin.setRange(0, 1_000_000)
-        self.ring_outer_diameter_spin.setRange(0, 1_000_000)
-        self.spot_diameter_spin.setDecimals(2)
-        self.spot_diameter_spin.setSingleStep(0.5)
-        self.ring_inner_diameter_spin.setDecimals(2)
-        self.ring_inner_diameter_spin.setSingleStep(0.5)
-        self.ring_outer_diameter_spin.setDecimals(2)
-        self.ring_outer_diameter_spin.setSingleStep(0.5)
-        self.spot_diameter_spin.setKeyboardTracking(False)
-        self.ring_inner_diameter_spin.setKeyboardTracking(False)
-        self.ring_outer_diameter_spin.setKeyboardTracking(False)
+        self.reference_inner_diameter_spin.setRange(0, 1_000_000)
+        self.reference_outer_diameter_spin.setRange(0, 1_000_000)
+        self.sample_diameter_spin.setDecimals(2)
+        self.sample_diameter_spin.setSingleStep(0.5)
+        self.reference_inner_diameter_spin.setDecimals(2)
+        self.reference_inner_diameter_spin.setSingleStep(0.5)
+        self.reference_outer_diameter_spin.setDecimals(2)
+        self.reference_outer_diameter_spin.setSingleStep(0.5)
+        self.sample_diameter_spin.setKeyboardTracking(False)
+        self.reference_inner_diameter_spin.setKeyboardTracking(False)
+        self.reference_outer_diameter_spin.setKeyboardTracking(False)
         self.array_spacing_spin.setKeyboardTracking(True)
         self.ignore_marked_check = QPushButton("Apply mask", self)
         self.ignore_marked_check.setCheckable(True)
-        self.detect_spots_button = self.spot_detection_auto_button
-        self.reorder_spots_button = self._make_icon_tool_button("sort-ascending-numbers", "#f8fafc", "Reorder spots by image position so the top-left spot becomes ID 1.")
-        self.clear_spots_button = self._make_icon_tool_button("trash-x", "#ef4444", "Remove all detected spots and groups from the current dataset.")
-        self.clear_spot_selection_button = QPushButton("Clear selection", self)
+        self.detect_rois_button = self.spot_detection_auto_button
+        self.reorder_rois_button = self._make_icon_tool_button("sort-ascending-numbers", "#f8fafc", "Reorder ROIs by image position so the top-left ROI becomes ID 1.")
+        self.clear_rois_button = self._make_icon_tool_button("trash-x", "#ef4444", "Remove all detected ROIs and groups from the current dataset.")
+        self.clear_roi_selection_button = QPushButton("Clear selection", self)
 
         self.frame_slider = QSlider(Qt.Orientation.Horizontal, self)
         self.frame_slider.setEnabled(False)
@@ -3058,9 +1392,9 @@ class MainWindow(MainWindowIcons, QMainWindow):
         self.frame_spin.installEventFilter(self)
         self.wavelength_spin.installEventFilter(self)
         self.chromatic_landmark_id_spin.installEventFilter(self)
-        self.spot_diameter_spin.installEventFilter(self)
-        self.ring_inner_diameter_spin.installEventFilter(self)
-        self.ring_outer_diameter_spin.installEventFilter(self)
+        self.sample_diameter_spin.installEventFilter(self)
+        self.reference_inner_diameter_spin.installEventFilter(self)
+        self.reference_outer_diameter_spin.installEventFilter(self)
         app = QApplication.instance()
         if app is not None:
             app.installEventFilter(self)
@@ -3089,7 +1423,7 @@ class MainWindow(MainWindowIcons, QMainWindow):
         self.image_name_label = QLabel(self)
         self.image_name_label.setObjectName("imageNameLabel")
         self.image_name_label.hide()
-        self.spot_editor_labels_button = self._create_label_visibility_button(self._spot_labels_visible)
+        self.roi_editor_labels_button = self._create_label_visibility_button(self._roi_labels_visible)
         self.measurement_status_label = QLabel("Ruler inactive.", self)
         self.measurement_um_x_spin = QDoubleSpinBox(self)
         self.measurement_um_y_spin = QDoubleSpinBox(self)
@@ -3113,16 +1447,6 @@ class MainWindow(MainWindowIcons, QMainWindow):
         self.image_view.viewport().installEventFilter(self)
         self.image_plot.vb.sigRangeChanged.connect(lambda *_args: self._refresh_scale_bar_overlay())
         self.image_plot.vb.sigRangeChanged.connect(self._on_image_view_range_changed)
-        self._build_layout()
-        self._create_toolbar()
-        self._connect_signals()
-        self._update_mask_file_button_state()
-        self._apply_dark_plot_theme()
-        self._update_reference_controls()
-        self._update_reference_summary()
-        self._update_apply_button_labels()
-        self._update_chromatic_summary()
-        self._setup_workflow_logging()
 
     def _build_layout(self) -> None:
         from lspr_imaging_app.gui.layout_builder import build_layout
@@ -3165,39 +1489,44 @@ class MainWindow(MainWindowIcons, QMainWindow):
         self.spot_edit_action.setCheckable(True)
         self.spot_edit_action.setToolTip("Left-click or right-click to select ROIs in the active ROI tab. Ctrl-click for group selection. Left-drag in Move mode to correct ROIs.")
         self.spot_edit_action.setShortcut(QKeySequence("Ctrl+E"))
-        self.spot_add_action = QAction(self._make_add_icon(), "Add", self)
-        self.spot_add_action.setCheckable(True)
-        self.spot_add_action.setEnabled(False)
-        self.spot_add_action.setToolTip("Left-click in the image to add a new ROI stamp using the active shape template.")
-        self.spot_add_action.setShortcut(QKeySequence("Ctrl+Shift+A"))
-        self.spot_move_action = QAction(self._make_move_icon(), "Move", self)
-        self.spot_move_action.setCheckable(True)
-        self.spot_move_action.setEnabled(False)
-        self.spot_move_action.setToolTip("Move selected ROIs by dragging or arrow keys while ROI edit mode is active.")
-        self.spot_move_action.setShortcut(QKeySequence("Ctrl+Shift+M"))
+        self.roi_add_action = QAction(self._make_add_icon(), "Add", self)
+        self.roi_add_action.setCheckable(True)
+        self.roi_add_action.setEnabled(False)
+        self.roi_add_action.setToolTip("Left-click in the image to add a new ROI stamp using the active shape template.")
+        self.roi_add_action.setShortcut(QKeySequence("Ctrl+Shift+A"))
+        self.roi_move_action = QAction(self._make_move_icon(), "Move", self)
+        self.roi_move_action.setCheckable(True)
+        self.roi_move_action.setEnabled(False)
+        self.roi_move_action.setToolTip("Move selected ROIs by dragging or arrow keys while ROI edit mode is active.")
+        self.roi_move_action.setShortcut(QKeySequence("Ctrl+Shift+M"))
         self.roi_array_action = QAction(self._tabler_icon("layout-grid"), "Array", self)
         self.roi_array_action.setCheckable(True)
         self.roi_array_action.setEnabled(False)
         self.roi_array_action.setToolTip("Stamp a grid of ROIs using the active ROI tab template.")
-        self.remove_spots_action = QAction(self._make_remove_icon(), "Remove", self)
-        self.remove_spots_action.setEnabled(False)
-        self.remove_spots_action.setToolTip("Remove the selected ROIs and renumber the remaining array.")
-        self.remove_spots_action.setShortcut(QKeySequence("Delete"))
-        self.group_spots_action = QAction(self._make_group_icon(), "Group", self)
-        self.group_spots_action.setEnabled(False)
-        self.group_spots_action.setToolTip("Create or update a named group from the current selection.")
-        self.group_spots_action.setShortcut(QKeySequence("Ctrl+G"))
-        self.ungroup_spots_action = QAction("Ungroup", self)
-        self.ungroup_spots_action.setEnabled(False)
-        self.ungroup_spots_action.setToolTip("Remove the selected spots from their current groups.")
-        self.ungroup_spots_action.setShortcut(QKeySequence("Ctrl+Shift+G"))
-        self.spot_list_action = QAction(self._make_spot_list_icon(), "Spot list", self)
-        self.spot_list_action.setCheckable(True)
-        self.spot_list_action.setToolTip("Show or hide the spot list table.")
-        self.spot_list_action.setShortcut(QKeySequence("Ctrl+L"))
+        self.remove_rois_action = QAction(self._make_remove_icon(), "Remove", self)
+        self.remove_rois_action.setEnabled(False)
+        self.remove_rois_action.setToolTip("Remove the selected ROIs and renumber the remaining array.")
+        self.remove_rois_action.setShortcut(QKeySequence("Delete"))
+        self.group_rois_action = QAction(self._make_group_icon(), "Group", self)
+        self.group_rois_action.setEnabled(False)
+        self.group_rois_action.setToolTip("Create or update a named group from the current selection.")
+        self.group_rois_action.setShortcut(QKeySequence("Ctrl+G"))
+        self.ungroup_rois_action = QAction("Ungroup", self)
+        self.ungroup_rois_action.setEnabled(False)
+        self.ungroup_rois_action.setToolTip("Remove the selected ROIs from their current groups.")
+        self.ungroup_rois_action.setShortcut(QKeySequence("Ctrl+Shift+G"))
+        self.roi_list_action = QAction(self._make_roi_list_icon(), "ROI list", self)
+        self.roi_list_action.setCheckable(True)
+        self.roi_list_action.setToolTip("Show or hide the ROI table.")
+        self.roi_list_action.setShortcut(QKeySequence("Ctrl+L"))
 
         self.reset_rotation_action = QAction(self.style().standardIcon(QStyle.StandardPixmap.SP_BrowserReload), "Reset rotation", self)
         self.reset_rotation_action.setToolTip("Reset image rotation to 0 degrees.")
+
+        self.rotation_fill_dark_button = self._create_rotation_fill_toggle_button()
+        self.rotation_fill_dark_button.setChecked(bool(self._state.preprocessing.rotation_fill_dark))
+        self.rotation_fill_dark_button.setIcon(self._make_rotation_fill_icon(self.rotation_fill_dark_button.isChecked()))
+        self._update_rotation_fill_button_tooltip()
 
         self.reset_crop_action = QAction(self.style().standardIcon(QStyle.StandardPixmap.SP_DialogResetButton), "Reset crop", self)
         self.reset_crop_action.setToolTip("Remove the current crop and show the full rotated image.")
@@ -3228,35 +1557,35 @@ class MainWindow(MainWindowIcons, QMainWindow):
         self.collapse_left_panels_action = QAction("Collapse left panels", self)
         self.about_action = QAction("About", self)
         self.calculate_spectrum_action = QAction("Calculate spectrum", self)
-        self.calculate_spectrum_action.setToolTip("Calculate the absorbance spectrum for the current frame and selected spots.")
+        self.calculate_spectrum_action.setToolTip("Calculate the absorbance spectrum for the current frame and selected ROIs.")
 
-        self.show_spots_check = self._create_view_toggle_button("spots", self._spots_visible, "Show or hide the spot overlays.")
-        self.bottom_spot_labels_button = self._create_label_visibility_button(self._spot_labels_visible)
-        self.show_rings_check = self._create_view_toggle_button("rings", self._rings_visible, "Show or hide the reference rings.")
+        self.show_rois_check = self._create_view_toggle_button("roi", self._rois_visible, "Show or hide the ROI overlays.")
+        self.bottom_roi_labels_button = self._create_label_visibility_button(self._roi_labels_visible)
+        self.show_rings_check = self._create_view_toggle_button("rings", self._reference_visible, "Show or hide the reference rings.")
         self.show_reference_points_check = self._create_view_toggle_button("reference_points", self._reference_points_visible, "Show or hide chromatic reference points.")
         self.show_mask_check = self._create_view_toggle_button("mask", self._mask_visible, "Show or hide the mask overlay.")
         self.show_highlight_check = self._create_view_toggle_button("highlight", self._highlight_visible, "Show or hide the histogram highlight overlay.")
         self.mask_color_button = QToolButton()
         self.mask_color_button.setText("")
         self.mask_color_button.setFixedSize(12, 12)
-        self.spot_color_button = QToolButton()
-        self.spot_color_button.setText("")
-        self.spot_color_button.setFixedSize(12, 12)
-        self.ring_color_button = QToolButton()
-        self.ring_color_button.setText("")
-        self.ring_color_button.setFixedSize(12, 12)
+        self.sample_color_button = QToolButton()
+        self.sample_color_button.setText("")
+        self.sample_color_button.setFixedSize(12, 12)
+        self.reference_color_button = QToolButton()
+        self.reference_color_button.setText("")
+        self.reference_color_button.setFixedSize(12, 12)
         self.highlight_color_button = QToolButton()
         self.highlight_color_button.setText("")
         self.highlight_color_button.setFixedSize(12, 12)
         self.mask_alpha_slider = CompactWedgeSlider(parent=self)
         self.mask_alpha_slider.setRange(0, 100)
         self.mask_alpha_slider.setValue(int(round(self._mask_alpha * 100.0)))
-        self.spot_alpha_slider = CompactWedgeSlider(parent=self)
-        self.spot_alpha_slider.setRange(0, 100)
-        self.spot_alpha_slider.setValue(int(round(self._spot_alpha * 100.0)))
-        self.ring_alpha_slider = CompactWedgeSlider(parent=self)
-        self.ring_alpha_slider.setRange(0, 100)
-        self.ring_alpha_slider.setValue(int(round(self._ring_alpha * 100.0)))
+        self.roi_alpha_slider = CompactWedgeSlider(parent=self)
+        self.roi_alpha_slider.setRange(0, 100)
+        self.roi_alpha_slider.setValue(int(round(self._roi_alpha * 100.0)))
+        self.reference_alpha_slider = CompactWedgeSlider(parent=self)
+        self.reference_alpha_slider.setRange(0, 100)
+        self.reference_alpha_slider.setValue(int(round(self._reference_alpha * 100.0)))
         self.highlight_alpha_slider = CompactWedgeSlider(parent=self)
         self.highlight_alpha_slider.setRange(0, 100)
         self.highlight_alpha_slider.setValue(int(round(self._highlight_alpha * 100.0)))
@@ -3265,6 +1594,7 @@ class MainWindow(MainWindowIcons, QMainWindow):
             [
                 self._create_image_tool_icon_button(self.rotate_action, accent="yellow"),
                 self._create_image_tool_icon_button(self.reset_rotation_action, accent="yellow"),
+                self.rotation_fill_dark_button,
                 self._create_image_tool_icon_button(self.crop_action, accent="blue"),
                 self._create_image_tool_icon_button(self.reset_crop_action, accent="blue"),
                 self._create_image_tool_icon_button(self.flip_horizontal_action, accent="cyan"),
@@ -3284,9 +1614,9 @@ class MainWindow(MainWindowIcons, QMainWindow):
             "View",
             [
                 self._create_toolbar_row([
-                    self._create_view_control("", self.show_spots_check, self.spot_color_button, self.spot_alpha_slider),
-                    self._create_toolbar_icon_toggle_control("", self.bottom_spot_labels_button),
-                    self._create_view_control("", self.show_rings_check, self.ring_color_button, self.ring_alpha_slider),
+                    self._create_view_control("", self.show_rois_check, self.sample_color_button, self.roi_alpha_slider),
+                    self._create_toolbar_icon_toggle_control("", self.bottom_roi_labels_button),
+                    self._create_view_control("", self.show_rings_check, self.reference_color_button, self.reference_alpha_slider),
                     self._create_toolbar_icon_toggle_control("", self.show_reference_points_check),
                     self._create_view_control("", self.show_mask_check, self.mask_color_button, self.mask_alpha_slider),
                     self._create_view_control("", self.show_highlight_check, self.highlight_color_button, self.highlight_alpha_slider),
@@ -3311,6 +1641,15 @@ class MainWindow(MainWindowIcons, QMainWindow):
         self._update_color_button_styles()
 
     def _connect_signals(self) -> None:
+        self._connect_dataset_and_nav()
+        self._connect_chromatic()
+        self._connect_analysis_and_histogram()
+        self._connect_background_and_mask()
+        self._connect_spot()
+        self._connect_toolbar_and_ui()
+
+
+    def _connect_dataset_and_nav(self) -> None:
         self.browse_button.clicked.connect(self._dataset_controller.browse_folder)
         self.load_button.clicked.connect(self._dataset_controller.browse_folder)
         self.dataset_ome_zarr_export_button.clicked.connect(self._dataset_controller.export_current_dataset_to_ome_zarr)
@@ -3320,6 +1659,17 @@ class MainWindow(MainWindowIcons, QMainWindow):
         self.import_settings_button.clicked.connect(self._import_processing_profile)
         self.reference_auto_button.clicked.connect(lambda _checked=False: self._set_reference_mode("auto"))
         self.reference_manual_button.clicked.connect(lambda _checked=False: self._set_current_reference_from_view())
+        self.frame_slider.valueChanged.connect(lambda _value: self._sync_analysis_plot_cursors())
+        self.frame_slider.valueChanged.connect(lambda _value: self._schedule_image_refresh())
+        self.frame_slider.valueChanged.connect(lambda _value: self._sync_auto_reference_to_current_frame())
+        self.wavelength_slider.valueChanged.connect(lambda _value: self._sync_analysis_plot_cursors())
+        self.wavelength_slider.valueChanged.connect(lambda _value: self._schedule_image_refresh())
+        self.frame_spin.valueChanged.connect(self._on_frame_spin_changed)
+        self.wavelength_spin.valueChanged.connect(self._on_wavelength_spin_changed)
+        self.analysis_start_frame_spin.valueChanged.connect(self._analysis_controller.on_frame_range_changed)
+        self.analysis_end_frame_spin.valueChanged.connect(self._analysis_controller.on_frame_range_changed)
+
+    def _connect_chromatic(self) -> None:
         self.chromatic_apply_check.toggled.connect(self._update_chromatic_settings)
         self.chromatic_apply_check.toggled.connect(self.chromatic_section.set_applied)
         self.chromatic_apply_check.toggled.connect(
@@ -3336,13 +1686,8 @@ class MainWindow(MainWindowIcons, QMainWindow):
         self.chromatic_feature_count_spin.currentIndexChanged.connect(self._on_chromatic_feature_count_changed)
         self.chromatic_subpixel_precision_combo.currentIndexChanged.connect(self._on_chromatic_subpixel_precision_changed)
         self.chromatic_transform_button.clicked.connect(self._on_chromatic_transform_button_clicked)
-        self.frame_slider.valueChanged.connect(lambda _value: self._sync_analysis_plot_cursors())
-        self.frame_slider.valueChanged.connect(lambda _value: self._schedule_image_refresh())
-        self.frame_slider.valueChanged.connect(lambda _value: self._sync_auto_reference_to_current_frame())
-        self.wavelength_slider.valueChanged.connect(lambda _value: self._sync_analysis_plot_cursors())
-        self.wavelength_slider.valueChanged.connect(lambda _value: self._schedule_image_refresh())
-        self.frame_spin.valueChanged.connect(self._on_frame_spin_changed)
-        self.wavelength_spin.valueChanged.connect(self._on_wavelength_spin_changed)
+
+    def _connect_analysis_and_histogram(self) -> None:
         self.hist_region.sigRegionChanged.connect(self._update_selected_intensity_overlay)
         self.hist_region.sigRegionChanged.connect(self._update_histogram_region_labels)
         self.hist_region.sigRegionChangeFinished.connect(self._on_histogram_region_changed)
@@ -3358,14 +1703,15 @@ class MainWindow(MainWindowIcons, QMainWindow):
         self.analysis_preview_button.clicked.connect(self._toggle_analysis_live_preview)
         self.analysis_calculate_all_button.clicked.connect(self._analysis_controller.calculate_sensorgram)
         self.analysis_stop_button.clicked.connect(self._analysis_controller.stop_sensorgram)
-        self.analysis_spot_table_button.clicked.connect(
-            lambda: self.spot_list_action.setChecked(not self.spot_list_action.isChecked())
+        self.analysis_roi_table_button.clicked.connect(
+            lambda: self.roi_list_action.setChecked(not self.roi_list_action.isChecked())
         )
-        self.spot_list_cached_button.toggled.connect(self._on_cached_spots_only_toggled)
+        self.roi_list_cached_button.toggled.connect(self._on_cached_rois_only_toggled)
         self.analysis_poly_order_spin.valueChanged.connect(self._analysis_controller.on_fit_settings_changed)
         self.analysis_metric_combo.currentIndexChanged.connect(self._analysis_controller.on_fit_settings_changed)
-        self.analysis_start_frame_spin.valueChanged.connect(self._analysis_controller.on_frame_range_changed)
-        self.analysis_end_frame_spin.valueChanged.connect(self._analysis_controller.on_frame_range_changed)
+        self.calculate_spectrum_action.triggered.connect(self._refresh_absorbance_spectrum)
+
+    def _connect_background_and_mask(self) -> None:
         self.background_removal_link.toggled.connect(self.background_section.set_applied)
         self.background_removal_link.toggled.connect(
             lambda checked: self.background_removal_link.setIcon(self._make_link_toggle_icon(bool(checked)))
@@ -3374,23 +1720,15 @@ class MainWindow(MainWindowIcons, QMainWindow):
         self.chromatic_section.apply_changed.connect(self._chromatic_controller.section_applied_changed)
         self.mask_section.apply_changed.connect(self._on_mask_section_applied_changed)
         self.image_tools_section.apply_changed.connect(self._on_image_tools_section_applied_changed)
-        self.spot_editor_section.apply_changed.connect(self._on_live_geometry_toggled)
+        self.roi_editor_section.apply_changed.connect(self._on_live_geometry_toggled)
         self.background_section.apply_changed.connect(self._on_background_section_applied_changed)
         self.analysis_section.apply_changed.connect(self._on_analysis_section_applied_changed)
-        self.shortcuts_action.triggered.connect(self._show_shortcuts_dialog)
-        self.reset_layout_action.triggered.connect(self._reset_layout_to_defaults)
-        self.reset_dock_layout_action.triggered.connect(self._reset_panel_layout)
-        self.show_all_panels_action.triggered.connect(lambda *_: self._set_all_panel_visibility(True))
-        self.hide_all_panels_action.triggered.connect(lambda *_: self._set_all_panel_visibility(False))
-        self.expand_left_panels_action.triggered.connect(self._expand_left_panels)
-        self.collapse_left_panels_action.triggered.connect(self._collapse_left_panels)
-        self.about_action.triggered.connect(self._show_about_dialog)
-        self.calculate_spectrum_action.triggered.connect(self._refresh_absorbance_spectrum)
         self.background_removal_link.toggled.connect(self._update_image_processing_settings)
         self.background_smoothing_sigma_spin.valueChanged.connect(self._update_image_processing_settings)
         self.background_smoothing_binning_combo.currentIndexChanged.connect(self._update_image_processing_settings)
         self.background_ignore_spot_button.toggled.connect(self._update_image_processing_settings)
         self.background_ignore_mask_button.toggled.connect(self._update_image_processing_settings)
+        self.background_local_ring_check.toggled.connect(self._update_image_processing_settings)
         self.background_create_new_button.clicked.connect(self._create_new_background)
         self.background_load_from_file_button.clicked.connect(self._load_background_from_file)
         self.background_save_button.clicked.connect(self._save_background_to_file)
@@ -3448,12 +1786,15 @@ class MainWindow(MainWindowIcons, QMainWindow):
         self.mask_draw_mode_combo.currentIndexChanged.connect(self._save_control_preferences)
         self.mask_brush_size_spin.valueChanged.connect(self._save_control_preferences)
         
-        self.spot_diameter_spin.valueChanged.connect(self._on_spot_diameter_spin_changed)
-        self.spot_diameter_spin.editingFinished.connect(self._commit_spot_geometry_edits)
-        self.ring_inner_diameter_spin.valueChanged.connect(self._on_ring_inner_diameter_spin_changed)
-        self.ring_inner_diameter_spin.editingFinished.connect(self._commit_spot_geometry_edits)
-        self.ring_outer_diameter_spin.valueChanged.connect(self._on_ring_outer_diameter_spin_changed)
-        self.ring_outer_diameter_spin.editingFinished.connect(self._commit_spot_geometry_edits)
+        self.ignore_marked_check.toggled.connect(self._update_spot_detection_settings)
+
+    def _connect_spot(self) -> None:
+        self.sample_diameter_spin.valueChanged.connect(self._on_roi_diameter_spin_changed)
+        self.sample_diameter_spin.editingFinished.connect(self._commit_spot_geometry_edits)
+        self.reference_inner_diameter_spin.valueChanged.connect(self._on_reference_inner_diameter_spin_changed)
+        self.reference_inner_diameter_spin.editingFinished.connect(self._commit_spot_geometry_edits)
+        self.reference_outer_diameter_spin.valueChanged.connect(self._on_reference_outer_diameter_spin_changed)
+        self.reference_outer_diameter_spin.editingFinished.connect(self._commit_spot_geometry_edits)
         self.rectangle_name_edit.editingFinished.connect(self._commit_rectangle_roi_edits)
         self.rectangle_width_spin.valueChanged.connect(lambda *_args: self._commit_rectangle_roi_edits())
         self.rectangle_height_spin.valueChanged.connect(lambda *_args: self._commit_rectangle_roi_edits())
@@ -3462,51 +1803,62 @@ class MainWindow(MainWindowIcons, QMainWindow):
         self.array_rows_spin.valueChanged.connect(self._update_spot_detection_settings)
         self.array_cols_spin.valueChanged.connect(self._update_spot_detection_settings)
         self.array_spacing_spin.valueChanged.connect(self._update_spot_detection_settings)
-        self.ignore_marked_check.toggled.connect(self._update_spot_detection_settings)
-        self.detect_spots_button.clicked.connect(self._detect_spots)
-        self.reorder_spots_button.clicked.connect(self._reorder_spots_by_position)
-        self.clear_spots_button.clicked.connect(self._clear_detected_spots)
-        self.clear_spot_selection_button.clicked.connect(self._clear_spot_selection)
+        self.detect_rois_button.clicked.connect(self._detect_spots)
+        self.reorder_rois_button.clicked.connect(self._reorder_spots_by_position)
+        self.clear_rois_button.clicked.connect(self._clear_detected_spots)
+        self.clear_roi_selection_button.clicked.connect(self._clear_spot_selection)
+        self.roi_array_action.toggled.connect(self._on_roi_array_toggled)
+        self.roi_list_action.toggled.connect(self._roi_table_controller.on_toggled)
+        self.roi_list_panel.visibilityChanged.connect(self._on_roi_panel_visibility_changed)
+        self.roi_table.itemSelectionChanged.connect(self._roi_table_controller.on_selection_changed)
+        self.roi_table.itemChanged.connect(self._roi_table_controller.on_item_changed)
+        self.roi_table.cellDoubleClicked.connect(self._roi_table_controller.on_cell_double_clicked)
+        self.roi_table.viewport().setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.roi_table.viewport().customContextMenuRequested.connect(self._roi_table_controller.show_context_menu)
+        self.roi_export_button.clicked.connect(self._roi_table_controller.export_csv)
+        self.roi_import_button.clicked.connect(self._roi_table_controller.import_csv)
+        self.remove_rois_action.triggered.connect(self._remove_selected_rois)
+        self.group_rois_action.triggered.connect(self._group_selected_rois)
+        self.ungroup_rois_action.triggered.connect(self._ungroup_selected_rois)
+        self.addAction(self.group_rois_action)
+        self.addAction(self.ungroup_rois_action)
+        self.show_rois_check.toggled.connect(self._on_show_spots_toggled)
+        self.bottom_roi_labels_button.toggled.connect(self._on_show_spot_labels_toggled)
+        self.roi_editor_labels_button.toggled.connect(self._on_spot_editor_show_labels_toggled)
+        self.show_rings_check.toggled.connect(self._on_show_rings_toggled)
+        self.show_reference_points_check.toggled.connect(self._on_show_reference_points_toggled)
+        self.show_mask_check.toggled.connect(self._on_show_mask_toggled)
+        self.show_highlight_check.toggled.connect(self._on_show_highlight_toggled)
+        self._refresh_roi_list_action_icon()
+
+    def _connect_toolbar_and_ui(self) -> None:
+        self.shortcuts_action.triggered.connect(self._show_shortcuts_dialog)
+        self.reset_layout_action.triggered.connect(self._reset_layout_to_defaults)
+        self.reset_dock_layout_action.triggered.connect(self._reset_panel_layout)
+        self.show_all_panels_action.triggered.connect(lambda *_: self._set_all_panel_visibility(True))
+        self.hide_all_panels_action.triggered.connect(lambda *_: self._set_all_panel_visibility(False))
+        self.expand_left_panels_action.triggered.connect(self._expand_left_panels)
+        self.collapse_left_panels_action.triggered.connect(self._collapse_left_panels)
+        self.about_action.triggered.connect(self._show_about_dialog)
         self.rotate_action.toggled.connect(self._on_rotate_tool_toggled)
         self.crop_action.toggled.connect(self._on_crop_tool_toggled)
         self.measure_action.toggled.connect(self._on_measure_tool_toggled)
         self.flip_horizontal_action.toggled.connect(self._on_flip_horizontal_toggled)
         self.flip_vertical_action.toggled.connect(self._on_flip_vertical_toggled)
         self.spot_edit_action.toggled.connect(self._on_spot_edit_tool_toggled)
-        self.spot_add_action.toggled.connect(self._on_spot_add_toggled)
-        self.spot_move_action.toggled.connect(self._on_spot_move_toggled)
-        self.roi_array_action.toggled.connect(self._on_roi_array_toggled)
-        self.spot_list_action.toggled.connect(self._spot_table_controller.on_toggled)
-        self.spot_list_panel.visibilityChanged.connect(self._on_spot_list_panel_visibility_changed)
-        self.spot_list_table.itemSelectionChanged.connect(self._spot_table_controller.on_selection_changed)
-        self.spot_list_table.itemChanged.connect(self._spot_table_controller.on_item_changed)
-        self.spot_list_table.cellDoubleClicked.connect(self._spot_table_controller.on_cell_double_clicked)
-        self.spot_list_table.viewport().setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
-        self.spot_list_table.viewport().customContextMenuRequested.connect(self._spot_table_controller.show_context_menu)
-        self.spot_list_export_button.clicked.connect(self._spot_table_controller.export_csv)
-        self.spot_list_import_button.clicked.connect(self._spot_table_controller.import_csv)
-        self.remove_spots_action.triggered.connect(self._remove_selected_spots)
-        self.group_spots_action.triggered.connect(self._group_selected_spots)
-        self.ungroup_spots_action.triggered.connect(self._ungroup_selected_spots)
-        self.addAction(self.group_spots_action)
-        self.addAction(self.ungroup_spots_action)
-        self.show_spots_check.toggled.connect(self._on_show_spots_toggled)
-        self.bottom_spot_labels_button.toggled.connect(self._on_show_spot_labels_toggled)
-        self.spot_editor_labels_button.toggled.connect(self._on_spot_editor_show_labels_toggled)
-        self.show_rings_check.toggled.connect(self._on_show_rings_toggled)
-        self.show_reference_points_check.toggled.connect(self._on_show_reference_points_toggled)
-        self.show_mask_check.toggled.connect(self._on_show_mask_toggled)
-        self.show_highlight_check.toggled.connect(self._on_show_highlight_toggled)
+        self.roi_add_action.toggled.connect(self._on_roi_add_toggled)
+        self.roi_move_action.toggled.connect(self._on_roi_move_toggled)
         self.mask_color_button.clicked.connect(lambda: self._choose_overlay_color("mask"))
-        self.spot_color_button.clicked.connect(lambda: self._choose_overlay_color("spots"))
-        self.ring_color_button.clicked.connect(lambda: self._choose_overlay_color("ring"))
+        self.sample_color_button.clicked.connect(lambda: self._choose_overlay_color("roi"))
+        self.reference_color_button.clicked.connect(lambda: self._choose_overlay_color("ring"))
         self.highlight_color_button.clicked.connect(lambda: self._choose_overlay_color("highlight"))
         self.scale_bar_color_button.clicked.connect(lambda: self._choose_overlay_color("scale_bar"))
         self.mask_alpha_slider.valueChanged.connect(self._on_mask_alpha_changed)
-        self.spot_alpha_slider.valueChanged.connect(self._on_spot_alpha_changed)
-        self.ring_alpha_slider.valueChanged.connect(self._on_ring_alpha_changed)
+        self.roi_alpha_slider.valueChanged.connect(self._on_roi_alpha_changed)
+        self.reference_alpha_slider.valueChanged.connect(self._on_reference_alpha_changed)
         self.highlight_alpha_slider.valueChanged.connect(self._on_highlight_alpha_changed)
         self.reset_rotation_action.triggered.connect(self._reset_rotation)
+        self.rotation_fill_dark_button.toggled.connect(self._on_rotation_fill_dark_toggled)
         self.reset_crop_action.triggered.connect(self._reset_crop)
         self.measurement_apply_button.clicked.connect(self._apply_measurement_calibration)
         self.measurement_unit_button.clicked.connect(self._toggle_display_units)
@@ -3514,109 +1866,74 @@ class MainWindow(MainWindowIcons, QMainWindow):
         self.undo_action.triggered.connect(self._undo)
         self.redo_action.triggered.connect(self._redo)
         self._configure_control_help()
-        self._refresh_spot_list_action_icon()
         self._update_analysis_control_state()
 
     # ------------------------------------------------------------------
-    # Spot list table and CSV helpers
+    # ROI list table and CSV helpers
     # ------------------------------------------------------------------
 
-    def _on_spot_list_toggled(self, checked: bool) -> None:
-        self.spot_list_panel.setVisible(checked)
-        self._settings.setValue("layout/spot_list_visible", bool(checked))
-        self._refresh_spot_list_action_icon()
-        if checked:
-            self._update_spot_list_table()
+    def _on_roi_list_toggled(self, checked: bool) -> None:
+        self._roi_table_controller._on_roi_list_toggled(checked)
 
-    def _on_cached_spots_only_toggled(self, checked: bool) -> None:
-        self._cached_spots_only_visible = bool(checked)
-        self._settings.setValue("layout/cached_spots_only_visible", bool(checked))
-        self.spot_list_cached_button.setIcon(self._make_cached_spots_icon(bool(checked)))
-        self._spot_table_controller.refresh_cached_row_styles()
-        self._update_spot_overlays()
-        self._refresh_visible_spectrum_from_cache()
-        self._analysis_controller.preview_sensorgram_from_cache()
+    def _on_cached_rois_only_toggled(self, checked: bool) -> None:
+        self._roi_table_controller._on_cached_rois_only_toggled(checked)
 
-    def _on_spot_list_panel_visibility_changed(self, visible: bool) -> None:
-        if self.spot_list_action.isChecked() == bool(visible):
-            return
-        self.spot_list_action.blockSignals(True)
-        self.spot_list_action.setChecked(bool(visible))
-        self.spot_list_action.blockSignals(False)
-        self._settings.setValue("layout/spot_list_visible", bool(visible))
-        self._refresh_spot_list_action_icon()
-        if visible:
-            self._update_spot_list_table()
+    def _on_roi_panel_visibility_changed(self, visible: bool) -> None:
+        self._roi_table_controller._on_roi_panel_visibility_changed(visible)
 
-    def _on_spot_list_selection_changed(self) -> None:
-        if getattr(self, "_spot_list_selection_syncing", False):
-            return
-        selected_ids: set[int] = set()
-        for row in range(self.spot_list_table.rowCount()):
-            if not self.spot_list_table.isRowHidden(row) and self.spot_list_table.selectionModel().isRowSelected(row, self.spot_list_table.rootIndex()):
-                item = self.spot_list_table.item(row, 0)
-                if item is not None:
-                    try:
-                        selected_ids.add(int(item.text()))
-                    except ValueError:
-                        continue
-        if selected_ids == self._selected_spot_ids:
-            return
-        self._selected_spot_ids = selected_ids
-        self._update_spot_overlays()
-        self._update_spot_summary()
-        self._update_selection_dependent_plots(prompt_live_preview=True)
+    def _on_roi_list_selection_changed(self) -> None:
+        self._roi_table_controller._on_roi_list_selection_changed()
 
-    def _sync_spot_list_table_selection(self) -> None:
-        if not self.spot_list_table.isVisible():
+    def _sync_roi_table_selection(self) -> None:
+        if not self.roi_table.isVisible():
             return
-        selection_model = self.spot_list_table.selectionModel()
+        selection_model = self.roi_table.selectionModel()
         if selection_model is None:
             return
-        self._spot_list_selection_syncing = True
+        self._roi_list_selection_syncing = True
         try:
             selection_model.clearSelection()
             first_selected_item: QTableWidgetItem | None = None
             first_selected_row: int | None = None
-            for row in range(self.spot_list_table.rowCount()):
-                item = self.spot_list_table.item(row, 0)
+            for row in range(self.roi_table.rowCount()):
+                item = self.roi_table.item(row, 0)
                 if item is None:
                     continue
                 try:
                     spot_id = int(item.text())
                 except ValueError:
                     continue
-                if spot_id in self._selected_spot_ids:
+                if spot_id in self._selected_roi_ids:
                     selection_model.select(
-                        self.spot_list_table.model().index(row, 0),
+                        self.roi_table.model().index(row, 0),
                         QItemSelectionModel.SelectionFlag.Select | QItemSelectionModel.SelectionFlag.Rows,
                     )
                     if first_selected_item is None:
                         first_selected_item = item
                         first_selected_row = row
             if first_selected_item is not None:
-                self.spot_list_table.scrollToItem(first_selected_item, QAbstractItemView.ScrollHint.PositionAtCenter)
-                self.spot_list_table.setCurrentItem(first_selected_item)
-                self._spot_list_range_anchor_row = first_selected_row
+                self.roi_table.scrollToItem(first_selected_item, QAbstractItemView.ScrollHint.PositionAtCenter)
+                self.roi_table.setCurrentItem(first_selected_item)
+                self._roi_list_range_anchor_row = first_selected_row
         finally:
-            self._spot_list_selection_syncing = False
+            self._roi_list_selection_syncing = False
         self._update_selection_dependent_plots()
 
-    def _select_spot_list_table_rows(self, rows: list[int]) -> None:
-        selection_model = self.spot_list_table.selectionModel()
+    def _select_roi_table_rows(self, rows: list[int]) -> None:
+        selection_model = self.roi_table.selectionModel()
         if selection_model is None:
             return
-        valid_rows = sorted({row for row in rows if 0 <= row < self.spot_list_table.rowCount()})
+        valid_rows = sorted({row for row in rows if 0 <= row < self.roi_table.rowCount()})
         if not valid_rows:
             return
         self._append_workflow_log(f"Selection | table rows {valid_rows}", level="debug")
-        self._spot_list_selection_syncing = True
+        self._roi_list_selection_syncing = True
         selected_ids: set[int] = set()
         first_selected_item: QTableWidgetItem | None = None
         try:
             selection_model.clearSelection()
             for row in valid_rows:
-                item = self.spot_list_table.item(row, 0)
+                item = self.roi_table.item(row, 0)
                 if item is None:
                     continue
                 try:
@@ -3624,26 +1941,26 @@ class MainWindow(MainWindowIcons, QMainWindow):
                 except ValueError:
                     continue
                 selection_model.select(
-                    self.spot_list_table.model().index(row, 0),
+                    self.roi_table.model().index(row, 0),
                     QItemSelectionModel.SelectionFlag.Select | QItemSelectionModel.SelectionFlag.Rows,
                 )
                 selected_ids.add(spot_id)
                 if first_selected_item is None:
                     first_selected_item = item
             if first_selected_item is not None:
-                self.spot_list_table.scrollToItem(first_selected_item, QAbstractItemView.ScrollHint.PositionAtCenter)
-                self.spot_list_table.setCurrentItem(first_selected_item)
+                self.roi_table.scrollToItem(first_selected_item, QAbstractItemView.ScrollHint.PositionAtCenter)
+                self.roi_table.setCurrentItem(first_selected_item)
         finally:
-            self._spot_list_selection_syncing = False
-        self._selected_spot_ids = selected_ids
-        self._update_spot_overlays()
-        self._update_spot_summary()
+            self._roi_list_selection_syncing = False
+        self._selected_roi_ids = selected_ids
+        self._update_roi_overlays()
+        self._update_roi_summary()
         self._update_selection_dependent_plots(prompt_live_preview=True)
 
-    def _spot_list_spot_id_for_row(self, row: int) -> int | None:
-        if row < 0 or row >= self.spot_list_table.rowCount():
+    def _roi_list_spot_id_for_row(self, row: int) -> int | None:
+        if row < 0 or row >= self.roi_table.rowCount():
             return None
-        item = self.spot_list_table.item(row, 0)
+        item = self.roi_table.item(row, 0)
         if item is None:
             return None
         try:
@@ -3651,72 +1968,54 @@ class MainWindow(MainWindowIcons, QMainWindow):
         except ValueError:
             return None
 
-    def _spot_list_selected_rows(self) -> list[int]:
-        selection_model = self.spot_list_table.selectionModel()
+    def _roi_list_selected_rows(self) -> list[int]:
+        selection_model = self.roi_table.selectionModel()
         if selection_model is None:
             return []
         rows: list[int] = []
-        for row in range(self.spot_list_table.rowCount()):
-            if selection_model.isRowSelected(row, self.spot_list_table.rootIndex()):
+        for row in range(self.roi_table.rowCount()):
+            if selection_model.isRowSelected(row, self.roi_table.rootIndex()):
                 rows.append(row)
         return rows
 
-    def _spot_list_selected_spot_ids(self) -> list[int]:
+    def _roi_list_selected_roi_ids(self) -> list[int]:
         spot_ids: list[int] = []
-        for row in self._spot_list_selected_rows():
-            spot_id = self._spot_list_spot_id_for_row(row)
+        for row in self._roi_list_selected_rows():
+            spot_id = self._roi_list_spot_id_for_row(row)
             if spot_id is not None:
                 spot_ids.append(spot_id)
         return spot_ids
 
-    def _spot_list_spot_index(self, spot_id: int) -> int | None:
-        for index, spot in enumerate(self._state.detected_spots):
-            if spot.spot_id == spot_id:
+    def _roi_list_spot_index(self, spot_id: int) -> int | None:
+        for index, spot in enumerate(self._state.area_rois):
+            if spot.area_roi_id == spot_id:
                 return index
         return None
 
-    def _refresh_spot_list_action_icon(self) -> None:
-        self.spot_list_action.setIcon(self._make_spot_list_icon(self.spot_list_action.isChecked()))
-        if hasattr(self, "analysis_spot_table_button"):
-            self.analysis_spot_table_button.setPixmap(
-                self._make_spot_list_icon(self.spot_list_action.isChecked()).pixmap(
+    def _refresh_roi_list_action_icon(self) -> None:
+        self.roi_list_action.setIcon(self._make_roi_list_icon(self.roi_list_action.isChecked()))
+        if hasattr(self, "analysis_roi_table_button"):
+            self.analysis_roi_table_button.setPixmap(
+                self._make_roi_list_icon(self.roi_list_action.isChecked()).pixmap(
                     APP_THEME.compact_icon_inner,
                     APP_THEME.compact_icon_inner,
                 )
             )
 
-    def _refresh_spot_list_table_headers(self) -> None:
-        spot_table_headers(self.spot_list_table)
+    def _refresh_roi_table_headers(self) -> None:
+        roi_table_headers(self.roi_table)
 
-    def _on_spot_list_item_changed(self, item: QTableWidgetItem) -> None:
-        if self._spot_list_table_updating:
-            return
-        spot_id = self._spot_list_spot_id_for_row(item.row())
-        if spot_id is None:
-            return
-        if item.column() == 1:
-            self._rename_spot_group_from_table(spot_id, item.text().strip())
-        elif item.column() in {2, 3, 4}:
-            self._edit_spot_diameter_cells_from_table(spot_id, item.row())
+    def _on_roi_list_item_changed(self, item: QTableWidgetItem) -> None:
+        self._roi_table_controller._on_roi_list_item_changed(item)
 
-    def _on_spot_list_cell_double_clicked(self, row: int, column: int) -> None:
-        spot_id = self._spot_list_spot_id_for_row(row)
-        if spot_id is None:
-            return
-        if column == 2:
-            self._edit_spot_color_from_table(spot_id)
-        elif column == 3:
-            self._edit_ring_color_from_table()
-        elif column == 4:
-            self._edit_spot_geometry_from_table(spot_id)
-        elif column == 5:
-            self._edit_ring_geometry_from_table(spot_id)
+    def _on_roi_list_cell_double_clicked(self, row: int, column: int) -> None:
+        self._roi_table_controller._on_roi_list_cell_double_clicked(row, column)
 
     def _rename_spot_group_from_table(self, spot_id: int, new_name: str) -> None:
-        current_group = self._group_for_spot(spot_id)
+        current_group = self._group_for_roi(spot_id)
         if not new_name:
             self.status_label.setText("Group name cannot be empty.")
-            self._update_spot_list_table()
+            self._update_roi_table()
             return
 
         if current_group is not None:
@@ -3726,271 +2025,271 @@ class MainWindow(MainWindowIcons, QMainWindow):
             current_group.name = new_name
         else:
             selected_ids = {spot_id}
-            self._push_undo_point("Group spots")
-            for group in self._state.spot_groups:
-                group.spot_ids = [spot for spot in group.spot_ids if spot not in selected_ids]
-            self._state.spot_groups = [group for group in self._state.spot_groups if group.spot_ids]
-            self._state.spot_groups.append(
-                SpotGroup(
-                    group_id=f"group_{len(self._state.spot_groups) + 1}",
+            self._push_undo_point("Group ROIs")
+            for group in self._state.area_roi_groups:
+                group.area_roi_ids = [spot for spot in group.area_roi_ids if spot not in selected_ids]
+            self._state.area_roi_groups = [group for group in self._state.area_roi_groups if group.area_roi_ids]
+            self._state.area_roi_groups.append(
+                AreaRoiGroup(
+                    group_id=f"group_{len(self._state.area_roi_groups) + 1}",
                     name=new_name,
-                    spot_color_hex=self._spot_visual_color.name(),
-                    ring_color_hex=self._ring_visual_color.name(),
-                    spot_ids=sorted(selected_ids),
+                    sample_color_hex=self._sample_visual_color.name(),
+                    reference_color_hex=self._reference_visual_color.name(),
+                    area_roi_ids=sorted(selected_ids),
                 )
             )
-        self._update_spot_overlays()
-        self._update_spot_summary()
+        self._update_roi_overlays()
+        self._update_roi_summary()
         self._save_processing_state_for_dataset()
-        self._update_spot_list_table()
+        self._update_roi_table()
 
     def _copy_spot_properties_from_table(self) -> None:
-        selected_ids = self._spot_list_selected_spot_ids()
+        selected_ids = self._roi_list_selected_roi_ids()
         if not selected_ids:
-            self.status_label.setText("Select a spot row first to copy its properties.")
+            self.status_label.setText("Select an ROI row first to copy its properties.")
             return
         spot_id = selected_ids[0]
-        spot = self._spot_by_id(spot_id)
-        if spot is None:
+        roi = self._roi_by_id(spot_id)
+        if roi is None:
             return
-        group = self._group_for_spot(spot_id)
+        group = self._group_for_roi(spot_id)
         self._spot_clipboard = {
             "group_name": group.name if group is not None else None,
-            "group_spot_color": group.spot_color_hex if group is not None else None,
-            "group_ring_color": group.ring_color_hex if group is not None else None,
-            "spot_color": self._spot_visual_color.name(),
-            "ring_color": self._ring_visual_color.name(),
+            "group_spot_color": group.sample_color_hex if group is not None else None,
+            "group_ring_color": group.reference_color_hex if group is not None else None,
+            "spot_color": self._sample_visual_color.name(),
+            "ring_color": self._reference_visual_color.name(),
         }
-        self.status_label.setText(f"Copied spot properties from spot {spot_id}.")
+        self.status_label.setText(f"Copied ROI properties from ROI {spot_id}.")
 
     def _paste_spot_properties_from_table(self) -> None:
         if not self._spot_clipboard:
-            self.status_label.setText("Nothing to paste yet. Copy a spot first.")
+            self.status_label.setText("Nothing to paste yet. Copy an ROI first.")
             return
-        selected_ids = self._spot_list_selected_spot_ids()
+        selected_ids = self._roi_list_selected_roi_ids()
         if not selected_ids:
-            self.status_label.setText("Select one or more spot rows to paste properties.")
+            self.status_label.setText("Select one or more ROI rows to paste properties.")
             return
-        self._push_undo_point("Paste spot properties")
+        self._push_undo_point("Paste ROI properties")
         group_name = self._spot_clipboard.get("group_name")
         group_spot_color = self._spot_clipboard.get("group_spot_color")
         group_ring_color = self._spot_clipboard.get("group_ring_color")
         spot_color = self._spot_clipboard.get("spot_color")
         ring_color = self._spot_clipboard.get("ring_color")
         if isinstance(spot_color, str):
-            self._spot_visual_color = QColor(spot_color)
+            self._sample_visual_color = QColor(spot_color)
         if isinstance(ring_color, str):
-            self._ring_visual_color = QColor(ring_color)
+            self._reference_visual_color = QColor(ring_color)
         if isinstance(group_name, str) and group_name:
-            target_group = next((group for group in self._state.spot_groups if group.name == group_name), None)
+            target_group = next((group for group in self._state.area_roi_groups if group.name == group_name), None)
             if target_group is None:
-                target_group = SpotGroup(
-                    group_id=f"group_{len(self._state.spot_groups) + 1}",
+                target_group = AreaRoiGroup(
+                    group_id=f"group_{len(self._state.area_roi_groups) + 1}",
                     name=group_name,
-                    spot_color_hex=str(group_spot_color) if isinstance(group_spot_color, str) else self._spot_visual_color.name(),
-                    ring_color_hex=str(group_ring_color) if isinstance(group_ring_color, str) else self._ring_visual_color.name(),
-                    spot_ids=[],
+                    sample_color_hex=str(group_spot_color) if isinstance(group_spot_color, str) else self._sample_visual_color.name(),
+                    reference_color_hex=str(group_ring_color) if isinstance(group_ring_color, str) else self._reference_visual_color.name(),
+                    area_roi_ids=[],
                 )
-                self._state.spot_groups.append(target_group)
+                self._state.area_roi_groups.append(target_group)
             else:
                 if isinstance(group_spot_color, str):
-                    target_group.spot_color_hex = group_spot_color
+                    target_group.sample_color_hex = group_spot_color
                 if isinstance(group_ring_color, str):
-                    target_group.ring_color_hex = group_ring_color
-            target_group.spot_ids = sorted(set(target_group.spot_ids).union(selected_ids))
-            for other_group in self._state.spot_groups:
+                    target_group.reference_color_hex = group_ring_color
+            target_group.area_roi_ids = sorted(set(target_group.area_roi_ids).union(selected_ids))
+            for other_group in self._state.area_roi_groups:
                 if other_group is target_group:
                     continue
-                other_group.spot_ids = [spot_id for spot_id in other_group.spot_ids if spot_id not in selected_ids]
-            self._state.spot_groups = [group for group in self._state.spot_groups if group.spot_ids]
+                other_group.area_roi_ids = [spot_id for spot_id in other_group.area_roi_ids if spot_id not in selected_ids]
+            self._state.area_roi_groups = [group for group in self._state.area_roi_groups if group.area_roi_ids]
         else:
-            for group in self._state.spot_groups:
-                group.spot_ids = [spot_id for spot_id in group.spot_ids if spot_id not in selected_ids]
-            self._state.spot_groups = [group for group in self._state.spot_groups if group.spot_ids]
+            for group in self._state.area_roi_groups:
+                group.area_roi_ids = [spot_id for spot_id in group.area_roi_ids if spot_id not in selected_ids]
+            self._state.area_roi_groups = [group for group in self._state.area_roi_groups if group.area_roi_ids]
         self._update_color_button_styles()
-        self._update_spot_overlays()
-        self._update_spot_summary()
+        self._update_roi_overlays()
+        self._update_roi_summary()
         self._save_processing_state_for_dataset()
-        self._update_spot_list_table()
+        self._update_roi_table()
 
-    def _move_selected_spots_in_table(self, direction: int) -> None:
-        selected_rows = self._spot_list_selected_rows()
+    def _move_selected_rois_in_table(self, direction: int) -> None:
+        selected_rows = self._roi_list_selected_rows()
         if not selected_rows or direction == 0:
             return
-        spot_id = self._spot_list_spot_id_for_row(selected_rows[0])
+        spot_id = self._roi_list_spot_id_for_row(selected_rows[0])
         if spot_id is None:
             return
-        index = self._spot_list_spot_index(spot_id)
+        index = self._roi_list_spot_index(spot_id)
         if index is None:
             return
         if direction < 0 and index == 0:
             return
-        if direction > 0 and index >= len(self._state.detected_spots) - 1:
+        if direction > 0 and index >= len(self._state.area_rois) - 1:
             return
-        reordered = list(self._state.detected_spots)
+        reordered = list(self._state.area_rois)
         swap_index = index - 1 if direction < 0 else index + 1
         reordered[index], reordered[swap_index] = reordered[swap_index], reordered[index]
-        old_ids = [spot.spot_id for spot in reordered]
+        old_ids = [roi.area_roi_id for roi in reordered]
         id_map = {old_id: new_id for new_id, old_id in enumerate(old_ids, start=1)}
-        for new_id, spot in enumerate(reordered, start=1):
-            spot.spot_id = new_id
-        for group in self._state.spot_groups:
-            group.spot_ids = [id_map.get(spot_id, spot_id) for spot_id in group.spot_ids]
-            group.spot_ids = sorted(dict.fromkeys(group.spot_ids))
-        self._state.detected_spots = reordered
-        self._selected_spot_ids = {id_map.get(spot_id, spot_id) for spot_id in self._selected_spot_ids}
-        self._update_spot_overlays()
-        self._update_spot_summary()
+        for new_id, roi in enumerate(reordered, start=1):
+            roi.area_roi_id = new_id
+        for group in self._state.area_roi_groups:
+            group.area_roi_ids = [id_map.get(spot_id, spot_id) for spot_id in group.area_roi_ids]
+            group.area_roi_ids = sorted(dict.fromkeys(group.area_roi_ids))
+        self._state.area_rois = reordered
+        self._selected_roi_ids = {id_map.get(spot_id, spot_id) for spot_id in self._selected_roi_ids}
+        self._update_roi_overlays()
+        self._update_roi_summary()
         self._save_processing_state_for_dataset()
-        self._update_spot_list_table()
+        self._update_roi_table()
 
     def _edit_spot_color_from_table(self, spot_id: int) -> None:
-        spot = self._spot_by_id(spot_id)
-        if spot is None:
+        roi = self._roi_by_id(spot_id)
+        if roi is None:
             return
-        initial = QColor(spot.spot_color_hex) if spot.spot_color_hex else QColor(self._spot_visual_color)
-        color = QColorDialog.getColor(initial, self, "Choose spot color")
+        initial = QColor(roi.sample_color_hex) if roi.sample_color_hex else QColor(self._sample_visual_color)
+        color = QColorDialog.getColor(initial, self, "Choose sample color")
         if not color.isValid():
             return
-        self._push_undo_point("Edit spot color")
-        spot.spot_color_hex = color.name()
+        self._push_undo_point("Edit ROI color")
+        roi.sample_color_hex = color.name()
         self._update_color_button_styles()
-        self._update_spot_overlays()
+        self._update_roi_overlays()
         self._save_processing_state_for_dataset()
-        self._update_spot_list_table()
+        self._update_roi_table()
 
     def _edit_ring_color_from_table(self) -> None:
-        selected_ids = self._spot_list_selected_spot_ids()
-        spot = self._spot_by_id(selected_ids[0]) if selected_ids else None
-        initial = QColor(spot.ring_color_hex) if spot is not None and spot.ring_color_hex else QColor(self._ring_visual_color)
+        selected_ids = self._roi_list_selected_roi_ids()
+        roi = self._roi_by_id(selected_ids[0]) if selected_ids else None
+        initial = QColor(roi.reference_color_hex) if roi is not None and roi.reference_color_hex else QColor(self._reference_visual_color)
         color = QColorDialog.getColor(initial, self, "Choose reference-ring color")
         if not color.isValid():
             return
         self._push_undo_point("Edit ring color")
-        if spot is not None:
-            spot.ring_color_hex = color.name()
+        if roi is not None:
+            roi.reference_color_hex = color.name()
         else:
-            self._ring_visual_color = color
+            self._reference_visual_color = color
         self._update_color_button_styles()
-        self._update_spot_overlays()
+        self._update_roi_overlays()
         self._save_processing_state_for_dataset()
-        self._update_spot_list_table()
+        self._update_roi_table()
 
     def _edit_spot_geometry_from_table(self, spot_id: int) -> None:
-        spot = self._spot_by_id(spot_id)
-        if spot is None:
+        roi = self._roi_by_id(spot_id)
+        if roi is None:
             return
         value, ok = QInputDialog.getDouble(
             self,
-            "Spot diameter",
-            f"Spot diameter for spot {spot_id}",
-            float(spot.spot_diameter_px if spot.spot_diameter_px is not None else self.spot_diameter_spin.value()),
+            "Sample diameter",
+            f"Sample diameter for ROI {spot_id}",
+            float(roi.sample_diameter_px if roi.sample_diameter_px is not None else self.sample_diameter_spin.value()),
             2.0,
             1000.0,
             2,
         )
         if not ok:
             return
-        self._push_undo_point("Edit spot diameter")
-        spot.spot_diameter_px = float(value)
+        self._push_undo_point("Edit ROI diameter")
+        roi.sample_diameter_px = float(value)
         self._save_processing_state_for_dataset()
-        self._update_spot_overlays()
-        self._update_spot_summary()
-        self._update_spot_list_table()
+        self._update_roi_overlays()
+        self._update_roi_summary()
+        self._update_roi_table()
 
     def _edit_ring_geometry_from_table(self, spot_id: int) -> None:
-        spot = self._spot_by_id(spot_id)
-        if spot is None:
+        roi = self._roi_by_id(spot_id)
+        if roi is None:
             return
-        inner_default = float(spot.ring_inner_diameter_px if spot.ring_inner_diameter_px is not None else self.ring_inner_diameter_spin.value())
-        outer_default = float(spot.ring_outer_diameter_px if spot.ring_outer_diameter_px is not None else self.ring_outer_diameter_spin.value())
-        inner_value, ok = QInputDialog.getDouble(self, "Reference ring", f"Inner diameter for spot {spot_id}", inner_default, 0.0, 1000.0, 2)
+        inner_default = float(roi.reference_inner_diameter_px if roi.reference_inner_diameter_px is not None else self.reference_inner_diameter_spin.value())
+        outer_default = float(roi.reference_outer_diameter_px if roi.reference_outer_diameter_px is not None else self.reference_outer_diameter_spin.value())
+        inner_value, ok = QInputDialog.getDouble(self, "Reference region", f"Inner diameter for ROI {spot_id}", inner_default, 0.0, 1000.0, 2)
         if not ok:
             return
-        outer_value, ok = QInputDialog.getDouble(self, "Reference ring", f"Outer diameter for spot {spot_id}", outer_default, inner_value, 1000.0, 2)
+        outer_value, ok = QInputDialog.getDouble(self, "Reference region", f"Outer diameter for ROI {spot_id}", outer_default, inner_value, 1000.0, 2)
         if not ok:
             return
         self._push_undo_point("Edit ring diameter")
-        spot.ring_inner_diameter_px = float(inner_value)
-        spot.ring_outer_diameter_px = float(max(outer_value, inner_value))
+        roi.reference_inner_diameter_px = float(inner_value)
+        roi.reference_outer_diameter_px = float(max(outer_value, inner_value))
         self._save_processing_state_for_dataset()
-        self._update_spot_overlays()
-        self._update_spot_summary()
-        self._update_spot_list_table()
+        self._update_roi_overlays()
+        self._update_roi_summary()
+        self._update_roi_table()
 
     def _edit_spot_diameter_cells_from_table(self, spot_id: int, row: int) -> None:
-        spot = self._spot_by_id(spot_id)
-        if spot is None:
+        roi = self._roi_by_id(spot_id)
+        if roi is None:
             return
         try:
-            spot_diameter_text = self.spot_list_table.item(row, 2).text() if self.spot_list_table.item(row, 2) is not None else ""
-            ring_inner_text = self.spot_list_table.item(row, 3).text() if self.spot_list_table.item(row, 3) is not None else ""
-            ring_outer_text = self.spot_list_table.item(row, 4).text() if self.spot_list_table.item(row, 4) is not None else ""
+            spot_diameter_text = self.roi_table.item(row, 2).text() if self.roi_table.item(row, 2) is not None else ""
+            ring_inner_text = self.roi_table.item(row, 3).text() if self.roi_table.item(row, 3) is not None else ""
+            ring_outer_text = self.roi_table.item(row, 4).text() if self.roi_table.item(row, 4) is not None else ""
             spot_diameter = float(spot_diameter_text)
             ring_inner = float(ring_inner_text)
             ring_outer = float(ring_outer_text)
         except ValueError:
-            self.status_label.setText("Spot diameter cells must contain numbers.")
-            self._update_spot_list_table()
+            self.status_label.setText("ROI diameter cells must contain numbers.")
+            self._update_roi_table()
             return
-        self._push_undo_point("Edit spot geometry")
-        spot.spot_diameter_px = spot_diameter
-        spot.ring_inner_diameter_px = ring_inner
-        spot.ring_outer_diameter_px = max(ring_outer, ring_inner)
-        if self.spot_geometry_scope_button.isChecked():
-            self._state.spot_detection.spot_radius_px = max(spot_diameter / 2.0, 1.0)
-        if self.ring_geometry_scope_button.isChecked():
-            self._state.spot_detection.ring_inner_radius_px = max(ring_inner / 2.0, 0.0)
-            self._state.spot_detection.ring_outer_radius_px = max(ring_outer / 2.0, ring_inner / 2.0)
+        self._push_undo_point("Edit ROI geometry")
+        roi.sample_diameter_px = spot_diameter
+        roi.reference_inner_diameter_px = ring_inner
+        roi.reference_outer_diameter_px = max(ring_outer, ring_inner)
+        if self.roi_geometry_scope_button.isChecked():
+            self._state.area_roi_settings.sample_radius_px = max(spot_diameter / 2.0, 1.0)
+        if self.reference_geometry_scope_button.isChecked():
+            self._state.area_roi_settings.reference_inner_radius_px = max(ring_inner / 2.0, 0.0)
+            self._state.area_roi_settings.reference_outer_radius_px = max(ring_outer / 2.0, ring_inner / 2.0)
         self._save_processing_state_for_dataset()
-        self._update_spot_overlays()
-        self._update_spot_summary()
-        self._update_spot_list_table()
+        self._update_roi_overlays()
+        self._update_roi_summary()
+        self._update_roi_table()
 
-    def _export_spot_list_csv(self) -> None:
-        path_str, _ = QFileDialog.getSaveFileName(self, "Save spot list CSV", "", "CSV Files (*.csv)")
+    def _export_roi_list_csv(self) -> None:
+        path_str, _ = QFileDialog.getSaveFileName(self, "Save ROI list CSV", "", "CSV Files (*.csv)")
         if not path_str:
             return
         path = Path(path_str)
-        rows = sorted(self._state.detected_spots, key=lambda spot: spot.spot_id)
+        rows = sorted(self._state.area_rois, key=lambda roi: roi.area_roi_id)
         with path.open("w", newline="", encoding="utf-8") as handle:
             writer = csv.writer(handle)
             writer.writerow([
-                "spot_id",
+                "area_roi_id",
                 "group_name",
-                "group_spot_color",
-                "group_ring_color",
-                "spot_color",
-                "ring_color",
+                "group_sample_color",
+                "group_reference_color",
+                "sample_color",
+                "reference_color",
                 "center_x",
                 "center_y",
-                "spot_order",
-                "spot_diameter_px",
-                "ring_inner_diameter_px",
-                "ring_outer_diameter_px",
+                "area_roi_order",
+                "sample_diameter_px",
+                "reference_inner_diameter_px",
+                "reference_outer_diameter_px",
             ])
-            for order, spot in enumerate(rows):
-                group = self._group_for_spot(spot.spot_id)
+            for order, roi in enumerate(rows):
+                group = self._group_for_roi(roi.area_roi_id)
                 writer.writerow([
-                    spot.spot_id,
+                    roi.area_roi_id,
                     group.name if group is not None else "",
-                    group.spot_color_hex if group is not None else "",
-                    group.ring_color_hex if group is not None else "",
-                    spot.spot_color_hex or "",
-                    spot.ring_color_hex or "",
-                    self._spot_visual_color.name(),
-                    self._ring_visual_color.name(),
-                    spot.center_x,
-                    spot.center_y,
+                    group.sample_color_hex if group is not None else "",
+                    group.reference_color_hex if group is not None else "",
+                    roi.sample_color_hex or "",
+                    roi.reference_color_hex or "",
+                    self._sample_visual_color.name(),
+                    self._reference_visual_color.name(),
+                    roi.center_x,
+                    roi.center_y,
                     order,
-                    "" if spot.spot_diameter_px is None else spot.spot_diameter_px,
-                    "" if spot.ring_inner_diameter_px is None else spot.ring_inner_diameter_px,
-                    "" if spot.ring_outer_diameter_px is None else spot.ring_outer_diameter_px,
+                    "" if roi.sample_diameter_px is None else roi.sample_diameter_px,
+                    "" if roi.reference_inner_diameter_px is None else roi.reference_inner_diameter_px,
+                    "" if roi.reference_outer_diameter_px is None else roi.reference_outer_diameter_px,
                 ])
-        self.status_label.setText(f"Saved spot list to {path.name}.")
+        self.status_label.setText(f"Saved ROI list to {path.name}.")
 
-    def _import_spot_list_csv(self) -> None:
-        path_str, _ = QFileDialog.getOpenFileName(self, "Load spot list CSV", "", "CSV Files (*.csv)")
+    def _import_roi_list_csv(self) -> None:
+        path_str, _ = QFileDialog.getOpenFileName(self, "Load ROI list CSV", "", "CSV Files (*.csv)")
         if not path_str:
             return
         path = Path(path_str)
@@ -4000,108 +2299,108 @@ class MainWindow(MainWindowIcons, QMainWindow):
         if not rows:
             self.status_label.setText("CSV file is empty.")
             return
-        self._push_undo_point("Import spot list CSV")
-        groups_by_name = {group.name: group for group in self._state.spot_groups}
+        self._push_undo_point("Import ROI list CSV")
+        groups_by_name = {group.name: group for group in self._state.area_roi_groups}
         ordered_rows = sorted(rows, key=lambda row: int(row.get("spot_order", row.get("spot_id", 0)) or 0))
         for row in ordered_rows:
             try:
                 spot_id = int(row.get("spot_id", ""))
             except ValueError:
                 continue
-            spot = self._spot_by_id(spot_id)
-            if spot is None:
+            roi = self._roi_by_id(spot_id)
+            if roi is None:
                 continue
             group_name = str(row.get("group_name", "")).strip()
             group_color = str(row.get("group_color", "")).strip() or "#f59e0b"
-            group_ring_color = str(row.get("group_ring_color", "")).strip() or self._ring_visual_color.name()
+            group_ring_color = str(row.get("group_ring_color", "")).strip() or self._reference_visual_color.name()
             if group_name:
                 group = groups_by_name.get(group_name)
                 if group is None:
-                    group = SpotGroup(
+                    group = AreaRoiGroup(
                         group_id=f"group_{len(groups_by_name) + 1}",
                         name=group_name,
-                        spot_color_hex=group_color,
-                        ring_color_hex=group_ring_color,
-                        spot_ids=[],
+                        sample_color_hex=group_color,
+                        reference_color_hex=group_ring_color,
+                        area_roi_ids=[],
                     )
-                    self._state.spot_groups.append(group)
+                    self._state.area_roi_groups.append(group)
                     groups_by_name[group_name] = group
-                if spot_id not in group.spot_ids:
-                    group.spot_ids.append(spot_id)
-                group.spot_color_hex = group_color
-                group.ring_color_hex = group_ring_color
-            spot.spot_diameter_px = None if row.get("spot_diameter_px", "") == "" else float(row["spot_diameter_px"])
-            spot.ring_inner_diameter_px = None if row.get("ring_inner_diameter_px", "") == "" else float(row["ring_inner_diameter_px"])
-            spot.ring_outer_diameter_px = None if row.get("ring_outer_diameter_px", "") == "" else float(row["ring_outer_diameter_px"])
+                if spot_id not in group.area_roi_ids:
+                    group.area_roi_ids.append(spot_id)
+                group.sample_color_hex = group_color
+                group.reference_color_hex = group_ring_color
+            roi.sample_diameter_px = None if row.get("spot_diameter_px", "") == "" else float(row["spot_diameter_px"])
+            roi.reference_inner_diameter_px = None if row.get("ring_inner_diameter_px", "") == "" else float(row["ring_inner_diameter_px"])
+            roi.reference_outer_diameter_px = None if row.get("ring_outer_diameter_px", "") == "" else float(row["ring_outer_diameter_px"])
             if row.get("spot_color", ""):
-                self._spot_visual_color = QColor(str(row["spot_color"]))
+                self._sample_visual_color = QColor(str(row["spot_color"]))
             if row.get("ring_color", ""):
-                self._ring_visual_color = QColor(str(row["ring_color"]))
+                self._reference_visual_color = QColor(str(row["ring_color"]))
         self._update_color_button_styles()
-        self._update_spot_overlays()
-        self._update_spot_summary()
+        self._update_roi_overlays()
+        self._update_roi_summary()
         self._save_processing_state_for_dataset()
-        self._update_spot_list_table()
-        self.status_label.setText(f"Loaded spot list from {path.name}.")
+        self._update_roi_table()
+        self.status_label.setText(f"Loaded ROI list from {path.name}.")
 
-    def _spot_list_table_legacy_copy(self) -> None:
-        self._spot_list_table_updating = True
-        self.spot_list_table.blockSignals(True)
-        self.spot_list_table.setRowCount(0)
-        spots = sorted(self._state.detected_spots, key=lambda spot: spot.spot_id)
-        if not spots:
-            self.spot_list_table.blockSignals(False)
-            self._spot_list_table_updating = False
-            self._sync_spot_list_table_selection()
+    def _roi_table_legacy_copy(self) -> None:
+        self._roi_table_updating = True
+        self.roi_table.blockSignals(True)
+        self.roi_table.setRowCount(0)
+        rois = sorted(self._state.area_rois, key=lambda roi: roi.area_roi_id)
+        if not rois:
+            self.roi_table.blockSignals(False)
+            self._roi_table_updating = False
+            self._sync_roi_table_selection()
             return
-        for spot in spots:
-            row = self.spot_list_table.rowCount()
-            self.spot_list_table.insertRow(row)
-            self.spot_list_table.setRowHeight(row, 18)
-            id_item = QTableWidgetItem(str(spot.spot_id))
+        for roi in rois:
+            row = self.roi_table.rowCount()
+            self.roi_table.insertRow(row)
+            self.roi_table.setRowHeight(row, 18)
+            id_item = QTableWidgetItem(str(roi.area_roi_id))
             id_item.setFlags(id_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
-            self.spot_list_table.setItem(row, 0, id_item)
-            group = self._group_for_spot(spot.spot_id)
+            self.roi_table.setItem(row, 0, id_item)
+            group = self._group_for_roi(roi.area_roi_id)
             group_name = group.name if group is not None else "—"
             group_item = QTableWidgetItem(group_name)
             group_item.setFlags(group_item.flags() | Qt.ItemFlag.ItemIsEditable)
             if group is not None:
-                group_color = QColor(group.spot_color_hex)
+                group_color = QColor(group.sample_color_hex)
                 if group_color.isValid():
                     group_item.setForeground(group_color)
-                    group_item.setToolTip(f"{group.name} ({group.spot_color_hex})")
-            self.spot_list_table.setItem(row, 1, group_item)
+                    group_item.setToolTip(f"{group.name} ({group.sample_color_hex})")
+            self.roi_table.setItem(row, 1, group_item)
             spot_color_label = QLabel()
             spot_color_label.setFixedSize(16, 16)
-            spot_color = getattr(self._state, "overlay_colors", {}).get("spots", QColor("#f8fafc")) if hasattr(self._state, "overlay_colors") else QColor("#f8fafc")
+            spot_color = getattr(self._state, "overlay_colors", {}).get("roi", QColor("#f8fafc")) if hasattr(self._state, "overlay_colors") else QColor("#f8fafc")
             spot_color_label.setStyleSheet(f"background-color: {spot_color.name()}; border: 1px solid #2d2d2d;")
-            self.spot_list_table.setCellWidget(row, 2, spot_color_label)
+            self.roi_table.setCellWidget(row, 2, spot_color_label)
             ring_color_label = QLabel()
             ring_color_label.setFixedSize(18, 18)
             ring_color = getattr(self._state, "overlay_colors", {}).get("ring", QColor("#38bdf8")) if hasattr(self._state, "overlay_colors") else QColor("#38bdf8")
             ring_color_label.setStyleSheet(f"background-color: {ring_color.name()}; border: 1px solid #2d2d2d;")
-            self.spot_list_table.setCellWidget(row, 3, ring_color_label)
+            self.roi_table.setCellWidget(row, 3, ring_color_label)
             if self._state.preprocessing.display_units == "um" and self._can_display_micrometers():
                 scale = self._microns_per_pixel_scalar()
-                pos_text = f"x: {spot.center_x * scale:.1f} y: {spot.center_y * scale:.1f}"
+                pos_text = f"x: {roi.center_x * scale:.1f} y: {roi.center_y * scale:.1f}"
             else:
-                pos_text = f"x: {spot.center_x:.1f} y: {spot.center_y:.1f}"
+                pos_text = f"x: {roi.center_x:.1f} y: {roi.center_y:.1f}"
             pos_item = QTableWidgetItem(pos_text)
             pos_item.setFlags(pos_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
-            self.spot_list_table.setItem(row, 4, pos_item)
-        self.spot_list_table.resizeColumnsToContents()
-        self.spot_list_table.setColumnWidth(0, 38)
-        self.spot_list_table.setColumnWidth(1, 88)
-        self.spot_list_table.setColumnWidth(2, 22)
-        self.spot_list_table.setColumnWidth(3, 22)
-        self.spot_list_table.setColumnWidth(4, 126)
-        self.spot_list_table.horizontalHeader().setStretchLastSection(True)
-        self._sync_spot_list_table_selection()
+            self.roi_table.setItem(row, 4, pos_item)
+        self.roi_table.resizeColumnsToContents()
+        self.roi_table.setColumnWidth(0, 38)
+        self.roi_table.setColumnWidth(1, 88)
+        self.roi_table.setColumnWidth(2, 22)
+        self.roi_table.setColumnWidth(3, 22)
+        self.roi_table.setColumnWidth(4, 126)
+        self.roi_table.horizontalHeader().setStretchLastSection(True)
+        self._sync_roi_table_selection()
 
-    def _update_spot_list_table(self) -> None:
-        if self._spot_list_refresh_timer.isActive():
-            self._spot_list_refresh_timer.stop()
-        self._spot_list_refresh_timer.start()
+    def _update_roi_table(self) -> None:
+        if self._roi_refresh_timer.isActive():
+            self._roi_refresh_timer.stop()
+        self._roi_refresh_timer.start()
 
     def _report_startup_progress(self, percent: int, message: str) -> None:
         callback = self._startup_progress_callback
@@ -4141,7 +2440,7 @@ class MainWindow(MainWindowIcons, QMainWindow):
             return
         self._report_startup_progress(58, "Loading analysis cache...")
         self._append_workflow_log("Startup | analysis cache restored", level="debug")
-        self._sync_spot_detection_controls()
+        self._sync_roi_detection_controls()
         self._restore_control_preferences()
         self._report_startup_progress(76, "Preparing the first image...")
         self._analysis_enabled = False
@@ -4490,11 +2789,11 @@ class MainWindow(MainWindowIcons, QMainWindow):
         )
         return frame_index, wavelength_index
 
-    def _spot_signature(self, spots: list[DetectedSpot] | None = None) -> tuple[object, ...]:
-        spot_list = self._state.detected_spots if spots is None else spots
+    def _roi_signature(self, spots: list[AreaRoi] | None = None) -> tuple[object, ...]:
+        roi_list = self._state.area_rois if spots is None else spots
         return tuple(
-            (spot.spot_id, round(float(spot.center_x), 3), round(float(spot.center_y), 3), round(float(spot.radius_px), 3))
-            for spot in spot_list
+            (roi.area_roi_id, round(float(roi.center_x), 3), round(float(roi.center_y), 3), round(float(roi.sample_radius_px), 3))
+            for roi in roi_list
         )
 
     def _preprocessing_signature(self, image_key: tuple[int, float] | None = None) -> tuple[object, ...]:
@@ -4503,9 +2802,9 @@ class MainWindow(MainWindowIcons, QMainWindow):
         spot_signature: tuple[object, ...] | None = None
         if (
             self._state.preprocessing.flatten_background_enabled
-            and self._state.preprocessing.flatten_background_exclude_spots
+            and self._state.preprocessing.flatten_background_exclude_area_rois
         ):
-            spot_signature = self._spot_signature(self._spots_for_preprocessing(image_key))
+            spot_signature = self._roi_signature(self._rois_for_preprocessing(image_key))
         mask_signature: tuple[object, ...] | None = None
         if (
             self._state.preprocessing.flatten_background_enabled
@@ -4517,6 +2816,7 @@ class MainWindow(MainWindowIcons, QMainWindow):
         return (
             bool(getattr(self._state.preprocessing, "image_tools_enabled", True)),
             round(float(self._state.preprocessing.rotation_angle_deg), 6),
+            bool(getattr(self._state.preprocessing, "rotation_fill_dark", False)),
             bool(self._state.preprocessing.flip_horizontal),
             bool(self._state.preprocessing.flip_vertical),
             chromatic_signature,
@@ -4528,7 +2828,7 @@ class MainWindow(MainWindowIcons, QMainWindow):
             bool(self._state.preprocessing.flatten_background_enabled),
             round(float(self._state.preprocessing.flatten_background_sigma_px), 3),
             int(max(getattr(self._state.preprocessing, "flatten_background_binning", 2), 1)),
-            bool(self._state.preprocessing.flatten_background_exclude_spots),
+            bool(self._state.preprocessing.flatten_background_exclude_area_rois),
             bool(self._state.preprocessing.flatten_background_exclude_mask),
             bool(self._state.preprocessing.chromatic_correction_enabled),
             spot_signature,
@@ -4562,13 +2862,13 @@ class MainWindow(MainWindowIcons, QMainWindow):
             return cached
 
         raw_image = load_image_array(str(record.path))
-        mask_settings = self._state.spot_detection if self._state.preprocessing.flatten_background_exclude_mask else None
-        spots = self._spots_for_preprocessing(image_key)
+        mask_settings = self._state.area_roi_settings if self._state.preprocessing.flatten_background_exclude_mask else None
+        rois = self._rois_for_preprocessing(image_key)
         external_mask, external_mask_processed = self._effective_external_mask_for_record(record.path, processed_space=True)
         processed = apply_preprocessing(
             raw_image,
             self._state.preprocessing,
-            spots=spots,
+            rois=rois,
             mask_settings=mask_settings,
             external_mask=external_mask,
             external_mask_processed=external_mask_processed,
@@ -4822,20 +3122,20 @@ class MainWindow(MainWindowIcons, QMainWindow):
             "\n"
             "What stays in memory\n"
             "- Processed image cache for the current stack.\n"
-            "- Per-spot absorbance cache for single-spot live preview.\n"
+            "- Per-ROI absorbance cache for single-ROI live preview.\n"
             "- Frame absorbance cache for the same frame/settings combinations.\n"
             "- Sensorgram cache for repeated frame-range calculations.\n"
             "- Chromatic landmarks and fitted transforms.\n"
             "\n"
             "What is loaded live\n"
             "- TIFF or Stack to Zarr planes that are not already cached.\n"
-            "- Uncached spot spectra and sensorgrams.\n"
+            "- Uncached ROI spectra and sensorgrams.\n"
             "- ROI and mask changes that alter the analysis signature.\n"
             "\n"
             "What is already optimized\n"
             "- Image refresh runs in the background.\n"
             "- Neighboring image planes are prefetched.\n"
-            "- Absorbance results are cached per spot and per frame.\n"
+            "- Absorbance results are cached per ROI and per frame.\n"
             "- Sensorgram preparation can reuse cached spectra when available.\n"
             "- Workflow events are mirrored to logs/lspr_imaging_<session>.log.\n"
             "- The Workflow console shows the same events live inside the app.\n"
@@ -4865,21 +3165,31 @@ class MainWindow(MainWindowIcons, QMainWindow):
         dialog.exec()
 
     def _update_status_hint(self) -> None:
-        if self._active_tool == "spots":
-            if self._roi_editor_mode in {"circles", "rectangles"}:
-                if self.spot_move_action.isChecked():
+        if self._active_tool == "roi":
+            if self._roi_editor_mode == "rectangles":
+                if self.roi_move_action.isChecked():
                     self._set_status_hint("Left-click selects ROIs, right-drag moves them, Delete removes selected ROIs.")
-                elif self.spot_add_action.isChecked():
-                    self._set_status_hint("Left-click adds an ROI stamp from the active ROI template.")
+                elif self.roi_add_action.isChecked():
+                    self._set_status_hint("Left-click adds a rectangle ROI stamp from the active template.")
                 elif self.roi_array_action.isChecked():
-                    self._set_status_hint("Left-click stamps an ROI array from the active template.")
+                    self._set_status_hint("Left-click stamps a rectangle ROI array from the active template.")
                 else:
                     self._set_status_hint("Left-click selects ROIs. Shift adds to the selection, Delete removes them.")
                 return
-            if self.spot_move_action.isChecked():
+            if self._roi_editor_mode == "circles":
+                if self.roi_move_action.isChecked():
+                    self._set_status_hint("Left-click selects, right-drag moves. Arrow keys nudge. Delete removes.")
+                elif self.roi_add_action.isChecked():
+                    self._set_status_hint("Left-click places a circle ROI at the cursor position.")
+                elif self.roi_array_action.isChecked():
+                    self._set_status_hint("Left-click stamps a grid of circle ROIs centred on the cursor.")
+                else:
+                    self._set_status_hint("Left-click selects ROIs, Shift adds, box-drag multi-select, Delete removes.")
+                return
+            if self.roi_move_action.isChecked():
                 self._set_status_hint("Left-click selects, Shift adds, left-drag boxes, right-drag moves, middle-drag pans.")
-            elif self.spot_add_action.isChecked():
-                self._set_status_hint("Left-click adds a spot. Shift-click still adds to selection.")
+            elif self.roi_add_action.isChecked():
+                self._set_status_hint("Left-click adds an ROI. Shift-click still adds to selection.")
             else:
                 self._set_status_hint("Left-click selects, Shift adds, left-drag boxes, double-click empty space clears selection.")
             return
@@ -4900,6 +3210,7 @@ class MainWindow(MainWindowIcons, QMainWindow):
         return (
             bool(getattr(self._state.preprocessing, "image_tools_enabled", True)),
             round(float(self._state.preprocessing.rotation_angle_deg), 6),
+            bool(getattr(self._state.preprocessing, "rotation_fill_dark", False)),
             bool(self._state.preprocessing.flip_horizontal),
             bool(self._state.preprocessing.flip_vertical),
             bool(crop.enabled),
@@ -4916,21 +3227,21 @@ class MainWindow(MainWindowIcons, QMainWindow):
             folder_text=self.folder_edit.text(),
             frame_slider_value=int(self.frame_slider.value()) if hasattr(self, "frame_slider") else 0,
             wavelength_slider_value=int(self.wavelength_slider.value()) if hasattr(self, "wavelength_slider") else 0,
-            selected_spot_ids=set(self._selected_spot_ids),
-            spot_visual_color=self._spot_visual_color.name(),
-            ring_visual_color=self._ring_visual_color.name(),
+            selected_roi_ids=set(self._selected_roi_ids),
+            spot_visual_color=self._sample_visual_color.name(),
+            ring_visual_color=self._reference_visual_color.name(),
             mask_visual_color=self._mask_visual_color.name(),
             histogram_mask_visual_color=self._histogram_mask_visual_color.name(),
             figure_mask_visual_color=self._figure_mask_visual_color.name(),
             highlight_visual_color=self._highlight_visual_color.name(),
-            spot_alpha=float(self._spot_alpha),
-            ring_alpha=float(self._ring_alpha),
+            roi_alpha=float(self._roi_alpha),
+            reference_alpha=float(self._reference_alpha),
             mask_alpha=float(self._mask_alpha),
             histogram_mask_alpha=float(self._mask_alpha),  # Use same alpha for now
             figure_mask_alpha=float(self._mask_alpha),     # Use same alpha for now
             highlight_alpha=float(self._highlight_alpha),
-            spots_visible=bool(self._spots_visible),
-            rings_visible=bool(self._rings_visible),
+            spots_visible=bool(self._rois_visible),
+            rings_visible=bool(self._reference_visible),
             mask_visible=bool(self._mask_visible),
             reference_points_visible=bool(self._reference_points_visible),
             histogram_mask_visible=bool(self._mask_visible),  # Use same visibility for now
@@ -4949,16 +3260,16 @@ class MainWindow(MainWindowIcons, QMainWindow):
             snapshot.frame_slider_value,
             snapshot.wavelength_slider_value,
             repr(asdict(snapshot.state.preprocessing)),
-            repr(asdict(snapshot.state.spot_detection)),
-            repr([asdict(spot) for spot in snapshot.state.detected_spots]),
-            repr([asdict(group) for group in snapshot.state.spot_groups]),
-            tuple(sorted(snapshot.selected_spot_ids)),
+            repr(asdict(snapshot.state.area_roi_settings)),
+            repr([asdict(spot) for spot in snapshot.state.area_rois]),
+            repr([asdict(group) for group in snapshot.state.area_roi_groups]),
+            tuple(sorted(snapshot.selected_roi_ids)),
             snapshot.spot_visual_color,
             snapshot.ring_visual_color,
             snapshot.mask_visual_color,
             snapshot.highlight_visual_color,
-            round(snapshot.spot_alpha, 4),
-            round(snapshot.ring_alpha, 4),
+            round(snapshot.roi_alpha, 4),
+            round(snapshot.reference_alpha, 4),
             round(snapshot.mask_alpha, 4),
             round(snapshot.highlight_alpha, 4),
             snapshot.spots_visible,
@@ -5020,20 +3331,21 @@ class MainWindow(MainWindowIcons, QMainWindow):
             self._background_profile_request_id += 1
             self._showing_background_profile_main = False
             self._state = deepcopy(snapshot.state)
+            self._reset_roi_id_counter_from_state()
             self.folder_edit.setText(snapshot.folder_text)
-            self._selected_spot_ids = set(snapshot.selected_spot_ids)
-            self._spot_visual_color = QColor(snapshot.spot_visual_color)
-            self._ring_visual_color = QColor(snapshot.ring_visual_color)
+            self._selected_roi_ids = set(snapshot.selected_roi_ids)
+            self._sample_visual_color = QColor(snapshot.spot_visual_color)
+            self._reference_visual_color = QColor(snapshot.ring_visual_color)
             self._mask_visual_color = QColor(snapshot.mask_visual_color)
             self._histogram_mask_visual_color = QColor(snapshot.histogram_mask_visual_color)
             self._figure_mask_visual_color = QColor(snapshot.figure_mask_visual_color)
             self._highlight_visual_color = QColor(snapshot.highlight_visual_color)
-            self._spot_alpha = snapshot.spot_alpha
-            self._ring_alpha = snapshot.ring_alpha
+            self._roi_alpha = snapshot.roi_alpha
+            self._reference_alpha = snapshot.reference_alpha
             self._mask_alpha = snapshot.mask_alpha
             self._highlight_alpha = snapshot.highlight_alpha
-            self._spots_visible = snapshot.spots_visible
-            self._rings_visible = snapshot.rings_visible
+            self._rois_visible = snapshot.spots_visible
+            self._reference_visible = snapshot.rings_visible
             self._mask_visible = snapshot.mask_visible
             self._reference_points_visible = snapshot.reference_points_visible
             self._highlight_visible = snapshot.highlight_visible
@@ -5063,42 +3375,42 @@ class MainWindow(MainWindowIcons, QMainWindow):
             self._sync_image_processing_controls()
             self._configure_navigation_inputs()
             self._update_analysis_control_state()
-            self._sync_spot_detection_controls()
+            self._sync_roi_detection_controls()
             self._update_mask_file_button_state()
             self._update_color_button_styles()
-            self.show_spots_check.blockSignals(True)
-            self.bottom_spot_labels_button.blockSignals(True)
-            self.spot_editor_labels_button.blockSignals(True)
+            self.show_rois_check.blockSignals(True)
+            self.bottom_roi_labels_button.blockSignals(True)
+            self.roi_editor_labels_button.blockSignals(True)
             self.show_rings_check.blockSignals(True)
             self.show_mask_check.blockSignals(True)
             self.show_reference_points_check.blockSignals(True)
             self.show_highlight_check.blockSignals(True)
-            self.show_spots_check.setChecked(self._spots_visible)
-            self.bottom_spot_labels_button.setChecked(self._spot_labels_visible)
-            self.spot_editor_labels_button.setChecked(self._spot_labels_visible)
-            self.show_rings_check.setChecked(self._rings_visible)
+            self.show_rois_check.setChecked(self._rois_visible)
+            self.bottom_roi_labels_button.setChecked(self._roi_labels_visible)
+            self.roi_editor_labels_button.setChecked(self._roi_labels_visible)
+            self.show_rings_check.setChecked(self._reference_visible)
             self.show_mask_check.setChecked(self._mask_visible)
             self.show_reference_points_check.setChecked(self._reference_points_visible)
             self.show_highlight_check.setChecked(self._highlight_visible)
-            self.show_spots_check.blockSignals(False)
-            self.bottom_spot_labels_button.blockSignals(False)
-            self.spot_editor_labels_button.blockSignals(False)
+            self.show_rois_check.blockSignals(False)
+            self.bottom_roi_labels_button.blockSignals(False)
+            self.roi_editor_labels_button.blockSignals(False)
             self.show_rings_check.blockSignals(False)
             self.show_mask_check.blockSignals(False)
             self.show_reference_points_check.blockSignals(False)
             self.show_highlight_check.blockSignals(False)
             self._refresh_view_toggle_icons()
-            self._update_spot_label_button_icon(bool(self._spot_labels_visible))
-            self.spot_alpha_slider.blockSignals(True)
-            self.ring_alpha_slider.blockSignals(True)
+            self._update_spot_label_button_icon(bool(self._roi_labels_visible))
+            self.roi_alpha_slider.blockSignals(True)
+            self.reference_alpha_slider.blockSignals(True)
             self.mask_alpha_slider.blockSignals(True)
             self.highlight_alpha_slider.blockSignals(True)
-            self.spot_alpha_slider.setValue(int(round(self._spot_alpha * 100.0)))
-            self.ring_alpha_slider.setValue(int(round(self._ring_alpha * 100.0)))
+            self.roi_alpha_slider.setValue(int(round(self._roi_alpha * 100.0)))
+            self.reference_alpha_slider.setValue(int(round(self._reference_alpha * 100.0)))
             self.mask_alpha_slider.setValue(int(round(self._mask_alpha * 100.0)))
             self.highlight_alpha_slider.setValue(int(round(self._highlight_alpha * 100.0)))
-            self.spot_alpha_slider.blockSignals(False)
-            self.ring_alpha_slider.blockSignals(False)
+            self.roi_alpha_slider.blockSignals(False)
+            self.reference_alpha_slider.blockSignals(False)
             self.mask_alpha_slider.blockSignals(False)
             self.highlight_alpha_slider.blockSignals(False)
 
@@ -5241,7 +3553,7 @@ class MainWindow(MainWindowIcons, QMainWindow):
         if self._current_processed_image is None:
             return
         self._histogram_refresh_timer.start()
-        if not self._dragging_spots and not self._spot_edit_refresh_pending:
+        if not self._dragging_spots and not self._roi_edit_refresh_pending:
             self._schedule_absorbance_spectrum_refresh()
 
     def _schedule_processing_state_save(self) -> None:
@@ -5250,184 +3562,42 @@ class MainWindow(MainWindowIcons, QMainWindow):
     def _mask_preview_signature(self, image_key: tuple[int, float] | None = None) -> tuple[object, ...]:
         target_key = image_key if image_key is not None else self._current_image_key
         return (
-            bool(self._state.spot_detection.ignore_marked_pixels),
+            bool(self._state.area_roi_settings.ignore_marked_pixels),
             int(self._mask_state_revision),
             self._external_mask_signature(target_key),
         )
 
     def _background_profile_signature(self) -> tuple[object, ...] | None:
-        if self._current_record_path is None or self._current_image_key is None:
-            return None
-        crop = self._state.preprocessing.crop
-        return (
-            str(self._current_record_path),
-            self._current_image_key,
-            bool(getattr(self._state.preprocessing, "image_tools_enabled", True)),
-            round(float(self._state.preprocessing.rotation_angle_deg), 6),
-            bool(self._state.preprocessing.flip_horizontal),
-            bool(self._state.preprocessing.flip_vertical),
-            self._chromatic_signature_for_image_key(self._current_image_key),
-            bool(crop.enabled),
-            int(crop.x),
-            int(crop.y),
-            int(crop.width),
-            int(crop.height),
-            round(float(self._state.preprocessing.flatten_background_sigma_px), 3),
-            int(max(getattr(self._state.preprocessing, "flatten_background_binning", 2), 1)),
-            bool(self._state.preprocessing.flatten_background_exclude_spots),
-            bool(self._state.preprocessing.flatten_background_exclude_mask),
-            self._spot_signature(self._spots_for_preprocessing(self._current_image_key))
-            if self._state.preprocessing.flatten_background_exclude_spots
-            else None,
-            self._mask_preview_signature() if self._state.preprocessing.flatten_background_exclude_mask else None,
-        )
+        return self._bg_profile._background_profile_signature()
 
     def _calculate_background_profile_image(self) -> np.ndarray | None:
-        if self._current_record_path is None or self._current_image_key is None:
-            return None
-        spots = (
-            deepcopy(self._spots_for_preprocessing(self._current_image_key))
-            if self._state.preprocessing.flatten_background_exclude_spots
-            else None
-        )
-        preprocessing = deepcopy(self._state.preprocessing)
-        mask_settings = deepcopy(self._state.spot_detection) if self._state.preprocessing.flatten_background_exclude_mask else None
-        external_mask, external_mask_processed = self._effective_external_mask_for_record(
-            self._current_record_path,
-            processed_space=True,
-        )
-        return _background_profile_task(
-            str(self._current_record_path),
-            (preprocessing, mask_settings, external_mask_processed),
-            float(self._state.preprocessing.flatten_background_sigma_px),
-            spots,
-            external_mask,
-        )
+        return self._bg_profile._calculate_background_profile_image()
 
     def _update_background_profile_preview(self) -> None:
-        signature = self._background_profile_signature()
-        if signature is None:
-            return
-        if (
-            self._background_profile_cache_signature == signature
-            and self._background_profile_cache_image is not None
-        ):
-            if self._showing_background_profile_main:
-                self._apply_main_image_content()
-            return
-        spots = (
-            deepcopy(self._spots_for_preprocessing(self._current_image_key))
-            if self._state.preprocessing.flatten_background_exclude_spots
-            else None
-        )
-        preprocessing = deepcopy(self._state.preprocessing)
-        mask_settings = deepcopy(self._state.spot_detection) if self._state.preprocessing.flatten_background_exclude_mask else None
-        external_mask, external_mask_processed = self._effective_external_mask_for_record(
-            self._current_record_path,
-            processed_space=True,
-        )
-        request_id = self._background_profile_request_id + 1
-        self._background_profile_request_id = request_id
-        worker = FunctionWorker(
-            _background_profile_task,
-            str(self._current_record_path),
-            (preprocessing, mask_settings, external_mask_processed),
-            float(self._state.preprocessing.flatten_background_sigma_px),
-            spots,
-            external_mask,
-            supports_progress=True,
-        )
-        self._begin_busy("Updating background profile preview...")
-        self._append_workflow_log("Background profile preview start", level="info")
-        worker.signals.progress.connect(self._update_busy_progress)
-        worker.signals.result.connect(
-            lambda profile,
-            request_id=request_id,
-            signature=signature: self._on_background_profile_ready(request_id, signature, profile)
-        )
-        worker.signals.error.connect(lambda message: self._on_background_profile_failed(message))
-        self._thread_pool.start(worker)
+        self._bg_profile._update_background_profile_preview()
 
     def _on_background_profile_ready(
         self,
         request_id: int,
         signature: tuple[object, ...],
-        profile: np.ndarray,
+        profile,
     ) -> None:
-        self._end_busy()
-        if request_id != self._background_profile_request_id:
-            return
-        if signature != self._background_profile_signature():
-            return
-        self._background_profile_cache_signature = signature
-        self._background_profile_cache_image = profile
-        self._append_workflow_log("Background profile preview done", level="success")
-        if self._showing_background_profile_main:
-            self._apply_main_image_content()
+        self._bg_profile._on_background_profile_ready(request_id, signature, profile)
 
     def _on_background_profile_failed(self, message: str) -> None:
-        self._end_busy()
-        self._append_workflow_log(f"Background profile preview failed | {message}", level="error")
-        self._background_error("Background profile preview", message)
+        self._bg_profile._on_background_profile_failed(message)
 
     def _invalidate_background_profile_cache(self) -> None:
-        self._background_profile_cache_signature = None
-        self._background_profile_cache_image = None
+        self._bg_profile._invalidate_background_profile_cache()
 
     def _apply_main_image_content(self) -> None:
-        if self._showing_background_profile_main and self._background_profile_cache_image is not None:
-            self.image_item.setImage(self._background_profile_cache_image.T, autoLevels=True)
-        elif self._current_processed_image is not None:
-            self.image_item.setImage(self._current_processed_image.T, autoLevels=True)
-        self._sync_main_view_mode()
-        self._update_reference_star_overlay()
+        self._bg_profile._apply_main_image_content()
 
     def _sync_main_view_mode(self) -> None:
-        showing_profile = self._showing_background_profile_main and self._background_profile_cache_image is not None
-        if showing_profile:
-            self.intensity_highlight_item.hide()
-            self.ignore_mask_item.hide()
-            if self._crop_roi is not None:
-                self._crop_roi.setVisible(False)
-            self._update_crop_overlay()
-            for bundle in self._spot_overlay_items.values():
-                bundle.curve.setVisible(False)
-                if bundle.ring_fill is not None:
-                    bundle.ring_fill.setVisible(False)
-                if bundle.inner_curve is not None:
-                    bundle.inner_curve.setVisible(False)
-                if bundle.outer_curve is not None:
-                    bundle.outer_curve.setVisible(False)
-                if bundle.label is not None:
-                    bundle.label.setVisible(False)
-            for bundle in self._guide_overlay_items.values():
-                bundle.vertical.setVisible(False)
-                bundle.horizontal.setVisible(False)
-                bundle.marker.setVisible(False)
-            for bundle in self._landmark_overlay_items.values():
-                bundle.curve.setVisible(False)
-                bundle.label.setVisible(False)
-            self._hide_measurement_overlay()
-            self._refresh_scale_bar_overlay()
-            return
-        self._update_selected_intensity_overlay()
-        self._update_ignore_mask_overlay()
-        self._sync_rotation_visibility()
-        self._sync_crop_visibility()
-        self._update_spot_overlays()
-        self._update_landmark_overlays()
-        self._update_guide_overlays()
-        self._sync_measurement_visibility()
-        self._update_reference_star_overlay()
+        self._bg_profile._sync_main_view_mode()
 
     def _sync_background_profile_buttons(self, checked: bool) -> None:
-        for button in (getattr(self, "background_profile_hold_button", None), getattr(self, "background_profile_button", None)):
-            if button is None:
-                continue
-            button.blockSignals(True)
-            button.setChecked(bool(checked))
-            button.setIcon(self._make_background_profile_icon(bool(checked), size=APP_THEME.compact_icon_inner))
-            button.blockSignals(False)
+        self._bg_profile._sync_background_profile_buttons(checked)
 
     def _sync_background_exclusion_buttons(self) -> None:
         if hasattr(self, "background_ignore_spot_button"):
@@ -5448,17 +3618,7 @@ class MainWindow(MainWindowIcons, QMainWindow):
             )
 
     def _on_background_profile_toggled(self, checked: bool) -> None:
-        self._showing_background_profile_main = bool(checked)
-        self._sync_background_profile_buttons(bool(checked))
-        if checked:
-            self._update_background_profile_preview()
-            if self._background_profile_cache_image is not None:
-                self._apply_main_image_content()
-            else:
-                self._sync_main_view_mode()
-        else:
-            self._apply_main_image_content()
-        self._save_visual_preferences()
+        self._bg_profile._on_background_profile_toggled(checked)
 
     def _apply_dark_plot_theme(self) -> None:
         theme = get_active_theme()
@@ -5513,8 +3673,8 @@ class MainWindow(MainWindowIcons, QMainWindow):
         self._refresh_pin_and_apply_icons()
         self._refresh_collapsible_styles()
         self._apply_high_contrast_button_styles()
-        self._apply_spot_list_table_style()
-        self._update_spot_label_button_icon(self._spot_labels_visible)
+        self._apply_roi_table_style()
+        self._update_spot_label_button_icon(self._roi_labels_visible)
         self._apply_histogram_log_mode(refresh=not self._startup_restore_in_progress)
 
     def _refresh_pin_and_apply_icons(self) -> None:
@@ -5523,7 +3683,7 @@ class MainWindow(MainWindowIcons, QMainWindow):
             getattr(self, "mask_section", None),
             getattr(self, "chromatic_section", None),
             getattr(self, "image_tools_section", None),
-            getattr(self, "spot_editor_section", None),
+            getattr(self, "roi_editor_section", None),
             getattr(self, "background_section", None),
             getattr(self, "analysis_section", None),
         ):
@@ -5540,7 +3700,7 @@ class MainWindow(MainWindowIcons, QMainWindow):
             getattr(self, "mask_section", None),
             getattr(self, "chromatic_section", None),
             getattr(self, "image_tools_section", None),
-            getattr(self, "spot_editor_section", None),
+            getattr(self, "roi_editor_section", None),
             getattr(self, "background_section", None),
             getattr(self, "analysis_section", None),
         ):
@@ -5587,14 +3747,14 @@ class MainWindow(MainWindowIcons, QMainWindow):
             self.chromatic_transform_button,
             self.ignore_marked_check,
             self.background_removal_link,
-            self.clear_spot_selection_button,
+            self.clear_roi_selection_button,
         ]
         for button in buttons:
             button.setStyleSheet(style)
 
-    def _apply_spot_list_table_style(self) -> None:
+    def _apply_roi_table_style(self) -> None:
         theme = get_active_theme()
-        self.spot_list_table.setStyleSheet(
+        self.roi_table.setStyleSheet(
             "QTableWidget {"
             f"  font-size: 8pt;"
             f"  color: {theme.text_primary};"
@@ -5631,7 +3791,7 @@ class MainWindow(MainWindowIcons, QMainWindow):
                     event.accept()
                     return
         
-        if self._active_tool == "spots" and event.key() in {Qt.Key.Key_PageUp, Qt.Key.Key_PageDown}:
+        if self._active_tool == "roi" and event.key() in {Qt.Key.Key_PageUp, Qt.Key.Key_PageDown}:
             if event.modifiers() & Qt.KeyboardModifier.ShiftModifier:
                 direction = -1 if event.key() == Qt.Key.Key_PageUp else 1
                 if self._navigate_wavelength_image(direction):
@@ -5655,7 +3815,7 @@ class MainWindow(MainWindowIcons, QMainWindow):
             self._adjust_rotation(step)
             event.accept()
             return
-        if self._active_tool == "spots" and self._roi_editor_mode in {"circles", "rectangles"}:
+        if self._active_tool == "roi" and self._roi_editor_mode == "rectangles":
             if event.key() in {Qt.Key.Key_Delete, Qt.Key.Key_Backspace}:
                 self._remove_selected_rectangle_rois()
                 event.accept()
@@ -5665,7 +3825,7 @@ class MainWindow(MainWindowIcons, QMainWindow):
                 Qt.Key.Key_Right,
                 Qt.Key.Key_Up,
                 Qt.Key.Key_Down,
-            } and self.spot_move_action.isChecked() and self._selected_rectangle_roi_ids:
+            } and self.roi_move_action.isChecked() and self._selected_rectangle_roi_ids:
                 step = 1.0
                 if event.modifiers() & Qt.KeyboardModifier.ControlModifier:
                     step = 5.0
@@ -5682,7 +3842,7 @@ class MainWindow(MainWindowIcons, QMainWindow):
                 self._move_selected_rectangle_rois(dx, dy)
                 event.accept()
                 return
-        if self._active_tool == "spots" and event.key() in {
+        if self._active_tool == "roi" and event.key() in {
             Qt.Key.Key_Left,
             Qt.Key.Key_Right,
             Qt.Key.Key_Up,
@@ -5692,7 +3852,7 @@ class MainWindow(MainWindowIcons, QMainWindow):
                 if self._select_neighbor_spot(event.key()):
                     event.accept()
                     return
-            elif self._is_current_reference_image() and self.spot_move_action.isChecked() and self._selected_spot_ids:
+            elif self._is_current_reference_image() and self.roi_move_action.isChecked() and self._selected_roi_ids:
                 step = 1.0
                 if event.modifiers() & Qt.KeyboardModifier.ControlModifier:
                     step = 5.0
@@ -5706,7 +3866,7 @@ class MainWindow(MainWindowIcons, QMainWindow):
                     dy = -step
                 elif event.key() == Qt.Key.Key_Down:
                     dy = step
-                self._move_selected_spots(dx, dy)
+                self._move_selected_rois(dx, dy)
                 event.accept()
                 return
         super().keyPressEvent(event)
@@ -5907,7 +4067,8 @@ class MainWindow(MainWindowIcons, QMainWindow):
             section.blockSignals(previous)
 
     def _unlink_image_tools_for_preview(self) -> bool:
-        if not bool(self._state.preprocessing.image_tools_enabled):
+        self._image_tools_pre_preview_enabled = bool(self._state.preprocessing.image_tools_enabled)
+        if not self._image_tools_pre_preview_enabled:
             self._image_tools_preview_only = True
             return False
         self._state.preprocessing.image_tools_enabled = False
@@ -5917,7 +4078,7 @@ class MainWindow(MainWindowIcons, QMainWindow):
         return True
 
     def _mask_section_applied(self) -> bool:
-        return bool(self._state.spot_detection.ignore_marked_pixels)
+        return bool(self._state.area_roi_settings.ignore_marked_pixels)
 
     def _bind_collapsible_group(self, sections: list[CollapsibleSection]) -> None:
         for section in sections:
@@ -5932,17 +4093,17 @@ class MainWindow(MainWindowIcons, QMainWindow):
         self._save_layout_preferences()
 
     def _restore_layout_preferences(self) -> None:
-        spot_list_visible = self._settings_bool("layout/spot_list_visible", True)
-        cached_spots_only_visible = self._settings_bool("layout/cached_spots_only_visible", False)
-        self.spot_list_action.blockSignals(True)
-        self.spot_list_action.setChecked(spot_list_visible)
-        self.spot_list_action.blockSignals(False)
-        if hasattr(self, "spot_list_cached_button"):
-            self.spot_list_cached_button.blockSignals(True)
-            self.spot_list_cached_button.setChecked(cached_spots_only_visible)
-            self.spot_list_cached_button.setIcon(self._make_cached_spots_icon(cached_spots_only_visible))
-            self.spot_list_cached_button.blockSignals(False)
-        self._cached_spots_only_visible = cached_spots_only_visible
+        roi_list_visible = self._settings_bool("layout/roi_list_visible", True)
+        cached_spots_only_visible = self._settings_bool("layout/cached_rois_only_visible", False)
+        self.roi_list_action.blockSignals(True)
+        self.roi_list_action.setChecked(roi_list_visible)
+        self.roi_list_action.blockSignals(False)
+        if hasattr(self, "roi_list_cached_button"):
+            self.roi_list_cached_button.blockSignals(True)
+            self.roi_list_cached_button.setChecked(cached_spots_only_visible)
+            self.roi_list_cached_button.setIcon(self._make_cached_rois_icon(cached_spots_only_visible))
+            self.roi_list_cached_button.blockSignals(False)
+        self._cached_rois_only_visible = cached_spots_only_visible
         self._suspend_collapsible_accordion = True
         try:
             self.dataset_section.set_pinned(self._settings_bool("dataset_section_pinned", False))
@@ -5953,8 +4114,8 @@ class MainWindow(MainWindowIcons, QMainWindow):
             self.mask_section.set_expanded(self._settings_bool("mask_section_expanded", True))
             self.image_tools_section.set_pinned(self._settings_bool("image_tools_panel_pinned", False))
             self.image_tools_section.set_expanded(self._settings_bool("image_tools_panel_expanded", True))
-            self.spot_editor_section.set_pinned(self._settings_bool("spot_editor_section_pinned", False))
-            self.spot_editor_section.set_expanded(self._settings_bool("spot_editor_section_expanded", True))
+            self.roi_editor_section.set_pinned(self._settings_bool("roi_editor_section_pinned", False))
+            self.roi_editor_section.set_expanded(self._settings_bool("roi_editor_section_expanded", True))
             self.background_section.set_pinned(self._settings_bool("background_section_pinned", False))
             self.background_section.set_expanded(self._settings_bool("background_section_expanded", True))
             self.analysis_section.set_pinned(self._settings_bool("analysis_section_pinned", False))
@@ -5982,8 +4143,8 @@ class MainWindow(MainWindowIcons, QMainWindow):
         if not self._layout_preferences_ready or self._suspend_layout_save:
             return
         self._settings.setValue("left_tab_index", self.left_tabs.currentIndex())
-        self._settings.setValue("layout/spot_list_visible", bool(self.spot_list_panel.isVisible()))
-        self._settings.setValue("layout/cached_spots_only_visible", bool(self._cached_spots_only_visible))
+        self._settings.setValue("layout/roi_list_visible", bool(self.roi_list_panel.isVisible()))
+        self._settings.setValue("layout/cached_rois_only_visible", bool(self._cached_rois_only_visible))
         self._settings.setValue("dataset_section_expanded", self.dataset_section.is_expanded())
         self._settings.setValue("dataset_section_pinned", self.dataset_section.is_pinned())
         self._settings.setValue("chromatic_section_expanded", self.chromatic_section.is_expanded())
@@ -5992,8 +4153,8 @@ class MainWindow(MainWindowIcons, QMainWindow):
         self._settings.setValue("mask_section_pinned", self.mask_section.is_pinned())
         self._settings.setValue("image_tools_panel_expanded", self.image_tools_section.is_expanded())
         self._settings.setValue("image_tools_panel_pinned", self.image_tools_section.is_pinned())
-        self._settings.setValue("spot_editor_section_expanded", self.spot_editor_section.is_expanded())
-        self._settings.setValue("spot_editor_section_pinned", self.spot_editor_section.is_pinned())
+        self._settings.setValue("roi_editor_section_expanded", self.roi_editor_section.is_expanded())
+        self._settings.setValue("roi_editor_section_pinned", self.roi_editor_section.is_pinned())
         self._settings.setValue("background_section_expanded", self.background_section.is_expanded())
         self._settings.setValue("background_section_pinned", self.background_section.is_pinned())
         self._settings.setValue("analysis_section_expanded", self.analysis_section.is_expanded())
@@ -6040,7 +4201,7 @@ class MainWindow(MainWindowIcons, QMainWindow):
     def _panel_layout_panels(self) -> list[tuple[str, QWidget]]:
         return [
             ("workflow_panel", self.workflow_panel),
-            ("spot_list_panel", self.spot_list_panel),
+            ("roi_list_panel", self.roi_list_panel),
             ("image_panel", self.image_panel),
             ("histogram_panel", self.histogram_panel),
             ("spectra_panel", self.spectra_panel),
@@ -6205,9 +4366,9 @@ class MainWindow(MainWindowIcons, QMainWindow):
 
     def _normalize_mask_application_state(self) -> None:
         apply_mask = bool(
-            self._state.spot_detection.ignore_marked_pixels or self._state.preprocessing.flatten_background_exclude_mask
+            self._state.area_roi_settings.ignore_marked_pixels or self._state.preprocessing.flatten_background_exclude_mask
         )
-        self._state.spot_detection.ignore_marked_pixels = apply_mask
+        self._state.area_roi_settings.ignore_marked_pixels = apply_mask
         self._state.preprocessing.flatten_background_exclude_mask = apply_mask
 
     def _processing_state_signature(self) -> str:
@@ -6230,10 +4391,10 @@ class MainWindow(MainWindowIcons, QMainWindow):
             )
         payload = {
             "preprocessing": asdict(self._state.preprocessing),
-            "spot_detection": asdict(self._state.spot_detection),
+            "spot_detection": asdict(self._state.area_roi_settings),
             "mask_settings": _mask_signature(self._state.mask),
-            "detected_spots": [asdict(spot) for spot in self._state.detected_spots],
-            "spot_groups": [asdict(group) for group in self._state.spot_groups],
+            "detected_spots": [asdict(roi) for roi in self._state.area_rois],
+            "spot_groups": [asdict(group) for group in self._state.area_roi_groups],
             "chromatic_models": [asdict(model) for model in self._state.chromatic_models],
             "chromatic_landmarks": [asdict(landmark) for landmark in self._state.chromatic_landmarks],
             "file_mask_path": str(self._current_file_mask_path) if self._current_file_mask_path is not None else None,
@@ -6261,6 +4422,25 @@ class MainWindow(MainWindowIcons, QMainWindow):
             action.blockSignals(True)
             action.setChecked(int(value) == timeout)
             action.blockSignals(False)
+
+    def _set_ui_scale_factor(self, value: str) -> None:
+        self._settings.setValue("ui/scale_factor", value)
+        for v, action in getattr(self, "_ui_scale_actions", {}).items():
+            action.blockSignals(True)
+            action.setChecked(v == value)
+            action.blockSignals(False)
+        reply = QMessageBox.question(
+            self,
+            "UI Scale",
+            "Restart now to apply the new UI scale?\n"
+            "Your current session will be saved and restored automatically.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.Yes,
+        )
+        if reply == QMessageBox.StandardButton.Yes:
+            self._save_processing_state_for_dataset()
+            subprocess.Popen([sys.executable] + sys.argv)
+            self.close()
 
     def _schedule_spot_state_save(self) -> None:
         self._spot_state_save_timer.start()
@@ -6493,17 +4673,17 @@ class MainWindow(MainWindowIcons, QMainWindow):
             tuple(tuple(round(float(value), 6) for value in row) for row in model.affine_matrix),
         )
 
-    def _display_spots(self, image_key: tuple[int, float] | None = None) -> list[DetectedSpot]:
+    def _display_rois(self, image_key: tuple[int, float] | None = None) -> list[AreaRoi]:
         target_key = image_key if image_key is not None else self._current_image_key
         if target_key is None:
-            return self._state.detected_spots
+            return self._state.area_rois
         if self._is_reference_image_key(target_key):
-            return self._state.detected_spots
+            return self._state.area_rois
         if self._current_processed_image is None and image_key is None:
-            return self._state.detected_spots
+            return self._state.area_rois
         signature = (
             target_key,
-            self._spot_signature(self._state.detected_spots),
+            self._roi_signature(self._state.area_rois),
             self._chromatic_signature_for_image_key(target_key),
             None if self._current_processed_image is None else self._current_processed_image.shape[:2],
         )
@@ -6511,28 +4691,28 @@ class MainWindow(MainWindowIcons, QMainWindow):
             return self._display_spot_cache_value
         affine_matrix = self._chromatic_affine_for_image_key(target_key)
         if affine_matrix is None:
-            transformed = self._state.detected_spots
+            transformed = self._state.area_rois
         else:
             clamp_shape = self._current_processed_image.shape[:2] if self._current_processed_image is not None else None
-            transformed = transform_spots_affine(self._state.detected_spots, affine_matrix, clamp_shape=clamp_shape)
+            transformed = transform_spots_affine(self._state.area_rois, affine_matrix, clamp_shape=clamp_shape)
         self._display_spot_cache_signature = signature
         self._display_spot_cache_value = transformed
         return transformed
 
-    def _spots_for_preprocessing(self, image_key: tuple[int, float] | None) -> list[DetectedSpot]:
+    def _rois_for_preprocessing(self, image_key: tuple[int, float] | None) -> list[AreaRoi]:
         if image_key is None or self._is_reference_image_key(image_key):
-            return self._state.detected_spots
+            return self._state.area_rois
         if not self._state.preprocessing.chromatic_correction_enabled:
-            return self._state.detected_spots
+            return self._state.area_rois
         affine_matrix = self._chromatic_affine_for_image_key(image_key)
         if affine_matrix is None:
-            return self._state.detected_spots
-        return transform_spots_affine(self._state.detected_spots, affine_matrix)
+            return self._state.area_rois
+        return transform_spots_affine(self._state.area_rois, affine_matrix)
 
-    def _spot_curve_points(
+    def _roi_curve_points(
         self,
-        source_spot: DetectedSpot,
-        display_spot: DetectedSpot,
+        source_roi: AreaRoi,
+        display_spot: AreaRoi,
         radius_px: float,
     ) -> tuple[np.ndarray, np.ndarray]:
         affine_matrix = self._chromatic_affine_for_image_key(self._current_image_key)
@@ -6542,7 +4722,7 @@ class MainWindow(MainWindowIcons, QMainWindow):
             ys = display_spot.center_y + float(radius_px) * np.sin(theta)
             return xs, ys
         return transformed_circle_points(
-            (float(source_spot.center_x), float(source_spot.center_y)),
+            (float(source_roi.center_x), float(source_roi.center_y)),
             float(radius_px),
             affine_matrix,
             self._spot_overlay_theta,
@@ -6557,28 +4737,28 @@ class MainWindow(MainWindowIcons, QMainWindow):
         reference_points_visible: bool,
         highlight_visible: bool,
     ) -> None:
-        self._spots_visible = bool(spots_visible)
-        self._rings_visible = bool(rings_visible)
+        self._rois_visible = bool(spots_visible)
+        self._reference_visible = bool(rings_visible)
         self._mask_visible = bool(mask_visible)
         self._reference_points_visible = bool(reference_points_visible)
         self._highlight_visible = bool(highlight_visible)
-        self.show_spots_check.blockSignals(True)
+        self.show_rois_check.blockSignals(True)
         self.show_rings_check.blockSignals(True)
         self.show_mask_check.blockSignals(True)
         self.show_reference_points_check.blockSignals(True)
         self.show_highlight_check.blockSignals(True)
-        self.show_spots_check.setChecked(self._spots_visible)
-        self.show_rings_check.setChecked(self._rings_visible)
+        self.show_rois_check.setChecked(self._rois_visible)
+        self.show_rings_check.setChecked(self._reference_visible)
         self.show_mask_check.setChecked(self._mask_visible)
         self.show_reference_points_check.setChecked(self._reference_points_visible)
         self.show_highlight_check.setChecked(self._highlight_visible)
-        self.show_spots_check.blockSignals(False)
+        self.show_rois_check.blockSignals(False)
         self.show_rings_check.blockSignals(False)
         self.show_mask_check.blockSignals(False)
         self.show_reference_points_check.blockSignals(False)
         self.show_highlight_check.blockSignals(False)
         self._refresh_view_toggle_icons()
-        self._update_spot_overlays()
+        self._update_roi_overlays()
         self._update_ignore_mask_overlay()
         self._update_selected_intensity_overlay()
         self._update_landmark_overlays()
@@ -6586,8 +4766,8 @@ class MainWindow(MainWindowIcons, QMainWindow):
     def _enter_chromatic_setup_mode(self) -> None:
         if self._chromatic_setup_saved_visibility is None:
             self._chromatic_setup_saved_visibility = (
-                bool(self._spots_visible),
-                bool(self._rings_visible),
+                bool(self._rois_visible),
+                bool(self._reference_visible),
                 bool(self._mask_visible),
                 bool(self._reference_points_visible),
                 bool(self._highlight_visible),
@@ -6735,77 +4915,7 @@ class MainWindow(MainWindowIcons, QMainWindow):
         return default_landmark_anchors(image_shape, feature_count)
 
     def _update_chromatic_summary(self) -> None:
-        if not self._state.dataset:
-            self.chromatic_summary.setText("No dataset loaded.")
-            self.chromatic_progress_label.setText("No dataset loaded.")
-            self.chromatic_transform_button.setEnabled(False)
-            self.chromatic_apply_check.setEnabled(False)
-            self.chromatic_section.set_apply_enabled(False)
-            self._set_section_applied(self.chromatic_section, bool(self._state.preprocessing.chromatic_correction_enabled))
-            self.chromatic_transform_button.setPixmap(self._chromatic_transform_icon(False).pixmap(24, 24))
-            self.chromatic_transform_button.setToolTip(
-                "Estimate chromatic transforms."
-            )
-            return
-        model_count = len(self._state.chromatic_models)
-        sample_keys = self._chromatic_sample_image_keys()
-        feature_ids = self._expected_chromatic_feature_ids()
-        filled_samples = 0
-        current_index = self._current_chromatic_sample_index()
-        for sample_key in sample_keys:
-            sample_marks = {
-                int(mark.landmark_id)
-                for mark in self._state.chromatic_landmarks
-                if int(mark.frame_index) == int(sample_key[0]) and abs(float(mark.wavelength_nm) - float(sample_key[1])) < 1e-6
-            }
-            if all(feature_id in sample_marks for feature_id in feature_ids):
-                filled_samples += 1
-        can_estimate = bool(sample_keys) and filled_samples == len(sample_keys) and len(feature_ids) >= 2
-        controls_locked = self._chromatic_auto_running
-        can_apply_models = model_count > 0 and not controls_locked
-        can_toggle_transform = (can_estimate or model_count > 0) and not controls_locked
-        self.chromatic_transform_button.setEnabled(can_toggle_transform)
-        self.chromatic_transform_button.setPixmap(self._chromatic_transform_icon(model_count > 0).pixmap(24, 24))
-        if model_count > 0:
-            self.chromatic_transform_button.setToolTip("Clear saved chromatic transforms.")
-        elif can_estimate:
-            self.chromatic_transform_button.setToolTip("Estimate chromatic transforms.")
-        else:
-            self.chromatic_transform_button.setToolTip("Estimate chromatic transforms.")
-        self.chromatic_apply_check.setEnabled(can_apply_models)
-        self.chromatic_section.set_apply_enabled(can_apply_models)
-        self._set_section_applied(self.chromatic_section, bool(self._state.preprocessing.chromatic_correction_enabled))
-        self.chromatic_summary.setText("Radial setup ready." if self._chromatic_setup_active else "Radial workflow ready.")
-        if sample_keys and current_index is not None:
-            current_key = sample_keys[current_index]
-            marked_current = len(
-                {
-                    int(mark.landmark_id)
-                    for mark in self._state.chromatic_landmarks
-                    if int(mark.frame_index) == int(current_key[0]) and abs(float(mark.wavelength_nm) - float(current_key[1])) < 1e-6
-                }
-            )
-            self.chromatic_progress_label.setText(
-                f"Sample image {current_index + 1}/{len(sample_keys)} at {current_key[1]:g} nm | "
-                f"reference points marked: {marked_current}/{len(feature_ids)} | "
-                f"completed sample images: {filled_samples}/{len(sample_keys)}"
-            )
-        elif sample_keys:
-            middle_index = len(sample_keys) // 2
-            self.chromatic_progress_label.setText(
-                f"Procedure ready: {len(sample_keys)} sampled wavelengths, middle reference at {sample_keys[middle_index][1]:g} nm."
-            )
-        else:
-            self.chromatic_progress_label.setText("Edit the radial workflow to choose sampled wavelengths.")
-        if model_count == 0:
-            return
-        rmses = [float(model.rmse_px) for model in self._state.chromatic_models if model.rmse_px > 0.0]
-        rmse_text = f"{float(np.mean(rmses)):.2f} px" if rmses else "0.00 px"
-        self.chromatic_summary.setText("Transforms estimated.")
-        self.chromatic_progress_label.setText(
-            f"Transforms ready for {model_count} image(s) | mean fit RMSE: {rmse_text} | "
-            f"{'applied' if self._state.preprocessing.chromatic_correction_enabled else 'ready to apply'}"
-        )
+        self._chromatic_controller._update_chromatic_summary()
 
     def _update_chromatic_control_state(self) -> None:
         self._ui_state_manager.update_chromatic_control_state()
@@ -6814,69 +4924,13 @@ class MainWindow(MainWindowIcons, QMainWindow):
         return bool(self._state.chromatic_landmarks) and not self._chromatic_auto_running and not self.chromatic_start_button.isChecked()
 
     def _on_chromatic_reference_points_all_toggled(self, checked: bool) -> None:
-        self._chromatic_reference_points_all_visible = bool(checked)
-        self._update_landmark_overlays()
-        self._schedule_processing_state_save()
+        self._chromatic_controller._on_chromatic_reference_points_all_toggled(checked)
 
     def _on_chromatic_landmark_id_changed(self, value: int) -> None:
-        feature_id = min(max(int(value), 1), len(self._expected_chromatic_feature_ids()))
-        self._chromatic_landmark_marker_id = feature_id
-        self._selected_landmark_id = feature_id
-        self._select_chromatic_feature(feature_id, center_view=True)
+        self._chromatic_controller._on_chromatic_landmark_id_changed(value)
 
     def _on_chromatic_landmark_tool_toggled(self, checked: bool) -> None:
-        self.chromatic_start_button.setIcon(self._make_spot_edit_icon(bool(checked)))
-        if checked:
-            if not self._is_chromatic_sample_image_key(self._current_image_key):
-                sample_keys = self._chromatic_sample_image_keys()
-                if sample_keys:
-                    self._set_current_frame_and_wavelength(int(sample_keys[0][0]), float(sample_keys[0][1]))
-                    self._set_status_text("Chromatic edit activated. Navigating to the first sampled wavelength image.")
-                    self._append_workflow_log(
-                        "Chromatic edit activated | navigated to first sampled wavelength image",
-                        level="info",
-                    )
-                else:
-                    self._set_status_text("Start the radial workflow before editing chromatic reference points.")
-                    self._append_workflow_log(
-                        "Chromatic edit rejected | no sampled chromatic images available",
-                        level="warning",
-                    )
-                    self.chromatic_start_button.blockSignals(True)
-                    self.chromatic_start_button.setChecked(False)
-                    self.chromatic_start_button.blockSignals(False)
-                    self.chromatic_start_button.setIcon(self._make_spot_edit_icon(False))
-                    return
-            self.rotate_action.blockSignals(True)
-            self.rotate_action.setChecked(False)
-            self.rotate_action.blockSignals(False)
-            self.crop_action.blockSignals(True)
-            self.crop_action.setChecked(False)
-            self.crop_action.blockSignals(False)
-            self.spot_edit_action.blockSignals(True)
-            self.spot_edit_action.setChecked(False)
-            self.spot_edit_action.blockSignals(False)
-            self.mask_pencil_check.blockSignals(True)
-            self.mask_pencil_check.setChecked(False)
-            self.mask_pencil_check.blockSignals(False)
-            self._active_tool = "chromatic_landmark"
-            self._selected_landmark_id = self._chromatic_landmark_marker_id
-            if hasattr(self, "image_panel"):
-                self.image_panel.raise_()
-            if hasattr(self, "image_view") and self.image_view is not None:
-                self.image_view.setFocus(Qt.FocusReason.ActiveWindowFocusReason)
-                viewport = self.image_view.viewport()
-                if viewport is not None:
-                    viewport.setFocus(Qt.FocusReason.ActiveWindowFocusReason)
-            self._set_status_text(
-                f"Chromatic reference point editor active. Click to place point {self._chromatic_landmark_marker_id}, "
-                "drag to adjust, PageUp/PageDown to switch reference points."
-            )
-            self._append_workflow_log("Chromatic edit activated", level="info")
-        elif self._active_tool == "chromatic_landmark":
-            self._active_tool = None
-            self._append_workflow_log("Chromatic edit deactivated", level="info")
-        self._update_landmark_overlays()
+        self._chromatic_controller._on_chromatic_landmark_tool_toggled(checked)
 
     def _expected_chromatic_feature_ids(self) -> list[int]:
         return list(range(1, max(int(self._state.preprocessing.chromatic_feature_count), 1) + 1))
@@ -7005,7 +5059,7 @@ class MainWindow(MainWindowIcons, QMainWindow):
             self.chromatic_reference_points_all_button.blockSignals(False)
         self._invalidate_image_analysis_caches()
         self._invalidate_background_profile_cache()
-        self._update_spot_overlays()
+        self._update_roi_overlays()
         self._schedule_histogram_refresh()
         self._update_landmark_overlays()
         self._update_chromatic_summary()
@@ -7047,23 +5101,7 @@ class MainWindow(MainWindowIcons, QMainWindow):
         self._chromatic_controller.auto_detect_landmarks(push_undo=push_undo)
 
     def _navigate_chromatic_sample(self, direction: int) -> bool:
-        sample_keys = self._chromatic_sample_image_keys()
-        if not sample_keys:
-            return False
-        current_index = self._current_chromatic_sample_index()
-        if current_index is None:
-            if self._current_image_key is None:
-                current_index = 0
-            else:
-                current_wavelength = float(self._current_image_key[1])
-                current_index = min(
-                    range(len(sample_keys)),
-                    key=lambda idx: abs(float(sample_keys[idx][1]) - current_wavelength),
-                )
-        target_index = min(max(current_index + int(direction), 0), len(sample_keys) - 1)
-        target_frame, target_wavelength = sample_keys[target_index]
-        self._set_current_frame_and_wavelength(target_frame, target_wavelength)
-        return True
+        self._chromatic_controller._navigate_chromatic_sample(direction)
 
     def _navigate_wavelength_image(self, direction: int) -> bool:
         frame = self._current_frame()
@@ -7095,96 +5133,16 @@ class MainWindow(MainWindowIcons, QMainWindow):
         return True
 
     def _on_chromatic_sample_count_changed(self, value: int) -> None:
-        sample_minimum = 1 if len(self._wavelength_values) <= 1 else 3
-        normalized = _normalized_odd_count(
-            int(value),
-            sample_minimum,
-            min(max(len(self._wavelength_values), sample_minimum), 7),
-        )
-        if normalized != int(value):
-            self.chromatic_sample_count_spin.blockSignals(True)
-            self.chromatic_sample_count_spin.setValue(normalized)
-            self.chromatic_sample_count_spin.blockSignals(False)
-        self._state.preprocessing.chromatic_sample_image_count = normalized
-        self._update_chromatic_summary()
-        self._schedule_processing_state_save()
+        self._chromatic_controller._on_chromatic_sample_count_changed(value)
 
     def _on_chromatic_feature_count_changed(self, value: int) -> None:
-        normalized = self._chromatic_feature_count_value()
-        if normalized != self._state.preprocessing.chromatic_feature_count:
-            self._state.preprocessing.chromatic_feature_count = normalized
-        max_feature = len(self._expected_chromatic_feature_ids())
-        self._chromatic_landmark_marker_id = min(self._chromatic_landmark_marker_id, max_feature)
-        self._selected_landmark_id = None if self._selected_landmark_id is None else min(self._selected_landmark_id, max_feature)
-        self.chromatic_landmark_id_spin.blockSignals(True)
-        self.chromatic_landmark_id_spin.setMaximum(max_feature)
-        self.chromatic_landmark_id_spin.setValue(self._chromatic_landmark_marker_id)
-        self.chromatic_landmark_id_spin.blockSignals(False)
-        self._update_chromatic_summary()
-        self._update_landmark_overlays()
-        self._schedule_processing_state_save()
+        self._chromatic_controller._on_chromatic_feature_count_changed(value)
 
     def _on_chromatic_subpixel_precision_changed(self, _value: int) -> None:
-        normalized = self._chromatic_subpixel_precision_value()
-        if normalized != int(getattr(self._state.preprocessing, "chromatic_subpixel_precision", 4)):
-            self._state.preprocessing.chromatic_subpixel_precision = normalized
-        self._update_chromatic_summary()
-        self._schedule_processing_state_save()
+        self._chromatic_controller._on_chromatic_subpixel_precision_changed(_value)
 
     def _seed_chromatic_landmarks_for_current_image(self) -> None:
-        if self._chromatic_auto_running:
-            return
-        image_key = self._current_image_key
-        if not self._is_chromatic_sample_image_key(image_key):
-            return
-        assert image_key is not None
-        expected_ids = self._expected_chromatic_feature_ids()
-        existing_ids = {int(mark.landmark_id) for mark in self._current_image_landmarks()}
-        missing_ids = [feature_id for feature_id in expected_ids if feature_id not in existing_ids]
-        if not missing_ids:
-            return
-        sample_keys = self._chromatic_sample_image_keys()
-        current_index = sample_keys.index(image_key)
-        candidate_keys: list[tuple[int, float]] = []
-        for index in range(current_index - 1, -1, -1):
-            candidate_keys.append(sample_keys[index])
-        reference_key = self._reference_image_key()
-        if reference_key is not None and reference_key not in candidate_keys and reference_key != image_key:
-            candidate_keys.append(reference_key)
-        for index in range(current_index + 1, len(sample_keys)):
-            candidate_keys.append(sample_keys[index])
-        source_marks: dict[int, tuple[float, float]] | None = None
-        for candidate_key in candidate_keys:
-            marks = {
-                int(mark.landmark_id): (float(mark.x_px), float(mark.y_px))
-                for mark in self._state.chromatic_landmarks
-                if int(mark.frame_index) == int(candidate_key[0])
-                and abs(float(mark.wavelength_nm) - float(candidate_key[1])) < 1e-6
-            }
-            if any(feature_id in marks for feature_id in missing_ids):
-                source_marks = marks
-                break
-        if source_marks is None and self._current_processed_image is not None:
-            current_marks = self._current_image_landmarks()
-            if not current_marks:
-                source_marks = self._default_chromatic_feature_points(
-                    self._current_processed_image.shape[:2],
-                    len(expected_ids),
-                )
-        if source_marks is None:
-            return
-        changed = False
-        for feature_id in missing_ids:
-            point = source_marks.get(feature_id)
-            if point is None:
-                continue
-            self._upsert_current_landmark(feature_id, point, clear_models=False)
-            changed = True
-        if changed:
-            self._finalize_chromatic_landmark_edit()
-            self._set_status_text(
-                f"Seeded missing reference points for {image_key[1]:g} nm from the nearest marked sample image."
-            )
+        self._chromatic_controller._seed_chromatic_landmarks_for_current_image()
 
     def _finalize_chromatic_landmark_edit(self, *, status_text: str | None = None) -> None:
         had_models = bool(self._state.chromatic_models)
@@ -7197,7 +5155,7 @@ class MainWindow(MainWindowIcons, QMainWindow):
         self._invalidate_image_analysis_caches()
         self._invalidate_background_profile_cache()
         self._update_chromatic_summary()
-        self._update_spot_overlays()
+        self._update_roi_overlays()
         self._update_ignore_mask_overlay()
         if had_models:
             self._schedule_histogram_refresh()
@@ -7402,15 +5360,7 @@ class MainWindow(MainWindowIcons, QMainWindow):
         star.move(margin, margin)
 
     def _update_reference_star_overlay(self) -> None:
-        star = self._ensure_reference_star_label()
-        visible = (
-            self._current_processed_image is not None
-            and self._is_current_reference_image()
-            and not self._showing_background_profile_main
-        )
-        star.setVisible(bool(visible))
-        if visible:
-            self._position_reference_star_label()
+        self._overlay_manager._update_reference_star_overlay()
 
     def _update_reference_navigation_styles(self) -> None:
         if self._state.dataset is None:
@@ -7482,7 +5432,7 @@ class MainWindow(MainWindowIcons, QMainWindow):
             self.mask_section.set_expanded(True)
             self.chromatic_section.set_expanded(False)
             self.image_tools_section.set_expanded(True)
-            self.spot_editor_section.set_expanded(True)
+            self.roi_editor_section.set_expanded(True)
             self.background_section.set_expanded(True)
             self.analysis_section.set_expanded(True)
         finally:
@@ -7512,7 +5462,7 @@ class MainWindow(MainWindowIcons, QMainWindow):
                 self.mask_section,
                 self.chromatic_section,
                 self.image_tools_section,
-                self.spot_editor_section,
+                self.roi_editor_section,
                 self.background_section,
                 self.analysis_section,
             ]:
@@ -7529,7 +5479,7 @@ class MainWindow(MainWindowIcons, QMainWindow):
                 self.mask_section,
                 self.chromatic_section,
                 self.image_tools_section,
-                self.spot_editor_section,
+                self.roi_editor_section,
                 self.background_section,
                 self.analysis_section,
             ]:
@@ -7548,19 +5498,19 @@ class MainWindow(MainWindowIcons, QMainWindow):
         self._set_help(self.ome_zarr_chunk_value_label, "Resolved Stack to Zarr chunk size in pixels.")
         self._set_help(self.ome_zarr_chunk_guide_button, "Guide: show chunk tiling over the current image.")
         self._set_help(self.ome_zarr_compression_button, "Compression: turn Stack to Zarr compression on or off.")
-        self._set_help(self.export_settings_button, "Export preprocessing, spot settings, spots, and groups to a JSON profile.")
-        self._set_help(self.import_settings_button, "Import preprocessing, spot settings, spots, and groups from a JSON profile.")
+        self._set_help(self.export_settings_button, "Export preprocessing, ROI settings, ROIs, and groups to a JSON profile.")
+        self._set_help(self.import_settings_button, "Import preprocessing, ROI settings, ROIs, and groups from a JSON profile.")
         self._set_help(self.frame_slider, "Choose the reference frame.")
         self._set_help(self.frame_spin, "Reference frame number.")
         self._set_help(self.wavelength_slider, "Choose the reference wavelength.")
         self._set_help(self.wavelength_spin, "Reference wavelength in nanometers.")
         self._set_help(self.reference_auto_button, "Auto: use the best wavelength in the current frame as the reference image.")
         self._set_help(self.reference_manual_button, "Manual: store the current frame and wavelength as the manual reference image.")
-        self._set_help(self.chromatic_apply_check, "Apply the saved chromatic transform models so reference spots and mask are propagated to non-reference images.")
+        self._set_help(self.chromatic_apply_check, "Apply the saved chromatic transform models so reference ROIs and mask are propagated to non-reference images.")
         self._set_help(self.chromatic_sample_count_spin, "Odd number of spectral images to sample across the stack for the radial chromatic workflow.")
         self._set_help(self.chromatic_feature_count_spin, "Choose 5, 15, or 30 editable spatial reference points to mark on each sampled image.")
         self._set_help(self.chromatic_start_button, "Edit: enter chromatic reference-point editing mode on the current sampled image.")
-        self._set_help(self.chromatic_auto_button, "Automatic spot detection: detect the chromatic reference points on the sampled images and track them across the wavelength stack.")
+        self._set_help(self.chromatic_auto_button, "Automatic ROI detection: detect the chromatic reference points on the sampled images and track them across the wavelength stack.")
         self._set_help(self.chromatic_reference_points_all_button, "Show all chromatic reference points across the sampled wavelengths. When linked, they are transformed into the current image space.")
         self._set_help(self.chromatic_prev_button, "Go to the previous sampled wavelength image.")
         self._set_help(self.chromatic_next_button, "Go to the next sampled wavelength image.")
@@ -7591,7 +5541,7 @@ class MainWindow(MainWindowIcons, QMainWindow):
             "Higher binning makes background removal much faster by estimating the smooth profile on a smaller image and "
             "upsampling it back. Start with 2x2, and use 4x4 only when the background changes slowly enough.",
         )
-        self._set_help(self.background_ignore_spot_button, "Ignore the detected spot area while estimating the illumination background.")
+        self._set_help(self.background_ignore_spot_button, "Ignore the detected ROI area while estimating the illumination background.")
         self._set_help(self.background_ignore_mask_button, "Ignore masked pixels while estimating the illumination background.")
         self._set_help(self.background_create_new_button, "Create a new background image from the current parameters.")
         self._set_help(self.background_load_from_file_button, "Load a background image from disk.")
@@ -7624,21 +5574,21 @@ class MainWindow(MainWindowIcons, QMainWindow):
         self._set_help(self.mask_draw_remove_button, "Erase blue mask pixels from the current mask preview.")
         self._set_help(self.mask_draw_mode_combo, "Choose whether the pencil adds mask pixels or erases them.")
         self._set_help(self.mask_brush_size_spin, "Brush diameter in pixels for the mask pencil.")
-        self._set_help(self.spot_diameter_spin, "Spot diameter in pixels.")
-        self._set_help(self.ring_inner_diameter_spin, "Inner diameter of the reference ring in pixels.")
-        self._set_help(self.ring_outer_diameter_spin, "Outer diameter of the reference ring in pixels.")
+        self._set_help(self.sample_diameter_spin, "Sample diameter in pixels.")
+        self._set_help(self.reference_inner_diameter_spin, "Inner diameter of the reference ring in pixels.")
+        self._set_help(self.reference_outer_diameter_spin, "Outer diameter of the reference ring in pixels.")
         self._set_help(self.array_rows_spin, "Expected number of ROI rows in the array.")
         self._set_help(self.array_cols_spin, "Expected number of ROI columns in the array.")
         self._set_help(self.array_spacing_spin, "Expected spacing between neighboring array ROIs in pixels.")
         self._set_help(self.ignore_marked_check, "Ignore pixels defined by the current mask controls and any loaded mask image.")
-        self._set_help(self.detect_spots_button, "Mode A: automatically detect array spots on the current reference image.")
-        self._set_help(self.spot_corner_select_button, "Mode B: select the four array corners first, then fill the grid. Coming later.")
-        self._set_help(self.reorder_spots_button, "Reorder detected spots by image position so the top-left spot becomes ID 1.")
-        self._set_help(self.clear_spots_button, "Remove all detected spots and groups from the current dataset.")
-        self._set_help(self.clear_spot_selection_button, "Clear the current spot selection.")
-        self._set_help(self.show_spots_check, "Show or hide the spot overlays.")
-        self._set_help(self.bottom_spot_labels_button, "Show or hide spot labels next to the spot overlays. This works independently of manual spot editing.")
-        self._set_help(self.spot_editor_labels_button, "Show or hide spot labels in the left panel. This works independently of manual spot editing.")
+        self._set_help(self.detect_rois_button, "Mode A: automatically detect array ROIs on the current reference image.")
+        self._set_help(self.roi_corner_select_button, "Mode B: select the four array corners first, then fill the grid. Coming later.")
+        self._set_help(self.reorder_rois_button, "Reorder detected ROIs by image position so the top-left ROI becomes ID 1.")
+        self._set_help(self.clear_rois_button, "Remove all detected ROIs and groups from the current dataset.")
+        self._set_help(self.clear_roi_selection_button, "Clear the current ROI selection.")
+        self._set_help(self.show_rois_check, "Show or hide the ROI overlays.")
+        self._set_help(self.bottom_roi_labels_button, "Show or hide ROI labels next to the ROI overlays. This works independently of manual ROI editing.")
+        self._set_help(self.roi_editor_labels_button, "Show or hide ROI labels in the left panel. This works independently of manual ROI editing.")
         self._set_help(self.show_rings_check, "Show or hide the reference rings.")
         self._set_help(self.show_reference_points_check, "Show or hide chromatic reference points.")
         self._set_help(self.show_mask_check, "Show or hide the mask overlay.")
@@ -7658,12 +5608,12 @@ class MainWindow(MainWindowIcons, QMainWindow):
             "The preview updates automatically when background settings change.",
         )
         self._set_help(self.mask_color_button, "Choose the mask-overlay color.")
-        self._set_help(self.spot_color_button, "Choose the spot overlay color.")
-        self._set_help(self.ring_color_button, "Choose the reference-ring color.")
+        self._set_help(self.sample_color_button, "Choose the ROI overlay color.")
+        self._set_help(self.reference_color_button, "Choose the reference-ring color.")
         self._set_help(self.highlight_color_button, "Choose the histogram-highlight overlay color.")
         self._set_help(self.mask_alpha_slider, "Mask transparency.")
-        self._set_help(self.spot_alpha_slider, "Spot transparency.")
-        self._set_help(self.ring_alpha_slider, "Reference-ring transparency.")
+        self._set_help(self.roi_alpha_slider, "ROI transparency.")
+        self._set_help(self.reference_alpha_slider, "Reference-ring transparency.")
         self._set_help(self.highlight_alpha_slider, "Highlight transparency.")
         self._set_help(self.rotate_action, "Manual rotation tool. Use arrow keys to adjust the angle.")
         self._set_help(self.crop_action, "Crop tool.")
@@ -7680,34 +5630,34 @@ class MainWindow(MainWindowIcons, QMainWindow):
         self._set_help(
             self.spot_edit_action,
             "Enable manual ROI editing mode.",
-            "Spot edit mode:\n"
-            "Left-click: select a spot or ROI\n"
-            "Shift+Left-click: add a spot or ROI to the selection\n"
-            "Double-left-click outside a spot or ROI: clear the selection\n"
+            "ROI edit mode:\n"
+            "Left-click: select an ROI\n"
+            "Shift+Left-click: add an ROI to the selection\n"
+            "Double-left-click outside an ROI: clear the selection\n"
             "Left-drag: draw a selection box\n"
-            "Right-drag: move selected spots when Move is active\n"
+            "Right-drag: move selected ROIs when Move is active\n"
             "Middle-drag: pan the image view\n"
-            "Arrow keys: move selected spots while Move is active\n"
-            "Shift+Arrow: select neighboring spot in the array\n"
-            "Ctrl+Arrow: move selected spots faster\n"
+            "Arrow keys: move selected ROIs while Move is active\n"
+            "Shift+Arrow: select neighboring ROI in the array\n"
+            "Ctrl+Arrow: move selected ROIs faster\n"
             "Ctrl+Shift+A: Add mode for the active shape template\n"
             "Ctrl+Shift+M: Move mode",
         )
-        self._set_help(self.spot_add_action, "Add mode: click the image to place a new ROI from the active shape template.")
-        self._set_help(self.spot_move_action, "Move selected spots by dragging or arrow keys.")
-        self._set_help(self.remove_spots_action, "Remove the selected spots.")
-        self._set_help(self.group_spots_action, "Group selected spots.")
-        self._set_help(self.ungroup_spots_action, "Ungroup selected spots.")
-        self._set_help(self.spot_list_cached_button, "Show only the spots that already have cached absorbance data.")
-        self._set_help(self.analysis_preview_button, "Live preview: update the spectrum and sensorgram automatically when spot selection changes.")
+        self._set_help(self.roi_add_action, "Add mode: click the image to place a new ROI from the active shape template.")
+        self._set_help(self.roi_move_action, "Move selected ROIs by dragging or arrow keys.")
+        self._set_help(self.remove_rois_action, "Remove the selected ROIs.")
+        self._set_help(self.group_rois_action, "Group selected ROIs.")
+        self._set_help(self.ungroup_rois_action, "Ungroup selected ROIs.")
+        self._set_help(self.roi_list_cached_button, "Show only the ROIs that already have cached absorbance data.")
+        self._set_help(self.analysis_preview_button, "Live preview: update the spectrum and sensorgram automatically when ROI selection changes.")
         self._set_help(self.shortcuts_action, "Show the main keyboard shortcuts.", shortcuts_text())
         self._set_help(self.reset_layout_action, "Restore default splitter sizes and panel states.")
         self._set_help(self.reset_dock_layout_action, "Restore default splitter sizes without changing panel visibility.")
         self._set_help(self.expand_left_panels_action, "Expand all left workflow panels.")
         self._set_help(self.collapse_left_panels_action, "Collapse all left workflow panels.")
-        self._set_help(self.calculate_spectrum_action, "Calculate the absorbance spectrum for the current frame and selected spots.")
+        self._set_help(self.calculate_spectrum_action, "Calculate the absorbance spectrum for the current frame and selected ROIs.")
         self._set_help(self.about_action, "Show basic app information.")
-        self._set_help(self.analysis_spot_table_button, "Show or hide the spot list table.")
+        self._set_help(self.analysis_roi_table_button, "Show or hide the ROI table.")
 
     def _create_toolbar_action_button(self, action: QAction, *, primary: bool = False, icon_only: bool = False) -> QToolButton:
         button = QToolButton(self)
@@ -7956,7 +5906,7 @@ class MainWindow(MainWindowIcons, QMainWindow):
         painter.end()
         return QIcon(pixmap)
 
-    def _make_cached_spots_icon(self, visible: bool, *, size: int = 24) -> QIcon:
+    def _make_cached_rois_icon(self, visible: bool, *, size: int = 24) -> QIcon:
         color = "#22c55e" if visible else "#94a3b8"
         icon = self._tabler_icon("database", color, size, stroke_width=2.0)
         if not icon.isNull():
@@ -7992,7 +5942,7 @@ class MainWindow(MainWindowIcons, QMainWindow):
         active_color = "#22c55e"
         inactive_color = "#94a3b8"
         color = active_color if visible else inactive_color
-        if kind == "spots":
+        if kind == "roi":
             icon = self._tabler_icon("current-location", color, 24, stroke_width=2.1)
             if not icon.isNull():
                 return icon
@@ -8027,7 +5977,7 @@ class MainWindow(MainWindowIcons, QMainWindow):
         pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
         painter.setPen(pen)
         painter.setBrush(Qt.BrushStyle.NoBrush)
-        if kind == "spots":
+        if kind == "roi":
             painter.drawEllipse(QRectF(6.0, 6.0, 12.0, 12.0))
             painter.drawEllipse(QRectF(10.0, 10.0, 4.0, 4.0))
         elif kind == "rings":
@@ -8105,8 +6055,8 @@ class MainWindow(MainWindowIcons, QMainWindow):
 
     def _refresh_view_toggle_icons(self) -> None:
         mappings = [
-            (getattr(self, "show_spots_check", None), "spots", self._spots_visible),
-            (getattr(self, "show_rings_check", None), "rings", self._rings_visible),
+            (getattr(self, "show_rois_check", None), "roi", self._rois_visible),
+            (getattr(self, "show_rings_check", None), "rings", self._reference_visible),
             (getattr(self, "show_reference_points_check", None), "reference_points", self._reference_points_visible),
             (
                 getattr(self, "chromatic_reference_points_all_button", None),
@@ -8289,6 +6239,40 @@ class MainWindow(MainWindowIcons, QMainWindow):
         """)
         return button
 
+    def _create_rotation_fill_toggle_button(self) -> QToolButton:
+        button = QToolButton(self)
+        button.setObjectName("leftSpotToolButton")
+        button.setAutoRaise(True)
+        button.setCheckable(True)
+        button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly)
+        button.setIconSize(QSize(28, 28))
+        button.setFixedSize(36, 36)
+        hover, pressed, checked = icon_accent_colors("yellow")
+        button.setStyleSheet(f"""
+            QToolButton {{
+                background: transparent;
+                border: 1px solid transparent;
+                border-radius: 8px;
+                padding: 2px;
+            }}
+            QToolButton:hover {{
+                background: {hover};
+                border: 1px solid #e2e8f0;
+                border-radius: 8px;
+            }}
+            QToolButton:pressed {{
+                background: {pressed};
+                border: 1px solid #94a3b8;
+                border-radius: 8px;
+            }}
+            QToolButton:checked {{
+                background: {checked};
+                border: 1px solid #22c55e;
+                border-radius: 8px;
+            }}
+        """)
+        return button
+
     def _create_label_visibility_button(self, visible: bool) -> QToolButton:
         button = QToolButton(self)
         button.setObjectName("spotLabelIconButton")
@@ -8298,14 +6282,14 @@ class MainWindow(MainWindowIcons, QMainWindow):
         button.setCheckable(True)
         button.setChecked(bool(visible))
         button.setIcon(self._make_spot_label_icon(bool(visible)))
-        button.setToolTip("Show or hide spot labels. This works independently of manual spot editing.")
+        button.setToolTip("Show or hide ROI labels. This works independently of manual ROI editing.")
         button.setStyleSheet(transparent_icon_button_stylesheet())
         button.toggled.connect(self._update_spot_label_button_icon)
         return button
 
     def _update_spot_label_button_icon(self, checked: bool) -> None:
         icon = self._make_spot_label_icon(bool(checked))
-        for attr_name in ("spot_editor_labels_button", "bottom_spot_labels_button"):
+        for attr_name in ("roi_editor_labels_button", "bottom_roi_labels_button"):
             button = getattr(self, attr_name, None)
             if button is not None:
                 button.setIcon(icon)
@@ -8387,16 +6371,16 @@ class MainWindow(MainWindowIcons, QMainWindow):
     def _populate_left_spot_editor_controls(self) -> None:
         self._clear_layout(self.left_spot_editor_layout)
         buttons = [
-            (self.spot_list_action, {"accent": "orange"}),
+            (self.roi_list_action, {"accent": "orange"}),
             (self.spot_edit_action, {"primary": True}),
-            (self.spot_add_action, {"accent": "green"}),
+            (self.roi_add_action, {"accent": "green"}),
             (self.roi_array_action, {"accent": "green"}),
-            (self.spot_move_action, {"accent": "blue"}),
-            (self.remove_spots_action, {"accent": "red"}),
+            (self.roi_move_action, {"accent": "blue"}),
+            (self.remove_rois_action, {"accent": "red"}),
         ]
         for action, kwargs in buttons:
             self.left_spot_editor_layout.addWidget(self._create_left_spot_editor_button(action, **kwargs))
-        self.left_spot_editor_layout.addWidget(self.spot_editor_labels_button)
+        self.left_spot_editor_layout.addWidget(self.roi_editor_labels_button)
         self.left_spot_editor_layout.addStretch(1)
 
     def _create_toolbar_row(self, widgets: list[QWidget]) -> QWidget:
@@ -8430,7 +6414,7 @@ class MainWindow(MainWindowIcons, QMainWindow):
         edit_menu = menu_bar.addMenu("&Edit")
         edit_menu.addAction(self.undo_action)
         edit_menu.addAction(self.redo_action)
-        edit_menu.addAction(self.clear_spot_selection_button.text(), self._clear_spot_selection)
+        edit_menu.addAction(self.clear_roi_selection_button.text(), self._clear_spot_selection)
 
         view_menu = menu_bar.addMenu("&View")
         view_menu.addAction(self.reset_layout_action)
@@ -8447,7 +6431,7 @@ class MainWindow(MainWindowIcons, QMainWindow):
         dock_menu.addAction(self.histogram_panel.toggleViewAction())
         dock_menu.addAction(self.spectra_panel.toggleViewAction())
         dock_menu.addAction(self.sensorgram_panel.toggleViewAction())
-        dock_menu.addAction(self.spot_list_panel.toggleViewAction())
+        dock_menu.addAction(self.roi_list_panel.toggleViewAction())
         view_menu.addSeparator()
         self.theme_blue_action = view_menu.addAction("Blue Dark Theme")
         self.theme_blue_action.setCheckable(True)
@@ -8462,6 +6446,30 @@ class MainWindow(MainWindowIcons, QMainWindow):
         current_theme = str(self._settings.value("ui/theme", "blue"))
         self.theme_gray_action.setChecked(current_theme == "gray")
         self.theme_blue_action.setChecked(current_theme != "gray")
+        view_menu.addSeparator()
+        ui_scale_menu = view_menu.addMenu("UI Scale")
+        ui_scale_group = QActionGroup(self)
+        ui_scale_group.setExclusive(True)
+        self._ui_scale_actions: dict[str, QAction] = {}
+        _UI_SCALE_OPTIONS = [
+            ("auto",  "Auto (system default)"),
+            ("0.75",  "75%"),
+            ("0.85",  "85%"),
+            ("1.0",   "100%  —  Normal"),
+            ("1.15",  "115%"),
+            ("1.25",  "125%"),
+            ("1.5",   "150%"),
+            ("1.75",  "175%"),
+            ("2.0",   "200%"),
+        ]
+        current_scale = str(self._settings.value("ui/scale_factor", "auto") or "auto")
+        for _sv, _sl in _UI_SCALE_OPTIONS:
+            _a = ui_scale_menu.addAction(_sl)
+            _a.setCheckable(True)
+            _a.setChecked(_sv == current_scale)
+            _a.triggered.connect(lambda checked, v=_sv: checked and self._set_ui_scale_factor(v))
+            ui_scale_group.addAction(_a)
+            self._ui_scale_actions[_sv] = _a
 
         analysis_menu = menu_bar.addMenu("&Analysis")
         analysis_menu.addAction(self.calculate_spectrum_action)
@@ -8486,6 +6494,7 @@ class MainWindow(MainWindowIcons, QMainWindow):
         if current_timeout not in self.startup_restore_timeout_actions:
             current_timeout = 5
         self._set_startup_restore_timeout_seconds(current_timeout)
+
 
         help_menu = menu_bar.addMenu("&Help")
         help_menu.addAction(self.shortcuts_action)
@@ -8525,8 +6534,17 @@ class MainWindow(MainWindowIcons, QMainWindow):
         return row
 
     def _set_spinbox_width(self, spinbox: QSpinBox | QDoubleSpinBox, text: str, *, minimum: int = 46) -> None:
-        width = spinbox.fontMetrics().horizontalAdvance(text) + 28
-        spinbox.setFixedWidth(max(minimum, width))
+        suffix = spinbox.suffix()
+        full_text = text if (not suffix or text.endswith(suffix)) else text + suffix
+        text_w = spinbox.fontMetrics().horizontalAdvance(full_text)
+        # Derive button+frame overhead from sizeHint(), which Qt computes from internal
+        # style metrics.  This is correct at any DPI/theme and works before the widget
+        # has been shown or placed in a layout (unlike subControlRect, which returns a
+        # zero-width rect when the widget geometry is still 0×0).
+        sh_w = spinbox.sizeHint().width()
+        max_text = spinbox.prefix() + spinbox.textFromValue(spinbox.maximum()) + spinbox.suffix()
+        overhead = max(sh_w - spinbox.fontMetrics().horizontalAdvance(max_text), 30)
+        spinbox.setFixedWidth(max(minimum, text_w + overhead))
 
     def _set_combo_width(self, combo: QComboBox, texts: list[str], *, minimum: int = 58) -> None:
         widest = max((combo.fontMetrics().horizontalAdvance(text) for text in texts), default=0)
@@ -8551,9 +6569,9 @@ class MainWindow(MainWindowIcons, QMainWindow):
         self._set_spinbox_width(self.chromatic_sample_count_spin, "777")
         self._set_combo_width(self.chromatic_feature_count_spin, ["5", "15", "30"], minimum=54)
         self._set_spinbox_width(self.chromatic_landmark_id_spin, "99", minimum=62)
-        self._set_spinbox_width(self.spot_diameter_spin, "9999.99")
-        self._set_spinbox_width(self.ring_inner_diameter_spin, "9999.99")
-        self._set_spinbox_width(self.ring_outer_diameter_spin, "9999.99")
+        self._set_spinbox_width(self.sample_diameter_spin, "9999.99")
+        self._set_spinbox_width(self.reference_inner_diameter_spin, "9999.99")
+        self._set_spinbox_width(self.reference_outer_diameter_spin, "9999.99")
         self._set_spinbox_width(self.background_smoothing_sigma_spin, "2000 px", minimum=72)
         self._set_combo_width(self.background_smoothing_binning_combo, ["4x4"])
         self._set_combo_width(self.mask_mode_combo, ["Local contrast"], minimum=96)
@@ -8562,9 +6580,17 @@ class MainWindow(MainWindowIcons, QMainWindow):
         self._set_spinbox_width(self.mask_local_contrast_sigma_spin, "500.0 %", minimum=78)
         self._set_spinbox_width(self.mask_local_z_spin, "20.0 sigma", minimum=84)
         self._set_spinbox_width(self.mask_morph_radius_spin, "100 px", minimum=64)
+        self._set_spinbox_width(self.mask_local_contrast_z_spin, "20.0 sigma", minimum=84)
+        self._set_spinbox_width(self.mask_morphology_radius_spin, "100 px", minimum=64)
+        self._set_spinbox_width(self.mask_relative_profile_sigma_spin, "2000 px", minimum=72)
         self._set_combo_width(self.mask_draw_mode_combo, ["Erase"])
         self._set_spinbox_width(self.mask_brush_size_spin, "200 px", minimum=68)
         self._set_spinbox_width(self.histogram_bins_spin, "8192 DN", minimum=70)
+        self._set_spinbox_width(self.analysis_poly_order_spin, "99", minimum=52)
+        self._set_combo_width(self.ome_zarr_chunk_mode_combo, ["Auto", "512"])
+        self._set_combo_width(self.analysis_metric_combo, ["Maximum", "Centroid"], minimum=80)
+        self._set_spinbox_width(self.analysis_start_frame_spin, "99999", minimum=66)
+        self._set_spinbox_width(self.analysis_end_frame_spin, "99999", minimum=66)
         self._set_spinbox_width(self.array_rows_spin, "100")
         self._set_spinbox_width(self.array_cols_spin, "100")
         self._set_spinbox_width(self.array_spacing_spin, "1000.00", minimum=68)
@@ -8573,7 +6599,6 @@ class MainWindow(MainWindowIcons, QMainWindow):
         self._set_spinbox_width(self.frame_spin, "99999", minimum=66)
         self._set_spinbox_width(self.wavelength_spin, "99999 nm", minimum=82)
         self._set_combo_width(self.chromatic_subpixel_precision_combo, ["1", "4", "9"], minimum=42)
-        self.mask_local_contrast_sigma_spin.setFixedWidth(self.mask_relative_threshold_spin.sizeHint().width())
         navigation_control_width = max(self.frame_spin.sizeHint().width(), self.wavelength_spin.sizeHint().width(), 82)
         navigation_slider_width = max(navigation_control_width + 80, 170)
         self.frame_spin.setFixedWidth(navigation_control_width)
@@ -8701,44 +6726,44 @@ class MainWindow(MainWindowIcons, QMainWindow):
             self.roi_array_action.blockSignals(True)
             self.roi_array_action.setChecked(False)
             self.roi_array_action.blockSignals(False)
-            if not self._spots_visible:
-                self.show_spots_check.blockSignals(True)
-                self.show_spots_check.setChecked(True)
-                self.show_spots_check.blockSignals(False)
-                self._spots_visible = True
+            if not self._rois_visible:
+                self.show_rois_check.blockSignals(True)
+                self.show_rois_check.setChecked(True)
+                self.show_rois_check.blockSignals(False)
+                self._rois_visible = True
                 self._refresh_view_toggle_icons()
                 self._save_visual_preferences()
-            self._active_tool = "spots"
-            self._sync_spot_edit_capabilities()
+            self._active_tool = "roi"
+            self._sync_roi_edit_capabilities()
             if self._is_current_reference_image():
                 self._set_status_text("ROI editor active.")
             else:
                 self._set_status_text("ROI inspect mode active.")
-        elif self._active_tool == "spots":
+        elif self._active_tool == "roi":
             self._active_tool = None
-            self.spot_add_action.blockSignals(True)
-            self.spot_add_action.setChecked(False)
-            self.spot_add_action.blockSignals(False)
-            self.spot_add_action.setEnabled(False)
-            self.spot_move_action.blockSignals(True)
-            self.spot_move_action.setChecked(False)
-            self.spot_move_action.blockSignals(False)
-            self.spot_move_action.setEnabled(False)
+            self.roi_add_action.blockSignals(True)
+            self.roi_add_action.setChecked(False)
+            self.roi_add_action.blockSignals(False)
+            self.roi_add_action.setEnabled(False)
+            self.roi_move_action.blockSignals(True)
+            self.roi_move_action.setChecked(False)
+            self.roi_move_action.blockSignals(False)
+            self.roi_move_action.setEnabled(False)
             self.roi_array_action.blockSignals(True)
             self.roi_array_action.setChecked(False)
             self.roi_array_action.blockSignals(False)
             self.roi_array_action.setEnabled(False)
-            self.remove_spots_action.setEnabled(False)
-            self.group_spots_action.setEnabled(False)
-            self.ungroup_spots_action.setEnabled(False)
+            self.remove_rois_action.setEnabled(False)
+            self.group_rois_action.setEnabled(False)
+            self.ungroup_rois_action.setEnabled(False)
             self._finalize_spot_edit_refresh()
         self._dragging_spots = False
         self._drag_anchor = None
         self._drag_original_positions.clear()
         self._sync_rotation_visibility()
         self._sync_crop_visibility()
-        self._sync_spot_edit_capabilities()
-        self._update_spot_overlays()
+        self._sync_roi_edit_capabilities()
+        self._update_roi_overlays()
         self._update_status_hint()
 
     def _on_mask_pencil_toggled(self, checked: bool) -> None:
@@ -8786,21 +6811,21 @@ class MainWindow(MainWindowIcons, QMainWindow):
         self._sync_mask_draw_mode_buttons()
         self._save_control_preferences()
 
-    def _sync_spot_edit_capabilities(self) -> None:
-        editable = self._active_tool == "spots" and self._is_current_reference_image()
-        self.spot_add_action.setEnabled(editable)
-        self.spot_move_action.setEnabled(editable)
+    def _sync_roi_edit_capabilities(self) -> None:
+        editable = self._active_tool == "roi" and self._is_current_reference_image()
+        self.roi_add_action.setEnabled(editable)
+        self.roi_move_action.setEnabled(editable)
         self.roi_array_action.setEnabled(editable)
-        self.remove_spots_action.setEnabled(editable)
-        self.group_spots_action.setEnabled(editable)
-        self.ungroup_spots_action.setEnabled(editable)
+        self.remove_rois_action.setEnabled(editable)
+        self.group_rois_action.setEnabled(editable)
+        self.ungroup_rois_action.setEnabled(editable)
         if not editable:
-            self.spot_add_action.blockSignals(True)
-            self.spot_add_action.setChecked(False)
-            self.spot_add_action.blockSignals(False)
-            self.spot_move_action.blockSignals(True)
-            self.spot_move_action.setChecked(False)
-            self.spot_move_action.blockSignals(False)
+            self.roi_add_action.blockSignals(True)
+            self.roi_add_action.setChecked(False)
+            self.roi_add_action.blockSignals(False)
+            self.roi_move_action.blockSignals(True)
+            self.roi_move_action.setChecked(False)
+            self.roi_move_action.blockSignals(False)
             self.roi_array_action.blockSignals(True)
             self.roi_array_action.setChecked(False)
             self.roi_array_action.blockSignals(False)
@@ -8808,22 +6833,22 @@ class MainWindow(MainWindowIcons, QMainWindow):
         self._sync_crop_visibility()
         self._update_status_hint()
 
-    def _on_spot_add_toggled(self, checked: bool) -> None:
+    def _on_roi_add_toggled(self, checked: bool) -> None:
         if checked:
-            self.spot_move_action.blockSignals(True)
-            self.spot_move_action.setChecked(False)
-            self.spot_move_action.blockSignals(False)
+            self.roi_move_action.blockSignals(True)
+            self.roi_move_action.setChecked(False)
+            self.roi_move_action.blockSignals(False)
             self.roi_array_action.blockSignals(True)
             self.roi_array_action.setChecked(False)
             self.roi_array_action.blockSignals(False)
-        self._update_spot_overlays()
+        self._update_roi_overlays()
         self._update_status_hint()
 
-    def _on_spot_move_toggled(self, checked: bool) -> None:
+    def _on_roi_move_toggled(self, checked: bool) -> None:
         if checked:
-            self.spot_add_action.blockSignals(True)
-            self.spot_add_action.setChecked(False)
-            self.spot_add_action.blockSignals(False)
+            self.roi_add_action.blockSignals(True)
+            self.roi_add_action.setChecked(False)
+            self.roi_add_action.blockSignals(False)
             self.roi_array_action.blockSignals(True)
             self.roi_array_action.setChecked(False)
             self.roi_array_action.blockSignals(False)
@@ -8834,18 +6859,18 @@ class MainWindow(MainWindowIcons, QMainWindow):
                 viewport = self.image_view.viewport()
                 if viewport is not None:
                     viewport.setFocus(Qt.FocusReason.ActiveWindowFocusReason)
-        self._update_spot_overlays()
+        self._update_roi_overlays()
         self._update_status_hint()
 
     def _on_roi_array_toggled(self, checked: bool) -> None:
         if checked:
-            self.spot_add_action.blockSignals(True)
-            self.spot_add_action.setChecked(False)
-            self.spot_add_action.blockSignals(False)
-            self.spot_move_action.blockSignals(True)
-            self.spot_move_action.setChecked(False)
-            self.spot_move_action.blockSignals(False)
-        self._update_spot_overlays()
+            self.roi_add_action.blockSignals(True)
+            self.roi_add_action.setChecked(False)
+            self.roi_add_action.blockSignals(False)
+            self.roi_move_action.blockSignals(True)
+            self.roi_move_action.setChecked(False)
+            self.roi_move_action.blockSignals(False)
+        self._update_roi_overlays()
         self._update_status_hint()
 
     def _on_flip_horizontal_toggled(self, checked: bool) -> None:
@@ -8872,6 +6897,26 @@ class MainWindow(MainWindowIcons, QMainWindow):
         self._refresh_image_tool_action_icons()
         self._apply_image_transform_change("Applied vertical flip." if checked else "Removed vertical flip.")
 
+    def _update_rotation_fill_button_tooltip(self) -> None:
+        if bool(self._state.preprocessing.rotation_fill_dark):
+            tooltip = "Rotation fill: dark (0). New corner pixels created by rotation are set to 0 intensity instead of copying the nearest edge pixel. Click to switch to edge-stretch fill."
+        else:
+            tooltip = "Rotation fill: edge-stretch. New corner pixels created by rotation copy the nearest edge pixel. Click to switch to dark (0 intensity) fill."
+        self.rotation_fill_dark_button.setToolTip(tooltip)
+
+    def _on_rotation_fill_dark_toggled(self, checked: bool) -> None:
+        if not self._ensure_reference_image_for_image_tools():
+            self.rotation_fill_dark_button.blockSignals(True)
+            self.rotation_fill_dark_button.setChecked(self._state.preprocessing.rotation_fill_dark)
+            self.rotation_fill_dark_button.blockSignals(False)
+            return
+        self._state.preprocessing.rotation_fill_dark = checked
+        self._refresh_image_tool_action_icons()
+        self._update_rotation_fill_button_tooltip()
+        self._apply_image_transform_change(
+            "Rotation fill set to dark (0)." if checked else "Rotation fill set to edge-stretch."
+        )
+
     def _ensure_reference_image_for_image_tools(self) -> bool:
         if self._current_record_path is None or self._is_current_reference_image():
             return True
@@ -8884,10 +6929,10 @@ class MainWindow(MainWindowIcons, QMainWindow):
         self._capture_pending_image_view_ranges(preserve_view=preserve_view)
         self._invalidate_image_analysis_caches()
         self._invalidate_background_profile_cache()
-        if self._state.detected_spots:
-            self._update_spot_overlays()
-            self._update_spot_summary()
-            self._sync_spot_detection_controls()
+        if self._state.area_rois:
+            self._update_roi_overlays()
+            self._update_roi_summary()
+            self._sync_roi_detection_controls()
         self._save_processing_state_for_dataset()
         self._current_image_key = None
         self._refresh_image()
@@ -8899,40 +6944,41 @@ class MainWindow(MainWindowIcons, QMainWindow):
 
     def _refresh_image_tool_action_icons(self) -> None:
         self.rotate_action.setIcon(self._make_rotate_icon(self.rotate_action.isChecked()))
+        self.rotation_fill_dark_button.setIcon(self._make_rotation_fill_icon(self.rotation_fill_dark_button.isChecked()))
         self.crop_action.setIcon(self._make_crop_icon(self.crop_action.isChecked()))
         self.flip_horizontal_action.setIcon(self._make_flip_horizontal_icon(self.flip_horizontal_action.isChecked()))
         self.flip_vertical_action.setIcon(self._make_flip_vertical_icon(self.flip_vertical_action.isChecked()))
         self.measure_action.setIcon(self._make_measure_icon(self.measure_action.isChecked()))
 
     def _on_show_spots_toggled(self, checked: bool) -> None:
-        self._spots_visible = checked
-        self._update_spot_overlays()
+        self._rois_visible = checked
+        self._update_roi_overlays()
         self._save_visual_preferences()
 
     def _on_show_spot_labels_toggled(self, checked: bool) -> None:
-        self._spot_labels_visible = checked
-        self.spot_editor_labels_button.blockSignals(True)
-        self.spot_editor_labels_button.setChecked(checked)
-        self.spot_editor_labels_button.blockSignals(False)
-        self.bottom_spot_labels_button.blockSignals(True)
-        self.bottom_spot_labels_button.setChecked(checked)
-        self.bottom_spot_labels_button.blockSignals(False)
+        self._roi_labels_visible = checked
+        self.roi_editor_labels_button.blockSignals(True)
+        self.roi_editor_labels_button.setChecked(checked)
+        self.roi_editor_labels_button.blockSignals(False)
+        self.bottom_roi_labels_button.blockSignals(True)
+        self.bottom_roi_labels_button.setChecked(checked)
+        self.bottom_roi_labels_button.blockSignals(False)
         self._update_spot_label_button_icon(bool(checked))
-        self._update_spot_overlays()
+        self._update_roi_overlays()
         self._save_visual_preferences()
 
     def _on_spot_editor_show_labels_toggled(self, checked: bool) -> None:
-        self._spot_labels_visible = checked
-        self.bottom_spot_labels_button.blockSignals(True)
-        self.bottom_spot_labels_button.setChecked(checked)
-        self.bottom_spot_labels_button.blockSignals(False)
+        self._roi_labels_visible = checked
+        self.bottom_roi_labels_button.blockSignals(True)
+        self.bottom_roi_labels_button.setChecked(checked)
+        self.bottom_roi_labels_button.blockSignals(False)
         self._update_spot_label_button_icon(bool(checked))
-        self._update_spot_overlays()
+        self._update_roi_overlays()
         self._save_visual_preferences()
 
     def _on_show_rings_toggled(self, checked: bool) -> None:
-        self._rings_visible = checked
-        self._update_spot_overlays()
+        self._reference_visible = checked
+        self._update_roi_overlays()
         self._save_visual_preferences()
 
     def _on_show_reference_points_toggled(self, checked: bool) -> None:
@@ -8968,11 +7014,11 @@ class MainWindow(MainWindowIcons, QMainWindow):
             self._state.preprocessing.display_units = "um"
         else:
             self._state.preprocessing.display_units = "px"
-        self._sync_spot_detection_controls()
-        self._update_spot_detection_labels()
+        self._sync_roi_detection_controls()
+        self._update_roi_detection_labels()
         self._update_measurement_status_label()
         self._refresh_scale_bar_overlay()
-        self._update_spot_list_table()
+        self._update_roi_table()
         self._save_processing_state_for_dataset()
         self._save_control_preferences()
 
@@ -9019,541 +7065,36 @@ class MainWindow(MainWindowIcons, QMainWindow):
         return self._shortcut_manager.handle_page_shortcuts(event)
 
     def eventFilter(self, watched, event) -> bool:  # type: ignore[override]
-        if event.type() == QEvent.Type.KeyPress and isinstance(event, QKeyEvent):
-            if self._handle_global_page_shortcuts(event):
-                return True
-        workflow_log_view = getattr(self, "workflow_log_view", None)
-        if workflow_log_view is not None and watched is workflow_log_view and event.type() == QEvent.Type.KeyPress:
-            key_event = event
-            if isinstance(key_event, QKeyEvent) and key_event.matches(QKeySequence.StandardKey.Copy):
-                self._copy_workflow_log()
-                return True
-        spot_list_table = getattr(self, "spot_list_table", None)
-        if spot_list_table is not None and watched is spot_list_table and event.type() == QEvent.Type.KeyPress:
-            key_event = event
-            if key_event.matches(QKeySequence.StandardKey.Undo):
-                self._undo()
-                return True
-            if key_event.matches(QKeySequence.StandardKey.Redo):
-                self._redo()
-                return True
-            if key_event.key() == Qt.Key.Key_PageUp:
-                self._move_selected_spots_in_table(-1)
-                return True
-            if key_event.key() == Qt.Key.Key_PageDown:
-                self._move_selected_spots_in_table(1)
-                return True
-            if key_event.key() in {Qt.Key.Key_Delete, Qt.Key.Key_Backspace}:
-                self._remove_selected_spots()
-                return True
-            if key_event.matches(QKeySequence.StandardKey.Copy):
-                self._copy_spot_properties_from_table()
-                return True
-            if key_event.matches(QKeySequence.StandardKey.Paste):
-                self._paste_spot_properties_from_table()
-                return True
-        if watched is self.chromatic_landmark_id_spin and event.type() == QEvent.Type.KeyPress and self._active_tool == "chromatic_landmark":
-            key_event = event
-            if key_event.key() in {Qt.Key.Key_PageUp, Qt.Key.Key_PageDown}:
-                direction = -1 if key_event.key() == Qt.Key.Key_PageUp else 1
-                if key_event.modifiers() & Qt.KeyboardModifier.ShiftModifier:
-                    if self._navigate_chromatic_sample(direction):
-                        return True
-                elif self._switch_chromatic_feature(direction):
-                    return True
-        if watched is self.wavelength_spin and event.type() == QEvent.Type.Wheel:
-            wheel_event = event
-            delta = wheel_event.angleDelta().y()
-            if delta == 0:
-                return True
-            step = 1 if delta > 0 else -1
-            self._step_wavelength_selection(step)
+        if self._image_interaction.handle_event(watched, event):
             return True
-        if watched is self.frame_spin and event.type() == QEvent.Type.Wheel:
-            wheel_event = event
-            delta = wheel_event.angleDelta().y()
-            if delta == 0:
-                return True
-            step = 1 if delta > 0 else -1
-            self._step_frame_selection(step)
-            return True
-        if watched is self.wavelength_slider and event.type() == QEvent.Type.Wheel:
-            wheel_event = event
-            delta = wheel_event.angleDelta().y()
-            if delta == 0:
-                return True
-            step = 1 if delta > 0 else -1
-            self._step_wavelength_selection(step)
-            return True
-        if watched is self.frame_slider and event.type() == QEvent.Type.Wheel:
-            wheel_event = event
-            delta = wheel_event.angleDelta().y()
-            if delta == 0:
-                return True
-            step = 1 if delta > 0 else -1
-            self._step_frame_selection(step)
-            return True
-        if watched in {self.spot_diameter_spin, self.ring_inner_diameter_spin, self.ring_outer_diameter_spin} and event.type() == QEvent.Type.Wheel:
-            wheel_event = event
-            delta = wheel_event.angleDelta().y()
-            if delta == 0:
-                return True
-            step = 1 if delta > 0 else -1
-            spinbox = watched
-            if hasattr(spinbox, "stepBy"):
-                spinbox.stepBy(step)
-            return True
-        spot_list_viewport = self.spot_list_table.viewport() if hasattr(self, "spot_list_table") else None
-        if spot_list_viewport is not None and watched is spot_list_viewport and event.type() == QEvent.Type.MouseButtonPress:
-            mouse_event = event
-            if mouse_event.button() == Qt.MouseButton.LeftButton:
-                row = self.spot_list_table.rowAt(int(mouse_event.position().toPoint().y()))
-                if row >= 0:
-                    if mouse_event.modifiers() & Qt.KeyboardModifier.ShiftModifier:
-                        anchor = self._spot_list_range_anchor_row
-                        if anchor is None or anchor < 0 or anchor >= self.spot_list_table.rowCount():
-                            anchor = self.spot_list_table.currentRow()
-                        if anchor < 0:
-                            anchor = row
-                        start_row, end_row = sorted((anchor, row))
-                        self._select_spot_list_table_rows(list(range(start_row, end_row + 1)))
-                        return True
-                    self._spot_list_range_anchor_row = row
-        image_view = getattr(self, "image_view", None)
-        if image_view is None:
-            return False
-        if watched is image_view.viewport() and event.type() == QEvent.Type.Resize:
-            self._position_reference_star_label()
-            return False
-        if watched is image_view.viewport() and self._active_tool == "crop":
-            if event.type() == QEvent.Type.MouseButtonPress and event.button() == Qt.MouseButton.MiddleButton:
-                point = self._image_point_from_mouse_event(event)
-                if point is None:
-                    return False
-                self._begin_image_pan(point)
-                return True
-            if event.type() == QEvent.Type.MouseMove and self._panning_image:
-                point = self._image_point_from_mouse_event(event)
-                if point is None:
-                    return True
-                self._update_image_pan(point)
-                return True
-            if event.type() == QEvent.Type.MouseButtonRelease and event.button() == Qt.MouseButton.MiddleButton and self._panning_image:
-                self._end_image_pan()
-                return True
-            if event.type() == QEvent.Type.MouseButtonPress and event.button() == Qt.MouseButton.RightButton:
-                point = self._image_point_from_mouse_event(event)
-                if point is None:
-                    return False
-                if self._crop_rect_contains_point(point):
-                    self._prepare_undo_snapshot("Crop")
-                    self._dragging_crop = True
-                    self._crop_drag_anchor = point
-                    crop = self._state.preprocessing.crop
-                    self._crop_drag_origin = (float(crop.x), float(crop.y))
-                    return True
-                return False
-            if event.type() == QEvent.Type.MouseMove and self._dragging_crop and self._crop_drag_anchor is not None and self._crop_drag_origin is not None:
-                point = self._image_point_from_mouse_event(event)
-                if point is None:
-                    return True
-                dx = float(point[0]) - float(self._crop_drag_anchor[0])
-                dy = float(point[1]) - float(self._crop_drag_anchor[1])
-                self._move_crop_roi_to(float(self._crop_drag_origin[0] + dx), float(self._crop_drag_origin[1] + dy))
-                return True
-            if event.type() == QEvent.Type.MouseButtonRelease and event.button() == Qt.MouseButton.RightButton and self._dragging_crop:
-                self._dragging_crop = False
-                self._crop_drag_anchor = None
-                self._crop_drag_origin = None
-                self._handle_image_tool_settings_changed("Crop moved.", preserve_view=True)
-                return True
-        if watched is image_view.viewport() and self._active_tool == "chromatic_landmark":
-            if event.type() == QEvent.Type.MouseButtonPress and event.button() == Qt.MouseButton.RightButton:
-                point = self._image_point_from_mouse_event(event)
-                if point is None:
-                    return False
-                landmark_id = self._find_landmark_id_at(point)
-                if landmark_id is not None:
-                    self._selected_landmark_id = landmark_id
-                    self.chromatic_landmark_id_spin.blockSignals(True)
-                    self.chromatic_landmark_id_spin.setValue(landmark_id)
-                    self.chromatic_landmark_id_spin.blockSignals(False)
-                    self._prepare_undo_snapshot("Chromatic landmarks")
-                    self._dragging_landmark = True
-                    self._dragging_landmark_started = False
-                    self._update_landmark_overlays()
-                else:
-                    self._selected_landmark_id = int(self._chromatic_landmark_marker_id)
-                    self._set_current_landmark(point)
-                return True
-            if event.type() == QEvent.Type.MouseMove and self._dragging_landmark and self._selected_landmark_id is not None:
-                point = self._image_point_from_mouse_event(event)
-                if point is None:
-                    return True
-                self._dragging_landmark_started = True
-                mark = self._current_landmark(int(self._selected_landmark_id))
-                if mark is not None:
-                    max_x = float(self._current_processed_image.shape[1] - 1) if self._current_processed_image is not None else float(mark.x_px)
-                    max_y = float(self._current_processed_image.shape[0] - 1) if self._current_processed_image is not None else float(mark.y_px)
-                    mark.x_px = float(np.clip(point[0], 0.0, max_x))
-                    mark.y_px = float(np.clip(point[1], 0.0, max_y))
-                    self._update_landmark_overlays()
-                return True
-            if event.type() == QEvent.Type.MouseButtonRelease and event.button() == Qt.MouseButton.LeftButton and self._dragging_landmark:
-                self._dragging_landmark = False
-                moved = self._dragging_landmark_started
-                self._dragging_landmark_started = False
-                if moved:
-                    self._finalize_chromatic_landmark_edit(status_text=f"Adjusted reference point {self._selected_landmark_id}.")
-                self._commit_prepared_undo_snapshot()
-                return True
-
-        if watched is self.image_view.viewport() and self._active_tool == "mask":
-            if event.type() == QEvent.Type.MouseButtonPress and event.button() == Qt.MouseButton.LeftButton:
-                point = self._image_point_from_mouse_event(event)
-                if point is None:
-                    return False
-                self._prepare_undo_snapshot("Edit mask")
-                self._mask_drawing = True
-                self._apply_mask_brush(point)
-                return True
-
-            if event.type() == QEvent.Type.MouseMove and self._mask_drawing:
-                point = self._image_point_from_mouse_event(event)
-                if point is None:
-                    return True
-                self._apply_mask_brush(point)
-                return True
-
-            if event.type() == QEvent.Type.MouseButtonRelease and event.button() == Qt.MouseButton.LeftButton and self._mask_drawing:
-                self._mask_drawing = False
-                self._finalize_mask_edit()
-                return True
-
-        if watched is self.image_view.viewport() and self._active_tool == "spots" and self._roi_editor_mode in {"circles", "rectangles"}:
-            allow_roi_add = self.spot_add_action.isChecked()
-            allow_roi_array = self.roi_array_action.isChecked()
-            allow_roi_move = self.spot_move_action.isChecked()
-            if event.type() == QEvent.Type.MouseButtonPress and event.button() == Qt.MouseButton.LeftButton:
-                point = self._image_point_from_mouse_event(event)
-                if point is None:
-                    return False
-                if allow_roi_array:
-                    self._add_roi_array_at(point)
-                    return True
-                if allow_roi_add:
-                    self._add_rectangle_roi_at(point)
-                    return True
-                hit_roi = self._rectangle_stamp_at(point)
-                if hit_roi is None:
-                    self._clear_rectangle_roi_selection()
-                    return True
-                additive = bool(event.modifiers() & Qt.KeyboardModifier.ShiftModifier)
-                if additive:
-                    self._select_rectangle_rois({hit_roi.roi_id}, additive=True)
-                else:
-                    self._select_rectangle_rois({hit_roi.roi_id}, additive=False)
-                self._spot_selection_drag_start = point
-                self._spot_selection_drag_button = Qt.MouseButton.LeftButton
-                self._spot_selection_pressed_spot_id = None
-                self._spot_selection_drag_modifiers = event.modifiers()
-                return True
-            if event.type() == QEvent.Type.MouseButtonPress and event.button() == Qt.MouseButton.RightButton:
-                point = self._image_point_from_mouse_event(event)
-                if point is None:
-                    return False
-                hit_roi = self._rectangle_stamp_at(point)
-                if allow_roi_move and self._selected_rectangle_roi_ids and hit_roi is not None:
-                    if hit_roi.roi_id not in self._selected_rectangle_roi_ids:
-                        self._select_rectangle_rois({hit_roi.roi_id}, additive=False)
-                    self._dragging_rectangle_rois = True
-                    self._rectangle_drag_anchor = point
-                    self._rectangle_drag_original_positions = {
-                        roi.roi_id: (roi.center_x, roi.center_y)
-                        for roi in self._state.rois
-                        if roi.roi_id in self._selected_rectangle_roi_ids
-                    }
-                    self._spot_selection_drag_button = Qt.MouseButton.RightButton
-                    self._spot_selection_drag_start = None
-                    self._spot_selection_pressed_spot_id = None
-                    self._spot_selection_drag_modifiers = Qt.KeyboardModifier.NoModifier
-                    return True
-                return True
-            if event.type() == QEvent.Type.MouseMove and self._dragging_rectangle_rois and self._rectangle_drag_anchor is not None:
-                point = self._image_point_from_mouse_event(event)
-                if point is None:
-                    return True
-                dx = point[0] - self._rectangle_drag_anchor[0]
-                dy = point[1] - self._rectangle_drag_anchor[1]
-                for roi in self._state.rois:
-                    if roi.roi_id not in self._selected_rectangle_roi_ids or roi.roi_id not in self._rectangle_drag_original_positions:
-                        continue
-                    base_x, base_y = self._rectangle_drag_original_positions[roi.roi_id]
-                    moved = move_roi_from_template(
-                        roi,
-                        center_x=base_x + dx,
-                        center_y=base_y + dy,
-                        image_shape=self._current_processed_image.shape if self._current_processed_image is not None else None,
-                    )
-                    roi.center_x = moved.center_x
-                    roi.center_y = moved.center_y
-                self._sync_rectangle_stamp_overlays()
-                return True
-            if event.type() == QEvent.Type.MouseButtonRelease and event.button() == Qt.MouseButton.RightButton and self._dragging_rectangle_rois:
-                self._dragging_rectangle_rois = False
-                self._rectangle_drag_anchor = None
-                self._rectangle_drag_original_positions.clear()
-                self._sync_rectangle_stamp_overlays()
-                self._save_processing_state_for_dataset()
-                self._schedule_processing_state_save()
-                self.status_label.setText(f"Moved {len(self._selected_rectangle_roi_ids)} selected rectangle ROI(s).")
-                return True
-            if event.type() == QEvent.Type.MouseButtonRelease and event.button() == Qt.MouseButton.LeftButton and self._spot_selection_drag_start is not None:
-                self._spot_selection_drag_start = None
-                self._spot_selection_drag_button = None
-                self._spot_selection_pressed_spot_id = None
-                self._spot_selection_drag_modifiers = Qt.KeyboardModifier.NoModifier
-                return True
-
-        selection_mode_active = (
-            (self._active_tool == "spots" and self._roi_editor_mode not in {"circles", "rectangles"})
-            or (self._analysis_enabled and self._state.dataset is not None)
-        )
-        if watched is self.image_view.viewport() and selection_mode_active:
-            allow_spot_add = self._active_tool == "spots" and self.spot_add_action.isChecked()
-            allow_spot_move = self._active_tool == "spots" and self.spot_move_action.isChecked()
-            if event.type() == QEvent.Type.MouseButtonPress and event.button() == Qt.MouseButton.LeftButton:
-                point = self._image_point_from_mouse_event(event)
-                if point is None:
-                    return False
-                if allow_spot_add:
-                    if self._roi_editor_mode in {"circles", "rectangles"}:
-                        self._add_rectangle_roi_at(point)
-                    else:
-                        self._add_spot_at(point)
-                    return True
-                spot_id = self._find_spot_id_at(point)
-                modifiers = event.modifiers()
-                self._spot_selection_drag_start = point
-                self._spot_selection_drag_button = Qt.MouseButton.LeftButton
-                self._spot_selection_pressed_spot_id = spot_id
-                self._spot_selection_drag_modifiers = modifiers
-                if self._spot_selection_rubber_band is None:
-                    self._spot_selection_rubber_band = QRubberBand(QRubberBand.Shape.Rectangle, self.image_view.viewport())
-                start_point = self.image_view.mapFromScene(self.image_plot.vb.mapViewToScene(pg.Point(point[0], point[1])))
-                self._spot_selection_rubber_band.setGeometry(start_point.x(), start_point.y(), 0, 0)
-                self._spot_selection_rubber_band.hide()
-                if spot_id is not None:
-                    if modifiers & Qt.KeyboardModifier.ShiftModifier:
-                        self._selected_spot_ids.add(spot_id)
-                    else:
-                        self._selected_spot_ids = {spot_id}
-                self._update_spot_overlays()
-                self._update_spot_summary()
-                self._sync_spot_list_table_selection()
-                self._update_selection_dependent_plots(prompt_live_preview=True)
-                return True
-
-            if event.type() == QEvent.Type.MouseButtonPress and event.button() == Qt.MouseButton.RightButton:
-                point = self._image_point_from_mouse_event(event)
-                if point is None:
-                    return False
-                spot_id = self._find_spot_id_at(point)
-                if allow_spot_move and self._is_current_reference_image() and spot_id is not None:
-                    if self._selected_spot_ids:
-                        drag_spot_ids = set(self._selected_spot_ids)
-                    else:
-                        self._selected_spot_ids = {spot_id}
-                        drag_spot_ids = {spot_id}
-                    self._update_spot_overlays()
-                    self._update_spot_summary()
-                    self._sync_spot_list_table_selection()
-                    self._update_selection_dependent_plots(prompt_live_preview=True)
-                    self._prepare_undo_snapshot("Move spots")
-                    self._dragging_spots = True
-                    self._drag_anchor = point
-                    self._drag_original_positions = {
-                        spot.spot_id: (spot.center_x, spot.center_y)
-                        for spot in self._state.detected_spots
-                        if spot.spot_id in drag_spot_ids
-                    }
-                    self._spot_selection_drag_button = Qt.MouseButton.RightButton
-                    self._spot_selection_drag_start = None
-                    self._spot_selection_pressed_spot_id = None
-                    self._spot_selection_drag_modifiers = Qt.KeyboardModifier.NoModifier
-                    return True
-                if self._analysis_enabled and spot_id is not None:
-                    if spot_id not in self._selected_spot_ids:
-                        self._selected_spot_ids = {spot_id}
-                        self._update_spot_overlays()
-                        self._update_spot_summary()
-                        self._sync_spot_list_table_selection()
-                        self._update_selection_dependent_plots(prompt_live_preview=True)
-                    self._show_analysis_spot_context_menu(spot_id, event.globalPosition().toPoint())
-                    return True
-                return True
-
-            if event.type() == QEvent.Type.MouseButtonDblClick and event.button() == Qt.MouseButton.RightButton:
-                if not self._analysis_enabled:
-                    return True
-                point = self._image_point_from_mouse_event(event)
-                if point is None:
-                    return True
-                spot_id = self._find_spot_id_at(point)
-                if spot_id is None:
-                    return True
-                if self._select_group_members_for_spot(spot_id):
-                    self.status_label.setText(f"Selected group members for spot {spot_id}.")
-                return True
-
-            if event.type() == QEvent.Type.MouseMove and self._dragging_spots and self._drag_anchor is not None:
-                point = self._image_point_from_mouse_event(event)
-                if point is None:
-                    return True
-                dx = point[0] - self._drag_anchor[0]
-                dy = point[1] - self._drag_anchor[1]
-                for spot in self._state.detected_spots:
-                    if spot.spot_id not in self._selected_spot_ids or spot.spot_id not in self._drag_original_positions:
-                        continue
-                    base_x, base_y = self._drag_original_positions[spot.spot_id]
-                    spot.center_x, spot.center_y = self._clamp_spot_position(spot, base_x + dx, base_y + dy)
-                self._schedule_spot_overlay_refresh()
-                return True
-
-            if (
-                event.type() == QEvent.Type.MouseMove
-                and self._spot_selection_drag_start is not None
-                and self._spot_selection_drag_button == Qt.MouseButton.LeftButton
-                and self._spot_selection_rubber_band is not None
-                and not self._dragging_spots
-            ):
-                current_point = self._image_point_from_mouse_event(event)
-                if current_point is None:
-                    return True
-                start_scene = self.image_plot.vb.mapViewToScene(pg.Point(self._spot_selection_drag_start[0], self._spot_selection_drag_start[1]))
-                current_scene = self.image_plot.vb.mapViewToScene(pg.Point(current_point[0], current_point[1]))
-                if (
-                    not self._spot_selection_rubber_band.isVisible()
-                    and hypot(
-                        float(current_point[0] - self._spot_selection_drag_start[0]),
-                        float(current_point[1] - self._spot_selection_drag_start[1]),
-                    ) < self._selection_drag_threshold()
-                ):
-                    return True
-                self._spot_selection_rubber_band.show()
-                top_left = QPointF(min(start_scene.x(), current_scene.x()), min(start_scene.y(), current_scene.y()))
-                bottom_right = QPointF(max(start_scene.x(), current_scene.x()), max(start_scene.y(), current_scene.y()))
-                rect = QRectF(top_left, bottom_right)
-                viewport_rect = self.image_view.mapFromScene(rect).boundingRect()
-                self._spot_selection_rubber_band.setGeometry(viewport_rect)
-                return True
-
-            if event.type() == QEvent.Type.MouseButtonRelease and event.button() == Qt.MouseButton.RightButton and self._dragging_spots:
-                self._dragging_spots = False
-                self._drag_anchor = None
-                self._drag_original_positions.clear()
-                self._spot_selection_drag_button = None
-                self._spot_overlay_refresh_timer.stop()
-                self._update_spot_overlays()
-                self._mark_spot_edit_refresh_pending()
-                self._save_processing_state_for_dataset()
-                self._schedule_processing_state_save()
-                self.status_label.setText(f"Moved {len(self._selected_spot_ids)} selected spots.")
-                return True
-
-            if (
-                event.type() == QEvent.Type.MouseButtonRelease
-                and event.button() == Qt.MouseButton.LeftButton
-                and self._spot_selection_drag_start is not None
-                and self._spot_selection_drag_button == Qt.MouseButton.LeftButton
-            ):
-                if self._spot_selection_rubber_band is not None:
-                    self._spot_selection_rubber_band.hide()
-                end_point = self._image_point_from_mouse_event(event)
-                start_x, start_y = self._spot_selection_drag_start
-                drag_modifiers = self._spot_selection_drag_modifiers
-                if end_point is None:
-                    end_x, end_y = start_x, start_y
-                else:
-                    end_x, end_y = end_point
-                drag_distance = hypot(float(end_x) - float(start_x), float(end_y) - float(start_y))
-                if drag_distance < 2.0 and self._spot_selection_pressed_spot_id is not None:
-                    clicked_spot_id = self._spot_selection_pressed_spot_id
-                    if drag_modifiers & Qt.KeyboardModifier.ShiftModifier:
-                        self._selected_spot_ids.add(clicked_spot_id)
-                    else:
-                        self._selected_spot_ids = {clicked_spot_id}
-                    self._spot_selection_drag_start = None
-                    self._spot_selection_drag_button = None
-                    self._spot_selection_pressed_spot_id = None
-                    self._spot_selection_drag_modifiers = Qt.KeyboardModifier.NoModifier
-                    self._update_spot_overlays()
-                    self._update_spot_summary()
-                    self._sync_spot_list_table_selection()
-                    self._update_selection_dependent_plots(prompt_live_preview=True)
-                    return True
-                left = min(start_x, end_x)
-                right = max(start_x, end_x)
-                top = min(start_y, end_y)
-                bottom = max(start_y, end_y)
-                dragged_spot_ids = {
-                    spot.spot_id
-                    for spot in self._display_spots()
-                    if left <= float(spot.center_x) <= right and top <= float(spot.center_y) <= bottom
-                }
-                if drag_modifiers & Qt.KeyboardModifier.ShiftModifier:
-                    self._selected_spot_ids.update(dragged_spot_ids)
-                else:
-                    self._selected_spot_ids = set(dragged_spot_ids)
-                self._spot_selection_drag_start = None
-                self._spot_selection_drag_button = None
-                self._spot_selection_pressed_spot_id = None
-                self._spot_selection_drag_modifiers = Qt.KeyboardModifier.NoModifier
-                self._update_spot_overlays()
-                self._update_spot_summary()
-                self._sync_spot_list_table_selection()
-                self._update_selection_dependent_plots(prompt_live_preview=True)
-                return True
-
-            if event.type() == QEvent.Type.MouseButtonRelease and event.button() == Qt.MouseButton.LeftButton:
-                self._spot_selection_drag_start = None
-                self._spot_selection_drag_button = None
-                self._spot_selection_pressed_spot_id = None
-                self._spot_selection_drag_modifiers = Qt.KeyboardModifier.NoModifier
-                return True
-
         return super().eventFilter(watched, event)
 
     def _image_point_from_mouse_event(self, event) -> tuple[float, float] | None:
-        scene_pos = self.image_view.mapToScene(event.position().toPoint())
-        if not self.image_plot.sceneBoundingRect().contains(scene_pos):
-            return None
-        mouse_point = self.image_plot.vb.mapSceneToView(scene_pos)
-        return float(mouse_point.x()), float(mouse_point.y())
+        return self._image_interaction._image_point_from_mouse_event(event)
 
     def _selection_drag_threshold(self) -> float:
-        return 5.0
+        return self._image_interaction._selection_drag_threshold()
 
-    def _find_spot_id_at(self, point: tuple[float, float]) -> int | None:
+    def _find_roi_id_at(self, point: tuple[float, float]) -> int | None:
         nearest_id: int | None = None
         nearest_distance = float("inf")
-        for spot in self._display_spots():
-            distance = hypot(point[0] - spot.center_x, point[1] - spot.center_y)
-            threshold = max(float(spot.radius_px) * 1.25, 8.0)
+        for roi in self._display_rois():
+            distance = hypot(point[0] - roi.center_x, point[1] - roi.center_y)
+            threshold = max(float(roi.sample_radius_px) * 1.25, 8.0)
             if distance <= threshold and distance < nearest_distance:
-                nearest_id = spot.spot_id
+                nearest_id = roi.area_roi_id
                 nearest_distance = distance
         return nearest_id
 
-    def _spot_by_id(self, spot_id: int) -> DetectedSpot | None:
-        for spot in self._state.detected_spots:
-            if spot.spot_id == spot_id:
-                return spot
+    def _roi_by_id(self, spot_id: int) -> AreaRoi | None:
+        for roi in self._state.area_rois:
+            if roi.area_roi_id == spot_id:
+                return roi
         return None
 
     def _array_position_for_spot(self, spot_id: int) -> tuple[int, int] | None:
-        rows = max(int(self._state.spot_detection.array_rows), 0)
-        cols = max(int(self._state.spot_detection.array_cols), 0)
+        rows = max(int(self._state.area_roi_settings.array_rows), 0)
+        cols = max(int(self._state.area_roi_settings.array_cols), 0)
         if rows <= 0 or cols <= 0:
             return None
         index = spot_id - 1
@@ -9566,18 +7107,18 @@ class MainWindow(MainWindowIcons, QMainWindow):
         if position is None:
             return str(int(spot_id)) if int(spot_id) > 0 else None
         row, col = position
-        cols = max(int(self._state.spot_detection.array_cols), 0)
+        cols = max(int(self._state.area_roi_settings.array_cols), 0)
         if cols <= 0:
             return str(int(spot_id)) if int(spot_id) > 0 else None
         return str(row * cols + col + 1)
 
     def _select_neighbor_spot(self, key: int) -> bool:
-        rows = max(int(self._state.spot_detection.array_rows), 0)
-        cols = max(int(self._state.spot_detection.array_cols), 0)
-        if rows <= 0 or cols <= 0 or not self._state.detected_spots:
+        rows = max(int(self._state.area_roi_settings.array_rows), 0)
+        cols = max(int(self._state.area_roi_settings.array_cols), 0)
+        if rows <= 0 or cols <= 0 or not self._state.area_rois:
             return False
 
-        current_id = min(self._selected_spot_ids) if self._selected_spot_ids else 1
+        current_id = min(self._selected_roi_ids) if self._selected_roi_ids else 1
         current_position = self._array_position_for_spot(current_id)
         if current_position is None:
             return False
@@ -9592,17 +7133,17 @@ class MainWindow(MainWindowIcons, QMainWindow):
         elif key == Qt.Key.Key_Down:
             row = min(row + 1, rows - 1)
         new_id = row * cols + col + 1
-        new_spot = self._spot_by_id(new_id)
+        new_spot = self._roi_by_id(new_id)
         if new_spot is None:
             return False
-        self._selected_spot_ids = {new_id}
-        self._update_spot_overlays()
-        self._update_spot_summary()
+        self._selected_roi_ids = {new_id}
+        self._update_roi_overlays()
+        self._update_roi_summary()
         self._update_selection_dependent_plots(prompt_live_preview=True)
         self._center_view_on_spot(new_spot)
         return True
 
-    def _center_view_on_spot(self, spot: DetectedSpot) -> None:
+    def _center_view_on_spot(self, spot: AreaRoi) -> None:
         if self._current_processed_image is None:
             return
 
@@ -9613,8 +7154,8 @@ class MainWindow(MainWindowIcons, QMainWindow):
 
         half_width = view_width / 2.0
         half_height = view_height / 2.0
-        center_x = float(np.clip(spot.center_x, half_width, max(float(image_width) - half_width, half_width)))
-        center_y = float(np.clip(spot.center_y, half_height, max(float(image_height) - half_height, half_height)))
+        center_x = float(np.clip(roi.center_x, half_width, max(float(image_width) - half_width, half_width)))
+        center_y = float(np.clip(roi.center_y, half_height, max(float(image_height) - half_height, half_height)))
 
         self.image_plot.vb.setRange(
             xRange=(center_x - half_width, center_x + half_width),
@@ -9684,48 +7225,85 @@ class MainWindow(MainWindowIcons, QMainWindow):
         next_index = min(max(current_index + int(direction), 0), len(feature_ids) - 1)
         return self._select_chromatic_feature(feature_ids[next_index], center_view=True)
 
-    def _move_selected_spots(self, dx: float, dy: float) -> None:
-        if not self._selected_spot_ids:
+    def _move_selected_rois(self, dx: float, dy: float) -> None:
+        if not self._selected_roi_ids:
             return
-        self._append_workflow_log(f"Spots | move {len(self._selected_spot_ids)} by dx={dx:g}, dy={dy:g}", level="debug")
-        self._prepare_undo_snapshot("Move spots")
-        for spot in self._state.detected_spots:
-            if spot.spot_id not in self._selected_spot_ids:
+        self._append_workflow_log(f"ROIs | move {len(self._selected_roi_ids)} by dx={dx:g}, dy={dy:g}", level="debug")
+        self._prepare_undo_snapshot("Move ROIs")
+        for roi in self._state.area_rois:
+            if roi.area_roi_id not in self._selected_roi_ids:
                 continue
-            spot.center_x, spot.center_y = self._clamp_spot_position(spot, spot.center_x + dx, spot.center_y + dy)
-        self._update_spot_overlays()
-        self._mark_spot_edit_refresh_pending()
+            roi.center_x, roi.center_y = self._clamp_roi_position(roi, roi.center_x + dx, roi.center_y + dy)
+        self._update_roi_overlays()
+        self._mark_roi_edit_refresh_pending()
         self._save_processing_state_for_dataset()
         self._schedule_processing_state_save()
 
-    def _add_spot_at(self, point: tuple[float, float]) -> None:
+    def _add_roi_at(self, point: tuple[float, float]) -> None:
         if self._current_processed_image is None:
-            self.status_label.setText("No image available for adding spots.")
+            self.status_label.setText("No image available for adding ROIs.")
             return
-        self._push_undo_point("Add spot")
-        radius = float(max(self._state.spot_detection.spot_radius_px, 1))
-        provisional = DetectedSpot(
-            spot_id=len(self._state.detected_spots) + 1,
+        self._push_undo_point("Add ROI")
+        radius = float(max(self._state.area_roi_settings.sample_radius_px, 1))
+        provisional = AreaRoi(
+            area_roi_id=len(self._state.area_rois) + 1,
             center_x=point[0],
             center_y=point[1],
-            radius_px=radius,
+            sample_radius_px=radius,
             score=0.0,
         )
-        provisional.center_x, provisional.center_y = self._clamp_spot_position(provisional, provisional.center_x, provisional.center_y)
-        self._state.detected_spots.append(provisional)
-        self._selected_spot_ids = {provisional.spot_id}
-        self._update_spot_overlays()
-        self._mark_spot_edit_refresh_pending()
-        self._update_spot_summary()
+        provisional.center_x, provisional.center_y = self._clamp_roi_position(provisional, provisional.center_x, provisional.center_y)
+        self._state.area_rois.append(provisional)
+        self._selected_roi_ids = {provisional.area_roi_id}
+        self._update_roi_overlays()
+        self._update_roi_table()
+        self._mark_roi_edit_refresh_pending()
+        self._update_roi_summary()
         self._save_processing_state_for_dataset()
         self._schedule_processing_state_save()
-        self.status_label.setText(f"Added spot {provisional.spot_id}.")
+        self.status_label.setText(f"Added ROI {provisional.area_roi_id}.")
 
-    def _clamp_spot_position(self, spot: DetectedSpot, x: float, y: float) -> tuple[float, float]:
+    def _add_roi_array_at(self, point: tuple[float, float]) -> None:
+        if self._current_processed_image is None:
+            self.status_label.setText("No image available for adding ROI array.")
+            return
+        rows = int(self.array_rows_spin.value())
+        cols = int(self.array_cols_spin.value())
+        spacing = max(float(self._length_display_to_px(float(self.array_spacing_spin.value()))), 0.0)
+        if rows <= 0 or cols <= 0 or spacing <= 0.0:
+            self.status_label.setText("Set array rows, columns, and spacing before stamping an ROI array.")
+            return
+        radius = float(max(self._state.area_roi_settings.sample_radius_px, 1))
+        image_height, image_width = self._current_processed_image.shape[:2]
+        step = spacing
+        start_x = float(point[0]) - (cols - 1) * step / 2.0
+        start_y = float(point[1]) - (rows - 1) * step / 2.0
+        self._push_undo_point("Add ROI array")
+        next_id = len(self._state.area_rois) + 1
+        new_rois: list[AreaRoi] = []
+        for row in range(rows):
+            for col in range(cols):
+                cx = start_x + col * step
+                cy = start_y + row * step
+                cx = float(min(max(cx, radius), max(float(image_width - 1) - radius, radius)))
+                cy = float(min(max(cy, radius), max(float(image_height - 1) - radius, radius)))
+                roi = AreaRoi(area_roi_id=next_id, center_x=cx, center_y=cy, sample_radius_px=radius, score=0.0)
+                new_rois.append(roi)
+                next_id += 1
+        self._state.area_rois.extend(new_rois)
+        self._selected_roi_ids = {s.area_roi_id for s in new_rois}
+        self._update_roi_overlays()
+        self._update_roi_table()
+        self._update_roi_summary()
+        self._save_processing_state_for_dataset()
+        self._schedule_processing_state_save()
+        self.status_label.setText(f"Added ROI array: {len(new_rois)} ROIs.")
+
+    def _clamp_roi_position(self, roi: AreaRoi, x: float, y: float) -> tuple[float, float]:
         if self._current_processed_image is None:
             return x, y
         image_height, image_width = self._current_processed_image.shape[:2]
-        radius = max(float(spot.radius_px), 1.0)
+        radius = max(float(roi.sample_radius_px), 1.0)
         clamped_x = min(max(x, radius), max(float(image_width - 1) - radius, radius))
         clamped_y = min(max(y, radius), max(float(image_height - 1) - radius, radius))
         return clamped_x, clamped_y
@@ -9737,7 +7315,7 @@ class MainWindow(MainWindowIcons, QMainWindow):
         status_text: str | None = None,
         refresh_histogram: bool = True,
     ) -> bool:
-        if self._current_processed_image is None or not self._state.detected_spots or not self._is_current_reference_image():
+        if self._current_processed_image is None or not self._state.area_rois or not self._is_current_reference_image():
             return False
         image_key = self._current_image_key
         if image_key is None:
@@ -9745,18 +7323,18 @@ class MainWindow(MainWindowIcons, QMainWindow):
         self._spot_metrics_request_id += 1
         request_id = self._spot_metrics_request_id
         image = self._current_processed_image
-        settings = deepcopy(self._state.spot_detection)
-        spots = deepcopy(self._state.detected_spots)
-        worker = FunctionWorker(_refresh_spot_metrics_task, image, settings, spots, self._current_external_mask())
-        self._begin_busy("Refreshing spot metrics...")
-        self._append_workflow_log("Spot metrics refresh start", level="info")
+        settings = deepcopy(self._state.area_roi_settings)
+        rois = deepcopy(self._state.area_rois)
+        worker = FunctionWorker(_refresh_roi_metrics_task, image, settings, rois, self._current_external_mask())
+        self._begin_busy("Refreshing ROI metrics...")
+        self._append_workflow_log("ROI metrics refresh start", level="info")
         worker.signals.result.connect(
             lambda refreshed_spots,
             request_id=request_id,
             image_key=image_key,
             save_after=save_after,
             status_text=status_text,
-            refresh_histogram=refresh_histogram: self._on_spot_metrics_ready(
+            refresh_histogram=refresh_histogram: self._on_roi_metrics_ready(
                 request_id,
                 image_key,
                 refreshed_spots,
@@ -9765,78 +7343,58 @@ class MainWindow(MainWindowIcons, QMainWindow):
                 refresh_histogram,
             )
         )
-        worker.signals.error.connect(lambda message: self._on_spot_metrics_failed(message))
+        worker.signals.error.connect(lambda message: self._on_roi_metrics_failed(message))
         self._thread_pool.start(worker)
         return True
 
-    def _on_spot_metrics_ready(
+    def _on_roi_metrics_ready(
         self,
         request_id: int,
         image_key: tuple[int, float],
-        refreshed_spots: list[DetectedSpot],
+        refreshed_spots: list[AreaRoi],
         save_after: bool,
         status_text: str | None,
         refresh_histogram: bool,
     ) -> None:
-        self._end_busy()
-        if request_id != self._spot_metrics_request_id:
-            return
-        if self._current_image_key != image_key:
-            return
-        self._state.detected_spots = refreshed_spots
-        if refresh_histogram:
-            self._invalidate_image_analysis_caches()
-            self._schedule_histogram_refresh()
-        self._update_spot_overlays()
-        self._update_spot_summary()
-        self._append_workflow_log(
-            f"Spot metrics refresh done | spots {len(refreshed_spots)}",
-            level="success",
-        )
-        if save_after:
-            self._schedule_processing_state_save()
-        if status_text:
-            self._set_status_text(status_text)
+        self._roi_table_controller._on_roi_metrics_ready(request_id, image_key, refreshed_spots, save_after, status_text, refresh_histogram)
 
-    def _on_spot_metrics_failed(self, message: str) -> None:
-        self._end_busy()
-        self._append_workflow_log(f"Spot metrics refresh failed | {message}", level="error")
-        self._background_error("Spot metric refresh", message)
+    def _on_roi_metrics_failed(self, message: str) -> None:
+        self._roi_table_controller._on_roi_metrics_failed(message)
 
-    def _refresh_spot_metrics_if_enabled(self) -> bool:
-        if not self.spot_editor_section.is_applied() or self._current_processed_image is None or not self._is_current_reference_image():
+    def _refresh_roi_metrics_if_enabled(self) -> bool:
+        if not self.roi_editor_section.is_applied() or self._current_processed_image is None or not self._is_current_reference_image():
             return False
         return self._request_spot_metrics_refresh(save_after=False, refresh_histogram=False)
 
-    def _mark_spot_edit_refresh_pending(self) -> None:
-        if self._active_tool == "spots":
+    def _mark_roi_edit_refresh_pending(self) -> None:
+        if self._active_tool == "roi":
             self._commit_prepared_undo_snapshot()
-            self._spot_edit_refresh_pending = True
+            self._roi_edit_refresh_pending = True
             self._save_processing_state_for_dataset()
             self._schedule_processing_state_save()
-            self.status_label.setText("Spot positions updated. Fit refresh is deferred until Edit spots is turned off.")
+            self.status_label.setText("ROI positions updated. Fit refresh is deferred until Edit ROIs is turned off.")
 
     def _finalize_spot_edit_refresh(self) -> None:
-        if not self._spot_edit_refresh_pending:
+        if not self._roi_edit_refresh_pending:
             return
-        self._spot_edit_refresh_pending = False
+        self._roi_edit_refresh_pending = False
         self._commit_prepared_undo_snapshot()
         self._invalidate_background_profile_cache()
         if self._showing_background_profile_main:
             self._update_background_profile_preview()
         if self._request_spot_metrics_refresh(
             save_after=True,
-            status_text="Spot fit metrics refreshed after leaving Edit spots.",
+            status_text="ROI fit metrics refreshed after leaving Edit ROIs.",
             refresh_histogram=True,
         ):
             return
         self._schedule_histogram_refresh()
-        self._update_spot_summary()
+        self._update_roi_summary()
         self._save_processing_state_for_dataset()
-        self.status_label.setText("Spot fit metrics refreshed after leaving Edit spots.")
+        self.status_label.setText("ROI fit metrics refreshed after leaving Edit ROIs.")
 
     def _refresh_histogram_if_available(self) -> None:
-        self._plot_manager.refresh_histogram_if_available()
+        self._overlay_manager._refresh_histogram_if_available()
 
     def _apply_histogram_log_mode(self, *, refresh: bool = True) -> None:
         self._plot_manager.apply_histogram_log_mode(refresh=refresh)
@@ -9864,7 +7422,7 @@ class MainWindow(MainWindowIcons, QMainWindow):
             self._clamp_histogram_log_range()
 
     def _on_histogram_y_scale_toggled(self, checked: bool) -> None:
-        self._plot_manager.on_histogram_y_scale_toggled(checked)
+        self._overlay_manager._on_histogram_y_scale_toggled(checked)
 
     def _histogram_log_y_max(self) -> float:
         return self._plot_manager.histogram_log_y_max()
@@ -9873,7 +7431,7 @@ class MainWindow(MainWindowIcons, QMainWindow):
         self._plot_manager.clamp_histogram_log_range()
 
     def _on_histogram_view_range_changed(self, *_args) -> None:
-        self._plot_manager.on_histogram_view_range_changed(*_args)
+        self._overlay_manager._on_histogram_view_range_changed(*_args)
 
     def _set_spectrum_summary_text(self, text: str) -> None:
         self._plot_manager.set_spectrum_summary_text(text)
@@ -9881,16 +7439,16 @@ class MainWindow(MainWindowIcons, QMainWindow):
     def _prepare_sensorgram_payload(self) -> tuple[tuple[object, ...], list[tuple[int, tuple[object, ...]]]] | None:
         if self._state.dataset is None:
             return None
-        selected_spot_ids = self._selected_spectrum_spot_ids()
-        if not selected_spot_ids:
+        selected_roi_ids = self._selected_spectrum_spot_ids()
+        if not selected_roi_ids:
             return None
-        selected_spot_id_set = set(selected_spot_ids)
-        selected_source_spots = [
-            deepcopy(spot)
-            for spot in self._state.detected_spots
-            if spot.spot_id in selected_spot_id_set
+        selected_spot_id_set = set(selected_roi_ids)
+        selected_source_rois = [
+            deepcopy(roi)
+            for roi in self._state.area_rois
+            if roi.area_roi_id in selected_spot_id_set
         ]
-        if not selected_source_spots:
+        if not selected_source_rois:
             return None
         frames = self._available_analysis_frames()
         if not frames:
@@ -9906,8 +7464,8 @@ class MainWindow(MainWindowIcons, QMainWindow):
                     executor.submit(
                         self._cached_sensorgram_frame_payload,
                         int(frame),
-                        selected_spot_ids,
-                        selected_source_spots,
+                        selected_roi_ids,
+                        selected_source_rois,
                     ): int(frame)
                     for frame in frames
                 }
@@ -9920,13 +7478,13 @@ class MainWindow(MainWindowIcons, QMainWindow):
             iterable_frames = prepared_frames
         else:
             iterable_frames = [
-                (int(frame), self._cached_sensorgram_frame_payload(frame, selected_spot_ids, selected_source_spots))
+                (int(frame), self._cached_sensorgram_frame_payload(frame, selected_roi_ids, selected_source_rois))
                 for frame in frames
             ]
         for frame, payload in iterable_frames:
             if payload is None:
                 continue
-            payload_signature = self._sensorgram_frame_payload_signature(frame, selected_spot_ids, selected_source_spots)
+            payload_signature = self._sensorgram_frame_payload_signature(frame, selected_roi_ids, selected_source_rois)
             if payload_signature is not None:
                 with self._analysis_cache_lock:
                     if payload_signature in self._sensorgram_frame_payload_cache:
@@ -9948,14 +7506,14 @@ class MainWindow(MainWindowIcons, QMainWindow):
         dataset_key = str(self._state.dataset.folder)
         signature = (
             dataset_key,
-            tuple(selected_spot_ids),
-            self._spot_signature(selected_source_spots),
+            tuple(selected_roi_ids),
+            self._roi_signature(selected_source_rois),
             self._analysis_metric_key(),
             int(self._analysis_poly_order()),
             tuple(round(float(value), 6) for value in self._wavelength_values),
             tuple(frame_signatures),
-            round(float(self._state.spot_detection.ring_inner_radius_px), 3),
-            round(float(self._state.spot_detection.ring_outer_radius_px), 3),
+            round(float(self._state.area_roi_settings.reference_inner_radius_px), 3),
+            round(float(self._state.area_roi_settings.reference_outer_radius_px), 3),
         )
         logging.getLogger("lspr_imaging_app.workflow").debug(
             "SG payload summary | hit=%s build=%s | frames=%s",
@@ -9968,91 +7526,26 @@ class MainWindow(MainWindowIcons, QMainWindow):
     def _sensorgram_signature_for_selection(
         self,
         frames: list[int],
-        selected_spot_ids: tuple[int, ...],
-        selected_source_spots: list[DetectedSpot],
+        selected_roi_ids: tuple[int, ...],
+        selected_source_rois: list[AreaRoi],
     ) -> tuple[object, ...] | None:
-        if self._state.dataset is None or not selected_spot_ids or not selected_source_spots or not frames:
-            return None
-        frame_signatures: list[tuple[object, ...]] = []
-        for frame in frames:
-            frame_signatures.append(
-                (
-                    int(frame),
-                    tuple(
-                        self._preprocessing_signature((int(frame), float(wavelength)))
-                        for wavelength in self._wavelength_values
-                    ),
-                )
-            )
-        dataset_key = str(self._state.dataset.folder)
-        return (
-            dataset_key,
-            tuple(selected_spot_ids),
-            self._spot_signature(selected_source_spots),
-            self._analysis_metric_key(),
-            int(self._analysis_poly_order()),
-            tuple(round(float(value), 6) for value in self._wavelength_values),
-            tuple(frame_signatures),
-            round(float(self._state.spot_detection.ring_inner_radius_px), 3),
-            round(float(self._state.spot_detection.ring_outer_radius_px), 3),
-        )
+        return self._analysis_controller._sensorgram_signature_for_selection(frames, selected_roi_ids, selected_source_rois)
 
     def _sensorgram_frame_payload_signature(
         self,
         frame: int,
-        selected_spot_ids: tuple[int, ...],
-        selected_source_spots: list[DetectedSpot],
+        selected_roi_ids: tuple[int, ...],
+        selected_source_rois: list[AreaRoi],
     ) -> tuple[object, ...] | None:
-        if self._state.dataset is None or not selected_spot_ids or not selected_source_spots:
-            return None
-        return (
-            str(self._state.dataset.folder),
-            int(frame),
-            tuple(selected_spot_ids),
-            self._spot_signature(selected_source_spots),
-            tuple(round(float(value), 6) for value in self._wavelength_values),
-            tuple(
-                self._preprocessing_signature((int(frame), float(wavelength)))
-                for wavelength in self._wavelength_values
-            ),
-            round(float(self._state.spot_detection.ring_inner_radius_px), 3),
-            round(float(self._state.spot_detection.ring_outer_radius_px), 3),
-        )
+        return self._analysis_controller._sensorgram_frame_payload_signature(frame, selected_roi_ids, selected_source_rois)
 
     def _cached_sensorgram_frame_payload(
         self,
         frame: int,
-        selected_spot_ids: tuple[int, ...],
-        selected_source_spots: list[DetectedSpot],
+        selected_roi_ids: tuple[int, ...],
+        selected_source_rois: list[AreaRoi],
     ) -> tuple[object, ...] | None:
-        logger = logging.getLogger("lspr_imaging_app.workflow")
-        signature = self._sensorgram_frame_payload_signature(frame, selected_spot_ids, selected_source_spots)
-        if signature is None:
-            return None
-        with self._analysis_cache_lock:
-            cached = self._sensorgram_frame_payload_cache.get(signature)
-            if cached is not None:
-                self._sensorgram_frame_payload_cache.move_to_end(signature)
-                logger.debug(
-                    "SG payload cache hit | frame=%s spots=%s",
-                    int(frame),
-                    len(selected_spot_ids),
-                )
-                return cached
-        payload = self._prepare_absorbance_spectrum_payload_for_frame(frame, selected_spot_ids, selected_source_spots)
-        if payload is None:
-            return None
-        with self._analysis_cache_lock:
-            self._sensorgram_frame_payload_cache[signature] = payload
-            self._sensorgram_frame_payload_cache.move_to_end(signature)
-            while len(self._sensorgram_frame_payload_cache) > self.SENSORGRAM_FRAME_PAYLOAD_CACHE_SIZE:
-                self._sensorgram_frame_payload_cache.popitem(last=False)
-        logger.debug(
-            "SG payload cache built | frame=%s spots=%s",
-            int(frame),
-            len(selected_spot_ids),
-        )
-        return payload
+        return self._analysis_controller._cached_sensorgram_frame_payload(frame, selected_roi_ids, selected_source_rois)
 
     def _schedule_sensorgram_refresh(self) -> None:
         if not self._startup_ready or self._startup_restore_in_progress or not self._analysis_live_preview_enabled:
@@ -10081,8 +7574,8 @@ class MainWindow(MainWindowIcons, QMainWindow):
             self._clear_sensorgram("Sensorgram is hidden during chromatic setup.")
             return
         if not self._selected_spectrum_spot_ids():
-            self._set_spectrum_summary_text("Select spots to show absorbance spectrum.")
-            self._clear_sensorgram("Select spots before calculating the sensorgram.")
+            self._set_spectrum_summary_text("Select ROIs to show absorbance spectrum.")
+            self._clear_sensorgram("Select ROIs before calculating the sensorgram.")
             return
         self._set_spectrum_summary_text(
             f"{self._spectrum_selection_label()} | Spectrum is out of date | Press Calculate spectrum"
@@ -10091,52 +7584,52 @@ class MainWindow(MainWindowIcons, QMainWindow):
             self._mark_sensorgram_stale()
 
     def _selected_spectrum_spot_ids(self) -> tuple[int, ...]:
-        return tuple(sorted(int(spot_id) for spot_id in self._selected_spot_ids))
+        return tuple(sorted(int(spot_id) for spot_id in self._selected_roi_ids))
 
-    def _selected_source_spots_snapshot(self) -> list[DetectedSpot]:
+    def _selected_source_rois_snapshot(self) -> list[AreaRoi]:
         selected_ids = self._selected_spectrum_spot_ids()
         if not selected_ids:
-            self._selected_source_spots_cache_signature = None
-            self._selected_source_spots_cache_value = tuple()
+            self._selected_source_rois_cache_signature = None
+            self._selected_source_rois_cache_value = tuple()
             return []
         signature_parts: list[object] = [selected_ids]
-        source_spots: list[DetectedSpot] = []
-        spot_by_id = {int(spot.spot_id): spot for spot in self._state.detected_spots}
+        source_rois: list[AreaRoi] = []
+        roi_by_id = {int(roi.area_roi_id): roi for roi in self._state.area_rois}
         for spot_id in selected_ids:
-            spot = spot_by_id.get(int(spot_id))
-            if spot is None:
-                self._selected_source_spots_cache_signature = None
-                self._selected_source_spots_cache_value = tuple()
+            roi = roi_by_id.get(int(spot_id))
+            if roi is None:
+                self._selected_source_rois_cache_signature = None
+                self._selected_source_rois_cache_value = tuple()
                 return []
-            source_spots.append(spot)
+            source_rois.append(roi)
             signature_parts.append(
                 (
-                    int(spot.spot_id),
-                    round(float(spot.center_x), 3),
-                    round(float(spot.center_y), 3),
-                    round(float(spot.radius_px), 3),
-                    round(float(spot.ring_inner_diameter_px or 0.0), 3),
-                    round(float(spot.ring_outer_diameter_px or 0.0), 3),
-                    spot.spot_color_hex or "",
-                    spot.ring_color_hex or "",
+                    int(roi.area_roi_id),
+                    round(float(roi.center_x), 3),
+                    round(float(roi.center_y), 3),
+                    round(float(roi.sample_radius_px), 3),
+                    round(float(roi.reference_inner_diameter_px or 0.0), 3),
+                    round(float(roi.reference_outer_diameter_px or 0.0), 3),
+                    roi.sample_color_hex or "",
+                    roi.reference_color_hex or "",
                 )
             )
         signature = tuple(signature_parts)
-        if self._selected_source_spots_cache_signature == signature and self._selected_source_spots_cache_value:
-            return list(self._selected_source_spots_cache_value)
-        copied = tuple(deepcopy(spot) for spot in source_spots)
-        self._selected_source_spots_cache_signature = signature
-        self._selected_source_spots_cache_value = copied
+        if self._selected_source_rois_cache_signature == signature and self._selected_source_rois_cache_value:
+            return list(self._selected_source_rois_cache_value)
+        copied = tuple(deepcopy(roi) for roi in source_rois)
+        self._selected_source_rois_cache_signature = signature
+        self._selected_source_rois_cache_value = copied
         return list(copied)
 
     def _spectrum_selection_label(self) -> str:
         selected_ids = self._selected_spectrum_spot_ids()
         if not selected_ids:
-            return "No spots"
-        if self._selected_spot_ids:
-            noun = "spot" if len(selected_ids) == 1 else "spots"
+            return "No ROIs"
+        if self._selected_roi_ids:
+            noun = "ROI" if len(selected_ids) == 1 else "ROIs"
             return f"{len(selected_ids)} selected {noun}"
-        noun = "spot" if len(selected_ids) == 1 else "spots"
+        noun = "ROI" if len(selected_ids) == 1 else "ROIs"
         return f"All {len(selected_ids)} {noun}"
 
     def _clear_absorbance_spectrum(self, summary_text: str) -> None:
@@ -10183,7 +7676,7 @@ class MainWindow(MainWindowIcons, QMainWindow):
     def _start_absorbance_spectrum_preparation(
         self,
         signature: tuple[object, ...],
-        selected_source_spots: list[DetectedSpot] | None = None,
+        selected_source_rois: list[AreaRoi] | None = None,
     ) -> None:
         if self._absorbance_prep_running:
             return
@@ -10195,7 +7688,7 @@ class MainWindow(MainWindowIcons, QMainWindow):
         self._append_workflow_log("Spec prep start", level="info")
         self._begin_busy("Preparing absorbance spectrum...", determinate=False)
         QApplication.processEvents()
-        worker = FunctionWorker(self._prepare_absorbance_spectrum_payload, selected_source_spots)
+        worker = FunctionWorker(self._prepare_absorbance_spectrum_payload, selected_source_rois)
         worker.signals.result.connect(
             lambda prepared, request_id=request_id, signature=signature: self._on_absorbance_spectrum_payload_ready(
                 request_id,
@@ -10214,92 +7707,55 @@ class MainWindow(MainWindowIcons, QMainWindow):
         expected_signature: tuple[object, ...],
         prepared: tuple[tuple[object, ...], tuple[object, ...]] | None,
     ) -> None:
-        if request_id != self._absorbance_prep_request_id:
-            return
-        self._absorbance_prep_running = False
-        self._absorbance_prep_started_at = None
-        self._absorbance_prep_request_signature = None
-        if prepared is None:
-            self._end_busy("Select spots to show absorbance spectrum.")
-            return
-        signature, payload = prepared
-        if signature != expected_signature:
-            self._absorbance_spectrum_dirty = True
-            self._end_busy("Select spots to show absorbance spectrum.")
-            return
-        if self._absorbance_prep_started_at is not None:
-            self._append_workflow_log(
-                f"Spec prep done | {self._format_elapsed_seconds(time.perf_counter() - self._absorbance_prep_started_at)}",
-                level="success",
-            )
-        self._pending_absorbance_spectrum_payload = (signature, payload)
-        self._start_pending_absorbance_spectrum_refresh(reuse_busy=True)
+        self._analysis_controller._on_absorbance_spectrum_payload_ready(request_id, expected_signature, prepared)
 
     def _on_absorbance_spectrum_payload_failed(self, request_id: int, message: str) -> None:
-        if request_id != self._absorbance_prep_request_id:
-            return
-        self._absorbance_prep_running = False
-        self._absorbance_prep_started_at = None
-        self._absorbance_prep_request_signature = None
-        self._end_busy()
-        self._background_error("Spectral absorbance prep", message)
+        self._analysis_controller._on_absorbance_spectrum_payload_failed(request_id, message)
 
     def _cached_absorbance_result_for_selection(
         self,
         signature: tuple[object, ...],
-        selected_spot_ids: tuple[int, ...],
-        selected_source_spots: list[DetectedSpot] | None = None,
+        selected_roi_ids: tuple[int, ...],
+        selected_source_rois: list[AreaRoi] | None = None,
     ) -> AbsorbanceSpectrumResult | None:
-        if not selected_spot_ids:
+        if not selected_roi_ids:
             return None
-        if len(selected_spot_ids) == 1:
+        if len(selected_roi_ids) == 1:
             for cache_signature, cached_result in reversed(list(self._spot_absorbance_cache.items())):
                 if self._absorbance_frame_signature(cache_signature) != self._absorbance_frame_signature(signature):
                     continue
-                if self._absorbance_result_covers_spot_ids(cached_result, selected_spot_ids):
+                if self._absorbance_result_covers_spot_ids(cached_result, selected_roi_ids):
                     return cached_result
         frame_signature = self._absorbance_frame_signature(signature)
         if frame_signature is not None:
             cached_result = self._absorbance_frame_cache.get(frame_signature)
-            if cached_result is not None and self._absorbance_result_covers_spot_ids(cached_result, selected_spot_ids):
+            if cached_result is not None and self._absorbance_result_covers_spot_ids(cached_result, selected_roi_ids):
                 return cached_result
         for cache_signature, cached_result in reversed(list(self._absorbance_spectrum_cache.items())):
             if self._absorbance_frame_signature(cache_signature) != frame_signature:
                 continue
-            if self._absorbance_result_covers_spot_ids(cached_result, selected_spot_ids):
+            if self._absorbance_result_covers_spot_ids(cached_result, selected_roi_ids):
                 return cached_result
-        if selected_source_spots:
-            cached_from_spots = self._cached_absorbance_result_from_spot_cache(selected_source_spots)
+        if selected_source_rois:
+            cached_from_spots = self._cached_absorbance_result_from_spot_cache(selected_source_rois)
             if cached_from_spots is not None:
                 return cached_from_spots
         return None
 
-    def _absorbance_spectrum_signature_for_source_spots(
+    def _absorbance_spectrum_signature_for_source_rois(
         self,
-        selected_source_spots: list[DetectedSpot],
+        selected_source_rois: list[AreaRoi],
     ) -> tuple[object, ...] | None:
-        frame = self._current_frame()
-        if frame is None or not selected_source_spots:
-            return None
-        selected_spot_ids = tuple(int(spot.spot_id) for spot in selected_source_spots)
-        return (
-            int(frame),
-            tuple(round(float(value), 6) for value in self._wavelength_values),
-            selected_spot_ids,
-            tuple(
-                self._chromatic_signature_for_image_key((int(frame), float(wavelength)))
-                for wavelength in self._wavelength_values
-            ),
-        )
+        return self._analysis_controller._absorbance_spectrum_signature_for_source_rois(selected_source_rois)
 
     def _absorbance_spectrum_signature(self) -> tuple[object, ...] | None:
-        return self._absorbance_spectrum_signature_for_source_spots(self._selected_source_spots_snapshot())
+        return self._analysis_controller._absorbance_spectrum_signature()
 
-    def _spot_absorbance_signature(self, spot: DetectedSpot) -> tuple[object, ...] | None:
+    def _roi_absorbance_signature(self, spot: AreaRoi) -> tuple[object, ...] | None:
         frame = self._current_frame()
         if frame is None or not self._wavelength_values:
             return None
-        return _spot_absorbance_signature(
+        return _roi_absorbance_signature(
             int(frame),
             tuple(float(value) for value in self._wavelength_values),
             spot,
@@ -10309,8 +7765,8 @@ class MainWindow(MainWindowIcons, QMainWindow):
             ),
         )
 
-    def _spot_has_cached_absorbance(self, spot: DetectedSpot) -> bool:
-        signature = self._spot_absorbance_signature(spot)
+    def _roi_has_cached_absorbance(self, spot: AreaRoi) -> bool:
+        signature = self._roi_absorbance_signature(spot)
         return signature is not None and self._spot_absorbance_cache.get(signature) is not None
 
     @staticmethod
@@ -10334,51 +7790,25 @@ class MainWindow(MainWindowIcons, QMainWindow):
         return (signature[0], signature[1], signature[3])
 
     @staticmethod
-    def _absorbance_result_covers_spot_ids(result: AbsorbanceSpectrumResult, selected_spot_ids: tuple[int, ...]) -> bool:
-        if not selected_spot_ids:
+    def _absorbance_result_covers_spot_ids(result: AbsorbanceSpectrumResult, selected_roi_ids: tuple[int, ...]) -> bool:
+        if not selected_roi_ids:
             return False
-        if not result.spot_results:
-            return len(selected_spot_ids) == 1
-        available_ids = {int(spot_id) for spot_id in result.spot_results.keys()}
-        return all(int(spot_id) in available_ids for spot_id in selected_spot_ids)
+        if not result.area_roi_results:
+            return len(selected_roi_ids) == 1
+        available_ids = {int(spot_id) for spot_id in result.area_roi_results.keys()}
+        return all(int(spot_id) in available_ids for spot_id in selected_roi_ids)
 
     def _cached_absorbance_result_from_spot_cache(
         self,
-        selected_source_spots: list[DetectedSpot],
+        selected_source_rois: list[AreaRoi],
     ) -> AbsorbanceSpectrumResult | None:
-        if not selected_source_spots:
-            return None
-        spot_results: dict[int, AbsorbanceSpectrumResult] = {}
-        for spot in selected_source_spots:
-            spot_signature = self._spot_absorbance_signature(spot)
-            if spot_signature is None:
-                return None
-            cached_result = self._spot_absorbance_cache.get(spot_signature)
-            if cached_result is None:
-                return None
-            spot_results[int(spot.spot_id)] = cached_result
-        first_result = next(iter(spot_results.values()), None)
-        if first_result is None:
-            return None
-        return AbsorbanceSpectrumResult(
-            wavelengths_nm=np.asarray(first_result.wavelengths_nm, dtype=np.float64),
-            absorbance=np.asarray(first_result.absorbance, dtype=np.float64),
-            spot_mean=np.asarray(first_result.spot_mean, dtype=np.float64),
-            ring_mean=np.asarray(first_result.ring_mean, dtype=np.float64),
-            spot_pixel_count=np.asarray(first_result.spot_pixel_count, dtype=np.int32),
-            ring_pixel_count=np.asarray(first_result.ring_pixel_count, dtype=np.int32),
-            load_seconds=float(first_result.load_seconds),
-            roi_seconds=float(first_result.roi_seconds),
-            fit_seconds=float(first_result.fit_seconds),
-            total_seconds=float(first_result.total_seconds),
-            spot_results=spot_results,
-        )
+        return self._analysis_controller._cached_absorbance_result_from_spot_cache(selected_source_rois)
 
     def _absorbance_roi_mask_signature(
         self,
         image_shape: tuple[int, int],
-        selected_spots: list[DetectedSpot],
-        selected_spot_ids: tuple[int, ...],
+        selected_rois: list[AreaRoi],
+        selected_roi_ids: tuple[int, ...],
         affine_matrix: np.ndarray | None,
     ) -> tuple[object, ...]:
         affine_signature = None
@@ -10386,57 +7816,57 @@ class MainWindow(MainWindowIcons, QMainWindow):
             affine_signature = tuple(round(float(value), 6) for value in np.asarray(affine_matrix, dtype=np.float64).ravel())
         return (
             tuple(int(value) for value in image_shape[:2]),
-            tuple(int(spot_id) for spot_id in selected_spot_ids),
-            self._spot_signature(selected_spots),
+            tuple(int(spot_id) for spot_id in selected_roi_ids),
+            self._roi_signature(selected_rois),
             affine_signature,
-            round(float(self._state.spot_detection.ring_inner_radius_px), 3),
-            round(float(self._state.spot_detection.ring_outer_radius_px), 3),
+            round(float(self._state.area_roi_settings.reference_inner_radius_px), 3),
+            round(float(self._state.area_roi_settings.reference_outer_radius_px), 3),
         )
 
     def _cached_absorbance_roi_mask_cache(
         self,
         image_shape: tuple[int, int],
-        selected_spots: list[DetectedSpot],
-        selected_spot_ids: tuple[int, ...],
+        selected_rois: list[AreaRoi],
+        selected_roi_ids: tuple[int, ...],
         affine_matrix: np.ndarray | None,
-        source_spots: list[DetectedSpot] | None = None,
+        source_rois: list[AreaRoi] | None = None,
     ) -> dict[str, object]:
         logger = logging.getLogger("lspr_imaging_app.workflow")
-        signature = self._absorbance_roi_mask_signature(image_shape, selected_spots, selected_spot_ids, affine_matrix)
+        signature = self._absorbance_roi_mask_signature(image_shape, selected_rois, selected_roi_ids, affine_matrix)
         with self._analysis_cache_lock:
             cached = self._absorbance_roi_mask_cache.get(signature)
             if cached is not None:
                 self._absorbance_roi_mask_cache.move_to_end(signature)
                 logger.debug(
-                    "ROI cache hit | shape=%sx%s spots=%s",
+                    "ROI cache hit | shape=%sx%s rois=%s",
                     int(image_shape[0]),
                     int(image_shape[1]),
-                    len(selected_spots),
+                    len(selected_rois),
                 )
                 return cached
-        selected_ids_local = tuple(int(spot_id) for spot_id in selected_spot_ids)
-        combined_spot_mask, combined_ring_mask = _selected_roi_masks_for_spectrum(
+        selected_ids_local = tuple(int(spot_id) for spot_id in selected_roi_ids)
+        combined_roi_mask, combined_ring_mask = _selected_roi_masks_for_spectrum(
             image_shape,
-            source_spots if source_spots is not None else selected_spots,
+            source_rois if source_rois is not None else selected_rois,
             selected_ids_local,
-            float(self._state.spot_detection.ring_inner_radius_px),
-            float(self._state.spot_detection.ring_outer_radius_px),
+            float(self._state.area_roi_settings.reference_inner_radius_px),
+            float(self._state.area_roi_settings.reference_outer_radius_px),
             affine_matrix,
         )
-        per_spot_masks: dict[int, tuple[np.ndarray, np.ndarray]] = {}
-        for spot in selected_spots:
-            per_spot_masks[int(spot.spot_id)] = _selected_roi_masks_for_spectrum(
+        per_roi_masks: dict[int, tuple[np.ndarray, np.ndarray]] = {}
+        for roi in selected_rois:
+            per_roi_masks[int(roi.area_roi_id)] = _selected_roi_masks_for_spectrum(
                 image_shape,
-                [spot],
-                (int(spot.spot_id),),
-                float(self._state.spot_detection.ring_inner_radius_px),
-                float(self._state.spot_detection.ring_outer_radius_px),
+                [roi],
+                (int(roi.area_roi_id),),
+                float(self._state.area_roi_settings.reference_inner_radius_px),
+                float(self._state.area_roi_settings.reference_outer_radius_px),
                 affine_matrix,
             )
         cached_value = {
             "shape": tuple(int(value) for value in image_shape[:2]),
-            "combined": (combined_spot_mask, combined_ring_mask),
-            "per_spot": per_spot_masks,
+            "combined": (combined_roi_mask, combined_ring_mask),
+            "per_spot": per_roi_masks,
         }
         with self._analysis_cache_lock:
             self._absorbance_roi_mask_cache[signature] = cached_value
@@ -10444,102 +7874,32 @@ class MainWindow(MainWindowIcons, QMainWindow):
             while len(self._absorbance_roi_mask_cache) > self.ABSORBANCE_ROI_MASK_CACHE_SIZE:
                 self._absorbance_roi_mask_cache.popitem(last=False)
         logger.debug(
-            "ROI cache built | shape=%sx%s spots=%s",
+            "ROI cache built | shape=%sx%s rois=%s",
             int(image_shape[0]),
             int(image_shape[1]),
-            len(selected_spots),
+            len(selected_rois),
         )
         return cached_value
 
     @staticmethod
     def _serialize_absorbance_result(result: AbsorbanceSpectrumResult) -> dict:
-        return {
-            "wavelengths_nm": [float(value) for value in np.asarray(result.wavelengths_nm, dtype=np.float64)],
-            "absorbance": [float(value) for value in np.asarray(result.absorbance, dtype=np.float64)],
-            "spot_mean": [float(value) for value in np.asarray(result.spot_mean, dtype=np.float64)],
-            "ring_mean": [float(value) for value in np.asarray(result.ring_mean, dtype=np.float64)],
-            "spot_pixel_count": [int(value) for value in np.asarray(result.spot_pixel_count, dtype=np.int32)],
-            "ring_pixel_count": [int(value) for value in np.asarray(result.ring_pixel_count, dtype=np.int32)],
-            "load_seconds": float(result.load_seconds),
-            "roi_seconds": float(result.roi_seconds),
-            "fit_seconds": float(result.fit_seconds),
-            "total_seconds": float(result.total_seconds),
-            "spot_results": {
-                str(int(spot_id)): MainWindow._serialize_absorbance_result(spot_result)
-                for spot_id, spot_result in (result.spot_results or {}).items()
-            },
-        }
+        from lspr_imaging_app.gui.analysis_controller import AnalysisController
+        return AnalysisController._serialize_absorbance_result(result)
 
     @staticmethod
     def _deserialize_absorbance_result(payload) -> AbsorbanceSpectrumResult:
-        if not isinstance(payload, dict):
-            return AbsorbanceSpectrumResult(
-                wavelengths_nm=np.asarray([], dtype=np.float64),
-                absorbance=np.asarray([], dtype=np.float64),
-                spot_mean=np.asarray([], dtype=np.float64),
-                ring_mean=np.asarray([], dtype=np.float64),
-                spot_pixel_count=np.asarray([], dtype=np.int32),
-                ring_pixel_count=np.asarray([], dtype=np.int32),
-            )
-        raw_spot_results = payload.get("spot_results", {})
-        spot_results: dict[int, AbsorbanceSpectrumResult] = {}
-        if isinstance(raw_spot_results, dict):
-            for key, value in raw_spot_results.items():
-                try:
-                    spot_id = int(key)
-                except Exception:
-                    continue
-                spot_results[spot_id] = MainWindow._deserialize_absorbance_result(value)
-        return AbsorbanceSpectrumResult(
-            wavelengths_nm=np.asarray(payload.get("wavelengths_nm", []), dtype=np.float64),
-            absorbance=np.asarray(payload.get("absorbance", []), dtype=np.float64),
-            spot_mean=np.asarray(payload.get("spot_mean", []), dtype=np.float64),
-            ring_mean=np.asarray(payload.get("ring_mean", []), dtype=np.float64),
-            spot_pixel_count=np.asarray(payload.get("spot_pixel_count", []), dtype=np.int32),
-            ring_pixel_count=np.asarray(payload.get("ring_pixel_count", []), dtype=np.int32),
-            load_seconds=float(payload.get("load_seconds", 0.0)),
-            roi_seconds=float(payload.get("roi_seconds", 0.0)),
-            fit_seconds=float(payload.get("fit_seconds", 0.0)),
-            total_seconds=float(payload.get("total_seconds", 0.0)),
-            spot_results=spot_results,
-        )
+        from lspr_imaging_app.gui.analysis_controller import AnalysisController
+        return AnalysisController._deserialize_absorbance_result(payload)
 
     @staticmethod
     def _serialize_sensorgram_result(result: SensorgramComputationResult) -> dict:
-        return {
-            "frame_indices": [int(value) for value in np.asarray(result.frame_indices, dtype=np.int32)],
-            "metric_values": [float(value) for value in np.asarray(result.metric_values, dtype=np.float64)],
-            "metric_signal": [float(value) for value in np.asarray(result.metric_signal, dtype=np.float64)],
-            "completed_count": int(result.completed_count),
-            "total_count": int(result.total_count),
-            "prep_seconds": float(result.prep_seconds),
-            "fit_seconds": float(result.fit_seconds),
-            "total_seconds": float(result.total_seconds),
-            "cancelled": bool(result.cancelled),
-        }
+        from lspr_imaging_app.gui.analysis_controller import AnalysisController
+        return AnalysisController._serialize_sensorgram_result(result)
 
     @staticmethod
     def _deserialize_sensorgram_result(payload) -> SensorgramComputationResult:
-        if not isinstance(payload, dict):
-            return SensorgramComputationResult(
-                frame_indices=np.asarray([], dtype=np.int32),
-                metric_values=np.asarray([], dtype=np.float64),
-                metric_signal=np.asarray([], dtype=np.float64),
-                completed_count=0,
-                total_count=0,
-                cancelled=False,
-            )
-        return SensorgramComputationResult(
-            frame_indices=np.asarray(payload.get("frame_indices", []), dtype=np.int32),
-            metric_values=np.asarray(payload.get("metric_values", []), dtype=np.float64),
-            metric_signal=np.asarray(payload.get("metric_signal", []), dtype=np.float64),
-            completed_count=int(payload.get("completed_count", 0)),
-            total_count=int(payload.get("total_count", 0)),
-            prep_seconds=float(payload.get("prep_seconds", 0.0)),
-            fit_seconds=float(payload.get("fit_seconds", 0.0)),
-            total_seconds=float(payload.get("total_seconds", 0.0)),
-            cancelled=bool(payload.get("cancelled", False)),
-        )
+        from lspr_imaging_app.gui.analysis_controller import AnalysisController
+        return AnalysisController._deserialize_sensorgram_result(payload)
 
     def _analysis_cache_payload(self) -> dict:
         payload: dict[str, list[dict[str, object]]] = {
@@ -10638,68 +7998,24 @@ class MainWindow(MainWindowIcons, QMainWindow):
     def _prepare_absorbance_spectrum_payload_for_frame(
         self,
         frame: int,
-        selected_spot_ids: tuple[int, ...],
-        selected_source_spots: list[DetectedSpot],
+        selected_roi_ids: tuple[int, ...],
+        selected_source_rois: list[AreaRoi],
     ) -> tuple[object, ...] | None:
-        if self._state.dataset is None or not selected_source_spots:
-            return None
-        preprocessing = deepcopy(self._state.preprocessing)
-        flatten_mask_settings = deepcopy(self._state.spot_detection) if preprocessing.flatten_background_exclude_mask else None
-        measurement_settings = deepcopy(self._state.spot_detection)
-        measurement_payload: list[tuple[float, str, list[DetectedSpot], np.ndarray | None, bool, np.ndarray | None]] = []
-        for wavelength in self._wavelength_values:
-            record = self._record_map.get((frame, wavelength))
-            if record is None:
-                continue
-            image_key = (frame, float(wavelength))
-            preprocessing_spots = deepcopy(self._spots_for_preprocessing(image_key))
-            affine_matrix = self._chromatic_affine_for_image_key(image_key)
-            if affine_matrix is not None:
-                affine_matrix = np.asarray(affine_matrix, dtype=np.float64)
-            external_mask, external_mask_processed = self._effective_external_mask_for_record(record.path, processed_space=True)
-            measurement_payload.append(
-                (
-                    float(wavelength),
-                    str(record.path),
-                    preprocessing_spots,
-                    affine_matrix,
-                    bool(external_mask_processed),
-                    None if external_mask is None else np.asarray(external_mask, dtype=bool),
-                )
-            )
-        if not measurement_payload:
-            return None
-        return (
-            measurement_payload,
-            preprocessing,
-            flatten_mask_settings,
-            measurement_settings,
-            self._absorbance_roi_mask_cache,
-            self._analysis_cache_lock,
-            int(self.ABSORBANCE_ROI_MASK_CACHE_SIZE),
-            deepcopy(selected_source_spots),
-            selected_spot_ids,
-            float(self._state.spot_detection.ring_inner_radius_px),
-            float(self._state.spot_detection.ring_outer_radius_px),
-            deepcopy(self._state.mask) if self._mask_section_applied() else None,
-        )
+        return self._analysis_controller._prepare_absorbance_spectrum_payload_for_frame(frame, selected_roi_ids, selected_source_rois)
+
+    def _prepare_fast_spectrum_payload_for_frame(
+        self,
+        frame: int,
+        selected_roi_ids: tuple,
+        selected_source_rois: list,
+    ) -> tuple | None:
+        return self._analysis_controller._prepare_fast_spectrum_payload_for_frame(frame, selected_roi_ids, selected_source_rois)
 
     def _prepare_absorbance_spectrum_payload(
         self,
-        selected_source_spots: list[DetectedSpot] | None = None,
+        selected_source_rois: list[AreaRoi] | None = None,
     ) -> tuple[tuple[object, ...], tuple[object, ...]] | None:
-        signature = self._absorbance_spectrum_signature()
-        if signature is None or self._state.dataset is None:
-            return None
-        frame = int(signature[0])
-        selected_source_spots = self._selected_source_spots_snapshot() if selected_source_spots is None else list(selected_source_spots)
-        if not selected_source_spots:
-            return None
-        selected_spot_ids = tuple(spot.spot_id for spot in selected_source_spots)
-        payload = self._prepare_absorbance_spectrum_payload_for_frame(frame, selected_spot_ids, selected_source_spots)
-        if payload is None:
-            return None
-        return signature, payload
+        return self._analysis_controller._prepare_absorbance_spectrum_payload(selected_source_rois)
 
     def _toggle_analysis_live_preview(self) -> None:
         self._analysis_live_preview_enabled = not self._analysis_live_preview_enabled
@@ -10719,70 +8035,7 @@ class MainWindow(MainWindowIcons, QMainWindow):
             self._set_status_text("Analysis live preview disabled.")
 
     def _refresh_absorbance_spectrum(self) -> None:
-        start_time = time.perf_counter()
-        if not self._analysis_enabled:
-            self._clear_absorbance_spectrum("Analysis calculations are disabled for this panel.")
-            return
-        selected_source_spots = self._selected_source_spots_snapshot()
-        if not selected_source_spots:
-            self._clear_absorbance_spectrum("Select spots to show absorbance spectrum.")
-            return
-        selected_spot_ids = tuple(spot.spot_id for spot in selected_source_spots)
-        spot_signatures = [self._spot_absorbance_signature(spot) for spot in selected_source_spots]
-        if any(signature is None for signature in spot_signatures):
-            self._clear_absorbance_spectrum("Select spots to show absorbance spectrum.")
-            return
-        if len(selected_source_spots) == 1:
-            spot_signature = spot_signatures[0]
-            assert spot_signature is not None
-            cached_spot_result = self._spot_absorbance_cache.get(spot_signature)
-            if cached_spot_result is not None:
-                self._absorbance_spectrum_dirty = False
-                self._apply_absorbance_spectrum_result(cached_spot_result)
-                self._spot_absorbance_cache.move_to_end(spot_signature)
-                elapsed = self._format_elapsed_seconds(time.perf_counter() - start_time)
-                self._append_workflow_log(f"Spec cache hit | {elapsed}", level="debug")
-                self._set_status_text(f"Spec | cache {elapsed}")
-                return
-        signature = self._absorbance_spectrum_signature_for_source_spots(selected_source_spots)
-        if signature is not None:
-            cached_result = self._cached_absorbance_result_for_selection(signature, selected_spot_ids, selected_source_spots)
-            if cached_result is not None:
-                self._absorbance_spectrum_dirty = False
-                self._apply_absorbance_spectrum_result(cached_result)
-                frame_signature = self._absorbance_frame_signature(signature)
-                if frame_signature is not None and frame_signature in self._absorbance_frame_cache:
-                    self._absorbance_frame_cache.move_to_end(frame_signature)
-                elapsed = self._format_elapsed_seconds(time.perf_counter() - start_time)
-                self._set_status_text(f"Spec | cache {elapsed}")
-                return
-        missing_source_spots = [
-            spot
-            for spot, signature_value in zip(selected_source_spots, spot_signatures, strict=False)
-            if signature_value is None or self._spot_absorbance_cache.get(signature_value) is None
-        ]
-        target_source_spots = missing_source_spots if missing_source_spots else selected_source_spots
-        signature = self._absorbance_spectrum_signature_for_source_spots(target_source_spots)
-        if signature is None:
-            self._clear_absorbance_spectrum("Select spots to show absorbance spectrum.")
-            return
-        if self._absorbance_spectrum_running and self._absorbance_spectrum_running_signature == signature:
-            return
-        if (
-            self._pending_absorbance_spectrum_payload is not None
-            and self._pending_absorbance_spectrum_payload[0] == signature
-        ):
-            return
-        if (
-            signature in self._absorbance_spectrum_cache
-        ):
-            self._absorbance_spectrum_dirty = False
-            self._apply_absorbance_spectrum_result(self._absorbance_spectrum_cache[signature])
-            self._absorbance_spectrum_cache.move_to_end(signature)
-            elapsed = self._format_elapsed_seconds(time.perf_counter() - start_time)
-            self._set_status_text(f"Spec | cache {elapsed}")
-            return
-        self._start_absorbance_spectrum_preparation(signature, target_source_spots)
+        self._analysis_controller._refresh_absorbance_spectrum()
 
     def _available_analysis_frames(self) -> list[int]:
         frame_range = self._current_analysis_frame_range()
@@ -10792,108 +8045,13 @@ class MainWindow(MainWindowIcons, QMainWindow):
         return [int(frame) for frame in self._frame_values if start <= int(frame) <= end]
 
     def _on_analysis_fit_settings_changed(self, *_args) -> None:
-        start_time = time.perf_counter()
-        self._save_control_preferences()
-        if self._analysis_live_preview_enabled:
-            self._schedule_sensorgram_refresh()
-        else:
-            self._mark_sensorgram_stale(
-                f"{self._analysis_metric_label()} sensorgram is out of date | Press Calculate all frames"
-            )
-        selected_source_spots = self._selected_source_spots_snapshot()
-        if len(selected_source_spots) == 1:
-            spot_signature = self._spot_absorbance_signature(selected_source_spots[0])
-            if spot_signature is not None and spot_signature in self._spot_absorbance_cache and not self._absorbance_spectrum_dirty:
-                self._absorbance_spectrum_dirty = False
-                self._apply_absorbance_spectrum_result(self._spot_absorbance_cache[spot_signature])
-                self._spot_absorbance_cache.move_to_end(spot_signature)
-                elapsed = self._format_elapsed_seconds(time.perf_counter() - start_time)
-                self._set_status_text(f"Spec | cache {elapsed}")
-                return
-        signature = self._absorbance_spectrum_signature()
-        if signature is not None and signature in self._absorbance_spectrum_cache and not self._absorbance_spectrum_dirty:
-            self._apply_absorbance_spectrum_result(self._absorbance_spectrum_cache[signature])
-            self._absorbance_spectrum_cache.move_to_end(signature)
-            elapsed = self._format_elapsed_seconds(time.perf_counter() - start_time)
-            self._append_workflow_log(f"Spec cache hit | {elapsed}", level="debug")
-            self._set_status_text(f"Spec | cache {elapsed}")
-        elif self._analysis_live_preview_enabled:
-            self._schedule_absorbance_spectrum_refresh()
+        self._analysis_controller._on_analysis_fit_settings_changed(*_args)
 
     def _on_analysis_frame_range_changed(self, *_args) -> None:
-        self._save_control_preferences()
-        if self.analysis_start_frame_spin.value() > self.analysis_end_frame_spin.value():
-            self.analysis_start_frame_spin.blockSignals(True)
-            self.analysis_end_frame_spin.blockSignals(True)
-            start = min(self.analysis_start_frame_spin.value(), self.analysis_end_frame_spin.value())
-            end = max(self.analysis_start_frame_spin.value(), self.analysis_end_frame_spin.value())
-            self.analysis_start_frame_spin.setValue(start)
-            self.analysis_end_frame_spin.setValue(end)
-            self.analysis_start_frame_spin.blockSignals(False)
-            self.analysis_end_frame_spin.blockSignals(False)
-        if self._analysis_live_preview_enabled and not self._analysis_controller.preview_sensorgram_from_cache():
-            self._analysis_controller.mark_stale(
-                f"{self._analysis_metric_label()} sensorgram is out of date | Press Calculate all frames"
-            )
-        elif not self._analysis_live_preview_enabled:
-            self._mark_sensorgram_stale()
+        self._analysis_controller._on_analysis_frame_range_changed(*_args)
 
     def _calculate_sensorgram_for_range(self) -> None:
-        if not self._analysis_enabled:
-            self._clear_sensorgram("Analysis calculations are disabled for this panel.")
-            return
-        if self._state.dataset is None:
-            self._clear_sensorgram("Load a dataset before calculating the sensorgram.")
-            return
-        if self._chromatic_setup_active:
-            self._clear_sensorgram("Sensorgram is hidden during chromatic setup.")
-            return
-        selected_spot_ids = self._selected_spectrum_spot_ids()
-        if not selected_spot_ids:
-            self._clear_sensorgram("Select spots before calculating the sensorgram.")
-            return
-        selected_source_spots = self._selected_source_spots_snapshot()
-        if not selected_source_spots:
-            self._clear_sensorgram("Select spots before calculating the sensorgram.")
-            return
-
-        frames = self._available_analysis_frames()
-        if not frames:
-            self._clear_sensorgram("No frames are available in the selected range.")
-            return
-
-        cached_signature = self._sensorgram_signature_for_selection(frames, selected_spot_ids, selected_source_spots)
-        if cached_signature is not None:
-            with self._analysis_cache_lock:
-                cached_sensorgram = self._sensorgram_cache.get(cached_signature)
-                if cached_sensorgram is not None:
-                    self._sensorgram_cache.move_to_end(cached_signature)
-                    self._append_workflow_log(
-                        f"SG cache hit | frames {len(frames)} | metric {self._analysis_metric_label()}",
-                        level="debug",
-                    )
-                    self._append_workflow_log(
-                        f"SG cache summary | payload hit {len(frames)} build 0 | result hit 1 build 0",
-                        level="debug",
-                    )
-                    self._sensorgram_frame_indices = np.asarray(cached_sensorgram.frame_indices, dtype=np.int32)
-                    self._sensorgram_metric_values = np.asarray(cached_sensorgram.metric_values, dtype=np.float64)
-                    self._sensorgram_metric_signal = np.asarray(cached_sensorgram.metric_signal, dtype=np.float64)
-                    self._set_sensorgram_series(self._sensorgram_frame_indices, self._sensorgram_metric_values)
-                    summary = (
-                        f"{self._analysis_metric_label()} | Cached {cached_sensorgram.completed_count}/"
-                        f"{cached_sensorgram.total_count} frames | Polynomial order {self._analysis_poly_order()}"
-                    )
-                    self._set_sensorgram_summary_text(summary)
-                    self._set_status_text("Sensorgram cache used.")
-                    return
-        self._sensorgram_running_signature = cached_signature
-
-        self._append_workflow_log(
-            f"SG calc start | spots {len(selected_spot_ids)} | frames {len(frames)} | metric {self._analysis_metric_label()}",
-            level="info",
-        )
-        self._start_sensorgram_worker(cached_signature, frames, selected_spot_ids, selected_source_spots)
+        self._analysis_controller._calculate_sensorgram_for_range()
 
     def _stop_sensorgram_calculation(self) -> None:
         if not self._sensorgram_running or self._sensorgram_cancel_event is None:
@@ -10909,77 +8067,13 @@ class MainWindow(MainWindowIcons, QMainWindow):
         total_count: int,
         point: SensorgramPointResult,
     ) -> None:
-        if request_id != self._sensorgram_request_id or not self._analysis_enabled:
-            return
-        metric_value = float("nan") if point.metric_value is None else float(point.metric_value)
-        metric_signal = float("nan") if point.metric_signal is None else float(point.metric_signal)
-        self._sensorgram_frame_indices = np.append(self._sensorgram_frame_indices, int(point.frame_index)).astype(np.int32, copy=False)
-        self._sensorgram_metric_values = np.append(self._sensorgram_metric_values, metric_value).astype(np.float64, copy=False)
-        self._sensorgram_metric_signal = np.append(self._sensorgram_metric_signal, metric_signal).astype(np.float64, copy=False)
-        self._set_sensorgram_series(
-            self._sensorgram_frame_indices,
-            self._sensorgram_metric_values,
-            summary_text=(
-                f"{self._analysis_metric_label()} | Calculating {self._sensorgram_frame_indices.size}/{total_count} frames"
-            ),
-        )
+        self._analysis_controller._on_sensorgram_partial_result(request_id, total_count, point)
 
     def _on_sensorgram_ready(self, request_id: int, result: SensorgramComputationResult) -> None:
-        if request_id != self._sensorgram_request_id:
-            return
-        self._sensorgram_running = False
-        self._sensorgram_cancel_event = None
-        self._end_busy()
-        if not self._analysis_enabled:
-            self._sensorgram_running_signature = None
-            self._update_analysis_control_state()
-            return
-        self._sensorgram_frame_indices = np.asarray(result.frame_indices, dtype=np.int32)
-        self._sensorgram_metric_values = np.asarray(result.metric_values, dtype=np.float64)
-        self._sensorgram_metric_signal = np.asarray(result.metric_signal, dtype=np.float64)
-        sensorgram_signature = self._sensorgram_running_signature
-        self._sensorgram_running_signature = None
-        if sensorgram_signature is not None:
-            with self._analysis_cache_lock:
-                self._sensorgram_cache[sensorgram_signature] = result
-                self._sensorgram_cache.move_to_end(sensorgram_signature)
-                while len(self._sensorgram_cache) > self.SENSORGRAM_CACHE_SIZE:
-                    self._sensorgram_cache.popitem(last=False)
-            self._append_workflow_log(
-                f"SG cache store | frames {int(result.completed_count)}/{int(result.total_count)}",
-                level="debug",
-            )
-            self._append_workflow_log(
-                f"SG cache summary | payload result cached | prep {self._format_elapsed_seconds(result.prep_seconds)}",
-                level="debug",
-            )
-        self._set_sensorgram_series(self._sensorgram_frame_indices, self._sensorgram_metric_values)
-        self._append_workflow_log(
-            f"SG done | prep {self._format_elapsed_seconds(result.prep_seconds)} | fit {self._format_elapsed_seconds(result.fit_seconds)}",
-            level="success",
-        )
-        summary = (
-            f"{self._analysis_metric_label()} | Calculated {result.completed_count}/{result.total_count} frames"
-            f" | Polynomial order {self._analysis_poly_order()}"
-        )
-        if result.cancelled:
-            summary = (
-                f"{self._analysis_metric_label()} | Stopped after {result.completed_count}/{result.total_count} frames"
-                f" | Polynomial order {self._analysis_poly_order()}"
-            )
-        self._set_sensorgram_summary_text(summary)
-        self._set_status_text("Sensorgram calculation stopped." if result.cancelled else "Sensorgram calculation finished.")
-        self._update_analysis_control_state()
+        self._analysis_controller._on_sensorgram_ready(request_id, result)
 
     def _on_sensorgram_failed(self, request_id: int, message: str) -> None:
-        if request_id != self._sensorgram_request_id:
-            return
-        self._sensorgram_running = False
-        self._sensorgram_cancel_event = None
-        self._end_busy()
-        self._update_analysis_control_state()
-        self._set_sensorgram_summary_text(f"Sensorgram failed: {message}")
-        self._background_error("Sensorgram", message)
+        self._analysis_controller._on_sensorgram_failed(request_id, message)
 
     def _start_pending_absorbance_spectrum_refresh(self, *, reuse_busy: bool = False) -> None:
         if self._pending_absorbance_spectrum_payload is None:
@@ -11024,217 +8118,23 @@ class MainWindow(MainWindowIcons, QMainWindow):
         signature: tuple[object, ...],
         result: AbsorbanceSpectrumResult,
     ) -> None:
-        started_at = self._absorbance_spectrum_started_at
-        self._absorbance_spectrum_started_at = None
-        self._absorbance_spectrum_running = False
-        self._absorbance_spectrum_running_signature = None
-        self._end_busy()
-        if request_id != self._absorbance_spectrum_request_id:
-            if self._pending_absorbance_spectrum_payload is not None:
-                self._start_pending_absorbance_spectrum_refresh()
-            return
-        self._absorbance_spectrum_cache[signature] = result
-        self._absorbance_spectrum_cache.move_to_end(signature)
-        while len(self._absorbance_spectrum_cache) > self.ABSORBANCE_SPECTRUM_CACHE_SIZE:
-            self._absorbance_spectrum_cache.popitem(last=False)
-        self._append_workflow_log(
-            f"Spec cache store | spots {len(signature[2]) if len(signature) > 2 and isinstance(signature[2], tuple) else 0}",
-            level="debug",
-        )
-        frame_signature = self._absorbance_frame_signature(signature)
-        if frame_signature is not None:
-            self._absorbance_frame_cache[frame_signature] = result
-            self._absorbance_frame_cache.move_to_end(frame_signature)
-            while len(self._absorbance_frame_cache) > self.ABSORBANCE_FRAME_CACHE_SIZE:
-                self._absorbance_frame_cache.popitem(last=False)
-            self._append_workflow_log("Spec frame cache store", level="debug")
-        self._absorbance_spectrum_dirty = False
-        fit_seconds = self._apply_absorbance_spectrum_result(result)
-        result.fit_seconds = float(fit_seconds)
-        self._append_workflow_log(
-            f"Spec done | load {self._format_elapsed_seconds(result.load_seconds)} | roi {self._format_elapsed_seconds(result.roi_seconds)} | fit {self._format_elapsed_seconds(fit_seconds)}",
-            level="success",
-        )
-        load_timing = self._compact_timing_text(("load", result.load_seconds), ("roi", result.roi_seconds))
-        fit_timing = self._format_elapsed_seconds(fit_seconds)
-        status_parts = ["Spec"]
-        if load_timing:
-            status_parts.append(load_timing)
-        if fit_timing:
-            status_parts.append(f"fit {fit_timing}")
-        if not load_timing and not fit_timing:
-            elapsed = self._format_elapsed_seconds(time.perf_counter() - started_at) if started_at is not None else ""
-            if elapsed:
-                status_parts.append(f"t {elapsed}")
-        self._set_status_text(" | ".join(status_parts))
-        if self._pending_absorbance_spectrum_payload is not None:
-            self._start_pending_absorbance_spectrum_refresh()
+        self._analysis_controller._on_absorbance_spectrum_ready(request_id, signature, result)
 
     def _on_absorbance_spectrum_failed(self, request_id: int, message: str) -> None:
-        self._absorbance_spectrum_started_at = None
-        self._absorbance_spectrum_running = False
-        self._absorbance_spectrum_running_signature = None
-        self._end_busy()
-        if request_id == self._absorbance_spectrum_request_id:
-            self._background_error("Spectral absorbance", message)
-        if self._pending_absorbance_spectrum_payload is not None:
-            self._start_pending_absorbance_spectrum_refresh()
+        self._analysis_controller._on_absorbance_spectrum_failed(request_id, message)
 
     def _apply_absorbance_spectrum_result(self, result: AbsorbanceSpectrumResult) -> None:
-        import time
-
-        fit_started = time.perf_counter()
-        selected_spot_ids = self._selected_spectrum_spot_ids()
-        series_payloads: list[tuple[str, int, AbsorbanceSpectrumResult]] = []
-        if result.spot_results:
-            if selected_spot_ids:
-                for spot_id in selected_spot_ids:
-                    spot_result = result.spot_results.get(int(spot_id))
-                    if spot_result is not None:
-                        series_payloads.append((f"Spot {int(spot_id)}", int(spot_id), spot_result))
-            else:
-                for spot_id in sorted(result.spot_results):
-                    series_payloads.append((f"Spot {int(spot_id)}", int(spot_id), result.spot_results[int(spot_id)]))
-        if selected_spot_ids and len(series_payloads) < len(selected_spot_ids):
-            existing_ids = {int(spot_id) for _, spot_id, _ in series_payloads}
-            for spot_id in selected_spot_ids:
-                if int(spot_id) in existing_ids:
-                    continue
-                spot = next((spot for spot in self._state.detected_spots if int(spot.spot_id) == int(spot_id)), None)
-                if spot is None:
-                    continue
-                spot_signature = self._spot_absorbance_signature(spot)
-                if spot_signature is None:
-                    continue
-                cached_result = self._spot_absorbance_cache.get(spot_signature)
-                if cached_result is not None:
-                    series_payloads.append((f"Spot {int(spot_id)}", int(spot_id), cached_result))
-        if not series_payloads and len(selected_spot_ids) > 1:
-            for spot_id in selected_spot_ids:
-                spot = next((spot for spot in self._state.detected_spots if int(spot.spot_id) == int(spot_id)), None)
-                if spot is None:
-                    continue
-                spot_signature = self._spot_absorbance_signature(spot)
-                if spot_signature is None:
-                    continue
-                cached_result = self._spot_absorbance_cache.get(spot_signature)
-                if cached_result is not None:
-                    series_payloads.append((f"Spot {int(spot_id)}", int(spot_id), cached_result))
-        if not series_payloads:
-            fallback_id = int(selected_spot_ids[0]) if selected_spot_ids else 0
-            series_payloads = [("Selection", fallback_id, result)]
-        highlighted_ids = set(selected_spot_ids)
-
-        self._clear_spectrum_series_items()
-        self.spectrum_current_point.setData([], [])
-        self.spectrum_metric_point.setData([], [])
-
-        x_values_all: list[np.ndarray] = []
-        y_values_all: list[np.ndarray] = []
-        fit_y_values_all: list[np.ndarray] = []
-        primary_result = series_payloads[0][2]
-        for label, spot_id, spot_result in series_payloads:
-            rendered = self._add_spectrum_series(
-                spot_id=spot_id,
-                result=spot_result,
-                label=label,
-                highlighted=bool(highlighted_ids) and int(spot_id) in highlighted_ids,
-                dimmed=len(series_payloads) > 1 and bool(highlighted_ids),
-            )
-            if rendered is None:
-                continue
-            x_values, y_values, fit_x_values, fit_y_values = rendered
-            x_values_all.append(np.asarray(x_values, dtype=np.float64))
-            y_values_all.append(np.asarray(y_values, dtype=np.float64))
-            if fit_x_values is not None and fit_y_values is not None and fit_x_values.size and fit_y_values.size:
-                fit_y_values_all.append(np.asarray(fit_y_values, dtype=np.float64))
-
-        if not x_values_all:
-            self._set_spectrum_summary_text(f"{self._spectrum_selection_label()} | No valid absorbance values")
-            return
-
-        x_min = min(float(np.min(values)) for values in x_values_all)
-        x_max = max(float(np.max(values)) for values in x_values_all)
-        y_min = min(float(np.min(values)) for values in y_values_all)
-        y_max = max(float(np.max(values)) for values in y_values_all)
-        for fit_values in fit_y_values_all:
-            if fit_values.size:
-                y_min = min(y_min, float(np.nanmin(fit_values)))
-                y_max = max(y_max, float(np.nanmax(fit_values)))
-        y_span = max(y_max - y_min, 0.05)
-        self.spectrum_plot.setXRange(x_min, x_max, padding=0.02)
-        self.spectrum_plot.setYRange(y_min - y_span * 0.08, y_max + y_span * 0.12, padding=0.0)
-
-        metric_value = None
-        metric_signal = None
-        current_text = ""
-        fit_text = ""
-        fit_seconds = 0.0
-        if len(series_payloads) == 1:
-            fit = self._analysis_fit_result_from_spectrum(primary_result)
-            if fit is not None:
-                metric_value, metric_signal = metric_value_from_fit(fit, self._analysis_metric_key())
-                if metric_value is not None and metric_signal is not None and np.isfinite(metric_value) and np.isfinite(metric_signal):
-                    self.spectrum_metric_point.setData([float(metric_value)], [float(metric_signal)])
-                else:
-                    self.spectrum_metric_point.setData([], [])
-            else:
-                self.spectrum_metric_point.setData([], [])
-            current_wavelength = self._current_wavelength()
-            current_point_index = None
-            if current_wavelength is not None:
-                current_point_index = next(
-                    (
-                        index
-                        for index, wavelength_nm in enumerate(primary_result.wavelengths_nm)
-                        if abs(float(wavelength_nm) - float(current_wavelength)) < 1e-6
-                        and np.isfinite(primary_result.absorbance[index])
-                    ),
-                    None,
-                )
-            if current_point_index is None:
-                self.spectrum_current_point.setData([], [])
-            else:
-                current_x = float(primary_result.wavelengths_nm[current_point_index])
-                current_y = float(primary_result.absorbance[current_point_index])
-                self.spectrum_current_point.setData([current_x], [current_y])
-                current_spot_mean = float(primary_result.spot_mean[current_point_index])
-                current_ring_mean = float(primary_result.ring_mean[current_point_index])
-                current_text = (
-                    f" | A({current_x:g} nm) = {current_y:.4f}"
-                    f" | spot {current_spot_mean:.1f}, ref. ring {current_ring_mean:.1f}"
-                )
-            if metric_value is not None and np.isfinite(metric_value):
-                fit_text = (
-                    f" | {self._analysis_metric_label()} {float(metric_value):.3f} nm"
-                    f" | Poly {self._analysis_poly_order()}"
-                )
-        else:
-            self.spectrum_current_point.setData([], [])
-            self.spectrum_metric_point.setData([], [])
-            fit_text = f" | {len(series_payloads)} spot series"
-        fit_seconds = time.perf_counter() - fit_started
-        self._last_absorbance_fit_seconds = fit_seconds
-
-        frame = self._current_frame()
-        spot_pixels = int(np.nanmax(primary_result.spot_pixel_count)) if primary_result.spot_pixel_count.size else 0
-        ring_pixels = int(np.nanmax(primary_result.ring_pixel_count)) if primary_result.ring_pixel_count.size else 0
-        self._set_spectrum_summary_text(
-            f"{self._spectrum_selection_label()} | Frame {frame if frame is not None else '-'}"
-            f" | ROI px: spot {spot_pixels}, ref. ring {ring_pixels}{current_text}{fit_text}"
-        )
-        self._update_single_frame_sensorgram(metric_value, metric_signal)
-        return fit_seconds
+        return self._analysis_controller._apply_absorbance_spectrum_result(result)
 
     def _update_color_button_styles(self) -> None:
         self.mask_color_button.setStyleSheet(
             f"QToolButton {{ background-color: {self._mask_visual_color.name()}; min-width: 14px; max-width: 14px; min-height: 14px; max-height: 14px; border: 1px solid #e2e8f0; border-radius: 4px; padding: 0; }}"
         )
-        self.spot_color_button.setStyleSheet(
-            f"QToolButton {{ background-color: {self._spot_visual_color.name()}; min-width: 14px; max-width: 14px; min-height: 14px; max-height: 14px; border: 1px solid #e2e8f0; border-radius: 4px; padding: 0; }}"
+        self.sample_color_button.setStyleSheet(
+            f"QToolButton {{ background-color: {self._sample_visual_color.name()}; min-width: 14px; max-width: 14px; min-height: 14px; max-height: 14px; border: 1px solid #e2e8f0; border-radius: 4px; padding: 0; }}"
         )
-        self.ring_color_button.setStyleSheet(
-            f"QToolButton {{ background-color: {self._ring_visual_color.name()}; min-width: 14px; max-width: 14px; min-height: 14px; max-height: 14px; border: 1px solid #e2e8f0; border-radius: 4px; padding: 0; }}"
+        self.reference_color_button.setStyleSheet(
+            f"QToolButton {{ background-color: {self._reference_visual_color.name()}; min-width: 14px; max-width: 14px; min-height: 14px; max-height: 14px; border: 1px solid #e2e8f0; border-radius: 4px; padding: 0; }}"
         )
         self.highlight_color_button.setStyleSheet(
             f"QToolButton {{ background-color: {self._highlight_visual_color.name()}; min-width: 14px; max-width: 14px; min-height: 14px; max-height: 14px; border: 1px solid #e2e8f0; border-radius: 4px; padding: 0; }}"
@@ -11243,10 +8143,10 @@ class MainWindow(MainWindowIcons, QMainWindow):
             f"QToolButton {{ background-color: {self._scale_bar_visual_color.name()}; min-width: 14px; max-width: 14px; min-height: 14px; max-height: 14px; border: 1px solid #e2e8f0; border-radius: 4px; padding: 0; }}"
         )
         self._update_histogram_region_styles()
-        if hasattr(self, "spot_list_table") and self.spot_list_table.columnCount() >= 5:
-            self._refresh_spot_list_table_headers()
-            if self.spot_list_table.isVisible():
-                self._update_spot_list_table()
+        if hasattr(self, "roi_table") and self.roi_table.columnCount() >= 5:
+            self._refresh_roi_table_headers()
+            if self.roi_table.isVisible():
+                self._update_roi_table()
 
     def _update_histogram_region_styles(self) -> None:
         highlight_brush = QColor(self._highlight_visual_color)
@@ -11310,12 +8210,25 @@ class MainWindow(MainWindowIcons, QMainWindow):
         self._update_crop_overlay()
         self._update_guide_overlays()
 
+    def _next_roi_id(self) -> str:
+        self._roi_id_counter += 1
+        return f"roi_{self._roi_id_counter}"
+
+    def _reset_roi_id_counter_from_state(self) -> None:
+        max_index = 0
+        for roi in self._state.rois:
+            if roi.roi_id.startswith("roi_"):
+                suffix = roi.roi_id[4:]
+                if suffix.isdigit():
+                    max_index = max(max_index, int(suffix))
+        self._roi_id_counter = max_index
+
     def _active_rectangle_template(self) -> RoiDefinition:
         if self._roi_editor_mode == "circles":
-            spot_diameter = max(float(self._length_display_to_px(float(self.spot_diameter_spin.value()))), 2.0)
-            ring_inner_diameter = max(float(self._length_display_to_px(float(self.ring_inner_diameter_spin.value()))), 0.0)
+            spot_diameter = max(float(self._length_display_to_px(float(self.sample_diameter_spin.value()))), 2.0)
+            ring_inner_diameter = max(float(self._length_display_to_px(float(self.reference_inner_diameter_spin.value()))), 0.0)
             ring_outer_diameter = max(
-                float(self._length_display_to_px(float(self.ring_outer_diameter_spin.value()))),
+                float(self._length_display_to_px(float(self.reference_outer_diameter_spin.value()))),
                 ring_inner_diameter,
             )
             padding = max((ring_inner_diameter - spot_diameter) / 2.0, 0.0)
@@ -11354,6 +8267,9 @@ class MainWindow(MainWindowIcons, QMainWindow):
                     resizable=True,
                     rotatable=False,
                 )
+                for _h in list(self._rectangle_roi.handles):
+                    if _h["type"] == "r":
+                        self._rectangle_roi.removeHandle(_h["item"])
             else:
                 self._rectangle_roi = pg.RectROI(
                     [x, y],
@@ -11380,7 +8296,7 @@ class MainWindow(MainWindowIcons, QMainWindow):
             self._ensure_rectangle_roi()
         if self._rectangle_roi is not None:
             self._rectangle_roi.setVisible(
-                self._roi_editor_mode in {"circles", "rectangles"}
+                self._roi_editor_mode == "rectangles"
                 and not self._showing_background_profile_main
                 and self._current_processed_image is not None
             )
@@ -11415,23 +8331,25 @@ class MainWindow(MainWindowIcons, QMainWindow):
         roi.size_x = max(float(size.x()), 2.0)
         roi.size_y = max(float(size.y()), 2.0)
         if self._roi_editor_mode == "circles":
-            self.spot_diameter_spin.blockSignals(True)
-            self.spot_diameter_spin.setValue(self._length_px_to_display(float(max(roi.size_x, roi.size_y))))
-            self.spot_diameter_spin.blockSignals(False)
-            self._state.spot_detection.spot_radius_px = max(float(roi.size_x), 1.0) / 2.0
-            self._state.spot_detection.ring_inner_radius_px = max(
+            self._rectangle_template.center_x = roi.center_x
+            self._rectangle_template.center_y = roi.center_y
+            self.sample_diameter_spin.blockSignals(True)
+            self.sample_diameter_spin.setValue(self._length_px_to_display(float(max(roi.size_x, roi.size_y))))
+            self.sample_diameter_spin.blockSignals(False)
+            self._state.area_roi_settings.sample_radius_px = max(float(roi.size_x), 1.0) / 2.0
+            self._state.area_roi_settings.reference_inner_radius_px = max(
                 float(roi.size_x) / 2.0 + float(roi.background_padding_px),
                 float(roi.size_x) / 2.0,
             )
-            self._state.spot_detection.ring_outer_radius_px = max(
-                float(self._state.spot_detection.ring_inner_radius_px) + float(roi.background_width_px),
-                float(self._state.spot_detection.ring_inner_radius_px),
+            self._state.area_roi_settings.reference_outer_radius_px = max(
+                float(self._state.area_roi_settings.reference_inner_radius_px) + float(roi.background_width_px),
+                float(self._state.area_roi_settings.reference_inner_radius_px),
             )
         if finished:
             self._push_undo_point("Rectangle ROI")
             self._save_processing_state_for_dataset()
         if self._roi_editor_mode == "circles":
-            self._update_spot_detection_labels(sync_controls=False)
+            self._update_roi_detection_labels(sync_controls=False)
         else:
             self._update_rectangle_roi_controls(sync_roi=False)
         self._update_rectangle_roi_summary()
@@ -11463,7 +8381,7 @@ class MainWindow(MainWindowIcons, QMainWindow):
                 (
                     f"Template center=({self._length_px_to_display(float(roi.center_x)):.1f}, "
                     f"{self._length_px_to_display(float(roi.center_y)):.1f}) "
-                    f"Spot D={self._length_px_to_display(float(roi.size_x)):.1f} "
+                    f"ROI D={self._length_px_to_display(float(roi.size_x)):.1f} "
                     f"Ring pad={self._length_px_to_display(float(roi.background_padding_px)):.1f} "
                     f"Ring width={self._length_px_to_display(float(roi.background_width_px)):.1f}"
                 )
@@ -11481,18 +8399,18 @@ class MainWindow(MainWindowIcons, QMainWindow):
         roi = self._active_rectangle_template()
         if self._roi_editor_mode == "circles":
             roi.name = roi.name.strip() or "Circle ROI"
-            roi.size_x = max(float(self._length_display_to_px(float(self.spot_diameter_spin.value()))), 2.0)
+            roi.size_x = max(float(self._length_display_to_px(float(self.sample_diameter_spin.value()))), 2.0)
             roi.size_y = float(roi.size_x)
             roi.background_padding_px = max(
-                float(self._length_display_to_px(float(self.ring_inner_diameter_spin.value()))) - float(roi.size_x),
+                float(self._length_display_to_px(float(self.reference_inner_diameter_spin.value()))) - float(roi.size_x),
                 0.0,
             ) / 2.0
             roi.background_width_px = max(
-                float(self._length_display_to_px(float(self.ring_outer_diameter_spin.value())))
-                - float(self._length_display_to_px(float(self.ring_inner_diameter_spin.value()))),
+                float(self._length_display_to_px(float(self.reference_outer_diameter_spin.value())))
+                - float(self._length_display_to_px(float(self.reference_inner_diameter_spin.value()))),
                 0.0,
             ) / 2.0
-            self._update_spot_detection_labels(sync_controls=False)
+            self._update_roi_detection_labels(sync_controls=False)
         else:
             roi.name = self.rectangle_name_edit.text().strip() or roi.name
             roi.size_x = max(float(self._length_display_to_px(float(self.rectangle_width_spin.value()))), 2.0)
@@ -11519,6 +8437,9 @@ class MainWindow(MainWindowIcons, QMainWindow):
                 resizable=True,
                 rotatable=False,
             )
+            for _h in list(item.handles):
+                if _h["type"] == "r":
+                    item.removeHandle(_h["item"])
         else:
             item = pg.RectROI(
                 [x, y],
@@ -11540,8 +8461,16 @@ class MainWindow(MainWindowIcons, QMainWindow):
         for item in self._rectangle_stamp_items:
             self.image_plot.removeItem(item)
         self._rectangle_stamp_items.clear()
+        for inner_c, outer_c in self._rectangle_stamp_ring_items.values():
+            if inner_c is not None:
+                self.image_plot.removeItem(inner_c)
+            if outer_c is not None:
+                self.image_plot.removeItem(outer_c)
+        self._rectangle_stamp_ring_items.clear()
         if self._current_processed_image is None:
             return
+        theta = np.linspace(0, 2 * np.pi, 200, dtype=np.float32)
+        theta = np.append(theta, theta[0])
         for roi in self._state.rois:
             if str(roi.shape) not in {"rectangle", "circle", "ellipse"}:
                 continue
@@ -11550,14 +8479,65 @@ class MainWindow(MainWindowIcons, QMainWindow):
                 continue
             setattr(item, "roi_id", roi.roi_id)
             self._rectangle_stamp_items.append(item)
+            if str(roi.shape).lower() in {"circle", "ellipse"} and float(roi.background_width_px) > 0:
+                inner_r = float(roi.size_x) / 2.0 + float(roi.background_padding_px)
+                outer_r = inner_r + float(roi.background_width_px)
+                inner_curve: pg.PlotCurveItem | None = None
+                if inner_r > 0:
+                    inner_curve = pg.PlotCurveItem()
+                    inner_curve.setSkipFiniteCheck(True)
+                    inner_curve.setData(
+                        float(roi.center_x) + inner_r * np.cos(theta),
+                        float(roi.center_y) + inner_r * np.sin(theta),
+                    )
+                    inner_curve.setPen(pg.mkPen("#f59e0b", width=1.2, style=Qt.PenStyle.DashLine))
+                    self.image_plot.addItem(inner_curve, ignoreBounds=True)
+                    inner_curve.setZValue(1.14)
+                outer_curve = pg.PlotCurveItem()
+                outer_curve.setSkipFiniteCheck(True)
+                outer_curve.setData(
+                    float(roi.center_x) + outer_r * np.cos(theta),
+                    float(roi.center_y) + outer_r * np.sin(theta),
+                )
+                outer_curve.setPen(pg.mkPen("#f59e0b", width=1.2, style=Qt.PenStyle.DotLine))
+                self.image_plot.addItem(outer_curve, ignoreBounds=True)
+                outer_curve.setZValue(1.14)
+                self._rectangle_stamp_ring_items[roi.roi_id] = (inner_curve, outer_curve)
         self._update_rectangle_stamp_visuals()
+
+    def _update_rectangle_stamp_ring_position(self, roi: "RoiDefinition") -> None:
+        ring_pair = self._rectangle_stamp_ring_items.get(roi.roi_id)
+        if ring_pair is None:
+            return
+        inner_curve, outer_curve = ring_pair
+        theta = np.linspace(0, 2 * np.pi, 200, dtype=np.float32)
+        theta = np.append(theta, theta[0])
+        inner_r = float(roi.size_x) / 2.0 + float(roi.background_padding_px)
+        outer_r = inner_r + float(roi.background_width_px)
+        cx, cy = float(roi.center_x), float(roi.center_y)
+        if inner_curve is not None:
+            inner_curve.setData(cx + inner_r * np.cos(theta), cy + inner_r * np.sin(theta))
+        if outer_curve is not None:
+            outer_curve.setData(cx + outer_r * np.cos(theta), cy + outer_r * np.sin(theta))
 
     def _update_rectangle_stamp_visuals(self) -> None:
         selected_pen = pg.mkPen("#fbbf24", width=2.8)
         normal_pen = pg.mkPen("#f59e0b", width=2)
+        selected_ring_inner = pg.mkPen("#fbbf24", width=1.4, style=Qt.PenStyle.DashLine)
+        selected_ring_outer = pg.mkPen("#fbbf24", width=1.4, style=Qt.PenStyle.DotLine)
+        normal_ring_inner = pg.mkPen("#f59e0b", width=1.2, style=Qt.PenStyle.DashLine)
+        normal_ring_outer = pg.mkPen("#f59e0b", width=1.2, style=Qt.PenStyle.DotLine)
         for item in self._rectangle_stamp_items:
             roi_id = str(getattr(item, "roi_id", ""))
-            item.setPen(selected_pen if roi_id in self._selected_rectangle_roi_ids else normal_pen)
+            selected = roi_id in self._selected_rectangle_roi_ids
+            item.setPen(selected_pen if selected else normal_pen)
+            ring_pair = self._rectangle_stamp_ring_items.get(roi_id)
+            if ring_pair is not None:
+                inner_c, outer_c = ring_pair
+                if inner_c is not None:
+                    inner_c.setPen(selected_ring_inner if selected else normal_ring_inner)
+                if outer_c is not None:
+                    outer_c.setPen(selected_ring_outer if selected else normal_ring_outer)
 
     def _rectangle_stamp_at(self, point: tuple[float, float]) -> RoiDefinition | None:
         x = float(point[0])
@@ -11643,13 +8623,14 @@ class MainWindow(MainWindowIcons, QMainWindow):
         )
         roi.center_x = updated.center_x
         roi.center_y = updated.center_y
-        roi.size_x = updated.size_x
-        roi.size_y = updated.size_y
+        roi.size_x = max(float(size.x()), 2.0)
+        roi.size_y = max(float(size.y()), 2.0)
+        self._update_rectangle_stamp_ring_position(roi)
         if finished:
             self._push_undo_point("ROI")
             self._save_processing_state_for_dataset()
         if self._roi_editor_mode == "circles":
-            self._update_spot_detection_labels(sync_controls=False)
+            self._update_roi_detection_labels(sync_controls=False)
         else:
             self._update_rectangle_roi_controls(sync_roi=False)
 
@@ -11661,7 +8642,7 @@ class MainWindow(MainWindowIcons, QMainWindow):
         if self._roi_editor_mode == "freehand":
             self.status_label.setText("Freehand ROI tools are not implemented yet.")
             return
-        roi_id = f"roi_{len(self._state.rois) + 1}"
+        roi_id = self._next_roi_id()
         if self._roi_editor_mode == "circles":
             template_name = template.name.strip() or f"Circle ROI {len(self._state.rois) + 1}"
         else:
@@ -11683,7 +8664,7 @@ class MainWindow(MainWindowIcons, QMainWindow):
         self._schedule_processing_state_save()
         self.status_label.setText(f"Added ROI {clone.roi_id}.")
 
-    def _add_roi_array_at(self, point: tuple[float, float]) -> None:
+    def _add_stamp_array_at(self, point: tuple[float, float]) -> None:
         if self._current_processed_image is None:
             self.status_label.setText("No image available for adding ROI arrays.")
             return
@@ -11697,7 +8678,9 @@ class MainWindow(MainWindowIcons, QMainWindow):
         if rows <= 0 or cols <= 0 or spacing <= 0.0:
             self.status_label.setText("Set array rows, columns, and spacing before stamping an ROI array.")
             return
-        start_index = len(self._state.rois) + 1
+        count = rows * cols
+        start_index = self._roi_id_counter + 1
+        self._roi_id_counter += count
         clones = create_rois_from_template_grid(
             template,
             rows=rows,
@@ -11711,6 +8694,7 @@ class MainWindow(MainWindowIcons, QMainWindow):
             roi_id_factory=lambda index: f"roi_{index}",
         )
         if not clones:
+            self._roi_id_counter -= count
             return
         self._push_undo_point("Add ROI array")
         self._state.rois.extend(clones)
@@ -11725,7 +8709,7 @@ class MainWindow(MainWindowIcons, QMainWindow):
         modes = ("circles", "rectangles", "freehand")
         self._roi_editor_mode = modes[index] if 0 <= index < len(modes) else "circles"
         if self._roi_editor_mode == "circles":
-            self._update_spot_detection_labels(sync_controls=True)
+            self._update_roi_detection_labels(sync_controls=True)
         elif self._roi_editor_mode == "rectangles":
             self._update_rectangle_roi_controls(sync_roi=True)
         self._sync_rectangle_roi_visibility()
@@ -11746,17 +8730,7 @@ class MainWindow(MainWindowIcons, QMainWindow):
         self._handle_image_tool_settings_changed("Crop updated.", preserve_view=True)
 
     def _crop_rect_contains_point(self, point: tuple[float, float]) -> bool:
-        if self._crop_roi is None:
-            return False
-        pos = self._crop_roi.pos()
-        size = self._crop_roi.size()
-        x0 = float(pos.x())
-        y0 = float(pos.y())
-        x1 = x0 + float(size.x())
-        y1 = y0 + float(size.y())
-        x = float(point[0])
-        y = float(point[1])
-        return x0 <= x <= x1 and y0 <= y <= y1
+        return self._image_interaction._crop_rect_contains_point(point)
 
     def _move_crop_roi_to(self, x: float, y: float) -> None:
         if self._crop_roi is None or self._current_processed_image is None:
@@ -11778,29 +8752,13 @@ class MainWindow(MainWindowIcons, QMainWindow):
         self._update_crop_overlay()
 
     def _begin_image_pan(self, point: tuple[float, float]) -> None:
-        if self._current_processed_image is None:
-            return
-        x_range, y_range = self.image_plot.vb.viewRange()
-        self._panning_image = True
-        self._pan_anchor_view = (float(point[0]), float(point[1]))
-        self._pan_anchor_ranges = ((float(x_range[0]), float(x_range[1])), (float(y_range[0]), float(y_range[1])))
+        self._image_interaction._begin_image_pan(point)
 
     def _update_image_pan(self, point: tuple[float, float]) -> None:
-        if not self._panning_image or self._pan_anchor_view is None or self._pan_anchor_ranges is None:
-            return
-        x_range, y_range = self._pan_anchor_ranges
-        dx = float(point[0]) - float(self._pan_anchor_view[0])
-        dy = float(point[1]) - float(self._pan_anchor_view[1])
-        self.image_plot.vb.setRange(
-            xRange=(x_range[0] - dx, x_range[1] - dx),
-            yRange=(y_range[0] - dy, y_range[1] - dy),
-            padding=0.0,
-        )
+        self._image_interaction._update_image_pan(point)
 
     def _end_image_pan(self) -> None:
-        self._panning_image = False
-        self._pan_anchor_view = None
-        self._pan_anchor_ranges = None
+        self._image_interaction._end_image_pan()
 
     def _ensure_crop_overlay(self) -> QGraphicsPathItem:
         if self._crop_overlay_item is not None:
@@ -11815,34 +8773,7 @@ class MainWindow(MainWindowIcons, QMainWindow):
         return overlay
 
     def _update_crop_overlay(self) -> None:
-        overlay = self._ensure_crop_overlay()
-        if (
-            self._crop_roi is None
-            or self._current_processed_image is None
-            or self._showing_background_profile_main
-            or self._active_tool != "crop"
-        ):
-            overlay.setVisible(False)
-            return
-
-        image_height, image_width = self._current_processed_image.shape[:2]
-        width = max(float(image_width), 1.0)
-        height = max(float(image_height), 1.0)
-        pos = self._crop_roi.pos()
-        size = self._crop_roi.size()
-        x = float(np.clip(pos.x(), 0.0, max(width - 1.0, 0.0)))
-        y = float(np.clip(pos.y(), 0.0, max(height - 1.0, 0.0)))
-        crop_width = float(np.clip(size.x(), 1.0, width))
-        crop_height = float(np.clip(size.y(), 1.0, height))
-        x = float(np.clip(x, 0.0, max(width - crop_width, 0.0)))
-        y = float(np.clip(y, 0.0, max(height - crop_height, 0.0)))
-
-        path = QPainterPath()
-        path.setFillRule(Qt.FillRule.OddEvenFill)
-        path.addRect(QRectF(0.0, 0.0, width, height))
-        path.addRect(QRectF(x, y, crop_width, crop_height))
-        overlay.setPath(path)
-        overlay.setVisible(True)
+        self._overlay_manager._update_crop_overlay()
 
     def _build_numeric_field(self, spinbox: QSpinBox | QDoubleSpinBox) -> QWidget:
         row = QWidget(self)
@@ -11852,21 +8783,20 @@ class MainWindow(MainWindowIcons, QMainWindow):
         layout.addWidget(spinbox)
         return row
 
-    def _build_spot_geometry_row(self) -> QWidget:
+    def _build_roi_geometry_row(self) -> QWidget:
         row = QWidget(self)
         layout = QGridLayout(row)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setHorizontalSpacing(6)
         layout.setVerticalSpacing(0)
-        self.spot_diameter_spin.setRange(2, 1000)
-        self.spot_diameter_spin.setButtonSymbols(QSpinBox.ButtonSymbols.UpDownArrows)
-        self.spot_diameter_spin.setFocusPolicy(Qt.FocusPolicy.WheelFocus)
-        self.spot_diameter_spin.setAccelerated(True)
-        self.spot_diameter_spin.setKeyboardTracking(True)
-        self.spot_diameter_spin.setMaximumWidth(84)
-        layout.addWidget(self.spot_geometry_scope_button, 0, 0, 2, 1)
+        self.sample_diameter_spin.setRange(2, 1000)
+        self.sample_diameter_spin.setButtonSymbols(QSpinBox.ButtonSymbols.UpDownArrows)
+        self.sample_diameter_spin.setFocusPolicy(Qt.FocusPolicy.WheelFocus)
+        self.sample_diameter_spin.setAccelerated(True)
+        self.sample_diameter_spin.setKeyboardTracking(True)
+        layout.addWidget(self.roi_geometry_scope_button, 0, 0, 2, 1)
         layout.addWidget(QLabel("D_s"), 0, 1)
-        layout.addWidget(self.spot_diameter_spin, 0, 4)
+        layout.addWidget(self.sample_diameter_spin, 0, 4)
         return row
 
     def _build_ring_row(self) -> QWidget:
@@ -11875,21 +8805,19 @@ class MainWindow(MainWindowIcons, QMainWindow):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setHorizontalSpacing(6)
         layout.setVerticalSpacing(0)
-        self.ring_inner_diameter_spin.setButtonSymbols(QSpinBox.ButtonSymbols.UpDownArrows)
-        self.ring_outer_diameter_spin.setButtonSymbols(QSpinBox.ButtonSymbols.UpDownArrows)
-        self.ring_inner_diameter_spin.setFocusPolicy(Qt.FocusPolicy.WheelFocus)
-        self.ring_outer_diameter_spin.setFocusPolicy(Qt.FocusPolicy.WheelFocus)
-        self.ring_inner_diameter_spin.setAccelerated(True)
-        self.ring_outer_diameter_spin.setAccelerated(True)
-        self.ring_inner_diameter_spin.setKeyboardTracking(False)
-        self.ring_outer_diameter_spin.setKeyboardTracking(False)
-        self.ring_inner_diameter_spin.setMaximumWidth(84)
-        self.ring_outer_diameter_spin.setMaximumWidth(84)
-        layout.addWidget(self.ring_geometry_scope_button, 0, 0, 2, 1)
+        self.reference_inner_diameter_spin.setButtonSymbols(QSpinBox.ButtonSymbols.UpDownArrows)
+        self.reference_outer_diameter_spin.setButtonSymbols(QSpinBox.ButtonSymbols.UpDownArrows)
+        self.reference_inner_diameter_spin.setFocusPolicy(Qt.FocusPolicy.WheelFocus)
+        self.reference_outer_diameter_spin.setFocusPolicy(Qt.FocusPolicy.WheelFocus)
+        self.reference_inner_diameter_spin.setAccelerated(True)
+        self.reference_outer_diameter_spin.setAccelerated(True)
+        self.reference_inner_diameter_spin.setKeyboardTracking(False)
+        self.reference_outer_diameter_spin.setKeyboardTracking(False)
+        layout.addWidget(self.reference_geometry_scope_button, 0, 0, 2, 1)
         layout.addWidget(QLabel("d_r"), 0, 1)
-        layout.addWidget(self.ring_inner_diameter_spin, 0, 2)
+        layout.addWidget(self.reference_inner_diameter_spin, 0, 2)
         layout.addWidget(QLabel("D_r"), 0, 3)
-        layout.addWidget(self.ring_outer_diameter_spin, 0, 4)
+        layout.addWidget(self.reference_outer_diameter_spin, 0, 4)
         return row
 
     def _build_rectangle_row(self) -> QWidget:
@@ -12016,7 +8944,7 @@ class MainWindow(MainWindowIcons, QMainWindow):
             self._visual_splitter.addWidget(self._top_visual_splitter)
             self._visual_splitter.addWidget(self._bottom_visual_splitter)
             self._main_splitter.addWidget(self.workflow_panel)
-            self._main_splitter.addWidget(self.spot_list_panel)
+            self._main_splitter.addWidget(self.roi_list_panel)
             self._main_splitter.addWidget(self._visual_splitter)
             self._workspace_root = QWidget(self)
             workspace_layout = QVBoxLayout(self._workspace_root)
@@ -12025,7 +8953,7 @@ class MainWindow(MainWindowIcons, QMainWindow):
             workspace_layout.addWidget(self._main_splitter, 1)
             self.setCentralWidget(self._workspace_root)
         self.workflow_panel.setVisible(True)
-        self.spot_list_panel.setVisible(self._settings_bool("layout/spot_list_visible", True))
+        self.roi_list_panel.setVisible(self._settings_bool("layout/roi_list_visible", True))
         self.image_panel.setVisible(True)
         self.histogram_panel.setVisible(True)
         self.spectra_panel.setVisible(True)
@@ -12045,7 +8973,7 @@ class MainWindow(MainWindowIcons, QMainWindow):
         self._bottom_visual_splitter.setStretchFactor(0, 1)
         self._bottom_visual_splitter.setStretchFactor(1, 1)
         if self._main_splitter.count() == 3:
-            self._main_splitter.setSizes([360, max(260, self.spot_list_panel.minimumWidth()), 1200])
+            self._main_splitter.setSizes([360, max(260, self.roi_list_panel.minimumWidth()), 1200])
         if self._visual_splitter.count() == 2:
             self._visual_splitter.setSizes([760, 420])
         if self._top_visual_splitter.count() == 2:
@@ -12128,8 +9056,8 @@ class MainWindow(MainWindowIcons, QMainWindow):
         layout.addStretch(1)
         return row
 
-    def _sync_spot_detection_controls(self) -> None:
-        self._ui_state_manager.sync_spot_detection_controls()
+    def _sync_roi_detection_controls(self) -> None:
+        self._ui_state_manager.sync_roi_detection_controls()
 
     def _update_mask_control_state(self) -> None:
         self._ui_state_manager.update_mask_control_state()
@@ -12157,8 +9085,8 @@ class MainWindow(MainWindowIcons, QMainWindow):
 
     def _on_live_geometry_toggled(self, applied: bool) -> None:
         checked = bool(applied)
-        if self.spot_editor_section.is_applied() != checked:
-            self.spot_editor_section.set_applied(checked)
+        if self.roi_editor_section.is_applied() != checked:
+            self.roi_editor_section.set_applied(checked)
         self._save_control_preferences()
 
     def _on_image_tools_section_applied_changed(self, applied: bool) -> None:
@@ -12169,6 +9097,7 @@ class MainWindow(MainWindowIcons, QMainWindow):
         self._push_undo_point("Image tools")
         self._state.preprocessing.image_tools_enabled = applied
         self._image_tools_preview_only = not applied
+        self._image_tools_pre_preview_enabled = applied
         status = (
             "Image tools linked. Recalculating downstream views."
             if applied
@@ -12182,26 +9111,7 @@ class MainWindow(MainWindowIcons, QMainWindow):
             self._end_busy(status)
 
     def _on_analysis_section_applied_changed(self, applied: bool) -> None:
-        applied = bool(applied)
-        self._append_workflow_log(f"Analysis linked state changed: {applied}", level="debug")
-        if self._analysis_enabled == applied:
-            self._update_analysis_control_state()
-            return
-        self._analysis_enabled = applied
-        self._settings.setValue("analysis_section_applied", self._analysis_enabled)
-        if not self._analysis_enabled and self._analysis_live_preview_enabled:
-            self._analysis_live_preview_enabled = False
-            self._settings.setValue("analysis/live_preview", False)
-        self._update_analysis_control_state()
-        if self._analysis_enabled:
-            self._mark_absorbance_spectrum_dirty()
-            self._set_status_text("Analysis calculations enabled.")
-            return
-        self._stop_sensorgram_calculation()
-        self._pending_sensorgram_payload = None
-        self._clear_absorbance_spectrum("Analysis calculations are disabled for this panel.")
-        self._clear_sensorgram("Analysis calculations are disabled for this panel.")
-        self._set_status_text("Analysis calculations disabled.")
+        self._analysis_controller._on_analysis_section_applied_changed(applied)
 
     def _update_geometry_control_ranges(self, image_shape: tuple[int, int] | None) -> None:
         if image_shape is None:
@@ -12209,10 +9119,10 @@ class MainWindow(MainWindowIcons, QMainWindow):
         else:
             image_height, image_width = image_shape[:2]
             max_diameter = max(int(max(image_width, image_height)), 20)
-        display_max = max(self._length_px_to_display(max_diameter), float(self.spot_diameter_spin.minimum()))
-        self.spot_diameter_spin.setMaximum(display_max)
-        self.ring_inner_diameter_spin.setMaximum(display_max)
-        self.ring_outer_diameter_spin.setMaximum(display_max)
+        display_max = max(self._length_px_to_display(max_diameter), float(self.sample_diameter_spin.minimum()))
+        self.sample_diameter_spin.setMaximum(display_max)
+        self.reference_inner_diameter_spin.setMaximum(display_max)
+        self.reference_outer_diameter_spin.setMaximum(display_max)
         for spinbox in (
             self.rectangle_width_spin,
             self.rectangle_height_spin,
@@ -12228,30 +9138,30 @@ class MainWindow(MainWindowIcons, QMainWindow):
             self._push_undo_point("Detection settings")
         previous_mask_signature = self._mask_preview_signature()
         previous_apply_mask = bool(self._state.preprocessing.flatten_background_exclude_mask)
-        self._state.spot_detection.array_rows = int(self.array_rows_spin.value())
-        self._state.spot_detection.array_cols = int(self.array_cols_spin.value())
-        self._state.spot_detection.array_spacing_px = int(round(self._length_display_to_px(self.array_spacing_spin.value())))
+        self._state.area_roi_settings.array_rows = int(self.array_rows_spin.value())
+        self._state.area_roi_settings.array_cols = int(self.array_cols_spin.value())
+        self._state.area_roi_settings.array_spacing_px = int(round(self._length_display_to_px(self.array_spacing_spin.value())))
         apply_mask = bool(self.ignore_marked_check.isChecked())
-        self._state.spot_detection.ignore_marked_pixels = apply_mask
+        self._state.area_roi_settings.ignore_marked_pixels = apply_mask
         self._state.preprocessing.flatten_background_exclude_mask = apply_mask
         self._set_section_applied(self.mask_section, apply_mask)
-        self._state.spot_detection.mask_mode = str(self.mask_mode_combo.currentData() or "absolute")
-        self._state.spot_detection.mask_profile_sigma_px = float(self.mask_relative_profile_sigma_spin.value())
-        self._state.spot_detection.mask_relative_threshold_fraction = float(self.mask_relative_threshold_spin.value()) / 100.0
-        self._state.spot_detection.mask_local_contrast_sigma_px = float(self.mask_local_contrast_sigma_spin.value())
-        self._state.spot_detection.mask_local_contrast_z_threshold = float(self.mask_local_contrast_z_spin.value())
-        if self._state.spot_detection.mask_mode == "absolute":
+        self._state.area_roi_settings.mask_mode = str(self.mask_mode_combo.currentData() or "absolute")
+        self._state.area_roi_settings.mask_profile_sigma_px = float(self.mask_relative_profile_sigma_spin.value())
+        self._state.area_roi_settings.mask_relative_threshold_fraction = float(self.mask_relative_threshold_spin.value()) / 100.0
+        self._state.area_roi_settings.mask_local_contrast_sigma_px = float(self.mask_local_contrast_sigma_spin.value())
+        self._state.area_roi_settings.mask_local_contrast_z_threshold = float(self.mask_local_contrast_z_spin.value())
+        if self._state.area_roi_settings.mask_mode == "absolute":
             lower, upper = self.ignore_region.getRegion()
             if lower > upper:
                 lower, upper = upper, lower
-            self._state.spot_detection.ignored_intensity_min_value = float(
+            self._state.area_roi_settings.ignored_intensity_min_value = float(
                 np.clip(lower, self.HISTOGRAM_MIN_INTENSITY, self.HISTOGRAM_MAX_INTENSITY)
             )
-            self._state.spot_detection.ignored_intensity_max_value = float(
+            self._state.area_roi_settings.ignored_intensity_max_value = float(
                 np.clip(upper, self.HISTOGRAM_MIN_INTENSITY, self.HISTOGRAM_MAX_INTENSITY)
             )
-            self._state.spot_detection.ignored_intensity_value = None
-        self._update_spot_detection_labels()
+            self._state.area_roi_settings.ignored_intensity_value = None
+        self._update_roi_detection_labels()
         if apply_mask and previous_mask_signature != self._mask_preview_signature():
             self._invalidate_image_analysis_caches()
             self._update_ignore_mask_overlay()
@@ -12277,8 +9187,9 @@ class MainWindow(MainWindowIcons, QMainWindow):
         self._state.preprocessing.flatten_background_binning = int(
             self.background_smoothing_binning_combo.currentData() or 2
         )
-        self._state.preprocessing.flatten_background_exclude_spots = bool(self.background_ignore_spot_button.isChecked())
+        self._state.preprocessing.flatten_background_exclude_area_rois = bool(self.background_ignore_spot_button.isChecked())
         self._state.preprocessing.flatten_background_exclude_mask = bool(self.background_ignore_mask_button.isChecked())
+        self._state.preprocessing.local_ring_normalization_enabled = bool(self.background_local_ring_check.isChecked())
         self._set_section_applied(self.background_section, bool(self._state.preprocessing.flatten_background_enabled))
         self._update_apply_button_labels()
         self._schedule_processing_state_save()
@@ -12333,112 +9244,112 @@ class MainWindow(MainWindowIcons, QMainWindow):
             return
         self._chromatic_controller.estimate_models()
 
-    def _update_spot_detection_labels(self, *, sync_controls: bool = True) -> None:
-        settings = self._state.spot_detection
-        diameter = max(2 * settings.spot_radius_px, 2)
-        ring_inner_diameter = max(int(round(2 * settings.ring_inner_radius_px)), 0)
-        ring_outer_diameter = max(int(round(2 * settings.ring_outer_radius_px)), 0)
+    def _update_roi_detection_labels(self, *, sync_controls: bool = True) -> None:
+        settings = self._state.area_roi_settings
+        diameter = max(2 * settings.sample_radius_px, 2)
+        ring_inner_diameter = max(int(round(2 * settings.reference_inner_radius_px)), 0)
+        ring_outer_diameter = max(int(round(2 * settings.reference_outer_radius_px)), 0)
         spot_area_px2 = np.pi * (float(diameter) / 2.0) ** 2
         ring_inner_radius_px = float(ring_inner_diameter) / 2.0
         ring_outer_radius_px = max(float(ring_outer_diameter) / 2.0, ring_inner_radius_px)
         ring_area_px2 = np.pi * max(ring_outer_radius_px * ring_outer_radius_px - ring_inner_radius_px * ring_inner_radius_px, 0.0)
         area_diff_px2 = spot_area_px2 - ring_area_px2
         if sync_controls:
-            self.spot_diameter_spin.blockSignals(True)
-            self.ring_inner_diameter_spin.blockSignals(True)
-            self.ring_outer_diameter_spin.blockSignals(True)
-            self.spot_diameter_spin.setValue(self._format_length_display_value(diameter))
-            self.ring_inner_diameter_spin.setValue(self._format_length_display_value(ring_inner_diameter))
-            self.ring_outer_diameter_spin.setValue(self._format_length_display_value(ring_outer_diameter))
-            self.spot_diameter_spin.blockSignals(False)
-            self.ring_inner_diameter_spin.blockSignals(False)
-            self.ring_outer_diameter_spin.blockSignals(False)
-        self.spot_geometry_area_label.setText(
+            self.sample_diameter_spin.blockSignals(True)
+            self.reference_inner_diameter_spin.blockSignals(True)
+            self.reference_outer_diameter_spin.blockSignals(True)
+            self.sample_diameter_spin.setValue(self._format_length_display_value(diameter))
+            self.reference_inner_diameter_spin.setValue(self._format_length_display_value(ring_inner_diameter))
+            self.reference_outer_diameter_spin.setValue(self._format_length_display_value(ring_outer_diameter))
+            self.sample_diameter_spin.blockSignals(False)
+            self.reference_inner_diameter_spin.blockSignals(False)
+            self.reference_outer_diameter_spin.blockSignals(False)
+        self.roi_geometry_area_label.setText(
             f"A_s={self._area_value_text(spot_area_px2)}, "
             f"A_r={self._area_value_text(ring_area_px2)}, "
             f"A_diff={self._area_delta_text(area_diff_px2)}"
         )
 
     def _apply_spot_geometry_preview(self, *, recalculate: bool) -> None:
-        if not self._state.detected_spots:
-            self._update_spot_overlays()
+        if not self._state.area_rois:
+            self._update_roi_overlays()
             return
-        selected_ids = set(self._selected_spot_ids)
-        apply_all = bool(self.spot_geometry_scope_button.isChecked())
-        for spot in self._state.detected_spots:
-            if apply_all or spot.spot_id in selected_ids:
-                spot.radius_px = float(self._state.spot_detection.spot_radius_px)
-                if spot.spot_diameter_px is not None:
-                    spot.spot_diameter_px = float(2 * self._state.spot_detection.spot_radius_px)
-                if spot.ring_inner_diameter_px is not None:
-                    spot.ring_inner_diameter_px = float(2 * self._state.spot_detection.ring_inner_radius_px)
-                if spot.ring_outer_diameter_px is not None:
-                    spot.ring_outer_diameter_px = float(2 * self._state.spot_detection.ring_outer_radius_px)
+        selected_ids = set(self._selected_roi_ids)
+        apply_all = bool(self.roi_geometry_scope_button.isChecked())
+        for roi in self._state.area_rois:
+            if apply_all or roi.area_roi_id in selected_ids:
+                roi.sample_radius_px = float(self._state.area_roi_settings.sample_radius_px)
+                if roi.sample_diameter_px is not None:
+                    roi.sample_diameter_px = float(2 * self._state.area_roi_settings.sample_radius_px)
+                if roi.reference_inner_diameter_px is not None:
+                    roi.reference_inner_diameter_px = float(2 * self._state.area_roi_settings.reference_inner_radius_px)
+                if roi.reference_outer_diameter_px is not None:
+                    roi.reference_outer_diameter_px = float(2 * self._state.area_roi_settings.reference_outer_radius_px)
 
         if recalculate and self._current_processed_image is not None:
             self._request_spot_metrics_refresh(save_after=False, refresh_histogram=False)
-        self._update_spot_overlays()
+        self._update_roi_overlays()
         if recalculate:
             self._schedule_histogram_refresh()
         else:
-            self._update_spot_detection_labels(sync_controls=False)
+            self._update_roi_detection_labels(sync_controls=False)
 
     def _update_geometry_settings(self, *, save: bool, recalculate: bool, normalize_relation: bool = True) -> None:
-        selected_ids = set(self._selected_spot_ids)
-        apply_all = bool(self.spot_geometry_scope_button.isChecked())
-        self._state.spot_detection.spot_radius_px = max(float(self._length_display_to_px(float(self.spot_diameter_spin.value())) / 2.0), 1.0)
-        ring_inner_radius = max(self._length_display_to_px(float(self.ring_inner_diameter_spin.value())) / 2.0, 0.0)
-        ring_outer_radius = max(self._length_display_to_px(float(self.ring_outer_diameter_spin.value())) / 2.0, 0.0)
+        selected_ids = set(self._selected_roi_ids)
+        apply_all = bool(self.roi_geometry_scope_button.isChecked())
+        self._state.area_roi_settings.sample_radius_px = max(float(self._length_display_to_px(float(self.sample_diameter_spin.value())) / 2.0), 1.0)
+        ring_inner_radius = max(self._length_display_to_px(float(self.reference_inner_diameter_spin.value())) / 2.0, 0.0)
+        ring_outer_radius = max(self._length_display_to_px(float(self.reference_outer_diameter_spin.value())) / 2.0, 0.0)
         if normalize_relation and ring_outer_radius < ring_inner_radius:
             ring_outer_radius = ring_inner_radius
-            self.ring_outer_diameter_spin.blockSignals(True)
-            self.ring_outer_diameter_spin.setValue(self._length_px_to_display(ring_outer_radius * 2.0))
-            self.ring_outer_diameter_spin.blockSignals(False)
-        self._state.spot_detection.ring_inner_radius_px = ring_inner_radius
-        self._state.spot_detection.ring_outer_radius_px = ring_outer_radius
+            self.reference_outer_diameter_spin.blockSignals(True)
+            self.reference_outer_diameter_spin.setValue(self._length_px_to_display(ring_outer_radius * 2.0))
+            self.reference_outer_diameter_spin.blockSignals(False)
+        self._state.area_roi_settings.reference_inner_radius_px = ring_inner_radius
+        self._state.area_roi_settings.reference_outer_radius_px = ring_outer_radius
         if apply_all:
-            for spot in self._state.detected_spots:
-                spot.spot_diameter_px = float(self._state.spot_detection.spot_radius_px * 2.0)
-                spot.ring_inner_diameter_px = float(ring_inner_radius * 2.0)
-                spot.ring_outer_diameter_px = float(ring_outer_radius * 2.0)
+            for roi in self._state.area_rois:
+                roi.sample_diameter_px = float(self._state.area_roi_settings.sample_radius_px * 2.0)
+                roi.reference_inner_diameter_px = float(ring_inner_radius * 2.0)
+                roi.reference_outer_diameter_px = float(ring_outer_radius * 2.0)
         else:
-            for spot in self._state.detected_spots:
-                if spot.spot_id in selected_ids:
-                    spot.spot_diameter_px = float(self._state.spot_detection.spot_radius_px * 2.0)
-                    spot.ring_inner_diameter_px = float(ring_inner_radius * 2.0)
-                    spot.ring_outer_diameter_px = float(ring_outer_radius * 2.0)
-        self._update_spot_detection_labels(sync_controls=False)
+            for roi in self._state.area_rois:
+                if roi.area_roi_id in selected_ids:
+                    roi.sample_diameter_px = float(self._state.area_roi_settings.sample_radius_px * 2.0)
+                    roi.reference_inner_diameter_px = float(ring_inner_radius * 2.0)
+                    roi.reference_outer_diameter_px = float(ring_outer_radius * 2.0)
+        self._update_roi_detection_labels(sync_controls=False)
         self._apply_spot_geometry_preview(recalculate=recalculate)
-        self._update_spot_list_table()
+        self._update_roi_table()
         if save:
             self._save_processing_state_for_dataset()
 
     def _refresh_spot_geometry(self) -> None:
         self._apply_spot_geometry_preview(recalculate=True)
         self._save_processing_state_for_dataset()
-        self.status_label.setText("Spot geometry refreshed.")
+        self.status_label.setText("ROI geometry refreshed.")
 
     def _commit_spot_geometry_edits(self) -> None:
-        self._push_undo_point("Spot geometry")
-        self.spot_diameter_spin.interpretText()
-        self.ring_inner_diameter_spin.interpretText()
-        self.ring_outer_diameter_spin.interpretText()
-        self._update_geometry_settings(save=True, recalculate=self.spot_editor_section.is_applied(), normalize_relation=True)
+        self._push_undo_point("ROI geometry")
+        self.sample_diameter_spin.interpretText()
+        self.reference_inner_diameter_spin.interpretText()
+        self.reference_outer_diameter_spin.interpretText()
+        self._update_geometry_settings(save=True, recalculate=self.roi_editor_section.is_applied(), normalize_relation=True)
 
     def _detect_spots(self) -> None:
         if self._current_processed_image is None:
-            self.status_label.setText("No image available for spot detection.")
+            self.status_label.setText("No image available for ROI detection.")
             return
         if not self._is_current_reference_image():
-            self.status_label.setText("Switch to the reference image before detecting spots.")
+            self.status_label.setText("Switch to the reference image before detecting ROIs.")
             return
-        self._push_undo_point("Detect spots")
+        self._push_undo_point("Detect ROIs")
         self._update_spot_detection_settings()
         self._spot_detection_request_id += 1
         request_id = self._spot_detection_request_id
         image_key = self._current_image_key
         image = self._current_processed_image
-        settings = deepcopy(self._state.spot_detection)
+        settings = deepcopy(self._state.area_roi_settings)
         worker = FunctionWorker(
             _detect_spots_task,
             image,
@@ -12446,74 +9357,74 @@ class MainWindow(MainWindowIcons, QMainWindow):
             self._current_external_mask(),
             supports_progress=True,
         )
-        self._begin_busy("Detecting spots...")
+        self._begin_busy("Detecting ROIs...")
         worker.signals.progress.connect(self._update_busy_progress)
         worker.signals.result.connect(
             lambda detected_spots,
             request_id=request_id,
-            image_key=image_key: self._on_detect_spots_ready(request_id, image_key, detected_spots)
+            image_key=image_key: self._on_detect_rois_ready(request_id, image_key, detected_spots)
         )
-        worker.signals.error.connect(lambda message: self._on_detect_spots_failed(message))
+        worker.signals.error.connect(lambda message: self._on_detect_rois_failed(message))
         self._thread_pool.start(worker)
 
     def _reorder_spots_by_position(self) -> None:
-        if not self._state.detected_spots:
-            self.status_label.setText("No spots available to reorder.")
+        if not self._state.area_rois:
+            self.status_label.setText("No ROIs available to reorder.")
             return
-        self._push_undo_point("Reorder spots by position")
-        rows = max(int(self._state.spot_detection.array_rows), 0)
-        cols = max(int(self._state.spot_detection.array_cols), 0)
-        spots = list(self._state.detected_spots)
-        if rows > 0 and cols > 0 and rows * cols == len(spots):
-            ordered = self._order_spots_as_array(spots, rows=rows, cols=cols)
+        self._push_undo_point("Reorder ROIs by position")
+        rows = max(int(self._state.area_roi_settings.array_rows), 0)
+        cols = max(int(self._state.area_roi_settings.array_cols), 0)
+        rois = list(self._state.area_rois)
+        if rows > 0 and cols > 0 and rows * cols == len(rois):
+            ordered = self._order_rois_as_array(rois, rows=rows, cols=cols)
         else:
-            ordered = self._order_spots_as_array(spots, rows=rows if rows > 0 else None, cols=cols if cols > 0 else None)
-        id_map = {spot.spot_id: new_id for new_id, spot in enumerate(ordered, start=1)}
-        for new_id, spot in enumerate(ordered, start=1):
-            spot.spot_id = new_id
-        for group in self._state.spot_groups:
-            group.spot_ids = [id_map.get(spot_id, spot_id) for spot_id in group.spot_ids]
-            group.spot_ids = sorted(dict.fromkeys(group.spot_ids))
-        self._state.detected_spots = ordered
-        self._selected_spot_ids = {id_map.get(spot_id, spot_id) for spot_id in self._selected_spot_ids if spot_id in id_map}
-        self._update_spot_overlays()
-        self._update_spot_summary()
+            ordered = self._order_rois_as_array(rois, rows=rows if rows > 0 else None, cols=cols if cols > 0 else None)
+        id_map = {roi.area_roi_id: new_id for new_id, roi in enumerate(ordered, start=1)}
+        for new_id, roi in enumerate(ordered, start=1):
+            roi.area_roi_id = new_id
+        for group in self._state.area_roi_groups:
+            group.area_roi_ids = [id_map.get(spot_id, spot_id) for spot_id in group.area_roi_ids]
+            group.area_roi_ids = sorted(dict.fromkeys(group.area_roi_ids))
+        self._state.area_rois = ordered
+        self._selected_roi_ids = {id_map.get(spot_id, spot_id) for spot_id in self._selected_roi_ids if spot_id in id_map}
+        self._update_roi_overlays()
+        self._update_roi_summary()
         self._update_selection_dependent_plots(force=True)
         self._save_processing_state_for_dataset()
-        self._update_spot_list_table()
-        self.status_label.setText("Reordered spots by image position.")
+        self._update_roi_table()
+        self.status_label.setText("Reordered ROIs by image position.")
 
     def _spot_reorder_row_band(self) -> float:
-        spacing = max(float(self._state.spot_detection.array_spacing_px), 0.0)
+        spacing = max(float(self._state.area_roi_settings.array_spacing_px), 0.0)
         diameters = [
-            float(spot.spot_diameter_px)
-            for spot in self._state.detected_spots
-            if spot.spot_diameter_px is not None and float(spot.spot_diameter_px) > 0.0
+            float(roi.sample_diameter_px)
+            for roi in self._state.area_rois
+            if roi.sample_diameter_px is not None and float(roi.sample_diameter_px) > 0.0
         ]
         if diameters:
             diameter_scale = float(np.median(np.asarray(diameters, dtype=np.float64)))
         else:
-            diameter_scale = float(max(self._state.spot_detection.spot_radius_px * 2.0, 1.0))
+            diameter_scale = float(max(self._state.area_roi_settings.sample_radius_px * 2.0, 1.0))
         band_from_spacing = spacing * 0.45 if spacing > 0.0 else 0.0
         band_from_diameter = diameter_scale * 0.75
         return float(max(band_from_spacing, band_from_diameter, 5.0))
 
-    def _order_spots_as_array(
+    def _order_rois_as_array(
         self,
-        spots: list[DetectedSpot],
+        spots: list[AreaRoi],
         *,
         rows: int | None,
         cols: int | None,
-    ) -> list[DetectedSpot]:
-        if not spots:
+    ) -> list[AreaRoi]:
+        if not rois:
             return []
-        sorted_spots = sorted(spots, key=lambda spot: (float(spot.center_y), float(spot.center_x), int(spot.spot_id)))
+        sorted_rois = sorted(rois, key=lambda roi: (float(roi.center_y), float(roi.center_x), int(roi.area_roi_id)))
         row_band = self._spot_reorder_row_band()
-        row_groups: list[list[DetectedSpot]] = []
+        row_groups: list[list[AreaRoi]] = []
         row_centers: list[float] = []
 
-        for spot in sorted_spots:
-            y = float(spot.center_y)
+        for roi in sorted_rois:
+            y = float(roi.center_y)
             best_index = -1
             best_distance = float("inf")
             for index, center_y in enumerate(row_centers):
@@ -12522,19 +9433,19 @@ class MainWindow(MainWindowIcons, QMainWindow):
                     best_distance = distance
                     best_index = index
             if best_index >= 0 and best_distance <= row_band:
-                row_groups[best_index].append(spot)
+                row_groups[best_index].append(roi)
                 row_centers[best_index] = float(np.mean([float(item.center_y) for item in row_groups[best_index]]))
             else:
-                row_groups.append([spot])
+                row_groups.append([roi])
                 row_centers.append(y)
 
         if rows is not None and rows > 0 and len(row_groups) != rows:
-            row_groups = [list(group) for group in np.array_split(np.asarray(sorted_spots, dtype=object), rows)]
+            row_groups = [list(group) for group in np.array_split(np.asarray(sorted_rois, dtype=object), rows)]
 
-        row_groups = [sorted(group, key=lambda spot: (float(spot.center_x), int(spot.spot_id))) for group in row_groups]
-        row_groups.sort(key=lambda group: float(np.mean([float(spot.center_y) for spot in group])) if group else 0.0)
+        row_groups = [sorted(group, key=lambda roi: (float(roi.center_x), int(roi.area_roi_id))) for group in row_groups]
+        row_groups.sort(key=lambda group: float(np.mean([float(roi.center_y) for roi in group])) if group else 0.0)
 
-        ordered: list[DetectedSpot] = []
+        ordered: list[AreaRoi] = []
         for row_group in row_groups:
             if cols is not None and cols > 0:
                 ordered.extend(row_group[:cols])
@@ -12542,152 +9453,130 @@ class MainWindow(MainWindowIcons, QMainWindow):
                 ordered.extend(row_group)
         return ordered
 
-    def _on_detect_spots_ready(
+    def _on_detect_rois_ready(
         self,
         request_id: int,
         image_key: tuple[int, float] | None,
-        detected_spots: list[DetectedSpot],
+        detected_spots: list[AreaRoi],
     ) -> None:
-        self._end_busy()
-        if request_id != self._spot_detection_request_id:
-            return
-        if self._current_image_key != image_key:
-            return
-        self._state.detected_spots = detected_spots
-        self._state.spot_groups.clear()
-        self._selected_spot_ids.clear()
-        self._invalidate_image_analysis_caches()
-        self._invalidate_background_profile_cache()
-        self._update_spot_overlays()
-        self._schedule_histogram_refresh()
-        self._update_spot_summary()
-        self._update_selection_dependent_plots(force=True)
-        if self._showing_background_profile_main:
-            self._update_background_profile_preview()
-        self._schedule_processing_state_save()
-        self._set_status_text(f"Detected {len(self._state.detected_spots)} spots on the reference image.")
-        self._append_workflow_log(
-            f"Spot detection done | spots {len(self._state.detected_spots)}",
-            level="success",
-        )
+        self._roi_table_controller._on_detect_rois_ready(request_id, image_key, detected_spots)
 
-    def _on_detect_spots_failed(self, message: str) -> None:
-        self._end_busy()
-        self._background_error("Spot detection", message)
+    def _on_detect_rois_failed(self, message: str) -> None:
+        self._roi_table_controller._on_detect_rois_failed(message)
 
     def _clear_detected_spots(self, persist: bool = True) -> None:
-        if self._state.detected_spots:
+        if self._state.area_rois:
             answer = QMessageBox.question(
                 self,
-                "Clear all spots",
-                "Remove all detected spots and groups from the current dataset?",
+                "Clear all ROIs",
+                "Remove all detected ROIs and groups from the current dataset?",
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
                 QMessageBox.StandardButton.No,
             )
             if answer != QMessageBox.StandardButton.Yes:
                 return
-        self._push_undo_point("Clear spots")
-        self._state.detected_spots.clear()
-        self._state.spot_groups.clear()
-        self._selected_spot_ids.clear()
+        self._push_undo_point("Clear ROIs")
+        self._state.area_rois.clear()
+        self._state.area_roi_groups.clear()
+        self._selected_roi_ids.clear()
         self._invalidate_background_profile_cache()
-        self._update_spot_overlays()
+        self._update_roi_overlays()
         self._schedule_histogram_refresh()
-        self._update_spot_summary()
+        self._update_roi_summary()
         if self._showing_background_profile_main:
             self._update_background_profile_preview()
         self._save_processing_state_for_dataset()
         if persist:
-            self.status_label.setText("Cleared detected spots.")
+            self.status_label.setText("Cleared detected ROIs.")
 
-    def _update_spot_summary(self) -> None:
-        count = len(self._state.detected_spots)
+    def _update_roi_summary(self) -> None:
+        count = len(self._state.area_rois)
         if count == 0:
-            self.spot_summary.setText("No spots detected.")
-            self._clear_absorbance_spectrum("Detect spots to show absorbance spectrum.")
+            self.roi_summary.setText("No ROIs detected.")
+            self._clear_absorbance_spectrum("Detect ROIs to show absorbance spectrum.")
             return
         selected_details = ""
-        if len(self._selected_spot_ids) == 1:
-            selected_id = next(iter(self._selected_spot_ids))
-            display_spot = next((spot for spot in self._display_spots() if spot.spot_id == selected_id), None)
-            if display_spot is not None:
+        if len(self._selected_roi_ids) == 1:
+            selected_id = next(iter(self._selected_roi_ids))
+            display_roi = next((spot for spot in self._display_rois() if spot.area_roi_id == selected_id), None)
+            if display_roi is not None:
                 label = self._array_label_for_spot(selected_id)
                 label_text = f" ({label})" if label is not None else ""
                 selected_details = (
-                    f"\nSelected spot: {selected_id}{label_text}"
-                    f"\nPosition: x={display_spot.center_x:.1f}, y={display_spot.center_y:.1f} px"
+                    f"\nSelected ROI: {selected_id}{label_text}"
+                    f"\nPosition: x={display_roi.center_x:.1f}, y={display_roi.center_y:.1f} px"
                 )
-                source_spot = self._spot_by_id(selected_id)
-                if source_spot is not None and not self._is_current_reference_image():
-                    dx = float(display_spot.center_x - source_spot.center_x)
-                    dy = float(display_spot.center_y - source_spot.center_y)
+                source_roi = self._roi_by_id(selected_id)
+                if source_roi is not None and not self._is_current_reference_image():
+                    dx = float(display_roi.center_x - source_roi.center_x)
+                    dy = float(display_roi.center_y - source_roi.center_y)
                     selected_details += f"\nShift from ref: dx={dx:+.1f}, dy={dy:+.1f} px"
-        self.spot_summary.setText(
-            f"Detected spots: {count}\nGroups: {len(self._state.spot_groups)}{selected_details}"
+        self.roi_summary.setText(
+            f"Detected ROIs: {count}\nGroups: {len(self._state.area_roi_groups)}{selected_details}"
         )
-        if not self._dragging_spots and not self._spot_edit_refresh_pending and not self._analysis_live_preview_enabled:
+        if not self._dragging_spots and not self._roi_edit_refresh_pending and not self._analysis_live_preview_enabled:
             self._schedule_absorbance_spectrum_refresh()
 
-    def _group_for_spot(self, spot_id: int) -> SpotGroup | None:
-        for group in self._state.spot_groups:
-            if spot_id in group.spot_ids:
+    def _group_for_roi(self, spot_id: int) -> AreaRoiGroup | None:
+        for group in self._state.area_roi_groups:
+            if spot_id in group.area_roi_ids:
                 return group
         return None
 
-    def _groups_for_spot(self, spot_id: int) -> list[SpotGroup]:
-        return [group for group in self._state.spot_groups if spot_id in group.spot_ids]
+    def _groups_for_spot(self, spot_id: int) -> list[AreaRoiGroup]:
+        return [group for group in self._state.area_roi_groups if spot_id in group.area_roi_ids]
 
     def _select_group_members_for_spot(self, spot_id: int) -> bool:
         groups = self._groups_for_spot(spot_id)
         if not groups:
             return False
-        selected_ids = {int(member_id) for group in groups for member_id in group.spot_ids}
+        selected_ids = {int(member_id) for group in groups for member_id in group.area_roi_ids}
         if not selected_ids:
             return False
-        if selected_ids == self._selected_spot_ids:
+        if selected_ids == self._selected_roi_ids:
             return True
-        self._selected_spot_ids = selected_ids
-        self._update_spot_overlays()
-        self._update_spot_summary()
-        self._sync_spot_list_table_selection()
+        self._selected_roi_ids = selected_ids
+        self._update_roi_overlays()
+        self._update_roi_summary()
+        self._sync_roi_table_selection()
         self._update_selection_dependent_plots(prompt_live_preview=True)
         return True
 
-    def _ungroup_selected_spots(self) -> None:
-        if not self._selected_spot_ids:
-            self.status_label.setText("Select spot(s) first to ungroup them.")
+    def _ungroup_selected_rois(self) -> None:
+        if not self._selected_roi_ids:
+            self.status_label.setText("Select ROI(s) first to ungroup them.")
             return
-        if not any(group.spot_ids for group in self._state.spot_groups):
-            self.status_label.setText("No grouped spots are selected.")
+        if not any(group.area_roi_ids for group in self._state.area_roi_groups):
+            self.status_label.setText("No grouped ROIs are selected.")
             return
-        self._append_workflow_log(f"Groups | ungroup {len(self._selected_spot_ids)} spot(s)", level="warning")
-        self._push_undo_point("Ungroup spots")
-        selected_ids = set(self._selected_spot_ids)
-        for group in self._state.spot_groups:
-            group.spot_ids = [spot_id for spot_id in group.spot_ids if spot_id not in selected_ids]
-        self._state.spot_groups = [group for group in self._state.spot_groups if group.spot_ids]
-        self._update_spot_overlays()
-        self._update_spot_summary()
-        self._update_spot_list_table()
+        self._append_workflow_log(f"Groups | ungroup {len(self._selected_roi_ids)} ROI(s)", level="warning")
+        self._push_undo_point("Ungroup ROIs")
+        selected_ids = set(self._selected_roi_ids)
+        for group in self._state.area_roi_groups:
+            group.area_roi_ids = [spot_id for spot_id in group.area_roi_ids if spot_id not in selected_ids]
+        self._state.area_roi_groups = [group for group in self._state.area_roi_groups if group.area_roi_ids]
+        self._update_roi_overlays()
+        self._update_roi_summary()
+        self._update_roi_table()
         self._save_processing_state_for_dataset()
-        self.status_label.setText("Removed selected spots from their groups.")
+        self.status_label.setText("Removed selected ROIs from their groups.")
 
     def _destroy_groups_for_spot(self, spot_id: int) -> None:
         groups = self._groups_for_spot(spot_id)
         if not groups:
-            self.status_label.setText("No group is assigned to the selected spot.")
+            self.status_label.setText("No group is assigned to the selected ROI.")
             return
         self._push_undo_point("Destroy group")
-        self._append_workflow_log(f"Groups | destroy for spot {spot_id}", level="warning")
+        self._append_workflow_log(f"Groups | destroy for ROI {spot_id}", level="warning")
         group_names = [group.name for group in groups if group.name]
-        remaining_groups = [group for group in self._state.spot_groups if group not in groups]
-        self._state.spot_groups = remaining_groups
-        self._update_spot_overlays()
-        self._update_spot_summary()
-        self._update_spot_list_table()
+        remaining_groups = [group for group in self._state.area_roi_groups if group not in groups]
+        self._state.area_roi_groups = remaining_groups
+        self._update_roi_overlays()
+        self._update_roi_summary()
+        self._update_roi_table()
         self._save_processing_state_for_dataset()
         group_text = ", ".join(group_names) if group_names else "group"
-        self.status_label.setText(f"Destroyed {group_text}; member spots are now free.")
+        self.status_label.setText(f"Destroyed {group_text}; member ROIs are now free.")
 
     def _show_analysis_spot_context_menu(self, spot_id: int, global_pos: QPoint) -> None:
         menu = QMenu(self)
@@ -12705,61 +9594,61 @@ class MainWindow(MainWindowIcons, QMainWindow):
         if action is None:
             return
         if action is group_action:
-            self._group_selected_spots()
+            self._group_selected_rois()
         elif select_group_action is not None and action is select_group_action:
             if self._select_group_members_for_spot(spot_id):
-                self.status_label.setText(f"Selected group members for spot {spot_id}.")
+                self.status_label.setText(f"Selected group members for ROI {spot_id}.")
         elif ungroup_action is not None and action is ungroup_action:
-            self._ungroup_selected_spots()
+            self._ungroup_selected_rois()
         elif destroy_group_action is not None and action is destroy_group_action:
             self._destroy_groups_for_spot(spot_id)
 
     def _reindex_detected_spots(self) -> None:
-        spot_id_map: dict[int, int] = {}
-        for new_id, spot in enumerate(self._state.detected_spots, start=1):
-            spot_id_map[spot.spot_id] = new_id
-            spot.spot_id = new_id
+        roi_id_map: dict[int, int] = {}
+        for new_id, roi in enumerate(self._state.area_rois, start=1):
+            roi_id_map[roi.area_roi_id] = new_id
+            roi.area_roi_id = new_id
 
-        updated_groups: list[SpotGroup] = []
-        for group in self._state.spot_groups:
-            group.spot_ids = [spot_id_map[spot_id] for spot_id in group.spot_ids if spot_id in spot_id_map]
-            if group.spot_ids:
+        updated_groups: list[AreaRoiGroup] = []
+        for group in self._state.area_roi_groups:
+            group.area_roi_ids = [roi_id_map[spot_id] for spot_id in group.area_roi_ids if spot_id in roi_id_map]
+            if group.area_roi_ids:
                 updated_groups.append(group)
-        self._state.spot_groups = updated_groups
+        self._state.area_roi_groups = updated_groups
 
-    def _remove_selected_spots(self) -> None:
-        if self._roi_editor_mode in {"circles", "rectangles"} and self._selected_rectangle_roi_ids:
+    def _remove_selected_rois(self) -> None:
+        if self._roi_editor_mode == "rectangles" and self._selected_rectangle_roi_ids:
             self._remove_selected_rectangle_rois()
             return
-        if not self._selected_spot_ids:
-            self.status_label.setText("Select spot(s) first to remove them.")
+        if not self._selected_roi_ids:
+            self.status_label.setText("Select ROI(s) first to remove them.")
             return
-        self._append_workflow_log(f"Spots | remove {len(self._selected_spot_ids)} selected", level="warning")
-        self._push_undo_point("Remove spots")
-        removed_count = len(self._selected_spot_ids)
-        self._state.detected_spots = [
-            spot for spot in self._state.detected_spots if spot.spot_id not in self._selected_spot_ids
+        self._append_workflow_log(f"ROIs | remove {len(self._selected_roi_ids)} selected", level="warning")
+        self._push_undo_point("Remove ROIs")
+        removed_count = len(self._selected_roi_ids)
+        self._state.area_rois = [
+            roi for roi in self._state.area_rois if roi.area_roi_id not in self._selected_roi_ids
         ]
         self._reindex_detected_spots()
-        self._selected_spot_ids.clear()
-        self._update_spot_overlays()
-        if self._active_tool == "spots":
-            self._mark_spot_edit_refresh_pending()
+        self._selected_roi_ids.clear()
+        self._update_roi_overlays()
+        if self._active_tool == "roi":
+            self._mark_roi_edit_refresh_pending()
         else:
             self._schedule_histogram_refresh()
-        self._update_spot_summary()
-        if self._active_tool != "spots":
+        self._update_roi_summary()
+        if self._active_tool != "roi":
             self._save_processing_state_for_dataset()
-        self.status_label.setText(f"Removed {removed_count} selected spot(s).")
+        self.status_label.setText(f"Removed {removed_count} selected ROI(s).")
 
-    def _group_selected_spots(self) -> None:
-        if not self._selected_spot_ids:
-            self.status_label.setText("Select spot(s) first to create a group.")
+    def _group_selected_rois(self) -> None:
+        if not self._selected_roi_ids:
+            self.status_label.setText("Select ROI(s) first to create a group.")
             return
 
-        current_group = self._group_for_spot(min(self._selected_spot_ids))
-        default_name = current_group.name if current_group is not None else f"Group {len(self._state.spot_groups) + 1}"
-        name, accepted = QInputDialog.getText(self, "Spot group", "Group name", text=default_name)
+        current_group = self._group_for_roi(min(self._selected_roi_ids))
+        default_name = current_group.name if current_group is not None else f"Group {len(self._state.area_roi_groups) + 1}"
+        name, accepted = QInputDialog.getText(self, "ROI group", "Group name", text=default_name)
         if not accepted:
             return
         name = name.strip()
@@ -12767,218 +9656,58 @@ class MainWindow(MainWindowIcons, QMainWindow):
             self.status_label.setText("Group creation cancelled: name is required.")
             return
 
-        initial_color = QColor(current_group.spot_color_hex) if current_group is not None else QColor("#f59e0b")
-        color = QColorDialog.getColor(initial_color, self, "Group spot color")
+        initial_color = QColor(current_group.sample_color_hex) if current_group is not None else QColor("#f59e0b")
+        color = QColorDialog.getColor(initial_color, self, "ROI group color")
         if not color.isValid():
             return
-        self._push_undo_point("Group spots")
+        self._push_undo_point("Group ROIs")
         self._append_workflow_log(
-            f"Groups | create '{name}' with {len(self._selected_spot_ids)} spot(s)",
+            f"Groups | create '{name}' with {len(self._selected_roi_ids)} ROI(s)",
             level="success",
         )
 
-        for group in self._state.spot_groups:
-            group.spot_ids = [spot_id for spot_id in group.spot_ids if spot_id not in self._selected_spot_ids]
-        self._state.spot_groups = [group for group in self._state.spot_groups if group.spot_ids]
+        for group in self._state.area_roi_groups:
+            group.area_roi_ids = [spot_id for spot_id in group.area_roi_ids if spot_id not in self._selected_roi_ids]
+        self._state.area_roi_groups = [group for group in self._state.area_roi_groups if group.area_roi_ids]
 
-        target_group = next((group for group in self._state.spot_groups if group.name == name), None)
+        target_group = next((group for group in self._state.area_roi_groups if group.name == name), None)
         if target_group is None:
-            target_group = SpotGroup(
-                group_id=f"group_{len(self._state.spot_groups) + 1}",
+            target_group = AreaRoiGroup(
+                group_id=f"group_{len(self._state.area_roi_groups) + 1}",
                 name=name,
-                spot_color_hex=color.name(),
-                ring_color_hex=self._ring_visual_color.name(),
-                spot_ids=sorted(self._selected_spot_ids),
+                sample_color_hex=color.name(),
+                reference_color_hex=self._reference_visual_color.name(),
+                area_roi_ids=sorted(self._selected_roi_ids),
             )
-            self._state.spot_groups.append(target_group)
+            self._state.area_roi_groups.append(target_group)
         else:
-            target_group.spot_color_hex = color.name()
-            target_group.spot_ids = sorted(set(target_group.spot_ids).union(self._selected_spot_ids))
+            target_group.sample_color_hex = color.name()
+            target_group.area_roi_ids = sorted(set(target_group.area_roi_ids).union(self._selected_roi_ids))
 
-        self._update_spot_overlays()
-        self._update_spot_summary()
+        self._update_roi_overlays()
+        self._update_roi_summary()
         self._save_processing_state_for_dataset()
-        self.status_label.setText(f"Grouped {len(self._selected_spot_ids)} spot(s) as '{name}'.")
+        self.status_label.setText(f"Grouped {len(self._selected_roi_ids)} ROI(s) as '{name}'.")
 
     def _clear_spot_selection(self) -> None:
-        self._selected_spot_ids.clear()
-        self._update_spot_overlays()
-        self._update_spot_summary()
+        self._selected_roi_ids.clear()
+        self._update_roi_overlays()
+        self._update_roi_summary()
         self._update_selection_dependent_plots(force=True)
-        self.status_label.setText("Cleared spot selection.")
+        self.status_label.setText("Cleared ROI selection.")
 
     def _schedule_spot_overlay_refresh(self) -> None:
         if not self._spot_overlay_refresh_timer.isActive():
             self._spot_overlay_refresh_timer.start()
 
     def _refresh_spot_overlays_during_drag(self) -> None:
-        self._update_spot_overlays(update_hidden_details=False)
+        self._overlay_manager._refresh_spot_overlays_during_drag()
 
-    def _update_spot_overlays(self, *, update_hidden_details: bool = True) -> None:
-        display_spots = self._display_spots()
-        source_spot_map = {spot.spot_id: spot for spot in self._state.detected_spots}
-        if self._showing_background_profile_main:
-            for bundle in self._spot_overlay_items.values():
-                bundle.curve.setVisible(False)
-                if bundle.ring_fill is not None:
-                    bundle.ring_fill.setVisible(False)
-                if bundle.inner_curve is not None:
-                    bundle.inner_curve.setVisible(False)
-                if bundle.outer_curve is not None:
-                    bundle.outer_curve.setVisible(False)
-                if bundle.label is not None:
-                    bundle.label.setVisible(False)
-            self._update_guide_overlays()
-            return
-        current_ids = {spot.spot_id for spot in display_spots}
-        for spot_id in list(self._spot_overlay_items):
-            if spot_id not in current_ids:
-                self._remove_spot_overlay_bundle(spot_id)
-
-        theta = self._spot_overlay_theta
-        ring_inner_radius = float(max(self._state.spot_detection.ring_inner_radius_px, 0))
-        ring_outer_radius = float(max(self._state.spot_detection.ring_outer_radius_px, self._state.spot_detection.ring_inner_radius_px))
-        for spot in display_spots:
-            source_spot = source_spot_map.get(spot.spot_id, spot)
-            bundle = self._spot_overlay_items.get(spot.spot_id)
-            if bundle is None:
-                curve = pg.PlotCurveItem()
-                curve.setSkipFiniteCheck(True)
-                self.image_plot.addItem(curve, ignoreBounds=True)
-                bundle = SpotOverlayBundle(curve=curve)
-                self._spot_overlay_items[spot.spot_id] = bundle
-            xs, ys = self._spot_curve_points(source_spot, spot, source_spot.radius_px)
-            group = self._group_for_spot(spot.spot_id)
-            pen_color = resolved_spot_color(spot, group, self._spot_visual_color)
-            pen_color.setAlphaF(self._alpha01(self._spot_alpha))
-            fill_color = resolved_spot_color(spot, group, self._spot_visual_color)
-            fill_color.setAlphaF(self._alpha01(max(self._spot_alpha * 0.22, 0.08)))
-            spot_signature = self._spot_absorbance_signature(source_spot)
-            spot_cached = bool(spot_signature is not None and self._spot_absorbance_cache.get(spot_signature) is not None)
-            if self._cached_spots_only_visible and not spot_cached and spot.spot_id not in self._selected_spot_ids:
-                dim_pen = QColor("#94a3b8")
-                dim_pen.setAlphaF(self._alpha01(0.16))
-                dim_fill = QColor("#94a3b8")
-                dim_fill.setAlphaF(self._alpha01(0.04))
-                pen_color = dim_pen
-                fill_color = dim_fill
-            elif self._cached_spots_only_visible and spot_cached and spot.spot_id not in self._selected_spot_ids:
-                cached_pen = QColor("#22c55e")
-                cached_pen.setAlphaF(self._alpha01(max(self._spot_alpha, 0.9)))
-                cached_fill = QColor("#22c55e")
-                cached_fill.setAlphaF(self._alpha01(max(self._spot_alpha * 0.16, 0.06)))
-                pen_color = cached_pen
-                fill_color = cached_fill
-            pen = pg.mkPen(pen_color, width=2)
-            brush = pg.mkBrush(fill_color)
-            if spot.inferred:
-                inferred_color = QColor("#f59e0b")
-                inferred_color.setAlphaF(self._alpha01(max(self._spot_alpha, 0.45)))
-                pen = pg.mkPen(inferred_color, width=2, style=Qt.PenStyle.DashLine)
-                inferred_fill = QColor("#f59e0b")
-                inferred_fill.setAlphaF(self._alpha01(max(self._spot_alpha * 0.15, 0.08)))
-                brush = pg.mkBrush(inferred_fill)
-            if spot.spot_id in self._selected_spot_ids:
-                selected_color = QColor("#38bdf8")
-                selected_color.setAlphaF(1.0)
-                pen = pg.mkPen(selected_color, width=3)
-                selected_fill = QColor("#38bdf8")
-                selected_fill.setAlphaF(0.2)
-                brush = pg.mkBrush(selected_fill)
-            bundle.curve.setData(xs, ys)
-            bundle.curve.setPen(pen)
-            bundle.curve.setFillLevel(spot.center_y)
-            bundle.curve.setBrush(brush)
-            bundle.curve.setVisible(self._spots_visible)
-            if self._rings_visible and ring_outer_radius > 0.0:
-                ring_color = resolved_ring_color(spot, group, self._ring_visual_color)
-                ring_color.setAlphaF(self._alpha01(max(self._ring_alpha * 1.3, 0.18)))
-                ring_fill = resolved_ring_color(spot, group, self._ring_visual_color)
-                ring_fill.setAlphaF(self._alpha01(max(self._ring_alpha, 0.03)))
-                if spot.spot_id in self._selected_spot_ids:
-                    ring_color = QColor("#38bdf8")
-                    ring_color.setAlphaF(self._alpha01(0.85))
-                    ring_fill = QColor("#38bdf8")
-                    ring_fill.setAlphaF(self._alpha01(max(self._ring_alpha, 0.08)))
-                inner_pen = pg.mkPen(ring_color, width=1.4, style=Qt.PenStyle.DashLine)
-                outer_pen = pg.mkPen(ring_color, width=1.4, style=Qt.PenStyle.DotLine)
-                if ring_inner_radius > 0.0:
-                    if bundle.inner_curve is None:
-                        bundle.inner_curve = pg.PlotCurveItem()
-                        bundle.inner_curve.setSkipFiniteCheck(True)
-                        self.image_plot.addItem(bundle.inner_curve, ignoreBounds=True)
-                    inner_xs, inner_ys = self._spot_curve_points(source_spot, spot, ring_inner_radius)
-                    bundle.inner_curve.setData(inner_xs, inner_ys)
-                    bundle.inner_curve.setPen(inner_pen)
-                    bundle.inner_curve.setVisible(True)
-                elif bundle.inner_curve is not None:
-                    bundle.inner_curve.setVisible(False)
-                if bundle.ring_fill is None:
-                    bundle.ring_fill = QGraphicsPathItem()
-                    self.image_plot.addItem(bundle.ring_fill, ignoreBounds=True)
-                bundle.ring_fill.setPath(
-                    self._create_ring_fill_path(
-                        spot.center_x,
-                        spot.center_y,
-                        ring_inner_radius,
-                        ring_outer_radius,
-                    )
-                )
-                bundle.ring_fill.setBrush(QBrush(ring_fill))
-                bundle.ring_fill.setPen(QPen(Qt.PenStyle.NoPen))
-                bundle.ring_fill.setVisible(True)
-                if bundle.outer_curve is None:
-                    bundle.outer_curve = pg.PlotCurveItem()
-                    bundle.outer_curve.setSkipFiniteCheck(True)
-                    self.image_plot.addItem(bundle.outer_curve, ignoreBounds=True)
-                outer_xs, outer_ys = self._spot_curve_points(source_spot, spot, ring_outer_radius)
-                bundle.outer_curve.setData(outer_xs, outer_ys)
-                bundle.outer_curve.setPen(outer_pen)
-                bundle.outer_curve.setVisible(True)
-            elif update_hidden_details:
-                if bundle.inner_curve is not None:
-                    bundle.inner_curve.setVisible(False)
-                if bundle.ring_fill is not None:
-                    bundle.ring_fill.setVisible(False)
-                if bundle.outer_curve is not None:
-                    bundle.outer_curve.setVisible(False)
-            label = self._array_label_for_spot(spot.spot_id)
-            if label is not None and self._spot_labels_visible:
-                is_selected = spot.spot_id in self._selected_spot_ids
-                if self._cached_spots_only_visible and not spot_cached and not is_selected:
-                    if bundle.label is not None:
-                        bundle.label.setVisible(False)
-                    continue
-                label_color = "#f8fafc" if is_selected else "#ffffff"
-                label_background = "#0f766e" if is_selected else "#0f172a"
-                label_border = "#5eead4" if is_selected else "#94a3b8"
-                label_text = label
-                if is_selected:
-                    label_text = f"{label}<br><span style='font-size:8.5pt; font-weight:600;'>x={spot.center_x:.1f}, y={spot.center_y:.1f}</span>"
-                if bundle.label is None:
-                    bundle.label = pg.TextItem(anchor=(0.0, 1.0))
-                    self.image_plot.addItem(bundle.label, ignoreBounds=True)
-                bundle.label.setHtml(
-                    "<span style="
-                    f"'color:{label_color}; "
-                    "font-size:10pt; "
-                    "font-weight:700; "
-                    f"background:{label_background}; "
-                    f"border:1px solid {label_border}; "
-                    "border-radius:4px; "
-                    "padding:2px 5px;'"
-                    f">{label_text}</span>"
-                )
-                bundle.label.setPos(spot.center_x + spot.radius_px + 4.0, spot.center_y - spot.radius_px - 2.0)
-                bundle.label.setVisible(self._spots_visible and self._spot_labels_visible)
-            elif update_hidden_details and bundle.label is not None:
-                bundle.label.setVisible(False)
-        self._update_guide_overlays()
-        if self.spot_list_table.isVisible():
-            self._update_spot_list_table()
+    def _update_roi_overlays(self, *, update_hidden_details: bool = True) -> None:
+        self._overlay_manager._update_roi_overlays(update_hidden_details=update_hidden_details)
 
     def _remove_spot_overlay_bundle(self, spot_id: int) -> None:
-        bundle = self._spot_overlay_items.pop(spot_id, None)
+        bundle = self._roi_overlay_items.pop(spot_id, None)
         if bundle is None:
             return
         self.image_plot.removeItem(bundle.curve)
@@ -12992,103 +9721,10 @@ class MainWindow(MainWindowIcons, QMainWindow):
             self.image_plot.removeItem(bundle.label)
 
     def _update_landmark_overlays(self) -> None:
-        if self._showing_background_profile_main:
-            for bundle in self._landmark_overlay_items.values():
-                bundle.curve.setVisible(False)
-                bundle.label.setVisible(False)
-            for bundle in self._chromatic_all_landmark_overlay_items.values():
-                bundle.points.setVisible(False)
-                if bundle.active_cross is not None:
-                    bundle.active_cross.setVisible(False)
-                bundle.label.setVisible(False)
-            return
-
-        if self._chromatic_reference_points_all_visible:
-            for bundle in self._landmark_overlay_items.values():
-                bundle.curve.setVisible(False)
-                bundle.label.setVisible(False)
-            self._update_chromatic_all_landmark_overlays()
-            return
-
-        if not self._reference_points_visible:
-            for bundle in self._landmark_overlay_items.values():
-                bundle.curve.setVisible(False)
-                bundle.label.setVisible(False)
-            for bundle in self._chromatic_all_landmark_overlay_items.values():
-                bundle.points.setVisible(False)
-                if bundle.active_cross is not None:
-                    bundle.active_cross.setVisible(False)
-                bundle.label.setVisible(False)
-            return
-
-        self._clear_chromatic_all_landmark_overlays()
-        current_landmarks = self._current_image_landmarks()
-        current_ids = {int(mark.landmark_id) for mark in current_landmarks}
-        for landmark_id in list(self._landmark_overlay_items):
-            if landmark_id not in current_ids:
-                bundle = self._landmark_overlay_items.pop(landmark_id)
-                self.image_plot.removeItem(bundle.curve)
-                self.image_plot.removeItem(bundle.label)
-
-        for mark in current_landmarks:
-            landmark_id = int(mark.landmark_id)
-            bundle = self._landmark_overlay_items.get(landmark_id)
-            if bundle is None:
-                curve = pg.PlotCurveItem()
-                curve.setSkipFiniteCheck(True)
-                self.image_plot.addItem(curve, ignoreBounds=True)
-                label = pg.TextItem(anchor=(0.0, 1.0))
-                self.image_plot.addItem(label, ignoreBounds=True)
-                bundle = LandmarkOverlayBundle(curve=curve, label=label)
-                self._landmark_overlay_items[landmark_id] = bundle
-            cross_size = 7.0
-            xs = np.asarray(
-                [
-                    float(mark.x_px) - cross_size,
-                    float(mark.x_px) + cross_size,
-                    np.nan,
-                    float(mark.x_px),
-                    float(mark.x_px),
-                ],
-                dtype=np.float64,
-            )
-            ys = np.asarray(
-                [
-                    float(mark.y_px),
-                    float(mark.y_px),
-                    np.nan,
-                    float(mark.y_px) - cross_size,
-                    float(mark.y_px) + cross_size,
-                ],
-                dtype=np.float64,
-            )
-            is_selected = landmark_id == int(self._selected_landmark_id or self._chromatic_landmark_marker_id)
-            pen_color = QColor("#f8fafc" if not is_selected else "#38bdf8")
-            bundle.curve.setData(xs, ys)
-            bundle.curve.setPen(pg.mkPen(pen_color, width=3.0 if is_selected else 2.2))
-            bundle.curve.setVisible(True)
-            bundle.label.setHtml(
-                "<span style="
-                f"'color:{pen_color.name()}; "
-                "font-size:10pt; "
-                "font-style:italic; "
-                "font-weight:700; "
-                f"background:{'#0f766e' if is_selected else '#0f172a'}; "
-                f"border:1px solid {('#5eead4' if is_selected else '#94a3b8')}; "
-                "border-radius:4px; "
-                "padding:2px 5px;'"
-                f">{landmark_id}</span>"
-            )
-            bundle.label.setPos(float(mark.x_px) + 8.0, float(mark.y_px) - 8.0)
-            bundle.label.setVisible(True)
+        self._overlay_manager._update_landmark_overlays()
 
     def _clear_chromatic_all_landmark_overlays(self) -> None:
-        for bundle in self._chromatic_all_landmark_overlay_items.values():
-            self.image_plot.removeItem(bundle.points)
-            if bundle.active_cross is not None:
-                self.image_plot.removeItem(bundle.active_cross)
-            self.image_plot.removeItem(bundle.label)
-        self._chromatic_all_landmark_overlay_items.clear()
+        self._chromatic_controller.clear_all_landmark_overlays()
 
     def _chromatic_wavelength_color(self, wavelength_nm: float) -> QColor:
         wavelength = float(np.clip(float(wavelength_nm), 380.0, 780.0))
@@ -13156,118 +9792,8 @@ class MainWindow(MainWindowIcons, QMainWindow):
         return float(target_point[0]), float(target_point[1])
 
     def _update_chromatic_all_landmark_overlays(self) -> None:
-        if self._showing_background_profile_main:
-            self._clear_chromatic_all_landmark_overlays()
-            return
-        current_key = self._current_image_key
-        if current_key is None or not self._state.chromatic_landmarks:
-            self._clear_chromatic_all_landmark_overlays()
-            return
-        linked_preview = bool(self._state.preprocessing.chromatic_correction_enabled and self._state.chromatic_models)
+        self._chromatic_controller.update_all_landmark_overlays()
 
-        grouped: dict[int, list[tuple[float, float, float, tuple[int, float]]]] = {}
-        for mark in self._state.chromatic_landmarks:
-            grouped.setdefault(int(mark.landmark_id), []).append(
-                (float(mark.x_px), float(mark.y_px), float(mark.wavelength_nm), (int(mark.frame_index), float(mark.wavelength_nm)))
-            )
-
-        current_ids = set(grouped)
-        for landmark_id in list(self._chromatic_all_landmark_overlay_items):
-            if landmark_id not in current_ids:
-                bundle = self._chromatic_all_landmark_overlay_items.pop(landmark_id)
-                self.image_plot.removeItem(bundle.points)
-                self.image_plot.removeItem(bundle.label)
-
-        for landmark_id, items in grouped.items():
-            bundle = self._chromatic_all_landmark_overlay_items.get(landmark_id)
-            if bundle is None:
-                points = pg.ScatterPlotItem(pxMode=True)
-                points.setZValue(42)
-                self.image_plot.addItem(points, ignoreBounds=True)
-                active_cross = pg.PlotCurveItem()
-                active_cross.setSkipFiniteCheck(True)
-                active_cross.setZValue(44)
-                self.image_plot.addItem(active_cross, ignoreBounds=True)
-                label = pg.TextItem(anchor=(0.0, 1.0))
-                label.setZValue(43)
-                self.image_plot.addItem(label, ignoreBounds=True)
-                bundle = ChromaticLandmarkAllOverlayBundle(points=points, active_cross=active_cross, label=label)
-                self._chromatic_all_landmark_overlay_items[landmark_id] = bundle
-            xs: list[float] = []
-            ys: list[float] = []
-            colors = [self._chromatic_wavelength_color(item[2]) for item in items]
-            pen_colors = [QColor(color) for color in colors]
-            brush_colors = [QColor(color) for color in colors]
-            for item_x, item_y, _wavelength, source_key in items:
-                display_point = (float(item_x), float(item_y))
-                if linked_preview:
-                    transformed = self._transform_chromatic_point_between_keys(display_point, source_key, current_key)
-                    if transformed is not None:
-                        display_point = transformed
-                xs.append(float(display_point[0]))
-                ys.append(float(display_point[1]))
-            bundle.points.setData(
-                x=xs,
-                y=ys,
-                size=10.5,
-                symbol="+",
-                pen=[pg.mkPen(color, width=1.3) for color in pen_colors],
-                brush=None,
-            )
-            bundle.points.setVisible(True)
-            current_item = next((item for item in items if item[3] == current_key), None)
-            if current_item is not None:
-                cross_size = 8.0
-                cross_xs = np.asarray(
-                    [
-                        float(xs[items.index(current_item)]) - cross_size,
-                        float(xs[items.index(current_item)]) + cross_size,
-                        np.nan,
-                        float(xs[items.index(current_item)]),
-                        float(xs[items.index(current_item)]),
-                    ],
-                    dtype=np.float64,
-                )
-                cross_ys = np.asarray(
-                    [
-                        float(ys[items.index(current_item)]),
-                        float(ys[items.index(current_item)]),
-                        np.nan,
-                        float(ys[items.index(current_item)]) - cross_size,
-                        float(ys[items.index(current_item)]) + cross_size,
-                    ],
-                    dtype=np.float64,
-                )
-                bundle.active_cross.setData(cross_xs, cross_ys)
-                bundle.active_cross.setPen(pg.mkPen("#f8fafc", width=3.4))
-                bundle.active_cross.setVisible(True)
-            elif bundle.active_cross is not None:
-                bundle.active_cross.setVisible(False)
-
-            representative_index = 0
-            current_wavelength = float(current_key[1])
-            for index, item in enumerate(items):
-                if abs(float(item[2]) - current_wavelength) < 1e-6:
-                    representative_index = index
-                    break
-            rep_x, rep_y, rep_wavelength, _ = items[representative_index]
-            rep_display_x = xs[representative_index]
-            rep_display_y = ys[representative_index]
-            label_color = self._chromatic_wavelength_color(rep_wavelength)
-            bundle.label.setHtml(
-                "<span style="
-                f"'color:{label_color.name()}; "
-                "font-size:10pt; "
-                "font-style:italic; "
-                "font-weight:700; "
-                f"background:{'#0f172a'}; "
-                f"border:1px solid {label_color.name()}; "
-                "border-radius:4px; "
-                "padding:2px 5px;'"
-                f">{landmark_id}</span>"
-            )
-            bundle.label.setPos(float(rep_display_x) + 8.0, float(rep_display_y) - 8.0)
-            bundle.label.setVisible(True)
 
     def _create_ring_fill_path(
         self,
@@ -13287,36 +9813,7 @@ class MainWindow(MainWindowIcons, QMainWindow):
         return path
 
     def _update_guide_overlays(self) -> None:
-        guide = self._ensure_image_tool_guide()
-        if guide is None or self._current_processed_image is None or self._showing_background_profile_main:
-            for bundle in self._guide_overlay_items.values():
-                bundle.vertical.setVisible(False)
-                bundle.horizontal.setVisible(False)
-                bundle.marker.setVisible(False)
-            self._hide_measurement_overlay()
-            self._refresh_scale_bar_overlay()
-            return
-        visible = self._active_tool in {"rotate", "crop"}
-        if not visible:
-            guide.vertical.setVisible(False)
-            guide.horizontal.setVisible(False)
-            guide.marker.setVisible(False)
-        else:
-            image_height, image_width = self._current_processed_image.shape[:2]
-            current_pos = guide.marker.pos()
-            x = float(np.clip(current_pos.x(), 0.0, max(float(image_width - 1), 0.0)))
-            y = float(np.clip(current_pos.y(), 0.0, max(float(image_height - 1), 0.0)))
-            if abs(float(current_pos.x()) - x) > 1e-6 or abs(float(current_pos.y()) - y) > 1e-6:
-                guide.marker.blockSignals(True)
-                guide.marker.setPos((x, y))
-                guide.marker.blockSignals(False)
-            guide.vertical.setData([x, x], [0.0, max(float(image_height - 1), 0.0)])
-            guide.horizontal.setData([0.0, max(float(image_width - 1), 0.0)], [y, y])
-            guide.vertical.setVisible(True)
-            guide.horizontal.setVisible(True)
-            guide.marker.setVisible(True)
-        self._update_measurement_overlay()
-        self._refresh_scale_bar_overlay()
+        self._overlay_manager._update_guide_overlays()
 
     def _ensure_image_tool_guide(self) -> GuideOverlayBundle | None:
         guide = self._guide_overlay_items.get(0)
@@ -13351,7 +9848,7 @@ class MainWindow(MainWindowIcons, QMainWindow):
         return guide
 
     def _on_image_tool_guide_moved(self, *_args) -> None:
-        self._update_guide_overlays()
+        self._overlay_manager._on_image_tool_guide_moved(*_args)
 
     def _update_ome_zarr_chunk_guide_overlay(self) -> None:
         for item in self._ome_zarr_chunk_overlay_items:
@@ -13381,112 +9878,16 @@ class MainWindow(MainWindowIcons, QMainWindow):
             self._ome_zarr_chunk_overlay_items.append(line)
 
     def _hide_measurement_overlay(self) -> None:
-        if self._measurement_overlay is None:
-            return
-        self._measurement_overlay.connector.setVisible(False)
-        self._measurement_overlay.marker_a.setVisible(False)
-        self._measurement_overlay.marker_b.setVisible(False)
-        self._measurement_overlay.label.setVisible(False)
+        self._overlay_manager._hide_measurement_overlay()
 
     def _ensure_measurement_overlay(self) -> MeasurementOverlayBundle:
-        if self._measurement_overlay is not None:
-            return self._measurement_overlay
-        settings = self._state.preprocessing
-        marker_a = pg.TargetItem(
-            pos=(float(settings.measurement_anchor1_x_px), float(settings.measurement_anchor1_y_px)),
-            movable=True,
-            pen=pg.mkPen("#f8fafc", width=1.8),
-            brush=pg.mkBrush(0, 0, 0, 0),
-            hoverPen=pg.mkPen("#22c55e", width=2.0),
-            hoverBrush=pg.mkBrush(0, 0, 0, 0),
-            size=12,
-        )
-        marker_b = pg.TargetItem(
-            pos=(float(settings.measurement_anchor2_x_px), float(settings.measurement_anchor2_y_px)),
-            movable=True,
-            pen=pg.mkPen("#f8fafc", width=1.8),
-            brush=pg.mkBrush(0, 0, 0, 0),
-            hoverPen=pg.mkPen("#22c55e", width=2.0),
-            hoverBrush=pg.mkBrush(0, 0, 0, 0),
-            size=12,
-        )
-        connector = pg.PlotCurveItem(pen=pg.mkPen(QColor(34, 197, 94, 180), width=1.8))
-        label = pg.TextItem(anchor=(0.5, 1.0))
-        marker_a.sigPositionChanged.connect(self._on_measurement_marker_moved)
-        marker_b.sigPositionChanged.connect(self._on_measurement_marker_moved)
-        marker_a.sigPositionChangeFinished.connect(self._on_measurement_marker_moved)
-        marker_b.sigPositionChangeFinished.connect(self._on_measurement_marker_moved)
-        self.image_plot.addItem(connector, ignoreBounds=True)
-        self.image_plot.addItem(marker_a, ignoreBounds=True)
-        self.image_plot.addItem(marker_b, ignoreBounds=True)
-        self.image_plot.addItem(label, ignoreBounds=True)
-        self._measurement_overlay = MeasurementOverlayBundle(
-            connector=connector,
-            marker_a=marker_a,
-            marker_b=marker_b,
-            label=label,
-        )
-        return self._measurement_overlay
+        return self._overlay_manager._ensure_measurement_overlay()
 
     def _update_measurement_overlay(self) -> None:
-        if self._current_processed_image is None or self._showing_background_profile_main or self._active_tool != "measure":
-            self._hide_measurement_overlay()
-            return
-        overlay = self._ensure_measurement_overlay()
-        image_height, image_width = self._current_processed_image.shape[:2]
-        settings = self._state.preprocessing
-        points = [
-            (overlay.marker_a, "measurement_anchor1_x_px", "measurement_anchor1_y_px"),
-            (overlay.marker_b, "measurement_anchor2_x_px", "measurement_anchor2_y_px"),
-        ]
-        for marker, x_attr, y_attr in points:
-            x_value = float(np.clip(float(getattr(settings, x_attr)), 0.0, max(float(image_width - 1), 0.0)))
-            y_value = float(np.clip(float(getattr(settings, y_attr)), 0.0, max(float(image_height - 1), 0.0)))
-            setattr(settings, x_attr, x_value)
-            setattr(settings, y_attr, y_value)
-            current_pos = marker.pos()
-            if abs(float(current_pos.x()) - x_value) > 1e-6 or abs(float(current_pos.y()) - y_value) > 1e-6:
-                marker.blockSignals(True)
-                marker.setPos((x_value, y_value))
-                marker.blockSignals(False)
-            marker.setVisible(True)
-        ax = float(settings.measurement_anchor1_x_px)
-        ay = float(settings.measurement_anchor1_y_px)
-        bx = float(settings.measurement_anchor2_x_px)
-        by = float(settings.measurement_anchor2_y_px)
-        overlay.connector.setData([ax, bx], [ay, by])
-        overlay.connector.setVisible(True)
-        dx, dy, distance = self._measurement_delta_components_px()
-        self._normalize_display_units()
-        if self._can_display_micrometers():
-            distance_um = self._microns_per_pixel_scalar() * distance
-            if self._display_uses_micrometers():
-                bar_label = f"{distance_um:.1f} µm | {distance:.1f} px"
-            else:
-                bar_label = f"{distance:.1f} px | {distance_um:.1f} µm"
-        else:
-            bar_label = f"{distance:.1f} px"
-        overlay.label.setHtml(
-            "<span style="
-            "'color:#22c55e; font-size:10pt; font-weight:700; background:#0f172a; "
-            "border:1px solid #22c55e; border-radius:4px; padding:2px 5px;'"
-            f">{bar_label}</span>"
-        )
-        overlay.label.setPos((ax + bx) * 0.5, min(ay, by) - 8.0)
-        overlay.label.setVisible(True)
-        self._update_measurement_status_label(dx_px=dx, dy_px=dy, distance_px=distance)
+        self._overlay_manager._update_measurement_overlay()
 
     def _on_measurement_marker_moved(self, *_args) -> None:
-        if self._measurement_overlay is None:
-            return
-        settings = self._state.preprocessing
-        settings.measurement_anchor1_x_px = float(self._measurement_overlay.marker_a.pos().x())
-        settings.measurement_anchor1_y_px = float(self._measurement_overlay.marker_a.pos().y())
-        settings.measurement_anchor2_x_px = float(self._measurement_overlay.marker_b.pos().x())
-        settings.measurement_anchor2_y_px = float(self._measurement_overlay.marker_b.pos().y())
-        self._update_measurement_overlay()
-        self._refresh_scale_bar_overlay()
-        self._schedule_processing_state_save()
+        self._overlay_manager._on_measurement_marker_moved(*_args)
 
     def _update_measurement_status_label(
         self,
@@ -13495,21 +9896,7 @@ class MainWindow(MainWindowIcons, QMainWindow):
         dy_px: float | None = None,
         distance_px: float | None = None,
     ) -> None:
-        if dx_px is None or dy_px is None or distance_px is None:
-            dx_px, dy_px, distance_px = self._measurement_delta_components_px()
-        if self._can_display_micrometers():
-            dx_um = abs(self._microns_per_pixel_scalar() * dx_px)
-            dy_um = abs(self._microns_per_pixel_scalar() * dy_px)
-            distance_um = self._microns_per_pixel_scalar() * distance_px
-            self.measurement_status_label.setText(
-                f"Δx {abs(dx_px):.1f} px / {dx_um:.1f} µm | "
-                f"Δy {abs(dy_px):.1f} px / {dy_um:.1f} µm | "
-                f"d {distance_px:.1f} px / {distance_um:.1f} µm"
-            )
-        else:
-            self.measurement_status_label.setText(
-                f"Δx {abs(dx_px):.1f} px | Δy {abs(dy_px):.1f} px | d {distance_px:.1f} px"
-            )
+        self._overlay_manager._update_measurement_status_label(dx_px=dx_px, dy_px=dy_px, distance_px=distance_px)
 
     def _apply_measurement_calibration(self) -> None:
         dx_px, dy_px, _distance_px = self._measurement_delta_components_px()
@@ -13536,7 +9923,7 @@ class MainWindow(MainWindowIcons, QMainWindow):
         self._state.preprocessing.calibration_enabled = True
         self._state.preprocessing.display_units = "um"
         self._update_display_unit_controls()
-        self._sync_spot_detection_controls()
+        self._sync_roi_detection_controls()
         self._save_processing_state_for_dataset()
         self._set_status_text("Measurement calibration applied in memory. Display units switched to micrometers.")
 
@@ -13594,115 +9981,10 @@ class MainWindow(MainWindowIcons, QMainWindow):
         return float(nice_base * (10.0 ** exponent))
 
     def _refresh_scale_bar_overlay(self) -> None:
-        if self._scale_bar_overlay is None and self._current_processed_image is None:
-            return
-        overlay = self._ensure_scale_bar_overlay() if self._current_processed_image is not None else self._scale_bar_overlay
-        if overlay is not None:
-            overlay.line.setPen(pg.mkPen(self._scale_bar_visual_color, width=2.4))
-            overlay.left_tick.setPen(pg.mkPen(self._scale_bar_visual_color, width=2.0))
-            overlay.right_tick.setPen(pg.mkPen(self._scale_bar_visual_color, width=2.0))
-            overlay.outline_line.setPen(pg.mkPen(QColor(255, 255, 255, 220), width=5.0))
-            overlay.outline_left_tick.setPen(pg.mkPen(QColor(255, 255, 255, 220), width=4.2))
-            overlay.outline_right_tick.setPen(pg.mkPen(QColor(255, 255, 255, 220), width=4.2))
-        if overlay is None or self._showing_background_profile_main or self._current_processed_image is None or not bool(self._state.preprocessing.scale_bar_visible):
-            if overlay is not None:
-                overlay.outline_line.setVisible(False)
-                overlay.line.setVisible(False)
-                overlay.outline_left_tick.setVisible(False)
-                overlay.left_tick.setVisible(False)
-                overlay.outline_right_tick.setVisible(False)
-                overlay.right_tick.setVisible(False)
-                overlay.outline_label.setVisible(False)
-                overlay.label.setVisible(False)
-            return
-        x_range, y_range = self.image_plot.vb.viewRange()
-        x_left, x_right = sorted((float(x_range[0]), float(x_range[1])))
-        y_top, y_bottom = sorted((float(y_range[0]), float(y_range[1])))
-        visible_width = max(x_right - x_left, 1.0)
-        visible_height = max(y_bottom - y_top, 1.0)
-        available_px = max(visible_width * 0.22, 30.0)
-        if self._display_uses_micrometers():
-            bar_value = self._nice_scale_bar_value(available_px * self._microns_per_pixel_scalar())
-            bar_length_px = bar_value / self._microns_per_pixel_scalar()
-            label_text = f"{bar_value:g} µm"
-        else:
-            bar_value = self._nice_scale_bar_value(available_px)
-            bar_length_px = bar_value
-            label_text = f"{bar_value:g} px"
-        margin_x = max(visible_width * 0.03, 12.0)
-        margin_y = max(visible_height * 0.05, 12.0)
-        x1 = x_right - margin_x
-        x0 = max(x_left + margin_x, x1 - float(bar_length_px))
-        y = y_bottom - margin_y
-        tick_half = float(np.clip(visible_height * 0.02, 4.0, 8.0))
-        overlay.outline_line.setData([x0, x1], [y, y])
-        overlay.line.setData([x0, x1], [y, y])
-        overlay.outline_left_tick.setData([x0, x0], [y - tick_half, y + tick_half])
-        overlay.left_tick.setData([x0, x0], [y - tick_half, y + tick_half])
-        overlay.outline_right_tick.setData([x1, x1], [y - tick_half, y + tick_half])
-        overlay.right_tick.setData([x1, x1], [y - tick_half, y + tick_half])
-        overlay.outline_label.setHtml(
-            "<span style="
-            "'color:#f8fafc; font-size:10pt; font-weight:800;'"
-            f">{label_text}</span>"
-        )
-        overlay.label.setHtml(
-            "<span style="
-            "'color:#05070b; font-size:9pt; font-weight:800;'"
-            f">{label_text}</span>"
-        )
-        label_x = (x0 + x1) * 0.5
-        label_y = y - tick_half - max(visible_height * 0.015, 3.0)
-        overlay.outline_label.setPos(label_x, label_y)
-        overlay.label.setPos(label_x, label_y)
-        overlay.outline_line.setVisible(True)
-        overlay.line.setVisible(True)
-        overlay.outline_left_tick.setVisible(True)
-        overlay.left_tick.setVisible(True)
-        overlay.outline_right_tick.setVisible(True)
-        overlay.right_tick.setVisible(True)
-        overlay.outline_label.setVisible(True)
-        overlay.label.setVisible(True)
+        self._overlay_manager._refresh_scale_bar_overlay()
 
     def _update_ignore_mask_overlay(self) -> None:
-        if self._showing_background_profile_main or self._current_processed_image is None:
-            self.ignore_mask_item.hide()
-            self.histogram_mask_item.hide()
-            self.figure_mask_item.hide()
-            return
-
-        mask = self._ignored_mask(self._current_processed_image)
-        if self._mask_visible and np.any(mask):
-            overlay = np.zeros((*mask.shape, 4), dtype=np.uint8)
-            overlay_color = np.array(
-                [
-                    self._mask_visual_color.red(),
-                    self._mask_visual_color.green(),
-                    self._mask_visual_color.blue(),
-                    int(round(self._mask_alpha * 255.0)),
-                ],
-                dtype=np.uint8,
-            )
-            overlay[mask] = overlay_color
-            self.ignore_mask_item.setImage(np.transpose(overlay, (1, 0, 2)), autoLevels=False)
-            self.ignore_mask_item.show()
-        else:
-            self.ignore_mask_item.hide()
-
-        self.histogram_mask_item.hide()
-
-        if self._mask_figure_preview is not None:
-            preview_mask = apply_spatial_mask(self._mask_figure_preview, self._state.preprocessing)
-            if preview_mask.shape == mask.shape and np.any(preview_mask):
-                fig_overlay = np.zeros((*preview_mask.shape, 4), dtype=np.uint8)
-                fig_color = np.array([56, 189, 248, 110], dtype=np.uint8)
-                fig_overlay[preview_mask] = fig_color
-                self.figure_mask_item.setImage(np.transpose(fig_overlay, (1, 0, 2)), autoLevels=False)
-                self.figure_mask_item.show()
-            else:
-                self.figure_mask_item.hide()
-        else:
-            self.figure_mask_item.hide()
+        self._overlay_manager._update_ignore_mask_overlay()
 
     def _update_histogram(self, image: np.ndarray) -> None:
         self._plot_manager.update_histogram(image)
@@ -13792,116 +10074,72 @@ class MainWindow(MainWindowIcons, QMainWindow):
         image_f32 = image.astype(np.float32, copy=False)
         image_height, image_width = image_f32.shape[:2]
         ignored_mask = self._ignored_mask(image_f32)
-        spot_mask = np.zeros((image_height, image_width), dtype=bool)
+        roi_mask = np.zeros((image_height, image_width), dtype=bool)
         ring_mask = np.zeros((image_height, image_width), dtype=bool)
-        display_spots = self._display_spots()
-        if display_spots:
+        display_rois = self._display_rois()
+        if display_rois:
             affine_matrix = self._chromatic_affine_for_image_key(self._current_image_key)
-            ring_inner_radius = float(max(self._state.spot_detection.ring_inner_radius_px, 0.0))
-            ring_outer_radius = float(max(self._state.spot_detection.ring_outer_radius_px, ring_inner_radius))
+            ring_inner_radius = float(max(self._state.area_roi_settings.reference_inner_radius_px, 0.0))
+            ring_outer_radius = float(max(self._state.area_roi_settings.reference_outer_radius_px, ring_inner_radius))
             if affine_matrix is None or self._is_current_reference_image():
                 yy, xx = np.indices((image_height, image_width), dtype=np.float32)
-                for spot in display_spots:
-                    distance_sq = (xx - float(spot.center_x)) ** 2 + (yy - float(spot.center_y)) ** 2
-                    spot_mask |= distance_sq <= float(spot.radius_px) ** 2
+                for roi in display_rois:
+                    distance_sq = (xx - float(roi.center_x)) ** 2 + (yy - float(roi.center_y)) ** 2
+                    roi_mask |= distance_sq <= float(roi.sample_radius_px) ** 2
                     if ring_outer_radius > 0.0:
                         outer_mask = distance_sq <= ring_outer_radius ** 2
                         inner_mask = distance_sq < ring_inner_radius ** 2 if ring_inner_radius > 0.0 else np.zeros_like(outer_mask)
                         ring_mask |= outer_mask & ~inner_mask
             else:
-                source_spot_map = {spot.spot_id: spot for spot in self._state.detected_spots}
-                for spot in display_spots:
-                    source_spot = source_spot_map.get(spot.spot_id, spot)
-                    spot_mask |= transformed_disk_mask(
+                source_roi_map = {roi.area_roi_id: roi for roi in self._state.area_rois}
+                for roi in display_rois:
+                    source_roi = source_roi_map.get(roi.area_roi_id, roi)
+                    roi_mask |= transformed_disk_mask(
                         (image_height, image_width),
-                        (float(source_spot.center_x), float(source_spot.center_y)),
-                        float(source_spot.radius_px),
+                        (float(source_roi.center_x), float(source_roi.center_y)),
+                        float(source_roi.sample_radius_px),
                         affine_matrix,
                     )
                     if ring_outer_radius > 0.0:
                         ring_mask |= transformed_annulus_mask(
                             (image_height, image_width),
-                            (float(source_spot.center_x), float(source_spot.center_y)),
+                            (float(source_roi.center_x), float(source_roi.center_y)),
                             float(ring_inner_radius),
                             float(ring_outer_radius),
                             affine_matrix,
                         )
-        spot_mask &= ~ignored_mask
+        roi_mask &= ~ignored_mask
         ring_mask &= ~ignored_mask
-        ring_mask &= ~spot_mask
-        residual_mask = ~(spot_mask | ring_mask | ignored_mask)
-        cached = (spot_mask, ring_mask, ignored_mask, residual_mask)
+        ring_mask &= ~roi_mask
+        residual_mask = ~(roi_mask | ring_mask | ignored_mask)
+        cached = (roi_mask, ring_mask, ignored_mask, residual_mask)
         self._roi_mask_cache_signature = signature
         self._roi_mask_cache_values = cached
         return cached
 
     def _roi_intensity_values(self, image: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         image_f32 = image.astype(np.float32, copy=False)
-        spot_mask, ring_mask, ignored_mask, _residual_mask = self._roi_area_masks(image_f32)
+        roi_mask, ring_mask, ignored_mask, _residual_mask = self._roi_area_masks(image_f32)
         return (
-            image_f32[spot_mask],
+            image_f32[roi_mask],
             image_f32[ring_mask],
             image_f32[ignored_mask],
         )
 
     def _on_histogram_region_changed(self) -> None:
-        self._push_undo_point("Highlight range")
-        lower, upper = self.hist_region.getRegion()
-        if lower > upper:
-            lower, upper = upper, lower
-        self._state.spot_detection.intensity_min_value = float(
-            np.clip(lower, self.HISTOGRAM_MIN_INTENSITY, self.HISTOGRAM_MAX_INTENSITY)
-        )
-        self._state.spot_detection.intensity_max_value = float(
-            np.clip(upper, self.HISTOGRAM_MIN_INTENSITY, self.HISTOGRAM_MAX_INTENSITY)
-        )
-        self._state.preprocessing.histogram_highlight_min_value = float(lower)
-        self._state.preprocessing.histogram_highlight_max_value = float(upper)
-        self._update_selected_intensity_overlay()
-        self._save_control_preferences()
-        self._save_processing_state_for_dataset()
+        self._overlay_manager._on_histogram_region_changed()
 
     def _on_ignore_region_changed(self) -> None:
-        return
+        self._overlay_manager._on_ignore_region_changed()
 
     def _preview_ignore_region_overlay(self) -> None:
         return
 
     def _on_histogram_bins_changed(self, _value: int) -> None:
-        self._schedule_histogram_refresh()
+        self._overlay_manager._on_histogram_bins_changed(_value)
 
     def _update_selected_intensity_overlay(self) -> None:
-        if self._showing_background_profile_main or self._current_processed_image is None or not self._highlight_visible:
-            self.intensity_highlight_item.hide()
-            return
-
-        lower, upper = self.hist_region.getRegion()
-        if lower > upper:
-            lower, upper = upper, lower
-        lower = float(np.clip(lower, self.HISTOGRAM_MIN_INTENSITY, self.HISTOGRAM_MAX_INTENSITY))
-        upper = float(np.clip(upper, self.HISTOGRAM_MIN_INTENSITY, self.HISTOGRAM_MAX_INTENSITY))
-        if lower <= self.HISTOGRAM_MIN_INTENSITY and upper >= self.HISTOGRAM_MAX_INTENSITY:
-            self.intensity_highlight_item.hide()
-            return
-
-        image = self._current_processed_image.astype(np.float32, copy=False)
-        selection_mask = (image >= lower) & (image <= upper)
-        if not np.any(selection_mask):
-            self.intensity_highlight_item.hide()
-            return
-
-        overlay = np.zeros((*selection_mask.shape, 4), dtype=np.uint8)
-        overlay[selection_mask] = np.array(
-            [
-                self._highlight_visual_color.red(),
-                self._highlight_visual_color.green(),
-                self._highlight_visual_color.blue(),
-                int(round(self._highlight_alpha * 255.0)),
-            ],
-            dtype=np.uint8,
-        )
-        self.intensity_highlight_item.setImage(np.transpose(overlay, (1, 0, 2)), autoLevels=False)
-        self.intensity_highlight_item.show()
+        self._overlay_manager._update_selected_intensity_overlay()
 
     def _update_histogram_region_labels(self) -> None:
         view_range = self.histogram_plot.viewRange()
@@ -13929,9 +10167,9 @@ class MainWindow(MainWindowIcons, QMainWindow):
         initial = (
             self._mask_visual_color
             if target == "mask"
-            else self._spot_visual_color
-            if target == "spots"
-            else self._ring_visual_color
+            else self._sample_visual_color
+            if target == "roi"
+            else self._reference_visual_color
             if target == "ring"
             else self._highlight_visual_color
         )
@@ -13943,15 +10181,15 @@ class MainWindow(MainWindowIcons, QMainWindow):
             self._mask_visual_color = color
             self._update_ignore_mask_overlay()
             self._restyle_area_histogram_curves()
-        elif target == "spots":
-            self._spot_visual_color = color
-            self._update_spot_overlays()
+        elif target == "roi":
+            self._sample_visual_color = color
+            self._update_roi_overlays()
             self._restyle_area_histogram_curves()
             self._refresh_visible_spectrum_from_cache()
             self._analysis_controller.update_selection_highlight(force=True)
         elif target == "ring":
-            self._ring_visual_color = color
-            self._update_spot_overlays()
+            self._reference_visual_color = color
+            self._update_roi_overlays()
             self._restyle_area_histogram_curves()
             self._refresh_visible_spectrum_from_cache()
             self._analysis_controller.update_selection_highlight(force=True)
@@ -13968,22 +10206,22 @@ class MainWindow(MainWindowIcons, QMainWindow):
     def _refresh_visible_spectrum_from_cache(self) -> bool:
         if not self._analysis_enabled:
             return False
-        selected_source_spots = self._selected_source_spots_snapshot()
-        selected_spot_ids = tuple(spot.spot_id for spot in selected_source_spots)
+        selected_source_rois = self._selected_source_rois_snapshot()
+        selected_roi_ids = tuple(roi.area_roi_id for roi in selected_source_rois)
         spot_signature = None
-        if len(selected_source_spots) == 1:
-            spot_signature = self._spot_absorbance_signature(selected_source_spots[0])
+        if len(selected_source_rois) == 1:
+            spot_signature = self._roi_absorbance_signature(selected_source_rois[0])
             if spot_signature is not None:
                 cached_spot_result = self._spot_absorbance_cache.get(spot_signature)
                 if cached_spot_result is not None:
                     self._apply_absorbance_spectrum_result(cached_spot_result)
                     self._spot_absorbance_cache.move_to_end(spot_signature)
-                    self._append_workflow_log("Spec repaint | spot cache", level="debug")
+                    self._append_workflow_log("Spec repaint | roi cache", level="debug")
                     return True
         signature = self._absorbance_spectrum_signature()
         if signature is None:
             return False
-        if not selected_source_spots:
+        if not selected_source_rois:
             cached_result = self._absorbance_spectrum_cache.get(signature)
             if cached_result is not None:
                 self._apply_absorbance_spectrum_result(cached_result)
@@ -13993,7 +10231,7 @@ class MainWindow(MainWindowIcons, QMainWindow):
                 self._append_workflow_log("Spec repaint | spectrum cache", level="debug")
                 return True
             return False
-        cached_result = self._cached_absorbance_result_for_selection(signature, selected_spot_ids)
+        cached_result = self._cached_absorbance_result_for_selection(signature, selected_roi_ids)
         if cached_result is not None:
             self._apply_absorbance_spectrum_result(cached_result)
             frame_signature = self._absorbance_frame_signature(signature)
@@ -14014,7 +10252,7 @@ class MainWindow(MainWindowIcons, QMainWindow):
             return None
         if spectrum_hit and sensorgram_hit:
             return None
-        if not self._selected_spot_ids:
+        if not self._selected_roi_ids:
             return None
         message = "Cached live preview is not available for the current selection."
         if spectrum_hit and not sensorgram_hit:
@@ -14073,7 +10311,7 @@ class MainWindow(MainWindowIcons, QMainWindow):
                 )
 
     def _update_selection_dependent_plots(self, *, force: bool = False, prompt_live_preview: bool = False) -> None:
-        selected_signature = tuple(sorted(int(spot_id) for spot_id in self._selected_spot_ids))
+        selected_signature = tuple(sorted(int(spot_id) for spot_id in self._selected_roi_ids))
         if not force and selected_signature == self._selection_plot_highlight_signature:
             return
         self._selection_plot_highlight_signature = selected_signature
@@ -14091,17 +10329,17 @@ class MainWindow(MainWindowIcons, QMainWindow):
         self._restyle_area_histogram_curves()
         self._save_visual_preferences()
 
-    def _on_spot_alpha_changed(self, value: int) -> None:
+    def _on_roi_alpha_changed(self, value: int) -> None:
         self._push_undo_point("Overlay appearance")
-        self._spot_alpha = self._alpha01(float(value) / 100.0)
-        self._update_spot_overlays()
+        self._roi_alpha = self._alpha01(float(value) / 100.0)
+        self._update_roi_overlays()
         self._restyle_area_histogram_curves()
         self._save_visual_preferences()
 
-    def _on_ring_alpha_changed(self, value: int) -> None:
+    def _on_reference_alpha_changed(self, value: int) -> None:
         self._push_undo_point("Overlay appearance")
-        self._ring_alpha = self._alpha01(float(value) / 100.0)
-        self._update_spot_overlays()
+        self._reference_alpha = self._alpha01(float(value) / 100.0)
+        self._update_roi_overlays()
         self._restyle_area_histogram_curves()
         self._save_visual_preferences()
 
@@ -14501,7 +10739,7 @@ class MainWindow(MainWindowIcons, QMainWindow):
             mask = self._current_file_mask.astype(bool, copy=False)
         else:
             raw_image = load_image_array(str(self._current_record_path)).astype(np.float32, copy=False)
-            export_settings = deepcopy(self._state.spot_detection)
+            export_settings = deepcopy(self._state.area_roi_settings)
             export_settings.ignore_marked_pixels = True
             mask = ignored_pixel_mask(raw_image, export_settings, external_mask=None)
         try:
@@ -14780,44 +11018,14 @@ class MainWindow(MainWindowIcons, QMainWindow):
             f"Save the current background image.\nTarget file name: {background_default_name}"
         )
 
-    def _on_spot_diameter_spin_changed(self, value: int) -> None:
-        diameter_px = max(self._length_display_to_px(float(value)), 2.0)
-        self._append_workflow_log_throttled(
-            "spot_diameter_change",
-            f"Spot diameter changed | display={value} | px={diameter_px:.2f}",
-            level="debug",
-            min_interval=1.0,
-        )
-        self._state.spot_detection.spot_radius_px = max(float(diameter_px / 2.0), 1.0)
-        self._update_geometry_settings(save=False, recalculate=False)
+    def _on_roi_diameter_spin_changed(self, value: int) -> None:
+        self._roi_table_controller._on_roi_diameter_spin_changed(value)
 
-    def _on_ring_inner_diameter_spin_changed(self, value: int) -> None:
-        _inner = max(float(value), 0.0)
-        self._append_workflow_log_throttled(
-            "ring_inner_change",
-            f"Ring inner changed | display={value}",
-            level="debug",
-            min_interval=1.0,
-        )
-        self._update_geometry_settings(
-            save=False,
-            recalculate=False,
-            normalize_relation=True,
-        )
+    def _on_reference_inner_diameter_spin_changed(self, value: int) -> None:
+        self._roi_table_controller._on_reference_inner_diameter_spin_changed(value)
 
-    def _on_ring_outer_diameter_spin_changed(self, value: int) -> None:
-        _outer = max(float(value), 0.0)
-        self._append_workflow_log_throttled(
-            "ring_outer_change",
-            f"Ring outer changed | display={value}",
-            level="debug",
-            min_interval=1.0,
-        )
-        self._update_geometry_settings(
-            save=False,
-            recalculate=False,
-            normalize_relation=True,
-        )
+    def _on_reference_outer_diameter_spin_changed(self, value: int) -> None:
+        self._roi_table_controller._on_reference_outer_diameter_spin_changed(value)
 
     def _on_frame_spin_changed(self, value: int) -> None:
         if not self._frame_values:
@@ -14901,9 +11109,9 @@ class MainWindow(MainWindowIcons, QMainWindow):
         decimals = 0
         step = 1.0 if use_um else 1.0
         for spinbox in (
-            self.spot_diameter_spin,
-            self.ring_inner_diameter_spin,
-            self.ring_outer_diameter_spin,
+            self.sample_diameter_spin,
+            self.reference_inner_diameter_spin,
+            self.reference_outer_diameter_spin,
             self.array_spacing_spin,
         ):
             spinbox.setSuffix(suffix)
@@ -14914,6 +11122,14 @@ class MainWindow(MainWindowIcons, QMainWindow):
         self._refresh_unit_toggle_button()
         self._update_measurement_status_label()
         self._refresh_scale_bar_overlay()
+        # Re-calibrate widths now that the suffix has changed.
+        for _uspin in (
+            self.sample_diameter_spin,
+            self.reference_inner_diameter_spin,
+            self.reference_outer_diameter_spin,
+            self.array_spacing_spin,
+        ):
+            self._set_spinbox_width(_uspin, "9999")
 
     def _format_length_display_value(self, value_px: float) -> float:
         return format_length_display_value(self._display_uses_micrometers(), self._microns_per_pixel_scalar(), value_px)

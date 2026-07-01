@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from dataclasses import replace as _dataclass_replace
 from pathlib import Path
 
 import numpy as np
 from PyQt6.QtWidgets import QFileDialog, QMessageBox
 
-from lspr_imaging_app.domain.models import CropDefinition, MaskSettings, SpotDetectionSettings
+from lspr_imaging_app.domain.models import AreaRoiDetectionSettings, CropDefinition, MaskSettings
 from lspr_imaging_app.storage.workspace import (
     load_preprocessing,
     load_processing_profile,
@@ -50,7 +51,7 @@ class SessionStateManager:
             return
         window._report_startup_progress(58, "Loading analysis cache...")
         window._append_workflow_log("Startup | analysis cache restored", level="debug")
-        window._sync_spot_detection_controls()
+        window._sync_roi_detection_controls()
         window._restore_control_preferences()
         window._report_startup_progress(76, "Preparing the first image...")
         window._analysis_enabled = False
@@ -92,9 +93,9 @@ class SessionStateManager:
                 window._report_startup_progress(42, "Loading processing profile...")
                 (
                     preprocessing,
-                    spot_detection,
-                    detected_spots,
-                    spot_groups,
+                    area_roi_settings,
+                    area_rois,
+                    area_roi_groups,
                     rois,
                     chromatic_models,
                     chromatic_landmarks,
@@ -103,11 +104,12 @@ class SessionStateManager:
                     mask_settings,
                 ) = load_processing_profile(profile_path)
                 window._state.preprocessing = preprocessing
-                window._state.spot_detection = spot_detection
+                window._state.area_roi_settings = area_roi_settings
                 window._state.mask = mask_settings
-                window._state.detected_spots = detected_spots
-                window._state.spot_groups = spot_groups
+                window._state.area_rois = area_rois
+                window._state.area_roi_groups = area_roi_groups
                 window._state.rois = rois
+                window._reset_roi_id_counter_from_state()
                 window._current_file_mask = None
                 window._current_file_mask_path = None
                 window._current_file_mask_session_source_path = None
@@ -123,7 +125,7 @@ class SessionStateManager:
                         window._current_file_mask_session_source_path = (
                             None if restored_record_path is None else Path(str(restored_record_path))
                         )
-                window._report_startup_progress(48, "Restoring spot groups...")
+                window._report_startup_progress(48, "Restoring ROI groups...")
                 window._report_startup_progress(54, "Restoring chromatic transforms...")
                 window._state.chromatic_models = chromatic_models
                 window._state.chromatic_landmarks = chromatic_landmarks
@@ -145,7 +147,7 @@ class SessionStateManager:
                         level="debug",
                     )
                 window._normalize_mask_application_state()
-                window._update_spot_list_table()
+                window._update_roi_table()
                 window._update_chromatic_control_state()
                 window._restore_chromatic_view_after_load()
                 window._report_startup_progress(60, "Processing profile restored.")
@@ -156,10 +158,10 @@ class SessionStateManager:
         if preprocessing_path is not None and preprocessing_path.exists():
             try:
                 window._state.preprocessing = load_preprocessing(preprocessing_path)
-                window._state.spot_detection = SpotDetectionSettings()
+                window._state.area_roi_settings = AreaRoiDetectionSettings()
                 window._state.mask = MaskSettings()
-                window._state.detected_spots.clear()
-                window._state.spot_groups.clear()
+                window._state.area_rois.clear()
+                window._state.area_roi_groups.clear()
                 window._state.rois.clear()
                 window._state.chromatic_models.clear()
                 window._state.chromatic_landmarks.clear()
@@ -168,20 +170,21 @@ class SessionStateManager:
                 window._current_file_mask_session_source_path = None
                 window._selected_rectangle_roi_ids.clear()
                 window._sync_rectangle_stamp_overlays()
-                window._update_spot_list_table()
+                window._update_roi_table()
                 window._normalize_mask_application_state()
                 return
             except Exception as exc:
                 window.status_label.setText(f"Preprocessing load failed: {exc}")
 
         window._state.preprocessing.rotation_angle_deg = 0.0
+        window._state.preprocessing.rotation_fill_dark = False
         window._state.preprocessing.flip_horizontal = False
         window._state.preprocessing.flip_vertical = False
         window._state.preprocessing.crop = CropDefinition()
         window._state.preprocessing.flatten_background_enabled = False
         window._state.preprocessing.flatten_background_sigma_px = 48.0
         window._state.preprocessing.flatten_background_binning = 2
-        window._state.preprocessing.flatten_background_exclude_spots = True
+        window._state.preprocessing.flatten_background_exclude_area_rois = True
         window._state.preprocessing.flatten_background_exclude_mask = False
         window._state.preprocessing.chromatic_correction_enabled = False
         window._state.preprocessing.chromatic_registration_mode = "landmark_radial"
@@ -192,10 +195,10 @@ class SessionStateManager:
         window._state.preprocessing.reference_mode = "auto"
         window._state.preprocessing.reference_wavelength_nm = None
         window._state.preprocessing.reference_frame_index = 0
-        window._state.spot_detection = SpotDetectionSettings()
+        window._state.area_roi_settings = AreaRoiDetectionSettings()
         window._state.mask = MaskSettings()
-        window._state.detected_spots.clear()
-        window._state.spot_groups.clear()
+        window._state.area_rois.clear()
+        window._state.area_roi_groups.clear()
         window._state.rois.clear()
         window._state.chromatic_models.clear()
         window._state.chromatic_landmarks.clear()
@@ -204,7 +207,7 @@ class SessionStateManager:
         window._current_file_mask_session_source_path = None
         window._selected_rectangle_roi_ids.clear()
         window._sync_rectangle_stamp_overlays()
-        window._update_spot_list_table()
+        window._update_roi_table()
 
     def save_processing_state_for_dataset(self, *, force: bool = False, reason: str | None = None) -> None:
         window = self._window
@@ -236,13 +239,24 @@ class SessionStateManager:
             )
             return
         try:
-            save_preprocessing(path, window._state.preprocessing)
+            # While the crop/rotate tool is active we set image_tools_enabled=False
+            # so the user can see the full image while adjusting.  That preview-mode
+            # state must NOT be persisted; restore the pre-preview value so that the
+            # next session opens with the same "applied" state as before editing started.
+            preprocessing_to_save = window._state.preprocessing
+            if getattr(window, "_image_tools_preview_only", False):
+                pre = bool(getattr(window, "_image_tools_pre_preview_enabled", True))
+                if preprocessing_to_save.image_tools_enabled != pre:
+                    preprocessing_to_save = _dataclass_replace(
+                        preprocessing_to_save, image_tools_enabled=pre
+                    )
+            save_preprocessing(path, preprocessing_to_save)
             save_processing_profile(
                 profile_path,
-                window._state.preprocessing,
-                window._state.spot_detection,
-                window._state.detected_spots,
-                window._state.spot_groups,
+                preprocessing_to_save,
+                window._state.area_roi_settings,
+                window._state.area_rois,
+                window._state.area_roi_groups,
                 window._state.rois,
                 window._state.chromatic_models,
                 window._state.chromatic_landmarks,
@@ -294,9 +308,9 @@ class SessionStateManager:
             save_processing_profile(
                 Path(destination),
                 window._state.preprocessing,
-                window._state.spot_detection,
-                window._state.detected_spots,
-                window._state.spot_groups,
+                window._state.area_roi_settings,
+                window._state.area_rois,
+                window._state.area_roi_groups,
                 window._state.rois,
                 window._state.chromatic_models,
                 window._state.chromatic_landmarks,
@@ -338,9 +352,9 @@ class SessionStateManager:
         try:
             (
                 preprocessing,
-                spot_detection,
-                detected_spots,
-                spot_groups,
+                area_roi_settings,
+                area_rois,
+                area_roi_groups,
                 rois,
                 chromatic_models,
                 chromatic_landmarks,
@@ -349,10 +363,11 @@ class SessionStateManager:
                 mask_settings,
             ) = load_processing_profile(Path(source))
             window._state.preprocessing = preprocessing
-            window._state.spot_detection = spot_detection
-            window._state.detected_spots = detected_spots
-            window._state.spot_groups = spot_groups
+            window._state.area_roi_settings = area_roi_settings
+            window._state.area_rois = area_rois
+            window._state.area_roi_groups = area_roi_groups
             window._state.rois = rois
+            window._reset_roi_id_counter_from_state()
             window._state.chromatic_models = chromatic_models
             window._state.chromatic_landmarks = chromatic_landmarks
             window._state.mask = mask_settings
@@ -365,13 +380,13 @@ class SessionStateManager:
                         None if restored_record_path is None else Path(str(restored_record_path))
                     )
             window._restore_analysis_caches(analysis_cache)
-            window._update_spot_list_table()
+            window._update_roi_table()
             window._restore_control_preferences()
             window._update_chromatic_control_state()
             window._restore_chromatic_view_after_load()
             window._sync_reference_selection_from_settings()
             window._sync_image_processing_controls()
-            window._sync_spot_detection_controls()
+            window._sync_roi_detection_controls()
             window._current_image_key = None
             window._refresh_image()
             window._save_processing_state_for_dataset()

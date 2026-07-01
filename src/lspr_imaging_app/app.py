@@ -12,6 +12,7 @@ from PyQt6.QtGui import QColor, QFont, QPainter, QPalette, QPen, QPixmap
 from PyQt6.QtWidgets import QApplication, QMainWindow, QSplashScreen
 
 from lspr_ui import (
+    BLUE_DARK_THEME,
     GRAY_DARK_THEME,
     app_icon,
     apply_base_app_theme,
@@ -200,7 +201,27 @@ def _resolve_default_dataset_folder() -> Path:
     return candidates[-1]
 
 
+def _apply_ui_scale_factor() -> None:
+    """Set QT_SCALE_FACTOR from saved preference before QApplication is created.
+
+    QT_SCALE_FACTOR is a multiplier on top of Qt's automatic OS-DPI scaling.
+    1.25 = 25 % larger than OS default, 0.85 = 15 % smaller, etc.
+    "auto" (or missing) = leave Qt's default DPI handling untouched.
+    """
+    try:
+        # QSettings("org", "app") works before QApplication on all platforms.
+        raw = str(QSettings("LSPR", "LSPRImaging").value("ui/scale_factor", "auto") or "auto").strip()
+        if raw and raw != "auto":
+            factor = float(raw)
+            if 0.5 <= factor <= 3.0:
+                # setdefault: respect QT_SCALE_FACTOR already set in the environment.
+                os.environ.setdefault("QT_SCALE_FACTOR", f"{factor:.6g}")
+    except Exception:
+        pass
+
+
 def main() -> None:
+    _apply_ui_scale_factor()
     log_path = _configure_logging()
     app = QApplication(sys.argv)
     app.setApplicationName(APP_NAME)
@@ -209,8 +230,7 @@ def main() -> None:
     app.setQuitOnLastWindowClosed(False)
     app.setWindowIcon(app_icon())
     settings = QSettings("LSPR", "LSPRImaging")
-    if str(settings.value("ui/theme", "blue")) == "gray":
-        set_active_theme(GRAY_DARK_THEME)
+    set_active_theme(GRAY_DARK_THEME if str(settings.value("ui/theme", "blue")) == "gray" else BLUE_DARK_THEME)
     fast_startup = _fast_startup_enabled(settings)
     logging.getLogger("lspr_imaging_app.startup").info("Session log file: %s", log_path)
     apply_base_app_theme(app, get_active_theme())

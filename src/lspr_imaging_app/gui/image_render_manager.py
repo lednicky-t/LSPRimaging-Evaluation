@@ -44,8 +44,8 @@ class ImageRenderManager:
         if window._current_image_key == image_key:
             return
         preprocessing = deepcopy(window._state.preprocessing)
-        mask_settings = deepcopy(window._state.spot_detection) if preprocessing.flatten_background_exclude_mask else None
-        spots = deepcopy(window._spots_for_preprocessing(image_key))
+        mask_settings = deepcopy(window._state.area_roi_settings) if preprocessing.flatten_background_exclude_mask else None
+        rois = deepcopy(window._rois_for_preprocessing(image_key))
         _external_mask, external_mask_processed = window._effective_external_mask_for_record(record.path, processed_space=True)
         cache_key = window._processed_image_cache_key(record.path, image_key)
         signature = cache_key
@@ -67,7 +67,7 @@ class ImageRenderManager:
             wavelength,
             record.path.name,
             (preprocessing, mask_settings, external_mask_processed),
-            spots,
+            rois,
         )
         if not window._image_refresh_running:
             self.start_pending_image_refresh()
@@ -87,7 +87,7 @@ class ImageRenderManager:
             wavelength,
             record_name,
             preprocessing,
-            spots,
+            rois,
         ) = window._pending_image_refresh_payload
         from lspr_imaging_app.gui.main_window import FunctionWorker, _process_image_task
 
@@ -102,7 +102,7 @@ class ImageRenderManager:
             _process_image_task,
             path_str,
             preprocessing,
-            spots,
+            rois,
             external_mask,
             window._state.mask if window._mask_section_applied() else None,
         )
@@ -189,14 +189,22 @@ class ImageRenderManager:
         window._update_mask_file_button_state()
         window._refresh_mask_previews()
         is_reference_view = window._is_current_reference_image()
-        window.detect_spots_button.setEnabled(is_reference_view)
+        window.detect_rois_button.setEnabled(is_reference_view)
         if not is_reference_view:
             window.mask_pencil_check.blockSignals(True)
             window.mask_pencil_check.setChecked(False)
             window.mask_pencil_check.blockSignals(False)
-        window._sync_spot_edit_capabilities()
+        window._sync_roi_edit_capabilities()
         window._sync_rectangle_roi_from_definition()
         window._sync_rectangle_roi_visibility()
+        if hasattr(window, "rotation_fill_dark_button"):
+            window.rotation_fill_dark_button.blockSignals(True)
+            window.rotation_fill_dark_button.setChecked(window._state.preprocessing.rotation_fill_dark)
+            window.rotation_fill_dark_button.blockSignals(False)
+            window.rotation_fill_dark_button.setIcon(
+                window._make_rotation_fill_icon(window.rotation_fill_dark_button.isChecked())
+            )
+            window._update_rotation_fill_button_tooltip()
         if hasattr(window, "flip_horizontal_action"):
             window.flip_horizontal_action.blockSignals(True)
             window.flip_horizontal_action.setChecked(window._state.preprocessing.flip_horizontal)

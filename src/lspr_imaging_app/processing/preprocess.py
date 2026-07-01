@@ -3,15 +3,15 @@ from __future__ import annotations
 import numpy as np
 from scipy import ndimage
 
-from lspr_imaging_app.domain.models import DetectedSpot, PreprocessingSettings, SpotDetectionSettings, MaskSettings
+from lspr_imaging_app.domain.models import AreaRoi, AreaRoiDetectionSettings, MaskSettings, PreprocessingSettings
 from lspr_imaging_app.processing.spot_detection import ignored_pixel_mask
 
 
 def apply_preprocessing(
     image: np.ndarray,
     settings: PreprocessingSettings,
-    spots: list[DetectedSpot] | None = None,
-    mask_settings: SpotDetectionSettings | None = None,
+    rois: list[AreaRoi] | None = None,
+    mask_settings: AreaRoiDetectionSettings | None = None,
     external_mask: np.ndarray | None = None,
     external_mask_processed: bool = False,
     mask_state: MaskSettings | None = None,
@@ -50,7 +50,7 @@ def apply_preprocessing(
             processed,
             sigma_px=float(settings.flatten_background_sigma_px),
             binning=max(int(getattr(settings, "flatten_background_binning", 2)), 1),
-            spots=spots if settings.flatten_background_exclude_spots else None,
+            rois=rois if settings.flatten_background_exclude_area_rois else None,
             mask_settings=mask_settings if settings.flatten_background_exclude_mask else None,
             external_mask=None,  # Already applied above
         )
@@ -62,7 +62,13 @@ def apply_spatial_preprocessing(
     image: np.ndarray,
     settings: PreprocessingSettings,
 ) -> np.ndarray:
-    return _apply_spatial_transform(image, settings, order=1, mode="nearest", cval=0.0)
+    # Pixels added by rotation (the corners outside the original frame) have no
+    # real measurement behind them. "nearest" stretches the nearest edge pixel
+    # into that area (no scientific meaning, but visually seamless); the
+    # rotation_fill_dark toggle instead fills it with 0 so it's clearly marked
+    # as "not data".
+    fill_mode = "constant" if bool(settings.rotation_fill_dark) else "nearest"
+    return _apply_spatial_transform(image, settings, order=1, mode=fill_mode, cval=0.0)
 
 
 def apply_spatial_mask(
@@ -145,8 +151,8 @@ def flatten_background(
     *,
     sigma_px: float,
     binning: int = 1,
-    spots: list[DetectedSpot] | None = None,
-    mask_settings: SpotDetectionSettings | None = None,
+    rois: list[AreaRoi] | None = None,
+    mask_settings: AreaRoiDetectionSettings | None = None,
     external_mask: np.ndarray | None = None,
 ) -> np.ndarray:
     image_f32 = image.astype(np.float32, copy=False)
@@ -154,13 +160,13 @@ def flatten_background(
         image_f32,
         sigma_px=sigma_px,
         binning=binning,
-        spots=spots,
+        rois=rois,
         mask_settings=mask_settings,
         external_mask=external_mask,
     )
     valid_mask = ~_combined_exclusion_mask(
         image_f32,
-        spots=spots,
+        rois=rois,
         mask_settings=mask_settings,
         external_mask=external_mask,
     )
@@ -175,15 +181,15 @@ def estimate_background_profile(
     *,
     sigma_px: float,
     binning: int = 1,
-    spots: list[DetectedSpot] | None = None,
-    mask_settings: SpotDetectionSettings | None = None,
+    rois: list[AreaRoi] | None = None,
+    mask_settings: AreaRoiDetectionSettings | None = None,
     external_mask: np.ndarray | None = None,
 ) -> np.ndarray:
     image_f32 = image.astype(np.float32, copy=False)
     sigma = max(float(sigma_px), 1.0)
     exclusion_mask = _combined_exclusion_mask(
         image_f32,
-        spots=spots,
+        rois=rois,
         mask_settings=mask_settings,
         external_mask=external_mask,
     )
@@ -246,25 +252,25 @@ def _resize_to_shape(array: np.ndarray, shape: tuple[int, int]) -> np.ndarray:
     return corrected
 
 
-def _spot_exclusion_mask(
+def _roi_exclusion_mask(
     image_shape: tuple[int, int],
-    spots: list[DetectedSpot] | None = None,
+    rois: list[AreaRoi] | None = None,
 ) -> np.ndarray:
     exclusion_mask = np.zeros(image_shape, dtype=bool)
-    if not spots:
+    if not rois:
         return exclusion_mask
 
-    for spot in spots:
-        exclusion_radius = max(float(spot.radius_px) * 1.35, float(spot.radius_px) + 2.0)
+    for roi in rois:
+        exclusion_radius = max(float(roi.sample_radius_px) * 1.35, float(roi.sample_radius_px) + 2.0)
         radius_ceil = int(np.ceil(exclusion_radius))
-        x0 = max(int(np.floor(spot.center_x)) - radius_ceil, 0)
-        x1 = min(int(np.floor(spot.center_x)) + radius_ceil + 1, image_shape[1])
-        y0 = max(int(np.floor(spot.center_y)) - radius_ceil, 0)
-        y1 = min(int(np.floor(spot.center_y)) + radius_ceil + 1, image_shape[0])
+        x0 = max(int(np.floor(roi.center_x)) - radius_ceil, 0)
+        x1 = min(int(np.floor(roi.center_x)) + radius_ceil + 1, image_shape[1])
+        y0 = max(int(np.floor(roi.center_y)) - radius_ceil, 0)
+        y1 = min(int(np.floor(roi.center_y)) + radius_ceil + 1, image_shape[0])
         if x0 >= x1 or y0 >= y1:
             continue
         yy, xx = np.ogrid[y0:y1, x0:x1]
-        distance_sq = (xx - float(spot.center_x)) ** 2 + (yy - float(spot.center_y)) ** 2
+        distance_sq = (xx - float(roi.center_x)) ** 2 + (yy - float(roi.center_y)) ** 2
         exclusion_mask[y0:y1, x0:x1] |= distance_sq <= exclusion_radius**2
     return exclusion_mask
 
@@ -272,11 +278,11 @@ def _spot_exclusion_mask(
 def _combined_exclusion_mask(
     image: np.ndarray,
     *,
-    spots: list[DetectedSpot] | None = None,
-    mask_settings: SpotDetectionSettings | None = None,
+    rois: list[AreaRoi] | None = None,
+    mask_settings: AreaRoiDetectionSettings | None = None,
     external_mask: np.ndarray | None = None,
 ) -> np.ndarray:
-    exclusion_mask = _spot_exclusion_mask(image.shape[:2], spots)
+    exclusion_mask = _roi_exclusion_mask(image.shape[:2], rois)
     if mask_settings is not None:
         exclusion_mask |= ignored_pixel_mask(
             image.astype(np.float32, copy=False),

@@ -5,12 +5,12 @@ from math import hypot
 import numpy as np
 from scipy import ndimage
 
-from lspr_imaging_app.domain.models import DetectedSpot, SpotDetectionSettings
+from lspr_imaging_app.domain.models import AreaRoi, AreaRoiDetectionSettings
 
 
 def ignored_pixel_mask(
     image: np.ndarray,
-    settings: SpotDetectionSettings,
+    settings: AreaRoiDetectionSettings,
     external_mask: np.ndarray | None = None,
 ) -> np.ndarray:
     image_shape = image.shape[:2]
@@ -34,33 +34,12 @@ def _normalized_external_mask(
     return mask
 
 
-def _relative_threshold_mask(image: np.ndarray, settings: SpotDetectionSettings) -> np.ndarray:
-    sigma = max(float(getattr(settings, "mask_profile_sigma_px", 48.0)), 1.0)
-    profile = ndimage.gaussian_filter(image.astype(np.float32, copy=False), sigma=sigma, mode="nearest")
-    threshold_fraction = max(float(getattr(settings, "mask_relative_threshold_fraction", 0.18)), 0.0)
-    safe_profile = np.maximum(profile, 1e-6)
-    relative_delta = (image.astype(np.float32, copy=False) - safe_profile) / safe_profile
-    return np.abs(relative_delta) >= threshold_fraction
-
-
-def _local_contrast_mask(image: np.ndarray, settings: SpotDetectionSettings) -> np.ndarray:
-    sigma = max(float(getattr(settings, "mask_local_contrast_sigma_px", 8.0)), 1.0)
-    image_f32 = image.astype(np.float32, copy=False)
-    local_mean = ndimage.gaussian_filter(image_f32, sigma=sigma, mode="nearest")
-    local_sq_mean = ndimage.gaussian_filter(image_f32 * image_f32, sigma=sigma, mode="nearest")
-    local_var = np.maximum(local_sq_mean - local_mean * local_mean, 0.0)
-    local_std = np.sqrt(local_var)
-    z_threshold = max(float(getattr(settings, "mask_local_contrast_z_threshold", 3.0)), 0.1)
-    z_score = np.abs(image_f32 - local_mean) / np.maximum(local_std, 1e-6)
-    return z_score >= z_threshold
-
-
 def detect_spots(
     image: np.ndarray,
-    settings: SpotDetectionSettings,
+    settings: AreaRoiDetectionSettings,
     external_mask: np.ndarray | None = None,
     progress_callback=None,
-) -> list[DetectedSpot]:
+) -> list[AreaRoi]:
     if image.size == 0:
         return []
 
@@ -68,16 +47,16 @@ def detect_spots(
         if progress_callback is not None:
             progress_callback(int(max(0, min(percent, 100))), text)
 
-    report_progress(5, "Spot recognition: preparing mask...")
+    report_progress(5, "ROI detection: preparing mask...")
     image_f32 = image.astype(np.float32, copy=False)
     valid_mask = ~ignored_pixel_mask(image_f32, settings, external_mask=external_mask)
     if not np.any(valid_mask):
-        report_progress(100, "Spot recognition: no valid pixels.")
+        report_progress(100, "ROI detection: no valid pixels.")
         return []
 
-    radius = float(settings.spot_radius_px)
+    radius = float(settings.sample_radius_px)
     sigma = max(radius / 2.5, 1.0)
-    report_progress(12, "Spot recognition: smoothing image...")
+    report_progress(12, "ROI detection: smoothing image...")
     filtered, filter_support = _masked_gaussian_filter(image_f32, valid_mask, sigma=sigma)
     search_image = -filtered if settings.mode == "dark" else filtered
 
@@ -94,15 +73,15 @@ def detect_spots(
     candidate_mask = (filtered >= intensity_min) & (filtered <= intensity_max)
     candidate_mask &= valid_mask & (filter_support > 0.05)
 
-    neighborhood = max(int(settings.array_spacing_px if int(settings.array_spacing_px) > 0 else settings.spot_radius_px * 2), 3)
+    neighborhood = max(int(settings.array_spacing_px if int(settings.array_spacing_px) > 0 else settings.sample_radius_px * 2), 3)
     searchable = np.where(candidate_mask, search_image, -np.inf)
     local_max = searchable == ndimage.maximum_filter(searchable, size=neighborhood, mode="nearest")
     candidates = np.argwhere(local_max & candidate_mask)
     if candidates.size == 0:
-        report_progress(100, "Spot recognition: no candidates found.")
+        report_progress(100, "ROI detection: no candidates found.")
         return []
 
-    report_progress(24, f"Spot recognition: scoring {len(candidates)} candidates...")
+    report_progress(24, f"ROI detection: scoring {len(candidates)} candidates...")
     scored: list[tuple[float, float, float]] = []
     total_candidates = max(len(candidates), 1)
     progress_step = max(total_candidates // 20, 1)
@@ -123,24 +102,24 @@ def detect_spots(
         )
         if index % progress_step == 0 or index == total_candidates:
             scaled = 24 + int(round((index / total_candidates) * 28))
-            report_progress(scaled, f"Spot recognition: scored {index}/{total_candidates} candidates...")
+            report_progress(scaled, f"ROI detection: scored {index}/{total_candidates} candidates...")
     scored.sort(reverse=True)
 
-    accepted: list[DetectedSpot] = []
-    min_distance = float(settings.array_spacing_px if int(settings.array_spacing_px) > 0 else settings.spot_radius_px * 2)
+    accepted: list[AreaRoi] = []
+    min_distance = float(settings.array_spacing_px if int(settings.array_spacing_px) > 0 else settings.sample_radius_px * 2)
     image_height, image_width = image.shape[:2]
     total_scored = max(len(scored), 1)
     for index, (score, x, y) in enumerate(scored, start=1):
-        if any(hypot(x - spot.center_x, y - spot.center_y) < min_distance for spot in accepted):
+        if any(hypot(x - roi.center_x, y - roi.center_y) < min_distance for roi in accepted):
             continue
         accepted.append(
-            DetectedSpot(
-                spot_id=len(accepted) + 1,
+            AreaRoi(
+                area_roi_id=len(accepted) + 1,
                 center_x=x,
                 center_y=y,
-                radius_px=radius,
+                sample_radius_px=radius,
                 score=score,
-                spot_diameter_px=float(radius * 2.0),
+                sample_diameter_px=float(radius * 2.0),
             )
         )
         expected_count = max(int(settings.array_rows), 0) * max(int(settings.array_cols), 0)
@@ -149,23 +128,23 @@ def detect_spots(
             break
         if index % max(total_scored // 10, 1) == 0 or index == total_scored:
             scaled = 52 + int(round((index / total_scored) * 20))
-            report_progress(scaled, f"Spot recognition: accepted {len(accepted)} spots...")
+            report_progress(scaled, f"ROI detection: accepted {len(accepted)} ROIs...")
 
-    report_progress(74, "Spot recognition: refining spots...")
+    report_progress(74, "ROI detection: refining ROIs...")
     accepted = [
         _refine_detected_spot(
-            spot,
+            roi,
             filtered=filtered,
             valid_mask=valid_mask,
             radius=radius,
             mode=settings.mode,
         )
-        for spot in accepted
+        for roi in accepted
     ]
 
     expected_count = max(int(settings.array_rows), 0) * max(int(settings.array_cols), 0)
     if expected_count > 0 and int(settings.array_spacing_px) > 0 and accepted:
-        report_progress(84, "Spot recognition: fitting grid...")
+        report_progress(84, "ROI detection: fitting grid...")
         accepted = _fit_grid_array(
             accepted=accepted,
             filtered=filtered,
@@ -177,21 +156,21 @@ def detect_spots(
             mode=settings.mode,
         )
 
-    for index, spot in enumerate(accepted, start=1):
-        spot.spot_id = index
-    report_progress(100, f"Spot recognition: detected {len(accepted)} spots.")
+    for index, roi in enumerate(accepted, start=1):
+        roi.area_roi_id = index
+    report_progress(100, f"ROI detection: detected {len(accepted)} ROIs.")
     return accepted
 
 
-def refresh_spot_metrics(
+def refresh_roi_metrics(
     image: np.ndarray,
-    settings: SpotDetectionSettings,
-    spots: list[DetectedSpot],
+    settings: AreaRoiDetectionSettings,
+    rois: list[AreaRoi],
     external_mask: np.ndarray | None = None,
-) -> list[DetectedSpot]:
-    if image.size == 0 or not spots:
-        return spots
-    return spots
+) -> list[AreaRoi]:
+    if image.size == 0 or not rois:
+        return rois
+    return rois
 
 
 def _masked_gaussian_filter(image: np.ndarray, valid_mask: np.ndarray, sigma: float) -> tuple[np.ndarray, np.ndarray]:
@@ -205,7 +184,7 @@ def _masked_gaussian_filter(image: np.ndarray, valid_mask: np.ndarray, sigma: fl
 
 
 def _refine_detected_spot(
-    spot: DetectedSpot,
+    roi: AreaRoi,
     *,
     filtered: np.ndarray,
     valid_mask: np.ndarray,
@@ -214,36 +193,36 @@ def _refine_detected_spot(
     search_radius: float | None = None,
     fallback_x: float | None = None,
     fallback_y: float | None = None,
-) -> DetectedSpot:
+) -> AreaRoi:
     refined_x, refined_y, refined_score, found_signal = _refine_spot_center(
         filtered=filtered,
         valid_mask=valid_mask,
-        seed_x=spot.center_x,
-        seed_y=spot.center_y,
+        seed_x=roi.center_x,
+        seed_y=roi.center_y,
         radius=radius,
         mode=mode,
         search_radius=search_radius,
     )
     if not found_signal:
-        refined_x = spot.center_x if fallback_x is None else fallback_x
-        refined_y = spot.center_y if fallback_y is None else fallback_y
-    return DetectedSpot(
-        spot_id=spot.spot_id,
+        refined_x = roi.center_x if fallback_x is None else fallback_x
+        refined_y = roi.center_y if fallback_y is None else fallback_y
+    return AreaRoi(
+        area_roi_id=roi.area_roi_id,
         center_x=refined_x,
         center_y=refined_y,
-        radius_px=spot.radius_px,
-        score=max(spot.score, refined_score),
-        spot_color_hex=spot.spot_color_hex,
-        ring_color_hex=spot.ring_color_hex,
-        spot_diameter_px=spot.spot_diameter_px,
-        ring_inner_diameter_px=spot.ring_inner_diameter_px,
-        ring_outer_diameter_px=spot.ring_outer_diameter_px,
-        support_mean_radius_px=spot.support_mean_radius_px,
-        support_radius_std_px=spot.support_radius_std_px,
-        support_value_mean=spot.support_value_mean,
-        support_value_std=spot.support_value_std,
-        quality_score=spot.quality_score,
-        inferred=spot.inferred and not found_signal,
+        sample_radius_px=roi.sample_radius_px,
+        score=max(roi.score, refined_score),
+        sample_color_hex=roi.sample_color_hex,
+        reference_color_hex=roi.reference_color_hex,
+        sample_diameter_px=roi.sample_diameter_px,
+        reference_inner_diameter_px=roi.reference_inner_diameter_px,
+        reference_outer_diameter_px=roi.reference_outer_diameter_px,
+        support_mean_radius_px=roi.support_mean_radius_px,
+        support_radius_std_px=roi.support_radius_std_px,
+        support_value_mean=roi.support_value_mean,
+        support_value_std=roi.support_value_std,
+        quality_score=roi.quality_score,
+        inferred=roi.inferred and not found_signal,
     )
 
 
@@ -301,13 +280,13 @@ def _refine_spot_center(
 
 
 def _filter_by_array_support(
-    accepted: list[DetectedSpot],
+    accepted: list[AreaRoi],
     expected_count: int,
     expected_spacing: float,
-) -> list[DetectedSpot]:
+) -> list[AreaRoi]:
     tolerance = max(expected_spacing * 0.35, 4.0)
 
-    def support_score(spot: DetectedSpot) -> tuple[int, float]:
+    def support_score(spot: AreaRoi) -> tuple[int, float]:
         aligned_neighbors = 0
         for other in accepted:
             if other is spot:
@@ -325,7 +304,7 @@ def _filter_by_array_support(
 
 
 def _fit_grid_array(
-    accepted: list[DetectedSpot],
+    accepted: list[AreaRoi],
     filtered: np.ndarray,
     valid_mask: np.ndarray,
     rows: int,
@@ -333,13 +312,13 @@ def _fit_grid_array(
     spacing: float,
     radius: float,
     mode: str,
-) -> list[DetectedSpot]:
+) -> list[AreaRoi]:
     if rows <= 0 or cols <= 0 or spacing <= 0.0:
         return accepted
 
     supported = _filter_by_array_support(accepted, rows * cols, spacing)
-    xs = np.asarray([spot.center_x for spot in supported], dtype=np.float64)
-    ys = np.asarray([spot.center_y for spot in supported], dtype=np.float64)
+    xs = np.asarray([roi.center_x for roi in supported], dtype=np.float64)
+    ys = np.asarray([roi.center_y for roi in supported], dtype=np.float64)
     if xs.size == 0 or ys.size == 0:
         return accepted
 
@@ -348,22 +327,22 @@ def _fit_grid_array(
     tolerance = max(spacing * 0.45, radius * 1.5, 5.0)
     refine_radius = min(tolerance, max(radius * 2.0, 4.0))
 
-    fitted: list[DetectedSpot] = []
+    fitted: list[AreaRoi] = []
     used_indices: set[int] = set()
     for row in range(rows):
         for col in range(cols):
             grid_x = origin_x + col * spacing
             grid_y = origin_y + row * spacing
 
-            nearest: DetectedSpot | None = None
+            nearest: AreaRoi | None = None
             nearest_distance = float("inf")
             nearest_index = -1
-            for index, spot in enumerate(accepted):
+            for index, roi in enumerate(accepted):
                 if index in used_indices:
                     continue
-                distance = hypot(spot.center_x - grid_x, spot.center_y - grid_y)
+                distance = hypot(roi.center_x - grid_x, roi.center_y - grid_y)
                 if distance < nearest_distance:
-                    nearest = spot
+                    nearest = roi
                     nearest_distance = distance
                     nearest_index = index
 
@@ -393,13 +372,13 @@ def _fit_grid_array(
                 search_radius=refine_radius,
             )
             fitted.append(
-                DetectedSpot(
-                    spot_id=0,
+                AreaRoi(
+                    area_roi_id=0,
                     center_x=refined_x if found_signal else grid_x,
                     center_y=refined_y if found_signal else grid_y,
-                    radius_px=radius,
+                    sample_radius_px=radius,
                     score=refined_score,
-                    spot_diameter_px=float(radius * 2.0),
+                    sample_diameter_px=float(radius * 2.0),
                     inferred=not found_signal,
                 )
             )

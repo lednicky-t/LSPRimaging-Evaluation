@@ -77,7 +77,7 @@ class MaskController:
                 raw_image = dataset_load_plane(window._state.dataset, int(current_key[0]), float(current_key[1])).astype(np.float32, copy=False)
             else:
                 raw_image = load_image_array(str(window._current_record_path)).astype(np.float32, copy=False)
-            export_settings = deepcopy(window._state.spot_detection)
+            export_settings = deepcopy(window._state.area_roi_settings)
             export_settings.ignore_marked_pixels = True
             from lspr_imaging_app.processing.spot_detection import ignored_pixel_mask
             mask = ignored_pixel_mask(raw_image, export_settings, external_mask=None)

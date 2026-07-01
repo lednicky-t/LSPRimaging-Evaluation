@@ -8,14 +8,14 @@ from PyQt6.QtWidgets import QTableWidget, QTableWidgetItem
 
 
 @dataclass(slots=True)
-class SpotTableRowColors:
-    spot: QColor
-    ring: QColor
+class RoiTableRowColors:
+    sample: QColor
+    reference: QColor
 
 
 @dataclass(slots=True)
-class SpotTableRowData:
-    spot_id: int
+class RoiTableRowData:
+    area_roi_id: int
     group_name: str
     spot_color: QColor
     ring_color: QColor
@@ -26,7 +26,7 @@ class SpotTableRowData:
     y_text: str
 
 
-def spot_table_headers(table: QTableWidget) -> None:
+def roi_table_headers(table: QTableWidget) -> None:
     if table.columnCount() < 9:
         return
     table.setHorizontalHeaderItem(2, QTableWidgetItem("C_c"))
@@ -58,12 +58,12 @@ def format_xy_value(value: float, display_units: str, scale: float | None = None
     return f"{value:.1f}"
 
 
-def append_spot_table_row(table: QTableWidget, row: SpotTableRowData) -> None:
+def append_roi_table_row(table: QTableWidget, row: RoiTableRowData) -> None:
     index = table.rowCount()
     table.insertRow(index)
     table.setRowHeight(index, 18)
 
-    id_item = QTableWidgetItem(str(row.spot_id))
+    id_item = QTableWidgetItem(str(row.area_roi_id))
     id_item.setFlags(id_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
     table.setItem(index, 0, id_item)
 

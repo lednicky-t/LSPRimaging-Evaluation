@@ -179,45 +179,69 @@ def build_layout(window) -> None:
     circle_editor_layout.setVerticalSpacing(4)
     circle_editor_layout.setLabelAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
     circle_editor_layout.addRow("", window._make_section_separator())
-    circle_editor_layout.addRow("Spot diameter", window._build_spot_geometry_row())
+    circle_editor_layout.addRow("Sample diameter", window._build_roi_geometry_row())
     circle_editor_layout.addRow("Reference ring", window._build_ring_row())
-    circle_editor_layout.addRow("Areas", window.spot_geometry_area_label)
+    circle_editor_layout.addRow("Areas", window.roi_geometry_area_label)
     circle_editor_layout.addRow("", window._make_section_separator())
     detection_buttons = QHBoxLayout()
     detection_buttons.setContentsMargins(0, 0, 0, 0)
     detection_buttons.setSpacing(4)
-    detection_buttons.addWidget(window.detect_spots_button)
-    detection_buttons.addWidget(window.spot_corner_select_button)
-    detection_buttons.addWidget(window.reorder_spots_button)
-    detection_buttons.addWidget(window.clear_spots_button)
+    detection_buttons.addWidget(window.detect_rois_button)
+    detection_buttons.addWidget(window.roi_corner_select_button)
+    detection_buttons.addWidget(window.reorder_rois_button)
+    detection_buttons.addWidget(window.clear_rois_button)
     detection_buttons.addStretch(1)
     circle_editor_layout.addRow("", detection_buttons)
-    circle_editor_layout.addRow("Result", window.spot_summary)
+    circle_editor_layout.addRow("Result", window.roi_summary)
 
     rectangle_editor_group = QWidget(window)
-    rectangle_editor_layout = QFormLayout(rectangle_editor_group)
-    rectangle_editor_layout.setContentsMargins(8, 8, 8, 8)
-    rectangle_editor_layout.setHorizontalSpacing(6)
-    rectangle_editor_layout.setVerticalSpacing(4)
-    rectangle_editor_layout.setLabelAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
-    rectangle_editor_layout.addRow("", window._make_section_separator())
-    rectangle_editor_layout.addRow("Rectangle", window._build_rectangle_row())
-    rectangle_editor_layout.addRow("Status", window.rectangle_summary_label)
-    rectangle_editor_layout.addRow("", window._make_section_separator())
-    rectangle_editor_layout.addRow("", QLabel("Rectangle ROI editing is the first custom-shape path."))
+    rectangle_editor_layout = QVBoxLayout(rectangle_editor_group)
+    rectangle_editor_layout.setContentsMargins(12, 12, 12, 12)
+    _rect_placeholder = QLabel("Rectangle ROI editing — coming soon.")
+    _rect_placeholder.setWordWrap(True)
+    _rect_placeholder.setStyleSheet("color: #64748b; font-style: italic;")
+    rectangle_editor_layout.addWidget(_rect_placeholder)
+    rectangle_editor_layout.addStretch(1)
 
     freehand_editor_group = QWidget(window)
-    freehand_editor_layout = QFormLayout(freehand_editor_group)
-    freehand_editor_layout.setContentsMargins(8, 8, 8, 8)
-    freehand_editor_layout.setHorizontalSpacing(6)
-    freehand_editor_layout.setVerticalSpacing(4)
-    freehand_editor_layout.setLabelAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
-    freehand_editor_layout.addRow("", QLabel("Polygon/freehand ROI tools will be added here later."))
+    freehand_editor_layout = QVBoxLayout(freehand_editor_group)
+    freehand_editor_layout.setContentsMargins(12, 12, 12, 12)
+    _freehand_placeholder = QLabel("Polygon / freehand ROI editing — coming soon.")
+    _freehand_placeholder.setWordWrap(True)
+    _freehand_placeholder.setStyleSheet("color: #64748b; font-style: italic;")
+    freehand_editor_layout.addWidget(_freehand_placeholder)
+    freehand_editor_layout.addStretch(1)
 
     window.roi_editor_tabs = QTabWidget(window)
     window.roi_editor_tabs.setTabPosition(QTabWidget.TabPosition.North)
-    window.roi_editor_tabs.setDocumentMode(True)
     window.roi_editor_tabs.setMovable(False)
+    window.roi_editor_tabs.setStyleSheet(
+        "QTabWidget::pane {"
+        "  border: 1px solid #334155;"
+        "  border-top: none;"
+        "  background: transparent;"
+        "}"
+        "QTabBar::tab {"
+        "  padding: 5px 14px;"
+        "  min-width: 64px;"
+        "  border: 1px solid #334155;"
+        "  border-bottom: none;"
+        "  border-radius: 4px 4px 0 0;"
+        "  background: #1e293b;"
+        "  color: #94a3b8;"
+        "  margin-right: 2px;"
+        "}"
+        "QTabBar::tab:selected {"
+        "  background: #0f172a;"
+        "  color: #f1f5f9;"
+        "  border-color: #475569;"
+        "  font-weight: 600;"
+        "}"
+        "QTabBar::tab:hover:!selected {"
+        "  background: #263245;"
+        "  color: #cbd5e1;"
+        "}"
+    )
     window.roi_editor_tabs.addTab(circle_editor_group, "Circles")
     window.roi_editor_tabs.addTab(rectangle_editor_group, "Rectangles")
     window.roi_editor_tabs.addTab(freehand_editor_group, "Freehand")
@@ -261,6 +285,7 @@ def build_layout(window) -> None:
     background_row.addSpacing(10)
     background_row.addWidget(window.background_ignore_spot_button)
     background_row.addWidget(window.background_ignore_mask_button)
+    background_row.addWidget(window.background_local_ring_check)
     background_row.addWidget(window.background_profile_button)
     background_row.addStretch(1)
     background_layout.addRow("Background", background_row)
@@ -272,7 +297,7 @@ def build_layout(window) -> None:
     analysis_layout.setVerticalSpacing(4)
     analysis_layout.setLabelAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
     analysis_scope_row = QHBoxLayout()
-    analysis_scope_row.addWidget(window.analysis_spot_table_button)
+    analysis_scope_row.addWidget(window.analysis_roi_table_button)
     analysis_scope_row.addWidget(window.analysis_refresh_button)
     analysis_scope_row.addWidget(window.analysis_calculate_all_button)
     analysis_scope_row.addWidget(window.analysis_stop_button)
@@ -318,7 +343,7 @@ def build_layout(window) -> None:
         "Mask",
         mask_group,
         expanded=True,
-        applied=bool(window._state.spot_detection.ignore_marked_pixels),
+        applied=bool(window._state.area_roi_settings.ignore_marked_pixels),
         apply_tooltip="Apply or skip mask-based exclusions during image display and processing.",
         help_text=panel_help_text("mask"),
         parent=window,
@@ -332,12 +357,12 @@ def build_layout(window) -> None:
         help_text=panel_help_text("image_tools"),
         parent=window,
     )
-    window.spot_editor_section = CollapsibleSection(
+    window.roi_editor_section = CollapsibleSection(
         "ROI editor",
         roi_editor_content,
         expanded=True,
         applied=bool(window._read_bool_setting("controls/live_geometry", False)),
-        apply_tooltip="Apply live spot-geometry recalculation while editing.",
+        apply_tooltip="Apply live ROI geometry recalculation while editing.",
         help_text=panel_help_text("roi_editor"),
         parent=window,
     )
@@ -365,7 +390,7 @@ def build_layout(window) -> None:
             window.mask_section,
             window.chromatic_section,
             window.image_tools_section,
-            window.spot_editor_section,
+            window.roi_editor_section,
             window.background_section,
             window.analysis_section,
         ]
@@ -387,7 +412,7 @@ def build_layout(window) -> None:
             window.mask_section,
             window.chromatic_section,
             window.image_tools_section,
-            window.spot_editor_section,
+            window.roi_editor_section,
             window.background_section,
             window.analysis_section,
         ),
@@ -436,63 +461,63 @@ def build_layout(window) -> None:
     image_tools_layout.addWidget(window.image_view, 1)
     image_tools_layout.addWidget(window.bottom_view_toolbar)
 
-    window.spot_list_table = QTableWidget(window)
-    window.spot_list_table.setColumnCount(9)
-    window.spot_list_table.setHorizontalHeaderLabels(["ID", "Group", "C_c", "C_r", "D_s", "d_r", "D_r", "x", "y"])
-    window.spot_list_table.setAlternatingRowColors(False)
-    window.spot_list_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
-    window.spot_list_table.setSelectionMode(QTableWidget.SelectionMode.ExtendedSelection)
-    window.spot_list_table.setEditTriggers(QTableWidget.EditTrigger.DoubleClicked | QTableWidget.EditTrigger.EditKeyPressed)
-    window.spot_list_table.setWordWrap(False)
-    window.spot_list_table.verticalHeader().setVisible(False)
-    window.spot_list_table.horizontalHeader().setDefaultAlignment(Qt.AlignmentFlag.AlignLeft)
-    window.spot_list_table.horizontalHeader().setStretchLastSection(True)
-    window.spot_list_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
-    window.spot_list_table.horizontalHeader().setSortIndicatorShown(True)
-    window.spot_list_table.setSortingEnabled(True)
-    window.spot_list_table.setShowGrid(False)
-    table_font = window.spot_list_table.font()
+    window.roi_table = QTableWidget(window)
+    window.roi_table.setColumnCount(9)
+    window.roi_table.setHorizontalHeaderLabels(["ID", "Group", "C_c", "C_r", "D_s", "d_r", "D_r", "x", "y"])
+    window.roi_table.setAlternatingRowColors(False)
+    window.roi_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+    window.roi_table.setSelectionMode(QTableWidget.SelectionMode.ExtendedSelection)
+    window.roi_table.setEditTriggers(QTableWidget.EditTrigger.DoubleClicked | QTableWidget.EditTrigger.EditKeyPressed)
+    window.roi_table.setWordWrap(False)
+    window.roi_table.verticalHeader().setVisible(False)
+    window.roi_table.horizontalHeader().setDefaultAlignment(Qt.AlignmentFlag.AlignLeft)
+    window.roi_table.horizontalHeader().setStretchLastSection(True)
+    window.roi_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
+    window.roi_table.horizontalHeader().setSortIndicatorShown(True)
+    window.roi_table.setSortingEnabled(True)
+    window.roi_table.setShowGrid(False)
+    table_font = window.roi_table.font()
     table_font.setPointSize(8)
-    window.spot_list_table.setFont(table_font)
-    window.spot_list_table.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Expanding)
-    window.spot_list_table.setMaximumWidth(16777215)
-    window.spot_list_table.setMinimumWidth(220)
-    window.spot_list_table.installEventFilter(window)
-    window.spot_list_table.viewport().installEventFilter(window)
+    window.roi_table.setFont(table_font)
+    window.roi_table.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Expanding)
+    window.roi_table.setMaximumWidth(16777215)
+    window.roi_table.setMinimumWidth(220)
+    window.roi_table.installEventFilter(window)
+    window.roi_table.viewport().installEventFilter(window)
     window._set_help(
-        window.spot_list_table,
-        "Spot table keyboard shortcuts:\n"
-        "PageUp / PageDown: Move selected spots in the table\n"
-        "Delete / Backspace: Remove selected spots\n"
-        "Ctrl+C: Copy selected spot properties\n"
-        "Ctrl+V: Paste copied spot properties\n"
-        "Double-click: Edit the clicked spot field\n"
-        "Use the table selection to choose one or more spots before copying or moving.",
+        window.roi_table,
+        "ROI table keyboard shortcuts:\n"
+        "PageUp / PageDown: Move selected ROIs in the table\n"
+        "Delete / Backspace: Remove selected ROIs\n"
+        "Ctrl+C: Copy selected ROI properties\n"
+        "Ctrl+V: Paste copied ROI properties\n"
+        "Double-click: Edit the clicked ROI field\n"
+        "Use the table selection to choose one or more ROIs before copying or moving.",
     )
-    spot_list_panel = QWidget(window)
-    window.spot_list_io_layout = QVBoxLayout(spot_list_panel)
-    window.spot_list_io_layout.setContentsMargins(0, 0, 0, 0)
-    window.spot_list_io_layout.setSpacing(4)
-    window.spot_list_io_layout.addWidget(window.spot_list_table)
+    roi_list_panel = QWidget(window)
+    window.roi_list_io_layout = QVBoxLayout(roi_list_panel)
+    window.roi_list_io_layout.setContentsMargins(0, 0, 0, 0)
+    window.roi_list_io_layout.setSpacing(4)
+    window.roi_list_io_layout.addWidget(window.roi_table)
     spot_list_io_row = QHBoxLayout()
     spot_list_io_row.setContentsMargins(0, 0, 0, 0)
     spot_list_io_row.setSpacing(4)
-    window.spot_list_cached_button = window._make_icon_tool_button(
+    window.roi_list_cached_button = window._make_icon_tool_button(
         "database",
         "#22c55e",
-        "Show only cached spots in the image overlay.",
+        "Show only cached ROIs in the image overlay.",
         checkable=True,
-        icon=window._make_cached_spots_icon(window._cached_spots_only_visible),
+        icon=window._make_cached_rois_icon(window._cached_rois_only_visible),
     )
-    window.spot_list_cached_button.setChecked(window._cached_spots_only_visible)
-    window.spot_list_export_button = window._make_icon_tool_button("file-import", "#22c55e", "Save the spot table to a CSV file.")
-    window.spot_list_import_button = window._make_icon_tool_button("file-export", "#38bdf8", "Load spot table data from a CSV file.")
-    spot_list_io_row.addWidget(window.spot_list_cached_button)
+    window.roi_list_cached_button.setChecked(window._cached_rois_only_visible)
+    window.roi_export_button = window._make_icon_tool_button("file-import", "#22c55e", "Save the ROI table to a CSV file.")
+    window.roi_import_button = window._make_icon_tool_button("file-export", "#38bdf8", "Load ROI table data from a CSV file.")
+    spot_list_io_row.addWidget(window.roi_list_cached_button)
     spot_list_io_row.addStretch(1)
-    spot_list_io_row.addWidget(window.spot_list_export_button)
-    spot_list_io_row.addWidget(window.spot_list_import_button)
-    window.spot_list_io_layout.addLayout(spot_list_io_row)
-    window._apply_spot_list_table_style()
+    spot_list_io_row.addWidget(window.roi_export_button)
+    spot_list_io_row.addWidget(window.roi_import_button)
+    window.roi_list_io_layout.addLayout(spot_list_io_row)
+    window._apply_roi_table_style()
 
     workflow_content = QWidget(window)
     workflow_content_layout = QVBoxLayout(workflow_content)
@@ -545,8 +570,8 @@ def build_layout(window) -> None:
     workflow_content_layout.addWidget(window.workflow_log_section, 0)
     window.workflow_panel = window._create_panel_container("Workflow", workflow_content, panel_name="workflowPanel")
     window.workflow_panel.setMinimumWidth(340)
-    window.spot_list_panel = window._create_panel_container("Spot table", spot_list_panel, panel_name="spotListPanel")
-    window.spot_list_panel.setMinimumWidth(240)
+    window.roi_list_panel = window._create_panel_container("ROI table", roi_list_panel, panel_name="spotListPanel")
+    window.roi_list_panel.setMinimumWidth(240)
     window.image_panel = window._create_panel_container("Image area", image_tools_panel, panel_name="imageAreaPanel")
     window.image_panel.setMinimumWidth(360)
     window.histogram_panel = window._create_panel_container("Histogram", histogram_content, panel_name="histogramPanel")
@@ -555,6 +580,6 @@ def build_layout(window) -> None:
     window.spectra_panel.setMinimumWidth(320)
     window.sensorgram_panel = window._create_panel_container("Sensorgram", sensorgram_content, panel_name="sensorgramPanel")
     window.sensorgram_panel.setMinimumWidth(320)
-    for panel in (window.workflow_panel, window.spot_list_panel, window.image_panel, window.histogram_panel, window.spectra_panel, window.sensorgram_panel):
+    for panel in (window.workflow_panel, window.roi_list_panel, window.image_panel, window.histogram_panel, window.spectra_panel, window.sensorgram_panel):
         panel.visibilityChanged.connect(lambda _visible, target=panel: window._on_panel_visibility_changed(target))
     window._restore_default_panel_layout()

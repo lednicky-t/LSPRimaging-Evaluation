@@ -98,14 +98,14 @@ from lspr_ui import (
     standard_push_button_stylesheet,
     transparent_icon_button_stylesheet,
 )
-from lspr_imaging_app.gui.spot_table_helpers import (
-    SpotTableRowData,
-    append_spot_table_row,
+from lspr_imaging_app.gui.roi_table_helpers import (
+    RoiTableRowData,
+    append_roi_table_row,
     format_xy_value,
     make_color_swatch_icon,
-    spot_table_headers,
+    roi_table_headers,
 )
-from lspr_imaging_app.gui.spot_table_controller import SpotTableController
+from lspr_imaging_app.gui.roi_table_controller import RoiTableController
 from lspr_imaging_app.gui.mask_controller import MaskController
 from lspr_imaging_app.gui.chromatic_controller import ChromaticController
 from lspr_imaging_app.gui.shortcut_manager import ShortcutManager
@@ -133,10 +133,12 @@ from lspr_imaging_app.gui.ui_helpers import (
     settings_bool,
     settings_int,
 )
-from lspr_imaging_app.gui.spot_overlay_helpers import resolved_ring_color, resolved_spot_color
+from lspr_imaging_app.gui.roi_overlay_helpers import resolved_reference_color, resolved_roi_color
 from lspr_imaging_app.gui.analysis_controller import AnalysisController
+from lspr_imaging_app.gui.analysis_tasks import _ome_zarr_export_task
 from lspr_imaging_app.gui.dataset_controller import DatasetController
 from lspr_imaging_app.gui.image_controller import ImageController
+from lspr_imaging_app.gui.worker import FunctionWorker
 from lspr_imaging_app.domain.roi_editor_tools import (
     create_rois_from_template,
     create_rois_from_template_grid,
@@ -150,11 +152,11 @@ from lspr_imaging_app.domain.models import (
     ChromaticLandmarkObservation,
     ChromaticTransformModel,
     CropDefinition,
-    DetectedSpot,
+    AreaRoi,
     FitResult,
     MaskSettings,
-    SpotDetectionSettings,
-    SpotGroup,
+    AreaRoiDetectionSettings,
+    AreaRoiGroup,
 )
 from lspr_imaging_app.io.dataset import (
     dataset_record_map,
@@ -188,7 +190,7 @@ from lspr_imaging_app.processing.preprocess import (
     spatial_output_shape,
     spatial_coordinate_maps,
 )
-from lspr_imaging_app.processing.spot_detection import detect_spots, ignored_pixel_mask, refresh_spot_metrics
+from lspr_imaging_app.processing.spot_detection import detect_spots, ignored_pixel_mask, refresh_roi_metrics
 from lspr_imaging_app.storage.workspace import (
     load_preprocessing,
     load_processing_profile,
@@ -639,6 +641,9 @@ class MainWindowIcons:
         if self._ome_zarr_export_running:
             self._set_status_text("Stack to Zarr export is already running.")
             return
+        # Snapshot preprocessing now so later edits in the GUI (while export runs
+        # in the background) can't change the settings mid-export.
+        preprocessing_snapshot = deepcopy(self._state.preprocessing)
         self._ome_zarr_export_request_id += 1
         request_id = self._ome_zarr_export_request_id
         self._ome_zarr_export_cancel_event = threading.Event()
@@ -653,11 +658,13 @@ class MainWindowIcons:
             destination,
             int(chunk_size_px),
             bool(compression_enabled),
+            preprocessing_snapshot,
             cancel_event=self._ome_zarr_export_cancel_event,
             supports_progress=True,
         )
+        tools_text = "applied" if bool(getattr(preprocessing_snapshot, "image_tools_enabled", False)) else "ignored"
         self._append_workflow_log(
-            f"OME-Zarr export start | chunks {chunk_size_px}px | compression {'on' if compression_enabled else 'off'}",
+            f"OME-Zarr export start | chunks {chunk_size_px}px | compression {'on' if compression_enabled else 'off'} | image tools {tools_text}",
             level="info",
         )
         worker.signals.progress.connect(self._update_busy_progress)
@@ -933,6 +940,33 @@ class MainWindowIcons:
         return QIcon(pixmap)
 
     @staticmethod
+    def _make_rotation_fill_icon(dark: bool = False) -> QIcon:
+        # Filled square = new corner pixels are forced to 0 (dark/no-data).
+        # Outline square = new corner pixels are stretched from the nearest
+        # edge pixel (the previous, always-on behavior).
+        color = "#fbbf24" if dark else "#94a3b8"
+        icon = MainWindowIcons._tabler_icon(
+            "square-rounded",
+            color,
+            24,
+            stroke_width=2.1,
+            fill=color if dark else "none",
+        )
+        if not icon.isNull():
+            return icon
+        pixmap = QPixmap(24, 24)
+        pixmap.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(pixmap)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        pen = QPen(QColor(color), 2.1)
+        pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+        painter.setPen(pen)
+        painter.setBrush(QColor(color) if dark else Qt.BrushStyle.NoBrush)
+        painter.drawRoundedRect(QRectF(4.0, 4.0, 16.0, 16.0), 3.0, 3.0)
+        painter.end()
+        return QIcon(pixmap)
+
+    @staticmethod
     def _make_crop_icon(active: bool = False) -> QIcon:
         color = "#38bdf8" if active else "#f8fafc"
         icon = MainWindowIcons._tabler_icon("crop", color, 24, stroke_width=2.1)
@@ -1075,7 +1109,7 @@ class MainWindowIcons:
         return QIcon(pixmap)
 
     @staticmethod
-    def _make_spot_list_icon(active: bool = False) -> QIcon:
+    def _make_roi_list_icon(active: bool = False) -> QIcon:
         color = "#f59e0b" if active else "#f8fafc"
         icon = MainWindowIcons._lucide_icon("table", color, 24, stroke_width=2.3)
         if not icon.isNull():

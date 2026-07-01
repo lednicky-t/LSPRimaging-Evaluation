@@ -9,15 +9,15 @@ import numpy as np
 
 from lspr_imaging_app.format_versions import PROCESSING_PROFILE_VERSION, ROI_EXPORT_VERSION, WORKSPACE_SCHEMA_VERSION
 from lspr_imaging_app.domain.models import (
+    AreaRoi,
+    AreaRoiDetectionSettings,
+    AreaRoiGroup,
     ChromaticLandmarkObservation,
     ChromaticTransformModel,
     CropDefinition,
-    DetectedSpot,
     MaskSettings,
     PreprocessingSettings,
     RoiDefinition,
-    SpotGroup,
-    SpotDetectionSettings,
 )
 
 
@@ -138,6 +138,7 @@ def save_preprocessing(path: Path, settings: PreprocessingSettings) -> None:
     payload = {
         "image_tools_enabled": bool(getattr(settings, "image_tools_enabled", True)),
         "rotation_angle_deg": float(settings.rotation_angle_deg),
+        "rotation_fill_dark": bool(getattr(settings, "rotation_fill_dark", False)),
         "flip_horizontal": bool(settings.flip_horizontal),
         "flip_vertical": bool(settings.flip_vertical),
         "crop": asdict(settings.crop),
@@ -153,8 +154,9 @@ def save_preprocessing(path: Path, settings: PreprocessingSettings) -> None:
         "flatten_background_enabled": bool(settings.flatten_background_enabled),
         "flatten_background_sigma_px": float(settings.flatten_background_sigma_px),
         "flatten_background_binning": int(settings.flatten_background_binning),
-        "flatten_background_exclude_spots": bool(settings.flatten_background_exclude_spots),
+        "flatten_background_exclude_area_rois": bool(settings.flatten_background_exclude_area_rois),
         "flatten_background_exclude_mask": bool(settings.flatten_background_exclude_mask),
+        "local_ring_normalization_enabled": bool(getattr(settings, "local_ring_normalization_enabled", False)),
         "chromatic_correction_enabled": bool(settings.chromatic_correction_enabled),
         "chromatic_registration_mode": str(settings.chromatic_registration_mode),
         "chromatic_sample_image_count": int(settings.chromatic_sample_image_count),
@@ -177,6 +179,7 @@ def load_preprocessing(path: Path) -> PreprocessingSettings:
     return PreprocessingSettings(
         image_tools_enabled=bool(payload.get("image_tools_enabled", True)),
         rotation_angle_deg=float(payload.get("rotation_angle_deg", 0.0)),
+        rotation_fill_dark=bool(payload.get("rotation_fill_dark", False)),
         flip_horizontal=bool(payload.get("flip_horizontal", False)),
         flip_vertical=bool(payload.get("flip_vertical", False)),
         crop=CropDefinition(
@@ -198,8 +201,12 @@ def load_preprocessing(path: Path) -> PreprocessingSettings:
         flatten_background_enabled=bool(payload.get("flatten_background_enabled", False)),
         flatten_background_sigma_px=float(payload.get("flatten_background_sigma_px", 48.0)),
         flatten_background_binning=max(int(payload.get("flatten_background_binning", 2)), 1),
-        flatten_background_exclude_spots=bool(payload.get("flatten_background_exclude_spots", True)),
+        # fall back to old key name from profiles saved before the rename
+        flatten_background_exclude_area_rois=bool(
+            payload.get("flatten_background_exclude_area_rois", payload.get("flatten_background_exclude_spots", True))
+        ),
         flatten_background_exclude_mask=bool(payload.get("flatten_background_exclude_mask", False)),
+        local_ring_normalization_enabled=bool(payload.get("local_ring_normalization_enabled", False)),
         chromatic_correction_enabled=bool(payload.get("chromatic_correction_enabled", False)),
         chromatic_registration_mode=str(payload.get("chromatic_registration_mode", "landmark_radial")),
         chromatic_sample_image_count=int(payload.get("chromatic_sample_image_count", 5)),
@@ -218,9 +225,9 @@ def load_preprocessing(path: Path) -> PreprocessingSettings:
 def save_processing_profile(
     path: Path,
     preprocessing: PreprocessingSettings,
-    spot_detection: SpotDetectionSettings,
-    detected_spots: list[DetectedSpot],
-    spot_groups: list[SpotGroup] | None = None,
+    area_roi_settings: AreaRoiDetectionSettings,
+    area_rois: list[AreaRoi],
+    area_roi_groups: list[AreaRoiGroup] | None = None,
     rois: list[RoiDefinition] | None = None,
     chromatic_models: list[ChromaticTransformModel] | None = None,
     chromatic_landmarks: list[ChromaticLandmarkObservation] | None = None,
@@ -235,6 +242,7 @@ def save_processing_profile(
         "preprocessing": {
             "image_tools_enabled": bool(getattr(preprocessing, "image_tools_enabled", True)),
             "rotation_angle_deg": float(preprocessing.rotation_angle_deg),
+            "rotation_fill_dark": bool(getattr(preprocessing, "rotation_fill_dark", False)),
             "flip_horizontal": bool(preprocessing.flip_horizontal),
             "flip_vertical": bool(preprocessing.flip_vertical),
             "crop": asdict(preprocessing.crop),
@@ -250,8 +258,9 @@ def save_processing_profile(
             "flatten_background_enabled": bool(preprocessing.flatten_background_enabled),
             "flatten_background_sigma_px": float(preprocessing.flatten_background_sigma_px),
             "flatten_background_binning": int(preprocessing.flatten_background_binning),
-            "flatten_background_exclude_spots": bool(preprocessing.flatten_background_exclude_spots),
+            "flatten_background_exclude_area_rois": bool(preprocessing.flatten_background_exclude_area_rois),
             "flatten_background_exclude_mask": bool(preprocessing.flatten_background_exclude_mask),
+            "local_ring_normalization_enabled": bool(getattr(preprocessing, "local_ring_normalization_enabled", False)),
             "chromatic_correction_enabled": bool(preprocessing.chromatic_correction_enabled),
             "chromatic_registration_mode": str(preprocessing.chromatic_registration_mode),
             "chromatic_sample_image_count": int(preprocessing.chromatic_sample_image_count),
@@ -265,9 +274,9 @@ def save_processing_profile(
             "histogram_highlight_min_value": preprocessing.histogram_highlight_min_value,
             "histogram_highlight_max_value": preprocessing.histogram_highlight_max_value,
         },
-        "spot_detection": asdict(spot_detection),
-        "detected_spots": [asdict(spot) for spot in detected_spots],
-        "spot_groups": [asdict(group) for group in (spot_groups or [])],
+        "area_roi_settings": asdict(area_roi_settings),
+        "area_rois": [asdict(area_roi) for area_roi in area_rois],
+        "area_roi_groups": [asdict(group) for group in (area_roi_groups or [])],
         "rois": [asdict(roi) for roi in (rois or [])],
         "chromatic_models": [asdict(model) for model in (chromatic_models or [])],
         "chromatic_landmarks": [asdict(mark) for mark in (chromatic_landmarks or [])],
@@ -291,9 +300,9 @@ def load_processing_profile(
     path: Path,
 ) -> tuple[
     PreprocessingSettings,
-    SpotDetectionSettings,
-    list[DetectedSpot],
-    list[SpotGroup],
+    AreaRoiDetectionSettings,
+    list[AreaRoi],
+    list[AreaRoiGroup],
     list[RoiDefinition],
     list[ChromaticTransformModel],
     list[ChromaticLandmarkObservation],
@@ -313,6 +322,7 @@ def load_processing_profile(
     preprocessing = PreprocessingSettings(
         image_tools_enabled=bool(preprocessing_payload.get("image_tools_enabled", True)),
         rotation_angle_deg=float(preprocessing_payload.get("rotation_angle_deg", 0.0)),
+        rotation_fill_dark=bool(preprocessing_payload.get("rotation_fill_dark", False)),
         flip_horizontal=bool(preprocessing_payload.get("flip_horizontal", False)),
         flip_vertical=bool(preprocessing_payload.get("flip_vertical", False)),
         crop=CropDefinition(
@@ -334,8 +344,14 @@ def load_processing_profile(
         flatten_background_enabled=bool(preprocessing_payload.get("flatten_background_enabled", False)),
         flatten_background_sigma_px=float(preprocessing_payload.get("flatten_background_sigma_px", 48.0)),
         flatten_background_binning=max(int(preprocessing_payload.get("flatten_background_binning", 2)), 1),
-        flatten_background_exclude_spots=bool(preprocessing_payload.get("flatten_background_exclude_spots", True)),
+        flatten_background_exclude_area_rois=bool(
+            preprocessing_payload.get(
+                "flatten_background_exclude_area_rois",
+                preprocessing_payload.get("flatten_background_exclude_spots", True),
+            )
+        ),
         flatten_background_exclude_mask=bool(preprocessing_payload.get("flatten_background_exclude_mask", False)),
+        local_ring_normalization_enabled=bool(preprocessing_payload.get("local_ring_normalization_enabled", False)),
         chromatic_correction_enabled=bool(preprocessing_payload.get("chromatic_correction_enabled", False)),
         chromatic_registration_mode=str(preprocessing_payload.get("chromatic_registration_mode", "landmark_radial")),
         chromatic_sample_image_count=int(preprocessing_payload.get("chromatic_sample_image_count", 5)),
@@ -362,10 +378,13 @@ def load_processing_profile(
         ),
     )
 
-    raw_detection = payload.get("spot_detection", {})
+    # Support both new key ("area_roi_settings") and old key ("spot_detection") from pre-rename profiles.
+    raw_detection = payload.get("area_roi_settings", payload.get("spot_detection", {}))
     if not isinstance(raw_detection, dict):
         raw_detection = {}
-    detection = SpotDetectionSettings(
+
+    _sample_radius_default = float(raw_detection.get("sample_radius_px", raw_detection.get("spot_radius_px", 10.0)))
+    detection = AreaRoiDetectionSettings(
         mode=str(raw_detection.get("mode", "dark")),
         intensity_min_value=(
             None if raw_detection.get("intensity_min_value") is None else float(raw_detection.get("intensity_min_value"))
@@ -378,13 +397,23 @@ def load_processing_profile(
         mask_relative_threshold_fraction=float(raw_detection.get("mask_relative_threshold_fraction", 0.18)),
         mask_local_contrast_sigma_px=float(raw_detection.get("mask_local_contrast_sigma_px", 8.0)),
         mask_local_contrast_z_threshold=float(raw_detection.get("mask_local_contrast_z_threshold", 3.0)),
-        spot_radius_px=float(raw_detection.get("spot_radius_px", 10.0)),
-        ring_inner_radius_px=max(
-            float(raw_detection.get("ring_inner_radius_px", max(float(raw_detection.get("spot_radius_px", 10)) + 4.0, 14.0))),
+        sample_radius_px=_sample_radius_default,
+        reference_inner_radius_px=max(
+            float(
+                raw_detection.get(
+                    "reference_inner_radius_px",
+                    raw_detection.get("ring_inner_radius_px", max(_sample_radius_default + 4.0, 14.0)),
+                )
+            ),
             0.0,
         ),
-        ring_outer_radius_px=max(
-            float(raw_detection.get("ring_outer_radius_px", max(float(raw_detection.get("spot_radius_px", 10)) + 8.0, 18.0))),
+        reference_outer_radius_px=max(
+            float(
+                raw_detection.get(
+                    "reference_outer_radius_px",
+                    raw_detection.get("ring_outer_radius_px", max(_sample_radius_default + 8.0, 18.0)),
+                )
+            ),
             0.0,
         ),
         ignore_marked_pixels=bool(
@@ -418,30 +447,45 @@ def load_processing_profile(
             else:
                 detection.ignored_intensity_min_value = float(legacy_threshold)
                 detection.ignored_intensity_max_value = 65535.0
-    detection.ring_outer_radius_px = max(detection.ring_outer_radius_px, detection.ring_inner_radius_px)
+    detection.reference_outer_radius_px = max(detection.reference_outer_radius_px, detection.reference_inner_radius_px)
 
-    raw_spots = payload.get("detected_spots", [])
-    spots: list[DetectedSpot] = []
+    # Support old key "detected_spots" from pre-rename profiles.
+    raw_spots = payload.get("area_rois", payload.get("detected_spots", []))
+    area_rois: list[AreaRoi] = []
     if isinstance(raw_spots, list):
         for raw in raw_spots:
             if not isinstance(raw, dict):
                 continue
-            spots.append(
-                DetectedSpot(
-                    spot_id=int(raw.get("spot_id", len(spots) + 1)),
+            area_rois.append(
+                AreaRoi(
+                    area_roi_id=int(raw.get("area_roi_id", raw.get("spot_id", len(area_rois) + 1))),
                     center_x=float(raw.get("center_x", 0.0)),
                     center_y=float(raw.get("center_y", 0.0)),
-                    radius_px=float(raw.get("radius_px", 0.0)),
-                    spot_color_hex=(None if raw.get("spot_color_hex") in (None, "") else str(raw.get("spot_color_hex"))),
-                    ring_color_hex=(None if raw.get("ring_color_hex") in (None, "") else str(raw.get("ring_color_hex"))),
-                    spot_diameter_px=(
-                        None if raw.get("spot_diameter_px") is None else float(raw.get("spot_diameter_px"))
+                    sample_radius_px=float(raw.get("sample_radius_px", raw.get("radius_px", 0.0))),
+                    sample_color_hex=(
+                        None
+                        if raw.get("sample_color_hex", raw.get("spot_color_hex")) in (None, "")
+                        else str(raw.get("sample_color_hex", raw.get("spot_color_hex")))
                     ),
-                    ring_inner_diameter_px=(
-                        None if raw.get("ring_inner_diameter_px") is None else float(raw.get("ring_inner_diameter_px"))
+                    reference_color_hex=(
+                        None
+                        if raw.get("reference_color_hex", raw.get("ring_color_hex")) in (None, "")
+                        else str(raw.get("reference_color_hex", raw.get("ring_color_hex")))
                     ),
-                    ring_outer_diameter_px=(
-                        None if raw.get("ring_outer_diameter_px") is None else float(raw.get("ring_outer_diameter_px"))
+                    sample_diameter_px=(
+                        None
+                        if raw.get("sample_diameter_px", raw.get("spot_diameter_px")) is None
+                        else float(raw.get("sample_diameter_px", raw.get("spot_diameter_px")))
+                    ),
+                    reference_inner_diameter_px=(
+                        None
+                        if raw.get("reference_inner_diameter_px", raw.get("ring_inner_diameter_px")) is None
+                        else float(raw.get("reference_inner_diameter_px", raw.get("ring_inner_diameter_px")))
+                    ),
+                    reference_outer_diameter_px=(
+                        None
+                        if raw.get("reference_outer_diameter_px", raw.get("ring_outer_diameter_px")) is None
+                        else float(raw.get("reference_outer_diameter_px", raw.get("ring_outer_diameter_px")))
                     ),
                     score=float(raw.get("score", 0.0)),
                     support_mean_radius_px=float(raw.get("support_mean_radius_px", 0.0)),
@@ -453,21 +497,26 @@ def load_processing_profile(
                 )
             )
 
-    raw_groups = payload.get("spot_groups", [])
-    groups: list[SpotGroup] = []
+    # Support old key "spot_groups" from pre-rename profiles.
+    raw_groups = payload.get("area_roi_groups", payload.get("spot_groups", []))
+    area_roi_groups: list[AreaRoiGroup] = []
     if isinstance(raw_groups, list):
         for raw in raw_groups:
             if not isinstance(raw, dict):
                 continue
-            spot_ids_raw = raw.get("spot_ids", [])
-            spot_ids = [int(spot_id) for spot_id in spot_ids_raw] if isinstance(spot_ids_raw, list) else []
-            groups.append(
-                SpotGroup(
-                    group_id=str(raw.get("group_id", f"group_{len(groups) + 1}")),
-                    name=str(raw.get("name", f"Group {len(groups) + 1}")),
-                    spot_color_hex=str(raw.get("spot_color_hex", raw.get("color_hex", "#f59e0b"))),
-                    ring_color_hex=str(raw.get("ring_color_hex", raw.get("color_hex", "#38bdf8"))),
-                    spot_ids=spot_ids,
+            ids_raw = raw.get("area_roi_ids", raw.get("spot_ids", []))
+            area_roi_ids = [int(x) for x in ids_raw] if isinstance(ids_raw, list) else []
+            area_roi_groups.append(
+                AreaRoiGroup(
+                    group_id=str(raw.get("group_id", f"group_{len(area_roi_groups) + 1}")),
+                    name=str(raw.get("name", f"Group {len(area_roi_groups) + 1}")),
+                    sample_color_hex=str(
+                        raw.get("sample_color_hex", raw.get("spot_color_hex", raw.get("color_hex", "#f59e0b")))
+                    ),
+                    reference_color_hex=str(
+                        raw.get("reference_color_hex", raw.get("ring_color_hex", raw.get("color_hex", "#38bdf8")))
+                    ),
+                    area_roi_ids=area_roi_ids,
                 )
             )
 
@@ -552,4 +601,4 @@ def load_processing_profile(
                 "mask": decoded_mask,
             }
 
-    return preprocessing, detection, spots, groups, rois, chromatic_models, chromatic_landmarks, analysis_cache, session_mask, mask_settings
+    return preprocessing, detection, area_rois, area_roi_groups, rois, chromatic_models, chromatic_landmarks, analysis_cache, session_mask, mask_settings

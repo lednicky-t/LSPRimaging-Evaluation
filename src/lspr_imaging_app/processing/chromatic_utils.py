@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from lspr_imaging_app.domain.models import ChromaticTransformModel, DetectedSpot, PreprocessingSettings
+from lspr_imaging_app.domain.models import AreaRoi, ChromaticTransformModel, PreprocessingSettings
 from lspr_imaging_app.processing.chromatic import (
     apply_affine_to_points,
     compose_similarity_matrix,

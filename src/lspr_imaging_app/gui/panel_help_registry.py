@@ -70,7 +70,7 @@ PANEL_HELP: dict[str, PanelHelpEntry] = {
     ),
     "array_detect": PanelHelpEntry(
         title="Array detect",
-        description="Reorder detected spots into the expected rectangular array layout.",
+        description="Reorder detected ROIs into the expected rectangular array layout.",
         shortcut_keys=("array_detect",),
     ),
     "background": PanelHelpEntry(
@@ -80,7 +80,7 @@ PANEL_HELP: dict[str, PanelHelpEntry] = {
     ),
     "analysis": PanelHelpEntry(
         title="Analysis",
-        description="Calculate spectra and sensorgrams for the selected spots.",
+        description="Calculate spectra and sensorgrams for the selected ROIs.",
         shortcut_keys=("table",),
     ),
     "logs": PanelHelpEntry(

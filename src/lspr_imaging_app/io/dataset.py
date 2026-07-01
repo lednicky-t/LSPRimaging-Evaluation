@@ -21,7 +21,8 @@ except Exception:  # pragma: no cover - optional acceleration path
     _tifffile_imread = None
     _tifffile_TiffFile = None
 
-from lspr_imaging_app.domain.models import ImageDataset, ImageKey, ImageRecord
+from lspr_imaging_app.domain.models import ImageDataset, ImageKey, ImageRecord, PreprocessingSettings
+from lspr_imaging_app.processing.preprocess import apply_spatial_preprocessing
 
 
 IMAGE_PATTERN = re.compile(r"WL(?P<wl>\d+(?:\.\d+)?)Frame(?P<frame>\d+)", re.IGNORECASE)
@@ -90,6 +91,59 @@ def dataset_load_plane(dataset: ImageDataset, frame_index: int, wavelength_nm: f
     if record is None:
         raise KeyError(f"No record found for frame={frame_index}, wavelength={wavelength_nm}")
     return load_image_array(str(record.path))
+
+
+def dataset_load_plane_roi(
+    dataset: ImageDataset,
+    frame_index: int,
+    wavelength_nm: float,
+    y_start: int,
+    y_end: int,
+    x_start: int,
+    x_end: int,
+    *,
+    record: "ImageRecord | None" = None,
+) -> np.ndarray:
+    """Load a spatial tile from the given plane.
+
+    For OME-Zarr datasets reads only the requested region from the chunked array,
+    loading only the zarr chunks that intersect the bounding box — much faster than
+    loading the full plane when only a small ROI is needed.
+
+    For TIFF stacks, loads the full image and returns the crop (no partial TIFF reads).
+
+    The optional *record* argument accepts a pre-looked-up ImageRecord to avoid the
+    O(N) scan of dataset_get_record when the caller already holds the record map.
+    """
+    if record is None:
+        record = dataset_get_record(dataset, frame_index, wavelength_nm)
+    if record is None:
+        raise KeyError(f"No record found for frame={frame_index}, wavelength={wavelength_nm}")
+    path = record.path
+    ome_root = _ome_zarr_root(
+        path.parent.parent if path.parent.name == OME_ZARR_ARRAY_DIRNAME else path.parent
+    )
+    if ome_root is not None and path.parent == _ome_zarr_array_dir(ome_root):
+        array = _ome_zarr_array_cached(str(ome_root))
+        try:
+            fi, wi, *_ = (int(part) for part in path.stem.split("."))
+        except Exception:
+            pass  # fall through to full load + crop
+        else:
+            shape = getattr(array, "shape", None)
+            h = int(shape[2]) if isinstance(shape, tuple) and len(shape) == 4 else None
+            w = int(shape[3]) if isinstance(shape, tuple) and len(shape) == 4 else None
+            y0 = max(int(y_start), 0)
+            y1 = min(int(y_end), h) if h is not None else int(y_end)
+            x0 = max(int(x_start), 0)
+            x1 = min(int(x_end), w) if w is not None else int(x_end)
+            return np.asarray(array[fi, wi, y0:y1, x0:x1], dtype=np.float32)
+    # Fallback: full load then crop (TIFF or unrecognised zarr layout)
+    full = load_image_array(str(path))
+    h, w = int(full.shape[0]), int(full.shape[1])
+    y0, y1 = max(int(y_start), 0), min(int(y_end), h)
+    x0, x1 = max(int(x_start), 0), min(int(x_end), w)
+    return full[y0:y1, x0:x1].astype(np.float32, copy=False)
 
 
 def dataset_plane_shape(dataset: ImageDataset, frame_index: int, wavelength_nm: float) -> tuple[int, int]:
@@ -203,16 +257,41 @@ def export_ome_zarr_dataset(
     *,
     chunk_size_px: int = 256,
     compression_enabled: bool = True,
+    preprocessing: PreprocessingSettings | None = None,
     progress_callback: Callable[[int, str], None] | None = None,
     cancel_event: threading.Event | None = None,
 ) -> Path:
+    # TODO(perf): zarr v2 writes one file per chunk, so total file count =
+    # frames * wavelengths * tiles_per_plane (often tens of thousands). On Windows
+    # with AV scanning, or on network drives, this dominates export time. Switch to
+    # zarr v3 with sharding to bundle chunks into fewer physical files while keeping
+    # the same logical chunk shape for reads.
+    # TODO(perf): reader thread pool (worker_count) and Blosc's internal compression
+    # threads can oversubscribe CPU cores simultaneously; benchmark lowering Blosc's
+    # nthreads and/or writing multiple planes concurrently from a small writer pool
+    # instead of compressing one plane with many threads.
+    # TODO(perf): worker_count is capped at cpu_count, tuned for CPU-bound decode; on
+    # fast SSD/NVMe storage a higher count (1.5-2x cpu_count) may improve throughput
+    # since threads are I/O-bound. Needs benchmarking on target hardware.
+    # TODO(feature): expose a faster compression preset (e.g. lz4 + byte-shuffle)
+    # alongside the current size-optimized zstd+bitshuffle default.
     zarr, Blosc, _blosc, write_multiscales_metadata = _require_ome_zarr_support()
     destination = destination if destination.suffix == ".zarr" or destination.name.endswith(".ome.zarr") else destination.with_suffix(".ome.zarr")
     records = sorted(dataset.records, key=lambda record: (int(record.key.frame_index), float(record.key.wavelength_nm)))
     if not records:
         raise ValueError("No images are available for OME-Zarr export.")
 
-    first_image = load_image_array(str(records[0].path))
+    # Image tools (rotation/flip/crop) are baked into the exported pixels only when
+    # they are "applied/linked" in the GUI. Calibration (um/px) is only meaningful
+    # in that same processed coordinate space, so it rides along with the same flag.
+    apply_image_tools = preprocessing is not None and bool(getattr(preprocessing, "image_tools_enabled", False))
+
+    def transform_plane(plane: np.ndarray) -> np.ndarray:
+        if not apply_image_tools:
+            return plane
+        return apply_spatial_preprocessing(plane, preprocessing)
+
+    first_image = transform_plane(_load_image_array_native(str(records[0].path)))
     if first_image.ndim != 2:
         raise ValueError("OME-Zarr export expects 2D image planes.")
     height, width = first_image.shape[:2]
@@ -227,7 +306,7 @@ def export_ome_zarr_dataset(
     destination.mkdir(parents=True, exist_ok=True)
     group = zarr.group(store=str(destination), overwrite=True, zarr_format=2)
     chunks = (1, 1, min(int(chunk_size_px), int(height)), min(int(chunk_size_px), int(width)))
-    array = group.create_dataset(
+    array = group.create_array(
         OME_ZARR_ARRAY_DIRNAME,
         shape=(len(frames), len(wavelengths), height, width),
         chunks=chunks,
@@ -274,7 +353,7 @@ def export_ome_zarr_dataset(
         record = record_map.get((int(frame_index), float(wavelength_nm)))
         if record is None:
             return frame_pos, wavelength_pos, None
-        plane = load_image_array(str(record.path))
+        plane = transform_plane(_load_image_array_native(str(record.path)))
         if cancel_event is not None and cancel_event.is_set():
             raise RuntimeError("OME-Zarr export cancelled.")
         plane = np.asarray(plane, dtype=target_dtype)
@@ -294,14 +373,10 @@ def export_ome_zarr_dataset(
     prefetch_window = max(worker_count * 4, worker_count + 2)
 
     def write_plane(frame_pos: int, wavelength_pos: int, plane: np.ndarray) -> None:
-        for y0 in range(0, height, y_chunk):
-            y1 = min(y0 + y_chunk, height)
-            for x0 in range(0, width, x_chunk):
-                x1 = min(x0 + x_chunk, width)
-                if cancel_event is not None and cancel_event.is_set():
-                    raise RuntimeError("OME-Zarr export cancelled.")
-                array[frame_pos, wavelength_pos, y0:y1, x0:x1] = plane[y0:y1, x0:x1]
-                advance_progress()
+        if cancel_event is not None and cancel_event.is_set():
+            raise RuntimeError("OME-Zarr export cancelled.")
+        array[frame_pos, wavelength_pos] = plane
+        advance_progress(tiles_per_plane)
 
     previous_blosc_threads = None
     if compression_enabled:
@@ -348,20 +423,51 @@ def export_ome_zarr_dataset(
                 pass
     if cancel_event is not None and cancel_event.is_set():
         raise RuntimeError("OME-Zarr export cancelled.")
+
+    # Embed real physical pixel size (um/px) in the OME-NGFF metadata when the
+    # source calibration is available and the export is in the same processed
+    # coordinate space the calibration was measured in (i.e. image tools applied).
+    write_pixel_size = (
+        apply_image_tools
+        and preprocessing is not None
+        and bool(getattr(preprocessing, "calibration_enabled", False))
+    )
+    scale_y = float(preprocessing.microns_per_pixel_y) if write_pixel_size else 1.0
+    scale_x = float(preprocessing.microns_per_pixel_x) if write_pixel_size else 1.0
+    axes_units = {"y": "micrometer", "x": "micrometer"} if write_pixel_size else None
+
     write_multiscales_metadata(
         group,
-        datasets=[{"path": OME_ZARR_ARRAY_DIRNAME, "coordinateTransformations": [{"type": "scale", "scale": [1, 1, 1, 1]}]}],
+        datasets=[{"path": OME_ZARR_ARRAY_DIRNAME, "coordinateTransformations": [{"type": "scale", "scale": [1, 1, scale_y, scale_x]}]}],
         axes=["t", "wavelength", "y", "x"],
         name="LSPR image stack",
+        axes_units=axes_units,
     )
-    group.attrs[OME_ZARR_LSPR_KEY] = {
+    lspr_attrs: dict = {
         "frame_indices": [int(value) for value in frames],
         "wavelengths_nm": [float(value) for value in wavelengths],
         "source_folder": str(dataset.folder),
         "chunk_size_px": int(chunk_size_px),
         "compression": "zstd+bitshuffle" if compression_enabled else "none",
         "dtype": str(target_dtype),
+        "image_tools_applied": bool(apply_image_tools),
     }
+    if apply_image_tools and preprocessing is not None:
+        crop = preprocessing.crop
+        lspr_attrs["image_tools"] = {
+            "rotation_angle_deg": float(preprocessing.rotation_angle_deg),
+            "rotation_fill_dark": bool(preprocessing.rotation_fill_dark),
+            "flip_horizontal": bool(preprocessing.flip_horizontal),
+            "flip_vertical": bool(preprocessing.flip_vertical),
+            "crop": (
+                {"x": int(crop.x), "y": int(crop.y), "width": int(crop.width), "height": int(crop.height)}
+                if crop.enabled and crop.width > 0 and crop.height > 0
+                else None
+            ),
+        }
+    if write_pixel_size:
+        lspr_attrs["pixel_size_um"] = {"x": scale_x, "y": scale_y}
+    group.attrs[OME_ZARR_LSPR_KEY] = lspr_attrs
 
     return destination
 
@@ -409,6 +515,37 @@ def _load_image_array_uncached(path_str: str) -> np.ndarray:
         if _tifffile_imread is None:
             raise
         return np.asarray(_tifffile_imread(path_str), dtype=np.float32)
+
+
+def _load_image_array_native(path_str: str) -> np.ndarray:
+    """Load an image preserving its on-disk dtype (no float32 upcast).
+
+    Used for OME-Zarr export, where the exported array should keep the same
+    bit depth as the source files instead of the float32 used for display
+    and analysis math elsewhere in the app.
+    """
+    path = Path(path_str)
+    ome_root = _ome_zarr_root(path.parent.parent if path.parent.name == OME_ZARR_ARRAY_DIRNAME else path.parent)
+    if ome_root is not None and path.parent == _ome_zarr_array_dir(ome_root):
+        array = _ome_zarr_array_cached(str(ome_root))
+        stem = path.name
+        try:
+            frame_index, wavelength_index, *_ = (int(part) for part in stem.split("."))
+        except Exception as exc:
+            raise ValueError(f"Invalid OME-Zarr chunk path: {path.name}") from exc
+        return np.asarray(array[frame_index, wavelength_index])
+    if path.suffix.lower() in {".tif", ".tiff"} and _tifffile_imread is not None:
+        try:
+            return np.asarray(_tifffile_imread(path_str, maxworkers=max(2, os.cpu_count() or 1)))
+        except TypeError:
+            return np.asarray(_tifffile_imread(path_str))
+    try:
+        with Image.open(path_str) as image:
+            return np.array(image)
+    except Exception:
+        if _tifffile_imread is None:
+            raise
+        return np.asarray(_tifffile_imread(path_str))
 
 
 @lru_cache(maxsize=1024)

@@ -3,7 +3,7 @@ from __future__ import annotations
 import numpy as np
 
 from lspr_imaging_app.domain.models import FitResult, ImageDataset, RoiDefinition, RoiMetricSeries, RoiSpectrum
-from lspr_imaging_app.io.dataset import dataset_get_record, load_image_array
+from lspr_imaging_app.io.dataset import dataset_record_map, load_image_array
 from lspr_imaging_app.processing.roi import region_means
 
 
@@ -18,8 +18,9 @@ def extract_roi_spectrum(dataset: ImageDataset, roi: RoiDefinition, frame_index:
     absorbance = []
     roi_means = []
     bg_means = []
+    record_map = dataset_record_map(dataset)
     for wl in dataset.wavelengths_nm:
-        record = dataset_get_record(dataset, frame_index, wl)
+        record = record_map.get((int(frame_index), float(wl)))
         if record is None:
             continue
         image = load_image_array(str(record.path))

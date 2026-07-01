@@ -6,7 +6,7 @@ from pathlib import Path
 from PyQt6.QtCore import QSettings
 from PyQt6.QtGui import QColor
 
-from lspr_imaging_app.domain.models import CropDefinition, MaskSettings, SpotDetectionSettings
+from lspr_imaging_app.domain.models import AreaRoiDetectionSettings, CropDefinition, MaskSettings
 
 
 class SessionController:
@@ -40,13 +40,14 @@ class SessionController:
 
     def set_default_processing_state(self) -> None:
         self.window._state.preprocessing.rotation_angle_deg = 0.0
+        self.window._state.preprocessing.rotation_fill_dark = False
         self.window._state.preprocessing.flip_horizontal = False
         self.window._state.preprocessing.flip_vertical = False
         self.window._state.preprocessing.crop = CropDefinition()
         self.window._state.preprocessing.flatten_background_enabled = False
         self.window._state.preprocessing.flatten_background_sigma_px = 48.0
         self.window._state.preprocessing.flatten_background_binning = 2
-        self.window._state.preprocessing.flatten_background_exclude_spots = True
+        self.window._state.preprocessing.flatten_background_exclude_area_rois = True
         self.window._state.preprocessing.flatten_background_exclude_mask = False
         self.window._state.preprocessing.chromatic_correction_enabled = False
         self.window._state.preprocessing.chromatic_registration_mode = "landmark_radial"
@@ -57,10 +58,10 @@ class SessionController:
         self.window._state.preprocessing.reference_mode = "auto"
         self.window._state.preprocessing.reference_wavelength_nm = None
         self.window._state.preprocessing.reference_frame_index = 0
-        self.window._state.spot_detection = SpotDetectionSettings()
+        self.window._state.area_roi_settings = AreaRoiDetectionSettings()
         self.window._state.mask = MaskSettings()
-        self.window._state.detected_spots.clear()
-        self.window._state.spot_groups.clear()
+        self.window._state.area_rois.clear()
+        self.window._state.area_roi_groups.clear()
         self.window._state.chromatic_models.clear()
         self.window._state.chromatic_landmarks.clear()
 

@@ -2,9 +2,8 @@ from __future__ import annotations
 
 import numpy as np
 
-from lspr_imaging_app.domain.models import MaskSettings, SpotDetectionSettings
+from lspr_imaging_app.domain.models import MaskSettings
 from lspr_imaging_app.processing.preprocess import apply_spatial_mask
-from lspr_imaging_app.processing.spot_detection import ignored_pixel_mask
 
 
 def combine_mask_layers(mask_state: MaskSettings | None, shape: tuple[int, int]) -> np.ndarray | None:
@@ -34,12 +33,4 @@ def transformed_mask(mask: np.ndarray | None, settings) -> np.ndarray | None:
     return apply_spatial_mask(mask, settings)
 
 
-def ignored_mask_from_detection(
-    image: np.ndarray,
-    detection: SpotDetectionSettings,
-    *,
-    spots=None,
-    external_mask=None,
-) -> np.ndarray:
-    return ignored_pixel_mask(image, detection, spots=spots, external_mask=external_mask)
 

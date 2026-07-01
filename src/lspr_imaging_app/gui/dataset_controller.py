@@ -4,7 +4,7 @@ from pathlib import Path
 
 from PyQt6.QtWidgets import QFileDialog, QMessageBox
 
-from lspr_imaging_app.domain.models import MaskSettings, SpotDetectionSettings
+from lspr_imaging_app.domain.models import AreaRoiDetectionSettings, MaskSettings
 from lspr_imaging_app.io.dataset import dataset_record_map, load_dataset
 
 
@@ -82,7 +82,7 @@ class DatasetController:
         self.window._sensorgram_cache.clear()
         self.window._sensorgram_running_signature = None
         self.window._pending_sensorgram_payload = None
-        self.window._state.spot_detection = SpotDetectionSettings()
+        self.window._state.area_roi_settings = AreaRoiDetectionSettings()
         self.window._state.mask = MaskSettings()
         if callable(progress):
             progress(58, "Restoring processing profile...")
@@ -142,4 +142,51 @@ class DatasetController:
             QMessageBox.critical(self.window, "Stack to Zarr export failed", str(exc))
             self.window._set_status_text(f"Stack to Zarr export failed: {exc}")
             return
+        summary = self._describe_ome_zarr_export_plan(destination, chunk_size_px, compression_enabled)
+        confirm = QMessageBox.question(
+            self.window,
+            "Confirm Stack to Zarr export",
+            summary,
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if confirm != QMessageBox.StandardButton.Yes:
+            return
         self.window._start_ome_zarr_export(destination, chunk_size_px, compression_enabled=compression_enabled)
+
+    def _describe_ome_zarr_export_plan(self, destination: Path, chunk_size_px: int, compression_enabled: bool) -> str:
+        preprocessing = self.window._state.preprocessing
+        tools_applied = bool(getattr(preprocessing, "image_tools_enabled", False))
+        lines = [f"Destination: {destination}", ""]
+        if tools_applied:
+            lines.append("Image tools: APPLIED (linked) — exported pixels will be transformed.")
+            angle = float(preprocessing.rotation_angle_deg)
+            fill = "dark (0)" if bool(preprocessing.rotation_fill_dark) else "edge-stretch"
+            lines.append(f"  - Rotation: {angle:.2f} deg, new-pixel fill = {fill}" if abs(angle) > 1e-9 else "  - Rotation: none")
+            flips = []
+            if preprocessing.flip_horizontal:
+                flips.append("horizontal")
+            if preprocessing.flip_vertical:
+                flips.append("vertical")
+            lines.append(f"  - Flip: {', '.join(flips) if flips else 'none'}")
+            crop = preprocessing.crop
+            if crop.enabled and crop.width > 0 and crop.height > 0:
+                lines.append(f"  - Crop: x={crop.x}, y={crop.y}, width={crop.width}, height={crop.height}")
+            else:
+                lines.append("  - Crop: none")
+            if bool(getattr(preprocessing, "calibration_enabled", False)):
+                lines.append(
+                    f"  - Pixel size metadata: {float(preprocessing.microns_per_pixel_x):.4f} um/px (X) x "
+                    f"{float(preprocessing.microns_per_pixel_y):.4f} um/px (Y) will be embedded."
+                )
+            else:
+                lines.append("  - Pixel size metadata: none (calibration is not enabled).")
+        else:
+            lines.append("Image tools: NOT applied — raw, untransformed source pixels will be exported.")
+            lines.append("  - No pixel size metadata will be embedded (requires image tools applied + calibration enabled).")
+        lines.append("")
+        lines.append(f"Chunk size: {int(chunk_size_px)} px")
+        lines.append(f"Compression: {'zstd + bitshuffle (on)' if compression_enabled else 'none (off)'}")
+        lines.append("")
+        lines.append("Proceed with export?")
+        return "\n".join(lines)

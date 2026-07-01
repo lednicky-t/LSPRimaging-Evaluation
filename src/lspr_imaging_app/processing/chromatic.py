@@ -11,7 +11,7 @@ try:
 except Exception:  # pragma: no cover - optional acceleration path
     _phase_cross_correlation = None
 
-from lspr_imaging_app.domain.models import DetectedSpot
+from lspr_imaging_app.domain.models import AreaRoi
 
 
 @dataclass(slots=True)
@@ -505,33 +505,33 @@ def compose_similarity_matrix(scale: float, angle_rad: float, shift_x_px: float,
 
 
 def transform_spots_affine(
-    spots: list[DetectedSpot],
+    rois: list[AreaRoi],
     affine_matrix: np.ndarray,
     *,
     clamp_shape: tuple[int, int] | None = None,
-) -> list[DetectedSpot]:
-    if not spots:
+) -> list[AreaRoi]:
+    if not rois:
         return []
-    source_points = np.asarray([(spot.center_x, spot.center_y) for spot in spots], dtype=np.float64)
+    source_points = np.asarray([(roi.center_x, roi.center_y) for roi in rois], dtype=np.float64)
     target_points = apply_affine_to_points(source_points, affine_matrix)
     linear = np.asarray(affine_matrix[:, :2], dtype=np.float64)
     singular_values = np.linalg.svd(linear, compute_uv=False)
     scale = float(np.max(singular_values))
     scale = max(scale, 1e-6)
-    transformed: list[DetectedSpot] = []
+    transformed: list[AreaRoi] = []
     max_x = float(clamp_shape[1] - 1) if clamp_shape is not None else None
     max_y = float(clamp_shape[0] - 1) if clamp_shape is not None else None
-    for index, spot in enumerate(spots):
+    for index, roi in enumerate(rois):
         target_x = float(target_points[index, 0])
         target_y = float(target_points[index, 1])
-        transformed_spot = deepcopy(spot)
-        transformed_spot.center_x = target_x
-        transformed_spot.center_y = target_y
-        transformed_spot.radius_px = max(float(spot.radius_px) * scale, 1.0)
+        transformed_roi = deepcopy(roi)
+        transformed_roi.center_x = target_x
+        transformed_roi.center_y = target_y
+        transformed_roi.sample_radius_px = max(float(roi.sample_radius_px) * scale, 1.0)
         if max_x is not None and max_y is not None:
-            transformed_spot.center_x = float(np.clip(transformed_spot.center_x, 0.0, max_x))
-            transformed_spot.center_y = float(np.clip(transformed_spot.center_y, 0.0, max_y))
-        transformed.append(transformed_spot)
+            transformed_roi.center_x = float(np.clip(transformed_roi.center_x, 0.0, max_x))
+            transformed_roi.center_y = float(np.clip(transformed_roi.center_y, 0.0, max_y))
+        transformed.append(transformed_roi)
     return transformed
 
 
