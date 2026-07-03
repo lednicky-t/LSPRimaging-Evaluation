@@ -113,6 +113,9 @@ def _apply_spatial_transform(
 ) -> np.ndarray:
     processed = image
 
+    if not bool(getattr(settings, "image_tools_enabled", True)):
+        return processed
+
     angle = float(settings.rotation_angle_deg)
     if abs(angle) > 1e-9:
         processed = ndimage.rotate(
@@ -130,9 +133,6 @@ def _apply_spatial_transform(
 
     if settings.flip_vertical:
         processed = np.flipud(processed)
-
-    if not bool(getattr(settings, "image_tools_enabled", True)):
-        return processed
 
     crop = settings.crop
     if crop.enabled and crop.width > 0 and crop.height > 0:

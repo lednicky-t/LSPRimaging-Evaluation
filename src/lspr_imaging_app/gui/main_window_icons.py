@@ -120,7 +120,6 @@ from lspr_imaging_app.gui.ui_helpers import (
     area_value_text,
     chromatic_feature_count_value,
     chromatic_subpixel_precision_value,
-    current_ome_zarr_chunk_size,
     current_ome_zarr_compression_enabled,
     display_length_suffix,
     format_length_display_value,
@@ -164,7 +163,6 @@ from lspr_imaging_app.io.dataset import (
     export_ome_zarr_dataset,
     load_dataset,
     load_image_array,
-    load_image_shape,
 )
 from lspr_imaging_app.processing.analysis import absorbance_from_means, fit_absorbance_curve, metric_value_from_fit
 from lspr_imaging_app.processing.chromatic import (
@@ -465,48 +463,24 @@ class MainWindowIcons:
             self.dataset_stack_label.setText("ImageStack")
             self.dataset_stack_label.setToolTip("The loaded dataset is treated as an image stack.")
 
-    def _ome_zarr_chunk_candidates(self) -> list[int]:
-        return [64, 128, 256, 512]
-
     def _current_ome_zarr_chunk_size(self) -> int:
-        mode = str(self.ome_zarr_chunk_mode_combo.currentData() or "auto")
-        return current_ome_zarr_chunk_size(mode, lambda: self._suggest_ome_zarr_chunk_size())
+        return max(int(self.ome_zarr_chunk_spin.value()), 4)
 
     def _current_ome_zarr_compression_enabled(self) -> bool:
         return current_ome_zarr_compression_enabled(self.ome_zarr_compression_button.isChecked())
 
-    def _suggest_ome_zarr_chunk_size(self, image_shape: tuple[int, int] | None = None) -> int:
-        if image_shape is None and self._current_processed_image is not None:
-            image_shape = tuple(int(v) for v in self._current_processed_image.shape[:2])
-        if image_shape is None and self._current_record_path is not None:
-            try:
-                image_shape = load_image_shape(str(self._current_record_path))
-            except Exception:
-                image_shape = None
-        if image_shape is None:
-            return int(self._settings_int("ome_zarr/chunk_size_px", 256, minimum=64, maximum=512))
-        height, width = int(image_shape[0]), int(image_shape[1])
-        limit = max(min(height, width), 64)
-        candidates = [size for size in self._ome_zarr_chunk_candidates() if size <= limit]
-        if not candidates:
-            candidates = [64]
-        exact = [size for size in candidates if height % size == 0 and width % size == 0]
-        if exact:
-            return max(exact)
-        return min(
-            candidates,
-            key=lambda size: (
-                abs((height % size) / max(float(size), 1.0)) + abs((width % size) / max(float(size), 1.0)),
-                abs(float(size) - min(float(height), float(width)) / 4.0),
-                -float(size),
-            ),
-        )
-
     def _sync_ome_zarr_chunk_controls(self) -> None:
         self._ui_state_manager.sync_ome_zarr_chunk_controls()
 
-    def _on_ome_zarr_chunk_mode_changed(self, _index: int) -> None:
+    def _current_ome_zarr_shard_mode(self) -> str:
+        return str(self.ome_zarr_shard_mode_combo.currentData() or "per_image")
+
+    def _on_ome_zarr_chunk_size_changed(self, _value: int) -> None:
         self._sync_ome_zarr_chunk_controls()
+        self._save_layout_preferences()
+
+    def _on_ome_zarr_shard_mode_changed(self, _index: int) -> None:
+        self._settings.setValue("ome_zarr/shard_mode", self.ome_zarr_shard_mode_combo.currentData())
         self._save_layout_preferences()
 
     def _ome_zarr_grid_icon(self, active: bool) -> QIcon:
@@ -623,8 +597,9 @@ class MainWindowIcons:
         self.dataset_ome_zarr_export_stop_button.setVisible(bool(running))
         self.dataset_ome_zarr_export_stop_button.setEnabled(bool(running))
         self.dataset_ome_zarr_export_button.setEnabled(not running and self._state.dataset is not None)
-        self.ome_zarr_chunk_mode_combo.setEnabled(not running)
+        self.ome_zarr_chunk_spin.setEnabled(not running)
         self.ome_zarr_chunk_guide_button.setEnabled(not running)
+        self.ome_zarr_shard_mode_combo.setEnabled(not running)
         self.ome_zarr_compression_button.setEnabled(not running)
         self.dataset_ome_zarr_controls_row.setEnabled(not running)
         self.dataset_ome_zarr_options_row.setEnabled(not running)
@@ -633,7 +608,7 @@ class MainWindowIcons:
             self.dataset_ome_zarr_export_status_label.setText("Progress")
         self._sync_ome_zarr_chunk_controls()
 
-    def _start_ome_zarr_export(self, destination: Path, chunk_size_px: int, *, compression_enabled: bool = True) -> None:
+    def _start_ome_zarr_export(self, destination: Path, chunk_size_px: int, *, compression_enabled: bool = True, shard_mode: str = "per_image") -> None:
         dataset = self._state.dataset
         if dataset is None:
             self._set_status_text("Load a dataset before exporting Stack to Zarr.")
@@ -659,12 +634,14 @@ class MainWindowIcons:
             int(chunk_size_px),
             bool(compression_enabled),
             preprocessing_snapshot,
+            shard_mode,
             cancel_event=self._ome_zarr_export_cancel_event,
             supports_progress=True,
         )
         tools_text = "applied" if bool(getattr(preprocessing_snapshot, "image_tools_enabled", False)) else "ignored"
+        shard_text = "per_frame" if shard_mode == "per_frame" else "per_image"
         self._append_workflow_log(
-            f"OME-Zarr export start | chunks {chunk_size_px}px | compression {'on' if compression_enabled else 'off'} | image tools {tools_text}",
+            f"OME-Zarr export start | chunks {chunk_size_px}px | shard {shard_text} | compression {'on' if compression_enabled else 'off'} | image tools {tools_text}",
             level="info",
         )
         worker.signals.progress.connect(self._update_busy_progress)
@@ -673,7 +650,11 @@ class MainWindowIcons:
         )
         worker.signals.result.connect(lambda result, request_id=request_id: self._on_ome_zarr_export_finished(request_id, result))
         worker.signals.error.connect(lambda message, request_id=request_id: self._on_ome_zarr_export_failed(request_id, message))
-        self._thread_pool.start(worker)
+        # Run in a dedicated daemon thread instead of QThreadPool so the export is
+        # fully independent of the GUI thread pool (Qt tasks like image loading keep
+        # their pool slots) and Qt signals are delivered via queued connections.
+        self._ome_zarr_export_thread = threading.Thread(target=worker.run, daemon=True, name="ome-zarr-export")
+        self._ome_zarr_export_thread.start()
 
     def _stop_ome_zarr_export(self) -> None:
         if not self._ome_zarr_export_running or self._ome_zarr_export_cancel_event is None:
@@ -713,8 +694,9 @@ class MainWindowIcons:
         self.dataset_ome_zarr_export_stop_button.setVisible(False)
         self.dataset_ome_zarr_export_stop_button.setEnabled(False)
         self.dataset_ome_zarr_export_button.setEnabled(self._state.dataset is not None)
-        self.ome_zarr_chunk_mode_combo.setEnabled(True)
+        self.ome_zarr_chunk_spin.setEnabled(True)
         self.ome_zarr_chunk_guide_button.setEnabled(True)
+        self.ome_zarr_shard_mode_combo.setEnabled(True)
         self.ome_zarr_compression_button.setEnabled(True)
         self.dataset_ome_zarr_controls_row.setEnabled(True)
         self.dataset_ome_zarr_options_row.setEnabled(True)

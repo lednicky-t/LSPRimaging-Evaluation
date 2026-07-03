@@ -123,7 +123,6 @@ from lspr_imaging_app.gui.ui_helpers import (
     area_value_text,
     chromatic_feature_count_value,
     chromatic_subpixel_precision_value,
-    current_ome_zarr_chunk_size,
     current_ome_zarr_compression_enabled,
     display_length_suffix,
     format_length_display_value,
@@ -474,6 +473,7 @@ class MainWindow(MainWindowIcons, QMainWindow):
         ] | None = None
         self._ome_zarr_export_running = False
         self._ome_zarr_export_cancel_event: threading.Event | None = None
+        self._ome_zarr_export_thread: threading.Thread | None = None
         self._ome_zarr_export_started_at: float | None = None
         self._ome_zarr_export_destination: Path | None = None
         self._busy_started_at: float | None = None
@@ -607,29 +607,19 @@ class MainWindow(MainWindowIcons, QMainWindow):
             "Export: write the current dataset to a Stack to Zarr in a chosen folder.",
             icon=self._dataset_transfer_icon("export", "#38bdf8"),
         )
-        self.ome_zarr_chunk_mode_combo = QComboBox(self)
-        self.ome_zarr_chunk_mode_combo.addItem("Auto", "auto")
-        self.ome_zarr_chunk_mode_combo.addItem("64", 64)
-        self.ome_zarr_chunk_mode_combo.addItem("128", 128)
-        self.ome_zarr_chunk_mode_combo.addItem("256", 256)
-        self.ome_zarr_chunk_mode_combo.addItem("512", 512)
-        self.ome_zarr_chunk_mode_combo.setCurrentIndex(
-            max(
-                self.ome_zarr_chunk_mode_combo.findData(
-                    self._settings.value("ome_zarr/chunk_mode", "auto")
-                ),
-                0,
-            )
+        self.ome_zarr_chunk_spin = QSpinBox(self)
+        self.ome_zarr_chunk_spin.setRange(4, 4096)
+        self.ome_zarr_chunk_spin.setSingleStep(1)
+        self.ome_zarr_chunk_spin.setSuffix(" px")
+        self.ome_zarr_chunk_spin.setValue(
+            self._settings_int("ome_zarr/chunk_size_px", 64, minimum=4, maximum=4096)
         )
-        self.ome_zarr_chunk_mode_combo.setToolTip(
-            "Choose a common Zarr chunk size or let the app suggest one from the current image size."
+        self.ome_zarr_chunk_spin.setToolTip(
+            "Square spatial chunk size for Zarr export. Any value from 4 to 4096 px — does not need to be a power of 2."
         )
         self.ome_zarr_chunk_label = QLabel("Chunk tile", self)
         self.ome_zarr_chunk_label.setObjectName("toolbarMiniLabel")
         self.ome_zarr_chunk_label.setToolTip("Square spatial chunk size used when exporting Zarr.")
-        self.ome_zarr_chunk_value_label = QLabel("256 px", self)
-        self.ome_zarr_chunk_value_label.setObjectName("toolbarMiniLabel")
-        self.ome_zarr_chunk_value_label.setToolTip("Resolved Zarr chunk size in pixels.")
         self.ome_zarr_chunk_guide_button = self._make_icon_tool_button(
             "grid-4x4",
             "#94a3b8",
@@ -639,6 +629,19 @@ class MainWindow(MainWindowIcons, QMainWindow):
         )
         self.ome_zarr_chunk_guide_button.setChecked(self._settings_bool("ome_zarr/chunk_guide_visible", False))
         self.ome_zarr_chunk_guide_button.toggled.connect(self._on_ome_zarr_chunk_guide_toggled)
+        self.ome_zarr_shard_label = QLabel("Shard", self)
+        self.ome_zarr_shard_label.setObjectName("toolbarMiniLabel")
+        self.ome_zarr_shard_label.setToolTip("How many images are packed into a single shard file on disk.")
+        self.ome_zarr_shard_mode_combo = QComboBox(self)
+        self.ome_zarr_shard_mode_combo.addItem("1 image", "per_image")
+        self.ome_zarr_shard_mode_combo.addItem("1 frame", "per_frame")
+        saved_shard_mode = self._settings.value("ome_zarr/shard_mode", "per_image")
+        idx = self.ome_zarr_shard_mode_combo.findData(saved_shard_mode)
+        self.ome_zarr_shard_mode_combo.setCurrentIndex(max(idx, 0))
+        self.ome_zarr_shard_mode_combo.setToolTip(
+            "1 image: one shard per wavelength×frame — best for viewing single images.\n"
+            "1 frame: one shard per frame (all wavelengths together) — best for spectral fitting, fewest files."
+        )
         self.ome_zarr_compression_label = QLabel("Compression", self)
         self.ome_zarr_compression_label.setObjectName("toolbarMiniLabel")
         self.ome_zarr_compression_label.setToolTip("Toggle Zarr compression on or off.")
@@ -687,9 +690,10 @@ class MainWindow(MainWindowIcons, QMainWindow):
         dataset_ome_zarr_options_layout.setContentsMargins(0, 0, 0, 0)
         dataset_ome_zarr_options_layout.setSpacing(4)
         dataset_ome_zarr_options_layout.addWidget(self.ome_zarr_chunk_label)
-        dataset_ome_zarr_options_layout.addWidget(self.ome_zarr_chunk_mode_combo)
-        dataset_ome_zarr_options_layout.addWidget(self.ome_zarr_chunk_value_label)
+        dataset_ome_zarr_options_layout.addWidget(self.ome_zarr_chunk_spin)
         dataset_ome_zarr_options_layout.addWidget(self.ome_zarr_chunk_guide_button)
+        dataset_ome_zarr_options_layout.addWidget(self.ome_zarr_shard_label)
+        dataset_ome_zarr_options_layout.addWidget(self.ome_zarr_shard_mode_combo)
         dataset_ome_zarr_options_layout.addStretch(1)
         self.dataset_ome_zarr_compression_row = QWidget(self)
         dataset_ome_zarr_compression_layout = QHBoxLayout(self.dataset_ome_zarr_compression_row)
@@ -1654,7 +1658,8 @@ class MainWindow(MainWindowIcons, QMainWindow):
         self.load_button.clicked.connect(self._dataset_controller.browse_folder)
         self.dataset_ome_zarr_export_button.clicked.connect(self._dataset_controller.export_current_dataset_to_ome_zarr)
         self.dataset_ome_zarr_export_stop_button.clicked.connect(self._stop_ome_zarr_export)
-        self.ome_zarr_chunk_mode_combo.currentIndexChanged.connect(self._on_ome_zarr_chunk_mode_changed)
+        self.ome_zarr_chunk_spin.valueChanged.connect(self._on_ome_zarr_chunk_size_changed)
+        self.ome_zarr_shard_mode_combo.currentIndexChanged.connect(self._on_ome_zarr_shard_mode_changed)
         self.export_settings_button.clicked.connect(self._export_processing_profile)
         self.import_settings_button.clicked.connect(self._import_processing_profile)
         self.reference_auto_button.clicked.connect(lambda _checked=False: self._set_reference_mode("auto"))
@@ -4163,7 +4168,7 @@ class MainWindow(MainWindowIcons, QMainWindow):
         if hasattr(self, "workflow_log_section"):
             self._settings.setValue("workflow_log_section_expanded", self.workflow_log_section.is_expanded())
         self._settings.setValue("ome_zarr/chunk_size_px", int(self._current_ome_zarr_chunk_size()))
-        self._settings.setValue("ome_zarr/chunk_mode", self.ome_zarr_chunk_mode_combo.currentData())
+        self._settings.setValue("ome_zarr/shard_mode", self.ome_zarr_shard_mode_combo.currentData())
         self._settings.setValue("ome_zarr/chunk_guide_visible", bool(self.ome_zarr_chunk_guide_button.isChecked()))
         self._settings.setValue("ome_zarr/compression_enabled", bool(self.ome_zarr_compression_button.isChecked()))
         self._save_panel_layout_preferences()
@@ -5494,8 +5499,8 @@ class MainWindow(MainWindowIcons, QMainWindow):
         self._set_help(self.load_button, "Load dataset: choose a dataset folder and open it.")
         self._set_help(self.dataset_ome_zarr_export_button, "Export: write the current dataset to a Stack to Zarr in a chosen folder.")
         self._set_help(self.dataset_ome_zarr_export_stop_button, "Stop: cancel the running Stack to Zarr export.")
-        self._set_help(self.ome_zarr_chunk_mode_combo, "Choose a common chunk size or let the app suggest one based on the image size.")
-        self._set_help(self.ome_zarr_chunk_value_label, "Resolved Stack to Zarr chunk size in pixels.")
+        self._set_help(self.ome_zarr_chunk_spin, "Chunk tile size for Zarr export. Any value 4–4096 px — does not need to be a power of 2.")
+        self._set_help(self.ome_zarr_shard_mode_combo, "Shard grouping: '1 image' = one file per wavelength×frame; '1 frame' = one file per time point (all wavelengths together).")
         self._set_help(self.ome_zarr_chunk_guide_button, "Guide: show chunk tiling over the current image.")
         self._set_help(self.ome_zarr_compression_button, "Compression: turn Stack to Zarr compression on or off.")
         self._set_help(self.export_settings_button, "Export preprocessing, ROI settings, ROIs, and groups to a JSON profile.")
@@ -6587,7 +6592,8 @@ class MainWindow(MainWindowIcons, QMainWindow):
         self._set_spinbox_width(self.mask_brush_size_spin, "200 px", minimum=68)
         self._set_spinbox_width(self.histogram_bins_spin, "8192 DN", minimum=70)
         self._set_spinbox_width(self.analysis_poly_order_spin, "99", minimum=52)
-        self._set_combo_width(self.ome_zarr_chunk_mode_combo, ["Auto", "512"])
+        self._set_spinbox_width(self.ome_zarr_chunk_spin, "4096 px", minimum=72)
+        self._set_combo_width(self.ome_zarr_shard_mode_combo, ["1 frame"])
         self._set_combo_width(self.analysis_metric_combo, ["Maximum", "Centroid"], minimum=80)
         self._set_spinbox_width(self.analysis_start_frame_spin, "99999", minimum=66)
         self._set_spinbox_width(self.analysis_end_frame_spin, "99999", minimum=66)

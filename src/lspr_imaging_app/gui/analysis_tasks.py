@@ -109,6 +109,7 @@ def _ome_zarr_export_task(
     chunk_size_px: int,
     compression_enabled: bool,
     preprocessing=None,
+    shard_mode: str = "per_image",
     *,
     cancel_event: threading.Event | None = None,
     progress_callback=None,
@@ -119,6 +120,7 @@ def _ome_zarr_export_task(
         chunk_size_px=chunk_size_px,
         compression_enabled=compression_enabled,
         preprocessing=preprocessing,
+        shard_mode=shard_mode,
         progress_callback=progress_callback,
         cancel_event=cancel_event,
     )

@@ -8,26 +8,17 @@ Priority levels: `[high]` `[medium]` `[low]`
 
 ### [high] OME-Zarr converter: performance / resource utilization
 The export pipeline is slow despite low CPU and SSD utilization — machine resources are
-largely idle during conversion. Investigate what is blocking full throughput:
-- Is the bottleneck the Python GIL, Blosc thread count, small write granularity, zarr chunk
-  file overhead (one file per chunk on Windows), or TIFF decode speed?
-- Check whether the current worker-thread / Blosc-thread configuration is oversubscribed
-  or undersubscribed.
+largely idle during conversion. Remaining sub-tasks after thread-oversubscription fix:
+- ~~Thread oversubscription fixed~~: Blosc now gets `cpu_count // 2` threads (not full
+  `cpu_count`) so reader workers aren't starved during compression. Per-file tifffile
+  `maxworkers` in `_load_image_array_native` reduced to 2 (from `cpu_count`) since the
+  export worker pool already provides inter-file parallelism.
+- Worker count (`worker_count`) is still capped at `cpu_count`; increasing to 1.5–2×
+  may help on fast NVMe but needs benchmarking — see `TODO(perf)` in `io/dataset.py`.
 - Consider exposing a faster compression preset (e.g. lz4 + byte-shuffle) alongside the
   current size-optimized zstd + bitshuffle default.
 - Longer term: evaluate zarr v3 sharding to collapse many small chunk files into fewer
   physical files (especially beneficial on Windows with AV scanning and on network drives).
-- See existing `TODO(perf)` comments in `io/dataset.py` → `export_ome_zarr_dataset()`.
-
-### [high] Image tools: rotation not reverting when "not applied"
-When Image tools are toggled off (not applied/linked), rotation is still visible in the
-displayed image instead of reverting to the raw, unrotated data.
-- Investigate `_apply_spatial_transform` in `processing/preprocess.py`: rotation and flip
-  are currently applied unconditionally regardless of `image_tools_enabled`; only crop is
-  gated on that flag.
-- Decide whether rotation/flip should also respect `image_tools_enabled` (likely yes, to
-  match user expectation), and update the live display pipeline accordingly.
-- Make sure the cache-invalidation signatures are updated alongside any change.
 
 ---
 

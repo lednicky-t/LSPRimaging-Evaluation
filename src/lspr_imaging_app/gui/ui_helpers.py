@@ -132,14 +132,5 @@ def area_delta_text(use_micrometers: bool, microns_per_pixel: float, area_px2: f
     return f"{area_value:.0f} px\u00b2"
 
 
-def current_ome_zarr_chunk_size(chunk_mode: str, suggest_chunk_size) -> int:
-    if chunk_mode == "auto":
-        return int(suggest_chunk_size())
-    try:
-        return max(int(chunk_mode), 64)
-    except Exception:
-        return int(suggest_chunk_size())
-
-
 def current_ome_zarr_compression_enabled(is_checked: bool) -> bool:
     return bool(is_checked)

@@ -138,11 +138,12 @@ class DatasetController:
         try:
             chunk_size_px = int(self.window._current_ome_zarr_chunk_size())
             compression_enabled = bool(self.window._current_ome_zarr_compression_enabled())
+            shard_mode = str(self.window._current_ome_zarr_shard_mode())
         except Exception as exc:
             QMessageBox.critical(self.window, "Stack to Zarr export failed", str(exc))
             self.window._set_status_text(f"Stack to Zarr export failed: {exc}")
             return
-        summary = self._describe_ome_zarr_export_plan(destination, chunk_size_px, compression_enabled)
+        summary = self._describe_ome_zarr_export_plan(destination, chunk_size_px, compression_enabled, shard_mode)
         confirm = QMessageBox.question(
             self.window,
             "Confirm Stack to Zarr export",
@@ -152,9 +153,9 @@ class DatasetController:
         )
         if confirm != QMessageBox.StandardButton.Yes:
             return
-        self.window._start_ome_zarr_export(destination, chunk_size_px, compression_enabled=compression_enabled)
+        self.window._start_ome_zarr_export(destination, chunk_size_px, compression_enabled=compression_enabled, shard_mode=shard_mode)
 
-    def _describe_ome_zarr_export_plan(self, destination: Path, chunk_size_px: int, compression_enabled: bool) -> str:
+    def _describe_ome_zarr_export_plan(self, destination: Path, chunk_size_px: int, compression_enabled: bool, shard_mode: str = "per_image") -> str:
         preprocessing = self.window._state.preprocessing
         tools_applied = bool(getattr(preprocessing, "image_tools_enabled", False))
         lines = [f"Destination: {destination}", ""]
@@ -185,8 +186,10 @@ class DatasetController:
             lines.append("Image tools: NOT applied — raw, untransformed source pixels will be exported.")
             lines.append("  - No pixel size metadata will be embedded (requires image tools applied + calibration enabled).")
         lines.append("")
-        lines.append(f"Chunk size: {int(chunk_size_px)} px")
-        lines.append(f"Compression: {'zstd + bitshuffle (on)' if compression_enabled else 'none (off)'}")
+        lines.append(f"Chunk tile: {int(chunk_size_px)} px")
+        shard_label = "1 image per file" if shard_mode == "per_image" else "1 frame per file (all wavelengths)"
+        lines.append(f"Shard: {shard_label}")
+        lines.append(f"Compression: {'lz4 + bitshuffle (on)' if compression_enabled else 'none (off)'}")
         lines.append("")
         lines.append("Proceed with export?")
         return "\n".join(lines)

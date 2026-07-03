@@ -15,8 +15,9 @@ from run_bootstrap import bootstrap_app_environment
 
 bootstrap_app_environment("apps/LSPRi/eva/src")
 
-from lspr_imaging_app.app import main
-
-
-if __name__ == "__main__":
+if __name__ == "__main__" and not sys.flags.run_command:
+    # sys.flags.run_command is set when Python is invoked with -c "...", which is
+    # how multiprocessing.spawn starts worker processes on Windows.  Without this
+    # guard the workers would re-run main() and try to create a second Qt app.
+    from lspr_imaging_app.app import main
     main()

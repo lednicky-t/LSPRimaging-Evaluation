@@ -366,10 +366,7 @@ class UIStateManager:
             return
         window._ome_zarr_chunk_controls_syncing = True
         try:
-            mode = str(window.ome_zarr_chunk_mode_combo.currentData() or "auto")
-            window._settings.setValue("ome_zarr/chunk_mode", mode)
             size = window._current_ome_zarr_chunk_size()
-            window.ome_zarr_chunk_value_label.setText(f"{int(size)} px")
             window._settings.setValue("ome_zarr/chunk_size_px", int(size))
             window.ome_zarr_chunk_guide_button.setIcon(window._ome_zarr_grid_icon(window.ome_zarr_chunk_guide_button.isChecked()))
             compression_enabled = window._current_ome_zarr_compression_enabled()
