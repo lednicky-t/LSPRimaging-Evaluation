@@ -6,6 +6,7 @@ h5py
 pydantic>=2
 imagecodecs
 scipy
+opencv-python-headless
 tifffile
 scikit-image
 tabler-icons

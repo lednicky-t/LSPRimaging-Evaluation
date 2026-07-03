@@ -20,6 +20,7 @@ dependencies = [
     "pyqtgraph",
     "scikit-image",
     "scipy",
+    "opencv-python-headless",
     "tifffile",
     "tabler-qicon",
     "lucide",

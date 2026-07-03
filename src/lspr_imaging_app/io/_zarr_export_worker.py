@@ -128,8 +128,8 @@ def write_shard(spec: ShardWriteSpec) -> int:
         plane = np.asarray(_load_image(record_path), dtype=dtype)
 
         if spec.apply_image_tools and spec.preprocessing is not None:
-            from lspr_imaging_app.processing.preprocess import apply_spatial_preprocessing
-            plane = np.asarray(apply_spatial_preprocessing(plane, spec.preprocessing), dtype=dtype)
+            from lspr_imaging_app.processing.preprocess import apply_spatial_preprocessing_export
+            plane = np.asarray(apply_spatial_preprocessing_export(plane, spec.preprocessing), dtype=dtype)
 
         # Pad to exact shard dimensions so every tile is a full inner_chunk
         h, w = plane.shape[:2]
