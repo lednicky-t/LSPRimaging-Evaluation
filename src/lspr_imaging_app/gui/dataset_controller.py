@@ -2,10 +2,18 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PyQt6.QtWidgets import QFileDialog, QMessageBox
+from PyQt6.QtWidgets import QFileDialog, QInputDialog, QMessageBox
 
 from lspr_imaging_app.domain.models import AreaRoiDetectionSettings, MaskSettings
-from lspr_imaging_app.io.dataset import dataset_record_map, load_dataset
+from lspr_imaging_app.io.dataset import (
+    build_ome_zarr_export_folder_name,
+    compare_ome_zarr_summaries,
+    dataset_record_map,
+    describe_new_ome_zarr_export,
+    load_dataset,
+    read_existing_ome_zarr_summary,
+    sanitize_ome_zarr_export_name,
+)
 
 
 class DatasetController:
@@ -114,6 +122,25 @@ class DatasetController:
         if dataset is None:
             self.window._set_status_text("Load a dataset before exporting Stack to Zarr.")
             return
+        try:
+            chunk_size_px = int(self.window._current_ome_zarr_chunk_size())
+            compression_enabled = bool(self.window._current_ome_zarr_compression_enabled())
+            shard_mode = str(self.window._current_ome_zarr_shard_mode())
+        except Exception as exc:
+            QMessageBox.critical(self.window, "Stack to Zarr export failed", str(exc))
+            self.window._set_status_text(f"Stack to Zarr export failed: {exc}")
+            return
+
+        name, name_ok = QInputDialog.getText(
+            self.window,
+            "Name this Stack to Zarr export",
+            "Export name (used to build the destination folder name):",
+            text=dataset.folder.name,
+        )
+        if not name_ok:
+            return
+        name = sanitize_ome_zarr_export_name(name)
+
         default_parent = dataset.folder if dataset.folder.exists() else dataset.folder.parent
         if not default_parent.exists():
             default_parent = dataset.folder.parent if dataset.folder.parent.exists() else dataset.folder
@@ -124,25 +151,30 @@ class DatasetController:
         )
         if not parent_dir:
             return
-        destination = Path(parent_dir) / f"{dataset.folder.name}.ome.zarr"
-        if destination.exists():
-            confirm = QMessageBox.question(
-                self.window,
-                "Overwrite Stack to Zarr export?",
-                f"{destination.name} already exists. Replace it?",
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                QMessageBox.StandardButton.No,
-            )
-            if confirm != QMessageBox.StandardButton.Yes:
-                return
+
+        preprocessing = self.window._state.preprocessing
         try:
-            chunk_size_px = int(self.window._current_ome_zarr_chunk_size())
-            compression_enabled = bool(self.window._current_ome_zarr_compression_enabled())
-            shard_mode = str(self.window._current_ome_zarr_shard_mode())
+            new_summary = describe_new_ome_zarr_export(
+                dataset, preprocessing,
+                chunk_size_px=chunk_size_px, compression_enabled=compression_enabled, shard_mode=shard_mode,
+            )
         except Exception as exc:
             QMessageBox.critical(self.window, "Stack to Zarr export failed", str(exc))
             self.window._set_status_text(f"Stack to Zarr export failed: {exc}")
             return
+        folder_name = build_ome_zarr_export_folder_name(
+            name,
+            width=new_summary.width, height=new_summary.height,
+            frame_count=new_summary.frame_count, wavelength_count=new_summary.wavelength_count,
+            chunk_size_px=new_summary.chunk_size_px, shard_mode=new_summary.shard_mode,
+            compression_enabled=new_summary.compression_enabled, dtype=new_summary.dtype_str,
+        )
+        destination = Path(parent_dir) / folder_name
+
+        destination = self._resolve_ome_zarr_destination_collision(destination, new_summary)
+        if destination is None:
+            return
+
         summary = self._describe_ome_zarr_export_plan(destination, chunk_size_px, compression_enabled, shard_mode)
         confirm = QMessageBox.question(
             self.window,
@@ -154,6 +186,74 @@ class DatasetController:
         if confirm != QMessageBox.StandardButton.Yes:
             return
         self.window._start_ome_zarr_export(destination, chunk_size_px, compression_enabled=compression_enabled, shard_mode=shard_mode)
+
+    def _resolve_ome_zarr_destination_collision(self, destination: Path, new_summary) -> Path | None:
+        """If `destination` already exists, compare its saved parameters against
+        the prospective export and ask the user how to proceed. Returns the
+        (possibly adjusted, e.g. auto-suffixed) destination to use, or None if
+        the export should be cancelled.
+        """
+        while destination.exists():
+            existing_summary = read_existing_ome_zarr_summary(destination)
+            if existing_summary is None:
+                confirm = QMessageBox.question(
+                    self.window,
+                    "Folder already exists",
+                    f"{destination.name} already exists and doesn't look like a previous "
+                    "OME-Zarr export from this app. Overwrite it?",
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                    QMessageBox.StandardButton.No,
+                )
+                return destination if confirm == QMessageBox.StandardButton.Yes else None
+
+            all_match, rows = compare_ome_zarr_summaries(existing_summary, new_summary)
+            if all_match:
+                confirm = QMessageBox.question(
+                    self.window,
+                    "Identical export already exists",
+                    f"An OME-Zarr export with exactly these parameters already exists at:\n{destination}\n\nOverwrite it?",
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                    QMessageBox.StandardButton.No,
+                )
+                return destination if confirm == QMessageBox.StandardButton.Yes else None
+
+            table_lines = [f"{'Field':<24} {'Existing':<32} {'New'}"]
+            table_lines.append("-" * 80)
+            for label, existing_value, new_value in rows:
+                marker = "  " if existing_value == new_value else "* "
+                table_lines.append(f"{marker}{label:<22} {existing_value:<32} {new_value}")
+            message = (
+                f"A different OME-Zarr export already exists at:\n{destination}\n\n"
+                + "\n".join(table_lines)
+                + "\n\nAdd this as a new, separately-named export; replace the existing one; or cancel?"
+            )
+            box = QMessageBox(self.window)
+            box.setWindowTitle("Existing export has different parameters")
+            box.setText(message)
+            add_button = box.addButton("Add as new", QMessageBox.ButtonRole.AcceptRole)
+            replace_button = box.addButton("Replace", QMessageBox.ButtonRole.DestructiveRole)
+            box.addButton("Cancel", QMessageBox.ButtonRole.RejectRole)
+            box.setDefaultButton(add_button)
+            box.exec()
+            clicked = box.clickedButton()
+            if clicked is replace_button:
+                return destination
+            if clicked is add_button:
+                destination = self._next_available_ome_zarr_path(destination)
+                continue
+            return None
+        return destination
+
+    @staticmethod
+    def _next_available_ome_zarr_path(destination: Path) -> Path:
+        suffix = ".ome.zarr"
+        stem = destination.name[: -len(suffix)] if destination.name.endswith(suffix) else destination.stem
+        counter = 2
+        while True:
+            candidate = destination.with_name(f"{stem}_{counter}{suffix}")
+            if not candidate.exists():
+                return candidate
+            counter += 1
 
     def _describe_ome_zarr_export_plan(self, destination: Path, chunk_size_px: int, compression_enabled: bool, shard_mode: str = "per_image") -> str:
         preprocessing = self.window._state.preprocessing

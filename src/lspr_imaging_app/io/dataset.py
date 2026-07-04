@@ -5,6 +5,7 @@ import logging
 import re
 import threading
 import time
+from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
 from typing import Callable
@@ -276,6 +277,230 @@ def _format_seconds(seconds: float) -> str:
     return f"{minutes:02d}:{seconds:02d}"
 
 
+def probe_ome_zarr_export_shape(
+    dataset: ImageDataset,
+    preprocessing: PreprocessingSettings | None,
+) -> tuple[int, int, np.dtype]:
+    """Determine the (height, width, dtype) an OME-Zarr export of this dataset
+    would produce, without running the full export. Used both by the exporter
+    itself and by the GUI to name/compare a destination folder before export
+    actually starts, so the two must stay in exact agreement.
+    """
+    records = sorted(dataset.records, key=lambda record: (int(record.key.frame_index), float(record.key.wavelength_nm)))
+    if not records:
+        raise ValueError("No images are available for OME-Zarr export.")
+    apply_image_tools = preprocessing is not None and bool(getattr(preprocessing, "image_tools_enabled", False))
+    first_image = _load_image_array_native(str(records[0].path))
+    if apply_image_tools:
+        first_image = apply_spatial_preprocessing(first_image, preprocessing)
+    if first_image.ndim != 2:
+        raise ValueError("OME-Zarr export expects 2D image planes.")
+    height, width = first_image.shape[:2]
+    if np.issubdtype(first_image.dtype, np.integer):
+        target_dtype = np.dtype(np.uint16 if first_image.dtype.itemsize <= 2 else first_image.dtype)
+    else:
+        target_dtype = np.dtype(np.float32)
+    return int(height), int(width), target_dtype
+
+
+def format_ome_zarr_dtype_tag(dtype: np.dtype) -> str:
+    kind_prefix = {"u": "u", "i": "i", "f": "f"}.get(np.dtype(dtype).kind, np.dtype(dtype).kind)
+    return f"{kind_prefix}{np.dtype(dtype).itemsize * 8}"
+
+
+_SAFE_NAME_RE = re.compile(r"[^A-Za-z0-9_-]+")
+
+
+def sanitize_ome_zarr_export_name(name: str) -> str:
+    cleaned = _SAFE_NAME_RE.sub("_", name.strip()).strip("_")
+    return cleaned or "export"
+
+
+def build_ome_zarr_export_folder_name(
+    name: str,
+    *,
+    width: int,
+    height: int,
+    frame_count: int,
+    wavelength_count: int,
+    chunk_size_px: int,
+    shard_mode: str,
+    compression_enabled: bool,
+    dtype: np.dtype,
+) -> str:
+    """Compact, human-scannable folder name: name + the parameters that most
+    affect what the dataset actually contains (size, frame/wavelength count,
+    chunking/sharding, compression, dtype). Collision-safety against a
+    same-named-but-different export is handled separately by comparing the
+    destination's actual saved metadata, not by this name alone.
+    """
+    safe_name = sanitize_ome_zarr_export_name(name)
+    shard_tag = "F" if shard_mode == "per_frame" else "I"
+    compression_tag = "Z" if compression_enabled else "N"
+    dtype_tag = format_ome_zarr_dtype_tag(dtype)
+    return (
+        f"{safe_name}_{int(width)}x{int(height)}_{int(frame_count)}x{int(wavelength_count)}"
+        f"_c{int(chunk_size_px)}{shard_tag}{compression_tag}_{dtype_tag}.ome.zarr"
+    )
+
+
+@dataclass
+class OmeZarrExportSummary:
+    width: int
+    height: int
+    frame_count: int
+    wavelength_count: int
+    chunk_size_px: int
+    shard_mode: str
+    compression_enabled: bool
+    dtype_str: str
+    image_tools_applied: bool
+    rotation_angle_deg: float = 0.0
+    rotation_fill_dark: bool = False
+    flip_horizontal: bool = False
+    flip_vertical: bool = False
+    crop: tuple[int, int, int, int] | None = None
+    pixel_size_um: tuple[float, float] | None = None
+    source_folder: str | None = None
+
+    def field_lines(self) -> list[tuple[str, str]]:
+        shard_label = "1 frame per file" if self.shard_mode == "per_frame" else "1 image per file"
+        lines = [
+            ("Image size", f"{self.width} x {self.height} px"),
+            ("Frames x wavelengths", f"{self.frame_count} x {self.wavelength_count}"),
+            ("Chunk / shard", f"{self.chunk_size_px}px, {shard_label}"),
+            ("Compression", "lz4 + bitshuffle" if self.compression_enabled else "none"),
+            ("Dtype", self.dtype_str),
+            ("Image tools", "applied (linked)" if self.image_tools_applied else "not applied (raw pixels)"),
+        ]
+        if self.image_tools_applied:
+            lines.append(("Rotation", f"{self.rotation_angle_deg:.2f} deg" if abs(self.rotation_angle_deg) > 1e-9 else "none"))
+            flips = [label for enabled, label in ((self.flip_horizontal, "horizontal"), (self.flip_vertical, "vertical")) if enabled]
+            lines.append(("Flip", ", ".join(flips) if flips else "none"))
+            lines.append(("Crop", f"x={self.crop[0]}, y={self.crop[1]}, w={self.crop[2]}, h={self.crop[3]}" if self.crop else "none"))
+        if self.pixel_size_um is not None:
+            lines.append(("Pixel size", f"{self.pixel_size_um[0]:.4f} x {self.pixel_size_um[1]:.4f} um/px"))
+        if self.source_folder:
+            lines.append(("Source folder", self.source_folder))
+        return lines
+
+
+def describe_new_ome_zarr_export(
+    dataset: ImageDataset,
+    preprocessing: PreprocessingSettings | None,
+    *,
+    chunk_size_px: int,
+    compression_enabled: bool,
+    shard_mode: str,
+) -> OmeZarrExportSummary:
+    height, width, target_dtype = probe_ome_zarr_export_shape(dataset, preprocessing)
+    apply_image_tools = preprocessing is not None and bool(getattr(preprocessing, "image_tools_enabled", False))
+    crop_tuple = None
+    rotation_angle_deg = 0.0
+    rotation_fill_dark = False
+    flip_horizontal = False
+    flip_vertical = False
+    pixel_size_um = None
+    if apply_image_tools and preprocessing is not None:
+        rotation_angle_deg = float(preprocessing.rotation_angle_deg)
+        rotation_fill_dark = bool(preprocessing.rotation_fill_dark)
+        flip_horizontal = bool(preprocessing.flip_horizontal)
+        flip_vertical = bool(preprocessing.flip_vertical)
+        crop = preprocessing.crop
+        if crop.enabled and crop.width > 0 and crop.height > 0:
+            crop_tuple = (int(crop.x), int(crop.y), int(crop.width), int(crop.height))
+        if bool(getattr(preprocessing, "calibration_enabled", False)):
+            pixel_size_um = (float(preprocessing.microns_per_pixel_x), float(preprocessing.microns_per_pixel_y))
+    return OmeZarrExportSummary(
+        width=width,
+        height=height,
+        frame_count=len(dataset.frame_indices),
+        wavelength_count=len(dataset.wavelengths_nm),
+        chunk_size_px=int(chunk_size_px),
+        shard_mode=str(shard_mode),
+        compression_enabled=bool(compression_enabled),
+        dtype_str=str(target_dtype),
+        image_tools_applied=apply_image_tools,
+        rotation_angle_deg=rotation_angle_deg,
+        rotation_fill_dark=rotation_fill_dark,
+        flip_horizontal=flip_horizontal,
+        flip_vertical=flip_vertical,
+        crop=crop_tuple,
+        pixel_size_um=pixel_size_um,
+        source_folder=str(dataset.folder),
+    )
+
+
+def read_existing_ome_zarr_summary(destination: Path) -> OmeZarrExportSummary | None:
+    """Read back an existing OME-Zarr export's saved parameters for comparison
+    against a prospective new export. Returns None if `destination` isn't a
+    recognized LSPR OME-Zarr export (missing/foreign content, or unreadable).
+    """
+    if not destination.exists():
+        return None
+    try:
+        zarr, _, _, _ = _require_ome_zarr_support()
+        from zarr.storage import LocalStore
+
+        group = zarr.open_group(store=LocalStore(str(destination)), mode="r")
+        lspr_attrs = dict(group.attrs.get(OME_ZARR_LSPR_KEY, {}))
+        if not lspr_attrs:
+            return None
+        array = group[OME_ZARR_ARRAY_DIRNAME]
+        frame_count, wavelength_count, height, width = array.shape
+        image_tools = lspr_attrs.get("image_tools") or {}
+        crop = image_tools.get("crop")
+        pixel_size = lspr_attrs.get("pixel_size_um")
+        return OmeZarrExportSummary(
+            width=int(width),
+            height=int(height),
+            frame_count=int(frame_count),
+            wavelength_count=int(wavelength_count),
+            chunk_size_px=int(lspr_attrs.get("chunk_size_px", 0)),
+            shard_mode=str(lspr_attrs.get("shard_mode", "per_image")),
+            compression_enabled=str(lspr_attrs.get("compression", "none")) != "none",
+            dtype_str=str(lspr_attrs.get("dtype", "")),
+            image_tools_applied=bool(lspr_attrs.get("image_tools_applied", False)),
+            rotation_angle_deg=float(image_tools.get("rotation_angle_deg", 0.0)),
+            rotation_fill_dark=bool(image_tools.get("rotation_fill_dark", False)),
+            flip_horizontal=bool(image_tools.get("flip_horizontal", False)),
+            flip_vertical=bool(image_tools.get("flip_vertical", False)),
+            crop=(int(crop["x"]), int(crop["y"]), int(crop["width"]), int(crop["height"])) if crop else None,
+            pixel_size_um=(float(pixel_size["x"]), float(pixel_size["y"])) if pixel_size else None,
+            source_folder=lspr_attrs.get("source_folder"),
+        )
+    except Exception:
+        # Expected whenever the destination isn't a recognized LSPR OME-Zarr export
+        # (e.g. an unrelated folder, or a partially-written one) — not an error.
+        logging.getLogger("lspr_imaging_app.io").debug(
+            "Destination %s is not a readable LSPR OME-Zarr export.", destination, exc_info=True
+        )
+        return None
+
+
+def compare_ome_zarr_summaries(
+    existing: OmeZarrExportSummary,
+    new: OmeZarrExportSummary,
+) -> tuple[bool, list[tuple[str, str, str]]]:
+    """Compare two export summaries field-by-field. Returns (all_match, rows),
+    where rows is (field_label, existing_value, new_value) for every field
+    present on either side (fields only one side has show as "-" on the other).
+    """
+    existing_lines = dict(existing.field_lines())
+    new_lines = dict(new.field_lines())
+    all_labels = list(existing_lines.keys())
+    all_labels += [label for label in new_lines.keys() if label not in existing_lines]
+    rows: list[tuple[str, str, str]] = []
+    all_match = True
+    for label in all_labels:
+        existing_value = existing_lines.get(label, "-")
+        new_value = new_lines.get(label, "-")
+        if existing_value != new_value:
+            all_match = False
+        rows.append((label, existing_value, new_value))
+    return all_match, rows
+
+
 def export_ome_zarr_dataset(
     dataset: ImageDataset,
     destination: Path,
@@ -306,20 +531,7 @@ def export_ome_zarr_dataset(
     # they are "applied/linked" in the GUI. Calibration (um/px) is only meaningful
     # in that same processed coordinate space, so it rides along with the same flag.
     apply_image_tools = preprocessing is not None and bool(getattr(preprocessing, "image_tools_enabled", False))
-
-    def transform_plane(plane: np.ndarray) -> np.ndarray:
-        if not apply_image_tools:
-            return plane
-        return apply_spatial_preprocessing(plane, preprocessing)
-
-    first_image = transform_plane(_load_image_array_native(str(records[0].path)))
-    if first_image.ndim != 2:
-        raise ValueError("OME-Zarr export expects 2D image planes.")
-    height, width = first_image.shape[:2]
-    if np.issubdtype(first_image.dtype, np.integer):
-        target_dtype = np.dtype(np.uint16 if first_image.dtype.itemsize <= 2 else first_image.dtype)
-    else:
-        target_dtype = np.dtype(np.float32)
+    height, width, target_dtype = probe_ome_zarr_export_shape(dataset, preprocessing)
     frames = dataset.frame_indices
     wavelengths = dataset.wavelengths_nm
     record_map = dataset_record_map(dataset)
