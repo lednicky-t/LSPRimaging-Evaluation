@@ -28,7 +28,7 @@ PANEL_HELP: dict[str, PanelHelpEntry] = {
     "dataset": PanelHelpEntry(
         title="Dataset",
         description=(
-            "Load a dataset, choose the reference mode, and move through frames and wavelengths.\n"
+            "Load a dataset, choose the reference mode, and move through spectral cubes and wavelengths.\n"
             "The summary block shows whether the current data is a raw ImageStack or a Stack to Zarr.\n"
             "Reference mode chooses how the reference image is selected and stored in the processing profile."
         ),

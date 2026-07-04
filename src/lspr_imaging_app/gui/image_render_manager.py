@@ -38,7 +38,7 @@ class ImageRenderManager:
         window._update_sensorgram_current_point()
         record = window._record_map.get((frame, wavelength))
         if record is None:
-            window.status_label.setText("Selected frame/wavelength combination is missing.")
+            window.status_label.setText("Selected spectral cube/wavelength combination is missing.")
             return
         image_key = (frame, wavelength)
         if window._current_image_key == image_key:
@@ -55,7 +55,7 @@ class ImageRenderManager:
             started_at = time.perf_counter()
             window._apply_loaded_image(cached, record.path, image_key, frame, wavelength, record.path.name)
             elapsed = window._format_elapsed_seconds(time.perf_counter() - started_at)
-            window._set_status_text(f"Img F{frame} {wavelength:g}nm | cache {elapsed}")
+            window._set_status_text(f"Img spectral cube {frame} {wavelength:g}nm | cache {elapsed}")
             return
         window._pending_image_refresh_payload = (
             signature,
@@ -154,7 +154,7 @@ class ImageRenderManager:
                 window._append_workflow_log_throttled("image_apply", f"Image apply | {apply_elapsed}", level="debug", min_interval=2.0)
         elapsed = window._format_elapsed_seconds(time.perf_counter() - started_at) if started_at is not None else ""
         if elapsed:
-            window._set_status_text(f"Img F{frame} {wavelength:g}nm | load {elapsed}")
+            window._set_status_text(f"Img spectral cube {frame} {wavelength:g}nm | load {elapsed}")
         if window._pending_image_refresh_payload is not None:
             self.start_pending_image_refresh()
 
@@ -247,7 +247,7 @@ class ImageRenderManager:
         window._sync_rotation_tool()
         window._sync_crop_tool(processed.shape)
         window._update_landmark_overlays()
-        window._set_status_text(f"Img F{frame} {wavelength:g}nm")
+        window._set_status_text(f"Img spectral cube {frame} {wavelength:g}nm")
         if not window._chromatic_setup_active and not bool(getattr(window, "_image_tools_preview_only", False)):
             window._schedule_processing_state_save()
             window._refresh_visible_spectrum_from_cache()

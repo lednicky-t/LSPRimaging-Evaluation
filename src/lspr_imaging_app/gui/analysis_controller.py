@@ -79,12 +79,12 @@ class AnalysisController:
                 self.window._sensorgram_cache.popitem(last=False)
         self.set_sensorgram_series(self.window._sensorgram_frame_indices, self.window._sensorgram_metric_values)
         summary = (
-            f"{self.window._analysis_metric_label()} | Calculated {result.completed_count}/{result.total_count} frames"
+            f"{self.window._analysis_metric_label()} | Calculated {result.completed_count}/{result.total_count} spectral cubes"
             f" | Polynomial order {self.window._analysis_poly_order()}"
         )
         if result.cancelled:
             summary = (
-                f"{self.window._analysis_metric_label()} | Stopped after {result.completed_count}/{result.total_count} frames"
+                f"{self.window._analysis_metric_label()} | Stopped after {result.completed_count}/{result.total_count} spectral cubes"
                 f" | Polynomial order {self.window._analysis_poly_order()}"
             )
         self.window._set_sensorgram_summary_text(summary)
@@ -177,11 +177,11 @@ class AnalysisController:
             return
         frames = self.available_analysis_frames()
         if not frames:
-            self.clear_sensorgram("No frames are available in the selected range.")
+            self.clear_sensorgram("No spectral cubes are available in the selected range.")
             return
         signature = self.window._sensorgram_signature_for_selection(frames, selected_roi_ids, selected_source_rois)
         if signature is None:
-            self.clear_sensorgram("No spectra are available in the selected frame range.")
+            self.clear_sensorgram("No spectra are available in the selected spectral cube range.")
             return
         if self.window._sensorgram_running and self.window._sensorgram_running_signature == signature:
             return
@@ -192,7 +192,7 @@ class AnalysisController:
         if self.window._sensorgram_running:
             self.window._pending_sensorgram_payload = (signature, frames, selected_roi_ids, selected_source_rois)
             self.window._set_sensorgram_summary_text(
-                f"{self.window._analysis_metric_label()} | Updating {len(frames)} frames"
+                f"{self.window._analysis_metric_label()} | Updating {len(frames)} spectral cubes"
             )
             return
         self._start_sensorgram_worker(signature, frames, selected_roi_ids, selected_source_rois)
@@ -259,7 +259,7 @@ class AnalysisController:
         self.window._update_analysis_control_state()
         fast_label = " [fast]" if use_fast_path else ""
         self.window._set_sensorgram_summary_text(
-            f"{self.window._analysis_metric_label()}{fast_label} | Preparing {len(frames)} frames"
+            f"{self.window._analysis_metric_label()}{fast_label} | Preparing {len(frames)} spectral cubes"
             f" | Range {frames[0]}-{frames[-1]}"
         )
         self.window._set_status_text("Preparing fitted sensorgram...")
@@ -318,7 +318,7 @@ class AnalysisController:
         self.set_sensorgram_series(
             self.window._sensorgram_frame_indices,
             self.window._sensorgram_metric_values,
-            summary_text=f"{self.window._analysis_metric_label()} | Calculating {self.window._sensorgram_frame_indices.size}/{total_count} frames",
+            summary_text=f"{self.window._analysis_metric_label()} | Calculating {self.window._sensorgram_frame_indices.size}/{total_count} spectral cubes",
         )
 
     def on_sensorgram_ready(self, request_id: int, result) -> None:
@@ -448,8 +448,8 @@ class AnalysisController:
         range_text = ""
         frame_range = self.window._current_analysis_frame_range()
         if frame_range is not None:
-            range_text = f" | Frames {frame_range[0]}-{frame_range[1]}"
-        message = reason or f"{metric_label} sensorgram is out of date | Press Calculate all frames{range_text}"
+            range_text = f" | Spectral cubes {frame_range[0]}-{frame_range[1]}"
+        message = reason or f"{metric_label} sensorgram is out of date | Press Calculate all spectral cubes{range_text}"
         self.clear_sensorgram(message)
 
     # ------------------------------------------------------------------
@@ -901,7 +901,7 @@ class AnalysisController:
             self.window._schedule_sensorgram_refresh()
         else:
             self.window._mark_sensorgram_stale(
-                f"{self.window._analysis_metric_label()} sensorgram is out of date | Press Calculate all frames"
+                f"{self.window._analysis_metric_label()} sensorgram is out of date | Press Calculate all spectral cubes"
             )
         selected_source_rois = self.window._selected_source_rois_snapshot()
         if len(selected_source_rois) == 1:
@@ -936,7 +936,7 @@ class AnalysisController:
             self.window.analysis_end_frame_spin.blockSignals(False)
         if self.window._analysis_live_preview_enabled and not self.preview_sensorgram_from_cache():
             self.mark_stale(
-                f"{self.window._analysis_metric_label()} sensorgram is out of date | Press Calculate all frames"
+                f"{self.window._analysis_metric_label()} sensorgram is out of date | Press Calculate all spectral cubes"
             )
         elif not self.window._analysis_live_preview_enabled:
             self.window._mark_sensorgram_stale()
@@ -962,7 +962,7 @@ class AnalysisController:
 
         frames = self.window._available_analysis_frames()
         if not frames:
-            self.window._clear_sensorgram("No frames are available in the selected range.")
+            self.window._clear_sensorgram("No spectral cubes are available in the selected range.")
             return
 
         cached_signature = self.window._sensorgram_signature_for_selection(frames, selected_roi_ids, selected_source_rois)
@@ -985,7 +985,7 @@ class AnalysisController:
                     self.window._set_sensorgram_series(self.window._sensorgram_frame_indices, self.window._sensorgram_metric_values)
                     summary = (
                         f"{self.window._analysis_metric_label()} | Cached {cached_sensorgram.completed_count}/"
-                        f"{cached_sensorgram.total_count} frames | Polynomial order {self.window._analysis_poly_order()}"
+                        f"{cached_sensorgram.total_count} spectral cubes | Polynomial order {self.window._analysis_poly_order()}"
                     )
                     self.window._set_sensorgram_summary_text(summary)
                     self.window._set_status_text("Sensorgram cache used.")
@@ -1015,7 +1015,7 @@ class AnalysisController:
             self.window._sensorgram_frame_indices,
             self.window._sensorgram_metric_values,
             summary_text=(
-                f"{self.window._analysis_metric_label()} | Calculating {self.window._sensorgram_frame_indices.size}/{total_count} frames"
+                f"{self.window._analysis_metric_label()} | Calculating {self.window._sensorgram_frame_indices.size}/{total_count} spectral cubes"
             ),
         )
 
@@ -1054,12 +1054,12 @@ class AnalysisController:
             level="success",
         )
         summary = (
-            f"{self.window._analysis_metric_label()} | Calculated {result.completed_count}/{result.total_count} frames"
+            f"{self.window._analysis_metric_label()} | Calculated {result.completed_count}/{result.total_count} spectral cubes"
             f" | Polynomial order {self.window._analysis_poly_order()}"
         )
         if result.cancelled:
             summary = (
-                f"{self.window._analysis_metric_label()} | Stopped after {result.completed_count}/{result.total_count} frames"
+                f"{self.window._analysis_metric_label()} | Stopped after {result.completed_count}/{result.total_count} spectral cubes"
                 f" | Polynomial order {self.window._analysis_poly_order()}"
             )
         self.window._set_sensorgram_summary_text(summary)
@@ -1276,7 +1276,7 @@ class AnalysisController:
         sample_pixels = int(np.nanmax(primary_result.sample_pixel_count)) if primary_result.sample_pixel_count.size else 0
         reference_pixels = int(np.nanmax(primary_result.reference_pixel_count)) if primary_result.reference_pixel_count.size else 0
         self.window._set_spectrum_summary_text(
-            f"{self.window._spectrum_selection_label()} | Frame {frame if frame is not None else '-'}"
+            f"{self.window._spectrum_selection_label()} | Spectral cube {frame if frame is not None else '-'}"
             f" | ROI px: sample {sample_pixels}, reference {reference_pixels}{current_text}{fit_text}"
         )
         self.window._update_single_frame_sensorgram(metric_value, metric_signal)

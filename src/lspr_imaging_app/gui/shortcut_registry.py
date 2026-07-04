@@ -22,7 +22,7 @@ SHORTCUT_SECTIONS: tuple[ShortcutSection, ...] = (
             "Ctrl+Z: Undo last recorded edit",
             "Ctrl+Shift+Z / Ctrl+Y: Redo the last undone edit",
             "Shift+PageUp / Shift+PageDown: Previous / next wavelength image",
-            "Ctrl+Shift+PageUp / Ctrl+Shift+PageDown: Previous / next time frame",
+            "Ctrl+Shift+PageUp / Ctrl+Shift+PageDown: Previous / next spectral cube",
             "F1: Show this shortcut list",
         ),
     ),
@@ -31,7 +31,7 @@ SHORTCUT_SECTIONS: tuple[ShortcutSection, ...] = (
         title="Dataset / image navigation",
         lines=(
             "Shift+PageUp / Shift+PageDown: Previous / next wavelength image",
-            "Ctrl+Shift+PageUp / Ctrl+Shift+PageDown: Previous / next time frame",
+            "Ctrl+Shift+PageUp / Ctrl+Shift+PageDown: Previous / next spectral cube",
         ),
     ),
     ShortcutSection(

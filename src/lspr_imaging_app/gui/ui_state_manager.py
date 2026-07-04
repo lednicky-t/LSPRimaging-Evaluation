@@ -229,7 +229,7 @@ class UIStateManager:
         current_frame = current_key[0] if current_key is not None else None
         current_wavelength = current_key[1] if current_key is not None else None
         reference_text = (
-            f"Reference image: F{int(current_frame)} / {float(current_wavelength):g} nm"
+            f"Reference image: spectral cube {int(current_frame)} / {float(current_wavelength):g} nm"
             if current_key is not None
             else "Reference image: auto"
         )

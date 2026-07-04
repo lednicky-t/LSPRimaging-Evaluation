@@ -287,7 +287,7 @@ class DatasetController:
             lines.append("  - No pixel size metadata will be embedded (requires image tools applied + calibration enabled).")
         lines.append("")
         lines.append(f"Chunk tile: {int(chunk_size_px)} px")
-        shard_label = "1 image per file" if shard_mode == "per_image" else "1 frame per file (all wavelengths)"
+        shard_label = "1 image per file" if shard_mode == "per_image" else "1 spectral cube per file (all wavelengths)"
         lines.append(f"Shard: {shard_label}")
         lines.append(f"Compression: {'lz4 + bitshuffle (on)' if compression_enabled else 'none (off)'}")
         lines.append("")

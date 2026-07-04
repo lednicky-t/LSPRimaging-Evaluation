@@ -634,13 +634,13 @@ class MainWindow(MainWindowIcons, QMainWindow):
         self.ome_zarr_shard_label.setToolTip("How many images are packed into a single shard file on disk.")
         self.ome_zarr_shard_mode_combo = QComboBox(self)
         self.ome_zarr_shard_mode_combo.addItem("1 image", "per_image")
-        self.ome_zarr_shard_mode_combo.addItem("1 frame", "per_frame")
+        self.ome_zarr_shard_mode_combo.addItem("1 spectral cube", "per_frame")
         saved_shard_mode = self._settings.value("ome_zarr/shard_mode", "per_image")
         idx = self.ome_zarr_shard_mode_combo.findData(saved_shard_mode)
         self.ome_zarr_shard_mode_combo.setCurrentIndex(max(idx, 0))
         self.ome_zarr_shard_mode_combo.setToolTip(
-            "1 image: one shard per wavelength×frame — best for viewing single images.\n"
-            "1 frame: one shard per frame (all wavelengths together) — best for spectral fitting, fewest files."
+            "1 image: one shard per wavelength × spectral cube — best for viewing single images.\n"
+            "1 spectral cube: one shard per spectral cube (all wavelengths together) — best for spectral fitting, fewest files."
         )
         self.ome_zarr_compression_label = QLabel("Compression", self)
         self.ome_zarr_compression_label.setObjectName("toolbarMiniLabel")
@@ -728,7 +728,7 @@ class MainWindow(MainWindowIcons, QMainWindow):
         self.reference_auto_button.setFixedSize(APP_THEME.compact_icon_outer, APP_THEME.compact_icon_outer)
         self.reference_auto_button.setIconSize(QSize(APP_THEME.compact_icon_inner, APP_THEME.compact_icon_inner))
         self.reference_auto_button.setStyleSheet(transparent_icon_button_stylesheet())
-        self.reference_auto_button.setToolTip("Auto: Use the best wavelength in the current frame as the reference.")
+        self.reference_auto_button.setToolTip("Auto: Use the best wavelength in the current spectral cube as the reference.")
         self.reference_auto_button.setIcon(self._reference_mode_icon("auto", False))
         self.reference_manual_button = QToolButton(self)
         self.reference_manual_button.setCheckable(True)
@@ -737,13 +737,13 @@ class MainWindow(MainWindowIcons, QMainWindow):
         self.reference_manual_button.setFixedSize(APP_THEME.compact_icon_outer, APP_THEME.compact_icon_outer)
         self.reference_manual_button.setIconSize(QSize(APP_THEME.compact_icon_inner, APP_THEME.compact_icon_inner))
         self.reference_manual_button.setStyleSheet(transparent_icon_button_stylesheet())
-        self.reference_manual_button.setToolTip("Manual: Store the current frame and wavelength as the manual reference.")
+        self.reference_manual_button.setToolTip("Manual: Store the current spectral cube and wavelength as the manual reference.")
         self.reference_manual_button.setIcon(self._reference_mode_icon("manual", False))
         self.reference_mode_button_group = QButtonGroup(self)
         self.reference_mode_button_group.setExclusive(True)
         self.reference_mode_button_group.addButton(self.reference_auto_button)
         self.reference_mode_button_group.addButton(self.reference_manual_button)
-        self.reference_frame_status_label = QLabel("Frame: -", self)
+        self.reference_frame_status_label = QLabel("Spectral cube: -", self)
         self.reference_wavelength_status_label = QLabel("Wavelength: -", self)
         self.reference_method_status_label = QLabel("Method: -", self)
         self.reference_mode_combo = QComboBox(self)
@@ -1244,7 +1244,7 @@ class MainWindow(MainWindowIcons, QMainWindow):
         self.analysis_preview_button.setCursor(Qt.CursorShape.PointingHandCursor)
         self.analysis_calculate_all_button = self._free_standing_icon_label(
             self._make_analysis_all_frames_icon(False),
-            "Calculate all frames.",
+            "Calculate all spectral cubes.",
             size=APP_THEME.compact_icon_inner,
             parent=self,
         )
@@ -1321,7 +1321,7 @@ class MainWindow(MainWindowIcons, QMainWindow):
         self.spectrum_cursor_line.setZValue(20)
         self.spectrum_cursor_line.hide()
         self.spectrum_plot.addItem(self.spectrum_cursor_line)
-        self.sensorgram_summary_label = QLabel("Calculate all frames to build the fitted sensorgram.", self)
+        self.sensorgram_summary_label = QLabel("Calculate all spectral cubes to build the fitted sensorgram.", self)
         self.sensorgram_summary_label.setWordWrap(True)
         self.sensorgram_plot = pg.PlotWidget(parent=self)
         self.sensorgram_plot.setMinimumHeight(110)
@@ -1561,7 +1561,7 @@ class MainWindow(MainWindowIcons, QMainWindow):
         self.collapse_left_panels_action = QAction("Collapse left panels", self)
         self.about_action = QAction("About", self)
         self.calculate_spectrum_action = QAction("Calculate spectrum", self)
-        self.calculate_spectrum_action.setToolTip("Calculate the absorbance spectrum for the current frame and selected ROIs.")
+        self.calculate_spectrum_action.setToolTip("Calculate the absorbance spectrum for the current spectral cube and selected ROIs.")
 
         self.show_rois_check = self._create_view_toggle_button("roi", self._rois_visible, "Show or hide the ROI overlays.")
         self.bottom_roi_labels_button = self._create_label_visibility_button(self._roi_labels_visible)
@@ -2547,7 +2547,7 @@ class MainWindow(MainWindowIcons, QMainWindow):
 
     def _update_sensorgram_plot_labels(self) -> None:
         self.sensorgram_plot.setLabel("left", self._analysis_metric_axis_label())
-        self.sensorgram_plot.setLabel("bottom", "Frame")
+        self.sensorgram_plot.setLabel("bottom", "Spectral cube")
 
     def _analysis_plot_frame_range(self) -> tuple[int, int] | None:
         if not self._frame_values:
@@ -2711,7 +2711,7 @@ class MainWindow(MainWindowIcons, QMainWindow):
         return (
             f"{stack_label} loaded.\n"
             f"Images: {len(records)}\n"
-            f"Frames: {frame_text} | Wavelengths: {wavelength_text}\n"
+            f"Spectral cubes: {frame_text} | Wavelengths: {wavelength_text}\n"
             f"Dataset size: {self._format_dataset_bytes(size_bytes)}\n"
             f"Resolution: {resolution_text}\n"
             f"Dataset's date: {dataset_date}"
@@ -3128,8 +3128,8 @@ class MainWindow(MainWindowIcons, QMainWindow):
             "What stays in memory\n"
             "- Processed image cache for the current stack.\n"
             "- Per-ROI absorbance cache for single-ROI live preview.\n"
-            "- Frame absorbance cache for the same frame/settings combinations.\n"
-            "- Sensorgram cache for repeated frame-range calculations.\n"
+            "- Spectral cube absorbance cache for the same spectral cube/settings combinations.\n"
+            "- Sensorgram cache for repeated spectral-cube-range calculations.\n"
             "- Chromatic landmarks and fitted transforms.\n"
             "\n"
             "What is loaded live\n"
@@ -3140,15 +3140,15 @@ class MainWindow(MainWindowIcons, QMainWindow):
             "What is already optimized\n"
             "- Image refresh runs in the background.\n"
             "- Neighboring image planes are prefetched.\n"
-            "- Absorbance results are cached per ROI and per frame.\n"
+            "- Absorbance results are cached per ROI and per spectral cube.\n"
             "- Sensorgram preparation can reuse cached spectra when available.\n"
             "- Workflow events are mirrored to logs/lspr_imaging_<session>.log.\n"
             "- The Workflow console shows the same events live inside the app.\n"
             "\n"
             "Next useful optimizations\n"
-            "- Move more frame preparation off the UI thread.\n"
+            "- Move more spectral cube preparation off the UI thread.\n"
             "- Add selective ROI-only reads for compatible formats.\n"
-            "- Expand frame-level caching for repeated sensorgram navigation.\n"
+            "- Expand spectral-cube-level caching for repeated sensorgram navigation.\n"
             "- Keep using Stack to Zarr for random access and larger datasets.\n"
         )
 
@@ -3663,7 +3663,7 @@ class MainWindow(MainWindowIcons, QMainWindow):
         self.image_toolbar.setStyleSheet(dark_image_toolbar_stylesheet())
         self._configure_data_plot(self.histogram_plot, bottom_label="Intensity", left_label="Pixels (%)", y_min=0.0)
         self._configure_data_plot(self.spectrum_plot, bottom_label="Wavelength (nm)", left_label="Absorbance")
-        self._configure_data_plot(self.sensorgram_plot, bottom_label="Frame", left_label="Metric")
+        self._configure_data_plot(self.sensorgram_plot, bottom_label="Spectral cube", left_label="Metric")
         self._update_sensorgram_plot_labels()
         self._apply_high_contrast_button_styles()
 
@@ -5043,7 +5043,7 @@ class MainWindow(MainWindowIcons, QMainWindow):
             self._chromatic_landmark_marker_id = next_id
             self._selected_landmark_id = landmark_id
         self._set_status_text(
-            f"Stored reference point {landmark_id} at {key[1]:g} nm frame {key[0]}."
+            f"Stored reference point {landmark_id} at {key[1]:g} nm spectral cube {key[0]}."
         )
 
     def _clear_chromatic_landmarks(self, *, push_undo: bool = True) -> None:
@@ -5204,7 +5204,7 @@ class MainWindow(MainWindowIcons, QMainWindow):
         if ref_key is None:
             self.reference_summary.setText("Reference: not set.")
             self.reference_wavelength_status_label.setText("Wavelength: -")
-            self.reference_frame_status_label.setText("Frame: -")
+            self.reference_frame_status_label.setText("Spectral cube: -")
             self.reference_method_status_label.setText("Method: -")
             self._update_reference_navigation_styles()
             self._update_reference_star_overlay()
@@ -5215,9 +5215,9 @@ class MainWindow(MainWindowIcons, QMainWindow):
         wavelength_active = current_wavelength is not None and abs(float(current_wavelength) - float(ref_wavelength)) < 1e-6
         frame_active = current_frame is not None and int(current_frame) == int(ref_frame)
         method_text = "Auto" if mode != "manual" else "Manual"
-        self.reference_summary.setText(f"Reference: {method_text.lower()} | {ref_wavelength:g} nm | frame {ref_frame}")
+        self.reference_summary.setText(f"Reference: {method_text.lower()} | {ref_wavelength:g} nm | spectral cube {ref_frame}")
         self.reference_wavelength_status_label.setText(f"Wavelength: {ref_wavelength:g} nm")
-        self.reference_frame_status_label.setText(f"Frame: {ref_frame}")
+        self.reference_frame_status_label.setText(f"Spectral cube: {ref_frame}")
         self.reference_method_status_label.setText(f"Method: {method_text}")
         self.reference_wavelength_status_label.setStyleSheet(
             f"color: {'#84cc16' if wavelength_active else '#f8fafc'}; font-weight: 600;"
@@ -5283,7 +5283,7 @@ class MainWindow(MainWindowIcons, QMainWindow):
         self._update_landmark_overlays()
         if save:
             self._schedule_processing_state_save()
-        self._set_status_text(f"Manual reference set to {wavelength:g} nm | frame {frame}.")
+        self._set_status_text(f"Manual reference set to {wavelength:g} nm | spectral cube {frame}.")
 
     def _sync_auto_reference_to_current_frame(self) -> None:
         if str(self._state.preprocessing.reference_mode or "auto") != "auto":
@@ -5500,17 +5500,17 @@ class MainWindow(MainWindowIcons, QMainWindow):
         self._set_help(self.dataset_ome_zarr_export_button, "Export: write the current dataset to a Stack to Zarr in a chosen folder.")
         self._set_help(self.dataset_ome_zarr_export_stop_button, "Stop: cancel the running Stack to Zarr export.")
         self._set_help(self.ome_zarr_chunk_spin, "Chunk tile size for Zarr export. Any value 4–4096 px — does not need to be a power of 2.")
-        self._set_help(self.ome_zarr_shard_mode_combo, "Shard grouping: '1 image' = one file per wavelength×frame; '1 frame' = one file per time point (all wavelengths together).")
+        self._set_help(self.ome_zarr_shard_mode_combo, "Shard grouping: '1 image' = one file per wavelength × spectral cube; '1 spectral cube' = one file per time point (all wavelengths together).")
         self._set_help(self.ome_zarr_chunk_guide_button, "Guide: show chunk tiling over the current image.")
         self._set_help(self.ome_zarr_compression_button, "Compression: turn Stack to Zarr compression on or off.")
         self._set_help(self.export_settings_button, "Export preprocessing, ROI settings, ROIs, and groups to a JSON profile.")
         self._set_help(self.import_settings_button, "Import preprocessing, ROI settings, ROIs, and groups from a JSON profile.")
-        self._set_help(self.frame_slider, "Choose the reference frame.")
-        self._set_help(self.frame_spin, "Reference frame number.")
+        self._set_help(self.frame_slider, "Choose the reference spectral cube.")
+        self._set_help(self.frame_spin, "Reference spectral cube number.")
         self._set_help(self.wavelength_slider, "Choose the reference wavelength.")
         self._set_help(self.wavelength_spin, "Reference wavelength in nanometers.")
-        self._set_help(self.reference_auto_button, "Auto: use the best wavelength in the current frame as the reference image.")
-        self._set_help(self.reference_manual_button, "Manual: store the current frame and wavelength as the manual reference image.")
+        self._set_help(self.reference_auto_button, "Auto: use the best wavelength in the current spectral cube as the reference image.")
+        self._set_help(self.reference_manual_button, "Manual: store the current spectral cube and wavelength as the manual reference image.")
         self._set_help(self.chromatic_apply_check, "Apply the saved chromatic transform models so reference ROIs and mask are propagated to non-reference images.")
         self._set_help(self.chromatic_sample_count_spin, "Odd number of spectral images to sample across the stack for the radial chromatic workflow.")
         self._set_help(self.chromatic_feature_count_spin, "Choose 5, 15, or 30 editable spatial reference points to mark on each sampled image.")
@@ -5660,7 +5660,7 @@ class MainWindow(MainWindowIcons, QMainWindow):
         self._set_help(self.reset_dock_layout_action, "Restore default splitter sizes without changing panel visibility.")
         self._set_help(self.expand_left_panels_action, "Expand all left workflow panels.")
         self._set_help(self.collapse_left_panels_action, "Collapse all left workflow panels.")
-        self._set_help(self.calculate_spectrum_action, "Calculate the absorbance spectrum for the current frame and selected ROIs.")
+        self._set_help(self.calculate_spectrum_action, "Calculate the absorbance spectrum for the current spectral cube and selected ROIs.")
         self._set_help(self.about_action, "Show basic app information.")
         self._set_help(self.analysis_roi_table_button, "Show or hide the ROI table.")
 
@@ -6592,8 +6592,8 @@ class MainWindow(MainWindowIcons, QMainWindow):
         self._set_spinbox_width(self.mask_brush_size_spin, "200 px", minimum=68)
         self._set_spinbox_width(self.histogram_bins_spin, "8192 DN", minimum=70)
         self._set_spinbox_width(self.analysis_poly_order_spin, "99", minimum=52)
-        self._set_spinbox_width(self.ome_zarr_chunk_spin, "4096 px", minimum=72)
-        self._set_combo_width(self.ome_zarr_shard_mode_combo, ["1 frame"])
+        self._set_spinbox_width(self.ome_zarr_chunk_spin, "999 px", minimum=60)
+        self._set_combo_width(self.ome_zarr_shard_mode_combo, ["1 spectral cube"], minimum=220)
         self._set_combo_width(self.analysis_metric_combo, ["Maximum", "Centroid"], minimum=80)
         self._set_spinbox_width(self.analysis_start_frame_spin, "99999", minimum=66)
         self._set_spinbox_width(self.analysis_end_frame_spin, "99999", minimum=66)
@@ -10313,7 +10313,7 @@ class MainWindow(MainWindowIcons, QMainWindow):
                 )
             if not sensorgram_hit:
                 self._analysis_controller.mark_stale(
-                    f"{self._analysis_metric_label()} sensorgram is out of date | Press Calculate all frames"
+                    f"{self._analysis_metric_label()} sensorgram is out of date | Press Calculate all spectral cubes"
                 )
 
     def _update_selection_dependent_plots(self, *, force: bool = False, prompt_live_preview: bool = False) -> None:

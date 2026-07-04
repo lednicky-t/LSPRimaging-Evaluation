@@ -266,7 +266,7 @@ class PlotManager:
             return
         frame = window._current_frame()
         if frame is None or metric_value is None or not np.isfinite(metric_value):
-            self.clear_sensorgram("Calculate all frames to build the fitted sensorgram.")
+            self.clear_sensorgram("Calculate all spectral cubes to build the fitted sensorgram.")
             return
         signal_value = float(metric_signal) if metric_signal is not None and np.isfinite(metric_signal) else float("nan")
         window._sensorgram_metric_signal = np.asarray([signal_value], dtype=np.float64)
@@ -274,7 +274,7 @@ class PlotManager:
             [int(frame)],
             [float(metric_value)],
             summary_text=(
-                f"{window._analysis_metric_label()} | Frame {int(frame)} = {float(metric_value):.3f} nm"
+                f"{window._analysis_metric_label()} | Spectral cube {int(frame)} = {float(metric_value):.3f} nm"
                 f" | Polynomial order {window._analysis_poly_order()}"
             ),
         )

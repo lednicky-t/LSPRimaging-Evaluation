@@ -686,7 +686,7 @@ def _sensorgram_metric_task(
                 if progress_callback is not None:
                     progress_callback(
                         int(round((completed / max(total_input_count, 1)) * 20.0)),
-                        f"Preparing sensorgram {completed}/{total_input_count} frames",
+                        f"Preparing sensorgram {completed}/{total_input_count} spectral cubes",
                     )
         prep_seconds = time.perf_counter() - prep_started
         frame_payloads = sorted(built_payloads, key=lambda item: item[0])
@@ -721,7 +721,7 @@ def _sensorgram_metric_task(
             overall = compute_base + (((position - 1) + (inner_percent / 100.0)) / total) * compute_span
             progress_callback(
                 int(round(overall)),
-                text or f"Sensorgram {position}/{total}: frame {frame_number}",
+                text or f"Sensorgram {position}/{total}: spectral cube {frame_number}",
             )
 
         _active_task = task_fn if task_fn is not None else _absorbance_spectrum_task
@@ -764,7 +764,7 @@ def _sensorgram_metric_task(
         if progress_callback is not None:
             progress_callback(
                 int(round(compute_base + (index / total) * compute_span)),
-                f"Sensorgram {index}/{total}: frame {int(frame_index)}",
+                f"Sensorgram {index}/{total}: spectral cube {int(frame_index)}",
             )
     fit_seconds = time.perf_counter() - compute_started
 
@@ -1031,6 +1031,6 @@ def _estimate_chromatic_models_task(
         if progress_callback is not None:
             progress_callback(
                 int(round(index / total * 100.0)),
-                f"Chromatic correction {index}/{total}: {wavelength:g} nm frame {frame}",
+                f"Chromatic correction {index}/{total}: {wavelength:g} nm spectral cube {frame}",
             )
     return models

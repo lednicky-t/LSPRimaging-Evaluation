@@ -73,9 +73,9 @@ def build_layout(window) -> None:
     slider_group = QGroupBox("Dataset slicer", dataset_group)
     slider_group.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
     slider_layout = QVBoxLayout(slider_group)
-    slicer_label_width = 78
+    slicer_label_width = 100
     frame_row = QHBoxLayout()
-    frame_label = QLabel("Frame", slider_group)
+    frame_label = QLabel("Spectral cube", slider_group)
     frame_label.setFixedWidth(slicer_label_width)
     frame_row.addWidget(frame_label)
     frame_row.addWidget(window.frame_slider, 1)
@@ -323,7 +323,7 @@ def build_layout(window) -> None:
     analysis_range_row.addWidget(QLabel("End"))
     analysis_range_row.addWidget(window.analysis_end_frame_spin)
     analysis_range_row.addStretch(1)
-    analysis_layout.addRow("Frames", analysis_range_row)
+    analysis_layout.addRow("Spectral cubes", analysis_range_row)
     analysis_layout.addRow("Formula", window.analysis_formula_label)
     analysis_layout.addRow("Result", window.analysis_summary_label)
 

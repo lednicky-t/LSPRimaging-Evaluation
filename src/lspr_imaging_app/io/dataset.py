@@ -364,10 +364,10 @@ class OmeZarrExportSummary:
     source_folder: str | None = None
 
     def field_lines(self) -> list[tuple[str, str]]:
-        shard_label = "1 frame per file" if self.shard_mode == "per_frame" else "1 image per file"
+        shard_label = "1 spectral cube per file" if self.shard_mode == "per_frame" else "1 image per file"
         lines = [
             ("Image size", f"{self.width} x {self.height} px"),
-            ("Frames x wavelengths", f"{self.frame_count} x {self.wavelength_count}"),
+            ("Spectral cubes x wavelengths", f"{self.frame_count} x {self.wavelength_count}"),
             ("Chunk / shard", f"{self.chunk_size_px}px, {shard_label}"),
             ("Compression", "lz4 + bitshuffle" if self.compression_enabled else "none"),
             ("Dtype", self.dtype_str),
