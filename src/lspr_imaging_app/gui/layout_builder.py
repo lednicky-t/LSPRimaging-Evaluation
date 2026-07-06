@@ -387,9 +387,9 @@ def build_layout(window) -> None:
     window._bind_collapsible_group(
         [
             window.dataset_section,
+            window.image_tools_section,
             window.mask_section,
             window.chromatic_section,
-            window.image_tools_section,
             window.roi_editor_section,
             window.background_section,
             window.analysis_section,
@@ -409,9 +409,9 @@ def build_layout(window) -> None:
     window.left_tabs.addTab(
         window._make_left_tab_page(
             window.dataset_section,
+            window.image_tools_section,
             window.mask_section,
             window.chromatic_section,
-            window.image_tools_section,
             window.roi_editor_section,
             window.background_section,
             window.analysis_section,

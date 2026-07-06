@@ -2689,24 +2689,47 @@ class MainWindow(MainWindowIcons, QMainWindow):
                 resolution_text = f"{width} x {height} px"
             except Exception:
                 resolution_text = "Unknown"
-        size_bytes = 0
-        for record in records:
+        ome_zarr = dataset_is_ome_zarr(dataset)
+        if ome_zarr:
+            # OME-Zarr records carry synthetic per-plane "paths" (e.g. 0/3.2.0.0)
+            # used only to key into the zarr array — they aren't real files on
+            # disk (zarr v3 sharding packs many logical planes into one shard
+            # file), so record.path.stat() always fails here. The real,
+            # statable files are the shard/metadata files under the dataset's
+            # actual .ome.zarr folder instead.
+            size_bytes = 0
+            mtimes: list[float] = []
             try:
-                size_bytes += int(record.path.stat().st_size)
+                for entry in dataset.folder.rglob("*"):
+                    if not entry.is_file():
+                        continue
+                    try:
+                        stat_result = entry.stat()
+                    except OSError:
+                        continue
+                    size_bytes += int(stat_result.st_size)
+                    mtimes.append(stat_result.st_mtime)
             except OSError:
-                continue
-        if records:
-            try:
-                dataset_date = datetime.fromtimestamp(
-                    min(record.path.stat().st_mtime for record in records)
-                ).strftime("%Y-%m-%d")
-            except Exception:
-                dataset_date = "Unknown"
+                pass
+            dataset_date = datetime.fromtimestamp(min(mtimes)).strftime("%Y-%m-%d") if mtimes else "Unknown"
         else:
-            dataset_date = "Unknown"
+            size_bytes = 0
+            for record in records:
+                try:
+                    size_bytes += int(record.path.stat().st_size)
+                except OSError:
+                    continue
+            if records:
+                try:
+                    dataset_date = datetime.fromtimestamp(
+                        min(record.path.stat().st_mtime for record in records)
+                    ).strftime("%Y-%m-%d")
+                except Exception:
+                    dataset_date = "Unknown"
+            else:
+                dataset_date = "Unknown"
         frame_text = f"{len(frame_values)}" if frame_values else "0"
         wavelength_text = f"{len(wavelength_values)}" if wavelength_values else "0"
-        ome_zarr = dataset_is_ome_zarr(dataset)
         stack_label = dataset.format_label if dataset is not None else "ImageStack"
         return (
             f"{stack_label} loaded.\n"
