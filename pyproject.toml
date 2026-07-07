@@ -13,7 +13,7 @@ dependencies = [
     "numpy",
     "pydantic>=2",
     "Pillow",
-    "PyQt6",
+    "PyQt6>=6.11,<7",
     "imagecodecs",
     "ome-zarr",
     "numcodecs",
@@ -26,7 +26,7 @@ dependencies = [
     "lucide",
     "lspr-ui>=0.1.0",
     "lspr-core>=0.1.0",
-    "zarr",
+    "zarr>=3.2,<4",
 ]
 
 [project.scripts]
