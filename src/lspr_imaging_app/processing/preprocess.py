@@ -15,10 +15,19 @@ def apply_preprocessing(
     external_mask: np.ndarray | None = None,
     external_mask_processed: bool = False,
     mask_state: MaskSettings | None = None,
+    region: tuple[int, int, int, int] | None = None,
 ) -> np.ndarray:
+    """`region` (x0, y0, x1, y1), if given, only affects what's *returned* —
+    masking and the rotate/flip/crop step always run on the whole image
+    (spatial alignment and, when background flattening is on, the background
+    estimate itself both need full-image context regardless of region). When
+    background flattening is on, `region` is passed through to
+    flatten_background to skip materializing/upsampling values nobody reads;
+    otherwise the full processed image is just sliced before returning.
+    """
     # Apply mask to raw image before spatial preprocessing
     masked_image = image
-    
+
     # Apply new mask system to raw image
     combined_mask = None
     if mask_state is not None:
@@ -27,24 +36,24 @@ def apply_preprocessing(
                 combined_mask = mask_state.histogram_mask.copy()
             else:
                 combined_mask |= mask_state.histogram_mask
-        
+
         if mask_state.figure_enabled and mask_state.figure_mask is not None:
             if combined_mask is None:
                 combined_mask = mask_state.figure_mask.copy()
             else:
                 combined_mask |= mask_state.figure_mask
-    
+
     # Apply combined new masks
     if combined_mask is not None:
         masked_image = np.where(combined_mask.astype(bool), 0, masked_image)
-    
+
     # Apply legacy external mask if provided
     if external_mask is not None and not external_mask_processed:
         # external_mask is already in raw image coordinates
         masked_image = np.where(external_mask.astype(bool), 0, masked_image)
-    
+
     processed = apply_spatial_preprocessing(masked_image, settings)
-    
+
     if settings.flatten_background_enabled:
         processed = flatten_background(
             processed,
@@ -53,8 +62,13 @@ def apply_preprocessing(
             rois=rois if settings.flatten_background_exclude_area_rois else None,
             mask_settings=mask_settings if settings.flatten_background_exclude_mask else None,
             external_mask=None,  # Already applied above
+            region=region,
         )
+        return processed
 
+    if region is not None:
+        x0, y0, x1, y1 = region
+        return processed[y0:y1, x0:x1]
     return processed
 
 
@@ -166,6 +180,125 @@ def _combined_export_transform(
     combined_matrix = rot_matrix @ flip_diag
     combined_offset = rot_matrix @ translate + offset
     return combined_matrix, combined_offset, (y1 - y0, x1 - x0)
+
+
+def combined_transform_for_box(
+    in_shape: tuple[int, int],
+    settings: PreprocessingSettings,
+    box: tuple[int, int, int, int],
+) -> tuple[np.ndarray, np.ndarray, tuple[int, int]]:
+    """Like _combined_export_transform, but maps an arbitrary PROCESSED-space
+    sub-box — e.g. a small region around one or more ROIs, in the same
+    coordinate system as ROI centers, rather than the whole
+    rotate+flip+crop output — back to raw input coordinates.
+
+    `box` is `(x0, y0, x1, y1)` in PROCESSED-space (i.e. relative to the
+    existing crop, if any — same space as _combined_export_transform's
+    output and as ROI centers). Used to read+resample just a small patch
+    around selected ROIs when rotation/flip is active, instead of the whole
+    plane — the same idea as _combined_export_transform, just parameterized
+    by an arbitrary target box instead of always the full configured crop.
+    """
+    angle = float(settings.rotation_angle_deg)
+    rot_matrix, offset, (out_h, out_w) = _rotation_geometry(in_shape, angle)
+
+    fy_sign = -1.0 if settings.flip_vertical else 1.0
+    fy_const = float(out_h - 1) if settings.flip_vertical else 0.0
+    fx_sign = -1.0 if settings.flip_horizontal else 1.0
+    fx_const = float(out_w - 1) if settings.flip_horizontal else 0.0
+    flip_diag = np.array([[fy_sign, 0.0], [0.0, fx_sign]])
+    flip_const = np.array([fy_const, fx_const])
+
+    crop = settings.crop
+    if crop.enabled and crop.width > 0 and crop.height > 0:
+        crop_x0 = max(0, min(int(crop.x), out_w - 1))
+        crop_y0 = max(0, min(int(crop.y), out_h - 1))
+    else:
+        crop_x0, crop_y0 = 0, 0
+
+    box_x0, box_y0, box_x1, box_y1 = box
+    # Shift the box from processed-space (relative to the existing crop) into
+    # rotated+flipped-canvas space (what the crop itself is defined against),
+    # matching _combined_export_transform's crop_origin convention exactly.
+    canvas_origin = np.array([float(crop_y0 + box_y0), float(crop_x0 + box_x0)])
+    translate = flip_diag @ canvas_origin + flip_const
+
+    combined_matrix = rot_matrix @ flip_diag
+    combined_offset = rot_matrix @ translate + offset
+    return combined_matrix, combined_offset, (box_y1 - box_y0, box_x1 - box_x0)
+
+
+def raw_bounding_box_for_processed_box(
+    in_shape: tuple[int, int],
+    settings: PreprocessingSettings,
+    box: tuple[int, int, int, int],
+) -> tuple[int, int, int, int]:
+    """The axis-aligned raw-space box that must be read to resample a given
+    PROCESSED-space box, accounting for rotation. Rotating a rectangle
+    produces a rotated rectangle in source space, so this returns the
+    (possibly larger) enclosing axis-aligned box — mapping the processed
+    box's 4 corners back through the same combined transform and taking the
+    min/max.
+    """
+    matrix, offset, _ = combined_transform_for_box(in_shape, settings, box)
+    box_x0, box_y0, box_x1, box_y1 = box
+    box_h, box_w = box_y1 - box_y0, box_x1 - box_x0
+    corners = np.array([[0, 0], [0, box_w], [box_h, 0], [box_h, box_w]], dtype=np.float64)
+    raw_corners = (matrix @ corners.T).T + offset
+    raw_y0 = int(np.floor(raw_corners[:, 0].min()))
+    raw_y1 = int(np.ceil(raw_corners[:, 0].max())) + 1
+    raw_x0 = int(np.floor(raw_corners[:, 1].min()))
+    raw_x1 = int(np.ceil(raw_corners[:, 1].max())) + 1
+
+    # Clamp to a valid, non-empty, in-bounds box. A box near a rotated
+    # canvas's edge-stretch-filled corner can have its true (unclamped) raw
+    # extent fall entirely outside the raw image — clamping x0/x1 (or y0/y1)
+    # independently to [0, dim] could then invert (x0 > x1). Clamping x0 into
+    # a valid index first, then x1 to be at least x0+1, guarantees a valid
+    # box that still contains the correct nearest-edge pixel for "nearest"
+    # fill mode, instead of an empty/inverted slice.
+    raw_height, raw_width = int(in_shape[0]), int(in_shape[1])
+    raw_y0 = min(max(raw_y0, 0), raw_height - 1)
+    raw_x0 = min(max(raw_x0, 0), raw_width - 1)
+    raw_y1 = max(min(raw_y1, raw_height), raw_y0 + 1)
+    raw_x1 = max(min(raw_x1, raw_width), raw_x0 + 1)
+    return raw_x0, raw_y0, raw_x1, raw_y1
+
+
+def resample_raw_patch_to_processed_box(
+    raw_patch: np.ndarray,
+    raw_patch_origin_xy: tuple[int, int],
+    in_shape: tuple[int, int],
+    settings: PreprocessingSettings,
+    box: tuple[int, int, int, int],
+) -> np.ndarray:
+    """Resample a raw-space patch (already read via a chunk-aware partial
+    read, at `raw_patch_origin_xy` within the full raw image) directly into
+    the final PROCESSED-space `box`, applying rotation/flip. Mirrors
+    apply_spatial_preprocessing_export's interpolation (scipy affine_transform
+    with the same fill-mode handling) but scoped to a small box instead of
+    the whole plane, and reading from an already-cropped-to-the-needed-region
+    raw patch instead of the full raw array.
+    """
+    matrix, offset, out_shape = combined_transform_for_box(in_shape, settings, box)
+    if out_shape[0] <= 0 or out_shape[1] <= 0:
+        return np.zeros(out_shape, dtype=raw_patch.dtype)
+    raw_x0, raw_y0 = raw_patch_origin_xy
+    # raw_coord = matrix @ [r,c] + offset (full raw image coords); raw_patch's
+    # own local coords are raw_coord - (raw_y0, raw_x0), i.e. a plain
+    # subtraction from the offset term, not a matrix-multiplied one.
+    local_offset = offset - np.array([float(raw_y0), float(raw_x0)])
+    fill_mode = "constant" if bool(settings.rotation_fill_dark) else "nearest"
+    return ndimage.affine_transform(
+        raw_patch,
+        matrix,
+        local_offset,
+        output_shape=out_shape,
+        order=1,
+        mode=fill_mode,
+        cval=0.0,
+        prefilter=False,
+    )
 
 
 def apply_spatial_preprocessing_export(
@@ -316,9 +449,60 @@ def flatten_background(
     rois: list[AreaRoi] | None = None,
     mask_settings: AreaRoiDetectionSettings | None = None,
     external_mask: np.ndarray | None = None,
+    region: tuple[int, int, int, int] | None = None,
 ) -> np.ndarray:
+    """Background-flatten `image`. The background estimate is always computed
+    from the *whole* image (same cost/accuracy for TIFF and zarr — nothing
+    about the estimate itself is scoped). When `region` (x0, y0, x1, y1) is
+    given, only that region of the flattened result is returned — for a
+    ROI-based calculation, nothing downstream ever reads the rest of the
+    flattened frame, so materializing it is pure waste, especially the
+    upsample-back-to-full-resolution step inside estimate_background_profile
+    when binning is enabled. `image` itself must still be the full image
+    (needed for the blur and the exclusion mask/baseline), only the *output*
+    is scoped.
+    """
     image_f32 = image.astype(np.float32, copy=False)
-    background = estimate_background_profile(
+    binning_factor = max(int(binning), 1)
+
+    if region is None or binning_factor <= 1:
+        # No separate binned intermediate to exploit when binning is off, and
+        # the baseline needs a whole-image statistic regardless of region —
+        # compute the background once, exactly as before, and slice locally
+        # if a region was requested. Zero behavior/perf change from before
+        # this function accepted `region` at all.
+        background_full = estimate_background_profile(
+            image_f32,
+            sigma_px=sigma_px,
+            binning=binning,
+            rois=rois,
+            mask_settings=mask_settings,
+            external_mask=external_mask,
+        )
+        valid_mask = ~_combined_exclusion_mask(
+            image_f32, rois=rois, mask_settings=mask_settings, external_mask=external_mask,
+        )
+        baseline = float(np.median(background_full[valid_mask])) if np.any(valid_mask) else float(np.median(background_full))
+        if region is None:
+            flattened = image_f32 - background_full + baseline
+        else:
+            x0, y0, x1, y1 = region
+            flattened = image_f32[y0:y1, x0:x1] - background_full[y0:y1, x0:x1] + baseline
+        return np.clip(flattened, 0.0, 65535.0)
+
+    # binning_factor > 1 and a region was requested: skip the expensive
+    # full-resolution upsample entirely, only computing the small region's
+    # background values (see estimate_background_profile / _background_baseline).
+    background_region = estimate_background_profile(
+        image_f32,
+        sigma_px=sigma_px,
+        binning=binning,
+        rois=rois,
+        mask_settings=mask_settings,
+        external_mask=external_mask,
+        region=region,
+    )
+    baseline = _background_baseline(
         image_f32,
         sigma_px=sigma_px,
         binning=binning,
@@ -326,15 +510,8 @@ def flatten_background(
         mask_settings=mask_settings,
         external_mask=external_mask,
     )
-    valid_mask = ~_combined_exclusion_mask(
-        image_f32,
-        rois=rois,
-        mask_settings=mask_settings,
-        external_mask=external_mask,
-    )
-
-    baseline = float(np.median(background[valid_mask])) if np.any(valid_mask) else float(np.median(background))
-    flattened = image_f32 - background + baseline
+    x0, y0, x1, y1 = region
+    flattened = image_f32[y0:y1, x0:x1] - background_region + baseline
     return np.clip(flattened, 0.0, 65535.0)
 
 
@@ -346,7 +523,15 @@ def estimate_background_profile(
     rois: list[AreaRoi] | None = None,
     mask_settings: AreaRoiDetectionSettings | None = None,
     external_mask: np.ndarray | None = None,
+    region: tuple[int, int, int, int] | None = None,
 ) -> np.ndarray:
+    """Estimate the smooth spatial background of `image`. When `region` is
+    given, only that (x0, y0, x1, y1) region of the estimate is returned —
+    the expensive part this avoids is the upsample-back-to-full-resolution
+    step (ndimage.zoom over the whole frame) when binning is enabled; the
+    Gaussian blur that produces the underlying (binned) estimate still runs
+    over the whole image either way, same as the non-regional path.
+    """
     image_f32 = image.astype(np.float32, copy=False)
     sigma = max(float(sigma_px), 1.0)
     exclusion_mask = _combined_exclusion_mask(
@@ -367,6 +552,8 @@ def estimate_background_profile(
         fallback = float(np.median(image_f32[valid_mask])) if np.any(valid_mask) else float(np.median(image_f32))
         background_small = np.full_like(numerator_small, fallback)
         np.divide(numerator_small, denominator_small, out=background_small, where=denominator_small > 1e-6)
+        if region is not None:
+            return _resize_region_to_shape(background_small, image_f32.shape[:2], region)
         background = _resize_to_shape(background_small, image_f32.shape[:2])
         return background.astype(np.float32, copy=False)
 
@@ -376,7 +563,65 @@ def estimate_background_profile(
     fallback = float(np.median(image_f32[valid_mask])) if np.any(valid_mask) else float(np.median(image_f32))
     background = np.full_like(image_f32, fallback)
     np.divide(numerator, denominator, out=background, where=denominator > 1e-6)
+    if region is not None:
+        x0, y0, x1, y1 = region
+        return background[y0:y1, x0:x1]
     return background
+
+
+def _background_baseline(
+    image_f32: np.ndarray,
+    *,
+    sigma_px: float,
+    binning: int = 1,
+    rois: list[AreaRoi] | None = None,
+    mask_settings: AreaRoiDetectionSettings | None = None,
+    external_mask: np.ndarray | None = None,
+) -> float:
+    """The scalar re-centering value flatten_background adds back after
+    subtracting the spatially-varying background estimate. This is
+    inherently a whole-image statistic (a representative "typical" background
+    level), so unlike the estimate's spatial shape it can't be scoped to a
+    ROI region. When binning is enabled, it's computed from the already-cheap
+    binned arrays rather than re-deriving it from a full-resolution estimate
+    that region callers never otherwise materialize — background is itself
+    the output of a large-sigma blur, so it has no meaningful variation at
+    scales finer than one binned cell, making this equivalent in practice to
+    the full-resolution median, not merely a rough approximation of it.
+    """
+    binning_factor = max(int(binning), 1)
+    exclusion_mask = _combined_exclusion_mask(
+        image_f32,
+        rois=rois,
+        mask_settings=mask_settings,
+        external_mask=external_mask,
+    )
+    valid_mask = ~exclusion_mask
+    if binning_factor <= 1:
+        background = estimate_background_profile(
+            image_f32,
+            sigma_px=sigma_px,
+            binning=binning,
+            rois=rois,
+            mask_settings=mask_settings,
+            external_mask=external_mask,
+        )
+        return float(np.median(background[valid_mask])) if np.any(valid_mask) else float(np.median(background))
+
+    weights = valid_mask.astype(np.float32, copy=False)
+    sigma = max(float(sigma_px), 1.0)
+    binned_weighted = _bin_array_mean(image_f32 * weights, binning_factor)
+    binned_weights = _bin_array_mean(weights, binning_factor)
+    binned_sigma = max(sigma / float(binning_factor), 1.0)
+    numerator_small = ndimage.gaussian_filter(binned_weighted, sigma=binned_sigma, mode="nearest")
+    denominator_small = ndimage.gaussian_filter(binned_weights, sigma=binned_sigma, mode="nearest")
+    fallback = float(np.median(image_f32[valid_mask])) if np.any(valid_mask) else float(np.median(image_f32))
+    background_small = np.full_like(numerator_small, fallback)
+    np.divide(numerator_small, denominator_small, out=background_small, where=denominator_small > 1e-6)
+    binned_valid_mask = binned_weights > 0.5
+    if np.any(binned_valid_mask):
+        return float(np.median(background_small[binned_valid_mask]))
+    return float(np.median(background_small))
 
 
 def _bin_array_mean(array: np.ndarray, factor: int) -> np.ndarray:
@@ -412,6 +657,63 @@ def _resize_to_shape(array: np.ndarray, shape: tuple[int, int]) -> np.ndarray:
     if copy_height < shape[0] and copy_width < shape[1]:
         corrected[copy_height:, copy_width:] = corrected[copy_height - 1 : copy_height, copy_width - 1 : copy_width]
     return corrected
+
+
+def _resize_region_to_shape(
+    array: np.ndarray,
+    shape: tuple[int, int],
+    region: tuple[int, int, int, int],
+) -> np.ndarray:
+    """Same result as _resize_to_shape(array, shape)[y0:y1, x0:x1], without
+    materializing the full upsampled array — for background flattening on a
+    zarr dataset, only a small ROI-sized region of the upsampled background
+    is ever actually used, so upsampling the whole frame (an operation whose
+    cost scales with the full image, same as scipy's rotate/warp cost we
+    already optimized elsewhere) is pure waste.
+
+    `region` is (x0, y0, x1, y1) in the target `shape`'s coordinates.
+
+    Replicates ndimage.zoom's exact grid_mode=False coordinate formula
+    (`source = out_idx * (in_dim - 1) / (out_dim - 1)`, read from scipy's own
+    zoom() source — not the naive reciprocal-of-zoom-factor guess) via
+    map_coordinates restricted to the region, plus _resize_to_shape's edge
+    replication for the rare case where ndimage.zoom's actual output shape
+    (rounded from the requested zoom factor) doesn't exactly match `shape`.
+    """
+    x0, y0, x1, y1 = region
+    region_h, region_w = y1 - y0, x1 - x0
+    if array.shape[:2] == shape:
+        return array[y0:y1, x0:x1].astype(np.float32, copy=False)
+
+    zoom_factors = (shape[0] / float(array.shape[0]), shape[1] / float(array.shape[1]))
+    # Same rounding scipy's zoom() uses internally to size its output —
+    # needed to know whether _resize_to_shape's edge-replication correction
+    # applies (rare, only on floating-point rounding mismatches).
+    resized_shape = (
+        int(round(array.shape[0] * zoom_factors[0])),
+        int(round(array.shape[1] * zoom_factors[1])),
+    )
+
+    def _sample(oy: np.ndarray, ox: np.ndarray) -> np.ndarray:
+        # ndimage.zoom's exact grid_mode=False mapping: endpoints aligned,
+        # linear in between — not oy/zoom_factor.
+        src_y = oy * (array.shape[0] - 1) / max(resized_shape[0] - 1, 1)
+        src_x = ox * (array.shape[1] - 1) / max(resized_shape[1] - 1, 1)
+        return ndimage.map_coordinates(
+            array, [src_y, src_x], order=1, mode="nearest", prefilter=False,
+        )
+
+    yy, xx = np.meshgrid(np.arange(y0, y1), np.arange(x0, x1), indexing="ij")
+
+    if resized_shape[0] >= shape[0] and resized_shape[1] >= shape[1]:
+        # No edge-replication needed anywhere in `shape` — the common case.
+        return _sample(yy.astype(np.float64), xx.astype(np.float64)).astype(np.float32, copy=False)
+
+    # Rare correction path: for rows/cols beyond resized_shape, _resize_to_shape
+    # replicates the last valid row/col instead of extrapolating the zoom.
+    clamped_y = np.minimum(yy, resized_shape[0] - 1).astype(np.float64)
+    clamped_x = np.minimum(xx, resized_shape[1] - 1).astype(np.float64)
+    return _sample(clamped_y, clamped_x).astype(np.float32, copy=False)
 
 
 def _roi_exclusion_mask(

@@ -420,6 +420,53 @@ def transformed_disk_mask(
     return transformed_annulus_mask(image_shape, center_xy, 0.0, radius_px, affine_matrix)
 
 
+def _annulus_mask_in_box(
+    box_x0: int,
+    box_y0: int,
+    box_x1: int,
+    box_y1: int,
+    center_xy: tuple[float, float],
+    inner_radius: float,
+    outer_radius: float,
+    affine_matrix: np.ndarray,
+) -> np.ndarray:
+    """Core annulus-mask math for an explicit target-space box [x0:x1, y0:y1]
+    (in the same coordinate space `affine_matrix` maps *into*). For every pixel
+    in that box, maps back through the inverse affine to source space and
+    checks distance from `center_xy` against [inner_radius, outer_radius].
+    Returns a mask shaped (box_y1 - box_y0, box_x1 - box_x0).
+    """
+    box_h, box_w = box_y1 - box_y0, box_x1 - box_x0
+    if box_h <= 0 or box_w <= 0:
+        return np.zeros((max(box_h, 0), max(box_w, 0)), dtype=bool)
+    yy, xx = np.indices((box_h, box_w), dtype=np.float64)
+    target_points = np.column_stack((xx.ravel() + box_x0, yy.ravel() + box_y0))
+    inverse_affine = invert_affine_matrix(affine_matrix)
+    source_points = apply_affine_to_points(target_points, inverse_affine)
+    dx = source_points[:, 0] - float(center_xy[0])
+    dy = source_points[:, 1] - float(center_xy[1])
+    distance_sq = dx * dx + dy * dy
+    mask_local = (distance_sq <= outer_radius * outer_radius) & (distance_sq >= inner_radius * inner_radius)
+    return mask_local.reshape((box_h, box_w))
+
+
+def annulus_reach_box(
+    center_xy: tuple[float, float],
+    outer_radius: float,
+    affine_matrix: np.ndarray,
+) -> tuple[float, float]:
+    """How far (in target space) the transformed annulus can reach from its
+    transformed center, and the transformed center itself — shared by the
+    full-image and patch-scoped variants so both use the same tight bound.
+    """
+    linear = np.asarray(affine_matrix[:, :2], dtype=np.float64)
+    singular_values = np.linalg.svd(linear, compute_uv=False)
+    max_scale = max(float(np.max(singular_values)), 1e-6)
+    transformed_center = apply_affine_to_points(np.asarray([[center_xy[0], center_xy[1]]], dtype=np.float64), affine_matrix)[0]
+    reach = outer_radius * max_scale + 3.0
+    return transformed_center, reach
+
+
 def transformed_annulus_mask(
     image_shape: tuple[int, int],
     center_xy: tuple[float, float],
@@ -433,11 +480,7 @@ def transformed_annulus_mask(
     if outer_radius <= 0.0:
         return np.zeros((image_height, image_width), dtype=bool)
 
-    linear = np.asarray(affine_matrix[:, :2], dtype=np.float64)
-    singular_values = np.linalg.svd(linear, compute_uv=False)
-    max_scale = max(float(np.max(singular_values)), 1e-6)
-    transformed_center = apply_affine_to_points(np.asarray([[center_xy[0], center_xy[1]]], dtype=np.float64), affine_matrix)[0]
-    reach = outer_radius * max_scale + 3.0
+    transformed_center, reach = annulus_reach_box(center_xy, outer_radius, affine_matrix)
     x0 = max(int(np.floor(transformed_center[0] - reach)), 0)
     x1 = min(int(np.ceil(transformed_center[0] + reach)) + 1, image_width)
     y0 = max(int(np.floor(transformed_center[1] - reach)), 0)
@@ -445,17 +488,45 @@ def transformed_annulus_mask(
     if x0 >= x1 or y0 >= y1:
         return np.zeros((image_height, image_width), dtype=bool)
 
-    yy, xx = np.indices((y1 - y0, x1 - x0), dtype=np.float64)
-    target_points = np.column_stack((xx.ravel() + x0, yy.ravel() + y0))
-    inverse_affine = invert_affine_matrix(affine_matrix)
-    source_points = apply_affine_to_points(target_points, inverse_affine)
-    dx = source_points[:, 0] - float(center_xy[0])
-    dy = source_points[:, 1] - float(center_xy[1])
-    distance_sq = dx * dx + dy * dy
-    mask_local = (distance_sq <= outer_radius * outer_radius) & (distance_sq >= inner_radius * inner_radius)
+    mask_local = _annulus_mask_in_box(x0, y0, x1, y1, center_xy, inner_radius, outer_radius, affine_matrix)
     mask = np.zeros((image_height, image_width), dtype=bool)
-    mask[y0:y1, x0:x1] = mask_local.reshape((y1 - y0, x1 - x0))
+    mask[y0:y1, x0:x1] = mask_local
     return mask
+
+
+def transformed_annulus_mask_for_patch(
+    patch_origin_xy: tuple[int, int],
+    patch_shape: tuple[int, int],
+    center_xy: tuple[float, float],
+    inner_radius_px: float,
+    outer_radius_px: float,
+    affine_matrix: np.ndarray,
+) -> np.ndarray:
+    """Same geometry as transformed_annulus_mask, but scoped to a patch that's
+    already been read from a smaller region of the target space (e.g. a
+    zarr-chunk-aware partial read around one or more ROIs) — returns a mask
+    shaped `patch_shape`, local to `patch_origin_xy`, instead of embedding into
+    a full-image-sized array. Use when the caller has already decided the
+    patch is the right region (e.g. a per-ROI or union bounding box); this
+    does not do its own reach-based shrinking beyond the given patch.
+    """
+    patch_h, patch_w = patch_shape[:2]
+    inner_radius = max(float(inner_radius_px), 0.0)
+    outer_radius = max(float(outer_radius_px), inner_radius)
+    if outer_radius <= 0.0:
+        return np.zeros((patch_h, patch_w), dtype=bool)
+    px0, py0 = int(patch_origin_xy[0]), int(patch_origin_xy[1])
+    return _annulus_mask_in_box(px0, py0, px0 + patch_w, py0 + patch_h, center_xy, inner_radius, outer_radius, affine_matrix)
+
+
+def transformed_disk_mask_for_patch(
+    patch_origin_xy: tuple[int, int],
+    patch_shape: tuple[int, int],
+    center_xy: tuple[float, float],
+    radius_px: float,
+    affine_matrix: np.ndarray,
+) -> np.ndarray:
+    return transformed_annulus_mask_for_patch(patch_origin_xy, patch_shape, center_xy, 0.0, radius_px, affine_matrix)
 
 
 def fit_similarity_matrix(source_points_xy: np.ndarray, target_points_xy: np.ndarray) -> np.ndarray:

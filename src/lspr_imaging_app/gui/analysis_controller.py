@@ -219,6 +219,49 @@ class AnalysisController:
         self._apply_cached_sensorgram_result(signature, cached_result, preview=True)
         return True
 
+    def _fast_spectrum_path_eligible(self, selected_source_rois: list[AreaRoi]) -> bool:
+        """Whether the ROI-scoped, zarr-chunk-aware fast path can be used for
+        the whole sensorgram/spectrum run. Decided once, upfront — NOT
+        re-checked per frame — because a per-frame "not worth it" bail-out
+        would silently drop that frame's data point instead of falling back
+        to the full-plane path (frame_payload_builder results that come back
+        None are just skipped, not retried another way).
+
+        The "is the ROI selection compact enough" part uses a chromatic-shift
+        agnostic box (chromatic shifts are small perturbations that wouldn't
+        change whether ROIs are scattered enough to make scoping pointless),
+        so this stays a cheap, synchronous, no-pixel-data-loaded check.
+        """
+        from lspr_imaging_app.gui.analysis_tasks import compute_roi_union_bounding_box, roi_union_box_is_worth_scoping
+        from lspr_imaging_app.io.dataset import load_image_shape
+        from lspr_imaging_app.processing.preprocess import spatial_output_shape
+
+        preprocessing = self.window._state.preprocessing
+        dataset = self.window._state.dataset
+        basic_eligible = (
+            bool(selected_source_rois)
+            and dataset is not None
+            and dataset.is_ome_zarr
+        )
+        if not basic_eligible:
+            return False
+        first_record = next(iter(self.window._record_map.values()), None)
+        if first_record is None:
+            return False
+        try:
+            raw_shape = load_image_shape(str(first_record.path))
+        except Exception:
+            return False
+        image_height, image_width = spatial_output_shape(raw_shape, preprocessing)
+        box = compute_roi_union_bounding_box(
+            selected_source_rois,
+            float(self.window._state.area_roi_settings.reference_outer_radius_px),
+            [None],
+            image_height,
+            image_width,
+        )
+        return box is not None and roi_union_box_is_worth_scoping(box, image_height, image_width)
+
     def _start_sensorgram_worker(
         self,
         signature: tuple[object, ...],
@@ -240,17 +283,7 @@ class AnalysisController:
             _absorbance_spectrum_fast_task,
         )
 
-        preprocessing = self.window._state.preprocessing
-        dataset = self.window._state.dataset
-        use_fast_path = (
-            len(selected_roi_ids) == 1
-            and bool(getattr(preprocessing, "local_ring_normalization_enabled", False))
-            and dataset is not None
-            and dataset.is_ome_zarr
-            and float(getattr(preprocessing, "rotation_angle_deg", 0.0)) == 0.0
-            and not bool(getattr(preprocessing, "flip_horizontal", False))
-            and not bool(getattr(preprocessing, "flip_vertical", False))
-        )
+        use_fast_path = self._fast_spectrum_path_eligible(selected_source_rois)
 
         self.window._sensorgram_cancel_event = threading.Event()
         self.window._sensorgram_started_at = time.perf_counter()
@@ -373,57 +406,6 @@ class AnalysisController:
             self._apply_cached_sensorgram_result(signature, cached_result, preview=True)
             return
         self._start_sensorgram_worker(signature, list(frames), tuple(selected_roi_ids), list(selected_source_rois))
-
-    def start_pending_absorbance_spectrum_refresh(self) -> None:
-        if self.window._pending_absorbance_spectrum_payload is None:
-            return
-        from lspr_imaging_app.gui.main_window import FunctionWorker, _absorbance_spectrum_task
-
-        signature, payload = self.window._pending_absorbance_spectrum_payload
-        self.window._pending_absorbance_spectrum_payload = None
-        request_id = self.window._absorbance_spectrum_request_id + 1
-        self.window._absorbance_spectrum_request_id = request_id
-        self.window._absorbance_spectrum_running = True
-        self.window._absorbance_spectrum_running_signature = signature
-        self.window._begin_busy("Updating absorbance spectrum...", determinate=True)
-        worker = FunctionWorker(_absorbance_spectrum_task, *payload, supports_progress=True)
-        worker.signals.progress.connect(self.window._update_busy_progress)
-        worker.signals.result.connect(lambda result, request_id=request_id, signature=signature: self.on_absorbance_spectrum_ready(request_id, signature, result))
-        worker.signals.error.connect(lambda message, request_id=request_id: self.on_absorbance_spectrum_failed(request_id, message))
-        self.window._thread_pool.start(worker)
-
-    def on_absorbance_spectrum_ready(self, request_id: int, signature, result) -> None:
-        import time
-
-        self.window._absorbance_spectrum_running = False
-        self.window._absorbance_spectrum_running_signature = None
-        self.window._end_busy()
-        if request_id != self.window._absorbance_spectrum_request_id:
-            if self.window._pending_absorbance_spectrum_payload is not None:
-                self.start_pending_absorbance_spectrum_refresh()
-            return
-        started_at = self.window._absorbance_spectrum_started_at
-        elapsed = self.window._format_elapsed_seconds(time.perf_counter() - started_at) if started_at is not None else ""
-        self.window._absorbance_spectrum_cache[signature] = result
-        self.window._absorbance_spectrum_cache.move_to_end(signature)
-        while len(self.window._absorbance_spectrum_cache) > self.window.ABSORBANCE_SPECTRUM_CACHE_SIZE:
-            self.window._absorbance_spectrum_cache.popitem(last=False)
-        self._store_spot_absorbance_cache(result)
-        self.window._absorbance_spectrum_dirty = False
-        self.window._apply_absorbance_spectrum_result(result)
-        if elapsed:
-            self.window._set_status_text(f"Absorbance spectrum updated in {elapsed}.")
-        if self.window._pending_absorbance_spectrum_payload is not None:
-            self.start_pending_absorbance_spectrum_refresh()
-
-    def on_absorbance_spectrum_failed(self, request_id: int, message: str) -> None:
-        self.window._absorbance_spectrum_running = False
-        self.window._absorbance_spectrum_running_signature = None
-        self.window._end_busy()
-        if request_id == self.window._absorbance_spectrum_request_id:
-            self.window._background_error("Spectral absorbance", message)
-        if self.window._pending_absorbance_spectrum_payload is not None:
-            self.start_pending_absorbance_spectrum_refresh()
 
     def update_current_point(self) -> None:
         current_frame = self.window._current_frame()
@@ -746,33 +728,114 @@ class AnalysisController:
     ) -> tuple | None:
         """Build a lightweight payload for _absorbance_spectrum_fast_task.
 
-        Used when local_ring_normalization_enabled is True and the dataset is OME-Zarr
-        with no rotation or flip transforms.  The fast task reads only the ROI bounding
-        box from the zarr array and skips global background flattening.
+        Used when the dataset is OME-Zarr, background flattening is off, and
+        no rotation/flip transform is active (see the eligibility check in
+        _start_sensorgram_worker, which also confirms the ROI selection is
+        compact enough for a scoped read to be worthwhile — that decision is
+        made once for the whole run, not per frame, so this always proceeds
+        with a scoped read once called; it must never bail out for a "not
+        worth it" reason here, or a frame would silently vanish from the
+        sensorgram instead of falling back to the full-plane path). Returns
+        None only when there's genuinely nothing to compute (no data for this
+        frame, or no ROI geometry to build a box from at all).
         """
-        if self.window._state.dataset is None or not selected_source_rois or len(selected_source_rois) != 1:
+        from lspr_imaging_app.gui.analysis_tasks import compute_roi_union_bounding_box
+        from lspr_imaging_app.io.dataset import load_image_shape
+        from lspr_imaging_app.processing.preprocess import spatial_output_shape
+
+        if self.window._state.dataset is None or not selected_source_rois:
             return None
-        roi = selected_source_rois[0]
         preprocessing = self.window._state.preprocessing
-        crop_x = int(preprocessing.crop.x) if preprocessing.crop.enabled else 0
-        crop_y = int(preprocessing.crop.y) if preprocessing.crop.enabled else 0
+
+        # Mirror ignored_pixel_mask's own gating: an external mask only excludes
+        # pixels from the absorbance calculation when ignore_marked_pixels is
+        # on. Fetching it unconditionally and applying it in the fast task
+        # regardless of this flag would silently diverge from the slow path.
+        exclude_marked_pixels = bool(getattr(self.window._state.area_roi_settings, "ignore_marked_pixels", False))
+
+        measurement_payload: list[tuple[float, np.ndarray | None, np.ndarray | None]] = []
+        affine_matrices: list[np.ndarray | None] = []
+        first_record = None
+        for wavelength in self.window._wavelength_values:
+            record = self.window._record_map.get((frame, wavelength))
+            if record is None:
+                continue
+            if first_record is None:
+                first_record = record
+            image_key = (frame, float(wavelength))
+            affine_matrix = self.window._chromatic_affine_for_image_key(image_key)
+            if affine_matrix is not None:
+                affine_matrix = np.asarray(affine_matrix, dtype=np.float64)
+            external_mask = None
+            if exclude_marked_pixels:
+                external_mask, _ = self.window._effective_external_mask_for_record(record.path, processed_space=True)
+            measurement_payload.append(
+                (
+                    float(wavelength),
+                    affine_matrix,
+                    None if external_mask is None else np.asarray(external_mask, dtype=bool),
+                )
+            )
+            affine_matrices.append(affine_matrix)
+        if not measurement_payload or first_record is None:
+            return None
+
+        try:
+            raw_shape = load_image_shape(str(first_record.path))
+        except Exception:
+            return None
+        image_height, image_width = spatial_output_shape(raw_shape, preprocessing)
+
+        box = compute_roi_union_bounding_box(
+            selected_source_rois,
+            float(self.window._state.area_roi_settings.reference_outer_radius_px),
+            affine_matrices,
+            image_height,
+            image_width,
+        )
+        if box is None:
+            return None
+
+        # Matches _prepare_absorbance_spectrum_payload_for_frame's own convention
+        # for these two: mask_state only when the mask panel is applied/linked,
+        # and background's own exclusion mask_settings only when background
+        # flattening is configured to exclude the mask.
+        mask_state = deepcopy(self.window._state.mask) if self.window._mask_section_applied() else None
+        background_mask_settings = (
+            deepcopy(self.window._state.area_roi_settings)
+            if bool(getattr(preprocessing, "flatten_background_exclude_mask", False))
+            else None
+        )
+
         return (
             self.window._state.dataset,
             int(frame),
-            list(self.window._wavelength_values),
+            measurement_payload,
             dict(self.window._record_map),
-            deepcopy(roi),
-            float(self.window._state.area_roi_settings.sample_radius_px),
+            deepcopy(selected_source_rois),
+            selected_roi_ids,
             float(self.window._state.area_roi_settings.reference_inner_radius_px),
             float(self.window._state.area_roi_settings.reference_outer_radius_px),
-            crop_x,
-            crop_y,
+            box,
+            deepcopy(preprocessing),
+            raw_shape,
+            mask_state,
+            background_mask_settings,
         )
 
     def _prepare_absorbance_spectrum_payload(
         self,
         selected_source_rois: list[AreaRoi] | None = None,
-    ) -> tuple[tuple[object, ...], tuple[object, ...]] | None:
+    ) -> tuple[tuple[object, ...], tuple[object, ...], object] | None:
+        """Build the (signature, payload, task_fn) for a single-frame spectrum
+        calculation. Uses the exact same eligibility decision and payload
+        builders as the sensorgram loop (_fast_spectrum_path_eligible,
+        _prepare_fast_spectrum_payload_for_frame /
+        _prepare_absorbance_spectrum_payload_for_frame) — a single-frame
+        spectrum is just a one-frame sensorgram, so there is one decision
+        point and one pair of task functions, not a separate parallel
+        implementation for this case.
+        """
         if self.window._state.dataset is None:
             return None
         selected_source_rois = self.window._selected_source_rois_snapshot() if selected_source_rois is None else list(selected_source_rois)
@@ -783,10 +846,21 @@ class AnalysisController:
             return None
         frame = int(signature[0])
         selected_roi_ids = tuple(roi.area_roi_id for roi in selected_source_rois)
+
+        from lspr_imaging_app.gui.analysis_tasks import _absorbance_spectrum_fast_task, _absorbance_spectrum_task
+
+        if self._fast_spectrum_path_eligible(selected_source_rois):
+            payload = self._prepare_fast_spectrum_payload_for_frame(frame, selected_roi_ids, selected_source_rois)
+            if payload is not None:
+                return signature, payload, _absorbance_spectrum_fast_task
+            # Fast payload builder found genuinely nothing to compute for this
+            # frame (e.g. no records) — fall through to the full-plane path
+            # rather than reporting "no spectrum" when the slow path might
+            # still have an answer.
         payload = self._prepare_absorbance_spectrum_payload_for_frame(frame, selected_roi_ids, selected_source_rois)
         if payload is None:
             return None
-        return signature, payload
+        return signature, payload, _absorbance_spectrum_task
 
     # ------------------------------------------------------------------
     # Result / event handler methods (moved from MainWindow)
@@ -796,7 +870,7 @@ class AnalysisController:
         self,
         request_id: int,
         expected_signature: tuple[object, ...],
-        prepared: tuple[tuple[object, ...], tuple[object, ...]] | None,
+        prepared: tuple[tuple[object, ...], tuple[object, ...], object] | None,
     ) -> None:
         if request_id != self.window._absorbance_prep_request_id:
             return
@@ -811,12 +885,12 @@ class AnalysisController:
         if prepared is None:
             self.window._end_busy("Select ROIs to show absorbance spectrum.")
             return
-        signature, payload = prepared
+        signature, payload, task_fn = prepared
         if signature != expected_signature:
             self.window._absorbance_spectrum_dirty = True
             self.window._end_busy("Select ROIs to show absorbance spectrum.")
             return
-        self.window._pending_absorbance_spectrum_payload = (signature, payload)
+        self.window._pending_absorbance_spectrum_payload = (signature, payload, task_fn)
         self.window._start_pending_absorbance_spectrum_refresh(reuse_busy=True)
 
     def _on_absorbance_spectrum_payload_failed(self, request_id: int, message: str) -> None:

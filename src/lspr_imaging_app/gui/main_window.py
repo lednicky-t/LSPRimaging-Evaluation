@@ -232,8 +232,6 @@ from .worker import (
 )
 from .analysis_tasks import (
     _absorbance_roi_mask_cache_key,
-    _absorbance_spectrum_fast_task,
-    _absorbance_spectrum_task,
     _auto_chromatic_landmarks_task,
     _background_profile_task,
     _detect_spots_task,
@@ -8107,7 +8105,7 @@ class MainWindow(MainWindowIcons, QMainWindow):
     def _start_pending_absorbance_spectrum_refresh(self, *, reuse_busy: bool = False) -> None:
         if self._pending_absorbance_spectrum_payload is None:
             return
-        signature, payload = self._pending_absorbance_spectrum_payload
+        signature, payload, task_fn = self._pending_absorbance_spectrum_payload
         self._pending_absorbance_spectrum_payload = None
         request_id = self._absorbance_spectrum_request_id + 1
         self._absorbance_spectrum_request_id = request_id
@@ -8128,7 +8126,7 @@ class MainWindow(MainWindowIcons, QMainWindow):
         else:
             self._begin_busy("Updating absorbance spectrum...", determinate=True)
         worker = FunctionWorker(
-            _absorbance_spectrum_task,
+            task_fn,
             *payload,
             supports_progress=True,
         )

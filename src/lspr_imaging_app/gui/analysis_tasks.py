@@ -16,6 +16,7 @@ from lspr_imaging_app.io.dataset import dataset_load_plane_roi, export_ome_zarr_
 from lspr_imaging_app.processing.analysis import absorbance_from_means, fit_absorbance_curve, metric_value_from_fit
 from lspr_imaging_app.processing.chromatic import (
     ChromaticRegistrationResult,
+    annulus_reach_box,
     apply_affine_to_points,
     detect_regional_landmarks,
     estimate_affine_chromatic_transform,
@@ -23,7 +24,9 @@ from lspr_imaging_app.processing.chromatic import (
     identity_affine_matrix,
     track_landmarks,
     transformed_annulus_mask,
+    transformed_annulus_mask_for_patch,
     transformed_disk_mask,
+    transformed_disk_mask_for_patch,
 )
 from lspr_imaging_app.processing.preprocess import (
     apply_preprocessing,
@@ -133,7 +136,20 @@ def _selected_roi_masks_for_spectrum(
     ring_inner_radius_px: float,
     ring_outer_radius_px: float,
     affine_matrix: np.ndarray | None,
+    *,
+    patch_origin_xy: tuple[int, int] = (0, 0),
 ) -> tuple[np.ndarray, np.ndarray]:
+    """Build sample/reference-ring masks for the selected ROIs.
+
+    ROI centers (`roi.center_x/center_y`) are always in full processed-image
+    coordinates. By default (`patch_origin_xy=(0, 0)` and `image_shape` the
+    full image) this returns full-image-sized masks, as before. When called
+    with `image_shape` set to a smaller patch's shape and `patch_origin_xy`
+    set to that patch's top-left corner (in full-image coordinates), it
+    returns masks local to that patch instead — for use with a
+    zarr-chunk-aware partial read that only loaded that patch, rather than
+    the whole plane.
+    """
     image_height, image_width = image_shape[:2]
     roi_mask = np.zeros((image_height, image_width), dtype=bool)
     ring_mask = np.zeros((image_height, image_width), dtype=bool)
@@ -152,8 +168,11 @@ def _selected_roi_masks_for_spectrum(
         identity_affine_matrix(),
         atol=1e-9,
     )
+    px0, py0 = patch_origin_xy
     if not use_affine:
         yy, xx = np.indices((image_height, image_width), dtype=np.float32)
+        xx = xx + px0
+        yy = yy + py0
         for roi in effective_rois:
             distance_sq = (xx - float(roi.center_x)) ** 2 + (yy - float(roi.center_y)) ** 2
             roi_mask |= distance_sq <= float(roi.sample_radius_px) ** 2
@@ -164,23 +183,111 @@ def _selected_roi_masks_for_spectrum(
         ring_mask &= ~roi_mask
         return roi_mask, ring_mask
 
-    for roi in effective_rois:
-        roi_mask |= transformed_disk_mask(
-            (image_height, image_width),
-            (float(roi.center_x), float(roi.center_y)),
-            float(roi.sample_radius_px),
-            affine_matrix,
-        )
-        if ring_outer_radius > 0.0:
-            ring_mask |= transformed_annulus_mask(
+    # (0, 0) covers both the original full-image call convention (all existing
+    # callers) and a patch that happens to start at the image origin — either
+    # way, absolute and patch-local coordinates coincide, so the reach-window
+    # optimized functions apply directly and give an identical result while
+    # keeping their existing performance characteristics. Only a genuinely
+    # offset patch needs the explicit-origin "_for_patch" variants below.
+    if px0 == 0 and py0 == 0:
+        for roi in effective_rois:
+            roi_mask |= transformed_disk_mask(
                 (image_height, image_width),
                 (float(roi.center_x), float(roi.center_y)),
-                float(ring_inner_radius),
-                float(ring_outer_radius),
+                float(roi.sample_radius_px),
                 affine_matrix,
             )
+            if ring_outer_radius > 0.0:
+                ring_mask |= transformed_annulus_mask(
+                    (image_height, image_width),
+                    (float(roi.center_x), float(roi.center_y)),
+                    float(ring_inner_radius),
+                    float(ring_outer_radius),
+                    affine_matrix,
+                )
+    else:
+        for roi in effective_rois:
+            roi_mask |= transformed_disk_mask_for_patch(
+                (px0, py0),
+                (image_height, image_width),
+                (float(roi.center_x), float(roi.center_y)),
+                float(roi.sample_radius_px),
+                affine_matrix,
+            )
+            if ring_outer_radius > 0.0:
+                ring_mask |= transformed_annulus_mask_for_patch(
+                    (px0, py0),
+                    (image_height, image_width),
+                    (float(roi.center_x), float(roi.center_y)),
+                    float(ring_inner_radius),
+                    float(ring_outer_radius),
+                    affine_matrix,
+                )
     ring_mask &= ~roi_mask
     return roi_mask, ring_mask
+
+
+def compute_roi_union_bounding_box(
+    selected_rois: list[AreaRoi],
+    ring_outer_radius_px: float,
+    affine_matrices: list[np.ndarray | None],
+    image_height: int,
+    image_width: int,
+    margin_px: float = 3.0,
+) -> tuple[int, int, int, int] | None:
+    """Smallest axis-aligned box (x0, y0, x1, y1), in full processed-image
+    coordinates, guaranteed to contain every selected ROI's sample circle and
+    reference ring, across every given per-wavelength chromatic transform
+    (pass `[None]` if chromatic correction isn't active). Used to decide the
+    single region a zarr-chunk-aware partial read needs to cover for every
+    wavelength, instead of loading the whole plane. Returns None if there's
+    nothing to bound (no ROIs) or the box would cover the whole image anyway.
+    """
+    if not selected_rois or image_height <= 0 or image_width <= 0:
+        return None
+    ring_outer = float(max(ring_outer_radius_px, 0.0))
+    matrices = affine_matrices if affine_matrices else [None]
+
+    x_min, y_min = float("inf"), float("inf")
+    x_max, y_max = float("-inf"), float("-inf")
+    for roi in selected_rois:
+        cx, cy = float(roi.center_x), float(roi.center_y)
+        roi_reach = max(ring_outer, float(roi.sample_radius_px))
+        for matrix in matrices:
+            matrix_arr = None if matrix is None else np.asarray(matrix, dtype=np.float64)
+            if matrix_arr is None or np.allclose(matrix_arr, identity_affine_matrix(), atol=1e-9):
+                tx, ty, reach = cx, cy, roi_reach + margin_px
+            else:
+                (tx, ty), reach = annulus_reach_box((cx, cy), roi_reach, matrix_arr)
+            x_min, x_max = min(x_min, tx - reach), max(x_max, tx + reach)
+            y_min, y_max = min(y_min, ty - reach), max(y_max, ty + reach)
+
+    x0 = max(int(np.floor(x_min)), 0)
+    y0 = max(int(np.floor(y_min)), 0)
+    x1 = min(int(np.ceil(x_max)) + 1, image_width)
+    y1 = min(int(np.ceil(y_max)) + 1, image_height)
+    if x0 >= x1 or y0 >= y1:
+        return None
+    return x0, y0, x1, y1
+
+
+def roi_union_box_is_worth_scoping(
+    box: tuple[int, int, int, int],
+    image_height: int,
+    image_width: int,
+    max_area_fraction: float = 0.6,
+) -> bool:
+    """Whether a scoped read of `box` is meaningfully cheaper than loading the
+    whole plane. If selected ROIs are scattered enough that their union
+    covers most of the image anyway, a full-plane load is simpler and just as
+    fast, so callers should fall back rather than bother with a partial read.
+    """
+    x0, y0, x1, y1 = box
+    full_area = image_height * image_width
+    if full_area <= 0:
+        return False
+    box_area = (x1 - x0) * (y1 - y0)
+    return box_area <= max_area_fraction * full_area
 
 
 def _roi_absorbance_signature(
@@ -506,83 +613,141 @@ def _absorbance_spectrum_task(
 def _absorbance_spectrum_fast_task(
     dataset,
     frame_index: int,
-    wavelengths: list,
+    measurement_payload: list[tuple[float, np.ndarray | None, np.ndarray | None]],
     record_map: dict,
-    roi,
-    sample_radius_px: float,
-    reference_inner_radius_px: float,
-    reference_outer_radius_px: float,
-    crop_x: int,
-    crop_y: int,
+    selected_rois: list[AreaRoi],
+    selected_roi_ids: tuple[int, ...],
+    ring_inner_radius_px: float,
+    ring_outer_radius_px: float,
+    box: tuple[int, int, int, int],
+    preprocessing,
+    raw_shape: tuple[int, int],
+    mask_state=None,
+    background_mask_settings=None,
     cancel_event: threading.Event | None = None,
     progress_callback=None,
 ) -> AbsorbanceSpectrumResult:
-    """Fast single-ROI absorbance spectrum using OME-Zarr spatial reads.
+    """Fast multi-ROI absorbance spectrum using OME-Zarr chunk-aware spatial reads.
 
-    Reads only the spatial bounding box of the circle+ring from each zarr plane,
-    then computes sample and reference means directly from the patch.
-    Global background flattening is intentionally skipped — the reference ring
-    provides per-ROI local normalization, which is valid for circle+ring geometry.
-    Only applicable when there is no rotation or flip transform active.
+    `box` is a single bounding region, in full PROCESSED-image coordinates
+    (matching ROI centers, external masks, etc.), precomputed by the caller to
+    cover every selected ROI's sample circle and reference ring across all
+    wavelengths' chromatic transforms.
+
+    Normally (no background flattening), rotation/flip/crop are handled by
+    reading only the (possibly larger) enclosing raw-space box
+    (raw_bounding_box_for_processed_box) and resampling it directly into
+    `box` (resample_raw_patch_to_processed_box) — the same affine-transform
+    approach already validated for OME-Zarr export, just scoped to a small
+    region instead of the whole plane.
+
+    When `preprocessing.flatten_background_enabled` is on, the background
+    estimate genuinely needs the whole image (same cost as the slow path,
+    same as TIFF — nothing scoped there), so this instead loads the full
+    plane and calls apply_preprocessing(..., region=box), which threads the
+    region through to flatten_background so only the ROI-chunk's background
+    values get computed/upsampled/subtracted — the same "load once, only
+    finish the last step for the region actually read" idea, just with a
+    full-plane load instead of a chunk-aware one for this one case.
+
+    Supports multiple ROIs, chromatic correction, and external/ignored-pixel
+    masks either way.
     """
+    from lspr_imaging_app.processing.preprocess import (
+        apply_preprocessing,
+        raw_bounding_box_for_processed_box,
+        resample_raw_patch_to_processed_box,
+    )
+
     task_started = time.perf_counter()
-    cx = float(roi.center_x)
-    cy = float(roi.center_y)
-    r_outer = float(reference_outer_radius_px)
-    margin = 3
+    x0, y0, x1, y1 = box
+    patch_h, patch_w = y1 - y0, x1 - x0
+    flatten_background_enabled = bool(getattr(preprocessing, "flatten_background_enabled", False))
+    if not flatten_background_enabled:
+        raw_x0, raw_y0, raw_x1, raw_y1 = raw_bounding_box_for_processed_box(raw_shape, preprocessing, box)
 
-    raw_cx = cx + int(crop_x)
-    raw_cy = cy + int(crop_y)
-    y0 = max(0, int(raw_cy - r_outer) - margin)
-    y1 = int(raw_cy + r_outer) + margin + 1
-    x0 = max(0, int(raw_cx - r_outer) - margin)
-    x1 = int(raw_cx + r_outer) + margin + 1
-    center_py = raw_cy - y0
-    center_px = raw_cx - x0
+    roi_accumulators: dict[int, dict[str, list]] = {
+        int(roi.area_roi_id): {
+            "wavelengths": [], "absorbance": [], "sample_mean": [], "reference_mean": [],
+            "sample_pixel_count": [], "reference_pixel_count": [],
+        }
+        for roi in selected_rois
+    }
+    total = max(len(measurement_payload), 1)
 
-    wavelengths_list = list(wavelengths)
-    total = max(len(wavelengths_list), 1)
-
-    def _load_wl(idx_wl: tuple) -> tuple:
-        idx, wl = idx_wl
+    def _load_wl(item: tuple) -> tuple:
+        index, (wavelength_nm, affine_matrix, external_mask) = item
+        empty_per_roi = {
+            int(roi.area_roi_id): (float("nan"), float("nan"), float("nan"), 0, 0) for roi in selected_rois
+        }
         if cancel_event is not None and cancel_event.is_set():
-            return (idx, float(wl), float("nan"), float("nan"), float("nan"), 0, 0)
-        record = record_map.get((int(frame_index), float(wl)))
+            return (index, float(wavelength_nm), (float("nan"), float("nan"), float("nan"), 0, 0), empty_per_roi)
+        record = record_map.get((int(frame_index), float(wavelength_nm)))
         if record is None:
-            return (idx, float(wl), float("nan"), float("nan"), float("nan"), 0, 0)
-        patch = dataset_load_plane_roi(dataset, int(frame_index), float(wl), y0, y1, x0, x1, record=record)
-        if patch is None or patch.size == 0:
-            return (idx, float(wl), float("nan"), float("nan"), float("nan"), 0, 0)
-        ph, pw = patch.shape[:2]
-        y_idx, x_idx = np.mgrid[0:ph, 0:pw]
-        dist2 = (y_idx - center_py) ** 2 + (x_idx - center_px) ** 2
-        sample_mask = dist2 <= float(sample_radius_px) ** 2
-        dist = np.sqrt(dist2)
-        ring_mask = (dist >= float(reference_inner_radius_px)) & (dist <= r_outer)
-        ring_mask &= ~sample_mask
-        sample_pixels = patch[sample_mask]
-        ring_pixels = patch[ring_mask]
-        if sample_pixels.size == 0 or ring_pixels.size == 0:
-            return (idx, float(wl), float("nan"), float("nan"), float("nan"), 0, 0)
-        sm = float(np.mean(sample_pixels))
-        rm = float(np.mean(ring_pixels))
-        return (idx, float(wl), absorbance_from_means(sm, rm), sm, rm, int(sample_pixels.size), int(ring_pixels.size))
+            return (index, float(wavelength_nm), (float("nan"), float("nan"), float("nan"), 0, 0), empty_per_roi)
 
-    worker_count = max(1, min(max(int(os.cpu_count() or 2) // 2, 2), 8, len(wavelengths_list)))
-    indexed = list(enumerate(wavelengths_list))
-    results: list = [None] * len(wavelengths_list)
+        if flatten_background_enabled:
+            raw_image = load_image_array(str(record.path))
+            background_rois = selected_rois if bool(getattr(preprocessing, "flatten_background_exclude_area_rois", True)) else None
+            background_mask = background_mask_settings if bool(getattr(preprocessing, "flatten_background_exclude_mask", False)) else None
+            patch = apply_preprocessing(
+                raw_image, preprocessing,
+                rois=background_rois, mask_settings=background_mask,
+                external_mask=external_mask, external_mask_processed=True,
+                mask_state=mask_state, region=box,
+            )
+            patch = np.asarray(patch, dtype=np.float32)
+        else:
+            raw_patch = dataset_load_plane_roi(dataset, int(frame_index), float(wavelength_nm), raw_y0, raw_y1, raw_x0, raw_x1, record=record)
+            if raw_patch is None or raw_patch.size == 0:
+                return (index, float(wavelength_nm), (float("nan"), float("nan"), float("nan"), 0, 0), empty_per_roi)
+            patch = resample_raw_patch_to_processed_box(
+                np.asarray(raw_patch, dtype=np.float32), (raw_x0, raw_y0), raw_shape, preprocessing, box,
+            )
+
+        ignored_patch = None
+        if external_mask is not None:
+            mask_full = np.asarray(external_mask, dtype=bool)
+            if mask_full.shape[0] >= y1 and mask_full.shape[1] >= x1:
+                ignored_patch = mask_full[y0:y1, x0:x1]
+
+        def _means_for(rois_subset: list[AreaRoi], ids_subset: tuple[int, ...]) -> tuple[float, float, float, int, int]:
+            roi_mask, ring_mask = _selected_roi_masks_for_spectrum(
+                (patch_h, patch_w), rois_subset, ids_subset, ring_inner_radius_px, ring_outer_radius_px,
+                affine_matrix, patch_origin_xy=(x0, y0),
+            )
+            if ignored_patch is not None:
+                roi_mask = roi_mask & ~ignored_patch
+                ring_mask = ring_mask & ~ignored_patch
+            sample_pixels = patch[roi_mask]
+            ring_pixels = patch[ring_mask]
+            if sample_pixels.size == 0 or ring_pixels.size == 0:
+                return float("nan"), float("nan"), float("nan"), int(sample_pixels.size), int(ring_pixels.size)
+            sm = float(np.mean(sample_pixels))
+            rm = float(np.mean(ring_pixels))
+            return absorbance_from_means(sm, rm), sm, rm, int(sample_pixels.size), int(ring_pixels.size)
+
+        combined = _means_for(selected_rois, selected_roi_ids)
+        per_roi = {
+            int(roi.area_roi_id): _means_for([roi], (int(roi.area_roi_id),)) for roi in selected_rois
+        }
+        return (index, float(wavelength_nm), combined, per_roi)
+
+    worker_count = max(1, min(max(int(os.cpu_count() or 2) // 2, 2), 8, len(measurement_payload)))
+    indexed = list(enumerate(measurement_payload))
+    results: list = [None] * len(measurement_payload)
 
     if worker_count <= 1:
-        for idx_wl in indexed:
-            results[idx_wl[0]] = _load_wl(idx_wl)
+        for item in indexed:
+            results[item[0]] = _load_wl(item)
             if progress_callback is not None:
                 progress_callback(
-                    int(round((idx_wl[0] + 1) / total * 100)),
-                    f"Fast spectrum {idx_wl[0]+1}/{total}: {float(idx_wl[1]):g} nm",
+                    int(round((item[0] + 1) / total * 100)),
+                    f"Fast spectrum {item[0]+1}/{total}: {float(item[1][0]):g} nm",
                 )
     else:
         with ThreadPoolExecutor(max_workers=worker_count) as executor:
-            future_map = {executor.submit(_load_wl, idx_wl): idx_wl[0] for idx_wl in indexed}
+            future_map = {executor.submit(_load_wl, item): item[0] for item in indexed}
             done_count = 0
             for future in as_completed(future_map):
                 idx = int(future_map[future])
@@ -604,31 +769,44 @@ def _absorbance_spectrum_fast_task(
     for r in results:
         if r is None:
             continue
-        _, wl, abs_val, sm, rm, spc, rpc = r
+        _, wl, (abs_val, sm, rm, spc, rpc), per_roi = r
         wavelengths_out.append(float(wl))
         absorbance_values.append(float(abs_val))
         sample_mean_values.append(float(sm))
         reference_mean_values.append(float(rm))
         sample_pixel_counts.append(int(spc))
         reference_pixel_counts.append(int(rpc))
+        for roi in selected_rois:
+            roi_abs, roi_sm, roi_rm, roi_spc, roi_rpc = per_roi[int(roi.area_roi_id)]
+            accumulator = roi_accumulators[int(roi.area_roi_id)]
+            accumulator["wavelengths"].append(float(wl))
+            accumulator["absorbance"].append(float(roi_abs))
+            accumulator["sample_mean"].append(float(roi_sm))
+            accumulator["reference_mean"].append(float(roi_rm))
+            accumulator["sample_pixel_count"].append(int(roi_spc))
+            accumulator["reference_pixel_count"].append(int(roi_rpc))
 
-    per_roi = AbsorbanceSpectrumResult(
+    spot_results: dict[int, AbsorbanceSpectrumResult] = {}
+    for roi in selected_rois:
+        data = roi_accumulators[int(roi.area_roi_id)]
+        spot_results[int(roi.area_roi_id)] = AbsorbanceSpectrumResult(
+            wavelengths_nm=np.asarray(data["wavelengths"], dtype=np.float64),
+            absorbance=np.asarray(data["absorbance"], dtype=np.float64),
+            sample_mean=np.asarray(data["sample_mean"], dtype=np.float64),
+            reference_mean=np.asarray(data["reference_mean"], dtype=np.float64),
+            sample_pixel_count=np.asarray(data["sample_pixel_count"], dtype=np.int32),
+            reference_pixel_count=np.asarray(data["reference_pixel_count"], dtype=np.int32),
+        )
+
+    return AbsorbanceSpectrumResult(
         wavelengths_nm=np.asarray(wavelengths_out, dtype=np.float64),
         absorbance=np.asarray(absorbance_values, dtype=np.float64),
         sample_mean=np.asarray(sample_mean_values, dtype=np.float64),
         reference_mean=np.asarray(reference_mean_values, dtype=np.float64),
         sample_pixel_count=np.asarray(sample_pixel_counts, dtype=np.int32),
         reference_pixel_count=np.asarray(reference_pixel_counts, dtype=np.int32),
-    )
-    return AbsorbanceSpectrumResult(
-        wavelengths_nm=per_roi.wavelengths_nm,
-        absorbance=per_roi.absorbance,
-        sample_mean=per_roi.sample_mean,
-        reference_mean=per_roi.reference_mean,
-        sample_pixel_count=per_roi.sample_pixel_count,
-        reference_pixel_count=per_roi.reference_pixel_count,
         total_seconds=time.perf_counter() - task_started,
-        area_roi_results={int(roi.area_roi_id): per_roi},
+        area_roi_results=spot_results,
     )
 
 
