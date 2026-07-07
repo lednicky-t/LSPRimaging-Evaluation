@@ -1,3 +1,32 @@
+"""Per-wavelength chromatic-aberration registration.
+
+Each wavelength plane is geometrically registered against a reference plane
+(the plane a wavelength's own affine transform should map *onto*) so that a
+pixel at a given (x, y) in the reference corresponds to the same physical
+sample location in every other wavelength. The pipeline combines three
+standard building blocks rather than one named published algorithm:
+
+1. A global translation estimate via FFT phase correlation
+   (Kuglin, C. D. & Hines, D. C. "The phase correlation image alignment
+   method." Proc. IEEE Conf. Cybernetics and Society, 1975), refined with
+   `skimage.registration.phase_cross_correlation`'s upsampled cross-power
+   spectrum when available (Guizar-Sicairos, M., Thurman, S. T. & Fienup,
+   J. R. "Efficient subpixel image registration algorithms." Opt. Lett. 33,
+   156-158, 2008).
+2. Local tie points found by normalized cross-correlation template matching
+   on a grid of tiles, searched near the position the global shift predicts.
+3. A full affine (or similarity) transform fit through those tie points,
+   with a small iterative outlier-rejection loop (refit, drop the
+   highest-residual points, refit again) in place of a full RANSAC.
+
+`estimate_affine_chromatic_transform` runs the whole pipeline;
+`detect_regional_landmarks`/`track_landmarks` instead locate and follow a
+small set of user-visible feature points (for the manual/landmark
+correction path) using a Harris corner response
+(Harris, C. & Stephens, M. "A Combined Corner and Edge Detector." Proc. 4th
+Alvey Vision Conference, 1988) in place of template matching.
+"""
+
 from __future__ import annotations
 
 from copy import deepcopy
@@ -31,6 +60,14 @@ def identity_affine_matrix() -> np.ndarray:
 
 
 def prepare_registration_image(image: np.ndarray) -> np.ndarray:
+    """Turn a raw wavelength image into a registration-friendly feature map.
+
+    Band-pass filters out both fine sensor noise and the slowly-varying
+    illumination background (difference of two Gaussians), then takes the
+    gradient magnitude so registration matches on *edges/texture* rather than
+    absolute intensity -- intensity itself varies a lot between wavelengths
+    even at the same physical spot, but edge structure doesn't.
+    """
     image_f32 = image.astype(np.float32, copy=False)
     smooth = ndimage.gaussian_filter(image_f32, sigma=1.2, mode="nearest")
     background = ndimage.gaussian_filter(image_f32, sigma=18.0, mode="nearest")
@@ -56,6 +93,16 @@ def detect_regional_landmarks(
     patch_radius_px: int = 10,
     subpixel_precision: int = 1,
 ) -> dict[int, tuple[float, float]]:
+    """Find `feature_count` trackable landmark points on the reference image.
+
+    Lays out `feature_count` anchor positions on a roughly-even grid
+    (`default_landmark_anchors`), then searches near each anchor for the
+    strongest Harris corner response (`_corner_response`) as the actual
+    landmark -- corners/junctions are far more reliably re-locatable across
+    wavelengths than a flat or edge-only region. Falls back to the raw
+    anchor position if no clear corner is found nearby, so every requested
+    feature always gets a point. Returns `{feature_id: (x, y)}`.
+    """
     prepared = prepare_registration_image(image)
     response = _corner_response(prepared)
     image_height, image_width = prepared.shape[:2]
@@ -127,6 +174,15 @@ def track_landmarks(
     patch_radius_px: int = 10,
     subpixel_precision: int = 1,
 ) -> dict[int, tuple[float, float]]:
+    """Follow `reference_landmarks` from `reference_image` into `target_image`.
+
+    First estimates one global shift for the whole image via phase
+    correlation, then, for each landmark, cuts a small patch around its
+    reference position and normalized-cross-correlation-matches it against a
+    search window centered on the shift-predicted position in the target
+    image (`_match_patch`). Falls back to the plain global-shift prediction
+    for any landmark whose patch match fails or scores too low.
+    """
     if not reference_landmarks:
         return {}
     reference_prepared = prepare_registration_image(reference_image)
@@ -192,6 +248,22 @@ def estimate_affine_chromatic_transform(
     spacing_px: int | None = None,
     subpixel_precision: int = 1,
 ) -> ChromaticRegistrationResult:
+    """Estimate the affine transform mapping `target_image` onto `reference_image`.
+
+    1. One global (x, y) shift via phase correlation over the whole image.
+    2. A grid of tile-sized tie points: for each tile in the reference, a
+       normalized-cross-correlation search (`_match_patch`) around the
+       shift-predicted position in the target, skipping near-uniform tiles
+       (`max_ref_std`) that carry no useful texture to match.
+    3. An affine fit through the tie points (`fit_affine_matrix`), then (in
+       "robust" mode) a few rounds of refit-and-drop-the-worst-residuals to
+       reject bad tie points before the final fit -- a lightweight stand-in
+       for full RANSAC, since the tie points are already fairly clean.
+
+    Falls back to a pure-translation matrix (no rotation/scale) if fewer than
+    3 tie points survive, since an affine fit needs at least 3 non-collinear
+    correspondences.
+    """
     reference = prepare_registration_image(reference_image)
     target = prepare_registration_image(target_image)
     if mode == "robust":
@@ -299,6 +371,17 @@ def estimate_affine_chromatic_transform(
 
 
 def phase_correlation_shift(reference_image: np.ndarray, target_image: np.ndarray) -> tuple[float, float, float]:
+    """Estimate the whole-image (x, y) translation that best aligns the two images.
+
+    Classic FFT phase correlation (Kuglin, C. D. & Hines, D. C. "The phase
+    correlation image alignment method." Proc. IEEE Conf. Cybernetics and
+    Society, 1975): the cross-power spectrum of the two images' FFTs, with
+    magnitude normalized to 1 at every frequency, has an inverse FFT that is
+    a sharp peak located exactly at the true shift -- unlike a raw
+    cross-correlation, whose peak width depends on image content. Only
+    accurate to whole pixels; `multiscale_phase_correlation_shift` adds
+    subpixel precision. Returns `(shift_x, shift_y, peak_sharpness)`.
+    """
     reference = reference_image.astype(np.float32, copy=False)
     target = target_image.astype(np.float32, copy=False)
     eps = 1e-8
@@ -321,6 +404,17 @@ def phase_correlation_shift(reference_image: np.ndarray, target_image: np.ndarra
 
 
 def multiscale_phase_correlation_shift(reference_image: np.ndarray, target_image: np.ndarray) -> tuple[float, float, float]:
+    """Subpixel-accurate version of `phase_correlation_shift`.
+
+    Prefers `skimage.registration.phase_cross_correlation`'s upsampled
+    cross-power-spectrum method (Guizar-Sicairos, M., Thurman, S. T. &
+    Fienup, J. R. "Efficient subpixel image registration algorithms."
+    Opt. Lett. 33, 156-158, 2008), which gets subpixel precision without
+    ever computing a full upsampled FFT. If scikit-image's registration
+    module isn't installed, falls back to a manual coarse-then-fine scheme:
+    a whole-pixel shift on a 2x-downsampled pair, then a second whole-pixel
+    correction at full resolution after pre-shifting by the coarse estimate.
+    """
     if _phase_cross_correlation is not None:
         shift_rc, error, _diffphase = _phase_cross_correlation(
             reference_image.astype(np.float32, copy=False),
@@ -343,6 +437,17 @@ def multiscale_phase_correlation_shift(reference_image: np.ndarray, target_image
 
 
 def fit_affine_matrix(source_points_xy: np.ndarray, target_points_xy: np.ndarray) -> np.ndarray:
+    """Ordinary-least-squares affine fit (rotation + scale + shear + translation)
+    through matched point pairs.
+
+    Each output coordinate (target x, target y) is an independent linear
+    combination of (source x, source y, 1), solved by least squares
+    (`np.linalg.lstsq`) rather than an exact solve, so it works cleanly with
+    more than the minimum 3 point pairs -- extra, noisy correspondences
+    average out rather than making the system unsolvable. Returns a 2x3
+    matrix `[[a, b, tx], [c, d, ty]]` such that
+    `target = matrix @ [source_x, source_y, 1]`.
+    """
     design = np.column_stack((source_points_xy[:, 0], source_points_xy[:, 1], np.ones(source_points_xy.shape[0])))
     coeff_x, _, _, _ = np.linalg.lstsq(design, target_points_xy[:, 0], rcond=None)
     coeff_y, _, _, _ = np.linalg.lstsq(design, target_points_xy[:, 1], rcond=None)
@@ -350,6 +455,7 @@ def fit_affine_matrix(source_points_xy: np.ndarray, target_points_xy: np.ndarray
 
 
 def apply_affine_to_points(points_xy: np.ndarray, affine_matrix: np.ndarray) -> np.ndarray:
+    """Map `points_xy` (N x 2) through the 2x3 affine `matrix @ [x, y, 1]`."""
     if points_xy.size == 0:
         return points_xy.astype(np.float64, copy=True)
     design = np.column_stack((points_xy[:, 0], points_xy[:, 1], np.ones(points_xy.shape[0], dtype=np.float64)))
@@ -357,11 +463,16 @@ def apply_affine_to_points(points_xy: np.ndarray, affine_matrix: np.ndarray) -> 
 
 
 def affine_residuals(source_points_xy: np.ndarray, target_points_xy: np.ndarray, affine_matrix: np.ndarray) -> np.ndarray:
+    """Per-point distance (px) between `affine_matrix @ source` and `target` -- the
+    fit-quality/outlier-rejection metric used throughout this module."""
     predicted = apply_affine_to_points(source_points_xy, affine_matrix)
     return np.sqrt(np.sum((predicted - target_points_xy) ** 2, axis=1))
 
 
 def invert_affine_matrix(affine_matrix: np.ndarray) -> np.ndarray:
+    """Invert a 2x3 affine matrix (linear part + translation), so
+    `apply_affine_to_points(apply_affine_to_points(p, m), invert_affine_matrix(m)) == p`.
+    """
     linear = np.asarray(affine_matrix[:, :2], dtype=np.float64)
     translation = np.asarray(affine_matrix[:, 2], dtype=np.float64)
     inverse_linear = np.linalg.inv(linear)
@@ -530,6 +641,25 @@ def transformed_disk_mask_for_patch(
 
 
 def fit_similarity_matrix(source_points_xy: np.ndarray, target_points_xy: np.ndarray) -> np.ndarray:
+    """Least-squares fit of a *similarity* transform (uniform scale + rotation +
+    translation only -- no shear or independent x/y scale) through matched
+    point pairs.
+
+    Implements Umeyama's closed-form solution (Umeyama, S. "Least-squares
+    estimation of transformation parameters between two point patterns."
+    IEEE Trans. Pattern Anal. Mach. Intell. 13(4), 376-380, 1991): center
+    both point sets, take the SVD of their cross-covariance, and read the
+    optimal rotation off `V @ U.T` (flipping the last singular vector if
+    that rotation has determinant < 0, which would mean a reflection rather
+    than a rotation); the optimal scale is the sum of singular values
+    divided by the source points' variance.
+
+    Used for the "radial"/landmark-based correction mode, where a handful of
+    user-picked points should only ever imply a rigid-plus-zoom transform,
+    not an arbitrary shear -- so a small number of noisy landmarks can't
+    accidentally warp the image. Raises `ValueError` with fewer than 2 point
+    pairs, or if the source points are degenerate (all coincident).
+    """
     if source_points_xy.shape[0] < 2 or target_points_xy.shape[0] < 2:
         raise ValueError("At least two landmark pairs are required for the radial landmark model.")
     source = np.asarray(source_points_xy, dtype=np.float64)
@@ -554,6 +684,11 @@ def fit_similarity_matrix(source_points_xy: np.ndarray, target_points_xy: np.nda
 
 
 def decompose_similarity_matrix(affine_matrix: np.ndarray) -> tuple[float, float, float, float]:
+    """Read a similarity matrix's `(scale, angle_rad, shift_x_px, shift_y_px)`
+    back out of its 2x3 form -- the inverse of `compose_similarity_matrix`,
+    used to show a human-editable scale/rotation/shift in the GUI instead of
+    raw matrix coefficients.
+    """
     matrix = np.asarray(affine_matrix, dtype=np.float64)
     linear = matrix[:, :2]
     scale_x = float(np.hypot(linear[0, 0], linear[1, 0]))
@@ -564,6 +699,8 @@ def decompose_similarity_matrix(affine_matrix: np.ndarray) -> tuple[float, float
 
 
 def compose_similarity_matrix(scale: float, angle_rad: float, shift_x_px: float, shift_y_px: float) -> np.ndarray:
+    """Build a 2x3 similarity matrix from `(scale, angle_rad, shift_x_px,
+    shift_y_px)` -- the inverse of `decompose_similarity_matrix`."""
     cos_angle = float(np.cos(angle_rad))
     sin_angle = float(np.sin(angle_rad))
     return np.array(
@@ -607,6 +744,16 @@ def transform_spots_affine(
 
 
 def _corner_response(image: np.ndarray) -> np.ndarray:
+    """Harris corner response (Harris, C. & Stephens, M. "A Combined Corner
+    and Edge Detector." Proc. 4th Alvey Vision Conference, 1988):
+    `det(structure_tensor) - k * trace(structure_tensor)**2` with the
+    textbook `k = 0.04`, computed from Gaussian-smoothed products of the
+    Sobel gradients. High values mark corners/junctions -- points whose
+    local neighborhood looks different when shifted in *any* direction,
+    which is exactly what makes a point reliably re-locatable in another
+    wavelength's image. Boosted by local gradient magnitude so corners in
+    higher-contrast regions win out over comparably-cornery but faint ones.
+    """
     image_f32 = image.astype(np.float32, copy=False)
     gx = ndimage.sobel(image_f32, axis=1, mode="nearest")
     gy = ndimage.sobel(image_f32, axis=0, mode="nearest")
@@ -817,6 +964,18 @@ def _match_patch(
     score_threshold: float,
     subpixel_precision: int = 1,
 ) -> tuple[float | None, float | None, float]:
+    """Locate `reference_patch` inside `search_area` by normalized cross-correlation.
+
+    Both patch and search area are zero-mean normalized first (the patch is
+    also unit-variance normalized), then correlated via FFT-based
+    convolution (`scipy.signal.fftconvolve`) rather than a direct sliding-
+    window sum, which is far cheaper for the tile sizes used here. The
+    result is z-scored against its own mean/std so `score_threshold` means
+    "how many standard deviations above the background correlation level"
+    rather than a raw, scale-dependent number. Returns `(None, None, score)`
+    if the patch is flat (nothing to match) or the best match doesn't clear
+    `score_threshold`.
+    """
     patch = reference_patch.astype(np.float32, copy=False)
     search = search_area.astype(np.float32, copy=False)
     patch -= float(np.mean(patch))
@@ -861,6 +1020,16 @@ def _refine_peak_position(
     peak_y: int,
     subpixel_precision: int,
 ) -> tuple[float, float]:
+    """Refine an integer-pixel correlation peak to subpixel precision.
+
+    Fits a 2D quadratic surface (`a*x^2 + b*y^2 + c*xy + d*x + e*y + f`) to a
+    small neighborhood around the discrete peak by least squares, then
+    solves for that quadratic's analytic maximum via its gradient/Hessian --
+    standard parabolic-interpolation subpixel peak finding, the same idea
+    used for subpixel PIV (particle image velocimetry) peak fitting. Falls
+    back to the integer peak position if the neighborhood runs off the edge
+    of `surface` or the fit is degenerate.
+    """
     radius = _subpixel_refinement_radius(subpixel_precision)
     if radius <= 0:
         return float(peak_x), float(peak_y)

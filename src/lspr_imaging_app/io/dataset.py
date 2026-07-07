@@ -74,6 +74,14 @@ _LOGGER = logging.getLogger("lspr_imaging_app.workflow")
 
 
 def load_dataset(folder: Path) -> ImageDataset:
+    """Load `folder` as an `ImageDataset`, auto-detecting the format.
+
+    An OME-Zarr export (see `export_ome_zarr_dataset`) is detected by the
+    presence of its zarr metadata files and loaded via
+    `load_ome_zarr_dataset`. Otherwise `folder` is treated as a flat
+    directory of TIFF files named like `WL500Frame3.tif` (wavelength in nm,
+    spectral cube index), parsed by `IMAGE_PATTERN`.
+    """
     if is_ome_zarr_dataset(folder):
         return load_ome_zarr_dataset(folder)
     records: list[ImageRecord] = []
@@ -109,6 +117,12 @@ def dataset_get_record_map(dataset: ImageDataset) -> dict[tuple[int, float], Ima
 
 
 def dataset_load_plane(dataset: ImageDataset, spectral_cube_index: int, wavelength_nm: float) -> np.ndarray:
+    """Load one full (spectral_cube_index, wavelength_nm) plane as float32.
+
+    For a scoped read of just part of a plane (e.g. around a small ROI on an
+    OME-Zarr dataset), use `dataset_load_plane_roi` instead -- it only reads
+    the zarr chunks the requested region actually touches.
+    """
     record = dataset_get_record(dataset, spectral_cube_index, wavelength_nm)
     if record is None:
         raise KeyError(f"No record found for spectral_cube_index={spectral_cube_index}, wavelength={wavelength_nm}")
@@ -280,6 +294,14 @@ def _fast_read_zarr_plane(meta: dict, spectral_cube_pos: int, wavelength_pos: in
     file's raw bytes. Returns None on any surprise (missing shard, size
     mismatch, decode failure, ...) so the caller falls back to the standard
     zarr array read rather than risk returning a subtly wrong image.
+
+    The byte layout parsed here is the Zarr v3 "sharding indexed" codec
+    (Zarr core protocol v3.0, sharding codec spec:
+    https://zarr-specs.readthedocs.io/en/latest/v3/codecs/sharding-indexed/index.html):
+    a shard file is `[compressed inner chunk 0]...[compressed inner chunk
+    n-1][index: n x (u64 offset, u64 nbytes), one pair per inner chunk, in
+    C order][u32 CRC32C of the index]`; a missing inner chunk's offset/length
+    are both `0xFFFFFFFFFFFFFFFF`.
     """
     ich, icw = meta["ich"], meta["icw"]
     n_cy, n_cx = meta["n_cy"], meta["n_cx"]
@@ -365,10 +387,27 @@ def _ome_zarr_array_meta(root: Path) -> dict:
 
 
 def _ome_zarr_plane_path(root: Path, spectral_cube_index: int, wavelength_index: int) -> Path:
+    """Build the synthetic per-plane "path" this app uses as an `ImageRecord.path`
+    for an OME-Zarr dataset. Not a real file on disk -- its stem
+    `{spectral_cube_pos}.{wavelength_pos}.0.0` (positions within the sorted
+    spectral_cube_indices/wavelengths_nm lists, not the raw index/nm values)
+    is parsed back out by `_read_ome_zarr_plane_by_path` to know which plane
+    to read, the same way a real TIFF path's filename is parsed by
+    `IMAGE_PATTERN`.
+    """
     return _ome_zarr_array_dir(root) / f"{int(spectral_cube_index)}.{int(wavelength_index)}.0.0"
 
 
 def load_ome_zarr_dataset(folder: Path) -> ImageDataset:
+    """Load an OME-Zarr export (from `export_ome_zarr_dataset`) as an `ImageDataset`.
+
+    Reads the array shape (spectral_cube_count, wavelength_count, y, x) and
+    the app's own `lspr` attrs group (spectral cube indices, wavelengths,
+    written by `export_ome_zarr_dataset`) to reconstruct one `ImageRecord`
+    per plane, with each record's `path` a synthetic, non-existent path (see
+    `_ome_zarr_plane_path`) that later reads recognize and route through the
+    zarr-aware loading path instead of a real file open.
+    """
     root = _ome_zarr_root(folder)
     if root is None:
         raise FileNotFoundError(f"No OME-Zarr dataset found in {folder}")
@@ -648,10 +687,33 @@ def export_ome_zarr_dataset(
     progress_callback: Callable[[int, str], None] | None = None,
     cancel_event: threading.Event | None = None,
 ) -> Path:
-    # NOTE(perf): zarr v3 sharding — one shard file per plane, 64×64 inner chunks.
-    # Workers write each shard directly (bypassing zarr's async event loop) using
-    # numcodecs Blosc + CRC32C index. Benchmarks: 119 MB/s at 64px vs 21 MB/s via
-    # zarr API at same chunk size. zarr reads the shards transparently via its codec.
+    """Export `dataset` (a TIFF stack or another OME-Zarr dataset) as a new
+    OME-Zarr v3 dataset at `destination`, using zarr's sharding codec (Zarr
+    core protocol v3.0: https://zarr-specs.readthedocs.io/en/latest/v3/codecs/sharding-indexed/index.html)
+    so many small logical chunks (`chunk_size_px` x `chunk_size_px`, what
+    readers see) are physically grouped into one shard file per plane
+    (`shard_mode="per_image"`) or one shard file per spectral cube covering
+    all its wavelengths (`shard_mode="per_spectral_cube"`) -- far fewer
+    files on disk, and readers can still fetch just the chunks they need.
+
+    The actual shard bytes are written directly by worker processes
+    (`ProcessPoolExecutor`) using `numcodecs`' Blosc compressor and a
+    hand-built CRC32C-checksummed index, bypassing zarr's own async
+    write API entirely -- ~119 MB/s at a 64px chunk size in benchmarking,
+    vs. ~21 MB/s writing through zarr's API at the same chunk size, because
+    zarr dispatches every chunk's compression and write as its own
+    `asyncio.to_thread` call. Written this way, the shards are still fully
+    standard zarr v3 sharded arrays: any zarr-v3-compliant reader (including
+    zarr's own generic array API) can read them back with no special
+    knowledge of how they were produced -- `_fast_read_zarr_plane` is purely
+    a *read-side* speed optimization for this app's own loading path, not a
+    requirement for the file format to be valid.
+
+    When `preprocessing.image_tools_enabled` is set, rotation/flip/crop (and
+    physical pixel-size calibration, meaningful only in that same processed
+    coordinate space) are baked into the exported pixel data rather than
+    left for a reader to apply -- see `docs/image_tools_coordinate_spaces.md`.
+    """
     zarr, _, _, write_multiscales_metadata = _require_ome_zarr_support()
     try:
         from zarr.codecs import BloscCodec
