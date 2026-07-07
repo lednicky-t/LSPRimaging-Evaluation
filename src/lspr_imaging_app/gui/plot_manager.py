@@ -249,32 +249,32 @@ class PlotManager:
 
     def set_sensorgram_series(
         self,
-        frame_indices,
+        spectral_cube_indices,
         metric_values,
         *,
         summary_text: str | None = None,
     ) -> None:
-        self._window._analysis_controller.set_sensorgram_series(frame_indices, metric_values, summary_text=summary_text)
+        self._window._analysis_controller.set_sensorgram_series(spectral_cube_indices, metric_values, summary_text=summary_text)
 
     def update_sensorgram_current_point(self) -> None:
         self._window._analysis_controller.update_current_point()
 
-    def update_single_frame_sensorgram(self, metric_value: float | None, metric_signal: float | None) -> None:
+    def update_single_spectral_cube_sensorgram(self, metric_value: float | None, metric_signal: float | None) -> None:
         window = self._window
-        if window._sensorgram_running or window._sensorgram_frame_indices.size > 1:
+        if window._sensorgram_running or window._sensorgram_spectral_cube_indices.size > 1:
             self.update_sensorgram_current_point()
             return
-        frame = window._current_frame()
-        if frame is None or metric_value is None or not np.isfinite(metric_value):
+        spectral_cube_index = window._current_spectral_cube()
+        if spectral_cube_index is None or metric_value is None or not np.isfinite(metric_value):
             self.clear_sensorgram("Calculate all spectral cubes to build the fitted sensorgram.")
             return
         signal_value = float(metric_signal) if metric_signal is not None and np.isfinite(metric_signal) else float("nan")
         window._sensorgram_metric_signal = np.asarray([signal_value], dtype=np.float64)
         self.set_sensorgram_series(
-            [int(frame)],
+            [int(spectral_cube_index)],
             [float(metric_value)],
             summary_text=(
-                f"{window._analysis_metric_label()} | Spectral cube {int(frame)} = {float(metric_value):.3f} nm"
+                f"{window._analysis_metric_label()} | Spectral cube {int(spectral_cube_index)} = {float(metric_value):.3f} nm"
                 f" | Polynomial order {window._analysis_poly_order()}"
             ),
         )

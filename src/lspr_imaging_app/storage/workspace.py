@@ -166,7 +166,7 @@ def save_preprocessing(path: Path, settings: PreprocessingSettings) -> None:
         "chromatic_search_radius_px": int(settings.chromatic_search_radius_px),
         "reference_mode": str(settings.reference_mode),
         "reference_wavelength_nm": settings.reference_wavelength_nm,
-        "reference_frame_index": int(settings.reference_frame_index),
+        "reference_spectral_cube_index": int(settings.reference_spectral_cube_index),
     }
     path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
@@ -218,7 +218,10 @@ def load_preprocessing(path: Path) -> PreprocessingSettings:
         reference_wavelength_nm=(
             None if payload.get("reference_wavelength_nm") is None else float(payload.get("reference_wavelength_nm"))
         ),
-        reference_frame_index=int(payload.get("reference_frame_index", 0)),
+        # fall back to old key name from profiles saved before the rename
+        reference_spectral_cube_index=int(
+            payload.get("reference_spectral_cube_index", payload.get("reference_frame_index", 0))
+        ),
     )
 
 
@@ -270,7 +273,7 @@ def save_processing_profile(
             "chromatic_search_radius_px": int(preprocessing.chromatic_search_radius_px),
             "reference_mode": str(preprocessing.reference_mode),
             "reference_wavelength_nm": preprocessing.reference_wavelength_nm,
-            "reference_frame_index": int(preprocessing.reference_frame_index),
+            "reference_spectral_cube_index": int(preprocessing.reference_spectral_cube_index),
             "histogram_highlight_min_value": preprocessing.histogram_highlight_min_value,
             "histogram_highlight_max_value": preprocessing.histogram_highlight_max_value,
         },
@@ -365,7 +368,10 @@ def load_processing_profile(
             if preprocessing_payload.get("reference_wavelength_nm") is None
             else float(preprocessing_payload.get("reference_wavelength_nm"))
         ),
-        reference_frame_index=int(preprocessing_payload.get("reference_frame_index", 0)),
+        # fall back to old key name from profiles saved before the rename
+        reference_spectral_cube_index=int(
+            preprocessing_payload.get("reference_spectral_cube_index", preprocessing_payload.get("reference_frame_index", 0))
+        ),
         histogram_highlight_min_value=(
             None
             if preprocessing_payload.get("histogram_highlight_min_value") is None
@@ -556,7 +562,10 @@ def load_processing_profile(
                 matrix_raw = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]]
             chromatic_models.append(
                 ChromaticTransformModel(
-                    frame_index=int(raw.get("frame_index", preprocessing.reference_frame_index)),
+                    # fall back to old key name from profiles saved before the rename
+                    spectral_cube_index=int(
+                        raw.get("spectral_cube_index", raw.get("frame_index", preprocessing.reference_spectral_cube_index))
+                    ),
                     wavelength_nm=float(raw.get("wavelength_nm", preprocessing.reference_wavelength_nm or 0.0)),
                     model_kind=str(raw.get("model_kind", "image_affine")),
                     affine_matrix=[[float(value) for value in row] for row in matrix_raw],
@@ -578,7 +587,10 @@ def load_processing_profile(
             chromatic_landmarks.append(
                 ChromaticLandmarkObservation(
                     landmark_id=int(raw.get("landmark_id", 1)),
-                    frame_index=int(raw.get("frame_index", preprocessing.reference_frame_index)),
+                    # fall back to old key name from profiles saved before the rename
+                    spectral_cube_index=int(
+                        raw.get("spectral_cube_index", raw.get("frame_index", preprocessing.reference_spectral_cube_index))
+                    ),
                     wavelength_nm=float(raw.get("wavelength_nm", preprocessing.reference_wavelength_nm or 0.0)),
                     x_px=float(raw.get("x_px", 0.0)),
                     y_px=float(raw.get("y_px", 0.0)),

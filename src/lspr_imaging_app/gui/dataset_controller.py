@@ -74,8 +74,8 @@ class DatasetController:
         if callable(progress):
             progress(48, "Loading dataset records...")
         self.window._record_map = dataset_record_map(dataset)
-        self.window._record_key_by_path = {record.path: (int(record.key.frame_index), float(record.key.wavelength_nm)) for record in dataset.records}
-        self.window._frame_values = dataset.frame_indices
+        self.window._record_key_by_path = {record.path: (int(record.key.spectral_cube_index), float(record.key.wavelength_nm)) for record in dataset.records}
+        self.window._spectral_cube_values = dataset.spectral_cube_indices
         self.window._wavelength_values = dataset.wavelengths_nm
         self.window._reference_contrast_cache.clear()
         self.window._current_record_path = None
@@ -101,7 +101,7 @@ class DatasetController:
         self.window._sync_ome_zarr_chunk_controls()
         self.window._sync_image_processing_controls()
 
-        self.window._configure_slider(self.window.frame_slider, len(self.window._frame_values))
+        self.window._configure_slider(self.window.spectral_cube_slider, len(self.window._spectral_cube_values))
         self.window._configure_slider(self.window.wavelength_slider, len(self.window._wavelength_values))
         self.window._configure_navigation_inputs()
         self.window._sync_reference_selection_from_settings()
@@ -165,7 +165,7 @@ class DatasetController:
         folder_name = build_ome_zarr_export_folder_name(
             name,
             width=new_summary.width, height=new_summary.height,
-            frame_count=new_summary.frame_count, wavelength_count=new_summary.wavelength_count,
+            spectral_cube_count=new_summary.spectral_cube_count, wavelength_count=new_summary.wavelength_count,
             chunk_size_px=new_summary.chunk_size_px, shard_mode=new_summary.shard_mode,
             compression_enabled=new_summary.compression_enabled, dtype=new_summary.dtype_str,
         )

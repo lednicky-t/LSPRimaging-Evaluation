@@ -291,13 +291,13 @@ def roi_union_box_is_worth_scoping(
 
 
 def _roi_absorbance_signature(
-    frame: int,
+    spectral_cube_index: int,
     wavelength_values: tuple[float, ...],
     roi: AreaRoi,
     chromatic_signatures: tuple[object, ...],
 ) -> tuple[object, ...]:
     return (
-        int(frame),
+        int(spectral_cube_index),
         tuple(round(float(value), 6) for value in wavelength_values),
         int(roi.area_roi_id),
         round(float(roi.center_x), 3),
@@ -612,7 +612,7 @@ def _absorbance_spectrum_task(
 
 def _absorbance_spectrum_fast_task(
     dataset,
-    frame_index: int,
+    spectral_cube_index: int,
     measurement_payload: list[tuple[float, np.ndarray | None, np.ndarray | None]],
     record_map: dict,
     selected_rois: list[AreaRoi],
@@ -682,7 +682,7 @@ def _absorbance_spectrum_fast_task(
         }
         if cancel_event is not None and cancel_event.is_set():
             return (index, float(wavelength_nm), (float("nan"), float("nan"), float("nan"), 0, 0), empty_per_roi)
-        record = record_map.get((int(frame_index), float(wavelength_nm)))
+        record = record_map.get((int(spectral_cube_index), float(wavelength_nm)))
         if record is None:
             return (index, float(wavelength_nm), (float("nan"), float("nan"), float("nan"), 0, 0), empty_per_roi)
 
@@ -698,7 +698,7 @@ def _absorbance_spectrum_fast_task(
             )
             patch = np.asarray(patch, dtype=np.float32)
         else:
-            raw_patch = dataset_load_plane_roi(dataset, int(frame_index), float(wavelength_nm), raw_y0, raw_y1, raw_x0, raw_x1, record=record)
+            raw_patch = dataset_load_plane_roi(dataset, int(spectral_cube_index), float(wavelength_nm), raw_y0, raw_y1, raw_x0, raw_x1, record=record)
             if raw_patch is None or raw_patch.size == 0:
                 return (index, float(wavelength_nm), (float("nan"), float("nan"), float("nan"), 0, 0), empty_per_roi)
             patch = resample_raw_patch_to_processed_box(
@@ -811,26 +811,26 @@ def _absorbance_spectrum_fast_task(
 
 
 def _sensorgram_metric_task(
-    frame_payloads_or_frames,
+    spectral_cube_payloads_or_spectral_cubes,
     poly_order: int,
     metric_key: str,
     cancel_event: threading.Event | None = None,
     progress_callback=None,
     partial_callback=None,
-    frame_payload_builder=None,
+    spectral_cube_payload_builder=None,
     task_fn=None,
 ) -> SensorgramComputationResult:
     task_started = time.perf_counter()
-    frame_payloads: list[tuple[int, tuple[object, ...]]] = []
-    total_input_count = len(frame_payloads_or_frames) if hasattr(frame_payloads_or_frames, "__len__") else 0
+    spectral_cube_payloads: list[tuple[int, tuple[object, ...]]] = []
+    total_input_count = len(spectral_cube_payloads_or_spectral_cubes) if hasattr(spectral_cube_payloads_or_spectral_cubes, "__len__") else 0
     prep_seconds = 0.0
     fit_seconds = 0.0
-    if frame_payload_builder is not None:
-        frames = [int(frame) for frame in frame_payloads_or_frames]
-        total_input_count = len(frames)
-        if not frames:
+    if spectral_cube_payload_builder is not None:
+        spectral_cubes = [int(spectral_cube_index) for spectral_cube_index in spectral_cube_payloads_or_spectral_cubes]
+        total_input_count = len(spectral_cubes)
+        if not spectral_cubes:
             return SensorgramComputationResult(
-                frame_indices=np.asarray([], dtype=np.int32),
+                spectral_cube_indices=np.asarray([], dtype=np.int32),
                 metric_values=np.asarray([], dtype=np.float64),
                 metric_signal=np.asarray([], dtype=np.float64),
                 completed_count=0,
@@ -845,12 +845,12 @@ def _sensorgram_metric_task(
         built_payloads: list[tuple[int, tuple[object, ...]]] = []
         worker_count = max(2, min(4, os.cpu_count() or 2))
         with ThreadPoolExecutor(max_workers=worker_count) as executor:
-            future_map = {executor.submit(frame_payload_builder, int(frame)): int(frame) for frame in frames}
+            future_map = {executor.submit(spectral_cube_payload_builder, int(spectral_cube_index)): int(spectral_cube_index) for spectral_cube_index in spectral_cubes}
             for future in as_completed(future_map):
-                frame_index = int(future_map[future])
+                spectral_cube_index = int(future_map[future])
                 if cancel_event is not None and cancel_event.is_set():
                     return SensorgramComputationResult(
-                        frame_indices=np.asarray([], dtype=np.int32),
+                        spectral_cube_indices=np.asarray([], dtype=np.int32),
                         metric_values=np.asarray([], dtype=np.float64),
                         metric_signal=np.asarray([], dtype=np.float64),
                         completed_count=len(built_payloads),
@@ -859,7 +859,7 @@ def _sensorgram_metric_task(
                     )
                 payload = future.result()
                 if payload is not None:
-                    built_payloads.append((frame_index, payload))
+                    built_payloads.append((spectral_cube_index, payload))
                 completed += 1
                 if progress_callback is not None:
                     progress_callback(
@@ -867,54 +867,54 @@ def _sensorgram_metric_task(
                         f"Preparing sensorgram {completed}/{total_input_count} spectral cubes",
                     )
         prep_seconds = time.perf_counter() - prep_started
-        frame_payloads = sorted(built_payloads, key=lambda item: item[0])
+        spectral_cube_payloads = sorted(built_payloads, key=lambda item: item[0])
     else:
-        frame_payloads = list(frame_payloads_or_frames)
-    frame_indices: list[int] = []
+        spectral_cube_payloads = list(spectral_cube_payloads_or_spectral_cubes)
+    spectral_cube_indices: list[int] = []
     metric_values: list[float] = []
     metric_signals: list[float] = []
-    total = max(len(frame_payloads), 1)
-    compute_base = 20.0 if frame_payload_builder is not None else 0.0
-    compute_span = 80.0 if frame_payload_builder is not None else 100.0
+    total = max(len(spectral_cube_payloads), 1)
+    compute_base = 20.0 if spectral_cube_payload_builder is not None else 0.0
+    compute_span = 80.0 if spectral_cube_payload_builder is not None else 100.0
     compute_started = time.perf_counter()
 
-    for index, (frame_index, payload) in enumerate(frame_payloads, start=1):
+    for index, (spectral_cube_index, payload) in enumerate(spectral_cube_payloads, start=1):
         if cancel_event is not None and cancel_event.is_set():
             return SensorgramComputationResult(
-                frame_indices=np.asarray(frame_indices, dtype=np.int32),
+                spectral_cube_indices=np.asarray(spectral_cube_indices, dtype=np.int32),
                 metric_values=np.asarray(metric_values, dtype=np.float64),
                 metric_signal=np.asarray(metric_signals, dtype=np.float64),
-                completed_count=len(frame_indices),
-                total_count=len(frame_payloads),
+                completed_count=len(spectral_cube_indices),
+                total_count=len(spectral_cube_payloads),
                 prep_seconds=prep_seconds,
                 fit_seconds=fit_seconds,
                 total_seconds=time.perf_counter() - task_started,
                 cancelled=True,
             )
 
-        def frame_progress_callback(percent: int, text: str | None = None, *, frame_number: int = int(frame_index), position: int = index) -> None:
+        def spectral_cube_progress_callback(percent: int, text: str | None = None, *, spectral_cube_number: int = int(spectral_cube_index), position: int = index) -> None:
             if progress_callback is None:
                 return
             inner_percent = float(np.clip(float(percent), 0.0, 100.0))
             overall = compute_base + (((position - 1) + (inner_percent / 100.0)) / total) * compute_span
             progress_callback(
                 int(round(overall)),
-                text or f"Sensorgram {position}/{total}: spectral cube {frame_number}",
+                text or f"Sensorgram {position}/{total}: spectral cube {spectral_cube_number}",
             )
 
         _active_task = task_fn if task_fn is not None else _absorbance_spectrum_task
         spectrum = _active_task(
             *payload,
             cancel_event=cancel_event,
-            progress_callback=frame_progress_callback,
+            progress_callback=spectral_cube_progress_callback,
         )
         if cancel_event is not None and cancel_event.is_set():
             return SensorgramComputationResult(
-                frame_indices=np.asarray(frame_indices, dtype=np.int32),
+                spectral_cube_indices=np.asarray(spectral_cube_indices, dtype=np.int32),
                 metric_values=np.asarray(metric_values, dtype=np.float64),
                 metric_signal=np.asarray(metric_signals, dtype=np.float64),
-                completed_count=len(frame_indices),
-                total_count=len(frame_payloads),
+                completed_count=len(spectral_cube_indices),
+                total_count=len(spectral_cube_payloads),
                 cancelled=True,
             )
 
@@ -927,14 +927,14 @@ def _sensorgram_metric_task(
         metric_float = float(metric_value) if metric_value is not None and np.isfinite(metric_value) else float("nan")
         signal_float = float(metric_signal) if metric_signal is not None and np.isfinite(metric_signal) else float("nan")
 
-        frame_indices.append(int(frame_index))
+        spectral_cube_indices.append(int(spectral_cube_index))
         metric_values.append(metric_float)
         metric_signals.append(signal_float)
 
         if partial_callback is not None:
             partial_callback(
                 SensorgramPointResult(
-                    frame_index=int(frame_index),
+                    spectral_cube_index=int(spectral_cube_index),
                     metric_value=None if not np.isfinite(metric_float) else metric_float,
                     metric_signal=None if not np.isfinite(signal_float) else signal_float,
                 )
@@ -942,16 +942,16 @@ def _sensorgram_metric_task(
         if progress_callback is not None:
             progress_callback(
                 int(round(compute_base + (index / total) * compute_span)),
-                f"Sensorgram {index}/{total}: spectral cube {int(frame_index)}",
+                f"Sensorgram {index}/{total}: spectral cube {int(spectral_cube_index)}",
             )
     fit_seconds = time.perf_counter() - compute_started
 
     return SensorgramComputationResult(
-        frame_indices=np.asarray(frame_indices, dtype=np.int32),
+        spectral_cube_indices=np.asarray(spectral_cube_indices, dtype=np.int32),
         metric_values=np.asarray(metric_values, dtype=np.float64),
         metric_signal=np.asarray(metric_signals, dtype=np.float64),
-        completed_count=len(frame_indices),
-        total_count=len(frame_payloads),
+        completed_count=len(spectral_cube_indices),
+        total_count=len(spectral_cube_payloads),
         prep_seconds=prep_seconds,
         fit_seconds=fit_seconds,
         total_seconds=time.perf_counter() - task_started,
@@ -973,29 +973,29 @@ def _auto_chromatic_landmarks_task(
     preprocessing_settings.chromatic_correction_enabled = False
     processed_images: list[tuple[int, float, np.ndarray]] = []
     total = max(len(sample_payload), 1)
-    for index, (frame, wavelength, path_str) in enumerate(sample_payload, start=1):
+    for index, (spectral_cube_index, wavelength, path_str) in enumerate(sample_payload, start=1):
         raw_image = load_image_array(path_str)
         processed = apply_spatial_preprocessing(raw_image, preprocessing_settings)
-        processed_images.append((int(frame), float(wavelength), processed))
+        processed_images.append((int(spectral_cube_index), float(wavelength), processed))
         if progress_callback is not None:
             progress_callback(
                 int(round((index / total) * 40)),
                 f"Loading sampled chromatic image {index}/{total}...",
             )
-    first_frame, first_wavelength, first_image = processed_images[0]
+    first_spectral_cube, first_wavelength, first_image = processed_images[0]
     current_landmarks = detect_regional_landmarks(
         first_image,
         int(feature_count),
         subpixel_precision=int(subpixel_precision),
     )
     observations: list[tuple[int, int, float, float, float]] = [
-        (int(feature_id), int(first_frame), float(first_wavelength), float(point[0]), float(point[1]))
+        (int(feature_id), int(first_spectral_cube), float(first_wavelength), float(point[0]), float(point[1]))
         for feature_id, point in sorted(current_landmarks.items())
     ]
     if progress_callback is not None:
         progress_callback(50, f"Detected reference points on sampled image 1/{total}.")
     previous_image = first_image
-    for index, (frame, wavelength, image) in enumerate(processed_images[1:], start=2):
+    for index, (spectral_cube_index, wavelength, image) in enumerate(processed_images[1:], start=2):
         current_landmarks = track_landmarks(
             previous_image,
             image,
@@ -1003,7 +1003,7 @@ def _auto_chromatic_landmarks_task(
             subpixel_precision=int(subpixel_precision),
         )
         for feature_id, point in sorted(current_landmarks.items()):
-            observations.append((int(feature_id), int(frame), float(wavelength), float(point[0]), float(point[1])))
+            observations.append((int(feature_id), int(spectral_cube_index), float(wavelength), float(point[0]), float(point[1])))
         previous_image = image
         if progress_callback is not None:
             progress_callback(
@@ -1051,8 +1051,8 @@ def _estimate_chromatic_models_task(
     if mode == "landmark_radial":
         if not landmarks_payload:
             raise ValueError("No chromatic reference points are available. Start the radial workflow and mark reference points first.")
-        reference_frame, reference_wavelength = int(reference_key[0]), float(reference_key[1])
-        all_wavelengths = sorted({float(wavelength) for _frame, wavelength, _path in record_specs})
+        reference_spectral_cube, reference_wavelength = int(reference_key[0]), float(reference_key[1])
+        all_wavelengths = sorted({float(wavelength) for _spectral_cube, wavelength, _path in record_specs})
         sampled_wavelengths = _sampled_wavelengths(
             all_wavelengths,
             int(getattr(preprocessing, "chromatic_sample_image_count", 5)),
@@ -1061,8 +1061,8 @@ def _estimate_chromatic_models_task(
         expected_feature_ids = list(range(1, feature_count + 1))
 
         landmarks_by_wavelength: dict[float, dict[int, tuple[float, float]]] = {}
-        for landmark_id, frame, wavelength, x_px, y_px in landmarks_payload:
-            if int(frame) != reference_frame:
+        for landmark_id, spectral_cube_index, wavelength, x_px, y_px in landmarks_payload:
+            if int(spectral_cube_index) != reference_spectral_cube:
                 continue
             marks = landmarks_by_wavelength.setdefault(float(wavelength), {})
             marks[int(landmark_id)] = (float(x_px), float(y_px))
@@ -1141,11 +1141,11 @@ def _estimate_chromatic_models_task(
             rmse_by_wavelength[wavelength_f64] = float(np.interp(wavelength_f64, sample_axis, np.asarray(rmse_values, dtype=np.float64)))
             feature_counts_by_wavelength[wavelength_f64] = len(expected_feature_ids)
 
-        for frame, wavelength, _path_str in record_specs:
+        for spectral_cube_index, wavelength, _path_str in record_specs:
             matrix = matrices_by_wavelength[float(wavelength)]
             models.append(
                 ChromaticTransformModel(
-                    frame_index=int(frame),
+                    spectral_cube_index=int(spectral_cube_index),
                     wavelength_nm=float(wavelength),
                     model_kind="landmark_affine",
                     affine_matrix=[[float(value) for value in row] for row in matrix.tolist()],
@@ -1160,7 +1160,7 @@ def _estimate_chromatic_models_task(
             )
         return models
 
-    reference_path = next((path_str for frame, wavelength, path_str in record_specs if (frame, wavelength) == reference_key), None)
+    reference_path = next((path_str for spectral_cube_index, wavelength, path_str in record_specs if (spectral_cube_index, wavelength) == reference_key), None)
     if reference_path is None:
         raise ValueError("Reference image is missing from the dataset.")
     reference_raw = load_image_array(reference_path)
@@ -1168,8 +1168,8 @@ def _estimate_chromatic_models_task(
     tile_size = int(max(preprocessing.chromatic_tile_size_px, 24))
     search_radius = int(max(preprocessing.chromatic_search_radius_px, 6))
     total = max(len(record_specs), 1)
-    for index, (frame, wavelength, path_str) in enumerate(record_specs, start=1):
-        if (frame, wavelength) == reference_key:
+    for index, (spectral_cube_index, wavelength, path_str) in enumerate(record_specs, start=1):
+        if (spectral_cube_index, wavelength) == reference_key:
             result = ChromaticRegistrationResult(
                 affine_matrix=identity_affine_matrix(),
                 global_shift_x_px=0.0,
@@ -1193,7 +1193,7 @@ def _estimate_chromatic_models_task(
             )
         models.append(
             ChromaticTransformModel(
-                frame_index=int(frame),
+                spectral_cube_index=int(spectral_cube_index),
                 wavelength_nm=float(wavelength),
                 model_kind="image_affine",
                 affine_matrix=[[float(value) for value in row] for row in result.affine_matrix.tolist()],
@@ -1209,6 +1209,6 @@ def _estimate_chromatic_models_task(
         if progress_callback is not None:
             progress_callback(
                 int(round(index / total * 100.0)),
-                f"Chromatic correction {index}/{total}: {wavelength:g} nm spectral cube {frame}",
+                f"Chromatic correction {index}/{total}: {wavelength:g} nm spectral cube {spectral_cube_index}",
             )
     return models

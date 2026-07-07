@@ -57,10 +57,10 @@ class ImageInteractionController:
                 w._redo()
                 return True
             if key_event.key() == Qt.Key.Key_PageUp:
-                w._move_selected_spots_in_table(-1)
+                w._move_selected_rois_in_table(-1)
                 return True
             if key_event.key() == Qt.Key.Key_PageDown:
-                w._move_selected_spots_in_table(1)
+                w._move_selected_rois_in_table(1)
                 return True
             if key_event.key() in {Qt.Key.Key_Delete, Qt.Key.Key_Backspace}:
                 w._remove_selected_rois()
@@ -91,13 +91,13 @@ class ImageInteractionController:
             w._step_wavelength_selection(step)
             return True
 
-        if watched is w.frame_spin and event.type() == QEvent.Type.Wheel:
+        if watched is w.spectral_cube_spin and event.type() == QEvent.Type.Wheel:
             wheel_event = event
             delta = wheel_event.angleDelta().y()
             if delta == 0:
                 return True
             step = 1 if delta > 0 else -1
-            w._step_frame_selection(step)
+            w._step_spectral_cube_selection(step)
             return True
 
         if watched is w.wavelength_slider and event.type() == QEvent.Type.Wheel:
@@ -109,13 +109,13 @@ class ImageInteractionController:
             w._step_wavelength_selection(step)
             return True
 
-        if watched is w.frame_slider and event.type() == QEvent.Type.Wheel:
+        if watched is w.spectral_cube_slider and event.type() == QEvent.Type.Wheel:
             wheel_event = event
             delta = wheel_event.angleDelta().y()
             if delta == 0:
                 return True
             step = 1 if delta > 0 else -1
-            w._step_frame_selection(step)
+            w._step_spectral_cube_selection(step)
             return True
 
         if watched in {w.sample_diameter_spin, w.reference_inner_diameter_spin, w.reference_outer_diameter_spin} and event.type() == QEvent.Type.Wheel:

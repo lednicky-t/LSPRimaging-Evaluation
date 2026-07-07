@@ -195,8 +195,8 @@ class UIStateManager:
         window._settings.setValue("histogram_bin_size", int(window.histogram_bins_spin.value()))
         window._settings.setValue("analysis/poly_order", int(window.analysis_poly_order_spin.value()))
         window._settings.setValue("analysis/metric", str(window.analysis_metric_combo.currentData() or "centroid"))
-        window._settings.setValue("analysis/frame_start", int(window.analysis_start_frame_spin.value()))
-        window._settings.setValue("analysis/frame_end", int(window.analysis_end_frame_spin.value()))
+        window._settings.setValue("analysis/spectral_cube_start", int(window.analysis_start_spectral_cube_spin.value()))
+        window._settings.setValue("analysis/spectral_cube_end", int(window.analysis_end_spectral_cube_spin.value()))
         window._settings.setValue("analysis/live_preview", bool(window._analysis_live_preview_enabled))
         window._settings.setValue("histogram/log_y", bool(window._histogram_log_y_enabled))
         lower, upper = window.hist_region.getRegion()
@@ -222,14 +222,14 @@ class UIStateManager:
         window = self._window
         settings = window._state.preprocessing
         has_dataset = window._state.dataset is not None
-        manual_enabled = has_dataset and bool(window._frame_values) and bool(window._wavelength_values)
-        auto_enabled = has_dataset and bool(window._frame_values)
+        manual_enabled = has_dataset and bool(window._spectral_cube_values) and bool(window._wavelength_values)
+        auto_enabled = has_dataset and bool(window._spectral_cube_values)
         current_key = window._reference_image_key()
         current_record = window._reference_record()
-        current_frame = current_key[0] if current_key is not None else None
+        current_spectral_cube = current_key[0] if current_key is not None else None
         current_wavelength = current_key[1] if current_key is not None else None
         reference_text = (
-            f"Reference image: spectral cube {int(current_frame)} / {float(current_wavelength):g} nm"
+            f"Reference image: spectral cube {int(current_spectral_cube)} / {float(current_wavelength):g} nm"
             if current_key is not None
             else "Reference image: auto"
         )
@@ -249,7 +249,7 @@ class UIStateManager:
     def update_analysis_control_state(self) -> None:
         window = self._window
         enabled = bool(window._analysis_enabled)
-        has_dataset = window._state.dataset is not None and bool(window._frame_values) and bool(window._wavelength_values)
+        has_dataset = window._state.dataset is not None and bool(window._spectral_cube_values) and bool(window._wavelength_values)
         interactive = enabled and has_dataset and not window._sensorgram_running
         window.analysis_refresh_button.setEnabled(interactive)
         window.analysis_refresh_button.setPixmap(
@@ -265,7 +265,7 @@ class UIStateManager:
         )
         window.analysis_calculate_all_button.setEnabled(interactive)
         window.analysis_calculate_all_button.setPixmap(
-            window._make_analysis_all_frames_icon(enabled and has_dataset).pixmap(APP_THEME.compact_icon_inner, APP_THEME.compact_icon_inner)
+            window._make_analysis_all_spectral_cubes_icon(enabled and has_dataset).pixmap(APP_THEME.compact_icon_inner, APP_THEME.compact_icon_inner)
         )
         window.analysis_stop_button.setEnabled(enabled and window._sensorgram_running)
         window.analysis_stop_button.setPixmap(

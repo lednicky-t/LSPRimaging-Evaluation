@@ -639,7 +639,7 @@ class MainWindowIcons:
             supports_progress=True,
         )
         tools_text = "applied" if bool(getattr(preprocessing_snapshot, "image_tools_enabled", False)) else "ignored"
-        shard_text = "per_frame" if shard_mode == "per_frame" else "per_image"
+        shard_text = "per_spectral_cube" if shard_mode == "per_spectral_cube" else "per_image"
         self._append_workflow_log(
             f"OME-Zarr export start | chunks {chunk_size_px}px | shard {shard_text} | compression {'on' if compression_enabled else 'off'} | image tools {tools_text}",
             level="info",
@@ -1278,16 +1278,16 @@ class MainWindowIcons:
         self.reference_mode_combo.blockSignals(True)
         self.reference_mode_combo.setCurrentIndex(combo_index)
         self.reference_mode_combo.blockSignals(False)
-        if not self._frame_values or not self._wavelength_values:
+        if not self._spectral_cube_values or not self._wavelength_values:
             self._update_reference_controls()
             self._update_reference_summary()
             return
-        frame_index, wavelength_index = self._initial_reference_indices()
-        self.frame_slider.blockSignals(True)
+        spectral_cube_index, wavelength_index = self._initial_reference_indices()
+        self.spectral_cube_slider.blockSignals(True)
         self.wavelength_slider.blockSignals(True)
-        self.frame_slider.setValue(frame_index)
+        self.spectral_cube_slider.setValue(spectral_cube_index)
         self.wavelength_slider.setValue(wavelength_index)
-        self.frame_slider.blockSignals(False)
+        self.spectral_cube_slider.blockSignals(False)
         self.wavelength_slider.blockSignals(False)
         self._update_reference_controls()
         self._update_reference_summary()

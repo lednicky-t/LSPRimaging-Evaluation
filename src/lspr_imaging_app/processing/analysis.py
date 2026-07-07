@@ -13,14 +13,14 @@ def absorbance_from_means(roi_mean: float, background_mean: float) -> float:
     return float(np.log10(background_mean / roi_mean))
 
 
-def extract_roi_spectrum(dataset: ImageDataset, roi: RoiDefinition, frame_index: int) -> RoiSpectrum:
+def extract_roi_spectrum(dataset: ImageDataset, roi: RoiDefinition, spectral_cube_index: int) -> RoiSpectrum:
     wavelengths = []
     absorbance = []
     roi_means = []
     bg_means = []
     record_map = dataset_record_map(dataset)
     for wl in dataset.wavelengths_nm:
-        record = record_map.get((int(frame_index), float(wl)))
+        record = record_map.get((int(spectral_cube_index), float(wl)))
         if record is None:
             continue
         image = load_image_array(str(record.path))
@@ -31,7 +31,7 @@ def extract_roi_spectrum(dataset: ImageDataset, roi: RoiDefinition, frame_index:
         absorbance.append(absorbance_from_means(roi_mean, bg_mean))
     return RoiSpectrum(
         roi_name=roi.name,
-        frame_index=frame_index,
+        spectral_cube_index=spectral_cube_index,
         wavelengths_nm=np.asarray(wavelengths, dtype=np.float64),
         absorbance=np.asarray(absorbance, dtype=np.float64),
         roi_mean=np.asarray(roi_means, dtype=np.float64),
@@ -158,20 +158,20 @@ def extract_metric_series(
     wl_min: float | None = None,
     wl_max: float | None = None,
 ) -> RoiMetricSeries:
-    frames = []
+    spectral_cubes = []
     peak_wl = []
     centroid = []
     peak_abs = []
-    for frame in dataset.frame_indices:
-        spectrum = extract_roi_spectrum(dataset, roi, frame)
+    for spectral_cube_index in dataset.spectral_cube_indices:
+        spectrum = extract_roi_spectrum(dataset, roi, spectral_cube_index)
         fit = fit_roi_spectrum(spectrum, poly_order=poly_order, wl_min=wl_min, wl_max=wl_max)
-        frames.append(frame)
+        spectral_cubes.append(spectral_cube_index)
         peak_wl.append(np.nan if fit.peak_wavelength_nm is None else fit.peak_wavelength_nm)
         centroid.append(np.nan if fit.centroid_nm is None else fit.centroid_nm)
         peak_abs.append(np.nan if fit.peak_absorbance is None else fit.peak_absorbance)
     return RoiMetricSeries(
         roi_name=roi.name,
-        frame_indices=np.asarray(frames, dtype=np.int32),
+        spectral_cube_indices=np.asarray(spectral_cubes, dtype=np.int32),
         peak_wavelength_nm=np.asarray(peak_wl, dtype=np.float64),
         centroid_nm=np.asarray(centroid, dtype=np.float64),
         peak_absorbance=np.asarray(peak_abs, dtype=np.float64),
@@ -184,15 +184,15 @@ def export_roi_series_csv(dataset: ImageDataset, rois: list[RoiDefinition], dest
     rows = []
     for roi in rois:
         series = extract_metric_series(dataset, roi)
-        for frame, peak_wl, centroid, peak_abs in zip(
-            series.frame_indices,
+        for spectral_cube_index, peak_wl, centroid, peak_abs in zip(
+            series.spectral_cube_indices,
             series.peak_wavelength_nm,
             series.centroid_nm,
             series.peak_absorbance,
         ):
-            rows.append([roi.name, int(frame), peak_wl, centroid, peak_abs])
+            rows.append([roi.name, int(spectral_cube_index), peak_wl, centroid, peak_abs])
 
     with open(destination, "w", newline="", encoding="utf-8") as handle:
         writer = csv.writer(handle)
-        writer.writerow(["roi", "frame", "peak_wavelength_nm", "centroid_nm", "peak_absorbance"])
+        writer.writerow(["roi", "spectral_cube_index", "peak_wavelength_nm", "centroid_nm", "peak_absorbance"])
         writer.writerows(rows)

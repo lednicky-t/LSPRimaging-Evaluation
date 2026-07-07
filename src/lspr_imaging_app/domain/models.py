@@ -9,7 +9,7 @@ import numpy as np
 @dataclass(slots=True, frozen=True)
 class ImageKey:
     wavelength_nm: float
-    frame_index: int
+    spectral_cube_index: int
 
 
 @dataclass(slots=True)
@@ -29,8 +29,8 @@ class ImageDataset:
         return sorted({record.key.wavelength_nm for record in self.records})
 
     @property
-    def frame_indices(self) -> list[int]:
-        return sorted({record.key.frame_index for record in self.records})
+    def spectral_cube_indices(self) -> list[int]:
+        return sorted({record.key.spectral_cube_index for record in self.records})
 
     @property
     def is_ome_zarr(self) -> bool:
@@ -86,7 +86,7 @@ class PreprocessingSettings:
     chromatic_search_radius_px: int = 24
     reference_mode: str = "auto"
     reference_wavelength_nm: float | None = None
-    reference_frame_index: int = 0
+    reference_spectral_cube_index: int = 0
     histogram_highlight_min_value: float | None = None
     histogram_highlight_max_value: float | None = None
 
@@ -145,7 +145,7 @@ SpotDetectionSettings = AreaRoiDetectionSettings
 @dataclass(slots=True)
 class RoiSpectrum:
     roi_name: str
-    frame_index: int
+    spectral_cube_index: int
     wavelengths_nm: np.ndarray
     absorbance: np.ndarray
     roi_mean: np.ndarray
@@ -155,7 +155,7 @@ class RoiSpectrum:
 @dataclass(slots=True)
 class RoiMetricSeries:
     roi_name: str
-    frame_indices: np.ndarray
+    spectral_cube_indices: np.ndarray
     peak_wavelength_nm: np.ndarray
     centroid_nm: np.ndarray
     peak_absorbance: np.ndarray
@@ -225,7 +225,7 @@ SpotGroup = AreaRoiGroup
 
 @dataclass(slots=True)
 class ChromaticTransformModel:
-    frame_index: int
+    spectral_cube_index: int
     wavelength_nm: float
     model_kind: str = "image_affine"
     affine_matrix: list[list[float]] = field(default_factory=lambda: [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]])
@@ -241,7 +241,7 @@ class ChromaticTransformModel:
 @dataclass(slots=True)
 class ChromaticLandmarkObservation:
     landmark_id: int
-    frame_index: int
+    spectral_cube_index: int
     wavelength_nm: float
     x_px: float
     y_px: float

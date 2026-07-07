@@ -266,11 +266,11 @@ class MainWindow(MainWindowIcons, QMainWindow):
     HISTOGRAM_LOG_Y_FLOOR = 0.1
     PROCESSED_IMAGE_CACHE_SIZE = 6
     ABSORBANCE_SPECTRUM_CACHE_SIZE = 48
-    ABSORBANCE_FRAME_CACHE_SIZE = 48
+    ABSORBANCE_SPECTRAL_CUBE_CACHE_SIZE = 48
     ABSORBANCE_ROI_MASK_CACHE_SIZE = 48
     SPOT_ABSORBANCE_CACHE_SIZE = 512
     SENSORGRAM_CACHE_SIZE = 48
-    SENSORGRAM_FRAME_PAYLOAD_CACHE_SIZE = 96
+    SENSORGRAM_SPECTRAL_CUBE_PAYLOAD_CACHE_SIZE = 96
     UNDO_STACK_LIMIT = 5
     # Quick navigation:
     # - layout and signal wiring: _build_layout, _create_toolbar, _connect_signals
@@ -326,7 +326,7 @@ class MainWindow(MainWindowIcons, QMainWindow):
         self._panel_layout_visibility_backup: dict[str, QByteArray] | None = None
         self._current_image_key: tuple[int, float] | None = None
         self._previous_image_key: tuple[int, float] | None = None
-        self._frame_values: list[int] = []
+        self._spectral_cube_values: list[int] = []
         self._wavelength_values: list[float] = []
         self._thread_pool = QThreadPool(self)
         self._thread_pool.setMaxThreadCount(max(4, min(6, os.cpu_count() or 4)))
@@ -424,10 +424,10 @@ class MainWindow(MainWindowIcons, QMainWindow):
         self._histogram_source_cache_values: tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray] | None = None
         self._histogram_log_range_guard = False
         self._absorbance_spectrum_cache: OrderedDict[tuple[object, ...], AbsorbanceSpectrumResult] = OrderedDict()
-        self._absorbance_frame_cache: OrderedDict[tuple[object, ...], AbsorbanceSpectrumResult] = OrderedDict()
+        self._absorbance_spectral_cube_cache: OrderedDict[tuple[object, ...], AbsorbanceSpectrumResult] = OrderedDict()
         self._absorbance_roi_mask_cache: OrderedDict[tuple[object, ...], dict[str, object]] = OrderedDict()
         self._sensorgram_cache: OrderedDict[tuple[object, ...], SensorgramComputationResult] = OrderedDict()
-        self._sensorgram_frame_payload_cache: OrderedDict[tuple[object, ...], tuple[object, ...]] = OrderedDict()
+        self._sensorgram_spectral_cube_payload_cache: OrderedDict[tuple[object, ...], tuple[object, ...]] = OrderedDict()
         self._analysis_cache_lock = threading.Lock()
         self._last_absorbance_fit_seconds: float | None = None
         self._last_saved_processing_signature: str | None = None
@@ -481,7 +481,7 @@ class MainWindow(MainWindowIcons, QMainWindow):
         self._absorbance_prep_running = False
         self._absorbance_prep_started_at: float | None = None
         self._absorbance_prep_request_signature: tuple[object, ...] | None = None
-        self._sensorgram_frame_indices = np.asarray([], dtype=np.int32)
+        self._sensorgram_spectral_cube_indices = np.asarray([], dtype=np.int32)
         self._sensorgram_metric_values = np.asarray([], dtype=np.float64)
         self._sensorgram_metric_signal = np.asarray([], dtype=np.float64)
         self._display_spot_cache_signature: tuple[object, ...] | None = None
@@ -632,8 +632,10 @@ class MainWindow(MainWindowIcons, QMainWindow):
         self.ome_zarr_shard_label.setToolTip("How many images are packed into a single shard file on disk.")
         self.ome_zarr_shard_mode_combo = QComboBox(self)
         self.ome_zarr_shard_mode_combo.addItem("1 image", "per_image")
-        self.ome_zarr_shard_mode_combo.addItem("1 spectral cube", "per_frame")
+        self.ome_zarr_shard_mode_combo.addItem("1 spectral cube", "per_spectral_cube")
         saved_shard_mode = self._settings.value("ome_zarr/shard_mode", "per_image")
+        if saved_shard_mode == "per_frame":  # legacy value from before the frame -> spectral cube rename
+            saved_shard_mode = "per_spectral_cube"
         idx = self.ome_zarr_shard_mode_combo.findData(saved_shard_mode)
         self.ome_zarr_shard_mode_combo.setCurrentIndex(max(idx, 0))
         self.ome_zarr_shard_mode_combo.setToolTip(
@@ -741,7 +743,7 @@ class MainWindow(MainWindowIcons, QMainWindow):
         self.reference_mode_button_group.setExclusive(True)
         self.reference_mode_button_group.addButton(self.reference_auto_button)
         self.reference_mode_button_group.addButton(self.reference_manual_button)
-        self.reference_frame_status_label = QLabel("Spectral cube: -", self)
+        self.reference_spectral_cube_status_label = QLabel("Spectral cube: -", self)
         self.reference_wavelength_status_label = QLabel("Wavelength: -", self)
         self.reference_method_status_label = QLabel("Method: -", self)
         self.reference_mode_combo = QComboBox(self)
@@ -1241,7 +1243,7 @@ class MainWindow(MainWindowIcons, QMainWindow):
         )
         self.analysis_preview_button.setCursor(Qt.CursorShape.PointingHandCursor)
         self.analysis_calculate_all_button = self._free_standing_icon_label(
-            self._make_analysis_all_frames_icon(False),
+            self._make_analysis_all_spectral_cubes_icon(False),
             "Calculate all spectral cubes.",
             size=APP_THEME.compact_icon_inner,
             parent=self,
@@ -1272,12 +1274,12 @@ class MainWindow(MainWindowIcons, QMainWindow):
         stored_metric = str(self._settings.value("analysis/metric", "centroid") or "centroid").strip().lower()
         metric_index = max(self.analysis_metric_combo.findData(stored_metric), 0)
         self.analysis_metric_combo.setCurrentIndex(metric_index)
-        self.analysis_start_frame_spin = QSpinBox(self)
-        self.analysis_start_frame_spin.setEnabled(False)
-        self.analysis_start_frame_spin.setKeyboardTracking(False)
-        self.analysis_end_frame_spin = QSpinBox(self)
-        self.analysis_end_frame_spin.setEnabled(False)
-        self.analysis_end_frame_spin.setKeyboardTracking(False)
+        self.analysis_start_spectral_cube_spin = QSpinBox(self)
+        self.analysis_start_spectral_cube_spin.setEnabled(False)
+        self.analysis_start_spectral_cube_spin.setKeyboardTracking(False)
+        self.analysis_end_spectral_cube_spin = QSpinBox(self)
+        self.analysis_end_spectral_cube_spin.setEnabled(False)
+        self.analysis_end_spectral_cube_spin.setKeyboardTracking(False)
         self.analysis_formula_label = QLabel("A = log10(Iref. ring / Ispot)", self)
         self.analysis_formula_label.setWordWrap(True)
         self.analysis_summary_label = QLabel("Select ROIs to show absorbance spectrum.", self)
@@ -1379,19 +1381,19 @@ class MainWindow(MainWindowIcons, QMainWindow):
         self.clear_rois_button = self._make_icon_tool_button("trash-x", "#ef4444", "Remove all detected ROIs and groups from the current dataset.")
         self.clear_roi_selection_button = QPushButton("Clear selection", self)
 
-        self.frame_slider = QSlider(Qt.Orientation.Horizontal, self)
-        self.frame_slider.setEnabled(False)
-        self.frame_spin = QSpinBox(self)
-        self.frame_spin.setEnabled(False)
+        self.spectral_cube_slider = QSlider(Qt.Orientation.Horizontal, self)
+        self.spectral_cube_slider.setEnabled(False)
+        self.spectral_cube_spin = QSpinBox(self)
+        self.spectral_cube_spin.setEnabled(False)
         self.wavelength_slider = QSlider(Qt.Orientation.Horizontal, self)
         self.wavelength_slider.setEnabled(False)
         self.wavelength_spin = QDoubleSpinBox(self)
         self.wavelength_spin.setEnabled(False)
         self.wavelength_spin.setDecimals(2)
         self.wavelength_spin.setSuffix(" nm")
-        self.frame_slider.installEventFilter(self)
+        self.spectral_cube_slider.installEventFilter(self)
         self.wavelength_slider.installEventFilter(self)
-        self.frame_spin.installEventFilter(self)
+        self.spectral_cube_spin.installEventFilter(self)
         self.wavelength_spin.installEventFilter(self)
         self.chromatic_landmark_id_spin.installEventFilter(self)
         self.sample_diameter_spin.installEventFilter(self)
@@ -1662,15 +1664,15 @@ class MainWindow(MainWindowIcons, QMainWindow):
         self.import_settings_button.clicked.connect(self._import_processing_profile)
         self.reference_auto_button.clicked.connect(lambda _checked=False: self._set_reference_mode("auto"))
         self.reference_manual_button.clicked.connect(lambda _checked=False: self._set_current_reference_from_view())
-        self.frame_slider.valueChanged.connect(lambda _value: self._sync_analysis_plot_cursors())
-        self.frame_slider.valueChanged.connect(lambda _value: self._schedule_image_refresh())
-        self.frame_slider.valueChanged.connect(lambda _value: self._sync_auto_reference_to_current_frame())
+        self.spectral_cube_slider.valueChanged.connect(lambda _value: self._sync_analysis_plot_cursors())
+        self.spectral_cube_slider.valueChanged.connect(lambda _value: self._schedule_image_refresh())
+        self.spectral_cube_slider.valueChanged.connect(lambda _value: self._sync_auto_reference_to_current_spectral_cube(follow_view=False))
         self.wavelength_slider.valueChanged.connect(lambda _value: self._sync_analysis_plot_cursors())
         self.wavelength_slider.valueChanged.connect(lambda _value: self._schedule_image_refresh())
-        self.frame_spin.valueChanged.connect(self._on_frame_spin_changed)
+        self.spectral_cube_spin.valueChanged.connect(self._on_spectral_cube_spin_changed)
         self.wavelength_spin.valueChanged.connect(self._on_wavelength_spin_changed)
-        self.analysis_start_frame_spin.valueChanged.connect(self._analysis_controller.on_frame_range_changed)
-        self.analysis_end_frame_spin.valueChanged.connect(self._analysis_controller.on_frame_range_changed)
+        self.analysis_start_spectral_cube_spin.valueChanged.connect(self._analysis_controller.on_spectral_cube_range_changed)
+        self.analysis_end_spectral_cube_spin.valueChanged.connect(self._analysis_controller.on_spectral_cube_range_changed)
 
     def _connect_chromatic(self) -> None:
         self.chromatic_apply_check.toggled.connect(self._update_chromatic_settings)
@@ -2479,10 +2481,10 @@ class MainWindow(MainWindowIcons, QMainWindow):
         slider.setPageStep(1)
 
     def _configure_navigation_inputs(self) -> None:
-        frame_enabled = bool(self._frame_values)
-        self.frame_spin.setEnabled(frame_enabled)
-        if frame_enabled:
-            self.frame_spin.setRange(min(self._frame_values), max(self._frame_values))
+        spectral_cube_enabled = bool(self._spectral_cube_values)
+        self.spectral_cube_spin.setEnabled(spectral_cube_enabled)
+        if spectral_cube_enabled:
+            self.spectral_cube_spin.setRange(min(self._spectral_cube_values), max(self._spectral_cube_values))
 
         wavelength_enabled = bool(self._wavelength_values)
         self.wavelength_spin.setEnabled(wavelength_enabled)
@@ -2490,7 +2492,7 @@ class MainWindow(MainWindowIcons, QMainWindow):
             self.wavelength_spin.setRange(min(self._wavelength_values), max(self._wavelength_values))
             decimals = max((self._decimal_places(value) for value in self._wavelength_values), default=0)
             self.wavelength_spin.setDecimals(min(max(decimals, 0), 4))
-        self._sync_analysis_frame_range_controls()
+        self._sync_analysis_spectral_cube_range_controls()
         self._sync_analysis_plots()
 
     def _analysis_metric_key(self) -> str:
@@ -2508,37 +2510,37 @@ class MainWindow(MainWindowIcons, QMainWindow):
     def _analysis_poly_order(self) -> int:
         return int(self.analysis_poly_order_spin.value())
 
-    def _current_analysis_frame_range(self) -> tuple[int, int] | None:
-        if not self._frame_values:
+    def _current_analysis_spectral_cube_range(self) -> tuple[int, int] | None:
+        if not self._spectral_cube_values:
             return None
-        start = int(self.analysis_start_frame_spin.value())
-        end = int(self.analysis_end_frame_spin.value())
+        start = int(self.analysis_start_spectral_cube_spin.value())
+        end = int(self.analysis_end_spectral_cube_spin.value())
         if start > end:
             start, end = end, start
         return start, end
 
-    def _sync_analysis_frame_range_controls(self) -> None:
-        frame_enabled = bool(self._frame_values)
-        self.analysis_start_frame_spin.setEnabled(frame_enabled)
-        self.analysis_end_frame_spin.setEnabled(frame_enabled)
-        if not frame_enabled:
+    def _sync_analysis_spectral_cube_range_controls(self) -> None:
+        spectral_cube_enabled = bool(self._spectral_cube_values)
+        self.analysis_start_spectral_cube_spin.setEnabled(spectral_cube_enabled)
+        self.analysis_end_spectral_cube_spin.setEnabled(spectral_cube_enabled)
+        if not spectral_cube_enabled:
             return
 
-        frame_min = int(min(self._frame_values))
-        frame_max = int(max(self._frame_values))
-        stored_start = self._settings_int("analysis/frame_start", frame_min, minimum=frame_min, maximum=frame_max)
-        stored_end = self._settings_int("analysis/frame_end", frame_max, minimum=frame_min, maximum=frame_max)
+        spectral_cube_min = int(min(self._spectral_cube_values))
+        spectral_cube_max = int(max(self._spectral_cube_values))
+        stored_start = self._settings_int("analysis/spectral_cube_start", spectral_cube_min, minimum=spectral_cube_min, maximum=spectral_cube_max)
+        stored_end = self._settings_int("analysis/spectral_cube_end", spectral_cube_max, minimum=spectral_cube_min, maximum=spectral_cube_max)
         if stored_start > stored_end:
             stored_start, stored_end = stored_end, stored_start
 
-        self.analysis_start_frame_spin.blockSignals(True)
-        self.analysis_end_frame_spin.blockSignals(True)
-        self.analysis_start_frame_spin.setRange(frame_min, frame_max)
-        self.analysis_end_frame_spin.setRange(frame_min, frame_max)
-        self.analysis_start_frame_spin.setValue(stored_start)
-        self.analysis_end_frame_spin.setValue(stored_end)
-        self.analysis_start_frame_spin.blockSignals(False)
-        self.analysis_end_frame_spin.blockSignals(False)
+        self.analysis_start_spectral_cube_spin.blockSignals(True)
+        self.analysis_end_spectral_cube_spin.blockSignals(True)
+        self.analysis_start_spectral_cube_spin.setRange(spectral_cube_min, spectral_cube_max)
+        self.analysis_end_spectral_cube_spin.setRange(spectral_cube_min, spectral_cube_max)
+        self.analysis_start_spectral_cube_spin.setValue(stored_start)
+        self.analysis_end_spectral_cube_spin.setValue(stored_end)
+        self.analysis_start_spectral_cube_spin.blockSignals(False)
+        self.analysis_end_spectral_cube_spin.blockSignals(False)
 
     def _set_sensorgram_summary_text(self, text: str) -> None:
         self.sensorgram_summary_label.setText(text)
@@ -2547,10 +2549,10 @@ class MainWindow(MainWindowIcons, QMainWindow):
         self.sensorgram_plot.setLabel("left", self._analysis_metric_axis_label())
         self.sensorgram_plot.setLabel("bottom", "Spectral cube")
 
-    def _analysis_plot_frame_range(self) -> tuple[int, int] | None:
-        if not self._frame_values:
+    def _analysis_plot_spectral_cube_range(self) -> tuple[int, int] | None:
+        if not self._spectral_cube_values:
             return None
-        return int(min(self._frame_values)), int(max(self._frame_values))
+        return int(min(self._spectral_cube_values)), int(max(self._spectral_cube_values))
 
     def _analysis_plot_wavelength_range(self) -> tuple[float, float] | None:
         if not self._wavelength_values:
@@ -2558,34 +2560,34 @@ class MainWindow(MainWindowIcons, QMainWindow):
         return float(min(self._wavelength_values)), float(max(self._wavelength_values))
 
     def _sync_analysis_plot_axes(self) -> None:
-        frame_range = self._analysis_plot_frame_range()
+        spectral_cube_range = self._analysis_plot_spectral_cube_range()
         wavelength_range = self._analysis_plot_wavelength_range()
         if wavelength_range is not None:
             self.spectrum_plot.setLimits(xMin=wavelength_range[0], xMax=wavelength_range[1])
             self.spectrum_plot.setXRange(wavelength_range[0], wavelength_range[1], padding=0.03)
-        if frame_range is not None:
-            self.sensorgram_plot.setLimits(xMin=frame_range[0], xMax=frame_range[1])
-            self.sensorgram_plot.setXRange(float(frame_range[0]), float(frame_range[1]), padding=0.03)
+        if spectral_cube_range is not None:
+            self.sensorgram_plot.setLimits(xMin=spectral_cube_range[0], xMax=spectral_cube_range[1])
+            self.sensorgram_plot.setXRange(float(spectral_cube_range[0]), float(spectral_cube_range[1]), padding=0.03)
 
     def _sync_analysis_plot_cursors(self) -> None:
-        has_dataset = bool(self._frame_values) and bool(self._wavelength_values)
+        has_dataset = bool(self._spectral_cube_values) and bool(self._wavelength_values)
         if not has_dataset:
             self.spectrum_cursor_line.hide()
             self.sensorgram_cursor_line.hide()
             return
         self.spectrum_cursor_line.show()
         self.sensorgram_cursor_line.show()
-        current_frame = self._current_frame()
+        current_spectral_cube = self._current_spectral_cube()
         current_wavelength = self._current_wavelength()
-        if current_frame is None:
-            current_frame = int(self._frame_values[0])
+        if current_spectral_cube is None:
+            current_spectral_cube = int(self._spectral_cube_values[0])
         if current_wavelength is None:
             current_wavelength = float(self._wavelength_values[0])
         cursor_color = self._chromatic_wavelength_color(float(current_wavelength))
         self.spectrum_cursor_line.blockSignals(True)
         self.sensorgram_cursor_line.blockSignals(True)
         self.spectrum_cursor_line.setValue(float(current_wavelength))
-        self.sensorgram_cursor_line.setValue(float(current_frame))
+        self.sensorgram_cursor_line.setValue(float(current_spectral_cube))
         self.spectrum_cursor_line.setPen(pg.mkPen(cursor_color, width=2.2))
         self.spectrum_cursor_line.blockSignals(False)
         self.sensorgram_cursor_line.blockSignals(False)
@@ -2603,41 +2605,41 @@ class MainWindow(MainWindowIcons, QMainWindow):
             range(len(self._wavelength_values)),
             key=lambda idx: abs(float(self._wavelength_values[idx]) - wavelength),
         )
-        current_frame = self._current_frame()
-        if current_frame is None and self._frame_values:
-            current_frame = int(self._frame_values[self.frame_slider.value()])
-        if current_frame is None:
+        current_spectral_cube = self._current_spectral_cube()
+        if current_spectral_cube is None and self._spectral_cube_values:
+            current_spectral_cube = int(self._spectral_cube_values[self.spectral_cube_slider.value()])
+        if current_spectral_cube is None:
             return
         target_wavelength = float(self._wavelength_values[nearest_index])
-        self._set_current_frame_and_wavelength(int(current_frame), target_wavelength)
+        self._set_current_spectral_cube_and_wavelength(int(current_spectral_cube), target_wavelength)
 
     def _on_sensorgram_cursor_moved(self) -> None:
-        if not self._frame_values:
+        if not self._spectral_cube_values:
             return
-        frame = float(self.sensorgram_cursor_line.value())
+        spectral_cube_index = float(self.sensorgram_cursor_line.value())
         nearest_index = min(
-            range(len(self._frame_values)),
-            key=lambda idx: abs(float(self._frame_values[idx]) - frame),
+            range(len(self._spectral_cube_values)),
+            key=lambda idx: abs(float(self._spectral_cube_values[idx]) - spectral_cube_index),
         )
         current_wavelength = self._current_wavelength()
         if current_wavelength is None and self._wavelength_values:
             current_wavelength = float(self._wavelength_values[self.wavelength_slider.value()])
         if current_wavelength is None:
             return
-        target_frame = int(self._frame_values[nearest_index])
-        self._set_current_frame_and_wavelength(target_frame, float(current_wavelength))
+        target_spectral_cube = int(self._spectral_cube_values[nearest_index])
+        self._set_current_spectral_cube_and_wavelength(target_spectral_cube, float(current_wavelength))
 
     def _clear_sensorgram(self, summary_text: str) -> None:
         self._plot_manager.clear_sensorgram(summary_text)
 
     def _set_sensorgram_series(
         self,
-        frame_indices,
+        spectral_cube_indices,
         metric_values,
         *,
         summary_text: str | None = None,
     ) -> None:
-        self._plot_manager.set_sensorgram_series(frame_indices, metric_values, summary_text=summary_text)
+        self._plot_manager.set_sensorgram_series(spectral_cube_indices, metric_values, summary_text=summary_text)
 
     def _update_sensorgram_current_point(self) -> None:
         self._plot_manager.update_sensorgram_current_point()
@@ -2650,10 +2652,10 @@ class MainWindow(MainWindowIcons, QMainWindow):
             return
         self._analysis_controller.mark_stale(reason)
 
-    def _current_frame(self) -> int | None:
-        if not self._frame_values:
+    def _current_spectral_cube(self) -> int | None:
+        if not self._spectral_cube_values:
             return None
-        return self._frame_values[self.frame_slider.value()]
+        return self._spectral_cube_values[self.spectral_cube_slider.value()]
 
     def _current_wavelength(self) -> float | None:
         if not self._wavelength_values:
@@ -2677,7 +2679,7 @@ class MainWindow(MainWindowIcons, QMainWindow):
         if dataset is None:
             return "Load an image folder to begin."
         records = list(getattr(dataset, "records", []))
-        frame_values = list(getattr(dataset, "frame_indices", []))
+        spectral_cube_values = list(getattr(dataset, "spectral_cube_indices", []))
         wavelength_values = list(getattr(dataset, "wavelengths_nm", []))
         first_record = records[0] if records else None
         resolution_text = "Unknown"
@@ -2726,24 +2728,24 @@ class MainWindow(MainWindowIcons, QMainWindow):
                     dataset_date = "Unknown"
             else:
                 dataset_date = "Unknown"
-        frame_text = f"{len(frame_values)}" if frame_values else "0"
+        spectral_cube_text = f"{len(spectral_cube_values)}" if spectral_cube_values else "0"
         wavelength_text = f"{len(wavelength_values)}" if wavelength_values else "0"
         stack_label = dataset.format_label if dataset is not None else "ImageStack"
         return (
             f"{stack_label} loaded.\n"
             f"Images: {len(records)}\n"
-            f"Spectral cubes: {frame_text} | Wavelengths: {wavelength_text}\n"
+            f"Spectral cubes: {spectral_cube_text} | Wavelengths: {wavelength_text}\n"
             f"Dataset size: {self._format_dataset_bytes(size_bytes)}\n"
             f"Resolution: {resolution_text}\n"
             f"Dataset's date: {dataset_date}"
         )
 
     def _refresh_image(self) -> None:
-        frame = self._current_frame()
+        spectral_cube_index = self._current_spectral_cube()
         wavelength = self._current_wavelength()
         self._append_workflow_log_throttled(
             "image_refresh",
-            f"Image refresh | frame {frame if frame is not None else '-'} | wavelength {wavelength if wavelength is not None else '-'}",
+            f"Image refresh | spectral_cube_index {spectral_cube_index if spectral_cube_index is not None else '-'} | wavelength {wavelength if wavelength is not None else '-'}",
             level="debug",
         )
         self._image_controller.refresh_image()
@@ -2757,7 +2759,7 @@ class MainWindow(MainWindowIcons, QMainWindow):
         cache_key: tuple[object, ...],
         record_path: Path,
         image_key: tuple[int, float],
-        frame: int,
+        spectral_cube_index: int,
         wavelength: float,
         record_name: str,
         processed: np.ndarray,
@@ -2767,7 +2769,7 @@ class MainWindow(MainWindowIcons, QMainWindow):
             cache_key,
             record_path,
             image_key,
-            frame,
+            spectral_cube_index,
             wavelength,
             record_name,
             processed,
@@ -2781,39 +2783,39 @@ class MainWindow(MainWindowIcons, QMainWindow):
         processed: np.ndarray,
         record_path: Path,
         image_key: tuple[int, float],
-        frame: int,
+        spectral_cube_index: int,
         wavelength: float,
         record_name: str,
     ) -> None:
-        self._image_controller.apply_loaded_image(processed, record_path, image_key, frame, wavelength, record_name)
+        self._image_controller.apply_loaded_image(processed, record_path, image_key, spectral_cube_index, wavelength, record_name)
 
     def _update_image_name_overlay(self, record_name: str | None) -> None:
         self.image_name_label.hide()
 
     def _initial_reference_indices(self) -> tuple[int, int]:
-        if not self._frame_values or not self._wavelength_values:
+        if not self._spectral_cube_values or not self._wavelength_values:
             return 0, 0
         if str(self._state.preprocessing.reference_mode or "auto") == "manual":
-            ref_frame = int(self._state.preprocessing.reference_frame_index)
+            ref_spectral_cube = int(self._state.preprocessing.reference_spectral_cube_index)
             ref_wavelength = self._state.preprocessing.reference_wavelength_nm
-            frame_index = self._frame_values.index(ref_frame) if ref_frame in self._frame_values else 0
+            spectral_cube_index = self._spectral_cube_values.index(ref_spectral_cube) if ref_spectral_cube in self._spectral_cube_values else 0
             wavelength_index = 0
             if ref_wavelength is not None:
                 wavelength_index = min(
                     range(len(self._wavelength_values)),
                     key=lambda idx: abs(self._wavelength_values[idx] - float(ref_wavelength)),
                 )
-            return frame_index, wavelength_index
-        auto_key = self._auto_reference_image_key_for_frame(self._frame_values[0])
+            return spectral_cube_index, wavelength_index
+        auto_key = self._auto_reference_image_key_for_spectral_cube(self._spectral_cube_values[0])
         if auto_key is None:
             return 0, 0
-        auto_frame, auto_wavelength = auto_key
-        frame_index = self._frame_values.index(int(auto_frame)) if int(auto_frame) in self._frame_values else 0
+        auto_spectral_cube, auto_wavelength = auto_key
+        spectral_cube_index = self._spectral_cube_values.index(int(auto_spectral_cube)) if int(auto_spectral_cube) in self._spectral_cube_values else 0
         wavelength_index = min(
             range(len(self._wavelength_values)),
             key=lambda idx: abs(self._wavelength_values[idx] - float(auto_wavelength)),
         )
-        return frame_index, wavelength_index
+        return spectral_cube_index, wavelength_index
 
     def _roi_signature(self, spots: list[AreaRoi] | None = None) -> tuple[object, ...]:
         roi_list = self._state.area_rois if spots is None else spots
@@ -2917,7 +2919,7 @@ class MainWindow(MainWindowIcons, QMainWindow):
 
     def _invalidate_absorbance_spectrum_cache(self) -> None:
         self._absorbance_spectrum_cache.clear()
-        self._absorbance_frame_cache.clear()
+        self._absorbance_spectral_cube_cache.clear()
         self._spot_absorbance_cache.clear()
         self._absorbance_spectrum_dirty = True
 
@@ -3251,7 +3253,7 @@ class MainWindow(MainWindowIcons, QMainWindow):
             label=label,
             state=deepcopy(self._state),
             folder_text=self.folder_edit.text(),
-            frame_slider_value=int(self.frame_slider.value()) if hasattr(self, "frame_slider") else 0,
+            spectral_cube_slider_value=int(self.spectral_cube_slider.value()) if hasattr(self, "spectral_cube_slider") else 0,
             wavelength_slider_value=int(self.wavelength_slider.value()) if hasattr(self, "wavelength_slider") else 0,
             selected_roi_ids=set(self._selected_roi_ids),
             spot_visual_color=self._sample_visual_color.name(),
@@ -3283,7 +3285,7 @@ class MainWindow(MainWindowIcons, QMainWindow):
         return (
             dataset_folder,
             snapshot.folder_text,
-            snapshot.frame_slider_value,
+            snapshot.spectral_cube_slider_value,
             snapshot.wavelength_slider_value,
             repr(asdict(snapshot.state.preprocessing)),
             repr(asdict(snapshot.state.area_roi_settings)),
@@ -3387,11 +3389,11 @@ class MainWindow(MainWindowIcons, QMainWindow):
             dataset = self._state.dataset
             self._record_map = dataset_record_map(dataset) if dataset is not None else {}
             self._record_key_by_path = (
-                {record.path: (int(record.key.frame_index), float(record.key.wavelength_nm)) for record in dataset.records}
+                {record.path: (int(record.key.spectral_cube_index), float(record.key.wavelength_nm)) for record in dataset.records}
                 if dataset is not None
                 else {}
             )
-            self._frame_values = dataset.frame_indices if dataset is not None else []
+            self._spectral_cube_values = dataset.spectral_cube_indices if dataset is not None else []
             self._wavelength_values = dataset.wavelengths_nm if dataset is not None else []
             self._current_record_path = None
             self._current_image_key = None
@@ -3440,17 +3442,17 @@ class MainWindow(MainWindowIcons, QMainWindow):
             self.mask_alpha_slider.blockSignals(False)
             self.highlight_alpha_slider.blockSignals(False)
 
-            self._configure_slider(self.frame_slider, len(self._frame_values))
+            self._configure_slider(self.spectral_cube_slider, len(self._spectral_cube_values))
             self._configure_slider(self.wavelength_slider, len(self._wavelength_values))
             self._configure_navigation_inputs()
-            if dataset is not None and self._frame_values and self._wavelength_values:
-                frame_value = min(max(snapshot.frame_slider_value, 0), len(self._frame_values) - 1)
+            if dataset is not None and self._spectral_cube_values and self._wavelength_values:
+                spectral_cube_value = min(max(snapshot.spectral_cube_slider_value, 0), len(self._spectral_cube_values) - 1)
                 wavelength_value = min(max(snapshot.wavelength_slider_value, 0), len(self._wavelength_values) - 1)
-                self.frame_slider.blockSignals(True)
+                self.spectral_cube_slider.blockSignals(True)
                 self.wavelength_slider.blockSignals(True)
-                self.frame_slider.setValue(frame_value)
+                self.spectral_cube_slider.setValue(spectral_cube_value)
                 self.wavelength_slider.setValue(wavelength_value)
-                self.frame_slider.blockSignals(False)
+                self.spectral_cube_slider.blockSignals(False)
                 self.wavelength_slider.blockSignals(False)
                 self._refresh_image()
             self._update_selection_dependent_plots(force=True)
@@ -4051,9 +4053,9 @@ class MainWindow(MainWindowIcons, QMainWindow):
         if available is None:
             return
 
-        frame = self.frameGeometry()
-        x = min(max(frame.x(), available.left()), max(available.right() - frame.width() + 1, available.left()))
-        y = min(max(frame.y(), available.top()), max(available.bottom() - frame.height() + 1, available.top()))
+        frame_geometry = self.frameGeometry()
+        x = min(max(frame_geometry.x(), available.left()), max(available.right() - frame_geometry.width() + 1, available.left()))
+        y = min(max(frame_geometry.y(), available.top()), max(available.bottom() - frame_geometry.height() + 1, available.top()))
         self.move(x, y)
 
     def _load_last_folder(self, fallback: Path) -> Path:
@@ -4590,11 +4592,11 @@ class MainWindow(MainWindowIcons, QMainWindow):
 
     def _reference_image_key(self) -> tuple[int, float] | None:
         if str(self._state.preprocessing.reference_mode or "auto") != "manual":
-            return self._auto_reference_image_key_for_frame(self._current_frame())
+            return self._auto_reference_image_key_for_spectral_cube(self._current_spectral_cube())
         wavelength = self._state.preprocessing.reference_wavelength_nm
         if wavelength is None:
             return None
-        return int(self._state.preprocessing.reference_frame_index), float(wavelength)
+        return int(self._state.preprocessing.reference_spectral_cube_index), float(wavelength)
 
     def _reference_contrast_score(self, record_path: Path) -> float:
         cache_key = str(record_path)
@@ -4617,13 +4619,13 @@ class MainWindow(MainWindowIcons, QMainWindow):
         self._reference_contrast_cache[cache_key] = score
         return score
 
-    def _auto_reference_image_key_for_frame(self, frame: int | None) -> tuple[int, float] | None:
-        if frame is None:
+    def _auto_reference_image_key_for_spectral_cube(self, spectral_cube_index: int | None) -> tuple[int, float] | None:
+        if spectral_cube_index is None:
             return None
         best_key: tuple[int, float] | None = None
         best_score = float("-inf")
         for wavelength in self._wavelength_values:
-            key = (int(frame), float(wavelength))
+            key = (int(spectral_cube_index), float(wavelength))
             record = self._record_map.get(key)
             if record is None:
                 continue
@@ -4645,7 +4647,7 @@ class MainWindow(MainWindowIcons, QMainWindow):
         target_key = self._image_key_for_record_path(record_path)
         if target_key is None:
             return self._reference_image_key()
-        return self._auto_reference_image_key_for_frame(int(target_key[0]))
+        return self._auto_reference_image_key_for_spectral_cube(int(target_key[0]))
 
     def _reference_record_for_record_path(self, record_path: Path):
         key = self._reference_image_key_for_record_path(record_path)
@@ -4663,9 +4665,9 @@ class MainWindow(MainWindowIcons, QMainWindow):
     def _chromatic_model_for_image_key(self, image_key: tuple[int, float] | None) -> ChromaticTransformModel | None:
         if image_key is None:
             return None
-        frame, wavelength = image_key
+        spectral_cube_index, wavelength = image_key
         for model in self._state.chromatic_models:
-            if int(model.frame_index) == int(frame) and abs(float(model.wavelength_nm) - float(wavelength)) < 1e-6:
+            if int(model.spectral_cube_index) == int(spectral_cube_index) and abs(float(model.wavelength_nm) - float(wavelength)) < 1e-6:
                 return model
         return None
 
@@ -4694,7 +4696,7 @@ class MainWindow(MainWindowIcons, QMainWindow):
         if model is None:
             return None
         return (
-            int(model.frame_index),
+            int(model.spectral_cube_index),
             round(float(model.wavelength_nm), 6),
             tuple(tuple(round(float(value), 6) for value in row) for row in model.affine_matrix),
         )
@@ -4965,8 +4967,8 @@ class MainWindow(MainWindowIcons, QMainWindow):
         reference_key = self._reference_image_key()
         if reference_key is None:
             return []
-        frame = int(reference_key[0])
-        return [(frame, wavelength) for wavelength in _sampled_wavelengths(self._wavelength_values, self._state.preprocessing.chromatic_sample_image_count)]
+        spectral_cube_index = int(reference_key[0])
+        return [(spectral_cube_index, wavelength) for wavelength in _sampled_wavelengths(self._wavelength_values, self._state.preprocessing.chromatic_sample_image_count)]
 
     def _is_chromatic_sample_image_key(self, image_key: tuple[int, float] | None) -> bool:
         return image_key is not None and image_key in self._chromatic_sample_image_keys()
@@ -4984,11 +4986,11 @@ class MainWindow(MainWindowIcons, QMainWindow):
         key = self._current_image_key
         if key is None:
             return []
-        frame, wavelength = key
+        spectral_cube_index, wavelength = key
         return [
             mark
             for mark in self._state.chromatic_landmarks
-            if int(mark.frame_index) == int(frame) and abs(float(mark.wavelength_nm) - float(wavelength)) < 1e-6
+            if int(mark.spectral_cube_index) == int(spectral_cube_index) and abs(float(mark.wavelength_nm) - float(wavelength)) < 1e-6
         ]
 
     def _current_landmark(self, landmark_id: int) -> ChromaticLandmarkObservation | None:
@@ -5017,12 +5019,12 @@ class MainWindow(MainWindowIcons, QMainWindow):
         key = self._current_image_key
         if key is None:
             return False
-        frame, wavelength = key
+        spectral_cube_index, wavelength = key
         updated = False
         for mark in self._state.chromatic_landmarks:
             if (
                 int(mark.landmark_id) == int(landmark_id)
-                and int(mark.frame_index) == int(frame)
+                and int(mark.spectral_cube_index) == int(spectral_cube_index)
                 and abs(float(mark.wavelength_nm) - float(wavelength)) < 1e-6
             ):
                 mark.x_px = float(point[0])
@@ -5033,7 +5035,7 @@ class MainWindow(MainWindowIcons, QMainWindow):
             self._state.chromatic_landmarks.append(
                 ChromaticLandmarkObservation(
                     landmark_id=int(landmark_id),
-                    frame_index=int(frame),
+                    spectral_cube_index=int(spectral_cube_index),
                     wavelength_nm=float(wavelength),
                     x_px=float(point[0]),
                     y_px=float(point[1]),
@@ -5093,13 +5095,13 @@ class MainWindow(MainWindowIcons, QMainWindow):
         self._selected_landmark_id = None
         self._set_status_text("Cleared chromatic landmarks and models.")
 
-    def _set_current_frame_and_wavelength(self, frame: int, wavelength: float) -> None:
+    def _set_current_spectral_cube_and_wavelength(self, spectral_cube_index: int, wavelength: float) -> None:
         self._capture_chromatic_view_ranges()
-        if frame in self._frame_values:
-            frame_index = self._frame_values.index(frame)
-            self.frame_slider.blockSignals(True)
-            self.frame_slider.setValue(frame_index)
-            self.frame_slider.blockSignals(False)
+        if spectral_cube_index in self._spectral_cube_values:
+            spectral_cube_index = self._spectral_cube_values.index(spectral_cube_index)
+            self.spectral_cube_slider.blockSignals(True)
+            self.spectral_cube_slider.setValue(spectral_cube_index)
+            self.spectral_cube_slider.blockSignals(False)
         if self._wavelength_values:
             wavelength_index = min(
                 range(len(self._wavelength_values)),
@@ -5116,11 +5118,11 @@ class MainWindow(MainWindowIcons, QMainWindow):
 
     def _chromatic_sample_payload(self) -> list[tuple[int, float, str]]:
         payload: list[tuple[int, float, str]] = []
-        for frame, wavelength in self._chromatic_sample_image_keys():
-            record = self._record_map.get((frame, wavelength))
+        for spectral_cube_index, wavelength in self._chromatic_sample_image_keys():
+            record = self._record_map.get((spectral_cube_index, wavelength))
             if record is None:
                 continue
-            payload.append((int(frame), float(wavelength), str(record.path)))
+            payload.append((int(spectral_cube_index), float(wavelength), str(record.path)))
         return payload
 
     def _auto_detect_chromatic_landmarks(self, *, push_undo: bool = True) -> None:
@@ -5130,9 +5132,9 @@ class MainWindow(MainWindowIcons, QMainWindow):
         self._chromatic_controller._navigate_chromatic_sample(direction)
 
     def _navigate_wavelength_image(self, direction: int) -> bool:
-        frame = self._current_frame()
+        spectral_cube_index = self._current_spectral_cube()
         wavelength = self._current_wavelength()
-        if frame is None or wavelength is None or not self._wavelength_values:
+        if spectral_cube_index is None or wavelength is None or not self._wavelength_values:
             return False
         try:
             current_index = self._wavelength_values.index(float(wavelength))
@@ -5145,17 +5147,17 @@ class MainWindow(MainWindowIcons, QMainWindow):
         target_wavelength = float(self._wavelength_values[target_index])
         if abs(target_wavelength - float(wavelength)) < 1e-9:
             return False
-        self._set_current_frame_and_wavelength(int(frame), target_wavelength)
+        self._set_current_spectral_cube_and_wavelength(int(spectral_cube_index), target_wavelength)
         return True
 
-    def _navigate_frame_image(self, direction: int) -> bool:
-        if not self._frame_values:
+    def _navigate_spectral_cube_image(self, direction: int) -> bool:
+        if not self._spectral_cube_values:
             return False
-        current_index = self.frame_slider.value()
-        target_index = min(max(current_index + int(direction), 0), len(self._frame_values) - 1)
+        current_index = self.spectral_cube_slider.value()
+        target_index = min(max(current_index + int(direction), 0), len(self._spectral_cube_values) - 1)
         if target_index == current_index:
             return False
-        self.frame_slider.setValue(target_index)
+        self.spectral_cube_slider.setValue(target_index)
         return True
 
     def _on_chromatic_sample_count_changed(self, value: int) -> None:
@@ -5209,7 +5211,7 @@ class MainWindow(MainWindowIcons, QMainWindow):
         combo_index = max(self.reference_mode_combo.findData(normalized_mode), 0)
         if self.reference_mode_combo.currentData() == normalized_mode:
             if normalized_mode == "auto":
-                self._sync_auto_reference_to_current_frame()
+                self._sync_auto_reference_to_current_spectral_cube()
             else:
                 self._update_reference_controls()
                 self._update_reference_summary()
@@ -5225,26 +5227,26 @@ class MainWindow(MainWindowIcons, QMainWindow):
         if ref_key is None:
             self.reference_summary.setText("Reference: not set.")
             self.reference_wavelength_status_label.setText("Wavelength: -")
-            self.reference_frame_status_label.setText("Spectral cube: -")
+            self.reference_spectral_cube_status_label.setText("Spectral cube: -")
             self.reference_method_status_label.setText("Method: -")
             self._update_reference_navigation_styles()
             self._update_reference_star_overlay()
             return
-        ref_frame, ref_wavelength = ref_key
-        current_frame = self._current_frame()
+        ref_spectral_cube, ref_wavelength = ref_key
+        current_spectral_cube = self._current_spectral_cube()
         current_wavelength = self._current_wavelength()
         wavelength_active = current_wavelength is not None and abs(float(current_wavelength) - float(ref_wavelength)) < 1e-6
-        frame_active = current_frame is not None and int(current_frame) == int(ref_frame)
+        spectral_cube_active = current_spectral_cube is not None and int(current_spectral_cube) == int(ref_spectral_cube)
         method_text = "Auto" if mode != "manual" else "Manual"
-        self.reference_summary.setText(f"Reference: {method_text.lower()} | {ref_wavelength:g} nm | spectral cube {ref_frame}")
+        self.reference_summary.setText(f"Reference: {method_text.lower()} | {ref_wavelength:g} nm | spectral cube {ref_spectral_cube}")
         self.reference_wavelength_status_label.setText(f"Wavelength: {ref_wavelength:g} nm")
-        self.reference_frame_status_label.setText(f"Spectral cube: {ref_frame}")
+        self.reference_spectral_cube_status_label.setText(f"Spectral cube: {ref_spectral_cube}")
         self.reference_method_status_label.setText(f"Method: {method_text}")
         self.reference_wavelength_status_label.setStyleSheet(
             f"color: {'#84cc16' if wavelength_active else '#f8fafc'}; font-weight: 600;"
         )
-        self.reference_frame_status_label.setStyleSheet(
-            f"color: {'#facc15' if frame_active else '#f8fafc'}; font-weight: 600;"
+        self.reference_spectral_cube_status_label.setStyleSheet(
+            f"color: {'#facc15' if spectral_cube_active else '#f8fafc'}; font-weight: 600;"
         )
         self.reference_method_status_label.setStyleSheet(
             "color: #84cc16; font-weight: 600;"
@@ -5264,7 +5266,7 @@ class MainWindow(MainWindowIcons, QMainWindow):
             if self._state.preprocessing.reference_wavelength_nm is None:
                 self._set_current_reference_from_view(push_undo=False, save=False)
         else:
-            self._sync_auto_reference_to_current_frame()
+            self._sync_auto_reference_to_current_spectral_cube()
         self._state.chromatic_models.clear()
         self._state.chromatic_landmarks.clear()
         self._state.preprocessing.chromatic_correction_enabled = False
@@ -5279,15 +5281,15 @@ class MainWindow(MainWindowIcons, QMainWindow):
         self._schedule_processing_state_save()
 
     def _set_current_reference_from_view(self, *, push_undo: bool = True, save: bool = True) -> None:
-        frame = self._current_frame()
+        spectral_cube_index = self._current_spectral_cube()
         wavelength = self._current_wavelength()
-        if frame is None or wavelength is None:
+        if spectral_cube_index is None or wavelength is None:
             self._set_status_text("No image is selected for manual reference.")
             return
         if push_undo:
             self._push_undo_point("Reference image")
         self._state.preprocessing.reference_mode = "manual"
-        self._state.preprocessing.reference_frame_index = int(frame)
+        self._state.preprocessing.reference_spectral_cube_index = int(spectral_cube_index)
         self._state.preprocessing.reference_wavelength_nm = float(wavelength)
         self._state.chromatic_models.clear()
         self._state.chromatic_landmarks.clear()
@@ -5304,22 +5306,22 @@ class MainWindow(MainWindowIcons, QMainWindow):
         self._update_landmark_overlays()
         if save:
             self._schedule_processing_state_save()
-        self._set_status_text(f"Manual reference set to {wavelength:g} nm | spectral cube {frame}.")
+        self._set_status_text(f"Manual reference set to {wavelength:g} nm | spectral cube {spectral_cube_index}.")
 
-    def _sync_auto_reference_to_current_frame(self) -> None:
+    def _sync_auto_reference_to_current_spectral_cube(self, follow_view: bool = True) -> None:
         if str(self._state.preprocessing.reference_mode or "auto") != "auto":
             return
-        frame = self._current_frame()
-        if frame is None:
+        spectral_cube_index = self._current_spectral_cube()
+        if spectral_cube_index is None:
             return
-        auto_key = self._auto_reference_image_key_for_frame(frame)
+        auto_key = self._auto_reference_image_key_for_spectral_cube(spectral_cube_index)
         if auto_key is None:
             return
-        auto_frame, auto_wavelength = auto_key
+        auto_spectral_cube, auto_wavelength = auto_key
         self._state.preprocessing.reference_mode = "auto"
-        self._state.preprocessing.reference_frame_index = int(auto_frame)
+        self._state.preprocessing.reference_spectral_cube_index = int(auto_spectral_cube)
         self._state.preprocessing.reference_wavelength_nm = float(auto_wavelength)
-        if self._current_image_key != auto_key and self._wavelength_values:
+        if follow_view and self._current_image_key != auto_key and self._wavelength_values:
             wavelength_index = min(
                 range(len(self._wavelength_values)),
                 key=lambda idx: abs(self._wavelength_values[idx] - float(auto_wavelength)),
@@ -5390,32 +5392,32 @@ class MainWindow(MainWindowIcons, QMainWindow):
 
     def _update_reference_navigation_styles(self) -> None:
         if self._state.dataset is None:
-            self.frame_spin.setStyleSheet("")
+            self.spectral_cube_spin.setStyleSheet("")
             self.wavelength_spin.setStyleSheet("")
-            self.frame_slider.setStyleSheet("")
+            self.spectral_cube_slider.setStyleSheet("")
             self.wavelength_slider.setStyleSheet("")
             return
         ref_key = self._reference_image_key()
-        current_frame = self._current_frame()
+        current_spectral_cube = self._current_spectral_cube()
         current_wavelength = self._current_wavelength()
-        frame_active = ref_key is not None and current_frame is not None and int(current_frame) == int(ref_key[0])
+        spectral_cube_active = ref_key is not None and current_spectral_cube is not None and int(current_spectral_cube) == int(ref_key[0])
         wavelength_active = (
             ref_key is not None
             and current_wavelength is not None
             and abs(float(current_wavelength) - float(ref_key[1])) < 1e-6
         )
-        if frame_active:
-            self.frame_spin.setStyleSheet(
+        if spectral_cube_active:
+            self.spectral_cube_spin.setStyleSheet(
                 "QSpinBox { background: rgba(250, 204, 21, 0.14); border: 1px solid #facc15; color: #fef08a; }"
             )
-            self.frame_slider.setStyleSheet(
+            self.spectral_cube_slider.setStyleSheet(
                 "QSlider::handle:horizontal { background: #facc15; border: 1px solid #fef08a; width: 12px; margin: -5px 0; border-radius: 6px; }"
                 "QSlider::handle:horizontal:hover { background: #fde047; }"
                 "QSlider::handle:horizontal:pressed { background: #eab308; }"
             )
         else:
-            self.frame_spin.setStyleSheet("")
-            self.frame_slider.setStyleSheet("")
+            self.spectral_cube_spin.setStyleSheet("")
+            self.spectral_cube_slider.setStyleSheet("")
         if wavelength_active:
             self.wavelength_spin.setStyleSheet(
                 "QSpinBox { background: rgba(132, 204, 22, 0.14); border: 1px solid #84cc16; color: #d9f99d; }"
@@ -5526,8 +5528,8 @@ class MainWindow(MainWindowIcons, QMainWindow):
         self._set_help(self.ome_zarr_compression_button, "Compression: turn Stack to Zarr compression on or off.")
         self._set_help(self.export_settings_button, "Export preprocessing, ROI settings, ROIs, and groups to a JSON profile.")
         self._set_help(self.import_settings_button, "Import preprocessing, ROI settings, ROIs, and groups from a JSON profile.")
-        self._set_help(self.frame_slider, "Choose the reference spectral cube.")
-        self._set_help(self.frame_spin, "Reference spectral cube number.")
+        self._set_help(self.spectral_cube_slider, "Choose the reference spectral cube.")
+        self._set_help(self.spectral_cube_spin, "Reference spectral cube number.")
         self._set_help(self.wavelength_slider, "Choose the reference wavelength.")
         self._set_help(self.wavelength_spin, "Reference wavelength in nanometers.")
         self._set_help(self.reference_auto_button, "Auto: use the best wavelength in the current spectral cube as the reference image.")
@@ -5858,7 +5860,7 @@ class MainWindow(MainWindowIcons, QMainWindow):
         painter.end()
         return QIcon(pixmap)
 
-    def _make_analysis_all_frames_icon(self, active: bool, *, size: int = 24) -> QIcon:
+    def _make_analysis_all_spectral_cubes_icon(self, active: bool, *, size: int = 24) -> QIcon:
         color = "#22c55e" if active else "#f8fafc"
         fill_color = "#22c55e" if active else "none"
         svg = f"""
@@ -6616,21 +6618,21 @@ class MainWindow(MainWindowIcons, QMainWindow):
         self._set_spinbox_width(self.ome_zarr_chunk_spin, "999 px", minimum=60)
         self._set_combo_width(self.ome_zarr_shard_mode_combo, ["1 spectral cube"], minimum=220)
         self._set_combo_width(self.analysis_metric_combo, ["Maximum", "Centroid"], minimum=80)
-        self._set_spinbox_width(self.analysis_start_frame_spin, "99999", minimum=66)
-        self._set_spinbox_width(self.analysis_end_frame_spin, "99999", minimum=66)
+        self._set_spinbox_width(self.analysis_start_spectral_cube_spin, "99999", minimum=66)
+        self._set_spinbox_width(self.analysis_end_spectral_cube_spin, "99999", minimum=66)
         self._set_spinbox_width(self.array_rows_spin, "100")
         self._set_spinbox_width(self.array_cols_spin, "100")
         self._set_spinbox_width(self.array_spacing_spin, "1000.00", minimum=68)
         self._set_spinbox_width(self.measurement_um_x_spin, "1000000", minimum=58)
         self._set_spinbox_width(self.measurement_um_y_spin, "1000000", minimum=58)
-        self._set_spinbox_width(self.frame_spin, "99999", minimum=66)
+        self._set_spinbox_width(self.spectral_cube_spin, "99999", minimum=66)
         self._set_spinbox_width(self.wavelength_spin, "99999 nm", minimum=82)
         self._set_combo_width(self.chromatic_subpixel_precision_combo, ["1", "4", "9"], minimum=42)
-        navigation_control_width = max(self.frame_spin.sizeHint().width(), self.wavelength_spin.sizeHint().width(), 82)
+        navigation_control_width = max(self.spectral_cube_spin.sizeHint().width(), self.wavelength_spin.sizeHint().width(), 82)
         navigation_slider_width = max(navigation_control_width + 80, 170)
-        self.frame_spin.setFixedWidth(navigation_control_width)
+        self.spectral_cube_spin.setFixedWidth(navigation_control_width)
         self.wavelength_spin.setFixedWidth(navigation_control_width)
-        self.frame_slider.setFixedWidth(navigation_slider_width)
+        self.spectral_cube_slider.setFixedWidth(navigation_slider_width)
         self.wavelength_slider.setFixedWidth(navigation_slider_width)
 
     def _on_rotate_tool_toggled(self, checked: bool) -> None:
@@ -6740,7 +6742,7 @@ class MainWindow(MainWindowIcons, QMainWindow):
         if checked:
             reference_key = self._reference_image_key()
             if reference_key is not None and self._current_image_key != reference_key:
-                self._set_current_frame_and_wavelength(int(reference_key[0]), float(reference_key[1]))
+                self._set_current_spectral_cube_and_wavelength(int(reference_key[0]), float(reference_key[1]))
             self.mask_pencil_check.blockSignals(True)
             self.mask_pencil_check.setChecked(False)
             self.mask_pencil_check.blockSignals(False)
@@ -7477,58 +7479,58 @@ class MainWindow(MainWindowIcons, QMainWindow):
         ]
         if not selected_source_rois:
             return None
-        frames = self._available_analysis_frames()
-        if not frames:
+        spectral_cubes = self._available_analysis_spectral_cubes()
+        if not spectral_cubes:
             return None
-        frame_payloads: list[tuple[int, tuple[object, ...]]] = []
-        frame_signatures: list[tuple[object, ...]] = []
+        spectral_cube_payloads: list[tuple[int, tuple[object, ...]]] = []
+        spectral_cube_signatures: list[tuple[object, ...]] = []
         payload_cache_hits = 0
         payload_cache_builds = 0
-        worker_count = max(1, min(int(os.cpu_count() or 1), 4, len(frames)))
+        worker_count = max(1, min(int(os.cpu_count() or 1), 4, len(spectral_cubes)))
         if worker_count > 1:
             with ThreadPoolExecutor(max_workers=worker_count) as executor:
                 future_map = {
                     executor.submit(
-                        self._cached_sensorgram_frame_payload,
-                        int(frame),
+                        self._cached_sensorgram_spectral_cube_payload,
+                        int(spectral_cube_index),
                         selected_roi_ids,
                         selected_source_rois,
-                    ): int(frame)
-                    for frame in frames
+                    ): int(spectral_cube_index)
+                    for spectral_cube_index in spectral_cubes
                 }
-                prepared_frames: list[tuple[int, tuple[object, ...] | None]] = []
+                prepared_spectral_cubes: list[tuple[int, tuple[object, ...] | None]] = []
                 for future in as_completed(future_map):
-                    frame = int(future_map[future])
+                    spectral_cube_index = int(future_map[future])
                     payload = future.result()
-                    prepared_frames.append((frame, payload))
-            prepared_frames.sort(key=lambda item: item[0])
-            iterable_frames = prepared_frames
+                    prepared_spectral_cubes.append((spectral_cube_index, payload))
+            prepared_spectral_cubes.sort(key=lambda item: item[0])
+            iterable_spectral_cubes = prepared_spectral_cubes
         else:
-            iterable_frames = [
-                (int(frame), self._cached_sensorgram_frame_payload(frame, selected_roi_ids, selected_source_rois))
-                for frame in frames
+            iterable_spectral_cubes = [
+                (int(spectral_cube_index), self._cached_sensorgram_spectral_cube_payload(spectral_cube_index, selected_roi_ids, selected_source_rois))
+                for spectral_cube_index in spectral_cubes
             ]
-        for frame, payload in iterable_frames:
+        for spectral_cube_index, payload in iterable_spectral_cubes:
             if payload is None:
                 continue
-            payload_signature = self._sensorgram_frame_payload_signature(frame, selected_roi_ids, selected_source_rois)
+            payload_signature = self._sensorgram_spectral_cube_payload_signature(spectral_cube_index, selected_roi_ids, selected_source_rois)
             if payload_signature is not None:
                 with self._analysis_cache_lock:
-                    if payload_signature in self._sensorgram_frame_payload_cache:
+                    if payload_signature in self._sensorgram_spectral_cube_payload_cache:
                         payload_cache_hits += 1
                     else:
                         payload_cache_builds += 1
-            frame_payloads.append((int(frame), payload))
-            frame_signatures.append(
+            spectral_cube_payloads.append((int(spectral_cube_index), payload))
+            spectral_cube_signatures.append(
                 (
-                    int(frame),
+                    int(spectral_cube_index),
                     tuple(
-                        self._preprocessing_signature((int(frame), float(wavelength)))
+                        self._preprocessing_signature((int(spectral_cube_index), float(wavelength)))
                         for wavelength in self._wavelength_values
                     ),
                 )
             )
-        if not frame_payloads:
+        if not spectral_cube_payloads:
             return None
         dataset_key = str(self._state.dataset.folder)
         signature = (
@@ -7538,41 +7540,41 @@ class MainWindow(MainWindowIcons, QMainWindow):
             self._analysis_metric_key(),
             int(self._analysis_poly_order()),
             tuple(round(float(value), 6) for value in self._wavelength_values),
-            tuple(frame_signatures),
+            tuple(spectral_cube_signatures),
             round(float(self._state.area_roi_settings.reference_inner_radius_px), 3),
             round(float(self._state.area_roi_settings.reference_outer_radius_px), 3),
         )
         logging.getLogger("lspr_imaging_app.workflow").debug(
-            "SG payload summary | hit=%s build=%s | frames=%s",
+            "SG payload summary | hit=%s build=%s | spectral_cubes=%s",
             int(payload_cache_hits),
             int(payload_cache_builds),
-            len(frame_payloads),
+            len(spectral_cube_payloads),
         )
-        return signature, frame_payloads
+        return signature, spectral_cube_payloads
 
     def _sensorgram_signature_for_selection(
         self,
-        frames: list[int],
+        spectral_cubes: list[int],
         selected_roi_ids: tuple[int, ...],
         selected_source_rois: list[AreaRoi],
     ) -> tuple[object, ...] | None:
-        return self._analysis_controller._sensorgram_signature_for_selection(frames, selected_roi_ids, selected_source_rois)
+        return self._analysis_controller._sensorgram_signature_for_selection(spectral_cubes, selected_roi_ids, selected_source_rois)
 
-    def _sensorgram_frame_payload_signature(
+    def _sensorgram_spectral_cube_payload_signature(
         self,
-        frame: int,
+        spectral_cube_index: int,
         selected_roi_ids: tuple[int, ...],
         selected_source_rois: list[AreaRoi],
     ) -> tuple[object, ...] | None:
-        return self._analysis_controller._sensorgram_frame_payload_signature(frame, selected_roi_ids, selected_source_rois)
+        return self._analysis_controller._sensorgram_spectral_cube_payload_signature(spectral_cube_index, selected_roi_ids, selected_source_rois)
 
-    def _cached_sensorgram_frame_payload(
+    def _cached_sensorgram_spectral_cube_payload(
         self,
-        frame: int,
+        spectral_cube_index: int,
         selected_roi_ids: tuple[int, ...],
         selected_source_rois: list[AreaRoi],
     ) -> tuple[object, ...] | None:
-        return self._analysis_controller._cached_sensorgram_frame_payload(frame, selected_roi_ids, selected_source_rois)
+        return self._analysis_controller._cached_sensorgram_spectral_cube_payload(spectral_cube_index, selected_roi_ids, selected_source_rois)
 
     def _schedule_sensorgram_refresh(self) -> None:
         if not self._startup_ready or self._startup_restore_in_progress or not self._analysis_live_preview_enabled:
@@ -7688,8 +7690,8 @@ class MainWindow(MainWindowIcons, QMainWindow):
     def _analysis_fit_result_from_spectrum(self, result: AbsorbanceSpectrumResult) -> FitResult | None:
         return self._plot_manager.analysis_fit_result_from_spectrum(result)
 
-    def _update_single_frame_sensorgram(self, metric_value: float | None, metric_signal: float | None) -> None:
-        self._plot_manager.update_single_frame_sensorgram(metric_value, metric_signal)
+    def _update_single_spectral_cube_sensorgram(self, metric_value: float | None, metric_signal: float | None) -> None:
+        self._plot_manager.update_single_spectral_cube_sensorgram(metric_value, metric_signal)
 
     def _schedule_absorbance_spectrum_refresh(self) -> None:
         if not self._startup_ready or self._startup_restore_in_progress:
@@ -7749,17 +7751,17 @@ class MainWindow(MainWindowIcons, QMainWindow):
             return None
         if len(selected_roi_ids) == 1:
             for cache_signature, cached_result in reversed(list(self._spot_absorbance_cache.items())):
-                if self._absorbance_frame_signature(cache_signature) != self._absorbance_frame_signature(signature):
+                if self._absorbance_spectral_cube_signature(cache_signature) != self._absorbance_spectral_cube_signature(signature):
                     continue
                 if self._absorbance_result_covers_spot_ids(cached_result, selected_roi_ids):
                     return cached_result
-        frame_signature = self._absorbance_frame_signature(signature)
-        if frame_signature is not None:
-            cached_result = self._absorbance_frame_cache.get(frame_signature)
+        spectral_cube_signature = self._absorbance_spectral_cube_signature(signature)
+        if spectral_cube_signature is not None:
+            cached_result = self._absorbance_spectral_cube_cache.get(spectral_cube_signature)
             if cached_result is not None and self._absorbance_result_covers_spot_ids(cached_result, selected_roi_ids):
                 return cached_result
         for cache_signature, cached_result in reversed(list(self._absorbance_spectrum_cache.items())):
-            if self._absorbance_frame_signature(cache_signature) != frame_signature:
+            if self._absorbance_spectral_cube_signature(cache_signature) != spectral_cube_signature:
                 continue
             if self._absorbance_result_covers_spot_ids(cached_result, selected_roi_ids):
                 return cached_result
@@ -7779,15 +7781,15 @@ class MainWindow(MainWindowIcons, QMainWindow):
         return self._analysis_controller._absorbance_spectrum_signature()
 
     def _roi_absorbance_signature(self, spot: AreaRoi) -> tuple[object, ...] | None:
-        frame = self._current_frame()
-        if frame is None or not self._wavelength_values:
+        spectral_cube_index = self._current_spectral_cube()
+        if spectral_cube_index is None or not self._wavelength_values:
             return None
         return _roi_absorbance_signature(
-            int(frame),
+            int(spectral_cube_index),
             tuple(float(value) for value in self._wavelength_values),
             spot,
             tuple(
-                self._chromatic_signature_for_image_key((int(frame), float(wavelength)))
+                self._chromatic_signature_for_image_key((int(spectral_cube_index), float(wavelength)))
                 for wavelength in self._wavelength_values
             ),
         )
@@ -7811,7 +7813,7 @@ class MainWindow(MainWindowIcons, QMainWindow):
         return value
 
     @staticmethod
-    def _absorbance_frame_signature(signature: tuple[object, ...] | None) -> tuple[object, ...] | None:
+    def _absorbance_spectral_cube_signature(signature: tuple[object, ...] | None) -> tuple[object, ...] | None:
         if signature is None or len(signature) < 4:
             return None
         return (signature[0], signature[1], signature[3])
@@ -7931,7 +7933,7 @@ class MainWindow(MainWindowIcons, QMainWindow):
     def _analysis_cache_payload(self) -> dict:
         payload: dict[str, list[dict[str, object]]] = {
             "absorbance_spectrum_cache": [],
-            "absorbance_frame_cache": [],
+            "absorbance_spectral_cube_cache": [],
             "spot_absorbance_cache": [],
             "sensorgram_cache": [],
         }
@@ -7942,8 +7944,8 @@ class MainWindow(MainWindowIcons, QMainWindow):
                     "result": self._serialize_absorbance_result(result),
                 }
             )
-        for signature, result in self._absorbance_frame_cache.items():
-            payload["absorbance_frame_cache"].append(
+        for signature, result in self._absorbance_spectral_cube_cache.items():
+            payload["absorbance_spectral_cube_cache"].append(
                 {
                     "signature": self._analysis_cache_signature_to_json(signature),
                     "result": self._serialize_absorbance_result(result),
@@ -7967,7 +7969,7 @@ class MainWindow(MainWindowIcons, QMainWindow):
 
     def _restore_analysis_caches(self, payload: dict | None) -> None:
         self._absorbance_spectrum_cache.clear()
-        self._absorbance_frame_cache.clear()
+        self._absorbance_spectral_cube_cache.clear()
         self._spot_absorbance_cache.clear()
         self._sensorgram_cache.clear()
         if not isinstance(payload, dict):
@@ -7982,25 +7984,25 @@ class MainWindow(MainWindowIcons, QMainWindow):
                 if signature is None:
                     continue
                 self._absorbance_spectrum_cache[signature] = result
-                frame_signature = self._absorbance_frame_signature(signature)
-                if frame_signature is not None:
-                    self._absorbance_frame_cache[frame_signature] = result
-                    self._absorbance_frame_cache.move_to_end(frame_signature)
-                    while len(self._absorbance_frame_cache) > self.ABSORBANCE_FRAME_CACHE_SIZE:
-                        self._absorbance_frame_cache.popitem(last=False)
-        raw_absorbance_frames = payload.get("absorbance_frame_cache", [])
-        if isinstance(raw_absorbance_frames, list):
-            for entry in raw_absorbance_frames:
+                spectral_cube_signature = self._absorbance_spectral_cube_signature(signature)
+                if spectral_cube_signature is not None:
+                    self._absorbance_spectral_cube_cache[spectral_cube_signature] = result
+                    self._absorbance_spectral_cube_cache.move_to_end(spectral_cube_signature)
+                    while len(self._absorbance_spectral_cube_cache) > self.ABSORBANCE_SPECTRAL_CUBE_CACHE_SIZE:
+                        self._absorbance_spectral_cube_cache.popitem(last=False)
+        raw_absorbance_spectral_cubes = payload.get("absorbance_spectral_cube_cache", [])
+        if isinstance(raw_absorbance_spectral_cubes, list):
+            for entry in raw_absorbance_spectral_cubes:
                 if not isinstance(entry, dict):
                     continue
                 signature = self._analysis_cache_signature_from_json(entry.get("signature"))
                 result = self._deserialize_absorbance_result(entry.get("result"))
                 if signature is None:
                     continue
-                self._absorbance_frame_cache[signature] = result
-                self._absorbance_frame_cache.move_to_end(signature)
-                while len(self._absorbance_frame_cache) > self.ABSORBANCE_FRAME_CACHE_SIZE:
-                    self._absorbance_frame_cache.popitem(last=False)
+                self._absorbance_spectral_cube_cache[signature] = result
+                self._absorbance_spectral_cube_cache.move_to_end(signature)
+                while len(self._absorbance_spectral_cube_cache) > self.ABSORBANCE_SPECTRAL_CUBE_CACHE_SIZE:
+                    self._absorbance_spectral_cube_cache.popitem(last=False)
         raw_spot_absorbance = payload.get("spot_absorbance_cache", [])
         if isinstance(raw_spot_absorbance, list):
             for entry in raw_spot_absorbance:
@@ -8022,21 +8024,21 @@ class MainWindow(MainWindowIcons, QMainWindow):
                     continue
                 self._sensorgram_cache[signature] = result
 
-    def _prepare_absorbance_spectrum_payload_for_frame(
+    def _prepare_absorbance_spectrum_payload_for_spectral_cube(
         self,
-        frame: int,
+        spectral_cube_index: int,
         selected_roi_ids: tuple[int, ...],
         selected_source_rois: list[AreaRoi],
     ) -> tuple[object, ...] | None:
-        return self._analysis_controller._prepare_absorbance_spectrum_payload_for_frame(frame, selected_roi_ids, selected_source_rois)
+        return self._analysis_controller._prepare_absorbance_spectrum_payload_for_spectral_cube(spectral_cube_index, selected_roi_ids, selected_source_rois)
 
-    def _prepare_fast_spectrum_payload_for_frame(
+    def _prepare_fast_spectrum_payload_for_spectral_cube(
         self,
-        frame: int,
+        spectral_cube_index: int,
         selected_roi_ids: tuple,
         selected_source_rois: list,
     ) -> tuple | None:
-        return self._analysis_controller._prepare_fast_spectrum_payload_for_frame(frame, selected_roi_ids, selected_source_rois)
+        return self._analysis_controller._prepare_fast_spectrum_payload_for_spectral_cube(spectral_cube_index, selected_roi_ids, selected_source_rois)
 
     def _prepare_absorbance_spectrum_payload(
         self,
@@ -8064,18 +8066,18 @@ class MainWindow(MainWindowIcons, QMainWindow):
     def _refresh_absorbance_spectrum(self) -> None:
         self._analysis_controller._refresh_absorbance_spectrum()
 
-    def _available_analysis_frames(self) -> list[int]:
-        frame_range = self._current_analysis_frame_range()
-        if frame_range is None:
+    def _available_analysis_spectral_cubes(self) -> list[int]:
+        spectral_cube_range = self._current_analysis_spectral_cube_range()
+        if spectral_cube_range is None:
             return []
-        start, end = frame_range
-        return [int(frame) for frame in self._frame_values if start <= int(frame) <= end]
+        start, end = spectral_cube_range
+        return [int(spectral_cube_index) for spectral_cube_index in self._spectral_cube_values if start <= int(spectral_cube_index) <= end]
 
     def _on_analysis_fit_settings_changed(self, *_args) -> None:
         self._analysis_controller._on_analysis_fit_settings_changed(*_args)
 
-    def _on_analysis_frame_range_changed(self, *_args) -> None:
-        self._analysis_controller._on_analysis_frame_range_changed(*_args)
+    def _on_analysis_spectral_cube_range_changed(self, *_args) -> None:
+        self._analysis_controller._on_analysis_spectral_cube_range_changed(*_args)
 
     def _calculate_sensorgram_for_range(self) -> None:
         self._analysis_controller._calculate_sensorgram_for_range()
@@ -10252,18 +10254,18 @@ class MainWindow(MainWindowIcons, QMainWindow):
             cached_result = self._absorbance_spectrum_cache.get(signature)
             if cached_result is not None:
                 self._apply_absorbance_spectrum_result(cached_result)
-                frame_signature = self._absorbance_frame_signature(signature)
-                if frame_signature is not None and frame_signature in self._absorbance_frame_cache:
-                    self._absorbance_frame_cache.move_to_end(frame_signature)
+                spectral_cube_signature = self._absorbance_spectral_cube_signature(signature)
+                if spectral_cube_signature is not None and spectral_cube_signature in self._absorbance_spectral_cube_cache:
+                    self._absorbance_spectral_cube_cache.move_to_end(spectral_cube_signature)
                 self._append_workflow_log("Spec repaint | spectrum cache", level="debug")
                 return True
             return False
         cached_result = self._cached_absorbance_result_for_selection(signature, selected_roi_ids)
         if cached_result is not None:
             self._apply_absorbance_spectrum_result(cached_result)
-            frame_signature = self._absorbance_frame_signature(signature)
-            if frame_signature is not None and frame_signature in self._absorbance_frame_cache:
-                self._absorbance_frame_cache.move_to_end(frame_signature)
+            spectral_cube_signature = self._absorbance_spectral_cube_signature(signature)
+            if spectral_cube_signature is not None and spectral_cube_signature in self._absorbance_spectral_cube_cache:
+                self._absorbance_spectral_cube_cache.move_to_end(spectral_cube_signature)
             self._append_workflow_log("Spec repaint | spectrum cache", level="debug")
             return True
         return False
@@ -11054,20 +11056,20 @@ class MainWindow(MainWindowIcons, QMainWindow):
     def _on_reference_outer_diameter_spin_changed(self, value: int) -> None:
         self._roi_table_controller._on_reference_outer_diameter_spin_changed(value)
 
-    def _on_frame_spin_changed(self, value: int) -> None:
-        if not self._frame_values:
+    def _on_spectral_cube_spin_changed(self, value: int) -> None:
+        if not self._spectral_cube_values:
             return
-        closest_index = min(range(len(self._frame_values)), key=lambda idx: abs(self._frame_values[idx] - value))
-        self.frame_slider.setValue(closest_index)
+        closest_index = min(range(len(self._spectral_cube_values)), key=lambda idx: abs(self._spectral_cube_values[idx] - value))
+        self.spectral_cube_slider.setValue(closest_index)
 
-    def _step_frame_selection(self, direction: int) -> bool:
-        if not self._frame_values:
+    def _step_spectral_cube_selection(self, direction: int) -> bool:
+        if not self._spectral_cube_values:
             return False
-        current_index = self.frame_slider.value()
-        target_index = min(max(current_index + int(direction), 0), len(self._frame_values) - 1)
+        current_index = self.spectral_cube_slider.value()
+        target_index = min(max(current_index + int(direction), 0), len(self._spectral_cube_values) - 1)
         if target_index == current_index:
             return False
-        self.frame_slider.setValue(target_index)
+        self.spectral_cube_slider.setValue(target_index)
         return True
 
     def _on_wavelength_spin_changed(self, value: float) -> None:
@@ -11084,10 +11086,10 @@ class MainWindow(MainWindowIcons, QMainWindow):
         if target_index == current_index:
             return False
         target_wavelength = float(self._wavelength_values[target_index])
-        current_frame = self._current_frame()
-        if current_frame is None:
+        current_spectral_cube = self._current_spectral_cube()
+        if current_spectral_cube is None:
             return False
-        self._set_current_frame_and_wavelength(int(current_frame), target_wavelength)
+        self._set_current_spectral_cube_and_wavelength(int(current_spectral_cube), target_wavelength)
         return True
 
     @staticmethod

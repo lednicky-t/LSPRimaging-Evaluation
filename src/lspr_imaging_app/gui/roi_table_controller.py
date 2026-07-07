@@ -291,12 +291,12 @@ class RoiTableController:
         if action is None:
             return
         if action is group_action:
-            self.window._group_selected_spots()
+            self.window._group_selected_rois()
         elif select_group_action is not None and action is select_group_action:
             if self.window._select_group_members_for_spot(spot_id):
                 self.window.status_label.setText(f"Selected group members for ROI {spot_id}.")
         elif ungroup_action is not None and action is ungroup_action:
-            self.window._ungroup_selected_spots()
+            self.window._ungroup_selected_rois()
         elif destroy_group_action is not None and action is destroy_group_action:
             self.window._destroy_groups_for_spot(spot_id)
 
@@ -429,7 +429,7 @@ class RoiTableController:
         self.window._paste_spot_properties_from_table()
 
     def move_selected(self, direction: int) -> None:
-        self.window._move_selected_spots_in_table(direction)
+        self.window._move_selected_rois_in_table(direction)
 
     def edit_spot_color_from_row(self, spot_id: int) -> None:
         self.window._edit_spot_color_from_table(spot_id)
@@ -595,7 +595,7 @@ class RoiTableController:
     def _on_roi_list_item_changed(self, item: QTableWidgetItem) -> None:
         if self.window._roi_table_updating:
             return
-        spot_id = self.window._spot_list_spot_id_for_row(item.row())
+        spot_id = self.window._roi_list_spot_id_for_row(item.row())
         if spot_id is None:
             return
         if item.column() == 1:
@@ -605,7 +605,7 @@ class RoiTableController:
 
 
     def _on_roi_list_cell_double_clicked(self, row: int, column: int) -> None:
-        spot_id = self.window._spot_list_spot_id_for_row(row)
+        spot_id = self.window._roi_list_spot_id_for_row(row)
         if spot_id is None:
             return
         if column == 2:

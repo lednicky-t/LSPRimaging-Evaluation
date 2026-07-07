@@ -16,31 +16,31 @@ class ImageRenderManager:
         dataset = window._state.dataset
         if dataset is None:
             return
-        frame = window._current_frame()
+        spectral_cube_index = window._current_spectral_cube()
         wavelength = window._current_wavelength()
-        if frame is None or wavelength is None:
+        if spectral_cube_index is None or wavelength is None:
             return
         if str(window._state.preprocessing.reference_mode or "auto") != "manual":
-            auto_key = window._auto_reference_image_key_for_frame(frame)
+            auto_key = window._auto_reference_image_key_for_spectral_cube(spectral_cube_index)
             if auto_key is not None:
-                auto_frame, auto_wavelength = auto_key
+                auto_spectral_cube, auto_wavelength = auto_key
                 window._state.preprocessing.reference_mode = "auto"
-                window._state.preprocessing.reference_frame_index = int(auto_frame)
+                window._state.preprocessing.reference_spectral_cube_index = int(auto_spectral_cube)
                 window._state.preprocessing.reference_wavelength_nm = float(auto_wavelength)
-        window.frame_spin.blockSignals(True)
-        window.frame_spin.setValue(int(frame))
-        window.frame_spin.blockSignals(False)
+        window.spectral_cube_spin.blockSignals(True)
+        window.spectral_cube_spin.setValue(int(spectral_cube_index))
+        window.spectral_cube_spin.blockSignals(False)
         window.wavelength_spin.blockSignals(True)
         window.wavelength_spin.setValue(float(wavelength))
         window.wavelength_spin.blockSignals(False)
         window._update_reference_controls()
         window._update_reference_summary()
         window._update_sensorgram_current_point()
-        record = window._record_map.get((frame, wavelength))
+        record = window._record_map.get((spectral_cube_index, wavelength))
         if record is None:
             window.status_label.setText("Selected spectral cube/wavelength combination is missing.")
             return
-        image_key = (frame, wavelength)
+        image_key = (spectral_cube_index, wavelength)
         if window._current_image_key == image_key:
             return
         preprocessing = deepcopy(window._state.preprocessing)
@@ -53,9 +53,9 @@ class ImageRenderManager:
         cached = window._get_processed_image_from_cache(cache_key)
         if cached is not None:
             started_at = time.perf_counter()
-            window._apply_loaded_image(cached, record.path, image_key, frame, wavelength, record.path.name)
+            window._apply_loaded_image(cached, record.path, image_key, spectral_cube_index, wavelength, record.path.name)
             elapsed = window._format_elapsed_seconds(time.perf_counter() - started_at)
-            window._set_status_text(f"Img spectral cube {frame} {wavelength:g}nm | cache {elapsed}")
+            window._set_status_text(f"Img spectral cube {spectral_cube_index} {wavelength:g}nm | cache {elapsed}")
             return
         window._pending_image_refresh_payload = (
             signature,
@@ -63,7 +63,7 @@ class ImageRenderManager:
             str(record.path),
             record.path,
             image_key,
-            frame,
+            spectral_cube_index,
             wavelength,
             record.path.name,
             (preprocessing, mask_settings, external_mask_processed),
@@ -83,7 +83,7 @@ class ImageRenderManager:
             path_str,
             record_path,
             image_key,
-            frame,
+            spectral_cube_index,
             wavelength,
             record_name,
             preprocessing,
@@ -112,14 +112,14 @@ class ImageRenderManager:
             cache_key=cache_key,
             record_path=record_path,
             image_key=image_key,
-            frame=frame,
+            spectral_cube_index=spectral_cube_index,
             wavelength=wavelength,
             record_name=record_name: self.on_image_refresh_ready(
                 signature,
                 cache_key,
                 record_path,
                 image_key,
-                frame,
+                spectral_cube_index,
                 wavelength,
                 record_name,
                 processed,
@@ -134,7 +134,7 @@ class ImageRenderManager:
         cache_key: tuple[object, ...],
         record_path: Path,
         image_key: tuple[int, float],
-        frame: int,
+        spectral_cube_index: int,
         wavelength: float,
         record_name: str,
         processed: np.ndarray,
@@ -148,13 +148,13 @@ class ImageRenderManager:
         window._store_processed_image_in_cache(cache_key, processed)
         apply_started_at = time.perf_counter()
         if signature == window._latest_image_refresh_signature:
-            self.apply_loaded_image(processed, record_path, image_key, frame, wavelength, record_name)
+            self.apply_loaded_image(processed, record_path, image_key, spectral_cube_index, wavelength, record_name)
             apply_elapsed = window._format_elapsed_seconds(time.perf_counter() - apply_started_at)
             if apply_elapsed:
                 window._append_workflow_log_throttled("image_apply", f"Image apply | {apply_elapsed}", level="debug", min_interval=2.0)
         elapsed = window._format_elapsed_seconds(time.perf_counter() - started_at) if started_at is not None else ""
         if elapsed:
-            window._set_status_text(f"Img spectral cube {frame} {wavelength:g}nm | load {elapsed}")
+            window._set_status_text(f"Img spectral cube {spectral_cube_index} {wavelength:g}nm | load {elapsed}")
         if window._pending_image_refresh_payload is not None:
             self.start_pending_image_refresh()
 
@@ -173,7 +173,7 @@ class ImageRenderManager:
         processed: np.ndarray,
         record_path: Path,
         image_key: tuple[int, float],
-        frame: int,
+        spectral_cube_index: int,
         wavelength: float,
         record_name: str,
     ) -> None:
@@ -247,7 +247,7 @@ class ImageRenderManager:
         window._sync_rotation_tool()
         window._sync_crop_tool(processed.shape)
         window._update_landmark_overlays()
-        window._set_status_text(f"Img spectral cube {frame} {wavelength:g}nm")
+        window._set_status_text(f"Img spectral cube {spectral_cube_index} {wavelength:g}nm")
         if not window._chromatic_setup_active and not bool(getattr(window, "_image_tools_preview_only", False)):
             window._schedule_processing_state_save()
             window._refresh_visible_spectrum_from_cache()

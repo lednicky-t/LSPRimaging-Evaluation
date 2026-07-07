@@ -76,7 +76,7 @@ def apply_spatial_preprocessing(
     image: np.ndarray,
     settings: PreprocessingSettings,
 ) -> np.ndarray:
-    # Pixels added by rotation (the corners outside the original frame) have no
+    # Pixels added by rotation (the corners outside the original image) have no
     # real measurement behind them. "nearest" stretches the nearest edge pixel
     # into that area (no scientific meaning, but visually seamless); the
     # rotation_fill_dark toggle instead fills it with 0 so it's clearly marked
@@ -309,7 +309,7 @@ def apply_spatial_preprocessing_export(
     hot path: resamples directly at the final rotate/flip/crop size instead
     of materializing the full ndimage.rotate(reshape=True) canvas and slicing
     it down afterward. When the configured crop is much smaller than the full
-    frame, this avoids interpolating pixels that would just be discarded.
+    spectral_cube_index, this avoids interpolating pixels that would just be discarded.
     Produces the same output as apply_spatial_preprocessing (same fill mode,
     same crop clamping) — only the amount of work differs.
     """
@@ -456,7 +456,7 @@ def flatten_background(
     about the estimate itself is scoped). When `region` (x0, y0, x1, y1) is
     given, only that region of the flattened result is returned — for a
     ROI-based calculation, nothing downstream ever reads the rest of the
-    flattened frame, so materializing it is pure waste, especially the
+    flattened image, so materializing it is pure waste, especially the
     upsample-back-to-full-resolution step inside estimate_background_profile
     when binning is enabled. `image` itself must still be the full image
     (needed for the blur and the exclusion mask/baseline), only the *output*
@@ -528,7 +528,7 @@ def estimate_background_profile(
     """Estimate the smooth spatial background of `image`. When `region` is
     given, only that (x0, y0, x1, y1) region of the estimate is returned —
     the expensive part this avoids is the upsample-back-to-full-resolution
-    step (ndimage.zoom over the whole frame) when binning is enabled; the
+    step (ndimage.zoom over the whole image) when binning is enabled; the
     Gaussian blur that produces the underlying (binned) estimate still runs
     over the whole image either way, same as the non-regional path.
     """
@@ -667,7 +667,7 @@ def _resize_region_to_shape(
     """Same result as _resize_to_shape(array, shape)[y0:y1, x0:x1], without
     materializing the full upsampled array — for background flattening on a
     zarr dataset, only a small ROI-sized region of the upsampled background
-    is ever actually used, so upsampling the whole frame (an operation whose
+    is ever actually used, so upsampling the whole image (an operation whose
     cost scales with the full image, same as scipy's rotate/warp cost we
     already optimized elsewhere) is pure waste.
 

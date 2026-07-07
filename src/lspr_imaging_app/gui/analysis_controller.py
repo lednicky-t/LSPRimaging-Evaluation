@@ -29,7 +29,7 @@ class AnalysisController:
         if not force and selected_signature == getattr(self.window, "_sensorgram_selection_highlight_signature", None):
             return
         self.window._sensorgram_selection_highlight_signature = selected_signature
-        has_data = self.window._sensorgram_frame_indices.size > 0
+        has_data = self.window._sensorgram_spectral_cube_indices.size > 0
         selected = bool(selected_signature) and has_data
         color = self._sensorgram_selection_color()
         curve_color = color if selected else QColor("#22c55e")
@@ -69,7 +69,7 @@ class AnalysisController:
         self.window._sensorgram_cancel_event = None
         self.window._end_busy()
         self.window._sync_busy_cursor_state()
-        self.window._sensorgram_frame_indices = np.asarray(result.frame_indices, dtype=np.int32)
+        self.window._sensorgram_spectral_cube_indices = np.asarray(result.spectral_cube_indices, dtype=np.int32)
         self.window._sensorgram_metric_values = np.asarray(result.metric_values, dtype=np.float64)
         self.window._sensorgram_metric_signal = np.asarray(result.metric_signal, dtype=np.float64)
         if signature:
@@ -77,7 +77,7 @@ class AnalysisController:
             self.window._sensorgram_cache.move_to_end(signature)
             while len(self.window._sensorgram_cache) > self.window.SENSORGRAM_CACHE_SIZE:
                 self.window._sensorgram_cache.popitem(last=False)
-        self.set_sensorgram_series(self.window._sensorgram_frame_indices, self.window._sensorgram_metric_values)
+        self.set_sensorgram_series(self.window._sensorgram_spectral_cube_indices, self.window._sensorgram_metric_values)
         summary = (
             f"{self.window._analysis_metric_label()} | Calculated {result.completed_count}/{result.total_count} spectral cubes"
             f" | Polynomial order {self.window._analysis_poly_order()}"
@@ -109,8 +109,8 @@ class AnalysisController:
     def on_fit_settings_changed(self, *_args) -> None:
         self.window._on_analysis_fit_settings_changed(*_args)
 
-    def on_frame_range_changed(self, *_args) -> None:
-        self.window._on_analysis_frame_range_changed(*_args)
+    def on_spectral_cube_range_changed(self, *_args) -> None:
+        self.window._on_analysis_spectral_cube_range_changed(*_args)
 
     def update_control_state(self) -> None:
         self.window._update_analysis_control_state()
@@ -119,7 +119,7 @@ class AnalysisController:
         self.window._update_sensorgram_plot_labels()
 
     def clear_sensorgram(self, summary_text: str) -> None:
-        self.window._sensorgram_frame_indices = np.asarray([], dtype=np.int32)
+        self.window._sensorgram_spectral_cube_indices = np.asarray([], dtype=np.int32)
         self.window._sensorgram_metric_values = np.asarray([], dtype=np.float64)
         self.window._sensorgram_metric_signal = np.asarray([], dtype=np.float64)
         self.window._pending_sensorgram_payload = None
@@ -129,17 +129,17 @@ class AnalysisController:
         self.update_selection_highlight(force=True)
         self.window.sensorgram_summary_label.setText(summary_text)
 
-    def set_sensorgram_series(self, frame_indices, metric_values, *, summary_text: str | None = None) -> None:
-        frames = np.asarray(frame_indices, dtype=np.int32)
+    def set_sensorgram_series(self, spectral_cube_indices, metric_values, *, summary_text: str | None = None) -> None:
+        spectral_cubes = np.asarray(spectral_cube_indices, dtype=np.int32)
         metrics = np.asarray(metric_values, dtype=np.float64)
-        valid_mask = np.isfinite(frames) & np.isfinite(metrics)
-        self.window._sensorgram_frame_indices = frames.copy()
+        valid_mask = np.isfinite(spectral_cubes) & np.isfinite(metrics)
+        self.window._sensorgram_spectral_cube_indices = spectral_cubes.copy()
         self.window._sensorgram_metric_values = metrics.copy()
-        self.window.sensorgram_curve.setData(frames[valid_mask], metrics[valid_mask])
+        self.window.sensorgram_curve.setData(spectral_cubes[valid_mask], metrics[valid_mask])
         self.update_plot_labels()
         self.update_selection_highlight(force=True)
         if np.any(valid_mask):
-            x_values = frames[valid_mask].astype(np.float64, copy=False)
+            x_values = spectral_cubes[valid_mask].astype(np.float64, copy=False)
             y_values = metrics[valid_mask].astype(np.float64, copy=False)
             self.window.sensorgram_plot.setXRange(float(np.min(x_values)), float(np.max(x_values)), padding=0.03)
             y_min = float(np.min(y_values))
@@ -153,8 +153,8 @@ class AnalysisController:
     def prepare_absorbance_spectrum_payload(self):
         return self._prepare_absorbance_spectrum_payload()
 
-    def available_analysis_frames(self) -> list[int]:
-        return self.window._available_analysis_frames()
+    def available_analysis_spectral_cubes(self) -> list[int]:
+        return self.window._available_analysis_spectral_cubes()
 
     def calculate_sensorgram_for_range(self) -> None:
         if not self.window._analysis_enabled:
@@ -175,11 +175,11 @@ class AnalysisController:
         if not selected_source_rois:
             self.clear_sensorgram("Detect or select ROIs before calculating the sensorgram.")
             return
-        frames = self.available_analysis_frames()
-        if not frames:
+        spectral_cubes = self.available_analysis_spectral_cubes()
+        if not spectral_cubes:
             self.clear_sensorgram("No spectral cubes are available in the selected range.")
             return
-        signature = self.window._sensorgram_signature_for_selection(frames, selected_roi_ids, selected_source_rois)
+        signature = self.window._sensorgram_signature_for_selection(spectral_cubes, selected_roi_ids, selected_source_rois)
         if signature is None:
             self.clear_sensorgram("No spectra are available in the selected spectral cube range.")
             return
@@ -190,12 +190,12 @@ class AnalysisController:
             self._apply_cached_sensorgram_result(signature, cached_result, preview=True)
             return
         if self.window._sensorgram_running:
-            self.window._pending_sensorgram_payload = (signature, frames, selected_roi_ids, selected_source_rois)
+            self.window._pending_sensorgram_payload = (signature, spectral_cubes, selected_roi_ids, selected_source_rois)
             self.window._set_sensorgram_summary_text(
-                f"{self.window._analysis_metric_label()} | Updating {len(frames)} spectral cubes"
+                f"{self.window._analysis_metric_label()} | Updating {len(spectral_cubes)} spectral cubes"
             )
             return
-        self._start_sensorgram_worker(signature, frames, selected_roi_ids, selected_source_rois)
+        self._start_sensorgram_worker(signature, spectral_cubes, selected_roi_ids, selected_source_rois)
 
     def preview_sensorgram_from_cache(self) -> bool:
         if not self.window._analysis_enabled or self.window._state.dataset is None or self.window._chromatic_setup_active:
@@ -207,10 +207,10 @@ class AnalysisController:
         selected_source_rois = [deepcopy(roi) for roi in self.window._state.area_rois if roi.area_roi_id in selected_roi_id_set]
         if not selected_source_rois:
             return False
-        frames = self.available_analysis_frames()
-        if not frames:
+        spectral_cubes = self.available_analysis_spectral_cubes()
+        if not spectral_cubes:
             return False
-        signature = self.window._sensorgram_signature_for_selection(frames, selected_roi_ids, selected_source_rois)
+        signature = self.window._sensorgram_signature_for_selection(spectral_cubes, selected_roi_ids, selected_source_rois)
         if signature is None:
             return False
         cached_result = self.window._sensorgram_cache.get(signature)
@@ -222,9 +222,9 @@ class AnalysisController:
     def _fast_spectrum_path_eligible(self, selected_source_rois: list[AreaRoi]) -> bool:
         """Whether the ROI-scoped, zarr-chunk-aware fast path can be used for
         the whole sensorgram/spectrum run. Decided once, upfront — NOT
-        re-checked per frame — because a per-frame "not worth it" bail-out
-        would silently drop that frame's data point instead of falling back
-        to the full-plane path (frame_payload_builder results that come back
+        re-checked per spectral_cube_index — because a per-spectral_cube_index "not worth it" bail-out
+        would silently drop that spectral_cube_index's data point instead of falling back
+        to the full-plane path (spectral_cube_payload_builder results that come back
         None are just skipped, not retried another way).
 
         The "is the ROI selection compact enough" part uses a chromatic-shift
@@ -265,7 +265,7 @@ class AnalysisController:
     def _start_sensorgram_worker(
         self,
         signature: tuple[object, ...],
-        frames: list[int],
+        spectral_cubes: list[int],
         selected_roi_ids: tuple[int, ...],
         selected_source_rois: list[AreaRoi],
     ) -> None:
@@ -292,22 +292,22 @@ class AnalysisController:
         self.window._update_analysis_control_state()
         fast_label = " [fast]" if use_fast_path else ""
         self.window._set_sensorgram_summary_text(
-            f"{self.window._analysis_metric_label()}{fast_label} | Preparing {len(frames)} spectral cubes"
-            f" | Range {frames[0]}-{frames[-1]}"
+            f"{self.window._analysis_metric_label()}{fast_label} | Preparing {len(spectral_cubes)} spectral cubes"
+            f" | Range {spectral_cubes[0]}-{spectral_cubes[-1]}"
         )
         self.window._set_status_text("Preparing fitted sensorgram...")
         self.window._begin_busy("Preparing fitted sensorgram...", determinate=True)
 
         if use_fast_path:
-            frame_payload_builder = lambda frame, selected_roi_ids=selected_roi_ids, selected_source_rois=selected_source_rois: self._prepare_fast_spectrum_payload_for_frame(
-                frame,
+            spectral_cube_payload_builder = lambda spectral_cube_index, selected_roi_ids=selected_roi_ids, selected_source_rois=selected_source_rois: self._prepare_fast_spectrum_payload_for_spectral_cube(
+                spectral_cube_index,
                 selected_roi_ids,
                 selected_source_rois,
             )
             task_fn = _absorbance_spectrum_fast_task
         else:
-            frame_payload_builder = lambda frame, selected_roi_ids=selected_roi_ids, selected_source_rois=selected_source_rois: self._cached_sensorgram_frame_payload(
-                frame,
+            spectral_cube_payload_builder = lambda spectral_cube_index, selected_roi_ids=selected_roi_ids, selected_source_rois=selected_source_rois: self._cached_sensorgram_spectral_cube_payload(
+                spectral_cube_index,
                 selected_roi_ids,
                 selected_source_rois,
             )
@@ -315,18 +315,18 @@ class AnalysisController:
 
         worker = FunctionWorker(
             _sensorgram_metric_task,
-            frames,
+            spectral_cubes,
             self.window._analysis_poly_order(),
             self.window._analysis_metric_key(),
             cancel_event=self.window._sensorgram_cancel_event,
             supports_progress=True,
             supports_partial=True,
-            frame_payload_builder=frame_payload_builder,
+            spectral_cube_payload_builder=spectral_cube_payload_builder,
             task_fn=task_fn,
         )
         worker.signals.progress.connect(self.window._update_busy_progress)
         worker.signals.partial.connect(
-            lambda point, request_id=request_id, total=len(frames): self.on_sensorgram_partial_result(request_id, total, point)
+            lambda point, request_id=request_id, total=len(spectral_cubes): self.on_sensorgram_partial_result(request_id, total, point)
         )
         worker.signals.result.connect(lambda result, request_id=request_id: self.on_sensorgram_ready(request_id, result))
         worker.signals.error.connect(lambda message, request_id=request_id: self.on_sensorgram_failed(request_id, message))
@@ -345,13 +345,13 @@ class AnalysisController:
             return
         metric_value = float("nan") if point.metric_value is None else float(point.metric_value)
         metric_signal = float("nan") if point.metric_signal is None else float(point.metric_signal)
-        self.window._sensorgram_frame_indices = np.append(self.window._sensorgram_frame_indices, int(point.frame_index)).astype(np.int32, copy=False)
+        self.window._sensorgram_spectral_cube_indices = np.append(self.window._sensorgram_spectral_cube_indices, int(point.spectral_cube_index)).astype(np.int32, copy=False)
         self.window._sensorgram_metric_values = np.append(self.window._sensorgram_metric_values, metric_value).astype(np.float64, copy=False)
         self.window._sensorgram_metric_signal = np.append(self.window._sensorgram_metric_signal, metric_signal).astype(np.float64, copy=False)
         self.set_sensorgram_series(
-            self.window._sensorgram_frame_indices,
+            self.window._sensorgram_spectral_cube_indices,
             self.window._sensorgram_metric_values,
-            summary_text=f"{self.window._analysis_metric_label()} | Calculating {self.window._sensorgram_frame_indices.size}/{total_count} spectral cubes",
+            summary_text=f"{self.window._analysis_metric_label()} | Calculating {self.window._sensorgram_spectral_cube_indices.size}/{total_count} spectral cubes",
         )
 
     def on_sensorgram_ready(self, request_id: int, result) -> None:
@@ -399,20 +399,20 @@ class AnalysisController:
     def start_pending_sensorgram_refresh(self) -> None:
         if self.window._pending_sensorgram_payload is None:
             return
-        signature, frames, selected_roi_ids, selected_source_rois = self.window._pending_sensorgram_payload
+        signature, spectral_cubes, selected_roi_ids, selected_source_rois = self.window._pending_sensorgram_payload
         self.window._pending_sensorgram_payload = None
         cached_result = self.window._sensorgram_cache.get(signature)
         if cached_result is not None:
             self._apply_cached_sensorgram_result(signature, cached_result, preview=True)
             return
-        self._start_sensorgram_worker(signature, list(frames), tuple(selected_roi_ids), list(selected_source_rois))
+        self._start_sensorgram_worker(signature, list(spectral_cubes), tuple(selected_roi_ids), list(selected_source_rois))
 
     def update_current_point(self) -> None:
-        current_frame = self.window._current_frame()
-        if current_frame is None or self.window._sensorgram_frame_indices.size == 0:
+        current_spectral_cube = self.window._current_spectral_cube()
+        if current_spectral_cube is None or self.window._sensorgram_spectral_cube_indices.size == 0:
             self.window.sensorgram_current_point.setData([], [])
             return
-        matches = np.where(self.window._sensorgram_frame_indices == int(current_frame))[0]
+        matches = np.where(self.window._sensorgram_spectral_cube_indices == int(current_spectral_cube))[0]
         if matches.size == 0:
             self.window.sensorgram_current_point.setData([], [])
             return
@@ -421,16 +421,16 @@ class AnalysisController:
         if not np.isfinite(value):
             self.window.sensorgram_current_point.setData([], [])
             return
-        self.window.sensorgram_current_point.setData([int(self.window._sensorgram_frame_indices[index])], [value])
+        self.window.sensorgram_current_point.setData([int(self.window._sensorgram_spectral_cube_indices[index])], [value])
 
     def mark_stale(self, reason: str | None = None) -> None:
         if self.window._sensorgram_running:
             return
         metric_label = self.window._analysis_metric_label()
         range_text = ""
-        frame_range = self.window._current_analysis_frame_range()
-        if frame_range is not None:
-            range_text = f" | Spectral cubes {frame_range[0]}-{frame_range[1]}"
+        spectral_cube_range = self.window._current_analysis_spectral_cube_range()
+        if spectral_cube_range is not None:
+            range_text = f" | Spectral cubes {spectral_cube_range[0]}-{spectral_cube_range[1]}"
         message = reason or f"{metric_label} sensorgram is out of date | Press Calculate all spectral cubes{range_text}"
         self.clear_sensorgram(message)
 
@@ -441,19 +441,19 @@ class AnalysisController:
 
     def _sensorgram_signature_for_selection(
         self,
-        frames: list[int],
+        spectral_cubes: list[int],
         selected_roi_ids: tuple[int, ...],
         selected_source_rois: list[AreaRoi],
     ) -> tuple[object, ...] | None:
-        if self.window._state.dataset is None or not selected_roi_ids or not selected_source_rois or not frames:
+        if self.window._state.dataset is None or not selected_roi_ids or not selected_source_rois or not spectral_cubes:
             return None
-        frame_signatures: list[tuple[object, ...]] = []
-        for frame in frames:
-            frame_signatures.append(
+        spectral_cube_signatures: list[tuple[object, ...]] = []
+        for spectral_cube_index in spectral_cubes:
+            spectral_cube_signatures.append(
                 (
-                    int(frame),
+                    int(spectral_cube_index),
                     tuple(
-                        self.window._preprocessing_signature((int(frame), float(wavelength)))
+                        self.window._preprocessing_signature((int(spectral_cube_index), float(wavelength)))
                         for wavelength in self.window._wavelength_values
                     ),
                 )
@@ -466,14 +466,14 @@ class AnalysisController:
             self.window._analysis_metric_key(),
             int(self.window._analysis_poly_order()),
             tuple(round(float(value), 6) for value in self.window._wavelength_values),
-            tuple(frame_signatures),
+            tuple(spectral_cube_signatures),
             round(float(self.window._state.area_roi_settings.reference_inner_radius_px), 3),
             round(float(self.window._state.area_roi_settings.reference_outer_radius_px), 3),
         )
 
-    def _sensorgram_frame_payload_signature(
+    def _sensorgram_spectral_cube_payload_signature(
         self,
-        frame: int,
+        spectral_cube_index: int,
         selected_roi_ids: tuple[int, ...],
         selected_source_rois: list[AreaRoi],
     ) -> tuple[object, ...] | None:
@@ -481,49 +481,49 @@ class AnalysisController:
             return None
         return (
             str(self.window._state.dataset.folder),
-            int(frame),
+            int(spectral_cube_index),
             tuple(selected_roi_ids),
             self.window._roi_signature(selected_source_rois),
             tuple(round(float(value), 6) for value in self.window._wavelength_values),
             tuple(
-                self.window._preprocessing_signature((int(frame), float(wavelength)))
+                self.window._preprocessing_signature((int(spectral_cube_index), float(wavelength)))
                 for wavelength in self.window._wavelength_values
             ),
             round(float(self.window._state.area_roi_settings.reference_inner_radius_px), 3),
             round(float(self.window._state.area_roi_settings.reference_outer_radius_px), 3),
         )
 
-    def _cached_sensorgram_frame_payload(
+    def _cached_sensorgram_spectral_cube_payload(
         self,
-        frame: int,
+        spectral_cube_index: int,
         selected_roi_ids: tuple[int, ...],
         selected_source_rois: list[AreaRoi],
     ) -> tuple[object, ...] | None:
         logger = logging.getLogger("lspr_imaging_app.workflow")
-        signature = self._sensorgram_frame_payload_signature(frame, selected_roi_ids, selected_source_rois)
+        signature = self._sensorgram_spectral_cube_payload_signature(spectral_cube_index, selected_roi_ids, selected_source_rois)
         if signature is None:
             return None
         with self.window._analysis_cache_lock:
-            cached = self.window._sensorgram_frame_payload_cache.get(signature)
+            cached = self.window._sensorgram_spectral_cube_payload_cache.get(signature)
             if cached is not None:
-                self.window._sensorgram_frame_payload_cache.move_to_end(signature)
+                self.window._sensorgram_spectral_cube_payload_cache.move_to_end(signature)
                 logger.debug(
-                    "SG payload cache hit | frame=%s rois=%s",
-                    int(frame),
+                    "SG payload cache hit | spectral_cube_index=%s rois=%s",
+                    int(spectral_cube_index),
                     len(selected_roi_ids),
                 )
                 return cached
-        payload = self._prepare_absorbance_spectrum_payload_for_frame(frame, selected_roi_ids, selected_source_rois)
+        payload = self._prepare_absorbance_spectrum_payload_for_spectral_cube(spectral_cube_index, selected_roi_ids, selected_source_rois)
         if payload is None:
             return None
         with self.window._analysis_cache_lock:
-            self.window._sensorgram_frame_payload_cache[signature] = payload
-            self.window._sensorgram_frame_payload_cache.move_to_end(signature)
-            while len(self.window._sensorgram_frame_payload_cache) > self.window.SENSORGRAM_FRAME_PAYLOAD_CACHE_SIZE:
-                self.window._sensorgram_frame_payload_cache.popitem(last=False)
+            self.window._sensorgram_spectral_cube_payload_cache[signature] = payload
+            self.window._sensorgram_spectral_cube_payload_cache.move_to_end(signature)
+            while len(self.window._sensorgram_spectral_cube_payload_cache) > self.window.SENSORGRAM_SPECTRAL_CUBE_PAYLOAD_CACHE_SIZE:
+                self.window._sensorgram_spectral_cube_payload_cache.popitem(last=False)
         logger.debug(
-            "SG payload cache built | frame=%s rois=%s",
-            int(frame),
+            "SG payload cache built | spectral_cube_index=%s rois=%s",
+            int(spectral_cube_index),
             len(selected_roi_ids),
         )
         return payload
@@ -532,16 +532,16 @@ class AnalysisController:
         self,
         selected_source_rois: list[AreaRoi],
     ) -> tuple[object, ...] | None:
-        frame = self.window._current_frame()
-        if frame is None or not selected_source_rois:
+        spectral_cube_index = self.window._current_spectral_cube()
+        if spectral_cube_index is None or not selected_source_rois:
             return None
         selected_roi_ids = tuple(int(roi.area_roi_id) for roi in selected_source_rois)
         return (
-            int(frame),
+            int(spectral_cube_index),
             tuple(round(float(value), 6) for value in self.window._wavelength_values),
             selected_roi_ids,
             tuple(
-                self.window._chromatic_signature_for_image_key((int(frame), float(wavelength)))
+                self.window._chromatic_signature_for_image_key((int(spectral_cube_index), float(wavelength)))
                 for wavelength in self.window._wavelength_values
             ),
         )
@@ -637,7 +637,7 @@ class AnalysisController:
     @staticmethod
     def _serialize_sensorgram_result(result: SensorgramComputationResult) -> dict:
         return {
-            "frame_indices": [int(value) for value in np.asarray(result.frame_indices, dtype=np.int32)],
+            "spectral_cube_indices": [int(value) for value in np.asarray(result.spectral_cube_indices, dtype=np.int32)],
             "metric_values": [float(value) for value in np.asarray(result.metric_values, dtype=np.float64)],
             "metric_signal": [float(value) for value in np.asarray(result.metric_signal, dtype=np.float64)],
             "completed_count": int(result.completed_count),
@@ -652,7 +652,7 @@ class AnalysisController:
     def _deserialize_sensorgram_result(payload) -> SensorgramComputationResult:
         if not isinstance(payload, dict):
             return SensorgramComputationResult(
-                frame_indices=np.asarray([], dtype=np.int32),
+                spectral_cube_indices=np.asarray([], dtype=np.int32),
                 metric_values=np.asarray([], dtype=np.float64),
                 metric_signal=np.asarray([], dtype=np.float64),
                 completed_count=0,
@@ -660,7 +660,7 @@ class AnalysisController:
                 cancelled=False,
             )
         return SensorgramComputationResult(
-            frame_indices=np.asarray(payload.get("frame_indices", []), dtype=np.int32),
+            spectral_cube_indices=np.asarray(payload.get("spectral_cube_indices", []), dtype=np.int32),
             metric_values=np.asarray(payload.get("metric_values", []), dtype=np.float64),
             metric_signal=np.asarray(payload.get("metric_signal", []), dtype=np.float64),
             completed_count=int(payload.get("completed_count", 0)),
@@ -671,9 +671,9 @@ class AnalysisController:
             cancelled=bool(payload.get("cancelled", False)),
         )
 
-    def _prepare_absorbance_spectrum_payload_for_frame(
+    def _prepare_absorbance_spectrum_payload_for_spectral_cube(
         self,
-        frame: int,
+        spectral_cube_index: int,
         selected_roi_ids: tuple[int, ...],
         selected_source_rois: list[AreaRoi],
     ) -> tuple[object, ...] | None:
@@ -684,10 +684,10 @@ class AnalysisController:
         measurement_settings = deepcopy(self.window._state.area_roi_settings)
         measurement_payload: list[tuple[float, str, list[AreaRoi], np.ndarray | None, bool, np.ndarray | None]] = []
         for wavelength in self.window._wavelength_values:
-            record = self.window._record_map.get((frame, wavelength))
+            record = self.window._record_map.get((spectral_cube_index, wavelength))
             if record is None:
                 continue
-            image_key = (frame, float(wavelength))
+            image_key = (spectral_cube_index, float(wavelength))
             preprocessing_spots = deepcopy(self.window._rois_for_preprocessing(image_key))
             affine_matrix = self.window._chromatic_affine_for_image_key(image_key)
             if affine_matrix is not None:
@@ -720,9 +720,9 @@ class AnalysisController:
             deepcopy(self.window._state.mask) if self.window._mask_section_applied() else None,
         )
 
-    def _prepare_fast_spectrum_payload_for_frame(
+    def _prepare_fast_spectrum_payload_for_spectral_cube(
         self,
-        frame: int,
+        spectral_cube_index: int,
         selected_roi_ids: tuple,
         selected_source_rois: list,
     ) -> tuple | None:
@@ -732,12 +732,12 @@ class AnalysisController:
         no rotation/flip transform is active (see the eligibility check in
         _start_sensorgram_worker, which also confirms the ROI selection is
         compact enough for a scoped read to be worthwhile — that decision is
-        made once for the whole run, not per frame, so this always proceeds
+        made once for the whole run, not per spectral_cube_index, so this always proceeds
         with a scoped read once called; it must never bail out for a "not
-        worth it" reason here, or a frame would silently vanish from the
+        worth it" reason here, or a spectral_cube_index would silently vanish from the
         sensorgram instead of falling back to the full-plane path). Returns
         None only when there's genuinely nothing to compute (no data for this
-        frame, or no ROI geometry to build a box from at all).
+        spectral_cube_index, or no ROI geometry to build a box from at all).
         """
         from lspr_imaging_app.gui.analysis_tasks import compute_roi_union_bounding_box
         from lspr_imaging_app.io.dataset import load_image_shape
@@ -757,12 +757,12 @@ class AnalysisController:
         affine_matrices: list[np.ndarray | None] = []
         first_record = None
         for wavelength in self.window._wavelength_values:
-            record = self.window._record_map.get((frame, wavelength))
+            record = self.window._record_map.get((spectral_cube_index, wavelength))
             if record is None:
                 continue
             if first_record is None:
                 first_record = record
-            image_key = (frame, float(wavelength))
+            image_key = (spectral_cube_index, float(wavelength))
             affine_matrix = self.window._chromatic_affine_for_image_key(image_key)
             if affine_matrix is not None:
                 affine_matrix = np.asarray(affine_matrix, dtype=np.float64)
@@ -796,7 +796,7 @@ class AnalysisController:
         if box is None:
             return None
 
-        # Matches _prepare_absorbance_spectrum_payload_for_frame's own convention
+        # Matches _prepare_absorbance_spectrum_payload_for_spectral_cube's own convention
         # for these two: mask_state only when the mask panel is applied/linked,
         # and background's own exclusion mask_settings only when background
         # flattening is configured to exclude the mask.
@@ -809,7 +809,7 @@ class AnalysisController:
 
         return (
             self.window._state.dataset,
-            int(frame),
+            int(spectral_cube_index),
             measurement_payload,
             dict(self.window._record_map),
             deepcopy(selected_source_rois),
@@ -827,12 +827,12 @@ class AnalysisController:
         self,
         selected_source_rois: list[AreaRoi] | None = None,
     ) -> tuple[tuple[object, ...], tuple[object, ...], object] | None:
-        """Build the (signature, payload, task_fn) for a single-frame spectrum
+        """Build the (signature, payload, task_fn) for a single-spectral-cube spectrum
         calculation. Uses the exact same eligibility decision and payload
         builders as the sensorgram loop (_fast_spectrum_path_eligible,
-        _prepare_fast_spectrum_payload_for_frame /
-        _prepare_absorbance_spectrum_payload_for_frame) — a single-frame
-        spectrum is just a one-frame sensorgram, so there is one decision
+        _prepare_fast_spectrum_payload_for_spectral_cube /
+        _prepare_absorbance_spectrum_payload_for_spectral_cube) — a single-spectral-cube
+        spectrum is just a one-spectral-cube sensorgram, so there is one decision
         point and one pair of task functions, not a separate parallel
         implementation for this case.
         """
@@ -844,20 +844,20 @@ class AnalysisController:
         signature = self._absorbance_spectrum_signature_for_source_spots(selected_source_rois)
         if signature is None:
             return None
-        frame = int(signature[0])
+        spectral_cube_index = int(signature[0])
         selected_roi_ids = tuple(roi.area_roi_id for roi in selected_source_rois)
 
         from lspr_imaging_app.gui.analysis_tasks import _absorbance_spectrum_fast_task, _absorbance_spectrum_task
 
         if self._fast_spectrum_path_eligible(selected_source_rois):
-            payload = self._prepare_fast_spectrum_payload_for_frame(frame, selected_roi_ids, selected_source_rois)
+            payload = self._prepare_fast_spectrum_payload_for_spectral_cube(spectral_cube_index, selected_roi_ids, selected_source_rois)
             if payload is not None:
                 return signature, payload, _absorbance_spectrum_fast_task
             # Fast payload builder found genuinely nothing to compute for this
-            # frame (e.g. no records) — fall through to the full-plane path
+            # spectral cube (e.g. no records) — fall through to the full-plane path
             # rather than reporting "no spectrum" when the slow path might
             # still have an answer.
-        payload = self._prepare_absorbance_spectrum_payload_for_frame(frame, selected_roi_ids, selected_source_rois)
+        payload = self._prepare_absorbance_spectrum_payload_for_spectral_cube(spectral_cube_index, selected_roi_ids, selected_source_rois)
         if payload is None:
             return None
         return signature, payload, _absorbance_spectrum_task
@@ -934,9 +934,9 @@ class AnalysisController:
             if cached_result is not None:
                 self.window._absorbance_spectrum_dirty = False
                 self._apply_absorbance_spectrum_result(cached_result)
-                frame_signature = self.window._absorbance_frame_signature(signature)
-                if frame_signature is not None and frame_signature in self.window._absorbance_frame_cache:
-                    self.window._absorbance_frame_cache.move_to_end(frame_signature)
+                spectral_cube_signature = self.window._absorbance_spectral_cube_signature(signature)
+                if spectral_cube_signature is not None and spectral_cube_signature in self.window._absorbance_spectral_cube_cache:
+                    self.window._absorbance_spectral_cube_cache.move_to_end(spectral_cube_signature)
                 elapsed = self.window._format_elapsed_seconds(time.perf_counter() - start_time)
                 self.window._set_status_text(f"Spec | cache {elapsed}")
                 return
@@ -997,17 +997,17 @@ class AnalysisController:
         elif self.window._analysis_live_preview_enabled:
             self.window._schedule_absorbance_spectrum_refresh()
 
-    def _on_analysis_frame_range_changed(self, *_args) -> None:
+    def _on_analysis_spectral_cube_range_changed(self, *_args) -> None:
         self.window._save_control_preferences()
-        if self.window.analysis_start_frame_spin.value() > self.window.analysis_end_frame_spin.value():
-            self.window.analysis_start_frame_spin.blockSignals(True)
-            self.window.analysis_end_frame_spin.blockSignals(True)
-            start = min(self.window.analysis_start_frame_spin.value(), self.window.analysis_end_frame_spin.value())
-            end = max(self.window.analysis_start_frame_spin.value(), self.window.analysis_end_frame_spin.value())
-            self.window.analysis_start_frame_spin.setValue(start)
-            self.window.analysis_end_frame_spin.setValue(end)
-            self.window.analysis_start_frame_spin.blockSignals(False)
-            self.window.analysis_end_frame_spin.blockSignals(False)
+        if self.window.analysis_start_spectral_cube_spin.value() > self.window.analysis_end_spectral_cube_spin.value():
+            self.window.analysis_start_spectral_cube_spin.blockSignals(True)
+            self.window.analysis_end_spectral_cube_spin.blockSignals(True)
+            start = min(self.window.analysis_start_spectral_cube_spin.value(), self.window.analysis_end_spectral_cube_spin.value())
+            end = max(self.window.analysis_start_spectral_cube_spin.value(), self.window.analysis_end_spectral_cube_spin.value())
+            self.window.analysis_start_spectral_cube_spin.setValue(start)
+            self.window.analysis_end_spectral_cube_spin.setValue(end)
+            self.window.analysis_start_spectral_cube_spin.blockSignals(False)
+            self.window.analysis_end_spectral_cube_spin.blockSignals(False)
         if self.window._analysis_live_preview_enabled and not self.preview_sensorgram_from_cache():
             self.mark_stale(
                 f"{self.window._analysis_metric_label()} sensorgram is out of date | Press Calculate all spectral cubes"
@@ -1034,29 +1034,29 @@ class AnalysisController:
             self.window._clear_sensorgram("Select ROIs before calculating the sensorgram.")
             return
 
-        frames = self.window._available_analysis_frames()
-        if not frames:
+        spectral_cubes = self.window._available_analysis_spectral_cubes()
+        if not spectral_cubes:
             self.window._clear_sensorgram("No spectral cubes are available in the selected range.")
             return
 
-        cached_signature = self.window._sensorgram_signature_for_selection(frames, selected_roi_ids, selected_source_rois)
+        cached_signature = self.window._sensorgram_signature_for_selection(spectral_cubes, selected_roi_ids, selected_source_rois)
         if cached_signature is not None:
             with self.window._analysis_cache_lock:
                 cached_sensorgram = self.window._sensorgram_cache.get(cached_signature)
                 if cached_sensorgram is not None:
                     self.window._sensorgram_cache.move_to_end(cached_signature)
                     self.window._append_workflow_log(
-                        f"SG cache hit | frames {len(frames)} | metric {self.window._analysis_metric_label()}",
+                        f"SG cache hit | spectral_cubes {len(spectral_cubes)} | metric {self.window._analysis_metric_label()}",
                         level="debug",
                     )
                     self.window._append_workflow_log(
-                        f"SG cache summary | payload hit {len(frames)} build 0 | result hit 1 build 0",
+                        f"SG cache summary | payload hit {len(spectral_cubes)} build 0 | result hit 1 build 0",
                         level="debug",
                     )
-                    self.window._sensorgram_frame_indices = np.asarray(cached_sensorgram.frame_indices, dtype=np.int32)
+                    self.window._sensorgram_spectral_cube_indices = np.asarray(cached_sensorgram.spectral_cube_indices, dtype=np.int32)
                     self.window._sensorgram_metric_values = np.asarray(cached_sensorgram.metric_values, dtype=np.float64)
                     self.window._sensorgram_metric_signal = np.asarray(cached_sensorgram.metric_signal, dtype=np.float64)
-                    self.window._set_sensorgram_series(self.window._sensorgram_frame_indices, self.window._sensorgram_metric_values)
+                    self.window._set_sensorgram_series(self.window._sensorgram_spectral_cube_indices, self.window._sensorgram_metric_values)
                     summary = (
                         f"{self.window._analysis_metric_label()} | Cached {cached_sensorgram.completed_count}/"
                         f"{cached_sensorgram.total_count} spectral cubes | Polynomial order {self.window._analysis_poly_order()}"
@@ -1067,10 +1067,10 @@ class AnalysisController:
         self.window._sensorgram_running_signature = cached_signature
 
         self.window._append_workflow_log(
-            f"SG calc start | rois {len(selected_roi_ids)} | frames {len(frames)} | metric {self.window._analysis_metric_label()}",
+            f"SG calc start | rois {len(selected_roi_ids)} | spectral_cubes {len(spectral_cubes)} | metric {self.window._analysis_metric_label()}",
             level="info",
         )
-        self._start_sensorgram_worker(cached_signature, frames, selected_roi_ids, selected_source_rois)
+        self._start_sensorgram_worker(cached_signature, spectral_cubes, selected_roi_ids, selected_source_rois)
 
     def _on_sensorgram_partial_result(
         self,
@@ -1082,14 +1082,14 @@ class AnalysisController:
             return
         metric_value = float("nan") if point.metric_value is None else float(point.metric_value)
         metric_signal = float("nan") if point.metric_signal is None else float(point.metric_signal)
-        self.window._sensorgram_frame_indices = np.append(self.window._sensorgram_frame_indices, int(point.frame_index)).astype(np.int32, copy=False)
+        self.window._sensorgram_spectral_cube_indices = np.append(self.window._sensorgram_spectral_cube_indices, int(point.spectral_cube_index)).astype(np.int32, copy=False)
         self.window._sensorgram_metric_values = np.append(self.window._sensorgram_metric_values, metric_value).astype(np.float64, copy=False)
         self.window._sensorgram_metric_signal = np.append(self.window._sensorgram_metric_signal, metric_signal).astype(np.float64, copy=False)
         self.window._set_sensorgram_series(
-            self.window._sensorgram_frame_indices,
+            self.window._sensorgram_spectral_cube_indices,
             self.window._sensorgram_metric_values,
             summary_text=(
-                f"{self.window._analysis_metric_label()} | Calculating {self.window._sensorgram_frame_indices.size}/{total_count} spectral cubes"
+                f"{self.window._analysis_metric_label()} | Calculating {self.window._sensorgram_spectral_cube_indices.size}/{total_count} spectral cubes"
             ),
         )
 
@@ -1103,7 +1103,7 @@ class AnalysisController:
             self.window._sensorgram_running_signature = None
             self.window._update_analysis_control_state()
             return
-        self.window._sensorgram_frame_indices = np.asarray(result.frame_indices, dtype=np.int32)
+        self.window._sensorgram_spectral_cube_indices = np.asarray(result.spectral_cube_indices, dtype=np.int32)
         self.window._sensorgram_metric_values = np.asarray(result.metric_values, dtype=np.float64)
         self.window._sensorgram_metric_signal = np.asarray(result.metric_signal, dtype=np.float64)
         sensorgram_signature = self.window._sensorgram_running_signature
@@ -1115,14 +1115,14 @@ class AnalysisController:
                 while len(self.window._sensorgram_cache) > self.window.SENSORGRAM_CACHE_SIZE:
                     self.window._sensorgram_cache.popitem(last=False)
             self.window._append_workflow_log(
-                f"SG cache store | frames {int(result.completed_count)}/{int(result.total_count)}",
+                f"SG cache store | spectral_cubes {int(result.completed_count)}/{int(result.total_count)}",
                 level="debug",
             )
             self.window._append_workflow_log(
                 f"SG cache summary | payload result cached | prep {self.window._format_elapsed_seconds(result.prep_seconds)}",
                 level="debug",
             )
-        self.window._set_sensorgram_series(self.window._sensorgram_frame_indices, self.window._sensorgram_metric_values)
+        self.window._set_sensorgram_series(self.window._sensorgram_spectral_cube_indices, self.window._sensorgram_metric_values)
         self.window._append_workflow_log(
             f"SG done | prep {self.window._format_elapsed_seconds(result.prep_seconds)} | fit {self.window._format_elapsed_seconds(result.fit_seconds)}",
             level="success",
@@ -1173,13 +1173,13 @@ class AnalysisController:
             f"Spec cache store | rois {len(signature[2]) if len(signature) > 2 and isinstance(signature[2], tuple) else 0}",
             level="debug",
         )
-        frame_signature = self.window._absorbance_frame_signature(signature)
-        if frame_signature is not None:
-            self.window._absorbance_frame_cache[frame_signature] = result
-            self.window._absorbance_frame_cache.move_to_end(frame_signature)
-            while len(self.window._absorbance_frame_cache) > self.window.ABSORBANCE_FRAME_CACHE_SIZE:
-                self.window._absorbance_frame_cache.popitem(last=False)
-            self.window._append_workflow_log("Spec frame cache store", level="debug")
+        spectral_cube_signature = self.window._absorbance_spectral_cube_signature(signature)
+        if spectral_cube_signature is not None:
+            self.window._absorbance_spectral_cube_cache[spectral_cube_signature] = result
+            self.window._absorbance_spectral_cube_cache.move_to_end(spectral_cube_signature)
+            while len(self.window._absorbance_spectral_cube_cache) > self.window.ABSORBANCE_SPECTRAL_CUBE_CACHE_SIZE:
+                self.window._absorbance_spectral_cube_cache.popitem(last=False)
+            self.window._append_workflow_log("Spec spectral_cube_index cache store", level="debug")
         self.window._absorbance_spectrum_dirty = False
         fit_seconds = self._apply_absorbance_spectrum_result(result) or 0.0
         result.fit_seconds = float(fit_seconds)
@@ -1346,14 +1346,14 @@ class AnalysisController:
         fit_seconds = time.perf_counter() - fit_started
         self.window._last_absorbance_fit_seconds = fit_seconds
 
-        frame = self.window._current_frame()
+        spectral_cube_index = self.window._current_spectral_cube()
         sample_pixels = int(np.nanmax(primary_result.sample_pixel_count)) if primary_result.sample_pixel_count.size else 0
         reference_pixels = int(np.nanmax(primary_result.reference_pixel_count)) if primary_result.reference_pixel_count.size else 0
         self.window._set_spectrum_summary_text(
-            f"{self.window._spectrum_selection_label()} | Spectral cube {frame if frame is not None else '-'}"
+            f"{self.window._spectrum_selection_label()} | Spectral cube {spectral_cube_index if spectral_cube_index is not None else '-'}"
             f" | ROI px: sample {sample_pixels}, reference {reference_pixels}{current_text}{fit_text}"
         )
-        self.window._update_single_frame_sensorgram(metric_value, metric_signal)
+        self.window._update_single_spectral_cube_sensorgram(metric_value, metric_signal)
         return fit_seconds
 
     def _on_analysis_section_applied_changed(self, applied: bool) -> None:

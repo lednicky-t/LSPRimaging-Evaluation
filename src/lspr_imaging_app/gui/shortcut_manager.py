@@ -14,7 +14,7 @@ class ShortcutManager:
         direction = -1 if event.key() == Qt.Key.Key_PageUp else 1
         modifiers = event.modifiers()
         if (modifiers & Qt.KeyboardModifier.ControlModifier) and (modifiers & Qt.KeyboardModifier.ShiftModifier):
-            if self.window._navigate_frame_image(direction):
+            if self.window._navigate_spectral_cube_image(direction):
                 event.accept()
                 return True
             return False

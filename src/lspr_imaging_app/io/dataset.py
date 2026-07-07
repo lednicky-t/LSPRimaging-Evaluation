@@ -26,7 +26,7 @@ from lspr_imaging_app.domain.models import ImageDataset, ImageKey, ImageRecord, 
 from lspr_imaging_app.processing.preprocess import apply_spatial_preprocessing
 
 
-IMAGE_PATTERN = re.compile(r"WL(?P<wl>\d+(?:\.\d+)?)Frame(?P<frame>\d+)", re.IGNORECASE)
+IMAGE_PATTERN = re.compile(r"WL(?P<wl>\d+(?:\.\d+)?)Frame(?P<spectral_cube_index>\d+)", re.IGNORECASE)
 OME_ZARR_META_FILENAME = ".zattrs"
 OME_ZARR_GROUP_FILENAME = ".zgroup"
 OME_ZARR_ARRAY_DIRNAME = "0"
@@ -82,24 +82,24 @@ def load_dataset(folder: Path) -> ImageDataset:
         if not match:
             continue
         wl = float(match.group("wl"))
-        frame = int(match.group("frame"))
-        records.append(ImageRecord(ImageKey(wavelength_nm=wl, frame_index=frame), path))
+        spectral_cube_index = int(match.group("spectral_cube_index"))
+        records.append(ImageRecord(ImageKey(wavelength_nm=wl, spectral_cube_index=spectral_cube_index), path))
     if not records:
         raise FileNotFoundError(f"No matching TIFF files found in {folder}")
     return ImageDataset(folder=folder, records=records, source_format="image_stack")
 
 
 def dataset_record_map(dataset: ImageDataset) -> dict[tuple[int, float], ImageRecord]:
-    return {(record.key.frame_index, record.key.wavelength_nm): record for record in dataset.records}
+    return {(record.key.spectral_cube_index, record.key.wavelength_nm): record for record in dataset.records}
 
 
 def dataset_is_ome_zarr(dataset: ImageDataset | None) -> bool:
     return bool(dataset is not None and dataset.is_ome_zarr)
 
 
-def dataset_get_record(dataset: ImageDataset, frame_index: int, wavelength_nm: float) -> ImageRecord | None:
+def dataset_get_record(dataset: ImageDataset, spectral_cube_index: int, wavelength_nm: float) -> ImageRecord | None:
     for record in dataset.records:
-        if int(record.key.frame_index) == int(frame_index) and float(record.key.wavelength_nm) == float(wavelength_nm):
+        if int(record.key.spectral_cube_index) == int(spectral_cube_index) and float(record.key.wavelength_nm) == float(wavelength_nm):
             return record
     return None
 
@@ -108,16 +108,16 @@ def dataset_get_record_map(dataset: ImageDataset) -> dict[tuple[int, float], Ima
     return dataset_record_map(dataset)
 
 
-def dataset_load_plane(dataset: ImageDataset, frame_index: int, wavelength_nm: float) -> np.ndarray:
-    record = dataset_get_record(dataset, frame_index, wavelength_nm)
+def dataset_load_plane(dataset: ImageDataset, spectral_cube_index: int, wavelength_nm: float) -> np.ndarray:
+    record = dataset_get_record(dataset, spectral_cube_index, wavelength_nm)
     if record is None:
-        raise KeyError(f"No record found for frame={frame_index}, wavelength={wavelength_nm}")
+        raise KeyError(f"No record found for spectral_cube_index={spectral_cube_index}, wavelength={wavelength_nm}")
     return load_image_array(str(record.path))
 
 
 def dataset_load_plane_roi(
     dataset: ImageDataset,
-    frame_index: int,
+    spectral_cube_index: int,
     wavelength_nm: float,
     y_start: int,
     y_end: int,
@@ -138,9 +138,9 @@ def dataset_load_plane_roi(
     O(N) scan of dataset_get_record when the caller already holds the record map.
     """
     if record is None:
-        record = dataset_get_record(dataset, frame_index, wavelength_nm)
+        record = dataset_get_record(dataset, spectral_cube_index, wavelength_nm)
     if record is None:
-        raise KeyError(f"No record found for frame={frame_index}, wavelength={wavelength_nm}")
+        raise KeyError(f"No record found for spectral_cube_index={spectral_cube_index}, wavelength={wavelength_nm}")
     path = record.path
     ome_root = _ome_zarr_root(
         path.parent.parent if path.parent.name == OME_ZARR_ARRAY_DIRNAME else path.parent
@@ -168,10 +168,10 @@ def dataset_load_plane_roi(
     return full[y0:y1, x0:x1].astype(np.float32, copy=False)
 
 
-def dataset_plane_shape(dataset: ImageDataset, frame_index: int, wavelength_nm: float) -> tuple[int, int]:
-    record = dataset_get_record(dataset, frame_index, wavelength_nm)
+def dataset_plane_shape(dataset: ImageDataset, spectral_cube_index: int, wavelength_nm: float) -> tuple[int, int]:
+    record = dataset_get_record(dataset, spectral_cube_index, wavelength_nm)
     if record is None:
-        raise KeyError(f"No record found for frame={frame_index}, wavelength={wavelength_nm}")
+        raise KeyError(f"No record found for spectral_cube_index={spectral_cube_index}, wavelength={wavelength_nm}")
     return load_image_shape(str(record.path))
 
 
@@ -223,6 +223,137 @@ def _ome_zarr_root_attrs(root: Path) -> dict:
     return payload if isinstance(payload, dict) else {}
 
 
+@lru_cache(maxsize=16)
+def _ome_zarr_fast_read_metadata(root_str: str) -> dict | None:
+    """Everything needed to read one plane directly from its zarr v3 shard
+    file — mirrors io/_zarr_export_worker.py's writer exactly (shard layout:
+    [compressed inner chunks...][index: n_inner x (u64 offset, u64 nbytes)]
+    [CRC32C]) — bypassing zarr's generic async chunked-array API, which
+    dispatches every chunk's file-read and decompression as a separate
+    asyncio.to_thread call. That's real overhead a full-plane read (which
+    always touches every chunk anyway) doesn't need to pay.
+
+    Returns None if this doesn't look like an export from that writer
+    (missing/foreign metadata), so callers fall back to the standard zarr
+    array API — this must never be the only way to read a dataset.
+    """
+    try:
+        group = _ome_zarr_group_cached(root_str)
+        lspr_attrs = dict(group.attrs.get(OME_ZARR_LSPR_KEY, {}))
+        if not lspr_attrs:
+            return None
+        array = group[OME_ZARR_ARRAY_DIRNAME]
+        _n_spectral_cubes, n_wl, height, width = array.shape
+        chunk_size_px = int(lspr_attrs.get("chunk_size_px", 0))
+        if chunk_size_px <= 0:
+            return None
+        shard_mode = str(lspr_attrs.get("shard_mode", "per_image"))
+        if shard_mode == "per_frame":  # legacy value from before the frame -> spectral cube rename
+            shard_mode = "per_spectral_cube"
+        compression = str(lspr_attrs.get("compression", "none"))
+        compression_cname = None if compression == "none" else compression.split("+")[0]
+        dtype = np.dtype(str(lspr_attrs.get("dtype") or array.dtype))
+        fill_value = 0.0 if np.issubdtype(dtype, np.integer) else float("nan")
+        ich = icw = chunk_size_px
+        n_cy = (int(height) + ich - 1) // ich
+        n_cx = (int(width) + icw - 1) // icw
+        return {
+            "root": Path(root_str),
+            "n_wl": int(n_wl),
+            "shard_mode": shard_mode,
+            "ich": ich,
+            "icw": icw,
+            "n_cy": n_cy,
+            "n_cx": n_cx,
+            "dtype": dtype,
+            "fill_value": fill_value,
+            "compression_cname": compression_cname,
+            "image_height": int(height),
+            "image_width": int(width),
+        }
+    except Exception:
+        return None
+
+
+def _fast_read_zarr_plane(meta: dict, spectral_cube_pos: int, wavelength_pos: int) -> np.ndarray | None:
+    """Read one (spectral_cube_pos, wavelength_pos) plane straight from its shard
+    file's raw bytes. Returns None on any surprise (missing shard, size
+    mismatch, decode failure, ...) so the caller falls back to the standard
+    zarr array read rather than risk returning a subtly wrong image.
+    """
+    ich, icw = meta["ich"], meta["icw"]
+    n_cy, n_cx = meta["n_cy"], meta["n_cx"]
+    n_wl = meta["n_wl"]
+    dtype = meta["dtype"]
+    fill_value = meta["fill_value"]
+    compression_cname = meta["compression_cname"]
+    image_height, image_width = meta["image_height"], meta["image_width"]
+    array_dir = meta["root"] / OME_ZARR_ARRAY_DIRNAME / "c"
+
+    n_inner_per_wl = n_cy * n_cx
+    if meta["shard_mode"] == "per_spectral_cube":
+        shard_path = array_dir / str(spectral_cube_pos) / "0" / "0" / "0"
+        n_inner_total = n_inner_per_wl * n_wl
+        wl_local = wavelength_pos
+    else:
+        shard_path = array_dir / str(spectral_cube_pos) / str(wavelength_pos) / "0" / "0"
+        n_inner_total = n_inner_per_wl
+        wl_local = 0
+
+    try:
+        file_size = shard_path.stat().st_size
+    except OSError:
+        return None
+
+    index_len = n_inner_total * 2 * 8
+    trailer_len = index_len + 4
+    if file_size < trailer_len:
+        return None
+
+    try:
+        with shard_path.open("rb") as f:
+            f.seek(file_size - trailer_len)
+            trailer = f.read(trailer_len)
+            index = np.frombuffer(trailer[:index_len], dtype=np.uint64)
+            offs_all = index[0::2]
+            lens_all = index[1::2]
+            base_ci = wl_local * n_inner_per_wl
+            offs = offs_all[base_ci: base_ci + n_inner_per_wl]
+            lens = lens_all[base_ci: base_ci + n_inner_per_wl]
+
+            missing = np.uint64((1 << 64) - 1)
+            present = offs != missing
+            shard_h, shard_w = n_cy * ich, n_cx * icw
+            plane = np.full((shard_h, shard_w), fill_value, dtype=dtype)
+
+            if np.any(present):
+                lo = int(offs[present].min())
+                hi = int((offs[present] + lens[present]).max())
+                f.seek(lo)
+                buf = f.read(hi - lo)
+                codec = None
+                if compression_cname:
+                    from numcodecs import Blosc
+                    codec = Blosc(cname=compression_cname, clevel=1, shuffle=Blosc.BITSHUFFLE)
+                for cy in range(n_cy):
+                    for cx in range(n_cx):
+                        ci_local = cy * n_cx + cx
+                        off = offs[ci_local]
+                        if off == missing:
+                            continue
+                        start = int(off) - lo
+                        length = int(lens[ci_local])
+                        raw = buf[start:start + length]
+                        if codec is not None:
+                            raw = codec.decode(raw)
+                        tile = np.frombuffer(raw, dtype=dtype).reshape(ich, icw)
+                        plane[cy * ich:(cy + 1) * ich, cx * icw:(cx + 1) * icw] = tile
+    except Exception:
+        return None
+
+    return np.array(plane[:image_height, :image_width], dtype=dtype, copy=True)
+
+
 def _ome_zarr_array_meta(root: Path) -> dict:
     array_meta_path = _ome_zarr_array_dir(root) / OME_ZARR_ARRAY_META_FILENAME
     if not array_meta_path.exists():
@@ -233,8 +364,8 @@ def _ome_zarr_array_meta(root: Path) -> dict:
     return payload
 
 
-def _ome_zarr_plane_path(root: Path, frame_index: int, wavelength_index: int) -> Path:
-    return _ome_zarr_array_dir(root) / f"{int(frame_index)}.{int(wavelength_index)}.0.0"
+def _ome_zarr_plane_path(root: Path, spectral_cube_index: int, wavelength_index: int) -> Path:
+    return _ome_zarr_array_dir(root) / f"{int(spectral_cube_index)}.{int(wavelength_index)}.0.0"
 
 
 def load_ome_zarr_dataset(folder: Path) -> ImageDataset:
@@ -247,21 +378,23 @@ def load_ome_zarr_dataset(folder: Path) -> ImageDataset:
     array = zarr_group[OME_ZARR_ARRAY_DIRNAME]
     shape = list(getattr(array, "shape", []))
     if not (isinstance(shape, list) and len(shape) == 4):
-        raise ValueError("OME-Zarr loader expects a 4D image stack shaped as [frame, wavelength, y, x].")
-    frame_count, wavelength_count = int(shape[0]), int(shape[1])
+        raise ValueError("OME-Zarr loader expects a 4D image stack shaped as [spectral_cube, wavelength, y, x].")
+    spectral_cube_count, wavelength_count = int(shape[0]), int(shape[1])
     attrs = dict(zarr_group.attrs.asdict() if hasattr(zarr_group.attrs, "asdict") else dict(zarr_group.attrs))
     lspr_meta = attrs.get(OME_ZARR_LSPR_KEY, {}) if isinstance(attrs.get(OME_ZARR_LSPR_KEY, {}), dict) else {}
-    frame_indices = [int(value) for value in lspr_meta.get("frame_indices", list(range(frame_count)))]
+    # "frame_indices" is the legacy key name from before the frame -> spectral cube rename.
+    legacy_indices = lspr_meta.get("frame_indices", list(range(spectral_cube_count)))
+    spectral_cube_indices = [int(value) for value in lspr_meta.get("spectral_cube_indices", legacy_indices)]
     wavelengths_nm = [float(value) for value in lspr_meta.get("wavelengths_nm", list(range(wavelength_count)))]
-    if len(frame_indices) != frame_count:
-        frame_indices = list(range(frame_count))
+    if len(spectral_cube_indices) != spectral_cube_count:
+        spectral_cube_indices = list(range(spectral_cube_count))
     if len(wavelengths_nm) != wavelength_count:
         wavelengths_nm = [float(index) for index in range(wavelength_count)]
     records: list[ImageRecord] = []
-    for frame_pos, frame_index in enumerate(frame_indices):
+    for spectral_cube_pos, spectral_cube_index in enumerate(spectral_cube_indices):
         for wl_pos, wavelength_nm in enumerate(wavelengths_nm):
-            plane_path = _ome_zarr_plane_path(root, frame_pos, wl_pos)
-            records.append(ImageRecord(ImageKey(wavelength_nm=float(wavelength_nm), frame_index=int(frame_index)), plane_path))
+            plane_path = _ome_zarr_plane_path(root, spectral_cube_pos, wl_pos)
+            records.append(ImageRecord(ImageKey(wavelength_nm=float(wavelength_nm), spectral_cube_index=int(spectral_cube_index)), plane_path))
     if not records:
         raise FileNotFoundError(f"No OME-Zarr planes found in {folder}")
     return ImageDataset(folder=root, records=records, source_format="ome_zarr")
@@ -286,7 +419,7 @@ def probe_ome_zarr_export_shape(
     itself and by the GUI to name/compare a destination folder before export
     actually starts, so the two must stay in exact agreement.
     """
-    records = sorted(dataset.records, key=lambda record: (int(record.key.frame_index), float(record.key.wavelength_nm)))
+    records = sorted(dataset.records, key=lambda record: (int(record.key.spectral_cube_index), float(record.key.wavelength_nm)))
     if not records:
         raise ValueError("No images are available for OME-Zarr export.")
     apply_image_tools = preprocessing is not None and bool(getattr(preprocessing, "image_tools_enabled", False))
@@ -321,7 +454,7 @@ def build_ome_zarr_export_folder_name(
     *,
     width: int,
     height: int,
-    frame_count: int,
+    spectral_cube_count: int,
     wavelength_count: int,
     chunk_size_px: int,
     shard_mode: str,
@@ -329,17 +462,17 @@ def build_ome_zarr_export_folder_name(
     dtype: np.dtype,
 ) -> str:
     """Compact, human-scannable folder name: name + the parameters that most
-    affect what the dataset actually contains (size, frame/wavelength count,
+    affect what the dataset actually contains (size, spectral_cube_index/wavelength count,
     chunking/sharding, compression, dtype). Collision-safety against a
     same-named-but-different export is handled separately by comparing the
     destination's actual saved metadata, not by this name alone.
     """
     safe_name = sanitize_ome_zarr_export_name(name)
-    shard_tag = "F" if shard_mode == "per_frame" else "I"
+    shard_tag = "F" if shard_mode == "per_spectral_cube" else "I"
     compression_tag = "Z" if compression_enabled else "N"
     dtype_tag = format_ome_zarr_dtype_tag(dtype)
     return (
-        f"{safe_name}_{int(width)}x{int(height)}_{int(frame_count)}x{int(wavelength_count)}"
+        f"{safe_name}_{int(width)}x{int(height)}_{int(spectral_cube_count)}x{int(wavelength_count)}"
         f"_c{int(chunk_size_px)}{shard_tag}{compression_tag}_{dtype_tag}.ome.zarr"
     )
 
@@ -348,7 +481,7 @@ def build_ome_zarr_export_folder_name(
 class OmeZarrExportSummary:
     width: int
     height: int
-    frame_count: int
+    spectral_cube_count: int
     wavelength_count: int
     chunk_size_px: int
     shard_mode: str
@@ -364,10 +497,10 @@ class OmeZarrExportSummary:
     source_folder: str | None = None
 
     def field_lines(self) -> list[tuple[str, str]]:
-        shard_label = "1 spectral cube per file" if self.shard_mode == "per_frame" else "1 image per file"
+        shard_label = "1 spectral cube per file" if self.shard_mode == "per_spectral_cube" else "1 image per file"
         lines = [
             ("Image size", f"{self.width} x {self.height} px"),
-            ("Spectral cubes x wavelengths", f"{self.frame_count} x {self.wavelength_count}"),
+            ("Spectral cubes x wavelengths", f"{self.spectral_cube_count} x {self.wavelength_count}"),
             ("Chunk / shard", f"{self.chunk_size_px}px, {shard_label}"),
             ("Compression", "lz4 + bitshuffle" if self.compression_enabled else "none"),
             ("Dtype", self.dtype_str),
@@ -414,7 +547,7 @@ def describe_new_ome_zarr_export(
     return OmeZarrExportSummary(
         width=width,
         height=height,
-        frame_count=len(dataset.frame_indices),
+        spectral_cube_count=len(dataset.spectral_cube_indices),
         wavelength_count=len(dataset.wavelengths_nm),
         chunk_size_px=int(chunk_size_px),
         shard_mode=str(shard_mode),
@@ -447,17 +580,20 @@ def read_existing_ome_zarr_summary(destination: Path) -> OmeZarrExportSummary | 
         if not lspr_attrs:
             return None
         array = group[OME_ZARR_ARRAY_DIRNAME]
-        frame_count, wavelength_count, height, width = array.shape
+        spectral_cube_count, wavelength_count, height, width = array.shape
         image_tools = lspr_attrs.get("image_tools") or {}
         crop = image_tools.get("crop")
         pixel_size = lspr_attrs.get("pixel_size_um")
+        shard_mode = str(lspr_attrs.get("shard_mode", "per_image"))
+        if shard_mode == "per_frame":  # legacy value from before the frame -> spectral cube rename
+            shard_mode = "per_spectral_cube"
         return OmeZarrExportSummary(
             width=int(width),
             height=int(height),
-            frame_count=int(frame_count),
+            spectral_cube_count=int(spectral_cube_count),
             wavelength_count=int(wavelength_count),
             chunk_size_px=int(lspr_attrs.get("chunk_size_px", 0)),
-            shard_mode=str(lspr_attrs.get("shard_mode", "per_image")),
+            shard_mode=shard_mode,
             compression_enabled=str(lspr_attrs.get("compression", "none")) != "none",
             dtype_str=str(lspr_attrs.get("dtype", "")),
             image_tools_applied=bool(lspr_attrs.get("image_tools_applied", False)),
@@ -523,7 +659,7 @@ def export_ome_zarr_dataset(
     except ImportError as exc:
         raise ImportError("OME-Zarr export requires zarr 3.x (zarr.codecs.BloscCodec).") from exc
     destination = destination if destination.suffix == ".zarr" or destination.name.endswith(".ome.zarr") else destination.with_suffix(".ome.zarr")
-    records = sorted(dataset.records, key=lambda record: (int(record.key.frame_index), float(record.key.wavelength_nm)))
+    records = sorted(dataset.records, key=lambda record: (int(record.key.spectral_cube_index), float(record.key.wavelength_nm)))
     if not records:
         raise ValueError("No images are available for OME-Zarr export.")
 
@@ -532,7 +668,7 @@ def export_ome_zarr_dataset(
     # in that same processed coordinate space, so it rides along with the same flag.
     apply_image_tools = preprocessing is not None and bool(getattr(preprocessing, "image_tools_enabled", False))
     height, width, target_dtype = probe_ome_zarr_export_shape(dataset, preprocessing)
-    frames = dataset.frame_indices
+    spectral_cubes = dataset.spectral_cube_indices
     wavelengths = dataset.wavelengths_nm
     record_map = dataset_record_map(dataset)
 
@@ -545,18 +681,18 @@ def export_ome_zarr_dataset(
     n_cx = sw // icw
     n_wl = len(wavelengths)
 
-    # per_image: one shard = one wavelength×frame  → shard (1, 1, sh, sw)
-    # per_frame: one shard = all wavelengths for one frame → shard (1, n_wl, sh, sw)
-    per_frame = shard_mode == "per_frame"
-    shard_shape = (1, n_wl, sh, sw) if per_frame else (1, 1, sh, sw)
-    n_inner_shard = (n_wl if per_frame else 1) * n_cy * n_cx
+    # per_image: one shard = one wavelength×spectral_cube_index  → shard (1, 1, sh, sw)
+    # per_spectral_cube: one shard = all wavelengths for one spectral_cube_index → shard (1, n_wl, sh, sw)
+    per_spectral_cube = shard_mode == "per_spectral_cube"
+    shard_shape = (1, n_wl, sh, sw) if per_spectral_cube else (1, 1, sh, sw)
+    n_inner_shard = (n_wl if per_spectral_cube else 1) * n_cy * n_cx
 
     destination.mkdir(parents=True, exist_ok=True)
     store = LocalStore(str(destination))
     group = zarr.open_group(store=store, mode="w", zarr_format=3)
     group.create_array(
         OME_ZARR_ARRAY_DIRNAME,
-        shape=(len(frames), n_wl, height, width),
+        shape=(len(spectral_cubes), n_wl, height, width),
         chunks=(1, 1, ich, icw),      # logical inner chunk — what readers see
         shards=shard_shape,            # physical shard on disk
         dtype=target_dtype,
@@ -568,7 +704,7 @@ def export_ome_zarr_dataset(
     fill_value = float(0 if np.issubdtype(target_dtype, np.integer) else float("nan"))
     compression_cname = "lz4" if compression_enabled else None
     shard_base_dir = destination / OME_ZARR_ARRAY_DIRNAME / "c"
-    total_planes = max(int(len(frames) * n_wl), 1)
+    total_planes = max(int(len(spectral_cubes) * n_wl), 1)
     total_units = max(total_planes * n_cy * n_cx, 1)
     completed_units = 0
     progress_lock = threading.Lock()
@@ -605,7 +741,7 @@ def export_ome_zarr_dataset(
             preprocessing=preprocessing if apply_image_tools else None,
         )
 
-    def _build_per_frame_spec(fp: int, fi: int) -> ShardWriteSpec:
+    def _build_per_spectral_cube_spec(fp: int, fi: int) -> ShardWriteSpec:
         return ShardWriteSpec(
             record_paths=[
                 str(record_map[(int(fi), float(wn))].path)
@@ -623,14 +759,14 @@ def export_ome_zarr_dataset(
             preprocessing=preprocessing if apply_image_tools else None,
         )
 
-    if per_frame:
-        task_args: list = [(int(fp), int(fi)) for fp, fi in enumerate(frames)]
-        make_spec = _build_per_frame_spec
-        n_tasks = len(frames)
+    if per_spectral_cube:
+        task_args: list = [(int(fp), int(fi)) for fp, fi in enumerate(spectral_cubes)]
+        make_spec = _build_per_spectral_cube_spec
+        n_tasks = len(spectral_cubes)
     else:
         task_args = [
             (int(fp), int(wp), int(fi), float(wn))
-            for fp, fi in enumerate(frames)
+            for fp, fi in enumerate(spectral_cubes)
             for wp, wn in enumerate(wavelengths)
         ]
         make_spec = _build_per_image_spec
@@ -693,7 +829,7 @@ def export_ome_zarr_dataset(
         axes_units=axes_units,
     )
     lspr_attrs: dict = {
-        "frame_indices": [int(value) for value in frames],
+        "spectral_cube_indices": [int(value) for value in spectral_cubes],
         "wavelengths_nm": [float(value) for value in wavelengths],
         "source_folder": str(dataset.folder),
         "chunk_size_px": int(chunk_size_px),
@@ -742,17 +878,34 @@ def _load_image_array_cached(path_str: str) -> np.ndarray:
     return array
 
 
+def _read_ome_zarr_plane_by_path(path: Path, ome_root: Path) -> np.ndarray:
+    """Read the plane a synthetic OME-Zarr record path refers to (its stem
+    encodes "{spectral_cube_pos}.{wavelength_pos}..."). Tries the direct shard-file
+    reader first (bypasses zarr's async chunked-array API — see
+    _fast_read_zarr_plane's docstring for why that matters for a full-plane
+    read); falls back to the standard zarr array API whenever the fast path
+    isn't available or doesn't look right, so correctness never depends on
+    the fast path succeeding.
+    """
+    stem = path.name
+    try:
+        spectral_cube_index, wavelength_index, *_ = (int(part) for part in stem.split("."))
+    except Exception as exc:
+        raise ValueError(f"Invalid OME-Zarr chunk path: {path.name}") from exc
+    meta = _ome_zarr_fast_read_metadata(str(ome_root))
+    if meta is not None:
+        fast_result = _fast_read_zarr_plane(meta, spectral_cube_index, wavelength_index)
+        if fast_result is not None:
+            return fast_result
+    array = _ome_zarr_array_cached(str(ome_root))
+    return np.asarray(array[spectral_cube_index, wavelength_index])
+
+
 def _load_image_array_uncached(path_str: str) -> np.ndarray:
     path = Path(path_str)
     ome_root = _ome_zarr_root(path.parent.parent if path.parent.name == OME_ZARR_ARRAY_DIRNAME else path.parent)
     if ome_root is not None and path.parent == _ome_zarr_array_dir(ome_root):
-        array = _ome_zarr_array_cached(str(ome_root))
-        stem = path.name
-        try:
-            frame_index, wavelength_index, *_ = (int(part) for part in stem.split("."))
-        except Exception as exc:
-            raise ValueError(f"Invalid OME-Zarr chunk path: {path.name}") from exc
-        return np.asarray(array[frame_index, wavelength_index], dtype=np.float32)
+        return np.asarray(_read_ome_zarr_plane_by_path(path, ome_root), dtype=np.float32)
     if path.suffix.lower() in {".tif", ".tiff"} and _tifffile_imread is not None:
         try:
             return np.asarray(_tifffile_imread(path_str, maxworkers=max(2, os.cpu_count() or 1)), dtype=np.float32)
@@ -777,13 +930,7 @@ def _load_image_array_native(path_str: str) -> np.ndarray:
     path = Path(path_str)
     ome_root = _ome_zarr_root(path.parent.parent if path.parent.name == OME_ZARR_ARRAY_DIRNAME else path.parent)
     if ome_root is not None and path.parent == _ome_zarr_array_dir(ome_root):
-        array = _ome_zarr_array_cached(str(ome_root))
-        stem = path.name
-        try:
-            frame_index, wavelength_index, *_ = (int(part) for part in stem.split("."))
-        except Exception as exc:
-            raise ValueError(f"Invalid OME-Zarr chunk path: {path.name}") from exc
-        return np.asarray(array[frame_index, wavelength_index])
+        return _read_ome_zarr_plane_by_path(path, ome_root)
     if path.suffix.lower() in {".tif", ".tiff"} and _tifffile_imread is not None:
         try:
             # maxworkers=2: inter-file parallelism comes from the export worker pool;

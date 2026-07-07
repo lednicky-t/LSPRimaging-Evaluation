@@ -26,9 +26,9 @@ class ChromaticController:
             window._set_status_text("Load a dataset before starting the radial chromatic workflow.")
             return
         window._push_undo_point("Chromatic workflow")
-        current_frame = window._current_frame()
-        if current_frame is None:
-            current_frame = window._frame_values[0] if window._frame_values else 0
+        current_spectral_cube = window._current_spectral_cube()
+        if current_spectral_cube is None:
+            current_spectral_cube = window._spectral_cube_values[0] if window._spectral_cube_values else 0
         sample_minimum = 1 if len(window._wavelength_values) <= 1 else 3
         sample_count = window._normalized_odd_count(
             int(window.chromatic_sample_count_spin.value()),
@@ -43,7 +43,7 @@ class ChromaticController:
         window._state.preprocessing.chromatic_sample_image_count = sample_count
         window._state.preprocessing.chromatic_feature_count = feature_count
         window._state.preprocessing.reference_mode = "manual"
-        window._state.preprocessing.reference_frame_index = int(current_frame)
+        window._state.preprocessing.reference_spectral_cube_index = int(current_spectral_cube)
         window._state.preprocessing.reference_wavelength_nm = float(middle_wavelength)
         window._state.preprocessing.chromatic_correction_enabled = False
         window._state.chromatic_landmarks.clear()
@@ -67,7 +67,7 @@ class ChromaticController:
         window._update_chromatic_control_state()
         window._schedule_processing_state_save()
         window._activate_chromatic_tool_after_refresh = True
-        window._set_current_frame_and_wavelength(int(current_frame), float(sample_wavelengths[0]))
+        window._set_current_spectral_cube_and_wavelength(int(current_spectral_cube), float(sample_wavelengths[0]))
         window._append_workflow_log(
             f"Chromatic workflow start | samples {sample_count} | features {feature_count}",
             level="info",
@@ -140,7 +140,7 @@ class ChromaticController:
         landmarks_payload = [
             (
                 int(mark.landmark_id),
-                int(mark.frame_index),
+                int(mark.spectral_cube_index),
                 float(mark.wavelength_nm),
                 float(mark.x_px),
                 float(mark.y_px),
@@ -149,8 +149,8 @@ class ChromaticController:
         ]
         if mode == "landmark_radial":
             marks_by_sample: dict[tuple[int, float], set[int]] = {sample_key: set() for sample_key in sample_keys}
-            for landmark_id, frame, wavelength, _x, _y in landmarks_payload:
-                sample_key = (int(frame), float(wavelength))
+            for landmark_id, spectral_cube_index, wavelength, _x, _y in landmarks_payload:
+                sample_key = (int(spectral_cube_index), float(wavelength))
                 if sample_key in marks_by_sample:
                     marks_by_sample[sample_key].add(int(landmark_id))
             complete_samples = [
@@ -185,7 +185,7 @@ class ChromaticController:
         request_id = window._chromatic_registration_request_id
         preprocessing = deepcopy(window._state.preprocessing)
         record_specs = [
-            (int(record.key.frame_index), float(record.key.wavelength_nm), str(record.path))
+            (int(record.key.spectral_cube_index), float(record.key.wavelength_nm), str(record.path))
             for record in dataset.records
         ]
         window._append_workflow_log(
@@ -219,12 +219,12 @@ class ChromaticController:
         window._state.chromatic_landmarks = [
             ChromaticLandmarkObservation(
                 landmark_id=int(feature_id),
-                frame_index=int(frame),
+                spectral_cube_index=int(spectral_cube_index),
                 wavelength_nm=float(wavelength),
                 x_px=float(x_px),
                 y_px=float(y_px),
             )
-            for feature_id, frame, wavelength, x_px, y_px in observations
+            for feature_id, spectral_cube_index, wavelength, x_px, y_px in observations
         ]
         window._selected_landmark_id = 1
         window._chromatic_landmark_marker_id = 1
@@ -324,7 +324,7 @@ class ChromaticController:
         grouped: dict[int, list[tuple[float, float, float, tuple[int, float]]]] = {}
         for mark in window._state.chromatic_landmarks:
             grouped.setdefault(int(mark.landmark_id), []).append(
-                (float(mark.x_px), float(mark.y_px), float(mark.wavelength_nm), (int(mark.frame_index), float(mark.wavelength_nm)))
+                (float(mark.x_px), float(mark.y_px), float(mark.wavelength_nm), (int(mark.spectral_cube_index), float(mark.wavelength_nm)))
             )
 
         current_ids = set(grouped)
@@ -436,7 +436,7 @@ class ChromaticController:
             sample_marks = {
                 int(mark.landmark_id)
                 for mark in self.window._state.chromatic_landmarks
-                if int(mark.frame_index) == int(sample_key[0]) and abs(float(mark.wavelength_nm) - float(sample_key[1])) < 1e-6
+                if int(mark.spectral_cube_index) == int(sample_key[0]) and abs(float(mark.wavelength_nm) - float(sample_key[1])) < 1e-6
             }
             if all(feature_id in sample_marks for feature_id in feature_ids):
                 filled_samples += 1
@@ -462,7 +462,7 @@ class ChromaticController:
                 {
                     int(mark.landmark_id)
                     for mark in self.window._state.chromatic_landmarks
-                    if int(mark.frame_index) == int(current_key[0]) and abs(float(mark.wavelength_nm) - float(current_key[1])) < 1e-6
+                    if int(mark.spectral_cube_index) == int(current_key[0]) and abs(float(mark.wavelength_nm) - float(current_key[1])) < 1e-6
                 }
             )
             self.window.chromatic_progress_label.setText(
@@ -507,7 +507,7 @@ class ChromaticController:
             if not self.window._is_chromatic_sample_image_key(self.window._current_image_key):
                 sample_keys = self.window._chromatic_sample_image_keys()
                 if sample_keys:
-                    self.window._set_current_frame_and_wavelength(int(sample_keys[0][0]), float(sample_keys[0][1]))
+                    self.window._set_current_spectral_cube_and_wavelength(int(sample_keys[0][0]), float(sample_keys[0][1]))
                     self.window._set_status_text("Chromatic edit activated. Navigating to the first sampled wavelength image.")
                     self.window._append_workflow_log(
                         "Chromatic edit activated | navigated to first sampled wavelength image",
@@ -623,7 +623,7 @@ class ChromaticController:
             marks = {
                 int(mark.landmark_id): (float(mark.x_px), float(mark.y_px))
                 for mark in self.window._state.chromatic_landmarks
-                if int(mark.frame_index) == int(candidate_key[0])
+                if int(mark.spectral_cube_index) == int(candidate_key[0])
                 and abs(float(mark.wavelength_nm) - float(candidate_key[1])) < 1e-6
             }
             if any(feature_id in marks for feature_id in missing_ids):
@@ -667,8 +667,8 @@ class ChromaticController:
                     key=lambda idx: abs(float(sample_keys[idx][1]) - current_wavelength),
                 )
         target_index = min(max(current_index + int(direction), 0), len(sample_keys) - 1)
-        target_frame, target_wavelength = sample_keys[target_index]
-        self.window._set_current_frame_and_wavelength(target_frame, target_wavelength)
+        target_spectral_cube, target_wavelength = sample_keys[target_index]
+        self.window._set_current_spectral_cube_and_wavelength(target_spectral_cube, target_wavelength)
         return True
 
 

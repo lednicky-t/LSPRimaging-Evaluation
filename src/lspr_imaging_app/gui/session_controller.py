@@ -57,7 +57,7 @@ class SessionController:
         self.window._state.preprocessing.chromatic_search_radius_px = 24
         self.window._state.preprocessing.reference_mode = "auto"
         self.window._state.preprocessing.reference_wavelength_nm = None
-        self.window._state.preprocessing.reference_frame_index = 0
+        self.window._state.preprocessing.reference_spectral_cube_index = 0
         self.window._state.area_roi_settings = AreaRoiDetectionSettings()
         self.window._state.mask = MaskSettings()
         self.window._state.area_rois.clear()

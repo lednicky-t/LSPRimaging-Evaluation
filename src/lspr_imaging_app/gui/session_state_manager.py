@@ -194,7 +194,7 @@ class SessionStateManager:
         window._state.preprocessing.chromatic_search_radius_px = 24
         window._state.preprocessing.reference_mode = "auto"
         window._state.preprocessing.reference_wavelength_nm = None
-        window._state.preprocessing.reference_frame_index = 0
+        window._state.preprocessing.reference_spectral_cube_index = 0
         window._state.area_roi_settings = AreaRoiDetectionSettings()
         window._state.mask = MaskSettings()
         window._state.area_rois.clear()

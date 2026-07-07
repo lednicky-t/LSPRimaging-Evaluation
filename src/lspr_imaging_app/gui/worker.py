@@ -84,7 +84,7 @@ class UndoSnapshot:
     label: str
     state: AnalysisState
     folder_text: str
-    frame_slider_value: int
+    spectral_cube_slider_value: int
     wavelength_slider_value: int
     selected_roi_ids: set[int]
     spot_visual_color: str
@@ -113,14 +113,14 @@ class UndoSnapshot:
 
 @dataclass(slots=True)
 class SensorgramPointResult:
-    frame_index: int
+    spectral_cube_index: int
     metric_value: float | None
     metric_signal: float | None
 
 
 @dataclass(slots=True)
 class SensorgramComputationResult:
-    frame_indices: np.ndarray
+    spectral_cube_indices: np.ndarray
     metric_values: np.ndarray
     metric_signal: np.ndarray
     completed_count: int
