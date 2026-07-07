@@ -2,41 +2,13 @@ from __future__ import annotations
 
 import numpy as np
 
-from lspr_imaging_app.domain.models import FitResult, ImageDataset, RoiDefinition, RoiMetricSeries, RoiSpectrum
-from lspr_imaging_app.io.dataset import dataset_record_map, load_image_array
-from lspr_imaging_app.processing.roi import region_means
+from lspr_imaging_app.domain.models import FitResult
 
 
 def absorbance_from_means(roi_mean: float, background_mean: float) -> float:
     roi_mean = max(float(roi_mean), 1e-9)
     background_mean = max(float(background_mean), 1e-9)
     return float(np.log10(background_mean / roi_mean))
-
-
-def extract_roi_spectrum(dataset: ImageDataset, roi: RoiDefinition, spectral_cube_index: int) -> RoiSpectrum:
-    wavelengths = []
-    absorbance = []
-    roi_means = []
-    bg_means = []
-    record_map = dataset_record_map(dataset)
-    for wl in dataset.wavelengths_nm:
-        record = record_map.get((int(spectral_cube_index), float(wl)))
-        if record is None:
-            continue
-        image = load_image_array(str(record.path))
-        roi_mean, bg_mean = region_means(image, roi)
-        wavelengths.append(wl)
-        roi_means.append(roi_mean)
-        bg_means.append(bg_mean)
-        absorbance.append(absorbance_from_means(roi_mean, bg_mean))
-    return RoiSpectrum(
-        roi_name=roi.name,
-        spectral_cube_index=spectral_cube_index,
-        wavelengths_nm=np.asarray(wavelengths, dtype=np.float64),
-        absorbance=np.asarray(absorbance, dtype=np.float64),
-        roi_mean=np.asarray(roi_means, dtype=np.float64),
-        background_mean=np.asarray(bg_means, dtype=np.float64),
-    )
 
 
 def fit_absorbance_curve(
@@ -121,21 +93,6 @@ def fit_absorbance_curve(
     )
 
 
-def fit_roi_spectrum(
-    spectrum: RoiSpectrum,
-    poly_order: int = 3,
-    wl_min: float | None = None,
-    wl_max: float | None = None,
-) -> FitResult:
-    return fit_absorbance_curve(
-        spectrum.wavelengths_nm,
-        spectrum.absorbance,
-        poly_order=poly_order,
-        wl_min=wl_min,
-        wl_max=wl_max,
-    )
-
-
 def metric_value_from_fit(fit: FitResult, metric_key: str) -> tuple[float | None, float | None]:
     key = str(metric_key).strip().lower()
     if key == "maximum":
@@ -149,50 +106,3 @@ def metric_value_from_fit(fit: FitResult, metric_key: str) -> tuple[float | None
             centroid_y = None
         return fit.centroid_nm, centroid_y
     return None, None
-
-
-def extract_metric_series(
-    dataset: ImageDataset,
-    roi: RoiDefinition,
-    poly_order: int = 3,
-    wl_min: float | None = None,
-    wl_max: float | None = None,
-) -> RoiMetricSeries:
-    spectral_cubes = []
-    peak_wl = []
-    centroid = []
-    peak_abs = []
-    for spectral_cube_index in dataset.spectral_cube_indices:
-        spectrum = extract_roi_spectrum(dataset, roi, spectral_cube_index)
-        fit = fit_roi_spectrum(spectrum, poly_order=poly_order, wl_min=wl_min, wl_max=wl_max)
-        spectral_cubes.append(spectral_cube_index)
-        peak_wl.append(np.nan if fit.peak_wavelength_nm is None else fit.peak_wavelength_nm)
-        centroid.append(np.nan if fit.centroid_nm is None else fit.centroid_nm)
-        peak_abs.append(np.nan if fit.peak_absorbance is None else fit.peak_absorbance)
-    return RoiMetricSeries(
-        roi_name=roi.name,
-        spectral_cube_indices=np.asarray(spectral_cubes, dtype=np.int32),
-        peak_wavelength_nm=np.asarray(peak_wl, dtype=np.float64),
-        centroid_nm=np.asarray(centroid, dtype=np.float64),
-        peak_absorbance=np.asarray(peak_abs, dtype=np.float64),
-    )
-
-
-def export_roi_series_csv(dataset: ImageDataset, rois: list[RoiDefinition], destination) -> None:
-    import csv
-
-    rows = []
-    for roi in rois:
-        series = extract_metric_series(dataset, roi)
-        for spectral_cube_index, peak_wl, centroid, peak_abs in zip(
-            series.spectral_cube_indices,
-            series.peak_wavelength_nm,
-            series.centroid_nm,
-            series.peak_absorbance,
-        ):
-            rows.append([roi.name, int(spectral_cube_index), peak_wl, centroid, peak_abs])
-
-    with open(destination, "w", newline="", encoding="utf-8") as handle:
-        writer = csv.writer(handle)
-        writer.writerow(["roi", "spectral_cube_index", "peak_wavelength_nm", "centroid_nm", "peak_absorbance"])
-        writer.writerows(rows)

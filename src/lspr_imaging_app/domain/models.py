@@ -143,25 +143,6 @@ SpotDetectionSettings = AreaRoiDetectionSettings
 
 
 @dataclass(slots=True)
-class RoiSpectrum:
-    roi_name: str
-    spectral_cube_index: int
-    wavelengths_nm: np.ndarray
-    absorbance: np.ndarray
-    roi_mean: np.ndarray
-    background_mean: np.ndarray
-
-
-@dataclass(slots=True)
-class RoiMetricSeries:
-    roi_name: str
-    spectral_cube_indices: np.ndarray
-    peak_wavelength_nm: np.ndarray
-    centroid_nm: np.ndarray
-    peak_absorbance: np.ndarray
-
-
-@dataclass(slots=True)
 class FitResult:
     fitted_wavelengths_nm: np.ndarray
     fitted_absorbance: np.ndarray
