@@ -6,11 +6,81 @@ import numpy as np
 import pyqtgraph as pg
 
 from lspr_imaging_app.domain.models import ChromaticLandmarkObservation, ChromaticTransformModel
+from lspr_imaging_app.gui.analysis_tasks import _sampled_wavelengths
+from lspr_imaging_app.gui.ui_helpers import chromatic_feature_count_value, chromatic_subpixel_precision_value
 from lspr_imaging_app.gui.worker import ChromaticLandmarkAllOverlayBundle
+from lspr_imaging_app.processing.chromatic import identity_affine_matrix
 
 class ChromaticController:
     def __init__(self, window) -> None:
         self.window = window
+
+    def feature_count_options(self) -> tuple[int, ...]:
+        return (5, 15, 30)
+
+    def feature_count_value(self) -> int:
+        window = self.window
+        return chromatic_feature_count_value(window.chromatic_feature_count_spin.currentData(), self.feature_count_options())
+
+    def set_feature_count_value(self, value: int) -> None:
+        window = self.window
+        target = int(value)
+        if target not in self.feature_count_options():
+            target = 15
+        index = max(window.chromatic_feature_count_spin.findData(target), 0)
+        window.chromatic_feature_count_spin.blockSignals(True)
+        window.chromatic_feature_count_spin.setCurrentIndex(index)
+        window.chromatic_feature_count_spin.blockSignals(False)
+
+    def subpixel_precision_options(self) -> tuple[int, ...]:
+        return (1, 4, 9)
+
+    def subpixel_precision_value(self) -> int:
+        window = self.window
+        return chromatic_subpixel_precision_value(window.chromatic_subpixel_precision_combo.currentData())
+
+    def model_for_image_key(self, image_key: tuple[int, float] | None) -> ChromaticTransformModel | None:
+        window = self.window
+        if image_key is None:
+            return None
+        spectral_cube_index, wavelength = image_key
+        for model in window._state.chromatic_models:
+            if int(model.spectral_cube_index) == int(spectral_cube_index) and abs(float(model.wavelength_nm) - float(wavelength)) < 1e-6:
+                return model
+        return None
+
+    def affine_for_image_key(self, image_key: tuple[int, float] | None) -> np.ndarray | None:
+        window = self.window
+        if image_key is None or window._is_reference_image_key(image_key):
+            return identity_affine_matrix() if image_key is not None else None
+        if not window._state.preprocessing.chromatic_correction_enabled:
+            return None
+        model = self.model_for_image_key(image_key)
+        if model is None:
+            return None
+        return np.asarray(model.affine_matrix, dtype=np.float64)
+
+    def affine_for_image_key_any(self, image_key: tuple[int, float] | None) -> np.ndarray | None:
+        window = self.window
+        if image_key is None or window._is_reference_image_key(image_key):
+            return identity_affine_matrix() if image_key is not None else None
+        model = self.model_for_image_key(image_key)
+        if model is None:
+            return None
+        return np.asarray(model.affine_matrix, dtype=np.float64)
+
+    def signature_for_image_key(self, image_key: tuple[int, float] | None) -> tuple[object, ...] | None:
+        window = self.window
+        if image_key is None or not window._state.preprocessing.chromatic_correction_enabled:
+            return None
+        model = self.model_for_image_key(image_key)
+        if model is None:
+            return None
+        return (
+            int(model.spectral_cube_index),
+            round(float(model.wavelength_nm), 6),
+            tuple(tuple(round(float(value), 6) for value in row) for row in model.affine_matrix),
+        )
 
     def section_applied_changed(self, applied: bool) -> None:
         window = self.window
@@ -35,8 +105,8 @@ class ChromaticController:
             sample_minimum,
             min(max(len(window._wavelength_values), sample_minimum), 7),
         )
-        feature_count = int(window._chromatic_feature_count_value())
-        sample_wavelengths = window._sampled_wavelengths(window._wavelength_values, sample_count)
+        feature_count = int(self.feature_count_value())
+        sample_wavelengths = _sampled_wavelengths(list(window._wavelength_values), int(sample_count))
         middle_wavelength = sample_wavelengths[len(sample_wavelengths) // 2]
         window._enter_chromatic_setup_mode()
         window._state.preprocessing.chromatic_registration_mode = "landmark_radial"
@@ -573,7 +643,7 @@ class ChromaticController:
 
 
     def _on_chromatic_feature_count_changed(self, value: int) -> None:
-        normalized = self.window._chromatic_feature_count_value()
+        normalized = self.feature_count_value()
         if normalized != self.window._state.preprocessing.chromatic_feature_count:
             self.window._state.preprocessing.chromatic_feature_count = normalized
         max_feature = len(self.window._expected_chromatic_feature_ids())
@@ -589,7 +659,7 @@ class ChromaticController:
 
 
     def _on_chromatic_subpixel_precision_changed(self, _value: int) -> None:
-        normalized = self.window._chromatic_subpixel_precision_value()
+        normalized = self.subpixel_precision_value()
         if normalized != int(getattr(self.window._state.preprocessing, "chromatic_subpixel_precision", 4)):
             self.window._state.preprocessing.chromatic_subpixel_precision = normalized
         self._update_chromatic_summary()
@@ -670,5 +740,3 @@ class ChromaticController:
         target_spectral_cube, target_wavelength = sample_keys[target_index]
         self.window._set_current_spectral_cube_and_wavelength(target_spectral_cube, target_wavelength)
         return True
-
-

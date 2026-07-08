@@ -121,8 +121,6 @@ from lspr_imaging_app.gui.ui_helpers import (
     alpha01,
     area_delta_text,
     area_value_text,
-    chromatic_feature_count_value,
-    chromatic_subpixel_precision_value,
     current_ome_zarr_compression_enabled,
     display_length_suffix,
     format_length_display_value,
@@ -4263,70 +4261,19 @@ class MainWindow(MainWindowIcons, QMainWindow):
         return normalized_odd_count(int(value), int(minimum), int(maximum))
 
     def _chromatic_feature_count_options(self) -> tuple[int, ...]:
-        return (5, 15, 30)
+        return self._chromatic_controller.feature_count_options()
 
     def _chromatic_feature_count_value(self) -> int:
-        return chromatic_feature_count_value(self.chromatic_feature_count_spin.currentData(), self._chromatic_feature_count_options())
+        return self._chromatic_controller.feature_count_value()
 
     def _set_chromatic_feature_count_value(self, value: int) -> None:
-        target = int(value)
-        if target not in self._chromatic_feature_count_options():
-            target = 15
-        index = max(self.chromatic_feature_count_spin.findData(target), 0)
-        self.chromatic_feature_count_spin.blockSignals(True)
-        self.chromatic_feature_count_spin.setCurrentIndex(index)
-        self.chromatic_feature_count_spin.blockSignals(False)
+        self._chromatic_controller.set_feature_count_value(value)
 
     def _chromatic_subpixel_precision_options(self) -> tuple[int, ...]:
-        return (1, 4, 9)
+        return self._chromatic_controller.subpixel_precision_options()
 
     def _chromatic_subpixel_precision_value(self) -> int:
-        return chromatic_subpixel_precision_value(self.chromatic_subpixel_precision_combo.currentData())
-
-    def _sampled_wavelengths(self, wavelengths_nm: list[float], sample_count: int) -> list[float]:
-        return _sampled_wavelengths(list(wavelengths_nm), int(sample_count))
-
-    def _chromatic_transform_icon(self, has_models: bool) -> QIcon:
-        if has_models:
-            icon = self._tabler_icon("wand", "#a855f7", 24, stroke_width=2.1)
-            if not icon.isNull():
-                return icon
-            pixmap = QPixmap(24, 24)
-            pixmap.fill(Qt.GlobalColor.transparent)
-            painter = QPainter(pixmap)
-            painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-            pen = QPen(QColor("#a855f7"), 2.2)
-            pen.setCapStyle(Qt.PenCapStyle.RoundCap)
-            pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
-            painter.setPen(pen)
-            painter.drawLine(QLineF(6.0, 18.0, 18.0, 6.0))
-            painter.drawLine(QLineF(15.0, 6.0, 18.0, 9.0))
-            painter.drawEllipse(QRectF(7.0, 1.8, 4.0, 4.0))
-            painter.drawEllipse(QRectF(17.0, 11.8, 4.0, 4.0))
-            painter.end()
-            return QIcon(pixmap)
-        icon = self._tabler_icon("wand-off", "#94a3b8", 24, stroke_width=2.1)
-        if not icon.isNull():
-            return icon
-        pixmap = QPixmap(24, 24)
-        pixmap.fill(Qt.GlobalColor.transparent)
-        painter = QPainter(pixmap)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        pen = QPen(QColor("#94a3b8"), 2.2)
-        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
-        pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
-        painter.setPen(pen)
-        painter.drawLine(QLineF(7.0, 17.0, 17.0, 7.0))
-        painter.drawLine(QLineF(8.0, 18.0, 18.0, 8.0))
-        painter.drawLine(QLineF(9.0, 14.0, 14.0, 9.0))
-        painter.drawLine(QLineF(10.5, 4.5, 13.0, 7.0))
-        painter.drawLine(QLineF(14.8, 2.4, 14.8, 4.6))
-        painter.drawLine(QLineF(14.8, 4.6, 17.0, 4.6))
-        painter.drawLine(QLineF(18.2, 7.2, 19.8, 8.8))
-        painter.drawLine(QLineF(18.4, 5.2, 18.4, 7.4))
-        painter.drawLine(QLineF(18.4, 7.4, 20.6, 7.4))
-        painter.end()
-        return QIcon(pixmap)
+        return self._chromatic_controller.subpixel_precision_value()
 
     def _update_apply_button_labels(self) -> None:
         mask_applied = bool(self.ignore_marked_check.isChecked())
@@ -4412,43 +4359,16 @@ class MainWindow(MainWindowIcons, QMainWindow):
         return self._is_reference_image_key(self._current_image_key)
 
     def _chromatic_model_for_image_key(self, image_key: tuple[int, float] | None) -> ChromaticTransformModel | None:
-        if image_key is None:
-            return None
-        spectral_cube_index, wavelength = image_key
-        for model in self._state.chromatic_models:
-            if int(model.spectral_cube_index) == int(spectral_cube_index) and abs(float(model.wavelength_nm) - float(wavelength)) < 1e-6:
-                return model
-        return None
+        return self._chromatic_controller.model_for_image_key(image_key)
 
     def _chromatic_affine_for_image_key(self, image_key: tuple[int, float] | None) -> np.ndarray | None:
-        if image_key is None or self._is_reference_image_key(image_key):
-            return identity_affine_matrix() if image_key is not None else None
-        if not self._state.preprocessing.chromatic_correction_enabled:
-            return None
-        model = self._chromatic_model_for_image_key(image_key)
-        if model is None:
-            return None
-        return np.asarray(model.affine_matrix, dtype=np.float64)
+        return self._chromatic_controller.affine_for_image_key(image_key)
 
     def _chromatic_affine_for_image_key_any(self, image_key: tuple[int, float] | None) -> np.ndarray | None:
-        if image_key is None or self._is_reference_image_key(image_key):
-            return identity_affine_matrix() if image_key is not None else None
-        model = self._chromatic_model_for_image_key(image_key)
-        if model is None:
-            return None
-        return np.asarray(model.affine_matrix, dtype=np.float64)
+        return self._chromatic_controller.affine_for_image_key_any(image_key)
 
     def _chromatic_signature_for_image_key(self, image_key: tuple[int, float] | None) -> tuple[object, ...] | None:
-        if image_key is None or not self._state.preprocessing.chromatic_correction_enabled:
-            return None
-        model = self._chromatic_model_for_image_key(image_key)
-        if model is None:
-            return None
-        return (
-            int(model.spectral_cube_index),
-            round(float(model.wavelength_nm), 6),
-            tuple(tuple(round(float(value), 6) for value in row) for row in model.affine_matrix),
-        )
+        return self._chromatic_controller.signature_for_image_key(image_key)
 
     def _display_rois(self, image_key: tuple[int, float] | None = None) -> list[AreaRoi]:
         target_key = image_key if image_key is not None else self._current_image_key
@@ -4869,7 +4789,7 @@ class MainWindow(MainWindowIcons, QMainWindow):
         return payload
 
     def _navigate_chromatic_sample(self, direction: int) -> bool:
-        self._chromatic_controller._navigate_chromatic_sample(direction)
+        return self._chromatic_controller._navigate_chromatic_sample(direction)
 
     def _navigate_wavelength_image(self, direction: int) -> bool:
         spectral_cube_index = self._current_spectral_cube()
