@@ -410,6 +410,10 @@ class MaskController:
             window._mask_figure_preview = None
         window._update_ignore_mask_overlay()
 
+    def mask_section_applied(self) -> bool:
+        window = self.window
+        return bool(window._state.area_roi_settings.ignore_marked_pixels)
+
     def mask_changes_affect_preprocessing(self) -> bool:
         window = self.window
         return bool(

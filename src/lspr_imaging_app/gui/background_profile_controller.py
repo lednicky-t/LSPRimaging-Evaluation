@@ -6,6 +6,7 @@ import numpy as np
 
 from lspr_imaging_app.gui.analysis_tasks import _background_profile_task
 from lspr_imaging_app.gui.worker import FunctionWorker
+from lspr_ui import APP_THEME
 
 
 class BackgroundProfileController:
@@ -187,13 +188,33 @@ class BackgroundProfileController:
 
 
     def _sync_background_profile_buttons(self, checked: bool) -> None:
-        for button in (getattr(self, "background_profile_hold_button", None), getattr(self, "background_profile_button", None)):
+        window = self.window
+        for button in (getattr(window, "background_profile_hold_button", None), getattr(window, "background_profile_button", None)):
             if button is None:
                 continue
             button.blockSignals(True)
             button.setChecked(bool(checked))
-            button.setIcon(self.window._make_background_profile_icon(bool(checked), size=APP_THEME.compact_icon_inner))
+            button.setIcon(window._make_background_profile_icon(bool(checked), size=APP_THEME.compact_icon_inner))
             button.blockSignals(False)
+
+    def _sync_background_exclusion_buttons(self) -> None:
+        window = self.window
+        if hasattr(window, "background_ignore_spot_button"):
+            window.background_ignore_spot_button.setIcon(
+                window._background_exclusion_icon(
+                    "current-location-off",
+                    bool(window.background_ignore_spot_button.isChecked()),
+                    size=APP_THEME.compact_icon_inner,
+                )
+            )
+        if hasattr(window, "background_ignore_mask_button"):
+            window.background_ignore_mask_button.setIcon(
+                window._background_exclusion_icon(
+                    "mask-off",
+                    bool(window.background_ignore_mask_button.isChecked()),
+                    size=APP_THEME.compact_icon_inner,
+                )
+            )
 
 
     def _on_background_profile_toggled(self, checked: bool) -> None:
@@ -208,4 +229,3 @@ class BackgroundProfileController:
         else:
             self._apply_main_image_content()
         self.window._save_visual_preferences()
-

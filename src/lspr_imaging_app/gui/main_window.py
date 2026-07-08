@@ -3279,22 +3279,7 @@ class MainWindow(MainWindowIcons, QMainWindow):
         self._bg_profile._sync_background_profile_buttons(checked)
 
     def _sync_background_exclusion_buttons(self) -> None:
-        if hasattr(self, "background_ignore_spot_button"):
-            self.background_ignore_spot_button.setIcon(
-                self._background_exclusion_icon(
-                    "current-location-off",
-                    bool(self.background_ignore_spot_button.isChecked()),
-                    size=APP_THEME.compact_icon_inner,
-                )
-            )
-        if hasattr(self, "background_ignore_mask_button"):
-            self.background_ignore_mask_button.setIcon(
-                self._background_exclusion_icon(
-                    "mask-off",
-                    bool(self.background_ignore_mask_button.isChecked()),
-                    size=APP_THEME.compact_icon_inner,
-                )
-            )
+        self._bg_profile._sync_background_exclusion_buttons()
 
     def _on_background_profile_toggled(self, checked: bool) -> None:
         self._bg_profile._on_background_profile_toggled(checked)
@@ -3758,7 +3743,7 @@ class MainWindow(MainWindowIcons, QMainWindow):
         return True
 
     def _mask_section_applied(self) -> bool:
-        return bool(self._state.area_roi_settings.ignore_marked_pixels)
+        return self._mask_controller.mask_section_applied()
 
     def _bind_collapsible_group(self, sections: list[CollapsibleSection]) -> None:
         for section in sections:
