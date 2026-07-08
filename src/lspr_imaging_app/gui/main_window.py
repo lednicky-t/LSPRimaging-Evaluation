@@ -4461,46 +4461,13 @@ class MainWindow(MainWindowIcons, QMainWindow):
         self._update_landmark_overlays()
 
     def _enter_chromatic_setup_mode(self) -> None:
-        if self._chromatic_setup_saved_visibility is None:
-            self._chromatic_setup_saved_visibility = (
-                bool(self._rois_visible),
-                bool(self._reference_visible),
-                bool(self._mask_visible),
-                bool(self._reference_points_visible),
-                bool(self._highlight_visible),
-            )
-        self._chromatic_setup_active = True
-        self._set_view_overlay_visibility(
-            spots_visible=False,
-            rings_visible=False,
-            mask_visible=False,
-            reference_points_visible=True,
-            highlight_visible=False,
-        )
+        self._chromatic_controller.enter_setup_mode()
 
     def _leave_chromatic_setup_mode(self) -> None:
-        self._chromatic_setup_active = False
-        if self._chromatic_setup_saved_visibility is not None:
-            spots_visible, rings_visible, mask_visible, reference_points_visible, highlight_visible = self._chromatic_setup_saved_visibility
-            self._set_view_overlay_visibility(
-                spots_visible=spots_visible,
-                rings_visible=rings_visible,
-                mask_visible=mask_visible,
-                reference_points_visible=reference_points_visible,
-                highlight_visible=highlight_visible,
-            )
-        self._chromatic_setup_saved_visibility = None
-        self._chromatic_pending_view_ranges = None
+        self._chromatic_controller.leave_setup_mode()
 
     def _capture_chromatic_view_ranges(self) -> None:
-        if not self._chromatic_setup_active or self._current_processed_image is None:
-            self._chromatic_pending_view_ranges = None
-            return
-        x_range, y_range = self.image_plot.vb.viewRange()
-        self._chromatic_pending_view_ranges = (
-            (float(x_range[0]), float(x_range[1])),
-            (float(y_range[0]), float(y_range[1])),
-        )
+        self._chromatic_controller.capture_view_ranges()
 
     def _capture_pending_image_view_ranges(self, *, preserve_view: bool = False) -> None:
         if self._current_processed_image is None:
@@ -4600,16 +4567,10 @@ class MainWindow(MainWindowIcons, QMainWindow):
         return self._set_clamped_image_view_ranges(x_range, y_range)
 
     def _restore_chromatic_view_after_load(self) -> bool:
-        if not self._chromatic_setup_active:
-            return False
-        previous_ranges = self._chromatic_pending_view_ranges
-        self._chromatic_pending_view_ranges = None
-        if previous_ranges is None:
-            return False
-        return self._set_clamped_image_view_ranges(previous_ranges[0], previous_ranges[1])
+        return self._chromatic_controller.restore_view_after_load()
 
     def _default_chromatic_feature_points(self, image_shape: tuple[int, int], feature_count: int) -> dict[int, tuple[float, float]]:
-        return default_landmark_anchors(image_shape, feature_count)
+        return self._chromatic_controller.default_feature_points(image_shape, feature_count)
 
     def _update_chromatic_summary(self) -> None:
         self._chromatic_controller._update_chromatic_summary()
@@ -4627,139 +4588,34 @@ class MainWindow(MainWindowIcons, QMainWindow):
         self._chromatic_controller._on_chromatic_landmark_tool_toggled(checked)
 
     def _expected_chromatic_feature_ids(self) -> list[int]:
-        return list(range(1, max(int(self._state.preprocessing.chromatic_feature_count), 1) + 1))
+        return self._chromatic_controller.expected_feature_ids()
 
     def _chromatic_sample_image_keys(self) -> list[tuple[int, float]]:
-        reference_key = self._reference_image_key()
-        if reference_key is None:
-            return []
-        spectral_cube_index = int(reference_key[0])
-        return [(spectral_cube_index, wavelength) for wavelength in _sampled_wavelengths(self._wavelength_values, self._state.preprocessing.chromatic_sample_image_count)]
+        return self._chromatic_controller.sample_image_keys()
 
     def _is_chromatic_sample_image_key(self, image_key: tuple[int, float] | None) -> bool:
-        return image_key is not None and image_key in self._chromatic_sample_image_keys()
+        return self._chromatic_controller.is_sample_image_key(image_key)
 
     def _current_chromatic_sample_index(self) -> int | None:
-        if self._current_image_key is None:
-            return None
-        sample_keys = self._chromatic_sample_image_keys()
-        try:
-            return sample_keys.index(self._current_image_key)
-        except ValueError:
-            return None
+        return self._chromatic_controller.current_sample_index()
 
     def _current_image_landmarks(self) -> list[ChromaticLandmarkObservation]:
-        key = self._current_image_key
-        if key is None:
-            return []
-        spectral_cube_index, wavelength = key
-        return [
-            mark
-            for mark in self._state.chromatic_landmarks
-            if int(mark.spectral_cube_index) == int(spectral_cube_index) and abs(float(mark.wavelength_nm) - float(wavelength)) < 1e-6
-        ]
+        return self._chromatic_controller.current_image_landmarks()
 
     def _current_landmark(self, landmark_id: int) -> ChromaticLandmarkObservation | None:
-        for mark in self._current_image_landmarks():
-            if int(mark.landmark_id) == int(landmark_id):
-                return mark
-        return None
+        return self._chromatic_controller.current_landmark(landmark_id)
 
     def _find_landmark_id_at(self, point: tuple[float, float]) -> int | None:
-        nearest_id: int | None = None
-        nearest_distance = float("inf")
-        for mark in self._current_image_landmarks():
-            distance = hypot(point[0] - float(mark.x_px), point[1] - float(mark.y_px))
-            if distance <= 10.0 and distance < nearest_distance:
-                nearest_distance = distance
-                nearest_id = int(mark.landmark_id)
-        return nearest_id
+        return self._chromatic_controller.find_landmark_id_at(point)
 
-    def _upsert_current_landmark(
-        self,
-        landmark_id: int,
-        point: tuple[float, float],
-        *,
-        clear_models: bool,
-    ) -> bool:
-        key = self._current_image_key
-        if key is None:
-            return False
-        spectral_cube_index, wavelength = key
-        updated = False
-        for mark in self._state.chromatic_landmarks:
-            if (
-                int(mark.landmark_id) == int(landmark_id)
-                and int(mark.spectral_cube_index) == int(spectral_cube_index)
-                and abs(float(mark.wavelength_nm) - float(wavelength)) < 1e-6
-            ):
-                mark.x_px = float(point[0])
-                mark.y_px = float(point[1])
-                updated = True
-                break
-        if not updated:
-            self._state.chromatic_landmarks.append(
-                ChromaticLandmarkObservation(
-                    landmark_id=int(landmark_id),
-                    spectral_cube_index=int(spectral_cube_index),
-                    wavelength_nm=float(wavelength),
-                    x_px=float(point[0]),
-                    y_px=float(point[1]),
-                )
-            )
-        self._selected_landmark_id = int(landmark_id)
-        self._chromatic_landmark_marker_id = int(landmark_id)
-        if clear_models:
-            self._finalize_chromatic_landmark_edit()
-        else:
-            self._update_landmark_overlays()
-        return updated
+    def _upsert_current_landmark(self, landmark_id: int, point: tuple[float, float], *, clear_models: bool) -> bool:
+        return self._chromatic_controller.upsert_current_landmark(landmark_id, point, clear_models=clear_models)
 
     def _set_current_landmark(self, point: tuple[float, float], *, auto_advance: bool = False) -> None:
-        key = self._current_image_key
-        if key is None:
-            self._set_status_text("No image is selected for reference-point marking.")
-            return
-        self._push_undo_point("Chromatic landmarks")
-        landmark_id = int(self._chromatic_landmark_marker_id)
-        self._upsert_current_landmark(landmark_id, point, clear_models=True)
-        if auto_advance:
-            expected_ids = self._expected_chromatic_feature_ids()
-            next_id = landmark_id + 1 if landmark_id < len(expected_ids) else landmark_id
-            self.chromatic_landmark_id_spin.blockSignals(True)
-            self.chromatic_landmark_id_spin.setValue(next_id)
-            self.chromatic_landmark_id_spin.blockSignals(False)
-            self._chromatic_landmark_marker_id = next_id
-            self._selected_landmark_id = landmark_id
-        self._set_status_text(
-            f"Stored reference point {landmark_id} at {key[1]:g} nm spectral cube {key[0]}."
-        )
+        self._chromatic_controller.set_current_landmark(point, auto_advance=auto_advance)
 
     def _clear_chromatic_landmarks(self, *, push_undo: bool = True) -> None:
-        if not self._state.chromatic_landmarks:
-            return
-        if push_undo:
-            self._push_undo_point("Chromatic landmarks")
-        self._state.chromatic_landmarks.clear()
-        self._state.chromatic_models.clear()
-        self._state.preprocessing.chromatic_correction_enabled = False
-        self._chromatic_reference_points_all_visible = False
-        self.chromatic_apply_check.blockSignals(True)
-        self.chromatic_apply_check.setChecked(False)
-        self.chromatic_apply_check.blockSignals(False)
-        if hasattr(self, "chromatic_reference_points_all_button"):
-            self.chromatic_reference_points_all_button.blockSignals(True)
-            self.chromatic_reference_points_all_button.setChecked(False)
-            self.chromatic_reference_points_all_button.blockSignals(False)
-        self._invalidate_image_analysis_caches()
-        self._invalidate_background_profile_cache()
-        self._update_roi_overlays()
-        self._schedule_histogram_refresh()
-        self._update_landmark_overlays()
-        self._update_chromatic_summary()
-        self._schedule_processing_state_save()
-        self._selected_landmark_id = None
-        self._set_status_text("Cleared chromatic landmarks and models.")
+        self._chromatic_controller.clear_landmarks(push_undo=push_undo)
 
     def _set_current_spectral_cube_and_wavelength(self, spectral_cube_index: int, wavelength: float) -> None:
         self._capture_chromatic_view_ranges()
@@ -4780,13 +4636,7 @@ class MainWindow(MainWindowIcons, QMainWindow):
         self._schedule_image_refresh()
 
     def _chromatic_sample_payload(self) -> list[tuple[int, float, str]]:
-        payload: list[tuple[int, float, str]] = []
-        for spectral_cube_index, wavelength in self._chromatic_sample_image_keys():
-            record = self._record_map.get((spectral_cube_index, wavelength))
-            if record is None:
-                continue
-            payload.append((int(spectral_cube_index), float(wavelength), str(record.path)))
-        return payload
+        return self._chromatic_controller.sample_payload()
 
     def _navigate_chromatic_sample(self, direction: int) -> bool:
         return self._chromatic_controller._navigate_chromatic_sample(direction)
@@ -4833,35 +4683,10 @@ class MainWindow(MainWindowIcons, QMainWindow):
         self._chromatic_controller._seed_chromatic_landmarks_for_current_image()
 
     def _finalize_chromatic_landmark_edit(self, *, status_text: str | None = None) -> None:
-        had_models = bool(self._state.chromatic_models)
-        if had_models:
-            self._state.chromatic_models.clear()
-            self._state.preprocessing.chromatic_correction_enabled = False
-            self.chromatic_apply_check.blockSignals(True)
-            self.chromatic_apply_check.setChecked(False)
-            self.chromatic_apply_check.blockSignals(False)
-        self._invalidate_image_analysis_caches()
-        self._invalidate_background_profile_cache()
-        self._update_chromatic_summary()
-        self._update_roi_overlays()
-        self._update_ignore_mask_overlay()
-        if had_models:
-            self._schedule_histogram_refresh()
-        self._update_landmark_overlays()
-        self._schedule_processing_state_save()
-        if status_text:
-            self._set_status_text(status_text)
+        self._chromatic_controller.finalize_landmark_edit(status_text=status_text)
 
     def _sync_current_chromatic_feature_selection(self) -> None:
-        if not self._is_chromatic_sample_image_key(self._current_image_key):
-            return
-        existing_ids = {int(mark.landmark_id) for mark in self._current_image_landmarks()}
-        for feature_id in self._expected_chromatic_feature_ids():
-            if feature_id not in existing_ids:
-                self._select_chromatic_feature(feature_id, center_view=False)
-                return
-        if self._selected_landmark_id is not None:
-            self._select_chromatic_feature(int(self._selected_landmark_id), center_view=False)
+        self._chromatic_controller.sync_current_feature_selection()
 
     def _update_reference_controls(self) -> None:
         self._ui_state_manager.update_reference_controls()
