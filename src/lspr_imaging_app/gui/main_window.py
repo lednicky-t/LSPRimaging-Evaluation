@@ -4283,15 +4283,6 @@ class MainWindow(MainWindowIcons, QMainWindow):
     def _chromatic_subpixel_precision_value(self) -> int:
         return chromatic_subpixel_precision_value(self.chromatic_subpixel_precision_combo.currentData())
 
-    def _set_chromatic_subpixel_precision_value(self, value: int) -> None:
-        target = int(value)
-        if target not in self._chromatic_subpixel_precision_options():
-            target = 4
-        index = max(self.chromatic_subpixel_precision_combo.findData(target), 0)
-        self.chromatic_subpixel_precision_combo.blockSignals(True)
-        self.chromatic_subpixel_precision_combo.setCurrentIndex(index)
-        self.chromatic_subpixel_precision_combo.blockSignals(False)
-
     def _sampled_wavelengths(self, wavelengths_nm: list[float], sample_count: int) -> list[float]:
         return _sampled_wavelengths(list(wavelengths_nm), int(sample_count))
 
@@ -4706,9 +4697,6 @@ class MainWindow(MainWindowIcons, QMainWindow):
     def _update_chromatic_control_state(self) -> None:
         self._ui_state_manager.update_chromatic_control_state()
 
-    def _chromatic_auto_detection_applied(self) -> bool:
-        return bool(self._state.chromatic_landmarks) and not self._chromatic_auto_running and not self.chromatic_start_button.isChecked()
-
     def _on_chromatic_reference_points_all_toggled(self, checked: bool) -> None:
         self._chromatic_controller._on_chromatic_reference_points_all_toggled(checked)
 
@@ -4871,9 +4859,6 @@ class MainWindow(MainWindowIcons, QMainWindow):
         self._sync_analysis_plot_cursors()
         self._schedule_image_refresh()
 
-    def _start_chromatic_workflow(self) -> None:
-        self._chromatic_controller.start_workflow()
-
     def _chromatic_sample_payload(self) -> list[tuple[int, float, str]]:
         payload: list[tuple[int, float, str]] = []
         for spectral_cube_index, wavelength in self._chromatic_sample_image_keys():
@@ -4882,9 +4867,6 @@ class MainWindow(MainWindowIcons, QMainWindow):
                 continue
             payload.append((int(spectral_cube_index), float(wavelength), str(record.path)))
         return payload
-
-    def _auto_detect_chromatic_landmarks(self, *, push_undo: bool = True) -> None:
-        self._chromatic_controller.auto_detect_landmarks(push_undo=push_undo)
 
     def _navigate_chromatic_sample(self, direction: int) -> bool:
         self._chromatic_controller._navigate_chromatic_sample(direction)
@@ -6644,25 +6626,6 @@ class MainWindow(MainWindowIcons, QMainWindow):
     ) -> AbsorbanceSpectrumResult | None:
         return self._analysis_controller._cached_absorbance_result_from_spot_cache(selected_source_rois)
 
-    def _absorbance_roi_mask_signature(
-        self,
-        image_shape: tuple[int, int],
-        selected_rois: list[AreaRoi],
-        selected_roi_ids: tuple[int, ...],
-        affine_matrix: np.ndarray | None,
-    ) -> tuple[object, ...]:
-        affine_signature = None
-        if affine_matrix is not None:
-            affine_signature = tuple(round(float(value), 6) for value in np.asarray(affine_matrix, dtype=np.float64).ravel())
-        return (
-            tuple(int(value) for value in image_shape[:2]),
-            tuple(int(spot_id) for spot_id in selected_roi_ids),
-            self._roi_signature(selected_rois),
-            affine_signature,
-            round(float(self._state.area_roi_settings.reference_inner_radius_px), 3),
-            round(float(self._state.area_roi_settings.reference_outer_radius_px), 3),
-        )
-
     def _serialize_absorbance_result(result: AbsorbanceSpectrumResult) -> dict:
         from lspr_imaging_app.gui.analysis_controller import AnalysisController
         return AnalysisController._serialize_absorbance_result(result)
@@ -7835,9 +7798,6 @@ class MainWindow(MainWindowIcons, QMainWindow):
     def _update_analysis_control_state(self) -> None:
         self._ui_state_manager.update_analysis_control_state()
 
-    def _on_chromatic_section_applied_changed(self, applied: bool) -> None:
-        self._chromatic_controller.section_applied_changed(applied)
-
     def _on_mask_section_applied_changed(self, applied: bool) -> None:
         if self.ignore_marked_check.isChecked() != bool(applied):
             self.ignore_marked_check.setChecked(bool(applied))
@@ -7985,9 +7945,6 @@ class MainWindow(MainWindowIcons, QMainWindow):
         self._schedule_processing_state_save()
         self._current_image_key = None
         self._schedule_image_refresh()
-
-    def _estimate_chromatic_models(self) -> None:
-        self._chromatic_controller.estimate_models()
 
     def _clear_chromatic_models(self, *, push_undo: bool = True) -> None:
         if push_undo:
