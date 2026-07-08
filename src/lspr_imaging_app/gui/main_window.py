@@ -5731,66 +5731,16 @@ class MainWindow(MainWindowIcons, QMainWindow):
         )
 
     def _center_view_on_landmark(self, landmark: ChromaticLandmarkObservation) -> None:
-        if self._current_processed_image is None:
-            return
-        x_range, y_range = self.image_plot.vb.viewRange()
-        view_width = max(float(x_range[1] - x_range[0]), 1.0)
-        view_height = max(float(y_range[1] - y_range[0]), 1.0)
-        image_height, image_width = self._current_processed_image.shape[:2]
-        half_width = view_width / 2.0
-        half_height = view_height / 2.0
-        center_x = float(np.clip(float(landmark.x_px), half_width, max(float(image_width) - half_width, half_width)))
-        center_y = float(np.clip(float(landmark.y_px), half_height, max(float(image_height) - half_height, half_height)))
-        self.image_plot.vb.setRange(
-            xRange=(center_x - half_width, center_x + half_width),
-            yRange=(center_y - half_height, center_y + half_height),
-            padding=0.0,
-        )
+        self._chromatic_controller.center_view_on_landmark(landmark)
 
     def _select_chromatic_feature(self, feature_id: int, *, center_view: bool = True) -> bool:
-        feature_ids = self._expected_chromatic_feature_ids()
-        if feature_id not in feature_ids:
-            return False
-        self._selected_landmark_id = int(feature_id)
-        self._chromatic_landmark_marker_id = int(feature_id)
-        self.chromatic_landmark_id_spin.blockSignals(True)
-        self.chromatic_landmark_id_spin.setValue(int(feature_id))
-        self.chromatic_landmark_id_spin.blockSignals(False)
-        mark = self._current_landmark(int(feature_id))
-        if mark is not None and center_view:
-            self._center_view_on_landmark(mark)
-        self._update_landmark_overlays()
-        return True
+        return self._chromatic_controller.select_feature(feature_id, center_view=center_view)
 
     def _move_selected_landmark(self, dx: float, dy: float) -> bool:
-        if self._selected_landmark_id is None:
-            return False
-        mark = self._current_landmark(int(self._selected_landmark_id))
-        if mark is None:
-            return False
-        self._prepare_undo_snapshot("Chromatic landmarks")
-        max_x = float(self._current_processed_image.shape[1] - 1) if self._current_processed_image is not None else float(mark.x_px)
-        max_y = float(self._current_processed_image.shape[0] - 1) if self._current_processed_image is not None else float(mark.y_px)
-        point = (
-            float(np.clip(float(mark.x_px) + dx, 0.0, max_x)),
-            float(np.clip(float(mark.y_px) + dy, 0.0, max_y)),
-        )
-        self._upsert_current_landmark(int(self._selected_landmark_id), point, clear_models=True)
-        self._center_view_on_landmark(mark)
-        self._commit_prepared_undo_snapshot()
-        return True
+        return self._chromatic_controller.move_selected_landmark(dx, dy)
 
     def _switch_chromatic_feature(self, direction: int) -> bool:
-        feature_ids = self._expected_chromatic_feature_ids()
-        if not feature_ids:
-            return False
-        current_id = int(self._selected_landmark_id or self._chromatic_landmark_marker_id or feature_ids[0])
-        try:
-            current_index = feature_ids.index(current_id)
-        except ValueError:
-            current_index = 0
-        next_index = min(max(current_index + int(direction), 0), len(feature_ids) - 1)
-        return self._select_chromatic_feature(feature_ids[next_index], center_view=True)
+        return self._chromatic_controller.switch_feature(direction)
 
     def _move_selected_rois(self, dx: float, dy: float) -> None:
         if not self._selected_roi_ids:

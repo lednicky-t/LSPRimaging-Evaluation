@@ -321,10 +321,76 @@ class ChromaticController:
         existing_ids = {int(mark.landmark_id) for mark in self.current_image_landmarks()}
         for feature_id in self.expected_feature_ids():
             if feature_id not in existing_ids:
-                window._select_chromatic_feature(feature_id, center_view=False)
+                self.select_feature(feature_id, center_view=False)
                 return
         if window._selected_landmark_id is not None:
-            window._select_chromatic_feature(int(window._selected_landmark_id), center_view=False)
+            self.select_feature(int(window._selected_landmark_id), center_view=False)
+
+    def center_view_on_landmark(self, landmark: ChromaticLandmarkObservation) -> None:
+        window = self.window
+        if window._current_processed_image is None:
+            return
+        x_range, y_range = window.image_plot.vb.viewRange()
+        view_width = max(float(x_range[1] - x_range[0]), 1.0)
+        view_height = max(float(y_range[1] - y_range[0]), 1.0)
+        image_height, image_width = window._current_processed_image.shape[:2]
+        half_width = view_width / 2.0
+        half_height = view_height / 2.0
+        center_x = float(np.clip(float(landmark.x_px), half_width, max(float(image_width) - half_width, half_width)))
+        center_y = float(np.clip(float(landmark.y_px), half_height, max(float(image_height) - half_height, half_height)))
+        window.image_plot.vb.setRange(
+            xRange=(center_x - half_width, center_x + half_width),
+            yRange=(center_y - half_height, center_y + half_height),
+            padding=0.0,
+        )
+
+    def select_feature(self, feature_id: int, *, center_view: bool = True) -> bool:
+        window = self.window
+        feature_ids = self.expected_feature_ids()
+        if feature_id not in feature_ids:
+            return False
+        window._selected_landmark_id = int(feature_id)
+        window._chromatic_landmark_marker_id = int(feature_id)
+        window.chromatic_landmark_id_spin.blockSignals(True)
+        window.chromatic_landmark_id_spin.setValue(int(feature_id))
+        window.chromatic_landmark_id_spin.blockSignals(False)
+        mark = self.current_landmark(int(feature_id))
+        if mark is not None and center_view:
+            self.center_view_on_landmark(mark)
+        window._update_landmark_overlays()
+        return True
+
+    def move_selected_landmark(self, dx: float, dy: float) -> bool:
+        window = self.window
+        if window._selected_landmark_id is None:
+            return False
+        mark = self.current_landmark(int(window._selected_landmark_id))
+        if mark is None:
+            return False
+        window._prepare_undo_snapshot("Chromatic landmarks")
+        max_x = float(window._current_processed_image.shape[1] - 1) if window._current_processed_image is not None else float(mark.x_px)
+        max_y = float(window._current_processed_image.shape[0] - 1) if window._current_processed_image is not None else float(mark.y_px)
+        point = (
+            float(np.clip(float(mark.x_px) + dx, 0.0, max_x)),
+            float(np.clip(float(mark.y_px) + dy, 0.0, max_y)),
+        )
+        self.upsert_current_landmark(int(window._selected_landmark_id), point, clear_models=True)
+        self.center_view_on_landmark(mark)
+        window._commit_prepared_undo_snapshot()
+        return True
+
+    def switch_feature(self, direction: int) -> bool:
+        window = self.window
+        feature_ids = self.expected_feature_ids()
+        if not feature_ids:
+            return False
+        current_id = int(window._selected_landmark_id or window._chromatic_landmark_marker_id or feature_ids[0])
+        try:
+            current_index = feature_ids.index(current_id)
+        except ValueError:
+            current_index = 0
+        next_index = min(max(current_index + int(direction), 0), len(feature_ids) - 1)
+        return self.select_feature(feature_ids[next_index], center_view=True)
 
     def section_applied_changed(self, applied: bool) -> None:
         window = self.window
@@ -352,7 +418,7 @@ class ChromaticController:
         feature_count = int(self.feature_count_value())
         sample_wavelengths = _sampled_wavelengths(list(window._wavelength_values), int(sample_count))
         middle_wavelength = sample_wavelengths[len(sample_wavelengths) // 2]
-        window._enter_chromatic_setup_mode()
+        self.enter_setup_mode()
         window._state.preprocessing.chromatic_registration_mode = "landmark_radial"
         window._state.preprocessing.chromatic_sample_image_count = sample_count
         window._state.preprocessing.chromatic_feature_count = feature_count
@@ -393,7 +459,7 @@ class ChromaticController:
 
     def auto_detect_landmarks(self, *, push_undo: bool = True) -> None:
         window = self.window
-        payload = window._chromatic_sample_payload()
+        payload = self.sample_payload()
         if not payload:
             window._set_status_text("Start the radial workflow before auto-detecting chromatic reference points.")
             return
@@ -449,8 +515,8 @@ class ChromaticController:
             window._set_status_text("Reference image is missing from the dataset.")
             return
         mode = str(window._state.preprocessing.chromatic_registration_mode or "landmark_radial")
-        sample_keys = window._chromatic_sample_image_keys()
-        feature_ids = window._expected_chromatic_feature_ids()
+        sample_keys = self.sample_image_keys()
+        feature_ids = self.expected_feature_ids()
         landmarks_payload = [
             (
                 int(mark.landmark_id),
@@ -542,7 +608,7 @@ class ChromaticController:
         ]
         window._selected_landmark_id = 1
         window._chromatic_landmark_marker_id = 1
-        window._sync_current_chromatic_feature_selection()
+        self.sync_current_feature_selection()
         window._update_landmark_overlays()
         window._update_chromatic_summary()
         window._update_chromatic_control_state()
@@ -591,7 +657,7 @@ class ChromaticController:
         window.chromatic_apply_check.blockSignals(True)
         window.chromatic_apply_check.setChecked(False)
         window.chromatic_apply_check.blockSignals(False)
-        window._leave_chromatic_setup_mode()
+        self.leave_setup_mode()
         window._invalidate_image_analysis_caches()
         window._invalidate_background_profile_cache()
         window._update_chromatic_summary()
@@ -742,10 +808,10 @@ class ChromaticController:
             )
             return
         model_count = len(self.window._state.chromatic_models)
-        sample_keys = self.window._chromatic_sample_image_keys()
-        feature_ids = self.window._expected_chromatic_feature_ids()
+        sample_keys = self.sample_image_keys()
+        feature_ids = self.expected_feature_ids()
         filled_samples = 0
-        current_index = self.window._current_chromatic_sample_index()
+        current_index = self.current_sample_index()
         for sample_key in sample_keys:
             sample_marks = {
                 int(mark.landmark_id)
@@ -809,17 +875,17 @@ class ChromaticController:
 
 
     def _on_chromatic_landmark_id_changed(self, value: int) -> None:
-        feature_id = min(max(int(value), 1), len(self.window._expected_chromatic_feature_ids()))
+        feature_id = min(max(int(value), 1), len(self.expected_feature_ids()))
         self.window._chromatic_landmark_marker_id = feature_id
         self.window._selected_landmark_id = feature_id
-        self.window._select_chromatic_feature(feature_id, center_view=True)
+        self.select_feature(feature_id, center_view=True)
 
 
     def _on_chromatic_landmark_tool_toggled(self, checked: bool) -> None:
         self.window.chromatic_start_button.setIcon(self.window._make_spot_edit_icon(bool(checked)))
         if checked:
-            if not self.window._is_chromatic_sample_image_key(self.window._current_image_key):
-                sample_keys = self.window._chromatic_sample_image_keys()
+            if not self.is_sample_image_key(self.window._current_image_key):
+                sample_keys = self.sample_image_keys()
                 if sample_keys:
                     self.window._set_current_spectral_cube_and_wavelength(int(sample_keys[0][0]), float(sample_keys[0][1]))
                     self.window._set_status_text("Chromatic edit activated. Navigating to the first sampled wavelength image.")
@@ -890,7 +956,7 @@ class ChromaticController:
         normalized = self.feature_count_value()
         if normalized != self.window._state.preprocessing.chromatic_feature_count:
             self.window._state.preprocessing.chromatic_feature_count = normalized
-        max_feature = len(self.window._expected_chromatic_feature_ids())
+        max_feature = len(self.expected_feature_ids())
         self.window._chromatic_landmark_marker_id = min(self.window._chromatic_landmark_marker_id, max_feature)
         self.window._selected_landmark_id = None if self.window._selected_landmark_id is None else min(self.window._selected_landmark_id, max_feature)
         self.window.chromatic_landmark_id_spin.blockSignals(True)
@@ -914,15 +980,15 @@ class ChromaticController:
         if self.window._chromatic_auto_running:
             return
         image_key = self.window._current_image_key
-        if not self.window._is_chromatic_sample_image_key(image_key):
+        if not self.is_sample_image_key(image_key):
             return
         assert image_key is not None
-        expected_ids = self.window._expected_chromatic_feature_ids()
-        existing_ids = {int(mark.landmark_id) for mark in self.window._current_image_landmarks()}
+        expected_ids = self.expected_feature_ids()
+        existing_ids = {int(mark.landmark_id) for mark in self.current_image_landmarks()}
         missing_ids = [feature_id for feature_id in expected_ids if feature_id not in existing_ids]
         if not missing_ids:
             return
-        sample_keys = self.window._chromatic_sample_image_keys()
+        sample_keys = self.sample_image_keys()
         current_index = sample_keys.index(image_key)
         candidate_keys: list[tuple[int, float]] = []
         for index in range(current_index - 1, -1, -1):
@@ -944,9 +1010,9 @@ class ChromaticController:
                 source_marks = marks
                 break
         if source_marks is None and self.window._current_processed_image is not None:
-            current_marks = self.window._current_image_landmarks()
+            current_marks = self.current_image_landmarks()
             if not current_marks:
-                source_marks = self.window._default_chromatic_feature_points(
+                source_marks = self.default_feature_points(
                     self.window._current_processed_image.shape[:2],
                     len(expected_ids),
                 )
@@ -957,20 +1023,20 @@ class ChromaticController:
             point = source_marks.get(feature_id)
             if point is None:
                 continue
-            self.window._upsert_current_landmark(feature_id, point, clear_models=False)
+            self.upsert_current_landmark(feature_id, point, clear_models=False)
             changed = True
         if changed:
-            self.window._finalize_chromatic_landmark_edit()
+            self.finalize_landmark_edit()
             self.window._set_status_text(
                 f"Seeded missing reference points for {image_key[1]:g} nm from the nearest marked sample image."
             )
 
 
     def _navigate_chromatic_sample(self, direction: int) -> bool:
-        sample_keys = self.window._chromatic_sample_image_keys()
+        sample_keys = self.sample_image_keys()
         if not sample_keys:
             return False
-        current_index = self.window._current_chromatic_sample_index()
+        current_index = self.current_sample_index()
         if current_index is None:
             if self.window._current_image_key is None:
                 current_index = 0
