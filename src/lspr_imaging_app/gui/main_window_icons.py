@@ -1291,3 +1291,951 @@ class MainWindowIcons:
         self.wavelength_slider.blockSignals(False)
         self._update_reference_controls()
         self._update_reference_summary()
+
+    def _create_toolbar_action_button(self, action: QAction, *, primary: bool = False, icon_only: bool = False) -> QToolButton:
+        button = QToolButton(self)
+        button.setDefaultAction(action)
+        button.setToolButtonStyle(
+            Qt.ToolButtonStyle.ToolButtonIconOnly if icon_only else Qt.ToolButtonStyle.ToolButtonTextBesideIcon
+        )
+        button.setAutoRaise(False)
+        button.setIconSize(QSize(16, 16))
+        if icon_only:
+            button.setFixedSize(22, 20)
+        button.setProperty("toolRole", "primary" if primary else "secondary")
+        button.setProperty("iconOnly", icon_only)
+        return button
+
+    def _make_icon_tool_button(
+        self,
+        icon_name: str,
+        color: str,
+        tooltip: str,
+        *,
+        checkable: bool = False,
+        icon: QIcon | None = None,
+    ) -> QToolButton:
+        button = QToolButton(self)
+        button.setAutoRaise(True)
+        button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly)
+        button.setIcon(icon if icon is not None else self._mask_panel_icon(icon_name, color=color, size=APP_THEME.icon_button_inner))
+        button.setIconSize(QSize(APP_THEME.compact_icon_inner, APP_THEME.compact_icon_inner))
+        button.setFixedSize(APP_THEME.compact_icon_outer, APP_THEME.compact_icon_outer)
+        button.setCheckable(checkable)
+        button.setToolTip(tooltip)
+        button.setCursor(Qt.CursorShape.PointingHandCursor)
+        button.setStyleSheet(transparent_icon_button_stylesheet())
+        return button
+
+    def _make_mask_morphology_button(self, operation: str, tooltip: str) -> QToolButton:
+        button = self._make_icon_tool_button(
+            "square-rounded-plus",
+            "#f8fafc",
+            tooltip,
+            checkable=True,
+            icon=self._make_mask_morphology_icon(operation),
+        )
+        hover, pressed, checked = icon_accent_colors("blue")
+        button.setStyleSheet(
+            transparent_icon_button_stylesheet(
+                hover=hover,
+                pressed=pressed,
+                checked=checked,
+            )
+        )
+        return button
+
+    def _make_mask_morphology_icon(self, operation: str, *, color: str = "#f8fafc", size: int = 24) -> QIcon:
+        if operation == "erode":
+            svg = f"""<svg xmlns="http://www.w3.org/2000/svg" width="{size}" height="{size}" viewBox="0 0 24 24" fill="none" stroke="{color}" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+  <path stroke="none" d="M0 0h24v24H0z" fill="none" />
+  <path d="M3 12a9 9 0 1 0 18 0a9 9 0 0 0 -18 0" />
+  <path d="M6 10l2 2l-2 2" />
+  <path d="M10 6l2 2l2 -2" />
+  <path d="M18 10l-2 2l2 2" />
+  <path d="M10 18l2 -2l2 2" />
+</svg>"""
+            return self._svg_icon_from_markup(svg, size=size)
+        if operation == "dilate":
+            svg = f"""<svg xmlns="http://www.w3.org/2000/svg" width="{size}" height="{size}" viewBox="0 0 24 24" fill="none" stroke="{color}" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+  <path stroke="none" d="M0 0h24v24H0z" fill="none" />
+  <path d="M3 12a9 9 0 1 0 18 0a9 9 0 0 0 -18 0" />
+  <path d="M7 10l-2 2l2 2" />
+  <path d="M10 7l2 -2l2 2" />
+  <path d="M17 10l2 2l-2 2" />
+  <path d="M10 17l2 2l2 -2" />
+</svg>"""
+            return self._svg_icon_from_markup(svg, size=size)
+        if operation == "open":
+            icon = self._tabler_icon("book", color=color, size=size, stroke_width=2.2)
+            if not icon.isNull():
+                return icon
+            return self._lucide_icon("book", color, size, stroke_width=2.2)
+        if operation == "close":
+            icon = self._tabler_icon("book-2", color=color, size=size, stroke_width=2.2)
+            if not icon.isNull():
+                return icon
+            return self._tabler_icon("book", color=color, size=size, stroke_width=2.2)
+        return QIcon()
+
+    def _mask_panel_icon(self, icon_name: str, color: str, *, size: int = 20) -> QIcon:
+        if icon_name in {"eye", "eye-closed"}:
+            return self._draw_mask_panel_fallback_icon(icon_name, QColor(color), size=size)
+        icon = self._tabler_icon(icon_name, color=color, size=size, stroke_width=2.1)
+        if not icon.isNull():
+            return icon
+        return self._draw_mask_panel_fallback_icon(icon_name, QColor(color), size=size)
+
+    def _make_background_profile_icon(self, active: bool, *, size: int = 22) -> QIcon:
+        color = "#38bdf8" if active else "#94a3b8"
+        icon = self._tabler_icon("background", color, size, stroke_width=2.0)
+        if not icon.isNull():
+            return icon
+        pixmap = QPixmap(size, size)
+        pixmap.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(pixmap)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setPen(QPen(QColor(color), 1.7))
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        scale = size / 22.0
+        painter.drawRoundedRect(QRectF(3.0 * scale, 4.0 * scale, 16.0 * scale, 14.0 * scale), 3.0 * scale, 3.0 * scale)
+        painter.drawLine(QPointF(6.0 * scale, 15.0 * scale), QPointF(10.0 * scale, 11.0 * scale))
+        painter.drawLine(QPointF(10.0 * scale, 11.0 * scale), QPointF(13.0 * scale, 13.5 * scale))
+        painter.drawLine(QPointF(13.0 * scale, 13.5 * scale), QPointF(17.0 * scale, 9.5 * scale))
+        painter.drawEllipse(QRectF(6.5 * scale, 6.5 * scale, 3.0 * scale, 3.0 * scale))
+        painter.end()
+        return QIcon(pixmap)
+
+    @staticmethod
+    def _make_link_toggle_icon(active: bool, *, size: int = 22) -> QIcon:
+        color = "#22c55e" if active else "#ef4444"
+        icon_name = "link" if active else "link-off"
+        icon = MainWindowIcons._tabler_icon(icon_name, color, size, stroke_width=2.0)
+        if not icon.isNull():
+            return icon
+        pixmap = QPixmap(size, size)
+        pixmap.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(pixmap)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        pen = QPen(QColor(color), max(1.8, size / 12.0))
+        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+        painter.setPen(pen)
+        scale = size / 24.0
+        painter.drawEllipse(QRectF(5.0 * scale, 8.0 * scale, 5.0 * scale, 5.0 * scale))
+        painter.drawEllipse(QRectF(13.0 * scale, 8.0 * scale, 5.0 * scale, 5.0 * scale))
+        painter.drawLine(QLineF(10.0 * scale, 10.5 * scale, 14.0 * scale, 10.5 * scale))
+        if active:
+            painter.drawLine(QLineF(8.5 * scale, 8.5 * scale, 10.0 * scale, 10.0 * scale))
+            painter.drawLine(QLineF(14.0 * scale, 10.0 * scale, 15.5 * scale, 8.5 * scale))
+        else:
+            painter.drawLine(QLineF(7.0 * scale, 15.0 * scale, 17.0 * scale, 5.0 * scale))
+        painter.end()
+        return QIcon(pixmap)
+
+    def _make_analysis_spectrum_icon(self, active: bool, *, size: int = 24) -> QIcon:
+        stroke_color = "#22c55e" if active else "#f8fafc"
+        top_layer_color = "#22c55e" if active else stroke_color
+        svg = f"""
+        <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="{stroke_color}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path stroke="none" d="M0 0h24v24H0z" fill="none" />
+            <path d="M12 4l-8 4l8 4l8 -4l-8 -4" stroke="{top_layer_color}" />
+            <path d="M4 12l8 4l8 -4" />
+            <path d="M4 16l8 4l8 -4" />
+        </svg>
+        """
+        icon = self._svg_icon_from_markup(svg, size=size)
+        if not icon.isNull():
+            return icon
+        return self._tabler_icon("stack-middle", stroke_color, size, stroke_width=2.0, fill="none")
+
+    def _make_analysis_preview_icon(self, active: bool, *, size: int = 24) -> QIcon:
+        color = "#22c55e" if active else "#94a3b8"
+        icon = self._tabler_icon("eye", color, size, stroke_width=2.0)
+        if not icon.isNull():
+            return icon
+        pixmap = QPixmap(size, size)
+        pixmap.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(pixmap)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setPen(QPen(QColor(color), max(1.8, size / 14.0), Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
+        scale = size / 24.0
+        painter.drawEllipse(QRectF(5.0 * scale, 8.0 * scale, 14.0 * scale, 8.0 * scale))
+        painter.drawEllipse(QRectF(9.25 * scale, 10.25 * scale, 5.5 * scale, 3.5 * scale))
+        painter.end()
+        return QIcon(pixmap)
+
+    def _make_analysis_all_spectral_cubes_icon(self, active: bool, *, size: int = 24) -> QIcon:
+        color = "#22c55e" if active else "#f8fafc"
+        fill_color = "#22c55e" if active else "none"
+        svg = f"""
+        <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="{color}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path stroke="none" d="M0 0h24v24H0z" fill="none" />
+            <path d="M12 2l-8 4l8 4l8 -4l-8 -4" />
+            <path d="M4 10l8 4l8 -4" />
+            <path d="M4 18l8 4l8 -4" />
+            <path d="M4 14l8 4l8 -4" fill="{fill_color}" />
+        </svg>
+        """
+        icon = self._svg_icon_from_markup(svg, size=size)
+        if not icon.isNull():
+            return icon
+        fallback = self._tabler_icon("stack-3", color, size, stroke_width=2.0, fill=color if active else None)
+        if not fallback.isNull():
+            return fallback
+        pixmap = QPixmap(size, size)
+        pixmap.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(pixmap)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setPen(QColor(color))
+        painter.setBrush(QColor(color) if active else Qt.BrushStyle.NoBrush)
+        scale = size / 24.0
+        painter.drawRoundedRect(QRectF(4.0 * scale, 3.0 * scale, 16.0 * scale, 4.0 * scale), 1.5 * scale, 1.5 * scale)
+        painter.drawRoundedRect(QRectF(4.0 * scale, 9.0 * scale, 16.0 * scale, 4.0 * scale), 1.5 * scale, 1.5 * scale)
+        painter.drawRoundedRect(QRectF(4.0 * scale, 15.0 * scale, 16.0 * scale, 4.0 * scale), 1.5 * scale, 1.5 * scale)
+        painter.end()
+        return QIcon(pixmap)
+
+    def _make_analysis_stop_icon(self, active: bool, *, size: int = 24) -> QIcon:
+        color = "#dc2626" if active else "#ef4444"
+        icon = self._tabler_icon("player-stop-filled", color, size, stroke_width=2.0, fill=color)
+        if not icon.isNull():
+            return icon
+        pixmap = QPixmap(size, size)
+        pixmap.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(pixmap)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor(color))
+        scale = size / 24.0
+        painter.drawRoundedRect(QRectF(6.0 * scale, 6.0 * scale, 12.0 * scale, 12.0 * scale), 2.6 * scale, 2.6 * scale)
+        painter.end()
+        return QIcon(pixmap)
+
+    def _make_spot_label_icon(self, visible: bool) -> QIcon:
+        icon_name = "label-important" if visible else "label-off"
+        color = "#22c55e" if visible else "#94a3b8"
+        icon = self._tabler_icon(icon_name, color, 22, stroke_width=2.0)
+        if not icon.isNull():
+            return icon
+        pixmap = QPixmap(22, 22)
+        pixmap.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(pixmap)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        pen = QPen(QColor(color), 1.8)
+        pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+        painter.setPen(pen)
+        tag = QPainterPath()
+        tag.moveTo(4.0, 6.0)
+        tag.lineTo(14.5, 6.0)
+        tag.lineTo(18.0, 11.0)
+        tag.lineTo(14.5, 16.0)
+        tag.lineTo(4.0, 16.0)
+        tag.closeSubpath()
+        painter.drawPath(tag)
+        painter.drawEllipse(QRectF(6.6, 9.1, 2.2, 2.2))
+        if not visible:
+            painter.drawLine(QPointF(5.0, 17.0), QPointF(17.0, 5.0))
+        painter.end()
+        return QIcon(pixmap)
+
+    def _make_cached_rois_icon(self, visible: bool, *, size: int = 24) -> QIcon:
+        color = "#22c55e" if visible else "#94a3b8"
+        icon = self._tabler_icon("database", color, size, stroke_width=2.0)
+        if not icon.isNull():
+            return icon
+        pixmap = QPixmap(size, size)
+        pixmap.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(pixmap)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        pen = QPen(QColor(color), max(1.5, size / 15.0))
+        painter.setPen(pen)
+        painter.setBrush(QColor(color) if visible else Qt.BrushStyle.NoBrush)
+        scale = size / 24.0
+        painter.drawEllipse(QRectF(5.0 * scale, 4.5 * scale, 14.0 * scale, 4.5 * scale))
+        painter.drawRect(QRectF(5.0 * scale, 7.5 * scale, 14.0 * scale, 9.0 * scale))
+        painter.drawEllipse(QRectF(5.0 * scale, 13.5 * scale, 14.0 * scale, 4.5 * scale))
+        painter.end()
+        return QIcon(pixmap)
+
+    def _histogram_highlight_icon(self, color: str, *, size: int = 24) -> QIcon:
+        svg = f"""<svg xmlns="http://www.w3.org/2000/svg" width="{size}" height="{size}" viewBox="0 0 24 24">
+  <path d="M3 13a1 1 0 0 1 1 -1h4a1 1 0 0 1 1 1v6a1 1 0 0 1 -1 1h-4a1 1 0 0 1 -1 -1l0 -6"
+        fill="none" stroke="{color}" stroke-width="2"/>
+  <path d="M15 9a1 1 0 0 1 1 -1h4a1 1 0 0 1 1 1v10a1 1 0 0 1 -1 1h-4a1 1 0 0 1 -1 -1l0 -10"
+        fill="none" stroke="{color}" stroke-width="2"/>
+  <path d="M9 5a1 1 0 0 1 1 -1h4a1 1 0 0 1 1 1v14a1 1 0 0 1 -1 1h-4a1 1 0 0 1 -1 -1l0 -14"
+        fill="{color}" stroke="{color}" stroke-width="2"/>
+  <path d="M4 20h14"
+        fill="none" stroke="{color}" stroke-width="2" stroke-linecap="round"/>
+</svg>"""
+        return self._svg_icon_from_markup(svg, size=size)
+
+    def _make_view_toggle_icon(self, kind: str, visible: bool) -> QIcon:
+        active_color = "#22c55e"
+        inactive_color = "#94a3b8"
+        color = active_color if visible else inactive_color
+        if kind == "roi":
+            icon = self._tabler_icon("current-location", color, 24, stroke_width=2.1)
+            if not icon.isNull():
+                return icon
+        elif kind == "rings":
+            icon = self._tabler_icon("target", color, 24, stroke_width=2.1)
+            if not icon.isNull():
+                return icon
+        elif kind == "reference_points":
+            icon_name = "map-pin" if visible else "map-pin-off"
+            icon = self._tabler_icon(icon_name, color, 24, stroke_width=2.1)
+            if not icon.isNull():
+                return icon
+        elif kind == "reference_points_all":
+            icon = self._tabler_icon("map-pins", color, 24, stroke_width=2.1)
+            if not icon.isNull():
+                return icon
+        elif kind == "mask":
+            icon_name = "mask" if visible else "mask-off"
+            icon = self._tabler_icon(icon_name, color, 24, stroke_width=2.1)
+            if not icon.isNull():
+                return icon
+        elif kind == "highlight":
+            icon = self._histogram_highlight_icon(color, size=24)
+            if not icon.isNull():
+                return icon
+        pixmap = QPixmap(24, 24)
+        pixmap.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(pixmap)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        pen = QPen(QColor(color), 2.0)
+        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+        painter.setPen(pen)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        if kind == "roi":
+            painter.drawEllipse(QRectF(6.0, 6.0, 12.0, 12.0))
+            painter.drawEllipse(QRectF(10.0, 10.0, 4.0, 4.0))
+        elif kind == "rings":
+            painter.drawEllipse(QRectF(4.5, 4.5, 15.0, 15.0))
+            painter.drawEllipse(QRectF(9.0, 9.0, 6.0, 6.0))
+        elif kind == "reference_points":
+            painter.drawEllipse(QRectF(8.2, 4.5, 7.6, 7.6))
+            painter.drawPath(QPainterPath())
+            painter.drawLine(QLineF(12.0, 11.5, 12.0, 18.2))
+            painter.drawLine(QLineF(12.0, 18.2, 9.0, 14.0))
+            painter.drawLine(QLineF(12.0, 18.2, 15.0, 14.0))
+        elif kind == "reference_points_all":
+            painter.drawEllipse(QRectF(6.0, 4.0, 5.5, 5.5))
+            painter.drawEllipse(QRectF(12.0, 4.0, 5.5, 5.5))
+            painter.drawEllipse(QRectF(9.0, 11.0, 5.5, 5.5))
+            painter.drawLine(QLineF(8.8, 9.2, 7.5, 14.2))
+            painter.drawLine(QLineF(12.2, 9.2, 13.5, 14.2))
+            painter.drawLine(QLineF(10.5, 9.2, 10.5, 16.0))
+        elif kind == "mask":
+            painter.drawRoundedRect(QRectF(4.5, 4.5, 15.0, 15.0), 3.0, 3.0)
+        elif kind == "histogram_log":
+            painter.drawLine(QLineF(6.0, 18.0, 6.0, 5.0))
+            painter.drawLine(QLineF(6.0, 18.0, 19.0, 18.0))
+            if visible:
+                painter.drawLine(QLineF(8.0, 15.5, 10.5, 15.5))
+                painter.drawLine(QLineF(8.0, 12.0, 13.5, 12.0))
+                painter.drawLine(QLineF(8.0, 8.5, 17.0, 8.5))
+                painter.drawText(QRectF(8.0, 4.0, 12.0, 8.0), Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, "log")
+            else:
+                painter.drawLine(QLineF(8.0, 15.5, 16.5, 15.5))
+                painter.drawLine(QLineF(8.0, 12.0, 16.5, 12.0))
+                painter.drawLine(QLineF(8.0, 8.5, 16.5, 8.5))
+                painter.drawText(QRectF(8.0, 4.0, 12.0, 8.0), Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, "lin")
+        else:
+            painter.drawRoundedRect(QRectF(5.0, 6.0, 4.0, 10.0), 1.0, 1.0)
+            painter.setBrush(QColor(color))
+            painter.drawRoundedRect(QRectF(10.0, 4.0, 4.0, 14.0), 1.0, 1.0)
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.drawRoundedRect(QRectF(15.0, 8.0, 4.0, 10.0), 1.0, 1.0)
+        painter.end()
+        return QIcon(pixmap)
+
+    def _background_exclusion_icon(self, icon_name: str, enabled: bool, *, size: int = 18) -> QIcon:
+        color = "#22c55e" if enabled else "#94a3b8"
+        icon = self._tabler_icon(icon_name, color, size, stroke_width=2.1)
+        if not icon.isNull():
+            return icon
+        pixmap = QPixmap(size, size)
+        pixmap.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(pixmap)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setPen(QPen(QColor(color), 2.0))
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        scale = size / 18.0
+        painter.drawRoundedRect(QRectF(3.0 * scale, 3.0 * scale, 12.0 * scale, 12.0 * scale), 3.0 * scale, 3.0 * scale)
+        painter.end()
+        return QIcon(pixmap)
+
+    def _create_view_toggle_button(self, kind: str, visible: bool, tooltip: str) -> QToolButton:
+        button = QToolButton(self)
+        button.setObjectName("toolbarPlainIconButton")
+        button.setAutoRaise(True)
+        button.setCheckable(True)
+        button.setChecked(bool(visible))
+        button.setIcon(self._make_view_toggle_icon(kind, bool(visible)))
+        button.setIconSize(QSize(APP_THEME.plain_icon_inner, APP_THEME.plain_icon_inner))
+        button.setFixedSize(APP_THEME.plain_icon_outer, APP_THEME.plain_icon_outer)
+        button.setToolTip(tooltip)
+        button.setStyleSheet(transparent_icon_button_stylesheet())
+        button.toggled.connect(lambda checked, target=button, toggle_kind=kind: self._update_view_toggle_icon(target, toggle_kind, checked))
+        return button
+
+    def _update_view_toggle_icon(self, button: QToolButton, kind: str, visible: bool) -> None:
+        button.setIcon(self._make_view_toggle_icon(kind, bool(visible)))
+
+    def _refresh_view_toggle_icons(self) -> None:
+        mappings = [
+            (getattr(self, "show_rois_check", None), "roi", self._rois_visible),
+            (getattr(self, "show_rings_check", None), "rings", self._reference_visible),
+            (getattr(self, "show_reference_points_check", None), "reference_points", self._reference_points_visible),
+            (
+                getattr(self, "chromatic_reference_points_all_button", None),
+                "reference_points_all",
+                self._chromatic_reference_points_all_visible,
+            ),
+            (getattr(self, "show_mask_check", None), "mask", self._mask_visible),
+            (getattr(self, "show_highlight_check", None), "highlight", self._highlight_visible),
+        ]
+        for button, kind, visible in mappings:
+            if button is not None:
+                self._update_view_toggle_icon(button, kind, visible)
+        if hasattr(self, "histogram_y_scale_button"):
+            self.histogram_y_scale_button.blockSignals(True)
+            self.histogram_y_scale_button.setChecked(self._histogram_log_y_enabled)
+            self.histogram_y_scale_button.blockSignals(False)
+
+    def _make_mask_toggle_icon(self, visible: bool, *, size: int = 24) -> QIcon:
+        color = QColor("#22c55e" if visible else "#94a3b8")
+        pixmap = QPixmap(size, size)
+        pixmap.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(pixmap)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        rect = QRectF(3.5, 3.5, size - 7.0, size - 7.0)
+        if visible:
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(color)
+            painter.drawRoundedRect(rect, 4.0, 4.0)
+            painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_Clear)
+            text_rect = QRectF(6.0, 4.5, size - 12.0, size - 9.0)
+            font = painter.font()
+            font.setBold(True)
+            font.setPixelSize(max(int(size * 0.58), 10))
+            painter.setFont(font)
+            painter.drawText(text_rect, Qt.AlignmentFlag.AlignCenter, "M")
+        else:
+            pen = QPen(color, 2.0)
+            pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+            painter.setPen(pen)
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.drawRoundedRect(rect, 4.0, 4.0)
+            font = painter.font()
+            font.setBold(True)
+            font.setPixelSize(max(int(size * 0.58), 10))
+            painter.setFont(font)
+            painter.drawText(QRectF(6.0, 4.5, size - 12.0, size - 9.0), Qt.AlignmentFlag.AlignCenter, "M")
+        painter.end()
+        return QIcon(pixmap)
+
+    def _make_scale_bar_icon(self, visible: bool, *, size: int = 24) -> QIcon:
+        color = "#22c55e" if visible else "#f8fafc"
+        svg = f"""
+        <svg xmlns="http://www.w3.org/2000/svg" width="120" height="30" viewBox="0 0 120 30" fill="none">
+            <line x1="6" y1="20" x2="50" y2="20" stroke="{color}" stroke-width="3.5" />
+            <line x1="6" y1="10" x2="6" y2="28" stroke="{color}" stroke-width="3.5" />
+            <line x1="50" y1="10" x2="50" y2="28" stroke="{color}" stroke-width="3.5" />
+        </svg>
+        """
+        pixmap = QPixmap(320, 120)
+        pixmap.fill(Qt.GlobalColor.transparent)
+        renderer = QSvgRenderer(QByteArray(svg.encode("utf-8")))
+        painter = QPainter(pixmap)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        renderer.render(painter, QRectF(0.0, 0.0, 320.0, 120.0))
+        painter.end()
+        return QIcon(pixmap)
+
+    def _create_scale_bar_toggle_button(self, visible: bool) -> QToolButton:
+        button = QToolButton(self)
+        button.setObjectName("toolbarPlainIconButton")
+        button.setAutoRaise(True)
+        button.setCheckable(True)
+        button.setChecked(bool(visible))
+        button.setIcon(self._make_scale_bar_icon(bool(visible)))
+        button.setIconSize(QSize(48, 24))
+        button.setFixedSize(56, APP_THEME.plain_icon_outer)
+        button.setToolTip("Show or hide the scale bar.")
+        button.setStyleSheet(transparent_icon_button_stylesheet())
+        button.toggled.connect(lambda checked, target=button: target.setIcon(self._make_scale_bar_icon(bool(checked))))
+        return button
+
+    def _create_unit_toggle_button(self) -> QToolButton:
+        button = QToolButton(self)
+        button.setObjectName("toolbarPlainIconButton")
+        button.setAutoRaise(True)
+        button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
+        self._normalize_display_units()
+        button.setText("µm" if str(self._state.preprocessing.display_units or "px") == "um" else "px")
+        button.setToolTip("Switch between pixel and micrometer display units.")
+        button.setCursor(Qt.CursorShape.PointingHandCursor)
+        button.setMinimumWidth(34)
+        button.setStyleSheet(
+            """
+            QToolButton {
+                background: transparent;
+                border: none;
+                padding: 0 2px;
+                font-weight: 700;
+                font-size: 12px;
+                color: #f8fafc;
+            }
+            QToolButton:hover {
+                color: #22c55e;
+            }
+            """
+        )
+        self._refresh_unit_toggle_button(button)
+        return button
+
+    def _refresh_unit_toggle_button(self, button: QToolButton | None = None) -> None:
+        target = self.measurement_unit_button if button is None else button
+        if target is None:
+            return
+        self._normalize_display_units()
+        is_um = str(self._state.preprocessing.display_units or "px") == "um"
+        target.setText("µm" if is_um else "px")
+        target.setStyleSheet(
+            f"""
+            QToolButton {{
+                background: transparent;
+                border: none;
+                padding: 0 2px;
+                font-weight: 700;
+                font-size: 12px;
+                color: {'#22c55e' if is_um else '#f8fafc'};
+            }}
+            QToolButton:hover {{
+                color: #22c55e;
+            }}
+            """
+        )
+
+    def _display_unit_text(self) -> str:
+        return "µm" if str(self._state.preprocessing.display_units or "px") == "um" else "px"
+
+    def _build_measurement_controls_row(self) -> QWidget:
+        row = QWidget(self.image_toolbar)
+        layout = QHBoxLayout(row)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(6)
+        layout.addWidget(self.measurement_status_label, 1)
+        layout.addWidget(QLabel("Δx"))
+        layout.addWidget(self.measurement_um_x_spin)
+        layout.addWidget(QLabel("Δy"))
+        layout.addWidget(self.measurement_um_y_spin)
+        layout.addWidget(self.measurement_apply_button)
+        return row
+
+    def _create_image_tool_icon_button(self, action: QAction, *, accent: str) -> QToolButton:
+        button = QToolButton(self)
+        button.setDefaultAction(action)
+        button.setObjectName("leftSpotToolButton")
+        button.setAutoRaise(True)
+        button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly)
+        button.setIconSize(QSize(28, 28))
+        button.setFixedSize(36, 36)
+        hover, pressed, checked = icon_accent_colors(accent)
+        button.setStyleSheet(f"""
+            QToolButton {{
+                background: transparent;
+                border: 1px solid transparent;
+                border-radius: 8px;
+                padding: 2px;
+            }}
+            QToolButton:hover {{
+                background: {hover};
+                border: 1px solid #e2e8f0;
+                border-radius: 8px;
+            }}
+            QToolButton:pressed {{
+                background: {pressed};
+                border: 1px solid #94a3b8;
+                border-radius: 8px;
+            }}
+            QToolButton:checked {{
+                background: {checked};
+                border: 1px solid #22c55e;
+                border-radius: 8px;
+            }}
+        """)
+        return button
+
+    def _create_rotation_fill_toggle_button(self) -> QToolButton:
+        button = QToolButton(self)
+        button.setObjectName("leftSpotToolButton")
+        button.setAutoRaise(True)
+        button.setCheckable(True)
+        button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly)
+        button.setIconSize(QSize(28, 28))
+        button.setFixedSize(36, 36)
+        hover, pressed, checked = icon_accent_colors("yellow")
+        button.setStyleSheet(f"""
+            QToolButton {{
+                background: transparent;
+                border: 1px solid transparent;
+                border-radius: 8px;
+                padding: 2px;
+            }}
+            QToolButton:hover {{
+                background: {hover};
+                border: 1px solid #e2e8f0;
+                border-radius: 8px;
+            }}
+            QToolButton:pressed {{
+                background: {pressed};
+                border: 1px solid #94a3b8;
+                border-radius: 8px;
+            }}
+            QToolButton:checked {{
+                background: {checked};
+                border: 1px solid #22c55e;
+                border-radius: 8px;
+            }}
+        """)
+        return button
+
+    def _create_label_visibility_button(self, visible: bool) -> QToolButton:
+        button = QToolButton(self)
+        button.setObjectName("spotLabelIconButton")
+        button.setAutoRaise(True)
+        button.setIconSize(QSize(APP_THEME.plain_icon_inner, APP_THEME.plain_icon_inner))
+        button.setFixedSize(APP_THEME.plain_icon_outer, APP_THEME.plain_icon_outer)
+        button.setCheckable(True)
+        button.setChecked(bool(visible))
+        button.setIcon(self._make_spot_label_icon(bool(visible)))
+        button.setToolTip("Show or hide ROI labels. This works independently of manual ROI editing.")
+        button.setStyleSheet(transparent_icon_button_stylesheet())
+        button.toggled.connect(self._update_spot_label_button_icon)
+        return button
+
+    def _update_spot_label_button_icon(self, checked: bool) -> None:
+        icon = self._make_spot_label_icon(bool(checked))
+        for attr_name in ("roi_editor_labels_button", "bottom_roi_labels_button"):
+            button = getattr(self, attr_name, None)
+            if button is not None:
+                button.setIcon(icon)
+
+    @staticmethod
+    def _draw_mask_panel_fallback_icon(icon_name: str, color: QColor, *, size: int = 20) -> QIcon:
+        pixmap = QPixmap(size, size)
+        pixmap.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(pixmap)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        pen = QPen(color, 1.9)
+        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+        painter.setPen(pen)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+
+        if icon_name in {"square-rounded-plus", "square-rounded-minus"}:
+            painter.drawRoundedRect(QRectF(3.0, 3.0, size - 6.0, size - 6.0), 4.0, 4.0)
+            painter.drawLine(QPointF(6.0, size / 2.0), QPointF(size - 6.0, size / 2.0))
+            if icon_name.endswith("plus"):
+                painter.drawLine(QPointF(size / 2.0, 6.0), QPointF(size / 2.0, size - 6.0))
+        elif icon_name == "sparkles":
+            painter.drawLine(QPointF(size / 2.0, 3.5), QPointF(size / 2.0, 8.0))
+            painter.drawLine(QPointF(size / 2.0, 12.0), QPointF(size / 2.0, size - 3.5))
+            painter.drawLine(QPointF(3.5, size / 2.0), QPointF(8.0, size / 2.0))
+            painter.drawLine(QPointF(12.0, size / 2.0), QPointF(size - 3.5, size / 2.0))
+            painter.drawLine(QPointF(5.2, 5.2), QPointF(8.3, 8.3))
+            painter.drawLine(QPointF(size - 5.2, 5.2), QPointF(size - 8.3, 8.3))
+            painter.drawLine(QPointF(5.2, size - 5.2), QPointF(8.3, size - 8.3))
+            painter.drawLine(QPointF(size - 5.2, size - 5.2), QPointF(size - 8.3, size - 8.3))
+        elif icon_name == "download":
+            painter.drawLine(QPointF(size / 2.0, 4.0), QPointF(size / 2.0, size - 8.0))
+            painter.drawLine(QPointF(size / 2.0, size - 8.0), QPointF(size / 2.0 - 3.2, size - 11.2))
+            painter.drawLine(QPointF(size / 2.0, size - 8.0), QPointF(size / 2.0 + 3.2, size - 11.2))
+            painter.drawLine(QPointF(4.5, size - 4.5), QPointF(size - 4.5, size - 4.5))
+        elif icon_name == "upload":
+            painter.drawLine(QPointF(size / 2.0, size - 4.0), QPointF(size / 2.0, 8.0))
+            painter.drawLine(QPointF(size / 2.0, 8.0), QPointF(size / 2.0 - 3.2, 11.2))
+            painter.drawLine(QPointF(size / 2.0, 8.0), QPointF(size / 2.0 + 3.2, 11.2))
+            painter.drawLine(QPointF(4.5, size - 4.5), QPointF(size - 4.5, size - 4.5))
+        elif icon_name in {"eye", "eye-closed"}:
+            path = QPainterPath()
+            path.moveTo(4.5, size / 2.0)
+            path.quadTo(size / 2.0, 5.5, size - 4.5, size / 2.0)
+            path.quadTo(size / 2.0, size - 5.5, 4.5, size / 2.0)
+            painter.drawPath(path)
+            painter.drawEllipse(QRectF(size / 2.0 - 2.0, size / 2.0 - 2.0, 4.0, 4.0))
+            if icon_name == "eye-closed":
+                painter.drawLine(QPointF(5.0, size - 5.0), QPointF(size - 5.0, 5.0))
+        else:
+            painter.drawEllipse(QRectF(4.0, 4.0, size - 8.0, size - 8.0))
+
+        painter.end()
+        return QIcon(pixmap)
+
+    def _create_left_spot_editor_button(self, action: QAction, *, primary: bool = False, accent: str = "neutral") -> QToolButton:
+        button = self._create_toolbar_action_button(action, primary=primary, icon_only=True)
+        button.setObjectName("leftSpotToolButton")
+        button.setAutoRaise(True)
+        button.setIconSize(QSize(APP_THEME.icon_button_inner, APP_THEME.icon_button_inner))
+        button.setFixedSize(APP_THEME.icon_button_outer, APP_THEME.icon_button_outer)
+        hover, pressed, checked = icon_accent_colors(accent)
+        button.setStyleSheet(
+            transparent_icon_button_stylesheet(
+                hover=hover,
+                pressed=pressed,
+                checked=checked,
+            )
+        )
+        return button
+
+    def _clear_layout(self, layout: QHBoxLayout | QVBoxLayout) -> None:
+        while layout.count():
+            item = layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+
+    def _populate_left_spot_editor_controls(self) -> None:
+        self._clear_layout(self.left_spot_editor_layout)
+        buttons = [
+            (self.roi_list_action, {"accent": "orange"}),
+            (self.spot_edit_action, {"primary": True}),
+            (self.roi_add_action, {"accent": "green"}),
+            (self.roi_array_action, {"accent": "green"}),
+            (self.roi_move_action, {"accent": "blue"}),
+            (self.remove_rois_action, {"accent": "red"}),
+        ]
+        for action, kwargs in buttons:
+            self.left_spot_editor_layout.addWidget(self._create_left_spot_editor_button(action, **kwargs))
+        self.left_spot_editor_layout.addWidget(self.roi_editor_labels_button)
+        self.left_spot_editor_layout.addStretch(1)
+
+    def _create_toolbar_row(self, widgets: list[QWidget]) -> QWidget:
+        row = QWidget(self.image_toolbar)
+        layout = QHBoxLayout(row)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(3)
+        for widget in widgets:
+            layout.addWidget(widget)
+        layout.addStretch(1)
+        return row
+
+    def _create_toolbar_section(self, title: str, rows: list[QWidget]) -> QWidget:
+        section = QWidget(self.image_toolbar)
+        section.setObjectName("toolbarSection")
+        layout = QVBoxLayout(section)
+        layout.setContentsMargins(4, 3, 4, 3)
+        layout.setSpacing(2)
+        for row in rows:
+            layout.addWidget(row)
+        return section
+
+    def _create_menu_bar(self) -> None:
+        menu_bar = self.menuBar()
+        file_menu = menu_bar.addMenu("&File")
+        file_menu.addAction("Load dataset...", self._dataset_controller.browse_folder)
+        file_menu.addAction("Export Stack to Zarr...", self._dataset_controller.export_current_dataset_to_ome_zarr)
+        file_menu.addSeparator()
+        file_menu.addAction("E&xit", self.close)
+
+        edit_menu = menu_bar.addMenu("&Edit")
+        edit_menu.addAction(self.undo_action)
+        edit_menu.addAction(self.redo_action)
+        edit_menu.addAction(self.clear_roi_selection_button.text(), self._clear_spot_selection)
+
+        view_menu = menu_bar.addMenu("&View")
+        view_menu.addAction(self.reset_layout_action)
+        view_menu.addAction(self.reset_dock_layout_action)
+        view_menu.addAction(self.expand_left_panels_action)
+        view_menu.addAction(self.collapse_left_panels_action)
+        view_menu.addSeparator()
+        dock_menu = view_menu.addMenu("Panels")
+        dock_menu.addAction(self.show_all_panels_action)
+        dock_menu.addAction(self.hide_all_panels_action)
+        dock_menu.addSeparator()
+        dock_menu.addAction(self.workflow_panel.toggleViewAction())
+        dock_menu.addAction(self.image_panel.toggleViewAction())
+        dock_menu.addAction(self.histogram_panel.toggleViewAction())
+        dock_menu.addAction(self.spectra_panel.toggleViewAction())
+        dock_menu.addAction(self.sensorgram_panel.toggleViewAction())
+        dock_menu.addAction(self.roi_list_panel.toggleViewAction())
+        view_menu.addSeparator()
+        self.theme_blue_action = view_menu.addAction("Blue Dark Theme")
+        self.theme_blue_action.setCheckable(True)
+        self.theme_gray_action = view_menu.addAction("Gray Dark Theme")
+        self.theme_gray_action.setCheckable(True)
+        self.theme_blue_action.triggered.connect(lambda checked: checked and self._set_ui_theme("blue"))
+        self.theme_gray_action.triggered.connect(lambda checked: checked and self._set_ui_theme("gray"))
+        theme_group = QActionGroup(self)
+        theme_group.setExclusive(True)
+        theme_group.addAction(self.theme_blue_action)
+        theme_group.addAction(self.theme_gray_action)
+        current_theme = str(self._settings.value("ui/theme", "blue"))
+        self.theme_gray_action.setChecked(current_theme == "gray")
+        self.theme_blue_action.setChecked(current_theme != "gray")
+        view_menu.addSeparator()
+        ui_scale_menu = view_menu.addMenu("UI Scale")
+        ui_scale_group = QActionGroup(self)
+        ui_scale_group.setExclusive(True)
+        self._ui_scale_actions: dict[str, QAction] = {}
+        _UI_SCALE_OPTIONS = [
+            ("auto",  "Auto (system default)"),
+            ("0.75",  "75%"),
+            ("0.85",  "85%"),
+            ("1.0",   "100%  —  Normal"),
+            ("1.15",  "115%"),
+            ("1.25",  "125%"),
+            ("1.5",   "150%"),
+            ("1.75",  "175%"),
+            ("2.0",   "200%"),
+        ]
+        current_scale = str(self._settings.value("ui/scale_factor", "auto") or "auto")
+        for _sv, _sl in _UI_SCALE_OPTIONS:
+            _a = ui_scale_menu.addAction(_sl)
+            _a.setCheckable(True)
+            _a.setChecked(_sv == current_scale)
+            _a.triggered.connect(lambda checked, v=_sv: checked and self._set_ui_scale_factor(v))
+            ui_scale_group.addAction(_a)
+            self._ui_scale_actions[_sv] = _a
+
+        analysis_menu = menu_bar.addMenu("&Analysis")
+        analysis_menu.addAction(self.calculate_spectrum_action)
+
+        preferences_menu = menu_bar.addMenu("&Preferences")
+        preferences_menu.addAction(self.reset_layout_action)
+        preferences_menu.addSeparator()
+        preferences_menu.addAction("Export processing profile", self._export_processing_profile)
+        preferences_menu.addAction("Import processing profile", self._import_processing_profile)
+        preferences_menu.addSeparator()
+        startup_restore_menu = preferences_menu.addMenu("Startup restore")
+        startup_restore_group = QActionGroup(self)
+        startup_restore_group.setExclusive(True)
+        self.startup_restore_timeout_actions = {}
+        for seconds, label in ((5, "Prompt restore (5s)"), (0, "Auto restore (0s)")):
+            action = startup_restore_menu.addAction(label)
+            action.setCheckable(True)
+            action.triggered.connect(lambda checked, value=seconds: checked and self._set_startup_restore_timeout_seconds(value))
+            startup_restore_group.addAction(action)
+            self.startup_restore_timeout_actions[seconds] = action
+        current_timeout = self._startup_restore_timeout_seconds()
+        if current_timeout not in self.startup_restore_timeout_actions:
+            current_timeout = 5
+        self._set_startup_restore_timeout_seconds(current_timeout)
+
+
+        help_menu = menu_bar.addMenu("&Help")
+        help_menu.addAction(self.shortcuts_action)
+        help_menu.addAction("Workflow notes", self._show_workflow_notes)
+        help_menu.addAction(self.about_action)
+
+    def _create_view_control(self, name: str, toggle: QWidget, color_button: QToolButton, slider: QWidget) -> QWidget:
+        row = QWidget(self.image_toolbar)
+        layout = QHBoxLayout(row)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(2)
+        toggle.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        color_button.setProperty("toolRole", "swatch")
+        slider.setFixedWidth(24)
+        if name:
+            name_label = QLabel(name, row)
+            name_label.setObjectName("toolbarMiniLabel")
+            name_label.setMinimumWidth(max(32, name_label.fontMetrics().horizontalAdvance(name) + 6))
+            layout.addWidget(name_label)
+        layout.addWidget(toggle)
+        layout.addWidget(color_button)
+        layout.addWidget(slider)
+        return row
+
+    def _create_toolbar_icon_toggle_control(self, name: str, toggle: QWidget) -> QWidget:
+        row = QWidget(self.image_toolbar)
+        layout = QHBoxLayout(row)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(2)
+        toggle.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        if name:
+            name_label = QLabel(name, row)
+            name_label.setObjectName("toolbarMiniLabel")
+            name_label.setMinimumWidth(max(42, name_label.fontMetrics().horizontalAdvance(name) + 6))
+            layout.addWidget(name_label)
+        layout.addWidget(toggle)
+        return row
+
+    def _set_spinbox_width(self, spinbox: QSpinBox | QDoubleSpinBox, text: str, *, minimum: int = 46) -> None:
+        suffix = spinbox.suffix()
+        full_text = text if (not suffix or text.endswith(suffix)) else text + suffix
+        text_w = spinbox.fontMetrics().horizontalAdvance(full_text)
+        # Derive button+frame overhead from sizeHint(), which Qt computes from internal
+        # style metrics.  This is correct at any DPI/theme and works before the widget
+        # has been shown or placed in a layout (unlike subControlRect, which returns a
+        # zero-width rect when the widget geometry is still 0×0).
+        sh_w = spinbox.sizeHint().width()
+        max_text = spinbox.prefix() + spinbox.textFromValue(spinbox.maximum()) + spinbox.suffix()
+        overhead = max(sh_w - spinbox.fontMetrics().horizontalAdvance(max_text), 30)
+        spinbox.setFixedWidth(max(minimum, text_w + overhead))
+
+    def _set_combo_width(self, combo: QComboBox, texts: list[str], *, minimum: int = 58) -> None:
+        widest = max((combo.fontMetrics().horizontalAdvance(text) for text in texts), default=0)
+        combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToContents)
+        combo.setFixedWidth(max(minimum, widest + 10))
+
+    def _apply_right_aligned_control_text(self) -> None:
+        for line_edit in self.findChildren(QLineEdit):
+            line_edit.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        for spinbox in self.findChildren(QAbstractSpinBox):
+            spinbox.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        for combo in self.findChildren(QComboBox):
+            combo.setEditable(True)
+            combo.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
+            line_edit = combo.lineEdit()
+            if line_edit is not None:
+                line_edit.setReadOnly(True)
+                line_edit.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+                line_edit.setFrame(False)
+
+    def _apply_compact_control_widths(self) -> None:
+        self._set_spinbox_width(self.chromatic_sample_count_spin, "777")
+        self._set_combo_width(self.chromatic_feature_count_spin, ["5", "15", "30"], minimum=54)
+        self._set_spinbox_width(self.chromatic_landmark_id_spin, "99", minimum=62)
+        self._set_spinbox_width(self.sample_diameter_spin, "9999.99")
+        self._set_spinbox_width(self.reference_inner_diameter_spin, "9999.99")
+        self._set_spinbox_width(self.reference_outer_diameter_spin, "9999.99")
+        self._set_spinbox_width(self.background_smoothing_sigma_spin, "2000 px", minimum=72)
+        self._set_combo_width(self.background_smoothing_binning_combo, ["4x4"])
+        self._set_combo_width(self.mask_mode_combo, ["Local contrast"], minimum=96)
+        self._set_spinbox_width(self.mask_profile_sigma_spin, "2000 px", minimum=72)
+        self._set_spinbox_width(self.mask_relative_threshold_spin, "500.0 %", minimum=78)
+        self._set_spinbox_width(self.mask_local_contrast_sigma_spin, "500.0 %", minimum=78)
+        self._set_spinbox_width(self.mask_local_z_spin, "20.0 sigma", minimum=84)
+        self._set_spinbox_width(self.mask_morph_radius_spin, "100 px", minimum=64)
+        self._set_spinbox_width(self.mask_local_contrast_z_spin, "20.0 sigma", minimum=84)
+        self._set_spinbox_width(self.mask_morphology_radius_spin, "100 px", minimum=64)
+        self._set_spinbox_width(self.mask_relative_profile_sigma_spin, "2000 px", minimum=72)
+        self._set_combo_width(self.mask_draw_mode_combo, ["Erase"])
+        self._set_spinbox_width(self.mask_brush_size_spin, "200 px", minimum=68)
+        self._set_spinbox_width(self.histogram_bins_spin, "8192 DN", minimum=70)
+        self._set_spinbox_width(self.analysis_poly_order_spin, "99", minimum=52)
+        self._set_spinbox_width(self.ome_zarr_chunk_spin, "999 px", minimum=60)
+        self._set_combo_width(self.ome_zarr_shard_mode_combo, ["1 spectral cube"], minimum=220)
+        self._set_combo_width(self.analysis_metric_combo, ["Maximum", "Centroid"], minimum=80)
+        self._set_spinbox_width(self.analysis_start_spectral_cube_spin, "99999", minimum=66)
+        self._set_spinbox_width(self.analysis_end_spectral_cube_spin, "99999", minimum=66)
+        self._set_spinbox_width(self.array_rows_spin, "100")
+        self._set_spinbox_width(self.array_cols_spin, "100")
+        self._set_spinbox_width(self.array_spacing_spin, "1000.00", minimum=68)
+        self._set_spinbox_width(self.measurement_um_x_spin, "1000000", minimum=58)
+        self._set_spinbox_width(self.measurement_um_y_spin, "1000000", minimum=58)
+        self._set_spinbox_width(self.spectral_cube_spin, "99999", minimum=66)
+        self._set_spinbox_width(self.wavelength_spin, "99999 nm", minimum=82)
+        self._set_combo_width(self.chromatic_subpixel_precision_combo, ["1", "4", "9"], minimum=42)
+        navigation_control_width = max(self.spectral_cube_spin.sizeHint().width(), self.wavelength_spin.sizeHint().width(), 82)
+        navigation_slider_width = max(navigation_control_width + 80, 170)
+        self.spectral_cube_spin.setFixedWidth(navigation_control_width)
+        self.wavelength_spin.setFixedWidth(navigation_control_width)
+        self.spectral_cube_slider.setFixedWidth(navigation_slider_width)
+        self.wavelength_slider.setFixedWidth(navigation_slider_width)

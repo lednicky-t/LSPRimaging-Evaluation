@@ -10,7 +10,7 @@ from scipy import ndimage
 
 from lspr_imaging_app.domain.models import MaskSettings
 from lspr_imaging_app.io.dataset import dataset_load_plane, dataset_plane_shape, load_image_array, load_image_shape
-from lspr_imaging_app.processing.preprocess import create_figure_mask
+from lspr_imaging_app.processing.preprocess import apply_spatial_mask, create_figure_mask, spatial_coordinate_maps
 
 
 class MaskController:
@@ -327,3 +327,516 @@ class MaskController:
         else:
             window._mask_figure_preview = None
         window._update_ignore_mask_overlay()
+
+    def mask_changes_affect_preprocessing(self) -> bool:
+        window = self.window
+        return bool(
+            window._state.preprocessing.flatten_background_enabled
+            and window._state.preprocessing.flatten_background_exclude_mask
+        )
+
+    def mask_change_status_suffix(self) -> str:
+        if self.mask_changes_affect_preprocessing():
+            return " Background removal will use it on the next image refresh."
+        return ""
+
+    def session_mask_payload(self) -> dict | None:
+        window = self.window
+        if window._current_file_mask is None or window._current_record_path is None:
+            return None
+        source_record = window._reference_record_for_record_path(window._current_record_path)
+        mask_record_path = source_record.path if source_record is not None else window._current_record_path
+        return {
+            "record_path": str(mask_record_path),
+            "mask": window._current_file_mask.copy(),
+        }
+
+    def manual_mask_required(self, *, create_if_missing: bool) -> np.ndarray | None:
+        window = self.window
+        if window._current_processed_image is None:
+            window._set_status_text("Load an image first to edit the mask.")
+            return None
+        if not window.ignore_marked_check.isChecked():
+            window.ignore_marked_check.setChecked(True)
+        if window._current_file_mask is None and create_if_missing:
+            default_path = self.current_mask_file_path()
+            raw_shape = (
+                load_image_shape(str(window._current_record_path))
+                if window._current_record_path is not None
+                else window._current_processed_image.shape[:2]
+            )
+            blank_mask = np.zeros(raw_shape, dtype=bool)
+            self.set_current_file_mask(blank_mask, default_path, refresh_preview=False)
+        if window._current_file_mask is None:
+            window._set_status_text("Load a file mask or start drawing with Pencil first.")
+            return None
+        return window._current_file_mask
+
+    def mask_structure(self, radius_px: int) -> np.ndarray:
+        radius = max(int(radius_px), 1)
+        yy, xx = np.ogrid[-radius : radius + 1, -radius : radius + 1]
+        return (xx * xx + yy * yy) <= radius * radius
+
+    def apply_mask_brush(self, point: tuple[float, float]) -> None:
+        window = self.window
+        mask = self.manual_mask_required(create_if_missing=True)
+        if mask is None or window._current_processed_image is None:
+            return
+        brush_radius = max(float(window.mask_brush_size_spin.value()) / 2.0, 0.5)
+        center_x = float(point[0])
+        center_y = float(point[1])
+        height, width = mask.shape
+        x_min = max(int(np.floor(center_x - brush_radius)), 0)
+        x_max = min(int(np.ceil(center_x + brush_radius)) + 1, width)
+        y_min = max(int(np.floor(center_y - brush_radius)), 0)
+        y_max = min(int(np.ceil(center_y + brush_radius)) + 1, height)
+        if x_min >= x_max or y_min >= y_max:
+            return
+        yy, xx = np.ogrid[y_min:y_max, x_min:x_max]
+        brush_mask = (xx - center_x) ** 2 + (yy - center_y) ** 2 <= brush_radius**2
+        coord_maps = self.processed_to_raw_maps()
+        if coord_maps is None:
+            return
+        x_map, y_map = coord_maps
+        raw_x = np.rint(x_map[y_min:y_max, x_min:x_max][brush_mask]).astype(np.int32, copy=False)
+        raw_y = np.rint(y_map[y_min:y_max, x_min:x_max][brush_mask]).astype(np.int32, copy=False)
+        valid = (
+            (raw_x >= 0)
+            & (raw_y >= 0)
+            & (raw_x < mask.shape[1])
+            & (raw_y < mask.shape[0])
+        )
+        if not np.any(valid):
+            return
+        draw_mode = str(window.mask_draw_mode_combo.currentData() or "add")
+        if draw_mode == "erase":
+            mask[raw_y[valid], raw_x[valid]] = False
+        else:
+            mask[raw_y[valid], raw_x[valid]] = True
+        window._append_workflow_log_throttled(
+            "mask_brush",
+            f"Mask brush | mode={draw_mode} | points={int(np.count_nonzero(valid))} | point=({center_x:.1f},{center_y:.1f})",
+            level="debug",
+            min_interval=0.5,
+        )
+        window._invalidate_image_analysis_caches()
+        window._update_ignore_mask_overlay()
+
+    def finalize_mask_edit(self) -> None:
+        window = self.window
+        if window._current_file_mask is None:
+            return
+        window._external_mask_revision += 1
+        window._invalidate_image_analysis_caches()
+        window._invalidate_background_profile_cache()
+        window._update_ignore_mask_overlay()
+        window._schedule_histogram_refresh()
+        if window._mask_section_applied():
+            window._current_image_key = None
+            window._schedule_image_refresh()
+        window._commit_prepared_undo_snapshot()
+        window._append_workflow_log(
+            f"Mask finalize | record={window._current_record_path} | shape={window._current_file_mask.shape}",
+            level="debug",
+        )
+        window._save_processing_state_for_dataset()
+        window._set_status_text(f"Mask updated. Save if you want to keep it on disk.{self.mask_change_status_suffix()}")
+
+    def current_mask_file_path(self) -> Path | None:
+        window = self.window
+        if window._current_record_path is None:
+            return None
+        reference_record = window._reference_record_for_record_path(window._current_record_path)
+        if reference_record is not None:
+            return reference_record.path.with_name(f"{reference_record.path.stem}_mask.png")
+        return window._current_record_path.with_name(f"{window._current_record_path.stem}_mask.png")
+
+    def mask_file_path_for_record(self, record_path: Path) -> Path:
+        return record_path.with_name(f"{record_path.stem}_mask.png")
+
+    def current_background_file_path(self) -> Path | None:
+        window = self.window
+        if window._current_record_path is None:
+            return None
+        reference_record = window._reference_record_for_record_path(window._current_record_path)
+        if reference_record is not None:
+            return reference_record.path.with_name(f"{reference_record.path.stem}_background.png")
+        return window._current_record_path.with_name(f"{window._current_record_path.stem}_background.png")
+
+    def current_external_mask(self) -> np.ndarray | None:
+        window = self.window
+        if window._current_record_path is None:
+            return None
+        processed_mask, _processed = self.effective_external_mask_for_record(window._current_record_path, processed_space=True)
+        return processed_mask
+
+    def effective_external_mask_for_record(
+        self,
+        record_path: Path,
+        *,
+        processed_space: bool = False,
+    ) -> tuple[np.ndarray | None, bool]:
+        window = self.window
+        if not window._mask_section_applied():
+            return None, False
+        return self.external_mask_for_record(record_path, processed_space=processed_space)
+
+    def external_mask_for_record(self, record_path: Path, *, processed_space: bool = False) -> tuple[np.ndarray | None, bool]:
+        window = self.window
+        source_record_path = record_path
+        reference_record = window._reference_record_for_record_path(record_path)
+        if reference_record is not None:
+            source_record_path = reference_record.path
+        expected_mask_path = self.mask_file_path_for_record(source_record_path)
+        if window._current_file_mask is not None and (
+            window._current_file_mask_path == expected_mask_path
+            or (
+                window._current_file_mask_path is None
+                and self.current_mask_file_path() == expected_mask_path
+            )
+        ):
+            source_mask = window._current_file_mask
+        else:
+            if not expected_mask_path.exists():
+                return None, False
+            try:
+                source_mask = self.read_mask_image(expected_mask_path, load_image_shape(str(source_record_path)))
+            except Exception:
+                return None, False
+
+        if not processed_space:
+            return source_mask, False
+
+        if source_mask is None:
+            return None, False
+
+        # Keep the image pixels untouched here. Chromatic correction stays in the
+        # analysis geometry path; masks remain in the spatially preprocessed space.
+        return apply_spatial_mask(source_mask, window._state.preprocessing), True
+
+    def external_mask_signature(self, image_key: tuple[int, float] | None = None) -> tuple[object, ...] | None:
+        window = self.window
+        if window._current_file_mask is None and window._current_record_path is None:
+            return None
+        target_key = image_key if image_key is not None else window._current_image_key
+        return (
+            window._external_mask_revision,
+            str(window._current_file_mask_path) if window._current_file_mask_path is not None else None,
+            None if window._current_file_mask is None else window._current_file_mask.shape,
+            window._raw_preprocessing_signature(),
+            window._chromatic_signature_for_image_key(target_key),
+        )
+
+    def processed_to_raw_maps(self) -> tuple[np.ndarray, np.ndarray] | None:
+        window = self.window
+        if window._current_record_path is None or window._current_processed_image is None:
+            return None
+        raw_image = load_image_array(str(window._current_record_path))
+        signature = (
+            str(window._current_record_path),
+            raw_image.shape[:2],
+            window._raw_preprocessing_signature(),
+        )
+        if (
+            window._processed_to_raw_map_signature == signature
+            and window._processed_to_raw_x_map is not None
+            and window._processed_to_raw_y_map is not None
+        ):
+            return window._processed_to_raw_x_map, window._processed_to_raw_y_map
+        x_map, y_map = spatial_coordinate_maps(raw_image.shape[:2], window._state.preprocessing)
+        window._processed_to_raw_map_signature = signature
+        window._processed_to_raw_x_map = x_map
+        window._processed_to_raw_y_map = y_map
+        return x_map, y_map
+
+    def set_current_file_mask(
+        self,
+        mask: np.ndarray | None,
+        path: Path | None,
+        *,
+        refresh_preview: bool,
+    ) -> bool:
+        window = self.window
+        normalized = None if mask is None else np.asarray(mask, dtype=bool)
+        normalized_path = path
+        if normalized is not None and normalized_path is None:
+            normalized_path = self.current_mask_file_path()
+        same_path = window._current_file_mask_path == normalized_path
+        same_mask = (
+            (window._current_file_mask is None and normalized is None)
+            or (
+                window._current_file_mask is not None
+                and normalized is not None
+                and window._current_file_mask.shape == normalized.shape
+                and np.array_equal(window._current_file_mask, normalized)
+            )
+        )
+        if same_path and same_mask:
+            window._append_workflow_log_throttled(
+                "current_file_mask_unchanged",
+                f"Current file mask unchanged | path={normalized_path} | shape={None if normalized is None else normalized.shape}",
+                level="debug",
+                min_interval=1.0,
+            )
+            return False
+
+        window._current_file_mask = None if normalized is None else normalized.copy()
+        window._current_file_mask_path = normalized_path
+        window._current_file_mask_session_source_path = None
+        window._external_mask_revision += 1
+        window._append_workflow_log_throttled(
+            "current_file_mask_set",
+            f"Current file mask set | path={normalized_path} | shape={None if normalized is None else normalized.shape} | rev={window._external_mask_revision}",
+            level="debug",
+            min_interval=0.5,
+        )
+        window._invalidate_image_analysis_caches()
+        window._invalidate_background_profile_cache()
+        self.update_mask_file_button_state()
+
+        if refresh_preview and window._current_processed_image is not None:
+            window._update_ignore_mask_overlay()
+            window._schedule_histogram_refresh()
+            if window._mask_section_applied():
+                window._current_image_key = None
+                window._schedule_image_refresh()
+        return True
+
+    def read_mask_image(self, path: Path, expected_shape: tuple[int, int]) -> np.ndarray:
+        with Image.open(path) as image:
+            mask = np.array(image.convert("L"), dtype=np.uint8)
+        if mask.shape != expected_shape:
+            raise ValueError(
+                f"Mask size {mask.shape[1]} x {mask.shape[0]} px does not match the current image "
+                f"{expected_shape[1]} x {expected_shape[0]} px."
+            )
+        return mask >= 128
+
+    def auto_load_mask_for_current_record(self) -> None:
+        window = self.window
+        if window._current_record_path is None:
+            self.set_current_file_mask(None, None, refresh_preview=False)
+            return
+        source_record = window._reference_record_for_record_path(window._current_record_path)
+        mask_record_path = source_record.path if source_record is not None else window._current_record_path
+        default_path = self.mask_file_path_for_record(mask_record_path)
+        expected_shape = load_image_shape(str(mask_record_path))
+        if window._current_file_mask is not None and window._current_file_mask_session_source_path is not None:
+            if window._current_file_mask.shape == expected_shape:
+                if window._current_file_mask_session_source_path == mask_record_path:
+                    return
+                if source_record is not None and window._current_file_mask_session_source_path == source_record.path:
+                    return
+            self.set_current_file_mask(None, None, refresh_preview=False)
+            window._current_file_mask_session_source_path = None
+            if default_path is None or not default_path.exists():
+                return
+        if (
+            window._current_file_mask is not None
+            and window._current_file_mask.shape == expected_shape
+            and (
+                window._current_file_mask_path == default_path
+                or (
+                    window._current_file_mask_path is None
+                    and self.current_mask_file_path() == default_path
+                )
+            )
+        ):
+            # Keep unsaved in-memory edits for the current image/reference slot.
+            return
+        if default_path is None or not default_path.exists():
+            self.set_current_file_mask(None, None, refresh_preview=False)
+            return
+        try:
+            mask = self.read_mask_image(default_path, expected_shape)
+        except Exception as exc:
+            self.set_current_file_mask(None, None, refresh_preview=False)
+            window._set_status_text(f"Skipped {default_path.name}: {exc}")
+            return
+        self.set_current_file_mask(mask, default_path, refresh_preview=False)
+
+    def set_mask_preview_button_icon(self, button, shown: bool) -> None:
+        window = self.window
+        icon_name = "eye" if shown else "eye-closed"
+        tooltip = "Hide preview." if shown else "Show preview."
+        button.setIcon(window._mask_panel_icon(icon_name, color="#38bdf8", size=20))
+        button.setToolTip(tooltip)
+
+    def current_mask_canvas(self) -> tuple[np.ndarray, Path | None] | None:
+        window = self.window
+        if window._current_record_path is None:
+            return None
+        raw_shape = load_image_shape(str(window._current_record_path))
+        if window._current_file_mask is not None and window._current_file_mask.shape == raw_shape:
+            return window._current_file_mask.copy(), window._current_file_mask_path
+        return np.zeros(raw_shape, dtype=bool), window._current_file_mask_path
+
+    def ensure_mask_section_applied(self) -> None:
+        window = self.window
+        if not window._mask_section_applied():
+            window.mask_section.set_applied(True)
+
+    def refresh_after_mask_change(self, status: str) -> None:
+        window = self.window
+        window._mask_state_revision += 1
+        window._invalidate_image_analysis_caches()
+        window._invalidate_background_profile_cache()
+        window._update_ignore_mask_overlay()
+        window._schedule_histogram_refresh()
+        if window._mask_section_applied():
+            window._current_image_key = None
+            window._schedule_image_refresh()
+        window._set_status_text(status)
+
+    def create_new_background(self) -> None:
+        window = self.window
+        if window._current_record_path is None:
+            window._set_status_text("Load an image first to create a background image.")
+            return
+        if window._state.preprocessing.chromatic_correction_enabled and not window._is_current_reference_image():
+            window._set_status_text("Switch to the reference image to create the reference background.")
+            return
+        if window._current_processed_image is None:
+            window._set_status_text("Load an image first to create a background image.")
+            return
+        background = window._calculate_background_profile_image()
+        if background is None:
+            window._set_status_text("Background image is not available yet.")
+            return
+        window._background_profile_cache_signature = window._background_profile_signature()
+        window._background_profile_cache_image = background
+        if window._showing_background_profile_main:
+            window._apply_main_image_content()
+        window._set_status_text("Created a new background image from the current parameters.")
+
+    def load_background_from_file(self) -> None:
+        window = self.window
+        if window._current_record_path is None:
+            window._set_status_text("Load an image first to load a background image.")
+            return
+        if window._state.preprocessing.chromatic_correction_enabled and not window._is_current_reference_image():
+            window._set_status_text("Switch to the reference image to load the reference background.")
+            return
+        default_path = self.current_background_file_path()
+        start_path = str(default_path if default_path is not None else Path(window.folder_edit.text()))
+        source, _ = QFileDialog.getOpenFileName(
+            window,
+            "Load background image",
+            start_path,
+            "Background images (*.png *.bmp *.tif *.tiff);;All files (*)",
+        )
+        if not source:
+            return
+        source_path = Path(source)
+        try:
+            target_record_path = window._reference_record().path if window._reference_record() is not None else window._current_record_path
+            expected_shape = window._current_processed_image.shape[:2] if window._current_processed_image is not None else load_image_shape(str(target_record_path))
+            background = self.read_background_image(source_path, expected_shape)
+        except Exception as exc:
+            QMessageBox.critical(window, "Load background failed", str(exc))
+            window._set_status_text(f"Load background failed: {exc}")
+            return
+        window._background_profile_cache_signature = window._background_profile_signature()
+        window._background_profile_cache_image = background
+        if window._showing_background_profile_main:
+            window._apply_main_image_content()
+        window._set_status_text(f"Loaded background from {source_path.name}.")
+
+    def save_background_to_file(self) -> None:
+        window = self.window
+        if window._current_record_path is None:
+            window._set_status_text("Load an image first to save a background image.")
+            return
+        if window._state.preprocessing.chromatic_correction_enabled and not window._is_current_reference_image():
+            window._set_status_text("Switch to the reference image to save the reference background.")
+            return
+        destination = self.current_background_file_path()
+        if destination is None:
+            window._set_status_text("No current image is available for background export.")
+            return
+        background = window._background_profile_cache_image
+        if background is None or window._background_profile_cache_signature != window._background_profile_signature():
+            background = window._calculate_background_profile_image()
+        if background is None:
+            window._set_status_text("Background image is not available yet.")
+            return
+        try:
+            background_u16 = np.clip(np.rint(background), 0, 65535).astype(np.uint16, copy=False)
+            Image.fromarray(background_u16, mode="I;16").save(destination)
+        except Exception as exc:
+            QMessageBox.critical(window, "Save background failed", str(exc))
+            window._set_status_text(f"Save background failed: {exc}")
+            return
+        window._background_profile_cache_signature = window._background_profile_signature()
+        window._background_profile_cache_image = background
+        if window._showing_background_profile_main:
+            window._apply_main_image_content()
+        window._set_status_text(f"Saved background to {destination.name}.")
+
+    def read_background_image(self, path: Path, expected_shape: tuple[int, int]) -> np.ndarray:
+        with Image.open(path) as image:
+            background = np.array(image.convert("I"), dtype=np.float32)
+        if background.shape != expected_shape:
+            raise ValueError(
+                f"Background size {background.shape[1]} x {background.shape[0]} px does not match the current image "
+                f"{expected_shape[1]} x {expected_shape[0]} px."
+            )
+        return background
+
+    def update_mask_file_button_state(self) -> None:
+        window = self.window
+        has_image = window._current_processed_image is not None
+        editable_mask = has_image and (window._is_current_reference_image() or not window._state.preprocessing.chromatic_correction_enabled)
+        window.mask_create_new_button.setEnabled(editable_mask)
+        window.mask_load_from_file_button.setEnabled(editable_mask)
+        window.mask_save_button.setEnabled(editable_mask)
+        window.histogram_mask_apply_button.setEnabled(editable_mask)
+        window.histogram_mask_reset_button.setEnabled(editable_mask)
+        window.relative_mask_apply_button.setEnabled(editable_mask)
+        window.relative_mask_reset_button.setEnabled(editable_mask)
+        window.relative_mask_show_button.setEnabled(has_image)
+        window.local_contrast_mask_apply_button.setEnabled(editable_mask)
+        window.local_contrast_mask_reset_button.setEnabled(editable_mask)
+        window.local_contrast_mask_show_button.setEnabled(has_image)
+        window.morphology_mask_apply_button.setEnabled(editable_mask)
+        window.morphology_mask_reset_button.setEnabled(editable_mask)
+        window.morphology_mask_show_button.setEnabled(has_image)
+        window.mask_morphology_radius_spin.setEnabled(has_image)
+        window.mask_morphology_erode_button.setEnabled(editable_mask)
+        window.mask_morphology_dilate_button.setEnabled(editable_mask)
+        window.mask_morphology_open_button.setEnabled(editable_mask)
+        window.mask_morphology_close_button.setEnabled(editable_mask)
+        window.background_create_new_button.setEnabled(editable_mask)
+        window.background_load_from_file_button.setEnabled(editable_mask)
+        window.background_save_button.setEnabled(editable_mask)
+        window.mask_morph_radius_spin.setEnabled(has_image)
+        window.mask_pencil_check.setEnabled(editable_mask)
+        window.mask_draw_mode_combo.setEnabled(editable_mask)
+        window.mask_draw_add_button.setEnabled(editable_mask and window.mask_pencil_check.isChecked())
+        window.mask_draw_remove_button.setEnabled(editable_mask and window.mask_pencil_check.isChecked())
+        window.mask_brush_size_spin.setEnabled(editable_mask)
+        default_path = self.current_mask_file_path()
+        default_name = default_path.name if default_path is not None else "current_image_mask.png"
+        if window._current_file_mask_path is not None:
+            current_source = window._current_file_mask_path.name
+        elif window._current_file_mask_session_source_path is not None:
+            current_source = "session mask"
+        else:
+            current_source = default_name
+        background_default_path = self.current_background_file_path()
+        background_default_name = background_default_path.name if background_default_path is not None else "current_image_background.png"
+        window.mask_load_from_file_button.setToolTip(
+            f"Load a black-and-white mask image for the current image.\nSuggested file name: {default_name}"
+        )
+        window.mask_save_button.setToolTip(
+            f"Save the current mask as a black-and-white image.\nTarget file name: {default_name}\nCurrent source: {current_source}"
+        )
+        window.background_create_new_button.setToolTip(
+            f"Create a new background image from the current parameters.\nTarget file name: {background_default_name}"
+        )
+        window.background_load_from_file_button.setToolTip(
+            f"Load a background image for the current image.\nSuggested file name: {background_default_name}"
+        )
+        window.background_save_button.setToolTip(
+            f"Save the current background image.\nTarget file name: {background_default_name}"
+        )

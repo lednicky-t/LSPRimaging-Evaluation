@@ -204,6 +204,7 @@ from lspr_imaging_app.storage.workspace import (
 
 
 from .main_window_icons import MainWindowIcons
+from .workflow_log_controller import WorkflowLogController
 from .widgets import (
     BusySpinner,
     ClickableIconLabel,
@@ -227,8 +228,6 @@ from .worker import (
     RoiOverlayBundle,
     UndoSnapshot,
     WorkerSignals,
-    WorkflowLogBridge,
-    WorkflowLogHandler,
 )
 from .analysis_tasks import (
     _absorbance_roi_mask_cache_key,
@@ -244,9 +243,6 @@ from .analysis_tasks import (
     _selected_roi_masks_for_spectrum,
     _roi_absorbance_signature,
 )
-
-SUCCESS_LOG_LEVEL = 25
-logging.addLevelName(SUCCESS_LOG_LEVEL, "SUCCESS")
 
 try:
     import tabler_icons
@@ -302,6 +298,7 @@ class MainWindow(MainWindowIcons, QMainWindow):
         self._setup_workflow_logging()
 
     def _init_controllers(self) -> None:
+        self._workflow_log_controller = WorkflowLogController(self)
         self._dataset_controller = DatasetController(self)
         self._image_controller = ImageController(self)
         self._roi_table_controller = RoiTableController(self)
@@ -1112,17 +1109,17 @@ class MainWindow(MainWindowIcons, QMainWindow):
         self.mask_brush_size_spin.setRange(1, 200)
         self.mask_brush_size_spin.setValue(12)
         self.mask_brush_size_spin.setSuffix(" px")
-        
+
         # New mask controls for redesigned system
         self.mask_create_new_button = self._make_icon_tool_button("sparkles", "#fbbf24", "Start a new blank mask.")
         self.mask_load_from_file_button = self._make_icon_tool_button("download", "#38bdf8", "Load a mask image.")
         self.mask_save_button = self._make_icon_tool_button("upload", "#22c55e", "Save the current mask image.")
-        
+
         # Histogram mask controls
         self.histogram_mask_apply_button = self._make_icon_tool_button("square-rounded-plus", "#22c55e", "Add highlighted histogram pixels to the current mask.")
         self.histogram_mask_reset_button = self._make_icon_tool_button("square-rounded-minus", "#ef4444", "Subtract highlighted histogram pixels from the current mask.")
-        
-        # Figure mask controls  
+
+        # Figure mask controls
         self.relative_mask_apply_button = self._make_icon_tool_button("square-rounded-plus", "#22c55e", "Add the relative-threshold preview to the current mask.")
         self.relative_mask_reset_button = self._make_icon_tool_button("square-rounded-minus", "#ef4444", "Subtract the relative-threshold preview from the current mask.")
         self.relative_mask_show_button = self._make_icon_tool_button("eye-closed", "#38bdf8", "Show the relative-threshold preview.", checkable=True)
@@ -1132,7 +1129,7 @@ class MainWindow(MainWindowIcons, QMainWindow):
         self.morphology_mask_apply_button = self._make_icon_tool_button("square-rounded-plus", "#22c55e", "Add the current morphology preview to the current mask.")
         self.morphology_mask_reset_button = self._make_icon_tool_button("square-rounded-minus", "#ef4444", "Subtract the current morphology preview from the current mask.")
         self.morphology_mask_show_button = self._make_icon_tool_button("eye-closed", "#38bdf8", "Show the morphology preview.", checkable=True)
-        
+
         # Updated existing controls with new names
         self.mask_relative_profile_sigma_spin = QSpinBox(self)
         self.mask_relative_profile_sigma_spin.setRange(3, 2000)
@@ -1749,7 +1746,7 @@ class MainWindow(MainWindowIcons, QMainWindow):
         self.mask_draw_mode_combo.currentIndexChanged.connect(self._sync_mask_draw_mode_buttons)
         self.mask_draw_add_button.clicked.connect(lambda: self._set_mask_draw_mode("add"))
         self.mask_draw_remove_button.clicked.connect(lambda: self._set_mask_draw_mode("erase"))
-        
+
         # New mask system connections
         self.mask_create_new_button.clicked.connect(self._mask_controller.create_new_mask)
         self.mask_load_from_file_button.clicked.connect(self._mask_controller.load_mask_from_file)
@@ -1790,7 +1787,7 @@ class MainWindow(MainWindowIcons, QMainWindow):
         self.mask_morphology_radius_spin.valueChanged.connect(self._save_control_preferences)
         self.mask_draw_mode_combo.currentIndexChanged.connect(self._save_control_preferences)
         self.mask_brush_size_spin.valueChanged.connect(self._save_control_preferences)
-        
+
         self.ignore_marked_check.toggled.connect(self._update_spot_detection_settings)
 
     def _connect_spot(self) -> None:
@@ -2938,296 +2935,57 @@ class MainWindow(MainWindowIcons, QMainWindow):
             self._mark_sensorgram_stale()
 
     def _background_error(self, context: str, message: str) -> None:
-        self._append_workflow_log(f"{context} failed: {message}", level="error")
-        self._set_status_text(f"{context} failed: {message}")
+        self._workflow_log_controller.background_error(context, message)
 
     def _set_workflow_log_autoscroll_enabled(self, enabled: bool) -> None:
-        self._workflow_log_autoscroll_enabled = bool(enabled)
-        if hasattr(self, "workflow_log_autoscroll_button"):
-            color = "#38bdf8" if enabled else "#94a3b8"
-            self.workflow_log_autoscroll_button.setIcon(self._mask_panel_icon("arrow-down", color=color, size=20))
+        self._workflow_log_controller.set_workflow_log_autoscroll_enabled(enabled)
 
     def _copy_workflow_log(self) -> None:
-        if not hasattr(self, "workflow_log_view"):
-            return
-        QApplication.clipboard().setText(self.workflow_log_view.toPlainText())
-        self._append_workflow_log("Workflow log copied to clipboard.", level="debug")
+        self._workflow_log_controller.copy_workflow_log()
 
     def _setup_workflow_logging(self) -> None:
-        if getattr(self, "_workflow_log_handler", None) is not None:
-            return
-        self._workflow_log_bridge = WorkflowLogBridge(self)
-        self._workflow_log_bridge.record_received.connect(self._append_workflow_log_entry)
-        handler = WorkflowLogHandler(self._workflow_log_bridge)
-        handler.setLevel(logging.DEBUG)
-        handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] [%(name)s] %(message)s", "%H:%M:%S"))
-        handler._lspr_gui_handler = True  # type: ignore[attr-defined]
-        package_logger = logging.getLogger("lspr_imaging_app")
-        package_logger.setLevel(logging.DEBUG)
-        if not any(getattr(existing, "_lspr_gui_handler", False) for existing in package_logger.handlers):
-            package_logger.addHandler(handler)
-        self._workflow_logger = logging.getLogger("lspr_imaging_app.workflow")
-        self._workflow_logger.setLevel(logging.DEBUG)
-        self._workflow_log_handler = handler
-        self._workflow_log_buffer: list[tuple[int, str]] = []
-        self._workflow_log_buffer_timer = QTimer(self)
-        self._workflow_log_buffer_timer.setSingleShot(True)
-        self._workflow_log_buffer_timer.timeout.connect(self._flush_workflow_log_buffer)
-        self._workflow_log_throttle_state: dict[str, tuple[float, str]] = {}
+        self._workflow_log_controller.setup_workflow_logging()
 
     def _remove_workflow_logging(self) -> None:
-        handler = getattr(self, "_workflow_log_handler", None)
-        if handler is None:
-            return
-        package_logger = logging.getLogger("lspr_imaging_app")
-        if handler in package_logger.handlers:
-            package_logger.removeHandler(handler)
-        self._workflow_log_handler = None
-        bridge = getattr(self, "_workflow_log_bridge", None)
-        if bridge is not None:
-            try:
-                bridge.record_received.disconnect(self._append_workflow_log_entry)
-            except Exception:
-                pass
-            self._workflow_log_bridge = None
-        buffer_timer = getattr(self, "_workflow_log_buffer_timer", None)
-        if buffer_timer is not None:
-            try:
-                buffer_timer.stop()
-            except Exception:
-                pass
-        self._workflow_log_buffer = []
-        self._workflow_log_throttle_state = {}
+        self._workflow_log_controller.remove_workflow_logging()
 
     def _append_workflow_log_entry(self, levelno: int, text: str) -> None:
-        line = str(text).rstrip()
-        if not line or not hasattr(self, "workflow_log_view"):
-            return
-        if int(levelno) < logging.INFO:
-            buffer = getattr(self, "_workflow_log_buffer", None)
-            buffer_timer = getattr(self, "_workflow_log_buffer_timer", None)
-            if buffer is not None and buffer_timer is not None:
-                buffer.append((int(levelno), line))
-                if not buffer_timer.isActive():
-                    buffer_timer.start(150)
-                return
-        self._append_workflow_log_entry_now(levelno, line)
+        self._workflow_log_controller.append_workflow_log_entry(levelno, text)
 
     def _flush_workflow_log_buffer(self) -> None:
-        buffer = getattr(self, "_workflow_log_buffer", None)
-        if not buffer:
-            return
-        batch = list(buffer)
-        buffer.clear()
-        for levelno, line in self._collapse_workflow_log_batch(batch):
-            self._append_workflow_log_entry_now(levelno, line)
-
-    @staticmethod
-    def _collapse_workflow_log_batch(batch: list[tuple[int, str]]) -> list[tuple[int, str]]:
-        if not batch:
-            return []
-        collapsed: list[tuple[int, str]] = []
-        image_hits = 0
-        image_builds = 0
-        roi_hits = 0
-        roi_builds = 0
-        for levelno, line in batch:
-            if "Image cache hit |" in line:
-                image_hits += 1
-                continue
-            if "Image cache built |" in line:
-                image_builds += 1
-                continue
-            if "ROI cache hit |" in line:
-                roi_hits += 1
-                continue
-            if "ROI cache built |" in line:
-                roi_builds += 1
-                continue
-            collapsed.append((levelno, line))
-        if image_hits or image_builds:
-            collapsed.append((logging.DEBUG, f"Image cache batch | hit={image_hits} build={image_builds}"))
-        if roi_hits or roi_builds:
-            collapsed.append((logging.DEBUG, f"ROI cache batch | hit={roi_hits} build={roi_builds}"))
-        return collapsed
+        self._workflow_log_controller.flush_workflow_log_buffer()
 
     def _append_workflow_log_entry_now(self, levelno: int, text: str) -> None:
-        color = {
-            logging.DEBUG: "#60a5fa",
-            logging.INFO: "#cbd5e1",
-            SUCCESS_LOG_LEVEL: "#22c55e",
-            logging.WARNING: "#f59e0b",
-            logging.ERROR: "#ef4444",
-            logging.CRITICAL: "#f43f5e",
-        }.get(int(levelno), "#cbd5e1")
-        escaped = escape(text).replace("\n", "<br>")
-        html = f'<div style="color:{color}; white-space:pre-wrap; margin:0;">{escaped}</div>'
-        self.workflow_log_view.moveCursor(QTextCursor.MoveOperation.End)
-        self.workflow_log_view.insertHtml(html)
-        self.workflow_log_view.insertHtml("<br>")
-        if self._workflow_log_autoscroll_enabled:
-            scrollbar = self.workflow_log_view.verticalScrollBar()
-            scrollbar.setValue(scrollbar.maximum())
+        self._workflow_log_controller.append_workflow_log_entry_now(levelno, text)
 
     def _append_workflow_log(self, message: str, *, level: str = "info") -> None:
-        line = str(message).strip()
-        if not line:
-            return
-        level_key = str(level).strip().lower()
-        levelno = {
-            "debug": logging.DEBUG,
-            "info": logging.INFO,
-            "success": SUCCESS_LOG_LEVEL,
-            "warning": logging.WARNING,
-            "error": logging.ERROR,
-            "critical": logging.CRITICAL,
-        }.get(level_key, logging.INFO)
-        logger = getattr(self, "_workflow_logger", logging.getLogger("lspr_imaging_app.workflow"))
-        logger.log(levelno, line)
+        self._workflow_log_controller.append_workflow_log(message, level=level)
 
     def _append_workflow_log_throttled(self, key: str, message: str, *, level: str = "debug", min_interval: float = 2.0) -> None:
-        line = str(message).strip()
-        if not line:
-            return
-        now = time.perf_counter()
-        state = getattr(self, "_workflow_log_throttle_state", None)
-        if state is None:
-            state = {}
-            self._workflow_log_throttle_state = state
-        previous = state.get(str(key))
-        if previous is not None:
-            previous_at, previous_line = previous
-            if previous_line == line and (now - previous_at) < float(min_interval):
-                return
-        state[str(key)] = (now, line)
-        self._append_workflow_log(line, level=level)
+        self._workflow_log_controller.append_workflow_log_throttled(key, message, level=level, min_interval=min_interval)
 
     def _set_status_text(self, text: str) -> None:
-        previous_text = self._status_bar_message.text()
-        self.status_label.setText(text)
-        self._status_bar_message.setText(text)
-        if previous_text and previous_text != text:
-            self._status_bar_last_action.setText(f"Last action: {previous_text}")
+        self._workflow_log_controller.set_status_text(text)
 
     def _set_status_hint(self, text: str) -> None:
-        self._status_bar_hint.setText(f"Hint: {text}")
+        self._workflow_log_controller.set_status_hint(text)
 
     @staticmethod
     def _format_elapsed_seconds(seconds: float | None) -> str:
-        if seconds is None or not np.isfinite(seconds) or seconds < 0:
-            return ""
-        total_seconds = int(round(float(seconds)))
-        hours, remainder = divmod(total_seconds, 3600)
-        minutes, secs = divmod(remainder, 60)
-        if hours:
-            return f"{hours:d}:{minutes:02d}:{secs:02d}"
-        return f"{minutes:d}:{secs:02d}"
+        return WorkflowLogController.format_elapsed_seconds(seconds)
 
-    @staticmethod
-    def _compact_timing_text(*parts: tuple[str, float | None]) -> str:
-        chunks: list[str] = []
-        for label, seconds in parts:
-            elapsed = MainWindow._format_elapsed_seconds(seconds)
-            if elapsed:
-                chunks.append(f"{label} {elapsed}")
-        return " | ".join(chunks)
+    def _compact_timing_text(self, *parts: tuple[str, float | None]) -> str:
+        return self._workflow_log_controller.compact_timing_text(*parts)
 
     def _workflow_notes_text(self) -> str:
-        return (
-            "Workflow notes\n"
-            "\n"
-            "Console labels\n"
-            "- DEBUG: technical details, diagnostics, and state changes for troubleshooting.\n"
-            "- INFO: normal progress messages and important updates.\n"
-            "- SUCCESS: a step finished correctly, so you can treat it as confirmed.\n"
-            "- WARNING: something looks unusual or was recovered automatically, but the app keeps going.\n"
-            "- ERROR / CRITICAL: a step failed or the app hit a serious problem that needs attention.\n"
-            "\n"
-            "Startup\n"
-            "- Core libraries load first.\n"
-            "- The splash screen restores the session, layout, and caches before the main window is shown.\n"
-            "- Analysis stays unlinked during startup so spectra and sensorgrams do not recalculate early.\n"
-            "\n"
-            "What stays in memory\n"
-            "- Processed image cache for the current stack.\n"
-            "- Per-ROI absorbance cache for single-ROI live preview.\n"
-            "- Spectral cube absorbance cache for the same spectral cube/settings combinations.\n"
-            "- Sensorgram cache for repeated spectral-cube-range calculations.\n"
-            "- Chromatic landmarks and fitted transforms.\n"
-            "\n"
-            "What is loaded live\n"
-            "- TIFF or Stack to Zarr planes that are not already cached.\n"
-            "- Uncached ROI spectra and sensorgrams.\n"
-            "- ROI and mask changes that alter the analysis signature.\n"
-            "\n"
-            "What is already optimized\n"
-            "- Image refresh runs in the background.\n"
-            "- Neighboring image planes are prefetched.\n"
-            "- Absorbance results are cached per ROI and per spectral cube.\n"
-            "- Sensorgram preparation can reuse cached spectra when available.\n"
-            "- Workflow events are mirrored to logs/lspr_imaging_<session>.log.\n"
-            "- The Workflow console shows the same events live inside the app.\n"
-            "\n"
-            "Next useful optimizations\n"
-            "- Move more spectral cube preparation off the UI thread.\n"
-            "- Add selective ROI-only reads for compatible formats.\n"
-            "- Expand spectral-cube-level caching for repeated sensorgram navigation.\n"
-            "- Keep using Stack to Zarr for random access and larger datasets.\n"
-        )
+        return self._workflow_log_controller.workflow_notes_text()
 
     def _show_workflow_notes(self) -> None:
-        dialog = QDialog(self)
-        dialog.setWindowTitle("Workflow notes")
-        dialog.resize(860, 640)
-        layout = QVBoxLayout(dialog)
-        layout.setContentsMargins(12, 12, 12, 12)
-        layout.setSpacing(10)
-        text = QPlainTextEdit(dialog)
-        text.setReadOnly(True)
-        text.setPlainText(self._workflow_notes_text())
-        layout.addWidget(text)
-        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close, dialog)
-        buttons.rejected.connect(dialog.reject)
-        buttons.accepted.connect(dialog.accept)
-        layout.addWidget(buttons)
-        dialog.exec()
+        self._workflow_log_controller.show_workflow_notes()
 
     def _update_status_hint(self) -> None:
-        if self._active_tool == "roi":
-            if self._roi_editor_mode == "rectangles":
-                if self.roi_move_action.isChecked():
-                    self._set_status_hint("Left-click selects ROIs, right-drag moves them, Delete removes selected ROIs.")
-                elif self.roi_add_action.isChecked():
-                    self._set_status_hint("Left-click adds a rectangle ROI stamp from the active template.")
-                elif self.roi_array_action.isChecked():
-                    self._set_status_hint("Left-click stamps a rectangle ROI array from the active template.")
-                else:
-                    self._set_status_hint("Left-click selects ROIs. Shift adds to the selection, Delete removes them.")
-                return
-            if self._roi_editor_mode == "circles":
-                if self.roi_move_action.isChecked():
-                    self._set_status_hint("Left-click selects, right-drag moves. Arrow keys nudge. Delete removes.")
-                elif self.roi_add_action.isChecked():
-                    self._set_status_hint("Left-click places a circle ROI at the cursor position.")
-                elif self.roi_array_action.isChecked():
-                    self._set_status_hint("Left-click stamps a grid of circle ROIs centred on the cursor.")
-                else:
-                    self._set_status_hint("Left-click selects ROIs, Shift adds, box-drag multi-select, Delete removes.")
-                return
-            if self.roi_move_action.isChecked():
-                self._set_status_hint("Left-click selects, Shift adds, left-drag boxes, right-drag moves, middle-drag pans.")
-            elif self.roi_add_action.isChecked():
-                self._set_status_hint("Left-click adds an ROI. Shift-click still adds to selection.")
-            else:
-                self._set_status_hint("Left-click selects, Shift adds, left-drag boxes, double-click empty space clears selection.")
-            return
-        if self._active_tool == "mask":
-            self._set_status_hint("Left-drag paints the mask. Use the toolbar icons to show, add, or subtract previews.")
-            return
-        if self._active_tool in {"rotate", "crop", "measure"}:
-            self._set_status_hint("Use the image toolbar controls for the active image tool.")
-            return
-        self._set_status_hint("Hover a control for guidance.")
+        self._workflow_log_controller.update_status_hint()
+
 
     @staticmethod
     def _alpha01(value: float) -> float:
@@ -3818,7 +3576,7 @@ class MainWindow(MainWindowIcons, QMainWindow):
                 if self._move_selected_landmark(dx, dy):
                     event.accept()
                     return
-        
+
         if self._active_tool == "roi" and event.key() in {Qt.Key.Key_PageUp, Qt.Key.Key_PageDown}:
             if event.modifiers() & Qt.KeyboardModifier.ShiftModifier:
                 direction = -1 if event.key() == Qt.Key.Key_PageUp else 1
@@ -5687,953 +5445,6 @@ class MainWindow(MainWindowIcons, QMainWindow):
         self._set_help(self.about_action, "Show basic app information.")
         self._set_help(self.analysis_roi_table_button, "Show or hide the ROI table.")
 
-    def _create_toolbar_action_button(self, action: QAction, *, primary: bool = False, icon_only: bool = False) -> QToolButton:
-        button = QToolButton(self)
-        button.setDefaultAction(action)
-        button.setToolButtonStyle(
-            Qt.ToolButtonStyle.ToolButtonIconOnly if icon_only else Qt.ToolButtonStyle.ToolButtonTextBesideIcon
-        )
-        button.setAutoRaise(False)
-        button.setIconSize(QSize(16, 16))
-        if icon_only:
-            button.setFixedSize(22, 20)
-        button.setProperty("toolRole", "primary" if primary else "secondary")
-        button.setProperty("iconOnly", icon_only)
-        return button
-
-    def _make_icon_tool_button(
-        self,
-        icon_name: str,
-        color: str,
-        tooltip: str,
-        *,
-        checkable: bool = False,
-        icon: QIcon | None = None,
-    ) -> QToolButton:
-        button = QToolButton(self)
-        button.setAutoRaise(True)
-        button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly)
-        button.setIcon(icon if icon is not None else self._mask_panel_icon(icon_name, color=color, size=APP_THEME.icon_button_inner))
-        button.setIconSize(QSize(APP_THEME.compact_icon_inner, APP_THEME.compact_icon_inner))
-        button.setFixedSize(APP_THEME.compact_icon_outer, APP_THEME.compact_icon_outer)
-        button.setCheckable(checkable)
-        button.setToolTip(tooltip)
-        button.setCursor(Qt.CursorShape.PointingHandCursor)
-        button.setStyleSheet(transparent_icon_button_stylesheet())
-        return button
-
-    def _make_mask_morphology_button(self, operation: str, tooltip: str) -> QToolButton:
-        button = self._make_icon_tool_button(
-            "square-rounded-plus",
-            "#f8fafc",
-            tooltip,
-            checkable=True,
-            icon=self._make_mask_morphology_icon(operation),
-        )
-        hover, pressed, checked = icon_accent_colors("blue")
-        button.setStyleSheet(
-            transparent_icon_button_stylesheet(
-                hover=hover,
-                pressed=pressed,
-                checked=checked,
-            )
-        )
-        return button
-
-    def _make_mask_morphology_icon(self, operation: str, *, color: str = "#f8fafc", size: int = 24) -> QIcon:
-        if operation == "erode":
-            svg = f"""<svg xmlns="http://www.w3.org/2000/svg" width="{size}" height="{size}" viewBox="0 0 24 24" fill="none" stroke="{color}" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
-  <path stroke="none" d="M0 0h24v24H0z" fill="none" />
-  <path d="M3 12a9 9 0 1 0 18 0a9 9 0 0 0 -18 0" />
-  <path d="M6 10l2 2l-2 2" />
-  <path d="M10 6l2 2l2 -2" />
-  <path d="M18 10l-2 2l2 2" />
-  <path d="M10 18l2 -2l2 2" />
-</svg>"""
-            return self._svg_icon_from_markup(svg, size=size)
-        if operation == "dilate":
-            svg = f"""<svg xmlns="http://www.w3.org/2000/svg" width="{size}" height="{size}" viewBox="0 0 24 24" fill="none" stroke="{color}" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
-  <path stroke="none" d="M0 0h24v24H0z" fill="none" />
-  <path d="M3 12a9 9 0 1 0 18 0a9 9 0 0 0 -18 0" />
-  <path d="M7 10l-2 2l2 2" />
-  <path d="M10 7l2 -2l2 2" />
-  <path d="M17 10l2 2l-2 2" />
-  <path d="M10 17l2 2l2 -2" />
-</svg>"""
-            return self._svg_icon_from_markup(svg, size=size)
-        if operation == "open":
-            icon = self._tabler_icon("book", color=color, size=size, stroke_width=2.2)
-            if not icon.isNull():
-                return icon
-            return self._lucide_icon("book", color, size, stroke_width=2.2)
-        if operation == "close":
-            icon = self._tabler_icon("book-2", color=color, size=size, stroke_width=2.2)
-            if not icon.isNull():
-                return icon
-            return self._tabler_icon("book", color=color, size=size, stroke_width=2.2)
-        return QIcon()
-
-    def _mask_panel_icon(self, icon_name: str, color: str, *, size: int = 20) -> QIcon:
-        if icon_name in {"eye", "eye-closed"}:
-            return self._draw_mask_panel_fallback_icon(icon_name, QColor(color), size=size)
-        icon = self._tabler_icon(icon_name, color=color, size=size, stroke_width=2.1)
-        if not icon.isNull():
-            return icon
-        return self._draw_mask_panel_fallback_icon(icon_name, QColor(color), size=size)
-
-    def _make_background_profile_icon(self, active: bool, *, size: int = 22) -> QIcon:
-        color = "#38bdf8" if active else "#94a3b8"
-        icon = self._tabler_icon("background", color, size, stroke_width=2.0)
-        if not icon.isNull():
-            return icon
-        pixmap = QPixmap(size, size)
-        pixmap.fill(Qt.GlobalColor.transparent)
-        painter = QPainter(pixmap)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        painter.setPen(QPen(QColor(color), 1.7))
-        painter.setBrush(Qt.BrushStyle.NoBrush)
-        scale = size / 22.0
-        painter.drawRoundedRect(QRectF(3.0 * scale, 4.0 * scale, 16.0 * scale, 14.0 * scale), 3.0 * scale, 3.0 * scale)
-        painter.drawLine(QPointF(6.0 * scale, 15.0 * scale), QPointF(10.0 * scale, 11.0 * scale))
-        painter.drawLine(QPointF(10.0 * scale, 11.0 * scale), QPointF(13.0 * scale, 13.5 * scale))
-        painter.drawLine(QPointF(13.0 * scale, 13.5 * scale), QPointF(17.0 * scale, 9.5 * scale))
-        painter.drawEllipse(QRectF(6.5 * scale, 6.5 * scale, 3.0 * scale, 3.0 * scale))
-        painter.end()
-        return QIcon(pixmap)
-
-    @staticmethod
-    def _make_link_toggle_icon(active: bool, *, size: int = 22) -> QIcon:
-        color = "#22c55e" if active else "#ef4444"
-        icon_name = "link" if active else "link-off"
-        icon = MainWindow._tabler_icon(icon_name, color, size, stroke_width=2.0)
-        if not icon.isNull():
-            return icon
-        pixmap = QPixmap(size, size)
-        pixmap.fill(Qt.GlobalColor.transparent)
-        painter = QPainter(pixmap)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        pen = QPen(QColor(color), max(1.8, size / 12.0))
-        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
-        pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
-        painter.setPen(pen)
-        scale = size / 24.0
-        painter.drawEllipse(QRectF(5.0 * scale, 8.0 * scale, 5.0 * scale, 5.0 * scale))
-        painter.drawEllipse(QRectF(13.0 * scale, 8.0 * scale, 5.0 * scale, 5.0 * scale))
-        painter.drawLine(QLineF(10.0 * scale, 10.5 * scale, 14.0 * scale, 10.5 * scale))
-        if active:
-            painter.drawLine(QLineF(8.5 * scale, 8.5 * scale, 10.0 * scale, 10.0 * scale))
-            painter.drawLine(QLineF(14.0 * scale, 10.0 * scale, 15.5 * scale, 8.5 * scale))
-        else:
-            painter.drawLine(QLineF(7.0 * scale, 15.0 * scale, 17.0 * scale, 5.0 * scale))
-        painter.end()
-        return QIcon(pixmap)
-
-    def _make_analysis_spectrum_icon(self, active: bool, *, size: int = 24) -> QIcon:
-        stroke_color = "#22c55e" if active else "#f8fafc"
-        top_layer_color = "#22c55e" if active else stroke_color
-        svg = f"""
-        <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="{stroke_color}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <path stroke="none" d="M0 0h24v24H0z" fill="none" />
-            <path d="M12 4l-8 4l8 4l8 -4l-8 -4" stroke="{top_layer_color}" />
-            <path d="M4 12l8 4l8 -4" />
-            <path d="M4 16l8 4l8 -4" />
-        </svg>
-        """
-        icon = self._svg_icon_from_markup(svg, size=size)
-        if not icon.isNull():
-            return icon
-        return self._tabler_icon("stack-middle", stroke_color, size, stroke_width=2.0, fill="none")
-
-    def _make_analysis_preview_icon(self, active: bool, *, size: int = 24) -> QIcon:
-        color = "#22c55e" if active else "#94a3b8"
-        icon = self._tabler_icon("eye", color, size, stroke_width=2.0)
-        if not icon.isNull():
-            return icon
-        pixmap = QPixmap(size, size)
-        pixmap.fill(Qt.GlobalColor.transparent)
-        painter = QPainter(pixmap)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        painter.setPen(QPen(QColor(color), max(1.8, size / 14.0), Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
-        scale = size / 24.0
-        painter.drawEllipse(QRectF(5.0 * scale, 8.0 * scale, 14.0 * scale, 8.0 * scale))
-        painter.drawEllipse(QRectF(9.25 * scale, 10.25 * scale, 5.5 * scale, 3.5 * scale))
-        painter.end()
-        return QIcon(pixmap)
-
-    def _make_analysis_all_spectral_cubes_icon(self, active: bool, *, size: int = 24) -> QIcon:
-        color = "#22c55e" if active else "#f8fafc"
-        fill_color = "#22c55e" if active else "none"
-        svg = f"""
-        <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="{color}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <path stroke="none" d="M0 0h24v24H0z" fill="none" />
-            <path d="M12 2l-8 4l8 4l8 -4l-8 -4" />
-            <path d="M4 10l8 4l8 -4" />
-            <path d="M4 18l8 4l8 -4" />
-            <path d="M4 14l8 4l8 -4" fill="{fill_color}" />
-        </svg>
-        """
-        icon = self._svg_icon_from_markup(svg, size=size)
-        if not icon.isNull():
-            return icon
-        fallback = self._tabler_icon("stack-3", color, size, stroke_width=2.0, fill=color if active else None)
-        if not fallback.isNull():
-            return fallback
-        pixmap = QPixmap(size, size)
-        pixmap.fill(Qt.GlobalColor.transparent)
-        painter = QPainter(pixmap)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        painter.setPen(QColor(color))
-        painter.setBrush(QColor(color) if active else Qt.BrushStyle.NoBrush)
-        scale = size / 24.0
-        painter.drawRoundedRect(QRectF(4.0 * scale, 3.0 * scale, 16.0 * scale, 4.0 * scale), 1.5 * scale, 1.5 * scale)
-        painter.drawRoundedRect(QRectF(4.0 * scale, 9.0 * scale, 16.0 * scale, 4.0 * scale), 1.5 * scale, 1.5 * scale)
-        painter.drawRoundedRect(QRectF(4.0 * scale, 15.0 * scale, 16.0 * scale, 4.0 * scale), 1.5 * scale, 1.5 * scale)
-        painter.end()
-        return QIcon(pixmap)
-
-    def _make_analysis_stop_icon(self, active: bool, *, size: int = 24) -> QIcon:
-        color = "#dc2626" if active else "#ef4444"
-        icon = self._tabler_icon("player-stop-filled", color, size, stroke_width=2.0, fill=color)
-        if not icon.isNull():
-            return icon
-        pixmap = QPixmap(size, size)
-        pixmap.fill(Qt.GlobalColor.transparent)
-        painter = QPainter(pixmap)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(QColor(color))
-        scale = size / 24.0
-        painter.drawRoundedRect(QRectF(6.0 * scale, 6.0 * scale, 12.0 * scale, 12.0 * scale), 2.6 * scale, 2.6 * scale)
-        painter.end()
-        return QIcon(pixmap)
-
-    def _make_spot_label_icon(self, visible: bool) -> QIcon:
-        icon_name = "label-important" if visible else "label-off"
-        color = "#22c55e" if visible else "#94a3b8"
-        icon = self._tabler_icon(icon_name, color, 22, stroke_width=2.0)
-        if not icon.isNull():
-            return icon
-        pixmap = QPixmap(22, 22)
-        pixmap.fill(Qt.GlobalColor.transparent)
-        painter = QPainter(pixmap)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        pen = QPen(QColor(color), 1.8)
-        pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
-        painter.setPen(pen)
-        tag = QPainterPath()
-        tag.moveTo(4.0, 6.0)
-        tag.lineTo(14.5, 6.0)
-        tag.lineTo(18.0, 11.0)
-        tag.lineTo(14.5, 16.0)
-        tag.lineTo(4.0, 16.0)
-        tag.closeSubpath()
-        painter.drawPath(tag)
-        painter.drawEllipse(QRectF(6.6, 9.1, 2.2, 2.2))
-        if not visible:
-            painter.drawLine(QPointF(5.0, 17.0), QPointF(17.0, 5.0))
-        painter.end()
-        return QIcon(pixmap)
-
-    def _make_cached_rois_icon(self, visible: bool, *, size: int = 24) -> QIcon:
-        color = "#22c55e" if visible else "#94a3b8"
-        icon = self._tabler_icon("database", color, size, stroke_width=2.0)
-        if not icon.isNull():
-            return icon
-        pixmap = QPixmap(size, size)
-        pixmap.fill(Qt.GlobalColor.transparent)
-        painter = QPainter(pixmap)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        pen = QPen(QColor(color), max(1.5, size / 15.0))
-        painter.setPen(pen)
-        painter.setBrush(QColor(color) if visible else Qt.BrushStyle.NoBrush)
-        scale = size / 24.0
-        painter.drawEllipse(QRectF(5.0 * scale, 4.5 * scale, 14.0 * scale, 4.5 * scale))
-        painter.drawRect(QRectF(5.0 * scale, 7.5 * scale, 14.0 * scale, 9.0 * scale))
-        painter.drawEllipse(QRectF(5.0 * scale, 13.5 * scale, 14.0 * scale, 4.5 * scale))
-        painter.end()
-        return QIcon(pixmap)
-
-    def _histogram_highlight_icon(self, color: str, *, size: int = 24) -> QIcon:
-        svg = f"""<svg xmlns="http://www.w3.org/2000/svg" width="{size}" height="{size}" viewBox="0 0 24 24">
-  <path d="M3 13a1 1 0 0 1 1 -1h4a1 1 0 0 1 1 1v6a1 1 0 0 1 -1 1h-4a1 1 0 0 1 -1 -1l0 -6"
-        fill="none" stroke="{color}" stroke-width="2"/>
-  <path d="M15 9a1 1 0 0 1 1 -1h4a1 1 0 0 1 1 1v10a1 1 0 0 1 -1 1h-4a1 1 0 0 1 -1 -1l0 -10"
-        fill="none" stroke="{color}" stroke-width="2"/>
-  <path d="M9 5a1 1 0 0 1 1 -1h4a1 1 0 0 1 1 1v14a1 1 0 0 1 -1 1h-4a1 1 0 0 1 -1 -1l0 -14"
-        fill="{color}" stroke="{color}" stroke-width="2"/>
-  <path d="M4 20h14"
-        fill="none" stroke="{color}" stroke-width="2" stroke-linecap="round"/>
-</svg>"""
-        return self._svg_icon_from_markup(svg, size=size)
-
-    def _make_view_toggle_icon(self, kind: str, visible: bool) -> QIcon:
-        active_color = "#22c55e"
-        inactive_color = "#94a3b8"
-        color = active_color if visible else inactive_color
-        if kind == "roi":
-            icon = self._tabler_icon("current-location", color, 24, stroke_width=2.1)
-            if not icon.isNull():
-                return icon
-        elif kind == "rings":
-            icon = self._tabler_icon("target", color, 24, stroke_width=2.1)
-            if not icon.isNull():
-                return icon
-        elif kind == "reference_points":
-            icon_name = "map-pin" if visible else "map-pin-off"
-            icon = self._tabler_icon(icon_name, color, 24, stroke_width=2.1)
-            if not icon.isNull():
-                return icon
-        elif kind == "reference_points_all":
-            icon = self._tabler_icon("map-pins", color, 24, stroke_width=2.1)
-            if not icon.isNull():
-                return icon
-        elif kind == "mask":
-            icon_name = "mask" if visible else "mask-off"
-            icon = self._tabler_icon(icon_name, color, 24, stroke_width=2.1)
-            if not icon.isNull():
-                return icon
-        elif kind == "highlight":
-            icon = self._histogram_highlight_icon(color, size=24)
-            if not icon.isNull():
-                return icon
-        pixmap = QPixmap(24, 24)
-        pixmap.fill(Qt.GlobalColor.transparent)
-        painter = QPainter(pixmap)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        pen = QPen(QColor(color), 2.0)
-        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
-        pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
-        painter.setPen(pen)
-        painter.setBrush(Qt.BrushStyle.NoBrush)
-        if kind == "roi":
-            painter.drawEllipse(QRectF(6.0, 6.0, 12.0, 12.0))
-            painter.drawEllipse(QRectF(10.0, 10.0, 4.0, 4.0))
-        elif kind == "rings":
-            painter.drawEllipse(QRectF(4.5, 4.5, 15.0, 15.0))
-            painter.drawEllipse(QRectF(9.0, 9.0, 6.0, 6.0))
-        elif kind == "reference_points":
-            painter.drawEllipse(QRectF(8.2, 4.5, 7.6, 7.6))
-            painter.drawPath(QPainterPath())
-            painter.drawLine(QLineF(12.0, 11.5, 12.0, 18.2))
-            painter.drawLine(QLineF(12.0, 18.2, 9.0, 14.0))
-            painter.drawLine(QLineF(12.0, 18.2, 15.0, 14.0))
-        elif kind == "reference_points_all":
-            painter.drawEllipse(QRectF(6.0, 4.0, 5.5, 5.5))
-            painter.drawEllipse(QRectF(12.0, 4.0, 5.5, 5.5))
-            painter.drawEllipse(QRectF(9.0, 11.0, 5.5, 5.5))
-            painter.drawLine(QLineF(8.8, 9.2, 7.5, 14.2))
-            painter.drawLine(QLineF(12.2, 9.2, 13.5, 14.2))
-            painter.drawLine(QLineF(10.5, 9.2, 10.5, 16.0))
-        elif kind == "mask":
-            painter.drawRoundedRect(QRectF(4.5, 4.5, 15.0, 15.0), 3.0, 3.0)
-        elif kind == "histogram_log":
-            painter.drawLine(QLineF(6.0, 18.0, 6.0, 5.0))
-            painter.drawLine(QLineF(6.0, 18.0, 19.0, 18.0))
-            if visible:
-                painter.drawLine(QLineF(8.0, 15.5, 10.5, 15.5))
-                painter.drawLine(QLineF(8.0, 12.0, 13.5, 12.0))
-                painter.drawLine(QLineF(8.0, 8.5, 17.0, 8.5))
-                painter.drawText(QRectF(8.0, 4.0, 12.0, 8.0), Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, "log")
-            else:
-                painter.drawLine(QLineF(8.0, 15.5, 16.5, 15.5))
-                painter.drawLine(QLineF(8.0, 12.0, 16.5, 12.0))
-                painter.drawLine(QLineF(8.0, 8.5, 16.5, 8.5))
-                painter.drawText(QRectF(8.0, 4.0, 12.0, 8.0), Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, "lin")
-        else:
-            painter.drawRoundedRect(QRectF(5.0, 6.0, 4.0, 10.0), 1.0, 1.0)
-            painter.setBrush(QColor(color))
-            painter.drawRoundedRect(QRectF(10.0, 4.0, 4.0, 14.0), 1.0, 1.0)
-            painter.setBrush(Qt.BrushStyle.NoBrush)
-            painter.drawRoundedRect(QRectF(15.0, 8.0, 4.0, 10.0), 1.0, 1.0)
-        painter.end()
-        return QIcon(pixmap)
-
-    def _background_exclusion_icon(self, icon_name: str, enabled: bool, *, size: int = 18) -> QIcon:
-        color = "#22c55e" if enabled else "#94a3b8"
-        icon = self._tabler_icon(icon_name, color, size, stroke_width=2.1)
-        if not icon.isNull():
-            return icon
-        pixmap = QPixmap(size, size)
-        pixmap.fill(Qt.GlobalColor.transparent)
-        painter = QPainter(pixmap)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        painter.setPen(QPen(QColor(color), 2.0))
-        painter.setBrush(Qt.BrushStyle.NoBrush)
-        scale = size / 18.0
-        painter.drawRoundedRect(QRectF(3.0 * scale, 3.0 * scale, 12.0 * scale, 12.0 * scale), 3.0 * scale, 3.0 * scale)
-        painter.end()
-        return QIcon(pixmap)
-
-    def _create_view_toggle_button(self, kind: str, visible: bool, tooltip: str) -> QToolButton:
-        button = QToolButton(self)
-        button.setObjectName("toolbarPlainIconButton")
-        button.setAutoRaise(True)
-        button.setCheckable(True)
-        button.setChecked(bool(visible))
-        button.setIcon(self._make_view_toggle_icon(kind, bool(visible)))
-        button.setIconSize(QSize(APP_THEME.plain_icon_inner, APP_THEME.plain_icon_inner))
-        button.setFixedSize(APP_THEME.plain_icon_outer, APP_THEME.plain_icon_outer)
-        button.setToolTip(tooltip)
-        button.setStyleSheet(transparent_icon_button_stylesheet())
-        button.toggled.connect(lambda checked, target=button, toggle_kind=kind: self._update_view_toggle_icon(target, toggle_kind, checked))
-        return button
-
-    def _update_view_toggle_icon(self, button: QToolButton, kind: str, visible: bool) -> None:
-        button.setIcon(self._make_view_toggle_icon(kind, bool(visible)))
-
-    def _refresh_view_toggle_icons(self) -> None:
-        mappings = [
-            (getattr(self, "show_rois_check", None), "roi", self._rois_visible),
-            (getattr(self, "show_rings_check", None), "rings", self._reference_visible),
-            (getattr(self, "show_reference_points_check", None), "reference_points", self._reference_points_visible),
-            (
-                getattr(self, "chromatic_reference_points_all_button", None),
-                "reference_points_all",
-                self._chromatic_reference_points_all_visible,
-            ),
-            (getattr(self, "show_mask_check", None), "mask", self._mask_visible),
-            (getattr(self, "show_highlight_check", None), "highlight", self._highlight_visible),
-        ]
-        for button, kind, visible in mappings:
-            if button is not None:
-                self._update_view_toggle_icon(button, kind, visible)
-        if hasattr(self, "histogram_y_scale_button"):
-            self.histogram_y_scale_button.blockSignals(True)
-            self.histogram_y_scale_button.setChecked(self._histogram_log_y_enabled)
-            self.histogram_y_scale_button.blockSignals(False)
-
-    def _make_mask_toggle_icon(self, visible: bool, *, size: int = 24) -> QIcon:
-        color = QColor("#22c55e" if visible else "#94a3b8")
-        pixmap = QPixmap(size, size)
-        pixmap.fill(Qt.GlobalColor.transparent)
-        painter = QPainter(pixmap)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        rect = QRectF(3.5, 3.5, size - 7.0, size - 7.0)
-        if visible:
-            painter.setPen(Qt.PenStyle.NoPen)
-            painter.setBrush(color)
-            painter.drawRoundedRect(rect, 4.0, 4.0)
-            painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_Clear)
-            text_rect = QRectF(6.0, 4.5, size - 12.0, size - 9.0)
-            font = painter.font()
-            font.setBold(True)
-            font.setPixelSize(max(int(size * 0.58), 10))
-            painter.setFont(font)
-            painter.drawText(text_rect, Qt.AlignmentFlag.AlignCenter, "M")
-        else:
-            pen = QPen(color, 2.0)
-            pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
-            painter.setPen(pen)
-            painter.setBrush(Qt.BrushStyle.NoBrush)
-            painter.drawRoundedRect(rect, 4.0, 4.0)
-            font = painter.font()
-            font.setBold(True)
-            font.setPixelSize(max(int(size * 0.58), 10))
-            painter.setFont(font)
-            painter.drawText(QRectF(6.0, 4.5, size - 12.0, size - 9.0), Qt.AlignmentFlag.AlignCenter, "M")
-        painter.end()
-        return QIcon(pixmap)
-
-    def _make_scale_bar_icon(self, visible: bool, *, size: int = 24) -> QIcon:
-        color = "#22c55e" if visible else "#f8fafc"
-        svg = f"""
-        <svg xmlns="http://www.w3.org/2000/svg" width="120" height="30" viewBox="0 0 120 30" fill="none">
-            <line x1="6" y1="20" x2="50" y2="20" stroke="{color}" stroke-width="3.5" />
-            <line x1="6" y1="10" x2="6" y2="28" stroke="{color}" stroke-width="3.5" />
-            <line x1="50" y1="10" x2="50" y2="28" stroke="{color}" stroke-width="3.5" />
-        </svg>
-        """
-        pixmap = QPixmap(320, 120)
-        pixmap.fill(Qt.GlobalColor.transparent)
-        renderer = QSvgRenderer(QByteArray(svg.encode("utf-8")))
-        painter = QPainter(pixmap)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        renderer.render(painter, QRectF(0.0, 0.0, 320.0, 120.0))
-        painter.end()
-        return QIcon(pixmap)
-
-    def _create_scale_bar_toggle_button(self, visible: bool) -> QToolButton:
-        button = QToolButton(self)
-        button.setObjectName("toolbarPlainIconButton")
-        button.setAutoRaise(True)
-        button.setCheckable(True)
-        button.setChecked(bool(visible))
-        button.setIcon(self._make_scale_bar_icon(bool(visible)))
-        button.setIconSize(QSize(48, 24))
-        button.setFixedSize(56, APP_THEME.plain_icon_outer)
-        button.setToolTip("Show or hide the scale bar.")
-        button.setStyleSheet(transparent_icon_button_stylesheet())
-        button.toggled.connect(lambda checked, target=button: target.setIcon(self._make_scale_bar_icon(bool(checked))))
-        return button
-
-    def _create_unit_toggle_button(self) -> QToolButton:
-        button = QToolButton(self)
-        button.setObjectName("toolbarPlainIconButton")
-        button.setAutoRaise(True)
-        button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
-        self._normalize_display_units()
-        button.setText("µm" if str(self._state.preprocessing.display_units or "px") == "um" else "px")
-        button.setToolTip("Switch between pixel and micrometer display units.")
-        button.setCursor(Qt.CursorShape.PointingHandCursor)
-        button.setMinimumWidth(34)
-        button.setStyleSheet(
-            """
-            QToolButton {
-                background: transparent;
-                border: none;
-                padding: 0 2px;
-                font-weight: 700;
-                font-size: 12px;
-                color: #f8fafc;
-            }
-            QToolButton:hover {
-                color: #22c55e;
-            }
-            """
-        )
-        self._refresh_unit_toggle_button(button)
-        return button
-
-    def _refresh_unit_toggle_button(self, button: QToolButton | None = None) -> None:
-        target = self.measurement_unit_button if button is None else button
-        if target is None:
-            return
-        self._normalize_display_units()
-        is_um = str(self._state.preprocessing.display_units or "px") == "um"
-        target.setText("µm" if is_um else "px")
-        target.setStyleSheet(
-            f"""
-            QToolButton {{
-                background: transparent;
-                border: none;
-                padding: 0 2px;
-                font-weight: 700;
-                font-size: 12px;
-                color: {'#22c55e' if is_um else '#f8fafc'};
-            }}
-            QToolButton:hover {{
-                color: #22c55e;
-            }}
-            """
-        )
-
-    def _display_unit_text(self) -> str:
-        return "µm" if str(self._state.preprocessing.display_units or "px") == "um" else "px"
-
-    def _build_measurement_controls_row(self) -> QWidget:
-        row = QWidget(self.image_toolbar)
-        layout = QHBoxLayout(row)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(6)
-        layout.addWidget(self.measurement_status_label, 1)
-        layout.addWidget(QLabel("Δx"))
-        layout.addWidget(self.measurement_um_x_spin)
-        layout.addWidget(QLabel("Δy"))
-        layout.addWidget(self.measurement_um_y_spin)
-        layout.addWidget(self.measurement_apply_button)
-        return row
-
-    def _create_image_tool_icon_button(self, action: QAction, *, accent: str) -> QToolButton:
-        button = QToolButton(self)
-        button.setDefaultAction(action)
-        button.setObjectName("leftSpotToolButton")
-        button.setAutoRaise(True)
-        button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly)
-        button.setIconSize(QSize(28, 28))
-        button.setFixedSize(36, 36)
-        hover, pressed, checked = icon_accent_colors(accent)
-        button.setStyleSheet(f"""
-            QToolButton {{
-                background: transparent;
-                border: 1px solid transparent;
-                border-radius: 8px;
-                padding: 2px;
-            }}
-            QToolButton:hover {{
-                background: {hover};
-                border: 1px solid #e2e8f0;
-                border-radius: 8px;
-            }}
-            QToolButton:pressed {{
-                background: {pressed};
-                border: 1px solid #94a3b8;
-                border-radius: 8px;
-            }}
-            QToolButton:checked {{
-                background: {checked};
-                border: 1px solid #22c55e;
-                border-radius: 8px;
-            }}
-        """)
-        return button
-
-    def _create_rotation_fill_toggle_button(self) -> QToolButton:
-        button = QToolButton(self)
-        button.setObjectName("leftSpotToolButton")
-        button.setAutoRaise(True)
-        button.setCheckable(True)
-        button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly)
-        button.setIconSize(QSize(28, 28))
-        button.setFixedSize(36, 36)
-        hover, pressed, checked = icon_accent_colors("yellow")
-        button.setStyleSheet(f"""
-            QToolButton {{
-                background: transparent;
-                border: 1px solid transparent;
-                border-radius: 8px;
-                padding: 2px;
-            }}
-            QToolButton:hover {{
-                background: {hover};
-                border: 1px solid #e2e8f0;
-                border-radius: 8px;
-            }}
-            QToolButton:pressed {{
-                background: {pressed};
-                border: 1px solid #94a3b8;
-                border-radius: 8px;
-            }}
-            QToolButton:checked {{
-                background: {checked};
-                border: 1px solid #22c55e;
-                border-radius: 8px;
-            }}
-        """)
-        return button
-
-    def _create_label_visibility_button(self, visible: bool) -> QToolButton:
-        button = QToolButton(self)
-        button.setObjectName("spotLabelIconButton")
-        button.setAutoRaise(True)
-        button.setIconSize(QSize(APP_THEME.plain_icon_inner, APP_THEME.plain_icon_inner))
-        button.setFixedSize(APP_THEME.plain_icon_outer, APP_THEME.plain_icon_outer)
-        button.setCheckable(True)
-        button.setChecked(bool(visible))
-        button.setIcon(self._make_spot_label_icon(bool(visible)))
-        button.setToolTip("Show or hide ROI labels. This works independently of manual ROI editing.")
-        button.setStyleSheet(transparent_icon_button_stylesheet())
-        button.toggled.connect(self._update_spot_label_button_icon)
-        return button
-
-    def _update_spot_label_button_icon(self, checked: bool) -> None:
-        icon = self._make_spot_label_icon(bool(checked))
-        for attr_name in ("roi_editor_labels_button", "bottom_roi_labels_button"):
-            button = getattr(self, attr_name, None)
-            if button is not None:
-                button.setIcon(icon)
-
-    @staticmethod
-    def _draw_mask_panel_fallback_icon(icon_name: str, color: QColor, *, size: int = 20) -> QIcon:
-        pixmap = QPixmap(size, size)
-        pixmap.fill(Qt.GlobalColor.transparent)
-        painter = QPainter(pixmap)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        pen = QPen(color, 1.9)
-        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
-        pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
-        painter.setPen(pen)
-        painter.setBrush(Qt.BrushStyle.NoBrush)
-
-        if icon_name in {"square-rounded-plus", "square-rounded-minus"}:
-            painter.drawRoundedRect(QRectF(3.0, 3.0, size - 6.0, size - 6.0), 4.0, 4.0)
-            painter.drawLine(QPointF(6.0, size / 2.0), QPointF(size - 6.0, size / 2.0))
-            if icon_name.endswith("plus"):
-                painter.drawLine(QPointF(size / 2.0, 6.0), QPointF(size / 2.0, size - 6.0))
-        elif icon_name == "sparkles":
-            painter.drawLine(QPointF(size / 2.0, 3.5), QPointF(size / 2.0, 8.0))
-            painter.drawLine(QPointF(size / 2.0, 12.0), QPointF(size / 2.0, size - 3.5))
-            painter.drawLine(QPointF(3.5, size / 2.0), QPointF(8.0, size / 2.0))
-            painter.drawLine(QPointF(12.0, size / 2.0), QPointF(size - 3.5, size / 2.0))
-            painter.drawLine(QPointF(5.2, 5.2), QPointF(8.3, 8.3))
-            painter.drawLine(QPointF(size - 5.2, 5.2), QPointF(size - 8.3, 8.3))
-            painter.drawLine(QPointF(5.2, size - 5.2), QPointF(8.3, size - 8.3))
-            painter.drawLine(QPointF(size - 5.2, size - 5.2), QPointF(size - 8.3, size - 8.3))
-        elif icon_name == "download":
-            painter.drawLine(QPointF(size / 2.0, 4.0), QPointF(size / 2.0, size - 8.0))
-            painter.drawLine(QPointF(size / 2.0, size - 8.0), QPointF(size / 2.0 - 3.2, size - 11.2))
-            painter.drawLine(QPointF(size / 2.0, size - 8.0), QPointF(size / 2.0 + 3.2, size - 11.2))
-            painter.drawLine(QPointF(4.5, size - 4.5), QPointF(size - 4.5, size - 4.5))
-        elif icon_name == "upload":
-            painter.drawLine(QPointF(size / 2.0, size - 4.0), QPointF(size / 2.0, 8.0))
-            painter.drawLine(QPointF(size / 2.0, 8.0), QPointF(size / 2.0 - 3.2, 11.2))
-            painter.drawLine(QPointF(size / 2.0, 8.0), QPointF(size / 2.0 + 3.2, 11.2))
-            painter.drawLine(QPointF(4.5, size - 4.5), QPointF(size - 4.5, size - 4.5))
-        elif icon_name in {"eye", "eye-closed"}:
-            path = QPainterPath()
-            path.moveTo(4.5, size / 2.0)
-            path.quadTo(size / 2.0, 5.5, size - 4.5, size / 2.0)
-            path.quadTo(size / 2.0, size - 5.5, 4.5, size / 2.0)
-            painter.drawPath(path)
-            painter.drawEllipse(QRectF(size / 2.0 - 2.0, size / 2.0 - 2.0, 4.0, 4.0))
-            if icon_name == "eye-closed":
-                painter.drawLine(QPointF(5.0, size - 5.0), QPointF(size - 5.0, 5.0))
-        else:
-            painter.drawEllipse(QRectF(4.0, 4.0, size - 8.0, size - 8.0))
-
-        painter.end()
-        return QIcon(pixmap)
-
-    def _create_left_spot_editor_button(self, action: QAction, *, primary: bool = False, accent: str = "neutral") -> QToolButton:
-        button = self._create_toolbar_action_button(action, primary=primary, icon_only=True)
-        button.setObjectName("leftSpotToolButton")
-        button.setAutoRaise(True)
-        button.setIconSize(QSize(APP_THEME.icon_button_inner, APP_THEME.icon_button_inner))
-        button.setFixedSize(APP_THEME.icon_button_outer, APP_THEME.icon_button_outer)
-        hover, pressed, checked = icon_accent_colors(accent)
-        button.setStyleSheet(
-            transparent_icon_button_stylesheet(
-                hover=hover,
-                pressed=pressed,
-                checked=checked,
-            )
-        )
-        return button
-
-    def _clear_layout(self, layout: QHBoxLayout | QVBoxLayout) -> None:
-        while layout.count():
-            item = layout.takeAt(0)
-            widget = item.widget()
-            if widget is not None:
-                widget.deleteLater()
-
-    def _populate_left_spot_editor_controls(self) -> None:
-        self._clear_layout(self.left_spot_editor_layout)
-        buttons = [
-            (self.roi_list_action, {"accent": "orange"}),
-            (self.spot_edit_action, {"primary": True}),
-            (self.roi_add_action, {"accent": "green"}),
-            (self.roi_array_action, {"accent": "green"}),
-            (self.roi_move_action, {"accent": "blue"}),
-            (self.remove_rois_action, {"accent": "red"}),
-        ]
-        for action, kwargs in buttons:
-            self.left_spot_editor_layout.addWidget(self._create_left_spot_editor_button(action, **kwargs))
-        self.left_spot_editor_layout.addWidget(self.roi_editor_labels_button)
-        self.left_spot_editor_layout.addStretch(1)
-
-    def _create_toolbar_row(self, widgets: list[QWidget]) -> QWidget:
-        row = QWidget(self.image_toolbar)
-        layout = QHBoxLayout(row)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(3)
-        for widget in widgets:
-            layout.addWidget(widget)
-        layout.addStretch(1)
-        return row
-
-    def _create_toolbar_section(self, title: str, rows: list[QWidget]) -> QWidget:
-        section = QWidget(self.image_toolbar)
-        section.setObjectName("toolbarSection")
-        layout = QVBoxLayout(section)
-        layout.setContentsMargins(4, 3, 4, 3)
-        layout.setSpacing(2)
-        for row in rows:
-            layout.addWidget(row)
-        return section
-
-    def _create_menu_bar(self) -> None:
-        menu_bar = self.menuBar()
-        file_menu = menu_bar.addMenu("&File")
-        file_menu.addAction("Load dataset...", self._dataset_controller.browse_folder)
-        file_menu.addAction("Export Stack to Zarr...", self._dataset_controller.export_current_dataset_to_ome_zarr)
-        file_menu.addSeparator()
-        file_menu.addAction("E&xit", self.close)
-
-        edit_menu = menu_bar.addMenu("&Edit")
-        edit_menu.addAction(self.undo_action)
-        edit_menu.addAction(self.redo_action)
-        edit_menu.addAction(self.clear_roi_selection_button.text(), self._clear_spot_selection)
-
-        view_menu = menu_bar.addMenu("&View")
-        view_menu.addAction(self.reset_layout_action)
-        view_menu.addAction(self.reset_dock_layout_action)
-        view_menu.addAction(self.expand_left_panels_action)
-        view_menu.addAction(self.collapse_left_panels_action)
-        view_menu.addSeparator()
-        dock_menu = view_menu.addMenu("Panels")
-        dock_menu.addAction(self.show_all_panels_action)
-        dock_menu.addAction(self.hide_all_panels_action)
-        dock_menu.addSeparator()
-        dock_menu.addAction(self.workflow_panel.toggleViewAction())
-        dock_menu.addAction(self.image_panel.toggleViewAction())
-        dock_menu.addAction(self.histogram_panel.toggleViewAction())
-        dock_menu.addAction(self.spectra_panel.toggleViewAction())
-        dock_menu.addAction(self.sensorgram_panel.toggleViewAction())
-        dock_menu.addAction(self.roi_list_panel.toggleViewAction())
-        view_menu.addSeparator()
-        self.theme_blue_action = view_menu.addAction("Blue Dark Theme")
-        self.theme_blue_action.setCheckable(True)
-        self.theme_gray_action = view_menu.addAction("Gray Dark Theme")
-        self.theme_gray_action.setCheckable(True)
-        self.theme_blue_action.triggered.connect(lambda checked: checked and self._set_ui_theme("blue"))
-        self.theme_gray_action.triggered.connect(lambda checked: checked and self._set_ui_theme("gray"))
-        theme_group = QActionGroup(self)
-        theme_group.setExclusive(True)
-        theme_group.addAction(self.theme_blue_action)
-        theme_group.addAction(self.theme_gray_action)
-        current_theme = str(self._settings.value("ui/theme", "blue"))
-        self.theme_gray_action.setChecked(current_theme == "gray")
-        self.theme_blue_action.setChecked(current_theme != "gray")
-        view_menu.addSeparator()
-        ui_scale_menu = view_menu.addMenu("UI Scale")
-        ui_scale_group = QActionGroup(self)
-        ui_scale_group.setExclusive(True)
-        self._ui_scale_actions: dict[str, QAction] = {}
-        _UI_SCALE_OPTIONS = [
-            ("auto",  "Auto (system default)"),
-            ("0.75",  "75%"),
-            ("0.85",  "85%"),
-            ("1.0",   "100%  —  Normal"),
-            ("1.15",  "115%"),
-            ("1.25",  "125%"),
-            ("1.5",   "150%"),
-            ("1.75",  "175%"),
-            ("2.0",   "200%"),
-        ]
-        current_scale = str(self._settings.value("ui/scale_factor", "auto") or "auto")
-        for _sv, _sl in _UI_SCALE_OPTIONS:
-            _a = ui_scale_menu.addAction(_sl)
-            _a.setCheckable(True)
-            _a.setChecked(_sv == current_scale)
-            _a.triggered.connect(lambda checked, v=_sv: checked and self._set_ui_scale_factor(v))
-            ui_scale_group.addAction(_a)
-            self._ui_scale_actions[_sv] = _a
-
-        analysis_menu = menu_bar.addMenu("&Analysis")
-        analysis_menu.addAction(self.calculate_spectrum_action)
-
-        preferences_menu = menu_bar.addMenu("&Preferences")
-        preferences_menu.addAction(self.reset_layout_action)
-        preferences_menu.addSeparator()
-        preferences_menu.addAction("Export processing profile", self._export_processing_profile)
-        preferences_menu.addAction("Import processing profile", self._import_processing_profile)
-        preferences_menu.addSeparator()
-        startup_restore_menu = preferences_menu.addMenu("Startup restore")
-        startup_restore_group = QActionGroup(self)
-        startup_restore_group.setExclusive(True)
-        self.startup_restore_timeout_actions = {}
-        for seconds, label in ((5, "Prompt restore (5s)"), (0, "Auto restore (0s)")):
-            action = startup_restore_menu.addAction(label)
-            action.setCheckable(True)
-            action.triggered.connect(lambda checked, value=seconds: checked and self._set_startup_restore_timeout_seconds(value))
-            startup_restore_group.addAction(action)
-            self.startup_restore_timeout_actions[seconds] = action
-        current_timeout = self._startup_restore_timeout_seconds()
-        if current_timeout not in self.startup_restore_timeout_actions:
-            current_timeout = 5
-        self._set_startup_restore_timeout_seconds(current_timeout)
-
-
-        help_menu = menu_bar.addMenu("&Help")
-        help_menu.addAction(self.shortcuts_action)
-        help_menu.addAction("Workflow notes", self._show_workflow_notes)
-        help_menu.addAction(self.about_action)
-
-    def _create_view_control(self, name: str, toggle: QWidget, color_button: QToolButton, slider: QWidget) -> QWidget:
-        row = QWidget(self.image_toolbar)
-        layout = QHBoxLayout(row)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(2)
-        toggle.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
-        color_button.setProperty("toolRole", "swatch")
-        slider.setFixedWidth(24)
-        if name:
-            name_label = QLabel(name, row)
-            name_label.setObjectName("toolbarMiniLabel")
-            name_label.setMinimumWidth(max(32, name_label.fontMetrics().horizontalAdvance(name) + 6))
-            layout.addWidget(name_label)
-        layout.addWidget(toggle)
-        layout.addWidget(color_button)
-        layout.addWidget(slider)
-        return row
-
-    def _create_toolbar_icon_toggle_control(self, name: str, toggle: QWidget) -> QWidget:
-        row = QWidget(self.image_toolbar)
-        layout = QHBoxLayout(row)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(2)
-        toggle.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
-        if name:
-            name_label = QLabel(name, row)
-            name_label.setObjectName("toolbarMiniLabel")
-            name_label.setMinimumWidth(max(42, name_label.fontMetrics().horizontalAdvance(name) + 6))
-            layout.addWidget(name_label)
-        layout.addWidget(toggle)
-        return row
-
-    def _set_spinbox_width(self, spinbox: QSpinBox | QDoubleSpinBox, text: str, *, minimum: int = 46) -> None:
-        suffix = spinbox.suffix()
-        full_text = text if (not suffix or text.endswith(suffix)) else text + suffix
-        text_w = spinbox.fontMetrics().horizontalAdvance(full_text)
-        # Derive button+frame overhead from sizeHint(), which Qt computes from internal
-        # style metrics.  This is correct at any DPI/theme and works before the widget
-        # has been shown or placed in a layout (unlike subControlRect, which returns a
-        # zero-width rect when the widget geometry is still 0×0).
-        sh_w = spinbox.sizeHint().width()
-        max_text = spinbox.prefix() + spinbox.textFromValue(spinbox.maximum()) + spinbox.suffix()
-        overhead = max(sh_w - spinbox.fontMetrics().horizontalAdvance(max_text), 30)
-        spinbox.setFixedWidth(max(minimum, text_w + overhead))
-
-    def _set_combo_width(self, combo: QComboBox, texts: list[str], *, minimum: int = 58) -> None:
-        widest = max((combo.fontMetrics().horizontalAdvance(text) for text in texts), default=0)
-        combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToContents)
-        combo.setFixedWidth(max(minimum, widest + 10))
-
-    def _apply_right_aligned_control_text(self) -> None:
-        for line_edit in self.findChildren(QLineEdit):
-            line_edit.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-        for spinbox in self.findChildren(QAbstractSpinBox):
-            spinbox.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-        for combo in self.findChildren(QComboBox):
-            combo.setEditable(True)
-            combo.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
-            line_edit = combo.lineEdit()
-            if line_edit is not None:
-                line_edit.setReadOnly(True)
-                line_edit.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-                line_edit.setFrame(False)
-
-    def _apply_compact_control_widths(self) -> None:
-        self._set_spinbox_width(self.chromatic_sample_count_spin, "777")
-        self._set_combo_width(self.chromatic_feature_count_spin, ["5", "15", "30"], minimum=54)
-        self._set_spinbox_width(self.chromatic_landmark_id_spin, "99", minimum=62)
-        self._set_spinbox_width(self.sample_diameter_spin, "9999.99")
-        self._set_spinbox_width(self.reference_inner_diameter_spin, "9999.99")
-        self._set_spinbox_width(self.reference_outer_diameter_spin, "9999.99")
-        self._set_spinbox_width(self.background_smoothing_sigma_spin, "2000 px", minimum=72)
-        self._set_combo_width(self.background_smoothing_binning_combo, ["4x4"])
-        self._set_combo_width(self.mask_mode_combo, ["Local contrast"], minimum=96)
-        self._set_spinbox_width(self.mask_profile_sigma_spin, "2000 px", minimum=72)
-        self._set_spinbox_width(self.mask_relative_threshold_spin, "500.0 %", minimum=78)
-        self._set_spinbox_width(self.mask_local_contrast_sigma_spin, "500.0 %", minimum=78)
-        self._set_spinbox_width(self.mask_local_z_spin, "20.0 sigma", minimum=84)
-        self._set_spinbox_width(self.mask_morph_radius_spin, "100 px", minimum=64)
-        self._set_spinbox_width(self.mask_local_contrast_z_spin, "20.0 sigma", minimum=84)
-        self._set_spinbox_width(self.mask_morphology_radius_spin, "100 px", minimum=64)
-        self._set_spinbox_width(self.mask_relative_profile_sigma_spin, "2000 px", minimum=72)
-        self._set_combo_width(self.mask_draw_mode_combo, ["Erase"])
-        self._set_spinbox_width(self.mask_brush_size_spin, "200 px", minimum=68)
-        self._set_spinbox_width(self.histogram_bins_spin, "8192 DN", minimum=70)
-        self._set_spinbox_width(self.analysis_poly_order_spin, "99", minimum=52)
-        self._set_spinbox_width(self.ome_zarr_chunk_spin, "999 px", minimum=60)
-        self._set_combo_width(self.ome_zarr_shard_mode_combo, ["1 spectral cube"], minimum=220)
-        self._set_combo_width(self.analysis_metric_combo, ["Maximum", "Centroid"], minimum=80)
-        self._set_spinbox_width(self.analysis_start_spectral_cube_spin, "99999", minimum=66)
-        self._set_spinbox_width(self.analysis_end_spectral_cube_spin, "99999", minimum=66)
-        self._set_spinbox_width(self.array_rows_spin, "100")
-        self._set_spinbox_width(self.array_cols_spin, "100")
-        self._set_spinbox_width(self.array_spacing_spin, "1000.00", minimum=68)
-        self._set_spinbox_width(self.measurement_um_x_spin, "1000000", minimum=58)
-        self._set_spinbox_width(self.measurement_um_y_spin, "1000000", minimum=58)
-        self._set_spinbox_width(self.spectral_cube_spin, "99999", minimum=66)
-        self._set_spinbox_width(self.wavelength_spin, "99999 nm", minimum=82)
-        self._set_combo_width(self.chromatic_subpixel_precision_combo, ["1", "4", "9"], minimum=42)
-        navigation_control_width = max(self.spectral_cube_spin.sizeHint().width(), self.wavelength_spin.sizeHint().width(), 82)
-        navigation_slider_width = max(navigation_control_width + 80, 170)
-        self.spectral_cube_spin.setFixedWidth(navigation_control_width)
-        self.wavelength_spin.setFixedWidth(navigation_control_width)
-        self.spectral_cube_slider.setFixedWidth(navigation_slider_width)
-        self.wavelength_slider.setFixedWidth(navigation_slider_width)
 
     def _on_rotate_tool_toggled(self, checked: bool) -> None:
         if checked:
@@ -7852,65 +6663,6 @@ class MainWindow(MainWindowIcons, QMainWindow):
             round(float(self._state.area_roi_settings.reference_outer_radius_px), 3),
         )
 
-    def _cached_absorbance_roi_mask_cache(
-        self,
-        image_shape: tuple[int, int],
-        selected_rois: list[AreaRoi],
-        selected_roi_ids: tuple[int, ...],
-        affine_matrix: np.ndarray | None,
-        source_rois: list[AreaRoi] | None = None,
-    ) -> dict[str, object]:
-        logger = logging.getLogger("lspr_imaging_app.workflow")
-        signature = self._absorbance_roi_mask_signature(image_shape, selected_rois, selected_roi_ids, affine_matrix)
-        with self._analysis_cache_lock:
-            cached = self._absorbance_roi_mask_cache.get(signature)
-            if cached is not None:
-                self._absorbance_roi_mask_cache.move_to_end(signature)
-                logger.debug(
-                    "ROI cache hit | shape=%sx%s rois=%s",
-                    int(image_shape[0]),
-                    int(image_shape[1]),
-                    len(selected_rois),
-                )
-                return cached
-        selected_ids_local = tuple(int(spot_id) for spot_id in selected_roi_ids)
-        combined_roi_mask, combined_ring_mask = _selected_roi_masks_for_spectrum(
-            image_shape,
-            source_rois if source_rois is not None else selected_rois,
-            selected_ids_local,
-            float(self._state.area_roi_settings.reference_inner_radius_px),
-            float(self._state.area_roi_settings.reference_outer_radius_px),
-            affine_matrix,
-        )
-        per_roi_masks: dict[int, tuple[np.ndarray, np.ndarray]] = {}
-        for roi in selected_rois:
-            per_roi_masks[int(roi.area_roi_id)] = _selected_roi_masks_for_spectrum(
-                image_shape,
-                [roi],
-                (int(roi.area_roi_id),),
-                float(self._state.area_roi_settings.reference_inner_radius_px),
-                float(self._state.area_roi_settings.reference_outer_radius_px),
-                affine_matrix,
-            )
-        cached_value = {
-            "shape": tuple(int(value) for value in image_shape[:2]),
-            "combined": (combined_roi_mask, combined_ring_mask),
-            "per_spot": per_roi_masks,
-        }
-        with self._analysis_cache_lock:
-            self._absorbance_roi_mask_cache[signature] = cached_value
-            self._absorbance_roi_mask_cache.move_to_end(signature)
-            while len(self._absorbance_roi_mask_cache) > self.ABSORBANCE_ROI_MASK_CACHE_SIZE:
-                self._absorbance_roi_mask_cache.popitem(last=False)
-        logger.debug(
-            "ROI cache built | shape=%sx%s rois=%s",
-            int(image_shape[0]),
-            int(image_shape[1]),
-            len(selected_rois),
-        )
-        return cached_value
-
-    @staticmethod
     def _serialize_absorbance_result(result: AbsorbanceSpectrumResult) -> dict:
         from lspr_imaging_app.gui.analysis_controller import AnalysisController
         return AnalysisController._serialize_absorbance_result(result)
@@ -9023,17 +7775,6 @@ class MainWindow(MainWindowIcons, QMainWindow):
         layout.addStretch(1)
         return row
 
-    def _build_histogram_mask_row(self) -> QWidget:
-        row = QWidget(self)
-        layout = QHBoxLayout(row)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(6)
-        layout.addWidget(QLabel("Min"))
-        # We'll use the existing histogram region controls
-        layout.addWidget(QLabel("Max"))
-        layout.addStretch(1)
-        return row
-
     def _build_relative_mask_row(self) -> QWidget:
         row = QWidget(self)
         layout = QHBoxLayout(row)
@@ -10051,9 +8792,6 @@ class MainWindow(MainWindowIcons, QMainWindow):
     def _histogram_source_signature(self, image: np.ndarray) -> tuple[object, ...]:
         return self._plot_manager.histogram_source_signature(image)
 
-    def _ignored_mask_signature(self, image: np.ndarray) -> tuple[object, ...]:
-        return self._plot_manager.ignored_mask_signature(image)
-
     def _ignored_mask(self, image: np.ndarray) -> np.ndarray:
         return self._plot_manager.ignored_mask(image)
 
@@ -10393,157 +9131,40 @@ class MainWindow(MainWindowIcons, QMainWindow):
         return lower, upper
 
     def _mask_changes_affect_preprocessing(self) -> bool:
-        return bool(
-            self._state.preprocessing.flatten_background_enabled
-            and self._state.preprocessing.flatten_background_exclude_mask
-        )
+        return self._mask_controller.mask_changes_affect_preprocessing()
 
     def _mask_change_status_suffix(self) -> str:
-        if self._mask_changes_affect_preprocessing():
-            return " Background removal will use it on the next image refresh."
-        return ""
+        return self._mask_controller.mask_change_status_suffix()
 
     def _session_mask_payload(self) -> dict | None:
-        if self._current_file_mask is None or self._current_record_path is None:
-            return None
-        source_record = self._reference_record_for_record_path(self._current_record_path)
-        mask_record_path = source_record.path if source_record is not None else self._current_record_path
-        return {
-            "record_path": str(mask_record_path),
-            "mask": self._current_file_mask.copy(),
-        }
+        return self._mask_controller.session_mask_payload()
 
     def _manual_mask_required(self, *, create_if_missing: bool) -> np.ndarray | None:
-        if self._current_processed_image is None:
-            self._set_status_text("Load an image first to edit the mask.")
-            return None
-        if not self.ignore_marked_check.isChecked():
-            self.ignore_marked_check.setChecked(True)
-        if self._current_file_mask is None and create_if_missing:
-            default_path = self._current_mask_file_path()
-            raw_shape = (
-                load_image_shape(str(self._current_record_path))
-                if self._current_record_path is not None
-                else self._current_processed_image.shape[:2]
-            )
-            blank_mask = np.zeros(raw_shape, dtype=bool)
-            self._set_current_file_mask(blank_mask, default_path, refresh_preview=False)
-        if self._current_file_mask is None:
-            self._set_status_text("Load a file mask or start drawing with Pencil first.")
-            return None
-        return self._current_file_mask
+        return self._mask_controller.manual_mask_required(create_if_missing=create_if_missing)
 
     def _mask_structure(self, radius_px: int) -> np.ndarray:
-        radius = max(int(radius_px), 1)
-        yy, xx = np.ogrid[-radius : radius + 1, -radius : radius + 1]
-        return (xx * xx + yy * yy) <= radius * radius
+        return self._mask_controller.mask_structure(radius_px)
 
     def _apply_mask_brush(self, point: tuple[float, float]) -> None:
-        mask = self._manual_mask_required(create_if_missing=True)
-        if mask is None or self._current_processed_image is None:
-            return
-        brush_radius = max(float(self.mask_brush_size_spin.value()) / 2.0, 0.5)
-        center_x = float(point[0])
-        center_y = float(point[1])
-        height, width = mask.shape
-        x_min = max(int(np.floor(center_x - brush_radius)), 0)
-        x_max = min(int(np.ceil(center_x + brush_radius)) + 1, width)
-        y_min = max(int(np.floor(center_y - brush_radius)), 0)
-        y_max = min(int(np.ceil(center_y + brush_radius)) + 1, height)
-        if x_min >= x_max or y_min >= y_max:
-            return
-        yy, xx = np.ogrid[y_min:y_max, x_min:x_max]
-        brush_mask = (xx - center_x) ** 2 + (yy - center_y) ** 2 <= brush_radius**2
-        coord_maps = self._processed_to_raw_maps()
-        if coord_maps is None:
-            return
-        x_map, y_map = coord_maps
-        raw_x = np.rint(x_map[y_min:y_max, x_min:x_max][brush_mask]).astype(np.int32, copy=False)
-        raw_y = np.rint(y_map[y_min:y_max, x_min:x_max][brush_mask]).astype(np.int32, copy=False)
-        valid = (
-            (raw_x >= 0)
-            & (raw_y >= 0)
-            & (raw_x < mask.shape[1])
-            & (raw_y < mask.shape[0])
-        )
-        if not np.any(valid):
-            return
-        draw_mode = str(self.mask_draw_mode_combo.currentData() or "add")
-        if draw_mode == "erase":
-            mask[raw_y[valid], raw_x[valid]] = False
-        else:
-            mask[raw_y[valid], raw_x[valid]] = True
-        self._append_workflow_log_throttled(
-            "mask_brush",
-            f"Mask brush | mode={draw_mode} | points={int(np.count_nonzero(valid))} | point=({center_x:.1f},{center_y:.1f})",
-            level="debug",
-            min_interval=0.5,
-        )
-        self._invalidate_image_analysis_caches()
-        self._update_ignore_mask_overlay()
+        self._mask_controller.apply_mask_brush(point)
 
     def _finalize_mask_edit(self) -> None:
-        if self._current_file_mask is None:
-            return
-        self._external_mask_revision += 1
-        self._invalidate_image_analysis_caches()
-        self._invalidate_background_profile_cache()
-        self._update_ignore_mask_overlay()
-        self._schedule_histogram_refresh()
-        if self._mask_section_applied():
-            self._current_image_key = None
-            self._schedule_image_refresh()
-        self._commit_prepared_undo_snapshot()
-        self._append_workflow_log(
-            f"Mask finalize | record={self._current_record_path} | shape={self._current_file_mask.shape}",
-            level="debug",
-        )
-        self._save_processing_state_for_dataset()
-        self._set_status_text(f"Mask updated. Save if you want to keep it on disk.{self._mask_change_status_suffix()}")
+        self._mask_controller.finalize_mask_edit()
 
     def _current_mask_file_path(self) -> Path | None:
-        if self._current_record_path is None:
-            return None
-        reference_record = self._reference_record_for_record_path(self._current_record_path)
-        if reference_record is not None:
-            return reference_record.path.with_name(f"{reference_record.path.stem}_mask.png")
-        return self._current_record_path.with_name(f"{self._current_record_path.stem}_mask.png")
+        return self._mask_controller.current_mask_file_path()
 
     def _mask_file_path_for_record(self, record_path: Path) -> Path:
-        return record_path.with_name(f"{record_path.stem}_mask.png")
+        return self._mask_controller.mask_file_path_for_record(record_path)
 
     def _current_background_file_path(self) -> Path | None:
-        if self._current_record_path is None:
-            return None
-        reference_record = self._reference_record_for_record_path(self._current_record_path)
-        if reference_record is not None:
-            return reference_record.path.with_name(f"{reference_record.path.stem}_background.png")
-        return self._current_record_path.with_name(f"{self._current_record_path.stem}_background.png")
-
-    def _background_file_path_for_record(self, record_path: Path) -> Path:
-        return record_path.with_name(f"{record_path.stem}_background.png")
+        return self._mask_controller.current_background_file_path()
 
     def _image_key_for_record_path(self, record_path: Path) -> tuple[int, float] | None:
         return self._record_key_by_path.get(record_path)
 
-    def _processed_shape_for_record(self, record_path: Path) -> tuple[int, int]:
-        cache_key = (str(record_path), self._raw_preprocessing_signature())
-        cached = self._processed_shape_cache.get(cache_key)
-        if cached is not None:
-            return cached
-        raw_shape = load_image_shape(str(record_path))
-        processed_shape = spatial_output_shape(raw_shape, self._state.preprocessing)
-        self._processed_shape_cache[cache_key] = processed_shape
-        return processed_shape
-
-    def _current_raw_external_mask(self) -> np.ndarray | None:
-        return self._current_file_mask
-
     def _current_external_mask(self) -> np.ndarray | None:
-        if self._current_record_path is None:
-            return None
-        processed_mask, _processed = self._effective_external_mask_for_record(self._current_record_path, processed_space=True)
-        return processed_mask
+        return self._mask_controller.current_external_mask()
 
     def _effective_external_mask_for_record(
         self,
@@ -10551,74 +9172,16 @@ class MainWindow(MainWindowIcons, QMainWindow):
         *,
         processed_space: bool = False,
     ) -> tuple[np.ndarray | None, bool]:
-        if not self._mask_section_applied():
-            return None, False
-        return self._external_mask_for_record(record_path, processed_space=processed_space)
+        return self._mask_controller.effective_external_mask_for_record(record_path, processed_space=processed_space)
 
     def _external_mask_for_record(self, record_path: Path, *, processed_space: bool = False) -> tuple[np.ndarray | None, bool]:
-        source_record_path = record_path
-        reference_record = self._reference_record_for_record_path(record_path)
-        if reference_record is not None:
-            source_record_path = reference_record.path
-        expected_mask_path = self._mask_file_path_for_record(source_record_path)
-        if self._current_file_mask is not None and (
-            self._current_file_mask_path == expected_mask_path
-            or (
-                self._current_file_mask_path is None
-                and self._current_mask_file_path() == expected_mask_path
-            )
-        ):
-            source_mask = self._current_file_mask
-        else:
-            if not expected_mask_path.exists():
-                return None, False
-            try:
-                source_mask = self._read_mask_image(expected_mask_path, load_image_shape(str(source_record_path)))
-            except Exception:
-                return None, False
-
-        if not processed_space:
-            return source_mask, False
-
-        if source_mask is None:
-            return None, False
-
-        # Keep the image pixels untouched here. Chromatic correction stays in the
-        # analysis geometry path; masks remain in the spatially preprocessed space.
-        return apply_spatial_mask(source_mask, self._state.preprocessing), True
+        return self._mask_controller.external_mask_for_record(record_path, processed_space=processed_space)
 
     def _external_mask_signature(self, image_key: tuple[int, float] | None = None) -> tuple[object, ...] | None:
-        if self._current_file_mask is None and self._current_record_path is None:
-            return None
-        target_key = image_key if image_key is not None else self._current_image_key
-        return (
-            self._external_mask_revision,
-            str(self._current_file_mask_path) if self._current_file_mask_path is not None else None,
-            None if self._current_file_mask is None else self._current_file_mask.shape,
-            self._raw_preprocessing_signature(),
-            self._chromatic_signature_for_image_key(target_key),
-        )
+        return self._mask_controller.external_mask_signature(image_key)
 
     def _processed_to_raw_maps(self) -> tuple[np.ndarray, np.ndarray] | None:
-        if self._current_record_path is None or self._current_processed_image is None:
-            return None
-        raw_image = load_image_array(str(self._current_record_path))
-        signature = (
-            str(self._current_record_path),
-            raw_image.shape[:2],
-            self._raw_preprocessing_signature(),
-        )
-        if (
-            self._processed_to_raw_map_signature == signature
-            and self._processed_to_raw_x_map is not None
-            and self._processed_to_raw_y_map is not None
-        ):
-            return self._processed_to_raw_x_map, self._processed_to_raw_y_map
-        x_map, y_map = spatial_coordinate_maps(raw_image.shape[:2], self._state.preprocessing)
-        self._processed_to_raw_map_signature = signature
-        self._processed_to_raw_x_map = x_map
-        self._processed_to_raw_y_map = y_map
-        return x_map, y_map
+        return self._mask_controller.processed_to_raw_maps()
 
     def _set_current_file_mask(
         self,
@@ -10627,425 +9190,46 @@ class MainWindow(MainWindowIcons, QMainWindow):
         *,
         refresh_preview: bool,
     ) -> bool:
-        normalized = None if mask is None else np.asarray(mask, dtype=bool)
-        normalized_path = path
-        if normalized is not None and normalized_path is None:
-            normalized_path = self._current_mask_file_path()
-        same_path = self._current_file_mask_path == normalized_path
-        same_mask = (
-            (self._current_file_mask is None and normalized is None)
-            or (
-                self._current_file_mask is not None
-                and normalized is not None
-                and self._current_file_mask.shape == normalized.shape
-                and np.array_equal(self._current_file_mask, normalized)
-            )
-        )
-        if same_path and same_mask:
-            self._append_workflow_log_throttled(
-                "current_file_mask_unchanged",
-                f"Current file mask unchanged | path={normalized_path} | shape={None if normalized is None else normalized.shape}",
-                level="debug",
-                min_interval=1.0,
-            )
-            return False
-
-        self._current_file_mask = None if normalized is None else normalized.copy()
-        self._current_file_mask_path = normalized_path
-        self._current_file_mask_session_source_path = None
-        self._external_mask_revision += 1
-        self._append_workflow_log_throttled(
-            "current_file_mask_set",
-            f"Current file mask set | path={normalized_path} | shape={None if normalized is None else normalized.shape} | rev={self._external_mask_revision}",
-            level="debug",
-            min_interval=0.5,
-        )
-        self._invalidate_image_analysis_caches()
-        self._invalidate_background_profile_cache()
-        self._update_mask_file_button_state()
-
-        if refresh_preview and self._current_processed_image is not None:
-            self._update_ignore_mask_overlay()
-            self._schedule_histogram_refresh()
-            if self._mask_section_applied():
-                self._current_image_key = None
-                self._schedule_image_refresh()
-        return True
+        return self._mask_controller.set_current_file_mask(mask, path, refresh_preview=refresh_preview)
 
     def _read_mask_image(self, path: Path, expected_shape: tuple[int, int]) -> np.ndarray:
-        with Image.open(path) as image:
-            mask = np.array(image.convert("L"), dtype=np.uint8)
-        if mask.shape != expected_shape:
-            raise ValueError(
-                f"Mask size {mask.shape[1]} x {mask.shape[0]} px does not match the current image "
-                f"{expected_shape[1]} x {expected_shape[0]} px."
-            )
-        return mask >= 128
+        return self._mask_controller.read_mask_image(path, expected_shape)
 
     def _auto_load_mask_for_current_record(self) -> None:
-        if self._current_record_path is None:
-            self._set_current_file_mask(None, None, refresh_preview=False)
-            return
-        source_record = self._reference_record_for_record_path(self._current_record_path)
-        mask_record_path = source_record.path if source_record is not None else self._current_record_path
-        default_path = self._mask_file_path_for_record(mask_record_path)
-        expected_shape = load_image_shape(str(mask_record_path))
-        if self._current_file_mask is not None and self._current_file_mask_session_source_path is not None:
-            if self._current_file_mask.shape == expected_shape:
-                if self._current_file_mask_session_source_path == mask_record_path:
-                    return
-                if source_record is not None and self._current_file_mask_session_source_path == source_record.path:
-                    return
-            self._set_current_file_mask(None, None, refresh_preview=False)
-            self._current_file_mask_session_source_path = None
-            if default_path is None or not default_path.exists():
-                return
-        if (
-            self._current_file_mask is not None
-            and self._current_file_mask.shape == expected_shape
-            and (
-                self._current_file_mask_path == default_path
-                or (
-                    self._current_file_mask_path is None
-                    and self._current_mask_file_path() == default_path
-                )
-            )
-        ):
-            # Keep unsaved in-memory edits for the current image/reference slot.
-            return
-        if default_path is None or not default_path.exists():
-            self._set_current_file_mask(None, None, refresh_preview=False)
-            return
-        try:
-            mask = self._read_mask_image(default_path, expected_shape)
-        except Exception as exc:
-            self._set_current_file_mask(None, None, refresh_preview=False)
-            self._set_status_text(f"Skipped {default_path.name}: {exc}")
-            return
-        self._set_current_file_mask(mask, default_path, refresh_preview=False)
-
-    def _load_mask_from_file(self) -> None:
-        if self._current_record_path is None:
-            self._set_status_text("Load an image first to load a mask file.")
-            return
-        if self._state.preprocessing.chromatic_correction_enabled and not self._is_current_reference_image():
-            self._set_status_text("Switch to the reference image to load the reference mask.")
-            return
-        default_path = self._current_mask_file_path()
-        start_path = str(default_path if default_path is not None else Path(self.folder_edit.text()))
-        source, _ = QFileDialog.getOpenFileName(
-            self,
-            "Load mask image",
-            start_path,
-            "Mask images (*.png *.bmp *.tif *.tiff);;All files (*)",
-        )
-        if not source:
-            return
-        source_path = Path(source)
-        try:
-            target_record_path = self._reference_record().path if self._reference_record() is not None else self._current_record_path
-            mask = self._read_mask_image(source_path, load_image_shape(str(target_record_path)))
-        except Exception as exc:
-            QMessageBox.critical(self, "Load mask failed", str(exc))
-            self._set_status_text(f"Load mask failed: {exc}")
-            return
-        self._clear_mask_preview_overlays(clear_toggles=True)
-        self._set_current_file_mask(mask, self._current_mask_file_path(), refresh_preview=True)
-        self._set_status_text(f"Loaded mask from {source_path.name}.{self._mask_change_status_suffix()}")
-
-    def _save_mask_to_file(self) -> None:
-        if self._current_record_path is None:
-            self._set_status_text("Load an image first to save a mask.")
-            return
-        if self._state.preprocessing.chromatic_correction_enabled and not self._is_current_reference_image():
-            self._set_status_text("Switch to the reference image to save the reference mask.")
-            return
-        destination = self._current_mask_file_path()
-        if destination is None:
-            self._set_status_text("No current image is available for mask export.")
-            return
-        if self._current_file_mask is not None:
-            mask = self._current_file_mask.astype(bool, copy=False)
-        else:
-            raw_image = load_image_array(str(self._current_record_path)).astype(np.float32, copy=False)
-            export_settings = deepcopy(self._state.area_roi_settings)
-            export_settings.ignore_marked_pixels = True
-            mask = ignored_pixel_mask(raw_image, export_settings, external_mask=None)
-        try:
-            Image.fromarray(np.where(mask, 255, 0).astype(np.uint8), mode="L").save(destination)
-        except Exception as exc:
-            QMessageBox.critical(self, "Save mask failed", str(exc))
-            self._set_status_text(f"Save mask failed: {exc}")
-            return
-        self._set_current_file_mask(mask, destination, refresh_preview=True)
-        self._set_status_text(f"Saved mask to {destination.name}.{self._mask_change_status_suffix()}")
+        self._mask_controller.auto_load_mask_for_current_record()
 
     def _clear_mask_preview_overlays(self, *, clear_toggles: bool = False) -> None:
         self._mask_controller.clear_preview_overlays(clear_toggles=clear_toggles)
 
     def _set_mask_preview_button_icon(self, button: QToolButton, shown: bool) -> None:
-        icon_name = "eye" if shown else "eye-closed"
-        tooltip = "Hide preview." if shown else "Show preview."
-        button.setIcon(self._mask_panel_icon(icon_name, color="#38bdf8", size=20))
-        button.setToolTip(tooltip)
-
-    def _on_mask_preview_toggled(self, preview_kind: str, checked: bool) -> None:
-        self._mask_controller.on_preview_toggled(preview_kind, checked)
-
-    def _set_mask_morphology_operation(self, operation: str) -> None:
-        self._mask_controller.set_morphology_operation(operation, True)
-
-    def _current_histogram_highlight_mask_raw(self) -> np.ndarray | None:
-        return self._mask_controller.current_histogram_highlight_mask_raw()
-
-    def _candidate_mask_for_tool(self, tool_key: str) -> np.ndarray | None:
-        return self._mask_controller.candidate_mask_for_tool(tool_key)
+        self._mask_controller.set_mask_preview_button_icon(button, shown)
 
     def _current_mask_canvas(self) -> tuple[np.ndarray, Path | None] | None:
-        if self._current_record_path is None:
-            return None
-        raw_shape = load_image_shape(str(self._current_record_path))
-        if self._current_file_mask is not None and self._current_file_mask.shape == raw_shape:
-            return self._current_file_mask.copy(), self._current_file_mask_path
-        return np.zeros(raw_shape, dtype=bool), self._current_file_mask_path
-
-    def _apply_mask_delta(self, tool_key: str, *, subtract: bool) -> None:
-        self._mask_controller.apply_mask_delta(tool_key, subtract=subtract)
+        return self._mask_controller.current_mask_canvas()
 
     def _refresh_mask_previews(self, *_args) -> None:
         self._mask_controller.refresh_previews()
 
     def _ensure_mask_section_applied(self) -> None:
-        if not self._mask_section_applied():
-            self.mask_section.set_applied(True)
+        self._mask_controller.ensure_mask_section_applied()
 
     def _refresh_after_mask_change(self, status: str) -> None:
-        self._mask_state_revision += 1
-        self._invalidate_image_analysis_caches()
-        self._invalidate_background_profile_cache()
-        self._update_ignore_mask_overlay()
-        self._schedule_histogram_refresh()
-        if self._mask_section_applied():
-            self._current_image_key = None
-            self._schedule_image_refresh()
-        self._set_status_text(status)
-
-    def _apply_histogram_mask(self) -> None:
-        self._mask_controller.apply_histogram_mask()
-
-    def _reset_histogram_mask(self) -> None:
-        self._mask_controller.reset_histogram_mask()
-
-    def _apply_figure_mask(self) -> None:
-        """Apply figure-based mask using spatial algorithms."""
-        if self._current_record_path is None:
-            self._set_status_text("Load an image first to apply figure mask.")
-            return
-        
-        # Get raw image for figure analysis
-        raw_image = load_image_array(str(self._current_record_path)).astype(np.float32, copy=False)
-        
-        # Get figure mask settings
-        algorithm = self.figure_algorithm_combo.currentText().lower()
-        sigma = self.figure_sigma_spin.value()
-        threshold = self.figure_threshold_spin.value()
-        
-        # Create figure mask
-        from ..processing.preprocess import create_figure_mask
-        mask = create_figure_mask(raw_image, algorithm, sigma, threshold)
-        
-        # Update the mask state
-        self._state.mask.figure_mask = mask
-        self._state.mask.figure_enabled = True
-        self._refresh_after_mask_change("Figure mask applied.")
-
-    def _reset_figure_mask(self) -> None:
-        """Reset figure mask."""
-        self._state.mask.figure_enabled = False
-        self._state.mask.figure_mask = None
-        self._refresh_after_mask_change("Figure mask reset.")
-
-    def _create_new_mask(self) -> None:
-        if self._current_record_path is None:
-            self._set_status_text("Load an image first to create a new mask.")
-            return
-        if self._state.preprocessing.chromatic_correction_enabled and not self._is_current_reference_image():
-            self._set_status_text("Switch to the reference image to edit the reference mask.")
-            return
-        self._ensure_mask_section_applied()
-        
-        raw_shape = load_image_shape(str(self._current_record_path))
-        new_mask = np.zeros(raw_shape, dtype=bool)
-        self._clear_mask_preview_overlays(clear_toggles=True)
-        self._set_current_file_mask(new_mask, self._current_mask_file_path(), refresh_preview=True)
-        self._set_status_text("Started a new blank mask.")
+        self._mask_controller.refresh_after_mask_change(status)
 
     def _create_new_background(self) -> None:
-        if self._current_record_path is None:
-            self._set_status_text("Load an image first to create a background image.")
-            return
-        if self._state.preprocessing.chromatic_correction_enabled and not self._is_current_reference_image():
-            self._set_status_text("Switch to the reference image to create the reference background.")
-            return
-        if self._current_processed_image is None:
-            self._set_status_text("Load an image first to create a background image.")
-            return
-        background = self._calculate_background_profile_image()
-        if background is None:
-            self._set_status_text("Background image is not available yet.")
-            return
-        self._background_profile_cache_signature = self._background_profile_signature()
-        self._background_profile_cache_image = background
-        if self._showing_background_profile_main:
-            self._apply_main_image_content()
-        self._set_status_text("Created a new background image from the current parameters.")
+        self._mask_controller.create_new_background()
 
     def _load_background_from_file(self) -> None:
-        if self._current_record_path is None:
-            self._set_status_text("Load an image first to load a background image.")
-            return
-        if self._state.preprocessing.chromatic_correction_enabled and not self._is_current_reference_image():
-            self._set_status_text("Switch to the reference image to load the reference background.")
-            return
-        default_path = self._current_background_file_path()
-        start_path = str(default_path if default_path is not None else Path(self.folder_edit.text()))
-        source, _ = QFileDialog.getOpenFileName(
-            self,
-            "Load background image",
-            start_path,
-            "Background images (*.png *.bmp *.tif *.tiff);;All files (*)",
-        )
-        if not source:
-            return
-        source_path = Path(source)
-        try:
-            target_record_path = self._reference_record().path if self._reference_record() is not None else self._current_record_path
-            expected_shape = self._current_processed_image.shape[:2] if self._current_processed_image is not None else load_image_shape(str(target_record_path))
-            background = self._read_background_image(source_path, expected_shape)
-        except Exception as exc:
-            QMessageBox.critical(self, "Load background failed", str(exc))
-            self._set_status_text(f"Load background failed: {exc}")
-            return
-        self._background_profile_cache_signature = self._background_profile_signature()
-        self._background_profile_cache_image = background
-        if self._showing_background_profile_main:
-            self._apply_main_image_content()
-        self._set_status_text(f"Loaded background from {source_path.name}.")
+        self._mask_controller.load_background_from_file()
 
     def _save_background_to_file(self) -> None:
-        if self._current_record_path is None:
-            self._set_status_text("Load an image first to save a background image.")
-            return
-        if self._state.preprocessing.chromatic_correction_enabled and not self._is_current_reference_image():
-            self._set_status_text("Switch to the reference image to save the reference background.")
-            return
-        destination = self._current_background_file_path()
-        if destination is None:
-            self._set_status_text("No current image is available for background export.")
-            return
-        background = self._background_profile_cache_image
-        if background is None or self._background_profile_cache_signature != self._background_profile_signature():
-            background = self._calculate_background_profile_image()
-        if background is None:
-            self._set_status_text("Background image is not available yet.")
-            return
-        try:
-            background_u16 = np.clip(np.rint(background), 0, 65535).astype(np.uint16, copy=False)
-            Image.fromarray(background_u16, mode="I;16").save(destination)
-        except Exception as exc:
-            QMessageBox.critical(self, "Save background failed", str(exc))
-            self._set_status_text(f"Save background failed: {exc}")
-            return
-        self._background_profile_cache_signature = self._background_profile_signature()
-        self._background_profile_cache_image = background
-        if self._showing_background_profile_main:
-            self._apply_main_image_content()
-        self._set_status_text(f"Saved background to {destination.name}.")
+        self._mask_controller.save_background_to_file()
 
     def _read_background_image(self, path: Path, expected_shape: tuple[int, int]) -> np.ndarray:
-        with Image.open(path) as image:
-            background = np.array(image.convert("I"), dtype=np.float32)
-        if background.shape != expected_shape:
-            raise ValueError(
-                f"Background size {background.shape[1]} x {background.shape[0]} px does not match the current image "
-                f"{expected_shape[1]} x {expected_shape[0]} px."
-            )
-        return background
-
-    def _apply_relative_mask(self) -> None:
-        self._mask_controller.apply_relative_mask()
-
-    def _reset_relative_mask(self) -> None:
-        self._mask_controller.reset_relative_mask()
-
-    def _apply_local_contrast_mask(self) -> None:
-        self._mask_controller.apply_local_contrast_mask()
-
-    def _reset_local_contrast_mask(self) -> None:
-        self._mask_controller.reset_local_contrast_mask()
-
-    def _apply_morphology_mask(self) -> None:
-        self._mask_controller.apply_morphology_mask()
-
-    def _reset_morphology_mask(self) -> None:
-        self._mask_controller.reset_morphology_mask()
+        return self._mask_controller.read_background_image(path, expected_shape)
 
     def _update_mask_file_button_state(self) -> None:
-        has_image = self._current_processed_image is not None
-        editable_mask = has_image and (self._is_current_reference_image() or not self._state.preprocessing.chromatic_correction_enabled)
-        self.mask_create_new_button.setEnabled(editable_mask)
-        self.mask_load_from_file_button.setEnabled(editable_mask)
-        self.mask_save_button.setEnabled(editable_mask)
-        self.histogram_mask_apply_button.setEnabled(editable_mask)
-        self.histogram_mask_reset_button.setEnabled(editable_mask)
-        self.relative_mask_apply_button.setEnabled(editable_mask)
-        self.relative_mask_reset_button.setEnabled(editable_mask)
-        self.relative_mask_show_button.setEnabled(has_image)
-        self.local_contrast_mask_apply_button.setEnabled(editable_mask)
-        self.local_contrast_mask_reset_button.setEnabled(editable_mask)
-        self.local_contrast_mask_show_button.setEnabled(has_image)
-        self.morphology_mask_apply_button.setEnabled(editable_mask)
-        self.morphology_mask_reset_button.setEnabled(editable_mask)
-        self.morphology_mask_show_button.setEnabled(has_image)
-        self.mask_morphology_radius_spin.setEnabled(has_image)
-        self.mask_morphology_erode_button.setEnabled(editable_mask)
-        self.mask_morphology_dilate_button.setEnabled(editable_mask)
-        self.mask_morphology_open_button.setEnabled(editable_mask)
-        self.mask_morphology_close_button.setEnabled(editable_mask)
-        self.background_create_new_button.setEnabled(editable_mask)
-        self.background_load_from_file_button.setEnabled(editable_mask)
-        self.background_save_button.setEnabled(editable_mask)
-        self.mask_morph_radius_spin.setEnabled(has_image)
-        self.mask_pencil_check.setEnabled(editable_mask)
-        self.mask_draw_mode_combo.setEnabled(editable_mask)
-        self.mask_draw_add_button.setEnabled(editable_mask and self.mask_pencil_check.isChecked())
-        self.mask_draw_remove_button.setEnabled(editable_mask and self.mask_pencil_check.isChecked())
-        self.mask_brush_size_spin.setEnabled(editable_mask)
-        default_path = self._current_mask_file_path()
-        default_name = default_path.name if default_path is not None else "current_image_mask.png"
-        if self._current_file_mask_path is not None:
-            current_source = self._current_file_mask_path.name
-        elif self._current_file_mask_session_source_path is not None:
-            current_source = "session mask"
-        else:
-            current_source = default_name
-        background_default_path = self._current_background_file_path()
-        background_default_name = background_default_path.name if background_default_path is not None else "current_image_background.png"
-        self.mask_load_from_file_button.setToolTip(
-            f"Load a black-and-white mask image for the current image.\nSuggested file name: {default_name}"
-        )
-        self.mask_save_button.setToolTip(
-            f"Save the current mask as a black-and-white image.\nTarget file name: {default_name}\nCurrent source: {current_source}"
-        )
-        self.background_create_new_button.setToolTip(
-            f"Create a new background image from the current parameters.\nTarget file name: {background_default_name}"
-        )
-        self.background_load_from_file_button.setToolTip(
-            f"Load a background image for the current image.\nSuggested file name: {background_default_name}"
-        )
-        self.background_save_button.setToolTip(
-            f"Save the current background image.\nTarget file name: {background_default_name}"
-        )
+        self._mask_controller.update_mask_file_button_state()
 
     def _on_roi_diameter_spin_changed(self, value: int) -> None:
         self._roi_table_controller._on_roi_diameter_spin_changed(value)
