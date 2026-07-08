@@ -10,7 +10,6 @@ import os
 import shutil
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from collections import OrderedDict
 from copy import deepcopy
 from dataclasses import asdict, dataclass
@@ -235,7 +234,6 @@ from .analysis_tasks import (
     _refresh_roi_metrics_task,
     _sampled_wavelengths,
     _selected_roi_masks_for_spectrum,
-    _roi_absorbance_signature,
 )
 
 try:
@@ -2487,138 +2485,49 @@ class MainWindow(MainWindowIcons, QMainWindow):
         self._sync_analysis_plots()
 
     def _analysis_metric_key(self) -> str:
-        return str(self.analysis_metric_combo.currentData() or "centroid")
+        return self._analysis_controller._analysis_metric_key()
 
     def _analysis_metric_label(self) -> str:
-        return str(self.analysis_metric_combo.currentText() or "Metric")
+        return self._analysis_controller._analysis_metric_label()
 
     def _analysis_metric_axis_label(self) -> str:
-        metric_key = self._analysis_metric_key()
-        if metric_key in {"maximum", "centroid"}:
-            return "Wavelength (nm)"
-        return "Metric"
+        return self._analysis_controller._analysis_metric_axis_label()
 
     def _analysis_poly_order(self) -> int:
-        return int(self.analysis_poly_order_spin.value())
+        return self._analysis_controller._analysis_poly_order()
 
     def _current_analysis_spectral_cube_range(self) -> tuple[int, int] | None:
-        if not self._spectral_cube_values:
-            return None
-        start = int(self.analysis_start_spectral_cube_spin.value())
-        end = int(self.analysis_end_spectral_cube_spin.value())
-        if start > end:
-            start, end = end, start
-        return start, end
+        return self._analysis_controller._current_analysis_spectral_cube_range()
 
     def _sync_analysis_spectral_cube_range_controls(self) -> None:
-        spectral_cube_enabled = bool(self._spectral_cube_values)
-        self.analysis_start_spectral_cube_spin.setEnabled(spectral_cube_enabled)
-        self.analysis_end_spectral_cube_spin.setEnabled(spectral_cube_enabled)
-        if not spectral_cube_enabled:
-            return
-
-        spectral_cube_min = int(min(self._spectral_cube_values))
-        spectral_cube_max = int(max(self._spectral_cube_values))
-        stored_start = self._settings_int("analysis/spectral_cube_start", spectral_cube_min, minimum=spectral_cube_min, maximum=spectral_cube_max)
-        stored_end = self._settings_int("analysis/spectral_cube_end", spectral_cube_max, minimum=spectral_cube_min, maximum=spectral_cube_max)
-        if stored_start > stored_end:
-            stored_start, stored_end = stored_end, stored_start
-
-        self.analysis_start_spectral_cube_spin.blockSignals(True)
-        self.analysis_end_spectral_cube_spin.blockSignals(True)
-        self.analysis_start_spectral_cube_spin.setRange(spectral_cube_min, spectral_cube_max)
-        self.analysis_end_spectral_cube_spin.setRange(spectral_cube_min, spectral_cube_max)
-        self.analysis_start_spectral_cube_spin.setValue(stored_start)
-        self.analysis_end_spectral_cube_spin.setValue(stored_end)
-        self.analysis_start_spectral_cube_spin.blockSignals(False)
-        self.analysis_end_spectral_cube_spin.blockSignals(False)
+        self._analysis_controller._sync_analysis_spectral_cube_range_controls()
 
     def _set_sensorgram_summary_text(self, text: str) -> None:
-        self.sensorgram_summary_label.setText(text)
+        self._analysis_controller._set_sensorgram_summary_text(text)
 
     def _update_sensorgram_plot_labels(self) -> None:
-        self.sensorgram_plot.setLabel("left", self._analysis_metric_axis_label())
-        self.sensorgram_plot.setLabel("bottom", "Spectral cube")
+        self._analysis_controller._update_sensorgram_plot_labels()
 
     def _analysis_plot_spectral_cube_range(self) -> tuple[int, int] | None:
-        if not self._spectral_cube_values:
-            return None
-        return int(min(self._spectral_cube_values)), int(max(self._spectral_cube_values))
+        return self._analysis_controller._analysis_plot_spectral_cube_range()
 
     def _analysis_plot_wavelength_range(self) -> tuple[float, float] | None:
-        if not self._wavelength_values:
-            return None
-        return float(min(self._wavelength_values)), float(max(self._wavelength_values))
+        return self._analysis_controller._analysis_plot_wavelength_range()
 
     def _sync_analysis_plot_axes(self) -> None:
-        spectral_cube_range = self._analysis_plot_spectral_cube_range()
-        wavelength_range = self._analysis_plot_wavelength_range()
-        if wavelength_range is not None:
-            self.spectrum_plot.setLimits(xMin=wavelength_range[0], xMax=wavelength_range[1])
-            self.spectrum_plot.setXRange(wavelength_range[0], wavelength_range[1], padding=0.03)
-        if spectral_cube_range is not None:
-            self.sensorgram_plot.setLimits(xMin=spectral_cube_range[0], xMax=spectral_cube_range[1])
-            self.sensorgram_plot.setXRange(float(spectral_cube_range[0]), float(spectral_cube_range[1]), padding=0.03)
+        self._analysis_controller._sync_analysis_plot_axes()
 
     def _sync_analysis_plot_cursors(self) -> None:
-        has_dataset = bool(self._spectral_cube_values) and bool(self._wavelength_values)
-        if not has_dataset:
-            self.spectrum_cursor_line.hide()
-            self.sensorgram_cursor_line.hide()
-            return
-        self.spectrum_cursor_line.show()
-        self.sensorgram_cursor_line.show()
-        current_spectral_cube = self._current_spectral_cube()
-        current_wavelength = self._current_wavelength()
-        if current_spectral_cube is None:
-            current_spectral_cube = int(self._spectral_cube_values[0])
-        if current_wavelength is None:
-            current_wavelength = float(self._wavelength_values[0])
-        cursor_color = self._chromatic_wavelength_color(float(current_wavelength))
-        self.spectrum_cursor_line.blockSignals(True)
-        self.sensorgram_cursor_line.blockSignals(True)
-        self.spectrum_cursor_line.setValue(float(current_wavelength))
-        self.sensorgram_cursor_line.setValue(float(current_spectral_cube))
-        self.spectrum_cursor_line.setPen(pg.mkPen(cursor_color, width=2.2))
-        self.spectrum_cursor_line.blockSignals(False)
-        self.sensorgram_cursor_line.blockSignals(False)
-        self._update_sensorgram_current_point()
+        self._analysis_controller._sync_analysis_plot_cursors()
 
     def _sync_analysis_plots(self) -> None:
-        self._sync_analysis_plot_axes()
-        self._sync_analysis_plot_cursors()
+        self._analysis_controller._sync_analysis_plots()
 
     def _on_spectrum_cursor_moved(self) -> None:
-        if not self._wavelength_values:
-            return
-        wavelength = float(self.spectrum_cursor_line.value())
-        nearest_index = min(
-            range(len(self._wavelength_values)),
-            key=lambda idx: abs(float(self._wavelength_values[idx]) - wavelength),
-        )
-        current_spectral_cube = self._current_spectral_cube()
-        if current_spectral_cube is None and self._spectral_cube_values:
-            current_spectral_cube = int(self._spectral_cube_values[self.spectral_cube_slider.value()])
-        if current_spectral_cube is None:
-            return
-        target_wavelength = float(self._wavelength_values[nearest_index])
-        self._set_current_spectral_cube_and_wavelength(int(current_spectral_cube), target_wavelength)
+        self._analysis_controller._on_spectrum_cursor_moved()
 
     def _on_sensorgram_cursor_moved(self) -> None:
-        if not self._spectral_cube_values:
-            return
-        spectral_cube_index = float(self.sensorgram_cursor_line.value())
-        nearest_index = min(
-            range(len(self._spectral_cube_values)),
-            key=lambda idx: abs(float(self._spectral_cube_values[idx]) - spectral_cube_index),
-        )
-        current_wavelength = self._current_wavelength()
-        if current_wavelength is None and self._wavelength_values:
-            current_wavelength = float(self._wavelength_values[self.wavelength_slider.value()])
-        if current_wavelength is None:
-            return
-        target_spectral_cube = int(self._spectral_cube_values[nearest_index])
-        self._set_current_spectral_cube_and_wavelength(target_spectral_cube, float(current_wavelength))
+        self._analysis_controller._on_sensorgram_cursor_moved()
 
     def _clear_sensorgram(self, summary_text: str) -> None:
         self._plot_manager.clear_sensorgram(summary_text)
@@ -2636,12 +2545,7 @@ class MainWindow(MainWindowIcons, QMainWindow):
         self._plot_manager.update_sensorgram_current_point()
 
     def _mark_sensorgram_stale(self, reason: str | None = None) -> None:
-        if self._analysis_live_preview_enabled and self._analysis_enabled and self._state.dataset is not None:
-            if reason is not None:
-                self._set_sensorgram_summary_text(reason)
-            self._schedule_sensorgram_refresh()
-            return
-        self._analysis_controller.mark_stale(reason)
+        self._analysis_controller._mark_sensorgram_stale(reason)
 
     def _current_spectral_cube(self) -> int | None:
         if not self._spectral_cube_values:
@@ -2654,6 +2558,7 @@ class MainWindow(MainWindowIcons, QMainWindow):
         return self._wavelength_values[self.wavelength_slider.value()]
 
     @staticmethod
+
     def _format_dataset_bytes(size_bytes: int) -> str:
         value = float(max(size_bytes, 0))
         units = ["B", "KB", "MB", "GB", "TB"]
@@ -2909,10 +2814,7 @@ class MainWindow(MainWindowIcons, QMainWindow):
         self._roi_mask_cache_values = None
 
     def _invalidate_absorbance_spectrum_cache(self) -> None:
-        self._absorbance_spectrum_cache.clear()
-        self._absorbance_spectral_cube_cache.clear()
-        self._spot_absorbance_cache.clear()
-        self._absorbance_spectrum_dirty = True
+        self._analysis_controller._invalidate_absorbance_spectrum_cache()
 
     def _invalidate_image_analysis_caches(self) -> None:
         self._invalidate_ignored_mask_cache()
@@ -2965,6 +2867,7 @@ class MainWindow(MainWindowIcons, QMainWindow):
         self._workflow_log_controller.set_status_hint(text)
 
     @staticmethod
+
     def _format_elapsed_seconds(seconds: float | None) -> str:
         return WorkflowLogController.format_elapsed_seconds(seconds)
 
@@ -2982,6 +2885,7 @@ class MainWindow(MainWindowIcons, QMainWindow):
 
 
     @staticmethod
+
     def _alpha01(value: float) -> float:
         return alpha01(value)
 
@@ -3832,6 +3736,7 @@ class MainWindow(MainWindowIcons, QMainWindow):
         return settings_bool(self._settings, key, default)
 
     @staticmethod
+
     def _set_section_applied(section: CollapsibleSection, applied: bool) -> None:
         if not section.has_apply_toggle():
             return
@@ -4108,6 +4013,7 @@ class MainWindow(MainWindowIcons, QMainWindow):
         self._save_layout_preferences()
 
     @staticmethod
+
     def _compact_folder_label(folder: Path) -> str:
         parts = folder.parts
         if len(parts) <= 2:
@@ -5904,93 +5810,6 @@ class MainWindow(MainWindowIcons, QMainWindow):
     def _set_spectrum_summary_text(self, text: str) -> None:
         self._plot_manager.set_spectrum_summary_text(text)
 
-    def _prepare_sensorgram_payload(self) -> tuple[tuple[object, ...], list[tuple[int, tuple[object, ...]]]] | None:
-        if self._state.dataset is None:
-            return None
-        selected_roi_ids = self._selected_spectrum_spot_ids()
-        if not selected_roi_ids:
-            return None
-        selected_spot_id_set = set(selected_roi_ids)
-        selected_source_rois = [
-            deepcopy(roi)
-            for roi in self._state.area_rois
-            if roi.area_roi_id in selected_spot_id_set
-        ]
-        if not selected_source_rois:
-            return None
-        spectral_cubes = self._available_analysis_spectral_cubes()
-        if not spectral_cubes:
-            return None
-        spectral_cube_payloads: list[tuple[int, tuple[object, ...]]] = []
-        spectral_cube_signatures: list[tuple[object, ...]] = []
-        payload_cache_hits = 0
-        payload_cache_builds = 0
-        worker_count = max(1, min(int(os.cpu_count() or 1), 4, len(spectral_cubes)))
-        if worker_count > 1:
-            with ThreadPoolExecutor(max_workers=worker_count) as executor:
-                future_map = {
-                    executor.submit(
-                        self._cached_sensorgram_spectral_cube_payload,
-                        int(spectral_cube_index),
-                        selected_roi_ids,
-                        selected_source_rois,
-                    ): int(spectral_cube_index)
-                    for spectral_cube_index in spectral_cubes
-                }
-                prepared_spectral_cubes: list[tuple[int, tuple[object, ...] | None]] = []
-                for future in as_completed(future_map):
-                    spectral_cube_index = int(future_map[future])
-                    payload = future.result()
-                    prepared_spectral_cubes.append((spectral_cube_index, payload))
-            prepared_spectral_cubes.sort(key=lambda item: item[0])
-            iterable_spectral_cubes = prepared_spectral_cubes
-        else:
-            iterable_spectral_cubes = [
-                (int(spectral_cube_index), self._cached_sensorgram_spectral_cube_payload(spectral_cube_index, selected_roi_ids, selected_source_rois))
-                for spectral_cube_index in spectral_cubes
-            ]
-        for spectral_cube_index, payload in iterable_spectral_cubes:
-            if payload is None:
-                continue
-            payload_signature = self._sensorgram_spectral_cube_payload_signature(spectral_cube_index, selected_roi_ids, selected_source_rois)
-            if payload_signature is not None:
-                with self._analysis_cache_lock:
-                    if payload_signature in self._sensorgram_spectral_cube_payload_cache:
-                        payload_cache_hits += 1
-                    else:
-                        payload_cache_builds += 1
-            spectral_cube_payloads.append((int(spectral_cube_index), payload))
-            spectral_cube_signatures.append(
-                (
-                    int(spectral_cube_index),
-                    tuple(
-                        self._preprocessing_signature((int(spectral_cube_index), float(wavelength)))
-                        for wavelength in self._wavelength_values
-                    ),
-                )
-            )
-        if not spectral_cube_payloads:
-            return None
-        dataset_key = str(self._state.dataset.folder)
-        signature = (
-            dataset_key,
-            tuple(selected_roi_ids),
-            self._roi_signature(selected_source_rois),
-            self._analysis_metric_key(),
-            int(self._analysis_poly_order()),
-            tuple(round(float(value), 6) for value in self._wavelength_values),
-            tuple(spectral_cube_signatures),
-            round(float(self._state.area_roi_settings.reference_inner_radius_px), 3),
-            round(float(self._state.area_roi_settings.reference_outer_radius_px), 3),
-        )
-        logging.getLogger("lspr_imaging_app.workflow").debug(
-            "SG payload summary | hit=%s build=%s | spectral_cubes=%s",
-            int(payload_cache_hits),
-            int(payload_cache_builds),
-            len(spectral_cube_payloads),
-        )
-        return signature, spectral_cube_payloads
-
     def _sensorgram_signature_for_selection(
         self,
         spectral_cubes: list[int],
@@ -6016,89 +5835,22 @@ class MainWindow(MainWindowIcons, QMainWindow):
         return self._analysis_controller._cached_sensorgram_spectral_cube_payload(spectral_cube_index, selected_roi_ids, selected_source_rois)
 
     def _schedule_sensorgram_refresh(self) -> None:
-        if not self._startup_ready or self._startup_restore_in_progress or not self._analysis_live_preview_enabled:
-            return
-        if self._sensorgram_refresh_timer.isActive():
-            self._sensorgram_refresh_timer.stop()
-        self._sensorgram_refresh_timer.start()
+        self._analysis_controller._schedule_sensorgram_refresh()
 
     def _refresh_sensorgram(self) -> None:
-        if not self._startup_ready or self._startup_restore_in_progress or not self._analysis_live_preview_enabled:
-            return
-        self._analysis_controller.calculate_sensorgram()
+        self._analysis_controller._refresh_sensorgram()
 
     def _mark_absorbance_spectrum_dirty(self) -> None:
-        self._absorbance_spectrum_dirty = True
-        if not self._analysis_enabled:
-            self._set_spectrum_summary_text("Analysis calculations are disabled for this panel.")
-            self._clear_sensorgram("Analysis calculations are disabled for this panel.")
-            return
-        if self._state.dataset is None:
-            self._set_spectrum_summary_text("Load a dataset to show absorbance spectrum.")
-            self._clear_sensorgram("Load a dataset to build the fitted sensorgram.")
-            return
-        if self._chromatic_setup_active:
-            self._set_spectrum_summary_text("Spectral absorbance is hidden during chromatic setup.")
-            self._clear_sensorgram("Sensorgram is hidden during chromatic setup.")
-            return
-        if not self._selected_spectrum_spot_ids():
-            self._set_spectrum_summary_text("Select ROIs to show absorbance spectrum.")
-            self._clear_sensorgram("Select ROIs before calculating the sensorgram.")
-            return
-        self._set_spectrum_summary_text(
-            f"{self._spectrum_selection_label()} | Spectrum is out of date | Press Calculate spectrum"
-        )
-        if not self._analysis_live_preview_enabled:
-            self._mark_sensorgram_stale()
+        self._analysis_controller._mark_absorbance_spectrum_dirty()
 
     def _selected_spectrum_spot_ids(self) -> tuple[int, ...]:
-        return tuple(sorted(int(spot_id) for spot_id in self._selected_roi_ids))
+        return self._analysis_controller._selected_spectrum_spot_ids()
 
     def _selected_source_rois_snapshot(self) -> list[AreaRoi]:
-        selected_ids = self._selected_spectrum_spot_ids()
-        if not selected_ids:
-            self._selected_source_rois_cache_signature = None
-            self._selected_source_rois_cache_value = tuple()
-            return []
-        signature_parts: list[object] = [selected_ids]
-        source_rois: list[AreaRoi] = []
-        roi_by_id = {int(roi.area_roi_id): roi for roi in self._state.area_rois}
-        for spot_id in selected_ids:
-            roi = roi_by_id.get(int(spot_id))
-            if roi is None:
-                self._selected_source_rois_cache_signature = None
-                self._selected_source_rois_cache_value = tuple()
-                return []
-            source_rois.append(roi)
-            signature_parts.append(
-                (
-                    int(roi.area_roi_id),
-                    round(float(roi.center_x), 3),
-                    round(float(roi.center_y), 3),
-                    round(float(roi.sample_radius_px), 3),
-                    round(float(roi.reference_inner_diameter_px or 0.0), 3),
-                    round(float(roi.reference_outer_diameter_px or 0.0), 3),
-                    roi.sample_color_hex or "",
-                    roi.reference_color_hex or "",
-                )
-            )
-        signature = tuple(signature_parts)
-        if self._selected_source_rois_cache_signature == signature and self._selected_source_rois_cache_value:
-            return list(self._selected_source_rois_cache_value)
-        copied = tuple(deepcopy(roi) for roi in source_rois)
-        self._selected_source_rois_cache_signature = signature
-        self._selected_source_rois_cache_value = copied
-        return list(copied)
+        return self._analysis_controller._selected_source_rois_snapshot()
 
     def _spectrum_selection_label(self) -> str:
-        selected_ids = self._selected_spectrum_spot_ids()
-        if not selected_ids:
-            return "No ROIs"
-        if self._selected_roi_ids:
-            noun = "ROI" if len(selected_ids) == 1 else "ROIs"
-            return f"{len(selected_ids)} selected {noun}"
-        noun = "ROI" if len(selected_ids) == 1 else "ROIs"
-        return f"All {len(selected_ids)} {noun}"
+        return self._analysis_controller._spectrum_selection_label()
 
     def _clear_absorbance_spectrum(self, summary_text: str) -> None:
         self._plot_manager.clear_absorbance_spectrum(summary_text)
@@ -6133,41 +5885,14 @@ class MainWindow(MainWindowIcons, QMainWindow):
         self._plot_manager.update_single_spectral_cube_sensorgram(metric_value, metric_signal)
 
     def _schedule_absorbance_spectrum_refresh(self) -> None:
-        if not self._startup_ready or self._startup_restore_in_progress:
-            return
-        self._mark_absorbance_spectrum_dirty()
-        if self._analysis_live_preview_enabled:
-            if self._absorbance_spectrum_timer.isActive():
-                self._absorbance_spectrum_timer.stop()
-            self._absorbance_spectrum_timer.start()
+        self._analysis_controller._schedule_absorbance_spectrum_refresh()
 
     def _start_absorbance_spectrum_preparation(
         self,
         signature: tuple[object, ...],
         selected_source_rois: list[AreaRoi] | None = None,
     ) -> None:
-        if self._absorbance_prep_running:
-            return
-        self._absorbance_prep_request_id += 1
-        request_id = self._absorbance_prep_request_id
-        self._absorbance_prep_running = True
-        self._absorbance_prep_request_signature = signature
-        self._absorbance_prep_started_at = time.perf_counter()
-        self._append_workflow_log("Spec prep start", level="info")
-        self._begin_busy("Preparing absorbance spectrum...", determinate=False)
-        QApplication.processEvents()
-        worker = FunctionWorker(self._prepare_absorbance_spectrum_payload, selected_source_rois)
-        worker.signals.result.connect(
-            lambda prepared, request_id=request_id, signature=signature: self._on_absorbance_spectrum_payload_ready(
-                request_id,
-                signature,
-                prepared,
-            )
-        )
-        worker.signals.error.connect(
-            lambda message, request_id=request_id: self._on_absorbance_spectrum_payload_failed(request_id, message)
-        )
-        self._thread_pool.start(worker)
+        self._analysis_controller._start_absorbance_spectrum_preparation(signature, selected_source_rois)
 
     def _on_absorbance_spectrum_payload_ready(
         self,
@@ -6186,85 +5911,28 @@ class MainWindow(MainWindowIcons, QMainWindow):
         selected_roi_ids: tuple[int, ...],
         selected_source_rois: list[AreaRoi] | None = None,
     ) -> AbsorbanceSpectrumResult | None:
-        if not selected_roi_ids:
-            return None
-        if len(selected_roi_ids) == 1:
-            for cache_signature, cached_result in reversed(list(self._spot_absorbance_cache.items())):
-                if self._absorbance_spectral_cube_signature(cache_signature) != self._absorbance_spectral_cube_signature(signature):
-                    continue
-                if self._absorbance_result_covers_spot_ids(cached_result, selected_roi_ids):
-                    return cached_result
-        spectral_cube_signature = self._absorbance_spectral_cube_signature(signature)
-        if spectral_cube_signature is not None:
-            cached_result = self._absorbance_spectral_cube_cache.get(spectral_cube_signature)
-            if cached_result is not None and self._absorbance_result_covers_spot_ids(cached_result, selected_roi_ids):
-                return cached_result
-        for cache_signature, cached_result in reversed(list(self._absorbance_spectrum_cache.items())):
-            if self._absorbance_spectral_cube_signature(cache_signature) != spectral_cube_signature:
-                continue
-            if self._absorbance_result_covers_spot_ids(cached_result, selected_roi_ids):
-                return cached_result
-        if selected_source_rois:
-            cached_from_spots = self._cached_absorbance_result_from_spot_cache(selected_source_rois)
-            if cached_from_spots is not None:
-                return cached_from_spots
-        return None
-
-    def _absorbance_spectrum_signature_for_source_rois(
-        self,
-        selected_source_rois: list[AreaRoi],
-    ) -> tuple[object, ...] | None:
-        return self._analysis_controller._absorbance_spectrum_signature_for_source_rois(selected_source_rois)
+        return self._analysis_controller._cached_absorbance_result_for_selection(signature, selected_roi_ids, selected_source_rois)
 
     def _absorbance_spectrum_signature(self) -> tuple[object, ...] | None:
         return self._analysis_controller._absorbance_spectrum_signature()
 
     def _roi_absorbance_signature(self, spot: AreaRoi) -> tuple[object, ...] | None:
-        spectral_cube_index = self._current_spectral_cube()
-        if spectral_cube_index is None or not self._wavelength_values:
-            return None
-        return _roi_absorbance_signature(
-            int(spectral_cube_index),
-            tuple(float(value) for value in self._wavelength_values),
-            spot,
-            tuple(
-                self._chromatic_signature_for_image_key((int(spectral_cube_index), float(wavelength)))
-                for wavelength in self._wavelength_values
-            ),
-        )
+        return self._analysis_controller._roi_absorbance_signature(spot)
 
     def _roi_has_cached_absorbance(self, spot: AreaRoi) -> bool:
-        signature = self._roi_absorbance_signature(spot)
-        return signature is not None and self._spot_absorbance_cache.get(signature) is not None
+        return self._analysis_controller._roi_has_cached_absorbance(spot)
 
-    @staticmethod
     def _analysis_cache_signature_to_json(value):
-        if isinstance(value, tuple):
-            return [MainWindow._analysis_cache_signature_to_json(item) for item in value]
-        if isinstance(value, list):
-            return [MainWindow._analysis_cache_signature_to_json(item) for item in value]
-        return value
+        return AnalysisController._analysis_cache_signature_to_json(value)
 
-    @staticmethod
     def _analysis_cache_signature_from_json(value):
-        if isinstance(value, list):
-            return tuple(MainWindow._analysis_cache_signature_from_json(item) for item in value)
-        return value
+        return AnalysisController._analysis_cache_signature_from_json(value)
 
-    @staticmethod
     def _absorbance_spectral_cube_signature(signature: tuple[object, ...] | None) -> tuple[object, ...] | None:
-        if signature is None or len(signature) < 4:
-            return None
-        return (signature[0], signature[1], signature[3])
+        return AnalysisController._absorbance_spectral_cube_signature(signature)
 
-    @staticmethod
     def _absorbance_result_covers_spot_ids(result: AbsorbanceSpectrumResult, selected_roi_ids: tuple[int, ...]) -> bool:
-        if not selected_roi_ids:
-            return False
-        if not result.area_roi_results:
-            return len(selected_roi_ids) == 1
-        available_ids = {int(spot_id) for spot_id in result.area_roi_results.keys()}
-        return all(int(spot_id) in available_ids for spot_id in selected_roi_ids)
+        return AnalysisController._absorbance_result_covers_spot_ids(result, selected_roi_ids)
 
     def _cached_absorbance_result_from_spot_cache(
         self,
@@ -6272,118 +5940,29 @@ class MainWindow(MainWindowIcons, QMainWindow):
     ) -> AbsorbanceSpectrumResult | None:
         return self._analysis_controller._cached_absorbance_result_from_spot_cache(selected_source_rois)
 
-    def _serialize_absorbance_result(result: AbsorbanceSpectrumResult) -> dict:
-        from lspr_imaging_app.gui.analysis_controller import AnalysisController
-        return AnalysisController._serialize_absorbance_result(result)
-
     @staticmethod
+
     def _deserialize_absorbance_result(payload) -> AbsorbanceSpectrumResult:
         from lspr_imaging_app.gui.analysis_controller import AnalysisController
         return AnalysisController._deserialize_absorbance_result(payload)
 
     @staticmethod
+
     def _serialize_sensorgram_result(result: SensorgramComputationResult) -> dict:
         from lspr_imaging_app.gui.analysis_controller import AnalysisController
         return AnalysisController._serialize_sensorgram_result(result)
 
     @staticmethod
+
     def _deserialize_sensorgram_result(payload) -> SensorgramComputationResult:
         from lspr_imaging_app.gui.analysis_controller import AnalysisController
         return AnalysisController._deserialize_sensorgram_result(payload)
 
     def _analysis_cache_payload(self) -> dict:
-        payload: dict[str, list[dict[str, object]]] = {
-            "absorbance_spectrum_cache": [],
-            "absorbance_spectral_cube_cache": [],
-            "spot_absorbance_cache": [],
-            "sensorgram_cache": [],
-        }
-        for signature, result in self._absorbance_spectrum_cache.items():
-            payload["absorbance_spectrum_cache"].append(
-                {
-                    "signature": self._analysis_cache_signature_to_json(signature),
-                    "result": self._serialize_absorbance_result(result),
-                }
-            )
-        for signature, result in self._absorbance_spectral_cube_cache.items():
-            payload["absorbance_spectral_cube_cache"].append(
-                {
-                    "signature": self._analysis_cache_signature_to_json(signature),
-                    "result": self._serialize_absorbance_result(result),
-                }
-            )
-        for signature, result in self._spot_absorbance_cache.items():
-            payload["spot_absorbance_cache"].append(
-                {
-                    "signature": self._analysis_cache_signature_to_json(signature),
-                    "result": self._serialize_absorbance_result(result),
-                }
-            )
-        for signature, result in self._sensorgram_cache.items():
-            payload["sensorgram_cache"].append(
-                {
-                    "signature": self._analysis_cache_signature_to_json(signature),
-                    "result": self._serialize_sensorgram_result(result),
-                }
-            )
-        return payload
+        return self._analysis_controller._analysis_cache_payload()
 
     def _restore_analysis_caches(self, payload: dict | None) -> None:
-        self._absorbance_spectrum_cache.clear()
-        self._absorbance_spectral_cube_cache.clear()
-        self._spot_absorbance_cache.clear()
-        self._sensorgram_cache.clear()
-        if not isinstance(payload, dict):
-            return
-        raw_absorbance = payload.get("absorbance_spectrum_cache", [])
-        if isinstance(raw_absorbance, list):
-            for entry in raw_absorbance:
-                if not isinstance(entry, dict):
-                    continue
-                signature = self._analysis_cache_signature_from_json(entry.get("signature"))
-                result = self._deserialize_absorbance_result(entry.get("result"))
-                if signature is None:
-                    continue
-                self._absorbance_spectrum_cache[signature] = result
-                spectral_cube_signature = self._absorbance_spectral_cube_signature(signature)
-                if spectral_cube_signature is not None:
-                    self._absorbance_spectral_cube_cache[spectral_cube_signature] = result
-                    self._absorbance_spectral_cube_cache.move_to_end(spectral_cube_signature)
-                    while len(self._absorbance_spectral_cube_cache) > self.ABSORBANCE_SPECTRAL_CUBE_CACHE_SIZE:
-                        self._absorbance_spectral_cube_cache.popitem(last=False)
-        raw_absorbance_spectral_cubes = payload.get("absorbance_spectral_cube_cache", [])
-        if isinstance(raw_absorbance_spectral_cubes, list):
-            for entry in raw_absorbance_spectral_cubes:
-                if not isinstance(entry, dict):
-                    continue
-                signature = self._analysis_cache_signature_from_json(entry.get("signature"))
-                result = self._deserialize_absorbance_result(entry.get("result"))
-                if signature is None:
-                    continue
-                self._absorbance_spectral_cube_cache[signature] = result
-                self._absorbance_spectral_cube_cache.move_to_end(signature)
-                while len(self._absorbance_spectral_cube_cache) > self.ABSORBANCE_SPECTRAL_CUBE_CACHE_SIZE:
-                    self._absorbance_spectral_cube_cache.popitem(last=False)
-        raw_spot_absorbance = payload.get("spot_absorbance_cache", [])
-        if isinstance(raw_spot_absorbance, list):
-            for entry in raw_spot_absorbance:
-                if not isinstance(entry, dict):
-                    continue
-                signature = self._analysis_cache_signature_from_json(entry.get("signature"))
-                result = self._deserialize_absorbance_result(entry.get("result"))
-                if signature is None:
-                    continue
-                self._spot_absorbance_cache[signature] = result
-        raw_sensorgram = payload.get("sensorgram_cache", [])
-        if isinstance(raw_sensorgram, list):
-            for entry in raw_sensorgram:
-                if not isinstance(entry, dict):
-                    continue
-                signature = self._analysis_cache_signature_from_json(entry.get("signature"))
-                result = self._deserialize_sensorgram_result(entry.get("result"))
-                if signature is None:
-                    continue
-                self._sensorgram_cache[signature] = result
+        self._analysis_controller._restore_analysis_caches(payload)
 
     def _prepare_absorbance_spectrum_payload_for_spectral_cube(
         self,
@@ -6408,31 +5987,13 @@ class MainWindow(MainWindowIcons, QMainWindow):
         return self._analysis_controller._prepare_absorbance_spectrum_payload(selected_source_rois)
 
     def _toggle_analysis_live_preview(self) -> None:
-        self._analysis_live_preview_enabled = not self._analysis_live_preview_enabled
-        if not self._analysis_enabled and self._analysis_live_preview_enabled:
-            self._analysis_live_preview_enabled = False
-            self._settings.setValue("analysis/live_preview", False)
-            self._update_analysis_control_state()
-            self._set_status_text("Enable Analysis to use live preview.")
-            return
-        self._settings.setValue("analysis/live_preview", bool(self._analysis_live_preview_enabled))
-        self._update_analysis_control_state()
-        if self._analysis_live_preview_enabled:
-            self._refresh_visible_spectrum_from_cache()
-            self._analysis_controller.preview_sensorgram_from_cache()
-            self._set_status_text("Analysis live preview enabled.")
-        else:
-            self._set_status_text("Analysis live preview disabled.")
+        self._analysis_controller._toggle_analysis_live_preview()
 
     def _refresh_absorbance_spectrum(self) -> None:
         self._analysis_controller._refresh_absorbance_spectrum()
 
     def _available_analysis_spectral_cubes(self) -> list[int]:
-        spectral_cube_range = self._current_analysis_spectral_cube_range()
-        if spectral_cube_range is None:
-            return []
-        start, end = spectral_cube_range
-        return [int(spectral_cube_index) for spectral_cube_index in self._spectral_cube_values if start <= int(spectral_cube_index) <= end]
+        return self._analysis_controller._available_analysis_spectral_cubes()
 
     def _on_analysis_fit_settings_changed(self, *_args) -> None:
         self._analysis_controller._on_analysis_fit_settings_changed(*_args)
@@ -6444,12 +6005,7 @@ class MainWindow(MainWindowIcons, QMainWindow):
         self._analysis_controller._calculate_sensorgram_for_range()
 
     def _stop_sensorgram_calculation(self) -> None:
-        if not self._sensorgram_running or self._sensorgram_cancel_event is None:
-            return
-        self._sensorgram_cancel_event.set()
-        self._pending_sensorgram_payload = None
-        self._set_sensorgram_summary_text("Stopping sensorgram calculation...")
-        self._set_status_text("Stopping sensorgram calculation...")
+        self._analysis_controller._stop_sensorgram_calculation()
 
     def _on_sensorgram_partial_result(
         self,
@@ -6466,41 +6022,7 @@ class MainWindow(MainWindowIcons, QMainWindow):
         self._analysis_controller._on_sensorgram_failed(request_id, message)
 
     def _start_pending_absorbance_spectrum_refresh(self, *, reuse_busy: bool = False) -> None:
-        if self._pending_absorbance_spectrum_payload is None:
-            return
-        signature, payload, task_fn = self._pending_absorbance_spectrum_payload
-        self._pending_absorbance_spectrum_payload = None
-        request_id = self._absorbance_spectrum_request_id + 1
-        self._absorbance_spectrum_request_id = request_id
-        self._absorbance_spectrum_running = True
-        self._absorbance_spectrum_running_signature = signature
-        self._absorbance_spectrum_started_at = time.perf_counter()
-        if reuse_busy:
-            self._busy_started_at = time.perf_counter()
-            self._busy_is_determinate = True
-            self._busy_last_percent = 0
-            self._status_bar_busy.setRange(0, 100)
-            self._status_bar_busy.setValue(0)
-            self._status_bar_busy.setTextVisible(True)
-            self._status_bar_busy.show()
-            self._status_bar_busy_detail.setText("0:00 | ETA --:-- | 0%")
-            self._status_bar_busy_detail.show()
-            self._set_status_text("Updating absorbance spectrum...")
-        else:
-            self._begin_busy("Updating absorbance spectrum...", determinate=True)
-        worker = FunctionWorker(
-            task_fn,
-            *payload,
-            supports_progress=True,
-        )
-        worker.signals.progress.connect(self._update_busy_progress)
-        worker.signals.result.connect(
-            lambda result,
-            request_id=request_id,
-            signature=signature: self._on_absorbance_spectrum_ready(request_id, signature, result)
-        )
-        worker.signals.error.connect(lambda message, request_id=request_id: self._on_absorbance_spectrum_failed(request_id, message))
-        self._thread_pool.start(worker)
+        self._analysis_controller._start_pending_absorbance_spectrum_refresh(reuse_busy=reuse_busy)
 
     def _on_absorbance_spectrum_ready(
         self,
@@ -8244,6 +7766,7 @@ class MainWindow(MainWindowIcons, QMainWindow):
         return self._scale_bar_overlay
 
     @staticmethod
+
     def _nice_scale_bar_value(target: float) -> float:
         if target <= 0.0:
             return 1.0
@@ -8480,42 +8003,7 @@ class MainWindow(MainWindowIcons, QMainWindow):
         self._save_visual_preferences()
 
     def _refresh_visible_spectrum_from_cache(self) -> bool:
-        if not self._analysis_enabled:
-            return False
-        selected_source_rois = self._selected_source_rois_snapshot()
-        selected_roi_ids = tuple(roi.area_roi_id for roi in selected_source_rois)
-        spot_signature = None
-        if len(selected_source_rois) == 1:
-            spot_signature = self._roi_absorbance_signature(selected_source_rois[0])
-            if spot_signature is not None:
-                cached_spot_result = self._spot_absorbance_cache.get(spot_signature)
-                if cached_spot_result is not None:
-                    self._apply_absorbance_spectrum_result(cached_spot_result)
-                    self._spot_absorbance_cache.move_to_end(spot_signature)
-                    self._append_workflow_log("Spec repaint | roi cache", level="debug")
-                    return True
-        signature = self._absorbance_spectrum_signature()
-        if signature is None:
-            return False
-        if not selected_source_rois:
-            cached_result = self._absorbance_spectrum_cache.get(signature)
-            if cached_result is not None:
-                self._apply_absorbance_spectrum_result(cached_result)
-                spectral_cube_signature = self._absorbance_spectral_cube_signature(signature)
-                if spectral_cube_signature is not None and spectral_cube_signature in self._absorbance_spectral_cube_cache:
-                    self._absorbance_spectral_cube_cache.move_to_end(spectral_cube_signature)
-                self._append_workflow_log("Spec repaint | spectrum cache", level="debug")
-                return True
-            return False
-        cached_result = self._cached_absorbance_result_for_selection(signature, selected_roi_ids)
-        if cached_result is not None:
-            self._apply_absorbance_spectrum_result(cached_result)
-            spectral_cube_signature = self._absorbance_spectral_cube_signature(signature)
-            if spectral_cube_signature is not None and spectral_cube_signature in self._absorbance_spectral_cube_cache:
-                self._absorbance_spectral_cube_cache.move_to_end(spectral_cube_signature)
-            self._append_workflow_log("Spec repaint | spectrum cache", level="debug")
-            return True
-        return False
+        return self._analysis_controller._refresh_visible_spectrum_from_cache()
 
     def _prompt_live_preview_calculation_choice(self, *, spectrum_hit: bool, sensorgram_hit: bool) -> str | None:
         if (
@@ -8786,6 +8274,7 @@ class MainWindow(MainWindowIcons, QMainWindow):
         return True
 
     @staticmethod
+
     def _decimal_places(value: float) -> int:
         text = f"{value:.6f}".rstrip("0").rstrip(".")
         if "." not in text:
