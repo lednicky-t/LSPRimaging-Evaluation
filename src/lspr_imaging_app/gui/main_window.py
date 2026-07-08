@@ -171,13 +171,9 @@ from lspr_imaging_app.io.dataset import (
 from lspr_imaging_app.processing.analysis import absorbance_from_means, fit_absorbance_curve, metric_value_from_fit
 from lspr_imaging_app.processing.chromatic import (
     ChromaticRegistrationResult,
-    apply_affine_to_points,
-    default_landmark_anchors,
     detect_regional_landmarks,
     fit_affine_matrix,
     estimate_affine_chromatic_transform,
-    identity_affine_matrix,
-    invert_affine_matrix,
     track_landmarks,
     transformed_annulus_mask,
     transformed_circle_points,
@@ -7627,44 +7623,13 @@ class MainWindow(MainWindowIcons, QMainWindow):
             self._update_background_profile_preview()
 
     def _update_chromatic_settings(self) -> None:
-        self._push_undo_point("Chromatic correction")
-        self._append_workflow_log("Chromatic link | toggled", level="debug")
-        self._state.preprocessing.chromatic_correction_enabled = bool(self.chromatic_apply_check.isChecked())
-        self.chromatic_apply_check.setIcon(self._make_link_toggle_icon(bool(self.chromatic_apply_check.isChecked())))
-        self._set_section_applied(self.chromatic_section, bool(self._state.preprocessing.chromatic_correction_enabled))
-        self._state.preprocessing.chromatic_registration_mode = "landmark_radial"
-        self._invalidate_image_analysis_caches()
-        self._invalidate_background_profile_cache()
-        self._chromatic_controller.update_control_state()
-        self._update_chromatic_summary()
-        self._schedule_processing_state_save()
-        self._current_image_key = None
-        self._schedule_image_refresh()
+        self._chromatic_controller.update_settings()
 
     def _clear_chromatic_models(self, *, push_undo: bool = True) -> None:
-        if push_undo:
-            self._push_undo_point("Chromatic correction")
-        self._append_workflow_log("Clearing chromatic transforms.", level="warning")
-        self._state.chromatic_models.clear()
-        self._state.preprocessing.chromatic_correction_enabled = False
-        self.chromatic_apply_check.blockSignals(True)
-        self.chromatic_apply_check.setChecked(False)
-        self.chromatic_apply_check.blockSignals(False)
-        self._invalidate_image_analysis_caches()
-        self._invalidate_background_profile_cache()
-        self._update_chromatic_summary()
-        self._schedule_processing_state_save()
-        self._current_image_key = None
-        self._schedule_image_refresh()
-        self._set_status_text("Cleared chromatic transforms.")
+        self._chromatic_controller.clear_models(push_undo=push_undo)
 
     def _on_chromatic_transform_button_clicked(self) -> None:
-        if not self._state.dataset or self._chromatic_auto_running:
-            return
-        if self._state.chromatic_models:
-            self._clear_chromatic_models()
-            return
-        self._chromatic_controller.estimate_models()
+        self._chromatic_controller.on_transform_button_clicked()
 
     def _update_roi_detection_labels(self, *, sync_controls: bool = True) -> None:
         settings = self._state.area_roi_settings
@@ -8149,42 +8114,7 @@ class MainWindow(MainWindowIcons, QMainWindow):
         self._chromatic_controller.clear_all_landmark_overlays()
 
     def _chromatic_wavelength_color(self, wavelength_nm: float) -> QColor:
-        wavelength = float(np.clip(float(wavelength_nm), 380.0, 780.0))
-        if wavelength < 440.0:
-            red = -(wavelength - 440.0) / 60.0
-            green = 0.0
-            blue = 1.0
-        elif wavelength < 490.0:
-            red = 0.0
-            green = (wavelength - 440.0) / 50.0
-            blue = 1.0
-        elif wavelength < 510.0:
-            red = 0.0
-            green = 1.0
-            blue = -(wavelength - 510.0) / 20.0
-        elif wavelength < 580.0:
-            red = (wavelength - 510.0) / 70.0
-            green = 1.0
-            blue = 0.0
-        elif wavelength < 645.0:
-            red = 1.0
-            green = -(wavelength - 645.0) / 65.0
-            blue = 0.0
-        else:
-            red = 1.0
-            green = 0.0
-            blue = 0.0
-        if wavelength < 420.0:
-            factor = 0.28 + 0.72 * (wavelength - 380.0) / 40.0
-        elif wavelength > 700.0:
-            factor = 0.28 + 0.72 * (780.0 - wavelength) / 80.0
-        else:
-            factor = 1.0
-        gamma = 0.85
-        red = float(np.clip((red * factor) ** gamma, 0.0, 1.0))
-        green = float(np.clip((green * factor) ** gamma, 0.0, 1.0))
-        blue = float(np.clip((blue * factor) ** gamma, 0.0, 1.0))
-        return QColor.fromRgbF(red, green, blue, 1.0)
+        return self._chromatic_controller.wavelength_color(wavelength_nm)
 
     def _transform_chromatic_point_between_keys(
         self,
@@ -8192,26 +8122,7 @@ class MainWindow(MainWindowIcons, QMainWindow):
         source_key: tuple[int, float],
         target_key: tuple[int, float],
     ) -> tuple[float, float] | None:
-        if source_key == target_key:
-            return float(point_xy[0]), float(point_xy[1])
-        source_affine = self._chromatic_affine_for_image_key_any(source_key)
-        target_affine = self._chromatic_affine_for_image_key_any(target_key)
-        if source_affine is None or target_affine is None:
-            return None
-        source_matrix = np.asarray(source_affine, dtype=np.float64)
-        target_matrix = np.asarray(target_affine, dtype=np.float64)
-        if self._is_reference_image_key(source_key):
-            source_to_reference = identity_affine_matrix()
-        else:
-            source_to_reference = invert_affine_matrix(source_matrix)
-        if self._is_reference_image_key(target_key):
-            reference_to_target = identity_affine_matrix()
-        else:
-            reference_to_target = target_matrix
-        point = np.asarray([[float(point_xy[0]), float(point_xy[1])]], dtype=np.float64)
-        reference_point = apply_affine_to_points(point, source_to_reference)[0]
-        target_point = apply_affine_to_points(np.asarray([reference_point], dtype=np.float64), reference_to_target)[0]
-        return float(target_point[0]), float(target_point[1])
+        return self._chromatic_controller.transform_point_between_keys(point_xy, source_key, target_key)
 
     def _update_chromatic_all_landmark_overlays(self) -> None:
         self._chromatic_controller.update_all_landmark_overlays()

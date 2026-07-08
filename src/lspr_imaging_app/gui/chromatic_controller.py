@@ -5,12 +5,18 @@ from math import hypot
 
 import numpy as np
 import pyqtgraph as pg
+from PyQt6.QtGui import QColor
 
 from lspr_imaging_app.domain.models import ChromaticLandmarkObservation, ChromaticTransformModel
 from lspr_imaging_app.gui.analysis_tasks import _sampled_wavelengths
 from lspr_imaging_app.gui.ui_helpers import chromatic_feature_count_value, chromatic_subpixel_precision_value
 from lspr_imaging_app.gui.worker import ChromaticLandmarkAllOverlayBundle
-from lspr_imaging_app.processing.chromatic import default_landmark_anchors, identity_affine_matrix
+from lspr_imaging_app.processing.chromatic import (
+    apply_affine_to_points,
+    default_landmark_anchors,
+    identity_affine_matrix,
+    invert_affine_matrix,
+)
 
 class ChromaticController:
     def __init__(self, window) -> None:
@@ -392,6 +398,115 @@ class ChromaticController:
         next_index = min(max(current_index + int(direction), 0), len(feature_ids) - 1)
         return self.select_feature(feature_ids[next_index], center_view=True)
 
+    def update_settings(self) -> None:
+        window = self.window
+        window._push_undo_point("Chromatic correction")
+        window._append_workflow_log("Chromatic link | toggled", level="debug")
+        window._state.preprocessing.chromatic_correction_enabled = bool(window.chromatic_apply_check.isChecked())
+        window.chromatic_apply_check.setIcon(window._make_link_toggle_icon(bool(window.chromatic_apply_check.isChecked())))
+        window._set_section_applied(window.chromatic_section, bool(window._state.preprocessing.chromatic_correction_enabled))
+        window._state.preprocessing.chromatic_registration_mode = "landmark_radial"
+        window._invalidate_image_analysis_caches()
+        window._invalidate_background_profile_cache()
+        self.update_control_state()
+        window._update_chromatic_summary()
+        window._schedule_processing_state_save()
+        window._current_image_key = None
+        window._schedule_image_refresh()
+
+    def clear_models(self, *, push_undo: bool = True) -> None:
+        window = self.window
+        if push_undo:
+            window._push_undo_point("Chromatic correction")
+        window._append_workflow_log("Clearing chromatic transforms.", level="warning")
+        window._state.chromatic_models.clear()
+        window._state.preprocessing.chromatic_correction_enabled = False
+        window.chromatic_apply_check.blockSignals(True)
+        window.chromatic_apply_check.setChecked(False)
+        window.chromatic_apply_check.blockSignals(False)
+        window._invalidate_image_analysis_caches()
+        window._invalidate_background_profile_cache()
+        window._update_chromatic_summary()
+        window._schedule_processing_state_save()
+        window._current_image_key = None
+        window._schedule_image_refresh()
+        window._set_status_text("Cleared chromatic transforms.")
+
+    def on_transform_button_clicked(self) -> None:
+        window = self.window
+        if not window._state.dataset or window._chromatic_auto_running:
+            return
+        if window._state.chromatic_models:
+            self.clear_models()
+            return
+        self.estimate_models()
+
+    def wavelength_color(self, wavelength_nm: float) -> QColor:
+        wavelength = float(np.clip(float(wavelength_nm), 380.0, 780.0))
+        if wavelength < 440.0:
+            red = -(wavelength - 440.0) / 60.0
+            green = 0.0
+            blue = 1.0
+        elif wavelength < 490.0:
+            red = 0.0
+            green = (wavelength - 440.0) / 50.0
+            blue = 1.0
+        elif wavelength < 510.0:
+            red = 0.0
+            green = 1.0
+            blue = -(wavelength - 510.0) / 20.0
+        elif wavelength < 580.0:
+            red = (wavelength - 510.0) / 70.0
+            green = 1.0
+            blue = 0.0
+        elif wavelength < 645.0:
+            red = 1.0
+            green = -(wavelength - 645.0) / 65.0
+            blue = 0.0
+        else:
+            red = 1.0
+            green = 0.0
+            blue = 0.0
+        if wavelength < 420.0:
+            factor = 0.28 + 0.72 * (wavelength - 380.0) / 40.0
+        elif wavelength > 700.0:
+            factor = 0.28 + 0.72 * (780.0 - wavelength) / 80.0
+        else:
+            factor = 1.0
+        gamma = 0.85
+        red = float(np.clip((red * factor) ** gamma, 0.0, 1.0))
+        green = float(np.clip((green * factor) ** gamma, 0.0, 1.0))
+        blue = float(np.clip((blue * factor) ** gamma, 0.0, 1.0))
+        return QColor.fromRgbF(red, green, blue, 1.0)
+
+    def transform_point_between_keys(
+        self,
+        point_xy: tuple[float, float],
+        source_key: tuple[int, float],
+        target_key: tuple[int, float],
+    ) -> tuple[float, float] | None:
+        window = self.window
+        if source_key == target_key:
+            return float(point_xy[0]), float(point_xy[1])
+        source_affine = self.affine_for_image_key_any(source_key)
+        target_affine = self.affine_for_image_key_any(target_key)
+        if source_affine is None or target_affine is None:
+            return None
+        source_matrix = np.asarray(source_affine, dtype=np.float64)
+        target_matrix = np.asarray(target_affine, dtype=np.float64)
+        if window._is_reference_image_key(source_key):
+            source_to_reference = identity_affine_matrix()
+        else:
+            source_to_reference = invert_affine_matrix(source_matrix)
+        if window._is_reference_image_key(target_key):
+            reference_to_target = identity_affine_matrix()
+        else:
+            reference_to_target = target_matrix
+        point = np.asarray([[float(point_xy[0]), float(point_xy[1])]], dtype=np.float64)
+        reference_point = apply_affine_to_points(point, source_to_reference)[0]
+        target_point = apply_affine_to_points(np.asarray([reference_point], dtype=np.float64), reference_to_target)[0]
+        return float(target_point[0]), float(target_point[1])
+
     def section_applied_changed(self, applied: bool) -> None:
         window = self.window
         if window.chromatic_apply_check.isChecked() != bool(applied):
@@ -731,13 +846,13 @@ class ChromaticController:
                 window._chromatic_all_landmark_overlay_items[landmark_id] = bundle
             xs: list[float] = []
             ys: list[float] = []
-            colors = [window._chromatic_wavelength_color(item[2]) for item in items]
+            colors = [self.wavelength_color(item[2]) for item in items]
             pen_colors = [colors[i] for i in range(len(colors))]
             brush_colors = [colors[i] for i in range(len(colors))]
             for item_x, item_y, _wavelength, source_key in items:
                 display_point = (float(item_x), float(item_y))
                 if linked_preview:
-                    transformed = window._transform_chromatic_point_between_keys(display_point, source_key, current_key)
+                    transformed = self.transform_point_between_keys(display_point, source_key, current_key)
                     if transformed is not None:
                         display_point = transformed
                 xs.append(float(display_point[0]))
@@ -778,7 +893,7 @@ class ChromaticController:
             _rep_x, _rep_y, rep_wavelength, _ = items[representative_index]
             rep_display_x = xs[representative_index]
             rep_display_y = ys[representative_index]
-            label_color = window._chromatic_wavelength_color(rep_wavelength)
+            label_color = self.wavelength_color(rep_wavelength)
             bundle.label.setHtml(
                 "<span style="
                 f"'color:{label_color.name()}; "
