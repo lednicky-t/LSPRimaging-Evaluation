@@ -17,6 +17,88 @@ class MaskController:
     def __init__(self, window) -> None:
         self.window = window
 
+    def preview_signature(self, image_key: tuple[int, float] | None = None) -> tuple[object, ...]:
+        window = self.window
+        target_key = image_key if image_key is not None else window._current_image_key
+        return (
+            bool(window._state.area_roi_settings.ignore_marked_pixels),
+            int(window._mask_state_revision),
+            window._external_mask_signature(target_key),
+        )
+
+    def normalize_application_state(self) -> None:
+        window = self.window
+        apply_mask = bool(
+            window._state.area_roi_settings.ignore_marked_pixels or window._state.preprocessing.flatten_background_exclude_mask
+        )
+        window._state.area_roi_settings.ignore_marked_pixels = apply_mask
+        window._state.preprocessing.flatten_background_exclude_mask = apply_mask
+
+    def on_pencil_toggled(self, checked: bool) -> None:
+        window = self.window
+        if checked:
+            if not window._is_current_reference_image():
+                window.mask_pencil_check.blockSignals(True)
+                window.mask_pencil_check.setChecked(False)
+                window.mask_pencil_check.blockSignals(False)
+                window.status_label.setText("Mask drawing is available only on the reference image.")
+                return
+            window.rotate_action.blockSignals(True)
+            window.rotate_action.setChecked(False)
+            window.rotate_action.blockSignals(False)
+            window.crop_action.blockSignals(True)
+            window.crop_action.setChecked(False)
+            window.crop_action.blockSignals(False)
+            window.spot_edit_action.blockSignals(True)
+            window.spot_edit_action.setChecked(False)
+            window.spot_edit_action.blockSignals(False)
+            window._active_tool = "mask"
+        elif window._active_tool == "mask":
+            window._active_tool = None
+        window._mask_drawing = False
+        window._drag_anchor = None
+        window._dragging_spots = False
+
+    def sync_draw_mode_buttons(self) -> None:
+        window = self.window
+        mode = str(window.mask_draw_mode_combo.currentData() or "add")
+        is_add = mode != "erase"
+        for button, checked in (
+            (window.mask_draw_add_button, is_add),
+            (window.mask_draw_remove_button, not is_add),
+        ):
+            button.blockSignals(True)
+            button.setChecked(bool(checked))
+            button.blockSignals(False)
+
+    def set_draw_mode(self, mode: str) -> None:
+        window = self.window
+        mode_key = "erase" if str(mode).strip().lower() == "erase" else "add"
+        index = window.mask_draw_mode_combo.findData(mode_key)
+        if index < 0:
+            index = 0
+        if window.mask_draw_mode_combo.currentIndex() != index:
+            window.mask_draw_mode_combo.setCurrentIndex(index)
+        self.sync_draw_mode_buttons()
+        window._save_control_preferences()
+
+    def on_section_applied_changed(self, applied: bool) -> None:
+        window = self.window
+        if window.ignore_marked_check.isChecked() != bool(applied):
+            window.ignore_marked_check.setChecked(bool(applied))
+
+    def on_background_section_applied_changed(self, applied: bool) -> None:
+        window = self.window
+        applied = bool(applied)
+        window._append_workflow_log(f"Background link | {applied}", level="debug")
+        if window.background_removal_link.isChecked() != applied:
+            window.background_removal_link.blockSignals(True)
+            window.background_removal_link.setChecked(applied)
+            window.background_removal_link.blockSignals(False)
+        if applied and window._showing_background_profile_main:
+            window._on_background_profile_toggled(False)
+        window._update_image_processing_settings()
+
     def load_mask_from_file(self) -> None:
         window = self.window
         if window._current_record_path is None:

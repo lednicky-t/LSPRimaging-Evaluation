@@ -3340,12 +3340,7 @@ class MainWindow(MainWindowIcons, QMainWindow):
         self._processing_state_save_timer.start()
 
     def _mask_preview_signature(self, image_key: tuple[int, float] | None = None) -> tuple[object, ...]:
-        target_key = image_key if image_key is not None else self._current_image_key
-        return (
-            bool(self._state.area_roi_settings.ignore_marked_pixels),
-            int(self._mask_state_revision),
-            self._external_mask_signature(target_key),
-        )
+        return self._mask_controller.preview_signature(image_key)
 
     def _background_profile_signature(self) -> tuple[object, ...] | None:
         return self._bg_profile._background_profile_signature()
@@ -4145,11 +4140,7 @@ class MainWindow(MainWindowIcons, QMainWindow):
         self._session_state_manager.load_processing_state_for_dataset()
 
     def _normalize_mask_application_state(self) -> None:
-        apply_mask = bool(
-            self._state.area_roi_settings.ignore_marked_pixels or self._state.preprocessing.flatten_background_exclude_mask
-        )
-        self._state.area_roi_settings.ignore_marked_pixels = apply_mask
-        self._state.preprocessing.flatten_background_exclude_mask = apply_mask
+        self._mask_controller.normalize_application_state()
 
     def _processing_state_signature(self) -> str:
         def _mask_signature(mask_settings: MaskSettings) -> tuple[object, ...]:
@@ -5330,49 +5321,13 @@ class MainWindow(MainWindowIcons, QMainWindow):
         self._update_status_hint()
 
     def _on_mask_pencil_toggled(self, checked: bool) -> None:
-        if checked:
-            if not self._is_current_reference_image():
-                self.mask_pencil_check.blockSignals(True)
-                self.mask_pencil_check.setChecked(False)
-                self.mask_pencil_check.blockSignals(False)
-                self.status_label.setText("Mask drawing is available only on the reference image.")
-                return
-            self.rotate_action.blockSignals(True)
-            self.rotate_action.setChecked(False)
-            self.rotate_action.blockSignals(False)
-            self.crop_action.blockSignals(True)
-            self.crop_action.setChecked(False)
-            self.crop_action.blockSignals(False)
-            self.spot_edit_action.blockSignals(True)
-            self.spot_edit_action.setChecked(False)
-            self.spot_edit_action.blockSignals(False)
-            self._active_tool = "mask"
-        elif self._active_tool == "mask":
-            self._active_tool = None
-        self._mask_drawing = False
-        self._drag_anchor = None
-        self._dragging_spots = False
+        self._mask_controller.on_pencil_toggled(checked)
 
     def _sync_mask_draw_mode_buttons(self) -> None:
-        mode = str(self.mask_draw_mode_combo.currentData() or "add")
-        is_add = mode != "erase"
-        for button, checked in (
-            (self.mask_draw_add_button, is_add),
-            (self.mask_draw_remove_button, not is_add),
-        ):
-            button.blockSignals(True)
-            button.setChecked(bool(checked))
-            button.blockSignals(False)
+        self._mask_controller.sync_draw_mode_buttons()
 
     def _set_mask_draw_mode(self, mode: str) -> None:
-        mode_key = "erase" if str(mode).strip().lower() == "erase" else "add"
-        index = self.mask_draw_mode_combo.findData(mode_key)
-        if index < 0:
-            index = 0
-        if self.mask_draw_mode_combo.currentIndex() != index:
-            self.mask_draw_mode_combo.setCurrentIndex(index)
-        self._sync_mask_draw_mode_buttons()
-        self._save_control_preferences()
+        self._mask_controller.set_draw_mode(mode)
 
     def _sync_roi_edit_capabilities(self) -> None:
         editable = self._active_tool == "roi" and self._is_current_reference_image()
@@ -7490,19 +7445,10 @@ class MainWindow(MainWindowIcons, QMainWindow):
         self._ui_state_manager.update_analysis_control_state()
 
     def _on_mask_section_applied_changed(self, applied: bool) -> None:
-        if self.ignore_marked_check.isChecked() != bool(applied):
-            self.ignore_marked_check.setChecked(bool(applied))
+        self._mask_controller.on_section_applied_changed(applied)
 
     def _on_background_section_applied_changed(self, applied: bool) -> None:
-        applied = bool(applied)
-        self._append_workflow_log(f"Background link | {applied}", level="debug")
-        if self.background_removal_link.isChecked() != applied:
-            self.background_removal_link.blockSignals(True)
-            self.background_removal_link.setChecked(applied)
-            self.background_removal_link.blockSignals(False)
-        if applied and self._showing_background_profile_main:
-            self._on_background_profile_toggled(False)
-        self._update_image_processing_settings()
+        self._mask_controller.on_background_section_applied_changed(applied)
 
     def _on_live_geometry_toggled(self, applied: bool) -> None:
         checked = bool(applied)
