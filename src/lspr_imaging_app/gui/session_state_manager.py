@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from collections.abc import Callable
 from dataclasses import replace as _dataclass_replace
 from pathlib import Path
 
@@ -19,63 +18,6 @@ from lspr_imaging_app.storage.workspace import (
 class SessionStateManager:
     def __init__(self, window) -> None:
         self._window = window
-
-    def run_startup_restore_flow(
-        self,
-        *,
-        show_window: bool = True,
-        progress_callback: Callable[[int, str], None] | None = None,
-    ) -> None:
-        window = self._window
-        window._startup_restore_in_progress = True
-        window._startup_progress_callback = progress_callback
-        window._append_workflow_log("Startup | restore begin", level="debug")
-        window._report_startup_progress(8, "Restoring window layout...")
-        window._restore_window_geometry()
-        window._restore_layout_preferences()
-        window._report_startup_progress(18, "Checking previous session...")
-        window._dataset_controller.run_startup_restore_flow()
-        if window._state.dataset is None:
-            window._append_workflow_log("Startup | no dataset restored", level="warning")
-            window._report_startup_progress(100, "Ready.")
-            if window._fast_startup:
-                window._set_status_text("Fast startup enabled. Load a dataset when ready.")
-            if show_window:
-                window.showNormal()
-                window.raise_()
-                window.activateWindow()
-                window._sync_panel_visibility_after_show()
-            window._startup_restore_in_progress = False
-            window._startup_ready = True
-            window._startup_progress_callback = None
-            return
-        window._report_startup_progress(58, "Loading analysis cache...")
-        window._append_workflow_log("Startup | analysis cache restored", level="debug")
-        window._sync_roi_detection_controls()
-        window._restore_control_preferences()
-        window._report_startup_progress(76, "Preparing the first image...")
-        window._analysis_enabled = False
-        window._analysis_live_preview_enabled = False
-        window._set_section_applied(window.analysis_section, False)
-        window._settings.setValue("analysis_section_applied", False)
-        window._settings.setValue("analysis/live_preview", False)
-        if window._histogram_log_y_enabled:
-            window._histogram_startup_autoscale_pending = True
-        window._refresh_image()
-        window._report_startup_progress(92, "Finalizing workspace...")
-        if show_window:
-            window.showNormal()
-            window.raise_()
-            window.activateWindow()
-            window._sync_panel_visibility_after_show()
-        window._startup_restore_in_progress = False
-        window._startup_ready = True
-        if window._histogram_startup_autoscale_pending and window._histogram_log_y_enabled and show_window:
-            QTimer.singleShot(300, window._autoscale_histogram_after_startup)
-        window._report_startup_progress(100, "Workspace ready.")
-        window._append_workflow_log("Startup | workspace ready", level="success")
-        window._startup_progress_callback = None
-        window._end_busy("Loaded dataset. Showing the reference image.")
 
     def _processing_profile_path(self) -> Path | None:
         return self._window._processing_profile_path()

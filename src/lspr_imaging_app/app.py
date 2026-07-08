@@ -7,9 +7,20 @@ import threading
 from datetime import datetime
 from pathlib import Path
 
-from PyQt6.QtCore import Qt, QSettings, QTimer
-from PyQt6.QtGui import QColor, QFont, QPainter, QPalette, QPen, QPixmap
-from PyQt6.QtWidgets import QApplication, QMainWindow, QSplashScreen
+from PyQt6.QtCore import QEasingCurve, Qt, QPropertyAnimation, QSettings, QTimer
+from PyQt6.QtGui import QColor, QGuiApplication, QLinearGradient, QPainter, QPalette, QPen
+from PyQt6.QtWidgets import (
+    QApplication,
+    QFrame,
+    QGraphicsOpacityEffect,
+    QHBoxLayout,
+    QLabel,
+    QMainWindow,
+    QProgressBar,
+    QStyleOptionProgressBar,
+    QVBoxLayout,
+    QWidget,
+)
 
 from lspr_ui import (
     BLUE_DARK_THEME,
@@ -75,66 +86,253 @@ def _configure_logging() -> Path:
     return log_path
 
 
-def _render_splash_pixmap(progress: int, message: str) -> QPixmap:
-    theme = get_active_theme()
-    pixmap = QPixmap(560, 300)
-    pixmap.fill(QColor(theme.window_bg))
+class StartupProgressBar(QProgressBar):
+    """Gradient progress bar matching the sLSPR Acquisition launch screen."""
 
-    painter = QPainter(pixmap)
-    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-    painter.fillRect(0, 0, 560, 300, QColor(theme.window_bg))
-    painter.setPen(Qt.PenStyle.NoPen)
-    painter.setBrush(QColor(theme.toolbar_section_bg))
-    painter.drawRoundedRect(22, 22, 516, 256, 18, 18)
-    track_x = 80
-    track_y = 210
-    track_width = 400
-    track_height = 16
-    progress = max(0, min(progress, 100))
-    fill_width = max(int(round(track_width * (progress / 100.0))), 10 if progress > 0 else 0)
-    painter.setBrush(QColor(theme.toolbar_bg))
-    painter.drawRoundedRect(track_x, track_y, track_width, track_height, 8, 8)
-    painter.setBrush(QColor(theme.control_bg_hover))
-    painter.drawRoundedRect(track_x, track_y, track_width, track_height, 8, 8)
-    painter.setBrush(QColor(theme.primary_action_bg))
-    if fill_width > 0:
-        painter.drawRoundedRect(track_x, track_y, fill_width, track_height, 8, 8)
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._glow_phase = 0.0
+        self._glow_timer = QTimer(self)
+        self._glow_timer.setInterval(20)
+        self._glow_timer.timeout.connect(self._advance_glow)
+        self._glow_timer.start()
 
-    painter.setPen(QPen(QColor(theme.text_primary)))
-    title_font = QFont("Segoe UI", 18, QFont.Weight.Bold)
-    body_font = QFont("Segoe UI", 9)
-    progress_font = QFont("Segoe UI", 10, QFont.Weight.DemiBold)
-    painter.setFont(title_font)
-    painter.drawText(40, 92, version_string())
-    painter.setFont(body_font)
-    painter.setPen(QColor(theme.control_border_hover))
-    painter.drawText(40, 120, "Fast ROI-first workflow for hyperspectral image review")
-    painter.setPen(QColor(theme.text_dim))
-    painter.drawText(40, 164, "Preparing dark workspace, image loader, and analysis tools...")
-    painter.drawText(40, 240, message)
-    painter.setFont(progress_font)
-    painter.setPen(QColor(theme.text_muted))
-    progress_text = f"{progress}%"
-    painter.drawText(track_x, track_y - 10, track_width, 16, Qt.AlignmentFlag.AlignCenter, progress_text)
-    painter.end()
-    return pixmap
+    def _advance_glow(self) -> None:
+        self._glow_phase = (self._glow_phase + 0.018) % 1.0
+        self.update()
+
+    def paintEvent(self, event) -> None:  # pragma: no cover - GUI runtime path
+        option = QStyleOptionProgressBar()
+        self.initStyleOption(option)
+        painter = QPainter(self)
+        try:
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+
+            rect = self.rect().adjusted(0, 0, -1, -1)
+            radius = 8.0
+            bg = QColor("#1f242b")
+            border = QColor("#2f353d")
+            fill_left = QColor("#7a5cff")
+            fill_mid1 = QColor("#4f88ff")
+            fill_mid2 = QColor("#39c7ba")
+            fill_mid3 = QColor("#e8d85f")
+            fill_right = QColor("#ef6b58")
+
+            painter.setPen(QPen(border, 1))
+            painter.setBrush(bg)
+            painter.drawRoundedRect(rect, radius, radius)
+
+            value = max(min(int(option.progress), int(option.maximum)), int(option.minimum))
+            span = max(option.maximum - option.minimum, 1)
+            fill_width = int(round(rect.width() * (value - option.minimum) / span))
+            fill_rect = rect.adjusted(1, 1, 0, -1)
+            fill_rect.setWidth(max(fill_width - 1, 0))
+            if fill_rect.width() > 0:
+                painter.setPen(Qt.PenStyle.NoPen)
+                fill = QLinearGradient(fill_rect.left(), fill_rect.top(), fill_rect.right(), fill_rect.top())
+                fill.setColorAt(0.0, fill_left)
+                fill.setColorAt(0.22, fill_mid1)
+                fill.setColorAt(0.45, fill_mid2)
+                fill.setColorAt(0.72, fill_mid3)
+                fill.setColorAt(1.0, fill_right)
+                painter.setBrush(fill)
+                painter.drawRoundedRect(fill_rect, radius, radius)
+
+                glow_width = max(int(fill_rect.width() * 0.42), 92)
+                travel_width = fill_rect.width() + glow_width
+                glow_center = fill_rect.left() + int(travel_width * self._glow_phase)
+                glow_left = int(glow_center - glow_width / 2)
+                glow_rect = fill_rect.adjusted(0, 0, 0, 0)
+                glow_rect.setLeft(glow_left)
+                glow_rect.setWidth(glow_width)
+                if glow_rect.right() >= fill_rect.left() and glow_rect.left() <= fill_rect.right():
+                    visible_left = max(glow_rect.left(), rect.left())
+                    visible_right = min(glow_rect.right(), fill_rect.right())
+                    if visible_right > visible_left:
+                        shine = QLinearGradient(visible_left, glow_rect.top(), visible_right, glow_rect.top())
+                        shine.setColorAt(0.0, QColor(255, 255, 255, 0))
+                        shine.setColorAt(0.36, QColor(255, 255, 255, 18))
+                        shine.setColorAt(0.50, QColor(255, 255, 255, 130))
+                        shine.setColorAt(0.64, QColor(255, 255, 255, 22))
+                        shine.setColorAt(1.0, QColor(255, 255, 255, 0))
+                        painter.save()
+                        painter.setClipRect(fill_rect)
+                        painter.setBrush(shine)
+                        painter.drawRoundedRect(fill_rect, radius, radius)
+                        painter.restore()
+        finally:
+            painter.end()
 
 
-def _build_splash() -> QSplashScreen:
-    pixmap = _render_splash_pixmap(8, "Opening workspace...")
-    splash = QSplashScreen(
-        pixmap,
-        Qt.WindowType.SplashScreen
-        | Qt.WindowType.FramelessWindowHint
-        | Qt.WindowType.Tool,
-    )
-    splash.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
-    return splash
+class StartupSplash(QWidget):
+    """Launch screen matching the sLSPR Acquisition app's startup splash."""
 
+    def __init__(self) -> None:
+        super().__init__(
+            None,
+            Qt.WindowType.SplashScreen | Qt.WindowType.FramelessWindowHint,
+        )
+        self.setObjectName("startupSplash")
+        self.setWindowTitle("Starting LSPR Imaging")
+        self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, False)
 
-def _update_splash(app: QApplication, splash: QSplashScreen, progress: int, message: str) -> None:
-    splash.setPixmap(_render_splash_pixmap(progress, message))
-    app.processEvents()
+        self._max_progress_seen = 0
+
+        accent = QFrame(self)
+        accent.setObjectName("startupAccent")
+        accent.setFixedHeight(4)
+        self._icon_opacity_effect = QGraphicsOpacityEffect(self)
+        self._icon_opacity_effect.setOpacity(0.25)
+        self._icon_label = QLabel(self)
+        self._icon_label.setObjectName("startupIcon")
+        self._icon_label.setFixedSize(108, 108)
+        self._icon_label.setPixmap(app_icon().pixmap(92, 92))
+        self._icon_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._icon_label.setGraphicsEffect(self._icon_opacity_effect)
+        self._icon_opacity_anim = QPropertyAnimation(self._icon_opacity_effect, b"opacity", self)
+        self._icon_opacity_anim.setDuration(220)
+        self._icon_opacity_anim.setEasingCurve(QEasingCurve.Type.InOutCubic)
+
+        title = QLabel(APP_NAME, self)
+        title.setObjectName("startupTitle")
+        title.setContentsMargins(0, 0, 0, 4)
+
+        version_label = QLabel(f"ver. {APP_VERSION}", self)
+        version_label.setObjectName("startupVersion")
+        version_label.setContentsMargins(0, 0, 0, 4)
+
+        subtitle = QLabel("Fast ROI-first workflow for hyperspectral image review.", self)
+        subtitle.setObjectName("startupSubtitle")
+        self._status_label = QLabel("Starting...", self)
+        self._status_label.setObjectName("startupStatus")
+        self._progress = StartupProgressBar(self)
+        self._progress.setRange(0, 100)
+        self._progress.setValue(0)
+        self._progress.setTextVisible(False)
+
+        layout = QVBoxLayout()
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+        layout.addWidget(accent)
+
+        body = QWidget(self)
+        content_row = QWidget(body)
+        content_layout = QVBoxLayout()
+        content_layout.setContentsMargins(0, 0, 0, 0)
+        content_layout.setSpacing(3)
+
+        title_row = QWidget(content_row)
+        title_row_layout = QHBoxLayout()
+        title_row_layout.setContentsMargins(0, 0, 0, 0)
+        title_row_layout.setSpacing(8)
+        title_row_layout.addWidget(title, 1)
+        title_row_layout.addWidget(version_label, 0, Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignRight)
+        title_row.setLayout(title_row_layout)
+
+        content_layout.addWidget(title_row)
+        content_layout.addWidget(subtitle)
+        content_layout.addWidget(self._status_label)
+        content_layout.addWidget(self._progress)
+        content_row.setLayout(content_layout)
+
+        header_row = QWidget(body)
+        header_layout = QVBoxLayout()
+        header_layout.setContentsMargins(0, 0, 0, 0)
+        header_layout.setSpacing(0)
+        header_layout.addWidget(self._icon_label, 0, Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft)
+        header_row.setLayout(header_layout)
+
+        body_layout = QHBoxLayout()
+        body_layout.setContentsMargins(24, 16, 24, 18)
+        body_layout.setSpacing(14)
+        body_layout.addWidget(header_row, 0, Qt.AlignmentFlag.AlignTop)
+        body_layout.addWidget(content_row, 1)
+        body.setLayout(body_layout)
+
+        layout.addWidget(body)
+        self.setLayout(layout)
+        self.setFixedSize(560, 190)
+        self.setStyleSheet(
+            """
+            QWidget#startupSplash {
+                background: #15191f;
+                border: 1px solid #2d333b;
+                border-radius: 18px;
+            }
+            QFrame#startupAccent {
+                background: qlineargradient(
+                    x1: 0, y1: 0, x2: 1, y2: 0,
+                    stop: 0 #7a5cff,
+                    stop: 0.22 #4f88ff,
+                    stop: 0.45 #39c7ba,
+                    stop: 0.72 #e8d85f,
+                    stop: 1 #ef6b58
+                );
+                border-top-left-radius: 18px;
+                border-top-right-radius: 18px;
+            }
+            QLabel#startupIcon {
+                background: transparent;
+            }
+            QLabel#startupTitle {
+                font-size: 18px;
+                font-weight: 700;
+                color: #eef2f6;
+                min-height: 24px;
+                padding-bottom: 0px;
+            }
+            QLabel#startupVersion {
+                color: #8a98a8;
+                font-size: 10px;
+                padding-top: 2px;
+            }
+            QLabel#startupSubtitle {
+                color: #95a0ac;
+                font-size: 12px;
+            }
+            QLabel#startupStatus {
+                color: #d7dce2;
+                font-size: 12px;
+            }
+            QProgressBar {
+                border: none;
+                background: transparent;
+                min-height: 18px;
+                max-height: 18px;
+                padding: 0px;
+            }
+            """
+        )
+
+    def show_centered(self) -> None:
+        screen = QGuiApplication.primaryScreen()
+        if screen is not None:
+            available = screen.availableGeometry()
+            x_pos = available.x() + (available.width() - self.width()) // 2
+            y_pos = available.y() + (available.height() - self.height()) // 2
+            self.move(x_pos, y_pos)
+        self.show()
+        QApplication.processEvents()
+
+    def update_progress(self, value: int, text: str) -> None:
+        # The startup flow is composed of several independently-numbered sub-phases
+        # (dataset restore, processing-profile restore, ...) whose own 0-100 scales
+        # don't line up with each other or with the outer flow. Clamping to the
+        # running maximum keeps the status text current while guaranteeing the bar
+        # itself never visibly moves backward.
+        value = max(0, min(value, 100))
+        self._max_progress_seen = max(self._max_progress_seen, value)
+        self._progress.setValue(self._max_progress_seen)
+        self._status_label.setText(text)
+        self._animate_icon_opacity(self._max_progress_seen)
+        QApplication.processEvents()
+
+    def _animate_icon_opacity(self, progress_value: int) -> None:
+        target = 0.25 + (max(0, min(progress_value, 100)) / 100.0) * 0.75
+        self._icon_opacity_anim.stop()
+        self._icon_opacity_anim.setStartValue(self._icon_opacity_effect.opacity())
+        self._icon_opacity_anim.setEndValue(target)
+        self._icon_opacity_anim.start()
 
 
 def _apply_dark_theme(app: QApplication) -> None:
@@ -236,10 +434,10 @@ def main() -> None:
     apply_base_app_theme(app, get_active_theme())
     _apply_active_palette(app)
     _apply_dark_theme(app)
-    splash = _build_splash()
-    splash.show()
-    _update_splash(app, splash, 10, "Opening workspace...")
-    _update_splash(app, splash, 20, "Loading application modules...")
+    splash = StartupSplash()
+    splash.show_centered()
+    splash.update_progress(10, "Opening workspace...")
+    splash.update_progress(20, "Loading application modules...")
     try:
         from lspr_imaging_app.gui.main_window import MainWindow
     except ModuleNotFoundError as exc:
@@ -252,24 +450,30 @@ def main() -> None:
             )
         raise
     default_folder = _resolve_default_dataset_folder()
-    _update_splash(app, splash, 40, "Building workspace...")
+    splash.update_progress(40, "Building workspace...")
     window = MainWindow(default_folder=default_folder, fast_startup=fast_startup)
-    _update_splash(app, splash, 55, "Preparing window layout...")
+    splash.update_progress(55, "Preparing window layout...")
     window.prepare_initial_show()
     window.setWindowState(Qt.WindowState.WindowNoState)
     window.hide()
     window.setEnabled(False)
     app.processEvents()
 
+    # run_startup_restore_flow() reports its own 0-100 sub-progress; remap it into
+    # the splash's remaining 65-95 span so the bar never jumps backward.
+    restore_flow_start, restore_flow_end = 65, 95
+
     def progress_callback(percent: int, message: str) -> None:
         logging.getLogger("lspr_imaging_app.startup").info("Splash | %s", message)
-        _update_splash(app, splash, percent, message)
+        percent = max(0, min(percent, 100))
+        remapped = restore_flow_start + round((restore_flow_end - restore_flow_start) * (percent / 100.0))
+        splash.update_progress(remapped, message)
 
     def finish_startup() -> None:
         try:
-            _update_splash(app, splash, 65, "Restoring saved layout...")
+            splash.update_progress(restore_flow_start, "Restoring saved layout...")
             window.run_startup_restore_flow(show_window=False, progress_callback=progress_callback)
-            _update_splash(app, splash, 96, "Launching workspace...")
+            splash.update_progress(96, "Launching workspace...")
             window.setEnabled(True)
             window.show()
             window.showNormal()
