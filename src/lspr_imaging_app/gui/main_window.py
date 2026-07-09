@@ -145,7 +145,7 @@ from .main_window_icons import MainWindowIcons
 from .workflow_log_controller import WorkflowLogController
 from .widgets import (
     BusySpinner,
-    CollapsibleSection,
+    CollapsibleSection,  # also re-exported: layout_builder.py imports it from here, not from widgets directly
     CompactWedgeSlider,
     PanelContainer,
     ResponsiveDoubleSpinBox,
@@ -153,7 +153,7 @@ from .widgets import (
 )
 from .worker import (
     ChromaticLandmarkAllOverlayBundle,
-    FunctionWorker,
+    FunctionWorker,  # also re-exported: chromatic_controller.py and image_render_manager.py import it from here at runtime
     GuideOverlayBundle,
     LandmarkOverlayBundle,
     MeasurementOverlayBundle,
@@ -163,8 +163,18 @@ from .worker import (
     RoiOverlayBundle,
     UndoSnapshot,
 )
+# _auto_chromatic_landmarks_task, _estimate_chromatic_models_task, and _process_image_task
+# are not called directly in this file - they look unused to linters, but
+# chromatic_controller.py and image_render_manager.py import them from
+# lspr_imaging_app.gui.main_window (not from analysis_tasks directly) via a runtime
+# `from lspr_imaging_app.gui.main_window import ...` to avoid a circular import. Removing
+# them here breaks those call sites at runtime, not at import time - a real regression from
+# an earlier "unused import" cleanup pass. Do not remove without checking for that pattern.
 from .analysis_tasks import (
+    _auto_chromatic_landmarks_task,  # noqa: F401 - re-exported, see comment above
     _detect_spots_task,
+    _estimate_chromatic_models_task,  # noqa: F401 - re-exported, see comment above
+    _process_image_task,  # noqa: F401 - re-exported, see comment above
     _refresh_roi_metrics_task,
 )
 
