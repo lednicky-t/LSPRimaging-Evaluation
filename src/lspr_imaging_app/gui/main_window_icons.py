@@ -21,14 +21,12 @@ from PyQt6.QtGui import QAction, QActionGroup, QBrush, QColor, QFont, QIcon, QPa
 from PyQt6.QtSvg import QSvgRenderer
 from PyQt6.QtWidgets import (
     QComboBox,
-    QDoubleSpinBox,
     QHBoxLayout,
     QLabel,
     QLineEdit,
     QMessageBox,
     QAbstractSpinBox,
     QSizePolicy,
-    QSpinBox,
     QToolButton,
     QVBoxLayout,
     QWidget,
@@ -37,6 +35,7 @@ from PyQt6.QtWidgets import (
 from lspr_ui import (
     APP_THEME,
     icon_accent_colors,
+    make_compact_spinbox,
     transparent_icon_button_stylesheet,
 )
 from lspr_imaging_app.gui.ui_helpers import (
@@ -2018,19 +2017,6 @@ class MainWindowIcons:
         layout.addWidget(toggle)
         return row
 
-    def _set_spinbox_width(self, spinbox: QSpinBox | QDoubleSpinBox, text: str, *, minimum: int = 46) -> None:
-        suffix = spinbox.suffix()
-        full_text = text if (not suffix or text.endswith(suffix)) else text + suffix
-        text_w = spinbox.fontMetrics().horizontalAdvance(full_text)
-        # Derive button+frame overhead from sizeHint(), which Qt computes from internal
-        # style metrics.  This is correct at any DPI/theme and works before the widget
-        # has been shown or placed in a layout (unlike subControlRect, which returns a
-        # zero-width rect when the widget geometry is still 0×0).
-        sh_w = spinbox.sizeHint().width()
-        max_text = spinbox.prefix() + spinbox.textFromValue(spinbox.maximum()) + spinbox.suffix()
-        overhead = max(sh_w - spinbox.fontMetrics().horizontalAdvance(max_text), 30)
-        spinbox.setFixedWidth(max(minimum, text_w + overhead))
-
     def _set_combo_width(self, combo: QComboBox, texts: list[str], *, minimum: int = 58) -> None:
         widest = max((combo.fontMetrics().horizontalAdvance(text) for text in texts), default=0)
         combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToContents)
@@ -2040,7 +2026,7 @@ class MainWindowIcons:
         for line_edit in self.findChildren(QLineEdit):
             line_edit.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         for spinbox in self.findChildren(QAbstractSpinBox):
-            spinbox.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            make_compact_spinbox(spinbox, height=APP_THEME.compact_icon_outer)
         for combo in self.findChildren(QComboBox):
             combo.setEditable(True)
             combo.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
@@ -2051,39 +2037,17 @@ class MainWindowIcons:
                 line_edit.setFrame(False)
 
     def _apply_compact_control_widths(self) -> None:
-        self._set_spinbox_width(self.chromatic_sample_count_spin, "777")
+        # Spin box widths are no longer hand-computed here: make_compact_spinbox()
+        # (called from _apply_right_aligned_control_text for every spin box) removes the
+        # native up/down buttons and the shared theme sets min-width: 0px, so Qt's own
+        # sizeHint() - which already accounts for the suffix and maximum value - produces
+        # a correctly compact width without per-widget guessed "widest text" maintenance.
         self._set_combo_width(self.chromatic_feature_count_spin, ["5", "15", "30"], minimum=54)
-        self._set_spinbox_width(self.chromatic_landmark_id_spin, "99", minimum=62)
-        self._set_spinbox_width(self.sample_diameter_spin, "9999.99")
-        self._set_spinbox_width(self.reference_inner_diameter_spin, "9999.99")
-        self._set_spinbox_width(self.reference_outer_diameter_spin, "9999.99")
-        self._set_spinbox_width(self.background_smoothing_sigma_spin, "2000 px", minimum=72)
         self._set_combo_width(self.background_smoothing_binning_combo, ["4x4"])
         self._set_combo_width(self.mask_mode_combo, ["Local contrast"], minimum=96)
-        self._set_spinbox_width(self.mask_profile_sigma_spin, "2000 px", minimum=72)
-        self._set_spinbox_width(self.mask_relative_threshold_spin, "500.0 %", minimum=78)
-        self._set_spinbox_width(self.mask_local_contrast_sigma_spin, "500.0 %", minimum=78)
-        self._set_spinbox_width(self.mask_local_z_spin, "20.0 sigma", minimum=84)
-        self._set_spinbox_width(self.mask_morph_radius_spin, "100 px", minimum=64)
-        self._set_spinbox_width(self.mask_local_contrast_z_spin, "20.0 sigma", minimum=84)
-        self._set_spinbox_width(self.mask_morphology_radius_spin, "100 px", minimum=64)
-        self._set_spinbox_width(self.mask_relative_profile_sigma_spin, "2000 px", minimum=72)
         self._set_combo_width(self.mask_draw_mode_combo, ["Erase"])
-        self._set_spinbox_width(self.mask_brush_size_spin, "200 px", minimum=68)
-        self._set_spinbox_width(self.histogram_bins_spin, "8192 DN", minimum=70)
-        self._set_spinbox_width(self.analysis_poly_order_spin, "99", minimum=52)
-        self._set_spinbox_width(self.ome_zarr_chunk_spin, "999 px", minimum=60)
         self._set_combo_width(self.ome_zarr_shard_mode_combo, ["1 spectral cube"], minimum=220)
         self._set_combo_width(self.analysis_metric_combo, ["Maximum", "Centroid"], minimum=80)
-        self._set_spinbox_width(self.analysis_start_spectral_cube_spin, "99999", minimum=66)
-        self._set_spinbox_width(self.analysis_end_spectral_cube_spin, "99999", minimum=66)
-        self._set_spinbox_width(self.array_rows_spin, "100")
-        self._set_spinbox_width(self.array_cols_spin, "100")
-        self._set_spinbox_width(self.array_spacing_spin, "1000.00", minimum=68)
-        self._set_spinbox_width(self.measurement_um_x_spin, "1000000", minimum=58)
-        self._set_spinbox_width(self.measurement_um_y_spin, "1000000", minimum=58)
-        self._set_spinbox_width(self.spectral_cube_spin, "99999", minimum=66)
-        self._set_spinbox_width(self.wavelength_spin, "99999 nm", minimum=82)
         self._set_combo_width(self.chromatic_subpixel_precision_combo, ["1", "4", "9"], minimum=42)
         navigation_control_width = max(self.spectral_cube_spin.sizeHint().width(), self.wavelength_spin.sizeHint().width(), 82)
         navigation_slider_width = max(navigation_control_width + 80, 170)

@@ -6674,7 +6674,6 @@ class MainWindow(MainWindowIcons, QMainWindow):
         ):
             spinbox.setDecimals(2)
             spinbox.setSingleStep(0.5)
-            spinbox.setButtonSymbols(QSpinBox.ButtonSymbols.UpDownArrows)
             spinbox.setFocusPolicy(Qt.FocusPolicy.WheelFocus)
             spinbox.setAccelerated(True)
             spinbox.setKeyboardTracking(False)
@@ -8260,14 +8259,6 @@ class MainWindow(MainWindowIcons, QMainWindow):
         self._refresh_unit_toggle_button()
         self._update_measurement_status_label()
         self._refresh_scale_bar_overlay()
-        # Re-calibrate widths now that the suffix has changed.
-        for _uspin in (
-            self.sample_diameter_spin,
-            self.reference_inner_diameter_spin,
-            self.reference_outer_diameter_spin,
-            self.array_spacing_spin,
-        ):
-            self._set_spinbox_width(_uspin, "9999")
 
     def _format_length_display_value(self, value_px: float) -> float:
         return format_length_display_value(self._display_uses_micrometers(), self._microns_per_pixel_scalar(), value_px)
