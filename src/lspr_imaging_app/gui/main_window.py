@@ -5,14 +5,12 @@ import csv
 import logging
 import subprocess
 import sys
-from html import escape
 import os
-import shutil
 import threading
 import time
 from collections import OrderedDict
 from copy import deepcopy
-from dataclasses import asdict, dataclass
+from dataclasses import asdict
 from datetime import datetime
 from math import hypot
 from pathlib import Path
@@ -20,39 +18,27 @@ from typing import Callable
 
 import numpy as np
 import pyqtgraph as pg
-from PIL import Image
 from PyQt6.QtCore import (
     QByteArray,
-    QEvent,
     QItemSelectionModel,
-    QLineF,
-    QObject,
     QPoint,
-    QPointF,
     QRectF,
-    QRunnable,
     QSize,
     QSettings,
     Qt,
     QThreadPool,
     QTimer,
-    pyqtSignal,
 )
-from PyQt6.QtGui import QAction, QActionGroup, QBrush, QColor, QFont, QGuiApplication, QIcon, QKeyEvent, QKeySequence, QLinearGradient, QPainter, QPainterPath, QPalette, QPen, QPixmap, QTextCursor
-from PyQt6.QtSvg import QSvgRenderer
+from PyQt6.QtGui import QAction, QColor, QFont, QGuiApplication, QIcon, QKeyEvent, QKeySequence, QPainter, QPainterPath, QPalette, QPen, QPixmap
 from PyQt6.QtWidgets import (
     QApplication,
     QCheckBox,
     QColorDialog,
-    QDialog,
-    QDialogButtonBox,
     QComboBox,
     QAbstractItemView,
     QDoubleSpinBox,
     QFileDialog,
-    QFormLayout,
     QGridLayout,
-    QGroupBox,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -63,28 +49,19 @@ from PyQt6.QtWidgets import (
     QMenu,
     QPushButton,
     QButtonGroup,
-    QProgressBar,
     QGraphicsPathItem,
-    QAbstractSpinBox,
     QScrollArea,
     QSizePolicy,
-    QHeaderView,
     QSpinBox,
-    QTabWidget,
     QSplitter,
     QSlider,
     QStyle,
-    QStyleOptionProgressBar,
-    QTableWidget,
     QTableWidgetItem,
     QToolButton,
     QRubberBand,
-    QPlainTextEdit,
-    QTextEdit,
     QVBoxLayout,
     QWidget,
 )
-from scipy import ndimage
 
 from lspr_ui import (
     APP_THEME,
@@ -95,16 +72,11 @@ from lspr_ui import (
     dark_image_toolbar_stylesheet,
     get_active_theme,
     icon_accent_colors,
-    section_header_label_stylesheet,
     set_active_theme,
     standard_push_button_stylesheet,
     transparent_icon_button_stylesheet,
 )
 from lspr_imaging_app.gui.roi_table_helpers import (
-    RoiTableRowData,
-    append_roi_table_row,
-    format_xy_value,
-    make_color_swatch_icon,
     roi_table_headers,
 )
 from lspr_imaging_app.gui.roi_table_controller import RoiTableController
@@ -115,13 +87,9 @@ from lspr_imaging_app.gui.shortcut_manager import ShortcutManager
 from lspr_imaging_app.gui.session_state_manager import SessionStateManager
 from lspr_imaging_app.gui.plot_manager import PlotManager
 from lspr_imaging_app.gui.ui_state_manager import UIStateManager
-from lspr_imaging_app.gui.panel_help_registry import panel_help_text
 from lspr_imaging_app.gui.shortcut_registry import shortcuts_text
 from lspr_imaging_app.gui.ui_helpers import (
     alpha01,
-    area_delta_text,
-    area_value_text,
-    current_ome_zarr_compression_enabled,
     display_length_suffix,
     format_length_display_value,
     length_display_to_px,
@@ -129,11 +97,9 @@ from lspr_imaging_app.gui.ui_helpers import (
     normalized_odd_count,
     read_bool_setting,
     read_float_setting,
-    ring_area_text,
     settings_bool,
     settings_int,
 )
-from lspr_imaging_app.gui.roi_overlay_helpers import resolved_reference_color, resolved_roi_color
 from lspr_imaging_app.gui.analysis_controller import AnalysisController
 from lspr_imaging_app.gui.dataset_controller import DatasetController
 from lspr_imaging_app.gui.image_controller import ImageController
@@ -153,7 +119,6 @@ from lspr_imaging_app.domain.models import (
     ChromaticTransformModel,
     CropDefinition,
     AreaRoi,
-    AreaRoiDetectionSettings,
     AreaRoiGroup,
     FitResult,
     MaskSettings,
@@ -162,19 +127,10 @@ from lspr_imaging_app.domain.models import (
 from lspr_imaging_app.io.dataset import (
     dataset_record_map,
     dataset_is_ome_zarr,
-    dataset_load_plane_roi,
-    export_ome_zarr_dataset,
-    load_dataset,
     load_image_array,
     load_image_shape,
 )
-from lspr_imaging_app.processing.analysis import absorbance_from_means, fit_absorbance_curve, metric_value_from_fit
 from lspr_imaging_app.processing.chromatic import (
-    ChromaticRegistrationResult,
-    detect_regional_landmarks,
-    fit_affine_matrix,
-    estimate_affine_chromatic_transform,
-    track_landmarks,
     transformed_annulus_mask,
     transformed_circle_points,
     transformed_disk_mask,
@@ -182,18 +138,6 @@ from lspr_imaging_app.processing.chromatic import (
 )
 from lspr_imaging_app.processing.preprocess import (
     apply_preprocessing,
-    apply_spatial_mask,
-    apply_spatial_preprocessing,
-    estimate_background_profile,
-    spatial_output_shape,
-    spatial_coordinate_maps,
-)
-from lspr_imaging_app.processing.spot_detection import detect_spots, ignored_pixel_mask, refresh_roi_metrics
-from lspr_imaging_app.storage.workspace import (
-    load_preprocessing,
-    load_processing_profile,
-    save_preprocessing,
-    save_processing_profile,
 )
 
 
@@ -201,11 +145,8 @@ from .main_window_icons import MainWindowIcons
 from .workflow_log_controller import WorkflowLogController
 from .widgets import (
     BusySpinner,
-    ClickableIconLabel,
     CollapsibleSection,
     CompactWedgeSlider,
-    FreeStandingToggleIconLabel,
-    FreeStandingToggleTextLabel,
     PanelContainer,
     ResponsiveDoubleSpinBox,
     ShineProgressBar,
@@ -221,19 +162,10 @@ from .worker import (
     SensorgramPointResult,
     RoiOverlayBundle,
     UndoSnapshot,
-    WorkerSignals,
 )
 from .analysis_tasks import (
-    _absorbance_roi_mask_cache_key,
-    _auto_chromatic_landmarks_task,
-    _background_profile_task,
     _detect_spots_task,
-    _estimate_chromatic_models_task,
-    _ome_zarr_export_task,
-    _process_image_task,
     _refresh_roi_metrics_task,
-    _sampled_wavelengths,
-    _selected_roi_masks_for_spectrum,
 )
 
 try:
@@ -7930,7 +7862,6 @@ class MainWindow(MainWindowIcons, QMainWindow):
         view_range = self.histogram_plot.viewRange()
         top_y = float(view_range[1][1]) if view_range and len(view_range) > 1 else 1.0
         label_top = max(top_y * 0.92, top_y - 0.8)
-        label_second = max(top_y * 0.84, top_y - 1.8)
 
         highlight_lower, highlight_upper = self.hist_region.getRegion()
         if highlight_lower > highlight_upper:

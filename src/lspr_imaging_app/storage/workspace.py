@@ -7,7 +7,7 @@ from pathlib import Path
 
 import numpy as np
 
-from lspr_imaging_app.format_versions import PROCESSING_PROFILE_VERSION, ROI_EXPORT_VERSION, WORKSPACE_SCHEMA_VERSION
+from lspr_imaging_app.format_versions import PROCESSING_PROFILE_VERSION, ROI_EXPORT_VERSION
 from lspr_imaging_app.domain.models import (
     AreaRoi,
     AreaRoiDetectionSettings,
@@ -109,8 +109,6 @@ def load_rois(path: Path) -> list[RoiDefinition]:
     payload = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(payload, dict):
         raise ValueError("Invalid ROI export format.")
-    _format_version = int(payload.get("format_version", ROI_EXPORT_VERSION))
-    _schema_version = int(payload.get("schema_version", ROI_EXPORT_VERSION))
     rois_raw = payload.get("rois", [])
     rois: list[RoiDefinition] = []
     for raw in rois_raw:

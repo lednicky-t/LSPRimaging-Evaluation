@@ -1,199 +1,51 @@
 from __future__ import annotations
 
-import json
-import csv
-import logging
-from html import escape
 import os
 import shutil
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from collections import OrderedDict
 from copy import deepcopy
-from dataclasses import asdict, dataclass
-from datetime import datetime
-from math import hypot
 from pathlib import Path
-from typing import Callable
 
 import numpy as np
-import pyqtgraph as pg
-from PIL import Image
 from PyQt6.QtCore import (
     QByteArray,
-    QEvent,
-    QItemSelectionModel,
     QLineF,
-    QObject,
     QPointF,
     QRectF,
-    QRunnable,
     QSize,
-    QSettings,
     Qt,
-    QThreadPool,
-    QTimer,
     pyqtSignal,
 )
-from PyQt6.QtGui import QAction, QActionGroup, QBrush, QColor, QFont, QGuiApplication, QIcon, QKeyEvent, QKeySequence, QLinearGradient, QPainter, QPainterPath, QPalette, QPen, QPixmap, QTextCursor
+from PyQt6.QtGui import QAction, QActionGroup, QBrush, QColor, QFont, QIcon, QPainter, QPainterPath, QPen, QPixmap
 from PyQt6.QtSvg import QSvgRenderer
 from PyQt6.QtWidgets import (
-    QApplication,
-    QCheckBox,
-    QColorDialog,
-    QDialog,
-    QDialogButtonBox,
     QComboBox,
-    QAbstractItemView,
     QDoubleSpinBox,
-    QFileDialog,
-    QFormLayout,
-    QGridLayout,
-    QGroupBox,
     QHBoxLayout,
     QLabel,
     QLineEdit,
-    QMainWindow,
-    QFrame,
     QMessageBox,
-    QInputDialog,
-    QMenu,
-    QPushButton,
-    QButtonGroup,
-    QProgressBar,
-    QGraphicsPathItem,
     QAbstractSpinBox,
-    QScrollArea,
     QSizePolicy,
-    QHeaderView,
     QSpinBox,
-    QTabWidget,
-    QSplitter,
-    QSlider,
-    QStyle,
-    QStyleOptionProgressBar,
-    QTableWidget,
-    QTableWidgetItem,
     QToolButton,
-    QRubberBand,
-    QPlainTextEdit,
-    QTextEdit,
     QVBoxLayout,
     QWidget,
 )
-from scipy import ndimage
 
 from lspr_ui import (
     APP_THEME,
-    BLUE_DARK_THEME,
-    GRAY_DARK_THEME,
-    collapsible_pin_stylesheet,
-    collapsible_toggle_stylesheet,
-    dark_image_toolbar_stylesheet,
-    get_active_theme,
     icon_accent_colors,
-    section_header_label_stylesheet,
-    set_active_theme,
-    standard_push_button_stylesheet,
     transparent_icon_button_stylesheet,
 )
-from lspr_imaging_app.gui.roi_table_helpers import (
-    RoiTableRowData,
-    append_roi_table_row,
-    format_xy_value,
-    make_color_swatch_icon,
-    roi_table_headers,
-)
-from lspr_imaging_app.gui.roi_table_controller import RoiTableController
-from lspr_imaging_app.gui.mask_controller import MaskController
-from lspr_imaging_app.gui.chromatic_controller import ChromaticController
-from lspr_imaging_app.gui.shortcut_manager import ShortcutManager
-from lspr_imaging_app.gui.session_state_manager import SessionStateManager
-from lspr_imaging_app.gui.plot_manager import PlotManager
-from lspr_imaging_app.gui.ui_state_manager import UIStateManager
-from lspr_imaging_app.gui.panel_help_registry import panel_help_text
-from lspr_imaging_app.gui.shortcut_registry import shortcuts_text
 from lspr_imaging_app.gui.ui_helpers import (
-    alpha01,
-    area_delta_text,
-    area_value_text,
-    chromatic_feature_count_value,
-    chromatic_subpixel_precision_value,
     current_ome_zarr_compression_enabled,
-    display_length_suffix,
-    format_length_display_value,
-    length_display_to_px,
-    length_px_to_display,
-    normalized_odd_count,
-    read_bool_setting,
-    read_float_setting,
-    ring_area_text,
-    settings_bool,
-    settings_int,
 )
-from lspr_imaging_app.gui.roi_overlay_helpers import resolved_reference_color, resolved_roi_color
-from lspr_imaging_app.gui.analysis_controller import AnalysisController
 from lspr_imaging_app.gui.analysis_tasks import _ome_zarr_export_task
-from lspr_imaging_app.gui.dataset_controller import DatasetController
-from lspr_imaging_app.gui.image_controller import ImageController
 from lspr_imaging_app.gui.worker import FunctionWorker
-from lspr_imaging_app.domain.roi_editor_tools import (
-    create_rois_from_template,
-    create_rois_from_template_grid,
-    move_roi_from_template,
-    roi_top_left_from_center,
-)
-from lspr_imaging_app.version import version_string
-from lspr_imaging_app.domain.models import (
-    AnalysisState,
-    AbsorbanceSpectrumResult,
-    ChromaticLandmarkObservation,
-    ChromaticTransformModel,
-    CropDefinition,
-    AreaRoi,
-    FitResult,
-    MaskSettings,
-    AreaRoiDetectionSettings,
-    AreaRoiGroup,
-)
 from lspr_imaging_app.io.dataset import (
-    dataset_record_map,
     dataset_is_ome_zarr,
-    export_ome_zarr_dataset,
-    load_dataset,
-    load_image_array,
-)
-from lspr_imaging_app.processing.analysis import absorbance_from_means, fit_absorbance_curve, metric_value_from_fit
-from lspr_imaging_app.processing.chromatic import (
-    ChromaticRegistrationResult,
-    apply_affine_to_points,
-    default_landmark_anchors,
-    detect_regional_landmarks,
-    fit_affine_matrix,
-    estimate_affine_chromatic_transform,
-    identity_affine_matrix,
-    invert_affine_matrix,
-    track_landmarks,
-    transformed_annulus_mask,
-    transformed_circle_points,
-    transformed_disk_mask,
-    transform_spots_affine,
-)
-from lspr_imaging_app.processing.preprocess import (
-    apply_preprocessing,
-    apply_spatial_mask,
-    apply_spatial_preprocessing,
-    estimate_background_profile,
-    spatial_output_shape,
-    spatial_coordinate_maps,
-)
-from lspr_imaging_app.processing.spot_detection import detect_spots, ignored_pixel_mask, refresh_roi_metrics
-from lspr_imaging_app.storage.workspace import (
-    load_preprocessing,
-    load_processing_profile,
-    save_preprocessing,
-    save_processing_profile,
 )
 
 try:

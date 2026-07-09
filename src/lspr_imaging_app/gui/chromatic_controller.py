@@ -849,7 +849,6 @@ class ChromaticController:
             ys: list[float] = []
             colors = [self.wavelength_color(item[2]) for item in items]
             pen_colors = [colors[i] for i in range(len(colors))]
-            brush_colors = [colors[i] for i in range(len(colors))]
             for item_x, item_y, _wavelength, source_key in items:
                 display_point = (float(item_x), float(item_y))
                 if linked_preview:

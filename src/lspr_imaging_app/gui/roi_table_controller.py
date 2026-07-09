@@ -5,7 +5,7 @@ import logging
 from datetime import datetime
 from pathlib import Path
 
-from PyQt6.QtCore import QItemSelectionModel, Qt
+from PyQt6.QtCore import QItemSelectionModel
 from PyQt6.QtGui import QBrush, QColor
 from PyQt6.QtWidgets import QFileDialog, QMenu, QMessageBox, QTableWidgetItem
 
@@ -690,7 +690,6 @@ class RoiTableController:
 
 
     def _on_reference_inner_diameter_spin_changed(self, value: int) -> None:
-        _inner = max(float(value), 0.0)
         self.window._append_workflow_log_throttled(
             "ring_inner_change",
             f"Ring inner changed | display={value}",
@@ -705,7 +704,6 @@ class RoiTableController:
 
 
     def _on_reference_outer_diameter_spin_changed(self, value: int) -> None:
-        _outer = max(float(value), 0.0)
         self.window._append_workflow_log_throttled(
             "ring_outer_change",
             f"Ring outer changed | display={value}",

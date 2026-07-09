@@ -6,10 +6,8 @@ from PyQt6.QtCore import Qt, QRectF
 from PyQt6.QtGui import QBrush, QColor, QPen, QPainterPath
 
 from lspr_imaging_app.gui.worker import (
-    GuideOverlayBundle,
     LandmarkOverlayBundle,
     MeasurementOverlayBundle,
-    ScaleBarOverlayBundle,
     RoiOverlayBundle,
 )
 from lspr_imaging_app.gui.roi_overlay_helpers import resolved_reference_color, resolved_roi_color
@@ -51,7 +49,6 @@ class OverlayManager:
             if spot_id not in current_ids:
                 w._remove_spot_overlay_bundle(spot_id)
 
-        theta = w._spot_overlay_theta
         ring_inner_radius = float(max(w._state.area_roi_settings.reference_inner_radius_px, 0))
         ring_outer_radius = float(max(w._state.area_roi_settings.reference_outer_radius_px, w._state.area_roi_settings.reference_inner_radius_px))
         for roi in display_rois:

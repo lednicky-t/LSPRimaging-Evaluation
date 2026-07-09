@@ -5,7 +5,7 @@ import pyqtgraph as pg
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QColor
 
-from lspr_imaging_app.domain.models import AbsorbanceSpectrumResult, AreaRoi, FitResult
+from lspr_imaging_app.domain.models import AbsorbanceSpectrumResult, FitResult
 from lspr_imaging_app.processing.analysis import fit_absorbance_curve
 from lspr_imaging_app.processing.chromatic import transformed_annulus_mask, transformed_disk_mask
 from lspr_imaging_app.processing.spot_detection import ignored_pixel_mask
@@ -182,7 +182,6 @@ class PlotManager:
         y_values = y_values[order]
         color = self.spot_spectrum_color(spot_id)
         fit_color = QColor(color).darker(125)
-        line_width = 2.5 if highlighted else 1.8
         symbol_size = 7.5 if highlighted else 6
         fit_width = 3.0 if highlighted else 2.0
         symbol_pen_width = 1.8 if highlighted else 1.4

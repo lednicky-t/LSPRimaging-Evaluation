@@ -53,4 +53,3 @@ If a saved file format changes, include a version field and a migration path.
 - Use ASCII unless the file already uses Unicode.
 - Keep compatibility helpers isolated from the primary model where possible.
 - Favor explicit version fields over guessing format variants from content.
-

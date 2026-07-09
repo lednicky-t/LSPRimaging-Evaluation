@@ -681,7 +681,6 @@ def _resize_region_to_shape(
     (rounded from the requested zoom factor) doesn't exactly match `shape`.
     """
     x0, y0, x1, y1 = region
-    region_h, region_w = y1 - y0, x1 - x0
     if array.shape[:2] == shape:
         return array[y0:y1, x0:x1].astype(np.float32, copy=False)
 
@@ -760,7 +759,7 @@ def create_histogram_mask(image: np.ndarray, settings: MaskSettings) -> np.ndarr
     """Create mask based on intensity histogram ranges."""
     if settings.histogram_min_value is None and settings.histogram_max_value is None:
         return np.zeros(image.shape[:2], dtype=bool)
-    
+
     mask = np.ones(image.shape[:2], dtype=bool)
     if settings.histogram_min_value is not None:
         mask &= (image >= settings.histogram_min_value)
@@ -797,7 +796,7 @@ def apply_morphology_to_mask(mask: np.ndarray, operation: str, radius_px: int) -
     from scipy import ndimage
     radius = max(int(radius_px), 1)
     struct_elem = ndimage.generate_binary_structure(2, 1)
-    
+
     if operation == "erode":
         return ndimage.binary_erosion(mask, structure=struct_elem, iterations=radius)
     elif operation == "dilate":

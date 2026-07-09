@@ -4,7 +4,6 @@ import numpy as np
 from PyQt6.QtCore import QByteArray, QPointF, QRectF, QSize, Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import (
     QColor,
-    QFont,
     QIcon,
     QLinearGradient,
     QPainter,
@@ -20,7 +19,6 @@ from PyQt6.QtWidgets import (
     QLabel,
     QMessageBox,
     QProgressBar,
-    QSizePolicy,
     QStyleOptionProgressBar,
     QToolButton,
     QVBoxLayout,

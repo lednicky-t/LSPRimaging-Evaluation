@@ -300,18 +300,20 @@ class AnalysisController:
         self.window._begin_busy("Preparing fitted sensorgram...", determinate=True)
 
         if use_fast_path:
-            spectral_cube_payload_builder = lambda spectral_cube_index, selected_roi_ids=selected_roi_ids, selected_source_rois=selected_source_rois: self._prepare_fast_spectrum_payload_for_spectral_cube(
-                spectral_cube_index,
-                selected_roi_ids,
-                selected_source_rois,
-            )
+            def spectral_cube_payload_builder(spectral_cube_index, selected_roi_ids=selected_roi_ids, selected_source_rois=selected_source_rois):
+                return self._prepare_fast_spectrum_payload_for_spectral_cube(
+                    spectral_cube_index,
+                    selected_roi_ids,
+                    selected_source_rois,
+                )
             task_fn = _absorbance_spectrum_fast_task
         else:
-            spectral_cube_payload_builder = lambda spectral_cube_index, selected_roi_ids=selected_roi_ids, selected_source_rois=selected_source_rois: self._cached_sensorgram_spectral_cube_payload(
-                spectral_cube_index,
-                selected_roi_ids,
-                selected_source_rois,
-            )
+            def spectral_cube_payload_builder(spectral_cube_index, selected_roi_ids=selected_roi_ids, selected_source_rois=selected_source_rois):
+                return self._cached_sensorgram_spectral_cube_payload(
+                    spectral_cube_index,
+                    selected_roi_ids,
+                    selected_source_rois,
+                )
             task_fn = None
 
         worker = FunctionWorker(

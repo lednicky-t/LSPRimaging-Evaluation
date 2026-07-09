@@ -22,4 +22,3 @@ This project follows a simple release log so format and workflow changes stay vi
 - Initial documented application series
 - Circular spot workflow with per-spot ROI evaluation
 - Spot table import/export and processing profile persistence
-

@@ -31,6 +31,3 @@ def apply_mask_layers(image: np.ndarray, mask_state: MaskSettings | None) -> np.
 
 def transformed_mask(mask: np.ndarray | None, settings) -> np.ndarray | None:
     return apply_spatial_mask(mask, settings)
-
-
-

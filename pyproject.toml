@@ -40,3 +40,7 @@ where = ["src"]
 
 [tool.setuptools.dynamic]
 version = {attr = "lspr_imaging_app.version.APP_VERSION"}
+
+[tool.ruff]
+target-version = "py312"
+src = ["src"]

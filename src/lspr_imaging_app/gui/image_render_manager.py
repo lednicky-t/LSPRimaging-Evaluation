@@ -180,7 +180,6 @@ class ImageRenderManager:
         window = self.window
         window._current_processed_image = processed
         window._current_record_path = record_path
-        previous_image_key = window._current_image_key
         window._current_image_key = image_key
         window._auto_load_mask_for_current_record()
         window._invalidate_image_analysis_caches()
@@ -235,12 +234,6 @@ class ImageRenderManager:
             restored_view = True
         if not restored_view:
             window.image_plot.autoRange()
-        flip_summary: list[str] = []
-        if window._state.preprocessing.flip_horizontal:
-            flip_summary.append("H")
-        if window._state.preprocessing.flip_vertical:
-            flip_summary.append("V")
-        flip_text = ", ".join(flip_summary) if flip_summary else "None"
         window._update_image_name_overlay(None)
         if not window._chromatic_setup_active and not bool(getattr(window, "_image_tools_preview_only", False)):
             window._update_histogram(processed)
