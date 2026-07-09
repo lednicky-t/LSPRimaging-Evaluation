@@ -5,6 +5,7 @@ from math import hypot
 
 import numpy as np
 import pyqtgraph as pg
+from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QColor
 
 from lspr_imaging_app.domain.models import ChromaticLandmarkObservation, ChromaticTransformModel
@@ -1033,9 +1034,9 @@ class ChromaticController:
             self.window.mask_pencil_check.blockSignals(False)
             self.window._active_tool = "chromatic_landmark"
             self.window._selected_landmark_id = self.window._chromatic_landmark_marker_id
-            if hasattr(self, "image_panel"):
+            if hasattr(self.window, "image_panel"):
                 self.window.image_panel.raise_()
-            if hasattr(self, "image_view") and self.window.image_view is not None:
+            if hasattr(self.window, "image_view") and self.window.image_view is not None:
                 self.window.image_view.setFocus(Qt.FocusReason.ActiveWindowFocusReason)
                 viewport = self.window.image_view.viewport()
                 if viewport is not None:

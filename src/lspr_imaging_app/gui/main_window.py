@@ -27,6 +27,7 @@ from PyQt6.QtCore import (
     QItemSelectionModel,
     QLineF,
     QObject,
+    QPoint,
     QPointF,
     QRectF,
     QRunnable,
@@ -228,7 +229,6 @@ from .analysis_tasks import (
     _background_profile_task,
     _detect_spots_task,
     _estimate_chromatic_models_task,
-    _normalized_odd_count,
     _ome_zarr_export_task,
     _process_image_task,
     _refresh_roi_metrics_task,
@@ -1874,9 +1874,6 @@ class MainWindow(MainWindowIcons, QMainWindow):
 
     def _on_roi_panel_visibility_changed(self, visible: bool) -> None:
         self._roi_table_controller._on_roi_panel_visibility_changed(visible)
-
-    def _on_roi_list_selection_changed(self) -> None:
-        self._roi_table_controller._on_roi_list_selection_changed()
 
     def _sync_roi_table_selection(self) -> None:
         if not self.roi_table.isVisible():
@@ -5563,8 +5560,8 @@ class MainWindow(MainWindowIcons, QMainWindow):
 
         half_width = view_width / 2.0
         half_height = view_height / 2.0
-        center_x = float(np.clip(roi.center_x, half_width, max(float(image_width) - half_width, half_width)))
-        center_y = float(np.clip(roi.center_y, half_height, max(float(image_height) - half_height, half_height)))
+        center_x = float(np.clip(spot.center_x, half_width, max(float(image_width) - half_width, half_width)))
+        center_y = float(np.clip(spot.center_y, half_height, max(float(image_height) - half_height, half_height)))
 
         self.image_plot.vb.setRange(
             xRange=(center_x - half_width, center_x + half_width),
@@ -5907,15 +5904,19 @@ class MainWindow(MainWindowIcons, QMainWindow):
     def _roi_has_cached_absorbance(self, spot: AreaRoi) -> bool:
         return self._analysis_controller._roi_has_cached_absorbance(spot)
 
+    @staticmethod
     def _analysis_cache_signature_to_json(value):
         return AnalysisController._analysis_cache_signature_to_json(value)
 
+    @staticmethod
     def _analysis_cache_signature_from_json(value):
         return AnalysisController._analysis_cache_signature_from_json(value)
 
+    @staticmethod
     def _absorbance_spectral_cube_signature(signature: tuple[object, ...] | None) -> tuple[object, ...] | None:
         return AnalysisController._absorbance_spectral_cube_signature(signature)
 
+    @staticmethod
     def _absorbance_result_covers_spot_ids(result: AbsorbanceSpectrumResult, selected_roi_ids: tuple[int, ...]) -> bool:
         return AnalysisController._absorbance_result_covers_spot_ids(result, selected_roi_ids)
 
@@ -7256,9 +7257,9 @@ class MainWindow(MainWindowIcons, QMainWindow):
         rows: int | None,
         cols: int | None,
     ) -> list[AreaRoi]:
-        if not rois:
+        if not spots:
             return []
-        sorted_rois = sorted(rois, key=lambda roi: (float(roi.center_y), float(roi.center_x), int(roi.area_roi_id)))
+        sorted_rois = sorted(spots, key=lambda roi: (float(roi.center_y), float(roi.center_x), int(roi.area_roi_id)))
         row_band = self._spot_reorder_row_band()
         row_groups: list[list[AreaRoi]] = []
         row_centers: list[float] = []

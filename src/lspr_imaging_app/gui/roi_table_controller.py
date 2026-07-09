@@ -9,8 +9,14 @@ from PyQt6.QtCore import QItemSelectionModel, Qt
 from PyQt6.QtGui import QBrush, QColor
 from PyQt6.QtWidgets import QFileDialog, QMenu, QMessageBox, QTableWidgetItem
 
-from lspr_imaging_app.domain.models import AreaRoiGroup
-from lspr_imaging_app.gui.roi_table_helpers import append_roi_table_row, format_xy_value, roi_table_headers, RoiTableRowData
+from lspr_imaging_app.domain.models import AreaRoi, AreaRoiGroup
+from lspr_imaging_app.gui.roi_table_helpers import (
+    append_roi_table_row,
+    format_xy_value,
+    make_color_swatch_icon,
+    roi_table_headers,
+    RoiTableRowData,
+)
 
 
 class RoiTableController:
@@ -42,7 +48,7 @@ class RoiTableController:
         if self.window.roi_table.rowCount() == 0:
             return
         spots = sorted(self.window._state.area_rois, key=lambda roi: roi.area_roi_id)
-        if not rois:
+        if not spots:
             return
         group_by_spot: dict[int, AreaRoiGroup] = {}
         for group in self.window._state.area_roi_groups:
@@ -572,24 +578,6 @@ class RoiTableController:
             self.window._update_roi_table()
 
 
-    def _on_roi_list_selection_changed(self) -> None:
-        if getattr(self, "_roi_list_selection_syncing", False):
-            return
-        selected_ids: set[int] = set()
-        for row in range(self.window.roi_table.rowCount()):
-            if not self.window.roi_table.isRowHidden(row) and self.window.roi_table.selectionModel().isRowSelected(row, self.window.roi_table.rootIndex()):
-                item = self.window.roi_table.item(row, 0)
-                if item is not None:
-                    try:
-                        selected_ids.add(int(item.text()))
-                    except ValueError:
-                        continue
-        if selected_ids == self.window._selected_roi_ids:
-            return
-        self.window._selected_roi_ids = selected_ids
-        self.window._update_roi_overlays()
-        self.window._update_roi_summary()
-        self.window._update_selection_dependent_plots(prompt_live_preview=True)
 
 
     def _on_roi_list_item_changed(self, item: QTableWidgetItem) -> None:
@@ -729,4 +717,3 @@ class RoiTableController:
             recalculate=False,
             normalize_relation=True,
         )
-
