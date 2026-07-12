@@ -16,6 +16,7 @@ def apply_preprocessing(
     external_mask_processed: bool = False,
     mask_state: MaskSettings | None = None,
     region: tuple[int, int, int, int] | None = None,
+    skip_crop: bool = False,
 ) -> np.ndarray:
     """`region` (x0, y0, x1, y1), if given, only affects what's *returned* —
     masking and the rotate/flip/crop step always run on the whole image
@@ -24,6 +25,13 @@ def apply_preprocessing(
     background flattening is on, `region` is passed through to
     flatten_background to skip materializing/upsampling values nobody reads;
     otherwise the full processed image is just sliced before returning.
+
+    `skip_crop`, if set, applies rotation/flip as usual but skips the final
+    crop slice — used for the live display while the crop/rotate tool is
+    open, so the crop rectangle is always drawn over the same rotated/flipped
+    canvas its coordinates are defined against (see the CLAUDE.md pitfall on
+    `image_tools_enabled`: getting this canvas wrong is what causes crop
+    settings to compound into an over-cropped image on session restore).
     """
     # Apply mask to raw image before spatial preprocessing
     masked_image = image
@@ -52,7 +60,7 @@ def apply_preprocessing(
         # external_mask is already in raw image coordinates
         masked_image = np.where(external_mask.astype(bool), 0, masked_image)
 
-    processed = apply_spatial_preprocessing(masked_image, settings)
+    processed = apply_spatial_preprocessing(masked_image, settings, skip_crop=skip_crop)
 
     if settings.flatten_background_enabled:
         processed = flatten_background(
@@ -75,6 +83,8 @@ def apply_preprocessing(
 def apply_spatial_preprocessing(
     image: np.ndarray,
     settings: PreprocessingSettings,
+    *,
+    skip_crop: bool = False,
 ) -> np.ndarray:
     # Pixels added by rotation (the corners outside the original image) have no
     # real measurement behind them. "nearest" stretches the nearest edge pixel
@@ -82,7 +92,7 @@ def apply_spatial_preprocessing(
     # rotation_fill_dark toggle instead fills it with 0 so it's clearly marked
     # as "not data".
     fill_mode = "constant" if bool(settings.rotation_fill_dark) else "nearest"
-    return _apply_spatial_transform(image, settings, order=1, mode=fill_mode, cval=0.0)
+    return _apply_spatial_transform(image, settings, order=1, mode=fill_mode, cval=0.0, skip_crop=skip_crop)
 
 
 def apply_spatial_mask(
@@ -405,6 +415,7 @@ def _apply_spatial_transform(
     order: int,
     mode: str,
     cval: float,
+    skip_crop: bool = False,
 ) -> np.ndarray:
     processed = image
 
@@ -428,6 +439,9 @@ def _apply_spatial_transform(
 
     if settings.flip_vertical:
         processed = np.flipud(processed)
+
+    if skip_crop:
+        return processed
 
     crop = settings.crop
     if crop.enabled and crop.width > 0 and crop.height > 0:

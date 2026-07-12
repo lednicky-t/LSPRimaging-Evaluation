@@ -17,7 +17,7 @@ from PyQt6.QtCore import (
     Qt,
     pyqtSignal,
 )
-from PyQt6.QtGui import QAction, QActionGroup, QBrush, QColor, QFont, QIcon, QPainter, QPainterPath, QPen, QPixmap
+from PyQt6.QtGui import QAction, QActionGroup, QBrush, QColor, QFont, QIcon, QKeySequence, QPainter, QPainterPath, QPen, QPixmap
 from PyQt6.QtSvg import QSvgRenderer
 from PyQt6.QtWidgets import (
     QComboBox,
@@ -320,6 +320,34 @@ class MainWindowIcons:
     def _current_ome_zarr_compression_enabled(self) -> bool:
         return current_ome_zarr_compression_enabled(self.ome_zarr_compression_button.isChecked())
 
+    def _current_ome_zarr_skip_excluded(self) -> bool:
+        return bool(self.ome_zarr_skip_excluded_button.isChecked())
+
+    def _on_ome_zarr_skip_excluded_toggled(self, checked: bool) -> None:
+        from PyQt6.QtWidgets import QMessageBox
+
+        if checked:
+            excluded_count = len(self._state.image_exclusions)
+            if excluded_count == 0:
+                confirm = QMessageBox.StandardButton.Yes
+            else:
+                confirm = QMessageBox.question(
+                    self,
+                    "Skip excluded images in export",
+                    f"{excluded_count} exclusion rule(s) are set. Exported planes they cover will be "
+                    "left empty (no pixel data) instead of containing real measurements.\n\n"
+                    "This cannot be undone once the export is written. Continue?",
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                    QMessageBox.StandardButton.No,
+                )
+            if confirm != QMessageBox.StandardButton.Yes:
+                self.ome_zarr_skip_excluded_button.blockSignals(True)
+                self.ome_zarr_skip_excluded_button.setChecked(False)
+                self.ome_zarr_skip_excluded_button.blockSignals(False)
+                checked = False
+        color = "#ef4444" if checked else "#94a3b8"
+        self.ome_zarr_skip_excluded_button.setIcon(self._mask_panel_icon("alert-triangle", color=color, size=APP_THEME.icon_button_inner))
+
     def _sync_ome_zarr_chunk_controls(self) -> None:
         self._ui_state_manager.sync_ome_zarr_chunk_controls()
 
@@ -459,7 +487,15 @@ class MainWindowIcons:
             self.dataset_ome_zarr_export_status_label.setText("Progress")
         self._sync_ome_zarr_chunk_controls()
 
-    def _start_ome_zarr_export(self, destination: Path, chunk_size_px: int, *, compression_enabled: bool = True, shard_mode: str = "per_image") -> None:
+    def _start_ome_zarr_export(
+        self,
+        destination: Path,
+        chunk_size_px: int,
+        *,
+        compression_enabled: bool = True,
+        shard_mode: str = "per_image",
+        skip_excluded_images: bool = False,
+    ) -> None:
         dataset = self._state.dataset
         if dataset is None:
             self._set_status_text("Load a dataset before exporting Stack to Zarr.")
@@ -478,6 +514,7 @@ class MainWindowIcons:
         self._set_ome_zarr_export_ui_running(True)
         self._set_status_text(f"Exporting Stack to Zarr to {destination.name}...")
         self._begin_busy("Exporting Stack to Zarr...", determinate=True)
+        excluded_rules_snapshot = deepcopy(self._state.image_exclusions) if skip_excluded_images else None
         worker = FunctionWorker(
             _ome_zarr_export_task,
             dataset,
@@ -486,13 +523,16 @@ class MainWindowIcons:
             bool(compression_enabled),
             preprocessing_snapshot,
             shard_mode,
+            excluded_rules=excluded_rules_snapshot,
+            skip_excluded=bool(skip_excluded_images),
             cancel_event=self._ome_zarr_export_cancel_event,
             supports_progress=True,
         )
         tools_text = "applied" if bool(getattr(preprocessing_snapshot, "image_tools_enabled", False)) else "ignored"
         shard_text = "per_spectral_cube" if shard_mode == "per_spectral_cube" else "per_image"
+        excluded_text = f"on ({len(excluded_rules_snapshot)} rules)" if skip_excluded_images else "off"
         self._append_workflow_log(
-            f"OME-Zarr export start | chunks {chunk_size_px}px | shard {shard_text} | compression {'on' if compression_enabled else 'off'} | image tools {tools_text}",
+            f"OME-Zarr export start | chunks {chunk_size_px}px | shard {shard_text} | compression {'on' if compression_enabled else 'off'} | image tools {tools_text} | skip excluded {excluded_text}",
             level="info",
         )
         worker.signals.progress.connect(self._update_busy_progress)
@@ -1910,6 +1950,11 @@ class MainWindowIcons:
         dock_menu.addAction(self.show_all_panels_action)
         dock_menu.addAction(self.hide_all_panels_action)
         dock_menu.addSeparator()
+        self.workflow_panel.toggleViewAction().setShortcut(QKeySequence("Ctrl+1"))
+        self.image_panel.toggleViewAction().setShortcut(QKeySequence("Ctrl+2"))
+        self.histogram_panel.toggleViewAction().setShortcut(QKeySequence("Ctrl+3"))
+        self.spectra_panel.toggleViewAction().setShortcut(QKeySequence("Ctrl+4"))
+        self.sensorgram_panel.toggleViewAction().setShortcut(QKeySequence("Ctrl+5"))
         dock_menu.addAction(self.workflow_panel.toggleViewAction())
         dock_menu.addAction(self.image_panel.toggleViewAction())
         dock_menu.addAction(self.histogram_panel.toggleViewAction())

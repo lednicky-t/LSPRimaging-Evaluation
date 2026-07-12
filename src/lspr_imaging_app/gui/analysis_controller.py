@@ -7,6 +7,7 @@ from copy import deepcopy
 from PyQt6.QtGui import QColor
 import pyqtgraph as pg
 
+from lspr_imaging_app.domain.exclusions import is_cube_fully_excluded, is_excluded
 from lspr_imaging_app.domain.models import AreaRoi, AbsorbanceSpectrumResult
 from lspr_imaging_app.gui.worker import SensorgramComputationResult
 from lspr_imaging_app.gui.analysis_tasks import _roi_absorbance_signature
@@ -688,7 +689,7 @@ class AnalysisController:
         measurement_payload: list[tuple[float, str, list[AreaRoi], np.ndarray | None, bool, np.ndarray | None]] = []
         for wavelength in self.window._wavelength_values:
             record = self.window._record_map.get((spectral_cube_index, wavelength))
-            if record is None:
+            if record is None or is_excluded(self.window._state.image_exclusions, spectral_cube_index, wavelength):
                 continue
             image_key = (spectral_cube_index, float(wavelength))
             preprocessing_spots = deepcopy(self.window._rois_for_preprocessing(image_key))
@@ -761,7 +762,7 @@ class AnalysisController:
         first_record = None
         for wavelength in self.window._wavelength_values:
             record = self.window._record_map.get((spectral_cube_index, wavelength))
-            if record is None:
+            if record is None or is_excluded(self.window._state.image_exclusions, spectral_cube_index, wavelength):
                 continue
             if first_record is None:
                 first_record = record
@@ -1529,6 +1530,20 @@ class AnalysisController:
         self.window._spot_absorbance_cache.clear()
         self.window._absorbance_spectrum_dirty = True
 
+    def _invalidate_caches_for_exclusion_change(self) -> None:
+        """Clear every cached absorbance/sensorgram result.
+
+        None of those caches' signatures include the exclusion rule set, so a
+        result computed before a rule was added/removed would otherwise be
+        served stale from cache -- silently ignoring the exclusion. Cheap
+        enough to just clear everything: rule changes are rare, deliberate
+        user actions, not a hot path.
+        """
+        self._invalidate_absorbance_spectrum_cache()
+        self.window._sensorgram_cache.clear()
+        self.window._sensorgram_spectral_cube_payload_cache.clear()
+        self.mark_stale("Exclusion rules changed")
+
     def _schedule_sensorgram_refresh(self) -> None:
         if not self.window._startup_ready or self.window._startup_restore_in_progress or not self.window._analysis_live_preview_enabled:
             return
@@ -1847,7 +1862,12 @@ class AnalysisController:
         if spectral_cube_range is None:
             return []
         start, end = spectral_cube_range
-        return [int(spectral_cube_index) for spectral_cube_index in self.window._spectral_cube_values if start <= int(spectral_cube_index) <= end]
+        return [
+            int(spectral_cube_index)
+            for spectral_cube_index in self.window._spectral_cube_values
+            if start <= int(spectral_cube_index) <= end
+            and not is_cube_fully_excluded(self.window._state.image_exclusions, spectral_cube_index)
+        ]
 
     def _stop_sensorgram_calculation(self) -> None:
         if not self.window._sensorgram_running or self.window._sensorgram_cancel_event is None:

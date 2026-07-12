@@ -8,6 +8,7 @@ import pyqtgraph as pg
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QColor
 
+from lspr_imaging_app.domain.exclusions import is_excluded
 from lspr_imaging_app.domain.models import ChromaticLandmarkObservation, ChromaticTransformModel
 from lspr_imaging_app.gui.analysis_tasks import _sampled_wavelengths
 from lspr_imaging_app.gui.ui_helpers import chromatic_feature_count_value, chromatic_subpixel_precision_value
@@ -683,6 +684,7 @@ class ChromaticController:
         record_specs = [
             (int(record.key.spectral_cube_index), float(record.key.wavelength_nm), str(record.path))
             for record in dataset.records
+            if not is_excluded(window._state.image_exclusions, record.key.spectral_cube_index, record.key.wavelength_nm)
         ]
         window._append_workflow_log(
             f"Chromatic estimation start | mode {mode} | records {len(record_specs)}",

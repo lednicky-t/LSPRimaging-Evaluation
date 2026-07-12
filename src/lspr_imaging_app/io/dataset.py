@@ -22,6 +22,7 @@ except Exception:  # pragma: no cover - optional acceleration path
     _tifffile_imread = None
     _tifffile_TiffFile = None
 
+from lspr_imaging_app.domain.exclusions import ImageExclusionRule, is_excluded
 from lspr_imaging_app.domain.models import ImageDataset, ImageKey, ImageRecord, PreprocessingSettings
 from lspr_imaging_app.processing.preprocess import apply_spatial_preprocessing
 
@@ -686,6 +687,8 @@ def export_ome_zarr_dataset(
     preprocessing: PreprocessingSettings | None = None,
     progress_callback: Callable[[int, str], None] | None = None,
     cancel_event: threading.Event | None = None,
+    excluded_rules: list[ImageExclusionRule] | None = None,
+    skip_excluded: bool = False,
 ) -> Path:
     """Export `dataset` (a TIFF stack or another OME-Zarr dataset) as a new
     OME-Zarr v3 dataset at `destination`, using zarr's sharding codec (Zarr
@@ -788,10 +791,13 @@ def export_ome_zarr_dataset(
             eta_text = f"ETA: {_format_seconds(elapsed / completed_units * remaining)}"
         progress_callback(percent, f"Exporting {completed_units}/{total_units} tiles | {eta_text}")
 
+    def _plane_excluded(fi: int, wn: float) -> bool:
+        return skip_excluded and is_excluded(excluded_rules or [], fi, wn)
+
     def _build_per_image_spec(fp: int, wp: int, fi: int, wn: float) -> ShardWriteSpec:
         record = record_map.get((int(fi), float(wn)))
         return ShardWriteSpec(
-            record_paths=[str(record.path) if record is not None else ""],
+            record_paths=[str(record.path) if record is not None and not _plane_excluded(fi, wn) else ""],
             shard_path=str(shard_base_dir / str(fp) / str(wp) / "0" / "0"),
             inner_chunk_h=ich, inner_chunk_w=icw,
             image_height=height, image_width=width,
@@ -807,7 +813,7 @@ def export_ome_zarr_dataset(
         return ShardWriteSpec(
             record_paths=[
                 str(record_map[(int(fi), float(wn))].path)
-                if (int(fi), float(wn)) in record_map else ""
+                if (int(fi), float(wn)) in record_map and not _plane_excluded(fi, wn) else ""
                 for wn in wavelengths
             ],
             shard_path=str(shard_base_dir / str(fp) / "0" / "0" / "0"),

@@ -4,7 +4,6 @@ from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QFont
 from PyQt6.QtWidgets import (
     QFormLayout,
-    QGroupBox,
     QHBoxLayout,
     QLabel,
     QSizePolicy,
@@ -52,6 +51,7 @@ def build_layout(window) -> None:
     dataset_layout.addRow("Stack to Zarr", window.dataset_ome_zarr_controls_row)
     dataset_layout.addRow("", window.dataset_ome_zarr_options_row)
     dataset_layout.addRow("", window.dataset_ome_zarr_compression_row)
+    dataset_layout.addRow("", window.dataset_ome_zarr_skip_excluded_row)
     dataset_layout.addRow("", window.dataset_ome_zarr_info_row)
     dataset_layout.addRow("", window.dataset_ome_zarr_export_progress_row)
     reference_row = QHBoxLayout()
@@ -70,25 +70,6 @@ def build_layout(window) -> None:
     reference_status_row.addWidget(window.reference_method_status_label)
     reference_status_row.addStretch(1)
     dataset_layout.addRow("Reference info", reference_status_row)
-    slider_group = QGroupBox("Dataset slicer", dataset_group)
-    slider_group.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
-    slider_layout = QVBoxLayout(slider_group)
-    slicer_label_width = 100
-    spectral_cube_row = QHBoxLayout()
-    spectral_cube_label = QLabel("Spectral cube", slider_group)
-    spectral_cube_label.setFixedWidth(slicer_label_width)
-    spectral_cube_row.addWidget(spectral_cube_label)
-    spectral_cube_row.addWidget(window.spectral_cube_slider, 1)
-    spectral_cube_row.addWidget(window.spectral_cube_spin)
-    wavelength_row = QHBoxLayout()
-    wavelength_label = QLabel("Wavelength", slider_group)
-    wavelength_label.setFixedWidth(slicer_label_width)
-    wavelength_row.addWidget(wavelength_label)
-    wavelength_row.addWidget(window.wavelength_slider, 1)
-    wavelength_row.addWidget(window.wavelength_spin)
-    slider_layout.addLayout(spectral_cube_row)
-    slider_layout.addLayout(wavelength_row)
-    dataset_layout.addRow(slider_group)
 
     mask_group = QWidget(window)
     mask_layout = QVBoxLayout(mask_group)
@@ -453,6 +434,29 @@ def build_layout(window) -> None:
 
     window.bottom_view_toolbar = QWidget(window)
     window.bottom_view_toolbar.setObjectName("bottomViewToolbar")
+
+    image_slicer_row = QWidget(window)
+    image_slicer_layout = QHBoxLayout(image_slicer_row)
+    image_slicer_layout.setContentsMargins(0, 0, 0, 0)
+    image_slicer_layout.setSpacing(6)
+    slicer_mini_label_width = 36
+    spectral_cube_mini_label = QLabel("Cube", image_slicer_row)
+    spectral_cube_mini_label.setObjectName("toolbarMiniLabel")
+    spectral_cube_mini_label.setFixedWidth(slicer_mini_label_width)
+    spectral_cube_mini_label.setToolTip("Spectral cube index")
+    image_slicer_layout.addWidget(spectral_cube_mini_label)
+    image_slicer_layout.addWidget(window.spectral_cube_slider, 1)
+    image_slicer_layout.addWidget(window.spectral_cube_spin)
+    wavelength_mini_label = QLabel("λ", image_slicer_row)
+    wavelength_mini_label.setObjectName("toolbarMiniLabel")
+    wavelength_mini_label.setFixedWidth(slicer_mini_label_width)
+    wavelength_mini_label.setToolTip("Wavelength")
+    image_slicer_layout.addWidget(wavelength_mini_label)
+    image_slicer_layout.addWidget(window.wavelength_slider, 1)
+    image_slicer_layout.addWidget(window.wavelength_spin)
+    image_slicer_layout.addWidget(window.reference_jump_button)
+    image_slicer_layout.addWidget(window.image_exclusion_button)
+
     image_tools_panel = QWidget(window)
     image_tools_layout = QVBoxLayout(image_tools_panel)
     image_tools_layout.setContentsMargins(0, 0, 0, 0)
@@ -460,6 +464,7 @@ def build_layout(window) -> None:
     image_tools_layout.addWidget(window.image_name_label)
     image_tools_layout.addWidget(window.image_view, 1)
     image_tools_layout.addWidget(window.bottom_view_toolbar)
+    image_tools_layout.addWidget(image_slicer_row)
 
     window.roi_table = QTableWidget(window)
     window.roi_table.setColumnCount(9)

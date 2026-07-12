@@ -23,6 +23,8 @@ SHORTCUT_SECTIONS: tuple[ShortcutSection, ...] = (
             "Ctrl+Shift+Z / Ctrl+Y: Redo the last undone edit",
             "Shift+PageUp / Shift+PageDown: Previous / next wavelength image",
             "Ctrl+Shift+PageUp / Ctrl+Shift+PageDown: Previous / next spectral cube",
+            "Ctrl+1 / Ctrl+2 / Ctrl+3 / Ctrl+4 / Ctrl+5: Show or hide the Workflow / Image / Histogram / Spectra / Sensorgram panel",
+            "Double-click a panel title: Hide that panel",
             "F1: Show this shortcut list",
         ),
     ),

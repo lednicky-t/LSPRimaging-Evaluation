@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import numpy as np
-from PyQt6.QtCore import QByteArray, QPointF, QRectF, QSize, Qt, QTimer, pyqtSignal
+from PyQt6.QtCore import QByteArray, QEvent, QPointF, QRectF, QSize, Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import (
     QColor,
     QIcon,
@@ -216,6 +216,7 @@ class PanelContainer(QWidget):
 
         header = QFrame(self)
         header.setObjectName("panelHeader")
+        header.setToolTip(f"Double-click to hide the {title} panel.")
         header_layout = QHBoxLayout(header)
         header_layout.setContentsMargins(8, 4, 8, 4)
         header_layout.setSpacing(4)
@@ -224,6 +225,8 @@ class PanelContainer(QWidget):
         title_label.setStyleSheet("font-weight: 600;")
         header_layout.addWidget(title_label)
         header_layout.addStretch(1)
+        self._header = header
+        header.installEventFilter(self)
 
         outer_layout.addWidget(header)
         outer_layout.addWidget(self._content, 1)
@@ -238,6 +241,12 @@ class PanelContainer(QWidget):
 
     def toggleViewAction(self):
         return self._toggle_action
+
+    def eventFilter(self, watched, event) -> bool:  # type: ignore[override]
+        if watched is self._header and event.type() == QEvent.Type.MouseButtonDblClick:
+            self.setVisible(False)
+            return True
+        return super().eventFilter(watched, event)
 
     def _set_visible_from_action(self, checked: bool) -> None:
         QWidget.setVisible(self, bool(checked))

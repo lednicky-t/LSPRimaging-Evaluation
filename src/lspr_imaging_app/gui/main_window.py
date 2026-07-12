@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import csv
-import logging
 import subprocess
 import sys
 import os
@@ -29,7 +28,7 @@ from PyQt6.QtCore import (
     QThreadPool,
     QTimer,
 )
-from PyQt6.QtGui import QAction, QColor, QFont, QGuiApplication, QIcon, QKeyEvent, QKeySequence, QPainter, QPainterPath, QPalette, QPen, QPixmap
+from PyQt6.QtGui import QAction, QBrush, QColor, QFont, QIcon, QKeyEvent, QKeySequence, QPainter, QPainterPath, QPalette, QPen, QPixmap
 from PyQt6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -53,7 +52,6 @@ from PyQt6.QtWidgets import (
     QScrollArea,
     QSizePolicy,
     QSpinBox,
-    QSplitter,
     QSlider,
     QStyle,
     QTableWidgetItem,
@@ -103,8 +101,12 @@ from lspr_imaging_app.gui.ui_helpers import (
 from lspr_imaging_app.gui.analysis_controller import AnalysisController
 from lspr_imaging_app.gui.dataset_controller import DatasetController
 from lspr_imaging_app.gui.image_controller import ImageController
+from lspr_imaging_app.gui.image_exclusion_controller import ImageExclusionController
 from lspr_imaging_app.gui.image_interaction_controller import ImageInteractionController
 from lspr_imaging_app.gui.overlay_manager import OverlayManager
+from lspr_imaging_app.gui.undo_manager import UndoManager
+from lspr_imaging_app.gui.layout_state_controller import LayoutStateController
+from lspr_imaging_app.gui.image_tools_controller import ImageToolsController
 from lspr_imaging_app.domain.roi_editor_tools import (
     create_rois_from_template,
     create_rois_from_template_grid,
@@ -117,7 +119,6 @@ from lspr_imaging_app.domain.models import (
     AbsorbanceSpectrumResult,
     ChromaticLandmarkObservation,
     ChromaticTransformModel,
-    CropDefinition,
     AreaRoi,
     AreaRoiGroup,
     FitResult,
@@ -125,16 +126,13 @@ from lspr_imaging_app.domain.models import (
     RoiDefinition,
 )
 from lspr_imaging_app.io.dataset import (
-    dataset_record_map,
     dataset_is_ome_zarr,
     load_image_array,
     load_image_shape,
 )
 from lspr_imaging_app.processing.chromatic import (
     transformed_annulus_mask,
-    transformed_circle_points,
     transformed_disk_mask,
-    transform_spots_affine,
 )
 from lspr_imaging_app.processing.preprocess import (
     apply_preprocessing,
@@ -177,6 +175,10 @@ from .analysis_tasks import (
     _process_image_task,  # noqa: F401 - re-exported, see comment above
     _refresh_roi_metrics_task,
 )
+# Plain `pyflakes` (unlike ruff) does not honor `# noqa`, so it still flags the three
+# re-exported names above as unused. This no-op reference marks them "used" for that
+# hook without changing behavior -- the actual re-export is the import itself.
+_ = (_auto_chromatic_landmarks_task, _estimate_chromatic_models_task, _process_image_task)
 
 try:
     import tabler_icons
@@ -201,12 +203,11 @@ class MainWindow(MainWindowIcons, QMainWindow):
     SPOT_ABSORBANCE_CACHE_SIZE = 512
     SENSORGRAM_CACHE_SIZE = 48
     SENSORGRAM_SPECTRAL_CUBE_PAYLOAD_CACHE_SIZE = 96
-    UNDO_STACK_LIMIT = 5
     # Quick navigation:
     # - layout and signal wiring: _build_layout, _create_toolbar, _connect_signals
     # - roi list table: _on_roi_list_toggled, _update_roi_table, CSV helpers
     # - image refresh pipeline: _refresh_image, _apply_loaded_image, _update_roi_overlays
-    # - persistence/session: _restore_layout_preferences, _save_layout_preferences, session save/load
+    # - persistence/session: layout_state_controller.py, session save/load
     # - analysis: _update_sensorgram_plot, analysis batch helpers
 
     def __init__(self, default_folder: Path, *, fast_startup: bool = False) -> None:
@@ -246,6 +247,10 @@ class MainWindow(MainWindowIcons, QMainWindow):
         self._image_interaction = ImageInteractionController(self)
         self._bg_profile = BackgroundProfileController(self)
         self._overlay_manager = OverlayManager(self)
+        self._undo_manager = UndoManager(self)
+        self._layout_state_controller = LayoutStateController(self)
+        self._image_tools_controller = ImageToolsController(self)
+        self._image_exclusion_controller = ImageExclusionController(self)
 
     def _init_state(self) -> None:
         self._analysis_enabled = self._settings_bool("analysis_section_applied", True)
@@ -268,6 +273,7 @@ class MainWindow(MainWindowIcons, QMainWindow):
         self._rectangle_stamp_ring_items: dict[str, tuple[pg.PlotCurveItem | None, pg.PlotCurveItem | None]] = {}
         self._selected_rectangle_roi_ids: set[str] = set()
         self._crop_overlay_item: QGraphicsPathItem | None = None
+        self._exclusion_overlay_item: QGraphicsPathItem | None = None
         self._active_tool: str | None = None
         self._suspend_crop_sync = False
         self._suspend_rectangle_sync = False
@@ -432,7 +438,6 @@ class MainWindow(MainWindowIcons, QMainWindow):
         self._restoring_undo = False
         self._spot_overlay_theta = np.linspace(0.0, 2.0 * np.pi, 48)
         self._image_tools_preview_only = False
-        self._image_tools_pre_preview_enabled: bool = True
         self._ome_zarr_chunk_controls_syncing = False
         theme = get_active_theme()
         self._sample_visual_color = QColor(theme.spot_color)
@@ -585,6 +590,16 @@ class MainWindow(MainWindowIcons, QMainWindow):
         )
         self.ome_zarr_compression_button.setChecked(self._settings_bool("ome_zarr/compression_enabled", True))
         self.ome_zarr_compression_button.toggled.connect(self._on_ome_zarr_compression_toggled)
+        self.ome_zarr_skip_excluded_label = QLabel("Skip excluded", self)
+        self.ome_zarr_skip_excluded_label.setObjectName("toolbarMiniLabel")
+        self.ome_zarr_skip_excluded_label.setToolTip("Omit pixel data for excluded images/wavelengths/spectral cubes from the export.")
+        self.ome_zarr_skip_excluded_button = self._make_icon_tool_button(
+            "alert-triangle",
+            "#94a3b8",
+            "Skip excluded images: leave excluded planes empty in the exported file instead of writing their pixel data.",
+            checkable=True,
+        )
+        self.ome_zarr_skip_excluded_button.toggled.connect(self._on_ome_zarr_skip_excluded_toggled)
         self.ome_zarr_dtype_label = QLabel("Dtype: uint16", self)
         self.ome_zarr_dtype_label.setObjectName("toolbarMiniLabel")
         self.ome_zarr_dtype_label.setToolTip("Zarr export stores 16-bit TIFF data as uint16.")
@@ -633,6 +648,13 @@ class MainWindow(MainWindowIcons, QMainWindow):
         dataset_ome_zarr_compression_layout.addWidget(self.ome_zarr_compression_label)
         dataset_ome_zarr_compression_layout.addWidget(self.ome_zarr_compression_button)
         dataset_ome_zarr_compression_layout.addStretch(1)
+        self.dataset_ome_zarr_skip_excluded_row = QWidget(self)
+        dataset_ome_zarr_skip_excluded_layout = QHBoxLayout(self.dataset_ome_zarr_skip_excluded_row)
+        dataset_ome_zarr_skip_excluded_layout.setContentsMargins(0, 0, 0, 0)
+        dataset_ome_zarr_skip_excluded_layout.setSpacing(4)
+        dataset_ome_zarr_skip_excluded_layout.addWidget(self.ome_zarr_skip_excluded_label)
+        dataset_ome_zarr_skip_excluded_layout.addWidget(self.ome_zarr_skip_excluded_button)
+        dataset_ome_zarr_skip_excluded_layout.addStretch(1)
         self.dataset_ome_zarr_info_row = QWidget(self)
         dataset_ome_zarr_info_layout = QHBoxLayout(self.dataset_ome_zarr_info_row)
         dataset_ome_zarr_info_layout.setContentsMargins(0, 0, 0, 0)
@@ -1322,6 +1344,13 @@ class MainWindow(MainWindowIcons, QMainWindow):
         self.wavelength_spin.setEnabled(False)
         self.wavelength_spin.setDecimals(2)
         self.wavelength_spin.setSuffix(" nm")
+        self.reference_jump_button = self._make_icon_tool_button(
+            "star", "#84cc16", "Jump to the reference image."
+        )
+        self.image_exclusion_button = self._make_icon_tool_button(
+            "ban", "#94a3b8", "Exclude this image/wavelength/spectral cube from processing, or manage exclusions."
+        )
+        self.image_exclusion_button.clicked.connect(self._show_image_exclusion_menu)
         self.spectral_cube_slider.installEventFilter(self)
         self.wavelength_slider.installEventFilter(self)
         self.spectral_cube_spin.installEventFilter(self)
@@ -1568,7 +1597,7 @@ class MainWindow(MainWindowIcons, QMainWindow):
         bottom_view_layout.addWidget(self.scale_bar_color_button, 0)
         bottom_view_layout.addWidget(self.scale_bar_toggle_button, 0)
         self._populate_left_spot_editor_controls()
-        self._refresh_image_tool_action_icons()
+        self._image_tools_controller.refresh_image_tool_action_icons()
         self._update_display_unit_controls()
         self._create_menu_bar()
         theme_name = str(self._settings.value("ui/theme", "blue"))
@@ -1595,6 +1624,7 @@ class MainWindow(MainWindowIcons, QMainWindow):
         self.import_settings_button.clicked.connect(self._import_processing_profile)
         self.reference_auto_button.clicked.connect(lambda _checked=False: self._set_reference_mode("auto"))
         self.reference_manual_button.clicked.connect(lambda _checked=False: self._set_current_reference_from_view())
+        self.reference_jump_button.clicked.connect(self._go_to_reference_image)
         self.spectral_cube_slider.valueChanged.connect(lambda _value: self._sync_analysis_plot_cursors())
         self.spectral_cube_slider.valueChanged.connect(lambda _value: self._schedule_image_refresh())
         self.spectral_cube_slider.valueChanged.connect(lambda _value: self._sync_auto_reference_to_current_spectral_cube(follow_view=False))
@@ -2363,7 +2393,7 @@ class MainWindow(MainWindowIcons, QMainWindow):
             if self._fast_startup:
                 self._set_status_text("Fast startup enabled. Load a dataset when ready.")
             if show_window:
-                self.showNormal()
+                self._layout_state_controller.restore_saved_window_state_after_show()
                 self.raise_()
                 self.activateWindow()
                 self._sync_panel_visibility_after_show()
@@ -2384,7 +2414,7 @@ class MainWindow(MainWindowIcons, QMainWindow):
         self._refresh_image()
         self._report_startup_progress(92, "Finalizing workspace...")
         if show_window:
-            self.showNormal()
+            self._layout_state_controller.restore_saved_window_state_after_show()
             self.raise_()
             self.activateWindow()
             self._sync_panel_visibility_after_show()
@@ -2396,10 +2426,16 @@ class MainWindow(MainWindowIcons, QMainWindow):
         self._end_busy("Loaded dataset. Showing the reference image.")
 
     def _restore_saved_window_layout(self) -> None:
-        if self._window_geometry_restored and self._layout_preferences_ready:
-            return
-        self._restore_window_geometry()
-        self._restore_layout_preferences()
+        self._layout_state_controller.restore_saved_window_layout()
+
+    def _restore_saved_window_state_after_show(self) -> None:
+        self._layout_state_controller.restore_saved_window_state_after_show()
+
+    def _restore_saved_panel_layout_state(self) -> bool:
+        return self._layout_state_controller.restore_saved_panel_layout_state()
+
+    def _normalize_panel_layout(self) -> None:
+        self._layout_state_controller.normalize_panel_layout()
 
     def _configure_slider(self, slider: QSlider, value_count: int) -> None:
         slider.setEnabled(value_count > 0)
@@ -2678,6 +2714,7 @@ class MainWindow(MainWindowIcons, QMainWindow):
             mask_signature = self._mask_preview_signature(image_key=image_key)
         return (
             bool(getattr(self._state.preprocessing, "image_tools_enabled", True)),
+            bool(getattr(self, "_image_tools_preview_only", False)),
             round(float(self._state.preprocessing.rotation_angle_deg), 6),
             bool(getattr(self._state.preprocessing, "rotation_fill_dark", False)),
             bool(self._state.preprocessing.flip_horizontal),
@@ -2736,6 +2773,7 @@ class MainWindow(MainWindowIcons, QMainWindow):
             external_mask=external_mask,
             external_mask_processed=external_mask_processed,
             mask_state=self._state.mask if self._mask_section_applied() else None,
+            skip_crop=bool(getattr(self, "_image_tools_preview_only", False)),
         )
         self._store_processed_image_in_cache(cache_key, processed)
         return processed
@@ -2754,6 +2792,9 @@ class MainWindow(MainWindowIcons, QMainWindow):
 
     def _invalidate_absorbance_spectrum_cache(self) -> None:
         self._analysis_controller._invalidate_absorbance_spectrum_cache()
+
+    def _invalidate_caches_for_exclusion_change(self) -> None:
+        self._analysis_controller._invalidate_caches_for_exclusion_change()
 
     def _invalidate_image_analysis_caches(self) -> None:
         self._invalidate_ignored_mask_cache()
@@ -2843,248 +2884,20 @@ class MainWindow(MainWindowIcons, QMainWindow):
             int(crop.height),
         )
 
-    def _make_undo_snapshot(self, label: str) -> UndoSnapshot:
-        return UndoSnapshot(
-            label=label,
-            state=deepcopy(self._state),
-            folder_text=self.folder_edit.text(),
-            spectral_cube_slider_value=int(self.spectral_cube_slider.value()) if hasattr(self, "spectral_cube_slider") else 0,
-            wavelength_slider_value=int(self.wavelength_slider.value()) if hasattr(self, "wavelength_slider") else 0,
-            selected_roi_ids=set(self._selected_roi_ids),
-            spot_visual_color=self._sample_visual_color.name(),
-            ring_visual_color=self._reference_visual_color.name(),
-            mask_visual_color=self._mask_visual_color.name(),
-            histogram_mask_visual_color=self._histogram_mask_visual_color.name(),
-            figure_mask_visual_color=self._figure_mask_visual_color.name(),
-            highlight_visual_color=self._highlight_visual_color.name(),
-            roi_alpha=float(self._roi_alpha),
-            reference_alpha=float(self._reference_alpha),
-            mask_alpha=float(self._mask_alpha),
-            histogram_mask_alpha=float(self._mask_alpha),  # Use same alpha for now
-            figure_mask_alpha=float(self._mask_alpha),     # Use same alpha for now
-            highlight_alpha=float(self._highlight_alpha),
-            spots_visible=bool(self._rois_visible),
-            rings_visible=bool(self._reference_visible),
-            mask_visible=bool(self._mask_visible),
-            reference_points_visible=bool(self._reference_points_visible),
-            histogram_mask_visible=bool(self._mask_visible),  # Use same visibility for now
-            figure_mask_visible=bool(self._mask_visible),     # Use same visibility for now
-            highlight_visible=bool(self._highlight_visible),
-            file_mask=None if self._current_file_mask is None else self._current_file_mask.copy(),
-            file_mask_path=None if self._current_file_mask_path is None else str(self._current_file_mask_path),
-            file_mask_revision=int(self._external_mask_revision),
-        )
-
-    def _undo_signature(self, snapshot: UndoSnapshot) -> tuple[object, ...]:
-        dataset_folder = None if snapshot.state.dataset is None else str(snapshot.state.dataset.folder)
-        return (
-            dataset_folder,
-            snapshot.folder_text,
-            snapshot.spectral_cube_slider_value,
-            snapshot.wavelength_slider_value,
-            repr(asdict(snapshot.state.preprocessing)),
-            repr(asdict(snapshot.state.area_roi_settings)),
-            repr([asdict(spot) for spot in snapshot.state.area_rois]),
-            repr([asdict(group) for group in snapshot.state.area_roi_groups]),
-            tuple(sorted(snapshot.selected_roi_ids)),
-            snapshot.spot_visual_color,
-            snapshot.ring_visual_color,
-            snapshot.mask_visual_color,
-            snapshot.highlight_visual_color,
-            round(snapshot.roi_alpha, 4),
-            round(snapshot.reference_alpha, 4),
-            round(snapshot.mask_alpha, 4),
-            round(snapshot.highlight_alpha, 4),
-            snapshot.spots_visible,
-            snapshot.rings_visible,
-            snapshot.mask_visible,
-            snapshot.reference_points_visible,
-            snapshot.highlight_visible,
-            snapshot.file_mask_revision,
-            snapshot.file_mask_path,
-        )
-
-    def _current_undo_signature(self) -> tuple[object, ...]:
-        return self._undo_signature(self._make_undo_snapshot("current"))
-
-    def _update_undo_action_state(self) -> None:
-        self.undo_action.setEnabled(bool(self._undo_stack) and self._busy_operation_count == 0)
-        if hasattr(self, "redo_action"):
-            self.redo_action.setEnabled(bool(self._redo_stack) and self._busy_operation_count == 0)
-
     def _push_undo_point(self, label: str) -> None:
-        if self._restoring_undo:
-            return
-        snapshot = self._make_undo_snapshot(label)
-        if self._undo_stack and self._undo_signature(self._undo_stack[-1]) == self._undo_signature(snapshot):
-            return
-        self._undo_stack.append(snapshot)
-        self._redo_stack.clear()
-        if len(self._undo_stack) > self.UNDO_STACK_LIMIT:
-            self._undo_stack = self._undo_stack[-self.UNDO_STACK_LIMIT :]
-        self._update_undo_action_state()
+        self._undo_manager.push(label)
 
     def _prepare_undo_snapshot(self, label: str) -> None:
-        if self._restoring_undo or self._prepared_undo_snapshot is not None:
-            return
-        self._prepared_undo_snapshot = self._make_undo_snapshot(label)
+        self._undo_manager.prepare(label)
 
     def _commit_prepared_undo_snapshot(self) -> None:
-        if self._prepared_undo_snapshot is None:
-            return
-        if self._undo_signature(self._prepared_undo_snapshot) != self._current_undo_signature():
-            self._undo_stack.append(self._prepared_undo_snapshot)
-            self._redo_stack.clear()
-            if len(self._undo_stack) > self.UNDO_STACK_LIMIT:
-                self._undo_stack = self._undo_stack[-self.UNDO_STACK_LIMIT :]
-        self._prepared_undo_snapshot = None
-        self._update_undo_action_state()
-
-    def _clear_prepared_undo_snapshot(self) -> None:
-        self._prepared_undo_snapshot = None
-
-    def _restore_undo_snapshot(self, snapshot: UndoSnapshot) -> None:
-        self._restoring_undo = True
-        try:
-            self._clear_prepared_undo_snapshot()
-            self._pending_image_refresh_payload = None
-            self._latest_image_refresh_signature = None
-            self._spot_detection_request_id += 1
-            self._spot_metrics_request_id += 1
-            self._background_profile_request_id += 1
-            self._showing_background_profile_main = False
-            self._state = deepcopy(snapshot.state)
-            self._reset_roi_id_counter_from_state()
-            self.folder_edit.setText(snapshot.folder_text)
-            self._selected_roi_ids = set(snapshot.selected_roi_ids)
-            self._sample_visual_color = QColor(snapshot.spot_visual_color)
-            self._reference_visual_color = QColor(snapshot.ring_visual_color)
-            self._mask_visual_color = QColor(snapshot.mask_visual_color)
-            self._histogram_mask_visual_color = QColor(snapshot.histogram_mask_visual_color)
-            self._figure_mask_visual_color = QColor(snapshot.figure_mask_visual_color)
-            self._highlight_visual_color = QColor(snapshot.highlight_visual_color)
-            self._roi_alpha = snapshot.roi_alpha
-            self._reference_alpha = snapshot.reference_alpha
-            self._mask_alpha = snapshot.mask_alpha
-            self._highlight_alpha = snapshot.highlight_alpha
-            self._rois_visible = snapshot.spots_visible
-            self._reference_visible = snapshot.rings_visible
-            self._mask_visible = snapshot.mask_visible
-            self._reference_points_visible = snapshot.reference_points_visible
-            self._highlight_visible = snapshot.highlight_visible
-            self._current_file_mask = None if snapshot.file_mask is None else snapshot.file_mask.copy()
-            self._current_file_mask_path = None if snapshot.file_mask_path is None else Path(snapshot.file_mask_path)
-            self._external_mask_revision = int(snapshot.file_mask_revision)
-            self._selected_rectangle_roi_ids.clear()
-            self._processed_image_cache.clear()
-            self._invalidate_image_analysis_caches()
-            self._invalidate_background_profile_cache()
-            self._sync_rectangle_stamp_overlays()
-
-            dataset = self._state.dataset
-            self._record_map = dataset_record_map(dataset) if dataset is not None else {}
-            self._record_key_by_path = (
-                {record.path: (int(record.key.spectral_cube_index), float(record.key.wavelength_nm)) for record in dataset.records}
-                if dataset is not None
-                else {}
-            )
-            self._spectral_cube_values = dataset.spectral_cube_indices if dataset is not None else []
-            self._wavelength_values = dataset.wavelengths_nm if dataset is not None else []
-            self._current_record_path = None
-            self._current_image_key = None
-            self._processed_shape_cache.clear()
-            self.dataset_summary.setText(self._dataset_summary_text(dataset))
-
-            self._sync_image_processing_controls()
-            self._configure_navigation_inputs()
-            self._update_analysis_control_state()
-            self._sync_roi_detection_controls()
-            self._update_mask_file_button_state()
-            self._update_color_button_styles()
-            self.show_rois_check.blockSignals(True)
-            self.bottom_roi_labels_button.blockSignals(True)
-            self.roi_editor_labels_button.blockSignals(True)
-            self.show_rings_check.blockSignals(True)
-            self.show_mask_check.blockSignals(True)
-            self.show_reference_points_check.blockSignals(True)
-            self.show_highlight_check.blockSignals(True)
-            self.show_rois_check.setChecked(self._rois_visible)
-            self.bottom_roi_labels_button.setChecked(self._roi_labels_visible)
-            self.roi_editor_labels_button.setChecked(self._roi_labels_visible)
-            self.show_rings_check.setChecked(self._reference_visible)
-            self.show_mask_check.setChecked(self._mask_visible)
-            self.show_reference_points_check.setChecked(self._reference_points_visible)
-            self.show_highlight_check.setChecked(self._highlight_visible)
-            self.show_rois_check.blockSignals(False)
-            self.bottom_roi_labels_button.blockSignals(False)
-            self.roi_editor_labels_button.blockSignals(False)
-            self.show_rings_check.blockSignals(False)
-            self.show_mask_check.blockSignals(False)
-            self.show_reference_points_check.blockSignals(False)
-            self.show_highlight_check.blockSignals(False)
-            self._refresh_view_toggle_icons()
-            self._update_spot_label_button_icon(bool(self._roi_labels_visible))
-            self.roi_alpha_slider.blockSignals(True)
-            self.reference_alpha_slider.blockSignals(True)
-            self.mask_alpha_slider.blockSignals(True)
-            self.highlight_alpha_slider.blockSignals(True)
-            self.roi_alpha_slider.setValue(int(round(self._roi_alpha * 100.0)))
-            self.reference_alpha_slider.setValue(int(round(self._reference_alpha * 100.0)))
-            self.mask_alpha_slider.setValue(int(round(self._mask_alpha * 100.0)))
-            self.highlight_alpha_slider.setValue(int(round(self._highlight_alpha * 100.0)))
-            self.roi_alpha_slider.blockSignals(False)
-            self.reference_alpha_slider.blockSignals(False)
-            self.mask_alpha_slider.blockSignals(False)
-            self.highlight_alpha_slider.blockSignals(False)
-
-            self._configure_slider(self.spectral_cube_slider, len(self._spectral_cube_values))
-            self._configure_slider(self.wavelength_slider, len(self._wavelength_values))
-            self._configure_navigation_inputs()
-            if dataset is not None and self._spectral_cube_values and self._wavelength_values:
-                spectral_cube_value = min(max(snapshot.spectral_cube_slider_value, 0), len(self._spectral_cube_values) - 1)
-                wavelength_value = min(max(snapshot.wavelength_slider_value, 0), len(self._wavelength_values) - 1)
-                self.spectral_cube_slider.blockSignals(True)
-                self.wavelength_slider.blockSignals(True)
-                self.spectral_cube_slider.setValue(spectral_cube_value)
-                self.wavelength_slider.setValue(wavelength_value)
-                self.spectral_cube_slider.blockSignals(False)
-                self.wavelength_slider.blockSignals(False)
-                self._refresh_image()
-            self._update_selection_dependent_plots(force=True)
-            self._save_visual_preferences()
-            self._schedule_processing_state_save()
-        finally:
-            self._restoring_undo = False
+        self._undo_manager.commit_prepared()
 
     def _undo(self) -> None:
-        if self._busy_operation_count > 0:
-            self._set_status_text("Wait for the current operation to finish before undo.")
-            return
-        if not self._undo_stack:
-            self._set_status_text("Nothing to undo.")
-            return
-        snapshot = self._undo_stack.pop()
-        self._redo_stack.append(self._make_undo_snapshot(snapshot.label))
-        if len(self._redo_stack) > self.UNDO_STACK_LIMIT:
-            self._redo_stack = self._redo_stack[-self.UNDO_STACK_LIMIT :]
-        self._restore_undo_snapshot(snapshot)
-        self._update_undo_action_state()
-        self._set_status_text(f"Undid: {snapshot.label}")
+        self._undo_manager.undo()
 
     def _redo(self) -> None:
-        if self._busy_operation_count > 0:
-            self._set_status_text("Wait for the current operation to finish before redo.")
-            return
-        if not self._redo_stack:
-            self._set_status_text("Nothing to redo.")
-            return
-        snapshot = self._redo_stack.pop()
-        self._undo_stack.append(self._make_undo_snapshot(snapshot.label))
-        if len(self._undo_stack) > self.UNDO_STACK_LIMIT:
-            self._undo_stack = self._undo_stack[-self.UNDO_STACK_LIMIT :]
-        self._restore_undo_snapshot(snapshot)
-        self._update_undo_action_state()
-        self._set_status_text(f"Redid: {snapshot.label}")
+        self._undo_manager.redo()
 
     def _begin_busy(self, text: str, *, determinate: bool = False) -> None:
         self._busy_operation_count += 1
@@ -3106,7 +2919,7 @@ class MainWindow(MainWindowIcons, QMainWindow):
         if not self._wait_cursor_active:
             QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
             self._wait_cursor_active = True
-        self._update_undo_action_state()
+        self._undo_manager.update_action_state()
 
     def _end_busy(self, text: str | None = None) -> None:
         self._busy_operation_count = max(0, self._busy_operation_count - 1)
@@ -3124,7 +2937,7 @@ class MainWindow(MainWindowIcons, QMainWindow):
             self._busy_last_percent = 0
         if text is not None:
             self._set_status_text(text)
-        self._update_undo_action_state()
+        self._undo_manager.update_action_state()
 
     def _sync_busy_cursor_state(self) -> None:
         if self._busy_operation_count <= 0:
@@ -3143,7 +2956,7 @@ class MainWindow(MainWindowIcons, QMainWindow):
         self._busy_started_at = None
         self._busy_is_determinate = False
         self._busy_last_percent = 0
-        self._update_undo_action_state()
+        self._undo_manager.update_action_state()
 
     def _update_busy_progress(self, percent: int, text: str | None = None) -> None:
         if self._busy_operation_count <= 0:
@@ -3373,105 +3186,8 @@ class MainWindow(MainWindowIcons, QMainWindow):
         )
 
     def keyPressEvent(self, event: QKeyEvent) -> None:
-        if self._handle_global_page_shortcuts(event):
+        if self._shortcut_manager.handle_key_press(event):
             return
-        if self._active_tool == "chromatic_landmark":
-            if event.key() in {Qt.Key.Key_Left, Qt.Key.Key_Right, Qt.Key.Key_Up, Qt.Key.Key_Down}:
-                step = 1.0
-                if event.modifiers() & Qt.KeyboardModifier.ControlModifier:
-                    step = 5.0
-                dx = 0.0
-                dy = 0.0
-                if event.key() == Qt.Key.Key_Left:
-                    dx = -step
-                elif event.key() == Qt.Key.Key_Right:
-                    dx = step
-                elif event.key() == Qt.Key.Key_Up:
-                    dy = -step
-                elif event.key() == Qt.Key.Key_Down:
-                    dy = step
-                if self._move_selected_landmark(dx, dy):
-                    event.accept()
-                    return
-
-        if self._active_tool == "roi" and event.key() in {Qt.Key.Key_PageUp, Qt.Key.Key_PageDown}:
-            if event.modifiers() & Qt.KeyboardModifier.ShiftModifier:
-                direction = -1 if event.key() == Qt.Key.Key_PageUp else 1
-                if self._navigate_wavelength_image(direction):
-                    event.accept()
-                    return
-
-        if self._active_tool == "rotate" and event.key() in {
-            Qt.Key.Key_Left,
-            Qt.Key.Key_Right,
-            Qt.Key.Key_Up,
-            Qt.Key.Key_Down,
-        }:
-            step = 0.1
-            if event.modifiers() & Qt.KeyboardModifier.ShiftModifier:
-                step = 5.0
-            elif event.modifiers() & Qt.KeyboardModifier.ControlModifier:
-                step = 1.0
-
-            if event.key() in {Qt.Key.Key_Left, Qt.Key.Key_Down}:
-                step *= -1.0
-            self._adjust_rotation(step)
-            event.accept()
-            return
-        if self._active_tool == "roi" and self._roi_editor_mode == "rectangles":
-            if event.key() in {Qt.Key.Key_Delete, Qt.Key.Key_Backspace}:
-                self._remove_selected_rectangle_rois()
-                event.accept()
-                return
-            if event.key() in {
-                Qt.Key.Key_Left,
-                Qt.Key.Key_Right,
-                Qt.Key.Key_Up,
-                Qt.Key.Key_Down,
-            } and self.roi_move_action.isChecked() and self._selected_rectangle_roi_ids:
-                step = 1.0
-                if event.modifiers() & Qt.KeyboardModifier.ControlModifier:
-                    step = 5.0
-                dx = 0.0
-                dy = 0.0
-                if event.key() == Qt.Key.Key_Left:
-                    dx = -step
-                elif event.key() == Qt.Key.Key_Right:
-                    dx = step
-                elif event.key() == Qt.Key.Key_Up:
-                    dy = -step
-                elif event.key() == Qt.Key.Key_Down:
-                    dy = step
-                self._move_selected_rectangle_rois(dx, dy)
-                event.accept()
-                return
-        if self._active_tool == "roi" and event.key() in {
-            Qt.Key.Key_Left,
-            Qt.Key.Key_Right,
-            Qt.Key.Key_Up,
-            Qt.Key.Key_Down,
-        }:
-            if event.modifiers() & Qt.KeyboardModifier.ShiftModifier:
-                if self._select_neighbor_spot(event.key()):
-                    event.accept()
-                    return
-            elif self._is_current_reference_image() and self.roi_move_action.isChecked() and self._selected_roi_ids:
-                step = 1.0
-                if event.modifiers() & Qt.KeyboardModifier.ControlModifier:
-                    step = 5.0
-                dx = 0.0
-                dy = 0.0
-                if event.key() == Qt.Key.Key_Left:
-                    dx = -step
-                elif event.key() == Qt.Key.Key_Right:
-                    dx = step
-                elif event.key() == Qt.Key.Key_Up:
-                    dy = -step
-                elif event.key() == Qt.Key.Key_Down:
-                    dy = step
-                self._move_selected_rois(dx, dy)
-                event.accept()
-                return
         super().keyPressEvent(event)
 
     def closeEvent(self, event) -> None:  # type: ignore[override]
@@ -3513,125 +3229,11 @@ class MainWindow(MainWindowIcons, QMainWindow):
         super().closeEvent(event)
 
     def prepare_initial_show(self) -> None:
-        if self._window_geometry_restored:
-            return
-        self.resize(1320, 860)
-        self.move(40, 40)
+        self._layout_state_controller.prepare_initial_show()
 
     # ------------------------------------------------------------------
     # Window and splitter restore/save
     # ------------------------------------------------------------------
-
-    def _restore_window_geometry(self) -> None:
-        if self._window_geometry_restored:
-            return
-        geometry_rel = self._settings.value("window_geometry_rel")
-        available = self._best_restore_screen_geometry(None)
-        logging.getLogger("lspr_imaging_app.layout").debug(
-            "restore window | saved_rel=%r | screen=%s",
-            geometry_rel,
-            available.getRect() if available is not None else None,
-        )
-        if isinstance(geometry_rel, list) and len(geometry_rel) == 4 and available is not None:
-            try:
-                rel_x, rel_y, rel_width, rel_height = (float(value) for value in geometry_rel)
-            except Exception:
-                rel_x, rel_y, rel_width, rel_height = 0.0, 0.0, 1.0, 1.0
-            rel_width = float(np.clip(rel_width, 0.2, 1.0))
-            rel_height = float(np.clip(rel_height, 0.2, 1.0))
-            width_limit = max(int(available.width() * 0.9), 900)
-            height_limit = max(int(available.height() * 0.9), 700)
-            width = min(max(int(round(rel_width * available.width())), 900), width_limit)
-            height = min(max(int(round(rel_height * available.height())), 700), height_limit)
-            margin_x = min(40, max(int(available.width() * 0.05), 12))
-            margin_y = min(40, max(int(available.height() * 0.05), 12))
-            x = available.left() + margin_x + int(round(np.clip(rel_x, 0.0, 1.0) * max(available.width() - width - 2 * margin_x, 0)))
-            y = available.top() + margin_y + int(round(np.clip(rel_y, 0.0, 1.0) * max(available.height() - height - 2 * margin_y, 0)))
-            logging.getLogger("lspr_imaging_app.layout").debug(
-                "apply geometry | x=%s y=%s w=%s h=%s",
-                x,
-                y,
-                width,
-                height,
-            )
-            self.setGeometry(x, y, width, height)
-        else:
-            if available is not None:
-                width = min(1320, max(900, int(available.width() * 0.9)))
-                height = min(860, max(700, int(available.height() * 0.9)))
-                x = available.left() + max((available.width() - width) // 2, 0)
-                y = available.top() + max((available.height() - height) // 2, 0)
-                logging.getLogger("lspr_imaging_app.layout").debug(
-                    "fallback geometry | x=%s y=%s w=%s h=%s",
-                    x,
-                    y,
-                    width,
-                    height,
-                )
-                self.setGeometry(x, y, width, height)
-            else:
-                self.resize(1320, 860)
-                self.move(40, 40)
-        if available is not None:
-            self._move_inside_available_screen(available)
-        try:
-            self._restore_default_panel_layout()
-        except Exception:
-            pass
-        self._startup_restore_window_maximized = self._settings_bool("window_is_maximized", False)
-        self._startup_restore_window_fullscreen = self._settings_bool("window_is_fullscreen", False)
-        self._window_geometry_restored = True
-
-    def _best_restore_screen_geometry(self, saved_rect: QRectF | None = None):
-        screens = QGuiApplication.screens()
-        if not screens:
-            return self.screen().availableGeometry() if self.screen() is not None else None
-        target_name = str(self._settings.value("window_screen_name", "") or "").strip()
-        logging.getLogger("lspr_imaging_app.layout").debug(
-            "screen candidates | %s | target=%r | saved_rect=%s",
-            [screen.name() for screen in screens],
-            target_name,
-            saved_rect.toRect().getRect() if saved_rect is not None else None,
-        )
-        for screen in screens:
-            if screen.name() == target_name:
-                logging.getLogger("lspr_imaging_app.layout").debug("selected screen by name | %s", screen.name())
-                return screen.availableGeometry()
-        if saved_rect is not None:
-            best_screen = None
-            best_area = -1
-            for screen in screens:
-                available = screen.availableGeometry()
-                intersection = available.intersected(saved_rect.toRect())
-                area = intersection.width() * intersection.height()
-                if area > best_area:
-                    best_area = area
-                    best_screen = screen
-            if best_screen is not None and best_area > 0:
-                logging.getLogger("lspr_imaging_app.layout").debug(
-                    "selected screen by overlap | %s | area=%s",
-                    best_screen.name(),
-                    best_area,
-                )
-                return best_screen.availableGeometry()
-        if self.screen() is not None:
-            logging.getLogger("lspr_imaging_app.layout").debug("selected current screen | %s", self.screen().name())
-            return self.screen().availableGeometry()
-        primary = QGuiApplication.primaryScreen()
-        if primary is not None:
-            logging.getLogger("lspr_imaging_app.layout").debug("selected primary screen | %s", primary.name())
-        return primary.availableGeometry() if primary is not None else None
-
-    def _move_inside_available_screen(self, available=None) -> None:
-        if available is None:
-            available = self.screen().availableGeometry() if self.screen() is not None else None
-        if available is None:
-            return
-
-        frame_geometry = self.frameGeometry()
-        x = min(max(frame_geometry.x(), available.left()), max(available.right() - frame_geometry.width() + 1, available.left()))
-        y = min(max(frame_geometry.y(), available.top()), max(available.bottom() - frame_geometry.height() + 1, available.top()))
-        self.move(x, y)
 
     def _load_last_folder(self, fallback: Path) -> Path:
         value = self._settings.value("last_folder")
@@ -3670,17 +3272,6 @@ class MainWindow(MainWindowIcons, QMainWindow):
         finally:
             section.blockSignals(previous)
 
-    def _unlink_image_tools_for_preview(self) -> bool:
-        self._image_tools_pre_preview_enabled = bool(self._state.preprocessing.image_tools_enabled)
-        if not self._image_tools_pre_preview_enabled:
-            self._image_tools_preview_only = True
-            return False
-        self._state.preprocessing.image_tools_enabled = False
-        self._image_tools_preview_only = True
-        self._set_section_applied(self.image_tools_section, False)
-        self._save_processing_state_for_dataset()
-        return True
-
     def _mask_section_applied(self) -> bool:
         return self._mask_controller.mask_section_applied()
 
@@ -3696,245 +3287,17 @@ class MainWindow(MainWindowIcons, QMainWindow):
     ) -> None:
         self._save_layout_preferences()
 
-    def _restore_layout_preferences(self) -> None:
-        roi_list_visible = self._settings_bool("layout/roi_list_visible", True)
-        cached_spots_only_visible = self._settings_bool("layout/cached_rois_only_visible", False)
-        self.roi_list_action.blockSignals(True)
-        self.roi_list_action.setChecked(roi_list_visible)
-        self.roi_list_action.blockSignals(False)
-        if hasattr(self, "roi_list_cached_button"):
-            self.roi_list_cached_button.blockSignals(True)
-            self.roi_list_cached_button.setChecked(cached_spots_only_visible)
-            self.roi_list_cached_button.setIcon(self._make_cached_rois_icon(cached_spots_only_visible))
-            self.roi_list_cached_button.blockSignals(False)
-        self._cached_rois_only_visible = cached_spots_only_visible
-        self._suspend_collapsible_accordion = True
-        try:
-            self.dataset_section.set_pinned(self._settings_bool("dataset_section_pinned", False))
-            self.dataset_section.set_expanded(self._settings_bool("dataset_section_expanded", True))
-            self.chromatic_section.set_pinned(self._settings_bool("chromatic_section_pinned", False))
-            self.chromatic_section.set_expanded(self._settings_bool("chromatic_section_expanded", False))
-            self.mask_section.set_pinned(self._settings_bool("mask_section_pinned", False))
-            self.mask_section.set_expanded(self._settings_bool("mask_section_expanded", True))
-            self.image_tools_section.set_pinned(self._settings_bool("image_tools_panel_pinned", False))
-            self.image_tools_section.set_expanded(self._settings_bool("image_tools_panel_expanded", True))
-            self.roi_editor_section.set_pinned(self._settings_bool("roi_editor_section_pinned", False))
-            self.roi_editor_section.set_expanded(self._settings_bool("roi_editor_section_expanded", True))
-            self.background_section.set_pinned(self._settings_bool("background_section_pinned", False))
-            self.background_section.set_expanded(self._settings_bool("background_section_expanded", True))
-            self.analysis_section.set_pinned(self._settings_bool("analysis_section_pinned", False))
-            self.analysis_section.set_expanded(self._settings_bool("analysis_section_expanded", True))
-            if hasattr(self, "workflow_log_section"):
-                self.workflow_log_section.set_expanded(True)
-            self._analysis_enabled = self._settings_bool("analysis_section_applied", self._analysis_enabled)
-            self._set_section_applied(self.analysis_section, self._analysis_enabled)
-        finally:
-            self._suspend_collapsible_accordion = False
-        self._restore_panel_layout_preferences()
-        self._normalize_panel_layout()
-        self.left_tabs.blockSignals(True)
-        try:
-            self.left_tabs.setCurrentIndex(self._settings_int("left_tab_index", 0, minimum=0, maximum=max(self.left_tabs.count() - 1, 0)))
-        finally:
-            self.left_tabs.blockSignals(False)
-        self._layout_preferences_ready = True
-        self._update_analysis_control_state()
-
-    def _apply_saved_splitter_sizes(self, main_sizes) -> None:
-        return
-
     def _save_layout_preferences(self) -> None:
-        if not self._layout_preferences_ready or self._suspend_layout_save:
-            return
-        self._settings.setValue("left_tab_index", self.left_tabs.currentIndex())
-        self._settings.setValue("layout/roi_list_visible", bool(self.roi_list_panel.isVisible()))
-        self._settings.setValue("layout/cached_rois_only_visible", bool(self._cached_rois_only_visible))
-        self._settings.setValue("dataset_section_expanded", self.dataset_section.is_expanded())
-        self._settings.setValue("dataset_section_pinned", self.dataset_section.is_pinned())
-        self._settings.setValue("chromatic_section_expanded", self.chromatic_section.is_expanded())
-        self._settings.setValue("chromatic_section_pinned", self.chromatic_section.is_pinned())
-        self._settings.setValue("mask_section_expanded", self.mask_section.is_expanded())
-        self._settings.setValue("mask_section_pinned", self.mask_section.is_pinned())
-        self._settings.setValue("image_tools_panel_expanded", self.image_tools_section.is_expanded())
-        self._settings.setValue("image_tools_panel_pinned", self.image_tools_section.is_pinned())
-        self._settings.setValue("roi_editor_section_expanded", self.roi_editor_section.is_expanded())
-        self._settings.setValue("roi_editor_section_pinned", self.roi_editor_section.is_pinned())
-        self._settings.setValue("background_section_expanded", self.background_section.is_expanded())
-        self._settings.setValue("background_section_pinned", self.background_section.is_pinned())
-        self._settings.setValue("analysis_section_expanded", self.analysis_section.is_expanded())
-        self._settings.setValue("analysis_section_pinned", self.analysis_section.is_pinned())
-        self._settings.setValue("analysis_section_applied", self._analysis_enabled)
-        if hasattr(self, "workflow_log_section"):
-            self._settings.setValue("workflow_log_section_expanded", self.workflow_log_section.is_expanded())
-        self._settings.setValue("ome_zarr/chunk_size_px", int(self._current_ome_zarr_chunk_size()))
-        self._settings.setValue("ome_zarr/shard_mode", self.ome_zarr_shard_mode_combo.currentData())
-        self._settings.setValue("ome_zarr/chunk_guide_visible", bool(self.ome_zarr_chunk_guide_button.isChecked()))
-        self._settings.setValue("ome_zarr/compression_enabled", bool(self.ome_zarr_compression_button.isChecked()))
-        self._save_panel_layout_preferences()
-
-    def _capture_panel_layout_snapshot(self) -> dict[str, QByteArray] | None:
-        if not hasattr(self, "_main_splitter"):
-            return None
-        return {
-            "main": self._main_splitter.saveState(),
-            "visual": self._visual_splitter.saveState(),
-            "top": self._top_visual_splitter.saveState(),
-            "bottom": self._bottom_visual_splitter.saveState(),
-        }
-
-    def _apply_panel_layout_snapshot(self, snapshot: dict[str, QByteArray] | None) -> None:
-        if snapshot is None:
-            self._apply_default_splitter_sizes()
-            return
-        for key, splitter_name in (
-            ("main", "_main_splitter"),
-            ("visual", "_visual_splitter"),
-            ("top", "_top_visual_splitter"),
-            ("bottom", "_bottom_visual_splitter"),
-        ):
-            splitter = getattr(self, splitter_name, None)
-            state = snapshot.get(key)
-            if splitter is None or not isinstance(state, QByteArray) or state.isEmpty():
-                continue
-            try:
-                splitter.restoreState(state)
-            except Exception:
-                pass
-        self._normalize_panel_layout()
-
-    def _panel_layout_panels(self) -> list[tuple[str, QWidget]]:
-        return [
-            ("workflow_panel", self.workflow_panel),
-            ("roi_list_panel", self.roi_list_panel),
-            ("image_panel", self.image_panel),
-            ("histogram_panel", self.histogram_panel),
-            ("spectra_panel", self.spectra_panel),
-            ("sensorgram_panel", self.sensorgram_panel),
-        ]
-
-    def _restore_saved_panel_layout_state(self) -> bool:
-        if not hasattr(self, "_main_splitter"):
-            logging.getLogger("lspr_imaging_app.layout").debug("splitter restore | no splitter layout")
-            self._append_workflow_log("Layout | no splitter layout available", level="warning")
-            return False
-        state_keys = {
-            "_main_splitter": "layout/main_splitter_state",
-            "_visual_splitter": "layout/visual_splitter_state",
-            "_top_visual_splitter": "layout/top_visual_splitter_state",
-            "_bottom_visual_splitter": "layout/bottom_visual_splitter_state",
-        }
-        restored_any = False
-        for attr_name, key in state_keys.items():
-            splitter = getattr(self, attr_name, None)
-            if splitter is None:
-                continue
-            state = self._settings.value(key)
-            if not isinstance(state, (QByteArray, bytes, bytearray)):
-                continue
-            blob = QByteArray(state)
-            if blob.isEmpty():
-                continue
-            try:
-                restored = bool(splitter.restoreState(blob))
-            except Exception:
-                restored = False
-            logging.getLogger("lspr_imaging_app.layout").debug(
-                "splitter restore | %s | restored=%s | size=%s",
-                attr_name,
-                restored,
-                blob.size(),
-            )
-            self._append_workflow_log(
-                f"Layout | {attr_name} restored={restored} size={blob.size()}",
-                level="debug" if restored else "warning",
-            )
-            restored_any = restored_any or restored
-        return restored_any
-
-    def _restore_saved_window_state_after_show(self) -> None:
-        if self._startup_restore_window_fullscreen:
-            self.showFullScreen()
-        elif self._startup_restore_window_maximized:
-            self.showMaximized()
-        else:
-            self.showNormal()
-
-    def _restore_panel_layout_preferences(self) -> None:
-        self._append_workflow_log("Layout | restoring panel visibility and splitter states", level="debug")
-        self._restore_default_panel_layout()
-        for name, panel in self._panel_layout_panels():
-            visible = self._settings_bool(f"layout/{name}_visible", True)
-            panel.blockSignals(True)
-            try:
-                panel.setVisible(visible)
-            finally:
-                panel.blockSignals(False)
-            self._append_workflow_log(f"Panel | restore {name} visible={visible}", level="debug")
-        if not self._restore_saved_panel_layout_state():
-            self._apply_default_splitter_sizes()
-            self._append_workflow_log("Layout | applied default splitter sizes", level="warning")
-
-    def _normalize_panel_layout(self) -> None:
-        if not hasattr(self, "_main_splitter"):
-            return
-        self._main_splitter.setChildrenCollapsible(False)
-        self._visual_splitter.setChildrenCollapsible(False)
-        self._top_visual_splitter.setChildrenCollapsible(False)
-        self._bottom_visual_splitter.setChildrenCollapsible(False)
+        self._layout_state_controller.save_layout_preferences()
 
     def _set_all_panel_visibility(self, visible: bool) -> None:
-        if not hasattr(self, "_main_splitter"):
-            return
-        snapshot = self._panel_layout_visibility_backup
-        self._append_workflow_log(f"Panel | {'show' if visible else 'hide'} all", level="debug")
-        if not visible and snapshot is None:
-            self._panel_layout_visibility_backup = self._capture_panel_layout_snapshot()
-        self._suspend_layout_save = True
-        try:
-            for _name, panel in self._panel_layout_panels():
-                panel.setVisible(bool(visible))
-        finally:
-            self._suspend_layout_save = False
-        if visible:
-            self._apply_panel_layout_snapshot(self._panel_layout_visibility_backup)
-            self._panel_layout_visibility_backup = None
-        self._save_panel_layout_preferences()
-        self._save_layout_preferences()
+        self._layout_state_controller.set_all_panel_visibility(visible)
 
     def _sync_panel_visibility_after_show(self) -> None:
-        for name, dock in self._panel_layout_panels():
-            visible = self._settings_bool(f"layout/{name}_visible", True)
-            dock.blockSignals(True)
-            try:
-                dock.toggleViewAction().setChecked(visible)
-                dock.setVisible(visible)
-            finally:
-                dock.blockSignals(False)
-            self._append_workflow_log(f"Panel | sync {name} visible={visible}", level="debug")
-        if hasattr(self, "workflow_log_section"):
-            try:
-                self.workflow_log_section.set_expanded(True)
-            except Exception:
-                pass
-
-    def _save_panel_layout_preferences(self) -> None:
-        for name, dock in self._panel_layout_panels():
-            visible = bool(dock.toggleViewAction().isChecked())
-            self._settings.setValue(f"layout/{name}_visible", visible)
-        if hasattr(self, "_main_splitter"):
-            self._settings.setValue("layout/main_splitter_state", self._main_splitter.saveState())
-        if hasattr(self, "_visual_splitter"):
-            self._settings.setValue("layout/visual_splitter_state", self._visual_splitter.saveState())
-        if hasattr(self, "_top_visual_splitter"):
-            self._settings.setValue("layout/top_visual_splitter_state", self._top_visual_splitter.saveState())
-        if hasattr(self, "_bottom_visual_splitter"):
-            self._settings.setValue("layout/bottom_visual_splitter_state", self._bottom_visual_splitter.saveState())
+        self._layout_state_controller.sync_panel_visibility_after_show()
 
     def _on_panel_visibility_changed(self, _dock: QWidget) -> None:
-        if isinstance(_dock, QWidget):
-            panel_name = _dock.objectName() or _dock.windowTitle() or _dock.__class__.__name__
-            self._append_workflow_log(f"Panel | visibility changed {panel_name}", level="debug")
-        self._save_layout_preferences()
+        self._layout_state_controller.on_panel_visibility_changed(_dock)
 
     @staticmethod
 
@@ -4056,11 +3419,7 @@ class MainWindow(MainWindowIcons, QMainWindow):
         self._ui_state_manager.save_visual_preferences()
 
     def _on_image_view_range_changed(self, *_args) -> None:
-        if self._current_processed_image is None or self._showing_background_profile_main:
-            return
-        if self._image_view_save_timer.isActive():
-            self._image_view_save_timer.stop()
-        self._image_view_save_timer.start()
+        self._image_controller.on_image_view_range_changed(*_args)
 
     def _save_control_preferences(self) -> None:
         self._ui_state_manager.save_control_preferences()
@@ -4188,40 +3547,10 @@ class MainWindow(MainWindowIcons, QMainWindow):
         return self._chromatic_controller.signature_for_image_key(image_key)
 
     def _display_rois(self, image_key: tuple[int, float] | None = None) -> list[AreaRoi]:
-        target_key = image_key if image_key is not None else self._current_image_key
-        if target_key is None:
-            return self._state.area_rois
-        if self._is_reference_image_key(target_key):
-            return self._state.area_rois
-        if self._current_processed_image is None and image_key is None:
-            return self._state.area_rois
-        signature = (
-            target_key,
-            self._roi_signature(self._state.area_rois),
-            self._chromatic_signature_for_image_key(target_key),
-            None if self._current_processed_image is None else self._current_processed_image.shape[:2],
-        )
-        if self._display_spot_cache_signature == signature and self._display_spot_cache_value is not None:
-            return self._display_spot_cache_value
-        affine_matrix = self._chromatic_affine_for_image_key(target_key)
-        if affine_matrix is None:
-            transformed = self._state.area_rois
-        else:
-            clamp_shape = self._current_processed_image.shape[:2] if self._current_processed_image is not None else None
-            transformed = transform_spots_affine(self._state.area_rois, affine_matrix, clamp_shape=clamp_shape)
-        self._display_spot_cache_signature = signature
-        self._display_spot_cache_value = transformed
-        return transformed
+        return self._image_controller.display_rois(image_key)
 
     def _rois_for_preprocessing(self, image_key: tuple[int, float] | None) -> list[AreaRoi]:
-        if image_key is None or self._is_reference_image_key(image_key):
-            return self._state.area_rois
-        if not self._state.preprocessing.chromatic_correction_enabled:
-            return self._state.area_rois
-        affine_matrix = self._chromatic_affine_for_image_key(image_key)
-        if affine_matrix is None:
-            return self._state.area_rois
-        return transform_spots_affine(self._state.area_rois, affine_matrix)
+        return self._image_controller.rois_for_preprocessing(image_key)
 
     def _roi_curve_points(
         self,
@@ -4229,18 +3558,7 @@ class MainWindow(MainWindowIcons, QMainWindow):
         display_spot: AreaRoi,
         radius_px: float,
     ) -> tuple[np.ndarray, np.ndarray]:
-        affine_matrix = self._chromatic_affine_for_image_key(self._current_image_key)
-        if affine_matrix is None or self._is_current_reference_image():
-            theta = self._spot_overlay_theta
-            xs = display_spot.center_x + float(radius_px) * np.cos(theta)
-            ys = display_spot.center_y + float(radius_px) * np.sin(theta)
-            return xs, ys
-        return transformed_circle_points(
-            (float(source_roi.center_x), float(source_roi.center_y)),
-            float(radius_px),
-            affine_matrix,
-            self._spot_overlay_theta,
-        )
+        return self._image_controller.roi_curve_points(source_roi, display_spot, radius_px)
 
     def _set_view_overlay_visibility(
         self,
@@ -4251,31 +3569,13 @@ class MainWindow(MainWindowIcons, QMainWindow):
         reference_points_visible: bool,
         highlight_visible: bool,
     ) -> None:
-        self._rois_visible = bool(spots_visible)
-        self._reference_visible = bool(rings_visible)
-        self._mask_visible = bool(mask_visible)
-        self._reference_points_visible = bool(reference_points_visible)
-        self._highlight_visible = bool(highlight_visible)
-        self.show_rois_check.blockSignals(True)
-        self.show_rings_check.blockSignals(True)
-        self.show_mask_check.blockSignals(True)
-        self.show_reference_points_check.blockSignals(True)
-        self.show_highlight_check.blockSignals(True)
-        self.show_rois_check.setChecked(self._rois_visible)
-        self.show_rings_check.setChecked(self._reference_visible)
-        self.show_mask_check.setChecked(self._mask_visible)
-        self.show_reference_points_check.setChecked(self._reference_points_visible)
-        self.show_highlight_check.setChecked(self._highlight_visible)
-        self.show_rois_check.blockSignals(False)
-        self.show_rings_check.blockSignals(False)
-        self.show_mask_check.blockSignals(False)
-        self.show_reference_points_check.blockSignals(False)
-        self.show_highlight_check.blockSignals(False)
-        self._refresh_view_toggle_icons()
-        self._update_roi_overlays()
-        self._update_ignore_mask_overlay()
-        self._update_selected_intensity_overlay()
-        self._update_landmark_overlays()
+        self._image_controller.set_view_overlay_visibility(
+            spots_visible=spots_visible,
+            rings_visible=rings_visible,
+            mask_visible=mask_visible,
+            reference_points_visible=reference_points_visible,
+            highlight_visible=highlight_visible,
+        )
 
     def _enter_chromatic_setup_mode(self) -> None:
         self._chromatic_controller.enter_setup_mode()
@@ -4287,101 +3587,20 @@ class MainWindow(MainWindowIcons, QMainWindow):
         self._chromatic_controller.capture_view_ranges()
 
     def _capture_pending_image_view_ranges(self, *, preserve_view: bool = False) -> None:
-        if self._current_processed_image is None:
-            self._pending_image_view_ranges = None
-            self._pending_image_view_crop_offset = None
-            self._pending_image_view_preserve = False
-            return
-        x_range, y_range = self.image_plot.vb.viewRange()
-        self._pending_image_view_ranges = (
-            (float(x_range[0]), float(x_range[1])),
-            (float(y_range[0]), float(y_range[1])),
-        )
-        self._pending_image_view_preserve = bool(preserve_view)
-        crop = self._state.preprocessing.crop
-        if self._active_tool == "crop" and crop.enabled and bool(self._state.preprocessing.image_tools_enabled):
-            self._pending_image_view_crop_offset = (float(crop.x), float(crop.y))
-        else:
-            self._pending_image_view_crop_offset = None
+        self._image_controller.capture_pending_image_view_ranges(preserve_view=preserve_view)
 
     def _set_clamped_image_view_ranges(
         self,
         x_range: tuple[float, float],
         y_range: tuple[float, float],
     ) -> bool:
-        if self._current_processed_image is None:
-            return False
-        image_height, image_width = self._current_processed_image.shape[:2]
-        view_width = max(float(x_range[1] - x_range[0]), 1.0)
-        view_height = max(float(y_range[1] - y_range[0]), 1.0)
-        if view_width >= float(image_width):
-            target_x_range = (0.0, float(image_width))
-        else:
-            shift_x = 0.0
-            if x_range[0] < 0.0:
-                shift_x = -float(x_range[0])
-            elif x_range[1] > float(image_width):
-                shift_x = float(image_width) - float(x_range[1])
-            target_x_range = (float(x_range[0] + shift_x), float(x_range[1] + shift_x))
-        if view_height >= float(image_height):
-            target_y_range = (0.0, float(image_height))
-        else:
-            shift_y = 0.0
-            if y_range[0] < 0.0:
-                shift_y = -float(y_range[0])
-            elif y_range[1] > float(image_height):
-                shift_y = float(image_height) - float(y_range[1])
-            target_y_range = (float(y_range[0] + shift_y), float(y_range[1] + shift_y))
-        self.image_plot.vb.setRange(xRange=target_x_range, yRange=target_y_range, padding=0.0)
-        return True
-
-    def _set_unclamped_image_view_ranges(
-        self,
-        x_range: tuple[float, float],
-        y_range: tuple[float, float],
-    ) -> bool:
-        if self._current_processed_image is None:
-            return False
-        self.image_plot.vb.setRange(
-            xRange=(float(x_range[0]), float(x_range[1])),
-            yRange=(float(y_range[0]), float(y_range[1])),
-            padding=0.0,
-        )
-        return True
+        return self._image_controller.set_clamped_image_view_ranges(x_range, y_range)
 
     def _restore_pending_image_view_after_load(self) -> bool:
-        previous_ranges = self._pending_image_view_ranges
-        crop_offset = self._pending_image_view_crop_offset
-        preserve_view = self._pending_image_view_preserve
-        self._pending_image_view_ranges = None
-        self._pending_image_view_crop_offset = None
-        self._pending_image_view_preserve = False
-        if previous_ranges is None:
-            return False
-        if preserve_view:
-            return self._set_unclamped_image_view_ranges(previous_ranges[0], previous_ranges[1])
-        if crop_offset is not None:
-            return self._set_unclamped_image_view_ranges(
-                (previous_ranges[0][0] - crop_offset[0], previous_ranges[0][1] - crop_offset[0]),
-                (previous_ranges[1][0] - crop_offset[1], previous_ranges[1][1] - crop_offset[1]),
-            )
-        return self._set_clamped_image_view_ranges(previous_ranges[0], previous_ranges[1])
+        return self._image_controller.restore_pending_image_view_after_load()
 
     def _restore_saved_image_view_after_load(self) -> bool:
-        if self._current_processed_image is None or self._showing_background_profile_main:
-            return False
-        x_min_raw = self._settings.value("visual/image_view_x_min", None)
-        x_max_raw = self._settings.value("visual/image_view_x_max", None)
-        y_min_raw = self._settings.value("visual/image_view_y_min", None)
-        y_max_raw = self._settings.value("visual/image_view_y_max", None)
-        if None in (x_min_raw, x_max_raw, y_min_raw, y_max_raw):
-            return False
-        try:
-            x_range = (float(x_min_raw), float(x_max_raw))
-            y_range = (float(y_min_raw), float(y_max_raw))
-        except (TypeError, ValueError):
-            return False
-        return self._set_clamped_image_view_ranges(x_range, y_range)
+        return self._image_controller.restore_saved_image_view_after_load()
 
     def _restore_chromatic_view_after_load(self) -> bool:
         return self._chromatic_controller.restore_view_after_load()
@@ -4451,6 +3670,13 @@ class MainWindow(MainWindowIcons, QMainWindow):
             self.wavelength_slider.blockSignals(False)
         self._sync_analysis_plot_cursors()
         self._schedule_image_refresh()
+
+    def _go_to_reference_image(self) -> None:
+        key = self._reference_image_key()
+        if key is None:
+            self._set_status_text("No reference image is set yet.")
+            return
+        self._set_current_spectral_cube_and_wavelength(int(key[0]), float(key[1]))
 
     def _chromatic_sample_payload(self) -> list[tuple[int, float, str]]:
         return self._chromatic_controller.sample_payload()
@@ -4755,68 +3981,16 @@ class MainWindow(MainWindowIcons, QMainWindow):
         )
 
     def _reset_layout_to_defaults(self) -> None:
-        self._restore_default_panel_layout()
-        self._suspend_collapsible_accordion = True
-        try:
-            self.dataset_section.set_expanded(True)
-            self.mask_section.set_expanded(True)
-            self.chromatic_section.set_expanded(False)
-            self.image_tools_section.set_expanded(True)
-            self.roi_editor_section.set_expanded(True)
-            self.background_section.set_expanded(True)
-            self.analysis_section.set_expanded(True)
-        finally:
-            self._suspend_collapsible_accordion = False
-        self.left_tabs.blockSignals(True)
-        try:
-            self.left_tabs.setCurrentIndex(0)
-        finally:
-            self.left_tabs.blockSignals(False)
-        self._save_layout_preferences()
-        self._set_status_text("Layout reset to defaults.")
+        self._layout_state_controller.reset_layout_to_defaults()
 
     def _reset_panel_layout(self) -> None:
-        self._panel_layout_visibility_backup = None
-        visibility = {name: panel.isVisible() for name, panel in self._panel_layout_panels()}
-        self._restore_default_panel_layout()
-        for name, panel in self._panel_layout_panels():
-            panel.setVisible(visibility.get(name, panel.isVisible()))
-        self._save_panel_layout_preferences()
-        self._set_status_text("Panel layout reset to defaults.")
+        self._layout_state_controller.reset_panel_layout()
 
     def _expand_left_panels(self) -> None:
-        self._suspend_collapsible_accordion = True
-        try:
-            for section in [
-                self.dataset_section,
-                self.mask_section,
-                self.chromatic_section,
-                self.image_tools_section,
-                self.roi_editor_section,
-                self.background_section,
-                self.analysis_section,
-            ]:
-                section.set_expanded(True)
-        finally:
-            self._suspend_collapsible_accordion = False
-        self._save_layout_preferences()
+        self._layout_state_controller.expand_left_panels()
 
     def _collapse_left_panels(self) -> None:
-        self._suspend_collapsible_accordion = True
-        try:
-            for section in [
-                self.dataset_section,
-                self.mask_section,
-                self.chromatic_section,
-                self.image_tools_section,
-                self.roi_editor_section,
-                self.background_section,
-                self.analysis_section,
-            ]:
-                section.set_expanded(False)
-        finally:
-            self._suspend_collapsible_accordion = False
-        self._save_layout_preferences()
+        self._layout_state_controller.collapse_left_panels()
 
     def _configure_control_help(self) -> None:
         self._set_help(self.folder_edit, "Dataset folder to load.", "Enter or paste the folder containing the image dataset.")
@@ -4828,6 +4002,8 @@ class MainWindow(MainWindowIcons, QMainWindow):
         self._set_help(self.ome_zarr_shard_mode_combo, "Shard grouping: '1 image' = one file per wavelength × spectral cube; '1 spectral cube' = one file per time point (all wavelengths together).")
         self._set_help(self.ome_zarr_chunk_guide_button, "Guide: show chunk tiling over the current image.")
         self._set_help(self.ome_zarr_compression_button, "Compression: turn Stack to Zarr compression on or off.")
+        self._set_help(self.ome_zarr_skip_excluded_button, "Skip excluded images: leave excluded planes empty in the Stack to Zarr export instead of writing their pixel data.")
+        self._set_help(self.image_exclusion_button, "Exclude this image/wavelength/spectral cube from processing, or manage exclusions.")
         self._set_help(self.export_settings_button, "Export preprocessing, ROI settings, ROIs, and groups to a JSON profile.")
         self._set_help(self.import_settings_button, "Import preprocessing, ROI settings, ROIs, and groups from a JSON profile.")
         self._set_help(self.spectral_cube_slider, "Choose the reference spectral cube.")
@@ -4991,107 +4167,13 @@ class MainWindow(MainWindowIcons, QMainWindow):
 
 
     def _on_rotate_tool_toggled(self, checked: bool) -> None:
-        if checked:
-            if not self._ensure_reference_image_for_image_tools():
-                self.rotate_action.blockSignals(True)
-                self.rotate_action.setChecked(False)
-                self.rotate_action.blockSignals(False)
-                self._sync_rotation_visibility()
-                self._sync_crop_visibility()
-                return
-            self._unlink_image_tools_for_preview()
-            self.mask_pencil_check.blockSignals(True)
-            self.mask_pencil_check.setChecked(False)
-            self.mask_pencil_check.blockSignals(False)
-            self.crop_action.blockSignals(True)
-            self.crop_action.setChecked(False)
-            self.crop_action.blockSignals(False)
-            self.measure_action.blockSignals(True)
-            self.measure_action.setChecked(False)
-            self.measure_action.blockSignals(False)
-            self.spot_edit_action.blockSignals(True)
-            self.spot_edit_action.setChecked(False)
-            self.spot_edit_action.blockSignals(False)
-            self.roi_array_action.blockSignals(True)
-            self.roi_array_action.setChecked(False)
-            self.roi_array_action.blockSignals(False)
-            self._active_tool = "rotate"
-        elif self._active_tool == "rotate":
-            self._active_tool = None
-        self._refresh_image_tool_action_icons()
-        self._sync_rotation_visibility()
-        self._sync_crop_visibility()
-        self._sync_measurement_visibility()
+        self._image_tools_controller.on_rotate_tool_toggled(checked)
 
     def _on_crop_tool_toggled(self, checked: bool) -> None:
-        if checked:
-            if not self._ensure_reference_image_for_image_tools():
-                self.crop_action.blockSignals(True)
-                self.crop_action.setChecked(False)
-                self.crop_action.blockSignals(False)
-                self._sync_rotation_visibility()
-                self._sync_crop_visibility()
-                return
-            self._unlink_image_tools_for_preview()
-            self.mask_pencil_check.blockSignals(True)
-            self.mask_pencil_check.setChecked(False)
-            self.mask_pencil_check.blockSignals(False)
-            self.rotate_action.blockSignals(True)
-            self.rotate_action.setChecked(False)
-            self.rotate_action.blockSignals(False)
-            self.measure_action.blockSignals(True)
-            self.measure_action.setChecked(False)
-            self.measure_action.blockSignals(False)
-            self.spot_edit_action.blockSignals(True)
-            self.spot_edit_action.setChecked(False)
-            self.spot_edit_action.blockSignals(False)
-            self.roi_array_action.blockSignals(True)
-            self.roi_array_action.setChecked(False)
-            self.roi_array_action.blockSignals(False)
-            self._active_tool = "crop"
-            self._state.preprocessing.crop.enabled = True
-            self._save_processing_state_for_dataset()
-        elif self._active_tool == "crop":
-            self._active_tool = None
-        self._refresh_image_tool_action_icons()
-        self._sync_rotation_visibility()
-        self._sync_crop_visibility()
-        self._sync_measurement_visibility()
-        self._current_image_key = None
-        self._refresh_image()
+        self._image_tools_controller.on_crop_tool_toggled(checked)
 
     def _on_measure_tool_toggled(self, checked: bool) -> None:
-        if checked:
-            if not self._ensure_reference_image_for_image_tools():
-                self.measure_action.blockSignals(True)
-                self.measure_action.setChecked(False)
-                self.measure_action.blockSignals(False)
-                self._sync_measurement_visibility()
-                return
-            self._unlink_image_tools_for_preview()
-            self.mask_pencil_check.blockSignals(True)
-            self.mask_pencil_check.setChecked(False)
-            self.mask_pencil_check.blockSignals(False)
-            self.rotate_action.blockSignals(True)
-            self.rotate_action.setChecked(False)
-            self.rotate_action.blockSignals(False)
-            self.crop_action.blockSignals(True)
-            self.crop_action.setChecked(False)
-            self.crop_action.blockSignals(False)
-            self.spot_edit_action.blockSignals(True)
-            self.spot_edit_action.setChecked(False)
-            self.spot_edit_action.blockSignals(False)
-            self.roi_array_action.blockSignals(True)
-            self.roi_array_action.setChecked(False)
-            self.roi_array_action.blockSignals(False)
-            self._active_tool = "measure"
-            self._set_status_text("Measurement tool active. Drag the two crosses, enter the real Δx/Δy in µm, then apply calibration.")
-        elif self._active_tool == "measure":
-            self._active_tool = None
-        self._refresh_image_tool_action_icons()
-        self._sync_rotation_visibility()
-        self._sync_crop_visibility()
-        self._sync_measurement_visibility()
+        self._image_tools_controller.on_measure_tool_toggled(checked)
 
     def _on_spot_edit_tool_toggled(self, checked: bool) -> None:
         if checked:
@@ -5222,81 +4304,19 @@ class MainWindow(MainWindowIcons, QMainWindow):
         self._update_status_hint()
 
     def _on_flip_horizontal_toggled(self, checked: bool) -> None:
-        if not self._ensure_reference_image_for_image_tools():
-            self.flip_horizontal_action.blockSignals(True)
-            self.flip_horizontal_action.setChecked(self._state.preprocessing.flip_horizontal)
-            self.flip_horizontal_action.blockSignals(False)
-            return
-        if checked:
-            self._unlink_image_tools_for_preview()
-        self._state.preprocessing.flip_horizontal = checked
-        self._refresh_image_tool_action_icons()
-        self._apply_image_transform_change("Applied horizontal flip." if checked else "Removed horizontal flip.")
+        self._image_tools_controller.on_flip_horizontal_toggled(checked)
 
     def _on_flip_vertical_toggled(self, checked: bool) -> None:
-        if not self._ensure_reference_image_for_image_tools():
-            self.flip_vertical_action.blockSignals(True)
-            self.flip_vertical_action.setChecked(self._state.preprocessing.flip_vertical)
-            self.flip_vertical_action.blockSignals(False)
-            return
-        if checked:
-            self._unlink_image_tools_for_preview()
-        self._state.preprocessing.flip_vertical = checked
-        self._refresh_image_tool_action_icons()
-        self._apply_image_transform_change("Applied vertical flip." if checked else "Removed vertical flip.")
+        self._image_tools_controller.on_flip_vertical_toggled(checked)
 
     def _update_rotation_fill_button_tooltip(self) -> None:
-        if bool(self._state.preprocessing.rotation_fill_dark):
-            tooltip = "Rotation fill: dark (0). New corner pixels created by rotation are set to 0 intensity instead of copying the nearest edge pixel. Click to switch to edge-stretch fill."
-        else:
-            tooltip = "Rotation fill: edge-stretch. New corner pixels created by rotation copy the nearest edge pixel. Click to switch to dark (0 intensity) fill."
-        self.rotation_fill_dark_button.setToolTip(tooltip)
+        self._image_tools_controller.update_rotation_fill_button_tooltip()
 
     def _on_rotation_fill_dark_toggled(self, checked: bool) -> None:
-        if not self._ensure_reference_image_for_image_tools():
-            self.rotation_fill_dark_button.blockSignals(True)
-            self.rotation_fill_dark_button.setChecked(self._state.preprocessing.rotation_fill_dark)
-            self.rotation_fill_dark_button.blockSignals(False)
-            return
-        self._state.preprocessing.rotation_fill_dark = checked
-        self._refresh_image_tool_action_icons()
-        self._update_rotation_fill_button_tooltip()
-        self._apply_image_transform_change(
-            "Rotation fill set to dark (0)." if checked else "Rotation fill set to edge-stretch."
-        )
-
-    def _ensure_reference_image_for_image_tools(self) -> bool:
-        if self._current_record_path is None or self._is_current_reference_image():
-            return True
-        self._set_status_text("Switch to the reference image to edit image tools.")
-        return False
+        self._image_tools_controller.on_rotation_fill_dark_toggled(checked)
 
     def _handle_image_tool_settings_changed(self, status: str, *, preserve_view: bool = False) -> None:
-        linked = bool(self.image_tools_section.is_applied())
-        self._image_tools_preview_only = not linked
-        self._capture_pending_image_view_ranges(preserve_view=preserve_view)
-        self._invalidate_image_analysis_caches()
-        self._invalidate_background_profile_cache()
-        if self._state.area_rois:
-            self._update_roi_overlays()
-            self._update_roi_summary()
-            self._sync_roi_detection_controls()
-        self._save_processing_state_for_dataset()
-        self._current_image_key = None
-        self._refresh_image()
-        self.status_label.setText(status)
-
-    def _apply_image_transform_change(self, status: str) -> None:
-        self._push_undo_point(status)
-        self._handle_image_tool_settings_changed(status, preserve_view=True)
-
-    def _refresh_image_tool_action_icons(self) -> None:
-        self.rotate_action.setIcon(self._make_rotate_icon(self.rotate_action.isChecked()))
-        self.rotation_fill_dark_button.setIcon(self._make_rotation_fill_icon(self.rotation_fill_dark_button.isChecked()))
-        self.crop_action.setIcon(self._make_crop_icon(self.crop_action.isChecked()))
-        self.flip_horizontal_action.setIcon(self._make_flip_horizontal_icon(self.flip_horizontal_action.isChecked()))
-        self.flip_vertical_action.setIcon(self._make_flip_vertical_icon(self.flip_vertical_action.isChecked()))
-        self.measure_action.setIcon(self._make_measure_icon(self.measure_action.isChecked()))
+        self._image_tools_controller.handle_image_tool_settings_changed(status, preserve_view=preserve_view)
 
     def _on_show_spots_toggled(self, checked: bool) -> None:
         self._rois_visible = checked
@@ -5376,38 +4396,22 @@ class MainWindow(MainWindowIcons, QMainWindow):
         self._save_processing_state_for_dataset()
 
     def _reset_rotation(self) -> None:
-        if not self._ensure_reference_image_for_image_tools():
-            return
-        self._push_undo_point("Reset rotation")
-        self._state.preprocessing.rotation_angle_deg = 0.0
-        self._handle_image_tool_settings_changed("Rotation reset to 0 deg.", preserve_view=True)
+        self._image_tools_controller.reset_rotation()
 
     def _reset_crop(self) -> None:
-        if not self._ensure_reference_image_for_image_tools():
-            return
-        self._push_undo_point("Reset crop")
-        self._state.preprocessing.crop = CropDefinition()
-        self._handle_image_tool_settings_changed("Crop reset.", preserve_view=True)
+        self._image_tools_controller.reset_crop()
 
     def _adjust_rotation(self, delta_deg: float) -> None:
-        if not self._ensure_reference_image_for_image_tools():
-            return
-        self._push_undo_point("Adjust rotation")
-        self._state.preprocessing.rotation_angle_deg += float(delta_deg)
-        self._handle_image_tool_settings_changed(
-            f"Rotation adjusted to {self._state.preprocessing.rotation_angle_deg:.2f} deg",
-            preserve_view=True,
-        )
+        self._image_tools_controller.adjust_rotation(delta_deg)
 
     def _sync_rotation_tool(self) -> None:
-        self._ensure_image_tool_guide()
-        self._sync_rotation_visibility()
+        self._image_tools_controller.sync_rotation_tool()
 
     def _update_rotation_preview(self) -> None:
         return
 
     def _sync_rotation_visibility(self) -> None:
-        self._update_guide_overlays()
+        self._image_tools_controller.sync_rotation_visibility()
 
     def _handle_global_page_shortcuts(self, event: QKeyEvent) -> bool:
         return self._shortcut_manager.handle_page_shortcuts(event)
@@ -6002,53 +5006,10 @@ class MainWindow(MainWindowIcons, QMainWindow):
             line.setPen(pg.mkPen(self._mask_visual_color, width=2))
 
     def _sync_crop_tool(self, image_shape: tuple[int, int]) -> None:
-        crop = self._state.preprocessing.crop
-        image_height, image_width = image_shape[:2]
-        self._ensure_image_tool_guide()
-        if self._crop_roi is None:
-            width = crop.width if crop.width > 0 else max(image_width // 2, 1)
-            height = crop.height if crop.height > 0 else max(image_height // 2, 1)
-            self._crop_roi = pg.RectROI(
-                [crop.x, crop.y],
-                [width, height],
-                pen=pg.mkPen("#38bdf8", width=2),
-                movable=False,
-                resizable=True,
-                rotatable=False,
-                sideScalers=False,
-            )
-            self._crop_roi.handleSize = 10
-            self._crop_roi.sigRegionChangeFinished.connect(self._crop_roi_changed)
-            self._crop_roi.sigRegionChanged.connect(lambda *_args: self._update_crop_overlay())
-            self._crop_roi.addScaleHandle([0.0, 0.0], [1.0, 1.0], name="top_left")
-            self._crop_roi.addScaleHandle([1.0, 0.0], [0.0, 1.0], name="top_right")
-            self._crop_roi.addScaleHandle([0.0, 1.0], [1.0, 0.0], name="bottom_left")
-            self._crop_roi.addScaleHandle([1.0, 1.0], [0.0, 0.0], name="bottom_right")
-            for fraction in (0.25, 0.5, 0.75):
-                self._crop_roi.addScaleHandle([0.0, fraction], [1.0, fraction], name=f"left_{fraction:g}")
-                self._crop_roi.addScaleHandle([1.0, fraction], [0.0, fraction], name=f"right_{fraction:g}")
-                self._crop_roi.addScaleHandle([fraction, 0.0], [fraction, 1.0], name=f"top_{fraction:g}")
-                self._crop_roi.addScaleHandle([fraction, 1.0], [fraction, 0.0], name=f"bottom_{fraction:g}")
-            self.image_plot.addItem(self._crop_roi)
-            self._crop_roi.setZValue(1.0)
-
-        width = crop.width if crop.width > 0 else max(image_width // 2, 1)
-        height = crop.height if crop.height > 0 else max(image_height // 2, 1)
-        x = min(max(crop.x, 0), max(image_width - width, 0))
-        y = min(max(crop.y, 0), max(image_height - height, 0))
-
-        self._suspend_crop_sync = True
-        self._crop_roi.setPos((x, y))
-        self._crop_roi.setSize((min(width, image_width), min(height, image_height)))
-        self._suspend_crop_sync = False
-        self._update_crop_overlay()
-        self._sync_crop_visibility()
+        self._image_tools_controller.sync_crop_tool(image_shape)
 
     def _sync_crop_visibility(self) -> None:
-        if self._crop_roi is not None:
-            self._crop_roi.setVisible(self._active_tool == "crop" and not self._showing_background_profile_main)
-        self._update_crop_overlay()
-        self._update_guide_overlays()
+        self._image_tools_controller.sync_crop_visibility()
 
     def _next_roi_id(self) -> str:
         self._roi_id_counter += 1
@@ -6555,41 +5516,11 @@ class MainWindow(MainWindowIcons, QMainWindow):
         self._sync_rectangle_roi_visibility()
         self._update_guide_overlays()
 
-    def _crop_roi_changed(self) -> None:
-        if self._suspend_crop_sync or self._crop_roi is None:
-            return
-        self._push_undo_point("Crop")
-        pos = self._crop_roi.pos()
-        size = self._crop_roi.size()
-        self._state.preprocessing.crop.x = max(int(round(pos.x())), 0)
-        self._state.preprocessing.crop.y = max(int(round(pos.y())), 0)
-        self._state.preprocessing.crop.width = max(int(round(size.x())), 1)
-        self._state.preprocessing.crop.height = max(int(round(size.y())), 1)
-        self._state.preprocessing.crop.enabled = True
-        self._update_crop_overlay()
-        self._handle_image_tool_settings_changed("Crop updated.", preserve_view=True)
-
     def _crop_rect_contains_point(self, point: tuple[float, float]) -> bool:
         return self._image_interaction._crop_rect_contains_point(point)
 
     def _move_crop_roi_to(self, x: float, y: float) -> None:
-        if self._crop_roi is None or self._current_processed_image is None:
-            return
-        image_height, image_width = self._current_processed_image.shape[:2]
-        size = self._crop_roi.size()
-        crop_width = max(float(size.x()), 1.0)
-        crop_height = max(float(size.y()), 1.0)
-        x = float(np.clip(float(x), 0.0, max(float(image_width) - crop_width, 0.0)))
-        y = float(np.clip(float(y), 0.0, max(float(image_height) - crop_height, 0.0)))
-        self._suspend_crop_sync = True
-        self._crop_roi.setPos((x, y))
-        self._suspend_crop_sync = False
-        self._state.preprocessing.crop.x = max(int(round(x)), 0)
-        self._state.preprocessing.crop.y = max(int(round(y)), 0)
-        self._state.preprocessing.crop.width = max(int(round(crop_width)), 1)
-        self._state.preprocessing.crop.height = max(int(round(crop_height)), 1)
-        self._state.preprocessing.crop.enabled = True
-        self._update_crop_overlay()
+        self._image_tools_controller.move_crop_roi_to(x, y)
 
     def _begin_image_pan(self, point: tuple[float, float]) -> None:
         self._image_interaction._begin_image_pan(point)
@@ -6614,6 +5545,28 @@ class MainWindow(MainWindowIcons, QMainWindow):
 
     def _update_crop_overlay(self) -> None:
         self._overlay_manager._update_crop_overlay()
+
+    def _ensure_exclusion_overlay(self) -> QGraphicsPathItem:
+        if self._exclusion_overlay_item is not None:
+            return self._exclusion_overlay_item
+        overlay = QGraphicsPathItem()
+        overlay.setZValue(0.3)
+        overlay.setPen(QPen(QColor("#ef4444"), 3))
+        overlay.setBrush(QBrush(Qt.BrushStyle.NoBrush))
+        overlay.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
+        overlay.setVisible(False)
+        self.image_plot.addItem(overlay)
+        self._exclusion_overlay_item = overlay
+        return overlay
+
+    def _show_image_exclusion_menu(self) -> None:
+        self._image_exclusion_controller.show_menu()
+
+    def _update_image_exclusion_indicator(self, spectral_cube_index: int | None = None, wavelength_nm: float | None = None) -> None:
+        self._image_exclusion_controller.update_indicator(spectral_cube_index, wavelength_nm)
+
+    def _refresh_image_exclusion_manage_dialog(self) -> None:
+        self._image_exclusion_controller.refresh_manage_dialog_if_open()
 
     def _build_numeric_field(self, spinbox: QSpinBox | QDoubleSpinBox) -> QWidget:
         row = QWidget(self)
@@ -6755,70 +5708,7 @@ class MainWindow(MainWindowIcons, QMainWindow):
         return panel
 
     def _restore_default_panel_layout(self) -> None:
-        if not hasattr(self, "_main_splitter"):
-            self._main_splitter = QSplitter(Qt.Orientation.Horizontal, self)
-            self._main_splitter.setObjectName("mainLayoutSplitter")
-            self._main_splitter.setChildrenCollapsible(False)
-            self._main_splitter.setHandleWidth(4)
-
-            self._visual_splitter = QSplitter(Qt.Orientation.Vertical, self._main_splitter)
-            self._visual_splitter.setObjectName("visualLayoutSplitter")
-            self._visual_splitter.setChildrenCollapsible(False)
-            self._visual_splitter.setHandleWidth(4)
-
-            self._top_visual_splitter = QSplitter(Qt.Orientation.Horizontal, self._visual_splitter)
-            self._top_visual_splitter.setObjectName("topVisualSplitter")
-            self._top_visual_splitter.setChildrenCollapsible(False)
-            self._top_visual_splitter.setHandleWidth(4)
-
-            self._bottom_visual_splitter = QSplitter(Qt.Orientation.Horizontal, self._visual_splitter)
-            self._bottom_visual_splitter.setObjectName("bottomVisualSplitter")
-            self._bottom_visual_splitter.setChildrenCollapsible(False)
-            self._bottom_visual_splitter.setHandleWidth(4)
-
-            self._top_visual_splitter.addWidget(self.image_panel)
-            self._top_visual_splitter.addWidget(self.histogram_panel)
-            self._bottom_visual_splitter.addWidget(self.spectra_panel)
-            self._bottom_visual_splitter.addWidget(self.sensorgram_panel)
-            self._visual_splitter.addWidget(self._top_visual_splitter)
-            self._visual_splitter.addWidget(self._bottom_visual_splitter)
-            self._main_splitter.addWidget(self.workflow_panel)
-            self._main_splitter.addWidget(self.roi_list_panel)
-            self._main_splitter.addWidget(self._visual_splitter)
-            self._workspace_root = QWidget(self)
-            workspace_layout = QVBoxLayout(self._workspace_root)
-            workspace_layout.setContentsMargins(0, 0, 0, 0)
-            workspace_layout.setSpacing(0)
-            workspace_layout.addWidget(self._main_splitter, 1)
-            self.setCentralWidget(self._workspace_root)
-        self.workflow_panel.setVisible(True)
-        self.roi_list_panel.setVisible(self._settings_bool("layout/roi_list_visible", True))
-        self.image_panel.setVisible(True)
-        self.histogram_panel.setVisible(True)
-        self.spectra_panel.setVisible(True)
-        self.sensorgram_panel.setVisible(True)
-        self._apply_default_splitter_sizes()
-
-    def _apply_default_splitter_sizes(self) -> None:
-        if not hasattr(self, "_main_splitter"):
-            return
-        self._main_splitter.setStretchFactor(0, 0)
-        self._main_splitter.setStretchFactor(1, 0)
-        self._main_splitter.setStretchFactor(2, 1)
-        self._visual_splitter.setStretchFactor(0, 1)
-        self._visual_splitter.setStretchFactor(1, 1)
-        self._top_visual_splitter.setStretchFactor(0, 4)
-        self._top_visual_splitter.setStretchFactor(1, 1)
-        self._bottom_visual_splitter.setStretchFactor(0, 1)
-        self._bottom_visual_splitter.setStretchFactor(1, 1)
-        if self._main_splitter.count() == 3:
-            self._main_splitter.setSizes([360, max(260, self.roi_list_panel.minimumWidth()), 1200])
-        if self._visual_splitter.count() == 2:
-            self._visual_splitter.setSizes([760, 420])
-        if self._top_visual_splitter.count() == 2:
-            self._top_visual_splitter.setSizes([980, 300])
-        if self._bottom_visual_splitter.count() == 2:
-            self._bottom_visual_splitter.setSizes([640, 640])
+        self._layout_state_controller.restore_default_panel_layout()
 
     def _build_mark_row(self) -> QWidget:
         row = QWidget(self)
@@ -6906,25 +5796,7 @@ class MainWindow(MainWindowIcons, QMainWindow):
         self._save_control_preferences()
 
     def _on_image_tools_section_applied_changed(self, applied: bool) -> None:
-        applied = bool(applied)
-        self._append_workflow_log(f"Image tools link | {applied}", level="debug")
-        if bool(getattr(self._state.preprocessing, "image_tools_enabled", True)) == applied:
-            return
-        self._push_undo_point("Image tools")
-        self._state.preprocessing.image_tools_enabled = applied
-        self._image_tools_preview_only = not applied
-        self._image_tools_pre_preview_enabled = applied
-        status = (
-            "Image tools linked. Recalculating downstream views."
-            if applied
-            else "Image tools link disabled. Preview only mode is active."
-        )
-        self._begin_busy("Applying image tools...")
-        QApplication.processEvents()
-        try:
-            self._handle_image_tool_settings_changed(status, preserve_view=True)
-        finally:
-            self._end_busy(status)
+        self._image_tools_controller.on_image_tools_section_applied_changed(applied)
 
     def _on_analysis_section_applied_changed(self, applied: bool) -> None:
         self._analysis_controller._on_analysis_section_applied_changed(applied)

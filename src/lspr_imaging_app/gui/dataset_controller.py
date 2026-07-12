@@ -126,6 +126,7 @@ class DatasetController:
             chunk_size_px = int(self.window._current_ome_zarr_chunk_size())
             compression_enabled = bool(self.window._current_ome_zarr_compression_enabled())
             shard_mode = str(self.window._current_ome_zarr_shard_mode())
+            skip_excluded_images = bool(self.window._current_ome_zarr_skip_excluded())
         except Exception as exc:
             QMessageBox.critical(self.window, "Stack to Zarr export failed", str(exc))
             self.window._set_status_text(f"Stack to Zarr export failed: {exc}")
@@ -185,7 +186,13 @@ class DatasetController:
         )
         if confirm != QMessageBox.StandardButton.Yes:
             return
-        self.window._start_ome_zarr_export(destination, chunk_size_px, compression_enabled=compression_enabled, shard_mode=shard_mode)
+        self.window._start_ome_zarr_export(
+            destination,
+            chunk_size_px,
+            compression_enabled=compression_enabled,
+            shard_mode=shard_mode,
+            skip_excluded_images=skip_excluded_images,
+        )
 
     def _resolve_ome_zarr_destination_collision(self, destination: Path, new_summary) -> Path | None:
         """If `destination` already exists, compare its saved parameters against
@@ -290,6 +297,11 @@ class DatasetController:
         shard_label = "1 image per file" if shard_mode == "per_image" else "1 spectral cube per file (all wavelengths)"
         lines.append(f"Shard: {shard_label}")
         lines.append(f"Compression: {'lz4 + bitshuffle (on)' if compression_enabled else 'none (off)'}")
+        excluded_count = len(self.window._state.image_exclusions)
+        if self.window._current_ome_zarr_skip_excluded():
+            lines.append(f"Skip excluded images: ON — {excluded_count} exclusion rule(s) will be left empty (no pixel data) in the export.")
+        else:
+            lines.append(f"Skip excluded images: off — all images will be exported, including {excluded_count} currently-excluded rule(s).")
         lines.append("")
         lines.append("Proceed with export?")
         return "\n".join(lines)

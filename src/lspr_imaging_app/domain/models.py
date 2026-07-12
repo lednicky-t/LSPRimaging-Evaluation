@@ -5,6 +5,8 @@ from pathlib import Path
 
 import numpy as np
 
+from lspr_imaging_app.domain.exclusions import ImageExclusionRule
+
 
 @dataclass(slots=True, frozen=True)
 class ImageKey:
@@ -253,3 +255,4 @@ class AnalysisState:
     chromatic_models: list[ChromaticTransformModel] = field(default_factory=list)
     chromatic_landmarks: list[ChromaticLandmarkObservation] = field(default_factory=list)
     mask: MaskSettings = field(default_factory=MaskSettings)
+    image_exclusions: list[ImageExclusionRule] = field(default_factory=list)

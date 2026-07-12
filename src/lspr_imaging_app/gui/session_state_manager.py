@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from dataclasses import replace as _dataclass_replace
 from pathlib import Path
 
 import numpy as np
@@ -44,6 +43,7 @@ class SessionStateManager:
                     analysis_cache,
                     session_mask,
                     mask_settings,
+                    image_exclusions,
                 ) = load_processing_profile(profile_path)
                 window._state.preprocessing = preprocessing
                 window._state.area_roi_settings = area_roi_settings
@@ -71,6 +71,7 @@ class SessionStateManager:
                 window._report_startup_progress(54, "Restoring chromatic transforms...")
                 window._state.chromatic_models = chromatic_models
                 window._state.chromatic_landmarks = chromatic_landmarks
+                window._state.image_exclusions = image_exclusions
                 window._restore_analysis_caches(analysis_cache)
                 window._selected_rectangle_roi_ids.clear()
                 window._sync_rectangle_stamp_overlays()
@@ -107,6 +108,7 @@ class SessionStateManager:
                 window._state.rois.clear()
                 window._state.chromatic_models.clear()
                 window._state.chromatic_landmarks.clear()
+                window._state.image_exclusions.clear()
                 window._current_file_mask = None
                 window._current_file_mask_path = None
                 window._current_file_mask_session_source_path = None
@@ -144,6 +146,7 @@ class SessionStateManager:
         window._state.rois.clear()
         window._state.chromatic_models.clear()
         window._state.chromatic_landmarks.clear()
+        window._state.image_exclusions.clear()
         window._current_file_mask = None
         window._current_file_mask_path = None
         window._current_file_mask_session_source_path = None
@@ -181,17 +184,12 @@ class SessionStateManager:
             )
             return
         try:
-            # While the crop/rotate tool is active we set image_tools_enabled=False
-            # so the user can see the full image while adjusting.  That preview-mode
-            # state must NOT be persisted; restore the pre-preview value so that the
-            # next session opens with the same "applied" state as before editing started.
+            # image_tools_enabled reflects only the user's explicit Image tools
+            # "applied" toggle - it is never changed just because the
+            # rotate/crop/measure tool preview is open (see
+            # ImageToolsController.unlink_for_preview), so there is nothing to
+            # restore here before saving.
             preprocessing_to_save = window._state.preprocessing
-            if getattr(window, "_image_tools_preview_only", False):
-                pre = bool(getattr(window, "_image_tools_pre_preview_enabled", True))
-                if preprocessing_to_save.image_tools_enabled != pre:
-                    preprocessing_to_save = _dataclass_replace(
-                        preprocessing_to_save, image_tools_enabled=pre
-                    )
             save_preprocessing(path, preprocessing_to_save)
             save_processing_profile(
                 profile_path,
@@ -205,6 +203,7 @@ class SessionStateManager:
                 window._analysis_cache_payload(),
                 session_mask=window._session_mask_payload(),
                 mask_settings=window._state.mask,
+                image_exclusions=window._state.image_exclusions,
             )
             session_mask_payload = window._session_mask_payload()
             if session_mask_payload is None:
@@ -259,6 +258,7 @@ class SessionStateManager:
                 window._analysis_cache_payload(),
                 session_mask=window._session_mask_payload(),
                 mask_settings=window._state.mask,
+                image_exclusions=window._state.image_exclusions,
             )
             session_mask_payload = window._session_mask_payload()
             if session_mask_payload is None:
@@ -303,6 +303,7 @@ class SessionStateManager:
                 analysis_cache,
                 session_mask,
                 mask_settings,
+                image_exclusions,
             ) = load_processing_profile(Path(source))
             window._state.preprocessing = preprocessing
             window._state.area_roi_settings = area_roi_settings
@@ -312,6 +313,7 @@ class SessionStateManager:
             window._reset_roi_id_counter_from_state()
             window._state.chromatic_models = chromatic_models
             window._state.chromatic_landmarks = chromatic_landmarks
+            window._state.image_exclusions = image_exclusions
             window._state.mask = mask_settings
             if session_mask is not None:
                 restored_mask = session_mask.get("mask")
@@ -329,6 +331,7 @@ class SessionStateManager:
             window._sync_reference_selection_from_settings()
             window._sync_image_processing_controls()
             window._sync_roi_detection_controls()
+            window._refresh_image_exclusion_manage_dialog()
             window._current_image_key = None
             window._refresh_image()
             window._save_processing_state_for_dataset()

@@ -41,6 +41,7 @@ def _process_image_task(path_str: str, preprocessing, rois, external_mask: np.nd
     raw_image = load_image_array(path_str)
     mask_settings = preprocessing[1] if isinstance(preprocessing, tuple) else None
     external_mask_processed = bool(preprocessing[2]) if isinstance(preprocessing, tuple) and len(preprocessing) > 2 else False
+    skip_crop = bool(preprocessing[3]) if isinstance(preprocessing, tuple) and len(preprocessing) > 3 else False
     preprocessing_settings = preprocessing[0] if isinstance(preprocessing, tuple) else preprocessing
     return apply_preprocessing(
         raw_image,
@@ -50,6 +51,7 @@ def _process_image_task(path_str: str, preprocessing, rois, external_mask: np.nd
         external_mask=external_mask,
         external_mask_processed=external_mask_processed,
         mask_state=mask_state,
+        skip_crop=skip_crop,
     )
 
 
@@ -114,6 +116,8 @@ def _ome_zarr_export_task(
     preprocessing=None,
     shard_mode: str = "per_image",
     *,
+    excluded_rules=None,
+    skip_excluded: bool = False,
     cancel_event: threading.Event | None = None,
     progress_callback=None,
 ) -> Path:
@@ -124,6 +128,8 @@ def _ome_zarr_export_task(
         compression_enabled=compression_enabled,
         preprocessing=preprocessing,
         shard_mode=shard_mode,
+        excluded_rules=excluded_rules,
+        skip_excluded=skip_excluded,
         progress_callback=progress_callback,
         cancel_event=cancel_event,
     )

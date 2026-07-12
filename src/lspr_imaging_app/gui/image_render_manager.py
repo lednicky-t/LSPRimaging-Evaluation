@@ -6,6 +6,8 @@ import time
 
 import numpy as np
 
+from lspr_imaging_app.processing.chromatic import transformed_circle_points, transform_spots_affine
+
 
 class ImageRenderManager:
     def __init__(self, window) -> None:
@@ -92,12 +94,13 @@ class ImageRenderManager:
         from lspr_imaging_app.gui.main_window import FunctionWorker, _process_image_task
 
         external_mask, external_mask_processed = window._effective_external_mask_for_record(record_path, processed_space=True)
+        skip_crop = bool(getattr(window, "_image_tools_preview_only", False))
         window._pending_image_refresh_payload = None
         window._image_refresh_running = True
         window._image_refresh_started_at = time.perf_counter()
         window._begin_busy(f"Loading {record_name}...")
         if isinstance(preprocessing, tuple):
-            preprocessing = (preprocessing[0], preprocessing[1], external_mask_processed)
+            preprocessing = (preprocessing[0], preprocessing[1], external_mask_processed, skip_crop)
         worker = FunctionWorker(
             _process_image_task,
             path_str,
@@ -221,13 +224,14 @@ class ImageRenderManager:
             window.chromatic_landmark_mark_button.setChecked(True)
         window._apply_main_image_content()
         window._update_reference_star_overlay()
+        window._update_image_exclusion_indicator(spectral_cube_index, wavelength)
         window._sync_ome_zarr_chunk_controls()
         window._update_ome_zarr_chunk_guide_overlay()
         restored_view = window._restore_chromatic_view_after_load()
         if not restored_view:
-            restored_view = window._restore_pending_image_view_after_load()
+            restored_view = self.restore_pending_image_view_after_load()
         if not restored_view:
-            restored_view = window._restore_saved_image_view_after_load()
+            restored_view = self.restore_saved_image_view_after_load()
         if bool(getattr(window, "_force_image_autorange_after_load", False)):
             window._force_image_autorange_after_load = False
             window.image_plot.autoRange()
@@ -254,3 +258,207 @@ class ImageRenderManager:
                 save_after=False,
                 refresh_histogram=False,
             )
+
+    def on_image_view_range_changed(self, *_args) -> None:
+        window = self.window
+        if window._current_processed_image is None or window._showing_background_profile_main:
+            return
+        if window._image_view_save_timer.isActive():
+            window._image_view_save_timer.stop()
+        window._image_view_save_timer.start()
+
+    def display_rois(self, image_key: tuple[int, float] | None = None) -> list:
+        window = self.window
+        target_key = image_key if image_key is not None else window._current_image_key
+        if target_key is None:
+            return window._state.area_rois
+        if window._is_reference_image_key(target_key):
+            return window._state.area_rois
+        if window._current_processed_image is None and image_key is None:
+            return window._state.area_rois
+        signature = (
+            target_key,
+            window._roi_signature(window._state.area_rois),
+            window._chromatic_signature_for_image_key(target_key),
+            None if window._current_processed_image is None else window._current_processed_image.shape[:2],
+        )
+        if window._display_spot_cache_signature == signature and window._display_spot_cache_value is not None:
+            return window._display_spot_cache_value
+        affine_matrix = window._chromatic_affine_for_image_key(target_key)
+        if affine_matrix is None:
+            transformed = window._state.area_rois
+        else:
+            clamp_shape = window._current_processed_image.shape[:2] if window._current_processed_image is not None else None
+            transformed = transform_spots_affine(window._state.area_rois, affine_matrix, clamp_shape=clamp_shape)
+        window._display_spot_cache_signature = signature
+        window._display_spot_cache_value = transformed
+        return transformed
+
+    def rois_for_preprocessing(self, image_key: tuple[int, float] | None) -> list:
+        window = self.window
+        if image_key is None or window._is_reference_image_key(image_key):
+            return window._state.area_rois
+        if not window._state.preprocessing.chromatic_correction_enabled:
+            return window._state.area_rois
+        affine_matrix = window._chromatic_affine_for_image_key(image_key)
+        if affine_matrix is None:
+            return window._state.area_rois
+        return transform_spots_affine(window._state.area_rois, affine_matrix)
+
+    def roi_curve_points(
+        self,
+        source_roi,
+        display_spot,
+        radius_px: float,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        window = self.window
+        affine_matrix = window._chromatic_affine_for_image_key(window._current_image_key)
+        if affine_matrix is None or window._is_current_reference_image():
+            theta = window._spot_overlay_theta
+            xs = display_spot.center_x + float(radius_px) * np.cos(theta)
+            ys = display_spot.center_y + float(radius_px) * np.sin(theta)
+            return xs, ys
+        return transformed_circle_points(
+            (float(source_roi.center_x), float(source_roi.center_y)),
+            float(radius_px),
+            affine_matrix,
+            window._spot_overlay_theta,
+        )
+
+    def set_view_overlay_visibility(
+        self,
+        *,
+        spots_visible: bool,
+        rings_visible: bool,
+        mask_visible: bool,
+        reference_points_visible: bool,
+        highlight_visible: bool,
+    ) -> None:
+        window = self.window
+        window._rois_visible = bool(spots_visible)
+        window._reference_visible = bool(rings_visible)
+        window._mask_visible = bool(mask_visible)
+        window._reference_points_visible = bool(reference_points_visible)
+        window._highlight_visible = bool(highlight_visible)
+        window.show_rois_check.blockSignals(True)
+        window.show_rings_check.blockSignals(True)
+        window.show_mask_check.blockSignals(True)
+        window.show_reference_points_check.blockSignals(True)
+        window.show_highlight_check.blockSignals(True)
+        window.show_rois_check.setChecked(window._rois_visible)
+        window.show_rings_check.setChecked(window._reference_visible)
+        window.show_mask_check.setChecked(window._mask_visible)
+        window.show_reference_points_check.setChecked(window._reference_points_visible)
+        window.show_highlight_check.setChecked(window._highlight_visible)
+        window.show_rois_check.blockSignals(False)
+        window.show_rings_check.blockSignals(False)
+        window.show_mask_check.blockSignals(False)
+        window.show_reference_points_check.blockSignals(False)
+        window.show_highlight_check.blockSignals(False)
+        window._refresh_view_toggle_icons()
+        window._update_roi_overlays()
+        window._update_ignore_mask_overlay()
+        window._update_selected_intensity_overlay()
+        window._update_landmark_overlays()
+
+    def capture_pending_image_view_ranges(self, *, preserve_view: bool = False) -> None:
+        window = self.window
+        if window._current_processed_image is None:
+            window._pending_image_view_ranges = None
+            window._pending_image_view_crop_offset = None
+            window._pending_image_view_preserve = False
+            return
+        x_range, y_range = window.image_plot.vb.viewRange()
+        window._pending_image_view_ranges = (
+            (float(x_range[0]), float(x_range[1])),
+            (float(y_range[0]), float(y_range[1])),
+        )
+        window._pending_image_view_preserve = bool(preserve_view)
+        crop = window._state.preprocessing.crop
+        if window._active_tool == "crop" and crop.enabled and bool(window._state.preprocessing.image_tools_enabled):
+            window._pending_image_view_crop_offset = (float(crop.x), float(crop.y))
+        else:
+            window._pending_image_view_crop_offset = None
+
+    def set_clamped_image_view_ranges(
+        self,
+        x_range: tuple[float, float],
+        y_range: tuple[float, float],
+    ) -> bool:
+        window = self.window
+        if window._current_processed_image is None:
+            return False
+        image_height, image_width = window._current_processed_image.shape[:2]
+        view_width = max(float(x_range[1] - x_range[0]), 1.0)
+        view_height = max(float(y_range[1] - y_range[0]), 1.0)
+        if view_width >= float(image_width):
+            target_x_range = (0.0, float(image_width))
+        else:
+            shift_x = 0.0
+            if x_range[0] < 0.0:
+                shift_x = -float(x_range[0])
+            elif x_range[1] > float(image_width):
+                shift_x = float(image_width) - float(x_range[1])
+            target_x_range = (float(x_range[0] + shift_x), float(x_range[1] + shift_x))
+        if view_height >= float(image_height):
+            target_y_range = (0.0, float(image_height))
+        else:
+            shift_y = 0.0
+            if y_range[0] < 0.0:
+                shift_y = -float(y_range[0])
+            elif y_range[1] > float(image_height):
+                shift_y = float(image_height) - float(y_range[1])
+            target_y_range = (float(y_range[0] + shift_y), float(y_range[1] + shift_y))
+        window.image_plot.vb.setRange(xRange=target_x_range, yRange=target_y_range, padding=0.0)
+        return True
+
+    def set_unclamped_image_view_ranges(
+        self,
+        x_range: tuple[float, float],
+        y_range: tuple[float, float],
+    ) -> bool:
+        window = self.window
+        if window._current_processed_image is None:
+            return False
+        window.image_plot.vb.setRange(
+            xRange=(float(x_range[0]), float(x_range[1])),
+            yRange=(float(y_range[0]), float(y_range[1])),
+            padding=0.0,
+        )
+        return True
+
+    def restore_pending_image_view_after_load(self) -> bool:
+        window = self.window
+        previous_ranges = window._pending_image_view_ranges
+        crop_offset = window._pending_image_view_crop_offset
+        preserve_view = window._pending_image_view_preserve
+        window._pending_image_view_ranges = None
+        window._pending_image_view_crop_offset = None
+        window._pending_image_view_preserve = False
+        if previous_ranges is None:
+            return False
+        if preserve_view:
+            return self.set_unclamped_image_view_ranges(previous_ranges[0], previous_ranges[1])
+        if crop_offset is not None:
+            return self.set_unclamped_image_view_ranges(
+                (previous_ranges[0][0] - crop_offset[0], previous_ranges[0][1] - crop_offset[0]),
+                (previous_ranges[1][0] - crop_offset[1], previous_ranges[1][1] - crop_offset[1]),
+            )
+        return self.set_clamped_image_view_ranges(previous_ranges[0], previous_ranges[1])
+
+    def restore_saved_image_view_after_load(self) -> bool:
+        window = self.window
+        if window._current_processed_image is None or window._showing_background_profile_main:
+            return False
+        x_min_raw = window._settings.value("visual/image_view_x_min", None)
+        x_max_raw = window._settings.value("visual/image_view_x_max", None)
+        y_min_raw = window._settings.value("visual/image_view_y_min", None)
+        y_max_raw = window._settings.value("visual/image_view_y_max", None)
+        if None in (x_min_raw, x_max_raw, y_min_raw, y_max_raw):
+            return False
+        try:
+            x_range = (float(x_min_raw), float(x_max_raw))
+            y_range = (float(y_min_raw), float(y_max_raw))
+        except (TypeError, ValueError):
+            return False
+        return self.set_clamped_image_view_ranges(x_range, y_range)

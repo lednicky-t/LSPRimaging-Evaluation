@@ -8,6 +8,7 @@ from pathlib import Path
 import numpy as np
 
 from lspr_imaging_app.format_versions import PROCESSING_PROFILE_VERSION, ROI_EXPORT_VERSION
+from lspr_imaging_app.domain.exclusions import ImageExclusionRule
 from lspr_imaging_app.domain.models import (
     AreaRoi,
     AreaRoiDetectionSettings,
@@ -235,6 +236,7 @@ def save_processing_profile(
     analysis_cache: dict | None = None,
     session_mask: dict | None = None,
     mask_settings: MaskSettings | None = None,
+    image_exclusions: list[ImageExclusionRule] | None = None,
 ) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = {
@@ -281,6 +283,7 @@ def save_processing_profile(
         "rois": [asdict(roi) for roi in (rois or [])],
         "chromatic_models": [asdict(model) for model in (chromatic_models or [])],
         "chromatic_landmarks": [asdict(mark) for mark in (chromatic_landmarks or [])],
+        "image_exclusions": [asdict(rule) for rule in (image_exclusions or [])],
     }
     if mask_settings is not None:
         payload["mask_settings"] = _encode_mask_settings(mask_settings)
@@ -310,6 +313,7 @@ def load_processing_profile(
     dict,
     dict | None,
     MaskSettings,
+    list[ImageExclusionRule],
 ]:
     payload = json.loads(path.read_text(encoding="utf-8"))
     preprocessing_payload = payload.get("preprocessing", payload)
@@ -611,4 +615,33 @@ def load_processing_profile(
                 "mask": decoded_mask,
             }
 
-    return preprocessing, detection, area_rois, area_roi_groups, rois, chromatic_models, chromatic_landmarks, analysis_cache, session_mask, mask_settings
+    raw_exclusions = payload.get("image_exclusions", [])
+    image_exclusions: list[ImageExclusionRule] = []
+    if isinstance(raw_exclusions, list):
+        for raw in raw_exclusions:
+            if not isinstance(raw, dict):
+                continue
+            raw_cube = raw.get("spectral_cube_index")
+            raw_wavelength = raw.get("wavelength_nm")
+            image_exclusions.append(
+                ImageExclusionRule(
+                    spectral_cube_index=None if raw_cube is None else int(raw_cube),
+                    wavelength_nm=None if raw_wavelength is None else float(raw_wavelength),
+                    note=str(raw.get("note", "")),
+                    created_at_utc=str(raw.get("created_at_utc", "")),
+                )
+            )
+
+    return (
+        preprocessing,
+        detection,
+        area_rois,
+        area_roi_groups,
+        rois,
+        chromatic_models,
+        chromatic_landmarks,
+        analysis_cache,
+        session_mask,
+        mask_settings,
+        image_exclusions,
+    )
