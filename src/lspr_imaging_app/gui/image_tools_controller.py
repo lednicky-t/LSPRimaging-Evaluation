@@ -264,42 +264,54 @@ class ImageToolsController:
         crop = window._state.preprocessing.crop
         image_height, image_width = image_shape[:2]
         window._ensure_image_tool_guide()
-        if window._crop_roi is None:
+        # Guard the whole construction-and-position sync, not just the final
+        # setPos/setSize: building a fresh RectROI's scale handles below fires
+        # pyqtgraph's sigRegionChangeFinished once per addScaleHandle() call
+        # (9 times), and crop_roi_changed() is already connected by then. With
+        # the guard only wrapping the later setPos/setSize, those construction
+        # -time signals ran unguarded and wrote the ROI's fallback size (half
+        # the image, used when crop.width/height are 0) straight back into
+        # window._state.preprocessing.crop with enabled=True -- silently
+        # resurrecting a "cleared" crop on every fresh session restart, since
+        # window._crop_roi only gets (re)built once per session.
+        window._suspend_crop_sync = True
+        try:
+            if window._crop_roi is None:
+                width = crop.width if crop.width > 0 else max(image_width // 2, 1)
+                height = crop.height if crop.height > 0 else max(image_height // 2, 1)
+                window._crop_roi = pg.RectROI(
+                    [crop.x, crop.y],
+                    [width, height],
+                    pen=pg.mkPen("#38bdf8", width=2),
+                    movable=False,
+                    resizable=True,
+                    rotatable=False,
+                    sideScalers=False,
+                )
+                window._crop_roi.handleSize = 10
+                window._crop_roi.sigRegionChangeFinished.connect(self.crop_roi_changed)
+                window._crop_roi.sigRegionChanged.connect(lambda *_args: window._update_crop_overlay())
+                window._crop_roi.addScaleHandle([0.0, 0.0], [1.0, 1.0], name="top_left")
+                window._crop_roi.addScaleHandle([1.0, 0.0], [0.0, 1.0], name="top_right")
+                window._crop_roi.addScaleHandle([0.0, 1.0], [1.0, 0.0], name="bottom_left")
+                window._crop_roi.addScaleHandle([1.0, 1.0], [0.0, 0.0], name="bottom_right")
+                for fraction in (0.25, 0.5, 0.75):
+                    window._crop_roi.addScaleHandle([0.0, fraction], [1.0, fraction], name=f"left_{fraction:g}")
+                    window._crop_roi.addScaleHandle([1.0, fraction], [0.0, fraction], name=f"right_{fraction:g}")
+                    window._crop_roi.addScaleHandle([fraction, 0.0], [fraction, 1.0], name=f"top_{fraction:g}")
+                    window._crop_roi.addScaleHandle([fraction, 1.0], [fraction, 0.0], name=f"bottom_{fraction:g}")
+                window.image_plot.addItem(window._crop_roi)
+                window._crop_roi.setZValue(1.0)
+
             width = crop.width if crop.width > 0 else max(image_width // 2, 1)
             height = crop.height if crop.height > 0 else max(image_height // 2, 1)
-            window._crop_roi = pg.RectROI(
-                [crop.x, crop.y],
-                [width, height],
-                pen=pg.mkPen("#38bdf8", width=2),
-                movable=False,
-                resizable=True,
-                rotatable=False,
-                sideScalers=False,
-            )
-            window._crop_roi.handleSize = 10
-            window._crop_roi.sigRegionChangeFinished.connect(self.crop_roi_changed)
-            window._crop_roi.sigRegionChanged.connect(lambda *_args: window._update_crop_overlay())
-            window._crop_roi.addScaleHandle([0.0, 0.0], [1.0, 1.0], name="top_left")
-            window._crop_roi.addScaleHandle([1.0, 0.0], [0.0, 1.0], name="top_right")
-            window._crop_roi.addScaleHandle([0.0, 1.0], [1.0, 0.0], name="bottom_left")
-            window._crop_roi.addScaleHandle([1.0, 1.0], [0.0, 0.0], name="bottom_right")
-            for fraction in (0.25, 0.5, 0.75):
-                window._crop_roi.addScaleHandle([0.0, fraction], [1.0, fraction], name=f"left_{fraction:g}")
-                window._crop_roi.addScaleHandle([1.0, fraction], [0.0, fraction], name=f"right_{fraction:g}")
-                window._crop_roi.addScaleHandle([fraction, 0.0], [fraction, 1.0], name=f"top_{fraction:g}")
-                window._crop_roi.addScaleHandle([fraction, 1.0], [fraction, 0.0], name=f"bottom_{fraction:g}")
-            window.image_plot.addItem(window._crop_roi)
-            window._crop_roi.setZValue(1.0)
+            x = min(max(crop.x, 0), max(image_width - width, 0))
+            y = min(max(crop.y, 0), max(image_height - height, 0))
 
-        width = crop.width if crop.width > 0 else max(image_width // 2, 1)
-        height = crop.height if crop.height > 0 else max(image_height // 2, 1)
-        x = min(max(crop.x, 0), max(image_width - width, 0))
-        y = min(max(crop.y, 0), max(image_height - height, 0))
-
-        window._suspend_crop_sync = True
-        window._crop_roi.setPos((x, y))
-        window._crop_roi.setSize((min(width, image_width), min(height, image_height)))
-        window._suspend_crop_sync = False
+            window._crop_roi.setPos((x, y))
+            window._crop_roi.setSize((min(width, image_width), min(height, image_height)))
+        finally:
+            window._suspend_crop_sync = False
         window._update_crop_overlay()
         self.sync_crop_visibility()
 

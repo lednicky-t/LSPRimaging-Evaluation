@@ -469,26 +469,47 @@ def main() -> None:
         remapped = restore_flow_start + round((restore_flow_end - restore_flow_start) * (percent / 100.0))
         splash.update_progress(remapped, message)
 
+    def close_splash() -> None:
+        splash.close()
+        splash.deleteLater()
+
     def finish_startup() -> None:
+        # Do every bit of window/panel/splitter restoration while the window is
+        # still hidden, and show it exactly once, already in its final state.
+        # An earlier version of this function called window.show()/showNormal()
+        # first and only *then* ran panel/splitter restoration plus
+        # _restore_saved_window_state_after_show() (which can itself call
+        # showMaximized()/showFullScreen(), a second, different show). With no
+        # event-loop turn in between show() and that later work, Windows showed
+        # a blank "ghost" placeholder for the whole gap (correct title/icon,
+        # empty content) -- fixed by giving Qt a paint turn, but that then
+        # exposed the *real* problem this reorder fixes: two visibly distinct
+        # show states painted back to back (small/default layout at whatever
+        # showNormal() first drew, then a visible resize/relayout once the
+        # saved splitter state and the real maximized/fullscreen state applied
+        # a moment later). Restoring everything before the single show() call
+        # avoids that "blink and rescale" entirely, and keeps the ghost-window
+        # fix, since show() is still followed by a processEvents() turn before
+        # more work (closing the splash) runs.
         try:
             splash.update_progress(restore_flow_start, "Restoring saved layout...")
             window.run_startup_restore_flow(show_window=False, progress_callback=progress_callback)
-            splash.update_progress(96, "Launching workspace...")
-            window.setEnabled(True)
-            window.show()
-            window.showNormal()
-            window._restore_saved_window_state_after_show()
-            window.raise_()
-            window.activateWindow()
+            splash.update_progress(85, "Restoring panel layout...")
             window._restore_saved_panel_layout_state()
             window._normalize_panel_layout()
             window._sync_panel_visibility_after_show()
+            splash.update_progress(96, "Launching workspace...")
+            window.setEnabled(True)
+            window._restore_saved_window_state_after_show()  # the one show() call: normal/maximized/fullscreen
+            window.raise_()
+            window.activateWindow()
             app.processEvents()
         finally:
-            splash.close()
-            splash.deleteLater()
             app.setQuitOnLastWindowClosed(True)
             _apply_windows_titlebar_theme(window)
+            # Small extra safety buffer on top of the processEvents() above, so the
+            # splash still covers the tail end of this paint settling.
+            QTimer.singleShot(200, close_splash)
 
     QTimer.singleShot(0, finish_startup)
     sys.exit(app.exec())
