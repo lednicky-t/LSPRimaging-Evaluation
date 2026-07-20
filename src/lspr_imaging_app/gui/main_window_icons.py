@@ -2095,11 +2095,15 @@ class MainWindowIcons:
         self._set_combo_width(self.analysis_metric_combo, ["Maximum", "Centroid"], minimum=80)
         self._set_combo_width(self.chromatic_subpixel_precision_combo, ["1", "4", "9"], minimum=42)
         navigation_control_width = max(self.spectral_cube_spin.sizeHint().width(), self.wavelength_spin.sizeHint().width(), 82)
-        navigation_slider_width = max(navigation_control_width + 80, 170)
+        # The spin boxes keep a hard fixed width so their digits never get clipped.
+        # The sliders only get a floor (minimum width): they are free to shrink toward
+        # it - and grow past their preferred width when there's room - so a narrow
+        # panel takes space away from the slider track, not from the number boxes.
+        navigation_slider_minimum_width = 60
         self.spectral_cube_spin.setFixedWidth(navigation_control_width)
         self.wavelength_spin.setFixedWidth(navigation_control_width)
-        self.spectral_cube_slider.setFixedWidth(navigation_slider_width)
-        self.wavelength_slider.setFixedWidth(navigation_slider_width)
+        self.spectral_cube_slider.setMinimumWidth(navigation_slider_minimum_width)
+        self.wavelength_slider.setMinimumWidth(navigation_slider_minimum_width)
 
     def _chromatic_transform_icon(self, has_models: bool) -> QIcon:
         if has_models:

@@ -28,7 +28,7 @@ from PyQt6.QtCore import (
     QThreadPool,
     QTimer,
 )
-from PyQt6.QtGui import QAction, QBrush, QColor, QFont, QIcon, QKeyEvent, QKeySequence, QPainter, QPainterPath, QPalette, QPen, QPixmap
+from PyQt6.QtGui import QAction, QBrush, QColor, QFont, QIcon, QKeyEvent, QKeySequence, QPainter, QPainterPath, QPalette, QPen, QPixmap, QWheelEvent
 from PyQt6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -189,6 +189,25 @@ try:
     import lucide
 except Exception:  # pragma: no cover - optional dependency
     lucide = None
+
+
+class _WheelHorizontalScrollArea(QScrollArea):
+    """A QScrollArea whose (vertical) mouse wheel input scrolls it horizontally.
+
+    Used for toolbar-style rows that only ever scroll left/right - a plain
+    QScrollArea ignores the wheel here since there is nothing to scroll
+    vertically, which feels broken for a horizontal strip of icons.
+    """
+
+    def wheelEvent(self, event: QWheelEvent) -> None:
+        delta = event.angleDelta().y() or event.angleDelta().x()
+        if delta:
+            bar = self.horizontalScrollBar()
+            bar.setValue(bar.value() - delta)
+            event.accept()
+        else:
+            super().wheelEvent(event)
+
 
 class MainWindow(MainWindowIcons, QMainWindow):
     SETTINGS_ORG = "LSPR"
@@ -1591,11 +1610,18 @@ class MainWindow(MainWindowIcons, QMainWindow):
 
         toolbar_layout.addWidget(self.measurement_controls_widget, 0)
         toolbar_layout.addStretch(1)
-        bottom_view_layout.addWidget(view_section, 0)
-        bottom_view_layout.addStretch(1)
-        bottom_view_layout.addWidget(self.measurement_unit_button, 0)
-        bottom_view_layout.addWidget(self.scale_bar_color_button, 0)
-        bottom_view_layout.addWidget(self.scale_bar_toggle_button, 0)
+
+        bottom_view_content = QWidget(self.bottom_view_toolbar)
+        bottom_view_content_layout = QHBoxLayout(bottom_view_content)
+        bottom_view_content_layout.setContentsMargins(0, 0, 0, 0)
+        bottom_view_content_layout.setSpacing(10)
+        bottom_view_content_layout.addWidget(view_section, 0)
+        bottom_view_content_layout.addWidget(self.measurement_unit_button, 0)
+        bottom_view_content_layout.addWidget(self.scale_bar_color_button, 0)
+        bottom_view_content_layout.addWidget(self.scale_bar_toggle_button, 0)
+        bottom_view_content_layout.addStretch(1)
+        bottom_view_layout.addWidget(self._make_scrollable_icon_row(bottom_view_content), 1)
+
         self._populate_left_spot_editor_controls()
         self._image_tools_controller.refresh_image_tool_action_icons()
         self._update_display_unit_controls()
@@ -1603,6 +1629,56 @@ class MainWindow(MainWindowIcons, QMainWindow):
         theme_name = str(self._settings.value("ui/theme", "blue"))
         self._set_ui_theme("gray" if theme_name == "gray" else "blue")
         self._update_color_button_styles()
+
+    def _make_scrollable_icon_row(self, content: QWidget) -> QWidget:
+        """Wrap a row of fixed-size icon controls so it scrolls horizontally
+        instead of overlapping/clipping when the panel is too narrow to fit
+        every control. Left/right arrow buttons only appear once the row
+        actually overflows."""
+        scroll = _WheelHorizontalScrollArea(content.parentWidget())
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        scroll.setWidget(content)
+        scroll.setStyleSheet("QScrollArea { border: none; background: transparent; }")
+        scroll.setFixedHeight(content.sizeHint().height())
+
+        left_button = self._make_icon_tool_button("chevron-left", "#f8fafc", "Scroll the row left.")
+        right_button = self._make_icon_tool_button("chevron-right", "#f8fafc", "Scroll the row right.")
+
+        bar = scroll.horizontalScrollBar()
+
+        def _scroll_by(direction: int) -> None:
+            step = max(scroll.viewport().width() - 20, 40)
+            bar.setValue(bar.value() + direction * step)
+
+        left_button.clicked.connect(lambda: _scroll_by(-1))
+        right_button.clicked.connect(lambda: _scroll_by(1))
+
+        def _update_arrows(*_args: object) -> None:
+            overflowing = bar.maximum() > bar.minimum()
+            left_button.setVisible(overflowing)
+            right_button.setVisible(overflowing)
+            left_button.setEnabled(bar.value() > bar.minimum())
+            right_button.setEnabled(bar.value() < bar.maximum())
+
+        bar.rangeChanged.connect(_update_arrows)
+        bar.valueChanged.connect(_update_arrows)
+        _update_arrows()
+
+        wrapper = QWidget(self)
+        layout = QHBoxLayout(wrapper)
+        # A few px of breathing room on each side: with 0 margin the right arrow
+        # sits flush against the dock/splitter boundary and its edge pixels get
+        # clipped by the splitter handle, making it look like the button vanished.
+        layout.setContentsMargins(2, 0, 4, 0)
+        layout.setSpacing(2)
+        layout.addWidget(left_button, 0)
+        layout.addWidget(scroll, 1)
+        layout.addWidget(right_button, 0)
+        return wrapper
 
     def _connect_signals(self) -> None:
         self._connect_dataset_and_nav()
