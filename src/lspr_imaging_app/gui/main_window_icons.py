@@ -61,6 +61,13 @@ except Exception:  # pragma: no cover - optional icon dependency
 class ClickableIconLabel(QLabel):
     clicked = pyqtSignal()
 
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        # Set here (not just at each call site) so every instance - including
+        # any future direct instantiation that skips the factory helpers
+        # below - shows a pointing hand instead of the default arrow cursor.
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+
     def mousePressEvent(self, event) -> None:  # type: ignore[override]
         if event.button() == Qt.MouseButton.LeftButton:
             self.clicked.emit()

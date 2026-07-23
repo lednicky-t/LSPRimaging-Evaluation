@@ -217,6 +217,7 @@ class PanelContainer(QWidget):
         header = QFrame(self)
         header.setObjectName("panelHeader")
         header.setToolTip(f"Double-click to hide the {title} panel.")
+        header.setCursor(Qt.CursorShape.PointingHandCursor)
         header_layout = QHBoxLayout(header)
         header_layout.setContentsMargins(8, 4, 8, 4)
         header_layout.setSpacing(4)
@@ -693,104 +694,3 @@ class ShineProgressBar(QProgressBar):
             painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, option.text)
 
         painter.end()
-
-
-class ClickableIconLabel(QLabel):
-    clicked = pyqtSignal()
-
-    def __init__(self, parent: QWidget | None = None) -> None:
-        super().__init__(parent)
-        self.setCursor(Qt.CursorShape.PointingHandCursor)
-
-    def mousePressEvent(self, event) -> None:  # type: ignore[override]
-        if event.button() == Qt.MouseButton.LeftButton:
-            self.clicked.emit()
-            event.accept()
-            return
-        super().mousePressEvent(event)
-
-
-class FreeStandingToggleIconLabel(ClickableIconLabel):
-    toggled = pyqtSignal(bool)
-
-    def __init__(self, parent: QWidget | None = None) -> None:
-        super().__init__(parent)
-        self._checked = False
-        self._icon: QIcon = QIcon()
-        self._icon_size = QSize(24, 24)
-
-    def setIcon(self, icon: QIcon) -> None:
-        self._icon = icon
-        self._refresh_pixmap()
-
-    def setIconSize(self, size: QSize) -> None:
-        self._icon_size = QSize(size)
-        self._refresh_pixmap()
-
-    def setChecked(self, checked: bool) -> None:
-        checked = bool(checked)
-        if self._checked == checked:
-            return
-        self._checked = checked
-        self._refresh_pixmap()
-        self.toggled.emit(self._checked)
-
-    def isChecked(self) -> bool:
-        return self._checked
-
-    def mousePressEvent(self, event) -> None:  # type: ignore[override]
-        if event.button() == Qt.MouseButton.LeftButton:
-            self.setChecked(not self._checked)
-            self.clicked.emit()
-            event.accept()
-            return
-        super().mousePressEvent(event)
-
-    def _refresh_pixmap(self) -> None:
-        if self._icon.isNull():
-            self.setPixmap(QPixmap())
-            return
-        self.setPixmap(self._icon.pixmap(self._icon_size))
-
-
-class FreeStandingToggleTextLabel(ClickableIconLabel):
-    toggled = pyqtSignal(bool)
-
-    def __init__(self, parent: QWidget | None = None) -> None:
-        super().__init__(parent)
-        self._checked = False
-        self._checked_text = ""
-        self._unchecked_text = ""
-        self.setAlignment(Qt.AlignmentFlag.AlignCenter)
-
-    def setTexts(self, unchecked_text: str, checked_text: str) -> None:
-        self._unchecked_text = str(unchecked_text)
-        self._checked_text = str(checked_text)
-        self._refresh_text()
-
-    def setChecked(self, checked: bool) -> None:
-        checked = bool(checked)
-        if self._checked == checked:
-            self._refresh_text()
-            return
-        self._checked = checked
-        self._refresh_text()
-        self.toggled.emit(self._checked)
-
-    def isChecked(self) -> bool:
-        return self._checked
-
-    def mousePressEvent(self, event) -> None:  # type: ignore[override]
-        if event.button() == Qt.MouseButton.LeftButton:
-            self.setChecked(not self._checked)
-            self.clicked.emit()
-            event.accept()
-            return
-        super().mousePressEvent(event)
-
-    def _refresh_text(self) -> None:
-        self.setText(self._checked_text if self._checked else self._unchecked_text)
-        self.setProperty("checked", self._checked)
-        self.style().unpolish(self)
-        self.style().polish(self)
-        self.update()
