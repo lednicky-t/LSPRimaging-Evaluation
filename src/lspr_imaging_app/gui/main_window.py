@@ -181,11 +181,6 @@ from .analysis_tasks import (
 _ = (_auto_chromatic_landmarks_task, _estimate_chromatic_models_task, _process_image_task)
 
 try:
-    import tabler_icons
-except Exception:  # pragma: no cover - optional dependency
-    tabler_icons = None
-
-try:
     import lucide
 except Exception:  # pragma: no cover - optional dependency
     lucide = None

@@ -1,13 +1,17 @@
 # -*- mode: python ; coding: utf-8 -*-
 
+from PyInstaller.utils.hooks import collect_data_files
+
+# lspr_ui's vendored Tabler icon SVGs are package-data, not Python source, so
+# PyInstaller won't pick them up automatically from hiddenimports alone.
+lspr_ui_datas = collect_data_files('lspr_ui', includes=['icon_assets/*.svg'])
 
 a = Analysis(
     ['src\\main.py'],
     pathex=[],
     binaries=[],
-    datas=[],
+    datas=lspr_ui_datas,
     hiddenimports=[
-        'tabler_icons',
         'lucide',
         'zarr',
         'numcodecs',

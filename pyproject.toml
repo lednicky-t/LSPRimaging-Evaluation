@@ -22,7 +22,6 @@ dependencies = [
     "scipy",
     "opencv-python-headless",
     "tifffile",
-    "tabler-qicon",
     "lucide",
     "lspr-ui>=0.1.0",
     "lspr-core>=0.1.0",

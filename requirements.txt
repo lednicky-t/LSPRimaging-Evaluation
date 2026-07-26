@@ -9,8 +9,6 @@ scipy
 opencv-python-headless
 tifffile
 scikit-image
-tabler-icons
-tabler-qicon
 lucide
 lspr-ui>=0.1.0
 lspr-core>=0.1.0

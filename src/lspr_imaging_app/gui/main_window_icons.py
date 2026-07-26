@@ -35,6 +35,7 @@ from PyQt6.QtWidgets import (
 from lspr_ui import (
     APP_THEME,
     icon_accent_colors,
+    load_tabler_icon,
     make_compact_spinbox,
     transparent_icon_button_stylesheet,
 )
@@ -46,11 +47,6 @@ from lspr_imaging_app.gui.worker import FunctionWorker
 from lspr_imaging_app.io.dataset import (
     dataset_is_ome_zarr,
 )
-
-try:
-    import tabler_icons
-except Exception:  # pragma: no cover - optional icon dependency
-    tabler_icons = None
 
 try:
     import lucide
@@ -230,23 +226,7 @@ class MainWindowIcons:
         stroke_width: float = 2.2,
         fill: str = "none",
     ) -> QIcon:
-        if tabler_icons is None:
-            return QIcon()
-        try:
-            svg = str(
-                tabler_icons.get_icon(
-                    name,
-                    size=size,
-                    stroke=color,
-                    fill=fill,
-                    stroke_width=stroke_width,
-                    stroke_linecap="round",
-                    stroke_linejoin="round",
-                )
-            )
-        except Exception:
-            return QIcon()
-        return MainWindowIcons._svg_icon_from_markup(svg, size=size)
+        return load_tabler_icon(name, color=color, size=size, stroke_width=stroke_width, fill=fill)
 
     @staticmethod
     def _lucide_icon(name: str, color: str = "#f8fafc", size: int = 24, *, stroke_width: float = 2.2) -> QIcon:
@@ -1378,7 +1358,7 @@ class MainWindowIcons:
         icon = self._svg_icon_from_markup(svg, size=size)
         if not icon.isNull():
             return icon
-        fallback = self._tabler_icon("stack-3", color, size, stroke_width=2.0, fill=color if active else None)
+        fallback = self._tabler_icon("stack-3", color, size, stroke_width=2.0, fill=color if active else "none")
         if not fallback.isNull():
             return fallback
         pixmap = QPixmap(size, size)

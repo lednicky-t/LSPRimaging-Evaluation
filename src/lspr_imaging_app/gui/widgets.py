@@ -30,14 +30,10 @@ from lspr_ui import (
     collapsible_pin_stylesheet,
     collapsible_toggle_stylesheet,
     get_active_theme,
+    tabler_icon_svg,
     transparent_icon_button_stylesheet,
 )
 from lspr_imaging_app.gui.main_window_icons import MainWindowIcons
-
-try:
-    import tabler_icons
-except Exception:
-    tabler_icons = None
 
 
 class ResponsiveDoubleSpinBox(QDoubleSpinBox):
@@ -377,30 +373,16 @@ class PanelContainer(QWidget):
     def _make_apply_icon(self, applied: bool) -> QIcon:
         icon_name = "link" if applied else "link-off"
         stroke = "#22c55e" if applied else "#ef4444"
-        if tabler_icons is not None:
-            try:
-                svg = str(
-                    tabler_icons.get_icon(
-                        icon_name,
-                        size=24,
-                        stroke=stroke,
-                        fill="none",
-                        stroke_width=2.2,
-                        stroke_linecap="round",
-                        stroke_linejoin="round",
-                    )
-                )
-            except Exception:
-                svg = ""
-            if svg:
-                renderer = QSvgRenderer(QByteArray(svg.encode("utf-8")))
-                if renderer.isValid():
-                    pixmap = QPixmap(20, 20)
-                    pixmap.fill(Qt.GlobalColor.transparent)
-                    painter = QPainter(pixmap)
-                    renderer.render(painter, QRectF(0.0, 1.0, 20.0, 18.0))
-                    painter.end()
-                    return QIcon(pixmap)
+        svg = tabler_icon_svg(icon_name, color=stroke, stroke_width=2.2)
+        if svg:
+            renderer = QSvgRenderer(QByteArray(svg.encode("utf-8")))
+            if renderer.isValid():
+                pixmap = QPixmap(20, 20)
+                pixmap.fill(Qt.GlobalColor.transparent)
+                painter = QPainter(pixmap)
+                renderer.render(painter, QRectF(0.0, 1.0, 20.0, 18.0))
+                painter.end()
+                return QIcon(pixmap)
 
         pixmap = QPixmap(20, 20)
         pixmap.fill(Qt.GlobalColor.transparent)
