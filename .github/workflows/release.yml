@@ -1,0 +1,39 @@
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Verify tag matches APP_VERSION
+        shell: bash
+        run: |
+          tag="${GITHUB_REF_NAME}"
+          expected="${tag#v}"
+          version_file="src/lspr_imaging_app/version.py"
+          actual=$(grep -oP '(?<=^APP_VERSION = ")[^"]+' "$version_file")
+          if [ -z "$actual" ]; then
+            echo "Could not find APP_VERSION in $version_file" >&2
+            exit 1
+          fi
+          if [ "$actual" != "$expected" ]; then
+            echo "Tag $tag does not match APP_VERSION '$actual' in $version_file. Bump APP_VERSION and commit before tagging." >&2
+            exit 1
+          fi
+          echo "Tag $tag matches APP_VERSION $actual."
+
+      - name: Publish GitHub release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" --title "LSPRimaging Evaluation ${GITHUB_REF_NAME}" --generate-notes
