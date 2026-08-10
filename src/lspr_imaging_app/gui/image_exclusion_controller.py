@@ -53,6 +53,7 @@ class ImageExclusionController:
         button = window.image_exclusion_button
         key = self._current_key()
         menu = QMenu(window)
+        menu.setToolTipsVisible(True)
         if key is None:
             action = menu.addAction("Load a dataset to manage exclusions")
             action.setEnabled(False)
@@ -63,11 +64,11 @@ class ImageExclusionController:
                 lambda: self._add_rule(spectral_cube_index, wavelength_nm),
             )
             menu.addAction(
-                f"Exclude {wavelength_nm:g} nm (all spectral cubes)",
+                f"Exclude {wavelength_nm:g} nm (in all spectral cubes)",
                 lambda: self._add_rule(None, wavelength_nm),
             )
             menu.addAction(
-                f"Exclude spectral cube {spectral_cube_index} (all wavelengths)",
+                f"Exclude spectral cube {spectral_cube_index} (in all wavelengths)",
                 lambda: self._add_rule(spectral_cube_index, None),
             )
             covering = [rule for rule in window._state.image_exclusions if is_excluded([rule], spectral_cube_index, wavelength_nm)]
@@ -85,9 +86,9 @@ class ImageExclusionController:
     @staticmethod
     def _describe_rule(rule: ImageExclusionRule) -> str:
         if rule.spectral_cube_index is None:
-            return f"{rule.wavelength_nm:g} nm (all spectral cubes)"
+            return f"{rule.wavelength_nm:g} nm (in all spectral cubes)"
         if rule.wavelength_nm is None:
-            return f"spectral cube {rule.spectral_cube_index} (all wavelengths)"
+            return f"spectral cube {rule.spectral_cube_index} (in all wavelengths)"
         return f"cube {rule.spectral_cube_index}, {rule.wavelength_nm:g} nm"
 
     # ------------------------------------------------------------------

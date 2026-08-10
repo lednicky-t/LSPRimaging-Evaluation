@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import numpy as np
-from PyQt6.QtWidgets import QFileDialog, QMessageBox
+from PyQt6.QtWidgets import QFileDialog, QInputDialog, QMessageBox
 
 from lspr_imaging_app.domain.models import AreaRoiDetectionSettings, CropDefinition, MaskSettings
 from lspr_imaging_app.storage.workspace import (
@@ -12,6 +13,13 @@ from lspr_imaging_app.storage.workspace import (
     save_preprocessing,
     save_processing_profile,
 )
+
+_SAFE_SESSION_NAME_RE = re.compile(r"[^A-Za-z0-9_-]+")
+
+
+def _sanitize_session_name(name: str) -> str:
+    cleaned = _SAFE_SESSION_NAME_RE.sub("_", name.strip()).strip("_")
+    return cleaned or "Default"
 
 
 class SessionStateManager:
@@ -120,6 +128,10 @@ class SessionStateManager:
             except Exception as exc:
                 window.status_label.setText(f"Preprocessing load failed: {exc}")
 
+        self._reset_processing_state_to_defaults()
+
+    def _reset_processing_state_to_defaults(self) -> None:
+        window = self._window
         window._state.preprocessing.rotation_angle_deg = 0.0
         window._state.preprocessing.rotation_fill_dark = False
         window._state.preprocessing.flip_horizontal = False
@@ -153,6 +165,69 @@ class SessionStateManager:
         window._selected_rectangle_roi_ids.clear()
         window._sync_rectangle_stamp_overlays()
         window._update_roi_table()
+
+    def new_session(self) -> None:
+        window = self._window
+        dataset = window._state.dataset
+        if dataset is None:
+            window._set_status_text("Load a dataset before starting a new session.")
+            return
+        name, ok = QInputDialog.getText(
+            window,
+            "New session",
+            "Name this session (leave blank for the default, unnamed session):",
+        )
+        if not ok:
+            return
+        name = _sanitize_session_name(name)
+        if name != "Default" and (dataset.folder / "sessions" / name / "processing_profile.json").exists():
+            confirm = QMessageBox.question(
+                window,
+                "Session already exists",
+                f'A session named "{name}" already exists. Starting a new session with this name '
+                "will reset its saved settings back to defaults. Continue?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if confirm != QMessageBox.StandardButton.Yes:
+                return
+        window._push_undo_point("New session")
+        self._reset_processing_state_to_defaults()
+        window._active_session_name = name
+        window._save_active_session_pointer()
+        window._current_image_key = None
+        window._refresh_image()
+        window._save_processing_state_for_dataset(force=True, reason="new session")
+        window._set_status_text(f'Started new session "{name}".')
+        window._append_workflow_log(f"New session started | name={name}", level="success")
+
+    def load_session(self) -> None:
+        window = self._window
+        dataset = window._state.dataset
+        if dataset is None:
+            window._set_status_text("Load a dataset before switching sessions.")
+            return
+        names = window._list_available_sessions()
+        current = window._active_session_name
+        name, ok = QInputDialog.getItem(
+            window,
+            "Load session",
+            "Choose a session to load:",
+            names,
+            names.index(current) if current in names else 0,
+            False,
+        )
+        if not ok or name == current:
+            return
+        window._save_processing_state_for_dataset(force=True, reason="switch session")
+        window._push_undo_point("Load session")
+        window._active_session_name = name
+        window._save_active_session_pointer()
+        self.load_processing_state_for_dataset()
+        window._current_image_key = None
+        window._refresh_image()
+        window._set_status_text(f'Loaded session "{name}".')
+        window._append_workflow_log(f"Session loaded | name={name}", level="success")
 
     def save_processing_state_for_dataset(self, *, force: bool = False, reason: str | None = None) -> None:
         window = self._window

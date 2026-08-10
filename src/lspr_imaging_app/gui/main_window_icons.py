@@ -24,6 +24,7 @@ from PyQt6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QMenu,
     QMessageBox,
     QAbstractSpinBox,
     QSizePolicy,
@@ -463,6 +464,7 @@ class MainWindowIcons:
         self.dataset_ome_zarr_export_stop_button.setVisible(bool(running))
         self.dataset_ome_zarr_export_stop_button.setEnabled(bool(running))
         self.dataset_ome_zarr_export_button.setEnabled(not running and self._state.dataset is not None)
+        self.export_ome_zarr_icon_button.setEnabled(not running and self._state.dataset is not None)
         self.ome_zarr_chunk_spin.setEnabled(not running)
         self.ome_zarr_chunk_guide_button.setEnabled(not running)
         self.ome_zarr_shard_mode_combo.setEnabled(not running)
@@ -572,6 +574,7 @@ class MainWindowIcons:
         self.dataset_ome_zarr_export_stop_button.setVisible(False)
         self.dataset_ome_zarr_export_stop_button.setEnabled(False)
         self.dataset_ome_zarr_export_button.setEnabled(self._state.dataset is not None)
+        self.export_ome_zarr_icon_button.setEnabled(self._state.dataset is not None)
         self.ome_zarr_chunk_spin.setEnabled(True)
         self.ome_zarr_chunk_guide_button.setEnabled(True)
         self.ome_zarr_shard_mode_combo.setEnabled(True)
@@ -1918,7 +1921,48 @@ class MainWindowIcons:
         menu_bar = self.menuBar()
         file_menu = menu_bar.addMenu("&File")
         file_menu.addAction("Load dataset...", self._dataset_controller.browse_folder)
-        file_menu.addAction("Export Stack to Zarr...", self._dataset_controller.export_current_dataset_to_ome_zarr)
+        zarr_dialog_action = file_menu.addAction("Stack to Zarr...", self._open_ome_zarr_export_dialog)
+        zarr_dialog_action.setToolTip("Open the Stack to Zarr export options window.")
+        file_menu.addSeparator()
+        new_session_action = file_menu.addAction("New Session...", self._new_session)
+        new_session_action.setToolTip("Start a fresh, optionally named session: resets ROIs/preprocessing to defaults for this dataset.")
+        load_session_action = file_menu.addAction("Load Session...", self._load_session)
+        load_session_action.setToolTip("Switch to a different named session's saved settings for this dataset.")
+        file_menu.addSeparator()
+        file_menu.addAction("Export processing profile", self._export_processing_profile)
+        file_menu.addAction("Import processing profile", self._import_processing_profile)
+        file_menu.addSeparator()
+
+        preferences_menu = file_menu.addMenu("Preferences")
+        self.theme_blue_action = preferences_menu.addAction("Blue Dark Theme")
+        self.theme_blue_action.setCheckable(True)
+        self.theme_gray_action = preferences_menu.addAction("Gray Dark Theme")
+        self.theme_gray_action.setCheckable(True)
+        self.theme_blue_action.triggered.connect(lambda checked: checked and self._set_ui_theme("blue"))
+        self.theme_gray_action.triggered.connect(lambda checked: checked and self._set_ui_theme("gray"))
+        theme_group = QActionGroup(self)
+        theme_group.setExclusive(True)
+        theme_group.addAction(self.theme_blue_action)
+        theme_group.addAction(self.theme_gray_action)
+        current_theme = str(self._settings.value("ui/theme", "blue"))
+        self.theme_gray_action.setChecked(current_theme == "gray")
+        self.theme_blue_action.setChecked(current_theme != "gray")
+        preferences_menu.addSeparator()
+        startup_restore_menu = preferences_menu.addMenu("Startup restore")
+        startup_restore_group = QActionGroup(self)
+        startup_restore_group.setExclusive(True)
+        self.startup_restore_timeout_actions = {}
+        for seconds, label in ((5, "Prompt restore (5s)"), (0, "Auto restore (0s)")):
+            action = startup_restore_menu.addAction(label)
+            action.setCheckable(True)
+            action.triggered.connect(lambda checked, value=seconds: checked and self._set_startup_restore_timeout_seconds(value))
+            startup_restore_group.addAction(action)
+            self.startup_restore_timeout_actions[seconds] = action
+        current_timeout = self._startup_restore_timeout_seconds()
+        if current_timeout not in self.startup_restore_timeout_actions:
+            current_timeout = 5
+        self._set_startup_restore_timeout_seconds(current_timeout)
+
         file_menu.addSeparator()
         file_menu.addAction("E&xit", self.close)
 
@@ -1949,20 +1993,6 @@ class MainWindowIcons:
         dock_menu.addAction(self.sensorgram_panel.toggleViewAction())
         dock_menu.addAction(self.roi_list_panel.toggleViewAction())
         view_menu.addSeparator()
-        self.theme_blue_action = view_menu.addAction("Blue Dark Theme")
-        self.theme_blue_action.setCheckable(True)
-        self.theme_gray_action = view_menu.addAction("Gray Dark Theme")
-        self.theme_gray_action.setCheckable(True)
-        self.theme_blue_action.triggered.connect(lambda checked: checked and self._set_ui_theme("blue"))
-        self.theme_gray_action.triggered.connect(lambda checked: checked and self._set_ui_theme("gray"))
-        theme_group = QActionGroup(self)
-        theme_group.setExclusive(True)
-        theme_group.addAction(self.theme_blue_action)
-        theme_group.addAction(self.theme_gray_action)
-        current_theme = str(self._settings.value("ui/theme", "blue"))
-        self.theme_gray_action.setChecked(current_theme == "gray")
-        self.theme_blue_action.setChecked(current_theme != "gray")
-        view_menu.addSeparator()
         ui_scale_menu = view_menu.addMenu("UI Scale")
         ui_scale_group = QActionGroup(self)
         ui_scale_group.setExclusive(True)
@@ -1990,32 +2020,17 @@ class MainWindowIcons:
         analysis_menu = menu_bar.addMenu("&Analysis")
         analysis_menu.addAction(self.calculate_spectrum_action)
 
-        preferences_menu = menu_bar.addMenu("&Preferences")
-        preferences_menu.addAction(self.reset_layout_action)
-        preferences_menu.addSeparator()
-        preferences_menu.addAction("Export processing profile", self._export_processing_profile)
-        preferences_menu.addAction("Import processing profile", self._import_processing_profile)
-        preferences_menu.addSeparator()
-        startup_restore_menu = preferences_menu.addMenu("Startup restore")
-        startup_restore_group = QActionGroup(self)
-        startup_restore_group.setExclusive(True)
-        self.startup_restore_timeout_actions = {}
-        for seconds, label in ((5, "Prompt restore (5s)"), (0, "Auto restore (0s)")):
-            action = startup_restore_menu.addAction(label)
-            action.setCheckable(True)
-            action.triggered.connect(lambda checked, value=seconds: checked and self._set_startup_restore_timeout_seconds(value))
-            startup_restore_group.addAction(action)
-            self.startup_restore_timeout_actions[seconds] = action
-        current_timeout = self._startup_restore_timeout_seconds()
-        if current_timeout not in self.startup_restore_timeout_actions:
-            current_timeout = 5
-        self._set_startup_restore_timeout_seconds(current_timeout)
-
-
         help_menu = menu_bar.addMenu("&Help")
         help_menu.addAction(self.shortcuts_action)
         help_menu.addAction("Workflow notes", self._show_workflow_notes)
         help_menu.addAction(self.about_action)
+
+        # Qt disables floating tooltips on QMenu items by default (hovering an
+        # action only shows its statusTip in the status bar); enable them so
+        # every menu action's tooltip pops up next to the cursor like it does
+        # for toolbar buttons.
+        for menu in menu_bar.findChildren(QMenu):
+            menu.setToolTipsVisible(True)
 
     def _create_view_control(self, name: str, toggle: QWidget, color_button: QToolButton, slider: QWidget) -> QWidget:
         row = QWidget(self.image_toolbar)
@@ -2080,7 +2095,8 @@ class MainWindowIcons:
         self._set_combo_width(self.mask_draw_mode_combo, ["Erase"])
         self._set_combo_width(self.ome_zarr_shard_mode_combo, ["1 spectral cube"], minimum=220)
         self._set_combo_width(self.analysis_metric_combo, ["Maximum", "Centroid"], minimum=80)
-        self._set_combo_width(self.chromatic_subpixel_precision_combo, ["1", "4", "9"], minimum=42)
+        self._set_combo_width(self.chromatic_subpixel_precision_combo, ["1", "4", "9"], minimum=58)
+        self._set_combo_width(self.chromatic_landmark_kind_combo, ["Corners", "Spots", "Both"], minimum=90)
         navigation_control_width = max(self.spectral_cube_spin.sizeHint().width(), self.wavelength_spin.sizeHint().width(), 82)
         # The spin boxes keep a hard fixed width so their digits never get clipped.
         # The sliders only get a floor (minimum width): they are free to shrink toward

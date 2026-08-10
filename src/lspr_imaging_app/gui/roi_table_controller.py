@@ -283,6 +283,7 @@ class RoiTableController:
         if spot_id is None:
             return
         menu = QMenu(table)
+        menu.setToolTipsVisible(True)
         group_action = menu.addAction("Group...")
         select_group_action = None
         ungroup_action = None

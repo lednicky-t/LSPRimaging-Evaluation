@@ -25,6 +25,7 @@ class UIStateManager:
         window.chromatic_sample_count_spin.blockSignals(True)
         window.chromatic_feature_count_spin.blockSignals(True)
         window.chromatic_subpixel_precision_combo.blockSignals(True)
+        window.chromatic_landmark_kind_combo.blockSignals(True)
         window.chromatic_landmark_id_spin.blockSignals(True)
         window.hist_region.blockSignals(True)
         reference_index = max(window.reference_mode_combo.findData(str(settings.reference_mode or "auto")), 0)
@@ -57,6 +58,12 @@ class UIStateManager:
         window._state.preprocessing.chromatic_subpixel_precision = int(
             window.chromatic_subpixel_precision_combo.currentData() or 4
         )
+        landmark_kind_value = str(getattr(settings, "chromatic_landmark_kind", "corner") or "corner")
+        landmark_kind_index = max(window.chromatic_landmark_kind_combo.findData(landmark_kind_value), 0)
+        window.chromatic_landmark_kind_combo.setCurrentIndex(landmark_kind_index)
+        window._state.preprocessing.chromatic_landmark_kind = str(
+            window.chromatic_landmark_kind_combo.currentData() or "corner"
+        )
         window.chromatic_landmark_id_spin.setMaximum(max(int(window.chromatic_feature_count_spin.currentData() or 15), 1))
         window._state.preprocessing.chromatic_feature_count = int(window.chromatic_feature_count_spin.currentData() or 15)
         window.chromatic_landmark_id_spin.setValue(max(int(window._chromatic_landmark_marker_id), 1))
@@ -84,6 +91,7 @@ class UIStateManager:
         window.chromatic_sample_count_spin.blockSignals(False)
         window.chromatic_feature_count_spin.blockSignals(False)
         window.chromatic_subpixel_precision_combo.blockSignals(False)
+        window.chromatic_landmark_kind_combo.blockSignals(False)
         window.chromatic_landmark_id_spin.blockSignals(False)
         window.hist_region.blockSignals(False)
         detection = window._state.area_roi_settings
@@ -287,6 +295,7 @@ class UIStateManager:
         window.chromatic_sample_count_spin.setEnabled(controls_enabled)
         window.chromatic_feature_count_spin.setEnabled(controls_enabled)
         window.chromatic_subpixel_precision_combo.setEnabled(controls_enabled)
+        window.chromatic_landmark_kind_combo.setEnabled(controls_enabled)
         window.chromatic_reference_points_all_button.setEnabled(has_dataset and bool(feature_ids))
         window.chromatic_start_button.setEnabled(can_edit and controls_enabled)
         window.chromatic_auto_button.setEnabled(has_dataset and controls_enabled and has_samples)

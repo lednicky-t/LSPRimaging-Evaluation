@@ -81,6 +81,7 @@ class PreprocessingSettings:
     local_ring_normalization_enabled: bool = False
     chromatic_correction_enabled: bool = False
     chromatic_registration_mode: str = "landmark_radial"
+    chromatic_landmark_kind: str = "corner"
     chromatic_sample_image_count: int = 5
     chromatic_feature_count: int = 5
     chromatic_subpixel_precision: int = 4

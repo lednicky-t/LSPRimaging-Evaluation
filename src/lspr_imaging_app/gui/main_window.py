@@ -35,6 +35,7 @@ from PyQt6.QtWidgets import (
     QColorDialog,
     QComboBox,
     QAbstractItemView,
+    QDialog,
     QDoubleSpinBox,
     QFileDialog,
     QGridLayout,
@@ -113,6 +114,8 @@ from lspr_imaging_app.domain.roi_editor_tools import (
     move_roi_from_template,
     roi_top_left_from_center,
 )
+from lspr_imaging_app.domain.exclusions import is_excluded
+from lspr_imaging_app.processing.reference_selection import bimodal_dip_contrast
 from lspr_imaging_app.version import version_string
 from lspr_imaging_app.domain.models import (
     AnalysisState,
@@ -129,6 +132,7 @@ from lspr_imaging_app.io.dataset import (
     dataset_is_ome_zarr,
     load_image_array,
     load_image_shape,
+    read_existing_ome_zarr_summary,
 )
 from lspr_imaging_app.processing.chromatic import (
     transformed_annulus_mask,
@@ -384,6 +388,7 @@ class MainWindow(MainWindowIcons, QMainWindow):
         self._last_saved_processing_signature: str | None = None
         self._last_saved_preprocessing_path: Path | None = None
         self._last_saved_profile_path: Path | None = None
+        self._active_session_name: str = "Default"
         self._last_saved_spot_table_signature: str | None = None
         self._last_saved_spot_table_path: Path | None = None
         self._image_refresh_running = False
@@ -524,6 +529,12 @@ class MainWindow(MainWindowIcons, QMainWindow):
         self.load_button = self._free_standing_icon_label(
             self._dataset_transfer_icon("import", "#22c55e"),
             "Load dataset: choose a folder and load it into the app.",
+            size=24,
+            parent=self,
+        )
+        self.export_ome_zarr_icon_button = self._free_standing_icon_label(
+            self._dataset_transfer_icon("export", "#38bdf8"),
+            "Stack to Zarr: open export options and write the current dataset to Zarr.",
             size=24,
             parent=self,
         )
@@ -685,6 +696,7 @@ class MainWindow(MainWindowIcons, QMainWindow):
         dataset_ome_zarr_export_progress_layout.addWidget(self.dataset_ome_zarr_export_eta_label)
         dataset_ome_zarr_export_progress_layout.addWidget(self.dataset_ome_zarr_export_stop_button)
         self.dataset_ome_zarr_export_progress_row.hide()
+        self._build_ome_zarr_export_dialog()
         self._update_dataset_stack_indicator(None)
         self.reference_summary = QLabel("Reference: current selection", self)
         self.reference_summary.setWordWrap(True)
@@ -721,6 +733,29 @@ class MainWindow(MainWindowIcons, QMainWindow):
         self.set_reference_button.hide()
         self.startup_restore_timeout_actions: dict[int, QAction] = {}
 
+    def _build_ome_zarr_export_dialog(self) -> None:
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Stack to Zarr")
+        dialog.setModal(False)
+        layout = QVBoxLayout(dialog)
+        layout.setContentsMargins(10, 10, 10, 10)
+        layout.setSpacing(8)
+        for row in (
+            self.dataset_ome_zarr_controls_row,
+            self.dataset_ome_zarr_options_row,
+            self.dataset_ome_zarr_compression_row,
+            self.dataset_ome_zarr_skip_excluded_row,
+            self.dataset_ome_zarr_info_row,
+            self.dataset_ome_zarr_export_progress_row,
+        ):
+            layout.addWidget(row)
+        self.ome_zarr_export_dialog = dialog
+
+    def _open_ome_zarr_export_dialog(self) -> None:
+        self.ome_zarr_export_dialog.show()
+        self.ome_zarr_export_dialog.raise_()
+        self.ome_zarr_export_dialog.activateWindow()
+
     def _init_chromatic_widgets(self) -> None:
         self.chromatic_summary = QLabel("Idle.", self)
         self.chromatic_summary.setWordWrap(True)
@@ -754,6 +789,20 @@ class MainWindow(MainWindowIcons, QMainWindow):
         self.chromatic_subpixel_precision_combo.setCurrentIndex(default_subpixel_index)
         self.chromatic_subpixel_precision_combo.setToolTip(
             "Sub.px: choose the chromatic reference-point refinement level. 1 = pixel, 4 = moderate, 9 = finer."
+        )
+        self.chromatic_landmark_kind_combo = QComboBox(self)
+        self.chromatic_landmark_kind_combo.addItem("Corners", "corner")
+        self.chromatic_landmark_kind_combo.addItem("Spots", "centroid")
+        self.chromatic_landmark_kind_combo.addItem("Both", "both")
+        default_landmark_kind = str(self._settings.value("chromatic/landmark_kind", "corner") or "corner")
+        default_landmark_kind_index = self.chromatic_landmark_kind_combo.findData(default_landmark_kind)
+        if default_landmark_kind_index < 0:
+            default_landmark_kind_index = 0
+        self.chromatic_landmark_kind_combo.setCurrentIndex(default_landmark_kind_index)
+        self.chromatic_landmark_kind_combo.setToolTip(
+            "Track: what to follow across wavelengths. Corners = small, precise features (can get lost as focus "
+            "blur grows at longer wavelengths). Spots = particle centroids (coarser, but far more robust to that "
+            "blur). Both = try both and keep whichever stays consistent with the point's own trend."
         )
         self.chromatic_start_button = self._free_standing_toggle_icon_label(
             self._make_spot_edit_icon(False),
@@ -1687,6 +1736,7 @@ class MainWindow(MainWindowIcons, QMainWindow):
     def _connect_dataset_and_nav(self) -> None:
         self.browse_button.clicked.connect(self._dataset_controller.browse_folder)
         self.load_button.clicked.connect(self._dataset_controller.browse_folder)
+        self.export_ome_zarr_icon_button.clicked.connect(self._open_ome_zarr_export_dialog)
         self.dataset_ome_zarr_export_button.clicked.connect(self._dataset_controller.export_current_dataset_to_ome_zarr)
         self.dataset_ome_zarr_export_stop_button.clicked.connect(self._stop_ome_zarr_export)
         self.ome_zarr_chunk_spin.valueChanged.connect(self._on_ome_zarr_chunk_size_changed)
@@ -1722,6 +1772,7 @@ class MainWindow(MainWindowIcons, QMainWindow):
         self.chromatic_sample_count_spin.valueChanged.connect(self._on_chromatic_sample_count_changed)
         self.chromatic_feature_count_spin.currentIndexChanged.connect(self._on_chromatic_feature_count_changed)
         self.chromatic_subpixel_precision_combo.currentIndexChanged.connect(self._on_chromatic_subpixel_precision_changed)
+        self.chromatic_landmark_kind_combo.currentIndexChanged.connect(self._on_chromatic_landmark_kind_changed)
         self.chromatic_transform_button.clicked.connect(self._on_chromatic_transform_button_clicked)
 
     def _connect_analysis_and_histogram(self) -> None:
@@ -2673,14 +2724,24 @@ class MainWindow(MainWindowIcons, QMainWindow):
         spectral_cube_text = f"{len(spectral_cube_values)}" if spectral_cube_values else "0"
         wavelength_text = f"{len(wavelength_values)}" if wavelength_values else "0"
         stack_label = dataset.format_label if dataset is not None else "ImageStack"
-        return (
-            f"{stack_label} loaded.\n"
-            f"Images: {len(records)}\n"
-            f"Spectral cubes: {spectral_cube_text} | Wavelengths: {wavelength_text}\n"
-            f"Dataset size: {self._format_dataset_bytes(size_bytes)}\n"
-            f"Resolution: {resolution_text}\n"
-            f"Dataset's date: {dataset_date}"
-        )
+        lines = [
+            f"{stack_label} loaded.",
+            f"Images: {len(records)}",
+            f"Spectral cubes: {spectral_cube_text} | Wavelengths: {wavelength_text}",
+            f"Dataset size: {self._format_dataset_bytes(size_bytes)}",
+            f"Resolution: {resolution_text}",
+            f"Dataset's date: {dataset_date}",
+        ]
+        if ome_zarr:
+            zarr_summary = read_existing_ome_zarr_summary(dataset.folder)
+            if zarr_summary is not None:
+                skip_labels = {"Image size", "Spectral cubes x wavelengths", "Source folder"}
+                lines.extend(
+                    f"{label}: {value}"
+                    for label, value in zarr_summary.field_lines()
+                    if label not in skip_labels
+                )
+        return "\n".join(lines)
 
     def _refresh_image(self) -> None:
         spectral_cube_index = self._current_spectral_cube()
@@ -3378,17 +3439,64 @@ class MainWindow(MainWindowIcons, QMainWindow):
             return str(folder)
         return f"...\\{parts[-2]}\\{parts[-1]}"
 
-    def _preprocessing_path(self) -> Path | None:
+    def _active_session_dir(self) -> Path | None:
         dataset = self._state.dataset
         if dataset is None:
             return None
-        return dataset.folder / "preprocessing.json"
+        if not self._active_session_name or self._active_session_name == "Default":
+            return dataset.folder
+        return dataset.folder / "sessions" / self._active_session_name
+
+    def _active_session_pointer_path(self) -> Path | None:
+        dataset = self._state.dataset
+        if dataset is None:
+            return None
+        return dataset.folder / "sessions" / "active_session.txt"
+
+    def _load_active_session_name_for_folder(self, folder: Path) -> str:
+        pointer = folder / "sessions" / "active_session.txt"
+        if pointer.exists():
+            try:
+                name = pointer.read_text(encoding="utf-8").strip()
+            except OSError:
+                name = ""
+            if name:
+                return name
+        return "Default"
+
+    def _save_active_session_pointer(self) -> None:
+        pointer = self._active_session_pointer_path()
+        if pointer is None:
+            return
+        try:
+            pointer.parent.mkdir(parents=True, exist_ok=True)
+            pointer.write_text(self._active_session_name, encoding="utf-8")
+        except OSError:
+            pass
+
+    def _list_available_sessions(self) -> list[str]:
+        names = ["Default"]
+        dataset = self._state.dataset
+        if dataset is None:
+            return names
+        sessions_dir = dataset.folder / "sessions"
+        if sessions_dir.exists():
+            for child in sorted(sessions_dir.iterdir(), key=lambda p: p.name.lower()):
+                if child.is_dir() and (child / "processing_profile.json").exists():
+                    names.append(child.name)
+        return names
+
+    def _preprocessing_path(self) -> Path | None:
+        session_dir = self._active_session_dir()
+        if session_dir is None:
+            return None
+        return session_dir / "preprocessing.json"
 
     def _processing_profile_path(self) -> Path | None:
-        dataset = self._state.dataset
-        if dataset is None:
+        session_dir = self._active_session_dir()
+        if session_dir is None:
             return None
-        return dataset.folder / "processing_profile.json"
+        return session_dir / "processing_profile.json"
 
     def _dataset_folder_path(self) -> Path | None:
         dataset = self._state.dataset
@@ -3446,6 +3554,12 @@ class MainWindow(MainWindowIcons, QMainWindow):
 
     def _import_processing_profile(self) -> None:
         self._session_state_manager.import_processing_profile()
+
+    def _new_session(self) -> None:
+        self._session_state_manager.new_session()
+
+    def _load_session(self) -> None:
+        self._session_state_manager.load_session()
 
     def _startup_restore_timeout_seconds(self) -> int:
         return max(int(self._settings.value("startup/restore_previous_session_timeout_s", 5)), 0)
@@ -3552,13 +3666,7 @@ class MainWindow(MainWindowIcons, QMainWindow):
             score = float("-inf")
             self._reference_contrast_cache[cache_key] = score
             return score
-        finite = image[np.isfinite(image)]
-        if finite.size == 0:
-            score = float("-inf")
-        else:
-            lower = float(np.quantile(finite, 0.02))
-            upper = float(np.quantile(finite, 0.98))
-            score = upper - lower
+        score = bimodal_dip_contrast(image)
         self._reference_contrast_cache[cache_key] = score
         return score
 
@@ -3568,6 +3676,8 @@ class MainWindow(MainWindowIcons, QMainWindow):
         best_key: tuple[int, float] | None = None
         best_score = float("-inf")
         for wavelength in self._wavelength_values:
+            if is_excluded(self._state.image_exclusions, int(spectral_cube_index), float(wavelength)):
+                continue
             key = (int(spectral_cube_index), float(wavelength))
             record = self._record_map.get(key)
             if record is None:
@@ -3792,6 +3902,9 @@ class MainWindow(MainWindowIcons, QMainWindow):
 
     def _on_chromatic_subpixel_precision_changed(self, _value: int) -> None:
         self._chromatic_controller._on_chromatic_subpixel_precision_changed(_value)
+
+    def _on_chromatic_landmark_kind_changed(self, _value: int) -> None:
+        self._chromatic_controller._on_chromatic_landmark_kind_changed(_value)
 
     def _seed_chromatic_landmarks_for_current_image(self) -> None:
         self._chromatic_controller._seed_chromatic_landmarks_for_current_image()
@@ -4097,6 +4210,11 @@ class MainWindow(MainWindowIcons, QMainWindow):
             "Active Ref.point ID. PageUp/PageDown switches between reference points while editing. Shift+PageUp/PageDown switches wavelength images globally.",
         )
         self._set_help(self.chromatic_subpixel_precision_combo, "Sub.px: choose the chromatic point refinement level. 1 = pixel, 4 = moderate, 9 = finer.")
+        self._set_help(
+            self.chromatic_landmark_kind_combo,
+            "Track: Corners = small, precise features (can get lost as focus blur grows toward longer wavelengths). "
+            "Spots = particle centroids (coarser, more robust to that blur). Both = try both per step.",
+        )
         self._set_help(self.chromatic_transform_button, "Estimate chromatic transforms or clear saved chromatic transforms.")
         self._set_help(
             self.histogram_bins_spin,
@@ -6305,6 +6423,7 @@ class MainWindow(MainWindowIcons, QMainWindow):
 
     def _show_analysis_spot_context_menu(self, spot_id: int, global_pos: QPoint) -> None:
         menu = QMenu(self)
+        menu.setToolTipsVisible(True)
         group_action = menu.addAction("Group...")
         select_group_action = None
         ungroup_action = None

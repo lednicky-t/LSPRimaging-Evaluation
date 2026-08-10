@@ -18,11 +18,10 @@ from lspr_imaging_app.processing.chromatic import (
     ChromaticRegistrationResult,
     annulus_reach_box,
     apply_affine_to_points,
-    detect_regional_landmarks,
+    auto_track_landmarks_over_wavelengths,
     estimate_affine_chromatic_transform,
     fit_affine_matrix,
     identity_affine_matrix,
-    track_landmarks,
     transformed_annulus_mask,
     transformed_annulus_mask_for_patch,
     transformed_disk_mask,
@@ -970,6 +969,9 @@ def _auto_chromatic_landmarks_task(
     preprocessing,
     feature_count: int,
     subpixel_precision: int,
+    spot_radius_px: float = 10.0,
+    spot_mode: str = "dark",
+    area_roi_settings=None,
     progress_callback=None,
 ) -> list[tuple[int, int, float, float, float]]:
     if not sample_payload:
@@ -988,34 +990,37 @@ def _auto_chromatic_landmarks_task(
                 int(round((index / total) * 40)),
                 f"Loading sampled chromatic image {index}/{total}...",
             )
-    first_spectral_cube, first_wavelength, first_image = processed_images[0]
-    current_landmarks = detect_regional_landmarks(
-        first_image,
-        int(feature_count),
-        subpixel_precision=int(subpixel_precision),
-    )
-    observations: list[tuple[int, int, float, float, float]] = [
-        (int(feature_id), int(first_spectral_cube), float(first_wavelength), float(point[0]), float(point[1]))
-        for feature_id, point in sorted(current_landmarks.items())
-    ]
-    if progress_callback is not None:
-        progress_callback(50, f"Detected reference points on sampled image 1/{total}.")
-    previous_image = first_image
-    for index, (spectral_cube_index, wavelength, image) in enumerate(processed_images[1:], start=2):
-        current_landmarks = track_landmarks(
-            previous_image,
-            image,
-            current_landmarks,
-            subpixel_precision=int(subpixel_precision),
-        )
-        for feature_id, point in sorted(current_landmarks.items()):
-            observations.append((int(feature_id), int(spectral_cube_index), float(wavelength), float(point[0]), float(point[1])))
-        previous_image = image
+    sample_spectral_cube_index = processed_images[0][0]
+    images_by_wavelength = [(wavelength, image) for _spectral_cube, wavelength, image in processed_images]
+    landmark_kind = str(getattr(preprocessing, "chromatic_landmark_kind", "corner") or "corner")
+    tracking_total = max(len(images_by_wavelength) - 1, 1)
+
+    def on_tracking_progress(step_index: int, step_total: int) -> None:
         if progress_callback is not None:
             progress_callback(
-                int(round(50 + ((index - 1) / max(total - 1, 1)) * 50)),
-                f"Tracked reference points on sampled image {index}/{total}...",
+                int(round(50 + (step_index / max(step_total, 1)) * 50)),
+                f"Tracked reference points on sampled image {step_index + 1}/{tracking_total + 1}...",
             )
+
+    if progress_callback is not None:
+        progress_callback(45, "Detecting reference points on the first sampled image...")
+    trajectories = auto_track_landmarks_over_wavelengths(
+        images_by_wavelength,
+        int(feature_count),
+        kind=landmark_kind,
+        spot_radius_px=float(spot_radius_px),
+        spot_mode=str(spot_mode),
+        subpixel_precision=int(subpixel_precision),
+        area_roi_settings=area_roi_settings,
+        progress_callback=on_tracking_progress,
+    )
+    if progress_callback is not None:
+        progress_callback(50, f"Detected reference points on sampled image 1/{total}.")
+    observations: list[tuple[int, int, float, float, float]] = [
+        (int(feature_id), int(sample_spectral_cube_index), float(wavelength), float(point[0]), float(point[1]))
+        for feature_id, per_wavelength in sorted(trajectories.items())
+        for wavelength, point in sorted(per_wavelength.items())
+    ]
     return observations
 
 
@@ -1059,8 +1064,16 @@ def _estimate_chromatic_models_task(
             raise ValueError("No chromatic reference points are available. Start the radial workflow and mark reference points first.")
         reference_spectral_cube, reference_wavelength = int(reference_key[0]), float(reference_key[1])
         all_wavelengths = sorted({float(wavelength) for _spectral_cube, wavelength, _path in record_specs})
+        # Sample candidates must come from the reference cube's own (already
+        # exclusion-filtered) wavelengths, not the union across every cube --
+        # otherwise this can pick a "sample wavelength" that was never offered
+        # to the user for landmark-marking (excluded on the reference cube but
+        # not elsewhere), producing a spurious "missing reference point" error.
+        reference_cube_wavelengths = sorted(
+            {float(wavelength) for spectral_cube_index, wavelength, _path in record_specs if int(spectral_cube_index) == reference_spectral_cube}
+        )
         sampled_wavelengths = _sampled_wavelengths(
-            all_wavelengths,
+            reference_cube_wavelengths,
             int(getattr(preprocessing, "chromatic_sample_image_count", 5)),
         )
         feature_count = max(int(getattr(preprocessing, "chromatic_feature_count", 5)), 1)

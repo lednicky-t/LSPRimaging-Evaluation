@@ -29,7 +29,12 @@ class DatasetController:
         self.load_dataset_from_folder(Path(self.window.folder_edit.text()), reset_image_view=reset_image_view)
 
     def has_restorable_session(self, folder: Path) -> bool:
-        return (folder / "processing_profile.json").exists()
+        if (folder / "processing_profile.json").exists():
+            return True
+        active_name = self.window._load_active_session_name_for_folder(folder)
+        if active_name and active_name != "Default":
+            return (folder / "sessions" / active_name / "processing_profile.json").exists()
+        return False
 
     def run_startup_restore_flow(self) -> None:
         progress = getattr(self.window, "_report_startup_progress", None)
@@ -71,6 +76,7 @@ class DatasetController:
             return
 
         self.window._state.dataset = dataset
+        self.window._active_session_name = self.window._load_active_session_name_for_folder(dataset.folder)
         if callable(progress):
             progress(48, "Loading dataset records...")
         self.window._record_map = dataset_record_map(dataset)

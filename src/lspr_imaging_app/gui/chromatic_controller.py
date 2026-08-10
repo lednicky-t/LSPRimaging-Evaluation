@@ -48,6 +48,24 @@ class ChromaticController:
         window = self.window
         return chromatic_subpixel_precision_value(window.chromatic_subpixel_precision_combo.currentData())
 
+    def landmark_kind_options(self) -> tuple[str, ...]:
+        return ("corner", "centroid", "both")
+
+    def landmark_kind_value(self) -> str:
+        window = self.window
+        value = str(window.chromatic_landmark_kind_combo.currentData() or "corner")
+        return value if value in self.landmark_kind_options() else "corner"
+
+    def set_landmark_kind_value(self, value: str) -> None:
+        window = self.window
+        target = str(value)
+        if target not in self.landmark_kind_options():
+            target = "corner"
+        index = max(window.chromatic_landmark_kind_combo.findData(target), 0)
+        window.chromatic_landmark_kind_combo.blockSignals(True)
+        window.chromatic_landmark_kind_combo.setCurrentIndex(index)
+        window.chromatic_landmark_kind_combo.blockSignals(False)
+
     def model_for_image_key(self, image_key: tuple[int, float] | None) -> ChromaticTransformModel | None:
         window = self.window
         if image_key is None:
@@ -159,7 +177,12 @@ class ChromaticController:
         if reference_key is None:
             return []
         spectral_cube_index = int(reference_key[0])
-        return [(spectral_cube_index, wavelength) for wavelength in _sampled_wavelengths(window._wavelength_values, window._state.preprocessing.chromatic_sample_image_count)]
+        candidate_wavelengths = [
+            wavelength
+            for wavelength in window._wavelength_values
+            if not is_excluded(window._state.image_exclusions, spectral_cube_index, float(wavelength))
+        ]
+        return [(spectral_cube_index, wavelength) for wavelength in _sampled_wavelengths(candidate_wavelengths, window._state.preprocessing.chromatic_sample_image_count)]
 
     def is_sample_image_key(self, image_key: tuple[int, float] | None) -> bool:
         return image_key is not None and image_key in self.sample_image_keys()
@@ -526,14 +549,22 @@ class ChromaticController:
         current_spectral_cube = window._current_spectral_cube()
         if current_spectral_cube is None:
             current_spectral_cube = window._spectral_cube_values[0] if window._spectral_cube_values else 0
-        sample_minimum = 1 if len(window._wavelength_values) <= 1 else 3
+        candidate_wavelengths = [
+            wavelength
+            for wavelength in window._wavelength_values
+            if not is_excluded(window._state.image_exclusions, int(current_spectral_cube), float(wavelength))
+        ]
+        if not candidate_wavelengths:
+            window._set_status_text("All wavelengths for this spectral cube are excluded; pick a different spectral cube.")
+            return
+        sample_minimum = 1 if len(candidate_wavelengths) <= 1 else 3
         sample_count = window._normalized_odd_count(
             int(window.chromatic_sample_count_spin.value()),
             sample_minimum,
-            min(max(len(window._wavelength_values), sample_minimum), 7),
+            min(max(len(candidate_wavelengths), sample_minimum), 7),
         )
         feature_count = int(self.feature_count_value())
-        sample_wavelengths = _sampled_wavelengths(list(window._wavelength_values), int(sample_count))
+        sample_wavelengths = _sampled_wavelengths(candidate_wavelengths, int(sample_count))
         middle_wavelength = sample_wavelengths[len(sample_wavelengths) // 2]
         self.enter_setup_mode()
         window._state.preprocessing.chromatic_registration_mode = "landmark_radial"
@@ -608,6 +639,9 @@ class ChromaticController:
             deepcopy(window._state.preprocessing),
             int(window._state.preprocessing.chromatic_feature_count),
             int(getattr(window._state.preprocessing, "chromatic_subpixel_precision", 4)),
+            float(getattr(window._state.area_roi_settings, "sample_radius_px", 10.0)),
+            str(getattr(window._state.area_roi_settings, "mode", "dark") or "dark"),
+            deepcopy(window._state.area_roi_settings),
             supports_progress=True,
         )
         worker.signals.progress.connect(window._update_busy_progress)
@@ -1089,6 +1123,13 @@ class ChromaticController:
         normalized = self.subpixel_precision_value()
         if normalized != int(getattr(self.window._state.preprocessing, "chromatic_subpixel_precision", 4)):
             self.window._state.preprocessing.chromatic_subpixel_precision = normalized
+        self._update_chromatic_summary()
+        self.window._schedule_processing_state_save()
+
+    def _on_chromatic_landmark_kind_changed(self, _index: int) -> None:
+        normalized = self.landmark_kind_value()
+        if normalized != str(getattr(self.window._state.preprocessing, "chromatic_landmark_kind", "corner")):
+            self.window._state.preprocessing.chromatic_landmark_kind = normalized
         self._update_chromatic_summary()
         self.window._schedule_processing_state_save()
 
