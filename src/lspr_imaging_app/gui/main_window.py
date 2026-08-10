@@ -286,6 +286,9 @@ class MainWindow(MainWindowIcons, QMainWindow):
         self._thread_pool.setMaxThreadCount(max(4, min(6, os.cpu_count() or 4)))
         self._current_record_path: Path | None = None
         self._crop_roi: pg.RectROI | None = None
+        self._chromatic_grid_roi: pg.RectROI | None = None
+        self._chromatic_grid_overlay_item: pg.PlotCurveItem | None = None
+        self._suspend_chromatic_grid_sync = False
         self._rectangle_roi: pg.RectROI | None = None
         self._rectangle_stamp_items: list[pg.RectROI] = []
         self._rectangle_stamp_ring_items: dict[str, tuple[pg.PlotCurveItem | None, pg.PlotCurveItem | None]] = {}
@@ -813,6 +816,23 @@ class MainWindow(MainWindowIcons, QMainWindow):
         )
         self.chromatic_start_button.toggled.connect(
             lambda checked: self.chromatic_start_button.setIcon(self._make_spot_edit_icon(bool(checked)))
+        )
+        self.chromatic_grid_button = self._free_standing_toggle_icon_label(
+            self._ome_zarr_grid_icon(False),
+            False,
+            "Grid area: show and resize the rectangle reference points are searched within, instead of "
+            "always using the whole image (helps keep points off rotated/blank image edges).",
+            size=24,
+            parent=self,
+        )
+        self.chromatic_grid_button.toggled.connect(
+            lambda checked: self.chromatic_grid_button.setIcon(self._ome_zarr_grid_icon(bool(checked)))
+        )
+        self.chromatic_grid_reset_button = self._free_standing_icon_label(
+            self._make_remove_icon(),
+            "Reset the chromatic search area back to the automatic full-image area.",
+            size=24,
+            parent=self,
         )
         self.chromatic_auto_button = QToolButton(self)
         self.chromatic_auto_button.setAutoRaise(True)
@@ -1763,6 +1783,8 @@ class MainWindow(MainWindowIcons, QMainWindow):
             lambda checked: self.chromatic_apply_check.setIcon(self._make_link_toggle_icon(bool(checked)))
         )
         self.chromatic_start_button.toggled.connect(self._on_chromatic_landmark_tool_toggled)
+        self.chromatic_grid_button.toggled.connect(self._chromatic_controller.on_grid_tool_toggled)
+        self.chromatic_grid_reset_button.clicked.connect(self._chromatic_controller.reset_grid_bounds)
         self.chromatic_auto_button.clicked.connect(self._chromatic_controller.auto_detect_landmarks)
         self.chromatic_reference_points_all_button.toggled.connect(self._on_chromatic_reference_points_all_toggled)
         self.chromatic_prev_button.clicked.connect(lambda: self._navigate_chromatic_sample(-1))
@@ -4200,6 +4222,12 @@ class MainWindow(MainWindowIcons, QMainWindow):
         self._set_help(self.chromatic_sample_count_spin, "Odd number of spectral images to sample across the stack for the radial chromatic workflow.")
         self._set_help(self.chromatic_feature_count_spin, "Choose 5, 15, or 30 editable spatial reference points to mark on each sampled image.")
         self._set_help(self.chromatic_start_button, "Edit: enter chromatic reference-point editing mode on the current sampled image.")
+        self._set_help(
+            self.chromatic_grid_button,
+            "Grid area: show and resize the rectangle reference points are searched within, instead of always "
+            "using the whole image (helps keep points off rotated/blank image edges).",
+        )
+        self._set_help(self.chromatic_grid_reset_button, "Reset the chromatic search area back to the automatic full-image area.")
         self._set_help(self.chromatic_auto_button, "Automatic ROI detection: detect the chromatic reference points on the sampled images and track them across the wavelength stack.")
         self._set_help(self.chromatic_reference_points_all_button, "Show all chromatic reference points across the sampled wavelengths. When linked, they are transformed into the current image space.")
         self._set_help(self.chromatic_prev_button, "Go to the previous sampled wavelength image.")
@@ -5196,6 +5224,9 @@ class MainWindow(MainWindowIcons, QMainWindow):
 
     def _sync_crop_tool(self, image_shape: tuple[int, int]) -> None:
         self._image_tools_controller.sync_crop_tool(image_shape)
+
+    def _sync_chromatic_grid_tool(self, image_shape: tuple[int, int]) -> None:
+        self._chromatic_controller.sync_grid_tool(image_shape)
 
     def _sync_crop_visibility(self) -> None:
         self._image_tools_controller.sync_crop_visibility()

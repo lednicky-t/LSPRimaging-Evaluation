@@ -52,12 +52,16 @@ class MaskController:
             window.spot_edit_action.blockSignals(True)
             window.spot_edit_action.setChecked(False)
             window.spot_edit_action.blockSignals(False)
+            window.chromatic_grid_button.blockSignals(True)
+            window.chromatic_grid_button.setChecked(False)
+            window.chromatic_grid_button.blockSignals(False)
             window._active_tool = "mask"
         elif window._active_tool == "mask":
             window._active_tool = None
         window._mask_drawing = False
         window._drag_anchor = None
         window._dragging_spots = False
+        window._chromatic_controller.sync_grid_visibility()
 
     def sync_draw_mode_buttons(self) -> None:
         window = self.window

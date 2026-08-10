@@ -93,35 +93,44 @@ def detect_regional_landmarks(
     *,
     patch_radius_px: int = 10,
     subpixel_precision: int = 1,
+    bounds: tuple[int, int, int, int] | None = None,
 ) -> dict[int, tuple[float, float]]:
     """Find `feature_count` trackable landmark points on the reference image.
 
     Lays out `feature_count` anchor positions on a roughly-even grid
-    (`default_landmark_anchors`), then searches near each anchor for the
-    strongest Harris corner response (`_corner_response`) as the actual
-    landmark -- corners/junctions are far more reliably re-locatable across
-    wavelengths than a flat or edge-only region. Falls back to the raw
-    anchor position if no clear corner is found nearby, so every requested
-    feature always gets a point. Returns `{feature_id: (x, y)}`.
+    (`default_landmark_anchors`, optionally confined to `bounds` -- see
+    there), then searches near each anchor for the strongest Harris corner
+    response (`_corner_response`) as the actual landmark -- corners/
+    junctions are far more reliably re-locatable across wavelengths than a
+    flat or edge-only region. Falls back to the raw anchor position if no
+    clear corner is found nearby, so every requested feature always gets a
+    point. Returns `{feature_id: (x, y)}`.
     """
     prepared = prepare_registration_image(image)
     response = _corner_response(prepared)
     image_height, image_width = prepared.shape[:2]
-    anchors = default_landmark_anchors((image_height, image_width), feature_count)
-    regions = _landmark_regions((image_height, image_width), feature_count)
+    anchors = default_landmark_anchors((image_height, image_width), feature_count, bounds=bounds)
+    regions = _landmark_regions((image_height, image_width), feature_count, bounds=bounds)
     edge_margin = max(int(patch_radius_px) * 2, 18)
     min_x = edge_margin
     min_y = edge_margin
     max_x = max(image_width - patch_radius_px - 1, min_x)
     max_y = max(image_height - patch_radius_px - 1, min_y)
     detected: dict[int, tuple[float, float]] = {}
-    search_radius = max(int(round(min(image_width, image_height) * 0.09)), int(patch_radius_px) * 2, 14)
+    # Scale the search radius from the *bounds* rectangle when one is given,
+    # not the full image -- otherwise a small user-chosen search area still
+    # lets this primary search reach well outside it (regions/anchors would
+    # respect bounds, but this generic radius wouldn't), defeating the point
+    # of a custom area on a low-texture image where many candidate positions
+    # score similarly.
+    scale_dim = float(min(bounds[2], bounds[3])) if bounds is not None and bounds[2] > 0 and bounds[3] > 0 else float(min(image_width, image_height))
+    search_radius = max(int(round(scale_dim * 0.09)), int(patch_radius_px) * 2, 14)
     for feature_id, anchor in anchors.items():
         center_x = int(round(anchor[0]))
         center_y = int(round(anchor[1]))
         local_radius = search_radius
         if feature_id == 1:
-            local_radius = max(int(round(min(image_width, image_height) * 0.045)), int(patch_radius_px) * 2, 10)
+            local_radius = max(int(round(scale_dim * 0.045)), int(patch_radius_px) * 2, 10)
         x0 = int(max(center_x - local_radius, min_x))
         x1 = int(min(center_x + local_radius + 1, max_x + 1))
         y0 = int(max(center_y - local_radius, min_y))
@@ -255,6 +264,7 @@ def detect_regional_spot_landmarks(
     spot_mode: str = "dark",
     patch_radius_px: int = 10,
     area_roi_settings: AreaRoiDetectionSettings | None = None,
+    bounds: tuple[int, int, int, int] | None = None,
 ) -> dict[int, tuple[float, float]]:
     """Find `feature_count` trackable landmark points on the reference image,
     like `detect_regional_landmarks`, but each point is a real particle
@@ -270,11 +280,13 @@ def detect_regional_spot_landmarks(
     *different* sector, which would break the spatial spread this
     segmentation exists to guarantee. Without `area_roi_settings`, this goes
     straight to the same local search (`_refine_spot_center`), unconstrained
-    to a sector, around each anchor position. Returns `{feature_id: (x, y)}`.
+    to a sector, around each anchor position. `bounds`, if given, confines
+    the whole anchor/sector grid to that rectangle -- see
+    `_landmark_sector_layout`. Returns `{feature_id: (x, y)}`.
     """
     image_f32 = image.astype(np.float32, copy=False)
     image_height, image_width = image_f32.shape[:2]
-    anchors = default_landmark_anchors((image_height, image_width), feature_count)
+    anchors = default_landmark_anchors((image_height, image_width), feature_count, bounds=bounds)
 
     if area_roi_settings is not None:
         # Zero/near-zero-score candidates (e.g. from a flat, featureless
@@ -296,7 +308,7 @@ def detect_regional_spot_landmarks(
         # (below) rather than reaching into a different sector's territory
         # -- staying spread out matters more here than every point landing
         # on an equally "real" particle.
-        regions = _landmark_regions((image_height, image_width), feature_count)
+        regions = _landmark_regions((image_height, image_width), feature_count, bounds=bounds)
         claimed: set[int] = set()
         detected: dict[int, tuple[float, float]] = {}
         local_filtered: np.ndarray | None = None
@@ -565,6 +577,7 @@ def auto_track_landmarks_over_wavelengths(
     patch_radius_px: int = 10,
     subpixel_precision: int = 1,
     area_roi_settings: AreaRoiDetectionSettings | None = None,
+    bounds: tuple[int, int, int, int] | None = None,
     progress_callback=None,
 ) -> dict[int, dict[float, tuple[float, float]]]:
     """Detect landmarks on the shortest-wavelength sampled image, then track
@@ -583,6 +596,9 @@ def auto_track_landmarks_over_wavelengths(
     `detect_regional_spot_landmarks`. This only affects the *starting*
     position; per-step tracking stays on the cheap local search, now with a
     real particle to follow instead of a possibly-arbitrary starting point.
+    `bounds` (`(x, y, width, height)` in image pixel space, e.g. a user-
+    dragged overlay rectangle) confines where that starting grid of anchors
+    is laid out in the first place -- see `_landmark_sector_layout`.
 
     Every step's chosen position is validated against a smooth per-landmark
     trend fit to its own trajectory so far, and replaced by the trend's own
@@ -607,6 +623,7 @@ def auto_track_landmarks_over_wavelengths(
             spot_mode=spot_mode,
             patch_radius_px=patch_radius_px,
             area_roi_settings=area_roi_settings,
+            bounds=bounds,
         )
     else:
         current = detect_regional_landmarks(
@@ -614,6 +631,7 @@ def auto_track_landmarks_over_wavelengths(
             feature_count,
             patch_radius_px=patch_radius_px,
             subpixel_precision=subpixel_precision,
+            bounds=bounds,
         )
 
     trajectories: dict[int, list[tuple[float, float, float]]] = {
@@ -1299,31 +1317,63 @@ def _select_spread_landmarks(
 def default_landmark_anchors(
     image_shape: tuple[int, int],
     feature_count: int,
+    *,
+    bounds: tuple[int, int, int, int] | None = None,
 ) -> dict[int, tuple[float, float]]:
-    centers, _regions = _landmark_sector_layout(image_shape, feature_count)
+    centers, _regions = _landmark_sector_layout(image_shape, feature_count, bounds=bounds)
     return centers
 
 
 def _landmark_regions(
     image_shape: tuple[int, int],
     feature_count: int,
+    *,
+    bounds: tuple[int, int, int, int] | None = None,
 ) -> dict[int, tuple[int, int, int, int]]:
-    _anchors, regions = _landmark_sector_layout(image_shape, feature_count)
+    _anchors, regions = _landmark_sector_layout(image_shape, feature_count, bounds=bounds)
     return regions
 
 
 def _landmark_sector_layout(
     image_shape: tuple[int, int],
     feature_count: int,
+    *,
+    bounds: tuple[int, int, int, int] | None = None,
 ) -> tuple[dict[int, tuple[float, float]], dict[int, tuple[int, int, int, int]]]:
+    """Lay out `feature_count` anchor points (and a region box per anchor,
+    used to keep matched candidates spread out -- see
+    `detect_regional_spot_landmarks`) on an evenly-spaced grid sized/oriented
+    from the feature count (5->2x3, 15->3x5, 30->5x6; other counts pick a
+    near-square grid).
+
+    By default the grid spans nearly the whole image, inset by a small
+    automatic margin. If `bounds` is given -- `(x, y, width, height)` in
+    image pixel space, e.g. a user-dragged overlay rectangle -- the grid is
+    confined to that rectangle instead, with a much smaller margin: the
+    point of a user-chosen area is to already exclude whatever shouldn't be
+    searched (a rotated image's blank corners, for instance), so there's no
+    need to additionally eat into it with the large default inset.
+    """
     image_height, image_width = image_shape[:2]
     max_features = 30
     count = max(1, min(int(feature_count), max_features))
-    min_dim = float(min(image_width, image_height))
-    edge_margin = max(min_dim * 0.06, 14.0)
-    mid_x = float(image_width - 1) * 0.5
-    mid_y = float(image_height - 1) * 0.5
-    aspect = float(image_width) / max(float(image_height), 1.0)
+
+    if bounds is not None and bounds[2] > 0 and bounds[3] > 0:
+        origin_x = float(np.clip(bounds[0], 0, max(image_width - 1, 0)))
+        origin_y = float(np.clip(bounds[1], 0, max(image_height - 1, 0)))
+        extent_w = float(np.clip(bounds[2], 1, max(image_width - origin_x, 1)))
+        extent_h = float(np.clip(bounds[3], 1, max(image_height - origin_y, 1)))
+        min_dim = float(min(extent_w, extent_h))
+        edge_margin = max(min_dim * 0.04, 6.0)
+    else:
+        origin_x, origin_y = 0.0, 0.0
+        extent_w, extent_h = float(image_width), float(image_height)
+        min_dim = float(min(image_width, image_height))
+        edge_margin = max(min_dim * 0.06, 14.0)
+
+    mid_x = origin_x + (extent_w - 1) * 0.5
+    mid_y = origin_y + (extent_h - 1) * 0.5
+    aspect = extent_w / max(extent_h, 1.0)
     if count == 5:
         grid_rows, grid_cols = ((2, 3) if aspect >= 1.0 else (3, 2))
     elif count == 15:
@@ -1337,8 +1387,8 @@ def _landmark_sector_layout(
     if grid_rows * grid_cols < count:
         grid_rows = int(np.ceil(count / max(grid_cols, 1)))
 
-    x_coords = np.linspace(edge_margin, float(image_width - 1) - edge_margin, num=max(grid_cols, 1), dtype=np.float64)
-    y_coords = np.linspace(edge_margin, float(image_height - 1) - edge_margin, num=max(grid_rows, 1), dtype=np.float64)
+    x_coords = np.linspace(origin_x + edge_margin, origin_x + extent_w - 1 - edge_margin, num=max(grid_cols, 1), dtype=np.float64)
+    y_coords = np.linspace(origin_y + edge_margin, origin_y + extent_h - 1 - edge_margin, num=max(grid_rows, 1), dtype=np.float64)
     candidates = [(float(x), float(y)) for y in y_coords for x in x_coords]
     if len(candidates) > count:
         selected = _select_evenly_spread_points(candidates, count, mid_x, mid_y)

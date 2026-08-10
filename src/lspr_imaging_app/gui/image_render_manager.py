@@ -243,6 +243,7 @@ class ImageRenderManager:
             window._update_histogram(processed)
         window._sync_rotation_tool()
         window._sync_crop_tool(processed.shape)
+        window._sync_chromatic_grid_tool(processed.shape)
         window._update_landmark_overlays()
         window._set_status_text(f"Img spectral cube {spectral_cube_index} {wavelength:g}nm")
         if not window._chromatic_setup_active and not bool(getattr(window, "_image_tools_preview_only", False)):

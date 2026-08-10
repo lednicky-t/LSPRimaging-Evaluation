@@ -16,6 +16,7 @@ from lspr_imaging_app.domain.models import (
     ChromaticLandmarkObservation,
     ChromaticTransformModel,
     CropDefinition,
+    GridBoundsDefinition,
     MaskSettings,
     PreprocessingSettings,
     RoiDefinition,
@@ -159,6 +160,7 @@ def save_preprocessing(path: Path, settings: PreprocessingSettings) -> None:
         "chromatic_correction_enabled": bool(settings.chromatic_correction_enabled),
         "chromatic_registration_mode": str(settings.chromatic_registration_mode),
         "chromatic_landmark_kind": str(getattr(settings, "chromatic_landmark_kind", "corner")),
+        "chromatic_grid_bounds": asdict(getattr(settings, "chromatic_grid_bounds", GridBoundsDefinition())),
         "chromatic_sample_image_count": int(settings.chromatic_sample_image_count),
         "chromatic_feature_count": int(settings.chromatic_feature_count),
         "chromatic_subpixel_precision": int(getattr(settings, "chromatic_subpixel_precision", 4)),
@@ -176,6 +178,9 @@ def load_preprocessing(path: Path) -> PreprocessingSettings:
     raw_crop = payload.get("crop", {})
     if not isinstance(raw_crop, dict):
         raw_crop = {}
+    raw_grid_bounds = payload.get("chromatic_grid_bounds", {})
+    if not isinstance(raw_grid_bounds, dict):
+        raw_grid_bounds = {}
     return PreprocessingSettings(
         image_tools_enabled=bool(payload.get("image_tools_enabled", True)),
         rotation_angle_deg=float(payload.get("rotation_angle_deg", 0.0)),
@@ -210,6 +215,13 @@ def load_preprocessing(path: Path) -> PreprocessingSettings:
         chromatic_correction_enabled=bool(payload.get("chromatic_correction_enabled", False)),
         chromatic_registration_mode=str(payload.get("chromatic_registration_mode", "landmark_radial")),
         chromatic_landmark_kind=str(payload.get("chromatic_landmark_kind", "corner")),
+        chromatic_grid_bounds=GridBoundsDefinition(
+            x=int(raw_grid_bounds.get("x", 0)),
+            y=int(raw_grid_bounds.get("y", 0)),
+            width=int(raw_grid_bounds.get("width", 0)),
+            height=int(raw_grid_bounds.get("height", 0)),
+            enabled=bool(raw_grid_bounds.get("enabled", False)),
+        ),
         chromatic_sample_image_count=int(payload.get("chromatic_sample_image_count", 5)),
         chromatic_feature_count=int(payload.get("chromatic_feature_count", 5)),
         chromatic_subpixel_precision=int(payload.get("chromatic_subpixel_precision", 4)),
@@ -269,6 +281,7 @@ def save_processing_profile(
             "chromatic_correction_enabled": bool(preprocessing.chromatic_correction_enabled),
             "chromatic_registration_mode": str(preprocessing.chromatic_registration_mode),
             "chromatic_landmark_kind": str(getattr(preprocessing, "chromatic_landmark_kind", "corner")),
+            "chromatic_grid_bounds": asdict(getattr(preprocessing, "chromatic_grid_bounds", GridBoundsDefinition())),
             "chromatic_sample_image_count": int(preprocessing.chromatic_sample_image_count),
             "chromatic_feature_count": int(preprocessing.chromatic_feature_count),
             "chromatic_subpixel_precision": int(getattr(preprocessing, "chromatic_subpixel_precision", 4)),
@@ -326,6 +339,9 @@ def load_processing_profile(
     raw_crop = preprocessing_payload.get("crop", {})
     if not isinstance(raw_crop, dict):
         raw_crop = {}
+    raw_grid_bounds = preprocessing_payload.get("chromatic_grid_bounds", {})
+    if not isinstance(raw_grid_bounds, dict):
+        raw_grid_bounds = {}
 
     preprocessing = PreprocessingSettings(
         image_tools_enabled=bool(preprocessing_payload.get("image_tools_enabled", True)),
@@ -363,6 +379,13 @@ def load_processing_profile(
         chromatic_correction_enabled=bool(preprocessing_payload.get("chromatic_correction_enabled", False)),
         chromatic_registration_mode=str(preprocessing_payload.get("chromatic_registration_mode", "landmark_radial")),
         chromatic_landmark_kind=str(preprocessing_payload.get("chromatic_landmark_kind", "corner")),
+        chromatic_grid_bounds=GridBoundsDefinition(
+            x=int(raw_grid_bounds.get("x", 0)),
+            y=int(raw_grid_bounds.get("y", 0)),
+            width=int(raw_grid_bounds.get("width", 0)),
+            height=int(raw_grid_bounds.get("height", 0)),
+            enabled=bool(raw_grid_bounds.get("enabled", False)),
+        ),
         chromatic_sample_image_count=int(preprocessing_payload.get("chromatic_sample_image_count", 5)),
         chromatic_feature_count=int(preprocessing_payload.get("chromatic_feature_count", 5)),
         chromatic_subpixel_precision=int(preprocessing_payload.get("chromatic_subpixel_precision", 4)),

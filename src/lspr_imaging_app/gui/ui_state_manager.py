@@ -298,6 +298,8 @@ class UIStateManager:
         window.chromatic_landmark_kind_combo.setEnabled(controls_enabled)
         window.chromatic_reference_points_all_button.setEnabled(has_dataset and bool(feature_ids))
         window.chromatic_start_button.setEnabled(can_edit and controls_enabled)
+        window.chromatic_grid_button.setEnabled(has_dataset and controls_enabled)
+        window.chromatic_grid_reset_button.setEnabled(has_dataset and controls_enabled)
         window.chromatic_auto_button.setEnabled(has_dataset and controls_enabled and has_samples)
         window.chromatic_prev_button.setEnabled(can_navigate and controls_enabled)
         window.chromatic_next_button.setEnabled(can_navigate and controls_enabled)

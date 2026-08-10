@@ -993,6 +993,15 @@ def _auto_chromatic_landmarks_task(
     sample_spectral_cube_index = processed_images[0][0]
     images_by_wavelength = [(wavelength, image) for _spectral_cube, wavelength, image in processed_images]
     landmark_kind = str(getattr(preprocessing, "chromatic_landmark_kind", "corner") or "corner")
+    grid_bounds = getattr(preprocessing, "chromatic_grid_bounds", None)
+    bounds = None
+    if (
+        grid_bounds is not None
+        and bool(getattr(grid_bounds, "enabled", False))
+        and int(getattr(grid_bounds, "width", 0)) > 0
+        and int(getattr(grid_bounds, "height", 0)) > 0
+    ):
+        bounds = (int(grid_bounds.x), int(grid_bounds.y), int(grid_bounds.width), int(grid_bounds.height))
     tracking_total = max(len(images_by_wavelength) - 1, 1)
 
     def on_tracking_progress(step_index: int, step_total: int) -> None:
@@ -1012,6 +1021,7 @@ def _auto_chromatic_landmarks_task(
         spot_mode=str(spot_mode),
         subpixel_precision=int(subpixel_precision),
         area_roi_settings=area_roi_settings,
+        bounds=bounds,
         progress_callback=on_tracking_progress,
     )
     if progress_callback is not None:

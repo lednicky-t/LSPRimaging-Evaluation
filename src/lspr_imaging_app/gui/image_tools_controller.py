@@ -93,6 +93,9 @@ class ImageToolsController:
             window.roi_array_action.blockSignals(True)
             window.roi_array_action.setChecked(False)
             window.roi_array_action.blockSignals(False)
+            window.chromatic_grid_button.blockSignals(True)
+            window.chromatic_grid_button.setChecked(False)
+            window.chromatic_grid_button.blockSignals(False)
             window._active_tool = "rotate"
         elif window._active_tool == "rotate":
             window._active_tool = None
@@ -101,6 +104,7 @@ class ImageToolsController:
         window._sync_rotation_visibility()
         window._sync_crop_visibility()
         window._sync_measurement_visibility()
+        window._chromatic_controller.sync_grid_visibility()
 
     def on_crop_tool_toggled(self, checked: bool) -> None:
         window = self.window
@@ -128,6 +132,9 @@ class ImageToolsController:
             window.roi_array_action.blockSignals(True)
             window.roi_array_action.setChecked(False)
             window.roi_array_action.blockSignals(False)
+            window.chromatic_grid_button.blockSignals(True)
+            window.chromatic_grid_button.setChecked(False)
+            window.chromatic_grid_button.blockSignals(False)
             window._active_tool = "crop"
             window._state.preprocessing.crop.enabled = True
             window._save_processing_state_for_dataset()
@@ -138,6 +145,7 @@ class ImageToolsController:
         window._sync_rotation_visibility()
         window._sync_crop_visibility()
         window._sync_measurement_visibility()
+        window._chromatic_controller.sync_grid_visibility()
         window._current_image_key = None
         window._refresh_image()
 
@@ -166,6 +174,9 @@ class ImageToolsController:
             window.roi_array_action.blockSignals(True)
             window.roi_array_action.setChecked(False)
             window.roi_array_action.blockSignals(False)
+            window.chromatic_grid_button.blockSignals(True)
+            window.chromatic_grid_button.setChecked(False)
+            window.chromatic_grid_button.blockSignals(False)
             window._active_tool = "measure"
             window._set_status_text("Measurement tool active. Drag the two crosses, enter the real Δx/Δy in µm, then apply calibration.")
         elif window._active_tool == "measure":
@@ -175,6 +186,7 @@ class ImageToolsController:
         window._sync_rotation_visibility()
         window._sync_crop_visibility()
         window._sync_measurement_visibility()
+        window._chromatic_controller.sync_grid_visibility()
 
     def on_flip_horizontal_toggled(self, checked: bool) -> None:
         window = self.window

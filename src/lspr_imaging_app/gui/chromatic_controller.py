@@ -9,7 +9,7 @@ from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QColor
 
 from lspr_imaging_app.domain.exclusions import is_excluded
-from lspr_imaging_app.domain.models import ChromaticLandmarkObservation, ChromaticTransformModel
+from lspr_imaging_app.domain.models import ChromaticLandmarkObservation, ChromaticTransformModel, GridBoundsDefinition
 from lspr_imaging_app.gui.analysis_tasks import _sampled_wavelengths
 from lspr_imaging_app.gui.ui_helpers import chromatic_feature_count_value, chromatic_subpixel_precision_value
 from lspr_imaging_app.gui.worker import ChromaticLandmarkAllOverlayBundle
@@ -18,6 +18,7 @@ from lspr_imaging_app.processing.chromatic import (
     default_landmark_anchors,
     identity_affine_matrix,
     invert_affine_matrix,
+    _landmark_regions,
 )
 
 class ChromaticController:
@@ -165,7 +166,161 @@ class ChromaticController:
         return window._set_clamped_image_view_ranges(previous_ranges[0], previous_ranges[1])
 
     def default_feature_points(self, image_shape: tuple[int, int], feature_count: int) -> dict[int, tuple[float, float]]:
-        return default_landmark_anchors(image_shape, feature_count)
+        return default_landmark_anchors(image_shape, feature_count, bounds=self.current_grid_bounds())
+
+    def current_grid_bounds(self) -> tuple[int, int, int, int] | None:
+        """The user-adjusted `(x, y, width, height)` search-area rectangle
+        (image pixel space), or `None` to use the automatic full-image
+        extent -- see `chromatic_grid_bounds` on `PreprocessingSettings` and
+        `processing.chromatic._landmark_sector_layout`.
+        """
+        bounds = getattr(self.window._state.preprocessing, "chromatic_grid_bounds", None)
+        if bounds is None or not bounds.enabled or bounds.width <= 0 or bounds.height <= 0:
+            return None
+        return (int(bounds.x), int(bounds.y), int(bounds.width), int(bounds.height))
+
+    def default_grid_bounds_for_image(self, image_shape: tuple[int, int]) -> tuple[int, int, int, int]:
+        """The automatic full-image extent `_landmark_sector_layout` would
+        use with no custom bounds -- the sensible starting rectangle to seed
+        the resizable overlay with, so the user adjusts *from* what's
+        currently in effect rather than from an arbitrary default.
+        """
+        image_height, image_width = image_shape[:2]
+        margin = max(min(image_width, image_height) * 0.06, 14.0)
+        width = max(image_width - 2 * margin, 1.0)
+        height = max(image_height - 2 * margin, 1.0)
+        return (int(round(margin)), int(round(margin)), int(round(width)), int(round(height)))
+
+    def sync_grid_tool(self, image_shape: tuple[int, int]) -> None:
+        window = self.window
+        image_height, image_width = image_shape[:2]
+        bounds = window._state.preprocessing.chromatic_grid_bounds
+        default_x, default_y, default_width, default_height = self.default_grid_bounds_for_image(image_shape)
+        width = bounds.width if bounds.enabled and bounds.width > 0 else default_width
+        height = bounds.height if bounds.enabled and bounds.height > 0 else default_height
+        x = bounds.x if bounds.enabled and bounds.width > 0 else default_x
+        y = bounds.y if bounds.enabled and bounds.height > 0 else default_y
+        x = min(max(x, 0), max(image_width - width, 0))
+        y = min(max(y, 0), max(image_height - height, 0))
+        width = min(width, image_width)
+        height = min(height, image_height)
+
+        window._suspend_chromatic_grid_sync = True
+        try:
+            if window._chromatic_grid_roi is None:
+                window._chromatic_grid_roi = pg.RectROI(
+                    [x, y],
+                    [width, height],
+                    pen=pg.mkPen("#facc15", width=2),
+                    movable=False,
+                    resizable=True,
+                    rotatable=False,
+                    sideScalers=False,
+                )
+                window._chromatic_grid_roi.handleSize = 10
+                window._chromatic_grid_roi.sigRegionChangeFinished.connect(self.grid_roi_changed)
+                window._chromatic_grid_roi.sigRegionChanged.connect(lambda *_args: self._update_chromatic_grid_overlay())
+                window._chromatic_grid_roi.addScaleHandle([0.0, 0.0], [1.0, 1.0], name="top_left")
+                window._chromatic_grid_roi.addScaleHandle([1.0, 0.0], [0.0, 1.0], name="top_right")
+                window._chromatic_grid_roi.addScaleHandle([0.0, 1.0], [1.0, 0.0], name="bottom_left")
+                window._chromatic_grid_roi.addScaleHandle([1.0, 1.0], [0.0, 0.0], name="bottom_right")
+                for fraction in (0.25, 0.5, 0.75):
+                    window._chromatic_grid_roi.addScaleHandle([0.0, fraction], [1.0, fraction], name=f"left_{fraction:g}")
+                    window._chromatic_grid_roi.addScaleHandle([1.0, fraction], [0.0, fraction], name=f"right_{fraction:g}")
+                    window._chromatic_grid_roi.addScaleHandle([fraction, 0.0], [fraction, 1.0], name=f"top_{fraction:g}")
+                    window._chromatic_grid_roi.addScaleHandle([fraction, 1.0], [fraction, 0.0], name=f"bottom_{fraction:g}")
+                window.image_plot.addItem(window._chromatic_grid_roi)
+                window._chromatic_grid_roi.setZValue(1.0)
+
+            window._chromatic_grid_roi.setPos((x, y))
+            window._chromatic_grid_roi.setSize((width, height))
+        finally:
+            window._suspend_chromatic_grid_sync = False
+        self.sync_grid_visibility()
+
+    def sync_grid_visibility(self) -> None:
+        window = self.window
+        if window._chromatic_grid_roi is not None:
+            window._chromatic_grid_roi.setVisible(window._active_tool == "chromatic_grid_bounds")
+        self._update_chromatic_grid_overlay()
+
+    def on_grid_tool_toggled(self, checked: bool) -> None:
+        window = self.window
+        if checked:
+            for other in (
+                window.chromatic_start_button,
+                window.rotate_action,
+                window.crop_action,
+                window.measure_action,
+                window.mask_pencil_check,
+                window.spot_edit_action,
+                window.roi_array_action,
+            ):
+                other.blockSignals(True)
+                other.setChecked(False)
+                other.blockSignals(False)
+            window._active_tool = "chromatic_grid_bounds"
+            image = window._current_processed_image
+            if image is not None:
+                self.sync_grid_tool(image.shape[:2])
+            window._set_status_text(
+                "Drag the yellow rectangle's edges/corners to set the area reference points are searched within."
+            )
+        elif window._active_tool == "chromatic_grid_bounds":
+            window._active_tool = None
+        self.sync_grid_visibility()
+
+    def grid_roi_changed(self) -> None:
+        window = self.window
+        if window._suspend_chromatic_grid_sync or window._chromatic_grid_roi is None:
+            return
+        pos = window._chromatic_grid_roi.pos()
+        size = window._chromatic_grid_roi.size()
+        window._push_undo_point("Chromatic search area")
+        window._state.preprocessing.chromatic_grid_bounds = GridBoundsDefinition(
+            x=max(int(round(pos.x())), 0),
+            y=max(int(round(pos.y())), 0),
+            width=max(int(round(size.x())), 1),
+            height=max(int(round(size.y())), 1),
+            enabled=True,
+        )
+        self._update_chromatic_grid_overlay()
+        window._schedule_processing_state_save()
+        window._set_status_text("Chromatic search area updated.")
+
+    def reset_grid_bounds(self) -> None:
+        window = self.window
+        window._push_undo_point("Reset chromatic search area")
+        window._state.preprocessing.chromatic_grid_bounds = GridBoundsDefinition()
+        image = window._current_processed_image
+        if image is not None:
+            self.sync_grid_tool(image.shape[:2])
+        window._schedule_processing_state_save()
+        window._set_status_text("Chromatic search area reset to the automatic full-image area.")
+
+    def _update_chromatic_grid_overlay(self) -> None:
+        window = self.window
+        show = window._active_tool in ("chromatic_grid_bounds", "chromatic_landmark") and window._state.dataset is not None
+        image = window._current_processed_image
+        if not show or image is None:
+            if window._chromatic_grid_overlay_item is not None:
+                window._chromatic_grid_overlay_item.setVisible(False)
+            return
+        feature_count = int(window._state.preprocessing.chromatic_feature_count)
+        regions = _landmark_regions(image.shape[:2], feature_count, bounds=self.current_grid_bounds())
+        xs: list[float] = []
+        ys: list[float] = []
+        for x0, x1, y0, y1 in regions.values():
+            xs.extend([float(x0), float(x1), float(x1), float(x0), float(x0), float("nan")])
+            ys.extend([float(y0), float(y0), float(y1), float(y1), float(y0), float("nan")])
+        if window._chromatic_grid_overlay_item is None:
+            curve = pg.PlotCurveItem()
+            curve.setSkipFiniteCheck(True)
+            window.image_plot.addItem(curve, ignoreBounds=True)
+            window._chromatic_grid_overlay_item = curve
+            window._chromatic_grid_overlay_item.setPen(pg.mkPen("#facc15", width=1.2, style=Qt.PenStyle.DashLine))
+        window._chromatic_grid_overlay_item.setData(np.asarray(xs, dtype=np.float64), np.asarray(ys, dtype=np.float64))
+        window._chromatic_grid_overlay_item.setVisible(True)
 
     def expected_feature_ids(self) -> list[int]:
         window = self.window
@@ -1067,6 +1222,9 @@ class ChromaticController:
             self.window.mask_pencil_check.blockSignals(True)
             self.window.mask_pencil_check.setChecked(False)
             self.window.mask_pencil_check.blockSignals(False)
+            self.window.chromatic_grid_button.blockSignals(True)
+            self.window.chromatic_grid_button.setChecked(False)
+            self.window.chromatic_grid_button.blockSignals(False)
             self.window._active_tool = "chromatic_landmark"
             self.window._selected_landmark_id = self.window._chromatic_landmark_marker_id
             if hasattr(self.window, "image_panel"):
@@ -1085,6 +1243,7 @@ class ChromaticController:
             self.window._active_tool = None
             self.window._append_workflow_log("Chromatic edit deactivated", level="info")
         self.window._update_landmark_overlays()
+        self.sync_grid_visibility()
 
 
     def _on_chromatic_sample_count_changed(self, value: int) -> None:
@@ -1116,6 +1275,7 @@ class ChromaticController:
         self.window.chromatic_landmark_id_spin.blockSignals(False)
         self._update_chromatic_summary()
         self.window._update_landmark_overlays()
+        self._update_chromatic_grid_overlay()
         self.window._schedule_processing_state_save()
 
 

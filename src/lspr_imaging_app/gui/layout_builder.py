@@ -139,6 +139,8 @@ def build_layout(window) -> None:
     chromatic_layout.addRow("Ref.points", refpoints_row)
     action_row = QHBoxLayout()
     action_row.addWidget(window.chromatic_start_button)
+    action_row.addWidget(window.chromatic_grid_button)
+    action_row.addWidget(window.chromatic_grid_reset_button)
     action_row.addWidget(window.chromatic_prev_button)
     action_row.addWidget(window.chromatic_next_button)
     action_row.addWidget(QLabel("Ref.point"))

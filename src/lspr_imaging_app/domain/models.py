@@ -57,6 +57,21 @@ class CropDefinition:
 
 
 @dataclass(slots=True)
+class GridBoundsDefinition:
+    """A user-adjustable rectangle (image pixel space) that the chromatic
+    reference-point search grid is laid out within, instead of nearly the
+    whole image. `enabled=False` (the default) means "use the automatic
+    full-image extent" -- unset until the user explicitly drags the overlay.
+    """
+
+    x: int = 0
+    y: int = 0
+    width: int = 0
+    height: int = 0
+    enabled: bool = False
+
+
+@dataclass(slots=True)
 class PreprocessingSettings:
     image_tools_enabled: bool = True
     rotation_angle_deg: float = 0.0
@@ -82,6 +97,7 @@ class PreprocessingSettings:
     chromatic_correction_enabled: bool = False
     chromatic_registration_mode: str = "landmark_radial"
     chromatic_landmark_kind: str = "corner"
+    chromatic_grid_bounds: GridBoundsDefinition = field(default_factory=GridBoundsDefinition)
     chromatic_sample_image_count: int = 5
     chromatic_feature_count: int = 5
     chromatic_subpixel_precision: int = 4
