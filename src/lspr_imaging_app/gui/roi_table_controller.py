@@ -221,7 +221,7 @@ class RoiTableController:
             return None
         folder.mkdir(parents=True, exist_ok=True)
         signature = self._roi_table_signature_snapshot()
-        if not force and self.window._last_saved_roi_table_signature_snapshot == signature and self.window._last_saved_roi_table_path is not None:
+        if not force and self.window._last_saved_roi_table_signature == signature and self.window._last_saved_roi_table_path is not None:
             return self.window._last_saved_roi_table_path
         rows = self._roi_table_rows_snapshot()
         path = self._roi_table_snapshot_path(folder)
@@ -245,7 +245,7 @@ class RoiTableController:
             ])
             if rows:
                 writer.writerows(rows)
-        self.window._last_saved_roi_table_signature_snapshot = signature
+        self.window._last_saved_roi_table_signature = signature
         self.window._last_saved_roi_table_path = path
         return path
 

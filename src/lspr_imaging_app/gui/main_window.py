@@ -466,11 +466,11 @@ class MainWindow(MainWindowIcons, QMainWindow):
         self._image_tools_preview_only = False
         self._ome_zarr_chunk_controls_syncing = False
         theme = get_active_theme()
-        self._sample_visual_color = QColor(theme.sample_color)
+        self._sample_visual_color = QColor(theme.spot_color)
         self._mask_visual_color = QColor(theme.mask_color)
         self._histogram_mask_visual_color = QColor(theme.histogram_mask_color)
         self._figure_mask_visual_color = QColor(theme.figure_mask_color)
-        self._reference_visual_color = QColor(theme.reference_color)
+        self._reference_visual_color = QColor(theme.ring_color)
         self._highlight_visual_color = QColor(theme.highlight_color)
         self._scale_bar_visual_color = QColor(theme.scale_bar_color)
         self._roi_alpha = 0.8
