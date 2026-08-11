@@ -837,18 +837,20 @@ class MainWindow(MainWindowIcons, QMainWindow):
         self.chromatic_auto_button = QToolButton(self)
         self.chromatic_auto_button.setAutoRaise(True)
         self.chromatic_auto_button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly)
-        self.chromatic_auto_button.setFixedSize(APP_THEME.compact_icon_outer, APP_THEME.compact_icon_outer)
-        self.chromatic_auto_button.setIconSize(QSize(APP_THEME.compact_icon_inner, APP_THEME.compact_icon_inner))
+        self.chromatic_auto_button.setFixedSize(28, 28)
+        self.chromatic_auto_button.setIconSize(QSize(24, 24))
         self.chromatic_auto_button.setStyleSheet(transparent_icon_button_stylesheet())
         self.chromatic_auto_button.setIcon(self._chromatic_auto_icon(False))
         self.chromatic_auto_button.setToolTip(
-            "Automatic ROI detection: detect the chromatic reference points on the first sampled image and track them across the other sampled wavelengths."
+            "Automatic ref.points finder: detect the chromatic reference points on the first sampled image and track them across the other sampled wavelengths."
         )
         self.chromatic_reference_points_all_button = self._create_view_toggle_button(
             "reference_points_all",
             self._chromatic_reference_points_all_visible,
             "Show all chromatic reference points across the sampled wavelengths. When chromatic transforms are linked, the points are transformed into the current image space.",
         )
+        self.chromatic_reference_points_all_button.setFixedSize(28, 28)
+        self.chromatic_reference_points_all_button.setIconSize(QSize(24, 24))
         self.chromatic_prev_button = self._free_standing_icon_label(
             self._navigation_chevron_icon("left"),
             "Go to the previous sampled wavelength image.",
@@ -4228,7 +4230,7 @@ class MainWindow(MainWindowIcons, QMainWindow):
             "using the whole image (helps keep points off rotated/blank image edges).",
         )
         self._set_help(self.chromatic_grid_reset_button, "Reset the chromatic search area back to the automatic full-image area.")
-        self._set_help(self.chromatic_auto_button, "Automatic ROI detection: detect the chromatic reference points on the sampled images and track them across the wavelength stack.")
+        self._set_help(self.chromatic_auto_button, "Automatic ref.points finder: detect the chromatic reference points on the sampled images and track them across the wavelength stack.")
         self._set_help(self.chromatic_reference_points_all_button, "Show all chromatic reference points across the sampled wavelengths. When linked, they are transformed into the current image space.")
         self._set_help(self.chromatic_prev_button, "Go to the previous sampled wavelength image.")
         self._set_help(self.chromatic_next_button, "Go to the next sampled wavelength image.")
