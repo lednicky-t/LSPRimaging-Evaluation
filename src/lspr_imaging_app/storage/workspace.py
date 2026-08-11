@@ -7,7 +7,7 @@ from pathlib import Path
 
 import numpy as np
 
-from lspr_imaging_app.format_versions import PROCESSING_PROFILE_VERSION, ROI_EXPORT_VERSION
+from lspr_imaging_app.format_versions import PROCESSING_PROFILE_VERSION
 from lspr_imaging_app.domain.exclusions import ImageExclusionRule
 from lspr_imaging_app.domain.models import (
     AreaRoi,
@@ -21,6 +21,11 @@ from lspr_imaging_app.domain.models import (
     PreprocessingSettings,
     RoiDefinition,
 )
+
+
+def write_json_file(path: Path, payload: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
 
 def _encode_mask_payload(mask: np.ndarray) -> dict:
@@ -96,45 +101,7 @@ def _decode_mask_settings(payload: dict) -> MaskSettings:
     )
 
 
-def save_rois(path: Path, rois: list[RoiDefinition]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    payload = {
-        "format_type": "lspr_imaging_roi_export",
-        "format_version": ROI_EXPORT_VERSION,
-        "schema_version": ROI_EXPORT_VERSION,
-        "rois": [asdict(roi) for roi in rois],
-    }
-    path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-
-
-def load_rois(path: Path) -> list[RoiDefinition]:
-    payload = json.loads(path.read_text(encoding="utf-8"))
-    if not isinstance(payload, dict):
-        raise ValueError("Invalid ROI export format.")
-    rois_raw = payload.get("rois", [])
-    rois: list[RoiDefinition] = []
-    for raw in rois_raw:
-        if not isinstance(raw, dict):
-            continue
-        rois.append(
-            RoiDefinition(
-                roi_id=str(raw.get("roi_id", "")),
-                name=str(raw.get("name", "ROI")),
-                shape=str(raw.get("shape", "ellipse")),
-                center_x=float(raw.get("center_x", 0.0)),
-                center_y=float(raw.get("center_y", 0.0)),
-                size_x=float(raw.get("size_x", 10.0)),
-                size_y=float(raw.get("size_y", 10.0)),
-                background_padding_px=float(raw.get("background_padding_px", 10.0)),
-                background_width_px=float(raw.get("background_width_px", 12.0)),
-                enabled=bool(raw.get("enabled", True)),
-            )
-        )
-    return rois
-
-
-def save_preprocessing(path: Path, settings: PreprocessingSettings) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
+def build_preprocessing_payload(settings: PreprocessingSettings) -> dict:
     payload = {
         "image_tools_enabled": bool(getattr(settings, "image_tools_enabled", True)),
         "rotation_angle_deg": float(settings.rotation_angle_deg),
@@ -156,10 +123,12 @@ def save_preprocessing(path: Path, settings: PreprocessingSettings) -> None:
         "flatten_background_binning": int(settings.flatten_background_binning),
         "flatten_background_exclude_area_rois": bool(settings.flatten_background_exclude_area_rois),
         "flatten_background_exclude_mask": bool(settings.flatten_background_exclude_mask),
-        "local_ring_normalization_enabled": bool(getattr(settings, "local_ring_normalization_enabled", False)),
+        "flatten_background_exclusion_dilation_px": int(getattr(settings, "flatten_background_exclusion_dilation_px", 0)),
+        "local_reference_normalization_enabled": bool(getattr(settings, "local_reference_normalization_enabled", False)),
         "chromatic_correction_enabled": bool(settings.chromatic_correction_enabled),
         "chromatic_registration_mode": str(settings.chromatic_registration_mode),
         "chromatic_landmark_kind": str(getattr(settings, "chromatic_landmark_kind", "corner")),
+        "chromatic_landmark_model": str(getattr(settings, "chromatic_landmark_model", "similarity")),
         "chromatic_grid_bounds": asdict(getattr(settings, "chromatic_grid_bounds", GridBoundsDefinition())),
         "chromatic_sample_image_count": int(settings.chromatic_sample_image_count),
         "chromatic_feature_count": int(settings.chromatic_feature_count),
@@ -170,7 +139,11 @@ def save_preprocessing(path: Path, settings: PreprocessingSettings) -> None:
         "reference_wavelength_nm": settings.reference_wavelength_nm,
         "reference_spectral_cube_index": int(settings.reference_spectral_cube_index),
     }
-    path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    return payload
+
+
+def save_preprocessing(path: Path, settings: PreprocessingSettings) -> None:
+    write_json_file(path, build_preprocessing_payload(settings))
 
 
 def load_preprocessing(path: Path) -> PreprocessingSettings:
@@ -211,10 +184,15 @@ def load_preprocessing(path: Path) -> PreprocessingSettings:
             payload.get("flatten_background_exclude_area_rois", payload.get("flatten_background_exclude_spots", True))
         ),
         flatten_background_exclude_mask=bool(payload.get("flatten_background_exclude_mask", False)),
-        local_ring_normalization_enabled=bool(payload.get("local_ring_normalization_enabled", False)),
+        flatten_background_exclusion_dilation_px=max(int(payload.get("flatten_background_exclusion_dilation_px", 0)), 0),
+        local_reference_normalization_enabled=bool(payload.get("local_reference_normalization_enabled", payload.get("local_ring_normalization_enabled", False))),
         chromatic_correction_enabled=bool(payload.get("chromatic_correction_enabled", False)),
         chromatic_registration_mode=str(payload.get("chromatic_registration_mode", "landmark_radial")),
         chromatic_landmark_kind=str(payload.get("chromatic_landmark_kind", "corner")),
+        # Fall back to "affine" (not the new default of "similarity") when the key is missing:
+        # files saved before this toggle existed were always fit with the affine model, so this
+        # preserves what that saved profile actually used if reloaded and re-estimated.
+        chromatic_landmark_model=str(payload.get("chromatic_landmark_model", "affine")),
         chromatic_grid_bounds=GridBoundsDefinition(
             x=int(raw_grid_bounds.get("x", 0)),
             y=int(raw_grid_bounds.get("y", 0)),
@@ -238,8 +216,7 @@ def load_preprocessing(path: Path) -> PreprocessingSettings:
     )
 
 
-def save_processing_profile(
-    path: Path,
+def build_processing_profile_payload(
     preprocessing: PreprocessingSettings,
     area_roi_settings: AreaRoiDetectionSettings,
     area_rois: list[AreaRoi],
@@ -251,8 +228,7 @@ def save_processing_profile(
     session_mask: dict | None = None,
     mask_settings: MaskSettings | None = None,
     image_exclusions: list[ImageExclusionRule] | None = None,
-) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
+) -> dict:
     payload = {
         "profile_type": "lspr_imaging_processing",
         "profile_version": PROCESSING_PROFILE_VERSION,
@@ -277,10 +253,12 @@ def save_processing_profile(
             "flatten_background_binning": int(preprocessing.flatten_background_binning),
             "flatten_background_exclude_area_rois": bool(preprocessing.flatten_background_exclude_area_rois),
             "flatten_background_exclude_mask": bool(preprocessing.flatten_background_exclude_mask),
-            "local_ring_normalization_enabled": bool(getattr(preprocessing, "local_ring_normalization_enabled", False)),
+            "flatten_background_exclusion_dilation_px": int(getattr(preprocessing, "flatten_background_exclusion_dilation_px", 0)),
+            "local_reference_normalization_enabled": bool(getattr(preprocessing, "local_reference_normalization_enabled", False)),
             "chromatic_correction_enabled": bool(preprocessing.chromatic_correction_enabled),
             "chromatic_registration_mode": str(preprocessing.chromatic_registration_mode),
             "chromatic_landmark_kind": str(getattr(preprocessing, "chromatic_landmark_kind", "corner")),
+            "chromatic_landmark_model": str(getattr(preprocessing, "chromatic_landmark_model", "similarity")),
             "chromatic_grid_bounds": asdict(getattr(preprocessing, "chromatic_grid_bounds", GridBoundsDefinition())),
             "chromatic_sample_image_count": int(preprocessing.chromatic_sample_image_count),
             "chromatic_feature_count": int(preprocessing.chromatic_feature_count),
@@ -313,7 +291,60 @@ def save_processing_profile(
                 "record_path": None if record_path is None else str(record_path),
                 "mask": _encode_mask_payload(np.asarray(mask, dtype=bool)),
             }
-    path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    return payload
+
+
+def save_processing_profile(
+    path: Path,
+    preprocessing: PreprocessingSettings,
+    area_roi_settings: AreaRoiDetectionSettings,
+    area_rois: list[AreaRoi],
+    area_roi_groups: list[AreaRoiGroup] | None = None,
+    rois: list[RoiDefinition] | None = None,
+    chromatic_models: list[ChromaticTransformModel] | None = None,
+    chromatic_landmarks: list[ChromaticLandmarkObservation] | None = None,
+    analysis_cache: dict | None = None,
+    session_mask: dict | None = None,
+    mask_settings: MaskSettings | None = None,
+    image_exclusions: list[ImageExclusionRule] | None = None,
+) -> None:
+    write_json_file(
+        path,
+        build_processing_profile_payload(
+            preprocessing,
+            area_roi_settings,
+            area_rois,
+            area_roi_groups,
+            rois,
+            chromatic_models,
+            chromatic_landmarks,
+            analysis_cache,
+            session_mask=session_mask,
+            mask_settings=mask_settings,
+            image_exclusions=image_exclusions,
+        ),
+    )
+
+
+def write_processing_state_files(
+    preprocessing_path: Path,
+    preprocessing_payload: dict,
+    profile_path: Path,
+    profile_payload: dict,
+) -> None:
+    """Write both processing-state files from already-built payloads.
+
+    Meant to run off the GUI thread: building the payloads (walking
+    dataclasses and the analysis caches) is cheap, in-memory work, but
+    `json.dumps` + `write_text` for a profile that includes a few hundred
+    cached spectra is not free, and this used to run synchronously inside a
+    debounced QTimer callback on the GUI thread -- freezing the UI for a
+    beat after every ROI drag or mask stroke. See SessionStateManager
+    .save_processing_state_for_dataset for the caller that dispatches this
+    to a background worker.
+    """
+    write_json_file(preprocessing_path, preprocessing_payload)
+    write_json_file(profile_path, profile_payload)
 
 
 def load_processing_profile(
@@ -375,10 +406,16 @@ def load_processing_profile(
             )
         ),
         flatten_background_exclude_mask=bool(preprocessing_payload.get("flatten_background_exclude_mask", False)),
-        local_ring_normalization_enabled=bool(preprocessing_payload.get("local_ring_normalization_enabled", False)),
+        flatten_background_exclusion_dilation_px=max(
+            int(preprocessing_payload.get("flatten_background_exclusion_dilation_px", 0)), 0
+        ),
+        local_reference_normalization_enabled=bool(preprocessing_payload.get("local_reference_normalization_enabled", preprocessing_payload.get("local_ring_normalization_enabled", False))),
         chromatic_correction_enabled=bool(preprocessing_payload.get("chromatic_correction_enabled", False)),
         chromatic_registration_mode=str(preprocessing_payload.get("chromatic_registration_mode", "landmark_radial")),
         chromatic_landmark_kind=str(preprocessing_payload.get("chromatic_landmark_kind", "corner")),
+        # See load_preprocessing: "affine" here (not "similarity") preserves what profiles saved
+        # before this toggle existed actually used.
+        chromatic_landmark_model=str(preprocessing_payload.get("chromatic_landmark_model", "affine")),
         chromatic_grid_bounds=GridBoundsDefinition(
             x=int(raw_grid_bounds.get("x", 0)),
             y=int(raw_grid_bounds.get("y", 0)),
@@ -485,10 +522,10 @@ def load_processing_profile(
     detection.reference_outer_radius_px = max(detection.reference_outer_radius_px, detection.reference_inner_radius_px)
 
     # Support old key "detected_spots" from pre-rename profiles.
-    raw_spots = payload.get("area_rois", payload.get("detected_spots", []))
+    raw_rois = payload.get("area_rois", payload.get("detected_spots", []))
     area_rois: list[AreaRoi] = []
-    if isinstance(raw_spots, list):
-        for raw in raw_spots:
+    if isinstance(raw_rois, list):
+        for raw in raw_rois:
             if not isinstance(raw, dict):
                 continue
             area_rois.append(

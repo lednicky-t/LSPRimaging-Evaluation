@@ -49,9 +49,9 @@ class MaskController:
             window.crop_action.blockSignals(True)
             window.crop_action.setChecked(False)
             window.crop_action.blockSignals(False)
-            window.spot_edit_action.blockSignals(True)
-            window.spot_edit_action.setChecked(False)
-            window.spot_edit_action.blockSignals(False)
+            window.roi_edit_action.blockSignals(True)
+            window.roi_edit_action.setChecked(False)
+            window.roi_edit_action.blockSignals(False)
             window.chromatic_grid_button.blockSignals(True)
             window.chromatic_grid_button.setChecked(False)
             window.chromatic_grid_button.blockSignals(False)
@@ -60,7 +60,7 @@ class MaskController:
             window._active_tool = None
         window._mask_drawing = False
         window._drag_anchor = None
-        window._dragging_spots = False
+        window._dragging_rois = False
         window._chromatic_controller.sync_grid_visibility()
 
     def sync_draw_mode_buttons(self) -> None:
@@ -165,7 +165,7 @@ class MaskController:
                 raw_image = load_image_array(str(window._current_record_path)).astype(np.float32, copy=False)
             export_settings = deepcopy(window._state.area_roi_settings)
             export_settings.ignore_marked_pixels = True
-            from lspr_imaging_app.processing.spot_detection import ignored_pixel_mask
+            from lspr_imaging_app.processing.roi_detection import ignored_pixel_mask
             mask = ignored_pixel_mask(raw_image, export_settings, external_mask=None)
         try:
             Image.fromarray(np.where(mask, 255, 0).astype(np.uint8), mode="L").save(destination)

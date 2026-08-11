@@ -24,7 +24,7 @@ class OverlayManager:
     # ROI overlays
     # ------------------------------------------------------------------
 
-    def _refresh_spot_overlays_during_drag(self) -> None:
+    def _refresh_roi_overlays_during_drag(self) -> None:
         self._update_roi_overlays(update_hidden_details=False)
 
     def _update_roi_overlays(self, *, update_hidden_details: bool = True) -> None:
@@ -34,8 +34,8 @@ class OverlayManager:
         if w._showing_background_profile_main:
             for bundle in w._roi_overlay_items.values():
                 bundle.curve.setVisible(False)
-                if bundle.ring_fill is not None:
-                    bundle.ring_fill.setVisible(False)
+                if bundle.reference_fill is not None:
+                    bundle.reference_fill.setVisible(False)
                 if bundle.inner_curve is not None:
                     bundle.inner_curve.setVisible(False)
                 if bundle.outer_curve is not None:
@@ -45,12 +45,12 @@ class OverlayManager:
             self._update_guide_overlays()
             return
         current_ids = {roi.area_roi_id for roi in display_rois}
-        for spot_id in list(w._roi_overlay_items):
-            if spot_id not in current_ids:
-                w._remove_spot_overlay_bundle(spot_id)
+        for roi_id in list(w._roi_overlay_items):
+            if roi_id not in current_ids:
+                w._remove_roi_overlay_bundle(roi_id)
 
-        ring_inner_radius = float(max(w._state.area_roi_settings.reference_inner_radius_px, 0))
-        ring_outer_radius = float(max(w._state.area_roi_settings.reference_outer_radius_px, w._state.area_roi_settings.reference_inner_radius_px))
+        reference_inner_radius = float(max(w._state.area_roi_settings.reference_inner_radius_px, 0))
+        reference_outer_radius = float(max(w._state.area_roi_settings.reference_outer_radius_px, w._state.area_roi_settings.reference_inner_radius_px))
         for roi in display_rois:
             source_roi = source_roi_map.get(roi.area_roi_id, roi)
             bundle = w._roi_overlay_items.get(roi.area_roi_id)
@@ -67,15 +67,15 @@ class OverlayManager:
             fill_color = resolved_roi_color(roi, group, w._sample_visual_color)
             fill_color.setAlphaF(w._alpha01(max(w._roi_alpha * 0.22, 0.08)))
             roi_signature = w._roi_absorbance_signature(source_roi)
-            spot_cached = bool(roi_signature is not None and w._spot_absorbance_cache.get(roi_signature) is not None)
-            if w._cached_rois_only_visible and not spot_cached and roi.area_roi_id not in w._selected_roi_ids:
+            roi_cached = bool(roi_signature is not None and w._roi_absorbance_cache.get(roi_signature) is not None)
+            if w._cached_rois_only_visible and not roi_cached and roi.area_roi_id not in w._selected_roi_ids:
                 dim_pen = QColor("#94a3b8")
                 dim_pen.setAlphaF(w._alpha01(0.16))
                 dim_fill = QColor("#94a3b8")
                 dim_fill.setAlphaF(w._alpha01(0.04))
                 pen_color = dim_pen
                 fill_color = dim_fill
-            elif w._cached_rois_only_visible and spot_cached and roi.area_roi_id not in w._selected_roi_ids:
+            elif w._cached_rois_only_visible and roi_cached and roi.area_roi_id not in w._selected_roi_ids:
                 cached_pen = QColor("#22c55e")
                 cached_pen.setAlphaF(w._alpha01(max(w._roi_alpha, 0.9)))
                 cached_fill = QColor("#22c55e")
@@ -103,63 +103,63 @@ class OverlayManager:
             bundle.curve.setFillLevel(roi.center_y)
             bundle.curve.setBrush(brush)
             bundle.curve.setVisible(w._rois_visible)
-            if w._reference_visible and ring_outer_radius > 0.0:
-                ring_color = resolved_reference_color(roi, group, w._reference_visual_color)
-                ring_color.setAlphaF(w._alpha01(max(w._reference_alpha * 1.3, 0.18)))
-                ring_fill = resolved_reference_color(roi, group, w._reference_visual_color)
-                ring_fill.setAlphaF(w._alpha01(max(w._reference_alpha, 0.03)))
+            if w._reference_visible and reference_outer_radius > 0.0:
+                reference_color = resolved_reference_color(roi, group, w._reference_visual_color)
+                reference_color.setAlphaF(w._alpha01(max(w._reference_alpha * 1.3, 0.18)))
+                reference_fill = resolved_reference_color(roi, group, w._reference_visual_color)
+                reference_fill.setAlphaF(w._alpha01(max(w._reference_alpha, 0.03)))
                 if roi.area_roi_id in w._selected_roi_ids:
-                    ring_color = QColor("#38bdf8")
-                    ring_color.setAlphaF(w._alpha01(0.85))
-                    ring_fill = QColor("#38bdf8")
-                    ring_fill.setAlphaF(w._alpha01(max(w._reference_alpha, 0.08)))
-                inner_pen = pg.mkPen(ring_color, width=1.4, style=Qt.PenStyle.DashLine)
-                outer_pen = pg.mkPen(ring_color, width=1.4, style=Qt.PenStyle.DotLine)
-                if ring_inner_radius > 0.0:
+                    reference_color = QColor("#38bdf8")
+                    reference_color.setAlphaF(w._alpha01(0.85))
+                    reference_fill = QColor("#38bdf8")
+                    reference_fill.setAlphaF(w._alpha01(max(w._reference_alpha, 0.08)))
+                inner_pen = pg.mkPen(reference_color, width=1.4, style=Qt.PenStyle.DashLine)
+                outer_pen = pg.mkPen(reference_color, width=1.4, style=Qt.PenStyle.DotLine)
+                if reference_inner_radius > 0.0:
                     if bundle.inner_curve is None:
                         bundle.inner_curve = pg.PlotCurveItem()
                         bundle.inner_curve.setSkipFiniteCheck(True)
                         w.image_plot.addItem(bundle.inner_curve, ignoreBounds=True)
-                    inner_xs, inner_ys = w._roi_curve_points(source_roi, roi, ring_inner_radius)
+                    inner_xs, inner_ys = w._roi_curve_points(source_roi, roi, reference_inner_radius)
                     bundle.inner_curve.setData(inner_xs, inner_ys)
                     bundle.inner_curve.setPen(inner_pen)
                     bundle.inner_curve.setVisible(True)
                 elif bundle.inner_curve is not None:
                     bundle.inner_curve.setVisible(False)
-                if bundle.ring_fill is None:
+                if bundle.reference_fill is None:
                     from PyQt6.QtWidgets import QGraphicsPathItem
-                    bundle.ring_fill = QGraphicsPathItem()
-                    w.image_plot.addItem(bundle.ring_fill, ignoreBounds=True)
-                bundle.ring_fill.setPath(
-                    w._create_ring_fill_path(
+                    bundle.reference_fill = QGraphicsPathItem()
+                    w.image_plot.addItem(bundle.reference_fill, ignoreBounds=True)
+                bundle.reference_fill.setPath(
+                    w._create_reference_fill_path(
                         roi.center_x,
                         roi.center_y,
-                        ring_inner_radius,
-                        ring_outer_radius,
+                        reference_inner_radius,
+                        reference_outer_radius,
                     )
                 )
-                bundle.ring_fill.setBrush(QBrush(ring_fill))
-                bundle.ring_fill.setPen(QPen(Qt.PenStyle.NoPen))
-                bundle.ring_fill.setVisible(True)
+                bundle.reference_fill.setBrush(QBrush(reference_fill))
+                bundle.reference_fill.setPen(QPen(Qt.PenStyle.NoPen))
+                bundle.reference_fill.setVisible(True)
                 if bundle.outer_curve is None:
                     bundle.outer_curve = pg.PlotCurveItem()
                     bundle.outer_curve.setSkipFiniteCheck(True)
                     w.image_plot.addItem(bundle.outer_curve, ignoreBounds=True)
-                outer_xs, outer_ys = w._roi_curve_points(source_roi, roi, ring_outer_radius)
+                outer_xs, outer_ys = w._roi_curve_points(source_roi, roi, reference_outer_radius)
                 bundle.outer_curve.setData(outer_xs, outer_ys)
                 bundle.outer_curve.setPen(outer_pen)
                 bundle.outer_curve.setVisible(True)
             elif update_hidden_details:
                 if bundle.inner_curve is not None:
                     bundle.inner_curve.setVisible(False)
-                if bundle.ring_fill is not None:
-                    bundle.ring_fill.setVisible(False)
+                if bundle.reference_fill is not None:
+                    bundle.reference_fill.setVisible(False)
                 if bundle.outer_curve is not None:
                     bundle.outer_curve.setVisible(False)
-            label = w._array_label_for_spot(roi.area_roi_id)
+            label = w._array_label_for_roi(roi.area_roi_id)
             if label is not None and w._roi_labels_visible:
                 is_selected = roi.area_roi_id in w._selected_roi_ids
-                if w._cached_rois_only_visible and not spot_cached and not is_selected:
+                if w._cached_rois_only_visible and not roi_cached and not is_selected:
                     if bundle.label is not None:
                         bundle.label.setVisible(False)
                     continue
@@ -319,7 +319,7 @@ class OverlayManager:
         y_top, y_bottom = sorted((float(y_range[0]), float(y_range[1])))
         visible_width = max(x_right - x_left, 1.0)
         visible_height = max(y_bottom - y_top, 1.0)
-        available_px = max(visible_width * 0.22, 30.0)
+        available_px = visible_width * 0.22
         if w._display_uses_micrometers():
             bar_value = w._nice_scale_bar_value(available_px * w._microns_per_pixel_scalar())
             bar_length_px = bar_value / w._microns_per_pixel_scalar()

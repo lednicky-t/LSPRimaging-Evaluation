@@ -18,14 +18,16 @@ class UIStateManager:
         window.flatten_background_check.blockSignals(True)
         window.flatten_background_sigma_spin.blockSignals(True)
         window.flatten_background_binning_combo.blockSignals(True)
-        window.background_ignore_spot_button.blockSignals(True)
+        window.background_ignore_roi_button.blockSignals(True)
         window.background_ignore_mask_button.blockSignals(True)
-        window.background_local_ring_check.blockSignals(True)
+        window.background_exclusion_dilation_spin.blockSignals(True)
+        window.background_local_reference_check.blockSignals(True)
         window.chromatic_apply_check.blockSignals(True)
         window.chromatic_sample_count_spin.blockSignals(True)
         window.chromatic_feature_count_spin.blockSignals(True)
         window.chromatic_subpixel_precision_combo.blockSignals(True)
         window.chromatic_landmark_kind_combo.blockSignals(True)
+        window.chromatic_landmark_model_combo.blockSignals(True)
         window.chromatic_landmark_id_spin.blockSignals(True)
         window.hist_region.blockSignals(True)
         reference_index = max(window.reference_mode_combo.findData(str(settings.reference_mode or "auto")), 0)
@@ -35,9 +37,12 @@ class UIStateManager:
         binning_value = max(int(getattr(settings, "flatten_background_binning", 2)), 1)
         binning_index = max(window.background_smoothing_binning_combo.findData(binning_value), 0)
         window.background_smoothing_binning_combo.setCurrentIndex(binning_index)
-        window.background_ignore_spot_button.setChecked(settings.flatten_background_exclude_area_rois)
+        window.background_ignore_roi_button.setChecked(settings.flatten_background_exclude_area_rois)
         window.background_ignore_mask_button.setChecked(settings.flatten_background_exclude_mask)
-        window.background_local_ring_check.setChecked(bool(getattr(settings, "local_ring_normalization_enabled", False)))
+        window.background_exclusion_dilation_spin.setValue(
+            max(int(getattr(settings, "flatten_background_exclusion_dilation_px", 0)), 0)
+        )
+        window.background_local_reference_check.setChecked(bool(getattr(settings, "local_reference_normalization_enabled", False)))
         window.chromatic_apply_check.setChecked(bool(settings.chromatic_correction_enabled))
         sample_minimum = 1 if len(window._wavelength_values) <= 1 else 3
         sample_maximum = min(max(len(window._wavelength_values), sample_minimum), 7)
@@ -64,6 +69,12 @@ class UIStateManager:
         window._state.preprocessing.chromatic_landmark_kind = str(
             window.chromatic_landmark_kind_combo.currentData() or "corner"
         )
+        landmark_model_value = str(getattr(settings, "chromatic_landmark_model", "similarity") or "similarity")
+        landmark_model_index = max(window.chromatic_landmark_model_combo.findData(landmark_model_value), 0)
+        window.chromatic_landmark_model_combo.setCurrentIndex(landmark_model_index)
+        window._state.preprocessing.chromatic_landmark_model = str(
+            window.chromatic_landmark_model_combo.currentData() or "similarity"
+        )
         window.chromatic_landmark_id_spin.setMaximum(max(int(window.chromatic_feature_count_spin.currentData() or 15), 1))
         window._state.preprocessing.chromatic_feature_count = int(window.chromatic_feature_count_spin.currentData() or 15)
         window.chromatic_landmark_id_spin.setValue(max(int(window._chromatic_landmark_marker_id), 1))
@@ -83,15 +94,17 @@ class UIStateManager:
         window.background_removal_link.blockSignals(False)
         window.background_smoothing_sigma_spin.blockSignals(False)
         window.background_smoothing_binning_combo.blockSignals(False)
-        window.background_ignore_spot_button.blockSignals(False)
+        window.background_ignore_roi_button.blockSignals(False)
         window.background_ignore_mask_button.blockSignals(False)
-        window.background_local_ring_check.blockSignals(False)
+        window.background_exclusion_dilation_spin.blockSignals(False)
+        window.background_local_reference_check.blockSignals(False)
         window._sync_background_exclusion_buttons()
         window.chromatic_apply_check.blockSignals(False)
         window.chromatic_sample_count_spin.blockSignals(False)
         window.chromatic_feature_count_spin.blockSignals(False)
         window.chromatic_subpixel_precision_combo.blockSignals(False)
         window.chromatic_landmark_kind_combo.blockSignals(False)
+        window.chromatic_landmark_model_combo.blockSignals(False)
         window.chromatic_landmark_id_spin.blockSignals(False)
         window.hist_region.blockSignals(False)
         detection = window._state.area_roi_settings
@@ -136,16 +149,16 @@ class UIStateManager:
     def restore_visual_preferences(self) -> None:
         window = self._window
         mask_color = QColor(str(window._settings.value("visual/mask_color", window._mask_visual_color.name())))
-        spot_color = QColor(str(window._settings.value("visual/spot_color", window._sample_visual_color.name())))
-        ring_color = QColor(str(window._settings.value("visual/ring_color", window._reference_visual_color.name())))
+        sample_color = QColor(str(window._settings.value("visual/sample_color", window._sample_visual_color.name())))
+        reference_color = QColor(str(window._settings.value("visual/reference_color", window._reference_visual_color.name())))
         highlight_color = QColor(str(window._settings.value("visual/highlight_color", window._highlight_visual_color.name())))
         scale_bar_color = QColor(str(window._settings.value("visual/scale_bar_color", window._scale_bar_visual_color.name())))
         if mask_color.isValid():
             window._mask_visual_color = mask_color
-        if spot_color.isValid():
-            window._sample_visual_color = spot_color
-        if ring_color.isValid():
-            window._reference_visual_color = ring_color
+        if sample_color.isValid():
+            window._sample_visual_color = sample_color
+        if reference_color.isValid():
+            window._reference_visual_color = reference_color
         if highlight_color.isValid():
             window._highlight_visual_color = highlight_color
         if scale_bar_color.isValid():
@@ -154,10 +167,10 @@ class UIStateManager:
         window._roi_alpha = window._alpha01(window._read_float_setting("visual/spot_alpha", window._roi_alpha))
         window._reference_alpha = window._alpha01(window._read_float_setting("visual/ring_alpha", window._reference_alpha))
         window._highlight_alpha = window._alpha01(window._read_float_setting("visual/highlight_alpha", window._highlight_alpha))
-        window._rois_visible = window._read_bool_setting("visual/spots_visible", window._rois_visible)
+        window._rois_visible = window._read_bool_setting("visual/rois_visible", window._rois_visible)
         window._roi_labels_visible = window._read_bool_setting("visual/spot_labels_visible", window._roi_labels_visible)
         window._mask_visible = window._read_bool_setting("visual/mask_visible", window._mask_visible)
-        window._reference_visible = window._read_bool_setting("visual/rings_visible", window._reference_visible)
+        window._reference_visible = window._read_bool_setting("visual/reference_rois_visible", window._reference_visible)
         window._highlight_visible = window._read_bool_setting("visual/highlight_visible", window._highlight_visible)
         window._reference_points_visible = window._read_bool_setting("visual/reference_points_visible", window._reference_points_visible)
         window._chromatic_reference_points_all_visible = window._read_bool_setting(
@@ -174,18 +187,18 @@ class UIStateManager:
     def save_visual_preferences(self) -> None:
         window = self._window
         window._settings.setValue("visual/mask_color", window._mask_visual_color.name())
-        window._settings.setValue("visual/spot_color", window._sample_visual_color.name())
-        window._settings.setValue("visual/ring_color", window._reference_visual_color.name())
+        window._settings.setValue("visual/sample_color", window._sample_visual_color.name())
+        window._settings.setValue("visual/reference_color", window._reference_visual_color.name())
         window._settings.setValue("visual/highlight_color", window._highlight_visual_color.name())
         window._settings.setValue("visual/scale_bar_color", window._scale_bar_visual_color.name())
         window._settings.setValue("visual/mask_alpha", float(window._mask_alpha))
         window._settings.setValue("visual/spot_alpha", float(window._roi_alpha))
         window._settings.setValue("visual/ring_alpha", float(window._reference_alpha))
         window._settings.setValue("visual/highlight_alpha", float(window._highlight_alpha))
-        window._settings.setValue("visual/spots_visible", window._rois_visible)
+        window._settings.setValue("visual/rois_visible", window._rois_visible)
         window._settings.setValue("visual/spot_labels_visible", window._roi_labels_visible)
         window._settings.setValue("visual/mask_visible", window._mask_visible)
-        window._settings.setValue("visual/rings_visible", window._reference_visible)
+        window._settings.setValue("visual/reference_rois_visible", window._reference_visible)
         window._settings.setValue("visual/highlight_visible", window._highlight_visible)
         window._settings.setValue("visual/reference_points_visible", window._reference_points_visible)
         window._settings.setValue("visual/chromatic_reference_points_all_visible", window._chromatic_reference_points_all_visible)
@@ -296,6 +309,7 @@ class UIStateManager:
         window.chromatic_feature_count_spin.setEnabled(controls_enabled)
         window.chromatic_subpixel_precision_combo.setEnabled(controls_enabled)
         window.chromatic_landmark_kind_combo.setEnabled(controls_enabled)
+        window.chromatic_landmark_model_combo.setEnabled(controls_enabled)
         window.chromatic_reference_points_all_button.setEnabled(has_dataset and bool(feature_ids))
         window.chromatic_start_button.setEnabled(can_edit and controls_enabled)
         window.chromatic_grid_button.setEnabled(has_dataset and controls_enabled)

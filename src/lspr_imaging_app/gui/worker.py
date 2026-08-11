@@ -33,7 +33,7 @@ class WorkflowLogHandler(logging.Handler):
 @dataclass(slots=True)
 class RoiOverlayBundle:
     curve: pg.PlotCurveItem
-    ring_fill: QGraphicsPathItem | None = None
+    reference_fill: QGraphicsPathItem | None = None
     inner_curve: pg.PlotCurveItem | None = None
     outer_curve: pg.PlotCurveItem | None = None
     label: pg.TextItem | None = None
@@ -87,8 +87,8 @@ class UndoSnapshot:
     spectral_cube_slider_value: int
     wavelength_slider_value: int
     selected_roi_ids: set[int]
-    spot_visual_color: str
-    ring_visual_color: str
+    sample_visual_color: str
+    reference_visual_color: str
     mask_visual_color: str
     histogram_mask_visual_color: str
     figure_mask_visual_color: str
@@ -99,8 +99,8 @@ class UndoSnapshot:
     histogram_mask_alpha: float
     figure_mask_alpha: float
     highlight_alpha: float
-    spots_visible: bool
-    rings_visible: bool
+    rois_visible: bool
+    reference_rois_visible: bool
     mask_visible: bool
     reference_points_visible: bool
     histogram_mask_visible: bool

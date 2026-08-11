@@ -19,15 +19,15 @@ class AnalysisController:
         self.window = window
 
     def _sensorgram_selection_color(self) -> QColor:
-        selected_roi_ids = tuple(self.window._selected_spectrum_spot_ids())
+        selected_roi_ids = tuple(self.window._selected_spectrum_roi_ids())
         if len(selected_roi_ids) == 1:
-            return QColor(self.window._spot_spectrum_color(int(selected_roi_ids[0])))
+            return QColor(self.window._roi_spectrum_color(int(selected_roi_ids[0])))
         if selected_roi_ids:
             return QColor("#38bdf8")
         return QColor("#22c55e")
 
     def update_selection_highlight(self, *, force: bool = False) -> None:
-        selected_signature = tuple(self.window._selected_spectrum_spot_ids())
+        selected_signature = tuple(self.window._selected_spectrum_roi_ids())
         if not force and selected_signature == getattr(self.window, "_sensorgram_selection_highlight_signature", None):
             return
         self.window._sensorgram_selection_highlight_signature = selected_signature
@@ -48,22 +48,22 @@ class AnalysisController:
         self.window.sensorgram_current_point.setSymbolBrush(point_brush)
         self.window.sensorgram_current_point.setSymbolPen(point_pen)
 
-    def _store_spot_absorbance_cache(self, result) -> None:
+    def _store_roi_absorbance_cache(self, result) -> None:
         area_roi_results = getattr(result, "area_roi_results", None)
         if not area_roi_results:
             return
         area_roi_by_id = {int(area_roi.area_roi_id): area_roi for area_roi in self.window._state.area_rois}
-        for area_roi_id, spot_result in area_roi_results.items():
+        for area_roi_id, roi_result in area_roi_results.items():
             area_roi = area_roi_by_id.get(int(area_roi_id))
             if area_roi is None:
                 continue
             signature = self.window._roi_absorbance_signature(area_roi)
             if signature is None:
                 continue
-            self.window._spot_absorbance_cache[signature] = spot_result
-            self.window._spot_absorbance_cache.move_to_end(signature)
-            while len(self.window._spot_absorbance_cache) > self.window.SPOT_ABSORBANCE_CACHE_SIZE:
-                self.window._spot_absorbance_cache.popitem(last=False)
+            self.window._roi_absorbance_cache[signature] = roi_result
+            self.window._roi_absorbance_cache.move_to_end(signature)
+            while len(self.window._roi_absorbance_cache) > self.window.ROI_ABSORBANCE_CACHE_SIZE:
+                self.window._roi_absorbance_cache.popitem(last=False)
 
     def _apply_cached_sensorgram_result(self, signature, result, *, preview: bool = False) -> None:
         self.window._sensorgram_running = False
@@ -168,7 +168,7 @@ class AnalysisController:
         if self.window._chromatic_setup_active:
             self.clear_sensorgram("Sensorgram is hidden during chromatic setup.")
             return
-        selected_roi_ids = self.window._selected_spectrum_spot_ids()
+        selected_roi_ids = self.window._selected_spectrum_roi_ids()
         if not selected_roi_ids:
             self.clear_sensorgram("Detect or select ROIs before calculating the sensorgram.")
             return
@@ -202,7 +202,7 @@ class AnalysisController:
     def preview_sensorgram_from_cache(self) -> bool:
         if not self.window._analysis_enabled or self.window._state.dataset is None or self.window._chromatic_setup_active:
             return False
-        selected_roi_ids = self.window._selected_spectrum_spot_ids()
+        selected_roi_ids = self.window._selected_spectrum_roi_ids()
         if not selected_roi_ids:
             return False
         selected_roi_id_set = set(selected_roi_ids)
@@ -317,6 +317,21 @@ class AnalysisController:
                 )
             task_fn = None
 
+        def spectral_cube_result_cache_get(spectral_cube_index, selected_roi_ids=selected_roi_ids, selected_source_rois=selected_source_rois):
+            return self._cached_sensorgram_spectral_cube_result(
+                spectral_cube_index,
+                selected_roi_ids,
+                selected_source_rois,
+            )
+
+        def spectral_cube_result_cache_store(spectral_cube_index, result, selected_roi_ids=selected_roi_ids, selected_source_rois=selected_source_rois):
+            self._store_sensorgram_spectral_cube_result(
+                spectral_cube_index,
+                selected_roi_ids,
+                selected_source_rois,
+                result,
+            )
+
         worker = FunctionWorker(
             _sensorgram_metric_task,
             spectral_cubes,
@@ -327,6 +342,8 @@ class AnalysisController:
             supports_partial=True,
             spectral_cube_payload_builder=spectral_cube_payload_builder,
             task_fn=task_fn,
+            spectral_cube_result_cache_get=spectral_cube_result_cache_get,
+            spectral_cube_result_cache_store=spectral_cube_result_cache_store,
         )
         worker.signals.progress.connect(self.window._update_busy_progress)
         worker.signals.partial.connect(
@@ -532,7 +549,42 @@ class AnalysisController:
         )
         return payload
 
-    def _absorbance_spectrum_signature_for_source_spots(
+    def _cached_sensorgram_spectral_cube_result(
+        self,
+        spectral_cube_index: int,
+        selected_roi_ids: tuple[int, ...],
+        selected_source_rois: list[AreaRoi],
+    ) -> AbsorbanceSpectrumResult | None:
+        """Per-frame math-layer cache (sample/reference means -> AbsorbanceSpectrumResult),
+        keyed by the same fit-parameter-independent signature as the payload cache above, so
+        changing only poly_order/metric_key never forces re-reading pixels for a frame whose
+        sample/reference means are already known."""
+        signature = self._sensorgram_spectral_cube_payload_signature(spectral_cube_index, selected_roi_ids, selected_source_rois)
+        if signature is None:
+            return None
+        with self.window._analysis_cache_lock:
+            cached = self.window._sensorgram_spectral_cube_result_cache.get(signature)
+            if cached is not None:
+                self.window._sensorgram_spectral_cube_result_cache.move_to_end(signature)
+            return cached
+
+    def _store_sensorgram_spectral_cube_result(
+        self,
+        spectral_cube_index: int,
+        selected_roi_ids: tuple[int, ...],
+        selected_source_rois: list[AreaRoi],
+        result: AbsorbanceSpectrumResult,
+    ) -> None:
+        signature = self._sensorgram_spectral_cube_payload_signature(spectral_cube_index, selected_roi_ids, selected_source_rois)
+        if signature is None:
+            return
+        with self.window._analysis_cache_lock:
+            self.window._sensorgram_spectral_cube_result_cache[signature] = result
+            self.window._sensorgram_spectral_cube_result_cache.move_to_end(signature)
+            while len(self.window._sensorgram_spectral_cube_result_cache) > self.window.SENSORGRAM_SPECTRAL_CUBE_RESULT_CACHE_SIZE:
+                self.window._sensorgram_spectral_cube_result_cache.popitem(last=False)
+
+    def _absorbance_spectrum_signature_for_source_rois(
         self,
         selected_source_rois: list[AreaRoi],
     ) -> tuple[object, ...] | None:
@@ -551,9 +603,9 @@ class AnalysisController:
         )
 
     def _absorbance_spectrum_signature(self) -> tuple[object, ...] | None:
-        return self._absorbance_spectrum_signature_for_source_spots(self.window._selected_source_rois_snapshot())
+        return self._absorbance_spectrum_signature_for_source_rois(self.window._selected_source_rois_snapshot())
 
-    def _cached_absorbance_result_from_spot_cache(
+    def _cached_absorbance_result_from_roi_cache(
         self,
         selected_source_rois: list[AreaRoi],
     ) -> AbsorbanceSpectrumResult | None:
@@ -564,7 +616,7 @@ class AnalysisController:
             roi_signature = self.window._roi_absorbance_signature(roi)
             if roi_signature is None:
                 return None
-            cached_result = self.window._spot_absorbance_cache.get(roi_signature)
+            cached_result = self.window._roi_absorbance_cache.get(roi_signature)
             if cached_result is None:
                 return None
             roi_results[int(roi.area_roi_id)] = cached_result
@@ -599,8 +651,8 @@ class AnalysisController:
             "fit_seconds": float(result.fit_seconds),
             "total_seconds": float(result.total_seconds),
             "area_roi_results": {
-                str(int(spot_id)): AnalysisController._serialize_absorbance_result(spot_result)
-                for spot_id, spot_result in (result.area_roi_results or {}).items()
+                str(int(roi_id)): AnalysisController._serialize_absorbance_result(roi_result)
+                for roi_id, roi_result in (result.area_roi_results or {}).items()
             },
         }
 
@@ -620,10 +672,10 @@ class AnalysisController:
         if isinstance(raw_roi_results, dict):
             for key, value in raw_roi_results.items():
                 try:
-                    spot_id = int(key)
+                    roi_id = int(key)
                 except Exception:
                     continue
-                roi_results[spot_id] = AnalysisController._deserialize_absorbance_result(value)
+                roi_results[roi_id] = AnalysisController._deserialize_absorbance_result(value)
         return AbsorbanceSpectrumResult(
             wavelengths_nm=np.asarray(payload.get("wavelengths_nm", []), dtype=np.float64),
             absorbance=np.asarray(payload.get("absorbance", []), dtype=np.float64),
@@ -692,7 +744,7 @@ class AnalysisController:
             if record is None or is_excluded(self.window._state.image_exclusions, spectral_cube_index, wavelength):
                 continue
             image_key = (spectral_cube_index, float(wavelength))
-            preprocessing_spots = deepcopy(self.window._rois_for_preprocessing(image_key))
+            preprocessing_rois = deepcopy(self.window._rois_for_preprocessing(image_key))
             affine_matrix = self.window._chromatic_affine_for_image_key(image_key)
             if affine_matrix is not None:
                 affine_matrix = np.asarray(affine_matrix, dtype=np.float64)
@@ -701,7 +753,7 @@ class AnalysisController:
                 (
                     float(wavelength),
                     str(record.path),
-                    preprocessing_spots,
+                    preprocessing_rois,
                     affine_matrix,
                     bool(external_mask_processed),
                     None if external_mask is None else np.asarray(external_mask, dtype=bool),
@@ -845,7 +897,7 @@ class AnalysisController:
         selected_source_rois = self.window._selected_source_rois_snapshot() if selected_source_rois is None else list(selected_source_rois)
         if not selected_source_rois:
             return None
-        signature = self._absorbance_spectrum_signature_for_source_spots(selected_source_rois)
+        signature = self._absorbance_spectrum_signature_for_source_rois(selected_source_rois)
         if signature is None:
             return None
         spectral_cube_index = int(signature[0])
@@ -923,16 +975,16 @@ class AnalysisController:
         if len(selected_source_rois) == 1:
             roi_signature = roi_signatures[0]
             assert roi_signature is not None
-            cached_spot_result = self.window._spot_absorbance_cache.get(roi_signature)
-            if cached_spot_result is not None:
+            cached_roi_result = self.window._roi_absorbance_cache.get(roi_signature)
+            if cached_roi_result is not None:
                 self.window._absorbance_spectrum_dirty = False
-                self._apply_absorbance_spectrum_result(cached_spot_result)
-                self.window._spot_absorbance_cache.move_to_end(roi_signature)
+                self._apply_absorbance_spectrum_result(cached_roi_result)
+                self.window._roi_absorbance_cache.move_to_end(roi_signature)
                 elapsed = self.window._format_elapsed_seconds(time.perf_counter() - start_time)
                 self.window._append_workflow_log(f"Spec cache hit | {elapsed}", level="debug")
                 self.window._set_status_text(f"Spec | cache {elapsed}")
                 return
-        signature = self._absorbance_spectrum_signature_for_source_spots(selected_source_rois)
+        signature = self._absorbance_spectrum_signature_for_source_rois(selected_source_rois)
         if signature is not None:
             cached_result = self.window._cached_absorbance_result_for_selection(signature, selected_roi_ids, selected_source_rois)
             if cached_result is not None:
@@ -944,13 +996,13 @@ class AnalysisController:
                 elapsed = self.window._format_elapsed_seconds(time.perf_counter() - start_time)
                 self.window._set_status_text(f"Spec | cache {elapsed}")
                 return
-        missing_source_spots = [
+        missing_source_rois = [
             roi
             for roi, signature_value in zip(selected_source_rois, roi_signatures, strict=False)
-            if signature_value is None or self.window._spot_absorbance_cache.get(signature_value) is None
+            if signature_value is None or self.window._roi_absorbance_cache.get(signature_value) is None
         ]
-        target_source_spots = missing_source_spots if missing_source_spots else selected_source_rois
-        signature = self._absorbance_spectrum_signature_for_source_spots(target_source_spots)
+        target_source_rois = missing_source_rois if missing_source_rois else selected_source_rois
+        signature = self._absorbance_spectrum_signature_for_source_rois(target_source_rois)
         if signature is None:
             self.window._clear_absorbance_spectrum("Select ROIs to show absorbance spectrum.")
             return
@@ -970,7 +1022,7 @@ class AnalysisController:
             elapsed = self.window._format_elapsed_seconds(time.perf_counter() - start_time)
             self.window._set_status_text(f"Spec | cache {elapsed}")
             return
-        self.window._start_absorbance_spectrum_preparation(signature, target_source_spots)
+        self.window._start_absorbance_spectrum_preparation(signature, target_source_rois)
 
     def _on_analysis_fit_settings_changed(self, *_args) -> None:
         start_time = time.perf_counter()
@@ -984,10 +1036,10 @@ class AnalysisController:
         selected_source_rois = self.window._selected_source_rois_snapshot()
         if len(selected_source_rois) == 1:
             roi_signature = self.window._roi_absorbance_signature(selected_source_rois[0])
-            if roi_signature is not None and roi_signature in self.window._spot_absorbance_cache and not self.window._absorbance_spectrum_dirty:
+            if roi_signature is not None and roi_signature in self.window._roi_absorbance_cache and not self.window._absorbance_spectrum_dirty:
                 self.window._absorbance_spectrum_dirty = False
-                self._apply_absorbance_spectrum_result(self.window._spot_absorbance_cache[roi_signature])
-                self.window._spot_absorbance_cache.move_to_end(roi_signature)
+                self._apply_absorbance_spectrum_result(self.window._roi_absorbance_cache[roi_signature])
+                self.window._roi_absorbance_cache.move_to_end(roi_signature)
                 elapsed = self.window._format_elapsed_seconds(time.perf_counter() - start_time)
                 self.window._set_status_text(f"Spec | cache {elapsed}")
                 return
@@ -1029,7 +1081,7 @@ class AnalysisController:
         if self.window._chromatic_setup_active:
             self.window._clear_sensorgram("Sensorgram is hidden during chromatic setup.")
             return
-        selected_roi_ids = self.window._selected_spectrum_spot_ids()
+        selected_roi_ids = self.window._selected_spectrum_roi_ids()
         if not selected_roi_ids:
             self.window._clear_sensorgram("Select ROIs before calculating the sensorgram.")
             return
@@ -1218,42 +1270,42 @@ class AnalysisController:
 
     def _apply_absorbance_spectrum_result(self, result: AbsorbanceSpectrumResult) -> float | None:
         fit_started = time.perf_counter()
-        selected_roi_ids = self.window._selected_spectrum_spot_ids()
+        selected_roi_ids = self.window._selected_spectrum_roi_ids()
         series_payloads: list[tuple[str, int, AbsorbanceSpectrumResult]] = []
         if result.area_roi_results:
             if selected_roi_ids:
-                for spot_id in selected_roi_ids:
-                    spot_result = result.area_roi_results.get(int(spot_id))
-                    if spot_result is not None:
-                        series_payloads.append((f"ROI {int(spot_id)}", int(spot_id), spot_result))
+                for roi_id in selected_roi_ids:
+                    roi_result = result.area_roi_results.get(int(roi_id))
+                    if roi_result is not None:
+                        series_payloads.append((f"ROI {int(roi_id)}", int(roi_id), roi_result))
             else:
-                for spot_id in sorted(result.area_roi_results):
-                    series_payloads.append((f"ROI {int(spot_id)}", int(spot_id), result.area_roi_results[int(spot_id)]))
+                for roi_id in sorted(result.area_roi_results):
+                    series_payloads.append((f"ROI {int(roi_id)}", int(roi_id), result.area_roi_results[int(roi_id)]))
         if selected_roi_ids and len(series_payloads) < len(selected_roi_ids):
-            existing_ids = {int(spot_id) for _, spot_id, _ in series_payloads}
-            for spot_id in selected_roi_ids:
-                if int(spot_id) in existing_ids:
+            existing_ids = {int(roi_id) for _, roi_id, _ in series_payloads}
+            for roi_id in selected_roi_ids:
+                if int(roi_id) in existing_ids:
                     continue
-                roi = next((roi for roi in self.window._state.area_rois if int(roi.area_roi_id) == int(spot_id)), None)
+                roi = next((roi for roi in self.window._state.area_rois if int(roi.area_roi_id) == int(roi_id)), None)
                 if roi is None:
                     continue
                 roi_signature = self.window._roi_absorbance_signature(roi)
                 if roi_signature is None:
                     continue
-                cached_result = self.window._spot_absorbance_cache.get(roi_signature)
+                cached_result = self.window._roi_absorbance_cache.get(roi_signature)
                 if cached_result is not None:
-                    series_payloads.append((f"ROI {int(spot_id)}", int(spot_id), cached_result))
+                    series_payloads.append((f"ROI {int(roi_id)}", int(roi_id), cached_result))
         if not series_payloads and len(selected_roi_ids) > 1:
-            for spot_id in selected_roi_ids:
-                roi = next((roi for roi in self.window._state.area_rois if int(roi.area_roi_id) == int(spot_id)), None)
+            for roi_id in selected_roi_ids:
+                roi = next((roi for roi in self.window._state.area_rois if int(roi.area_roi_id) == int(roi_id)), None)
                 if roi is None:
                     continue
                 roi_signature = self.window._roi_absorbance_signature(roi)
                 if roi_signature is None:
                     continue
-                cached_result = self.window._spot_absorbance_cache.get(roi_signature)
+                cached_result = self.window._roi_absorbance_cache.get(roi_signature)
                 if cached_result is not None:
-                    series_payloads.append((f"ROI {int(spot_id)}", int(spot_id), cached_result))
+                    series_payloads.append((f"ROI {int(roi_id)}", int(roi_id), cached_result))
         if not series_payloads:
             fallback_id = int(selected_roi_ids[0]) if selected_roi_ids else 0
             series_payloads = [("Selection", fallback_id, result)]
@@ -1267,12 +1319,12 @@ class AnalysisController:
         y_values_all: list[np.ndarray] = []
         fit_y_values_all: list[np.ndarray] = []
         primary_result = series_payloads[0][2]
-        for label, spot_id, spot_result in series_payloads:
+        for label, roi_id, roi_result in series_payloads:
             rendered = self.window._add_spectrum_series(
-                spot_id=spot_id,
-                result=spot_result,
+                roi_id=roi_id,
+                result=roi_result,
                 label=label,
-                highlighted=bool(highlighted_ids) and int(spot_id) in highlighted_ids,
+                highlighted=bool(highlighted_ids) and int(roi_id) in highlighted_ids,
                 dimmed=len(series_payloads) > 1 and bool(highlighted_ids),
             )
             if rendered is None:
@@ -1527,7 +1579,7 @@ class AnalysisController:
     def _invalidate_absorbance_spectrum_cache(self) -> None:
         self.window._absorbance_spectrum_cache.clear()
         self.window._absorbance_spectral_cube_cache.clear()
-        self.window._spot_absorbance_cache.clear()
+        self.window._roi_absorbance_cache.clear()
         self.window._absorbance_spectrum_dirty = True
 
     def _invalidate_caches_for_exclusion_change(self) -> None:
@@ -1570,7 +1622,7 @@ class AnalysisController:
             self.window._set_spectrum_summary_text("Spectral absorbance is hidden during chromatic setup.")
             self.window._clear_sensorgram("Sensorgram is hidden during chromatic setup.")
             return
-        if not self._selected_spectrum_spot_ids():
+        if not self._selected_spectrum_roi_ids():
             self.window._set_spectrum_summary_text("Select ROIs to show absorbance spectrum.")
             self.window._clear_sensorgram("Select ROIs before calculating the sensorgram.")
             return
@@ -1580,11 +1632,11 @@ class AnalysisController:
         if not self.window._analysis_live_preview_enabled:
             self._mark_sensorgram_stale()
 
-    def _selected_spectrum_spot_ids(self) -> tuple[int, ...]:
-        return tuple(sorted(int(spot_id) for spot_id in self.window._selected_roi_ids))
+    def _selected_spectrum_roi_ids(self) -> tuple[int, ...]:
+        return tuple(sorted(int(roi_id) for roi_id in self.window._selected_roi_ids))
 
     def _selected_source_rois_snapshot(self) -> list[AreaRoi]:
-        selected_ids = self._selected_spectrum_spot_ids()
+        selected_ids = self._selected_spectrum_roi_ids()
         if not selected_ids:
             self.window._selected_source_rois_cache_signature = None
             self.window._selected_source_rois_cache_value = tuple()
@@ -1592,8 +1644,8 @@ class AnalysisController:
         signature_parts: list[object] = [selected_ids]
         source_rois: list[AreaRoi] = []
         roi_by_id = {int(roi.area_roi_id): roi for roi in self.window._state.area_rois}
-        for spot_id in selected_ids:
-            roi = roi_by_id.get(int(spot_id))
+        for roi_id in selected_ids:
+            roi = roi_by_id.get(int(roi_id))
             if roi is None:
                 self.window._selected_source_rois_cache_signature = None
                 self.window._selected_source_rois_cache_value = tuple()
@@ -1620,7 +1672,7 @@ class AnalysisController:
         return list(copied)
 
     def _spectrum_selection_label(self) -> str:
-        selected_ids = self._selected_spectrum_spot_ids()
+        selected_ids = self._selected_spectrum_roi_ids()
         if not selected_ids:
             return "No ROIs"
         if self.window._selected_roi_ids:
@@ -1678,44 +1730,44 @@ class AnalysisController:
         if not selected_roi_ids:
             return None
         if len(selected_roi_ids) == 1:
-            for cache_signature, cached_result in reversed(list(self.window._spot_absorbance_cache.items())):
+            for cache_signature, cached_result in reversed(list(self.window._roi_absorbance_cache.items())):
                 if self._absorbance_spectral_cube_signature(cache_signature) != self._absorbance_spectral_cube_signature(signature):
                     continue
-                if self._absorbance_result_covers_spot_ids(cached_result, selected_roi_ids):
+                if self._absorbance_result_covers_roi_ids(cached_result, selected_roi_ids):
                     return cached_result
         spectral_cube_signature = self._absorbance_spectral_cube_signature(signature)
         if spectral_cube_signature is not None:
             cached_result = self.window._absorbance_spectral_cube_cache.get(spectral_cube_signature)
-            if cached_result is not None and self._absorbance_result_covers_spot_ids(cached_result, selected_roi_ids):
+            if cached_result is not None and self._absorbance_result_covers_roi_ids(cached_result, selected_roi_ids):
                 return cached_result
         for cache_signature, cached_result in reversed(list(self.window._absorbance_spectrum_cache.items())):
             if self._absorbance_spectral_cube_signature(cache_signature) != spectral_cube_signature:
                 continue
-            if self._absorbance_result_covers_spot_ids(cached_result, selected_roi_ids):
+            if self._absorbance_result_covers_roi_ids(cached_result, selected_roi_ids):
                 return cached_result
         if selected_source_rois:
-            cached_from_spots = self._cached_absorbance_result_from_spot_cache(selected_source_rois)
-            if cached_from_spots is not None:
-                return cached_from_spots
+            cached_from_rois = self._cached_absorbance_result_from_roi_cache(selected_source_rois)
+            if cached_from_rois is not None:
+                return cached_from_rois
         return None
 
-    def _roi_absorbance_signature(self, spot: AreaRoi) -> tuple[object, ...] | None:
+    def _roi_absorbance_signature(self, roi: AreaRoi) -> tuple[object, ...] | None:
         spectral_cube_index = self.window._current_spectral_cube()
         if spectral_cube_index is None or not self.window._wavelength_values:
             return None
         return _roi_absorbance_signature(
             int(spectral_cube_index),
             tuple(float(value) for value in self.window._wavelength_values),
-            spot,
+            roi,
             tuple(
                 self.window._chromatic_signature_for_image_key((int(spectral_cube_index), float(wavelength)))
                 for wavelength in self.window._wavelength_values
             ),
         )
 
-    def _roi_has_cached_absorbance(self, spot: AreaRoi) -> bool:
-        signature = self._roi_absorbance_signature(spot)
-        return signature is not None and self.window._spot_absorbance_cache.get(signature) is not None
+    def _roi_has_cached_absorbance(self, roi: AreaRoi) -> bool:
+        signature = self._roi_absorbance_signature(roi)
+        return signature is not None and self.window._roi_absorbance_cache.get(signature) is not None
 
     @staticmethod
     def _analysis_cache_signature_to_json(value):
@@ -1738,19 +1790,19 @@ class AnalysisController:
         return (signature[0], signature[1], signature[3])
 
     @staticmethod
-    def _absorbance_result_covers_spot_ids(result: AbsorbanceSpectrumResult, selected_roi_ids: tuple[int, ...]) -> bool:
+    def _absorbance_result_covers_roi_ids(result: AbsorbanceSpectrumResult, selected_roi_ids: tuple[int, ...]) -> bool:
         if not selected_roi_ids:
             return False
         if not result.area_roi_results:
             return len(selected_roi_ids) == 1
-        available_ids = {int(spot_id) for spot_id in result.area_roi_results.keys()}
-        return all(int(spot_id) in available_ids for spot_id in selected_roi_ids)
+        available_ids = {int(roi_id) for roi_id in result.area_roi_results.keys()}
+        return all(int(roi_id) in available_ids for roi_id in selected_roi_ids)
 
     def _analysis_cache_payload(self) -> dict:
         payload: dict[str, list[dict[str, object]]] = {
             "absorbance_spectrum_cache": [],
             "absorbance_spectral_cube_cache": [],
-            "spot_absorbance_cache": [],
+            "roi_absorbance_cache": [],
             "sensorgram_cache": [],
         }
         for signature, result in self.window._absorbance_spectrum_cache.items():
@@ -1767,8 +1819,8 @@ class AnalysisController:
                     "result": self._serialize_absorbance_result(result),
                 }
             )
-        for signature, result in self.window._spot_absorbance_cache.items():
-            payload["spot_absorbance_cache"].append(
+        for signature, result in self.window._roi_absorbance_cache.items():
+            payload["roi_absorbance_cache"].append(
                 {
                     "signature": self._analysis_cache_signature_to_json(signature),
                     "result": self._serialize_absorbance_result(result),
@@ -1786,7 +1838,7 @@ class AnalysisController:
     def _restore_analysis_caches(self, payload: dict | None) -> None:
         self.window._absorbance_spectrum_cache.clear()
         self.window._absorbance_spectral_cube_cache.clear()
-        self.window._spot_absorbance_cache.clear()
+        self.window._roi_absorbance_cache.clear()
         self.window._sensorgram_cache.clear()
         if not isinstance(payload, dict):
             return
@@ -1819,16 +1871,16 @@ class AnalysisController:
                 self.window._absorbance_spectral_cube_cache.move_to_end(signature)
                 while len(self.window._absorbance_spectral_cube_cache) > self.window.ABSORBANCE_SPECTRAL_CUBE_CACHE_SIZE:
                     self.window._absorbance_spectral_cube_cache.popitem(last=False)
-        raw_spot_absorbance = payload.get("spot_absorbance_cache", [])
-        if isinstance(raw_spot_absorbance, list):
-            for entry in raw_spot_absorbance:
+        raw_roi_absorbance = payload.get("roi_absorbance_cache", payload.get("spot_absorbance_cache", []))
+        if isinstance(raw_roi_absorbance, list):
+            for entry in raw_roi_absorbance:
                 if not isinstance(entry, dict):
                     continue
                 signature = self._analysis_cache_signature_from_json(entry.get("signature"))
                 result = self._deserialize_absorbance_result(entry.get("result"))
                 if signature is None:
                     continue
-                self.window._spot_absorbance_cache[signature] = result
+                self.window._roi_absorbance_cache[signature] = result
         raw_sensorgram = payload.get("sensorgram_cache", [])
         if isinstance(raw_sensorgram, list):
             for entry in raw_sensorgram:
@@ -1921,14 +1973,14 @@ class AnalysisController:
             return False
         selected_source_rois = self._selected_source_rois_snapshot()
         selected_roi_ids = tuple(roi.area_roi_id for roi in selected_source_rois)
-        spot_signature = None
+        roi_signature_single = None
         if len(selected_source_rois) == 1:
-            spot_signature = self._roi_absorbance_signature(selected_source_rois[0])
-            if spot_signature is not None:
-                cached_spot_result = self.window._spot_absorbance_cache.get(spot_signature)
-                if cached_spot_result is not None:
-                    self._apply_absorbance_spectrum_result(cached_spot_result)
-                    self.window._spot_absorbance_cache.move_to_end(spot_signature)
+            roi_signature_single = self._roi_absorbance_signature(selected_source_rois[0])
+            if roi_signature_single is not None:
+                cached_roi_result = self.window._roi_absorbance_cache.get(roi_signature_single)
+                if cached_roi_result is not None:
+                    self._apply_absorbance_spectrum_result(cached_roi_result)
+                    self.window._roi_absorbance_cache.move_to_end(roi_signature_single)
                     self.window._append_workflow_log("Spec repaint | roi cache", level="debug")
                     return True
         signature = self._absorbance_spectrum_signature()

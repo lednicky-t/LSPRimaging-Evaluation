@@ -152,16 +152,16 @@ class LayoutStateController:
     def restore_layout_preferences(self) -> None:
         window = self.window
         roi_list_visible = window._settings_bool("layout/roi_list_visible", True)
-        cached_spots_only_visible = window._settings_bool("layout/cached_rois_only_visible", False)
+        cached_rois_only_visible = window._settings_bool("layout/cached_rois_only_visible", False)
         window.roi_list_action.blockSignals(True)
         window.roi_list_action.setChecked(roi_list_visible)
         window.roi_list_action.blockSignals(False)
         if hasattr(window, "roi_list_cached_button"):
             window.roi_list_cached_button.blockSignals(True)
-            window.roi_list_cached_button.setChecked(cached_spots_only_visible)
-            window.roi_list_cached_button.setIcon(window._make_cached_rois_icon(cached_spots_only_visible))
+            window.roi_list_cached_button.setChecked(cached_rois_only_visible)
+            window.roi_list_cached_button.setIcon(window._make_cached_rois_icon(cached_rois_only_visible))
             window.roi_list_cached_button.blockSignals(False)
-        window._cached_rois_only_visible = cached_spots_only_visible
+        window._cached_rois_only_visible = cached_rois_only_visible
         window._suspend_collapsible_accordion = True
         try:
             window.dataset_section.set_pinned(window._settings_bool("dataset_section_pinned", False))

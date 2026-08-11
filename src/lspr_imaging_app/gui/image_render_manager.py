@@ -6,7 +6,7 @@ import time
 
 import numpy as np
 
-from lspr_imaging_app.processing.chromatic import transformed_circle_points, transform_spots_affine
+from lspr_imaging_app.processing.chromatic import transformed_circle_points, transform_rois_affine
 
 
 class ImageRenderManager:
@@ -185,7 +185,7 @@ class ImageRenderManager:
         window._current_record_path = record_path
         window._current_image_key = image_key
         window._auto_load_mask_for_current_record()
-        window._invalidate_image_analysis_caches()
+        window._invalidate_per_frame_display_caches()
         window._invalidate_background_profile_cache()
         window._update_geometry_control_ranges(processed.shape)
         window._update_mask_file_button_state()
@@ -255,7 +255,7 @@ class ImageRenderManager:
             and not window._chromatic_setup_active
             and not bool(getattr(window, "_image_tools_preview_only", False))
         ):
-            window._request_spot_metrics_refresh(
+            window._request_roi_metrics_refresh(
                 save_after=False,
                 refresh_histogram=False,
             )
@@ -283,16 +283,16 @@ class ImageRenderManager:
             window._chromatic_signature_for_image_key(target_key),
             None if window._current_processed_image is None else window._current_processed_image.shape[:2],
         )
-        if window._display_spot_cache_signature == signature and window._display_spot_cache_value is not None:
-            return window._display_spot_cache_value
+        if window._display_roi_cache_signature == signature and window._display_roi_cache_value is not None:
+            return window._display_roi_cache_value
         affine_matrix = window._chromatic_affine_for_image_key(target_key)
         if affine_matrix is None:
             transformed = window._state.area_rois
         else:
             clamp_shape = window._current_processed_image.shape[:2] if window._current_processed_image is not None else None
-            transformed = transform_spots_affine(window._state.area_rois, affine_matrix, clamp_shape=clamp_shape)
-        window._display_spot_cache_signature = signature
-        window._display_spot_cache_value = transformed
+            transformed = transform_rois_affine(window._state.area_rois, affine_matrix, clamp_shape=clamp_shape)
+        window._display_roi_cache_signature = signature
+        window._display_roi_cache_value = transformed
         return transformed
 
     def rois_for_preprocessing(self, image_key: tuple[int, float] | None) -> list:
@@ -304,55 +304,55 @@ class ImageRenderManager:
         affine_matrix = window._chromatic_affine_for_image_key(image_key)
         if affine_matrix is None:
             return window._state.area_rois
-        return transform_spots_affine(window._state.area_rois, affine_matrix)
+        return transform_rois_affine(window._state.area_rois, affine_matrix)
 
     def roi_curve_points(
         self,
         source_roi,
-        display_spot,
+        display_roi,
         radius_px: float,
     ) -> tuple[np.ndarray, np.ndarray]:
         window = self.window
         affine_matrix = window._chromatic_affine_for_image_key(window._current_image_key)
         if affine_matrix is None or window._is_current_reference_image():
-            theta = window._spot_overlay_theta
-            xs = display_spot.center_x + float(radius_px) * np.cos(theta)
-            ys = display_spot.center_y + float(radius_px) * np.sin(theta)
+            theta = window._roi_overlay_theta
+            xs = display_roi.center_x + float(radius_px) * np.cos(theta)
+            ys = display_roi.center_y + float(radius_px) * np.sin(theta)
             return xs, ys
         return transformed_circle_points(
             (float(source_roi.center_x), float(source_roi.center_y)),
             float(radius_px),
             affine_matrix,
-            window._spot_overlay_theta,
+            window._roi_overlay_theta,
         )
 
     def set_view_overlay_visibility(
         self,
         *,
-        spots_visible: bool,
-        rings_visible: bool,
+        rois_visible: bool,
+        reference_rois_visible: bool,
         mask_visible: bool,
         reference_points_visible: bool,
         highlight_visible: bool,
     ) -> None:
         window = self.window
-        window._rois_visible = bool(spots_visible)
-        window._reference_visible = bool(rings_visible)
+        window._rois_visible = bool(rois_visible)
+        window._reference_visible = bool(reference_rois_visible)
         window._mask_visible = bool(mask_visible)
         window._reference_points_visible = bool(reference_points_visible)
         window._highlight_visible = bool(highlight_visible)
         window.show_rois_check.blockSignals(True)
-        window.show_rings_check.blockSignals(True)
+        window.show_reference_check.blockSignals(True)
         window.show_mask_check.blockSignals(True)
         window.show_reference_points_check.blockSignals(True)
         window.show_highlight_check.blockSignals(True)
         window.show_rois_check.setChecked(window._rois_visible)
-        window.show_rings_check.setChecked(window._reference_visible)
+        window.show_reference_check.setChecked(window._reference_visible)
         window.show_mask_check.setChecked(window._mask_visible)
         window.show_reference_points_check.setChecked(window._reference_points_visible)
         window.show_highlight_check.setChecked(window._highlight_visible)
         window.show_rois_check.blockSignals(False)
-        window.show_rings_check.blockSignals(False)
+        window.show_reference_check.blockSignals(False)
         window.show_mask_check.blockSignals(False)
         window.show_reference_points_check.blockSignals(False)
         window.show_highlight_check.blockSignals(False)

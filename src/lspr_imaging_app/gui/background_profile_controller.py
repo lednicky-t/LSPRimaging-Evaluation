@@ -35,6 +35,7 @@ class BackgroundProfileController:
             int(max(getattr(self.window._state.preprocessing, "flatten_background_binning", 2), 1)),
             bool(self.window._state.preprocessing.flatten_background_exclude_area_rois),
             bool(self.window._state.preprocessing.flatten_background_exclude_mask),
+            int(getattr(self.window._state.preprocessing, "flatten_background_exclusion_dilation_px", 0)),
             self.window._roi_signature(self.window._rois_for_preprocessing(self.window._current_image_key))
             if self.window._state.preprocessing.flatten_background_exclude_area_rois
             else None,
@@ -123,7 +124,13 @@ class BackgroundProfileController:
             return
         self.window._background_profile_cache_signature = signature
         self.window._background_profile_cache_image = profile
-        self.window._append_workflow_log("Background profile preview done", level="success")
+        finite_profile = profile[np.isfinite(profile)]
+        if finite_profile.size:
+            pmin, pmax = float(finite_profile.min()), float(finite_profile.max())
+            spread_note = f" | range {pmin:.4g}-{pmax:.4g} (Δ{pmax - pmin:.4g})"
+        else:
+            spread_note = ""
+        self.window._append_workflow_log(f"Background profile preview done{spread_note}", level="success")
         if self.window._showing_background_profile_main:
             self._apply_main_image_content()
 
@@ -141,11 +148,30 @@ class BackgroundProfileController:
 
     def _apply_main_image_content(self) -> None:
         if self.window._showing_background_profile_main and self.window._background_profile_cache_image is not None:
-            self.window.image_item.setImage(self.window._background_profile_cache_image.T, autoLevels=True)
+            levels = self._background_profile_display_levels()
+            if levels is not None:
+                self.window.image_item.setImage(self.window._background_profile_cache_image.T, levels=levels)
+            else:
+                self.window.image_item.setImage(self.window._background_profile_cache_image.T, autoLevels=True)
         elif self.window._current_processed_image is not None:
             self.window.image_item.setImage(self.window._current_processed_image.T, autoLevels=True)
         self._sync_main_view_mode()
         self.window._update_reference_star_overlay()
+
+
+    def _background_profile_display_levels(self) -> tuple[float, float] | None:
+        # Match the data image's own intensity range so small profile variation isn't stretched to full black-white contrast.
+        image = self.window._current_processed_image
+        if image is None:
+            return None
+        finite = image[np.isfinite(image)]
+        if finite.size == 0:
+            return None
+        vmin = float(finite.min())
+        vmax = float(finite.max())
+        if vmax <= vmin:
+            return None
+        return (vmin, vmax)
 
 
     def _sync_main_view_mode(self) -> None:
@@ -158,8 +184,8 @@ class BackgroundProfileController:
             self.window._update_crop_overlay()
             for bundle in self.window._roi_overlay_items.values():
                 bundle.curve.setVisible(False)
-                if bundle.ring_fill is not None:
-                    bundle.ring_fill.setVisible(False)
+                if bundle.reference_fill is not None:
+                    bundle.reference_fill.setVisible(False)
                 if bundle.inner_curve is not None:
                     bundle.inner_curve.setVisible(False)
                 if bundle.outer_curve is not None:
@@ -199,11 +225,11 @@ class BackgroundProfileController:
 
     def _sync_background_exclusion_buttons(self) -> None:
         window = self.window
-        if hasattr(window, "background_ignore_spot_button"):
-            window.background_ignore_spot_button.setIcon(
+        if hasattr(window, "background_ignore_roi_button"):
+            window.background_ignore_roi_button.setIcon(
                 window._background_exclusion_icon(
                     "current-location-off",
-                    bool(window.background_ignore_spot_button.isChecked()),
+                    bool(window.background_ignore_roi_button.isChecked()),
                     size=APP_THEME.compact_icon_inner,
                 )
             )

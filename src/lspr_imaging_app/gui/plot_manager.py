@@ -8,7 +8,7 @@ from PyQt6.QtGui import QColor
 from lspr_imaging_app.domain.models import AbsorbanceSpectrumResult, FitResult
 from lspr_imaging_app.processing.analysis import fit_absorbance_curve
 from lspr_imaging_app.processing.chromatic import transformed_annulus_mask, transformed_disk_mask
-from lspr_imaging_app.processing.spot_detection import ignored_pixel_mask
+from lspr_imaging_app.processing.roi_detection import ignored_pixel_mask
 from lspr_imaging_app.gui.roi_overlay_helpers import resolved_roi_color
 
 
@@ -144,10 +144,10 @@ class PlotManager:
             except Exception:
                 pass
 
-    def spot_spectrum_color(self, spot_id: int) -> QColor:
+    def roi_spectrum_color(self, roi_id: int) -> QColor:
         window = self._window
-        roi = next((roi for roi in window._state.area_rois if int(roi.area_roi_id) == int(spot_id)), None)
-        group = window._group_for_roi(int(spot_id)) if roi is not None else None
+        roi = next((roi for roi in window._state.area_rois if int(roi.area_roi_id) == int(roi_id)), None)
+        group = window._group_for_roi(int(roi_id)) if roi is not None else None
         return QColor(resolved_roi_color(roi, group, window._sample_visual_color) if roi is not None else window._sample_visual_color)
 
     def analysis_fit_result_from_spectrum(self, result: AbsorbanceSpectrumResult) -> FitResult | None:
@@ -163,7 +163,7 @@ class PlotManager:
     def add_spectrum_series(
         self,
         *,
-        spot_id: int,
+        roi_id: int,
         result: AbsorbanceSpectrumResult,
         label: str | None = None,
         highlighted: bool = False,
@@ -180,7 +180,7 @@ class PlotManager:
         order = np.argsort(x_values)
         x_values = x_values[order]
         y_values = y_values[order]
-        color = self.spot_spectrum_color(spot_id)
+        color = self.roi_spectrum_color(roi_id)
         fit_color = QColor(color).darker(125)
         symbol_size = 7.5 if highlighted else 6
         fit_width = 3.0 if highlighted else 2.0
@@ -236,7 +236,7 @@ class PlotManager:
                     symbolBrush=pg.mkBrush(symbol_color),
                     symbolPen=pg.mkPen(color, width=symbol_pen_width),
                 )
-                window.spectrum_legend.addItem(legend_sample, f"{label or f'ROI {int(spot_id)}'}")
+                window.spectrum_legend.addItem(legend_sample, f"{label or f'ROI {int(roi_id)}'}")
             except Exception:
                 pass
         return (
@@ -283,7 +283,7 @@ class PlotManager:
 
     def update_histogram(self, image: np.ndarray) -> None:
         window = self._window
-        values, spot_values, ring_values, mask_values = self.histogram_source_values(image)
+        values, sample_values, reference_values, mask_values = self.histogram_source_values(image)
         y_floor = window.HISTOGRAM_LOG_Y_FLOOR if window._histogram_log_y_enabled else 0.0
         view_box = window.histogram_plot.getViewBox()
         if window._histogram_log_y_enabled:
@@ -323,8 +323,8 @@ class PlotManager:
             histogram_peak,
             self.update_area_histogram_curves(
                 edges=edges,
-                spot_values=spot_values,
-                ring_values=ring_values,
+                sample_values=sample_values,
+                reference_values=reference_values,
                 mask_values=mask_values,
                 total_pixels=float(values.size),
                 total_counts_display=total_counts_display,
@@ -353,12 +353,12 @@ class PlotManager:
 
     def histogram_source_signature(self, image: np.ndarray) -> tuple[object, ...]:
         window = self._window
-        spot_signature = window._roi_signature(window._display_rois())
+        roi_signature_for_preprocessing = window._roi_signature(window._display_rois())
         return (
             window._current_image_key,
             id(image),
             image.shape,
-            spot_signature,
+            roi_signature_for_preprocessing,
             round(float(window._state.area_roi_settings.reference_inner_radius_px), 3),
             round(float(window._state.area_roi_settings.reference_outer_radius_px), 3),
             bool(window._state.area_roi_settings.ignore_marked_pixels),
@@ -399,8 +399,8 @@ class PlotManager:
             window.HISTOGRAM_MIN_INTENSITY,
             window.HISTOGRAM_MAX_INTENSITY,
         )
-        spot_values, ring_values, mask_values = self.roi_intensity_values(image)
-        cached = (image_values, spot_values, ring_values, mask_values)
+        sample_values, reference_values, mask_values = self.roi_intensity_values(image)
+        cached = (image_values, sample_values, reference_values, mask_values)
         window._histogram_source_cache_signature = signature
         window._histogram_source_cache_values = cached
         return cached
@@ -435,8 +435,8 @@ class PlotManager:
         self,
         *,
         edges: np.ndarray,
-        spot_values: np.ndarray,
-        ring_values: np.ndarray,
+        sample_values: np.ndarray,
+        reference_values: np.ndarray,
         mask_values: np.ndarray,
         total_pixels: float,
         total_counts_display: np.ndarray,
@@ -444,24 +444,24 @@ class PlotManager:
         window = self._window
         y_floor = window.HISTOGRAM_LOG_Y_FLOOR if window._histogram_log_y_enabled else 0.0
         if window._histogram_log_y_enabled:
-            spot_counts_percent = self.histogram_counts_from_values(spot_values, edges)
-            ring_counts_percent = self.histogram_counts_from_values(ring_values, edges)
+            sample_counts_percent = self.histogram_counts_from_values(sample_values, edges)
+            reference_counts_percent = self.histogram_counts_from_values(reference_values, edges)
             mask_counts_percent = self.histogram_counts_from_values(mask_values, edges)
         else:
-            spot_counts_percent = self.histogram_percent_from_values(spot_values, edges, total_pixels)
-            ring_counts_percent = self.histogram_percent_from_values(ring_values, edges, total_pixels)
+            sample_counts_percent = self.histogram_percent_from_values(sample_values, edges, total_pixels)
+            reference_counts_percent = self.histogram_percent_from_values(reference_values, edges, total_pixels)
             mask_counts_percent = self.histogram_percent_from_values(mask_values, edges, total_pixels)
         if window._histogram_log_y_enabled:
-            spot_counts_percent = np.clip(spot_counts_percent, y_floor, None)
-            ring_counts_percent = np.clip(ring_counts_percent, y_floor, None)
+            sample_counts_percent = np.clip(sample_counts_percent, y_floor, None)
+            reference_counts_percent = np.clip(reference_counts_percent, y_floor, None)
             mask_counts_percent = np.clip(mask_counts_percent, y_floor, None)
 
-        self.set_histogram_curve_data(window.roi_histogram_curve, edges, spot_counts_percent, window._sample_visual_color, window._roi_alpha)
-        self.set_histogram_curve_data(window.reference_histogram_curve, edges, ring_counts_percent, window._reference_visual_color, window._reference_alpha)
+        self.set_histogram_curve_data(window.roi_histogram_curve, edges, sample_counts_percent, window._sample_visual_color, window._roi_alpha)
+        self.set_histogram_curve_data(window.reference_histogram_curve, edges, reference_counts_percent, window._reference_visual_color, window._reference_alpha)
         self.set_histogram_curve_data(window.mask_histogram_curve, edges, mask_counts_percent, window._mask_visual_color, window._mask_alpha)
 
         component_counts_percent = np.clip(
-            spot_counts_percent + ring_counts_percent + mask_counts_percent,
+            sample_counts_percent + reference_counts_percent + mask_counts_percent,
             0.0,
             total_counts_display,
         )
@@ -491,8 +491,8 @@ class PlotManager:
                 window.residual_fill_item.setVisible(True)
         return float(
             max(
-                np.max(spot_counts_percent) if spot_counts_percent.size else 0.0,
-                np.max(ring_counts_percent) if ring_counts_percent.size else 0.0,
+                np.max(sample_counts_percent) if sample_counts_percent.size else 0.0,
+                np.max(reference_counts_percent) if reference_counts_percent.size else 0.0,
                 np.max(mask_counts_percent) if mask_counts_percent.size else 0.0,
                 np.max(total_counts_display) if total_counts_display.size else 0.0,
             )
@@ -558,7 +558,7 @@ class PlotManager:
     def update_area_histogram_peak_labels(self) -> None:
         window = self._window
         self.update_area_histogram_peak_label(window.roi_histogram_curve, window.roi_histogram_label, "ROIs", window._sample_visual_color)
-        self.update_area_histogram_peak_label(window.reference_histogram_curve, window.reference_histogram_label, "Ref. rings", window._reference_visual_color)
+        self.update_area_histogram_peak_label(window.reference_histogram_curve, window.reference_histogram_label, "Reference ROIs", window._reference_visual_color)
 
     def update_area_histogram_peak_label(
         self,
@@ -598,54 +598,54 @@ class PlotManager:
         image_f32 = image.astype(np.float32, copy=False)
         image_height, image_width = image_f32.shape[:2]
         ignored_mask = self.ignored_mask(image_f32)
-        spot_mask = np.zeros((image_height, image_width), dtype=bool)
-        ring_mask = np.zeros((image_height, image_width), dtype=bool)
+        sample_mask = np.zeros((image_height, image_width), dtype=bool)
+        reference_mask = np.zeros((image_height, image_width), dtype=bool)
         display_rois = window._display_rois()
         if display_rois:
             affine_matrix = window._chromatic_affine_for_image_key(window._current_image_key)
-            ring_inner_radius = float(max(window._state.area_roi_settings.reference_inner_radius_px, 0.0))
-            ring_outer_radius = float(max(window._state.area_roi_settings.reference_outer_radius_px, ring_inner_radius))
+            reference_inner_radius = float(max(window._state.area_roi_settings.reference_inner_radius_px, 0.0))
+            reference_outer_radius = float(max(window._state.area_roi_settings.reference_outer_radius_px, reference_inner_radius))
             if affine_matrix is None or window._is_current_reference_image():
                 yy, xx = np.indices((image_height, image_width), dtype=np.float32)
                 for roi in display_rois:
                     distance_sq = (xx - float(roi.center_x)) ** 2 + (yy - float(roi.center_y)) ** 2
-                    spot_mask |= distance_sq <= float(roi.sample_radius_px) ** 2
-                    if ring_outer_radius > 0.0:
-                        outer_mask = distance_sq <= ring_outer_radius ** 2
-                        inner_mask = distance_sq < ring_inner_radius ** 2 if ring_inner_radius > 0.0 else np.zeros_like(outer_mask)
-                        ring_mask |= outer_mask & ~inner_mask
+                    sample_mask |= distance_sq <= float(roi.sample_radius_px) ** 2
+                    if reference_outer_radius > 0.0:
+                        outer_mask = distance_sq <= reference_outer_radius ** 2
+                        inner_mask = distance_sq < reference_inner_radius ** 2 if reference_inner_radius > 0.0 else np.zeros_like(outer_mask)
+                        reference_mask |= outer_mask & ~inner_mask
             else:
-                source_spot_map = {roi.area_roi_id: roi for roi in window._state.area_rois}
+                source_roi_map = {roi.area_roi_id: roi for roi in window._state.area_rois}
                 for roi in display_rois:
-                    source_roi = source_spot_map.get(roi.area_roi_id, roi)
-                    spot_mask |= transformed_disk_mask(
+                    source_roi = source_roi_map.get(roi.area_roi_id, roi)
+                    sample_mask |= transformed_disk_mask(
                         (image_height, image_width),
                         (float(source_roi.center_x), float(source_roi.center_y)),
                         float(source_roi.sample_radius_px),
                         affine_matrix,
                     )
-                    if ring_outer_radius > 0.0:
-                        ring_mask |= transformed_annulus_mask(
+                    if reference_outer_radius > 0.0:
+                        reference_mask |= transformed_annulus_mask(
                             (image_height, image_width),
                             (float(source_roi.center_x), float(source_roi.center_y)),
-                            float(ring_inner_radius),
-                            float(ring_outer_radius),
+                            float(reference_inner_radius),
+                            float(reference_outer_radius),
                             affine_matrix,
                         )
-        spot_mask &= ~ignored_mask
-        ring_mask &= ~ignored_mask
-        ring_mask &= ~spot_mask
-        residual_mask = ~(spot_mask | ring_mask | ignored_mask)
-        cached = (spot_mask, ring_mask, ignored_mask, residual_mask)
+        sample_mask &= ~ignored_mask
+        reference_mask &= ~ignored_mask
+        reference_mask &= ~sample_mask
+        residual_mask = ~(sample_mask | reference_mask | ignored_mask)
+        cached = (sample_mask, reference_mask, ignored_mask, residual_mask)
         window._roi_mask_cache_signature = signature
         window._roi_mask_cache_values = cached
         return cached
 
     def roi_intensity_values(self, image: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         image_f32 = image.astype(np.float32, copy=False)
-        spot_mask, ring_mask, ignored_mask, _residual_mask = self.roi_area_masks(image_f32)
+        sample_mask, reference_mask, ignored_mask, _residual_mask = self.roi_area_masks(image_f32)
         return (
-            image_f32[spot_mask],
-            image_f32[ring_mask],
+            image_f32[sample_mask],
+            image_f32[reference_mask],
             image_f32[ignored_mask],
         )

@@ -41,7 +41,7 @@ except Exception:  # pragma: no cover - optional acceleration path
     _phase_cross_correlation = None
 
 from lspr_imaging_app.domain.models import AreaRoi, AreaRoiDetectionSettings
-from lspr_imaging_app.processing.spot_detection import _masked_gaussian_filter, _refine_spot_center, detect_spots
+from lspr_imaging_app.processing.roi_detection import _masked_gaussian_filter, _refine_roi_center, detect_rois
 
 
 @dataclass(slots=True)
@@ -272,14 +272,14 @@ def detect_regional_spot_landmarks(
 
     If `area_roi_settings` is given, landmarks are seeded from the *full*
     array-aware spot detector used for ROI finding elsewhere in the app
-    (`processing.spot_detection.detect_spots`): every real particle in the
+    (`processing.roi_detection.detect_rois`): every real particle in the
     image is ranked and located first, then each anchor's own sector
     (`_landmark_regions`) claims its nearest one, falling back to a local
     circular-contrast search confined to that same sector if it contains no
     detected particle at all -- never a real particle claimed from a
     *different* sector, which would break the spatial spread this
     segmentation exists to guarantee. Without `area_roi_settings`, this goes
-    straight to the same local search (`_refine_spot_center`), unconstrained
+    straight to the same local search (`_refine_roi_center`), unconstrained
     to a sector, around each anchor position. `bounds`, if given, confines
     the whole anchor/sector grid to that rectangle -- see
     `_landmark_sector_layout`. Returns `{feature_id: (x, y)}`.
@@ -293,7 +293,7 @@ def detect_regional_spot_landmarks(
         # region) aren't genuine particles -- without this filter, one could
         # still win a "nearest to anchor" match over a real, higher-scoring
         # spot that just happens to sit a bit further away.
-        detected_rois = [roi for roi in detect_spots(image_f32, area_roi_settings) if roi.score > 0.0]
+        detected_rois = [roi for roi in detect_rois(image_f32, area_roi_settings) if roi.score > 0.0]
         # Matching must stay inside each anchor's own sector
         # (`_landmark_regions`, the same grid segmentation
         # `default_landmark_anchors` lays the anchors out on -- e.g. 3x5 for
@@ -336,7 +336,7 @@ def detect_regional_spot_landmarks(
             seed_x = float(np.clip(anchor[0], x0, max(x1 - 1, x0)))
             seed_y = float(np.clip(anchor[1], y0, max(y1 - 1, y0)))
             region_search_radius = max((x1 - x0) / 2.0, (y1 - y0) / 2.0, float(spot_radius_px))
-            refined_x, refined_y, _score, found = _refine_spot_center(
+            refined_x, refined_y, _score, found = _refine_roi_center(
                 filtered=local_filtered,
                 valid_mask=local_valid_mask,
                 seed_x=seed_x,
@@ -362,7 +362,7 @@ def detect_regional_spot_landmarks(
     for feature_id, anchor in anchors.items():
         seed_x = float(np.clip(anchor[0], min_x, max_x))
         seed_y = float(np.clip(anchor[1], min_y, max_y))
-        refined_x, refined_y, _score, found = _refine_spot_center(
+        refined_x, refined_y, _score, found = _refine_roi_center(
             filtered=filtered,
             valid_mask=valid_mask,
             seed_x=seed_x,
@@ -399,12 +399,12 @@ def track_spot_landmarks(
 
     If `area_roi_settings` is given, that location step matches each landmark
     to its nearest result from the full array-aware spot detector
-    (`detect_spots`) -- the same upgrade `detect_regional_spot_landmarks`
+    (`detect_rois`) -- the same upgrade `detect_regional_spot_landmarks`
     makes for the starting frame, applied here to every tracking step. This
-    is slower (`detect_spots` scans the whole image, once per call) but far
+    is slower (`detect_rois` scans the whole image, once per call) but far
     more reliable: a local circular-contrast search (the fallback below) can
     lock onto background texture or a stray pixel cluster that merely looks
-    spot-like, while `detect_spots`'s ranked scoring and non-max suppression
+    spot-like, while `detect_rois`'s ranked scoring and non-max suppression
     only returns genuine, already-validated particles. Falls back to the
     local search if no settings are given, and to the search center itself
     if no particle is found within `search_radius_px`.
@@ -431,7 +431,7 @@ def track_spot_landmarks(
     if area_roi_settings is not None:
         # See detect_regional_spot_landmarks: zero/near-zero-score candidates
         # aren't genuine particles and shouldn't win a nearest-position match.
-        detected_rois = [roi for roi in detect_spots(target_f32, area_roi_settings) if roi.score > 0.0]
+        detected_rois = [roi for roi in detect_rois(target_f32, area_roi_settings) if roi.score > 0.0]
         if detected_rois:
             for feature_id, point in reference_landmarks.items():
                 predicted_x, predicted_y = predicted_position(feature_id, point)
@@ -451,7 +451,7 @@ def track_spot_landmarks(
     filtered, _support = _masked_gaussian_filter(target_f32, valid_mask, sigma=sigma)
     for feature_id, point in reference_landmarks.items():
         predicted_x, predicted_y = predicted_position(feature_id, point)
-        refined_x, refined_y, _score, found = _refine_spot_center(
+        refined_x, refined_y, _score, found = _refine_roi_center(
             filtered=filtered,
             valid_mask=valid_mask,
             seed_x=predicted_x,
@@ -1162,7 +1162,7 @@ def compose_similarity_matrix(scale: float, angle_rad: float, shift_x_px: float,
     )
 
 
-def transform_spots_affine(
+def transform_rois_affine(
     rois: list[AreaRoi],
     affine_matrix: np.ndarray,
     *,

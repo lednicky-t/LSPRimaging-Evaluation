@@ -116,7 +116,7 @@ class ShortcutManager:
             Qt.Key.Key_Down,
         }:
             if event.modifiers() & Qt.KeyboardModifier.ShiftModifier:
-                if window._select_neighbor_spot(event.key()):
+                if window._select_neighbor_roi(event.key()):
                     event.accept()
                     return True
             elif window._is_current_reference_image() and window.roi_move_action.isChecked() and window._selected_roi_ids:

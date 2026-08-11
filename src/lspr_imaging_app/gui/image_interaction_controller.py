@@ -66,10 +66,10 @@ class ImageInteractionController:
                 w._remove_selected_rois()
                 return True
             if key_event.matches(QKeySequence.StandardKey.Copy):
-                w._copy_spot_properties_from_table()
+                w._copy_roi_properties_from_table()
                 return True
             if key_event.matches(QKeySequence.StandardKey.Paste):
-                w._paste_spot_properties_from_table()
+                w._paste_roi_properties_from_table()
                 return True
 
         if watched is w.chromatic_landmark_id_spin and event.type() == QEvent.Type.KeyPress and w._active_tool == "chromatic_landmark":
@@ -129,8 +129,8 @@ class ImageInteractionController:
                 spinbox.stepBy(step)
             return True
 
-        spot_list_viewport = w.roi_table.viewport() if hasattr(w, "roi_table") else None
-        if spot_list_viewport is not None and watched is spot_list_viewport and event.type() == QEvent.Type.MouseButtonPress:
+        roi_list_viewport = w.roi_table.viewport() if hasattr(w, "roi_table") else None
+        if roi_list_viewport is not None and watched is roi_list_viewport and event.type() == QEvent.Type.MouseButtonPress:
             mouse_event = event
             if mouse_event.button() == Qt.MouseButton.LeftButton:
                 row = w.roi_table.rowAt(int(mouse_event.position().toPoint().y()))
@@ -366,22 +366,22 @@ class ImageInteractionController:
                     else:
                         w._add_roi_at(point)
                     return True
-                spot_id = w._find_roi_id_at(point)
+                roi_id = w._find_roi_id_at(point)
                 modifiers = event.modifiers()
                 w._roi_selection_drag_start = point
                 w._roi_selection_drag_button = Qt.MouseButton.LeftButton
-                w._roi_selection_pressed_id = spot_id
+                w._roi_selection_pressed_id = roi_id
                 w._roi_selection_drag_modifiers = modifiers
                 if w._roi_selection_rubber_band is None:
                     w._roi_selection_rubber_band = QRubberBand(QRubberBand.Shape.Rectangle, w.image_view.viewport())
                 start_point = w.image_view.mapFromScene(w.image_plot.vb.mapViewToScene(pg.Point(point[0], point[1])))
                 w._roi_selection_rubber_band.setGeometry(start_point.x(), start_point.y(), 0, 0)
                 w._roi_selection_rubber_band.hide()
-                if spot_id is not None:
+                if roi_id is not None:
                     if modifiers & Qt.KeyboardModifier.ShiftModifier:
-                        w._selected_roi_ids.add(spot_id)
+                        w._selected_roi_ids.add(roi_id)
                     else:
-                        w._selected_roi_ids = {spot_id}
+                        w._selected_roi_ids = {roi_id}
                 w._update_roi_overlays()
                 w._update_roi_summary()
                 w._sync_roi_table_selection()
@@ -392,19 +392,19 @@ class ImageInteractionController:
                 point = self._image_point_from_mouse_event(event)
                 if point is None:
                     return False
-                spot_id = w._find_roi_id_at(point)
-                if allow_roi_move and w._is_current_reference_image() and spot_id is not None:
+                roi_id = w._find_roi_id_at(point)
+                if allow_roi_move and w._is_current_reference_image() and roi_id is not None:
                     if w._selected_roi_ids:
                         drag_roi_ids = set(w._selected_roi_ids)
                     else:
-                        w._selected_roi_ids = {spot_id}
-                        drag_roi_ids = {spot_id}
+                        w._selected_roi_ids = {roi_id}
+                        drag_roi_ids = {roi_id}
                     w._update_roi_overlays()
                     w._update_roi_summary()
                     w._sync_roi_table_selection()
                     w._update_selection_dependent_plots(prompt_live_preview=True)
                     w._prepare_undo_snapshot("Move ROIs")
-                    w._dragging_spots = True
+                    w._dragging_rois = True
                     w._drag_anchor = point
                     w._drag_original_positions = {
                         roi.area_roi_id: (roi.center_x, roi.center_y)
@@ -416,14 +416,14 @@ class ImageInteractionController:
                     w._roi_selection_pressed_id = None
                     w._roi_selection_drag_modifiers = Qt.KeyboardModifier.NoModifier
                     return True
-                if w._analysis_enabled and spot_id is not None:
-                    if spot_id not in w._selected_roi_ids:
-                        w._selected_roi_ids = {spot_id}
+                if w._analysis_enabled and roi_id is not None:
+                    if roi_id not in w._selected_roi_ids:
+                        w._selected_roi_ids = {roi_id}
                         w._update_roi_overlays()
                         w._update_roi_summary()
                         w._sync_roi_table_selection()
                         w._update_selection_dependent_plots(prompt_live_preview=True)
-                    w._show_analysis_spot_context_menu(spot_id, event.globalPosition().toPoint())
+                    w._show_analysis_roi_context_menu(roi_id, event.globalPosition().toPoint())
                     return True
                 return True
 
@@ -433,14 +433,14 @@ class ImageInteractionController:
                 point = self._image_point_from_mouse_event(event)
                 if point is None:
                     return True
-                spot_id = w._find_roi_id_at(point)
-                if spot_id is None:
+                roi_id = w._find_roi_id_at(point)
+                if roi_id is None:
                     return True
-                if w._select_group_members_for_spot(spot_id):
-                    w.status_label.setText(f"Selected group members for ROI {spot_id}.")
+                if w._select_group_members_for_roi(roi_id):
+                    w.status_label.setText(f"Selected group members for ROI {roi_id}.")
                 return True
 
-            if event.type() == QEvent.Type.MouseMove and w._dragging_spots and w._drag_anchor is not None:
+            if event.type() == QEvent.Type.MouseMove and w._dragging_rois and w._drag_anchor is not None:
                 point = self._image_point_from_mouse_event(event)
                 if point is None:
                     return True
@@ -451,7 +451,7 @@ class ImageInteractionController:
                         continue
                     base_x, base_y = w._drag_original_positions[roi.area_roi_id]
                     roi.center_x, roi.center_y = w._clamp_roi_position(roi, base_x + dx, base_y + dy)
-                w._schedule_spot_overlay_refresh()
+                w._schedule_roi_overlay_refresh()
                 return True
 
             if (
@@ -459,7 +459,7 @@ class ImageInteractionController:
                 and w._roi_selection_drag_start is not None
                 and w._roi_selection_drag_button == Qt.MouseButton.LeftButton
                 and w._roi_selection_rubber_band is not None
-                and not w._dragging_spots
+                and not w._dragging_rois
             ):
                 current_point = self._image_point_from_mouse_event(event)
                 if current_point is None:
@@ -482,12 +482,12 @@ class ImageInteractionController:
                 w._roi_selection_rubber_band.setGeometry(viewport_rect)
                 return True
 
-            if event.type() == QEvent.Type.MouseButtonRelease and event.button() == Qt.MouseButton.RightButton and w._dragging_spots:
-                w._dragging_spots = False
+            if event.type() == QEvent.Type.MouseButtonRelease and event.button() == Qt.MouseButton.RightButton and w._dragging_rois:
+                w._dragging_rois = False
                 w._drag_anchor = None
                 w._drag_original_positions.clear()
                 w._roi_selection_drag_button = None
-                w._spot_overlay_refresh_timer.stop()
+                w._roi_overlay_refresh_timer.stop()
                 w._update_roi_overlays()
                 w._mark_roi_edit_refresh_pending()
                 w._save_processing_state_for_dataset()
@@ -512,11 +512,11 @@ class ImageInteractionController:
                     end_x, end_y = end_point
                 drag_distance = hypot(float(end_x) - float(start_x), float(end_y) - float(start_y))
                 if drag_distance < 2.0 and w._roi_selection_pressed_id is not None:
-                    clicked_spot_id = w._roi_selection_pressed_id
+                    clicked_roi_id = w._roi_selection_pressed_id
                     if drag_modifiers & Qt.KeyboardModifier.ShiftModifier:
-                        w._selected_roi_ids.add(clicked_spot_id)
+                        w._selected_roi_ids.add(clicked_roi_id)
                     else:
-                        w._selected_roi_ids = {clicked_spot_id}
+                        w._selected_roi_ids = {clicked_roi_id}
                     w._roi_selection_drag_start = None
                     w._roi_selection_drag_button = None
                     w._roi_selection_pressed_id = None
@@ -530,15 +530,15 @@ class ImageInteractionController:
                 right = max(start_x, end_x)
                 top = min(start_y, end_y)
                 bottom = max(start_y, end_y)
-                dragged_spot_ids = {
+                dragged_roi_ids = {
                     roi.area_roi_id
                     for roi in w._display_rois()
                     if left <= float(roi.center_x) <= right and top <= float(roi.center_y) <= bottom
                 }
                 if drag_modifiers & Qt.KeyboardModifier.ShiftModifier:
-                    w._selected_roi_ids.update(dragged_spot_ids)
+                    w._selected_roi_ids.update(dragged_roi_ids)
                 else:
-                    w._selected_roi_ids = set(dragged_spot_ids)
+                    w._selected_roi_ids = set(dragged_roi_ids)
                 w._roi_selection_drag_start = None
                 w._roi_selection_drag_button = None
                 w._roi_selection_pressed_id = None

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import csv
 from copy import deepcopy
+from datetime import datetime
 from math import hypot
 
 import numpy as np
@@ -67,6 +69,24 @@ class ChromaticController:
         window.chromatic_landmark_kind_combo.setCurrentIndex(index)
         window.chromatic_landmark_kind_combo.blockSignals(False)
 
+    def landmark_model_options(self) -> tuple[str, ...]:
+        return ("similarity", "affine")
+
+    def landmark_model_value(self) -> str:
+        window = self.window
+        value = str(window.chromatic_landmark_model_combo.currentData() or "similarity")
+        return value if value in self.landmark_model_options() else "similarity"
+
+    def set_landmark_model_value(self, value: str) -> None:
+        window = self.window
+        target = str(value)
+        if target not in self.landmark_model_options():
+            target = "similarity"
+        index = max(window.chromatic_landmark_model_combo.findData(target), 0)
+        window.chromatic_landmark_model_combo.blockSignals(True)
+        window.chromatic_landmark_model_combo.setCurrentIndex(index)
+        window.chromatic_landmark_model_combo.blockSignals(False)
+
     def model_for_image_key(self, image_key: tuple[int, float] | None) -> ChromaticTransformModel | None:
         window = self.window
         if image_key is None:
@@ -122,8 +142,8 @@ class ChromaticController:
             )
         window._chromatic_setup_active = True
         window._set_view_overlay_visibility(
-            spots_visible=False,
-            rings_visible=False,
+            rois_visible=False,
+            reference_rois_visible=False,
             mask_visible=False,
             reference_points_visible=True,
             highlight_visible=False,
@@ -133,10 +153,10 @@ class ChromaticController:
         window = self.window
         window._chromatic_setup_active = False
         if window._chromatic_setup_saved_visibility is not None:
-            spots_visible, rings_visible, mask_visible, reference_points_visible, highlight_visible = window._chromatic_setup_saved_visibility
+            rois_visible, reference_rois_visible, mask_visible, reference_points_visible, highlight_visible = window._chromatic_setup_saved_visibility
             window._set_view_overlay_visibility(
-                spots_visible=spots_visible,
-                rings_visible=rings_visible,
+                rois_visible=rois_visible,
+                reference_rois_visible=reference_rois_visible,
                 mask_visible=mask_visible,
                 reference_points_visible=reference_points_visible,
                 highlight_visible=highlight_visible,
@@ -253,7 +273,7 @@ class ChromaticController:
                 window.crop_action,
                 window.measure_action,
                 window.mask_pencil_check,
-                window.spot_edit_action,
+                window.roi_edit_action,
                 window.roi_array_action,
             ):
                 other.blockSignals(True)
@@ -876,7 +896,7 @@ class ChromaticController:
             if not is_excluded(window._state.image_exclusions, record.key.spectral_cube_index, record.key.wavelength_nm)
         ]
         window._append_workflow_log(
-            f"Chromatic estimation start | mode {mode} | records {len(record_specs)}",
+            f"Chromatic estimation start | mode {mode} | model {window._state.preprocessing.chromatic_landmark_model} | records {len(record_specs)}",
             level="info",
         )
         from lspr_imaging_app.gui.main_window import FunctionWorker, _estimate_chromatic_models_task
@@ -984,6 +1004,103 @@ class ChromaticController:
             level="error",
         )
         self.window._background_error("Chromatic correction", message)
+
+    def export_landmarks_csv(self) -> None:
+        """Dump every marked chromatic reference point to a CSV file for offline analysis.
+
+        For each point, in addition to its raw tracked position, this recomputes the same
+        per-point residual the estimation fit already computes internally and then discards
+        (`_estimate_chromatic_models_task` only keeps the aggregate `rmse_px`) -- the predicted
+        position (this wavelength's fitted model applied to the point's own reference-wavelength
+        position) minus the actually-tracked position. Plotting `residual_x_px`/`residual_y_px`
+        against `raw_x_px`/`raw_y_px` as a vector field is the fastest way to see whether the
+        leftover per-point error has spatial structure (e.g. grows with distance from center,
+        or points a consistent direction) that would justify a different correction model, versus
+        being unstructured noise.
+        """
+        window = self.window
+        folder = window._dataset_folder_path()
+        if folder is None:
+            window._set_status_text("Load a dataset before exporting chromatic reference points.")
+            return
+        landmarks = window._state.chromatic_landmarks
+        if not landmarks:
+            window._set_status_text("No chromatic reference points to export yet.")
+            return
+
+        models_by_key: dict[tuple[int, float], ChromaticTransformModel] = {
+            (int(model.spectral_cube_index), float(model.wavelength_nm)): model
+            for model in window._state.chromatic_models
+        }
+        reference_positions: dict[int, tuple[float, float]] = {}
+        reference_key = window._reference_image_key()
+        if reference_key is not None:
+            ref_cube, ref_wavelength = int(reference_key[0]), float(reference_key[1])
+            for mark in landmarks:
+                if int(mark.spectral_cube_index) == ref_cube and abs(float(mark.wavelength_nm) - ref_wavelength) < 1e-6:
+                    reference_positions[int(mark.landmark_id)] = (float(mark.x_px), float(mark.y_px))
+
+        folder.mkdir(parents=True, exist_ok=True)
+        stamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+        path = folder / f"chromatic_landmarks_{stamp}.csv"
+        ordered_marks = sorted(landmarks, key=lambda item: (item.spectral_cube_index, item.wavelength_nm, item.landmark_id))
+        with path.open("w", newline="", encoding="utf-8") as handle:
+            writer = csv.writer(handle)
+            writer.writerow(
+                [
+                    "landmark_id",
+                    "spectral_cube_index",
+                    "wavelength_nm",
+                    "raw_x_px",
+                    "raw_y_px",
+                    "reference_x_px",
+                    "reference_y_px",
+                    "predicted_x_px",
+                    "predicted_y_px",
+                    "residual_x_px",
+                    "residual_y_px",
+                    "residual_px",
+                    "model_kind",
+                    "model_rmse_px",
+                ]
+            )
+            for mark in ordered_marks:
+                landmark_id = int(mark.landmark_id)
+                spectral_cube_index = int(mark.spectral_cube_index)
+                wavelength = float(mark.wavelength_nm)
+                raw_x, raw_y = float(mark.x_px), float(mark.y_px)
+                reference_point = reference_positions.get(landmark_id)
+                model = models_by_key.get((spectral_cube_index, wavelength))
+                predicted_x = predicted_y = residual_x = residual_y = residual_magnitude = ""
+                model_kind = model.model_kind if model is not None else ""
+                model_rmse = model.rmse_px if model is not None else ""
+                if reference_point is not None and model is not None:
+                    matrix = np.asarray(model.affine_matrix, dtype=np.float64)
+                    predicted = apply_affine_to_points(np.asarray([reference_point], dtype=np.float64), matrix)[0]
+                    predicted_x, predicted_y = float(predicted[0]), float(predicted[1])
+                    residual_x = predicted_x - raw_x
+                    residual_y = predicted_y - raw_y
+                    residual_magnitude = float(hypot(residual_x, residual_y))
+                writer.writerow(
+                    [
+                        landmark_id,
+                        spectral_cube_index,
+                        wavelength,
+                        raw_x,
+                        raw_y,
+                        "" if reference_point is None else reference_point[0],
+                        "" if reference_point is None else reference_point[1],
+                        predicted_x,
+                        predicted_y,
+                        residual_x,
+                        residual_y,
+                        residual_magnitude,
+                        model_kind,
+                        model_rmse,
+                    ]
+                )
+        window._set_status_text(f"Exported {len(landmarks)} chromatic reference point(s) to {path.name}.")
+        window._append_workflow_log(f"Chromatic reference points exported | {path.name}", level="info")
 
     def clear_all_landmark_overlays(self) -> None:
         window = self.window
@@ -1188,7 +1305,7 @@ class ChromaticController:
 
 
     def _on_chromatic_landmark_tool_toggled(self, checked: bool) -> None:
-        self.window.chromatic_start_button.setIcon(self.window._make_spot_edit_icon(bool(checked)))
+        self.window.chromatic_start_button.setIcon(self.window._make_roi_edit_icon(bool(checked)))
         if checked:
             if not self.is_sample_image_key(self.window._current_image_key):
                 sample_keys = self.sample_image_keys()
@@ -1208,7 +1325,7 @@ class ChromaticController:
                     self.window.chromatic_start_button.blockSignals(True)
                     self.window.chromatic_start_button.setChecked(False)
                     self.window.chromatic_start_button.blockSignals(False)
-                    self.window.chromatic_start_button.setIcon(self.window._make_spot_edit_icon(False))
+                    self.window.chromatic_start_button.setIcon(self.window._make_roi_edit_icon(False))
                     return
             self.window.rotate_action.blockSignals(True)
             self.window.rotate_action.setChecked(False)
@@ -1216,9 +1333,9 @@ class ChromaticController:
             self.window.crop_action.blockSignals(True)
             self.window.crop_action.setChecked(False)
             self.window.crop_action.blockSignals(False)
-            self.window.spot_edit_action.blockSignals(True)
-            self.window.spot_edit_action.setChecked(False)
-            self.window.spot_edit_action.blockSignals(False)
+            self.window.roi_edit_action.blockSignals(True)
+            self.window.roi_edit_action.setChecked(False)
+            self.window.roi_edit_action.blockSignals(False)
             self.window.mask_pencil_check.blockSignals(True)
             self.window.mask_pencil_check.setChecked(False)
             self.window.mask_pencil_check.blockSignals(False)
@@ -1290,6 +1407,13 @@ class ChromaticController:
         normalized = self.landmark_kind_value()
         if normalized != str(getattr(self.window._state.preprocessing, "chromatic_landmark_kind", "corner")):
             self.window._state.preprocessing.chromatic_landmark_kind = normalized
+        self._update_chromatic_summary()
+        self.window._schedule_processing_state_save()
+
+    def _on_chromatic_landmark_model_changed(self, _index: int) -> None:
+        normalized = self.landmark_model_value()
+        if normalized != str(getattr(self.window._state.preprocessing, "chromatic_landmark_model", "similarity")):
+            self.window._state.preprocessing.chromatic_landmark_model = normalized
         self._update_chromatic_summary()
         self.window._schedule_processing_state_save()
 

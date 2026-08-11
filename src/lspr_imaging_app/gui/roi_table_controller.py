@@ -31,7 +31,7 @@ class RoiTableController:
             item.setForeground(QBrush())
             item.setBackground(QBrush())
 
-    def _dim_uncached_row(self, row: int, *, spot_color: QColor, ring_color: QColor) -> None:
+    def _dim_uncached_row(self, row: int, *, sample_color: QColor, reference_color: QColor) -> None:
         dim_foreground = QBrush(QColor("#64748b"))
         for column in range(self.window.roi_table.columnCount()):
             item = self.window.roi_table.item(row, column)
@@ -40,45 +40,45 @@ class RoiTableController:
             item.setForeground(dim_foreground)
             item.setBackground(QBrush(QColor("#111827")) if column in {0, 1, 4, 5, 6, 7, 8} else item.background())
             if column == 2:
-                item.setIcon(make_color_swatch_icon(spot_color.darker(170)))
+                item.setIcon(make_color_swatch_icon(sample_color.darker(170)))
             elif column == 3:
-                item.setIcon(make_color_swatch_icon(ring_color.darker(170)))
+                item.setIcon(make_color_swatch_icon(reference_color.darker(170)))
 
     def refresh_cached_row_styles(self) -> None:
         if self.window.roi_table.rowCount() == 0:
             return
-        spots = sorted(self.window._state.area_rois, key=lambda roi: roi.area_roi_id)
-        if not spots:
+        rois = sorted(self.window._state.area_rois, key=lambda roi: roi.area_roi_id)
+        if not rois:
             return
-        group_by_spot: dict[int, AreaRoiGroup] = {}
+        group_by_roi: dict[int, AreaRoiGroup] = {}
         for group in self.window._state.area_roi_groups:
-            for spot_id in group.area_roi_ids:
-                group_by_spot[int(spot_id)] = group
-        cached_spot_ids = {int(roi.area_roi_id) for roi in spots if self.window._roi_has_cached_absorbance(roi)}
-        spot_color = QColor(self.window._sample_visual_color)
-        ring_color = QColor(self.window._reference_visual_color)
+            for roi_id in group.area_roi_ids:
+                group_by_roi[int(roi_id)] = group
+        cached_roi_ids = {int(roi.area_roi_id) for roi in rois if self.window._roi_has_cached_absorbance(roi)}
+        sample_color = QColor(self.window._sample_visual_color)
+        reference_color = QColor(self.window._reference_visual_color)
         self.window._roi_table_updating = True
         self.window.roi_table.blockSignals(True)
         try:
             for row in range(self.window.roi_table.rowCount()):
-                spot_id = self.spot_id_for_row(row)
-                if spot_id is None:
+                roi_id = self.roi_id_for_row(row)
+                if roi_id is None:
                     continue
-                roi = self.window._roi_by_id(spot_id)
+                roi = self.window._roi_by_id(roi_id)
                 if roi is None:
                     continue
-                group = group_by_spot.get(int(spot_id))
-                spot_row_color = QColor(roi.sample_color_hex) if roi.sample_color_hex and QColor(roi.sample_color_hex).isValid() else (QColor(group.sample_color_hex) if group is not None and QColor(group.sample_color_hex).isValid() else spot_color)
-                ring_row_color = QColor(roi.reference_color_hex) if roi.reference_color_hex and QColor(roi.reference_color_hex).isValid() else (QColor(group.reference_color_hex) if group is not None and QColor(group.reference_color_hex).isValid() else ring_color)
+                group = group_by_roi.get(int(roi_id))
+                sample_row_color = QColor(roi.sample_color_hex) if roi.sample_color_hex and QColor(roi.sample_color_hex).isValid() else (QColor(group.sample_color_hex) if group is not None and QColor(group.sample_color_hex).isValid() else sample_color)
+                reference_row_color = QColor(roi.reference_color_hex) if roi.reference_color_hex and QColor(roi.reference_color_hex).isValid() else (QColor(group.reference_color_hex) if group is not None and QColor(group.reference_color_hex).isValid() else reference_color)
                 self._clear_row_style(row)
-                spot_item = self.window.roi_table.item(row, 2)
-                if spot_item is not None:
-                    spot_item.setIcon(make_color_swatch_icon(spot_row_color))
-                ring_item = self.window.roi_table.item(row, 3)
-                if ring_item is not None:
-                    ring_item.setIcon(make_color_swatch_icon(ring_row_color))
-                if self.window._cached_rois_only_visible and int(spot_id) not in cached_spot_ids and int(spot_id) not in self.window._selected_roi_ids:
-                    self._dim_uncached_row(row, spot_color=spot_row_color, ring_color=ring_row_color)
+                sample_item = self.window.roi_table.item(row, 2)
+                if sample_item is not None:
+                    sample_item.setIcon(make_color_swatch_icon(sample_row_color))
+                reference_item = self.window.roi_table.item(row, 3)
+                if reference_item is not None:
+                    reference_item.setIcon(make_color_swatch_icon(reference_row_color))
+                if self.window._cached_rois_only_visible and int(roi_id) not in cached_roi_ids and int(roi_id) not in self.window._selected_roi_ids:
+                    self._dim_uncached_row(row, sample_color=sample_row_color, reference_color=reference_row_color)
         finally:
             self.window.roi_table.blockSignals(False)
             self.window._roi_table_updating = False
@@ -122,10 +122,10 @@ class RoiTableController:
                 if item is None:
                     continue
                 try:
-                    spot_id = int(item.text())
+                    roi_id = int(item.text())
                 except ValueError:
                     continue
-                if spot_id in self.window._selected_roi_ids:
+                if roi_id in self.window._selected_roi_ids:
                     selection_model.select(
                         self.window.roi_table.model().index(row, 0),
                         QItemSelectionModel.SelectionFlag.Select | QItemSelectionModel.SelectionFlag.Rows,
@@ -133,7 +133,7 @@ class RoiTableController:
         finally:
             self.window._roi_list_selection_syncing = False
 
-    def spot_id_for_row(self, row: int) -> int | None:
+    def roi_id_for_row(self, row: int) -> int | None:
         if row < 0 or row >= self.window.roi_table.rowCount():
             return None
         item = self.window.roi_table.item(row, 0)
@@ -150,8 +150,8 @@ class RoiTableController:
             return []
         return [row for row in range(self.window.roi_table.rowCount()) if selection_model.isRowSelected(row, self.window.roi_table.rootIndex())]
 
-    def selected_spot_ids(self) -> list[int]:
-        return [spot_id for row in self.selected_rows() if (spot_id := self.spot_id_for_row(row)) is not None]
+    def selected_roi_ids_list(self) -> list[int]:
+        return [roi_id for row in self.selected_rows() if (roi_id := self.roi_id_for_row(row)) is not None]
 
     def refresh_headers(self) -> None:
         roi_table_headers(self.window.roi_table)
@@ -159,10 +159,10 @@ class RoiTableController:
     def _dataset_folder(self) -> Path | None:
         return self.window._dataset_folder_path() if hasattr(self.window, "_dataset_folder_path") else None
 
-    def _spot_table_signature(self) -> str:
-        spots = sorted(self.window._state.area_rois, key=lambda roi: roi.area_roi_id)
+    def _roi_table_signature_snapshot(self) -> str:
+        rois = sorted(self.window._state.area_rois, key=lambda roi: roi.area_roi_id)
         parts: list[str] = []
-        for roi in spots:
+        for roi in rois:
             group = self.window._group_for_roi(roi.area_roi_id)
             parts.append(
                 "|".join(
@@ -183,7 +183,7 @@ class RoiTableController:
             )
         return "\n".join(parts)
 
-    def _spot_table_rows(self) -> list[list[object]]:
+    def _roi_table_rows_snapshot(self) -> list[list[object]]:
         rows: list[list[object]] = []
         for order, roi in enumerate(sorted(self.window._state.area_rois, key=lambda item: item.area_roi_id)):
             group = self.window._group_for_roi(roi.area_roi_id)
@@ -207,24 +207,24 @@ class RoiTableController:
             )
         return rows
 
-    def _spot_table_snapshot_path(self, folder: Path) -> Path:
+    def _roi_table_snapshot_path(self, folder: Path) -> Path:
         stamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-        return folder / f"spot_table_{stamp}.csv"
+        return folder / f"roi_table_{stamp}.csv"
 
-    def _latest_spot_table_path(self, folder: Path) -> Path | None:
-        candidates = sorted(folder.glob("spot_table_*.csv"), key=lambda path: path.stat().st_mtime if path.exists() else 0.0, reverse=True)
+    def _latest_roi_table_path(self, folder: Path) -> Path | None:
+        candidates = sorted(folder.glob("roi_table_*.csv"), key=lambda path: path.stat().st_mtime if path.exists() else 0.0, reverse=True)
         return candidates[0] if candidates else None
 
-    def _save_spot_table_snapshot(self, *, force: bool = False) -> Path | None:
+    def _save_roi_table_snapshot(self, *, force: bool = False) -> Path | None:
         folder = self._dataset_folder()
         if folder is None:
             return None
         folder.mkdir(parents=True, exist_ok=True)
-        signature = self._spot_table_signature()
-        if not force and self.window._last_saved_spot_table_signature == signature and self.window._last_saved_spot_table_path is not None:
-            return self.window._last_saved_spot_table_path
-        rows = self._spot_table_rows()
-        path = self._spot_table_snapshot_path(folder)
+        signature = self._roi_table_signature_snapshot()
+        if not force and self.window._last_saved_roi_table_signature_snapshot == signature and self.window._last_saved_roi_table_path is not None:
+            return self.window._last_saved_roi_table_path
+        rows = self._roi_table_rows_snapshot()
+        path = self._roi_table_snapshot_path(folder)
         with path.open("w", newline="", encoding="utf-8") as handle:
             writer = csv.writer(handle)
             writer.writerow([
@@ -245,33 +245,33 @@ class RoiTableController:
             ])
             if rows:
                 writer.writerows(rows)
-        self.window._last_saved_spot_table_signature = signature
-        self.window._last_saved_spot_table_path = path
+        self.window._last_saved_roi_table_signature_snapshot = signature
+        self.window._last_saved_roi_table_path = path
         return path
 
     def on_item_changed(self, item: QTableWidgetItem) -> None:
         if self.window._roi_table_updating:
             return
-        spot_id = self.spot_id_for_row(item.row())
-        if spot_id is None:
+        roi_id = self.roi_id_for_row(item.row())
+        if roi_id is None:
             return
         if item.column() == 1:
-            self.rename_group(spot_id, item.text().strip())
+            self.rename_group(roi_id, item.text().strip())
         elif item.column() in {2, 3, 4}:
-            self.edit_diameter_cells(spot_id, item.row())
+            self.edit_diameter_cells(roi_id, item.row())
 
     def on_cell_double_clicked(self, row: int, column: int) -> None:
-        spot_id = self.spot_id_for_row(row)
-        if spot_id is None:
+        roi_id = self.roi_id_for_row(row)
+        if roi_id is None:
             return
         if column == 2:
-            self.edit_spot_color(spot_id)
+            self.edit_roi_color(roi_id)
         elif column == 3:
-            self.edit_ring_color()
+            self.edit_reference_color()
         elif column == 4:
-            self.edit_spot_geometry(spot_id)
+            self.edit_roi_geometry(roi_id)
         elif column == 5:
-            self.edit_ring_geometry(spot_id)
+            self.edit_reference_geometry(roi_id)
 
     def show_context_menu(self, pos) -> None:
         table = self.window.roi_table
@@ -279,8 +279,8 @@ class RoiTableController:
         if item is None:
             return
         row = item.row()
-        spot_id = self.spot_id_for_row(row)
-        if spot_id is None:
+        roi_id = self.roi_id_for_row(row)
+        if roi_id is None:
             return
         menu = QMenu(table)
         menu.setToolTipsVisible(True)
@@ -288,7 +288,7 @@ class RoiTableController:
         select_group_action = None
         ungroup_action = None
         destroy_group_action = None
-        groups = self.window._groups_for_spot(spot_id)
+        groups = self.window._groups_for_roi(roi_id)
         if groups:
             select_group_action = menu.addAction("Select group members")
             ungroup_action = menu.addAction("Ungroup")
@@ -300,12 +300,12 @@ class RoiTableController:
         if action is group_action:
             self.window._group_selected_rois()
         elif select_group_action is not None and action is select_group_action:
-            if self.window._select_group_members_for_spot(spot_id):
-                self.window.status_label.setText(f"Selected group members for ROI {spot_id}.")
+            if self.window._select_group_members_for_roi(roi_id):
+                self.window.status_label.setText(f"Selected group members for ROI {roi_id}.")
         elif ungroup_action is not None and action is ungroup_action:
             self.window._ungroup_selected_rois()
         elif destroy_group_action is not None and action is destroy_group_action:
-            self.window._destroy_groups_for_spot(spot_id)
+            self.window._destroy_groups_for_roi(roi_id)
 
     def update_table(self) -> None:
         logger = logging.getLogger("lspr_imaging_app.workflow")
@@ -319,52 +319,52 @@ class RoiTableController:
         cached_rows = 0
         try:
             self.window.roi_table.setRowCount(0)
-            spots = sorted(self.window._state.area_rois, key=lambda roi: roi.area_roi_id)
-            group_by_spot: dict[int, AreaRoiGroup] = {}
+            rois = sorted(self.window._state.area_rois, key=lambda roi: roi.area_roi_id)
+            group_by_roi: dict[int, AreaRoiGroup] = {}
             for group in self.window._state.area_roi_groups:
-                for spot_id in group.area_roi_ids:
-                    group_by_spot[int(spot_id)] = group
-            cached_spot_ids = {int(roi.area_roi_id) for roi in spots if self.window._roi_has_cached_absorbance(roi)}
+                for roi_id in group.area_roi_ids:
+                    group_by_roi[int(roi_id)] = group
+            cached_roi_ids = {int(roi.area_roi_id) for roi in rois if self.window._roi_has_cached_absorbance(roi)}
             self.refresh_headers()
-            if not spots:
+            if not rois:
                 return
-            spot_color = QColor(self.window._sample_visual_color)
-            ring_color = QColor(self.window._reference_visual_color)
-            for roi in spots:
+            sample_color = QColor(self.window._sample_visual_color)
+            reference_color = QColor(self.window._reference_visual_color)
+            for roi in rois:
                 try:
-                    group = group_by_spot.get(int(roi.area_roi_id))
+                    group = group_by_roi.get(int(roi.area_roi_id))
                     group_name = group.name if group is not None else "-"
-                    spot_row_color = QColor(roi.sample_color_hex) if roi.sample_color_hex and QColor(roi.sample_color_hex).isValid() else (QColor(group.sample_color_hex) if group is not None and QColor(group.sample_color_hex).isValid() else spot_color)
-                    ring_row_color = QColor(roi.reference_color_hex) if roi.reference_color_hex and QColor(roi.reference_color_hex).isValid() else (QColor(group.reference_color_hex) if group is not None and QColor(group.reference_color_hex).isValid() else ring_color)
-                    spot_diameter_value = float(roi.sample_diameter_px if roi.sample_diameter_px is not None else 2.0 * self.window._state.area_roi_settings.sample_radius_px)
-                    ring_inner_value = float(roi.reference_inner_diameter_px if roi.reference_inner_diameter_px is not None else 2.0 * self.window._state.area_roi_settings.reference_inner_radius_px)
-                    ring_outer_value = float(roi.reference_outer_diameter_px if roi.reference_outer_diameter_px is not None else 2.0 * self.window._state.area_roi_settings.reference_outer_radius_px)
+                    sample_row_color = QColor(roi.sample_color_hex) if roi.sample_color_hex and QColor(roi.sample_color_hex).isValid() else (QColor(group.sample_color_hex) if group is not None and QColor(group.sample_color_hex).isValid() else sample_color)
+                    reference_row_color = QColor(roi.reference_color_hex) if roi.reference_color_hex and QColor(roi.reference_color_hex).isValid() else (QColor(group.reference_color_hex) if group is not None and QColor(group.reference_color_hex).isValid() else reference_color)
+                    sample_diameter_value = float(roi.sample_diameter_px if roi.sample_diameter_px is not None else 2.0 * self.window._state.area_roi_settings.sample_radius_px)
+                    reference_inner_value = float(roi.reference_inner_diameter_px if roi.reference_inner_diameter_px is not None else 2.0 * self.window._state.area_roi_settings.reference_inner_radius_px)
+                    reference_outer_value = float(roi.reference_outer_diameter_px if roi.reference_outer_diameter_px is not None else 2.0 * self.window._state.area_roi_settings.reference_outer_radius_px)
                     scale = self.window._microns_per_pixel_scalar() if self.window._state.preprocessing.display_units == "um" and self.window._can_display_micrometers() else None
-                    spot_diameter_text = (
-                        f"{self.window._format_length_display_value(spot_diameter_value):.0f}"
+                    sample_diameter_text = (
+                        f"{self.window._format_length_display_value(sample_diameter_value):.0f}"
                         if self.window._display_uses_micrometers()
-                        else f"{self.window._format_length_display_value(spot_diameter_value):.1f}"
+                        else f"{self.window._format_length_display_value(sample_diameter_value):.1f}"
                     )
-                    ring_inner_text = (
-                        f"{self.window._format_length_display_value(ring_inner_value):.0f}"
+                    reference_inner_text = (
+                        f"{self.window._format_length_display_value(reference_inner_value):.0f}"
                         if self.window._display_uses_micrometers()
-                        else f"{self.window._format_length_display_value(ring_inner_value):.1f}"
+                        else f"{self.window._format_length_display_value(reference_inner_value):.1f}"
                     )
-                    ring_outer_text = (
-                        f"{self.window._format_length_display_value(ring_outer_value):.0f}"
+                    reference_outer_text = (
+                        f"{self.window._format_length_display_value(reference_outer_value):.0f}"
                         if self.window._display_uses_micrometers()
-                        else f"{self.window._format_length_display_value(ring_outer_value):.1f}"
+                        else f"{self.window._format_length_display_value(reference_outer_value):.1f}"
                     )
                     append_roi_table_row(
                         self.window.roi_table,
                         RoiTableRowData(
                             area_roi_id=roi.area_roi_id,
                             group_name=group_name,
-                            spot_color=spot_row_color,
-                            ring_color=ring_row_color,
-                            spot_diameter_text=spot_diameter_text,
-                            ring_inner_text=ring_inner_text,
-                            ring_outer_text=ring_outer_text,
+                            sample_color=sample_row_color,
+                            reference_color=reference_row_color,
+                            sample_diameter_text=sample_diameter_text,
+                            reference_inner_text=reference_inner_text,
+                            reference_outer_text=reference_outer_text,
                             x_text=format_xy_value(roi.center_x, self.window._state.preprocessing.display_units, scale),
                             y_text=format_xy_value(roi.center_y, self.window._state.preprocessing.display_units, scale),
                         ),
@@ -372,16 +372,16 @@ class RoiTableController:
                     row = self.window.roi_table.rowCount() - 1
                     self.window.roi_table.item(row, 1).setToolTip("Double-click to create a group for the selected ROIs." if group is None else f"{group.name} (sample {group.sample_color_hex}, reference {group.reference_color_hex})")
                     self.window.roi_table.item(row, 2).setToolTip("Double-click to change the ROI or group color.")
-                    self.window.roi_table.item(row, 3).setToolTip("Double-click to change the reference-ring color.")
+                    self.window.roi_table.item(row, 3).setToolTip("Double-click to change the reference ROI color.")
                     total_rows += 1
-                    spot_cached = int(roi.area_roi_id) in cached_spot_ids
-                    if spot_cached:
+                    roi_cached = int(roi.area_roi_id) in cached_roi_ids
+                    if roi_cached:
                         cached_rows += 1
-                    if self.window._cached_rois_only_visible and not spot_cached:
+                    if self.window._cached_rois_only_visible and not roi_cached:
                         if roi.area_roi_id not in self.window._selected_roi_ids:
-                            self._dim_uncached_row(row, spot_color=spot_row_color, ring_color=ring_row_color)
+                            self._dim_uncached_row(row, sample_color=sample_row_color, reference_color=reference_row_color)
                 except Exception:
-                    logger.exception("Spot table row build failed | area_roi_id=%s", int(roi.area_roi_id))
+                    logger.exception("ROI table row build failed | area_roi_id=%s", int(roi.area_roi_id))
             self.window.roi_table.resizeColumnsToContents()
             self.window.roi_table.setColumnWidth(0, 34)
             self.window.roi_table.setColumnWidth(1, 96)
@@ -400,61 +400,61 @@ class RoiTableController:
                 self.window.roi_table.sortItems(sort_column, sort_order)
             self.window._roi_table_updating = False
         self.window._append_workflow_log_throttled(
-            "spot_table_update",
+            "roi_table_update",
             f"ROI table updated | rows={int(total_rows)} cached={int(cached_rows)} cached_only={bool(self.window._cached_rois_only_visible)}",
             level="debug",
             min_interval=2.0,
         )
         self.sync_selection()
-        self._save_spot_table_snapshot()
+        self._save_roi_table_snapshot()
 
-    def rename_group(self, spot_id: int, new_name: str) -> None:
-        self.window._rename_spot_group_from_table(spot_id, new_name)
+    def rename_group(self, roi_id: int, new_name: str) -> None:
+        self.window._rename_roi_group_from_table(roi_id, new_name)
 
-    def edit_spot_color(self, spot_id: int) -> None:
-        self.window._edit_spot_color_from_table(spot_id)
+    def edit_roi_color(self, roi_id: int) -> None:
+        self.window._edit_roi_color_from_table(roi_id)
 
-    def edit_ring_color(self) -> None:
-        self.window._edit_ring_color_from_table()
+    def edit_reference_color(self) -> None:
+        self.window._edit_reference_color_from_table()
 
-    def edit_spot_geometry(self, spot_id: int) -> None:
-        self.window._edit_spot_geometry_from_table(spot_id)
+    def edit_roi_geometry(self, roi_id: int) -> None:
+        self.window._edit_roi_geometry_from_table(roi_id)
 
-    def edit_ring_geometry(self, spot_id: int) -> None:
-        self.window._edit_ring_geometry_from_table(spot_id)
+    def edit_reference_geometry(self, roi_id: int) -> None:
+        self.window._edit_reference_geometry_from_table(roi_id)
 
-    def edit_diameter_cells(self, spot_id: int, row: int) -> None:
-        self.window._edit_spot_diameter_cells_from_table(spot_id, row)
+    def edit_diameter_cells(self, roi_id: int, row: int) -> None:
+        self.window._edit_roi_diameter_cells_from_table(roi_id, row)
 
-    def rename_group_from_row(self, spot_id: int, new_name: str) -> None:
-        self.window._rename_spot_group_from_table(spot_id, new_name)
+    def rename_group_from_row(self, roi_id: int, new_name: str) -> None:
+        self.window._rename_roi_group_from_table(roi_id, new_name)
 
     def copy_properties(self) -> None:
-        self.window._copy_spot_properties_from_table()
+        self.window._copy_roi_properties_from_table()
 
     def paste_properties(self) -> None:
-        self.window._paste_spot_properties_from_table()
+        self.window._paste_roi_properties_from_table()
 
     def move_selected(self, direction: int) -> None:
         self.window._move_selected_rois_in_table(direction)
 
-    def edit_spot_color_from_row(self, spot_id: int) -> None:
-        self.window._edit_spot_color_from_table(spot_id)
+    def edit_roi_color_from_row(self, roi_id: int) -> None:
+        self.window._edit_roi_color_from_table(roi_id)
 
-    def edit_ring_color_from_selection(self) -> None:
-        self.window._edit_ring_color_from_table()
+    def edit_reference_color_from_selection(self) -> None:
+        self.window._edit_reference_color_from_table()
 
-    def edit_spot_geometry_from_row(self, spot_id: int) -> None:
-        self.window._edit_spot_geometry_from_table(spot_id)
+    def edit_roi_geometry_from_row(self, roi_id: int) -> None:
+        self.window._edit_roi_geometry_from_table(roi_id)
 
-    def edit_ring_geometry_from_row(self, spot_id: int) -> None:
-        self.window._edit_ring_geometry_from_table(spot_id)
+    def edit_reference_geometry_from_row(self, roi_id: int) -> None:
+        self.window._edit_reference_geometry_from_table(roi_id)
 
-    def edit_diameter_cells_from_row(self, spot_id: int, row: int) -> None:
-        self.window._edit_spot_diameter_cells_from_table(spot_id, row)
+    def edit_diameter_cells_from_row(self, roi_id: int, row: int) -> None:
+        self.window._edit_roi_diameter_cells_from_table(roi_id, row)
 
     def export_csv(self) -> None:
-        path = self._save_spot_table_snapshot(force=True)
+        path = self._save_roi_table_snapshot(force=True)
         if path is None:
             self.window.status_label.setText("No dataset available for ROI table export.")
             return
@@ -465,7 +465,7 @@ class RoiTableController:
         if folder is None:
             self.window.status_label.setText("Load a dataset before importing an ROI table.")
             return
-        latest = self._latest_spot_table_path(folder)
+        latest = self._latest_roi_table_path(folder)
         path: Path | None = None
         if latest is not None:
             answer = QMessageBox.question(
@@ -510,10 +510,10 @@ class RoiTableController:
         ordered_rows = sorted(rows, key=lambda row: int(row.get("area_roi_order", row.get("spot_order", row.get("area_roi_id", row.get("spot_id", 0)))) or 0))
         for row in ordered_rows:
             try:
-                spot_id = int(row.get("area_roi_id", row.get("spot_id", "")))
+                roi_id = int(row.get("area_roi_id", row.get("spot_id", "")))
             except ValueError:
                 continue
-            roi = self.window._roi_by_id(spot_id)
+            roi = self.window._roi_by_id(roi_id)
             if roi is None:
                 continue
             group_name = str(row.get("group_name", "")).strip()
@@ -531,8 +531,8 @@ class RoiTableController:
                     )
                     self.window._state.area_roi_groups.append(group)
                     groups_by_name[group_name] = group
-                if spot_id not in group.area_roi_ids:
-                    group.area_roi_ids.append(spot_id)
+                if roi_id not in group.area_roi_ids:
+                    group.area_roi_ids.append(roi_id)
                 group.sample_color_hex = group_sample_color
                 group.reference_color_hex = group_reference_color
             roi.sample_diameter_px = None if row.get("sample_diameter_px", row.get("spot_diameter_px", "")) == "" else float(row.get("sample_diameter_px") or row.get("spot_diameter_px") or "")
@@ -584,27 +584,27 @@ class RoiTableController:
     def _on_roi_list_item_changed(self, item: QTableWidgetItem) -> None:
         if self.window._roi_table_updating:
             return
-        spot_id = self.window._roi_list_spot_id_for_row(item.row())
-        if spot_id is None:
+        roi_id = self.window._roi_list_roi_id_for_row(item.row())
+        if roi_id is None:
             return
         if item.column() == 1:
-            self.window._rename_spot_group_from_table(spot_id, item.text().strip())
+            self.window._rename_roi_group_from_table(roi_id, item.text().strip())
         elif item.column() in {2, 3, 4}:
-            self.window._edit_spot_diameter_cells_from_table(spot_id, item.row())
+            self.window._edit_roi_diameter_cells_from_table(roi_id, item.row())
 
 
     def _on_roi_list_cell_double_clicked(self, row: int, column: int) -> None:
-        spot_id = self.window._roi_list_spot_id_for_row(row)
-        if spot_id is None:
+        roi_id = self.window._roi_list_roi_id_for_row(row)
+        if roi_id is None:
             return
         if column == 2:
-            self.window._edit_spot_color_from_table(spot_id)
+            self.window._edit_roi_color_from_table(roi_id)
         elif column == 3:
-            self.window._edit_ring_color_from_table()
+            self.window._edit_reference_color_from_table()
         elif column == 4:
-            self.window._edit_spot_geometry_from_table(spot_id)
+            self.window._edit_roi_geometry_from_table(roi_id)
         elif column == 5:
-            self.window._edit_ring_geometry_from_table(spot_id)
+            self.window._edit_reference_geometry_from_table(roi_id)
 
 
     def _on_roi_metrics_ready(
@@ -617,7 +617,7 @@ class RoiTableController:
         refresh_histogram: bool,
     ) -> None:
         self.window._end_busy()
-        if request_id != self.window._spot_metrics_request_id:
+        if request_id != self.window._roi_metrics_request_id:
             return
         if self.window._current_image_key != image_key:
             return
@@ -639,8 +639,8 @@ class RoiTableController:
 
     def _on_roi_metrics_failed(self, message: str) -> None:
         self.window._end_busy()
-        self.window._append_workflow_log(f"Spot metrics refresh failed | {message}", level="error")
-        self.window._background_error("Spot metric refresh", message)
+        self.window._append_workflow_log(f"ROI metrics refresh failed | {message}", level="error")
+        self.window._background_error("ROI metric refresh", message)
 
 
     def _on_detect_rois_ready(
@@ -650,7 +650,7 @@ class RoiTableController:
         detected_rois: list[AreaRoi],
     ) -> None:
         self.window._end_busy()
-        if request_id != self.window._spot_detection_request_id:
+        if request_id != self.window._roi_detection_request_id:
             return
         if self.window._current_image_key != image_key:
             return
@@ -666,9 +666,15 @@ class RoiTableController:
         if self.window._showing_background_profile_main:
             self.window._update_background_profile_preview()
         self.window._schedule_processing_state_save()
-        self.window._set_status_text(f"Detected {len(self.window._state.area_rois)} spots on the reference image.")
+        roi_count = len(self.window._state.area_rois)
+        if roi_count == 0:
+            self.window._set_status_text(
+                "Detected 0 rois. Check that the histogram highlight range (blue band) covers your sample ROI intensities."
+            )
+        else:
+            self.window._set_status_text(f"Detected {roi_count} rois on the reference image.")
         self.window._append_workflow_log(
-            f"ROI detection done | spots {len(self.window._state.area_rois)}",
+            f"ROI detection done | rois {len(self.window._state.area_rois)}",
             level="success",
         )
 
@@ -681,8 +687,8 @@ class RoiTableController:
     def _on_roi_diameter_spin_changed(self, value: int) -> None:
         diameter_px = max(self.window._length_display_to_px(float(value)), 2.0)
         self.window._append_workflow_log_throttled(
-            "spot_diameter_change",
-            f"Spot diameter changed | display={value} | px={diameter_px:.2f}",
+            "sample_diameter_change",
+            f"Sample diameter changed | display={value} | px={diameter_px:.2f}",
             level="debug",
             min_interval=1.0,
         )
@@ -692,8 +698,8 @@ class RoiTableController:
 
     def _on_reference_inner_diameter_spin_changed(self, value: int) -> None:
         self.window._append_workflow_log_throttled(
-            "ring_inner_change",
-            f"Ring inner changed | display={value}",
+            "reference_inner_change",
+            f"Reference inner changed | display={value}",
             level="debug",
             min_interval=1.0,
         )
@@ -706,8 +712,8 @@ class RoiTableController:
 
     def _on_reference_outer_diameter_spin_changed(self, value: int) -> None:
         self.window._append_workflow_log_throttled(
-            "ring_outer_change",
-            f"Ring outer changed | display={value}",
+            "reference_outer_change",
+            f"Reference outer changed | display={value}",
             level="debug",
             min_interval=1.0,
         )

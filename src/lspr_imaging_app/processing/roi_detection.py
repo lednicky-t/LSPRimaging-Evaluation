@@ -34,7 +34,7 @@ def _normalized_external_mask(
     return mask
 
 
-def detect_spots(
+def detect_rois(
     image: np.ndarray,
     settings: AreaRoiDetectionSettings,
     external_mask: np.ndarray | None = None,
@@ -88,7 +88,7 @@ def detect_spots(
     for index, (y, x) in enumerate(candidates, start=1):
         scored.append(
             (
-                _spot_circular_contrast_score(
+                _roi_circular_contrast_score(
                     filtered=filtered,
                     valid_mask=valid_mask,
                     center_x=float(x),
@@ -123,8 +123,8 @@ def detect_spots(
             )
         )
         expected_count = max(int(settings.array_rows), 0) * max(int(settings.array_cols), 0)
-        max_spots = expected_count if expected_count > 0 else len(candidates)
-        if len(accepted) >= int(max_spots):
+        max_rois = expected_count if expected_count > 0 else len(candidates)
+        if len(accepted) >= int(max_rois):
             break
         if index % max(total_scored // 10, 1) == 0 or index == total_scored:
             scaled = 52 + int(round((index / total_scored) * 20))
@@ -132,7 +132,7 @@ def detect_spots(
 
     report_progress(74, "ROI detection: refining ROIs...")
     accepted = [
-        _refine_detected_spot(
+        _refine_detected_roi(
             roi,
             filtered=filtered,
             valid_mask=valid_mask,
@@ -183,7 +183,7 @@ def _masked_gaussian_filter(image: np.ndarray, valid_mask: np.ndarray, sigma: fl
     return filtered, denominator
 
 
-def _refine_detected_spot(
+def _refine_detected_roi(
     roi: AreaRoi,
     *,
     filtered: np.ndarray,
@@ -194,7 +194,7 @@ def _refine_detected_spot(
     fallback_x: float | None = None,
     fallback_y: float | None = None,
 ) -> AreaRoi:
-    refined_x, refined_y, refined_score, found_signal = _refine_spot_center(
+    refined_x, refined_y, refined_score, found_signal = _refine_roi_center(
         filtered=filtered,
         valid_mask=valid_mask,
         seed_x=roi.center_x,
@@ -226,7 +226,7 @@ def _refine_detected_spot(
     )
 
 
-def _refine_spot_center(
+def _refine_roi_center(
     *,
     filtered: np.ndarray,
     valid_mask: np.ndarray,
@@ -257,7 +257,7 @@ def _refine_spot_center(
             distance_sq = (float(x) - seed_x) ** 2 + (float(y) - seed_y) ** 2
             if distance_sq > local_radius**2:
                 continue
-            score = _spot_circular_contrast_score(
+            score = _roi_circular_contrast_score(
                 filtered=filtered,
                 valid_mask=valid_mask,
                 center_x=float(x),
@@ -286,18 +286,18 @@ def _filter_by_array_support(
 ) -> list[AreaRoi]:
     tolerance = max(expected_spacing * 0.35, 4.0)
 
-    def support_score(spot: AreaRoi) -> tuple[int, float]:
+    def support_score(roi: AreaRoi) -> tuple[int, float]:
         aligned_neighbors = 0
         for other in accepted:
-            if other is spot:
+            if other is roi:
                 continue
-            dx = abs(other.center_x - spot.center_x)
-            dy = abs(other.center_y - spot.center_y)
+            dx = abs(other.center_x - roi.center_x)
+            dy = abs(other.center_y - roi.center_y)
             if abs(dx - expected_spacing) <= tolerance and dy <= tolerance:
                 aligned_neighbors += 1
             elif abs(dy - expected_spacing) <= tolerance and dx <= tolerance:
                 aligned_neighbors += 1
-        return aligned_neighbors, spot.score
+        return aligned_neighbors, roi.score
 
     ranked = sorted(accepted, key=support_score, reverse=True)
     return ranked[:expected_count]
@@ -349,7 +349,7 @@ def _fit_grid_array(
             if nearest is not None and nearest_distance <= tolerance:
                 used_indices.add(nearest_index)
                 fitted.append(
-                    _refine_detected_spot(
+                    _refine_detected_roi(
                         nearest,
                         filtered=filtered,
                         valid_mask=valid_mask,
@@ -362,7 +362,7 @@ def _fit_grid_array(
                 )
                 continue
 
-            refined_x, refined_y, refined_score, found_signal = _refine_spot_center(
+            refined_x, refined_y, refined_score, found_signal = _refine_roi_center(
                 filtered=filtered,
                 valid_mask=valid_mask,
                 seed_x=grid_x,
@@ -386,7 +386,7 @@ def _fit_grid_array(
     return fitted
 
 
-def _spot_circular_contrast_score(
+def _roi_circular_contrast_score(
     *,
     filtered: np.ndarray,
     valid_mask: np.ndarray,

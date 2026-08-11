@@ -174,7 +174,7 @@ from .worker import (
 # an earlier "unused import" cleanup pass. Do not remove without checking for that pattern.
 from .analysis_tasks import (
     _auto_chromatic_landmarks_task,  # noqa: F401 - re-exported, see comment above
-    _detect_spots_task,
+    _detect_rois_task,
     _estimate_chromatic_models_task,  # noqa: F401 - re-exported, see comment above
     _process_image_task,  # noqa: F401 - re-exported, see comment above
     _refresh_roi_metrics_task,
@@ -218,9 +218,10 @@ class MainWindow(MainWindowIcons, QMainWindow):
     ABSORBANCE_SPECTRUM_CACHE_SIZE = 48
     ABSORBANCE_SPECTRAL_CUBE_CACHE_SIZE = 48
     ABSORBANCE_ROI_MASK_CACHE_SIZE = 48
-    SPOT_ABSORBANCE_CACHE_SIZE = 512
+    ROI_ABSORBANCE_CACHE_SIZE = 512
     SENSORGRAM_CACHE_SIZE = 48
     SENSORGRAM_SPECTRAL_CUBE_PAYLOAD_CACHE_SIZE = 96
+    SENSORGRAM_SPECTRAL_CUBE_RESULT_CACHE_SIZE = 96
     # Quick navigation:
     # - layout and signal wiring: _build_layout, _create_toolbar, _connect_signals
     # - roi list table: _on_roi_list_toggled, _update_roi_table, CSV helpers
@@ -333,7 +334,7 @@ class MainWindow(MainWindowIcons, QMainWindow):
         self._roi_list_selection_syncing = False
         self._roi_list_range_anchor_row: int | None = None
         self._roi_table_updating = False
-        self._spot_clipboard: dict[str, object] | None = None
+        self._roi_clipboard: dict[str, object] | None = None
         self._selected_roi_ids: set[int] = set()
         self._selection_plot_highlight_signature: tuple[int, ...] | None = None
         self._sensorgram_selection_highlight_signature: tuple[int, ...] | None = None
@@ -358,7 +359,7 @@ class MainWindow(MainWindowIcons, QMainWindow):
         self._suspend_collapsible_accordion = False
         self._dragging_landmark = False
         self._dragging_landmark_started = False
-        self._dragging_spots = False
+        self._dragging_rois = False
         self._drag_anchor: tuple[float, float] | None = None
         self._drag_original_positions: dict[int, tuple[float, float]] = {}
         self._roi_selection_rubber_band: QRubberBand | None = None
@@ -367,10 +368,10 @@ class MainWindow(MainWindowIcons, QMainWindow):
         self._roi_selection_pressed_id: int | None = None
         self._roi_selection_drag_modifiers: Qt.KeyboardModifier = Qt.KeyboardModifier.NoModifier
         self._roi_edit_refresh_pending = False
-        self._spot_overlay_refresh_timer = QTimer(self)
-        self._spot_overlay_refresh_timer.setSingleShot(True)
-        self._spot_overlay_refresh_timer.setInterval(16)
-        self._spot_overlay_refresh_timer.timeout.connect(self._refresh_spot_overlays_during_drag)
+        self._roi_overlay_refresh_timer = QTimer(self)
+        self._roi_overlay_refresh_timer.setSingleShot(True)
+        self._roi_overlay_refresh_timer.setInterval(16)
+        self._roi_overlay_refresh_timer.timeout.connect(self._refresh_roi_overlays_during_drag)
         self._processed_image_cache: OrderedDict[tuple[object, ...], np.ndarray] = OrderedDict()
         self._processed_shape_cache: dict[tuple[object, ...], tuple[int, int]] = {}
         self._reference_contrast_cache: dict[str, float] = {}
@@ -386,20 +387,23 @@ class MainWindow(MainWindowIcons, QMainWindow):
         self._absorbance_roi_mask_cache: OrderedDict[tuple[object, ...], dict[str, object]] = OrderedDict()
         self._sensorgram_cache: OrderedDict[tuple[object, ...], SensorgramComputationResult] = OrderedDict()
         self._sensorgram_spectral_cube_payload_cache: OrderedDict[tuple[object, ...], tuple[object, ...]] = OrderedDict()
+        self._sensorgram_spectral_cube_result_cache: OrderedDict[tuple[object, ...], AbsorbanceSpectrumResult] = OrderedDict()
         self._analysis_cache_lock = threading.Lock()
         self._last_absorbance_fit_seconds: float | None = None
         self._last_saved_processing_signature: str | None = None
         self._last_saved_preprocessing_path: Path | None = None
         self._last_saved_profile_path: Path | None = None
+        self._processing_profile_write_busy = False
+        self._processing_profile_write_pending: tuple[object, ...] | None = None
         self._active_session_name: str = "Default"
-        self._last_saved_spot_table_signature: str | None = None
-        self._last_saved_spot_table_path: Path | None = None
+        self._last_saved_roi_table_signature: str | None = None
+        self._last_saved_roi_table_path: Path | None = None
         self._image_refresh_running = False
         self._pending_image_refresh_payload: tuple[object, ...] | None = None
         self._latest_image_refresh_signature: tuple[object, ...] | None = None
         self._image_refresh_started_at: float | None = None
-        self._spot_metrics_request_id = 0
-        self._spot_detection_request_id = 0
+        self._roi_metrics_request_id = 0
+        self._roi_detection_request_id = 0
         self._background_profile_request_id = 0
         self._absorbance_spectrum_request_id = 0
         self._sensorgram_request_id = 0
@@ -410,7 +414,7 @@ class MainWindow(MainWindowIcons, QMainWindow):
         self._pending_absorbance_spectrum_payload: tuple[object, ...] | None = None
         self._absorbance_spectrum_dirty = True
         self._absorbance_spectrum_started_at: float | None = None
-        self._spot_absorbance_cache: OrderedDict[tuple[object, ...], AbsorbanceSpectrumResult] = OrderedDict()
+        self._roi_absorbance_cache: OrderedDict[tuple[object, ...], AbsorbanceSpectrumResult] = OrderedDict()
         self._analysis_live_preview_enabled = self._settings_bool("analysis/live_preview", False)
         self._histogram_log_y_enabled = self._settings_bool("histogram/log_y", False)
         self._histogram_startup_autoscale_pending = False
@@ -443,8 +447,8 @@ class MainWindow(MainWindowIcons, QMainWindow):
         self._sensorgram_spectral_cube_indices = np.asarray([], dtype=np.int32)
         self._sensorgram_metric_values = np.asarray([], dtype=np.float64)
         self._sensorgram_metric_signal = np.asarray([], dtype=np.float64)
-        self._display_spot_cache_signature: tuple[object, ...] | None = None
-        self._display_spot_cache_value: list[AreaRoi] | None = None
+        self._display_roi_cache_signature: tuple[object, ...] | None = None
+        self._display_roi_cache_value: list[AreaRoi] | None = None
         self._selected_source_rois_cache_signature: tuple[object, ...] | None = None
         self._selected_source_rois_cache_value: tuple[AreaRoi, ...] = tuple()
         self._processed_mask_view_cache_signature: tuple[object, ...] | None = None
@@ -458,15 +462,15 @@ class MainWindow(MainWindowIcons, QMainWindow):
         self._redo_stack: list[UndoSnapshot] = []
         self._prepared_undo_snapshot: UndoSnapshot | None = None
         self._restoring_undo = False
-        self._spot_overlay_theta = np.linspace(0.0, 2.0 * np.pi, 48)
+        self._roi_overlay_theta = np.linspace(0.0, 2.0 * np.pi, 48)
         self._image_tools_preview_only = False
         self._ome_zarr_chunk_controls_syncing = False
         theme = get_active_theme()
-        self._sample_visual_color = QColor(theme.spot_color)
+        self._sample_visual_color = QColor(theme.sample_color)
         self._mask_visual_color = QColor(theme.mask_color)
         self._histogram_mask_visual_color = QColor(theme.histogram_mask_color)
         self._figure_mask_visual_color = QColor(theme.figure_mask_color)
-        self._reference_visual_color = QColor(theme.ring_color)
+        self._reference_visual_color = QColor(theme.reference_color)
         self._highlight_visual_color = QColor(theme.highlight_color)
         self._scale_bar_visual_color = QColor(theme.scale_bar_color)
         self._roi_alpha = 0.8
@@ -502,10 +506,10 @@ class MainWindow(MainWindowIcons, QMainWindow):
         self._processing_state_save_timer.setSingleShot(True)
         self._processing_state_save_timer.setInterval(220)
         self._processing_state_save_timer.timeout.connect(self._save_processing_state_for_dataset)
-        self._spot_state_save_timer = QTimer(self)
-        self._spot_state_save_timer.setSingleShot(True)
-        self._spot_state_save_timer.setInterval(250)
-        self._spot_state_save_timer.timeout.connect(self._save_processing_state_for_dataset)
+        self._roi_state_save_timer = QTimer(self)
+        self._roi_state_save_timer.setSingleShot(True)
+        self._roi_state_save_timer.setInterval(250)
+        self._roi_state_save_timer.timeout.connect(self._save_processing_state_for_dataset)
         self._roi_refresh_timer = QTimer(self)
         self._roi_refresh_timer.setSingleShot(True)
         self._roi_refresh_timer.setInterval(25)
@@ -516,7 +520,7 @@ class MainWindow(MainWindowIcons, QMainWindow):
         self._init_dataset_widgets(default_folder)
         self._init_chromatic_widgets()
         self._init_status_and_histogram_widgets()
-        self._init_spot_and_background_widgets()
+        self._init_roi_and_background_widgets()
         self._init_mask_widgets()
         self._init_analysis_and_view_widgets()
 
@@ -807,15 +811,29 @@ class MainWindow(MainWindowIcons, QMainWindow):
             "blur grows at longer wavelengths). Spots = particle centroids (coarser, but far more robust to that "
             "blur). Both = try both and keep whichever stays consistent with the point's own trend."
         )
+        self.chromatic_landmark_model_combo = QComboBox(self)
+        self.chromatic_landmark_model_combo.addItem("Similarity", "similarity")
+        self.chromatic_landmark_model_combo.addItem("Affine", "affine")
+        default_landmark_model = str(self._settings.value("chromatic/landmark_model", "similarity") or "similarity")
+        default_landmark_model_index = self.chromatic_landmark_model_combo.findData(default_landmark_model)
+        if default_landmark_model_index < 0:
+            default_landmark_model_index = 0
+        self.chromatic_landmark_model_combo.setCurrentIndex(default_landmark_model_index)
+        self.chromatic_landmark_model_combo.setToolTip(
+            "Model: the transform fitted through the reference points. Similarity = uniform scale + rotation + "
+            "shift only (matches how real lateral chromatic aberration behaves; recommended). Affine = also allows "
+            "shear/unequal x-y scale, which a small set of noisy points can pick up spuriously and produce a worse "
+            "correction near the image center even as corner points look better."
+        )
         self.chromatic_start_button = self._free_standing_toggle_icon_label(
-            self._make_spot_edit_icon(False),
+            self._make_roi_edit_icon(False),
             False,
             "Edit: enter chromatic reference-point editing mode on the current sampled image.",
             size=24,
             parent=self,
         )
         self.chromatic_start_button.toggled.connect(
-            lambda checked: self.chromatic_start_button.setIcon(self._make_spot_edit_icon(bool(checked)))
+            lambda checked: self.chromatic_start_button.setIcon(self._make_roi_edit_icon(bool(checked)))
         )
         self.chromatic_grid_button = self._free_standing_toggle_icon_label(
             self._ome_zarr_grid_icon(False),
@@ -884,6 +902,14 @@ class MainWindow(MainWindowIcons, QMainWindow):
         )
         self.chromatic_estimate_button = self.chromatic_transform_button
         self.chromatic_clear_button = self.chromatic_transform_button
+        self.chromatic_landmark_export_button = self._free_standing_icon_label(
+            self._mask_panel_icon("file-export", color="#22c55e", size=24),
+            "Export marked reference points: raw tracked position, reference position, and (once transforms are "
+            "estimated) the model's predicted position and residual, one row per point per sampled wavelength -- "
+            "for plotting the residual pattern outside the app.",
+            size=24,
+            parent=self,
+        )
 
     def _init_status_and_histogram_widgets(self) -> None:
         self.roi_summary = QLabel("No ROIs detected.", self)
@@ -929,7 +955,7 @@ class MainWindow(MainWindowIcons, QMainWindow):
         self.histogram_legend = self.histogram_plot.addLegend(offset=(8, 8), labelTextColor="#e5edf7")
         self.histogram_curve = self.histogram_plot.plot(name="All pixels", pen=pg.mkPen("#ffffff", width=2.2))
         self.roi_histogram_curve = self.histogram_plot.plot(name="ROIs")
-        self.reference_histogram_curve = self.histogram_plot.plot(name="Ref. rings")
+        self.reference_histogram_curve = self.histogram_plot.plot(name="Reference ROIs")
         self.mask_histogram_curve = self.histogram_plot.plot(name="Mask")
         self.residual_histogram_curve = self.histogram_plot.plot(name="Residual")
         self.residual_fill_item = pg.FillBetweenItem(self.histogram_curve.curve, self.residual_histogram_curve.curve)
@@ -938,6 +964,10 @@ class MainWindow(MainWindowIcons, QMainWindow):
         self.histogram_plot.addItem(self.residual_fill_item)
         self.hist_region = pg.LinearRegionItem(values=(0.0, 1.0), brush=pg.mkBrush(56, 189, 248, 35))
         self.hist_region.setZValue(10)
+        self.hist_region.setToolTip(
+            "Histogram highlight range. This also sets the intensity range that 'Auto-locate ROIs' "
+            "searches within — if it doesn't cover your sample ROI intensities, detection will find 0 ROIs."
+        )
         self.histogram_plot.addItem(self.hist_region)
         self.hist_region_label = pg.TextItem(anchor=(0.5, 1.0))
         self.hist_region_label.setZValue(13)
@@ -968,7 +998,7 @@ class MainWindow(MainWindowIcons, QMainWindow):
         self.histogram_y_scale_button.setToolTip("Toggle histogram Y axis between linear and logarithmic scale.")
         self.histogram_y_scale_button.toggled.connect(self._on_histogram_y_scale_toggled)
 
-    def _init_spot_and_background_widgets(self) -> None:
+    def _init_roi_and_background_widgets(self) -> None:
         self.sample_diameter_spin = ResponsiveDoubleSpinBox(self)
         self.reference_inner_diameter_spin = ResponsiveDoubleSpinBox(self)
         self.reference_outer_diameter_spin = ResponsiveDoubleSpinBox(self)
@@ -997,7 +1027,7 @@ class MainWindow(MainWindowIcons, QMainWindow):
         self.flatten_background_check.setCheckable(True)
         self.flatten_background_check.setIcon(self._make_link_toggle_icon(False))
         self.flatten_background_check.setIconSize(QSize(APP_THEME.compact_icon_inner, APP_THEME.compact_icon_inner))
-        self.flatten_ignore_spot_area_check = self._make_icon_tool_button(
+        self.flatten_ignore_roi_area_check = self._make_icon_tool_button(
             "current-location-off",
             "#94a3b8",
             "Ignore the detected ROI area while estimating the illumination background.",
@@ -1011,10 +1041,10 @@ class MainWindow(MainWindowIcons, QMainWindow):
             checkable=True,
             icon=self._background_exclusion_icon("mask-off", False, size=APP_THEME.compact_icon_inner),
         )
-        self.flatten_ignore_spot_area_check.setChecked(True)
+        self.flatten_ignore_roi_area_check.setChecked(True)
         self._sync_background_exclusion_buttons()
-        self.flatten_ignore_spot_area_check.toggled.connect(
-            lambda checked: self.flatten_ignore_spot_area_check.setIcon(
+        self.flatten_ignore_roi_area_check.toggled.connect(
+            lambda checked: self.flatten_ignore_roi_area_check.setIcon(
                 self._background_exclusion_icon("current-location-off", checked, size=APP_THEME.compact_icon_inner)
             )
         )
@@ -1023,11 +1053,11 @@ class MainWindow(MainWindowIcons, QMainWindow):
                 self._background_exclusion_icon("mask-off", checked, size=APP_THEME.compact_icon_inner)
             )
         )
-        self.background_local_ring_check = self._make_icon_tool_button(
+        self.background_local_reference_check = self._make_icon_tool_button(
             "focus-2",
             "#94a3b8",
-            "Local ring normalization (circle+ring geometry only): use the reference ring area as "
-            "per-ROI background. Enables fast spatial reads for OME-Zarr datasets — "
+            "Local reference-ROI normalization (sample+reference ROI geometry only): use the reference "
+            "ROI area as per-ROI background. Enables fast spatial reads for OME-Zarr datasets — "
             "global background flattening is skipped during ROI analysis.",
             checkable=True,
         )
@@ -1078,17 +1108,22 @@ class MainWindow(MainWindowIcons, QMainWindow):
         self.flatten_background_sigma_spin.setRange(3, 2000)
         self.flatten_background_sigma_spin.setSuffix(" px")
         self.flatten_background_sigma_spin.setKeyboardTracking(False)
+        self.flatten_background_exclusion_dilation_spin = QSpinBox(self)
+        self.flatten_background_exclusion_dilation_spin.setRange(0, 100)
+        self.flatten_background_exclusion_dilation_spin.setSuffix(" px")
+        self.flatten_background_exclusion_dilation_spin.setKeyboardTracking(False)
         self.flatten_background_binning_combo = QComboBox(self)
         self.flatten_background_binning_combo.addItem("1x1", 1)
         self.flatten_background_binning_combo.addItem("2x2", 2)
         self.flatten_background_binning_combo.addItem("4x4", 4)
         # Clearer aliases for the background section controls.
         self.background_removal_link = self.flatten_background_check
-        self.background_ignore_spot_button = self.flatten_ignore_spot_area_check
+        self.background_ignore_roi_button = self.flatten_ignore_roi_area_check
         self.background_ignore_mask_button = self.flatten_ignore_mask_check
-        self.background_local_ring_button = self.background_local_ring_check
+        self.background_local_reference_button = self.background_local_reference_check
         self.background_smoothing_sigma_spin = self.flatten_background_sigma_spin
         self.background_smoothing_binning_combo = self.flatten_background_binning_combo
+        self.background_exclusion_dilation_spin = self.flatten_background_exclusion_dilation_spin
 
     def _init_mask_widgets(self) -> None:
         self.mask_mode_combo = QComboBox(self)
@@ -1246,7 +1281,7 @@ class MainWindow(MainWindowIcons, QMainWindow):
         self._set_mask_preview_button_icon(self.local_contrast_mask_show_button, self.local_contrast_mask_show_button.isChecked())
         self._set_mask_preview_button_icon(self.morphology_mask_show_button, self.morphology_mask_show_button.isChecked())
 
-        self.spot_detection_auto_button = self._make_icon_tool_button(
+        self.roi_detection_auto_button = self._make_icon_tool_button(
             "grid-dots",
             "#22c55e",
             "Mode A: automatically detect ROIs from the known array grid and spacing.",
@@ -1318,7 +1353,7 @@ class MainWindow(MainWindowIcons, QMainWindow):
         self.analysis_end_spectral_cube_spin = QSpinBox(self)
         self.analysis_end_spectral_cube_spin.setEnabled(False)
         self.analysis_end_spectral_cube_spin.setKeyboardTracking(False)
-        self.analysis_formula_label = QLabel("A = log10(Iref. ring / Ispot)", self)
+        self.analysis_formula_label = QLabel("A = log10(I_rROI / I_sROI)", self)
         self.analysis_formula_label.setWordWrap(True)
         self.analysis_summary_label = QLabel("Select ROIs to show absorbance spectrum.", self)
         self.analysis_summary_label.setWordWrap(True)
@@ -1414,7 +1449,7 @@ class MainWindow(MainWindowIcons, QMainWindow):
         self.array_spacing_spin.setKeyboardTracking(True)
         self.ignore_marked_check = QPushButton("Apply mask", self)
         self.ignore_marked_check.setCheckable(True)
-        self.detect_rois_button = self.spot_detection_auto_button
+        self.detect_rois_button = self.roi_detection_auto_button
         self.reorder_rois_button = self._make_icon_tool_button("sort-ascending-numbers", "#f8fafc", "Reorder ROIs by image position so the top-left ROI becomes ID 1.")
         self.clear_rois_button = self._make_icon_tool_button("trash-x", "#ef4444", "Remove all detected ROIs and groups from the current dataset.")
         self.clear_roi_selection_button = QPushButton("Clear selection", self)
@@ -1534,10 +1569,10 @@ class MainWindow(MainWindowIcons, QMainWindow):
         self.flip_vertical_action.setChecked(self._state.preprocessing.flip_vertical)
         self.flip_vertical_action.setToolTip("Flip the reference image vertically.")
 
-        self.spot_edit_action = QAction(self._make_spot_edit_icon(), "Manual edit", self)
-        self.spot_edit_action.setCheckable(True)
-        self.spot_edit_action.setToolTip("Left-click or right-click to select ROIs in the active ROI tab. Ctrl-click for group selection. Left-drag in Move mode to correct ROIs.")
-        self.spot_edit_action.setShortcut(QKeySequence("Ctrl+E"))
+        self.roi_edit_action = QAction(self._make_roi_edit_icon(), "Manual edit", self)
+        self.roi_edit_action.setCheckable(True)
+        self.roi_edit_action.setToolTip("Left-click or right-click to select ROIs in the active ROI tab. Ctrl-click for group selection. Left-drag in Move mode to correct ROIs.")
+        self.roi_edit_action.setShortcut(QKeySequence("Ctrl+E"))
         self.roi_add_action = QAction(self._make_add_icon(), "Add", self)
         self.roi_add_action.setCheckable(True)
         self.roi_add_action.setEnabled(False)
@@ -1610,7 +1645,7 @@ class MainWindow(MainWindowIcons, QMainWindow):
 
         self.show_rois_check = self._create_view_toggle_button("roi", self._rois_visible, "Show or hide the ROI overlays.")
         self.bottom_roi_labels_button = self._create_label_visibility_button(self._roi_labels_visible)
-        self.show_rings_check = self._create_view_toggle_button("rings", self._reference_visible, "Show or hide the reference rings.")
+        self.show_reference_check = self._create_view_toggle_button("reference", self._reference_visible, "Show or hide the reference ROI overlays.")
         self.show_reference_points_check = self._create_view_toggle_button("reference_points", self._reference_points_visible, "Show or hide chromatic reference points.")
         self.show_mask_check = self._create_view_toggle_button("mask", self._mask_visible, "Show or hide the mask overlay.")
         self.show_highlight_check = self._create_view_toggle_button("highlight", self._highlight_visible, "Show or hide the histogram highlight overlay.")
@@ -1665,7 +1700,7 @@ class MainWindow(MainWindowIcons, QMainWindow):
                 self._create_toolbar_row([
                     self._create_view_control("", self.show_rois_check, self.sample_color_button, self.roi_alpha_slider),
                     self._create_toolbar_icon_toggle_control("", self.bottom_roi_labels_button),
-                    self._create_view_control("", self.show_rings_check, self.reference_color_button, self.reference_alpha_slider),
+                    self._create_view_control("", self.show_reference_check, self.reference_color_button, self.reference_alpha_slider),
                     self._create_toolbar_icon_toggle_control("", self.show_reference_points_check),
                     self._create_view_control("", self.show_mask_check, self.mask_color_button, self.mask_alpha_slider),
                     self._create_view_control("", self.show_highlight_check, self.highlight_color_button, self.highlight_alpha_slider),
@@ -1688,7 +1723,7 @@ class MainWindow(MainWindowIcons, QMainWindow):
         bottom_view_content_layout.addStretch(1)
         bottom_view_layout.addWidget(self._make_scrollable_icon_row(bottom_view_content), 1)
 
-        self._populate_left_spot_editor_controls()
+        self._populate_left_roi_editor_controls()
         self._image_tools_controller.refresh_image_tool_action_icons()
         self._update_display_unit_controls()
         self._create_menu_bar()
@@ -1751,7 +1786,7 @@ class MainWindow(MainWindowIcons, QMainWindow):
         self._connect_chromatic()
         self._connect_analysis_and_histogram()
         self._connect_background_and_mask()
-        self._connect_spot()
+        self._connect_roi_editor()
         self._connect_toolbar_and_ui()
 
 
@@ -1797,7 +1832,9 @@ class MainWindow(MainWindowIcons, QMainWindow):
         self.chromatic_feature_count_spin.currentIndexChanged.connect(self._on_chromatic_feature_count_changed)
         self.chromatic_subpixel_precision_combo.currentIndexChanged.connect(self._on_chromatic_subpixel_precision_changed)
         self.chromatic_landmark_kind_combo.currentIndexChanged.connect(self._on_chromatic_landmark_kind_changed)
+        self.chromatic_landmark_model_combo.currentIndexChanged.connect(self._on_chromatic_landmark_model_changed)
         self.chromatic_transform_button.clicked.connect(self._on_chromatic_transform_button_clicked)
+        self.chromatic_landmark_export_button.clicked.connect(self._chromatic_controller.export_landmarks_csv)
 
     def _connect_analysis_and_histogram(self) -> None:
         self.hist_region.sigRegionChanged.connect(self._update_selected_intensity_overlay)
@@ -1838,20 +1875,21 @@ class MainWindow(MainWindowIcons, QMainWindow):
         self.background_removal_link.toggled.connect(self._update_image_processing_settings)
         self.background_smoothing_sigma_spin.valueChanged.connect(self._update_image_processing_settings)
         self.background_smoothing_binning_combo.currentIndexChanged.connect(self._update_image_processing_settings)
-        self.background_ignore_spot_button.toggled.connect(self._update_image_processing_settings)
+        self.background_ignore_roi_button.toggled.connect(self._update_image_processing_settings)
         self.background_ignore_mask_button.toggled.connect(self._update_image_processing_settings)
-        self.background_local_ring_check.toggled.connect(self._update_image_processing_settings)
+        self.background_exclusion_dilation_spin.valueChanged.connect(self._update_image_processing_settings)
+        self.background_local_reference_check.toggled.connect(self._update_image_processing_settings)
         self.background_create_new_button.clicked.connect(self._create_new_background)
         self.background_load_from_file_button.clicked.connect(self._load_background_from_file)
         self.background_save_button.clicked.connect(self._save_background_to_file)
         self.background_profile_hold_button.toggled.connect(self._on_background_profile_toggled)
         self.background_profile_button.toggled.connect(self._on_background_profile_toggled)
-        self.mask_mode_combo.currentIndexChanged.connect(self._update_spot_detection_settings)
+        self.mask_mode_combo.currentIndexChanged.connect(self._update_roi_detection_settings)
         self.mask_mode_combo.currentIndexChanged.connect(self._update_mask_control_state)
-        self.mask_profile_sigma_spin.valueChanged.connect(self._update_spot_detection_settings)
-        self.mask_relative_threshold_spin.valueChanged.connect(self._update_spot_detection_settings)
-        self.mask_local_sigma_spin.valueChanged.connect(self._update_spot_detection_settings)
-        self.mask_local_z_spin.valueChanged.connect(self._update_spot_detection_settings)
+        self.mask_profile_sigma_spin.valueChanged.connect(self._update_roi_detection_settings)
+        self.mask_relative_threshold_spin.valueChanged.connect(self._update_roi_detection_settings)
+        self.mask_local_sigma_spin.valueChanged.connect(self._update_roi_detection_settings)
+        self.mask_local_z_spin.valueChanged.connect(self._update_roi_detection_settings)
         self.mask_pencil_check.toggled.connect(self._on_mask_pencil_toggled)
         self.mask_draw_mode_combo.currentIndexChanged.connect(self._sync_mask_draw_mode_buttons)
         self.mask_draw_add_button.clicked.connect(lambda: self._set_mask_draw_mode("add"))
@@ -1882,12 +1920,12 @@ class MainWindow(MainWindowIcons, QMainWindow):
         self.mask_morphology_dilate_button.toggled.connect(lambda checked: self._mask_controller.set_morphology_operation("dilate", checked))
         self.mask_morphology_open_button.toggled.connect(lambda checked: self._mask_controller.set_morphology_operation("open", checked))
         self.mask_morphology_close_button.toggled.connect(lambda checked: self._mask_controller.set_morphology_operation("close", checked))
-        self.mask_relative_profile_sigma_spin.valueChanged.connect(self._update_spot_detection_settings)
+        self.mask_relative_profile_sigma_spin.valueChanged.connect(self._update_roi_detection_settings)
         self.mask_relative_profile_sigma_spin.valueChanged.connect(self._refresh_mask_previews)
         self.mask_relative_threshold_spin.valueChanged.connect(self._refresh_mask_previews)
-        self.mask_local_contrast_sigma_spin.valueChanged.connect(self._update_spot_detection_settings)
+        self.mask_local_contrast_sigma_spin.valueChanged.connect(self._update_roi_detection_settings)
         self.mask_local_contrast_sigma_spin.valueChanged.connect(self._refresh_mask_previews)
-        self.mask_local_contrast_z_spin.valueChanged.connect(self._update_spot_detection_settings)
+        self.mask_local_contrast_z_spin.valueChanged.connect(self._update_roi_detection_settings)
         self.mask_local_contrast_z_spin.valueChanged.connect(self._refresh_mask_previews)
         self.mask_morphology_radius_spin.valueChanged.connect(self._refresh_mask_previews)
         self.mask_relative_profile_sigma_spin.valueChanged.connect(self._save_control_preferences)
@@ -1898,27 +1936,27 @@ class MainWindow(MainWindowIcons, QMainWindow):
         self.mask_draw_mode_combo.currentIndexChanged.connect(self._save_control_preferences)
         self.mask_brush_size_spin.valueChanged.connect(self._save_control_preferences)
 
-        self.ignore_marked_check.toggled.connect(self._update_spot_detection_settings)
+        self.ignore_marked_check.toggled.connect(self._update_roi_detection_settings)
 
-    def _connect_spot(self) -> None:
+    def _connect_roi_editor(self) -> None:
         self.sample_diameter_spin.valueChanged.connect(self._on_roi_diameter_spin_changed)
-        self.sample_diameter_spin.editingFinished.connect(self._commit_spot_geometry_edits)
+        self.sample_diameter_spin.editingFinished.connect(self._commit_roi_geometry_edits)
         self.reference_inner_diameter_spin.valueChanged.connect(self._on_reference_inner_diameter_spin_changed)
-        self.reference_inner_diameter_spin.editingFinished.connect(self._commit_spot_geometry_edits)
+        self.reference_inner_diameter_spin.editingFinished.connect(self._commit_roi_geometry_edits)
         self.reference_outer_diameter_spin.valueChanged.connect(self._on_reference_outer_diameter_spin_changed)
-        self.reference_outer_diameter_spin.editingFinished.connect(self._commit_spot_geometry_edits)
+        self.reference_outer_diameter_spin.editingFinished.connect(self._commit_roi_geometry_edits)
         self.rectangle_name_edit.editingFinished.connect(self._commit_rectangle_roi_edits)
         self.rectangle_width_spin.valueChanged.connect(lambda *_args: self._commit_rectangle_roi_edits())
         self.rectangle_height_spin.valueChanged.connect(lambda *_args: self._commit_rectangle_roi_edits())
         self.rectangle_padding_spin.valueChanged.connect(lambda *_args: self._commit_rectangle_roi_edits())
         self.rectangle_background_width_spin.valueChanged.connect(lambda *_args: self._commit_rectangle_roi_edits())
-        self.array_rows_spin.valueChanged.connect(self._update_spot_detection_settings)
-        self.array_cols_spin.valueChanged.connect(self._update_spot_detection_settings)
-        self.array_spacing_spin.valueChanged.connect(self._update_spot_detection_settings)
-        self.detect_rois_button.clicked.connect(self._detect_spots)
-        self.reorder_rois_button.clicked.connect(self._reorder_spots_by_position)
-        self.clear_rois_button.clicked.connect(self._clear_detected_spots)
-        self.clear_roi_selection_button.clicked.connect(self._clear_spot_selection)
+        self.array_rows_spin.valueChanged.connect(self._update_roi_detection_settings)
+        self.array_cols_spin.valueChanged.connect(self._update_roi_detection_settings)
+        self.array_spacing_spin.valueChanged.connect(self._update_roi_detection_settings)
+        self.detect_rois_button.clicked.connect(self._detect_rois)
+        self.reorder_rois_button.clicked.connect(self._reorder_rois_by_position)
+        self.clear_rois_button.clicked.connect(self._clear_detected_rois)
+        self.clear_roi_selection_button.clicked.connect(self._clear_roi_selection)
         self.roi_array_action.toggled.connect(self._on_roi_array_toggled)
         self.roi_list_action.toggled.connect(self._roi_table_controller.on_toggled)
         self.roi_list_panel.visibilityChanged.connect(self._on_roi_panel_visibility_changed)
@@ -1934,10 +1972,10 @@ class MainWindow(MainWindowIcons, QMainWindow):
         self.ungroup_rois_action.triggered.connect(self._ungroup_selected_rois)
         self.addAction(self.group_rois_action)
         self.addAction(self.ungroup_rois_action)
-        self.show_rois_check.toggled.connect(self._on_show_spots_toggled)
-        self.bottom_roi_labels_button.toggled.connect(self._on_show_spot_labels_toggled)
-        self.roi_editor_labels_button.toggled.connect(self._on_spot_editor_show_labels_toggled)
-        self.show_rings_check.toggled.connect(self._on_show_rings_toggled)
+        self.show_rois_check.toggled.connect(self._on_show_rois_toggled)
+        self.bottom_roi_labels_button.toggled.connect(self._on_show_roi_labels_toggled)
+        self.roi_editor_labels_button.toggled.connect(self._on_roi_editor_show_labels_toggled)
+        self.show_reference_check.toggled.connect(self._on_show_reference_toggled)
         self.show_reference_points_check.toggled.connect(self._on_show_reference_points_toggled)
         self.show_mask_check.toggled.connect(self._on_show_mask_toggled)
         self.show_highlight_check.toggled.connect(self._on_show_highlight_toggled)
@@ -1957,12 +1995,12 @@ class MainWindow(MainWindowIcons, QMainWindow):
         self.measure_action.toggled.connect(self._on_measure_tool_toggled)
         self.flip_horizontal_action.toggled.connect(self._on_flip_horizontal_toggled)
         self.flip_vertical_action.toggled.connect(self._on_flip_vertical_toggled)
-        self.spot_edit_action.toggled.connect(self._on_spot_edit_tool_toggled)
+        self.roi_edit_action.toggled.connect(self._on_roi_edit_tool_toggled)
         self.roi_add_action.toggled.connect(self._on_roi_add_toggled)
         self.roi_move_action.toggled.connect(self._on_roi_move_toggled)
         self.mask_color_button.clicked.connect(lambda: self._choose_overlay_color("mask"))
         self.sample_color_button.clicked.connect(lambda: self._choose_overlay_color("roi"))
-        self.reference_color_button.clicked.connect(lambda: self._choose_overlay_color("ring"))
+        self.reference_color_button.clicked.connect(lambda: self._choose_overlay_color("reference"))
         self.highlight_color_button.clicked.connect(lambda: self._choose_overlay_color("highlight"))
         self.scale_bar_color_button.clicked.connect(lambda: self._choose_overlay_color("scale_bar"))
         self.mask_alpha_slider.valueChanged.connect(self._on_mask_alpha_changed)
@@ -2009,10 +2047,10 @@ class MainWindow(MainWindowIcons, QMainWindow):
                 if item is None:
                     continue
                 try:
-                    spot_id = int(item.text())
+                    roi_id = int(item.text())
                 except ValueError:
                     continue
-                if spot_id in self._selected_roi_ids:
+                if roi_id in self._selected_roi_ids:
                     selection_model.select(
                         self.roi_table.model().index(row, 0),
                         QItemSelectionModel.SelectionFlag.Select | QItemSelectionModel.SelectionFlag.Rows,
@@ -2046,14 +2084,14 @@ class MainWindow(MainWindowIcons, QMainWindow):
                 if item is None:
                     continue
                 try:
-                    spot_id = int(item.text())
+                    roi_id = int(item.text())
                 except ValueError:
                     continue
                 selection_model.select(
                     self.roi_table.model().index(row, 0),
                     QItemSelectionModel.SelectionFlag.Select | QItemSelectionModel.SelectionFlag.Rows,
                 )
-                selected_ids.add(spot_id)
+                selected_ids.add(roi_id)
                 if first_selected_item is None:
                     first_selected_item = item
             if first_selected_item is not None:
@@ -2066,7 +2104,7 @@ class MainWindow(MainWindowIcons, QMainWindow):
         self._update_roi_summary()
         self._update_selection_dependent_plots(prompt_live_preview=True)
 
-    def _roi_list_spot_id_for_row(self, row: int) -> int | None:
+    def _roi_list_roi_id_for_row(self, row: int) -> int | None:
         if row < 0 or row >= self.roi_table.rowCount():
             return None
         item = self.roi_table.item(row, 0)
@@ -2088,16 +2126,16 @@ class MainWindow(MainWindowIcons, QMainWindow):
         return rows
 
     def _roi_list_selected_roi_ids(self) -> list[int]:
-        spot_ids: list[int] = []
+        roi_ids: list[int] = []
         for row in self._roi_list_selected_rows():
-            spot_id = self._roi_list_spot_id_for_row(row)
-            if spot_id is not None:
-                spot_ids.append(spot_id)
-        return spot_ids
+            roi_id = self._roi_list_roi_id_for_row(row)
+            if roi_id is not None:
+                roi_ids.append(roi_id)
+        return roi_ids
 
-    def _roi_list_spot_index(self, spot_id: int) -> int | None:
-        for index, spot in enumerate(self._state.area_rois):
-            if spot.area_roi_id == spot_id:
+    def _roi_list_index_for_roi(self, roi_id: int) -> int | None:
+        for index, roi in enumerate(self._state.area_rois):
+            if roi.area_roi_id == roi_id:
                 return index
         return None
 
@@ -2120,8 +2158,8 @@ class MainWindow(MainWindowIcons, QMainWindow):
     def _on_roi_list_cell_double_clicked(self, row: int, column: int) -> None:
         self._roi_table_controller._on_roi_list_cell_double_clicked(row, column)
 
-    def _rename_spot_group_from_table(self, spot_id: int, new_name: str) -> None:
-        current_group = self._group_for_roi(spot_id)
+    def _rename_roi_group_from_table(self, roi_id: int, new_name: str) -> None:
+        current_group = self._group_for_roi(roi_id)
         if not new_name:
             self.status_label.setText("Group name cannot be empty.")
             self._update_roi_table()
@@ -2133,10 +2171,10 @@ class MainWindow(MainWindowIcons, QMainWindow):
             self._push_undo_point("Rename group")
             current_group.name = new_name
         else:
-            selected_ids = {spot_id}
+            selected_ids = {roi_id}
             self._push_undo_point("Group ROIs")
             for group in self._state.area_roi_groups:
-                group.area_roi_ids = [spot for spot in group.area_roi_ids if spot not in selected_ids]
+                group.area_roi_ids = [rid for rid in group.area_roi_ids if rid not in selected_ids]
             self._state.area_roi_groups = [group for group in self._state.area_roi_groups if group.area_roi_ids]
             self._state.area_roi_groups.append(
                 AreaRoiGroup(
@@ -2152,27 +2190,27 @@ class MainWindow(MainWindowIcons, QMainWindow):
         self._save_processing_state_for_dataset()
         self._update_roi_table()
 
-    def _copy_spot_properties_from_table(self) -> None:
+    def _copy_roi_properties_from_table(self) -> None:
         selected_ids = self._roi_list_selected_roi_ids()
         if not selected_ids:
             self.status_label.setText("Select an ROI row first to copy its properties.")
             return
-        spot_id = selected_ids[0]
-        roi = self._roi_by_id(spot_id)
+        roi_id = selected_ids[0]
+        roi = self._roi_by_id(roi_id)
         if roi is None:
             return
-        group = self._group_for_roi(spot_id)
-        self._spot_clipboard = {
+        group = self._group_for_roi(roi_id)
+        self._roi_clipboard = {
             "group_name": group.name if group is not None else None,
-            "group_spot_color": group.sample_color_hex if group is not None else None,
-            "group_ring_color": group.reference_color_hex if group is not None else None,
-            "spot_color": self._sample_visual_color.name(),
-            "ring_color": self._reference_visual_color.name(),
+            "group_sample_color": group.sample_color_hex if group is not None else None,
+            "group_reference_color": group.reference_color_hex if group is not None else None,
+            "sample_color": self._sample_visual_color.name(),
+            "reference_color": self._reference_visual_color.name(),
         }
-        self.status_label.setText(f"Copied ROI properties from ROI {spot_id}.")
+        self.status_label.setText(f"Copied ROI properties from ROI {roi_id}.")
 
-    def _paste_spot_properties_from_table(self) -> None:
-        if not self._spot_clipboard:
+    def _paste_roi_properties_from_table(self) -> None:
+        if not self._roi_clipboard:
             self.status_label.setText("Nothing to paste yet. Copy an ROI first.")
             return
         selected_ids = self._roi_list_selected_roi_ids()
@@ -2180,40 +2218,40 @@ class MainWindow(MainWindowIcons, QMainWindow):
             self.status_label.setText("Select one or more ROI rows to paste properties.")
             return
         self._push_undo_point("Paste ROI properties")
-        group_name = self._spot_clipboard.get("group_name")
-        group_spot_color = self._spot_clipboard.get("group_spot_color")
-        group_ring_color = self._spot_clipboard.get("group_ring_color")
-        spot_color = self._spot_clipboard.get("spot_color")
-        ring_color = self._spot_clipboard.get("ring_color")
-        if isinstance(spot_color, str):
-            self._sample_visual_color = QColor(spot_color)
-        if isinstance(ring_color, str):
-            self._reference_visual_color = QColor(ring_color)
+        group_name = self._roi_clipboard.get("group_name")
+        group_sample_color = self._roi_clipboard.get("group_sample_color")
+        group_reference_color = self._roi_clipboard.get("group_reference_color")
+        sample_color = self._roi_clipboard.get("sample_color")
+        reference_color = self._roi_clipboard.get("reference_color")
+        if isinstance(sample_color, str):
+            self._sample_visual_color = QColor(sample_color)
+        if isinstance(reference_color, str):
+            self._reference_visual_color = QColor(reference_color)
         if isinstance(group_name, str) and group_name:
             target_group = next((group for group in self._state.area_roi_groups if group.name == group_name), None)
             if target_group is None:
                 target_group = AreaRoiGroup(
                     group_id=f"group_{len(self._state.area_roi_groups) + 1}",
                     name=group_name,
-                    sample_color_hex=str(group_spot_color) if isinstance(group_spot_color, str) else self._sample_visual_color.name(),
-                    reference_color_hex=str(group_ring_color) if isinstance(group_ring_color, str) else self._reference_visual_color.name(),
+                    sample_color_hex=str(group_sample_color) if isinstance(group_sample_color, str) else self._sample_visual_color.name(),
+                    reference_color_hex=str(group_reference_color) if isinstance(group_reference_color, str) else self._reference_visual_color.name(),
                     area_roi_ids=[],
                 )
                 self._state.area_roi_groups.append(target_group)
             else:
-                if isinstance(group_spot_color, str):
-                    target_group.sample_color_hex = group_spot_color
-                if isinstance(group_ring_color, str):
-                    target_group.reference_color_hex = group_ring_color
+                if isinstance(group_sample_color, str):
+                    target_group.sample_color_hex = group_sample_color
+                if isinstance(group_reference_color, str):
+                    target_group.reference_color_hex = group_reference_color
             target_group.area_roi_ids = sorted(set(target_group.area_roi_ids).union(selected_ids))
             for other_group in self._state.area_roi_groups:
                 if other_group is target_group:
                     continue
-                other_group.area_roi_ids = [spot_id for spot_id in other_group.area_roi_ids if spot_id not in selected_ids]
+                other_group.area_roi_ids = [roi_id for roi_id in other_group.area_roi_ids if roi_id not in selected_ids]
             self._state.area_roi_groups = [group for group in self._state.area_roi_groups if group.area_roi_ids]
         else:
             for group in self._state.area_roi_groups:
-                group.area_roi_ids = [spot_id for spot_id in group.area_roi_ids if spot_id not in selected_ids]
+                group.area_roi_ids = [roi_id for roi_id in group.area_roi_ids if roi_id not in selected_ids]
             self._state.area_roi_groups = [group for group in self._state.area_roi_groups if group.area_roi_ids]
         self._update_color_button_styles()
         self._update_roi_overlays()
@@ -2225,10 +2263,10 @@ class MainWindow(MainWindowIcons, QMainWindow):
         selected_rows = self._roi_list_selected_rows()
         if not selected_rows or direction == 0:
             return
-        spot_id = self._roi_list_spot_id_for_row(selected_rows[0])
-        if spot_id is None:
+        roi_id = self._roi_list_roi_id_for_row(selected_rows[0])
+        if roi_id is None:
             return
-        index = self._roi_list_spot_index(spot_id)
+        index = self._roi_list_index_for_roi(roi_id)
         if index is None:
             return
         if direction < 0 and index == 0:
@@ -2243,17 +2281,17 @@ class MainWindow(MainWindowIcons, QMainWindow):
         for new_id, roi in enumerate(reordered, start=1):
             roi.area_roi_id = new_id
         for group in self._state.area_roi_groups:
-            group.area_roi_ids = [id_map.get(spot_id, spot_id) for spot_id in group.area_roi_ids]
+            group.area_roi_ids = [id_map.get(roi_id, roi_id) for roi_id in group.area_roi_ids]
             group.area_roi_ids = sorted(dict.fromkeys(group.area_roi_ids))
         self._state.area_rois = reordered
-        self._selected_roi_ids = {id_map.get(spot_id, spot_id) for spot_id in self._selected_roi_ids}
+        self._selected_roi_ids = {id_map.get(roi_id, roi_id) for roi_id in self._selected_roi_ids}
         self._update_roi_overlays()
         self._update_roi_summary()
         self._save_processing_state_for_dataset()
         self._update_roi_table()
 
-    def _edit_spot_color_from_table(self, spot_id: int) -> None:
-        roi = self._roi_by_id(spot_id)
+    def _edit_roi_color_from_table(self, roi_id: int) -> None:
+        roi = self._roi_by_id(roi_id)
         if roi is None:
             return
         initial = QColor(roi.sample_color_hex) if roi.sample_color_hex else QColor(self._sample_visual_color)
@@ -2267,14 +2305,14 @@ class MainWindow(MainWindowIcons, QMainWindow):
         self._save_processing_state_for_dataset()
         self._update_roi_table()
 
-    def _edit_ring_color_from_table(self) -> None:
+    def _edit_reference_color_from_table(self) -> None:
         selected_ids = self._roi_list_selected_roi_ids()
         roi = self._roi_by_id(selected_ids[0]) if selected_ids else None
         initial = QColor(roi.reference_color_hex) if roi is not None and roi.reference_color_hex else QColor(self._reference_visual_color)
-        color = QColorDialog.getColor(initial, self, "Choose reference-ring color")
+        color = QColorDialog.getColor(initial, self, "Choose reference ROI color")
         if not color.isValid():
             return
-        self._push_undo_point("Edit ring color")
+        self._push_undo_point("Edit reference ROI color")
         if roi is not None:
             roi.reference_color_hex = color.name()
         else:
@@ -2284,14 +2322,14 @@ class MainWindow(MainWindowIcons, QMainWindow):
         self._save_processing_state_for_dataset()
         self._update_roi_table()
 
-    def _edit_spot_geometry_from_table(self, spot_id: int) -> None:
-        roi = self._roi_by_id(spot_id)
+    def _edit_roi_geometry_from_table(self, roi_id: int) -> None:
+        roi = self._roi_by_id(roi_id)
         if roi is None:
             return
         value, ok = QInputDialog.getDouble(
             self,
             "Sample diameter",
-            f"Sample diameter for ROI {spot_id}",
+            f"Sample diameter for ROI {roi_id}",
             float(roi.sample_diameter_px if roi.sample_diameter_px is not None else self.sample_diameter_spin.value()),
             2.0,
             1000.0,
@@ -2306,19 +2344,19 @@ class MainWindow(MainWindowIcons, QMainWindow):
         self._update_roi_summary()
         self._update_roi_table()
 
-    def _edit_ring_geometry_from_table(self, spot_id: int) -> None:
-        roi = self._roi_by_id(spot_id)
+    def _edit_reference_geometry_from_table(self, roi_id: int) -> None:
+        roi = self._roi_by_id(roi_id)
         if roi is None:
             return
         inner_default = float(roi.reference_inner_diameter_px if roi.reference_inner_diameter_px is not None else self.reference_inner_diameter_spin.value())
         outer_default = float(roi.reference_outer_diameter_px if roi.reference_outer_diameter_px is not None else self.reference_outer_diameter_spin.value())
-        inner_value, ok = QInputDialog.getDouble(self, "Reference region", f"Inner diameter for ROI {spot_id}", inner_default, 0.0, 1000.0, 2)
+        inner_value, ok = QInputDialog.getDouble(self, "Reference ROI region", f"Inner diameter for ROI {roi_id}", inner_default, 0.0, 1000.0, 2)
         if not ok:
             return
-        outer_value, ok = QInputDialog.getDouble(self, "Reference region", f"Outer diameter for ROI {spot_id}", outer_default, inner_value, 1000.0, 2)
+        outer_value, ok = QInputDialog.getDouble(self, "Reference ROI region", f"Outer diameter for ROI {roi_id}", outer_default, inner_value, 1000.0, 2)
         if not ok:
             return
-        self._push_undo_point("Edit ring diameter")
+        self._push_undo_point("Edit reference ROI diameter")
         roi.reference_inner_diameter_px = float(inner_value)
         roi.reference_outer_diameter_px = float(max(outer_value, inner_value))
         self._save_processing_state_for_dataset()
@@ -2326,30 +2364,30 @@ class MainWindow(MainWindowIcons, QMainWindow):
         self._update_roi_summary()
         self._update_roi_table()
 
-    def _edit_spot_diameter_cells_from_table(self, spot_id: int, row: int) -> None:
-        roi = self._roi_by_id(spot_id)
+    def _edit_roi_diameter_cells_from_table(self, roi_id: int, row: int) -> None:
+        roi = self._roi_by_id(roi_id)
         if roi is None:
             return
         try:
-            spot_diameter_text = self.roi_table.item(row, 2).text() if self.roi_table.item(row, 2) is not None else ""
-            ring_inner_text = self.roi_table.item(row, 3).text() if self.roi_table.item(row, 3) is not None else ""
-            ring_outer_text = self.roi_table.item(row, 4).text() if self.roi_table.item(row, 4) is not None else ""
-            spot_diameter = float(spot_diameter_text)
-            ring_inner = float(ring_inner_text)
-            ring_outer = float(ring_outer_text)
+            sample_diameter_text = self.roi_table.item(row, 2).text() if self.roi_table.item(row, 2) is not None else ""
+            reference_inner_text = self.roi_table.item(row, 3).text() if self.roi_table.item(row, 3) is not None else ""
+            reference_outer_text = self.roi_table.item(row, 4).text() if self.roi_table.item(row, 4) is not None else ""
+            sample_diameter = float(sample_diameter_text)
+            reference_inner = float(reference_inner_text)
+            reference_outer = float(reference_outer_text)
         except ValueError:
             self.status_label.setText("ROI diameter cells must contain numbers.")
             self._update_roi_table()
             return
         self._push_undo_point("Edit ROI geometry")
-        roi.sample_diameter_px = spot_diameter
-        roi.reference_inner_diameter_px = ring_inner
-        roi.reference_outer_diameter_px = max(ring_outer, ring_inner)
+        roi.sample_diameter_px = sample_diameter
+        roi.reference_inner_diameter_px = reference_inner
+        roi.reference_outer_diameter_px = max(reference_outer, reference_inner)
         if self.roi_geometry_scope_button.isChecked():
-            self._state.area_roi_settings.sample_radius_px = max(spot_diameter / 2.0, 1.0)
+            self._state.area_roi_settings.sample_radius_px = max(sample_diameter / 2.0, 1.0)
         if self.reference_geometry_scope_button.isChecked():
-            self._state.area_roi_settings.reference_inner_radius_px = max(ring_inner / 2.0, 0.0)
-            self._state.area_roi_settings.reference_outer_radius_px = max(ring_outer / 2.0, ring_inner / 2.0)
+            self._state.area_roi_settings.reference_inner_radius_px = max(reference_inner / 2.0, 0.0)
+            self._state.area_roi_settings.reference_outer_radius_px = max(reference_outer / 2.0, reference_inner / 2.0)
         self._save_processing_state_for_dataset()
         self._update_roi_overlays()
         self._update_roi_summary()
@@ -2410,18 +2448,18 @@ class MainWindow(MainWindowIcons, QMainWindow):
             return
         self._push_undo_point("Import ROI list CSV")
         groups_by_name = {group.name: group for group in self._state.area_roi_groups}
-        ordered_rows = sorted(rows, key=lambda row: int(row.get("spot_order", row.get("spot_id", 0)) or 0))
+        ordered_rows = sorted(rows, key=lambda row: int(row.get("spot_order", row.get("roi_id", 0)) or 0))
         for row in ordered_rows:
             try:
-                spot_id = int(row.get("spot_id", ""))
+                roi_id = int(row.get("roi_id", ""))
             except ValueError:
                 continue
-            roi = self._roi_by_id(spot_id)
+            roi = self._roi_by_id(roi_id)
             if roi is None:
                 continue
             group_name = str(row.get("group_name", "")).strip()
             group_color = str(row.get("group_color", "")).strip() or "#f59e0b"
-            group_ring_color = str(row.get("group_ring_color", "")).strip() or self._reference_visual_color.name()
+            group_reference_color = str(row.get("group_reference_color", "")).strip() or self._reference_visual_color.name()
             if group_name:
                 group = groups_by_name.get(group_name)
                 if group is None:
@@ -2429,22 +2467,22 @@ class MainWindow(MainWindowIcons, QMainWindow):
                         group_id=f"group_{len(groups_by_name) + 1}",
                         name=group_name,
                         sample_color_hex=group_color,
-                        reference_color_hex=group_ring_color,
+                        reference_color_hex=group_reference_color,
                         area_roi_ids=[],
                     )
                     self._state.area_roi_groups.append(group)
                     groups_by_name[group_name] = group
-                if spot_id not in group.area_roi_ids:
-                    group.area_roi_ids.append(spot_id)
+                if roi_id not in group.area_roi_ids:
+                    group.area_roi_ids.append(roi_id)
                 group.sample_color_hex = group_color
-                group.reference_color_hex = group_ring_color
-            roi.sample_diameter_px = None if row.get("spot_diameter_px", "") == "" else float(row["spot_diameter_px"])
-            roi.reference_inner_diameter_px = None if row.get("ring_inner_diameter_px", "") == "" else float(row["ring_inner_diameter_px"])
-            roi.reference_outer_diameter_px = None if row.get("ring_outer_diameter_px", "") == "" else float(row["ring_outer_diameter_px"])
-            if row.get("spot_color", ""):
-                self._sample_visual_color = QColor(str(row["spot_color"]))
-            if row.get("ring_color", ""):
-                self._reference_visual_color = QColor(str(row["ring_color"]))
+                group.reference_color_hex = group_reference_color
+            roi.sample_diameter_px = None if row.get("sample_diameter_px", "") == "" else float(row["sample_diameter_px"])
+            roi.reference_inner_diameter_px = None if row.get("reference_inner_diameter_px", "") == "" else float(row["reference_inner_diameter_px"])
+            roi.reference_outer_diameter_px = None if row.get("reference_outer_diameter_px", "") == "" else float(row["reference_outer_diameter_px"])
+            if row.get("sample_color", ""):
+                self._sample_visual_color = QColor(str(row["sample_color"]))
+            if row.get("reference_color", ""):
+                self._reference_visual_color = QColor(str(row["reference_color"]))
         self._update_color_button_styles()
         self._update_roi_overlays()
         self._update_roi_summary()
@@ -2479,16 +2517,16 @@ class MainWindow(MainWindowIcons, QMainWindow):
                     group_item.setForeground(group_color)
                     group_item.setToolTip(f"{group.name} ({group.sample_color_hex})")
             self.roi_table.setItem(row, 1, group_item)
-            spot_color_label = QLabel()
-            spot_color_label.setFixedSize(16, 16)
-            spot_color = getattr(self._state, "overlay_colors", {}).get("roi", QColor("#f8fafc")) if hasattr(self._state, "overlay_colors") else QColor("#f8fafc")
-            spot_color_label.setStyleSheet(f"background-color: {spot_color.name()}; border: 1px solid #2d2d2d;")
-            self.roi_table.setCellWidget(row, 2, spot_color_label)
-            ring_color_label = QLabel()
-            ring_color_label.setFixedSize(18, 18)
-            ring_color = getattr(self._state, "overlay_colors", {}).get("ring", QColor("#38bdf8")) if hasattr(self._state, "overlay_colors") else QColor("#38bdf8")
-            ring_color_label.setStyleSheet(f"background-color: {ring_color.name()}; border: 1px solid #2d2d2d;")
-            self.roi_table.setCellWidget(row, 3, ring_color_label)
+            sample_color_label = QLabel()
+            sample_color_label.setFixedSize(16, 16)
+            sample_color = getattr(self._state, "overlay_colors", {}).get("roi", QColor("#f8fafc")) if hasattr(self._state, "overlay_colors") else QColor("#f8fafc")
+            sample_color_label.setStyleSheet(f"background-color: {sample_color.name()}; border: 1px solid #2d2d2d;")
+            self.roi_table.setCellWidget(row, 2, sample_color_label)
+            reference_color_label = QLabel()
+            reference_color_label.setFixedSize(18, 18)
+            reference_color = getattr(self._state, "overlay_colors", {}).get("ring", QColor("#38bdf8")) if hasattr(self._state, "overlay_colors") else QColor("#38bdf8")
+            reference_color_label.setStyleSheet(f"background-color: {reference_color.name()}; border: 1px solid #2d2d2d;")
+            self.roi_table.setCellWidget(row, 3, reference_color_label)
             if self._state.preprocessing.display_units == "um" and self._can_display_micrometers():
                 scale = self._microns_per_pixel_scalar()
                 pos_text = f"x: {roi.center_x * scale:.1f} y: {roi.center_y * scale:.1f}"
@@ -2844,8 +2882,8 @@ class MainWindow(MainWindowIcons, QMainWindow):
         )
         return spectral_cube_index, wavelength_index
 
-    def _roi_signature(self, spots: list[AreaRoi] | None = None) -> tuple[object, ...]:
-        roi_list = self._state.area_rois if spots is None else spots
+    def _roi_signature(self, rois: list[AreaRoi] | None = None) -> tuple[object, ...]:
+        roi_list = self._state.area_rois if rois is None else rois
         return tuple(
             (roi.area_roi_id, round(float(roi.center_x), 3), round(float(roi.center_y), 3), round(float(roi.sample_radius_px), 3))
             for roi in roi_list
@@ -2854,12 +2892,12 @@ class MainWindow(MainWindowIcons, QMainWindow):
     def _preprocessing_signature(self, image_key: tuple[int, float] | None = None) -> tuple[object, ...]:
         crop = self._state.preprocessing.crop
         chromatic_signature = self._chromatic_signature_for_image_key(image_key)
-        spot_signature: tuple[object, ...] | None = None
+        roi_signature_for_preprocessing: tuple[object, ...] | None = None
         if (
             self._state.preprocessing.flatten_background_enabled
             and self._state.preprocessing.flatten_background_exclude_area_rois
         ):
-            spot_signature = self._roi_signature(self._rois_for_preprocessing(image_key))
+            roi_signature_for_preprocessing = self._roi_signature(self._rois_for_preprocessing(image_key))
         mask_signature: tuple[object, ...] | None = None
         if (
             self._state.preprocessing.flatten_background_enabled
@@ -2886,8 +2924,9 @@ class MainWindow(MainWindowIcons, QMainWindow):
             int(max(getattr(self._state.preprocessing, "flatten_background_binning", 2), 1)),
             bool(self._state.preprocessing.flatten_background_exclude_area_rois),
             bool(self._state.preprocessing.flatten_background_exclude_mask),
+            int(getattr(self._state.preprocessing, "flatten_background_exclusion_dilation_px", 0)),
             bool(self._state.preprocessing.chromatic_correction_enabled),
-            spot_signature,
+            roi_signature_for_preprocessing,
             mask_signature,
         )
 
@@ -2952,17 +2991,29 @@ class MainWindow(MainWindowIcons, QMainWindow):
     def _invalidate_caches_for_exclusion_change(self) -> None:
         self._analysis_controller._invalidate_caches_for_exclusion_change()
 
-    def _invalidate_image_analysis_caches(self) -> None:
+    def _invalidate_per_frame_display_caches(self) -> None:
+        """Clears only the single-slot "currently displayed frame" caches. Safe to call on
+        every frame navigation: each of these caches only ever holds one frame's worth of
+        data, so navigating away from a frame would invalidate them via a signature mismatch
+        anyway. Does NOT touch the multi-frame absorbance/sensorgram math-layer caches
+        (_absorbance_spectrum_cache, _absorbance_spectral_cube_cache, _roi_absorbance_cache) —
+        those are already keyed per-frame, so clearing them here would just discard other
+        frames' results for no reason. Callers that changed something upstream of those caches
+        (mask, chromatic, image tools, background, dataset/session load) must call
+        _invalidate_image_analysis_caches() instead."""
         self._invalidate_ignored_mask_cache()
         self._invalidate_roi_mask_cache()
         self._invalidate_histogram_source_cache()
-        self._invalidate_absorbance_spectrum_cache()
         self._processed_external_mask_cache_signature = None
         self._processed_external_mask_cache_value = None
-        self._display_spot_cache_signature = None
-        self._display_spot_cache_value = None
+        self._display_roi_cache_signature = None
+        self._display_roi_cache_value = None
         self._processed_mask_view_cache_signature = None
         self._processed_mask_view_cache_value = None
+
+    def _invalidate_image_analysis_caches(self) -> None:
+        self._invalidate_per_frame_display_caches()
+        self._invalidate_absorbance_spectrum_cache()
         if hasattr(self, "analysis_metric_combo"):
             self._mark_sensorgram_stale()
 
@@ -3145,7 +3196,7 @@ class MainWindow(MainWindowIcons, QMainWindow):
         if self._current_processed_image is None:
             return
         self._histogram_refresh_timer.start()
-        if not self._dragging_spots and not self._roi_edit_refresh_pending:
+        if not self._dragging_rois and not self._roi_edit_refresh_pending:
             self._schedule_absorbance_spectrum_refresh()
 
     def _schedule_processing_state_save(self) -> None:
@@ -3246,7 +3297,7 @@ class MainWindow(MainWindowIcons, QMainWindow):
         self._refresh_collapsible_styles()
         self._apply_high_contrast_button_styles()
         self._apply_roi_table_style()
-        self._update_spot_label_button_icon(self._roi_labels_visible)
+        self._update_roi_label_button_icon(self._roi_labels_visible)
         self._apply_histogram_log_mode(refresh=not self._startup_restore_in_progress)
 
     def _refresh_pin_and_apply_icons(self) -> None:
@@ -3558,10 +3609,10 @@ class MainWindow(MainWindowIcons, QMainWindow):
             )
         payload = {
             "preprocessing": asdict(self._state.preprocessing),
-            "spot_detection": asdict(self._state.area_roi_settings),
+            "area_roi_settings": asdict(self._state.area_roi_settings),
             "mask_settings": _mask_signature(self._state.mask),
-            "detected_spots": [asdict(roi) for roi in self._state.area_rois],
-            "spot_groups": [asdict(group) for group in self._state.area_roi_groups],
+            "detected_rois": [asdict(roi) for roi in self._state.area_rois],
+            "area_roi_groups": [asdict(group) for group in self._state.area_roi_groups],
             "chromatic_models": [asdict(model) for model in self._state.chromatic_models],
             "chromatic_landmarks": [asdict(landmark) for landmark in self._state.chromatic_landmarks],
             "file_mask_path": str(self._current_file_mask_path) if self._current_file_mask_path is not None else None,
@@ -3615,8 +3666,8 @@ class MainWindow(MainWindowIcons, QMainWindow):
             subprocess.Popen([sys.executable] + sys.argv)
             self.close()
 
-    def _schedule_spot_state_save(self) -> None:
-        self._spot_state_save_timer.start()
+    def _schedule_roi_state_save(self) -> None:
+        self._roi_state_save_timer.start()
 
     def _sync_image_processing_controls(self) -> None:
         self._ui_state_manager.sync_image_processing_controls()
@@ -3760,23 +3811,23 @@ class MainWindow(MainWindowIcons, QMainWindow):
     def _roi_curve_points(
         self,
         source_roi: AreaRoi,
-        display_spot: AreaRoi,
+        display_roi: AreaRoi,
         radius_px: float,
     ) -> tuple[np.ndarray, np.ndarray]:
-        return self._image_controller.roi_curve_points(source_roi, display_spot, radius_px)
+        return self._image_controller.roi_curve_points(source_roi, display_roi, radius_px)
 
     def _set_view_overlay_visibility(
         self,
         *,
-        spots_visible: bool,
-        rings_visible: bool,
+        rois_visible: bool,
+        reference_rois_visible: bool,
         mask_visible: bool,
         reference_points_visible: bool,
         highlight_visible: bool,
     ) -> None:
         self._image_controller.set_view_overlay_visibility(
-            spots_visible=spots_visible,
-            rings_visible=rings_visible,
+            rois_visible=rois_visible,
+            reference_rois_visible=reference_rois_visible,
             mask_visible=mask_visible,
             reference_points_visible=reference_points_visible,
             highlight_visible=highlight_visible,
@@ -3929,6 +3980,9 @@ class MainWindow(MainWindowIcons, QMainWindow):
 
     def _on_chromatic_landmark_kind_changed(self, _value: int) -> None:
         self._chromatic_controller._on_chromatic_landmark_kind_changed(_value)
+
+    def _on_chromatic_landmark_model_changed(self, _value: int) -> None:
+        self._chromatic_controller._on_chromatic_landmark_model_changed(_value)
 
     def _seed_chromatic_landmarks_for_current_image(self) -> None:
         self._chromatic_controller._seed_chromatic_landmarks_for_current_image()
@@ -4245,7 +4299,19 @@ class MainWindow(MainWindowIcons, QMainWindow):
             "Track: Corners = small, precise features (can get lost as focus blur grows toward longer wavelengths). "
             "Spots = particle centroids (coarser, more robust to that blur). Both = try both per step.",
         )
+        self._set_help(
+            self.chromatic_landmark_model_combo,
+            "Model: Similarity = uniform scale + rotation + shift only, matching real lateral chromatic aberration "
+            "(recommended). Affine = also allows shear/unequal x-y scale, which a handful of noisy points can pick "
+            "up spuriously and worsen the correction near the image center.",
+        )
         self._set_help(self.chromatic_transform_button, "Estimate chromatic transforms or clear saved chromatic transforms.")
+        self._set_help(
+            self.chromatic_landmark_export_button,
+            "Export: save every marked reference point (raw position, reference position, and -- once transforms "
+            "are estimated -- the model's predicted position and residual) to a CSV file, for analyzing the "
+            "residual pattern outside the app.",
+        )
         self._set_help(
             self.histogram_bins_spin,
             "Histogram bin size in intensity units.",
@@ -4266,8 +4332,16 @@ class MainWindow(MainWindowIcons, QMainWindow):
             "Higher binning makes background removal much faster by estimating the smooth profile on a smaller image and "
             "upsampling it back. Start with 2x2, and use 4x4 only when the background changes slowly enough.",
         )
-        self._set_help(self.background_ignore_spot_button, "Ignore the detected ROI area while estimating the illumination background.")
+        self._set_help(self.background_ignore_roi_button, "Ignore the detected ROI area while estimating the illumination background.")
         self._set_help(self.background_ignore_mask_button, "Ignore masked pixels while estimating the illumination background.")
+        self._set_help(
+            self.background_exclusion_dilation_spin,
+            "Grow the ROI/mask exclusion zone by this many pixels before estimating the background.",
+            "Use this if a masked or ROI-excluded region's boundary doesn't line up exactly with the "
+            "pixels it's meant to exclude (e.g. a hand-painted mask edge, or a rotation-fill black edge) "
+            "— a few pixels of margin keeps stray edge pixels from pulling on the background estimate. "
+            "Only affects background estimation, not the mask/ROI shown elsewhere.",
+        )
         self._set_help(self.background_create_new_button, "Create a new background image from the current parameters.")
         self._set_help(self.background_load_from_file_button, "Load a background image from disk.")
         self._set_help(self.background_save_button, "Save the current background image as the current reference figure name plus _background.png.")
@@ -4300,13 +4374,20 @@ class MainWindow(MainWindowIcons, QMainWindow):
         self._set_help(self.mask_draw_mode_combo, "Choose whether the pencil adds mask pixels or erases them.")
         self._set_help(self.mask_brush_size_spin, "Brush diameter in pixels for the mask pencil.")
         self._set_help(self.sample_diameter_spin, "Sample diameter in pixels.")
-        self._set_help(self.reference_inner_diameter_spin, "Inner diameter of the reference ring in pixels.")
-        self._set_help(self.reference_outer_diameter_spin, "Outer diameter of the reference ring in pixels.")
+        self._set_help(self.reference_inner_diameter_spin, "Inner diameter of the reference ROI in pixels.")
+        self._set_help(self.reference_outer_diameter_spin, "Outer diameter of the reference ROI in pixels.")
         self._set_help(self.array_rows_spin, "Expected number of ROI rows in the array.")
         self._set_help(self.array_cols_spin, "Expected number of ROI columns in the array.")
         self._set_help(self.array_spacing_spin, "Expected spacing between neighboring array ROIs in pixels.")
         self._set_help(self.ignore_marked_check, "Ignore pixels defined by the current mask controls and any loaded mask image.")
-        self._set_help(self.detect_rois_button, "Mode A: automatically detect array ROIs on the current reference image.")
+        self._set_help(
+            self.detect_rois_button,
+            "Mode A: automatically detect array ROIs. Requires the histogram highlight range "
+            "(blue band) to cover your sample ROI intensities first, or you'll get 0 ROIs.",
+            "Mode A: automatically detect array ROIs on the current reference image. Detection only "
+            "searches within the histogram highlight range (the blue band on the histogram plot) — set "
+            "that range to cover your sample ROI intensities before clicking this, or detection will report 0 ROIs.",
+        )
         self._set_help(self.roi_corner_select_button, "Mode B: select the four array corners first, then fill the grid. Coming later.")
         self._set_help(self.reorder_rois_button, "Reorder detected ROIs by image position so the top-left ROI becomes ID 1.")
         self._set_help(self.clear_rois_button, "Remove all detected ROIs and groups from the current dataset.")
@@ -4314,10 +4395,17 @@ class MainWindow(MainWindowIcons, QMainWindow):
         self._set_help(self.show_rois_check, "Show or hide the ROI overlays.")
         self._set_help(self.bottom_roi_labels_button, "Show or hide ROI labels next to the ROI overlays. This works independently of manual ROI editing.")
         self._set_help(self.roi_editor_labels_button, "Show or hide ROI labels in the left panel. This works independently of manual ROI editing.")
-        self._set_help(self.show_rings_check, "Show or hide the reference rings.")
+        self._set_help(self.show_reference_check, "Show or hide the reference ROI overlays.")
         self._set_help(self.show_reference_points_check, "Show or hide chromatic reference points.")
         self._set_help(self.show_mask_check, "Show or hide the mask overlay.")
-        self._set_help(self.show_highlight_check, "Show or hide the histogram highlight overlay for the selected histogram range.")
+        self._set_help(
+            self.show_highlight_check,
+            "Show or hide the histogram highlight overlay. Note: the highlighted range is also the "
+            "intensity range 'Auto-locate ROIs' searches within.",
+            "Show or hide the histogram highlight overlay for the selected histogram range. This range "
+            "is also used by 'Auto-locate ROIs' (Mode A) as the intensity bounds for sample ROI candidates — "
+            "if it doesn't cover your sample ROI intensities, automatic ROI detection will find 0 ROIs.",
+        )
         self._set_help(self.measurement_unit_button, "Switch the displayed length units between pixels and micrometers.")
         self._set_help(self.scale_bar_toggle_button, "Show or hide the image scale bar.")
         self._set_help(
@@ -4334,11 +4422,11 @@ class MainWindow(MainWindowIcons, QMainWindow):
         )
         self._set_help(self.mask_color_button, "Choose the mask-overlay color.")
         self._set_help(self.sample_color_button, "Choose the ROI overlay color.")
-        self._set_help(self.reference_color_button, "Choose the reference-ring color.")
+        self._set_help(self.reference_color_button, "Choose the reference ROI color.")
         self._set_help(self.highlight_color_button, "Choose the histogram-highlight overlay color.")
         self._set_help(self.mask_alpha_slider, "Mask transparency.")
         self._set_help(self.roi_alpha_slider, "ROI transparency.")
-        self._set_help(self.reference_alpha_slider, "Reference-ring transparency.")
+        self._set_help(self.reference_alpha_slider, "Reference ROI transparency.")
         self._set_help(self.highlight_alpha_slider, "Highlight transparency.")
         self._set_help(self.rotate_action, "Manual rotation tool. Use arrow keys to adjust the angle.")
         self._set_help(self.crop_action, "Crop tool.")
@@ -4353,7 +4441,7 @@ class MainWindow(MainWindowIcons, QMainWindow):
         self._set_help(self.measurement_um_y_spin, "Real vertical distance between the ruler crosses in micrometers.")
         self._set_help(self.measurement_apply_button, "Apply the entered micrometer distances to calibrate the image in memory.")
         self._set_help(
-            self.spot_edit_action,
+            self.roi_edit_action,
             "Enable manual ROI editing mode.",
             "ROI edit mode:\n"
             "Left-click: select an ROI\n"
@@ -4394,7 +4482,7 @@ class MainWindow(MainWindowIcons, QMainWindow):
     def _on_measure_tool_toggled(self, checked: bool) -> None:
         self._image_tools_controller.on_measure_tool_toggled(checked)
 
-    def _on_spot_edit_tool_toggled(self, checked: bool) -> None:
+    def _on_roi_edit_tool_toggled(self, checked: bool) -> None:
         if checked:
             reference_key = self._reference_image_key()
             if reference_key is not None and self._current_image_key != reference_key:
@@ -4441,8 +4529,8 @@ class MainWindow(MainWindowIcons, QMainWindow):
             self.remove_rois_action.setEnabled(False)
             self.group_rois_action.setEnabled(False)
             self.ungroup_rois_action.setEnabled(False)
-            self._finalize_spot_edit_refresh()
-        self._dragging_spots = False
+            self._finalize_roi_edit_refresh()
+        self._dragging_rois = False
         self._drag_anchor = None
         self._drag_original_positions.clear()
         self._sync_rotation_visibility()
@@ -4537,12 +4625,12 @@ class MainWindow(MainWindowIcons, QMainWindow):
     def _handle_image_tool_settings_changed(self, status: str, *, preserve_view: bool = False) -> None:
         self._image_tools_controller.handle_image_tool_settings_changed(status, preserve_view=preserve_view)
 
-    def _on_show_spots_toggled(self, checked: bool) -> None:
+    def _on_show_rois_toggled(self, checked: bool) -> None:
         self._rois_visible = checked
         self._update_roi_overlays()
         self._save_visual_preferences()
 
-    def _on_show_spot_labels_toggled(self, checked: bool) -> None:
+    def _on_show_roi_labels_toggled(self, checked: bool) -> None:
         self._roi_labels_visible = checked
         self.roi_editor_labels_button.blockSignals(True)
         self.roi_editor_labels_button.setChecked(checked)
@@ -4550,20 +4638,20 @@ class MainWindow(MainWindowIcons, QMainWindow):
         self.bottom_roi_labels_button.blockSignals(True)
         self.bottom_roi_labels_button.setChecked(checked)
         self.bottom_roi_labels_button.blockSignals(False)
-        self._update_spot_label_button_icon(bool(checked))
+        self._update_roi_label_button_icon(bool(checked))
         self._update_roi_overlays()
         self._save_visual_preferences()
 
-    def _on_spot_editor_show_labels_toggled(self, checked: bool) -> None:
+    def _on_roi_editor_show_labels_toggled(self, checked: bool) -> None:
         self._roi_labels_visible = checked
         self.bottom_roi_labels_button.blockSignals(True)
         self.bottom_roi_labels_button.setChecked(checked)
         self.bottom_roi_labels_button.blockSignals(False)
-        self._update_spot_label_button_icon(bool(checked))
+        self._update_roi_label_button_icon(bool(checked))
         self._update_roi_overlays()
         self._save_visual_preferences()
 
-    def _on_show_rings_toggled(self, checked: bool) -> None:
+    def _on_show_reference_toggled(self, checked: bool) -> None:
         self._reference_visible = checked
         self._update_roi_overlays()
         self._save_visual_preferences()
@@ -4657,40 +4745,40 @@ class MainWindow(MainWindowIcons, QMainWindow):
                 nearest_distance = distance
         return nearest_id
 
-    def _roi_by_id(self, spot_id: int) -> AreaRoi | None:
+    def _roi_by_id(self, roi_id: int) -> AreaRoi | None:
         for roi in self._state.area_rois:
-            if roi.area_roi_id == spot_id:
+            if roi.area_roi_id == roi_id:
                 return roi
         return None
 
-    def _array_position_for_spot(self, spot_id: int) -> tuple[int, int] | None:
+    def _array_position_for_roi(self, roi_id: int) -> tuple[int, int] | None:
         rows = max(int(self._state.area_roi_settings.array_rows), 0)
         cols = max(int(self._state.area_roi_settings.array_cols), 0)
         if rows <= 0 or cols <= 0:
             return None
-        index = spot_id - 1
+        index = roi_id - 1
         if index < 0 or index >= rows * cols:
             return None
         return index // cols, index % cols
 
-    def _array_label_for_spot(self, spot_id: int) -> str | None:
-        position = self._array_position_for_spot(spot_id)
+    def _array_label_for_roi(self, roi_id: int) -> str | None:
+        position = self._array_position_for_roi(roi_id)
         if position is None:
-            return str(int(spot_id)) if int(spot_id) > 0 else None
+            return str(int(roi_id)) if int(roi_id) > 0 else None
         row, col = position
         cols = max(int(self._state.area_roi_settings.array_cols), 0)
         if cols <= 0:
-            return str(int(spot_id)) if int(spot_id) > 0 else None
+            return str(int(roi_id)) if int(roi_id) > 0 else None
         return str(row * cols + col + 1)
 
-    def _select_neighbor_spot(self, key: int) -> bool:
+    def _select_neighbor_roi(self, key: int) -> bool:
         rows = max(int(self._state.area_roi_settings.array_rows), 0)
         cols = max(int(self._state.area_roi_settings.array_cols), 0)
         if rows <= 0 or cols <= 0 or not self._state.area_rois:
             return False
 
         current_id = min(self._selected_roi_ids) if self._selected_roi_ids else 1
-        current_position = self._array_position_for_spot(current_id)
+        current_position = self._array_position_for_roi(current_id)
         if current_position is None:
             return False
 
@@ -4704,17 +4792,17 @@ class MainWindow(MainWindowIcons, QMainWindow):
         elif key == Qt.Key.Key_Down:
             row = min(row + 1, rows - 1)
         new_id = row * cols + col + 1
-        new_spot = self._roi_by_id(new_id)
-        if new_spot is None:
+        new_roi = self._roi_by_id(new_id)
+        if new_roi is None:
             return False
         self._selected_roi_ids = {new_id}
         self._update_roi_overlays()
         self._update_roi_summary()
         self._update_selection_dependent_plots(prompt_live_preview=True)
-        self._center_view_on_spot(new_spot)
+        self._center_view_on_roi(new_roi)
         return True
 
-    def _center_view_on_spot(self, spot: AreaRoi) -> None:
+    def _center_view_on_roi(self, roi: AreaRoi) -> None:
         if self._current_processed_image is None:
             return
 
@@ -4725,8 +4813,8 @@ class MainWindow(MainWindowIcons, QMainWindow):
 
         half_width = view_width / 2.0
         half_height = view_height / 2.0
-        center_x = float(np.clip(spot.center_x, half_width, max(float(image_width) - half_width, half_width)))
-        center_y = float(np.clip(spot.center_y, half_height, max(float(image_height) - half_height, half_height)))
+        center_x = float(np.clip(roi.center_x, half_width, max(float(image_width) - half_width, half_width)))
+        center_y = float(np.clip(roi.center_y, half_height, max(float(image_height) - half_height, half_height)))
 
         self.image_plot.vb.setRange(
             xRange=(center_x - half_width, center_x + half_width),
@@ -4829,7 +4917,7 @@ class MainWindow(MainWindowIcons, QMainWindow):
         clamped_y = min(max(y, radius), max(float(image_height - 1) - radius, radius))
         return clamped_x, clamped_y
 
-    def _request_spot_metrics_refresh(
+    def _request_roi_metrics_refresh(
         self,
         *,
         save_after: bool,
@@ -4841,8 +4929,8 @@ class MainWindow(MainWindowIcons, QMainWindow):
         image_key = self._current_image_key
         if image_key is None:
             return False
-        self._spot_metrics_request_id += 1
-        request_id = self._spot_metrics_request_id
+        self._roi_metrics_request_id += 1
+        request_id = self._roi_metrics_request_id
         image = self._current_processed_image
         settings = deepcopy(self._state.area_roi_settings)
         rois = deepcopy(self._state.area_rois)
@@ -4850,7 +4938,7 @@ class MainWindow(MainWindowIcons, QMainWindow):
         self._begin_busy("Refreshing ROI metrics...")
         self._append_workflow_log("ROI metrics refresh start", level="info")
         worker.signals.result.connect(
-            lambda refreshed_spots,
+            lambda refreshed_rois,
             request_id=request_id,
             image_key=image_key,
             save_after=save_after,
@@ -4858,7 +4946,7 @@ class MainWindow(MainWindowIcons, QMainWindow):
             refresh_histogram=refresh_histogram: self._on_roi_metrics_ready(
                 request_id,
                 image_key,
-                refreshed_spots,
+                refreshed_rois,
                 save_after,
                 status_text,
                 refresh_histogram,
@@ -4872,12 +4960,12 @@ class MainWindow(MainWindowIcons, QMainWindow):
         self,
         request_id: int,
         image_key: tuple[int, float],
-        refreshed_spots: list[AreaRoi],
+        refreshed_rois: list[AreaRoi],
         save_after: bool,
         status_text: str | None,
         refresh_histogram: bool,
     ) -> None:
-        self._roi_table_controller._on_roi_metrics_ready(request_id, image_key, refreshed_spots, save_after, status_text, refresh_histogram)
+        self._roi_table_controller._on_roi_metrics_ready(request_id, image_key, refreshed_rois, save_after, status_text, refresh_histogram)
 
     def _on_roi_metrics_failed(self, message: str) -> None:
         self._roi_table_controller._on_roi_metrics_failed(message)
@@ -4885,7 +4973,7 @@ class MainWindow(MainWindowIcons, QMainWindow):
     def _refresh_roi_metrics_if_enabled(self) -> bool:
         if not self.roi_editor_section.is_applied() or self._current_processed_image is None or not self._is_current_reference_image():
             return False
-        return self._request_spot_metrics_refresh(save_after=False, refresh_histogram=False)
+        return self._request_roi_metrics_refresh(save_after=False, refresh_histogram=False)
 
     def _mark_roi_edit_refresh_pending(self) -> None:
         if self._active_tool == "roi":
@@ -4895,7 +4983,7 @@ class MainWindow(MainWindowIcons, QMainWindow):
             self._schedule_processing_state_save()
             self.status_label.setText("ROI positions updated. Fit refresh is deferred until Edit ROIs is turned off.")
 
-    def _finalize_spot_edit_refresh(self) -> None:
+    def _finalize_roi_edit_refresh(self) -> None:
         if not self._roi_edit_refresh_pending:
             return
         self._roi_edit_refresh_pending = False
@@ -4903,7 +4991,7 @@ class MainWindow(MainWindowIcons, QMainWindow):
         self._invalidate_background_profile_cache()
         if self._showing_background_profile_main:
             self._update_background_profile_preview()
-        if self._request_spot_metrics_refresh(
+        if self._request_roi_metrics_refresh(
             save_after=True,
             status_text="ROI fit metrics refreshed after leaving Edit ROIs.",
             refresh_histogram=True,
@@ -4990,8 +5078,8 @@ class MainWindow(MainWindowIcons, QMainWindow):
     def _mark_absorbance_spectrum_dirty(self) -> None:
         self._analysis_controller._mark_absorbance_spectrum_dirty()
 
-    def _selected_spectrum_spot_ids(self) -> tuple[int, ...]:
-        return self._analysis_controller._selected_spectrum_spot_ids()
+    def _selected_spectrum_roi_ids(self) -> tuple[int, ...]:
+        return self._analysis_controller._selected_spectrum_roi_ids()
 
     def _selected_source_rois_snapshot(self) -> list[AreaRoi]:
         return self._analysis_controller._selected_source_rois_snapshot()
@@ -5005,20 +5093,20 @@ class MainWindow(MainWindowIcons, QMainWindow):
     def _clear_spectrum_series_items(self) -> None:
         self._plot_manager.clear_spectrum_series_items()
 
-    def _spot_spectrum_color(self, spot_id: int) -> QColor:
-        return self._plot_manager.spot_spectrum_color(spot_id)
+    def _roi_spectrum_color(self, roi_id: int) -> QColor:
+        return self._plot_manager.roi_spectrum_color(roi_id)
 
     def _add_spectrum_series(
         self,
         *,
-        spot_id: int,
+        roi_id: int,
         result: AbsorbanceSpectrumResult,
         label: str | None = None,
         highlighted: bool = False,
         dimmed: bool = False,
     ) -> tuple[np.ndarray, np.ndarray, np.ndarray | None, np.ndarray | None] | None:
         return self._plot_manager.add_spectrum_series(
-            spot_id=spot_id,
+            roi_id=roi_id,
             result=result,
             label=label,
             highlighted=highlighted,
@@ -5063,11 +5151,11 @@ class MainWindow(MainWindowIcons, QMainWindow):
     def _absorbance_spectrum_signature(self) -> tuple[object, ...] | None:
         return self._analysis_controller._absorbance_spectrum_signature()
 
-    def _roi_absorbance_signature(self, spot: AreaRoi) -> tuple[object, ...] | None:
-        return self._analysis_controller._roi_absorbance_signature(spot)
+    def _roi_absorbance_signature(self, roi: AreaRoi) -> tuple[object, ...] | None:
+        return self._analysis_controller._roi_absorbance_signature(roi)
 
-    def _roi_has_cached_absorbance(self, spot: AreaRoi) -> bool:
-        return self._analysis_controller._roi_has_cached_absorbance(spot)
+    def _roi_has_cached_absorbance(self, roi: AreaRoi) -> bool:
+        return self._analysis_controller._roi_has_cached_absorbance(roi)
 
     @staticmethod
     def _analysis_cache_signature_to_json(value):
@@ -5082,14 +5170,14 @@ class MainWindow(MainWindowIcons, QMainWindow):
         return AnalysisController._absorbance_spectral_cube_signature(signature)
 
     @staticmethod
-    def _absorbance_result_covers_spot_ids(result: AbsorbanceSpectrumResult, selected_roi_ids: tuple[int, ...]) -> bool:
-        return AnalysisController._absorbance_result_covers_spot_ids(result, selected_roi_ids)
+    def _absorbance_result_covers_roi_ids(result: AbsorbanceSpectrumResult, selected_roi_ids: tuple[int, ...]) -> bool:
+        return AnalysisController._absorbance_result_covers_roi_ids(result, selected_roi_ids)
 
-    def _cached_absorbance_result_from_spot_cache(
+    def _cached_absorbance_result_from_roi_cache(
         self,
         selected_source_rois: list[AreaRoi],
     ) -> AbsorbanceSpectrumResult | None:
-        return self._analysis_controller._cached_absorbance_result_from_spot_cache(selected_source_rois)
+        return self._analysis_controller._cached_absorbance_result_from_roi_cache(selected_source_rois)
 
     @staticmethod
 
@@ -5248,22 +5336,22 @@ class MainWindow(MainWindowIcons, QMainWindow):
 
     def _active_rectangle_template(self) -> RoiDefinition:
         if self._roi_editor_mode == "circles":
-            spot_diameter = max(float(self._length_display_to_px(float(self.sample_diameter_spin.value()))), 2.0)
-            ring_inner_diameter = max(float(self._length_display_to_px(float(self.reference_inner_diameter_spin.value()))), 0.0)
-            ring_outer_diameter = max(
+            sample_diameter = max(float(self._length_display_to_px(float(self.sample_diameter_spin.value()))), 2.0)
+            reference_inner_diameter = max(float(self._length_display_to_px(float(self.reference_inner_diameter_spin.value()))), 0.0)
+            reference_outer_diameter = max(
                 float(self._length_display_to_px(float(self.reference_outer_diameter_spin.value()))),
-                ring_inner_diameter,
+                reference_inner_diameter,
             )
-            padding = max((ring_inner_diameter - spot_diameter) / 2.0, 0.0)
-            width = max((ring_outer_diameter - ring_inner_diameter) / 2.0, 0.0)
+            padding = max((reference_inner_diameter - sample_diameter) / 2.0, 0.0)
+            width = max((reference_outer_diameter - reference_inner_diameter) / 2.0, 0.0)
             return RoiDefinition(
                 roi_id="circle_template",
                 name="Circle ROI",
                 shape="circle",
                 center_x=float(self._rectangle_template.center_x),
                 center_y=float(self._rectangle_template.center_y),
-                size_x=spot_diameter,
-                size_y=spot_diameter,
+                size_x=sample_diameter,
+                size_y=sample_diameter,
                 background_padding_px=padding,
                 background_width_px=width,
                 enabled=True,
@@ -5814,7 +5902,7 @@ class MainWindow(MainWindowIcons, QMainWindow):
         layout.addWidget(self.sample_diameter_spin, 0, 4)
         return row
 
-    def _build_ring_row(self) -> QWidget:
+    def _build_reference_row(self) -> QWidget:
         row = QWidget(self)
         layout = QGridLayout(row)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -6042,7 +6130,7 @@ class MainWindow(MainWindowIcons, QMainWindow):
             spinbox.setMaximum(display_max)
         self.array_spacing_spin.setMaximum(display_max)
 
-    def _update_spot_detection_settings(self) -> None:
+    def _update_roi_detection_settings(self) -> None:
         sender = self.sender()
         if sender is not None:
             self._push_undo_point("Detection settings")
@@ -6097,9 +6185,10 @@ class MainWindow(MainWindowIcons, QMainWindow):
         self._state.preprocessing.flatten_background_binning = int(
             self.background_smoothing_binning_combo.currentData() or 2
         )
-        self._state.preprocessing.flatten_background_exclude_area_rois = bool(self.background_ignore_spot_button.isChecked())
+        self._state.preprocessing.flatten_background_exclude_area_rois = bool(self.background_ignore_roi_button.isChecked())
         self._state.preprocessing.flatten_background_exclude_mask = bool(self.background_ignore_mask_button.isChecked())
-        self._state.preprocessing.local_ring_normalization_enabled = bool(self.background_local_ring_check.isChecked())
+        self._state.preprocessing.flatten_background_exclusion_dilation_px = int(self.background_exclusion_dilation_spin.value())
+        self._state.preprocessing.local_reference_normalization_enabled = bool(self.background_local_reference_check.isChecked())
         self._set_section_applied(self.background_section, bool(self._state.preprocessing.flatten_background_enabled))
         self._update_apply_button_labels()
         self._schedule_processing_state_save()
@@ -6123,30 +6212,30 @@ class MainWindow(MainWindowIcons, QMainWindow):
     def _update_roi_detection_labels(self, *, sync_controls: bool = True) -> None:
         settings = self._state.area_roi_settings
         diameter = max(2 * settings.sample_radius_px, 2)
-        ring_inner_diameter = max(int(round(2 * settings.reference_inner_radius_px)), 0)
-        ring_outer_diameter = max(int(round(2 * settings.reference_outer_radius_px)), 0)
-        spot_area_px2 = np.pi * (float(diameter) / 2.0) ** 2
-        ring_inner_radius_px = float(ring_inner_diameter) / 2.0
-        ring_outer_radius_px = max(float(ring_outer_diameter) / 2.0, ring_inner_radius_px)
-        ring_area_px2 = np.pi * max(ring_outer_radius_px * ring_outer_radius_px - ring_inner_radius_px * ring_inner_radius_px, 0.0)
-        area_diff_px2 = spot_area_px2 - ring_area_px2
+        reference_inner_diameter = max(int(round(2 * settings.reference_inner_radius_px)), 0)
+        reference_outer_diameter = max(int(round(2 * settings.reference_outer_radius_px)), 0)
+        sample_area_px2 = np.pi * (float(diameter) / 2.0) ** 2
+        reference_inner_radius_px = float(reference_inner_diameter) / 2.0
+        reference_outer_radius_px = max(float(reference_outer_diameter) / 2.0, reference_inner_radius_px)
+        reference_area_px2 = np.pi * max(reference_outer_radius_px * reference_outer_radius_px - reference_inner_radius_px * reference_inner_radius_px, 0.0)
+        area_diff_px2 = sample_area_px2 - reference_area_px2
         if sync_controls:
             self.sample_diameter_spin.blockSignals(True)
             self.reference_inner_diameter_spin.blockSignals(True)
             self.reference_outer_diameter_spin.blockSignals(True)
             self.sample_diameter_spin.setValue(self._format_length_display_value(diameter))
-            self.reference_inner_diameter_spin.setValue(self._format_length_display_value(ring_inner_diameter))
-            self.reference_outer_diameter_spin.setValue(self._format_length_display_value(ring_outer_diameter))
+            self.reference_inner_diameter_spin.setValue(self._format_length_display_value(reference_inner_diameter))
+            self.reference_outer_diameter_spin.setValue(self._format_length_display_value(reference_outer_diameter))
             self.sample_diameter_spin.blockSignals(False)
             self.reference_inner_diameter_spin.blockSignals(False)
             self.reference_outer_diameter_spin.blockSignals(False)
         self.roi_geometry_area_label.setText(
-            f"A_s={self._area_value_text(spot_area_px2)}, "
-            f"A_r={self._area_value_text(ring_area_px2)}, "
+            f"A_s={self._area_value_text(sample_area_px2)}, "
+            f"A_r={self._area_value_text(reference_area_px2)}, "
             f"A_diff={self._area_delta_text(area_diff_px2)}"
         )
 
-    def _apply_spot_geometry_preview(self, *, recalculate: bool) -> None:
+    def _apply_roi_geometry_preview(self, *, recalculate: bool) -> None:
         if not self._state.area_rois:
             self._update_roi_overlays()
             return
@@ -6163,7 +6252,7 @@ class MainWindow(MainWindowIcons, QMainWindow):
                     roi.reference_outer_diameter_px = float(2 * self._state.area_roi_settings.reference_outer_radius_px)
 
         if recalculate and self._current_processed_image is not None:
-            self._request_spot_metrics_refresh(save_after=False, refresh_histogram=False)
+            self._request_roi_metrics_refresh(save_after=False, refresh_histogram=False)
         self._update_roi_overlays()
         if recalculate:
             self._schedule_histogram_refresh()
@@ -6174,45 +6263,45 @@ class MainWindow(MainWindowIcons, QMainWindow):
         selected_ids = set(self._selected_roi_ids)
         apply_all = bool(self.roi_geometry_scope_button.isChecked())
         self._state.area_roi_settings.sample_radius_px = max(float(self._length_display_to_px(float(self.sample_diameter_spin.value())) / 2.0), 1.0)
-        ring_inner_radius = max(self._length_display_to_px(float(self.reference_inner_diameter_spin.value())) / 2.0, 0.0)
-        ring_outer_radius = max(self._length_display_to_px(float(self.reference_outer_diameter_spin.value())) / 2.0, 0.0)
-        if normalize_relation and ring_outer_radius < ring_inner_radius:
-            ring_outer_radius = ring_inner_radius
+        reference_inner_radius = max(self._length_display_to_px(float(self.reference_inner_diameter_spin.value())) / 2.0, 0.0)
+        reference_outer_radius = max(self._length_display_to_px(float(self.reference_outer_diameter_spin.value())) / 2.0, 0.0)
+        if normalize_relation and reference_outer_radius < reference_inner_radius:
+            reference_outer_radius = reference_inner_radius
             self.reference_outer_diameter_spin.blockSignals(True)
-            self.reference_outer_diameter_spin.setValue(self._length_px_to_display(ring_outer_radius * 2.0))
+            self.reference_outer_diameter_spin.setValue(self._length_px_to_display(reference_outer_radius * 2.0))
             self.reference_outer_diameter_spin.blockSignals(False)
-        self._state.area_roi_settings.reference_inner_radius_px = ring_inner_radius
-        self._state.area_roi_settings.reference_outer_radius_px = ring_outer_radius
+        self._state.area_roi_settings.reference_inner_radius_px = reference_inner_radius
+        self._state.area_roi_settings.reference_outer_radius_px = reference_outer_radius
         if apply_all:
             for roi in self._state.area_rois:
                 roi.sample_diameter_px = float(self._state.area_roi_settings.sample_radius_px * 2.0)
-                roi.reference_inner_diameter_px = float(ring_inner_radius * 2.0)
-                roi.reference_outer_diameter_px = float(ring_outer_radius * 2.0)
+                roi.reference_inner_diameter_px = float(reference_inner_radius * 2.0)
+                roi.reference_outer_diameter_px = float(reference_outer_radius * 2.0)
         else:
             for roi in self._state.area_rois:
                 if roi.area_roi_id in selected_ids:
                     roi.sample_diameter_px = float(self._state.area_roi_settings.sample_radius_px * 2.0)
-                    roi.reference_inner_diameter_px = float(ring_inner_radius * 2.0)
-                    roi.reference_outer_diameter_px = float(ring_outer_radius * 2.0)
+                    roi.reference_inner_diameter_px = float(reference_inner_radius * 2.0)
+                    roi.reference_outer_diameter_px = float(reference_outer_radius * 2.0)
         self._update_roi_detection_labels(sync_controls=False)
-        self._apply_spot_geometry_preview(recalculate=recalculate)
+        self._apply_roi_geometry_preview(recalculate=recalculate)
         self._update_roi_table()
         if save:
             self._save_processing_state_for_dataset()
 
-    def _refresh_spot_geometry(self) -> None:
-        self._apply_spot_geometry_preview(recalculate=True)
+    def _refresh_roi_geometry(self) -> None:
+        self._apply_roi_geometry_preview(recalculate=True)
         self._save_processing_state_for_dataset()
         self.status_label.setText("ROI geometry refreshed.")
 
-    def _commit_spot_geometry_edits(self) -> None:
+    def _commit_roi_geometry_edits(self) -> None:
         self._push_undo_point("ROI geometry")
         self.sample_diameter_spin.interpretText()
         self.reference_inner_diameter_spin.interpretText()
         self.reference_outer_diameter_spin.interpretText()
         self._update_geometry_settings(save=True, recalculate=self.roi_editor_section.is_applied(), normalize_relation=True)
 
-    def _detect_spots(self) -> None:
+    def _detect_rois(self) -> None:
         if self._current_processed_image is None:
             self.status_label.setText("No image available for ROI detection.")
             return
@@ -6220,14 +6309,14 @@ class MainWindow(MainWindowIcons, QMainWindow):
             self.status_label.setText("Switch to the reference image before detecting ROIs.")
             return
         self._push_undo_point("Detect ROIs")
-        self._update_spot_detection_settings()
-        self._spot_detection_request_id += 1
-        request_id = self._spot_detection_request_id
+        self._update_roi_detection_settings()
+        self._roi_detection_request_id += 1
+        request_id = self._roi_detection_request_id
         image_key = self._current_image_key
         image = self._current_processed_image
         settings = deepcopy(self._state.area_roi_settings)
         worker = FunctionWorker(
-            _detect_spots_task,
+            _detect_rois_task,
             image,
             settings,
             self._current_external_mask(),
@@ -6236,14 +6325,14 @@ class MainWindow(MainWindowIcons, QMainWindow):
         self._begin_busy("Detecting ROIs...")
         worker.signals.progress.connect(self._update_busy_progress)
         worker.signals.result.connect(
-            lambda detected_spots,
+            lambda detected_rois,
             request_id=request_id,
-            image_key=image_key: self._on_detect_rois_ready(request_id, image_key, detected_spots)
+            image_key=image_key: self._on_detect_rois_ready(request_id, image_key, detected_rois)
         )
         worker.signals.error.connect(lambda message: self._on_detect_rois_failed(message))
         self._thread_pool.start(worker)
 
-    def _reorder_spots_by_position(self) -> None:
+    def _reorder_rois_by_position(self) -> None:
         if not self._state.area_rois:
             self.status_label.setText("No ROIs available to reorder.")
             return
@@ -6259,10 +6348,10 @@ class MainWindow(MainWindowIcons, QMainWindow):
         for new_id, roi in enumerate(ordered, start=1):
             roi.area_roi_id = new_id
         for group in self._state.area_roi_groups:
-            group.area_roi_ids = [id_map.get(spot_id, spot_id) for spot_id in group.area_roi_ids]
+            group.area_roi_ids = [id_map.get(roi_id, roi_id) for roi_id in group.area_roi_ids]
             group.area_roi_ids = sorted(dict.fromkeys(group.area_roi_ids))
         self._state.area_rois = ordered
-        self._selected_roi_ids = {id_map.get(spot_id, spot_id) for spot_id in self._selected_roi_ids if spot_id in id_map}
+        self._selected_roi_ids = {id_map.get(roi_id, roi_id) for roi_id in self._selected_roi_ids if roi_id in id_map}
         self._update_roi_overlays()
         self._update_roi_summary()
         self._update_selection_dependent_plots(force=True)
@@ -6270,7 +6359,7 @@ class MainWindow(MainWindowIcons, QMainWindow):
         self._update_roi_table()
         self.status_label.setText("Reordered ROIs by image position.")
 
-    def _spot_reorder_row_band(self) -> float:
+    def _roi_reorder_row_band(self) -> float:
         spacing = max(float(self._state.area_roi_settings.array_spacing_px), 0.0)
         diameters = [
             float(roi.sample_diameter_px)
@@ -6287,15 +6376,15 @@ class MainWindow(MainWindowIcons, QMainWindow):
 
     def _order_rois_as_array(
         self,
-        spots: list[AreaRoi],
+        rois: list[AreaRoi],
         *,
         rows: int | None,
         cols: int | None,
     ) -> list[AreaRoi]:
-        if not spots:
+        if not rois:
             return []
-        sorted_rois = sorted(spots, key=lambda roi: (float(roi.center_y), float(roi.center_x), int(roi.area_roi_id)))
-        row_band = self._spot_reorder_row_band()
+        sorted_rois = sorted(rois, key=lambda roi: (float(roi.center_y), float(roi.center_x), int(roi.area_roi_id)))
+        row_band = self._roi_reorder_row_band()
         row_groups: list[list[AreaRoi]] = []
         row_centers: list[float] = []
 
@@ -6333,14 +6422,14 @@ class MainWindow(MainWindowIcons, QMainWindow):
         self,
         request_id: int,
         image_key: tuple[int, float] | None,
-        detected_spots: list[AreaRoi],
+        detected_rois: list[AreaRoi],
     ) -> None:
-        self._roi_table_controller._on_detect_rois_ready(request_id, image_key, detected_spots)
+        self._roi_table_controller._on_detect_rois_ready(request_id, image_key, detected_rois)
 
     def _on_detect_rois_failed(self, message: str) -> None:
         self._roi_table_controller._on_detect_rois_failed(message)
 
-    def _clear_detected_spots(self, persist: bool = True) -> None:
+    def _clear_detected_rois(self, persist: bool = True) -> None:
         if self._state.area_rois:
             answer = QMessageBox.question(
                 self,
@@ -6374,9 +6463,9 @@ class MainWindow(MainWindowIcons, QMainWindow):
         selected_details = ""
         if len(self._selected_roi_ids) == 1:
             selected_id = next(iter(self._selected_roi_ids))
-            display_roi = next((spot for spot in self._display_rois() if spot.area_roi_id == selected_id), None)
+            display_roi = next((roi for roi in self._display_rois() if roi.area_roi_id == selected_id), None)
             if display_roi is not None:
-                label = self._array_label_for_spot(selected_id)
+                label = self._array_label_for_roi(selected_id)
                 label_text = f" ({label})" if label is not None else ""
                 selected_details = (
                     f"\nSelected ROI: {selected_id}{label_text}"
@@ -6390,20 +6479,20 @@ class MainWindow(MainWindowIcons, QMainWindow):
         self.roi_summary.setText(
             f"Detected ROIs: {count}\nGroups: {len(self._state.area_roi_groups)}{selected_details}"
         )
-        if not self._dragging_spots and not self._roi_edit_refresh_pending and not self._analysis_live_preview_enabled:
+        if not self._dragging_rois and not self._roi_edit_refresh_pending and not self._analysis_live_preview_enabled:
             self._schedule_absorbance_spectrum_refresh()
 
-    def _group_for_roi(self, spot_id: int) -> AreaRoiGroup | None:
+    def _group_for_roi(self, roi_id: int) -> AreaRoiGroup | None:
         for group in self._state.area_roi_groups:
-            if spot_id in group.area_roi_ids:
+            if roi_id in group.area_roi_ids:
                 return group
         return None
 
-    def _groups_for_spot(self, spot_id: int) -> list[AreaRoiGroup]:
-        return [group for group in self._state.area_roi_groups if spot_id in group.area_roi_ids]
+    def _groups_for_roi(self, roi_id: int) -> list[AreaRoiGroup]:
+        return [group for group in self._state.area_roi_groups if roi_id in group.area_roi_ids]
 
-    def _select_group_members_for_spot(self, spot_id: int) -> bool:
-        groups = self._groups_for_spot(spot_id)
+    def _select_group_members_for_roi(self, roi_id: int) -> bool:
+        groups = self._groups_for_roi(roi_id)
         if not groups:
             return False
         selected_ids = {int(member_id) for group in groups for member_id in group.area_roi_ids}
@@ -6429,7 +6518,7 @@ class MainWindow(MainWindowIcons, QMainWindow):
         self._push_undo_point("Ungroup ROIs")
         selected_ids = set(self._selected_roi_ids)
         for group in self._state.area_roi_groups:
-            group.area_roi_ids = [spot_id for spot_id in group.area_roi_ids if spot_id not in selected_ids]
+            group.area_roi_ids = [roi_id for roi_id in group.area_roi_ids if roi_id not in selected_ids]
         self._state.area_roi_groups = [group for group in self._state.area_roi_groups if group.area_roi_ids]
         self._update_roi_overlays()
         self._update_roi_summary()
@@ -6437,13 +6526,13 @@ class MainWindow(MainWindowIcons, QMainWindow):
         self._save_processing_state_for_dataset()
         self.status_label.setText("Removed selected ROIs from their groups.")
 
-    def _destroy_groups_for_spot(self, spot_id: int) -> None:
-        groups = self._groups_for_spot(spot_id)
+    def _destroy_groups_for_roi(self, roi_id: int) -> None:
+        groups = self._groups_for_roi(roi_id)
         if not groups:
             self.status_label.setText("No group is assigned to the selected ROI.")
             return
         self._push_undo_point("Destroy group")
-        self._append_workflow_log(f"Groups | destroy for ROI {spot_id}", level="warning")
+        self._append_workflow_log(f"Groups | destroy for ROI {roi_id}", level="warning")
         group_names = [group.name for group in groups if group.name]
         remaining_groups = [group for group in self._state.area_roi_groups if group not in groups]
         self._state.area_roi_groups = remaining_groups
@@ -6454,14 +6543,14 @@ class MainWindow(MainWindowIcons, QMainWindow):
         group_text = ", ".join(group_names) if group_names else "group"
         self.status_label.setText(f"Destroyed {group_text}; member ROIs are now free.")
 
-    def _show_analysis_spot_context_menu(self, spot_id: int, global_pos: QPoint) -> None:
+    def _show_analysis_roi_context_menu(self, roi_id: int, global_pos: QPoint) -> None:
         menu = QMenu(self)
         menu.setToolTipsVisible(True)
         group_action = menu.addAction("Group...")
         select_group_action = None
         ungroup_action = None
         destroy_group_action = None
-        groups = self._groups_for_spot(spot_id)
+        groups = self._groups_for_roi(roi_id)
         if groups:
             select_group_action = menu.addAction("Select group members")
             ungroup_action = menu.addAction("Ungroup")
@@ -6473,14 +6562,14 @@ class MainWindow(MainWindowIcons, QMainWindow):
         if action is group_action:
             self._group_selected_rois()
         elif select_group_action is not None and action is select_group_action:
-            if self._select_group_members_for_spot(spot_id):
-                self.status_label.setText(f"Selected group members for ROI {spot_id}.")
+            if self._select_group_members_for_roi(roi_id):
+                self.status_label.setText(f"Selected group members for ROI {roi_id}.")
         elif ungroup_action is not None and action is ungroup_action:
             self._ungroup_selected_rois()
         elif destroy_group_action is not None and action is destroy_group_action:
-            self._destroy_groups_for_spot(spot_id)
+            self._destroy_groups_for_roi(roi_id)
 
-    def _reindex_detected_spots(self) -> None:
+    def _reindex_detected_rois(self) -> None:
         roi_id_map: dict[int, int] = {}
         for new_id, roi in enumerate(self._state.area_rois, start=1):
             roi_id_map[roi.area_roi_id] = new_id
@@ -6488,7 +6577,7 @@ class MainWindow(MainWindowIcons, QMainWindow):
 
         updated_groups: list[AreaRoiGroup] = []
         for group in self._state.area_roi_groups:
-            group.area_roi_ids = [roi_id_map[spot_id] for spot_id in group.area_roi_ids if spot_id in roi_id_map]
+            group.area_roi_ids = [roi_id_map[roi_id] for roi_id in group.area_roi_ids if roi_id in roi_id_map]
             if group.area_roi_ids:
                 updated_groups.append(group)
         self._state.area_roi_groups = updated_groups
@@ -6506,7 +6595,7 @@ class MainWindow(MainWindowIcons, QMainWindow):
         self._state.area_rois = [
             roi for roi in self._state.area_rois if roi.area_roi_id not in self._selected_roi_ids
         ]
-        self._reindex_detected_spots()
+        self._reindex_detected_rois()
         self._selected_roi_ids.clear()
         self._update_roi_overlays()
         if self._active_tool == "roi":
@@ -6544,7 +6633,7 @@ class MainWindow(MainWindowIcons, QMainWindow):
         )
 
         for group in self._state.area_roi_groups:
-            group.area_roi_ids = [spot_id for spot_id in group.area_roi_ids if spot_id not in self._selected_roi_ids]
+            group.area_roi_ids = [roi_id for roi_id in group.area_roi_ids if roi_id not in self._selected_roi_ids]
         self._state.area_roi_groups = [group for group in self._state.area_roi_groups if group.area_roi_ids]
 
         target_group = next((group for group in self._state.area_roi_groups if group.name == name), None)
@@ -6566,30 +6655,30 @@ class MainWindow(MainWindowIcons, QMainWindow):
         self._save_processing_state_for_dataset()
         self.status_label.setText(f"Grouped {len(self._selected_roi_ids)} ROI(s) as '{name}'.")
 
-    def _clear_spot_selection(self) -> None:
+    def _clear_roi_selection(self) -> None:
         self._selected_roi_ids.clear()
         self._update_roi_overlays()
         self._update_roi_summary()
         self._update_selection_dependent_plots(force=True)
         self.status_label.setText("Cleared ROI selection.")
 
-    def _schedule_spot_overlay_refresh(self) -> None:
-        if not self._spot_overlay_refresh_timer.isActive():
-            self._spot_overlay_refresh_timer.start()
+    def _schedule_roi_overlay_refresh(self) -> None:
+        if not self._roi_overlay_refresh_timer.isActive():
+            self._roi_overlay_refresh_timer.start()
 
-    def _refresh_spot_overlays_during_drag(self) -> None:
-        self._overlay_manager._refresh_spot_overlays_during_drag()
+    def _refresh_roi_overlays_during_drag(self) -> None:
+        self._overlay_manager._refresh_roi_overlays_during_drag()
 
     def _update_roi_overlays(self, *, update_hidden_details: bool = True) -> None:
         self._overlay_manager._update_roi_overlays(update_hidden_details=update_hidden_details)
 
-    def _remove_spot_overlay_bundle(self, spot_id: int) -> None:
-        bundle = self._roi_overlay_items.pop(spot_id, None)
+    def _remove_roi_overlay_bundle(self, roi_id: int) -> None:
+        bundle = self._roi_overlay_items.pop(roi_id, None)
         if bundle is None:
             return
         self.image_plot.removeItem(bundle.curve)
-        if bundle.ring_fill is not None:
-            self.image_plot.removeItem(bundle.ring_fill)
+        if bundle.reference_fill is not None:
+            self.image_plot.removeItem(bundle.reference_fill)
         if bundle.inner_curve is not None:
             self.image_plot.removeItem(bundle.inner_curve)
         if bundle.outer_curve is not None:
@@ -6618,7 +6707,7 @@ class MainWindow(MainWindowIcons, QMainWindow):
         self._chromatic_controller.update_all_landmark_overlays()
 
 
-    def _create_ring_fill_path(
+    def _create_reference_fill_path(
         self,
         center_x: float,
         center_y: float,
@@ -6817,16 +6906,16 @@ class MainWindow(MainWindowIcons, QMainWindow):
         self,
         *,
         edges: np.ndarray,
-        spot_values: np.ndarray,
-        ring_values: np.ndarray,
+        sample_values: np.ndarray,
+        reference_values: np.ndarray,
         mask_values: np.ndarray,
         total_pixels: float,
         total_counts_display: np.ndarray,
     ) -> float:
         return self._plot_manager.update_area_histogram_curves(
             edges=edges,
-            spot_values=spot_values,
-            ring_values=ring_values,
+            sample_values=sample_values,
+            reference_values=reference_values,
             mask_values=mask_values,
             total_pixels=total_pixels,
             total_counts_display=total_counts_display,
@@ -6896,21 +6985,21 @@ class MainWindow(MainWindowIcons, QMainWindow):
         image_height, image_width = image_f32.shape[:2]
         ignored_mask = self._ignored_mask(image_f32)
         roi_mask = np.zeros((image_height, image_width), dtype=bool)
-        ring_mask = np.zeros((image_height, image_width), dtype=bool)
+        reference_mask = np.zeros((image_height, image_width), dtype=bool)
         display_rois = self._display_rois()
         if display_rois:
             affine_matrix = self._chromatic_affine_for_image_key(self._current_image_key)
-            ring_inner_radius = float(max(self._state.area_roi_settings.reference_inner_radius_px, 0.0))
-            ring_outer_radius = float(max(self._state.area_roi_settings.reference_outer_radius_px, ring_inner_radius))
+            reference_inner_radius = float(max(self._state.area_roi_settings.reference_inner_radius_px, 0.0))
+            reference_outer_radius = float(max(self._state.area_roi_settings.reference_outer_radius_px, reference_inner_radius))
             if affine_matrix is None or self._is_current_reference_image():
                 yy, xx = np.indices((image_height, image_width), dtype=np.float32)
                 for roi in display_rois:
                     distance_sq = (xx - float(roi.center_x)) ** 2 + (yy - float(roi.center_y)) ** 2
                     roi_mask |= distance_sq <= float(roi.sample_radius_px) ** 2
-                    if ring_outer_radius > 0.0:
-                        outer_mask = distance_sq <= ring_outer_radius ** 2
-                        inner_mask = distance_sq < ring_inner_radius ** 2 if ring_inner_radius > 0.0 else np.zeros_like(outer_mask)
-                        ring_mask |= outer_mask & ~inner_mask
+                    if reference_outer_radius > 0.0:
+                        outer_mask = distance_sq <= reference_outer_radius ** 2
+                        inner_mask = distance_sq < reference_inner_radius ** 2 if reference_inner_radius > 0.0 else np.zeros_like(outer_mask)
+                        reference_mask |= outer_mask & ~inner_mask
             else:
                 source_roi_map = {roi.area_roi_id: roi for roi in self._state.area_rois}
                 for roi in display_rois:
@@ -6921,29 +7010,29 @@ class MainWindow(MainWindowIcons, QMainWindow):
                         float(source_roi.sample_radius_px),
                         affine_matrix,
                     )
-                    if ring_outer_radius > 0.0:
-                        ring_mask |= transformed_annulus_mask(
+                    if reference_outer_radius > 0.0:
+                        reference_mask |= transformed_annulus_mask(
                             (image_height, image_width),
                             (float(source_roi.center_x), float(source_roi.center_y)),
-                            float(ring_inner_radius),
-                            float(ring_outer_radius),
+                            float(reference_inner_radius),
+                            float(reference_outer_radius),
                             affine_matrix,
                         )
         roi_mask &= ~ignored_mask
-        ring_mask &= ~ignored_mask
-        ring_mask &= ~roi_mask
-        residual_mask = ~(roi_mask | ring_mask | ignored_mask)
-        cached = (roi_mask, ring_mask, ignored_mask, residual_mask)
+        reference_mask &= ~ignored_mask
+        reference_mask &= ~roi_mask
+        residual_mask = ~(roi_mask | reference_mask | ignored_mask)
+        cached = (roi_mask, reference_mask, ignored_mask, residual_mask)
         self._roi_mask_cache_signature = signature
         self._roi_mask_cache_values = cached
         return cached
 
     def _roi_intensity_values(self, image: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         image_f32 = image.astype(np.float32, copy=False)
-        roi_mask, ring_mask, ignored_mask, _residual_mask = self._roi_area_masks(image_f32)
+        roi_mask, reference_mask, ignored_mask, _residual_mask = self._roi_area_masks(image_f32)
         return (
             image_f32[roi_mask],
-            image_f32[ring_mask],
+            image_f32[reference_mask],
             image_f32[ignored_mask],
         )
 
@@ -6990,7 +7079,7 @@ class MainWindow(MainWindowIcons, QMainWindow):
             else self._sample_visual_color
             if target == "roi"
             else self._reference_visual_color
-            if target == "ring"
+            if target == "reference"
             else self._highlight_visual_color
         )
         color = QColorDialog.getColor(initial, self, "Choose overlay color")
@@ -7007,7 +7096,7 @@ class MainWindow(MainWindowIcons, QMainWindow):
             self._restyle_area_histogram_curves()
             self._refresh_visible_spectrum_from_cache()
             self._analysis_controller.update_selection_highlight(force=True)
-        elif target == "ring":
+        elif target == "reference":
             self._reference_visual_color = color
             self._update_roi_overlays()
             self._restyle_area_histogram_curves()
@@ -7068,7 +7157,7 @@ class MainWindow(MainWindowIcons, QMainWindow):
             or self._startup_restore_in_progress
         ):
             return
-        selection_signature = tuple(self._selected_spectrum_spot_ids())
+        selection_signature = tuple(self._selected_spectrum_roi_ids())
         if selection_signature == self._live_preview_prompt_selection_signature:
             return
         spectrum_hit = self._refresh_visible_spectrum_from_cache()
@@ -7096,7 +7185,7 @@ class MainWindow(MainWindowIcons, QMainWindow):
                 )
 
     def _update_selection_dependent_plots(self, *, force: bool = False, prompt_live_preview: bool = False) -> None:
-        selected_signature = tuple(sorted(int(spot_id) for spot_id in self._selected_roi_ids))
+        selected_signature = tuple(sorted(int(roi_id) for roi_id in self._selected_roi_ids))
         if not force and selected_signature == self._selection_plot_highlight_signature:
             return
         self._selection_plot_highlight_signature = selected_signature
@@ -7365,7 +7454,7 @@ class MainWindow(MainWindowIcons, QMainWindow):
             return f"{np.pi * radius_um * radius_um:.0f} µm²"
         return f"{np.pi * radius_px * radius_px:.0f} px²"
 
-    def _ring_area_text(self, inner_diameter_px: float, outer_diameter_px: float) -> str:
+    def _reference_area_text(self, inner_diameter_px: float, outer_diameter_px: float) -> str:
         inner_radius_px = max(float(inner_diameter_px) / 2.0, 0.0)
         outer_radius_px = max(float(outer_diameter_px) / 2.0, inner_radius_px)
         if self._display_uses_micrometers():

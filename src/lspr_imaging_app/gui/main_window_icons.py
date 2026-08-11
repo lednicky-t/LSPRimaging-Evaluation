@@ -948,7 +948,7 @@ class MainWindowIcons:
         return QIcon(pixmap)
 
     @staticmethod
-    def _make_spot_edit_icon(active: bool = False) -> QIcon:
+    def _make_roi_edit_icon(active: bool = False) -> QIcon:
         color = "#22c55e" if active else "#94a3b8"
         icon = MainWindowIcons._lucide_icon("square-pen", color, 24, stroke_width=2.3)
         if not icon.isNull():
@@ -1393,7 +1393,7 @@ class MainWindowIcons:
         painter.end()
         return QIcon(pixmap)
 
-    def _make_spot_label_icon(self, visible: bool) -> QIcon:
+    def _make_roi_label_icon(self, visible: bool) -> QIcon:
         icon_name = "label-important" if visible else "label-off"
         color = "#22c55e" if visible else "#94a3b8"
         icon = self._tabler_icon(icon_name, color, 22, stroke_width=2.0)
@@ -1460,7 +1460,7 @@ class MainWindowIcons:
             icon = self._tabler_icon("current-location", color, 24, stroke_width=2.1)
             if not icon.isNull():
                 return icon
-        elif kind == "rings":
+        elif kind == "reference":
             icon = self._tabler_icon("target", color, 24, stroke_width=2.1)
             if not icon.isNull():
                 return icon
@@ -1494,7 +1494,7 @@ class MainWindowIcons:
         if kind == "roi":
             painter.drawEllipse(QRectF(6.0, 6.0, 12.0, 12.0))
             painter.drawEllipse(QRectF(10.0, 10.0, 4.0, 4.0))
-        elif kind == "rings":
+        elif kind == "reference":
             painter.drawEllipse(QRectF(4.5, 4.5, 15.0, 15.0))
             painter.drawEllipse(QRectF(9.0, 9.0, 6.0, 6.0))
         elif kind == "reference_points":
@@ -1570,7 +1570,7 @@ class MainWindowIcons:
     def _refresh_view_toggle_icons(self) -> None:
         mappings = [
             (getattr(self, "show_rois_check", None), "roi", self._rois_visible),
-            (getattr(self, "show_rings_check", None), "rings", self._reference_visible),
+            (getattr(self, "show_reference_check", None), "reference", self._reference_visible),
             (getattr(self, "show_reference_points_check", None), "reference_points", self._reference_points_visible),
             (
                 getattr(self, "chromatic_reference_points_all_button", None),
@@ -1722,7 +1722,7 @@ class MainWindowIcons:
     def _create_image_tool_icon_button(self, action: QAction, *, accent: str) -> QToolButton:
         button = QToolButton(self)
         button.setDefaultAction(action)
-        button.setObjectName("leftSpotToolButton")
+        button.setObjectName("leftRoiToolButton")
         button.setAutoRaise(True)
         button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly)
         button.setIconSize(QSize(28, 28))
@@ -1755,7 +1755,7 @@ class MainWindowIcons:
 
     def _create_rotation_fill_toggle_button(self) -> QToolButton:
         button = QToolButton(self)
-        button.setObjectName("leftSpotToolButton")
+        button.setObjectName("leftRoiToolButton")
         button.setAutoRaise(True)
         button.setCheckable(True)
         button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly)
@@ -1789,20 +1789,20 @@ class MainWindowIcons:
 
     def _create_label_visibility_button(self, visible: bool) -> QToolButton:
         button = QToolButton(self)
-        button.setObjectName("spotLabelIconButton")
+        button.setObjectName("roiLabelIconButton")
         button.setAutoRaise(True)
         button.setIconSize(QSize(APP_THEME.plain_icon_inner, APP_THEME.plain_icon_inner))
         button.setFixedSize(APP_THEME.plain_icon_outer, APP_THEME.plain_icon_outer)
         button.setCheckable(True)
         button.setChecked(bool(visible))
-        button.setIcon(self._make_spot_label_icon(bool(visible)))
+        button.setIcon(self._make_roi_label_icon(bool(visible)))
         button.setToolTip("Show or hide ROI labels. This works independently of manual ROI editing.")
         button.setStyleSheet(transparent_icon_button_stylesheet())
-        button.toggled.connect(self._update_spot_label_button_icon)
+        button.toggled.connect(self._update_roi_label_button_icon)
         return button
 
-    def _update_spot_label_button_icon(self, checked: bool) -> None:
-        icon = self._make_spot_label_icon(bool(checked))
+    def _update_roi_label_button_icon(self, checked: bool) -> None:
+        icon = self._make_roi_label_icon(bool(checked))
         for attr_name in ("roi_editor_labels_button", "bottom_roi_labels_button"):
             button = getattr(self, attr_name, None)
             if button is not None:
@@ -1859,9 +1859,9 @@ class MainWindowIcons:
         painter.end()
         return QIcon(pixmap)
 
-    def _create_left_spot_editor_button(self, action: QAction, *, primary: bool = False, accent: str = "neutral") -> QToolButton:
+    def _create_left_roi_editor_button(self, action: QAction, *, primary: bool = False, accent: str = "neutral") -> QToolButton:
         button = self._create_toolbar_action_button(action, primary=primary, icon_only=True)
-        button.setObjectName("leftSpotToolButton")
+        button.setObjectName("leftRoiToolButton")
         button.setAutoRaise(True)
         button.setIconSize(QSize(APP_THEME.icon_button_inner, APP_THEME.icon_button_inner))
         button.setFixedSize(APP_THEME.icon_button_outer, APP_THEME.icon_button_outer)
@@ -1882,20 +1882,20 @@ class MainWindowIcons:
             if widget is not None:
                 widget.deleteLater()
 
-    def _populate_left_spot_editor_controls(self) -> None:
-        self._clear_layout(self.left_spot_editor_layout)
+    def _populate_left_roi_editor_controls(self) -> None:
+        self._clear_layout(self.left_roi_editor_layout)
         buttons = [
             (self.roi_list_action, {"accent": "orange"}),
-            (self.spot_edit_action, {"primary": True}),
+            (self.roi_edit_action, {"primary": True}),
             (self.roi_add_action, {"accent": "green"}),
             (self.roi_array_action, {"accent": "green"}),
             (self.roi_move_action, {"accent": "blue"}),
             (self.remove_rois_action, {"accent": "red"}),
         ]
         for action, kwargs in buttons:
-            self.left_spot_editor_layout.addWidget(self._create_left_spot_editor_button(action, **kwargs))
-        self.left_spot_editor_layout.addWidget(self.roi_editor_labels_button)
-        self.left_spot_editor_layout.addStretch(1)
+            self.left_roi_editor_layout.addWidget(self._create_left_roi_editor_button(action, **kwargs))
+        self.left_roi_editor_layout.addWidget(self.roi_editor_labels_button)
+        self.left_roi_editor_layout.addStretch(1)
 
     def _create_toolbar_row(self, widgets: list[QWidget]) -> QWidget:
         row = QWidget(self.image_toolbar)
@@ -1969,7 +1969,7 @@ class MainWindowIcons:
         edit_menu = menu_bar.addMenu("&Edit")
         edit_menu.addAction(self.undo_action)
         edit_menu.addAction(self.redo_action)
-        edit_menu.addAction(self.clear_roi_selection_button.text(), self._clear_spot_selection)
+        edit_menu.addAction(self.clear_roi_selection_button.text(), self._clear_roi_selection)
 
         view_menu = menu_bar.addMenu("&View")
         view_menu.addAction(self.reset_layout_action)
@@ -2097,6 +2097,7 @@ class MainWindowIcons:
         self._set_combo_width(self.analysis_metric_combo, ["Maximum", "Centroid"], minimum=80)
         self._set_combo_width(self.chromatic_subpixel_precision_combo, ["1", "4", "9"], minimum=58)
         self._set_combo_width(self.chromatic_landmark_kind_combo, ["Corners", "Spots", "Both"], minimum=90)
+        self._set_combo_width(self.chromatic_landmark_model_combo, ["Similarity", "Affine"], minimum=90)
         navigation_control_width = max(self.spectral_cube_spin.sizeHint().width(), self.wavelength_spin.sizeHint().width(), 82)
         # The spin boxes keep a hard fixed width so their digits never get clipped.
         # The sliders only get a floor (minimum width): they are free to shrink toward

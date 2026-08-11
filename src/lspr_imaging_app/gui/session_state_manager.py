@@ -7,11 +7,14 @@ import numpy as np
 from PyQt6.QtWidgets import QFileDialog, QInputDialog, QMessageBox
 
 from lspr_imaging_app.domain.models import AreaRoiDetectionSettings, CropDefinition, MaskSettings
+from lspr_imaging_app.gui.worker import FunctionWorker
 from lspr_imaging_app.storage.workspace import (
+    build_preprocessing_payload,
+    build_processing_profile_payload,
     load_preprocessing,
     load_processing_profile,
-    save_preprocessing,
     save_processing_profile,
+    write_processing_state_files,
 )
 
 _SAFE_SESSION_NAME_RE = re.compile(r"[^A-Za-z0-9_-]+")
@@ -142,10 +145,12 @@ class SessionStateManager:
         window._state.preprocessing.flatten_background_binning = 2
         window._state.preprocessing.flatten_background_exclude_area_rois = True
         window._state.preprocessing.flatten_background_exclude_mask = False
+        window._state.preprocessing.flatten_background_exclusion_dilation_px = 0
         window._state.preprocessing.chromatic_correction_enabled = False
         window._state.preprocessing.chromatic_registration_mode = "landmark_radial"
+        window._state.preprocessing.chromatic_landmark_model = "similarity"
         window._state.preprocessing.chromatic_sample_image_count = 5
-        window._state.preprocessing.chromatic_feature_count = 5
+        window._state.preprocessing.chromatic_feature_count = 15
         window._state.preprocessing.chromatic_tile_size_px = 96
         window._state.preprocessing.chromatic_search_radius_px = 24
         window._state.preprocessing.reference_mode = "auto"
@@ -233,8 +238,8 @@ class SessionStateManager:
         window = self._window
         if window._processing_state_save_timer.isActive():
             window._processing_state_save_timer.stop()
-        if window._spot_state_save_timer.isActive():
-            window._spot_state_save_timer.stop()
+        if window._roi_state_save_timer.isActive():
+            window._roi_state_save_timer.stop()
         path = window._preprocessing_path()
         profile_path = window._processing_profile_path()
         if path is None or profile_path is None:
@@ -258,6 +263,15 @@ class SessionStateManager:
                 min_interval=1.0,
             )
             return
+        # Building the payloads (dataclass -> dict, analysis-cache arrays ->
+        # lists) is cheap, synchronous, in-memory work, and must happen here
+        # on the GUI thread since it reads window._state directly and
+        # nothing else is going to mutate that concurrently. The expensive
+        # part -- json.dumps + writing to disk, which is not free once the
+        # analysis cache holds a few hundred spectra -- is dispatched to a
+        # background worker below instead of blocking the GUI thread the way
+        # it used to (this callback fires from a debounced QTimer after
+        # nearly every ROI drag, mask stroke, or exclusion toggle).
         try:
             # image_tools_enabled reflects only the user's explicit Image tools
             # "applied" toggle - it is never changed just because the
@@ -265,9 +279,9 @@ class SessionStateManager:
             # ImageToolsController.unlink_for_preview), so there is nothing to
             # restore here before saving.
             preprocessing_to_save = window._state.preprocessing
-            save_preprocessing(path, preprocessing_to_save)
-            save_processing_profile(
-                profile_path,
+            preprocessing_payload = build_preprocessing_payload(preprocessing_to_save)
+            session_mask_payload = window._session_mask_payload()
+            profile_payload = build_processing_profile_payload(
                 preprocessing_to_save,
                 window._state.area_roi_settings,
                 window._state.area_rois,
@@ -276,36 +290,84 @@ class SessionStateManager:
                 window._state.chromatic_models,
                 window._state.chromatic_landmarks,
                 window._analysis_cache_payload(),
-                session_mask=window._session_mask_payload(),
+                session_mask=session_mask_payload,
                 mask_settings=window._state.mask,
                 image_exclusions=window._state.image_exclusions,
             )
-            session_mask_payload = window._session_mask_payload()
-            if session_mask_payload is None:
-                window._append_workflow_log_throttled("session_mask_save", "Session mask save | none", level="debug", min_interval=1.0)
-            else:
-                mask_shape = None if not isinstance(session_mask_payload.get("mask"), np.ndarray) else tuple(int(v) for v in session_mask_payload["mask"].shape)
-                window._append_workflow_log_throttled(
-                    "session_mask_save",
-                    f"Session mask save | record={session_mask_payload.get('record_path')} | shape={mask_shape}",
-                    level="debug",
-                    min_interval=1.0,
-                )
-            window._append_workflow_log_throttled(
-                "processing_state_saved",
-                f"Processing state saved | path={profile_path.name}",
-                level="debug",
-                min_interval=1.0,
-            )
-            window._last_saved_processing_signature = signature
-            window._last_saved_preprocessing_path = path
-            window._last_saved_profile_path = profile_path
         except Exception as exc:
             window._append_workflow_log(
                 f"Processing state save failed | path={profile_path.name} | {exc}",
                 level="error",
             )
             window.status_label.setText(f"Preprocessing save failed: {exc}")
+            return
+
+        if session_mask_payload is None:
+            window._append_workflow_log_throttled("session_mask_save", "Session mask save | none", level="debug", min_interval=1.0)
+        else:
+            mask_shape = None if not isinstance(session_mask_payload.get("mask"), np.ndarray) else tuple(int(v) for v in session_mask_payload["mask"].shape)
+            window._append_workflow_log_throttled(
+                "session_mask_save",
+                f"Session mask save | record={session_mask_payload.get('record_path')} | shape={mask_shape}",
+                level="debug",
+                min_interval=1.0,
+            )
+
+        pending = (path, preprocessing_payload, profile_path, profile_payload, signature)
+        if window._processing_profile_write_busy:
+            # A previous save is still writing to disk. This newest payload
+            # already reflects every edit made so far -- including whatever
+            # the in-flight write is about to persist -- so just replace
+            # whatever was pending rather than starting a second, unordered
+            # write that could finish before or after this one.
+            window._processing_profile_write_pending = pending
+            return
+        self._start_processing_state_write(pending)
+
+    def _start_processing_state_write(self, pending: tuple) -> None:
+        window = self._window
+        path, preprocessing_payload, profile_path, profile_payload, signature = pending
+        window._processing_profile_write_busy = True
+        worker = FunctionWorker(write_processing_state_files, path, preprocessing_payload, profile_path, profile_payload)
+        worker.signals.result.connect(
+            lambda _result, path=path, profile_path=profile_path, signature=signature: (
+                self._on_processing_state_write_done(path, profile_path, signature)
+            )
+        )
+        worker.signals.error.connect(
+            lambda message, profile_path=profile_path: self._on_processing_state_write_failed(profile_path, message)
+        )
+        window._thread_pool.start(worker)
+
+    def _on_processing_state_write_done(self, path: Path, profile_path: Path, signature: str) -> None:
+        window = self._window
+        window._last_saved_processing_signature = signature
+        window._last_saved_preprocessing_path = path
+        window._last_saved_profile_path = profile_path
+        window._append_workflow_log_throttled(
+            "processing_state_saved",
+            f"Processing state saved | path={profile_path.name}",
+            level="debug",
+            min_interval=1.0,
+        )
+        self._finish_processing_state_write()
+
+    def _on_processing_state_write_failed(self, profile_path: Path, message: str) -> None:
+        window = self._window
+        window._append_workflow_log(
+            f"Processing state save failed | path={profile_path.name} | {message}",
+            level="error",
+        )
+        window.status_label.setText(f"Preprocessing save failed: {message}")
+        self._finish_processing_state_write()
+
+    def _finish_processing_state_write(self) -> None:
+        window = self._window
+        window._processing_profile_write_busy = False
+        pending = window._processing_profile_write_pending
+        if pending is not None:
+            window._processing_profile_write_pending = None
+            self._start_processing_state_write(pending)
 
     def export_processing_profile(self) -> None:
         window = self._window

@@ -5,10 +5,10 @@ import numpy as np
 from lspr_imaging_app.domain.models import FitResult
 
 
-def absorbance_from_means(roi_mean: float, background_mean: float) -> float:
-    roi_mean = max(float(roi_mean), 1e-9)
-    background_mean = max(float(background_mean), 1e-9)
-    return float(np.log10(background_mean / roi_mean))
+def absorbance_from_means(sample_mean: float, reference_mean: float) -> float:
+    sample_mean = max(float(sample_mean), 1e-9)
+    reference_mean = max(float(reference_mean), 1e-9)
+    return float(np.log10(reference_mean / sample_mean))
 
 
 def fit_absorbance_curve(

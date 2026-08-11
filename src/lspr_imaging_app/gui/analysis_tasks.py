@@ -21,6 +21,7 @@ from lspr_imaging_app.processing.chromatic import (
     auto_track_landmarks_over_wavelengths,
     estimate_affine_chromatic_transform,
     fit_affine_matrix,
+    fit_similarity_matrix,
     identity_affine_matrix,
     transformed_annulus_mask,
     transformed_annulus_mask_for_patch,
@@ -33,7 +34,7 @@ from lspr_imaging_app.processing.preprocess import (
     apply_spatial_preprocessing,
     estimate_background_profile,
 )
-from lspr_imaging_app.processing.spot_detection import detect_spots, ignored_pixel_mask, refresh_roi_metrics
+from lspr_imaging_app.processing.roi_detection import detect_rois, ignored_pixel_mask, refresh_roi_metrics
 
 
 def _process_image_task(path_str: str, preprocessing, rois, external_mask: np.ndarray | None, mask_state) -> np.ndarray:
@@ -63,13 +64,13 @@ def _refresh_roi_metrics_task(
     return refresh_roi_metrics(image, settings, rois, external_mask=external_mask)
 
 
-def _detect_spots_task(
+def _detect_rois_task(
     image: np.ndarray,
     settings,
     external_mask: np.ndarray | None,
     progress_callback=None,
 ) -> list[AreaRoi]:
-    return detect_spots(image, settings, external_mask=external_mask, progress_callback=progress_callback)
+    return detect_rois(image, settings, external_mask=external_mask, progress_callback=progress_callback)
 
 
 def _background_profile_task(
@@ -104,6 +105,7 @@ def _background_profile_task(
         rois=rois,
         mask_settings=mask_settings,
         external_mask=processed_external_mask,
+        exclusion_dilation_px=int(getattr(preprocessing_settings, "flatten_background_exclusion_dilation_px", 0)),
     )
 
 
@@ -137,14 +139,14 @@ def _ome_zarr_export_task(
 def _selected_roi_masks_for_spectrum(
     image_shape: tuple[int, int],
     source_rois: list[AreaRoi],
-    selected_spot_ids: tuple[int, ...],
-    ring_inner_radius_px: float,
-    ring_outer_radius_px: float,
+    selected_roi_ids: tuple[int, ...],
+    reference_inner_radius_px: float,
+    reference_outer_radius_px: float,
     affine_matrix: np.ndarray | None,
     *,
     patch_origin_xy: tuple[int, int] = (0, 0),
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Build sample/reference-ring masks for the selected ROIs.
+    """Build sample-ROI/reference-ROI masks for the selected ROIs.
 
     ROI centers (`roi.center_x/center_y`) are always in full processed-image
     coordinates. By default (`patch_origin_xy=(0, 0)` and `image_shape` the
@@ -157,17 +159,17 @@ def _selected_roi_masks_for_spectrum(
     """
     image_height, image_width = image_shape[:2]
     roi_mask = np.zeros((image_height, image_width), dtype=bool)
-    ring_mask = np.zeros((image_height, image_width), dtype=bool)
+    reference_mask = np.zeros((image_height, image_width), dtype=bool)
     if not source_rois:
-        return roi_mask, ring_mask
+        return roi_mask, reference_mask
 
-    selected_ids = set(int(spot_id) for spot_id in selected_spot_ids) if selected_spot_ids else None
+    selected_ids = set(int(roi_id) for roi_id in selected_roi_ids) if selected_roi_ids else None
     effective_rois = [roi for roi in source_rois if selected_ids is None or roi.area_roi_id in selected_ids]
     if not effective_rois:
-        return roi_mask, ring_mask
+        return roi_mask, reference_mask
 
-    ring_inner_radius = float(max(ring_inner_radius_px, 0.0))
-    ring_outer_radius = float(max(ring_outer_radius_px, ring_inner_radius))
+    reference_inner_radius = float(max(reference_inner_radius_px, 0.0))
+    reference_outer_radius = float(max(reference_outer_radius_px, reference_inner_radius))
     use_affine = affine_matrix is not None and not np.allclose(
         np.asarray(affine_matrix, dtype=np.float64),
         identity_affine_matrix(),
@@ -181,12 +183,12 @@ def _selected_roi_masks_for_spectrum(
         for roi in effective_rois:
             distance_sq = (xx - float(roi.center_x)) ** 2 + (yy - float(roi.center_y)) ** 2
             roi_mask |= distance_sq <= float(roi.sample_radius_px) ** 2
-            if ring_outer_radius > 0.0:
-                outer_mask = distance_sq <= ring_outer_radius**2
-                inner_mask = distance_sq < ring_inner_radius**2 if ring_inner_radius > 0.0 else np.zeros_like(outer_mask)
-                ring_mask |= outer_mask & ~inner_mask
-        ring_mask &= ~roi_mask
-        return roi_mask, ring_mask
+            if reference_outer_radius > 0.0:
+                outer_mask = distance_sq <= reference_outer_radius**2
+                inner_mask = distance_sq < reference_inner_radius**2 if reference_inner_radius > 0.0 else np.zeros_like(outer_mask)
+                reference_mask |= outer_mask & ~inner_mask
+        reference_mask &= ~roi_mask
+        return roi_mask, reference_mask
 
     # (0, 0) covers both the original full-image call convention (all existing
     # callers) and a patch that happens to start at the image origin — either
@@ -202,12 +204,12 @@ def _selected_roi_masks_for_spectrum(
                 float(roi.sample_radius_px),
                 affine_matrix,
             )
-            if ring_outer_radius > 0.0:
-                ring_mask |= transformed_annulus_mask(
+            if reference_outer_radius > 0.0:
+                reference_mask |= transformed_annulus_mask(
                     (image_height, image_width),
                     (float(roi.center_x), float(roi.center_y)),
-                    float(ring_inner_radius),
-                    float(ring_outer_radius),
+                    float(reference_inner_radius),
+                    float(reference_outer_radius),
                     affine_matrix,
                 )
     else:
@@ -219,22 +221,22 @@ def _selected_roi_masks_for_spectrum(
                 float(roi.sample_radius_px),
                 affine_matrix,
             )
-            if ring_outer_radius > 0.0:
-                ring_mask |= transformed_annulus_mask_for_patch(
+            if reference_outer_radius > 0.0:
+                reference_mask |= transformed_annulus_mask_for_patch(
                     (px0, py0),
                     (image_height, image_width),
                     (float(roi.center_x), float(roi.center_y)),
-                    float(ring_inner_radius),
-                    float(ring_outer_radius),
+                    float(reference_inner_radius),
+                    float(reference_outer_radius),
                     affine_matrix,
                 )
-    ring_mask &= ~roi_mask
-    return roi_mask, ring_mask
+    reference_mask &= ~roi_mask
+    return roi_mask, reference_mask
 
 
 def compute_roi_union_bounding_box(
     selected_rois: list[AreaRoi],
-    ring_outer_radius_px: float,
+    reference_outer_radius_px: float,
     affine_matrices: list[np.ndarray | None],
     image_height: int,
     image_width: int,
@@ -242,7 +244,7 @@ def compute_roi_union_bounding_box(
 ) -> tuple[int, int, int, int] | None:
     """Smallest axis-aligned box (x0, y0, x1, y1), in full processed-image
     coordinates, guaranteed to contain every selected ROI's sample circle and
-    reference ring, across every given per-wavelength chromatic transform
+    reference ROI ring, across every given per-wavelength chromatic transform
     (pass `[None]` if chromatic correction isn't active). Used to decide the
     single region a zarr-chunk-aware partial read needs to cover for every
     wavelength, instead of loading the whole plane. Returns None if there's
@@ -250,14 +252,14 @@ def compute_roi_union_bounding_box(
     """
     if not selected_rois or image_height <= 0 or image_width <= 0:
         return None
-    ring_outer = float(max(ring_outer_radius_px, 0.0))
+    reference_outer = float(max(reference_outer_radius_px, 0.0))
     matrices = affine_matrices if affine_matrices else [None]
 
     x_min, y_min = float("inf"), float("inf")
     x_max, y_max = float("-inf"), float("-inf")
     for roi in selected_rois:
         cx, cy = float(roi.center_x), float(roi.center_y)
-        roi_reach = max(ring_outer, float(roi.sample_radius_px))
+        roi_reach = max(reference_outer, float(roi.sample_radius_px))
         for matrix in matrices:
             matrix_arr = None if matrix is None else np.asarray(matrix, dtype=np.float64)
             if matrix_arr is None or np.allclose(matrix_arr, identity_affine_matrix(), atol=1e-9):
@@ -317,17 +319,17 @@ def _roi_absorbance_signature(
 def _absorbance_roi_mask_cache_key(
     image_shape: tuple[int, int],
     selected_rois: list[AreaRoi],
-    selected_spot_ids: tuple[int, ...],
+    selected_roi_ids: tuple[int, ...],
     affine_matrix: np.ndarray | None,
-    ring_inner_radius_px: float,
-    ring_outer_radius_px: float,
+    reference_inner_radius_px: float,
+    reference_outer_radius_px: float,
 ) -> tuple[object, ...]:
     affine_signature = None
     if affine_matrix is not None:
         affine_signature = tuple(round(float(value), 6) for value in np.asarray(affine_matrix, dtype=np.float64).ravel())
     return (
         tuple(int(value) for value in image_shape[:2]),
-        tuple(int(spot_id) for spot_id in selected_spot_ids),
+        tuple(int(roi_id) for roi_id in selected_roi_ids),
         tuple(
             (
                 int(roi.area_roi_id),
@@ -342,8 +344,8 @@ def _absorbance_roi_mask_cache_key(
             for roi in selected_rois
         ),
         affine_signature,
-        round(float(ring_inner_radius_px), 3),
-        round(float(ring_outer_radius_px), 3),
+        round(float(reference_inner_radius_px), 3),
+        round(float(reference_outer_radius_px), 3),
     )
 
 
@@ -356,9 +358,9 @@ def _absorbance_spectrum_task(
     roi_mask_cache_lock,
     roi_mask_cache_max_size: int,
     source_rois: list[AreaRoi],
-    selected_spot_ids: tuple[int, ...],
-    ring_inner_radius_px: float,
-    ring_outer_radius_px: float,
+    selected_roi_ids: tuple[int, ...],
+    reference_inner_radius_px: float,
+    reference_outer_radius_px: float,
     mask_state,
     cancel_event: threading.Event | None = None,
     progress_callback=None,
@@ -372,8 +374,8 @@ def _absorbance_spectrum_task(
         "roi_hits": 0,
         "roi_builds": 0,
     }
-    selected_spot_id_set = set(selected_spot_ids)
-    selected_rois = [roi for roi in source_rois if roi.area_roi_id in selected_spot_id_set]
+    selected_roi_id_set = set(selected_roi_ids)
+    selected_rois = [roi for roi in source_rois if roi.area_roi_id in selected_roi_id_set]
     roi_accumulators: dict[int, dict[str, list[float] | list[int]]] = {
         int(roi.area_roi_id): {
             "wavelengths": [],
@@ -405,8 +407,8 @@ def _absorbance_spectrum_task(
             selected_rois_local,
             selected_ids_local,
             affine_matrix_local,
-            ring_inner_radius_px,
-            ring_outer_radius_px,
+            reference_inner_radius_px,
+            reference_outer_radius_px,
         )
         with roi_mask_cache_lock:
             cached_value = roi_mask_cache.get(cache_key) if hasattr(roi_mask_cache, "get") else None
@@ -423,12 +425,12 @@ def _absorbance_spectrum_task(
                     len(selected_rois_local),
                 )
                 return cached_value
-        combined_roi_mask, combined_ring_mask = _selected_roi_masks_for_spectrum(
+        combined_roi_mask, combined_reference_mask = _selected_roi_masks_for_spectrum(
             image_shape,
             source_rois,
             selected_ids_local,
-            ring_inner_radius_px,
-            ring_outer_radius_px,
+            reference_inner_radius_px,
+            reference_outer_radius_px,
             affine_matrix_local,
         )
         per_roi_masks: dict[int, tuple[np.ndarray, np.ndarray]] = {}
@@ -437,13 +439,13 @@ def _absorbance_spectrum_task(
                 image_shape,
                 [roi],
                 (int(roi.area_roi_id),),
-                ring_inner_radius_px,
-                ring_outer_radius_px,
+                reference_inner_radius_px,
+                reference_outer_radius_px,
                 affine_matrix_local,
             )
         cached_value = {
             "shape": tuple(int(value) for value in image_shape[:2]),
-            "combined": (combined_roi_mask, combined_ring_mask),
+            "combined": (combined_roi_mask, combined_reference_mask),
             "per_roi": per_roi_masks,
         }
         with roi_mask_cache_lock:
@@ -466,7 +468,7 @@ def _absorbance_spectrum_task(
     def _load_and_preprocess_measurement(
         item: tuple[int, tuple[float, str, list[AreaRoi], np.ndarray | None, bool, np.ndarray | None]]
     ) -> tuple[int, float, np.ndarray, np.ndarray | None, np.ndarray | None, float]:
-        index, (wavelength_nm, path_str, preprocessing_spots, affine_matrix, external_mask_processed, external_mask) = item
+        index, (wavelength_nm, path_str, preprocessing_rois, affine_matrix, external_mask_processed, external_mask) = item
         load_started = time.perf_counter()
         cache_info_before = getattr(load_image_array, "cache_info", None)
         before_hits = cache_info_before().hits if callable(cache_info_before) else None
@@ -481,7 +483,7 @@ def _absorbance_spectrum_task(
         processed = apply_preprocessing(
             raw_image,
             preprocessing,
-            rois=preprocessing_spots,
+            rois=preprocessing_rois,
             mask_settings=flatten_mask_settings,
             external_mask=external_mask,
             external_mask_processed=external_mask_processed,
@@ -519,60 +521,60 @@ def _absorbance_spectrum_task(
 
         roi_started = time.perf_counter()
         current_shape = tuple(int(value) for value in processed.shape[:2])
-        roi_mask_cache_entry = _build_roi_mask_cache(current_shape, selected_rois, selected_spot_ids, affine_matrix)
+        roi_mask_cache_entry = _build_roi_mask_cache(current_shape, selected_rois, selected_roi_ids, affine_matrix)
         ignored_mask = ignored_pixel_mask(processed, measurement_settings, external_mask=external_mask)
-        combined_roi_mask, combined_ring_mask = roi_mask_cache_entry["combined"]  # type: ignore[index]
+        combined_roi_mask, combined_reference_mask = roi_mask_cache_entry["combined"]  # type: ignore[index]
         roi_mask = np.array(combined_roi_mask, dtype=bool, copy=True)
-        ring_mask = np.array(combined_ring_mask, dtype=bool, copy=True)
+        reference_mask = np.array(combined_reference_mask, dtype=bool, copy=True)
         roi_mask &= ~ignored_mask
-        ring_mask &= ~ignored_mask
-        ring_mask &= ~roi_mask
+        reference_mask &= ~ignored_mask
+        reference_mask &= ~roi_mask
 
-        spot_pixels = processed[roi_mask]
-        ring_pixels = processed[ring_mask]
-        if spot_pixels.size == 0 or ring_pixels.size == 0:
-            spot_mean = float("nan")
-            ring_mean = float("nan")
+        sample_pixels = processed[roi_mask]
+        reference_pixels = processed[reference_mask]
+        if sample_pixels.size == 0 or reference_pixels.size == 0:
+            sample_mean = float("nan")
+            reference_mean = float("nan")
             absorbance = float("nan")
         else:
-            spot_mean = float(np.mean(spot_pixels))
-            ring_mean = float(np.mean(ring_pixels))
-            absorbance = absorbance_from_means(spot_mean, ring_mean)
+            sample_mean = float(np.mean(sample_pixels))
+            reference_mean = float(np.mean(reference_pixels))
+            absorbance = absorbance_from_means(sample_mean, reference_mean)
 
         wavelengths.append(float(wavelength_nm))
         absorbance_values.append(absorbance)
-        sample_mean_values.append(spot_mean)
-        reference_mean_values.append(ring_mean)
-        sample_pixel_counts.append(int(spot_pixels.size))
-        reference_pixel_counts.append(int(ring_pixels.size))
+        sample_mean_values.append(sample_mean)
+        reference_mean_values.append(reference_mean)
+        sample_pixel_counts.append(int(sample_pixels.size))
+        reference_pixel_counts.append(int(reference_pixels.size))
 
         for roi in selected_rois:
             per_roi_masks = roi_mask_cache_entry["per_roi"]  # type: ignore[index]
-            roi_mask_template, ring_mask_template = per_roi_masks[int(roi.area_roi_id)]
+            roi_mask_template, reference_mask_template = per_roi_masks[int(roi.area_roi_id)]
             roi_mask_single = np.array(roi_mask_template, dtype=bool, copy=True)
-            ring_mask_single = np.array(ring_mask_template, dtype=bool, copy=True)
+            reference_mask_single = np.array(reference_mask_template, dtype=bool, copy=True)
             roi_mask_single &= ~ignored_mask
-            ring_mask_single &= ~ignored_mask
-            ring_mask_single &= ~roi_mask_single
+            reference_mask_single &= ~ignored_mask
+            reference_mask_single &= ~roi_mask_single
 
-            spot_pixels_single = processed[roi_mask_single]
-            ring_pixels_single = processed[ring_mask_single]
-            if spot_pixels_single.size == 0 or ring_pixels_single.size == 0:
-                spot_mean_single = float("nan")
-                ring_mean_single = float("nan")
+            sample_pixels_single = processed[roi_mask_single]
+            reference_pixels_single = processed[reference_mask_single]
+            if sample_pixels_single.size == 0 or reference_pixels_single.size == 0:
+                sample_mean_single = float("nan")
+                reference_mean_single = float("nan")
                 absorbance_single = float("nan")
             else:
-                spot_mean_single = float(np.mean(spot_pixels_single))
-                ring_mean_single = float(np.mean(ring_pixels_single))
-                absorbance_single = absorbance_from_means(spot_mean_single, ring_mean_single)
+                sample_mean_single = float(np.mean(sample_pixels_single))
+                reference_mean_single = float(np.mean(reference_pixels_single))
+                absorbance_single = absorbance_from_means(sample_mean_single, reference_mean_single)
 
             accumulator = roi_accumulators[int(roi.area_roi_id)]
             accumulator["wavelengths"].append(float(wavelength_nm))
             accumulator["absorbance"].append(absorbance_single)
-            accumulator["sample_mean"].append(spot_mean_single)
-            accumulator["reference_mean"].append(ring_mean_single)
-            accumulator["sample_pixel_count"].append(int(spot_pixels_single.size))
-            accumulator["reference_pixel_count"].append(int(ring_pixels_single.size))
+            accumulator["sample_mean"].append(sample_mean_single)
+            accumulator["reference_mean"].append(reference_mean_single)
+            accumulator["sample_pixel_count"].append(int(sample_pixels_single.size))
+            accumulator["reference_pixel_count"].append(int(reference_pixels_single.size))
         roi_seconds += time.perf_counter() - roi_started
 
         if progress_callback is not None:
@@ -581,10 +583,10 @@ def _absorbance_spectrum_task(
                 f"Spectral absorbance {index}/{total}: {float(wavelength_nm):g} nm",
             )
 
-    spot_results: dict[int, AbsorbanceSpectrumResult] = {}
+    roi_results: dict[int, AbsorbanceSpectrumResult] = {}
     for roi in selected_rois:
         data = roi_accumulators[int(roi.area_roi_id)]
-        spot_results[int(roi.area_roi_id)] = AbsorbanceSpectrumResult(
+        roi_results[int(roi.area_roi_id)] = AbsorbanceSpectrumResult(
             wavelengths_nm=np.asarray(data["wavelengths"], dtype=np.float64),
             absorbance=np.asarray(data["absorbance"], dtype=np.float64),
             sample_mean=np.asarray(data["sample_mean"], dtype=np.float64),
@@ -603,7 +605,7 @@ def _absorbance_spectrum_task(
         load_seconds=load_seconds,
         roi_seconds=roi_seconds,
         total_seconds=time.perf_counter() - task_started,
-        area_roi_results=spot_results,
+        area_roi_results=roi_results,
     )
     logging.getLogger("lspr_imaging_app.workflow").debug(
         "Spec cache summary | img hit=%s build=%s | roi hit=%s build=%s",
@@ -622,8 +624,8 @@ def _absorbance_spectrum_fast_task(
     record_map: dict,
     selected_rois: list[AreaRoi],
     selected_roi_ids: tuple[int, ...],
-    ring_inner_radius_px: float,
-    ring_outer_radius_px: float,
+    reference_inner_radius_px: float,
+    reference_outer_radius_px: float,
     box: tuple[int, int, int, int],
     preprocessing,
     raw_shape: tuple[int, int],
@@ -636,7 +638,7 @@ def _absorbance_spectrum_fast_task(
 
     `box` is a single bounding region, in full PROCESSED-image coordinates
     (matching ROI centers, external masks, etc.), precomputed by the caller to
-    cover every selected ROI's sample circle and reference ring across all
+    cover every selected ROI's sample circle and reference ROI ring across all
     wavelengths' chromatic transforms.
 
     Normally (no background flattening), rotation/flip/crop are handled by
@@ -717,20 +719,20 @@ def _absorbance_spectrum_fast_task(
                 ignored_patch = mask_full[y0:y1, x0:x1]
 
         def _means_for(rois_subset: list[AreaRoi], ids_subset: tuple[int, ...]) -> tuple[float, float, float, int, int]:
-            roi_mask, ring_mask = _selected_roi_masks_for_spectrum(
-                (patch_h, patch_w), rois_subset, ids_subset, ring_inner_radius_px, ring_outer_radius_px,
+            roi_mask, reference_mask = _selected_roi_masks_for_spectrum(
+                (patch_h, patch_w), rois_subset, ids_subset, reference_inner_radius_px, reference_outer_radius_px,
                 affine_matrix, patch_origin_xy=(x0, y0),
             )
             if ignored_patch is not None:
                 roi_mask = roi_mask & ~ignored_patch
-                ring_mask = ring_mask & ~ignored_patch
+                reference_mask = reference_mask & ~ignored_patch
             sample_pixels = patch[roi_mask]
-            ring_pixels = patch[ring_mask]
-            if sample_pixels.size == 0 or ring_pixels.size == 0:
-                return float("nan"), float("nan"), float("nan"), int(sample_pixels.size), int(ring_pixels.size)
+            reference_pixels = patch[reference_mask]
+            if sample_pixels.size == 0 or reference_pixels.size == 0:
+                return float("nan"), float("nan"), float("nan"), int(sample_pixels.size), int(reference_pixels.size)
             sm = float(np.mean(sample_pixels))
-            rm = float(np.mean(ring_pixels))
-            return absorbance_from_means(sm, rm), sm, rm, int(sample_pixels.size), int(ring_pixels.size)
+            rm = float(np.mean(reference_pixels))
+            return absorbance_from_means(sm, rm), sm, rm, int(sample_pixels.size), int(reference_pixels.size)
 
         combined = _means_for(selected_rois, selected_roi_ids)
         per_roi = {
@@ -791,10 +793,10 @@ def _absorbance_spectrum_fast_task(
             accumulator["sample_pixel_count"].append(int(roi_spc))
             accumulator["reference_pixel_count"].append(int(roi_rpc))
 
-    spot_results: dict[int, AbsorbanceSpectrumResult] = {}
+    roi_results: dict[int, AbsorbanceSpectrumResult] = {}
     for roi in selected_rois:
         data = roi_accumulators[int(roi.area_roi_id)]
-        spot_results[int(roi.area_roi_id)] = AbsorbanceSpectrumResult(
+        roi_results[int(roi.area_roi_id)] = AbsorbanceSpectrumResult(
             wavelengths_nm=np.asarray(data["wavelengths"], dtype=np.float64),
             absorbance=np.asarray(data["absorbance"], dtype=np.float64),
             sample_mean=np.asarray(data["sample_mean"], dtype=np.float64),
@@ -811,7 +813,7 @@ def _absorbance_spectrum_fast_task(
         sample_pixel_count=np.asarray(sample_pixel_counts, dtype=np.int32),
         reference_pixel_count=np.asarray(reference_pixel_counts, dtype=np.int32),
         total_seconds=time.perf_counter() - task_started,
-        area_roi_results=spot_results,
+        area_roi_results=roi_results,
     )
 
 
@@ -824,6 +826,8 @@ def _sensorgram_metric_task(
     partial_callback=None,
     spectral_cube_payload_builder=None,
     task_fn=None,
+    spectral_cube_result_cache_get=None,
+    spectral_cube_result_cache_store=None,
 ) -> SensorgramComputationResult:
     task_started = time.perf_counter()
     spectral_cube_payloads: list[tuple[int, tuple[object, ...]]] = []
@@ -907,12 +911,16 @@ def _sensorgram_metric_task(
                 text or f"Sensorgram {position}/{total}: spectral cube {spectral_cube_number}",
             )
 
-        _active_task = task_fn if task_fn is not None else _absorbance_spectrum_task
-        spectrum = _active_task(
-            *payload,
-            cancel_event=cancel_event,
-            progress_callback=spectral_cube_progress_callback,
-        )
+        spectrum = spectral_cube_result_cache_get(spectral_cube_index) if spectral_cube_result_cache_get is not None else None
+        if spectrum is None:
+            _active_task = task_fn if task_fn is not None else _absorbance_spectrum_task
+            spectrum = _active_task(
+                *payload,
+                cancel_event=cancel_event,
+                progress_callback=spectral_cube_progress_callback,
+            )
+            if spectral_cube_result_cache_store is not None:
+                spectral_cube_result_cache_store(spectral_cube_index, spectrum)
         if cancel_event is not None and cancel_event.is_set():
             return SensorgramComputationResult(
                 spectral_cube_indices=np.asarray(spectral_cube_indices, dtype=np.int32),
@@ -1068,6 +1076,7 @@ def _estimate_chromatic_models_task(
     progress_callback=None,
 ) -> list[ChromaticTransformModel]:
     mode = str(getattr(preprocessing, "chromatic_registration_mode", "landmark_radial") or "landmark_radial")
+    landmark_model = str(getattr(preprocessing, "chromatic_landmark_model", "similarity") or "similarity")
     models: list[ChromaticTransformModel] = []
     if mode == "landmark_radial":
         if not landmarks_payload:
@@ -1125,7 +1134,10 @@ def _estimate_chromatic_models_task(
                 rmse = 0.0
             else:
                 target_points = np.asarray([marks[feature_id] for feature_id in expected_feature_ids], dtype=np.float64)
-                matrix = fit_affine_matrix(reference_points, target_points)
+                if landmark_model == "similarity" and len(expected_feature_ids) >= 2:
+                    matrix = fit_similarity_matrix(reference_points, target_points)
+                else:
+                    matrix = fit_affine_matrix(reference_points, target_points)
                 residuals = np.sqrt(np.sum((apply_affine_to_points(reference_points, matrix) - target_points) ** 2, axis=1))
                 rmse = float(np.sqrt(np.mean(residuals**2))) if residuals.size else 0.0
             sample_matrices[float(wavelength)] = matrix
@@ -1170,13 +1182,14 @@ def _estimate_chromatic_models_task(
             rmse_by_wavelength[wavelength_f64] = float(np.interp(wavelength_f64, sample_axis, np.asarray(rmse_values, dtype=np.float64)))
             feature_counts_by_wavelength[wavelength_f64] = len(expected_feature_ids)
 
+        landmark_model_kind = "landmark_similarity" if landmark_model == "similarity" else "landmark_affine"
         for spectral_cube_index, wavelength, _path_str in record_specs:
             matrix = matrices_by_wavelength[float(wavelength)]
             models.append(
                 ChromaticTransformModel(
                     spectral_cube_index=int(spectral_cube_index),
                     wavelength_nm=float(wavelength),
-                    model_kind="landmark_affine",
+                    model_kind=landmark_model_kind,
                     affine_matrix=[[float(value) for value in row] for row in matrix.tolist()],
                     global_shift_x_px=float(matrix[0, 2]),
                     global_shift_y_px=float(matrix[1, 2]),

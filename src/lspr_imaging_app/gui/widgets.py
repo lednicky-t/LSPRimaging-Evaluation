@@ -24,7 +24,6 @@ from PyQt6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
-from pathlib import Path
 
 from lspr_ui import (
     collapsible_pin_stylesheet,
@@ -340,29 +339,20 @@ class PanelContainer(QWidget):
         return QIcon(pixmap)
 
     def _make_pin_icon(self, pinned: bool) -> QIcon:
-        color = QColor("#22c55e" if pinned else "#f8fafc")
-        themed_icon = PanelContainer._tinted_icon_from_candidates(
-            color,
-            16,
-            r"C:\Program Files\Inkscape\share\icons\Adwaita\symbolic\actions\view-pin-symbolic.svg",
-            r"C:\Program Files\Inkscape\share\inkscape\icons\hicolor\symbolic\actions\object-tweak-push-symbolic.svg",
-            r"C:\Program Files\Inkscape\share\inkscape\icons\Dash\symbolic\actions\object-tweak-push-symbolic.svg",
-            r"C:\Program Files\Inkscape\share\inkscape\icons\hicolor\symbolic\actions\markers-symbolic.svg",
-            r"C:\Program Files\Inkscape\share\inkscape\icons\Dash\symbolic\actions\markers-symbolic.svg",
-            r"C:\Program Files\Inkscape\share\inkscape\icons\multicolor\symbolic\actions\markers-symbolic.svg",
-        )
-        if not themed_icon.isNull():
-            return themed_icon
+        color = "#22c55e" if pinned else "#f8fafc"
+        icon = MainWindowIcons._tabler_icon("pin-filled" if pinned else "pin", color, 24, stroke_width=2.2)
+        if not icon.isNull():
+            return icon
 
         pixmap = QPixmap(16, 16)
         pixmap.fill(Qt.GlobalColor.transparent)
         painter = QPainter(pixmap)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        pen = QPen(color, 1.6)
+        pen = QPen(QColor(color), 1.6)
         pen.setCapStyle(Qt.PenCapStyle.RoundCap)
         pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
         painter.setPen(pen)
-        painter.setBrush(color if pinned else QColor(0, 0, 0, 0))
+        painter.setBrush(QColor(color) if pinned else QColor(0, 0, 0, 0))
         painter.drawRoundedRect(QRectF(4.2, 1.8, 7.0, 3.4), 1.7, 1.7)
         painter.drawLine(QPointF(7.7, 5.2), QPointF(7.7, 10.2))
         painter.drawLine(QPointF(5.0, 6.0), QPointF(10.4, 6.0))
@@ -401,26 +391,6 @@ class PanelContainer(QWidget):
             painter.drawLine(QPointF(4.0, 15.0), QPointF(16.0, 5.0))
         painter.end()
         return QIcon(pixmap)
-
-    @staticmethod
-    def _tinted_icon_from_candidates(color: QColor, size: int, *candidates: str) -> QIcon:
-        for candidate in candidates:
-            path = Path(candidate)
-            if not path.exists():
-                continue
-            base_icon = QIcon(str(path))
-            base_pixmap = base_icon.pixmap(size, size)
-            if base_pixmap.isNull():
-                continue
-            tinted = QPixmap(base_pixmap.size())
-            tinted.fill(Qt.GlobalColor.transparent)
-            painter = QPainter(tinted)
-            painter.drawPixmap(0, 0, base_pixmap)
-            painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceIn)
-            painter.fillRect(tinted.rect(), color)
-            painter.end()
-            return QIcon(tinted)
-        return QIcon()
 
 
 class CompactWedgeSlider(QWidget):

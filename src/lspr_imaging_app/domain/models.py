@@ -93,13 +93,15 @@ class PreprocessingSettings:
     flatten_background_binning: int = 2
     flatten_background_exclude_area_rois: bool = True
     flatten_background_exclude_mask: bool = False
-    local_ring_normalization_enabled: bool = False
+    flatten_background_exclusion_dilation_px: int = 0
+    local_reference_normalization_enabled: bool = False
     chromatic_correction_enabled: bool = False
     chromatic_registration_mode: str = "landmark_radial"
     chromatic_landmark_kind: str = "corner"
+    chromatic_landmark_model: str = "similarity"
     chromatic_grid_bounds: GridBoundsDefinition = field(default_factory=GridBoundsDefinition)
     chromatic_sample_image_count: int = 5
-    chromatic_feature_count: int = 5
+    chromatic_feature_count: int = 15
     chromatic_subpixel_precision: int = 4
     chromatic_tile_size_px: int = 96
     chromatic_search_radius_px: int = 24
@@ -157,10 +159,6 @@ class AreaRoiDetectionSettings:
     array_spacing_px: int = 0
 
 
-# Backward-compat alias
-SpotDetectionSettings = AreaRoiDetectionSettings
-
-
 @dataclass(slots=True)
 class FitResult:
     fitted_wavelengths_nm: np.ndarray
@@ -206,10 +204,6 @@ class AreaRoi:
     inferred: bool = False
 
 
-# Backward-compat alias
-DetectedSpot = AreaRoi
-
-
 @dataclass(slots=True)
 class AreaRoiGroup:
     group_id: str
@@ -217,10 +211,6 @@ class AreaRoiGroup:
     sample_color_hex: str = "#f59e0b"
     reference_color_hex: str = "#38bdf8"
     area_roi_ids: list[int] = field(default_factory=list)
-
-
-# Backward-compat alias
-SpotGroup = AreaRoiGroup
 
 
 @dataclass(slots=True)

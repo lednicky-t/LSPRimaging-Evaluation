@@ -32,8 +32,8 @@ class UndoManager:
             spectral_cube_slider_value=int(window.spectral_cube_slider.value()) if hasattr(window, "spectral_cube_slider") else 0,
             wavelength_slider_value=int(window.wavelength_slider.value()) if hasattr(window, "wavelength_slider") else 0,
             selected_roi_ids=set(window._selected_roi_ids),
-            spot_visual_color=window._sample_visual_color.name(),
-            ring_visual_color=window._reference_visual_color.name(),
+            sample_visual_color=window._sample_visual_color.name(),
+            reference_visual_color=window._reference_visual_color.name(),
             mask_visual_color=window._mask_visual_color.name(),
             histogram_mask_visual_color=window._histogram_mask_visual_color.name(),
             figure_mask_visual_color=window._figure_mask_visual_color.name(),
@@ -44,8 +44,8 @@ class UndoManager:
             histogram_mask_alpha=float(window._mask_alpha),  # Use same alpha for now
             figure_mask_alpha=float(window._mask_alpha),     # Use same alpha for now
             highlight_alpha=float(window._highlight_alpha),
-            spots_visible=bool(window._rois_visible),
-            rings_visible=bool(window._reference_visible),
+            rois_visible=bool(window._rois_visible),
+            reference_rois_visible=bool(window._reference_visible),
             mask_visible=bool(window._mask_visible),
             reference_points_visible=bool(window._reference_points_visible),
             histogram_mask_visible=bool(window._mask_visible),  # Use same visibility for now
@@ -65,19 +65,19 @@ class UndoManager:
             snapshot.wavelength_slider_value,
             repr(asdict(snapshot.state.preprocessing)),
             repr(asdict(snapshot.state.area_roi_settings)),
-            repr([asdict(spot) for spot in snapshot.state.area_rois]),
+            repr([asdict(roi) for roi in snapshot.state.area_rois]),
             repr([asdict(group) for group in snapshot.state.area_roi_groups]),
             tuple(sorted(snapshot.selected_roi_ids)),
-            snapshot.spot_visual_color,
-            snapshot.ring_visual_color,
+            snapshot.sample_visual_color,
+            snapshot.reference_visual_color,
             snapshot.mask_visual_color,
             snapshot.highlight_visual_color,
             round(snapshot.roi_alpha, 4),
             round(snapshot.reference_alpha, 4),
             round(snapshot.mask_alpha, 4),
             round(snapshot.highlight_alpha, 4),
-            snapshot.spots_visible,
-            snapshot.rings_visible,
+            snapshot.rois_visible,
+            snapshot.reference_rois_visible,
             snapshot.mask_visible,
             snapshot.reference_points_visible,
             snapshot.highlight_visible,
@@ -135,16 +135,16 @@ class UndoManager:
             self.clear_prepared()
             window._pending_image_refresh_payload = None
             window._latest_image_refresh_signature = None
-            window._spot_detection_request_id += 1
-            window._spot_metrics_request_id += 1
+            window._roi_detection_request_id += 1
+            window._roi_metrics_request_id += 1
             window._background_profile_request_id += 1
             window._showing_background_profile_main = False
             window._state = deepcopy(snapshot.state)
             window._reset_roi_id_counter_from_state()
             window.folder_edit.setText(snapshot.folder_text)
             window._selected_roi_ids = set(snapshot.selected_roi_ids)
-            window._sample_visual_color = QColor(snapshot.spot_visual_color)
-            window._reference_visual_color = QColor(snapshot.ring_visual_color)
+            window._sample_visual_color = QColor(snapshot.sample_visual_color)
+            window._reference_visual_color = QColor(snapshot.reference_visual_color)
             window._mask_visual_color = QColor(snapshot.mask_visual_color)
             window._histogram_mask_visual_color = QColor(snapshot.histogram_mask_visual_color)
             window._figure_mask_visual_color = QColor(snapshot.figure_mask_visual_color)
@@ -153,8 +153,8 @@ class UndoManager:
             window._reference_alpha = snapshot.reference_alpha
             window._mask_alpha = snapshot.mask_alpha
             window._highlight_alpha = snapshot.highlight_alpha
-            window._rois_visible = snapshot.spots_visible
-            window._reference_visible = snapshot.rings_visible
+            window._rois_visible = snapshot.rois_visible
+            window._reference_visible = snapshot.reference_rois_visible
             window._mask_visible = snapshot.mask_visible
             window._reference_points_visible = snapshot.reference_points_visible
             window._highlight_visible = snapshot.highlight_visible
@@ -190,26 +190,26 @@ class UndoManager:
             window.show_rois_check.blockSignals(True)
             window.bottom_roi_labels_button.blockSignals(True)
             window.roi_editor_labels_button.blockSignals(True)
-            window.show_rings_check.blockSignals(True)
+            window.show_reference_check.blockSignals(True)
             window.show_mask_check.blockSignals(True)
             window.show_reference_points_check.blockSignals(True)
             window.show_highlight_check.blockSignals(True)
             window.show_rois_check.setChecked(window._rois_visible)
             window.bottom_roi_labels_button.setChecked(window._roi_labels_visible)
             window.roi_editor_labels_button.setChecked(window._roi_labels_visible)
-            window.show_rings_check.setChecked(window._reference_visible)
+            window.show_reference_check.setChecked(window._reference_visible)
             window.show_mask_check.setChecked(window._mask_visible)
             window.show_reference_points_check.setChecked(window._reference_points_visible)
             window.show_highlight_check.setChecked(window._highlight_visible)
             window.show_rois_check.blockSignals(False)
             window.bottom_roi_labels_button.blockSignals(False)
             window.roi_editor_labels_button.blockSignals(False)
-            window.show_rings_check.blockSignals(False)
+            window.show_reference_check.blockSignals(False)
             window.show_mask_check.blockSignals(False)
             window.show_reference_points_check.blockSignals(False)
             window.show_highlight_check.blockSignals(False)
             window._refresh_view_toggle_icons()
-            window._update_spot_label_button_icon(bool(window._roi_labels_visible))
+            window._update_roi_label_button_icon(bool(window._roi_labels_visible))
             window.roi_alpha_slider.blockSignals(True)
             window.reference_alpha_slider.blockSignals(True)
             window.mask_alpha_slider.blockSignals(True)

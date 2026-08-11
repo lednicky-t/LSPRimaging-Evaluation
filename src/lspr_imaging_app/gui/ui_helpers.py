@@ -104,7 +104,7 @@ def circle_area_text(use_micrometers: bool, microns_per_pixel: float, diameter_p
     return f"{np.pi * radius_px * radius_px:.0f} px\u00b2"
 
 
-def ring_area_text(use_micrometers: bool, microns_per_pixel: float, inner_diameter_px: float, outer_diameter_px: float) -> str:
+def reference_area_text(use_micrometers: bool, microns_per_pixel: float, inner_diameter_px: float, outer_diameter_px: float) -> str:
     inner_radius_px = max(float(inner_diameter_px) / 2.0, 0.0)
     outer_radius_px = max(float(outer_diameter_px) / 2.0, inner_radius_px)
     if use_micrometers:

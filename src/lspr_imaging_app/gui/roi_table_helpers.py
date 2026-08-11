@@ -17,11 +17,11 @@ class RoiTableRowColors:
 class RoiTableRowData:
     area_roi_id: int
     group_name: str
-    spot_color: QColor
-    ring_color: QColor
-    spot_diameter_text: str
-    ring_inner_text: str
-    ring_outer_text: str
+    sample_color: QColor
+    reference_color: QColor
+    sample_diameter_text: str
+    reference_inner_text: str
+    reference_outer_text: str
     x_text: str
     y_text: str
 
@@ -29,7 +29,7 @@ class RoiTableRowData:
 def roi_table_headers(table: QTableWidget) -> None:
     if table.columnCount() < 9:
         return
-    table.setHorizontalHeaderItem(2, QTableWidgetItem("C_c"))
+    table.setHorizontalHeaderItem(2, QTableWidgetItem("C_s"))
     table.setHorizontalHeaderItem(3, QTableWidgetItem("C_r"))
     table.setHorizontalHeaderItem(4, QTableWidgetItem("D_s"))
     table.setHorizontalHeaderItem(5, QTableWidgetItem("d_r"))
@@ -71,27 +71,27 @@ def append_roi_table_row(table: QTableWidget, row: RoiTableRowData) -> None:
     group_item.setFlags(group_item.flags() | Qt.ItemFlag.ItemIsEditable)
     table.setItem(index, 1, group_item)
 
-    spot_item = QTableWidgetItem("")
-    spot_item.setFlags(spot_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
-    spot_item.setIcon(make_color_swatch_icon(row.spot_color))
-    table.setItem(index, 2, spot_item)
+    sample_item = QTableWidgetItem("")
+    sample_item.setFlags(sample_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+    sample_item.setIcon(make_color_swatch_icon(row.sample_color))
+    table.setItem(index, 2, sample_item)
 
-    ring_item = QTableWidgetItem("")
-    ring_item.setFlags(ring_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
-    ring_item.setIcon(make_color_swatch_icon(row.ring_color))
-    table.setItem(index, 3, ring_item)
+    reference_item = QTableWidgetItem("")
+    reference_item.setFlags(reference_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+    reference_item.setIcon(make_color_swatch_icon(row.reference_color))
+    table.setItem(index, 3, reference_item)
 
-    spot_diameter_item = QTableWidgetItem(row.spot_diameter_text)
-    spot_diameter_item.setFlags(spot_diameter_item.flags() | Qt.ItemFlag.ItemIsEditable)
-    table.setItem(index, 4, spot_diameter_item)
+    sample_diameter_item = QTableWidgetItem(row.sample_diameter_text)
+    sample_diameter_item.setFlags(sample_diameter_item.flags() | Qt.ItemFlag.ItemIsEditable)
+    table.setItem(index, 4, sample_diameter_item)
 
-    ring_inner_item = QTableWidgetItem(row.ring_inner_text)
-    ring_inner_item.setFlags(ring_inner_item.flags() | Qt.ItemFlag.ItemIsEditable)
-    table.setItem(index, 5, ring_inner_item)
+    reference_inner_item = QTableWidgetItem(row.reference_inner_text)
+    reference_inner_item.setFlags(reference_inner_item.flags() | Qt.ItemFlag.ItemIsEditable)
+    table.setItem(index, 5, reference_inner_item)
 
-    ring_outer_item = QTableWidgetItem(row.ring_outer_text)
-    ring_outer_item.setFlags(ring_outer_item.flags() | Qt.ItemFlag.ItemIsEditable)
-    table.setItem(index, 6, ring_outer_item)
+    reference_outer_item = QTableWidgetItem(row.reference_outer_text)
+    reference_outer_item.setFlags(reference_outer_item.flags() | Qt.ItemFlag.ItemIsEditable)
+    table.setItem(index, 6, reference_outer_item)
 
     x_item = QTableWidgetItem(row.x_text)
     x_item.setFlags(x_item.flags() & ~Qt.ItemFlag.ItemIsEditable)

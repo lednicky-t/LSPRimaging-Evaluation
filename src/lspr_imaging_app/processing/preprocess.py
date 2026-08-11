@@ -4,7 +4,7 @@ import numpy as np
 from scipy import ndimage
 
 from lspr_imaging_app.domain.models import AreaRoi, AreaRoiDetectionSettings, MaskSettings, PreprocessingSettings
-from lspr_imaging_app.processing.spot_detection import ignored_pixel_mask
+from lspr_imaging_app.processing.roi_detection import ignored_pixel_mask
 
 
 def apply_preprocessing(
@@ -55,12 +55,27 @@ def apply_preprocessing(
     if combined_mask is not None:
         masked_image = np.where(combined_mask.astype(bool), 0, masked_image)
 
-    # Apply legacy external mask if provided
+    # Apply legacy external mask if provided, in raw image coordinates
     if external_mask is not None and not external_mask_processed:
-        # external_mask is already in raw image coordinates
         masked_image = np.where(external_mask.astype(bool), 0, masked_image)
 
     processed = apply_spatial_preprocessing(masked_image, settings, skip_crop=skip_crop)
+
+    # A pre-transformed external mask (caller already rotated/flipped/cropped
+    # it to match `processed`, e.g. via apply_spatial_mask) can't be applied
+    # before the spatial transform above like the raw-space case is - do it
+    # here instead. Previously this branch did nothing: the mask was neither
+    # zeroed into `processed` nor forwarded to flatten_background, so a
+    # processed-space mask (the normal case - every caller resolves masks via
+    # processed_space=True) silently had no effect on background flattening,
+    # letting masked-out regions (e.g. rotation-fill black edges) still pull
+    # on the local background average.
+    processed_exclusion_mask = None
+    if external_mask is not None and external_mask_processed:
+        candidate = np.asarray(external_mask, dtype=bool)
+        if candidate.shape == processed.shape[:2]:
+            processed_exclusion_mask = candidate
+            processed = np.where(processed_exclusion_mask, 0, processed)
 
     if settings.flatten_background_enabled:
         processed = flatten_background(
@@ -69,8 +84,9 @@ def apply_preprocessing(
             binning=max(int(getattr(settings, "flatten_background_binning", 2)), 1),
             rois=rois if settings.flatten_background_exclude_area_rois else None,
             mask_settings=mask_settings if settings.flatten_background_exclude_mask else None,
-            external_mask=None,  # Already applied above
+            external_mask=processed_exclusion_mask if settings.flatten_background_exclude_mask else None,
             region=region,
+            exclusion_dilation_px=int(getattr(settings, "flatten_background_exclusion_dilation_px", 0)),
         )
         return processed
 
@@ -464,6 +480,7 @@ def flatten_background(
     mask_settings: AreaRoiDetectionSettings | None = None,
     external_mask: np.ndarray | None = None,
     region: tuple[int, int, int, int] | None = None,
+    exclusion_dilation_px: int = 0,
 ) -> np.ndarray:
     """Background-flatten `image`. The background estimate is always computed
     from the *whole* image (same cost/accuracy for TIFF and zarr — nothing
@@ -475,9 +492,20 @@ def flatten_background(
     when binning is enabled. `image` itself must still be the full image
     (needed for the blur and the exclusion mask/baseline), only the *output*
     is scoped.
+
+    `exclusion_dilation_px` grows the combined ROI/mask exclusion zone by that
+    many pixels (in the direction of more exclusion) before it's used to
+    weight the background estimate. Exists because a mask or ROI boundary
+    doesn't always land exactly on the true edge of the region it's meant to
+    exclude (e.g. a hand-painted mask or a rotation-fill edge can have a
+    stray transition pixel or two just outside it) — dilating gives a margin
+    against that without requiring pixel-perfect masks. Purely a background
+    estimation concern: it never touches the returned image's pixel values or
+    any other computation.
     """
     image_f32 = image.astype(np.float32, copy=False)
     binning_factor = max(int(binning), 1)
+    dilation_px = max(int(exclusion_dilation_px), 0)
 
     if region is None or binning_factor <= 1:
         # No separate binned intermediate to exploit when binning is off, and
@@ -492,9 +520,11 @@ def flatten_background(
             rois=rois,
             mask_settings=mask_settings,
             external_mask=external_mask,
+            exclusion_dilation_px=dilation_px,
         )
         valid_mask = ~_combined_exclusion_mask(
             image_f32, rois=rois, mask_settings=mask_settings, external_mask=external_mask,
+            dilation_px=dilation_px,
         )
         baseline = float(np.median(background_full[valid_mask])) if np.any(valid_mask) else float(np.median(background_full))
         if region is None:
@@ -515,6 +545,7 @@ def flatten_background(
         mask_settings=mask_settings,
         external_mask=external_mask,
         region=region,
+        exclusion_dilation_px=dilation_px,
     )
     baseline = _background_baseline(
         image_f32,
@@ -523,6 +554,7 @@ def flatten_background(
         rois=rois,
         mask_settings=mask_settings,
         external_mask=external_mask,
+        exclusion_dilation_px=dilation_px,
     )
     x0, y0, x1, y1 = region
     flattened = image_f32[y0:y1, x0:x1] - background_region + baseline
@@ -538,6 +570,7 @@ def estimate_background_profile(
     mask_settings: AreaRoiDetectionSettings | None = None,
     external_mask: np.ndarray | None = None,
     region: tuple[int, int, int, int] | None = None,
+    exclusion_dilation_px: int = 0,
 ) -> np.ndarray:
     """Estimate the smooth spatial background of `image`. When `region` is
     given, only that (x0, y0, x1, y1) region of the estimate is returned —
@@ -553,6 +586,7 @@ def estimate_background_profile(
         rois=rois,
         mask_settings=mask_settings,
         external_mask=external_mask,
+        dilation_px=exclusion_dilation_px,
     )
     valid_mask = ~exclusion_mask
     weights = valid_mask.astype(np.float32, copy=False)
@@ -591,6 +625,7 @@ def _background_baseline(
     rois: list[AreaRoi] | None = None,
     mask_settings: AreaRoiDetectionSettings | None = None,
     external_mask: np.ndarray | None = None,
+    exclusion_dilation_px: int = 0,
 ) -> float:
     """The scalar re-centering value flatten_background adds back after
     subtracting the spatially-varying background estimate. This is
@@ -609,6 +644,7 @@ def _background_baseline(
         rois=rois,
         mask_settings=mask_settings,
         external_mask=external_mask,
+        dilation_px=exclusion_dilation_px,
     )
     valid_mask = ~exclusion_mask
     if binning_factor <= 1:
@@ -619,6 +655,7 @@ def _background_baseline(
             rois=rois,
             mask_settings=mask_settings,
             external_mask=external_mask,
+            exclusion_dilation_px=exclusion_dilation_px,
         )
         return float(np.median(background[valid_mask])) if np.any(valid_mask) else float(np.median(background))
 
@@ -758,6 +795,7 @@ def _combined_exclusion_mask(
     rois: list[AreaRoi] | None = None,
     mask_settings: AreaRoiDetectionSettings | None = None,
     external_mask: np.ndarray | None = None,
+    dilation_px: int = 0,
 ) -> np.ndarray:
     exclusion_mask = _roi_exclusion_mask(image.shape[:2], rois)
     if mask_settings is not None:
@@ -766,6 +804,9 @@ def _combined_exclusion_mask(
             mask_settings,
             external_mask=external_mask,
         )
+    dilation = max(int(dilation_px), 0)
+    if dilation > 0 and np.any(exclusion_mask):
+        exclusion_mask = ndimage.binary_dilation(exclusion_mask, iterations=dilation)
     return exclusion_mask
 
 
