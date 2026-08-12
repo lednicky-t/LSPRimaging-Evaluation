@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import numpy as np
-from PyQt6.QtCore import QByteArray, QEvent, QPointF, QRectF, QSize, Qt, QTimer, pyqtSignal
+from PyQt6.QtCore import QByteArray, QPointF, QRectF, QSize, Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import (
     QColor,
     QIcon,
@@ -13,10 +13,9 @@ from PyQt6.QtGui import (
 )
 from PyQt6.QtSvg import QSvgRenderer
 from PyQt6.QtWidgets import (
+    QDockWidget,
     QDoubleSpinBox,
-    QFrame,
     QHBoxLayout,
-    QLabel,
     QMessageBox,
     QProgressBar,
     QStyleOptionProgressBar,
@@ -29,6 +28,7 @@ from lspr_ui import (
     collapsible_pin_stylesheet,
     collapsible_toggle_stylesheet,
     get_active_theme,
+    hex_to_rgba,
     tabler_icon_svg,
     transparent_icon_button_stylesheet,
 )
@@ -190,131 +190,54 @@ class CollapsibleSection(QWidget):
         self._apply_button.setEnabled(bool(enabled))
 
 
-class PanelContainer(QWidget):
-    visibilityChanged = pyqtSignal(bool)
-
+class PanelContainer(QDockWidget):
     def __init__(self, title: str, content: QWidget, parent: QWidget | None = None) -> None:
-        super().__init__(parent)
+        super().__init__(title, parent)
         self._title = title
-        from PyQt6.QtGui import QAction
-        self._toggle_action = QAction(title, self)
-        self._toggle_action.setCheckable(True)
-        self._toggle_action.setChecked(True)
-        self._toggle_action.toggled.connect(self._set_visible_from_action)
         self._content = content
-        self._content.setParent(self)
-
         self.setObjectName(f"{title.replace(' ', '')}Panel")
-        outer_layout = QVBoxLayout(self)
-        outer_layout.setContentsMargins(0, 0, 0, 0)
-        outer_layout.setSpacing(0)
+        self.setWidget(content)
+        self.setFeatures(
+            QDockWidget.DockWidgetFeature.DockWidgetMovable
+            | QDockWidget.DockWidgetFeature.DockWidgetFloatable
+            | QDockWidget.DockWidgetFeature.DockWidgetClosable
+        )
+        self.setAllowedAreas(Qt.DockWidgetArea.AllDockWidgetAreas)
 
-        header = QFrame(self)
-        header.setObjectName("panelHeader")
-        header.setToolTip(f"Double-click to hide the {title} panel.")
-        header.setCursor(Qt.CursorShape.PointingHandCursor)
-        header_layout = QHBoxLayout(header)
-        header_layout.setContentsMargins(8, 4, 8, 4)
-        header_layout.setSpacing(4)
-        title_label = QLabel(title, header)
-        title_label.setObjectName("toolbarMiniLabel")
-        title_label.setStyleSheet("font-weight: 600;")
-        header_layout.addWidget(title_label)
-        header_layout.addStretch(1)
-        self._header = header
-        header.installEventFilter(self)
-
-        outer_layout.addWidget(header)
-        outer_layout.addWidget(self._content, 1)
+        theme = get_active_theme()
         self.setStyleSheet(
             f"""
-            QFrame#panelHeader {{
-                background: {get_active_theme().window_bg};
-                border-bottom: 1px solid {get_active_theme().toolbar_border};
+            QDockWidget {{
+                color: {theme.text_primary};
+            }}
+            QDockWidget::title {{
+                background: {theme.window_bg};
+                border-bottom: 1px solid {theme.toolbar_border};
+                padding: 4px 8px;
+                font-weight: 600;
+            }}
+            QDockWidget::close-button, QDockWidget::float-button {{
+                background: transparent;
+                border: none;
+                width: 18px;
+                height: 18px;
+                padding: 1px;
+                subcontrol-position: top right;
+            }}
+            QDockWidget::float-button {{
+                subcontrol-position: top right;
+                right: 22px;
+            }}
+            QDockWidget::close-button:hover {{
+                background: {hex_to_rgba(theme.accent_red, 0.22)};
+                border-radius: 3px;
+            }}
+            QDockWidget::float-button:hover {{
+                background: {hex_to_rgba(theme.accent_blue, 0.22)};
+                border-radius: 3px;
             }}
             """
         )
-
-    def toggleViewAction(self):
-        return self._toggle_action
-
-    def eventFilter(self, watched, event) -> bool:  # type: ignore[override]
-        if watched is self._header and event.type() == QEvent.Type.MouseButtonDblClick:
-            self.setVisible(False)
-            return True
-        return super().eventFilter(watched, event)
-
-    def _set_visible_from_action(self, checked: bool) -> None:
-        QWidget.setVisible(self, bool(checked))
-
-    def setVisible(self, visible: bool) -> None:  # type: ignore[override]
-        visible = bool(visible)
-        changed = visible != QWidget.isVisible(self)
-        QWidget.setVisible(self, visible)
-        previous = self._toggle_action.blockSignals(True)
-        try:
-            self._toggle_action.setChecked(visible)
-        finally:
-            self._toggle_action.blockSignals(previous)
-        if changed:
-            self.visibilityChanged.emit(visible)
-
-    def raise_(self) -> None:  # type: ignore[override]
-        QWidget.raise_(self)
-
-    def setFloating(self, _floating: bool) -> None:
-        return
-
-    def isFloating(self) -> bool:
-        return False
-
-    def setAllowedAreas(self, _areas) -> None:
-        return
-
-    def setFeatures(self, _features) -> None:
-        return
-
-    def _set_expanded(self, expanded: bool) -> None:
-        self._toggle.setIcon(self._make_chevron_icon(expanded))
-        self._content.setVisible(expanded)
-        self.expanded_changed.emit(expanded)
-
-    def is_expanded(self) -> bool:
-        return self._toggle.isChecked()
-
-    def set_expanded(self, expanded: bool) -> None:
-        self._toggle.setChecked(expanded)
-
-    def is_pinned(self) -> bool:
-        return self._pin_button.isChecked()
-
-    def set_pinned(self, pinned: bool) -> None:
-        self._pin_button.setChecked(pinned)
-
-    def has_apply_toggle(self) -> bool:
-        return self._apply_button is not None
-
-    def is_applied(self) -> bool:
-        return True if self._apply_button is None else self._apply_button.isChecked()
-
-    def set_applied(self, applied: bool) -> None:
-        if self._apply_button is None:
-            return
-        self._apply_button.setChecked(bool(applied))
-
-    def set_apply_enabled(self, enabled: bool) -> None:
-        if self._apply_button is None:
-            return
-        self._apply_button.setEnabled(bool(enabled))
-
-    def _update_pin_icon(self, pinned: bool) -> None:
-        self._pin_button.setIcon(PanelContainer._make_pin_icon(self, pinned))
-
-    def _set_applied(self, applied: bool) -> None:
-        if self._apply_button is None:
-            return
-        self._apply_button.setIcon(PanelContainer._make_apply_icon(self, applied))
-        self.apply_changed.emit(applied)
 
     def _make_chevron_icon(self, expanded: bool) -> QIcon:
         pixmap = QPixmap(14, 14)

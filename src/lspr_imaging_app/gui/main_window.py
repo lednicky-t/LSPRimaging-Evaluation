@@ -275,10 +275,11 @@ class MainWindow(MainWindowIcons, QMainWindow):
         self._analysis_enabled = self._settings_bool("analysis_section_applied", True)
         self._window_geometry_restored = False
         self._layout_preferences_ready = False
+        self._dock_layout_built = False
         self._startup_restore_window_maximized = False
         self._startup_restore_window_fullscreen = False
         self._suspend_layout_save = False
-        self._panel_layout_visibility_backup: dict[str, QByteArray] | None = None
+        self._panel_layout_visibility_backup: QByteArray | None = None
         self._current_image_key: tuple[int, float] | None = None
         self._previous_image_key: tuple[int, float] | None = None
         self._spectral_cube_values: list[int] = []
@@ -6011,10 +6012,11 @@ class MainWindow(MainWindowIcons, QMainWindow):
         content: QWidget,
         *,
         panel_name: str,
-        allowed_areas: Qt.DockWidgetArea = Qt.DockWidgetArea.RightDockWidgetArea,
+        allowed_areas: Qt.DockWidgetArea = Qt.DockWidgetArea.AllDockWidgetAreas,
     ) -> PanelContainer:
         panel = PanelContainer(title, content, self)
         panel.setObjectName(panel_name)
+        panel.setAllowedAreas(allowed_areas)
         return panel
 
     def _restore_default_panel_layout(self) -> None:

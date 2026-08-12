@@ -5,7 +5,7 @@ import logging
 import numpy as np
 from PyQt6.QtCore import QByteArray, QRectF, Qt
 from PyQt6.QtGui import QGuiApplication
-from PyQt6.QtWidgets import QSplitter, QVBoxLayout, QWidget
+from PyQt6.QtWidgets import QWidget
 
 
 class LayoutStateController:
@@ -229,36 +229,21 @@ class LayoutStateController:
         window._settings.setValue("ome_zarr/compression_enabled", bool(window.ome_zarr_compression_button.isChecked()))
         self.save_panel_layout_preferences()
 
-    def capture_panel_layout_snapshot(self) -> dict[str, QByteArray] | None:
+    def capture_panel_layout_snapshot(self) -> QByteArray | None:
         window = self.window
-        if not hasattr(window, "_main_splitter"):
+        if not window._dock_layout_built:
             return None
-        return {
-            "main": window._main_splitter.saveState(),
-            "visual": window._visual_splitter.saveState(),
-            "top": window._top_visual_splitter.saveState(),
-            "bottom": window._bottom_visual_splitter.saveState(),
-        }
+        return window.saveState()
 
-    def apply_panel_layout_snapshot(self, snapshot: dict[str, QByteArray] | None) -> None:
+    def apply_panel_layout_snapshot(self, snapshot: QByteArray | None) -> None:
         window = self.window
-        if snapshot is None:
-            self.apply_default_splitter_sizes()
+        if snapshot is None or not isinstance(snapshot, QByteArray) or snapshot.isEmpty():
+            self.apply_default_dock_sizes()
             return
-        for key, splitter_name in (
-            ("main", "_main_splitter"),
-            ("visual", "_visual_splitter"),
-            ("top", "_top_visual_splitter"),
-            ("bottom", "_bottom_visual_splitter"),
-        ):
-            splitter = getattr(window, splitter_name, None)
-            state = snapshot.get(key)
-            if splitter is None or not isinstance(state, QByteArray) or state.isEmpty():
-                continue
-            try:
-                splitter.restoreState(state)
-            except Exception:
-                pass
+        try:
+            window.restoreState(snapshot)
+        except Exception:
+            pass
         self.normalize_panel_layout()
 
     def panel_layout_panels(self) -> list[tuple[str, QWidget]]:
@@ -274,43 +259,29 @@ class LayoutStateController:
 
     def restore_saved_panel_layout_state(self) -> bool:
         window = self.window
-        if not hasattr(window, "_main_splitter"):
-            logging.getLogger("lspr_imaging_app.layout").debug("splitter restore | no splitter layout")
-            window._append_workflow_log("Layout | no splitter layout available", level="warning")
+        if not window._dock_layout_built:
+            logging.getLogger("lspr_imaging_app.layout").debug("dock restore | no dock layout")
+            window._append_workflow_log("Layout | no dock layout available", level="warning")
             return False
-        state_keys = {
-            "_main_splitter": "layout/main_splitter_state",
-            "_visual_splitter": "layout/visual_splitter_state",
-            "_top_visual_splitter": "layout/top_visual_splitter_state",
-            "_bottom_visual_splitter": "layout/bottom_visual_splitter_state",
-        }
-        restored_any = False
-        for attr_name, key in state_keys.items():
-            splitter = getattr(window, attr_name, None)
-            if splitter is None:
-                continue
-            state = window._settings.value(key)
-            if not isinstance(state, (QByteArray, bytes, bytearray)):
-                continue
-            blob = QByteArray(state)
-            if blob.isEmpty():
-                continue
-            try:
-                restored = bool(splitter.restoreState(blob))
-            except Exception:
-                restored = False
-            logging.getLogger("lspr_imaging_app.layout").debug(
-                "splitter restore | %s | restored=%s | size=%s",
-                attr_name,
-                restored,
-                blob.size(),
-            )
-            window._append_workflow_log(
-                f"Layout | {attr_name} restored={restored} size={blob.size()}",
-                level="debug" if restored else "warning",
-            )
-            restored_any = restored_any or restored
-        return restored_any
+        state = window._settings.value("layout/dock_state")
+        if not isinstance(state, (QByteArray, bytes, bytearray)):
+            window._append_workflow_log("Layout | no saved dock_state", level="debug")
+            return False
+        blob = QByteArray(state)
+        if blob.isEmpty():
+            return False
+        try:
+            restored = bool(window.restoreState(blob))
+        except Exception:
+            restored = False
+        logging.getLogger("lspr_imaging_app.layout").debug(
+            "dock restore | restored=%s | size=%s", restored, blob.size()
+        )
+        window._append_workflow_log(
+            f"Layout | dock_state restored={restored} size={blob.size()}",
+            level="debug" if restored else "warning",
+        )
+        return restored
 
     def restore_saved_window_state_after_show(self) -> None:
         window = self.window
@@ -323,32 +294,22 @@ class LayoutStateController:
 
     def restore_panel_layout_preferences(self) -> None:
         window = self.window
-        window._append_workflow_log("Layout | restoring panel visibility and splitter states", level="debug")
+        window._append_workflow_log("Layout | restoring panel visibility and dock state", level="debug")
         self.restore_default_panel_layout()
-        for name, panel in self.panel_layout_panels():
-            visible = window._settings_bool(f"layout/{name}_visible", True)
-            panel.blockSignals(True)
-            try:
-                panel.setVisible(visible)
-            finally:
-                panel.blockSignals(False)
-            window._append_workflow_log(f"Panel | restore {name} visible={visible}", level="debug")
         if not self.restore_saved_panel_layout_state():
-            self.apply_default_splitter_sizes()
-            window._append_workflow_log("Layout | applied default splitter sizes", level="warning")
+            self.apply_default_dock_sizes()
+            window._append_workflow_log("Layout | applied default dock sizes", level="warning")
 
     def normalize_panel_layout(self) -> None:
-        window = self.window
-        if not hasattr(window, "_main_splitter"):
-            return
-        window._main_splitter.setChildrenCollapsible(False)
-        window._visual_splitter.setChildrenCollapsible(False)
-        window._top_visual_splitter.setChildrenCollapsible(False)
-        window._bottom_visual_splitter.setChildrenCollapsible(False)
+        # No-op: each panel already carries a setMinimumWidth() (see layout_builder.py),
+        # which Qt's dock layout respects on its own - unlike the old QSplitter tree,
+        # which needed setChildrenCollapsible(False) called explicitly to stop panels
+        # being dragged to zero width.
+        return
 
     def set_all_panel_visibility(self, visible: bool) -> None:
         window = self.window
-        if not hasattr(window, "_main_splitter"):
+        if not window._dock_layout_built:
             return
         snapshot = window._panel_layout_visibility_backup
         window._append_workflow_log(f"Panel | {'show' if visible else 'hide'} all", level="debug")
@@ -368,12 +329,18 @@ class LayoutStateController:
 
     def sync_panel_visibility_after_show(self) -> None:
         window = self.window
+        # Visibility already travels inside the restored "layout/dock_state" blob
+        # (window.restoreState() sets it before this runs) - this just re-asserts
+        # each toggleViewAction's checked state to match, as a defensive safety net.
+        # Uses isHidden(), not isVisible(): this runs while the top-level window is
+        # still hidden (see app.py finish_startup), and isVisible() is False for
+        # every child in that state regardless of each dock's own restored
+        # visibility - isHidden() reflects the dock's own explicit state only.
         for name, dock in self.panel_layout_panels():
-            visible = window._settings_bool(f"layout/{name}_visible", True)
+            visible = not dock.isHidden()
             dock.blockSignals(True)
             try:
                 dock.toggleViewAction().setChecked(visible)
-                dock.setVisible(visible)
             finally:
                 dock.blockSignals(False)
             window._append_workflow_log(f"Panel | sync {name} visible={visible}", level="debug")
@@ -385,17 +352,9 @@ class LayoutStateController:
 
     def save_panel_layout_preferences(self) -> None:
         window = self.window
-        for name, dock in self.panel_layout_panels():
-            visible = bool(dock.toggleViewAction().isChecked())
-            window._settings.setValue(f"layout/{name}_visible", visible)
-        if hasattr(window, "_main_splitter"):
-            window._settings.setValue("layout/main_splitter_state", window._main_splitter.saveState())
-        if hasattr(window, "_visual_splitter"):
-            window._settings.setValue("layout/visual_splitter_state", window._visual_splitter.saveState())
-        if hasattr(window, "_top_visual_splitter"):
-            window._settings.setValue("layout/top_visual_splitter_state", window._top_visual_splitter.saveState())
-        if hasattr(window, "_bottom_visual_splitter"):
-            window._settings.setValue("layout/bottom_visual_splitter_state", window._bottom_visual_splitter.saveState())
+        if not window._dock_layout_built:
+            return
+        window._settings.setValue("layout/dock_state", window.saveState())
 
     def on_panel_visibility_changed(self, _dock: QWidget) -> None:
         window = self.window
@@ -474,68 +433,47 @@ class LayoutStateController:
 
     def restore_default_panel_layout(self) -> None:
         window = self.window
-        if not hasattr(window, "_main_splitter"):
-            window._main_splitter = QSplitter(Qt.Orientation.Horizontal, window)
-            window._main_splitter.setObjectName("mainLayoutSplitter")
-            window._main_splitter.setChildrenCollapsible(False)
-            window._main_splitter.setHandleWidth(4)
-
-            window._visual_splitter = QSplitter(Qt.Orientation.Vertical, window._main_splitter)
-            window._visual_splitter.setObjectName("visualLayoutSplitter")
-            window._visual_splitter.setChildrenCollapsible(False)
-            window._visual_splitter.setHandleWidth(4)
-
-            window._top_visual_splitter = QSplitter(Qt.Orientation.Horizontal, window._visual_splitter)
-            window._top_visual_splitter.setObjectName("topVisualSplitter")
-            window._top_visual_splitter.setChildrenCollapsible(False)
-            window._top_visual_splitter.setHandleWidth(4)
-
-            window._bottom_visual_splitter = QSplitter(Qt.Orientation.Horizontal, window._visual_splitter)
-            window._bottom_visual_splitter.setObjectName("bottomVisualSplitter")
-            window._bottom_visual_splitter.setChildrenCollapsible(False)
-            window._bottom_visual_splitter.setHandleWidth(4)
-
-            window._top_visual_splitter.addWidget(window.image_panel)
-            window._top_visual_splitter.addWidget(window.histogram_panel)
-            window._bottom_visual_splitter.addWidget(window.spectra_panel)
-            window._bottom_visual_splitter.addWidget(window.sensorgram_panel)
-            window._visual_splitter.addWidget(window._top_visual_splitter)
-            window._visual_splitter.addWidget(window._bottom_visual_splitter)
-            window._main_splitter.addWidget(window.workflow_panel)
-            window._main_splitter.addWidget(window.roi_list_panel)
-            window._main_splitter.addWidget(window._visual_splitter)
-            window._workspace_root = QWidget(window)
-            workspace_layout = QVBoxLayout(window._workspace_root)
-            workspace_layout.setContentsMargins(0, 0, 0, 0)
-            workspace_layout.setSpacing(0)
-            workspace_layout.addWidget(window._main_splitter, 1)
-            window.setCentralWidget(window._workspace_root)
+        if not window._dock_layout_built:
+            window.setDockNestingEnabled(True)
+            window.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, window.workflow_panel)
+            window.splitDockWidget(window.workflow_panel, window.roi_list_panel, Qt.Orientation.Horizontal)
+            window.splitDockWidget(window.roi_list_panel, window.image_panel, Qt.Orientation.Horizontal)
+            window.splitDockWidget(window.image_panel, window.histogram_panel, Qt.Orientation.Horizontal)
+            window.splitDockWidget(window.image_panel, window.spectra_panel, Qt.Orientation.Vertical)
+            window.splitDockWidget(window.spectra_panel, window.sensorgram_panel, Qt.Orientation.Horizontal)
+            window._dock_layout_built = True
+        # Floating/docked state is remembered independently of visibility, so a
+        # panel closed while floating would otherwise reopen floating instead of
+        # docked - force every panel back into its default dock area here. This
+        # runs before restore_saved_panel_layout_state() during normal startup,
+        # so a user's actual saved floating layout still applies moments later;
+        # it only "sticks" here for the reset-to-defaults and no-saved-state paths.
+        for panel in (
+            window.workflow_panel,
+            window.roi_list_panel,
+            window.image_panel,
+            window.histogram_panel,
+            window.spectra_panel,
+            window.sensorgram_panel,
+        ):
+            panel.setFloating(False)
         window.workflow_panel.setVisible(True)
         window.roi_list_panel.setVisible(window._settings_bool("layout/roi_list_visible", True))
         window.image_panel.setVisible(True)
         window.histogram_panel.setVisible(True)
         window.spectra_panel.setVisible(True)
         window.sensorgram_panel.setVisible(True)
-        self.apply_default_splitter_sizes()
+        self.apply_default_dock_sizes()
 
-    def apply_default_splitter_sizes(self) -> None:
+    def apply_default_dock_sizes(self) -> None:
         window = self.window
-        if not hasattr(window, "_main_splitter"):
+        if not window._dock_layout_built:
             return
-        window._main_splitter.setStretchFactor(0, 0)
-        window._main_splitter.setStretchFactor(1, 0)
-        window._main_splitter.setStretchFactor(2, 1)
-        window._visual_splitter.setStretchFactor(0, 1)
-        window._visual_splitter.setStretchFactor(1, 1)
-        window._top_visual_splitter.setStretchFactor(0, 4)
-        window._top_visual_splitter.setStretchFactor(1, 1)
-        window._bottom_visual_splitter.setStretchFactor(0, 1)
-        window._bottom_visual_splitter.setStretchFactor(1, 1)
-        if window._main_splitter.count() == 3:
-            window._main_splitter.setSizes([360, max(260, window.roi_list_panel.minimumWidth()), 1200])
-        if window._visual_splitter.count() == 2:
-            window._visual_splitter.setSizes([760, 420])
-        if window._top_visual_splitter.count() == 2:
-            window._top_visual_splitter.setSizes([980, 300])
-        if window._bottom_visual_splitter.count() == 2:
-            window._bottom_visual_splitter.setSizes([640, 640])
+        window.resizeDocks(
+            [window.workflow_panel, window.roi_list_panel, window.image_panel],
+            [360, max(260, window.roi_list_panel.minimumWidth()), 1200],
+            Qt.Orientation.Horizontal,
+        )
+        window.resizeDocks([window.image_panel, window.spectra_panel], [760, 420], Qt.Orientation.Vertical)
+        window.resizeDocks([window.image_panel, window.histogram_panel], [980, 300], Qt.Orientation.Horizontal)
+        window.resizeDocks([window.spectra_panel, window.sensorgram_panel], [640, 640], Qt.Orientation.Horizontal)
