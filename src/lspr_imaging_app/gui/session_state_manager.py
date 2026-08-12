@@ -55,12 +55,14 @@ class SessionStateManager:
                     session_mask,
                     mask_settings,
                     image_exclusions,
+                    area_roi_arrays,
                 ) = load_processing_profile(profile_path)
                 window._state.preprocessing = preprocessing
                 window._state.area_roi_settings = area_roi_settings
                 window._state.mask = mask_settings
                 window._state.area_rois = area_rois
                 window._state.area_roi_groups = area_roi_groups
+                window._state.area_roi_arrays = area_roi_arrays
                 window._state.rois = rois
                 window._reset_roi_id_counter_from_state()
                 window._current_file_mask = None
@@ -293,6 +295,7 @@ class SessionStateManager:
                 session_mask=session_mask_payload,
                 mask_settings=window._state.mask,
                 image_exclusions=window._state.image_exclusions,
+                area_roi_arrays=window._state.area_roi_arrays,
             )
         except Exception as exc:
             window._append_workflow_log(
@@ -396,6 +399,7 @@ class SessionStateManager:
                 session_mask=window._session_mask_payload(),
                 mask_settings=window._state.mask,
                 image_exclusions=window._state.image_exclusions,
+                area_roi_arrays=window._state.area_roi_arrays,
             )
             session_mask_payload = window._session_mask_payload()
             if session_mask_payload is None:
@@ -441,11 +445,13 @@ class SessionStateManager:
                 session_mask,
                 mask_settings,
                 image_exclusions,
+                area_roi_arrays,
             ) = load_processing_profile(Path(source))
             window._state.preprocessing = preprocessing
             window._state.area_roi_settings = area_roi_settings
             window._state.area_rois = area_rois
             window._state.area_roi_groups = area_roi_groups
+            window._state.area_roi_arrays = area_roi_arrays
             window._state.rois = rois
             window._reset_roi_id_counter_from_state()
             window._state.chromatic_models = chromatic_models

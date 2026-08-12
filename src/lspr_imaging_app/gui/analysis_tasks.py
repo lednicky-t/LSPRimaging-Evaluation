@@ -35,6 +35,7 @@ from lspr_imaging_app.processing.preprocess import (
     estimate_background_profile,
 )
 from lspr_imaging_app.processing.roi_detection import detect_rois, ignored_pixel_mask, refresh_roi_metrics
+from lspr_imaging_app.processing.roi_rasterize import expand_mask, expand_mask_to_patch
 
 
 def _process_image_task(path_str: str, preprocessing, rois, external_mask: np.ndarray | None, mask_state) -> np.ndarray:
@@ -181,9 +182,20 @@ def _selected_roi_masks_for_spectrum(
         xx = xx + px0
         yy = yy + py0
         for roi in effective_rois:
-            distance_sq = (xx - float(roi.center_x)) ** 2 + (yy - float(roi.center_y)) ** 2
-            roi_mask |= distance_sq <= float(roi.sample_radius_px) ** 2
-            if reference_outer_radius > 0.0:
+            # "mask"-geometry ROIs carry their own cropped bitmap and skip the
+            # circle/annulus formula below; sample and reference are dispatched
+            # independently so one can be a mask while the other stays a circle.
+            needs_distance = roi.sample_geometry_type != "mask" or roi.reference_geometry_type not in ("mask", "none")
+            distance_sq = (xx - float(roi.center_x)) ** 2 + (yy - float(roi.center_y)) ** 2 if needs_distance else None
+
+            if roi.sample_geometry_type == "mask" and roi.sample_mask is not None:
+                roi_mask |= expand_mask_to_patch(roi.sample_mask, (px0, py0), (image_height, image_width))
+            else:
+                roi_mask |= distance_sq <= float(roi.sample_radius_px) ** 2
+
+            if roi.reference_geometry_type == "mask" and roi.reference_mask is not None:
+                reference_mask |= expand_mask_to_patch(roi.reference_mask, (px0, py0), (image_height, image_width))
+            elif roi.reference_geometry_type != "none" and reference_outer_radius > 0.0:
                 outer_mask = distance_sq <= reference_outer_radius**2
                 inner_mask = distance_sq < reference_inner_radius**2 if reference_inner_radius > 0.0 else np.zeros_like(outer_mask)
                 reference_mask |= outer_mask & ~inner_mask
@@ -198,13 +210,23 @@ def _selected_roi_masks_for_spectrum(
     # offset patch needs the explicit-origin "_for_patch" variants below.
     if px0 == 0 and py0 == 0:
         for roi in effective_rois:
-            roi_mask |= transformed_disk_mask(
-                (image_height, image_width),
-                (float(roi.center_x), float(roi.center_y)),
-                float(roi.sample_radius_px),
-                affine_matrix,
-            )
-            if reference_outer_radius > 0.0:
+            # Note: mask-geometry ROIs are not re-warped by the chromatic
+            # affine transform (unlike circle/annulus, which are recomputed
+            # per wavelength) — they sit at the same absolute pixel location
+            # for every wavelength. Fine for the current opt-in use of "mask"
+            # geometry; revisit if chromatic-corrected arbitrary masks are needed.
+            if roi.sample_geometry_type == "mask" and roi.sample_mask is not None:
+                roi_mask |= expand_mask(roi.sample_mask, (image_height, image_width))
+            else:
+                roi_mask |= transformed_disk_mask(
+                    (image_height, image_width),
+                    (float(roi.center_x), float(roi.center_y)),
+                    float(roi.sample_radius_px),
+                    affine_matrix,
+                )
+            if roi.reference_geometry_type == "mask" and roi.reference_mask is not None:
+                reference_mask |= expand_mask(roi.reference_mask, (image_height, image_width))
+            elif roi.reference_geometry_type != "none" and reference_outer_radius > 0.0:
                 reference_mask |= transformed_annulus_mask(
                     (image_height, image_width),
                     (float(roi.center_x), float(roi.center_y)),
@@ -214,14 +236,19 @@ def _selected_roi_masks_for_spectrum(
                 )
     else:
         for roi in effective_rois:
-            roi_mask |= transformed_disk_mask_for_patch(
-                (px0, py0),
-                (image_height, image_width),
-                (float(roi.center_x), float(roi.center_y)),
-                float(roi.sample_radius_px),
-                affine_matrix,
-            )
-            if reference_outer_radius > 0.0:
+            if roi.sample_geometry_type == "mask" and roi.sample_mask is not None:
+                roi_mask |= expand_mask_to_patch(roi.sample_mask, (px0, py0), (image_height, image_width))
+            else:
+                roi_mask |= transformed_disk_mask_for_patch(
+                    (px0, py0),
+                    (image_height, image_width),
+                    (float(roi.center_x), float(roi.center_y)),
+                    float(roi.sample_radius_px),
+                    affine_matrix,
+                )
+            if roi.reference_geometry_type == "mask" and roi.reference_mask is not None:
+                reference_mask |= expand_mask_to_patch(roi.reference_mask, (px0, py0), (image_height, image_width))
+            elif roi.reference_geometry_type != "none" and reference_outer_radius > 0.0:
                 reference_mask |= transformed_annulus_mask_for_patch(
                     (px0, py0),
                     (image_height, image_width),
@@ -312,6 +339,10 @@ def _roi_absorbance_signature(
         round(float(roi.sample_radius_px), 3),
         round(float(roi.reference_inner_diameter_px or 0.0), 3),
         round(float(roi.reference_outer_diameter_px or 0.0), 3),
+        roi.sample_geometry_type,
+        roi.reference_geometry_type,
+        _roi_mask_signature(roi.sample_mask),
+        _roi_mask_signature(roi.reference_mask),
         chromatic_signatures,
     )
 
@@ -340,6 +371,10 @@ def _absorbance_roi_mask_cache_key(
                 round(float(roi.reference_outer_diameter_px or 0.0), 3),
                 roi.sample_color_hex or "",
                 roi.reference_color_hex or "",
+                roi.sample_geometry_type,
+                roi.reference_geometry_type,
+                _roi_mask_signature(roi.sample_mask),
+                _roi_mask_signature(roi.reference_mask),
             )
             for roi in selected_rois
         ),
@@ -347,6 +382,16 @@ def _absorbance_roi_mask_cache_key(
         round(float(reference_inner_radius_px), 3),
         round(float(reference_outer_radius_px), 3),
     )
+
+
+def _roi_mask_signature(roi_mask) -> tuple[object, ...] | None:
+    """Cheap fingerprint for a RoiMask so the ROI mask cache correctly
+    invalidates when a user edits a "mask"-geometry ROI's bitmap in place
+    (same area_roi_id, different pixels).
+    """
+    if roi_mask is None:
+        return None
+    return (roi_mask.x0, roi_mask.y0, roi_mask.mask.shape, hash(roi_mask.mask.tobytes()))
 
 
 def _absorbance_spectrum_task(

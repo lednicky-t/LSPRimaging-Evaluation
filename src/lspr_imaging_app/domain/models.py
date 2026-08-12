@@ -185,6 +185,19 @@ class AbsorbanceSpectrumResult:
 
 
 @dataclass(slots=True)
+class RoiMask:
+    """Cropped boolean mask fallback for an irregular sample/reference region.
+
+    ``mask`` is cropped to its bounding box, not full-image sized; (x0, y0) is
+    the top-left corner of that box in processed-image pixel coordinates.
+    """
+
+    x0: int
+    y0: int
+    mask: np.ndarray
+
+
+@dataclass(slots=True)
 class AreaRoi:
     area_roi_id: int
     center_x: float
@@ -202,6 +215,16 @@ class AreaRoi:
     support_value_std: float = 0.0
     quality_score: float = 0.0
     inferred: bool = False
+    # Geometry escape hatch: "circle"/"annulus" (default) reproduce the existing
+    # radius-based behavior exactly; "mask" uses sample_mask/reference_mask instead.
+    sample_geometry_type: str = "circle"
+    sample_mask: RoiMask | None = None
+    reference_geometry_type: str = "annulus"
+    reference_mask: RoiMask | None = None
+    array_id: str | None = None
+    label: str | None = None
+    created_by: str = "user"
+    notes: str | None = None
 
 
 @dataclass(slots=True)
@@ -211,6 +234,28 @@ class AreaRoiGroup:
     sample_color_hex: str = "#f59e0b"
     reference_color_hex: str = "#38bdf8"
     area_roi_ids: list[int] = field(default_factory=list)
+
+
+@dataclass(slots=True)
+class RoiArrayGroup:
+    """Persisted grid recipe tying together AreaRoi members stamped as a periodic array.
+
+    This is the recipe, not a duplicate of member geometry: rows/cols/spacing/anchor
+    can be edited later to regenerate or nudge the whole array as a unit.
+    (anchor_x_px, anchor_y_px) is the position of the row=0, col=0 member, not
+    the array's visual center.
+    """
+
+    array_id: str
+    label: str
+    rows: int
+    cols: int
+    spacing_x_px: float
+    spacing_y_px: float
+    anchor_x_px: float
+    anchor_y_px: float
+    rotation_deg: float = 0.0
+    member_area_roi_ids: list[int] = field(default_factory=list)
 
 
 @dataclass(slots=True)
@@ -259,6 +304,7 @@ class AnalysisState:
     area_roi_settings: AreaRoiDetectionSettings = field(default_factory=AreaRoiDetectionSettings)
     area_rois: list[AreaRoi] = field(default_factory=list)
     area_roi_groups: list[AreaRoiGroup] = field(default_factory=list)
+    area_roi_arrays: list[RoiArrayGroup] = field(default_factory=list)
     chromatic_models: list[ChromaticTransformModel] = field(default_factory=list)
     chromatic_landmarks: list[ChromaticLandmarkObservation] = field(default_factory=list)
     mask: MaskSettings = field(default_factory=MaskSettings)

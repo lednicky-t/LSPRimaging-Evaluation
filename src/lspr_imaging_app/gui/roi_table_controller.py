@@ -9,7 +9,8 @@ from PyQt6.QtCore import QItemSelectionModel
 from PyQt6.QtGui import QBrush, QColor
 from PyQt6.QtWidgets import QFileDialog, QMenu, QMessageBox, QTableWidgetItem
 
-from lspr_imaging_app.domain.models import AreaRoi, AreaRoiGroup
+from lspr_imaging_app.domain.models import AreaRoi, AreaRoiGroup, RoiArrayGroup
+from lspr_imaging_app.domain.roi_editor_tools import build_roi_array_group
 from lspr_imaging_app.gui.roi_table_helpers import (
     append_roi_table_row,
     format_xy_value,
@@ -643,6 +644,39 @@ class RoiTableController:
         self.window._background_error("ROI metric refresh", message)
 
 
+    def _build_array_group_from_detection(self, detected_rois: list[AreaRoi]) -> list[RoiArrayGroup]:
+        """If array detection settings were configured and detection actually
+        produced a full grid, record the recipe as a persisted `RoiArrayGroup`
+        so rows/cols/spacing survive save/reload and can be edited later as a
+        unit, instead of being a one-shot detection parameter.
+
+        `detect_rois`/`_fit_grid_array` (processing/roi_detection.py) always
+        fill every grid cell (with an inferred ROI where no signal was found)
+        when grid fitting runs, so `len(detected_rois) == rows * cols` is a
+        reliable signal that fitting happened, without this GUI-layer code
+        needing to know detection internals.
+        """
+        settings = self.window._state.area_roi_settings
+        rows = int(settings.array_rows)
+        cols = int(settings.array_cols)
+        spacing = float(settings.array_spacing_px)
+        if rows <= 0 or cols <= 0 or spacing <= 0.0 or len(detected_rois) != rows * cols:
+            return []
+        first = detected_rois[0]
+        array_group = build_roi_array_group(
+            array_id="array_1",
+            label="Detected array",
+            rows=rows,
+            cols=cols,
+            spacing_x=spacing,
+            origin_x=float(first.center_x),
+            origin_y=float(first.center_y),
+            member_area_roi_ids=[int(roi.area_roi_id) for roi in detected_rois],
+        )
+        for roi in detected_rois:
+            roi.array_id = array_group.array_id
+        return [array_group]
+
     def _on_detect_rois_ready(
         self,
         request_id: int,
@@ -656,6 +690,7 @@ class RoiTableController:
             return
         self.window._state.area_rois = detected_rois
         self.window._state.area_roi_groups.clear()
+        self.window._state.area_roi_arrays = self._build_array_group_from_detection(detected_rois)
         self.window._selected_roi_ids.clear()
         self.window._invalidate_image_analysis_caches()
         self.window._invalidate_background_profile_cache()

@@ -19,7 +19,9 @@ from lspr_imaging_app.domain.models import (
     GridBoundsDefinition,
     MaskSettings,
     PreprocessingSettings,
+    RoiArrayGroup,
     RoiDefinition,
+    RoiMask,
 )
 
 
@@ -52,6 +54,34 @@ def _decode_mask_payload(payload: dict) -> np.ndarray | None:
         return unpacked.astype(bool, copy=False).reshape((height, width))
     except Exception:
         return None
+
+
+def _encode_roi_mask(roi_mask: RoiMask | None) -> dict | None:
+    if roi_mask is None:
+        return None
+    payload = _encode_mask_payload(roi_mask.mask)
+    payload["x0"] = int(roi_mask.x0)
+    payload["y0"] = int(roi_mask.y0)
+    return payload
+
+
+def _decode_roi_mask(payload: object) -> RoiMask | None:
+    if not isinstance(payload, dict):
+        return None
+    mask = _decode_mask_payload(payload)
+    if mask is None:
+        return None
+    return RoiMask(x0=int(payload.get("x0", 0)), y0=int(payload.get("y0", 0)), mask=mask)
+
+
+def _encode_area_roi(area_roi: AreaRoi) -> dict:
+    # asdict() would put the raw sample_mask/reference_mask ndarrays straight
+    # into the payload, which json.dumps can't serialize -- replace them with
+    # the same bitpacked encoding used for MaskSettings' masks.
+    payload = asdict(area_roi)
+    payload["sample_mask"] = _encode_roi_mask(area_roi.sample_mask)
+    payload["reference_mask"] = _encode_roi_mask(area_roi.reference_mask)
+    return payload
 
 
 def _encode_mask_settings(mask_settings: MaskSettings) -> dict:
@@ -228,6 +258,7 @@ def build_processing_profile_payload(
     session_mask: dict | None = None,
     mask_settings: MaskSettings | None = None,
     image_exclusions: list[ImageExclusionRule] | None = None,
+    area_roi_arrays: list[RoiArrayGroup] | None = None,
 ) -> dict:
     payload = {
         "profile_type": "lspr_imaging_processing",
@@ -272,8 +303,9 @@ def build_processing_profile_payload(
             "histogram_highlight_max_value": preprocessing.histogram_highlight_max_value,
         },
         "area_roi_settings": asdict(area_roi_settings),
-        "area_rois": [asdict(area_roi) for area_roi in area_rois],
+        "area_rois": [_encode_area_roi(area_roi) for area_roi in area_rois],
         "area_roi_groups": [asdict(group) for group in (area_roi_groups or [])],
+        "area_roi_arrays": [asdict(array_group) for array_group in (area_roi_arrays or [])],
         "rois": [asdict(roi) for roi in (rois or [])],
         "chromatic_models": [asdict(model) for model in (chromatic_models or [])],
         "chromatic_landmarks": [asdict(mark) for mark in (chromatic_landmarks or [])],
@@ -307,6 +339,7 @@ def save_processing_profile(
     session_mask: dict | None = None,
     mask_settings: MaskSettings | None = None,
     image_exclusions: list[ImageExclusionRule] | None = None,
+    area_roi_arrays: list[RoiArrayGroup] | None = None,
 ) -> None:
     write_json_file(
         path,
@@ -322,6 +355,7 @@ def save_processing_profile(
             session_mask=session_mask,
             mask_settings=mask_settings,
             image_exclusions=image_exclusions,
+            area_roi_arrays=area_roi_arrays,
         ),
     )
 
@@ -361,6 +395,7 @@ def load_processing_profile(
     dict | None,
     MaskSettings,
     list[ImageExclusionRule],
+    list[RoiArrayGroup],
 ]:
     payload = json.loads(path.read_text(encoding="utf-8"))
     preprocessing_payload = payload.get("preprocessing", payload)
@@ -566,6 +601,14 @@ def load_processing_profile(
                     support_value_std=float(raw.get("support_value_std", 0.0)),
                     quality_score=float(raw.get("quality_score", 0.0)),
                     inferred=bool(raw.get("inferred", False)),
+                    sample_geometry_type=str(raw.get("sample_geometry_type", "circle")),
+                    sample_mask=_decode_roi_mask(raw.get("sample_mask")),
+                    reference_geometry_type=str(raw.get("reference_geometry_type", "annulus")),
+                    reference_mask=_decode_roi_mask(raw.get("reference_mask")),
+                    array_id=(None if raw.get("array_id") in (None, "") else str(raw.get("array_id"))),
+                    label=(None if raw.get("label") in (None, "") else str(raw.get("label"))),
+                    created_by=str(raw.get("created_by", "user")),
+                    notes=(None if raw.get("notes") in (None, "") else str(raw.get("notes"))),
                 )
             )
 
@@ -589,6 +632,29 @@ def load_processing_profile(
                         raw.get("reference_color_hex", raw.get("ring_color_hex", raw.get("color_hex", "#38bdf8")))
                     ),
                     area_roi_ids=area_roi_ids,
+                )
+            )
+
+    raw_arrays = payload.get("area_roi_arrays", [])
+    area_roi_arrays: list[RoiArrayGroup] = []
+    if isinstance(raw_arrays, list):
+        for raw in raw_arrays:
+            if not isinstance(raw, dict):
+                continue
+            member_ids_raw = raw.get("member_area_roi_ids", [])
+            member_area_roi_ids = [int(x) for x in member_ids_raw] if isinstance(member_ids_raw, list) else []
+            area_roi_arrays.append(
+                RoiArrayGroup(
+                    array_id=str(raw.get("array_id", f"array_{len(area_roi_arrays) + 1}")),
+                    label=str(raw.get("label", f"Array {len(area_roi_arrays) + 1}")),
+                    rows=int(raw.get("rows", 0)),
+                    cols=int(raw.get("cols", 0)),
+                    spacing_x_px=float(raw.get("spacing_x_px", 0.0)),
+                    spacing_y_px=float(raw.get("spacing_y_px", 0.0)),
+                    anchor_x_px=float(raw.get("anchor_x_px", 0.0)),
+                    anchor_y_px=float(raw.get("anchor_y_px", 0.0)),
+                    rotation_deg=float(raw.get("rotation_deg", 0.0)),
+                    member_area_roi_ids=member_area_roi_ids,
                 )
             )
 
@@ -708,4 +774,5 @@ def load_processing_profile(
         session_mask,
         mask_settings,
         image_exclusions,
+        area_roi_arrays,
     )

@@ -67,6 +67,7 @@ class UndoManager:
             repr(asdict(snapshot.state.area_roi_settings)),
             repr([asdict(roi) for roi in snapshot.state.area_rois]),
             repr([asdict(group) for group in snapshot.state.area_roi_groups]),
+            repr([asdict(array_group) for array_group in snapshot.state.area_roi_arrays]),
             tuple(sorted(snapshot.selected_roi_ids)),
             snapshot.sample_visual_color,
             snapshot.reference_visual_color,
