@@ -16,6 +16,7 @@ from PyQt6.QtWidgets import (
     QDockWidget,
     QDoubleSpinBox,
     QHBoxLayout,
+    QLabel,
     QMessageBox,
     QProgressBar,
     QStyleOptionProgressBar,
@@ -205,39 +206,95 @@ class PanelContainer(QDockWidget):
         self.setAllowedAreas(Qt.DockWidgetArea.AllDockWidgetAreas)
 
         theme = get_active_theme()
-        self.setStyleSheet(
-            f"""
-            QDockWidget {{
-                color: {theme.text_primary};
-            }}
-            QDockWidget::title {{
-                background: {theme.window_bg};
-                border-bottom: 1px solid {theme.toolbar_border};
-                padding: 4px 8px;
-                font-weight: 600;
-            }}
-            QDockWidget::close-button, QDockWidget::float-button {{
-                background: transparent;
-                border: none;
-                width: 18px;
-                height: 18px;
-                padding: 1px;
-                subcontrol-position: top right;
-            }}
-            QDockWidget::float-button {{
-                subcontrol-position: top right;
-                right: 22px;
-            }}
-            QDockWidget::close-button:hover {{
-                background: {hex_to_rgba(theme.accent_red, 0.22)};
-                border-radius: 3px;
-            }}
-            QDockWidget::float-button:hover {{
-                background: {hex_to_rgba(theme.accent_blue, 0.22)};
-                border-radius: 3px;
-            }}
-            """
+        self.setStyleSheet(f"QDockWidget {{ color: {theme.text_primary}; }}")
+        # QDockWidget's built-in close/float buttons hard-code their icon's pixel
+        # size in Qt's C++ paint code; neither the stylesheet's width/height nor
+        # a QSS "icon-size"/"image" override nor setIconSize() on the internal
+        # qt_dockwidget_*button widgets has any effect on it. A custom title bar
+        # with real QToolButtons is the only way to make the glyphs bigger.
+        self.setTitleBarWidget(self._build_title_bar(title, theme))
+
+    def _build_title_bar(self, title: str, theme) -> QWidget:
+        bar = QWidget(self)
+        bar.setStyleSheet(f"background: {theme.window_bg};")
+        outer = QVBoxLayout(bar)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
+
+        row = QWidget(bar)
+        layout = QHBoxLayout(row)
+        layout.setContentsMargins(8, 4, 4, 4)
+        layout.setSpacing(2)
+        outer.addWidget(row)
+
+        label = QLabel(title, row)
+        label.setStyleSheet(f"color: {theme.text_primary}; font-weight: 600; background: transparent;")
+        layout.addWidget(label)
+        layout.addStretch(1)
+
+        float_button = QToolButton(row)
+        float_button.setIcon(self._make_float_icon())
+        float_button.setIconSize(QSize(18, 18))
+        float_button.setFixedSize(24, 24)
+        float_button.setAutoRaise(True)
+        float_button.setToolTip("Undock this panel into a floating window.")
+        float_button.setStyleSheet(
+            transparent_icon_button_stylesheet(hover=hex_to_rgba(theme.accent_blue, 0.22))
+            + "QToolButton:hover { border-radius: 4px; }"
         )
+        float_button.clicked.connect(lambda: self.setFloating(not self.isFloating()))
+        layout.addWidget(float_button)
+
+        close_button = QToolButton(row)
+        close_button.setIcon(self._make_close_icon())
+        close_button.setIconSize(QSize(18, 18))
+        close_button.setFixedSize(24, 24)
+        close_button.setAutoRaise(True)
+        close_button.setToolTip("Close this panel.")
+        close_button.setStyleSheet(
+            transparent_icon_button_stylesheet(hover=hex_to_rgba(theme.accent_red, 0.22))
+            + "QToolButton:hover { border-radius: 4px; }"
+        )
+        close_button.clicked.connect(self.close)
+        layout.addWidget(close_button)
+
+        # A plain widget (not a border-bottom in the stylesheet) - Qt mis-renders a QSS
+        # border-bottom set on a QDockWidget custom title bar as a short underline hugging
+        # the label text instead of a full-width rule, so the separator is drawn explicitly.
+        separator = QWidget(bar)
+        separator.setFixedHeight(1)
+        separator.setStyleSheet(f"background: {theme.toolbar_border};")
+        outer.addWidget(separator)
+
+        return bar
+
+    @staticmethod
+    def _make_close_icon(color: str = "#cbd5e1") -> QIcon:
+        svg = tabler_icon_svg("x", color=color, stroke_width=2.2)
+        if svg:
+            renderer = QSvgRenderer(QByteArray(svg.encode("utf-8")))
+            if renderer.isValid():
+                pixmap = QPixmap(20, 20)
+                pixmap.fill(Qt.GlobalColor.transparent)
+                painter = QPainter(pixmap)
+                renderer.render(painter, QRectF(1.0, 1.0, 18.0, 18.0))
+                painter.end()
+                return QIcon(pixmap)
+        return QIcon()
+
+    @staticmethod
+    def _make_float_icon(color: str = "#cbd5e1") -> QIcon:
+        svg = tabler_icon_svg("external-link", color=color, stroke_width=2.2)
+        if svg:
+            renderer = QSvgRenderer(QByteArray(svg.encode("utf-8")))
+            if renderer.isValid():
+                pixmap = QPixmap(20, 20)
+                pixmap.fill(Qt.GlobalColor.transparent)
+                painter = QPainter(pixmap)
+                renderer.render(painter, QRectF(1.0, 1.0, 18.0, 18.0))
+                painter.end()
+                return QIcon(pixmap)
+        return QIcon()
 
     def _make_chevron_icon(self, expanded: bool) -> QIcon:
         pixmap = QPixmap(14, 14)

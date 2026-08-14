@@ -41,6 +41,11 @@ Some masking tools are noticeably slow even on images of only a few MB. Investig
   region instead of the full image (trade-off: faster updates during static view, but
   requires recalculation on pan/zoom - evaluate whether the jerkiness is acceptable or
   if a brief delay + async update is preferable).
+- Partially addressed 2026-08: relative/local-contrast/morphology mask Apply and preview
+  no longer *freeze the GUI* while computing (backgrounded via `request_mask_candidate` in
+  `mask_controller.py`, with caching so repeat/Apply-after-Preview is instant). The
+  underlying computation cost itself (the actual bottleneck this item asks about) is
+  unchanged - this item is still open for that part.
 
 ### [medium] ROI value calculation: add variance / standard deviation
 ROI metrics currently store only the mean pixel value per ROI. Extend to also track:
@@ -79,6 +84,46 @@ tools. Filters should be applied non-destructively (preview only, like rotation/
 - First filter to implement: *(not yet specified - to be decided)*
 - Consider Gaussian blur, sharpening, or background-subtraction style filters as
   candidates.
+
+### [low] GUI freeze audit: remaining items
+From the 2026-08 architecture review that fixed the top 5 GUI-freeze findings (auto
+reference-image selection, mask apply/preview, background-profile create/save, and the
+dataset-load + processing-profile read path - see git history around that date on
+`dataset_controller.py`, `session_state_manager.py`, `background_profile_controller.py`,
+`mask_controller.py`, `main_window.py`). Lower-priority items from the same review, not
+yet addressed:
+
+- **Undo/redo snapshot cost**: `UndoManager.make_snapshot` deep-copies the whole analysis
+  state (all ROIs/groups/arrays, chromatic models/landmarks, exclusion rules, preprocessing
+  settings) plus a full-resolution mask-array `.copy()`, inline on the GUI thread, on
+  almost every mutating action (ROI drag-start, mask brush, crop, chromatic-landmark edit,
+  "Detect ROIs", exclusion toggles, etc.). Individually cheap; a real concern only as a
+  cumulative per-action stutter on sessions with large images/many ROIs/many landmarks.
+- **`QApplication.processEvents()` re-entrancy smell**: `analysis_controller.py`
+  (`_start_absorbance_spectrum_preparation`) and `image_tools_controller.py`
+  (`on_image_tools_section_applied_changed`) call `processEvents()` right after
+  `_begin_busy(...)` to force the busy cursor to paint before dispatching real work. Not
+  currently causing a freeze (the heavy work in both cases is already backgrounded), but a
+  stray `processEvents()` mid-handler re-enters the event loop and can let unrelated
+  queued events (e.g. a second click on the same button) run somewhere the handler doesn't
+  expect. Worth removing/replacing with a less re-entrant "force a repaint" mechanism if
+  it's ever the source of a hard-to-reproduce bug.
+- **Mask-brush painting + rotation resample**: `mask_controller.apply_mask_brush` (fires on
+  every `MouseMove` while the mask pencil is active) calls `_update_ignore_mask_overlay()`,
+  which - if a relative/local-contrast/morphology mask preview is toggled on *and* a
+  non-zero rotation angle is configured - runs `ndimage.rotate` on the full image on every
+  mouse-move during the stroke. Narrow combination (needs rotation + a mask preview +
+  active painting simultaneously), but a real, localized lag when it applies.
+- **`import_processing_profile()` / `export_processing_profile()` still synchronous**:
+  these two explicit File-menu actions do `load_processing_profile()` /
+  `save_processing_profile()` (JSON parse/serialize, potentially large with a big analysis
+  cache) directly on the GUI thread - the same underlying cost that made the *dataset-load*
+  read path worth backgrounding. Both already show a busy cursor via `_begin_busy`/
+  `_end_busy`, so at least they're honest about being slow, but they still block. Should be
+  lower-effort than the dataset-load fix was: the `_load_processing_state_task` dispatch
+  pattern (`analysis_tasks.py`) can likely be reused directly for
+  `import_processing_profile`; `export_processing_profile` would need an analogous
+  background dispatch for `save_processing_profile`.
 
 ---
 

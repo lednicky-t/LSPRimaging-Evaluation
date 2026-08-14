@@ -5,6 +5,7 @@ from pathlib import Path
 from PyQt6.QtWidgets import QFileDialog, QInputDialog, QMessageBox
 
 from lspr_imaging_app.domain.models import AreaRoiDetectionSettings, MaskSettings
+from lspr_imaging_app.gui.worker import FunctionWorker
 from lspr_imaging_app.io.dataset import (
     build_ome_zarr_export_folder_name,
     compare_ome_zarr_summaries,
@@ -25,8 +26,8 @@ class DatasetController:
         if folder:
             self.load_dataset_from_folder(Path(folder), reset_image_view=True)
 
-    def load_dataset_from_text(self, *, reset_image_view: bool = True) -> None:
-        self.load_dataset_from_folder(Path(self.window.folder_edit.text()), reset_image_view=reset_image_view)
+    def load_dataset_from_text(self, *, reset_image_view: bool = True, on_done=None) -> None:
+        self.load_dataset_from_folder(Path(self.window.folder_edit.text()), reset_image_view=reset_image_view, on_done=on_done)
 
     def has_restorable_session(self, folder: Path) -> bool:
         if (folder / "processing_profile.json").exists():
@@ -36,7 +37,7 @@ class DatasetController:
             return (folder / "sessions" / active_name / "processing_profile.json").exists()
         return False
 
-    def run_startup_restore_flow(self) -> None:
+    def run_startup_restore_flow(self, *, on_done=None) -> None:
         progress = getattr(self.window, "_report_startup_progress", None)
         if callable(progress):
             progress(20, "Checking startup preferences...")
@@ -44,84 +45,131 @@ class DatasetController:
             if callable(progress):
                 progress(100, "Fast startup enabled.")
             self.window._set_status_text("Fast startup enabled. Startup restore skipped.")
+            if on_done is not None:
+                on_done()
             return
         if self.window._state.dataset is not None:
             if callable(progress):
                 progress(100, "Workspace already loaded.")
+            if on_done is not None:
+                on_done()
             return
         folder = Path(self.window.folder_edit.text())
         if not self.has_restorable_session(folder):
             if callable(progress):
                 progress(100, "No previous session found.")
             self.window._set_status_text("Choose a dataset folder to begin.")
+            if on_done is not None:
+                on_done()
             return
         self.window._set_status_text("Restoring previous session...")
         if callable(progress):
             progress(30, "Loading previous session...")
-        self.load_dataset_from_text(reset_image_view=False)
+        self.load_dataset_from_text(reset_image_view=False, on_done=on_done)
 
-    def load_dataset_from_folder(self, folder: Path, *, reset_image_view: bool = True) -> None:
-        progress = getattr(self.window, "_report_startup_progress", None)
-        if self.window._state.dataset is not None:
-            self.window._push_undo_point("Load dataset")
-        self.window._leave_chromatic_setup_mode()
-        self.window._begin_busy(f"Loading dataset from {folder.name}...")
+    def load_dataset_from_folder(self, folder: Path, *, reset_image_view: bool = True, on_done=None) -> None:
+        window = self.window
+        if window._dataset_load_in_flight:
+            window._set_status_text("A dataset is already loading - please wait for it to finish.")
+            if on_done is not None:
+                on_done()
+            return
+        progress = getattr(window, "_report_startup_progress", None)
+        if window._state.dataset is not None:
+            window._push_undo_point("Load dataset")
+        window._leave_chromatic_setup_mode()
+        window._dataset_load_in_flight = True
+        self._set_dataset_load_controls_enabled(False)
+        window._begin_busy(f"Loading dataset from {folder.name}...")
         if callable(progress):
             progress(35, f"Loading dataset from {folder.name}...")
-        try:
-            dataset = load_dataset(folder)
-        except Exception as exc:
-            self.window._end_busy(f"Load failed: {exc}")
-            QMessageBox.critical(self.window, "Load failed", str(exc))
-            return
+        worker = FunctionWorker(load_dataset, folder)
+        worker.signals.result.connect(
+            lambda dataset, folder=folder, reset_image_view=reset_image_view, on_done=on_done:
+                self._on_dataset_loaded(folder, reset_image_view, on_done, dataset)
+        )
+        worker.signals.error.connect(
+            lambda message, on_done=on_done: self._on_dataset_load_failed(on_done, message)
+        )
+        window._thread_pool.start(worker)
 
-        self.window._state.dataset = dataset
-        self.window._active_session_name = self.window._load_active_session_name_for_folder(dataset.folder)
+    def _set_dataset_load_controls_enabled(self, enabled: bool) -> None:
+        window = self.window
+        window.browse_button.setEnabled(enabled)
+        window.load_button.setEnabled(enabled)
+
+    def _on_dataset_load_failed(self, on_done, message: str) -> None:
+        window = self.window
+        window._dataset_load_in_flight = False
+        self._set_dataset_load_controls_enabled(True)
+        window._end_busy(f"Load failed: {message}")
+        QMessageBox.critical(window, "Load failed", message)
+        if on_done is not None:
+            on_done()
+
+    def _on_dataset_loaded(self, folder: Path, reset_image_view: bool, on_done, dataset) -> None:
+        window = self.window
+        progress = getattr(window, "_report_startup_progress", None)
+
+        window._state.dataset = dataset
+        window._active_session_name = window._load_active_session_name_for_folder(dataset.folder)
         if callable(progress):
             progress(48, "Loading dataset records...")
-        self.window._record_map = dataset_record_map(dataset)
-        self.window._record_key_by_path = {record.path: (int(record.key.spectral_cube_index), float(record.key.wavelength_nm)) for record in dataset.records}
-        self.window._spectral_cube_values = dataset.spectral_cube_indices
-        self.window._wavelength_values = dataset.wavelengths_nm
-        self.window._reference_contrast_cache.clear()
-        self.window._current_record_path = None
-        self.window._current_file_mask = None
-        self.window._current_file_mask_path = None
-        self.window._processed_image_cache.clear()
-        self.window._processed_shape_cache.clear()
-        self.window._invalidate_image_analysis_caches()
-        self.window._invalidate_background_profile_cache()
-        self.window._current_image_key = None
-        self.window._force_image_autorange_after_load = bool(reset_image_view)
-        self.window._sensorgram_cache.clear()
-        self.window._sensorgram_running_signature = None
-        self.window._pending_sensorgram_payload = None
-        self.window._state.area_roi_settings = AreaRoiDetectionSettings()
-        self.window._state.mask = MaskSettings()
+        window._record_map = dataset_record_map(dataset)
+        window._record_key_by_path = {record.path: (int(record.key.spectral_cube_index), float(record.key.wavelength_nm)) for record in dataset.records}
+        window._spectral_cube_values = dataset.spectral_cube_indices
+        window._wavelength_values = dataset.wavelengths_nm
+        window._reference_contrast_cache.clear()
+        window._current_record_path = None
+        window._current_file_mask = None
+        window._current_file_mask_path = None
+        window._processed_image_cache.clear()
+        window._processed_shape_cache.clear()
+        window._invalidate_image_analysis_caches()
+        window._invalidate_background_profile_cache()
+        window._current_image_key = None
+        window._force_image_autorange_after_load = bool(reset_image_view)
+        window._sensorgram_cache.clear()
+        window._sensorgram_running_signature = None
+        window._pending_sensorgram_payload = None
+        window._state.area_roi_settings = AreaRoiDetectionSettings()
+        window._state.mask = MaskSettings()
         if callable(progress):
             progress(58, "Restoring processing profile...")
-        self.window._load_processing_state_for_dataset()
+        window._load_processing_state_for_dataset(
+            on_done=lambda: self._finish_load_dataset_from_folder(folder, on_done)
+        )
+
+    def _finish_load_dataset_from_folder(self, folder: Path, on_done) -> None:
+        window = self.window
+        progress = getattr(window, "_report_startup_progress", None)
+        dataset = window._state.dataset
         if callable(progress):
             progress(72, "Restoring analysis cache...")
-        self.window._update_dataset_stack_indicator(dataset)
-        self.window._sync_ome_zarr_chunk_controls()
-        self.window._sync_image_processing_controls()
+        window._update_dataset_stack_indicator(dataset)
+        window._sync_ome_zarr_chunk_controls()
+        window._sync_image_processing_controls()
 
-        self.window._configure_slider(self.window.spectral_cube_slider, len(self.window._spectral_cube_values))
-        self.window._configure_slider(self.window.wavelength_slider, len(self.window._wavelength_values))
-        self.window._configure_navigation_inputs()
-        self.window._sync_reference_selection_from_settings()
-        self.window._update_analysis_control_state()
-        self.window.dataset_summary.setText(self.window._dataset_summary_text(dataset))
+        window._configure_slider(window.spectral_cube_slider, len(window._spectral_cube_values))
+        window._configure_slider(window.wavelength_slider, len(window._wavelength_values))
+        window._configure_navigation_inputs()
+        window._sync_reference_selection_from_settings()
+        window._update_analysis_control_state()
+        window.dataset_summary.setText(window._dataset_summary_text(dataset))
 
-        self.window.folder_edit.setText(str(dataset.folder))
-        self.window.folder_edit.setToolTip(str(dataset.folder))
-        self.window._set_status_text(f"Loaded dataset from {folder.name}. Preparing the first image.")
+        window.folder_edit.setText(str(dataset.folder))
+        window.folder_edit.setToolTip(str(dataset.folder))
+        window._set_status_text(f"Loaded dataset from {folder.name}. Preparing the first image.")
         if callable(progress):
             progress(88, "Preparing the first image...")
-        self.window._refresh_image()
+        window._refresh_image()
         if callable(progress):
             progress(96, "Dataset ready.")
+        window._dataset_load_in_flight = False
+        self._set_dataset_load_controls_enabled(True)
+        window._end_busy()
+        if on_done is not None:
+            on_done()
 
     def export_current_dataset_to_ome_zarr(self) -> None:
         dataset = self.window._state.dataset

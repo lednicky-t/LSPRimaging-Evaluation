@@ -9,6 +9,8 @@ from PyQt6.QtWidgets import QFileDialog, QMessageBox
 from scipy import ndimage
 
 from lspr_imaging_app.domain.models import MaskSettings
+from lspr_imaging_app.gui.analysis_tasks import _mask_candidate_task
+from lspr_imaging_app.gui.worker import FunctionWorker
 from lspr_imaging_app.io.dataset import dataset_load_plane, dataset_plane_shape, load_image_array, load_image_shape
 from lspr_imaging_app.processing.preprocess import apply_spatial_mask, create_figure_mask, spatial_coordinate_maps
 
@@ -316,29 +318,27 @@ class MaskController:
         raw_mask[raw_y[valid], raw_x[valid]] = True
         return raw_mask
 
-    def candidate_mask_for_tool(self, tool_key: str) -> np.ndarray | None:
+    def mask_settings_from_controls(self) -> MaskSettings:
         window = self.window
-        if window._current_record_path is None:
-            return None
-        if tool_key == "histogram":
-            return self.current_histogram_highlight_mask_raw()
-
-        current_key = window._image_key_for_record_path(window._current_record_path)
-        if current_key is not None and window._state.dataset is not None:
-            raw_image = dataset_load_plane(window._state.dataset, int(current_key[0]), float(current_key[1])).astype(np.float32, copy=False)
-        else:
-            raw_image = load_image_array(str(window._current_record_path)).astype(np.float32, copy=False)
-        mask_settings = MaskSettings(
+        return MaskSettings(
             relative_threshold_fraction=float(window.mask_relative_threshold_spin.value()) / 100.0,
             relative_profile_sigma_px=float(window.mask_relative_profile_sigma_spin.value()),
             local_contrast_sigma_px=float(window.mask_local_contrast_sigma_spin.value()),
             local_contrast_z_threshold=float(window.mask_local_contrast_z_spin.value()),
         )
 
-        if tool_key == "relative":
-            return create_figure_mask(raw_image, mask_settings, "relative")
-        if tool_key == "local_contrast":
-            return create_figure_mask(raw_image, mask_settings, "local_contrast")
+    def candidate_mask_for_tool(self, tool_key: str) -> np.ndarray | None:
+        # Synchronous, authoritative computation for a mask candidate. Cheap for
+        # "histogram"/"morphology" (no disk I/O - the histogram tool reads pixels already
+        # in memory, morphology works off the in-memory mask canvas). "relative" and
+        # "local_contrast" reload the raw image and run scipy filtering over it, which is
+        # slow enough to freeze the GUI thread - callers that can tolerate an async answer
+        # should use `request_mask_candidate` instead, which backgrounds exactly those two.
+        window = self.window
+        if window._current_record_path is None:
+            return None
+        if tool_key == "histogram":
+            return self.current_histogram_highlight_mask_raw()
         if tool_key == "morphology":
             if not window._mask_morphology_operation:
                 return None
@@ -358,7 +358,108 @@ class MaskController:
                 return ndimage.binary_closing(current_mask, structure=structure)
             if operation == "dilate":
                 return ndimage.binary_dilation(current_mask, structure=structure)
+            return None
+
+        current_key = window._image_key_for_record_path(window._current_record_path)
+        if current_key is not None and window._state.dataset is not None:
+            raw_image = dataset_load_plane(window._state.dataset, int(current_key[0]), float(current_key[1])).astype(np.float32, copy=False)
+        else:
+            raw_image = load_image_array(str(window._current_record_path)).astype(np.float32, copy=False)
+        mask_settings = self.mask_settings_from_controls()
+        if tool_key == "relative":
+            return create_figure_mask(raw_image, mask_settings, "relative")
+        if tool_key == "local_contrast":
+            return create_figure_mask(raw_image, mask_settings, "local_contrast")
         return None
+
+    def mask_candidate_cache_key(self, tool_key: str) -> tuple[object, ...] | None:
+        window = self.window
+        if window._current_record_path is None:
+            return None
+        return (
+            str(window._current_record_path),
+            tool_key,
+            float(window.mask_relative_threshold_spin.value()),
+            float(window.mask_relative_profile_sigma_spin.value()),
+            float(window.mask_local_contrast_sigma_spin.value()),
+            float(window.mask_local_contrast_z_spin.value()),
+        )
+
+    def request_mask_candidate(self, tool_key: str, on_ready) -> None:
+        """Resolve a mask candidate for the current image, off the GUI thread when it's
+        "relative" or "local_contrast" (the two that reload the raw image and run scipy
+        filtering - see `candidate_mask_for_tool`). `on_ready(candidate)` is called with
+        the result: synchronously, in this call, for the cheap tool kinds and for a cache
+        hit; otherwise once the background computation finishes and the request is still
+        for the currently-displayed image (a stale result - the user moved to a different
+        image before it finished - is silently dropped)."""
+        window = self.window
+        if tool_key not in ("relative", "local_contrast"):
+            on_ready(self.candidate_mask_for_tool(tool_key))
+            return
+        cache_key = self.mask_candidate_cache_key(tool_key)
+        if cache_key is None:
+            on_ready(None)
+            return
+        cached = window._mask_candidate_cache.get(cache_key)
+        if cached is not None:
+            window._mask_candidate_cache.move_to_end(cache_key)
+            on_ready(cached)
+            return
+        window._mask_candidate_pending.setdefault(cache_key, []).append(on_ready)
+        if cache_key in window._mask_candidate_in_flight:
+            return
+        window._mask_candidate_in_flight.add(cache_key)
+        worker = FunctionWorker(
+            _mask_candidate_task,
+            str(window._current_record_path),
+            self.mask_settings_from_controls(),
+            tool_key,
+        )
+        worker.signals.result.connect(
+            lambda candidate, cache_key=cache_key: self._on_mask_candidate_computed(cache_key, candidate)
+        )
+        worker.signals.error.connect(
+            lambda message, cache_key=cache_key: self._on_mask_candidate_failed(cache_key, message)
+        )
+        window._thread_pool.start(worker)
+
+    def _on_mask_candidate_computed(self, cache_key: tuple[object, ...], candidate: np.ndarray) -> None:
+        window = self.window
+        window._mask_candidate_in_flight.discard(cache_key)
+        window._mask_candidate_cache[cache_key] = candidate
+        window._mask_candidate_cache.move_to_end(cache_key)
+        while len(window._mask_candidate_cache) > window.MASK_CANDIDATE_CACHE_SIZE:
+            window._mask_candidate_cache.popitem(last=False)
+        for callback in window._mask_candidate_pending.pop(cache_key, []):
+            callback(candidate)
+
+    def _on_mask_candidate_failed(self, cache_key: tuple[object, ...], message: str) -> None:
+        window = self.window
+        window._mask_candidate_in_flight.discard(cache_key)
+        window._append_workflow_log(f"Mask candidate computation failed | {message}", level="error")
+        for callback in window._mask_candidate_pending.pop(cache_key, []):
+            callback(None)
+
+    _MASK_TOOL_BUTTON_ATTRS = {
+        "histogram": ("histogram_mask_apply_button", "histogram_mask_reset_button"),
+        "relative": ("relative_mask_apply_button", "relative_mask_reset_button"),
+        "local_contrast": ("local_contrast_mask_apply_button", "local_contrast_mask_reset_button"),
+        "morphology": ("morphology_mask_apply_button", "morphology_mask_reset_button"),
+    }
+
+    def _set_mask_tool_buttons_busy(self, tool_key: str, busy: bool) -> None:
+        window = self.window
+        if busy:
+            for attr in self._MASK_TOOL_BUTTON_ATTRS.get(tool_key, ()):
+                button = getattr(window, attr, None)
+                if button is not None:
+                    button.setEnabled(False)
+        else:
+            # Re-enabling isn't just "not busy" - other conditions (e.g. viewing a
+            # non-reference image under chromatic correction) may still disable these
+            # buttons, so let the existing state computation decide.
+            window._update_mask_file_button_state()
 
     def apply_mask_delta(self, tool_key: str, *, subtract: bool) -> None:
         window = self.window
@@ -366,7 +467,27 @@ class MaskController:
             window._set_status_text("Load an image first.")
             return
         window._ensure_mask_section_applied()
-        candidate = self.candidate_mask_for_tool(tool_key)
+        record_path = window._current_record_path
+        self._set_mask_tool_buttons_busy(tool_key, True)
+        if tool_key in ("relative", "local_contrast"):
+            window._set_status_text(f"Computing {tool_key.replace('_', ' ')} mask...")
+        self.request_mask_candidate(
+            tool_key,
+            lambda candidate, tool_key=tool_key, subtract=subtract, record_path=record_path: self._finish_apply_mask_delta(
+                tool_key, subtract, record_path, candidate
+            ),
+        )
+
+    def _finish_apply_mask_delta(
+        self, tool_key: str, subtract: bool, record_path: Path, candidate: np.ndarray | None
+    ) -> None:
+        window = self.window
+        self._set_mask_tool_buttons_busy(tool_key, False)
+        if window._current_record_path != record_path:
+            window._set_status_text(
+                f"{tool_key.replace('_', ' ').title()} mask apply cancelled - the image changed before it finished."
+            )
+            return
         if candidate is None:
             window._set_status_text("No mask candidate is available yet.")
             return
@@ -402,16 +523,46 @@ class MaskController:
             window._mask_figure_preview = None
             window._update_ignore_mask_overlay()
             return
+        record_path = window._current_record_path
         if window.relative_mask_show_button.isChecked():
-            window._mask_histogram_preview = self.candidate_mask_for_tool("relative")
+            self.request_mask_candidate(
+                "relative",
+                lambda candidate, record_path=record_path: self._on_mask_preview_ready("relative", record_path, candidate),
+            )
         else:
             window._mask_histogram_preview = None
         if window.local_contrast_mask_show_button.isChecked():
-            window._mask_figure_preview = self.candidate_mask_for_tool("local_contrast")
+            self.request_mask_candidate(
+                "local_contrast",
+                lambda candidate, record_path=record_path: self._on_mask_preview_ready(
+                    "local_contrast", record_path, candidate
+                ),
+            )
         elif window.morphology_mask_show_button.isChecked():
-            window._mask_figure_preview = self.candidate_mask_for_tool("morphology")
+            self.request_mask_candidate(
+                "morphology",
+                lambda candidate, record_path=record_path: self._on_mask_preview_ready(
+                    "morphology", record_path, candidate
+                ),
+            )
         else:
             window._mask_figure_preview = None
+        window._update_ignore_mask_overlay()
+
+    def _on_mask_preview_ready(self, tool_key: str, record_path: Path, candidate: np.ndarray | None) -> None:
+        window = self.window
+        if window._current_record_path != record_path:
+            return  # The user moved to a different image before this finished.
+        if tool_key == "relative":
+            if not window.relative_mask_show_button.isChecked():
+                return
+            window._mask_histogram_preview = candidate
+        else:
+            if tool_key == "local_contrast" and not window.local_contrast_mask_show_button.isChecked():
+                return
+            if tool_key == "morphology" and not window.morphology_mask_show_button.isChecked():
+                return
+            window._mask_figure_preview = candidate
         window._update_ignore_mask_overlay()
 
     def mask_section_applied(self) -> bool:
@@ -621,10 +772,17 @@ class MaskController:
         window = self.window
         if window._current_record_path is None or window._current_processed_image is None:
             return None
-        raw_image = load_image_array(str(window._current_record_path))
+        # Shape only - avoid decoding the full raw image just to check the cache below,
+        # which used to happen on every call (including every mouse-move while painting
+        # a mask, since this cache-signature check ran before the cache-hit check).
+        current_key = window._image_key_for_record_path(window._current_record_path)
+        if current_key is not None and window._state.dataset is not None:
+            raw_shape = dataset_plane_shape(window._state.dataset, int(current_key[0]), float(current_key[1]))
+        else:
+            raw_shape = load_image_shape(str(window._current_record_path))
         signature = (
             str(window._current_record_path),
-            raw_image.shape[:2],
+            raw_shape,
             window._raw_preprocessing_signature(),
         )
         if (
@@ -633,7 +791,7 @@ class MaskController:
             and window._processed_to_raw_y_map is not None
         ):
             return window._processed_to_raw_x_map, window._processed_to_raw_y_map
-        x_map, y_map = spatial_coordinate_maps(raw_image.shape[:2], window._state.preprocessing)
+        x_map, y_map = spatial_coordinate_maps(raw_shape, window._state.preprocessing)
         window._processed_to_raw_map_signature = signature
         window._processed_to_raw_x_map = x_map
         window._processed_to_raw_y_map = y_map
@@ -789,14 +947,20 @@ class MaskController:
         if window._current_processed_image is None:
             window._set_status_text("Load an image first to create a background image.")
             return
-        background = window._calculate_background_profile_image()
+        window._set_status_text("Computing background image...")
+        window._request_background_profile_image(self._on_create_new_background_ready)
+
+    def _on_create_new_background_ready(self, background: np.ndarray | None) -> None:
+        window = self.window
         if background is None:
             window._set_status_text("Background image is not available yet.")
             return
-        window._background_profile_cache_signature = window._background_profile_signature()
-        window._background_profile_cache_image = background
         if window._showing_background_profile_main:
-            window._apply_main_image_content()
+            # Re-derives from the (possibly by-now-updated) current view rather than
+            # assuming `background` is still what should be displayed - see
+            # `request_background_profile_image`'s docstring on why on_ready can fire
+            # with a result for a view the user has since navigated away from.
+            window._update_background_profile_preview()
         window._set_status_text("Created a new background image from the current parameters.")
 
     def load_background_from_file(self) -> None:
@@ -844,9 +1008,13 @@ class MaskController:
         if destination is None:
             window._set_status_text("No current image is available for background export.")
             return
-        background = window._background_profile_cache_image
-        if background is None or window._background_profile_cache_signature != window._background_profile_signature():
-            background = window._calculate_background_profile_image()
+        window._set_status_text("Computing background image...")
+        window._request_background_profile_image(
+            lambda background, destination=destination: self._on_save_background_ready(destination, background)
+        )
+
+    def _on_save_background_ready(self, destination: Path, background: np.ndarray | None) -> None:
+        window = self.window
         if background is None:
             window._set_status_text("Background image is not available yet.")
             return
@@ -857,10 +1025,8 @@ class MaskController:
             QMessageBox.critical(window, "Save background failed", str(exc))
             window._set_status_text(f"Save background failed: {exc}")
             return
-        window._background_profile_cache_signature = window._background_profile_signature()
-        window._background_profile_cache_image = background
         if window._showing_background_profile_main:
-            window._apply_main_image_content()
+            window._update_background_profile_preview()
         window._set_status_text(f"Saved background to {destination.name}.")
 
     def read_background_image(self, path: Path, expected_shape: tuple[int, int]) -> np.ndarray:

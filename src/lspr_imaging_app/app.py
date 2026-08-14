@@ -491,25 +491,46 @@ def main() -> None:
         # avoids that "blink and rescale" entirely, and keeps the ghost-window
         # fix, since show() is still followed by a processEvents() turn before
         # more work (closing the splash) runs.
+        #
+        # run_startup_restore_flow() dispatches the dataset/processing-profile load to
+        # a background thread and returns immediately (see DatasetController /
+        # SessionStateManager) rather than blocking here - after_restore_flow is its
+        # completion callback, so everything that depends on that data being loaded
+        # (panel layout restore, the real show()) runs after it, not immediately after
+        # this call returns.
+        def after_restore_flow() -> None:
+            try:
+                splash.update_progress(85, "Restoring panel layout...")
+                window._restore_saved_panel_layout_state()
+                window._normalize_panel_layout()
+                window._sync_panel_visibility_after_show()
+                splash.update_progress(96, "Launching workspace...")
+                window.setEnabled(True)
+                window._restore_saved_window_state_after_show()  # the one show() call: normal/maximized/fullscreen
+                window.raise_()
+                window.activateWindow()
+                app.processEvents()
+            finally:
+                app.setQuitOnLastWindowClosed(True)
+                _apply_windows_titlebar_theme(window)
+                # Small extra safety buffer on top of the processEvents() above, so the
+                # splash still covers the tail end of this paint settling.
+                QTimer.singleShot(200, close_splash)
+
         try:
             splash.update_progress(restore_flow_start, "Restoring saved layout...")
-            window.run_startup_restore_flow(show_window=False, progress_callback=progress_callback)
-            splash.update_progress(85, "Restoring panel layout...")
-            window._restore_saved_panel_layout_state()
-            window._normalize_panel_layout()
-            window._sync_panel_visibility_after_show()
-            splash.update_progress(96, "Launching workspace...")
-            window.setEnabled(True)
-            window._restore_saved_window_state_after_show()  # the one show() call: normal/maximized/fullscreen
-            window.raise_()
-            window.activateWindow()
-            app.processEvents()
-        finally:
+            window.run_startup_restore_flow(
+                show_window=False, progress_callback=progress_callback, on_done=after_restore_flow
+            )
+        except Exception:
+            # run_startup_restore_flow() raised before it could even dispatch the
+            # background load - after_restore_flow() will never fire on its own, so
+            # run the same cleanup here directly rather than leaving the splash on
+            # screen forever.
             app.setQuitOnLastWindowClosed(True)
             _apply_windows_titlebar_theme(window)
-            # Small extra safety buffer on top of the processEvents() above, so the
-            # splash still covers the tail end of this paint settling.
             QTimer.singleShot(200, close_splash)
+            raise
 
     QTimer.singleShot(0, finish_startup)
     sys.exit(app.exec())

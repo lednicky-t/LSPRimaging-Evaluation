@@ -178,6 +178,7 @@ from .analysis_tasks import (
     _estimate_chromatic_models_task,  # noqa: F401 - re-exported, see comment above
     _process_image_task,  # noqa: F401 - re-exported, see comment above
     _refresh_roi_metrics_task,
+    _score_reference_candidates_task,
 )
 # Plain `pyflakes` (unlike ruff) does not honor `# noqa`, so it still flags the three
 # re-exported names above as unused. This no-op reference marks them "used" for that
@@ -215,6 +216,7 @@ class MainWindow(MainWindowIcons, QMainWindow):
     HISTOGRAM_MAX_INTENSITY = 65535.0
     HISTOGRAM_LOG_Y_FLOOR = 0.1
     PROCESSED_IMAGE_CACHE_SIZE = 6
+    MASK_CANDIDATE_CACHE_SIZE = 6
     ABSORBANCE_SPECTRUM_CACHE_SIZE = 48
     ABSORBANCE_SPECTRAL_CUBE_CACHE_SIZE = 48
     ABSORBANCE_ROI_MASK_CACHE_SIZE = 48
@@ -374,8 +376,12 @@ class MainWindow(MainWindowIcons, QMainWindow):
         self._roi_overlay_refresh_timer.setInterval(16)
         self._roi_overlay_refresh_timer.timeout.connect(self._refresh_roi_overlays_during_drag)
         self._processed_image_cache: OrderedDict[tuple[object, ...], np.ndarray] = OrderedDict()
+        self._mask_candidate_cache: OrderedDict[tuple[object, ...], np.ndarray] = OrderedDict()
+        self._mask_candidate_in_flight: set[tuple[object, ...]] = set()
+        self._mask_candidate_pending: dict[tuple[object, ...], list] = {}
         self._processed_shape_cache: dict[tuple[object, ...], tuple[int, int]] = {}
         self._reference_contrast_cache: dict[str, float] = {}
+        self._reference_prefetch_in_flight: set[int] = set()
         self._ignored_mask_cache_signature: tuple[object, ...] | None = None
         self._ignored_mask_cache_value: np.ndarray | None = None
         self._roi_mask_cache_signature: tuple[object, ...] | None = None
@@ -396,6 +402,7 @@ class MainWindow(MainWindowIcons, QMainWindow):
         self._last_saved_profile_path: Path | None = None
         self._processing_profile_write_busy = False
         self._processing_profile_write_pending: tuple[object, ...] | None = None
+        self._dataset_load_in_flight = False
         self._active_session_name: str = "Default"
         self._last_saved_roi_table_signature: str | None = None
         self._last_saved_roi_table_path: Path | None = None
@@ -405,7 +412,8 @@ class MainWindow(MainWindowIcons, QMainWindow):
         self._image_refresh_started_at: float | None = None
         self._roi_metrics_request_id = 0
         self._roi_detection_request_id = 0
-        self._background_profile_request_id = 0
+        self._background_profile_in_flight: set[tuple[object, ...]] = set()
+        self._background_profile_pending: dict[tuple[object, ...], list] = {}
         self._absorbance_spectrum_request_id = 0
         self._sensorgram_request_id = 0
         self._chromatic_registration_request_id = 0
@@ -491,6 +499,10 @@ class MainWindow(MainWindowIcons, QMainWindow):
         self._image_refresh_timer.setSingleShot(True)
         self._image_refresh_timer.setInterval(45)
         self._image_refresh_timer.timeout.connect(self._refresh_image)
+        self._reference_sync_timer = QTimer(self)
+        self._reference_sync_timer.setSingleShot(True)
+        self._reference_sync_timer.setInterval(45)
+        self._reference_sync_timer.timeout.connect(self._run_debounced_auto_reference_sync)
         self._histogram_refresh_timer = QTimer(self)
         self._histogram_refresh_timer.setSingleShot(True)
         self._histogram_refresh_timer.setInterval(35)
@@ -1806,7 +1818,7 @@ class MainWindow(MainWindowIcons, QMainWindow):
         self.reference_jump_button.clicked.connect(self._go_to_reference_image)
         self.spectral_cube_slider.valueChanged.connect(lambda _value: self._sync_analysis_plot_cursors())
         self.spectral_cube_slider.valueChanged.connect(lambda _value: self._schedule_image_refresh())
-        self.spectral_cube_slider.valueChanged.connect(lambda _value: self._sync_auto_reference_to_current_spectral_cube(follow_view=False))
+        self.spectral_cube_slider.valueChanged.connect(lambda _value: self._schedule_auto_reference_sync())
         self.wavelength_slider.valueChanged.connect(lambda _value: self._sync_analysis_plot_cursors())
         self.wavelength_slider.valueChanged.connect(lambda _value: self._schedule_image_refresh())
         self.spectral_cube_spin.valueChanged.connect(self._on_spectral_cube_spin_changed)
@@ -2564,6 +2576,7 @@ class MainWindow(MainWindowIcons, QMainWindow):
         *,
         show_window: bool = True,
         progress_callback: Callable[[int, str], None] | None = None,
+        on_done: Callable[[], None] | None = None,
     ) -> None:
         self._startup_restore_in_progress = True
         self._startup_progress_callback = progress_callback
@@ -2571,7 +2584,13 @@ class MainWindow(MainWindowIcons, QMainWindow):
         self._report_startup_progress(8, "Restoring window layout...")
         self._restore_saved_window_layout()
         self._report_startup_progress(18, "Checking previous session...")
-        self._dataset_controller.run_startup_restore_flow()
+        self._dataset_controller.run_startup_restore_flow(
+            on_done=lambda show_window=show_window, on_done=on_done: self._on_startup_dataset_restore_done(
+                show_window, on_done
+            )
+        )
+
+    def _on_startup_dataset_restore_done(self, show_window: bool, on_done: Callable[[], None] | None) -> None:
         if self._state.dataset is None:
             self._append_workflow_log("Startup | no dataset restored", level="warning")
             self._report_startup_progress(100, "Ready.")
@@ -2585,6 +2604,8 @@ class MainWindow(MainWindowIcons, QMainWindow):
             self._startup_restore_in_progress = False
             self._startup_ready = True
             self._startup_progress_callback = None
+            if on_done is not None:
+                on_done()
             return
         self._report_startup_progress(58, "Loading analysis cache...")
         self._append_workflow_log("Startup | analysis cache restored", level="debug")
@@ -2596,6 +2617,9 @@ class MainWindow(MainWindowIcons, QMainWindow):
         self._set_section_applied(self.analysis_section, False)
         self._settings.setValue("analysis_section_applied", False)
         self._settings.setValue("analysis/live_preview", False)
+        # The dataset-load chain that got us here already kicked off (and, on a cache
+        # hit, already applied) the first image - this call is a no-op in that case,
+        # matching the pre-async code's own redundant call at this same point.
         self._refresh_image()
         self._report_startup_progress(92, "Finalizing workspace...")
         if show_window:
@@ -2608,7 +2632,13 @@ class MainWindow(MainWindowIcons, QMainWindow):
         self._report_startup_progress(100, "Workspace ready.")
         self._append_workflow_log("Startup | workspace ready", level="success")
         self._startup_progress_callback = None
-        self._end_busy("Loaded dataset. Showing the reference image.")
+        # Busy-state pairing for the dataset load itself now lives entirely in
+        # DatasetController's async chain (_finish_load_dataset_from_folder calls
+        # _end_busy()) - calling _end_busy() again here would double-decrement the
+        # shared busy-operation counter for what was only ever one _begin_busy() call.
+        self._set_status_text("Loaded dataset. Showing the reference image.")
+        if on_done is not None:
+            on_done()
 
     def _restore_saved_window_layout(self) -> None:
         self._layout_state_controller.restore_saved_window_layout()
@@ -3212,6 +3242,9 @@ class MainWindow(MainWindowIcons, QMainWindow):
     def _calculate_background_profile_image(self) -> np.ndarray | None:
         return self._bg_profile._calculate_background_profile_image()
 
+    def _request_background_profile_image(self, on_ready) -> None:
+        self._bg_profile.request_background_profile_image(on_ready)
+
     def _update_background_profile_preview(self) -> None:
         self._bg_profile._update_background_profile_preview()
 
@@ -3584,8 +3617,8 @@ class MainWindow(MainWindowIcons, QMainWindow):
         folder = Path(folder_text)
         return folder if folder.exists() else None
 
-    def _load_processing_state_for_dataset(self) -> None:
-        self._session_state_manager.load_processing_state_for_dataset()
+    def _load_processing_state_for_dataset(self, *, on_done=None) -> None:
+        self._session_state_manager.load_processing_state_for_dataset(on_done=on_done)
 
     def _normalize_mask_application_state(self) -> None:
         self._mask_controller.normalize_application_state()
@@ -3746,11 +3779,10 @@ class MainWindow(MainWindowIcons, QMainWindow):
         self._reference_contrast_cache[cache_key] = score
         return score
 
-    def _auto_reference_image_key_for_spectral_cube(self, spectral_cube_index: int | None) -> tuple[int, float] | None:
-        if spectral_cube_index is None:
-            return None
-        best_key: tuple[int, float] | None = None
-        best_score = float("-inf")
+    def _reference_candidate_records_for_cube(
+        self, spectral_cube_index: int
+    ) -> list[tuple[tuple[int, float], object]]:
+        candidates: list[tuple[tuple[int, float], object]] = []
         for wavelength in self._wavelength_values:
             if is_excluded(self._state.image_exclusions, int(spectral_cube_index), float(wavelength)):
                 continue
@@ -3758,6 +3790,15 @@ class MainWindow(MainWindowIcons, QMainWindow):
             record = self._record_map.get(key)
             if record is None:
                 continue
+            candidates.append((key, record))
+        return candidates
+
+    def _auto_reference_image_key_for_spectral_cube(self, spectral_cube_index: int | None) -> tuple[int, float] | None:
+        if spectral_cube_index is None:
+            return None
+        best_key: tuple[int, float] | None = None
+        best_score = float("-inf")
+        for key, record in self._reference_candidate_records_for_cube(int(spectral_cube_index)):
             score = self._reference_contrast_score(record.path)
             if score > best_score:
                 best_score = score
@@ -4098,6 +4139,66 @@ class MainWindow(MainWindowIcons, QMainWindow):
         if save:
             self._schedule_processing_state_save()
         self._set_status_text(f"Manual reference set to {wavelength:g} nm | spectral cube {spectral_cube_index}.")
+
+    def _schedule_auto_reference_sync(self) -> None:
+        self._reference_sync_timer.start()
+
+    def _run_debounced_auto_reference_sync(self) -> None:
+        if str(self._state.preprocessing.reference_mode or "auto") != "auto":
+            return
+        spectral_cube_index = self._current_spectral_cube()
+        if spectral_cube_index is None:
+            return
+        if self._reference_contrast_scores_cached_for_cube(spectral_cube_index):
+            self._sync_auto_reference_to_current_spectral_cube(follow_view=False)
+        else:
+            self._prefetch_reference_contrast_scores(spectral_cube_index)
+
+    def _reference_contrast_scores_cached_for_cube(self, spectral_cube_index: int) -> bool:
+        return all(
+            str(record.path) in self._reference_contrast_cache
+            for _key, record in self._reference_candidate_records_for_cube(spectral_cube_index)
+        )
+
+    def _prefetch_reference_contrast_scores(self, spectral_cube_index: int) -> None:
+        # `_auto_reference_image_key_for_spectral_cube` scores every wavelength image in a
+        # spectral cube on first visit (disk load + contrast analysis per image), which can
+        # take a couple of seconds and would otherwise run inline on the GUI thread the moment
+        # the spectral-cube slider lands on an uncached cube. This scores the cube's images in
+        # the background instead; `_run_debounced_auto_reference_sync` above only calls the
+        # synchronous lookup once the cache is already warm.
+        if spectral_cube_index in self._reference_prefetch_in_flight:
+            return
+        paths_to_score = [
+            str(record.path)
+            for _key, record in self._reference_candidate_records_for_cube(spectral_cube_index)
+            if str(record.path) not in self._reference_contrast_cache
+        ]
+        if not paths_to_score:
+            return
+        self._reference_prefetch_in_flight.add(spectral_cube_index)
+        worker = FunctionWorker(_score_reference_candidates_task, paths_to_score)
+        worker.signals.result.connect(
+            lambda scores, spectral_cube_index=spectral_cube_index: self._on_reference_prefetch_ready(
+                spectral_cube_index, scores
+            )
+        )
+        worker.signals.error.connect(
+            lambda message, spectral_cube_index=spectral_cube_index: self._on_reference_prefetch_failed(
+                spectral_cube_index, message
+            )
+        )
+        self._thread_pool.start(worker)
+
+    def _on_reference_prefetch_ready(self, spectral_cube_index: int, scores: dict[str, float]) -> None:
+        self._reference_prefetch_in_flight.discard(spectral_cube_index)
+        self._reference_contrast_cache.update(scores)
+        if self._current_spectral_cube() == spectral_cube_index:
+            self._sync_auto_reference_to_current_spectral_cube(follow_view=False)
+
+    def _on_reference_prefetch_failed(self, spectral_cube_index: int, message: str) -> None:
+        self._reference_prefetch_in_flight.discard(spectral_cube_index)
+        self._append_workflow_log(f"Reference-image scoring failed | {message}", level="error")
 
     def _sync_auto_reference_to_current_spectral_cube(self, follow_view: bool = True) -> None:
         if str(self._state.preprocessing.reference_mode or "auto") != "auto":

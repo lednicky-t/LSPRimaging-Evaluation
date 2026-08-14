@@ -7,11 +7,11 @@ import numpy as np
 from PyQt6.QtWidgets import QFileDialog, QInputDialog, QMessageBox
 
 from lspr_imaging_app.domain.models import AreaRoiDetectionSettings, CropDefinition, MaskSettings
+from lspr_imaging_app.gui.analysis_tasks import _load_processing_state_task
 from lspr_imaging_app.gui.worker import FunctionWorker
 from lspr_imaging_app.storage.workspace import (
     build_preprocessing_payload,
     build_processing_profile_payload,
-    load_preprocessing,
     load_processing_profile,
     save_processing_profile,
     write_processing_state_files,
@@ -35,105 +35,125 @@ class SessionStateManager:
     def _session_mask_payload(self) -> dict | None:
         return self._window._session_mask_payload()
 
-    def load_processing_state_for_dataset(self) -> None:
+    def load_processing_state_for_dataset(self, *, on_done=None) -> None:
         window = self._window
         profile_path = window._processing_profile_path()
         preprocessing_path = window._preprocessing_path()
+        window._report_startup_progress(42, "Loading processing profile...")
+        worker = FunctionWorker(_load_processing_state_task, profile_path, preprocessing_path)
+        worker.signals.result.connect(
+            lambda result, on_done=on_done: self._on_processing_state_loaded(on_done, *result)
+        )
+        window._thread_pool.start(worker)
 
-        if profile_path is not None and profile_path.exists():
-            try:
-                window._report_startup_progress(42, "Loading processing profile...")
-                (
-                    preprocessing,
-                    area_roi_settings,
-                    area_rois,
-                    area_roi_groups,
-                    rois,
-                    chromatic_models,
-                    chromatic_landmarks,
-                    analysis_cache,
-                    session_mask,
-                    mask_settings,
-                    image_exclusions,
-                    area_roi_arrays,
-                ) = load_processing_profile(profile_path)
-                window._state.preprocessing = preprocessing
-                window._state.area_roi_settings = area_roi_settings
-                window._state.mask = mask_settings
-                window._state.area_rois = area_rois
-                window._state.area_roi_groups = area_roi_groups
-                window._state.area_roi_arrays = area_roi_arrays
-                window._state.rois = rois
-                window._reset_roi_id_counter_from_state()
-                window._current_file_mask = None
-                window._current_file_mask_path = None
-                window._current_file_mask_session_source_path = None
-                window._append_workflow_log(
-                    f"Mask settings restore | histogram={bool(mask_settings.histogram_enabled)} figure={bool(mask_settings.figure_enabled)}",
-                    level="debug",
-                )
-                if session_mask is not None:
-                    restored_mask = session_mask.get("mask")
-                    restored_record_path = session_mask.get("record_path")
-                    if isinstance(restored_mask, np.ndarray):
-                        window._set_current_file_mask(restored_mask, None, refresh_preview=False)
-                        window._current_file_mask_session_source_path = (
-                            None if restored_record_path is None else Path(str(restored_record_path))
-                        )
-                window._report_startup_progress(48, "Restoring ROI groups...")
-                window._report_startup_progress(54, "Restoring chromatic transforms...")
-                window._state.chromatic_models = chromatic_models
-                window._state.chromatic_landmarks = chromatic_landmarks
-                window._state.image_exclusions = image_exclusions
-                window._restore_analysis_caches(analysis_cache)
-                window._selected_rectangle_roi_ids.clear()
-                window._sync_rectangle_stamp_overlays()
-                window._append_workflow_log(
-                    f"Mask settings restore | histogram={bool(mask_settings.histogram_enabled)} figure={bool(mask_settings.figure_enabled)}",
-                    level="debug",
-                )
-                if session_mask is None:
-                    window._append_workflow_log("Session mask restore | none", level="debug")
-                else:
-                    restored_mask = session_mask.get("mask")
-                    restored_record_path = session_mask.get("record_path")
-                    mask_shape = None if not isinstance(restored_mask, np.ndarray) else tuple(int(v) for v in restored_mask.shape)
-                    window._append_workflow_log(
-                        f"Session mask restore | record={restored_record_path} | shape={mask_shape}",
-                        level="debug",
+    def _on_processing_state_loaded(
+        self,
+        on_done,
+        outcome: str,
+        payload: object,
+        profile_error: str | None,
+        preprocessing_error: str | None,
+    ) -> None:
+        window = self._window
+        if profile_error is not None:
+            window.status_label.setText(f"Processing profile load failed: {profile_error}")
+
+        if outcome == "profile":
+            (
+                preprocessing,
+                area_roi_settings,
+                area_rois,
+                area_roi_groups,
+                rois,
+                chromatic_models,
+                chromatic_landmarks,
+                analysis_cache,
+                session_mask,
+                mask_settings,
+                image_exclusions,
+                area_roi_arrays,
+            ) = payload
+            window._state.preprocessing = preprocessing
+            window._state.area_roi_settings = area_roi_settings
+            window._state.mask = mask_settings
+            window._state.area_rois = area_rois
+            window._state.area_roi_groups = area_roi_groups
+            window._state.area_roi_arrays = area_roi_arrays
+            window._state.rois = rois
+            window._reset_roi_id_counter_from_state()
+            window._current_file_mask = None
+            window._current_file_mask_path = None
+            window._current_file_mask_session_source_path = None
+            window._append_workflow_log(
+                f"Mask settings restore | histogram={bool(mask_settings.histogram_enabled)} figure={bool(mask_settings.figure_enabled)}",
+                level="debug",
+            )
+            if session_mask is not None:
+                restored_mask = session_mask.get("mask")
+                restored_record_path = session_mask.get("record_path")
+                if isinstance(restored_mask, np.ndarray):
+                    window._set_current_file_mask(restored_mask, None, refresh_preview=False)
+                    window._current_file_mask_session_source_path = (
+                        None if restored_record_path is None else Path(str(restored_record_path))
                     )
-                window._normalize_mask_application_state()
-                window._update_roi_table()
-                window._update_chromatic_control_state()
-                window._restore_chromatic_view_after_load()
-                window._report_startup_progress(60, "Processing profile restored.")
-                return
-            except Exception as exc:
-                window.status_label.setText(f"Processing profile load failed: {exc}")
+            window._report_startup_progress(48, "Restoring ROI groups...")
+            window._report_startup_progress(54, "Restoring chromatic transforms...")
+            window._state.chromatic_models = chromatic_models
+            window._state.chromatic_landmarks = chromatic_landmarks
+            window._state.image_exclusions = image_exclusions
+            window._restore_analysis_caches(analysis_cache)
+            window._selected_rectangle_roi_ids.clear()
+            window._sync_rectangle_stamp_overlays()
+            window._append_workflow_log(
+                f"Mask settings restore | histogram={bool(mask_settings.histogram_enabled)} figure={bool(mask_settings.figure_enabled)}",
+                level="debug",
+            )
+            if session_mask is None:
+                window._append_workflow_log("Session mask restore | none", level="debug")
+            else:
+                restored_mask = session_mask.get("mask")
+                restored_record_path = session_mask.get("record_path")
+                mask_shape = None if not isinstance(restored_mask, np.ndarray) else tuple(int(v) for v in restored_mask.shape)
+                window._append_workflow_log(
+                    f"Session mask restore | record={restored_record_path} | shape={mask_shape}",
+                    level="debug",
+                )
+            window._normalize_mask_application_state()
+            window._update_roi_table()
+            window._update_chromatic_control_state()
+            window._restore_chromatic_view_after_load()
+            window._report_startup_progress(60, "Processing profile restored.")
+            if on_done is not None:
+                on_done()
+            return
 
-        if preprocessing_path is not None and preprocessing_path.exists():
-            try:
-                window._state.preprocessing = load_preprocessing(preprocessing_path)
-                window._state.area_roi_settings = AreaRoiDetectionSettings()
-                window._state.mask = MaskSettings()
-                window._state.area_rois.clear()
-                window._state.area_roi_groups.clear()
-                window._state.rois.clear()
-                window._state.chromatic_models.clear()
-                window._state.chromatic_landmarks.clear()
-                window._state.image_exclusions.clear()
-                window._current_file_mask = None
-                window._current_file_mask_path = None
-                window._current_file_mask_session_source_path = None
-                window._selected_rectangle_roi_ids.clear()
-                window._sync_rectangle_stamp_overlays()
-                window._update_roi_table()
-                window._normalize_mask_application_state()
-                return
-            except Exception as exc:
-                window.status_label.setText(f"Preprocessing load failed: {exc}")
+        if preprocessing_error is not None:
+            window.status_label.setText(f"Preprocessing load failed: {preprocessing_error}")
+
+        if outcome == "preprocessing":
+            window._state.preprocessing = payload
+            window._state.area_roi_settings = AreaRoiDetectionSettings()
+            window._state.mask = MaskSettings()
+            window._state.area_rois.clear()
+            window._state.area_roi_groups.clear()
+            window._state.rois.clear()
+            window._state.chromatic_models.clear()
+            window._state.chromatic_landmarks.clear()
+            window._state.image_exclusions.clear()
+            window._current_file_mask = None
+            window._current_file_mask_path = None
+            window._current_file_mask_session_source_path = None
+            window._selected_rectangle_roi_ids.clear()
+            window._sync_rectangle_stamp_overlays()
+            window._update_roi_table()
+            window._normalize_mask_application_state()
+            if on_done is not None:
+                on_done()
+            return
 
         self._reset_processing_state_to_defaults()
+        if on_done is not None:
+            on_done()
 
     def _reset_processing_state_to_defaults(self) -> None:
         window = self._window
@@ -230,7 +250,10 @@ class SessionStateManager:
         window._push_undo_point("Load session")
         window._active_session_name = name
         window._save_active_session_pointer()
-        self.load_processing_state_for_dataset()
+        self.load_processing_state_for_dataset(on_done=lambda name=name: self._on_load_session_ready(name))
+
+    def _on_load_session_ready(self, name: str) -> None:
+        window = self._window
         window._current_image_key = None
         window._refresh_image()
         window._set_status_text(f'Loaded session "{name}".')

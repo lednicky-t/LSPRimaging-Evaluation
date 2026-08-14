@@ -13,6 +13,7 @@ import numpy as np
 from lspr_imaging_app.domain.models import AbsorbanceSpectrumResult, AreaRoi, ChromaticTransformModel
 from lspr_imaging_app.gui.worker import SensorgramComputationResult, SensorgramPointResult
 from lspr_imaging_app.io.dataset import dataset_load_plane_roi, export_ome_zarr_dataset, load_image_array
+from lspr_imaging_app.storage.workspace import load_preprocessing, load_processing_profile
 from lspr_imaging_app.processing.analysis import absorbance_from_means, fit_absorbance_curve, metric_value_from_fit
 from lspr_imaging_app.processing.chromatic import (
     ChromaticRegistrationResult,
@@ -32,10 +33,43 @@ from lspr_imaging_app.processing.preprocess import (
     apply_preprocessing,
     apply_spatial_mask,
     apply_spatial_preprocessing,
+    create_figure_mask,
     estimate_background_profile,
 )
+from lspr_imaging_app.processing.reference_selection import bimodal_dip_contrast
 from lspr_imaging_app.processing.roi_detection import detect_rois, ignored_pixel_mask, refresh_roi_metrics
 from lspr_imaging_app.processing.roi_rasterize import expand_mask, expand_mask_to_patch
+
+
+def _load_processing_state_task(
+    profile_path: Path | None, preprocessing_path: Path | None
+) -> tuple[str, object, str | None, str | None]:
+    """Mirrors SessionStateManager.load_processing_state_for_dataset's fallback order
+    (try the full processing profile, then the lighter preprocessing-only file, then
+    give up and let the caller reset to defaults) entirely off the GUI thread - both
+    `load_processing_profile`/`load_preprocessing` do blocking file I/O + JSON parsing
+    that isn't free once a session's analysis cache holds a few hundred spectra.
+
+    Returns (outcome, payload, profile_error, preprocessing_error):
+      - ("profile", <load_processing_profile(...) return tuple>, None, None)
+      - ("preprocessing", <PreprocessingSettings>, <profile error text, if any>, None)
+      - ("defaults", None, <profile error text, if any>, <preprocessing error text, if any>)
+    Errors are returned as text, not raised - each corresponds to a file that failed to
+    parse, which the original code treats as "fall back to the next option," not as an
+    unexpected failure of this task itself.
+    """
+    profile_error: str | None = None
+    if profile_path is not None and profile_path.exists():
+        try:
+            return "profile", load_processing_profile(profile_path), None, None
+        except Exception as exc:
+            profile_error = str(exc)
+    if preprocessing_path is not None and preprocessing_path.exists():
+        try:
+            return "preprocessing", load_preprocessing(preprocessing_path), profile_error, None
+        except Exception as exc:
+            return "defaults", None, profile_error, str(exc)
+    return "defaults", None, profile_error, None
 
 
 def _process_image_task(path_str: str, preprocessing, rois, external_mask: np.ndarray | None, mask_state) -> np.ndarray:
@@ -54,6 +88,23 @@ def _process_image_task(path_str: str, preprocessing, rois, external_mask: np.nd
         mask_state=mask_state,
         skip_crop=skip_crop,
     )
+
+
+def _mask_candidate_task(path_str: str, mask_settings, tool_key: str) -> np.ndarray:
+    raw_image = load_image_array(path_str).astype(np.float32, copy=False)
+    return create_figure_mask(raw_image, mask_settings, tool_key)
+
+
+def _score_reference_candidates_task(path_strs: list[str]) -> dict[str, float]:
+    scores: dict[str, float] = {}
+    for path_str in path_strs:
+        try:
+            image = load_image_array(path_str).astype(np.float32, copy=False)
+        except Exception:
+            scores[path_str] = float("-inf")
+            continue
+        scores[path_str] = bimodal_dip_contrast(image)
+    return scores
 
 
 def _refresh_roi_metrics_task(

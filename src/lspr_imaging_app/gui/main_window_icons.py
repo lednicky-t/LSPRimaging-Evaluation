@@ -1707,17 +1707,32 @@ class MainWindowIcons:
         return "µm" if str(self._state.preprocessing.display_units or "px") == "um" else "px"
 
     def _build_measurement_controls_row(self) -> QWidget:
-        row = QWidget(self.image_toolbar)
-        layout = QHBoxLayout(row)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(6)
-        layout.addWidget(self.measurement_status_label, 1)
-        layout.addWidget(QLabel("Δx"))
-        layout.addWidget(self.measurement_um_x_spin)
-        layout.addWidget(QLabel("Δy"))
-        layout.addWidget(self.measurement_um_y_spin)
-        layout.addWidget(self.measurement_apply_button)
-        return row
+        container = QWidget(self.image_toolbar)
+        outer_layout = QVBoxLayout(container)
+        outer_layout.setContentsMargins(0, 0, 0, 0)
+        outer_layout.setSpacing(2)
+
+        status_row = QWidget(container)
+        status_layout = QHBoxLayout(status_row)
+        status_layout.setContentsMargins(0, 0, 0, 0)
+        status_layout.setSpacing(6)
+        status_layout.addWidget(self.measurement_status_label, 1)
+
+        scale_row = QWidget(container)
+        scale_layout = QHBoxLayout(scale_row)
+        scale_layout.setContentsMargins(0, 0, 0, 0)
+        scale_layout.setSpacing(6)
+        scale_layout.addWidget(QLabel("Change scale:"))
+        scale_layout.addWidget(QLabel("Δx"))
+        scale_layout.addWidget(self.measurement_um_x_spin)
+        scale_layout.addWidget(QLabel("Δy"))
+        scale_layout.addWidget(self.measurement_um_y_spin)
+        scale_layout.addWidget(self.measurement_apply_button)
+        scale_layout.addStretch(1)
+
+        outer_layout.addWidget(status_row)
+        outer_layout.addWidget(scale_row)
+        return container
 
     def _create_image_tool_icon_button(self, action: QAction, *, accent: str) -> QToolButton:
         button = QToolButton(self)

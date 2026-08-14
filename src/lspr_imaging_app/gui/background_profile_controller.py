@@ -66,79 +66,107 @@ class BackgroundProfileController:
         )
 
 
-    def _update_background_profile_preview(self) -> None:
+    def request_background_profile_image(self, on_ready) -> None:
+        """Resolve the background-profile image for the current view, off the GUI thread
+        if it isn't already cached and current. `on_ready(image)` is called with the
+        result: synchronously, in this call, on a cache hit; otherwise once the background
+        computation finishes (`None` if it can't be computed or the job fails). Concurrent
+        requests for the same signature (e.g. the live preview and a "Create new
+        background" click both wanting the current view) share a single computation.
+
+        The single-slot cache (`_background_profile_cache_signature`/`_image`) is only
+        updated if the finished result still matches the *current* signature, so an
+        out-of-order/superseded result can't clobber it with stale data - but `on_ready`
+        still always fires with the (correctly computed, just possibly no-longer-current)
+        result, since callers like "Save background" want that answer regardless of
+        whether the view has since moved on.
+        """
+        window = self.window
         signature = self._background_profile_signature()
         if signature is None:
+            on_ready(None)
             return
         if (
-            self.window._background_profile_cache_signature == signature
-            and self.window._background_profile_cache_image is not None
+            window._background_profile_cache_signature == signature
+            and window._background_profile_cache_image is not None
         ):
-            if self.window._showing_background_profile_main:
-                self._apply_main_image_content()
+            on_ready(window._background_profile_cache_image)
             return
+        window._background_profile_pending.setdefault(signature, []).append(on_ready)
+        if signature in window._background_profile_in_flight:
+            return
+        window._background_profile_in_flight.add(signature)
         rois = (
-            deepcopy(self.window._rois_for_preprocessing(self.window._current_image_key))
-            if self.window._state.preprocessing.flatten_background_exclude_area_rois
+            deepcopy(window._rois_for_preprocessing(window._current_image_key))
+            if window._state.preprocessing.flatten_background_exclude_area_rois
             else None
         )
-        preprocessing = deepcopy(self.window._state.preprocessing)
-        mask_settings = deepcopy(self.window._state.area_roi_settings) if self.window._state.preprocessing.flatten_background_exclude_mask else None
-        external_mask, external_mask_processed = self.window._effective_external_mask_for_record(
-            self.window._current_record_path,
+        preprocessing = deepcopy(window._state.preprocessing)
+        mask_settings = deepcopy(window._state.area_roi_settings) if window._state.preprocessing.flatten_background_exclude_mask else None
+        external_mask, external_mask_processed = window._effective_external_mask_for_record(
+            window._current_record_path,
             processed_space=True,
         )
-        request_id = self.window._background_profile_request_id + 1
-        self.window._background_profile_request_id = request_id
         worker = FunctionWorker(
             _background_profile_task,
-            str(self.window._current_record_path),
+            str(window._current_record_path),
             (preprocessing, mask_settings, external_mask_processed),
-            float(self.window._state.preprocessing.flatten_background_sigma_px),
+            float(window._state.preprocessing.flatten_background_sigma_px),
             rois,
             external_mask,
             supports_progress=True,
         )
-        self.window._begin_busy("Updating background profile preview...")
-        self.window._append_workflow_log("Background profile preview start", level="info")
-        worker.signals.progress.connect(self.window._update_busy_progress)
+        window._begin_busy("Computing background profile...")
+        window._append_workflow_log("Background profile computation start", level="info")
+        worker.signals.progress.connect(window._update_busy_progress)
         worker.signals.result.connect(
-            lambda profile,
-            request_id=request_id,
-            signature=signature: self._on_background_profile_ready(request_id, signature, profile)
+            lambda profile, signature=signature: self._on_background_profile_ready(signature, profile)
         )
-        worker.signals.error.connect(lambda message: self._on_background_profile_failed(message))
-        self.window._thread_pool.start(worker)
+        worker.signals.error.connect(
+            lambda message, signature=signature: self._on_background_profile_failed(signature, message)
+        )
+        window._thread_pool.start(worker)
 
 
-    def _on_background_profile_ready(
-        self,
-        request_id: int,
-        signature: tuple[object, ...],
-        profile: np.ndarray,
-    ) -> None:
-        self.window._end_busy()
-        if request_id != self.window._background_profile_request_id:
+    def _update_background_profile_preview(self) -> None:
+        self.request_background_profile_image(self._on_background_profile_preview_ready)
+
+
+    def _on_background_profile_preview_ready(self, profile: np.ndarray | None) -> None:
+        window = self.window
+        if profile is None or not window._showing_background_profile_main:
             return
-        if signature != self._background_profile_signature():
-            return
-        self.window._background_profile_cache_signature = signature
-        self.window._background_profile_cache_image = profile
+        if window._background_profile_cache_signature != self._background_profile_signature():
+            return  # A newer request has since superseded this one.
+        self._apply_main_image_content()
+
+
+    def _on_background_profile_ready(self, signature: tuple[object, ...], profile: np.ndarray) -> None:
+        window = self.window
+        window._background_profile_in_flight.discard(signature)
+        window._end_busy()
+        if signature == self._background_profile_signature():
+            window._background_profile_cache_signature = signature
+            window._background_profile_cache_image = profile
         finite_profile = profile[np.isfinite(profile)]
         if finite_profile.size:
             pmin, pmax = float(finite_profile.min()), float(finite_profile.max())
             spread_note = f" | range {pmin:.4g}-{pmax:.4g} (Δ{pmax - pmin:.4g})"
         else:
             spread_note = ""
-        self.window._append_workflow_log(f"Background profile preview done{spread_note}", level="success")
-        if self.window._showing_background_profile_main:
-            self._apply_main_image_content()
+        window._append_workflow_log(f"Background profile computation done{spread_note}", level="success")
+        for callback in window._background_profile_pending.pop(signature, []):
+            callback(profile)
 
 
-    def _on_background_profile_failed(self, message: str) -> None:
-        self.window._end_busy()
-        self.window._append_workflow_log(f"Background profile preview failed | {message}", level="error")
-        self.window._background_error("Background profile preview", message)
+    def _on_background_profile_failed(self, signature: tuple[object, ...], message: str) -> None:
+        window = self.window
+        window._background_profile_in_flight.discard(signature)
+        window._end_busy()
+        window._append_workflow_log(f"Background profile computation failed | {message}", level="error")
+        window._background_error("Background profile", message)
+        for callback in window._background_profile_pending.pop(signature, []):
+            callback(None)
 
 
     def _invalidate_background_profile_cache(self) -> None:
