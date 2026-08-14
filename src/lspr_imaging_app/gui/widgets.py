@@ -204,6 +204,11 @@ class PanelContainer(QDockWidget):
             | QDockWidget.DockWidgetFeature.DockWidgetClosable
         )
         self.setAllowedAreas(Qt.DockWidgetArea.AllDockWidgetAreas)
+        # While floating, docking is disabled by default (see _on_top_level_changed) so
+        # dragging the floating window around/over the main app doesn't trigger Qt's
+        # dock-target hint overlay or risk an accidental snap-back. The float button
+        # re-arms docking on click, tracked here so it can also gate a second click.
+        self._dock_armed = False
 
         theme = get_active_theme()
         self.setStyleSheet(f"QDockWidget {{ color: {theme.text_primary}; }}")
@@ -213,6 +218,7 @@ class PanelContainer(QDockWidget):
         # qt_dockwidget_*button widgets has any effect on it. A custom title bar
         # with real QToolButtons is the only way to make the glyphs bigger.
         self.setTitleBarWidget(self._build_title_bar(title, theme))
+        self.topLevelChanged.connect(self._on_top_level_changed)
 
     def _build_title_bar(self, title: str, theme) -> QWidget:
         bar = QWidget(self)
@@ -242,8 +248,9 @@ class PanelContainer(QDockWidget):
             transparent_icon_button_stylesheet(hover=hex_to_rgba(theme.accent_blue, 0.22))
             + "QToolButton:hover { border-radius: 4px; }"
         )
-        float_button.clicked.connect(lambda: self.setFloating(not self.isFloating()))
+        float_button.clicked.connect(self._on_float_button_clicked)
         layout.addWidget(float_button)
+        self._float_button = float_button
 
         close_button = QToolButton(row)
         close_button.setIcon(self._make_close_icon())
@@ -267,6 +274,50 @@ class PanelContainer(QDockWidget):
         outer.addWidget(separator)
 
         return bar
+
+    def _on_float_button_clicked(self) -> None:
+        if not self.isFloating():
+            self.setFloating(True)
+            return
+        # Already floating: the click toggles whether docking is armed rather than
+        # changing floating state again (see _on_top_level_changed for why docking
+        # starts disabled here).
+        self._dock_armed = not self._dock_armed
+        self.setAllowedAreas(
+            Qt.DockWidgetArea.AllDockWidgetAreas
+            if self._dock_armed
+            else Qt.DockWidgetArea.NoDockWidgetArea
+        )
+        self._update_float_button_appearance()
+
+    def _on_top_level_changed(self, floating: bool) -> None:
+        # Disable docking the moment the panel becomes floating - regardless of
+        # whether that happened via the float button or the user dragging the title
+        # bar out - so moving the floating window around/over the main app doesn't
+        # trigger Qt's dock-target hint overlay or accidentally snap it back in.
+        # Re-docking (floating -> docked, by any means) always restores all areas.
+        self._dock_armed = False
+        self.setAllowedAreas(
+            Qt.DockWidgetArea.NoDockWidgetArea if floating else Qt.DockWidgetArea.AllDockWidgetAreas
+        )
+        self._update_float_button_appearance()
+
+    def _update_float_button_appearance(self) -> None:
+        if not self.isFloating():
+            self._float_button.setIcon(self._make_float_icon())
+            self._float_button.setToolTip("Undock this panel into a floating window.")
+        elif self._dock_armed:
+            self._float_button.setIcon(self._make_float_icon("#22c55e"))
+            self._float_button.setToolTip(
+                "Docking enabled - drag this window onto a dock area to dock it, "
+                "or click again to disable docking."
+            )
+        else:
+            self._float_button.setIcon(self._make_float_icon())
+            self._float_button.setToolTip(
+                "Docking disabled while floating, so this window won't snap back when "
+                "moved over the main app. Click to re-enable docking."
+            )
 
     @staticmethod
     def _make_close_icon(color: str = "#cbd5e1") -> QIcon:
