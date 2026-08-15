@@ -4,24 +4,6 @@ Priority levels: `[high]` `[medium]` `[low]`
 
 ---
 
-## High Priority
-
-### [high] OME-Zarr converter: performance / resource utilization
-The export pipeline is slow despite low CPU and SSD utilization - machine resources are
-largely idle during conversion. Remaining sub-tasks after thread-oversubscription fix:
-- ~~Thread oversubscription fixed~~: Blosc now gets `cpu_count // 2` threads (not full
-  `cpu_count`) so reader workers aren't starved during compression. Per-file tifffile
-  `maxworkers` in `_load_image_array_native` reduced to 2 (from `cpu_count`) since the
-  export worker pool already provides inter-file parallelism.
-- Worker count (`worker_count`) is still capped at `cpu_count`; increasing to 1.5-2x
-  may help on fast NVMe but needs benchmarking - see `TODO(perf)` in `io/dataset.py`.
-- Consider exposing a faster compression preset (e.g. lz4 + byte-shuffle) alongside the
-  current size-optimized zstd + bitshuffle default.
-- Longer term: evaluate zarr v3 sharding to collapse many small chunk files into fewer
-  physical files (especially beneficial on Windows with AV scanning and on network drives).
-
----
-
 ## Medium Priority
 
 ### [medium] Mask panel: control fields too wide
@@ -57,6 +39,31 @@ ROI metrics currently store only the mean pixel value per ROI. Extend to also tr
 ---
 
 ## Low Priority
+
+### [low] OME-Zarr export: validate adaptive worker tuning on real hardware
+The original "export is slow, resources idle" problem (see git history around 2026-07-03,
+`export_ome_zarr_dataset` in `io/dataset.py`) was fixed by bypassing zarr's own
+`asyncio.to_thread`-per-chunk write API and writing shards directly from a
+`ProcessPoolExecutor` (~119 MB/s vs ~21 MB/s in benchmarking at 64px chunks), plus zarr v3
+sharding (`shard_mode`) to cut down on small-file count, plus a faster lz4+bitshuffle
+compressor. A follow-up tuning idea (a static `1.5x cpu_count` worker-count guess,
+2026-08-15) was replaced the same day by real adaptive measurement instead of a guess:
+- `export_ome_zarr_dataset` now times each shard task's read/compress/write phases
+  (`write_shard` returns a `ShardWriteResult`, `_zarr_export_worker.py`) and, every
+  `adaptive_batch_mb` of data processed (default 1 GB), checks the measured I/O-wait
+  fraction and adds or removes worker processes accordingly (bounded to
+  `[cpu_count, 2x cpu_count]`) — see the coordinator loop around dataset.py:845-940.
+- Togglable in `File > Preferences > OME-Zarr export: adaptive worker tuning` (default
+  **on**), with the sample size adjustable there too. Off is a true baseline (plain
+  `cpu_count`, no timing/decision logic runs at all) specifically so the feature itself can
+  be A/B'd by running the same export twice.
+- Still genuinely unverified: whether this actually helps on real hardware/drives, and
+  whether the flip thresholds (`ADAPTIVE_IO_FLIP_UP`/`DOWN` = 0.5/0.2, step size
+  `cpu_count // 4`) are well-tuned. That can only be answered by using it — compare
+  wall-clock export time (reported in the finish message/workflow log) with the toggle on
+  vs. off on the same dataset/destination, ideally including at least one slower drive
+  (network share, HDD, or a drive with Windows AV scanning) where I/O-wait should actually
+  show up.
 
 ### [low] Compare `plim` legacy repo against current imaging app
 Create and keep a repo-local comparison note for `ondrejstranik/plim.git` so future work

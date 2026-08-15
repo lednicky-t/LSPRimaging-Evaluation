@@ -504,6 +504,8 @@ class MainWindowIcons:
         self._set_status_text(f"Exporting Stack to Zarr to {destination.name}...")
         self._begin_busy("Exporting Stack to Zarr...", determinate=True)
         excluded_rules_snapshot = deepcopy(self._state.image_exclusions) if skip_excluded_images else None
+        adaptive_enabled = self._ome_zarr_adaptive_enabled()
+        adaptive_batch_mb = self._ome_zarr_adaptive_batch_mb()
         worker = FunctionWorker(
             _ome_zarr_export_task,
             dataset,
@@ -515,13 +517,16 @@ class MainWindowIcons:
             excluded_rules=excluded_rules_snapshot,
             skip_excluded=bool(skip_excluded_images),
             cancel_event=self._ome_zarr_export_cancel_event,
+            adaptive_workers_enabled=adaptive_enabled,
+            adaptive_batch_mb=adaptive_batch_mb,
             supports_progress=True,
         )
         tools_text = "applied" if bool(getattr(preprocessing_snapshot, "image_tools_enabled", False)) else "ignored"
         shard_text = "per_spectral_cube" if shard_mode == "per_spectral_cube" else "per_image"
         excluded_text = f"on ({len(excluded_rules_snapshot)} rules)" if skip_excluded_images else "off"
+        adaptive_text = f"on ({adaptive_batch_mb}MB)" if adaptive_enabled else "off"
         self._append_workflow_log(
-            f"OME-Zarr export start | chunks {chunk_size_px}px | shard {shard_text} | compression {'on' if compression_enabled else 'off'} | image tools {tools_text} | skip excluded {excluded_text}",
+            f"OME-Zarr export start | chunks {chunk_size_px}px | shard {shard_text} | compression {'on' if compression_enabled else 'off'} | image tools {tools_text} | skip excluded {excluded_text} | adaptive tuning {adaptive_text}",
             level="info",
         )
         worker.signals.progress.connect(self._update_busy_progress)
@@ -543,8 +548,33 @@ class MainWindowIcons:
         self._set_status_text("Stopping Stack to Zarr export...")
         self.dataset_ome_zarr_export_eta_label.setText("ETA: stopping...")
 
+    def _show_ome_zarr_adaptive_tuning_info(self) -> None:
+        QMessageBox.information(
+            self,
+            "Adaptive worker tuning",
+            "Stack-to-Zarr export writes many shard files in parallel using several "
+            "worker processes — normally one per CPU core, since compressing image "
+            "data is CPU-intensive.\n\n"
+            "Adaptive worker tuning periodically checks, using real timing from the "
+            "export itself, whether time is being spent waiting on the disk (reading "
+            "source images, writing shard files) or on compression (CPU work). If "
+            "it's mostly waiting on disk — common with slower drives, network "
+            "drives, or antivirus scanning every new file — it adds a few extra "
+            "worker processes so the CPU stays busy while others wait. On a fast "
+            "local SSD, it typically makes no change.\n\n"
+            "Checks happen after a configurable amount of data has been processed "
+            "(default 1 GB, see \"Sample size for tuning decisions\"). A larger "
+            "sample avoids mistaking a fast drive's temporary write-cache burst for "
+            "its true sustained speed.\n\n"
+            "Turn this off for a fixed, predictable worker count (equal to your "
+            "CPU's core count) on every export — useful when comparing export times.",
+        )
+
     def _on_ome_zarr_export_progress(self, request_id: int, percent: int, text: str) -> None:
         if request_id != self._ome_zarr_export_request_id or not self._ome_zarr_export_running:
+            return
+        if text.startswith("ADAPTIVE_FLIP: "):
+            self._append_workflow_log(text.removeprefix("ADAPTIVE_FLIP: "), level="info")
             return
         current_percent = int(np.clip(percent, 0, 100))
         self.dataset_ome_zarr_export_progress_bar.setValue(current_percent)
@@ -1977,6 +2007,38 @@ class MainWindowIcons:
         if current_timeout not in self.startup_restore_timeout_actions:
             current_timeout = 5
         self._set_startup_restore_timeout_seconds(current_timeout)
+
+        preferences_menu.addSeparator()
+        zarr_tuning_menu = preferences_menu.addMenu("OME-Zarr export: adaptive worker tuning")
+        self.zarr_adaptive_enabled_action = zarr_tuning_menu.addAction("Enabled")
+        self.zarr_adaptive_enabled_action.setCheckable(True)
+        self.zarr_adaptive_enabled_action.setChecked(self._ome_zarr_adaptive_enabled())
+        self.zarr_adaptive_enabled_action.triggered.connect(self._set_ome_zarr_adaptive_enabled)
+        zarr_tuning_menu.addSeparator()
+        batch_size_menu = zarr_tuning_menu.addMenu("Sample size for tuning decisions")
+        batch_size_group = QActionGroup(self)
+        batch_size_group.setExclusive(True)
+        self.zarr_adaptive_batch_actions = {}
+        _ZARR_ADAPTIVE_BATCH_OPTIONS = [
+            (256, "256 MB"),
+            (512, "512 MB"),
+            (1024, "1 GB (default)"),
+            (2048, "2 GB"),
+            (4096, "4 GB"),
+        ]
+        for mb, label in _ZARR_ADAPTIVE_BATCH_OPTIONS:
+            action = batch_size_menu.addAction(label)
+            action.setCheckable(True)
+            action.triggered.connect(lambda checked, value=mb: checked and self._set_ome_zarr_adaptive_batch_mb(value))
+            batch_size_group.addAction(action)
+            self.zarr_adaptive_batch_actions[mb] = action
+        current_batch_mb = self._ome_zarr_adaptive_batch_mb()
+        if current_batch_mb not in self.zarr_adaptive_batch_actions:
+            current_batch_mb = 1024
+        self._set_ome_zarr_adaptive_batch_mb(current_batch_mb)
+        zarr_tuning_menu.addSeparator()
+        zarr_tuning_info_action = zarr_tuning_menu.addAction(self._tabler_icon("info-circle"), "What is this?")
+        zarr_tuning_info_action.triggered.connect(self._show_ome_zarr_adaptive_tuning_info)
 
         file_menu.addSeparator()
         file_menu.addAction("E&xit", self.close)

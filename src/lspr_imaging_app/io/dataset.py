@@ -35,6 +35,13 @@ OME_ZARR_ARRAY_META_FILENAME = ".zarray"
 OME_ZARR_LSPR_KEY = "lspr"
 _OME_ZARR_IMPORT_ERROR: ImportError | None = None
 
+# Adaptive worker-count tuning for export_ome_zarr_dataset (module-level so tests
+# can monkeypatch them for deterministic flip behavior instead of depending on
+# real disk-timing noise). See export_ome_zarr_dataset's coordinator loop.
+ADAPTIVE_MAX_FACTOR = 2.0          # never exceed 2x cpu_count
+ADAPTIVE_IO_FLIP_UP = 0.5          # >=50% time in read+write -> add workers
+ADAPTIVE_IO_FLIP_DOWN = 0.2        # <=20% time in read+write -> remove workers
+
 
 def _crc32c(data: bytes) -> int:
     """CRC32C (Castagnoli) checksum — required for zarr v3 shard index format."""
@@ -689,6 +696,8 @@ def export_ome_zarr_dataset(
     cancel_event: threading.Event | None = None,
     excluded_rules: list[ImageExclusionRule] | None = None,
     skip_excluded: bool = False,
+    adaptive_workers_enabled: bool = True,
+    adaptive_batch_mb: int = 1024,
 ) -> Path:
     """Export `dataset` (a TIFF stack or another OME-Zarr dataset) as a new
     OME-Zarr v3 dataset at `destination`, using zarr's sharding codec (Zarr
@@ -842,38 +851,109 @@ def export_ome_zarr_dataset(
 
     # ProcessPoolExecutor: each worker runs in a separate Python interpreter with
     # its own GIL, so the main Qt thread stays responsive at any CPU count.
-    worker_count = max(1, min(int(os.cpu_count() or 4), n_tasks))
+    # Baseline is plain cpu_count (no oversubscription) -- adaptive tuning below
+    # is what decides whether to go higher, based on real measurement instead of
+    # a guess.
+    cpu_count = int(os.cpu_count() or 4)
+    worker_count = max(1, min(cpu_count, n_tasks))
     prefetch_window = max(worker_count * 2, worker_count + 2)
     task_iter = iter(task_args)
     pending: dict = {}
 
-    report_progress(force=True)
-    with ProcessPoolExecutor(max_workers=worker_count, initializer=_worker_init) as executor:
-        def submit_next() -> bool:
-            try:
-                args = next(task_iter)
-            except StopIteration:
-                return False
-            future = executor.submit(write_shard, make_spec(*args))
-            pending[future] = True
-            return True
+    # Adaptive worker tuning: each export task mixes disk I/O (image read, shard
+    # write) with CPU work (Blosc compress). Periodically check, from real timing
+    # of the export itself, which one dominates -- if the export is spending most
+    # of its time waiting on disk, add worker processes so other workers' CPU
+    # work can fill that gap; if it's CPU-bound, stay at cpu_count (adding
+    # workers wouldn't help -- there's no idle core to fill). Bounded to
+    # [cpu_count, 2x cpu_count]: never go *below* cpu_count, only compensate for
+    # I/O wait above it. Off (adaptive_workers_enabled=False) skips this entirely
+    # so it can serve as a true, reproducible baseline. See the Preferences >
+    # "OME-Zarr export: adaptive worker tuning" menu for the user-facing controls.
+    batch_bytes_threshold = max(int(adaptive_batch_mb), 1) * 1024 * 1024
+    window_bytes = 0
+    window_read_s = 0.0
+    window_write_s = 0.0
+    window_compress_s = 0.0
 
+    report_progress(force=True)
+    executor = ProcessPoolExecutor(max_workers=worker_count, initializer=_worker_init)
+    executors_to_close = [executor]
+
+    def submit_next() -> bool:
+        try:
+            args = next(task_iter)
+        except StopIteration:
+            return False
+        future = executor.submit(write_shard, make_spec(*args))
+        pending[future] = True
+        return True
+
+    try:
         for _ in range(min(prefetch_window, n_tasks)):
             if not submit_next():
                 break
 
         while pending:
             if cancel_event is not None and cancel_event.is_set():
-                executor.shutdown(wait=False, cancel_futures=True)
+                for ex in executors_to_close:
+                    ex.shutdown(wait=False, cancel_futures=True)
                 raise RuntimeError("OME-Zarr export cancelled.")
             done, _ = wait(list(pending.keys()), return_when=FIRST_COMPLETED)
             for future in done:
                 pending.pop(future, None)
-                tiles = future.result()
+                result = future.result()
                 with progress_lock:
-                    completed_units = min(total_units, completed_units + tiles)
+                    completed_units = min(total_units, completed_units + result.n_inner)
                 report_progress()
+
+                if adaptive_workers_enabled:
+                    window_bytes += result.bytes_written
+                    window_read_s += result.read_s
+                    window_write_s += result.write_s
+                    window_compress_s += result.compress_s
+                    if window_bytes >= batch_bytes_threshold:
+                        io_total = window_read_s + window_write_s
+                        denom = io_total + window_compress_s
+                        if denom > 0:
+                            io_fraction = io_total / denom
+                            step = max(1, cpu_count // 4)
+                            if io_fraction >= ADAPTIVE_IO_FLIP_UP and worker_count < round(cpu_count * ADAPTIVE_MAX_FACTOR):
+                                new_worker_count = min(round(cpu_count * ADAPTIVE_MAX_FACTOR), worker_count + step)
+                            elif io_fraction <= ADAPTIVE_IO_FLIP_DOWN and worker_count > cpu_count:
+                                new_worker_count = max(cpu_count, worker_count - step)
+                            else:
+                                new_worker_count = worker_count
+                            new_worker_count = max(1, min(new_worker_count, n_tasks))
+                            if new_worker_count != worker_count:
+                                old_worker_count = worker_count
+                                old_executor = executor
+                                executor = ProcessPoolExecutor(max_workers=new_worker_count, initializer=_worker_init)
+                                executors_to_close.append(executor)
+                                old_executor.shutdown(wait=False)
+                                prefetch_window = max(new_worker_count * 2, new_worker_count + 2)
+                                if progress_callback is not None:
+                                    progress_callback(
+                                        last_percent if last_percent >= 0 else 0,
+                                        f"ADAPTIVE_FLIP: {worker_count} -> {new_worker_count} workers "
+                                        f"({io_fraction:.0%} I/O wait over last {adaptive_batch_mb}MB)",
+                                    )
+                                worker_count = new_worker_count
+                                if worker_count > old_worker_count:
+                                    # Top up in-flight work so the added workers have
+                                    # something to do immediately, instead of waiting
+                                    # for the next one-in-one-out submission.
+                                    target_pending = min(prefetch_window, n_tasks)
+                                    while len(pending) < target_pending:
+                                        if not submit_next():
+                                            break
+                        window_bytes = 0
+                        window_read_s = window_write_s = window_compress_s = 0.0
+
                 submit_next()
+    finally:
+        for ex in executors_to_close:
+            ex.shutdown(wait=True)
     if cancel_event is not None and cancel_event.is_set():
         raise RuntimeError("OME-Zarr export cancelled.")
 

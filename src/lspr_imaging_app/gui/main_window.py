@@ -3681,6 +3681,22 @@ class MainWindow(MainWindowIcons, QMainWindow):
             action.setChecked(int(value) == timeout)
             action.blockSignals(False)
 
+    def _ome_zarr_adaptive_enabled(self) -> bool:
+        return str(self._settings.value("export/ome_zarr_adaptive_enabled", "true")).strip().lower() != "false"
+
+    def _set_ome_zarr_adaptive_enabled(self, checked: bool) -> None:
+        self._settings.setValue("export/ome_zarr_adaptive_enabled", "true" if checked else "false")
+
+    def _ome_zarr_adaptive_batch_mb(self) -> int:
+        return int(self._settings.value("export/ome_zarr_adaptive_batch_mb", 1024))
+
+    def _set_ome_zarr_adaptive_batch_mb(self, value: int) -> None:
+        self._settings.setValue("export/ome_zarr_adaptive_batch_mb", int(value))
+        for v, action in getattr(self, "zarr_adaptive_batch_actions", {}).items():
+            action.blockSignals(True)
+            action.setChecked(int(v) == int(value))
+            action.blockSignals(False)
+
     def _set_ui_scale_factor(self, value: str) -> None:
         self._settings.setValue("ui/scale_factor", value)
         for v, action in getattr(self, "_ui_scale_actions", {}).items():

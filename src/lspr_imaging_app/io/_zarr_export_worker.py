@@ -11,6 +11,7 @@ inside write_shard on first task).
 from __future__ import annotations
 
 import struct
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -76,6 +77,22 @@ class ShardWriteSpec:
     preprocessing: object | None    # PreprocessingSettings dataclass, or None
 
 
+@dataclass
+class ShardWriteResult:
+    """Timing breakdown for one write_shard() call, used by the coordinator's
+    adaptive worker-count tuning (see export_ome_zarr_dataset in dataset.py).
+
+    read_s is an I/O proxy, not a precise measurement: _load_image() blends real
+    disk I/O with TIFF-decode CPU time, and there's no clean way to split those
+    apart without instrumenting inside tifffile/PIL itself.
+    """
+    n_inner: int
+    bytes_written: int   # actual bytes physically written to the shard file
+    read_s: float         # image read + decode + optional preprocessing
+    compress_s: float     # Blosc tile encode (pure CPU)
+    write_s: float         # shard file write
+
+
 def _load_image(path_str: str) -> np.ndarray:
     path = Path(path_str)
     if path.suffix.lower() in {".tif", ".tiff"}:
@@ -94,11 +111,13 @@ def _load_image(path_str: str) -> np.ndarray:
         return np.array(img)
 
 
-def write_shard(spec: ShardWriteSpec) -> int:
+def write_shard(spec: ShardWriteSpec) -> ShardWriteResult:
     """Read source images, compress tiles, write one zarr v3 shard file.
 
-    Returns spec.n_inner so the coordinator can advance the progress counter
-    by the right amount even when some records are missing.
+    Returns a ShardWriteResult carrying spec.n_inner (so the coordinator can
+    advance the progress counter by the right amount even when some records
+    are missing) plus a per-phase timing breakdown used for adaptive worker
+    tuning (see export_ome_zarr_dataset in dataset.py).
     """
     from numcodecs import Blosc
 
@@ -120,11 +139,14 @@ def write_shard(spec: ShardWriteSpec) -> int:
     all_offs = np.full(n_inner, MISSING, dtype=np.uint64)
     all_lens = np.full(n_inner, MISSING, dtype=np.uint64)
     byte_offset = 0
+    read_s = 0.0
+    compress_s = 0.0
 
     for wl_idx, record_path in enumerate(spec.record_paths):
         if not record_path:
             continue  # missing record — index entry stays MISSING; reader uses fill value
 
+        _t0 = time.perf_counter()
         plane = np.asarray(_load_image(record_path), dtype=dtype)
 
         if spec.apply_image_tools and spec.preprocessing is not None:
@@ -139,6 +161,7 @@ def write_shard(spec: ShardWriteSpec) -> int:
             plane = padded
         else:
             plane = np.ascontiguousarray(plane)
+        read_s += time.perf_counter() - _t0
 
         base_ci = wl_idx * (n_cy * n_cx)
         for cy in range(n_cy):
@@ -146,7 +169,9 @@ def write_shard(spec: ShardWriteSpec) -> int:
                 tile = np.ascontiguousarray(
                     plane[cy * ich : (cy + 1) * ich, cx * icw : (cx + 1) * icw], dtype=dtype
                 )
+                _t0 = time.perf_counter()
                 encoded = codec.encode(tile.tobytes()) if codec else tile.tobytes()
+                compress_s += time.perf_counter() - _t0
                 ci = base_ci + cy * n_cx + cx
                 all_offs[ci] = byte_offset
                 all_lens[ci] = len(encoded)
@@ -161,10 +186,16 @@ def write_shard(spec: ShardWriteSpec) -> int:
 
     shard_path = Path(spec.shard_path)
     shard_path.parent.mkdir(parents=True, exist_ok=True)
+    _t0 = time.perf_counter()
     with shard_path.open("wb") as f:
         for buf in all_bufs:
             f.write(buf)
         f.write(index_bytes)
         f.write(struct.pack("<I", _crc32c(index_bytes)))
+    write_s = time.perf_counter() - _t0
 
-    return n_inner  # coordinator adds this to completed_units for progress tracking
+    bytes_written = byte_offset + len(index_bytes) + 4
+    return ShardWriteResult(
+        n_inner=n_inner, bytes_written=bytes_written,
+        read_s=read_s, compress_s=compress_s, write_s=write_s,
+    )

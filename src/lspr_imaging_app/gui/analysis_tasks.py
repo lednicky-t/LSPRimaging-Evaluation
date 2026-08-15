@@ -172,6 +172,8 @@ def _ome_zarr_export_task(
     excluded_rules=None,
     skip_excluded: bool = False,
     cancel_event: threading.Event | None = None,
+    adaptive_workers_enabled: bool = True,
+    adaptive_batch_mb: int = 1024,
     progress_callback=None,
 ) -> Path:
     return export_ome_zarr_dataset(
@@ -185,6 +187,8 @@ def _ome_zarr_export_task(
         skip_excluded=skip_excluded,
         progress_callback=progress_callback,
         cancel_event=cancel_event,
+        adaptive_workers_enabled=adaptive_workers_enabled,
+        adaptive_batch_mb=adaptive_batch_mb,
     )
 
 
