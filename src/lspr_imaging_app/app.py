@@ -7,14 +7,16 @@ import threading
 from datetime import datetime
 from pathlib import Path
 
-from PyQt6.QtCore import QEasingCurve, Qt, QPropertyAnimation, QSettings, QTimer
+from PyQt6.QtCore import QEasingCurve, QEvent, QObject, Qt, QPropertyAnimation, QSettings, QTimer
 from PyQt6.QtGui import QColor, QGuiApplication, QLinearGradient, QPainter, QPalette, QPen
 from PyQt6.QtWidgets import (
     QApplication,
+    QComboBox,
     QFrame,
     QGraphicsOpacityEffect,
     QHBoxLayout,
     QLabel,
+    QLineEdit,
     QMainWindow,
     QProgressBar,
     QStyleOptionProgressBar,
@@ -335,8 +337,53 @@ class StartupSplash(QWidget):
         self._icon_opacity_anim.start()
 
 
+def _combo_box_no_arrow_stylesheet() -> str:
+    # Collapsing the drop-down subcontrol to zero width - rather than just
+    # hiding the arrow image - is what actually frees up its reserved space,
+    # so QComboBox's own "padding: 2px 5px" (see startup_app_stylesheet())
+    # applies symmetrically instead of the text looking pushed left.
+    return """
+    QComboBox::drop-down {
+        width: 0px;
+        border: none;
+    }
+    QComboBox::down-arrow {
+        image: none;
+        width: 0px;
+        height: 0px;
+    }
+    """
+
+
+class _ComboBoxClickToOpenFilter(QObject):
+    """Restores click-to-open anywhere on a QComboBox once its arrow
+    subcontrol is styled to zero width (see _combo_box_no_arrow_stylesheet).
+
+    Every QComboBox in this app is made editable-but-read-only elsewhere
+    (see _apply_right_aligned_control_text: combo.setEditable(True) plus a
+    read-only lineEdit()) purely so its text can be right-aligned - Qt has
+    no other way to align a plain non-editable combo box's text. That means
+    a click on the box almost always lands on that internal QLineEdit, not
+    the QComboBox itself, so it has to be handled here too. Before the arrow
+    was hidden, only that small arrow subcontrol opened the popup on click;
+    hiding it left no clickable region at all, so this restores click-to-open
+    across the whole box instead of just the old arrow-sized sliver.
+    """
+
+    def eventFilter(self, obj, event) -> bool:
+        if event.type() != QEvent.Type.MouseButtonPress or event.button() != Qt.MouseButton.LeftButton:
+            return False
+        combo = obj if isinstance(obj, QComboBox) else None
+        if combo is None and isinstance(obj, QLineEdit) and isinstance(obj.parent(), QComboBox):
+            combo = obj.parent()
+        if combo is not None and combo.isEnabled() and not combo.view().isVisible():
+            combo.showPopup()
+            return True
+        return False
+
+
 def _apply_dark_theme(app: QApplication) -> None:
-    app.setStyleSheet(startup_app_stylesheet())
+    app.setStyleSheet(startup_app_stylesheet() + _combo_box_no_arrow_stylesheet())
 
 
 def _apply_active_palette(app: QApplication) -> None:
@@ -427,6 +474,8 @@ def main() -> None:
     app.setApplicationVersion(APP_VERSION)
     app.setQuitOnLastWindowClosed(False)
     app.setWindowIcon(app_icon())
+    combo_box_click_filter = _ComboBoxClickToOpenFilter(app)
+    app.installEventFilter(combo_box_click_filter)
     settings = QSettings("LSPR", "LSPRImaging")
     set_active_theme(GRAY_DARK_THEME if str(settings.value("ui/theme", "blue")) == "gray" else BLUE_DARK_THEME)
     fast_startup = _fast_startup_enabled(settings)

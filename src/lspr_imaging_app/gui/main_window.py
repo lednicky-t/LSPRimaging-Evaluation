@@ -35,7 +35,6 @@ from PyQt6.QtWidgets import (
     QColorDialog,
     QComboBox,
     QAbstractItemView,
-    QDialog,
     QDoubleSpinBox,
     QFileDialog,
     QGridLayout,
@@ -67,7 +66,6 @@ from lspr_ui import (
     BLUE_DARK_THEME,
     GRAY_DARK_THEME,
     collapsible_pin_stylesheet,
-    collapsible_toggle_stylesheet,
     dark_image_toolbar_stylesheet,
     get_active_theme,
     icon_accent_colors,
@@ -546,15 +544,9 @@ class MainWindow(MainWindowIcons, QMainWindow):
             size=24,
             parent=self,
         )
-        self.load_button = self._free_standing_icon_label(
-            self._dataset_transfer_icon("import", "#22c55e"),
-            "Load dataset: choose a folder and load it into the app.",
-            size=24,
-            parent=self,
-        )
-        self.export_ome_zarr_icon_button = self._free_standing_icon_label(
-            self._dataset_transfer_icon("export", "#38bdf8"),
-            "Stack to Zarr: open export options and write the current dataset to Zarr.",
+        self.open_explorer_button = self._free_standing_icon_label(
+            self._dataset_open_folder_icon(),
+            "Open the dataset folder in File Explorer.",
             size=24,
             parent=self,
         )
@@ -562,24 +554,6 @@ class MainWindow(MainWindowIcons, QMainWindow):
         self.import_settings_button = QPushButton("Import settings", self)
         self.export_settings_button.hide()
         self.import_settings_button.hide()
-        self.dataset_summary = QLabel("Load an image folder to begin.", self)
-        self.dataset_summary.setWordWrap(True)
-        self.dataset_summary.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
-        self.dataset_stack_icon = QLabel(self)
-        self.dataset_stack_icon.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.dataset_stack_icon.setPixmap(self._dataset_stack_icon_pixmap(36, ome_zarr=False))
-        self.dataset_stack_icon.setToolTip("Image stack loaded from the selected dataset folder.")
-        self.dataset_stack_label = QLabel("ImageStack", self)
-        self.dataset_stack_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.dataset_stack_label.setObjectName("toolbarMiniLabel")
-        self.dataset_stack_label.setToolTip("The loaded dataset is treated as an image stack.")
-        self.dataset_stack_widget = QWidget(self)
-        dataset_stack_layout = QVBoxLayout(self.dataset_stack_widget)
-        dataset_stack_layout.setContentsMargins(0, 0, 0, 0)
-        dataset_stack_layout.setSpacing(2)
-        dataset_stack_layout.setAlignment(Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop)
-        dataset_stack_layout.addWidget(self.dataset_stack_icon, 0, Qt.AlignmentFlag.AlignHCenter)
-        dataset_stack_layout.addWidget(self.dataset_stack_label, 0, Qt.AlignmentFlag.AlignHCenter)
         self.dataset_ome_zarr_export_button = self._make_icon_tool_button(
             "database-export",
             "#38bdf8",
@@ -716,10 +690,90 @@ class MainWindow(MainWindowIcons, QMainWindow):
         dataset_ome_zarr_export_progress_layout.addWidget(self.dataset_ome_zarr_export_eta_label)
         dataset_ome_zarr_export_progress_layout.addWidget(self.dataset_ome_zarr_export_stop_button)
         self.dataset_ome_zarr_export_progress_row.hide()
-        self._build_ome_zarr_export_dialog()
+
+        # Compact "Dataset:" title-row indicator - dataset type icon + text,
+        # kept in sync by _update_dataset_stack_indicator().
+        self.dataset_type_icon = QLabel(self)
+        self.dataset_type_icon.setFixedSize(16, 16)
+        self.dataset_type_label = QLabel("not loaded", self)
+        self.dataset_type_indicator_row = QWidget(self)
+        dataset_type_indicator_layout = QHBoxLayout(self.dataset_type_indicator_row)
+        dataset_type_indicator_layout.setContentsMargins(0, 0, 0, 0)
+        dataset_type_indicator_layout.setSpacing(4)
+        dataset_type_indicator_layout.addWidget(self.dataset_type_icon, 0, Qt.AlignmentFlag.AlignVCenter)
+        dataset_type_indicator_layout.addWidget(self.dataset_type_label, 0, Qt.AlignmentFlag.AlignVCenter)
+
+        # Compact "Summary" title-row stats - same pattern as the "Dataset:"
+        # and "Image tools:" title indicators, kept in sync by
+        # _update_dataset_summary_labels().
+        self.summary_header_stats_label = QLabel("", self)
+        self.summary_header_stats_label.setStyleSheet(f"color: {get_active_theme().text_dim};")
+
+        # "Summary" nested section fields, paired two-per-row where noted.
+        self.summary_images_label = QLabel("Images:", self)
+        self.summary_dataset_size_label = QLabel("Dataset size:", self)
+        self.summary_spectral_cubes_label = QLabel("Spectral cubes:", self)
+        self.summary_wavelengths_label = QLabel("Wavelengths:", self)
+        self.summary_resolution_label = QLabel("Resolution:", self)
+        self.summary_date_label = QLabel("Dataset's date:", self)
+        self.summary_base_rows_widget = QWidget(self)
+        summary_base_layout = QVBoxLayout(self.summary_base_rows_widget)
+        summary_base_layout.setContentsMargins(0, 0, 0, 0)
+        summary_base_layout.setSpacing(2)
+        summary_images_row = QHBoxLayout()
+        summary_images_row.setSpacing(16)
+        summary_images_row.addWidget(self.summary_images_label)
+        summary_images_row.addWidget(self.summary_dataset_size_label)
+        summary_images_row.addStretch(1)
+        summary_base_layout.addLayout(summary_images_row)
+        summary_cubes_row = QHBoxLayout()
+        summary_cubes_row.setSpacing(16)
+        summary_cubes_row.addWidget(self.summary_spectral_cubes_label)
+        summary_cubes_row.addWidget(self.summary_wavelengths_label)
+        summary_cubes_row.addStretch(1)
+        summary_base_layout.addLayout(summary_cubes_row)
+        summary_base_layout.addWidget(self.summary_resolution_label)
+        summary_base_layout.addWidget(self.summary_date_label)
+
+        self.summary_chunk_label = QLabel("Chunk:", self)
+        self.summary_shard_label = QLabel("Shard:", self)
+        self.summary_compression_label = QLabel("Compression:", self)
+        self.summary_dtype_label = QLabel("Dtype:", self)
+        self.summary_image_tools_label = QLabel("Image tools:", self)
+        self.summary_rotation_label = QLabel("Rotation:", self)
+        self.summary_flip_label = QLabel("Flip:", self)
+        self.summary_crop_label = QLabel("Crop:", self)
+        self.summary_pixel_size_label = QLabel("Pixel size:", self)
+        self.summary_rotation_flip_row = QWidget(self)
+        summary_rotation_flip_layout = QHBoxLayout(self.summary_rotation_flip_row)
+        summary_rotation_flip_layout.setContentsMargins(0, 0, 0, 0)
+        summary_rotation_flip_layout.setSpacing(16)
+        summary_rotation_flip_layout.addWidget(self.summary_rotation_label)
+        summary_rotation_flip_layout.addWidget(self.summary_flip_label)
+        summary_rotation_flip_layout.addStretch(1)
+        self.summary_ome_zarr_rows_widget = QWidget(self)
+        summary_ome_zarr_layout = QVBoxLayout(self.summary_ome_zarr_rows_widget)
+        summary_ome_zarr_layout.setContentsMargins(0, 0, 0, 0)
+        summary_ome_zarr_layout.setSpacing(2)
+        summary_chunk_row = QHBoxLayout()
+        summary_chunk_row.setSpacing(16)
+        summary_chunk_row.addWidget(self.summary_chunk_label)
+        summary_chunk_row.addWidget(self.summary_shard_label)
+        summary_chunk_row.addStretch(1)
+        summary_ome_zarr_layout.addLayout(summary_chunk_row)
+        summary_compression_row = QHBoxLayout()
+        summary_compression_row.setSpacing(16)
+        summary_compression_row.addWidget(self.summary_compression_label)
+        summary_compression_row.addWidget(self.summary_dtype_label)
+        summary_compression_row.addStretch(1)
+        summary_ome_zarr_layout.addLayout(summary_compression_row)
+        summary_ome_zarr_layout.addWidget(self.summary_image_tools_label)
+        summary_ome_zarr_layout.addWidget(self.summary_rotation_flip_row)
+        summary_ome_zarr_layout.addWidget(self.summary_crop_label)
+        summary_ome_zarr_layout.addWidget(self.summary_pixel_size_label)
+
         self._update_dataset_stack_indicator(None)
-        self.reference_summary = QLabel("Reference: current selection", self)
-        self.reference_summary.setWordWrap(True)
+        self._update_dataset_summary_labels(None)
         self.reference_auto_button = QToolButton(self)
         self.reference_auto_button.setCheckable(True)
         self.reference_auto_button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly)
@@ -742,7 +796,7 @@ class MainWindow(MainWindowIcons, QMainWindow):
         self.reference_mode_button_group.setExclusive(True)
         self.reference_mode_button_group.addButton(self.reference_auto_button)
         self.reference_mode_button_group.addButton(self.reference_manual_button)
-        self.reference_spectral_cube_status_label = QLabel("Spectral cube: -", self)
+        self.reference_spectral_cube_status_label = QLabel("Cube: -", self)
         self.reference_wavelength_status_label = QLabel("Wavelength: -", self)
         self.reference_method_status_label = QLabel("Method: -", self)
         self.reference_mode_combo = QComboBox(self)
@@ -753,28 +807,9 @@ class MainWindow(MainWindowIcons, QMainWindow):
         self.set_reference_button.hide()
         self.startup_restore_timeout_actions: dict[int, QAction] = {}
 
-    def _build_ome_zarr_export_dialog(self) -> None:
-        dialog = QDialog(self)
-        dialog.setWindowTitle("Stack to Zarr")
-        dialog.setModal(False)
-        layout = QVBoxLayout(dialog)
-        layout.setContentsMargins(10, 10, 10, 10)
-        layout.setSpacing(8)
-        for row in (
-            self.dataset_ome_zarr_controls_row,
-            self.dataset_ome_zarr_options_row,
-            self.dataset_ome_zarr_compression_row,
-            self.dataset_ome_zarr_skip_excluded_row,
-            self.dataset_ome_zarr_info_row,
-            self.dataset_ome_zarr_export_progress_row,
-        ):
-            layout.addWidget(row)
-        self.ome_zarr_export_dialog = dialog
-
-    def _open_ome_zarr_export_dialog(self) -> None:
-        self.ome_zarr_export_dialog.show()
-        self.ome_zarr_export_dialog.raise_()
-        self.ome_zarr_export_dialog.activateWindow()
+    def _reveal_export_section(self) -> None:
+        if hasattr(self, "export_section"):
+            self.export_section.set_expanded(True)
 
     def _init_chromatic_widgets(self) -> None:
         self.chromatic_summary = QLabel("Idle.", self)
@@ -1805,8 +1840,7 @@ class MainWindow(MainWindowIcons, QMainWindow):
 
     def _connect_dataset_and_nav(self) -> None:
         self.browse_button.clicked.connect(self._dataset_controller.browse_folder)
-        self.load_button.clicked.connect(self._dataset_controller.browse_folder)
-        self.export_ome_zarr_icon_button.clicked.connect(self._open_ome_zarr_export_dialog)
+        self.open_explorer_button.clicked.connect(self._dataset_controller.open_dataset_folder_in_explorer)
         self.dataset_ome_zarr_export_button.clicked.connect(self._dataset_controller.export_current_dataset_to_ome_zarr)
         self.dataset_ome_zarr_export_stop_button.clicked.connect(self._stop_ome_zarr_export)
         self.ome_zarr_chunk_spin.valueChanged.connect(self._on_ome_zarr_chunk_size_changed)
@@ -1881,7 +1915,7 @@ class MainWindow(MainWindowIcons, QMainWindow):
         self.ignore_marked_check.toggled.connect(self.mask_section.set_applied)
         self.chromatic_section.apply_changed.connect(self._chromatic_controller.section_applied_changed)
         self.mask_section.apply_changed.connect(self._on_mask_section_applied_changed)
-        self.image_tools_section.apply_changed.connect(self._on_image_tools_section_applied_changed)
+        self.transforms_section.apply_changed.connect(self._on_image_tools_section_applied_changed)
         self.roi_editor_section.apply_changed.connect(self._on_live_geometry_toggled)
         self.background_section.apply_changed.connect(self._on_background_section_applied_changed)
         self.analysis_section.apply_changed.connect(self._on_analysis_section_applied_changed)
@@ -2760,10 +2794,13 @@ class MainWindow(MainWindowIcons, QMainWindow):
             return f"{int(value)} {units[unit]}"
         return f"{value:.1f} {units[unit]}"
 
-    def _dataset_summary_text(self, dataset=None) -> str:
+    def _update_dataset_summary_labels(self, dataset=None) -> None:
         dataset = self._state.dataset if dataset is None else dataset
         if dataset is None:
-            return "Load an image folder to begin."
+            self.summary_header_stats_label.setText("")
+            self.summary_base_rows_widget.setVisible(False)
+            self.summary_ome_zarr_rows_widget.setVisible(False)
+            return
         records = list(getattr(dataset, "records", []))
         spectral_cube_values = list(getattr(dataset, "spectral_cube_indices", []))
         wavelength_values = list(getattr(dataset, "wavelengths_nm", []))
@@ -2816,25 +2853,58 @@ class MainWindow(MainWindowIcons, QMainWindow):
                 dataset_date = "Unknown"
         spectral_cube_text = f"{len(spectral_cube_values)}" if spectral_cube_values else "0"
         wavelength_text = f"{len(wavelength_values)}" if wavelength_values else "0"
-        stack_label = dataset.format_label if dataset is not None else "ImageStack"
-        lines = [
-            f"{stack_label} loaded.",
-            f"Images: {len(records)}",
-            f"Spectral cubes: {spectral_cube_text} | Wavelengths: {wavelength_text}",
-            f"Dataset size: {self._format_dataset_bytes(size_bytes)}",
-            f"Resolution: {resolution_text}",
-            f"Dataset's date: {dataset_date}",
-        ]
-        if ome_zarr:
-            zarr_summary = read_existing_ome_zarr_summary(dataset.folder)
-            if zarr_summary is not None:
-                skip_labels = {"Image size", "Spectral cubes x wavelengths", "Source folder"}
-                lines.extend(
-                    f"{label}: {value}"
-                    for label, value in zarr_summary.field_lines()
-                    if label not in skip_labels
+        dataset_size_text = self._format_dataset_bytes(size_bytes)
+
+        self.summary_header_stats_label.setText(
+            f"Size: {dataset_size_text}, Images: {len(records)}, Cubes: {spectral_cube_text}, WL: {wavelength_text}"
+        )
+        self.summary_images_label.setText(f"Images: {len(records)}")
+        self.summary_dataset_size_label.setText(f"Dataset size: {dataset_size_text}")
+        self.summary_spectral_cubes_label.setText(f"Spectral cubes: {spectral_cube_text}")
+        self.summary_wavelengths_label.setText(f"Wavelengths: {wavelength_text}")
+        self.summary_resolution_label.setText(f"Resolution: {resolution_text}")
+        self.summary_date_label.setText(f"Dataset's date: {dataset_date}")
+        self.summary_base_rows_widget.setVisible(True)
+
+        zarr_summary = read_existing_ome_zarr_summary(dataset.folder) if ome_zarr else None
+        self.summary_ome_zarr_rows_widget.setVisible(zarr_summary is not None)
+        if zarr_summary is None:
+            return
+        shard_text = "Cube/file" if zarr_summary.shard_mode == "per_spectral_cube" else "Image/file"
+        self.summary_chunk_label.setText(f"Chunk: {zarr_summary.chunk_size_px}px")
+        self.summary_shard_label.setText(f"Shard: {shard_text}")
+        self.summary_compression_label.setText(
+            f"Compression: {'lz4 + bitshuffle' if zarr_summary.compression_enabled else 'none'}"
+        )
+        self.summary_dtype_label.setText(f"Dtype: {zarr_summary.dtype_str}")
+        self.summary_image_tools_label.setText(
+            "Image tools: " + ("applied (linked)" if zarr_summary.image_tools_applied else "not applied (raw pixels)")
+        )
+        self.summary_rotation_flip_row.setVisible(zarr_summary.image_tools_applied)
+        if zarr_summary.image_tools_applied:
+            rotation_text = (
+                f"{zarr_summary.rotation_angle_deg:.2f} deg" if abs(zarr_summary.rotation_angle_deg) > 1e-9 else "none"
+            )
+            self.summary_rotation_label.setText(f"Rotation: {rotation_text}")
+            flips = [
+                label
+                for enabled, label in (
+                    (zarr_summary.flip_horizontal, "horizontal"),
+                    (zarr_summary.flip_vertical, "vertical"),
                 )
-        return "\n".join(lines)
+                if enabled
+            ]
+            self.summary_flip_label.setText(f"Flip: {', '.join(flips) if flips else 'none'}")
+        crop = zarr_summary.crop
+        self.summary_crop_label.setVisible(zarr_summary.image_tools_applied)
+        self.summary_crop_label.setText(
+            f"Crop: x={crop[0]}, y={crop[1]}, w={crop[2]}, h={crop[3]}" if crop else "Crop: none"
+        )
+        self.summary_pixel_size_label.setVisible(zarr_summary.pixel_size_um is not None)
+        if zarr_summary.pixel_size_um is not None:
+            self.summary_pixel_size_label.setText(
+                f"Pixel size: {zarr_summary.pixel_size_um[0]:.4f} x {zarr_summary.pixel_size_um[1]:.4f} um/px"
+            )
 
     def _refresh_image(self) -> None:
         spectral_cube_index = self._current_spectral_cube()
@@ -3334,38 +3404,37 @@ class MainWindow(MainWindowIcons, QMainWindow):
         self._update_roi_label_button_icon(self._roi_labels_visible)
         self._apply_histogram_log_mode(refresh=not self._startup_restore_in_progress)
 
-    def _refresh_pin_and_apply_icons(self) -> None:
-        for section in (
+    def _all_collapsible_sections(self) -> tuple:
+        return (
             getattr(self, "dataset_section", None),
             getattr(self, "mask_section", None),
             getattr(self, "chromatic_section", None),
             getattr(self, "image_tools_section", None),
+            getattr(self, "transforms_section", None),
             getattr(self, "roi_editor_section", None),
             getattr(self, "background_section", None),
             getattr(self, "analysis_section", None),
-        ):
+            getattr(self, "spectra_fitting_section", None),
+            getattr(self, "statistics_section", None),
+            getattr(self, "results_export_section", None),
+        )
+
+    def _refresh_pin_and_apply_icons(self) -> None:
+        for section in self._all_collapsible_sections():
             if section is None:
                 continue
-            if hasattr(section, "_pin_button"):
+            if getattr(section, "_pin_button", None) is not None:
                 section._pin_button.setIcon(section._make_pin_icon(section._pin_button.isChecked()))
-            if hasattr(section, "_apply_button") and section._apply_button is not None:
+            if getattr(section, "_apply_button", None) is not None:
                 section._apply_button.setIcon(section._make_apply_icon(section._apply_button.isChecked()))
 
     def _refresh_collapsible_styles(self) -> None:
-        for section in (
-            getattr(self, "dataset_section", None),
-            getattr(self, "mask_section", None),
-            getattr(self, "chromatic_section", None),
-            getattr(self, "image_tools_section", None),
-            getattr(self, "roi_editor_section", None),
-            getattr(self, "background_section", None),
-            getattr(self, "analysis_section", None),
-        ):
+        for section in self._all_collapsible_sections():
             if section is None:
                 continue
-            if hasattr(section, "_toggle"):
-                section._toggle.setStyleSheet(collapsible_toggle_stylesheet())
-            if hasattr(section, "_pin_button"):
+            if hasattr(section, "refresh_toggle_style"):
+                section.refresh_toggle_style()
+            if getattr(section, "_pin_button", None) is not None:
                 section._pin_button.setStyleSheet(collapsible_pin_stylesheet())
 
     def _configure_data_plot(
@@ -3391,7 +3460,7 @@ class MainWindow(MainWindowIcons, QMainWindow):
         style = standard_push_button_stylesheet(padding="2px 6px", font_size=10)
         buttons = [
             self.browse_button,
-            self.load_button,
+            self.open_explorer_button,
             self.export_settings_button,
             self.import_settings_button,
             self.set_reference_button,
@@ -4071,12 +4140,13 @@ class MainWindow(MainWindowIcons, QMainWindow):
 
     def _update_reference_summary(self) -> None:
         mode = str(self._state.preprocessing.reference_mode or "auto")
+        method_text = "Auto" if mode != "manual" else "Manual"
         ref_key = self._reference_image_key()
         if ref_key is None:
-            self.reference_summary.setText("Reference: not set.")
             self.reference_wavelength_status_label.setText("Wavelength: -")
-            self.reference_spectral_cube_status_label.setText("Spectral cube: -")
-            self.reference_method_status_label.setText("Method: -")
+            self.reference_spectral_cube_status_label.setText("Cube: -")
+            self.reference_method_status_label.setText(f"Method: {method_text}")
+            self.reference_method_status_label.setStyleSheet("color: #84cc16; font-weight: 600;")
             self._update_reference_navigation_styles()
             self._update_reference_star_overlay()
             return
@@ -4085,10 +4155,8 @@ class MainWindow(MainWindowIcons, QMainWindow):
         current_wavelength = self._current_wavelength()
         wavelength_active = current_wavelength is not None and abs(float(current_wavelength) - float(ref_wavelength)) < 1e-6
         spectral_cube_active = current_spectral_cube is not None and int(current_spectral_cube) == int(ref_spectral_cube)
-        method_text = "Auto" if mode != "manual" else "Manual"
-        self.reference_summary.setText(f"Reference: {method_text.lower()} | {ref_wavelength:g} nm | spectral cube {ref_spectral_cube}")
         self.reference_wavelength_status_label.setText(f"Wavelength: {ref_wavelength:g} nm")
-        self.reference_spectral_cube_status_label.setText(f"Spectral cube: {ref_spectral_cube}")
+        self.reference_spectral_cube_status_label.setText(f"Cube: {ref_spectral_cube}")
         self.reference_method_status_label.setText(f"Method: {method_text}")
         self.reference_wavelength_status_label.setStyleSheet(
             f"color: {'#84cc16' if wavelength_active else '#f8fafc'}; font-weight: 600;"
@@ -4096,9 +4164,7 @@ class MainWindow(MainWindowIcons, QMainWindow):
         self.reference_spectral_cube_status_label.setStyleSheet(
             f"color: {'#facc15' if spectral_cube_active else '#f8fafc'}; font-weight: 600;"
         )
-        self.reference_method_status_label.setStyleSheet(
-            "color: #84cc16; font-weight: 600;"
-        )
+        self.reference_method_status_label.setStyleSheet("color: #84cc16; font-weight: 600;")
         self._update_reference_navigation_styles()
         self._update_reference_star_overlay()
 
@@ -4375,7 +4441,7 @@ class MainWindow(MainWindowIcons, QMainWindow):
     def _configure_control_help(self) -> None:
         self._set_help(self.folder_edit, "Dataset folder to load.", "Enter or paste the folder containing the image dataset.")
         self._set_help(self.browse_button, "Browse for a dataset folder.")
-        self._set_help(self.load_button, "Load dataset: choose a dataset folder and open it.")
+        self._set_help(self.open_explorer_button, "Open the dataset folder in File Explorer.")
         self._set_help(self.dataset_ome_zarr_export_button, "Export: write the current dataset to a Stack to Zarr in a chosen folder.")
         self._set_help(self.dataset_ome_zarr_export_stop_button, "Stop: cancel the running Stack to Zarr export.")
         self._set_help(self.ome_zarr_chunk_spin, "Chunk tile size for Zarr export. Any value 4–4096 px — does not need to be a power of 2.")

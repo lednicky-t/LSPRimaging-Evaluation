@@ -289,18 +289,37 @@ class MainWindowIcons:
         painter.end()
         return pixmap
 
+    @staticmethod
+    def _not_available_icon(color: str = "#67707d", size: int = 16) -> QIcon:
+        icon = MainWindowIcons._tabler_icon("ban", color, size, stroke_width=2.1)
+        if not icon.isNull():
+            return icon
+        pixmap = QPixmap(size, size)
+        pixmap.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(pixmap)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        pen = QPen(QColor(color), max(1.6, size / 12.0))
+        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        painter.setPen(pen)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        margin = size * 0.12
+        painter.drawEllipse(QRectF(margin, margin, size - 2 * margin, size - 2 * margin))
+        painter.drawLine(QPointF(size * 0.24, size * 0.76), QPointF(size * 0.76, size * 0.24))
+        painter.end()
+        return QIcon(pixmap)
+
     def _update_dataset_stack_indicator(self, dataset=None) -> None:
+        # Compact title-row indicator next to the "Dataset" section header -
+        # shows "not loaded" rather than defaulting to the ImageStack look
+        # when nothing is loaded.
         dataset = self._state.dataset if dataset is None else dataset
         ome_zarr = dataset_is_ome_zarr(dataset)
-        self.dataset_stack_icon.setPixmap(self._dataset_stack_icon_pixmap(36, ome_zarr=ome_zarr))
-        if ome_zarr:
-            self.dataset_stack_icon.setToolTip("OME-Zarr stack loaded from the selected dataset folder.")
-            self.dataset_stack_label.setText("OME-Zarr")
-            self.dataset_stack_label.setToolTip("The loaded dataset is stored as an OME-Zarr image stack.")
+        if dataset is None:
+            self.dataset_type_icon.setPixmap(self._not_available_icon(size=16).pixmap(16, 16))
+            self.dataset_type_label.setText("not loaded")
         else:
-            self.dataset_stack_icon.setToolTip("Image stack loaded from the selected dataset folder.")
-            self.dataset_stack_label.setText("ImageStack")
-            self.dataset_stack_label.setToolTip("The loaded dataset is treated as an image stack.")
+            self.dataset_type_icon.setPixmap(self._dataset_stack_icon_pixmap(16, ome_zarr=ome_zarr))
+            self.dataset_type_label.setText("OME-Zarr" if ome_zarr else "ImageStack")
 
     def _current_ome_zarr_chunk_size(self) -> int:
         return max(int(self.ome_zarr_chunk_spin.value()), 4)
@@ -464,7 +483,6 @@ class MainWindowIcons:
         self.dataset_ome_zarr_export_stop_button.setVisible(bool(running))
         self.dataset_ome_zarr_export_stop_button.setEnabled(bool(running))
         self.dataset_ome_zarr_export_button.setEnabled(not running and self._state.dataset is not None)
-        self.export_ome_zarr_icon_button.setEnabled(not running and self._state.dataset is not None)
         self.ome_zarr_chunk_spin.setEnabled(not running)
         self.ome_zarr_chunk_guide_button.setEnabled(not running)
         self.ome_zarr_shard_mode_combo.setEnabled(not running)
@@ -604,7 +622,6 @@ class MainWindowIcons:
         self.dataset_ome_zarr_export_stop_button.setVisible(False)
         self.dataset_ome_zarr_export_stop_button.setEnabled(False)
         self.dataset_ome_zarr_export_button.setEnabled(self._state.dataset is not None)
-        self.export_ome_zarr_icon_button.setEnabled(self._state.dataset is not None)
         self.ome_zarr_chunk_spin.setEnabled(True)
         self.ome_zarr_chunk_guide_button.setEnabled(True)
         self.ome_zarr_shard_mode_combo.setEnabled(True)
@@ -813,6 +830,13 @@ class MainWindowIcons:
         painter.drawEllipse(QRectF(13.5 * scale, 12.0 * scale, 2.5 * scale, 2.5 * scale))
         painter.end()
         return QIcon(pixmap)
+
+    @staticmethod
+    def _dataset_open_folder_icon(color: str = "#f59e0b", size: int = 24) -> QIcon:
+        icon = MainWindowIcons._tabler_icon("folder-open", color, size, stroke_width=2.1)
+        if not icon.isNull():
+            return icon
+        return MainWindowIcons._dataset_folder_icon(color, size)
 
     @staticmethod
     def _make_rotate_icon(active: bool = False) -> QIcon:
@@ -1966,7 +1990,7 @@ class MainWindowIcons:
         menu_bar = self.menuBar()
         file_menu = menu_bar.addMenu("&File")
         file_menu.addAction("Load dataset...", self._dataset_controller.browse_folder)
-        zarr_dialog_action = file_menu.addAction("Stack to Zarr...", self._open_ome_zarr_export_dialog)
+        zarr_dialog_action = file_menu.addAction("Stack to Zarr...", self._reveal_export_section)
         zarr_dialog_action.setToolTip("Open the Stack to Zarr export options window.")
         file_menu.addSeparator()
         new_session_action = file_menu.addAction("New Session...", self._new_session)

@@ -78,7 +78,7 @@ class UIStateManager:
         window.chromatic_landmark_id_spin.setMaximum(max(int(window.chromatic_feature_count_spin.currentData() or 15), 1))
         window._state.preprocessing.chromatic_feature_count = int(window.chromatic_feature_count_spin.currentData() or 15)
         window.chromatic_landmark_id_spin.setValue(max(int(window._chromatic_landmark_marker_id), 1))
-        window._set_section_applied(window.image_tools_section, bool(getattr(settings, "image_tools_enabled", True)))
+        window._set_section_applied(window.transforms_section, bool(getattr(settings, "image_tools_enabled", True)))
         window._set_section_applied(window.roi_editor_section, bool(window._read_bool_setting("controls/live_geometry", False)))
         window._set_section_applied(window.background_section, bool(settings.flatten_background_enabled))
         window._set_section_applied(window.chromatic_section, bool(settings.chromatic_correction_enabled))
@@ -245,18 +245,6 @@ class UIStateManager:
         has_dataset = window._state.dataset is not None
         manual_enabled = has_dataset and bool(window._spectral_cube_values) and bool(window._wavelength_values)
         auto_enabled = has_dataset and bool(window._spectral_cube_values)
-        current_key = window._reference_image_key()
-        current_record = window._reference_record()
-        current_spectral_cube = current_key[0] if current_key is not None else None
-        current_wavelength = current_key[1] if current_key is not None else None
-        reference_text = (
-            f"Reference image: spectral cube {int(current_spectral_cube)} / {float(current_wavelength):g} nm"
-            if current_key is not None
-            else "Reference image: auto"
-        )
-        if current_record is not None:
-            reference_text += f" | {current_record.path.name}"
-        window.reference_summary.setText(reference_text)
         window.reference_auto_button.setEnabled(auto_enabled)
         window.reference_manual_button.setEnabled(manual_enabled)
         if window.reference_auto_button.isChecked() != (str(settings.reference_mode or "auto") != "manual"):

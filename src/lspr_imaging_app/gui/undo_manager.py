@@ -179,7 +179,7 @@ class UndoManager:
             window._current_record_path = None
             window._current_image_key = None
             window._processed_shape_cache.clear()
-            window.dataset_summary.setText(window._dataset_summary_text(dataset))
+            window._update_dataset_summary_labels(dataset)
 
             window._sync_image_processing_controls()
             window._configure_navigation_inputs()

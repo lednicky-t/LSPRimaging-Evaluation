@@ -28,11 +28,32 @@ PANEL_HELP: dict[str, PanelHelpEntry] = {
     "dataset": PanelHelpEntry(
         title="Dataset",
         description=(
-            "Load a dataset, choose the reference mode, and move through spectral cubes and wavelengths.\n"
-            "The summary block shows whether the current data is a raw ImageStack or a Stack to Zarr.\n"
-            "Reference mode chooses how the reference image is selected and stored in the processing profile."
+            "Browse for or type a dataset folder, then load it. The icon next to the title shows whether the "
+            "loaded data is a raw ImageStack or an OME-Zarr stack. Nested tabs below hold the dataset Summary, "
+            "Reference selection, and Export controls."
         ),
         shortcut_keys=("dataset",),
+    ),
+    "summary": PanelHelpEntry(
+        title="Summary",
+        description=(
+            "Read-only overview of the loaded dataset: image/wavelength counts, size on disk, resolution, and, "
+            "for an OME-Zarr stack, its chunking, compression, dtype, and the rotation/flip/crop it was exported with."
+        ),
+    ),
+    "reference": PanelHelpEntry(
+        title="Reference",
+        description=(
+            "Choose how the reference image is selected and stored in the processing profile: Auto picks the best "
+            "wavelength in the current spectral cube; Manual stores the current spectral cube and wavelength."
+        ),
+    ),
+    "export": PanelHelpEntry(
+        title="Export",
+        description=(
+            "Write the current dataset to an OME-Zarr stack: chunk size, sharding (one image or one spectral cube "
+            "per file), compression, and whether to skip excluded images. Progress shows here once export starts."
+        ),
     ),
     "chromatic": PanelHelpEntry(
         title="Chromatic correction",
@@ -54,8 +75,8 @@ PANEL_HELP: dict[str, PanelHelpEntry] = {
         ),
         shortcut_keys=("main",),
     ),
-    "image_tools": PanelHelpEntry(
-        title="Image tools",
+    "transforms": PanelHelpEntry(
+        title="Transforms",
         description=(
             "Control manual rotation, flipping, cropping, and measurement/calibration after chromatic correction has been set up."
         ),
@@ -82,6 +103,18 @@ PANEL_HELP: dict[str, PanelHelpEntry] = {
         title="Analysis",
         description="Calculate spectra and sensorgrams for the selected ROIs.",
         shortcut_keys=("table",),
+    ),
+    "spectra_fitting": PanelHelpEntry(
+        title="Spectra fitting",
+        description="Choose the polynomial fit order and the extraction metric used to compute each ROI's absorbance value from its spectrum.",
+    ),
+    "statistics": PanelHelpEntry(
+        title="Statistics",
+        description="Averaging, smoothing, and axis-selection tools for post-processing computed spectra and sensorgrams. Not implemented yet.",
+    ),
+    "results_export": PanelHelpEntry(
+        title="Results / Export",
+        description="Sensorgram region and kinetics tools, and export of ROI values, spectra, and sensorgram metrics. Not implemented yet.",
     ),
     "logs": PanelHelpEntry(
         title="Logs",

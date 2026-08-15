@@ -10,14 +10,109 @@ from PyQt6.QtWidgets import (
     QTabWidget,
     QTableWidget,
     QTextEdit,
+    QToolButton,
     QVBoxLayout,
     QWidget,
     QHeaderView,
-    QStyle,
 )
+
+from lspr_ui import get_active_theme
 
 from lspr_imaging_app.gui.main_window import CollapsibleSection
 from lspr_imaging_app.gui.panel_help_registry import panel_help_text
+
+
+def _visible_tab_stylesheet() -> str:
+    return (
+        "QTabWidget::pane {"
+        "  border: 1px solid #334155;"
+        "  border-top: none;"
+        "  background: transparent;"
+        "}"
+        "QTabBar::tab {"
+        "  padding: 5px 14px;"
+        "  min-width: 64px;"
+        "  border: 1px solid #334155;"
+        "  border-bottom: none;"
+        "  border-radius: 4px 4px 0 0;"
+        "  background: #1e293b;"
+        "  color: #94a3b8;"
+        "  margin-right: 2px;"
+        "}"
+        "QTabBar::tab:selected {"
+        "  background: #0f172a;"
+        "  color: #f1f5f9;"
+        "  border-color: #475569;"
+        "  font-weight: 600;"
+        "}"
+        "QTabBar::tab:hover:!selected {"
+        "  background: #263245;"
+        "  color: #cbd5e1;"
+        "}"
+    )
+
+
+def _placeholder_label(text: str) -> QLabel:
+    label = QLabel(text)
+    label.setWordWrap(True)
+    label.setStyleSheet("color: #64748b; font-style: italic;")
+    return label
+
+
+def _nested_section_group(parent: QWidget, *sections: QWidget) -> QWidget:
+    """Indent child CollapsibleSections so they read as nested under their
+    parent section instead of sitting flush with it."""
+    outer = QWidget(parent)
+    outer_layout = QVBoxLayout(outer)
+    outer_layout.setContentsMargins(16, 2, 0, 2)
+    outer_layout.setSpacing(4)
+    for section in sections:
+        outer_layout.addWidget(section)
+    return outer
+
+
+def _nested_title_color() -> str:
+    return get_active_theme().text_dim
+
+
+def _make_apply_status_label(window: QWidget, target_section: CollapsibleSection, text: str, tooltip: str) -> QToolButton:
+    """A small clickable text indicator mirroring target_section's apply state -
+    green when applied, red when not, same colors as its link/link-off icon.
+    Clicking it toggles the same state the icon controls."""
+    theme = get_active_theme()
+    button = QToolButton(window)
+    button.setText(f"[{text}]")
+    button.setAutoRaise(True)
+    button.setCheckable(False)
+    button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
+    button.setCursor(Qt.CursorShape.PointingHandCursor)
+    button.setToolTip(tooltip)
+
+    def refresh() -> None:
+        color = theme.accent_green if target_section.is_applied() else theme.accent_red
+        button.setStyleSheet(
+            "QToolButton {"
+            f"  color: {color};"
+            "  background: transparent;"
+            "  border: none;"
+            "  font-weight: 600;"
+            # Same vertical padding as the section title's own toggle button
+            # (collapsible_toggle_stylesheet: "padding: 4px 0"), and no font-size
+            # override, so this baseline lines up with "Image tools" instead of
+            # sitting off-center against it.
+            "  padding: 4px 2px;"
+            "}"
+            "QToolButton:hover { text-decoration: underline; }"
+        )
+
+    button.clicked.connect(lambda *_: target_section.set_applied(not target_section.is_applied()))
+    # add_applied_listener(), not apply_changed - apply_changed is deliberately
+    # suppressed (via blockSignals) while session state is restored at startup,
+    # so a purely visual mirror like this one needs the always-fires path or it
+    # falls out of sync with the section's own icon after a restore.
+    target_section.add_applied_listener(lambda *_: refresh())
+    refresh()
+    return button
 
 
 def build_layout(window) -> None:
@@ -25,46 +120,97 @@ def build_layout(window) -> None:
     top_row = QHBoxLayout(top_row_widget)
     top_row.setContentsMargins(0, 0, 0, 0)
     top_row.setSpacing(4)
-    folder_label = QLabel(window)
-    folder_label.setPixmap(window.style().standardIcon(QStyle.StandardPixmap.SP_DirIcon).pixmap(16, 16))
-    folder_label.setToolTip("Dataset folder")
-    top_row.addWidget(folder_label)
+    top_row.addWidget(window.open_explorer_button)
     top_row.addWidget(window.folder_edit, 1)
     top_row.addWidget(window.browse_button)
-    top_row.addWidget(window.load_button)
-    top_row.addWidget(window.export_ome_zarr_icon_button)
 
-    dataset_group = QWidget(window)
-    dataset_layout = QFormLayout(dataset_group)
-    dataset_layout.setContentsMargins(8, 8, 8, 8)
-    dataset_layout.setHorizontalSpacing(6)
-    dataset_layout.setVerticalSpacing(4)
-    dataset_layout.setLabelAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
-    dataset_layout.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
-    dataset_layout.insertRow(0, top_row_widget)
-    summary_block = QWidget(window)
-    summary_block_layout = QVBoxLayout(summary_block)
-    summary_block_layout.setContentsMargins(0, 0, 0, 0)
-    summary_block_layout.setSpacing(2)
-    summary_block_layout.addWidget(window.dataset_summary)
-    summary_block_layout.addWidget(window.dataset_stack_widget, 0, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
-    dataset_layout.addRow("Summary", summary_block)
-    reference_row = QHBoxLayout()
-    reference_row.addWidget(window.reference_summary, 1)
-    dataset_layout.addRow("Reference", reference_row)
+    # "Summary" nested section: structured, paired-row fields. The compact
+    # Size/Images/Cubes/WL stats sit on the section's own title row instead
+    # (header_extra), same pattern as "Dataset:" and "Image tools:".
+    summary_content = QWidget(window)
+    summary_content_layout = QVBoxLayout(summary_content)
+    summary_content_layout.setContentsMargins(8, 8, 8, 8)
+    summary_content_layout.setSpacing(6)
+    summary_content_layout.addWidget(window.summary_base_rows_widget)
+    summary_content_layout.addWidget(window.summary_ome_zarr_rows_widget)
+    window.summary_section = CollapsibleSection(
+        "Summary",
+        summary_content,
+        expanded=True,
+        help_text=panel_help_text("summary"),
+        title_color=_nested_title_color(),
+        header_extra=window.summary_header_stats_label,
+        parent=window,
+    )
+
+    # "Reference" nested section: title row carries the wavelength/cube
+    # indicators (same pattern as "Summary"'s title stats), content below
+    # holds the actual mode controls.
+    reference_header_row = QWidget(window)
+    reference_header_layout = QHBoxLayout(reference_header_row)
+    reference_header_layout.setContentsMargins(0, 0, 0, 0)
+    reference_header_layout.setSpacing(0)
+    reference_header_layout.addWidget(window.reference_wavelength_status_label)
+    reference_header_layout.addWidget(QLabel(","))
+    reference_header_layout.addSpacing(6)
+    reference_header_layout.addWidget(window.reference_spectral_cube_status_label)
+
+    reference_content = QWidget(window)
+    reference_layout = QFormLayout(reference_content)
+    reference_layout.setContentsMargins(8, 8, 8, 8)
+    reference_layout.setHorizontalSpacing(6)
+    reference_layout.setVerticalSpacing(4)
+    reference_layout.setLabelAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+    reference_layout.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
     reference_controls = QHBoxLayout()
     reference_controls.addWidget(window.reference_auto_button)
     reference_controls.addWidget(window.reference_manual_button)
+    reference_controls.addSpacing(10)
+    reference_controls.addWidget(window.reference_method_status_label)
     reference_controls.addStretch(1)
-    dataset_layout.addRow("Reference mode", reference_controls)
-    reference_status_row = QHBoxLayout()
-    reference_status_row.setContentsMargins(0, 0, 0, 0)
-    reference_status_row.setSpacing(10)
-    reference_status_row.addWidget(window.reference_wavelength_status_label)
-    reference_status_row.addWidget(window.reference_spectral_cube_status_label)
-    reference_status_row.addWidget(window.reference_method_status_label)
-    reference_status_row.addStretch(1)
-    dataset_layout.addRow("Reference info", reference_status_row)
+    reference_layout.addRow("Reference mode", reference_controls)
+    window.reference_section = CollapsibleSection(
+        "Reference",
+        reference_content,
+        expanded=True,
+        help_text=panel_help_text("reference"),
+        title_color=_nested_title_color(),
+        header_extra=reference_header_row,
+        parent=window,
+    )
+
+    # "Export" nested section: the controls that used to live in the
+    # "Stack to Zarr" pop-out dialog, now inline instead of a separate window.
+    export_content = QWidget(window)
+    export_content_layout = QVBoxLayout(export_content)
+    export_content_layout.setContentsMargins(8, 8, 8, 8)
+    export_content_layout.setSpacing(8)
+    for row in (
+        window.dataset_ome_zarr_controls_row,
+        window.dataset_ome_zarr_options_row,
+        window.dataset_ome_zarr_compression_row,
+        window.dataset_ome_zarr_skip_excluded_row,
+        window.dataset_ome_zarr_info_row,
+        window.dataset_ome_zarr_export_progress_row,
+    ):
+        export_content_layout.addWidget(row)
+    window.export_section = CollapsibleSection(
+        "Export",
+        export_content,
+        expanded=False,
+        help_text=panel_help_text("export"),
+        title_color=_nested_title_color(),
+        parent=window,
+    )
+
+    dataset_inner = QWidget(window)
+    dataset_inner_layout = QVBoxLayout(dataset_inner)
+    dataset_inner_layout.setContentsMargins(0, 0, 0, 0)
+    dataset_inner_layout.setSpacing(4)
+    dataset_inner_layout.addWidget(top_row_widget)
+    dataset_inner_layout.addWidget(
+        _nested_section_group(window, window.summary_section, window.reference_section, window.export_section)
+    )
 
     mask_group = QWidget(window)
     mask_layout = QVBoxLayout(mask_group)
@@ -187,51 +333,19 @@ def build_layout(window) -> None:
     rectangle_editor_group = QWidget(window)
     rectangle_editor_layout = QVBoxLayout(rectangle_editor_group)
     rectangle_editor_layout.setContentsMargins(12, 12, 12, 12)
-    _rect_placeholder = QLabel("Rectangle ROI editing — coming soon.")
-    _rect_placeholder.setWordWrap(True)
-    _rect_placeholder.setStyleSheet("color: #64748b; font-style: italic;")
-    rectangle_editor_layout.addWidget(_rect_placeholder)
+    rectangle_editor_layout.addWidget(_placeholder_label("Rectangle ROI editing — coming soon."))
     rectangle_editor_layout.addStretch(1)
 
     freehand_editor_group = QWidget(window)
     freehand_editor_layout = QVBoxLayout(freehand_editor_group)
     freehand_editor_layout.setContentsMargins(12, 12, 12, 12)
-    _freehand_placeholder = QLabel("Polygon / freehand ROI editing — coming soon.")
-    _freehand_placeholder.setWordWrap(True)
-    _freehand_placeholder.setStyleSheet("color: #64748b; font-style: italic;")
-    freehand_editor_layout.addWidget(_freehand_placeholder)
+    freehand_editor_layout.addWidget(_placeholder_label("Polygon / freehand ROI editing — coming soon."))
     freehand_editor_layout.addStretch(1)
 
     window.roi_editor_tabs = QTabWidget(window)
     window.roi_editor_tabs.setTabPosition(QTabWidget.TabPosition.North)
     window.roi_editor_tabs.setMovable(False)
-    window.roi_editor_tabs.setStyleSheet(
-        "QTabWidget::pane {"
-        "  border: 1px solid #334155;"
-        "  border-top: none;"
-        "  background: transparent;"
-        "}"
-        "QTabBar::tab {"
-        "  padding: 5px 14px;"
-        "  min-width: 64px;"
-        "  border: 1px solid #334155;"
-        "  border-bottom: none;"
-        "  border-radius: 4px 4px 0 0;"
-        "  background: #1e293b;"
-        "  color: #94a3b8;"
-        "  margin-right: 2px;"
-        "}"
-        "QTabBar::tab:selected {"
-        "  background: #0f172a;"
-        "  color: #f1f5f9;"
-        "  border-color: #475569;"
-        "  font-weight: 600;"
-        "}"
-        "QTabBar::tab:hover:!selected {"
-        "  background: #263245;"
-        "  color: #cbd5e1;"
-        "}"
-    )
+    window.roi_editor_tabs.setStyleSheet(_visible_tab_stylesheet())
     window.roi_editor_tabs.addTab(circle_editor_group, "Circles")
     window.roi_editor_tabs.addTab(rectangle_editor_group, "Rectangles")
     window.roi_editor_tabs.addTab(freehand_editor_group, "Freehand")
@@ -283,12 +397,14 @@ def build_layout(window) -> None:
     background_row.addStretch(1)
     background_layout.addRow("Background", background_row)
 
-    analysis_group = QWidget(window)
-    analysis_layout = QFormLayout(analysis_group)
-    analysis_layout.setContentsMargins(8, 8, 8, 8)
-    analysis_layout.setHorizontalSpacing(6)
-    analysis_layout.setVerticalSpacing(4)
-    analysis_layout.setLabelAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+    # Top row: controls that scope *which* cubes/ROIs get computed. Stays above
+    # the nested Spectra fitting / Statistics sections below it.
+    analysis_top_widget = QWidget(window)
+    analysis_top_layout = QFormLayout(analysis_top_widget)
+    analysis_top_layout.setContentsMargins(8, 8, 8, 4)
+    analysis_top_layout.setHorizontalSpacing(6)
+    analysis_top_layout.setVerticalSpacing(4)
+    analysis_top_layout.setLabelAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
     analysis_scope_row = QHBoxLayout()
     analysis_scope_row.addWidget(window.analysis_roi_table_button)
     analysis_scope_row.addWidget(window.analysis_refresh_button)
@@ -296,17 +412,7 @@ def build_layout(window) -> None:
     analysis_scope_row.addWidget(window.analysis_stop_button)
     analysis_scope_row.addWidget(window.analysis_preview_button)
     analysis_scope_row.addStretch(1)
-    analysis_layout.addRow("Selection", analysis_scope_row)
-    analysis_fit_row = QHBoxLayout()
-    analysis_fit_row.setContentsMargins(0, 0, 0, 0)
-    analysis_fit_row.setSpacing(6)
-    analysis_fit_row.addWidget(QLabel("Order"))
-    analysis_fit_row.addWidget(window.analysis_poly_order_spin)
-    analysis_fit_row.addSpacing(10)
-    analysis_fit_row.addWidget(QLabel("Metric"))
-    analysis_fit_row.addWidget(window.analysis_metric_combo)
-    analysis_fit_row.addStretch(1)
-    analysis_layout.addRow("Fit", analysis_fit_row)
+    analysis_top_layout.addRow("Selection", analysis_scope_row)
     analysis_range_row = QHBoxLayout()
     analysis_range_row.setContentsMargins(0, 0, 0, 0)
     analysis_range_row.setSpacing(6)
@@ -316,13 +422,47 @@ def build_layout(window) -> None:
     analysis_range_row.addWidget(QLabel("End"))
     analysis_range_row.addWidget(window.analysis_end_spectral_cube_spin)
     analysis_range_row.addStretch(1)
-    analysis_layout.addRow("Spectral cubes", analysis_range_row)
-    analysis_layout.addRow("Formula", window.analysis_formula_label)
-    analysis_layout.addRow("Result", window.analysis_summary_label)
+    analysis_top_layout.addRow("Spectral cubes", analysis_range_row)
+
+    # "Spectra fitting" nested section: the metric/formula definition itself.
+    analysis_fitting_content = QWidget(window)
+    analysis_fitting_layout = QFormLayout(analysis_fitting_content)
+    analysis_fitting_layout.setContentsMargins(8, 8, 8, 8)
+    analysis_fitting_layout.setHorizontalSpacing(6)
+    analysis_fitting_layout.setVerticalSpacing(4)
+    analysis_fitting_layout.setLabelAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+    analysis_fit_row = QHBoxLayout()
+    analysis_fit_row.setContentsMargins(0, 0, 0, 0)
+    analysis_fit_row.setSpacing(6)
+    analysis_fit_row.addWidget(QLabel("Order"))
+    analysis_fit_row.addWidget(window.analysis_poly_order_spin)
+    analysis_fit_row.addSpacing(10)
+    analysis_fit_row.addWidget(QLabel("Metric"))
+    analysis_fit_row.addWidget(window.analysis_metric_combo)
+    analysis_fit_row.addStretch(1)
+    analysis_fitting_layout.addRow("Fit", analysis_fit_row)
+    analysis_fitting_layout.addRow("Formula", window.analysis_formula_label)
+    analysis_fitting_layout.addRow("Result", window.analysis_summary_label)
+
+    # "Statistics" nested section: averaging/smoothing controls - not designed yet.
+    analysis_statistics_content = QWidget(window)
+    analysis_statistics_layout = QVBoxLayout(analysis_statistics_content)
+    analysis_statistics_layout.setContentsMargins(12, 12, 12, 12)
+    analysis_statistics_layout.addWidget(
+        _placeholder_label("Statistics tools (averaging, smoothing, axis selection) — coming soon.")
+    )
+    analysis_statistics_layout.addStretch(1)
 
     window.image_toolbar = QWidget(window)
     window.image_toolbar.setObjectName("imageToolbar")
-    window.dataset_section = CollapsibleSection("Dataset", dataset_group, expanded=True, help_text=panel_help_text("dataset"), parent=window)
+    window.dataset_section = CollapsibleSection(
+        "Dataset:",
+        dataset_inner,
+        expanded=True,
+        help_text=panel_help_text("dataset"),
+        header_extra=window.dataset_type_indicator_row,
+        parent=window,
+    )
     window.chromatic_section = CollapsibleSection(
         "Chromatic correction",
         chromatic_group,
@@ -330,6 +470,7 @@ def build_layout(window) -> None:
         applied=bool(window._state.preprocessing.chromatic_correction_enabled),
         apply_tooltip="Apply or skip the stored chromatic transform models for display and processing.",
         help_text=panel_help_text("chromatic"),
+        title_color=_nested_title_color(),
         parent=window,
     )
     window.mask_section = CollapsibleSection(
@@ -339,24 +480,7 @@ def build_layout(window) -> None:
         applied=bool(window._state.area_roi_settings.ignore_marked_pixels),
         apply_tooltip="Apply or skip mask-based exclusions during image display and processing.",
         help_text=panel_help_text("mask"),
-        parent=window,
-    )
-    window.image_tools_section = CollapsibleSection(
-        "Image tools",
-        window.image_toolbar,
-        expanded=True,
-        applied=bool(window._state.preprocessing.image_tools_enabled),
-        apply_tooltip="Link image tools to the processed image. Off means preview only; on means recalculate downstream views.",
-        help_text=panel_help_text("image_tools"),
-        parent=window,
-    )
-    window.roi_editor_section = CollapsibleSection(
-        "ROI editor",
-        roi_editor_content,
-        expanded=True,
-        applied=bool(window._read_bool_setting("controls/live_geometry", False)),
-        apply_tooltip="Apply live ROI geometry recalculation while editing.",
-        help_text=panel_help_text("roi_editor"),
+        title_color=_nested_title_color(),
         parent=window,
     )
     window.background_section = CollapsibleSection(
@@ -366,26 +490,154 @@ def build_layout(window) -> None:
         applied=bool(window._state.preprocessing.flatten_background_enabled),
         apply_tooltip="Apply or skip background removal from the processing pipeline.",
         help_text=panel_help_text("background"),
+        title_color=_nested_title_color(),
         parent=window,
+    )
+
+    # "Transforms" nests the icon row (rotate/crop/measure) as a child section,
+    # a sibling of Mask / Chromatic correction / Background removal, all under
+    # "Image tools" - which is now just their parent, not a control itself.
+    window.transforms_section = CollapsibleSection(
+        "Transforms",
+        window.image_toolbar,
+        expanded=True,
+        applied=bool(window._state.preprocessing.image_tools_enabled),
+        apply_tooltip="Link image tools to the processed image. Off means preview only; on means recalculate downstream views.",
+        help_text=panel_help_text("transforms"),
+        title_color=_nested_title_color(),
+        parent=window,
+    )
+    image_tools_inner = QWidget(window)
+    image_tools_inner_layout = QVBoxLayout(image_tools_inner)
+    image_tools_inner_layout.setContentsMargins(0, 0, 0, 0)
+    image_tools_inner_layout.setSpacing(4)
+    image_tools_inner_layout.addWidget(
+        _nested_section_group(
+            window, window.transforms_section, window.mask_section, window.chromatic_section, window.background_section
+        )
+    )
+
+    # Header status row: click any bracketed label to toggle that stage's apply
+    # state - same green/red as its own link/link-off icon, just visible at a
+    # glance from the "Image tools" header without opening each nested section.
+    image_tools_status_row = QWidget(window)
+    image_tools_status_layout = QHBoxLayout(image_tools_status_row)
+    image_tools_status_layout.setContentsMargins(0, 0, 0, 0)
+    image_tools_status_layout.setSpacing(2)
+    image_tools_status_layout.addWidget(
+        _make_apply_status_label(
+            window, window.transforms_section, "Transforms", "Toggle whether image-tool transforms are linked to the processed image."
+        )
+    )
+    image_tools_status_layout.addWidget(
+        _make_apply_status_label(window, window.mask_section, "Mask", "Toggle whether mask-based exclusions are applied.")
+    )
+    image_tools_status_layout.addWidget(
+        _make_apply_status_label(
+            window, window.chromatic_section, "Chrom. correct.", "Toggle whether the stored chromatic transform is applied."
+        )
+    )
+    image_tools_status_layout.addWidget(
+        _make_apply_status_label(
+            window, window.background_section, "BG removal", "Toggle whether background removal is applied."
+        )
+    )
+
+    # "Image tools" is now a pure parent/grouping header: no apply toggle, help,
+    # or pin of its own - those moved to "Transforms" above, which is what they
+    # actually described (linking the icon-row tools to the processed image).
+    window.image_tools_section = CollapsibleSection(
+        "Image tools:",
+        image_tools_inner,
+        expanded=True,
+        show_help=False,
+        show_pin=False,
+        header_extra=image_tools_status_row,
+        parent=window,
+    )
+
+    window.roi_editor_section = CollapsibleSection(
+        "ROI editor",
+        roi_editor_content,
+        expanded=True,
+        applied=bool(window._read_bool_setting("controls/live_geometry", False)),
+        apply_tooltip="Apply live ROI geometry recalculation while editing.",
+        help_text=panel_help_text("roi_editor"),
+        parent=window,
+    )
+
+    # "Analysis" nests Spectra fitting / Statistics as child sections
+    # underneath the scope/range controls that stay pinned above them.
+    window.spectra_fitting_section = CollapsibleSection(
+        "Spectra fitting",
+        analysis_fitting_content,
+        expanded=True,
+        help_text=panel_help_text("spectra_fitting"),
+        title_color=_nested_title_color(),
+        parent=window,
+    )
+    window.statistics_section = CollapsibleSection(
+        "Statistics",
+        analysis_statistics_content,
+        expanded=False,
+        help_text=panel_help_text("statistics"),
+        title_color=_nested_title_color(),
+        parent=window,
+    )
+    analysis_inner = QWidget(window)
+    analysis_inner_layout = QVBoxLayout(analysis_inner)
+    analysis_inner_layout.setContentsMargins(0, 0, 0, 0)
+    analysis_inner_layout.setSpacing(4)
+    analysis_inner_layout.addWidget(analysis_top_widget)
+    analysis_inner_layout.addWidget(
+        _nested_section_group(window, window.spectra_fitting_section, window.statistics_section)
     )
     window.analysis_section = CollapsibleSection(
         "Analysis",
-        analysis_group,
+        analysis_inner,
         expanded=True,
         applied=bool(window._analysis_enabled),
         apply_tooltip="Enable or disable analysis calculations.",
         help_text=panel_help_text("analysis"),
         parent=window,
     )
+
+    # "Results / Export": sensorgram region/measurement tools and export of
+    # ROI values, spectra, and sensorgram metrics - not designed yet.
+    results_export_content = QWidget(window)
+    results_export_layout = QVBoxLayout(results_export_content)
+    results_export_layout.setContentsMargins(12, 12, 12, 12)
+    results_export_layout.addWidget(
+        _placeholder_label(
+            "Sensorgram measurement (regions, averages, kinetics/slopes, step comparison) "
+            "and export of ROI values, spectra, and sensorgram metrics — coming soon."
+        )
+    )
+    results_export_layout.addStretch(1)
+    window.results_export_section = CollapsibleSection(
+        "Results / Export",
+        results_export_content,
+        expanded=False,
+        help_text=panel_help_text("results_export"),
+        parent=window,
+    )
+
     window._bind_collapsible_group(
         [
             window.dataset_section,
+            window.summary_section,
+            window.reference_section,
+            window.export_section,
             window.image_tools_section,
+            window.transforms_section,
             window.mask_section,
             window.chromatic_section,
-            window.roi_editor_section,
             window.background_section,
+            window.roi_editor_section,
             window.analysis_section,
+            window.spectra_fitting_section,
+            window.statistics_section,
+            window.results_export_section,
         ]
     )
 
@@ -403,11 +655,9 @@ def build_layout(window) -> None:
         window._make_left_tab_page(
             window.dataset_section,
             window.image_tools_section,
-            window.mask_section,
-            window.chromatic_section,
             window.roi_editor_section,
-            window.background_section,
             window.analysis_section,
+            window.results_export_section,
         ),
         "ROI controls",
     )

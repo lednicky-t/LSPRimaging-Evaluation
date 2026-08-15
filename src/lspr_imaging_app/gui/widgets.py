@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Callable
+
 import numpy as np
 from PyQt6.QtCore import QByteArray, QPointF, QRectF, QSize, Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import (
@@ -59,9 +61,14 @@ class CollapsibleSection(QWidget):
         applied: bool | None = None,
         apply_tooltip: str | None = None,
         help_text: str | None = None,
+        title_color: str | None = None,
+        header_extra: QWidget | None = None,
+        show_help: bool = True,
+        show_pin: bool = True,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
+        self._title_color = title_color
         self._toggle = QToolButton(self)
         self._toggle.setText(title)
         self._toggle.setCheckable(True)
@@ -71,23 +78,26 @@ class CollapsibleSection(QWidget):
         self._toggle.setArrowType(Qt.ArrowType.NoArrow)
         self._toggle.setIcon(PanelContainer._make_chevron_icon(self, expanded))
         self._toggle.setIconSize(QSize(12, 12))
-        self._toggle.setStyleSheet(collapsible_toggle_stylesheet())
+        self.refresh_toggle_style()
         self._toggle.toggled.connect(self._set_expanded)
 
-        self._pin_button = QToolButton(self)
-        self._pin_button.setText("")
-        self._pin_button.setCheckable(True)
-        self._pin_button.setChecked(False)
-        self._pin_button.setAutoRaise(True)
-        self._pin_button.setIcon(PanelContainer._make_pin_icon(self, False))
-        self._pin_button.setIconSize(QSize(16, 16))
-        self._pin_button.setFixedSize(22, 22)
-        self._pin_button.setToolTip("Pin this panel open so it is not auto-collapsed by the accordion.")
-        self._pin_button.setStyleSheet(collapsible_pin_stylesheet())
-        self._pin_button.toggled.connect(self.pin_changed.emit)
-        self._pin_button.toggled.connect(self._update_pin_icon)
+        self._pin_button: QToolButton | None = None
+        if show_pin:
+            self._pin_button = QToolButton(self)
+            self._pin_button.setText("")
+            self._pin_button.setCheckable(True)
+            self._pin_button.setChecked(False)
+            self._pin_button.setAutoRaise(True)
+            self._pin_button.setIcon(PanelContainer._make_pin_icon(self, False))
+            self._pin_button.setIconSize(QSize(16, 16))
+            self._pin_button.setFixedSize(22, 22)
+            self._pin_button.setToolTip("Pin this panel open so it is not auto-collapsed by the accordion.")
+            self._pin_button.setStyleSheet(collapsible_pin_stylesheet())
+            self._pin_button.toggled.connect(self.pin_changed.emit)
+            self._pin_button.toggled.connect(self._update_pin_icon)
 
         self._apply_button: QToolButton | None = None
+        self._applied_listeners: list[Callable[[bool], None]] = []
         if applied is not None:
             self._apply_button = QToolButton(self)
             self._apply_button.setText("")
@@ -101,18 +111,20 @@ class CollapsibleSection(QWidget):
             self._apply_button.setStyleSheet(transparent_icon_button_stylesheet())
             self._apply_button.toggled.connect(self._set_applied)
 
-        self._help_button = QToolButton(self)
-        self._help_button.setText("")
-        self._help_button.setAutoRaise(True)
-        self._help_button.setCheckable(False)
-        self._help_button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly)
-        self._help_button.setIcon(MainWindowIcons._make_help_icon())
-        self._help_button.setIconSize(QSize(16, 16))
-        self._help_button.setFixedSize(22, 22)
-        self._help_button.setToolTip("Show panel shortcuts and help.")
-        self._help_button.setStyleSheet(transparent_icon_button_stylesheet())
-        help_message = help_text or "No additional panel help is available yet."
-        self._help_button.clicked.connect(lambda *_: QMessageBox.information(self, self._toggle.text(), help_message))
+        self._help_button: QToolButton | None = None
+        if show_help:
+            self._help_button = QToolButton(self)
+            self._help_button.setText("")
+            self._help_button.setAutoRaise(True)
+            self._help_button.setCheckable(False)
+            self._help_button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly)
+            self._help_button.setIcon(MainWindowIcons._make_help_icon())
+            self._help_button.setIconSize(QSize(16, 16))
+            self._help_button.setFixedSize(22, 22)
+            self._help_button.setToolTip("Show panel shortcuts and help.")
+            self._help_button.setStyleSheet(transparent_icon_button_stylesheet())
+            help_message = help_text or "No additional panel help is available yet."
+            self._help_button.clicked.connect(lambda *_: QMessageBox.information(self, self._toggle.text(), help_message))
 
         self._content = content
         self._content.setParent(self)
@@ -122,15 +134,21 @@ class CollapsibleSection(QWidget):
         header_layout = QHBoxLayout(header)
         header_layout.setContentsMargins(0, 0, 0, 0)
         header_layout.setSpacing(4)
-        header_layout.addWidget(self._toggle, 1)
+        header_layout.addWidget(self._toggle, 0)
+        if header_extra is not None:
+            header_extra.setParent(header)
+            header_layout.addWidget(header_extra, 0, Qt.AlignmentFlag.AlignVCenter)
+        header_layout.addStretch(1)
         right_controls = QWidget(header)
         right_layout = QHBoxLayout(right_controls)
         right_layout.setContentsMargins(0, 0, 0, 0)
         right_layout.setSpacing(2)
-        right_layout.addWidget(self._help_button, 0, Qt.AlignmentFlag.AlignVCenter)
+        if self._help_button is not None:
+            right_layout.addWidget(self._help_button, 0, Qt.AlignmentFlag.AlignVCenter)
         if self._apply_button is not None:
             right_layout.addWidget(self._apply_button, 0, Qt.AlignmentFlag.AlignVCenter)
-        right_layout.addWidget(self._pin_button, 0, Qt.AlignmentFlag.AlignVCenter)
+        if self._pin_button is not None:
+            right_layout.addWidget(self._pin_button, 0, Qt.AlignmentFlag.AlignVCenter)
         header_layout.addWidget(right_controls, 0, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
 
         layout = QVBoxLayout(self)
@@ -145,13 +163,38 @@ class CollapsibleSection(QWidget):
         self.expanded_changed.emit(expanded)
 
     def _update_pin_icon(self, pinned: bool) -> None:
-        self._pin_button.setIcon(self._make_pin_icon(pinned))
+        if self._pin_button is not None:
+            self._pin_button.setIcon(self._make_pin_icon(pinned))
+
+    def refresh_toggle_style(self) -> None:
+        """(Re)apply the toggle button's stylesheet, including title_color if
+        set. Called at construction time and again whenever the app-wide theme
+        changes, so a theme switch doesn't wipe out a nested section's dimmed
+        title color by reapplying only the plain base stylesheet."""
+        stylesheet = collapsible_toggle_stylesheet()
+        if self._title_color is not None:
+            stylesheet += (
+                f"\nQToolButton {{ color: {self._title_color}; }}"
+                f"\nQToolButton:checked {{ color: {self._title_color}; }}"
+            )
+        self._toggle.setStyleSheet(stylesheet)
 
     def _set_applied(self, applied: bool) -> None:
         if self._apply_button is None:
             return
         self._apply_button.setIcon(self._make_apply_icon(applied))
+        for listener in self._applied_listeners:
+            listener(applied)
         self.apply_changed.emit(applied)
+
+    def add_applied_listener(self, callback: Callable[[bool], None]) -> None:
+        """Register a callback that always fires when the apply state changes,
+        even while this section's own signals are blocked (e.g. blockSignals()
+        during session restore, used to suppress apply_changed's functional
+        reactions like triggering a recompute). For purely visual mirrors of
+        apply state - such as inline status labels - that must never fall out
+        of sync with the icon, which updates unconditionally just above."""
+        self._applied_listeners.append(callback)
 
     def _make_chevron_icon(self, expanded: bool) -> QIcon:
         return PanelContainer._make_chevron_icon(self, expanded)
@@ -169,9 +212,11 @@ class CollapsibleSection(QWidget):
         self._toggle.setChecked(bool(expanded))
 
     def is_pinned(self) -> bool:
-        return self._pin_button.isChecked()
+        return False if self._pin_button is None else self._pin_button.isChecked()
 
     def set_pinned(self, pinned: bool) -> None:
+        if self._pin_button is None:
+            return
         self._pin_button.setChecked(bool(pinned))
 
     def has_apply_toggle(self) -> bool:

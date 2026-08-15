@@ -166,18 +166,31 @@ class LayoutStateController:
         try:
             window.dataset_section.set_pinned(window._settings_bool("dataset_section_pinned", False))
             window.dataset_section.set_expanded(window._settings_bool("dataset_section_expanded", True))
+            window.summary_section.set_pinned(window._settings_bool("summary_section_pinned", False))
+            window.summary_section.set_expanded(window._settings_bool("summary_section_expanded", True))
+            window.reference_section.set_pinned(window._settings_bool("reference_section_pinned", False))
+            window.reference_section.set_expanded(window._settings_bool("reference_section_expanded", True))
+            window.export_section.set_pinned(window._settings_bool("export_section_pinned", False))
+            window.export_section.set_expanded(window._settings_bool("export_section_expanded", False))
             window.chromatic_section.set_pinned(window._settings_bool("chromatic_section_pinned", False))
             window.chromatic_section.set_expanded(window._settings_bool("chromatic_section_expanded", False))
             window.mask_section.set_pinned(window._settings_bool("mask_section_pinned", False))
             window.mask_section.set_expanded(window._settings_bool("mask_section_expanded", True))
-            window.image_tools_section.set_pinned(window._settings_bool("image_tools_panel_pinned", False))
             window.image_tools_section.set_expanded(window._settings_bool("image_tools_panel_expanded", True))
+            window.transforms_section.set_pinned(window._settings_bool("transforms_section_pinned", False))
+            window.transforms_section.set_expanded(window._settings_bool("transforms_section_expanded", True))
             window.roi_editor_section.set_pinned(window._settings_bool("roi_editor_section_pinned", False))
             window.roi_editor_section.set_expanded(window._settings_bool("roi_editor_section_expanded", True))
             window.background_section.set_pinned(window._settings_bool("background_section_pinned", False))
             window.background_section.set_expanded(window._settings_bool("background_section_expanded", True))
             window.analysis_section.set_pinned(window._settings_bool("analysis_section_pinned", False))
             window.analysis_section.set_expanded(window._settings_bool("analysis_section_expanded", True))
+            window.spectra_fitting_section.set_pinned(window._settings_bool("spectra_fitting_section_pinned", False))
+            window.spectra_fitting_section.set_expanded(window._settings_bool("spectra_fitting_section_expanded", True))
+            window.statistics_section.set_pinned(window._settings_bool("statistics_section_pinned", False))
+            window.statistics_section.set_expanded(window._settings_bool("statistics_section_expanded", False))
+            window.results_export_section.set_pinned(window._settings_bool("results_export_section_pinned", False))
+            window.results_export_section.set_expanded(window._settings_bool("results_export_section_expanded", False))
             if hasattr(window, "workflow_log_section"):
                 window.workflow_log_section.set_expanded(True)
             window._analysis_enabled = window._settings_bool("analysis_section_applied", window._analysis_enabled)
@@ -208,12 +221,19 @@ class LayoutStateController:
         window._settings.setValue("layout/cached_rois_only_visible", bool(window._cached_rois_only_visible))
         window._settings.setValue("dataset_section_expanded", window.dataset_section.is_expanded())
         window._settings.setValue("dataset_section_pinned", window.dataset_section.is_pinned())
+        window._settings.setValue("summary_section_expanded", window.summary_section.is_expanded())
+        window._settings.setValue("summary_section_pinned", window.summary_section.is_pinned())
+        window._settings.setValue("reference_section_expanded", window.reference_section.is_expanded())
+        window._settings.setValue("reference_section_pinned", window.reference_section.is_pinned())
+        window._settings.setValue("export_section_expanded", window.export_section.is_expanded())
+        window._settings.setValue("export_section_pinned", window.export_section.is_pinned())
         window._settings.setValue("chromatic_section_expanded", window.chromatic_section.is_expanded())
         window._settings.setValue("chromatic_section_pinned", window.chromatic_section.is_pinned())
         window._settings.setValue("mask_section_expanded", window.mask_section.is_expanded())
         window._settings.setValue("mask_section_pinned", window.mask_section.is_pinned())
         window._settings.setValue("image_tools_panel_expanded", window.image_tools_section.is_expanded())
-        window._settings.setValue("image_tools_panel_pinned", window.image_tools_section.is_pinned())
+        window._settings.setValue("transforms_section_expanded", window.transforms_section.is_expanded())
+        window._settings.setValue("transforms_section_pinned", window.transforms_section.is_pinned())
         window._settings.setValue("roi_editor_section_expanded", window.roi_editor_section.is_expanded())
         window._settings.setValue("roi_editor_section_pinned", window.roi_editor_section.is_pinned())
         window._settings.setValue("background_section_expanded", window.background_section.is_expanded())
@@ -221,6 +241,12 @@ class LayoutStateController:
         window._settings.setValue("analysis_section_expanded", window.analysis_section.is_expanded())
         window._settings.setValue("analysis_section_pinned", window.analysis_section.is_pinned())
         window._settings.setValue("analysis_section_applied", window._analysis_enabled)
+        window._settings.setValue("spectra_fitting_section_expanded", window.spectra_fitting_section.is_expanded())
+        window._settings.setValue("spectra_fitting_section_pinned", window.spectra_fitting_section.is_pinned())
+        window._settings.setValue("statistics_section_expanded", window.statistics_section.is_expanded())
+        window._settings.setValue("statistics_section_pinned", window.statistics_section.is_pinned())
+        window._settings.setValue("results_export_section_expanded", window.results_export_section.is_expanded())
+        window._settings.setValue("results_export_section_pinned", window.results_export_section.is_pinned())
         if hasattr(window, "workflow_log_section"):
             window._settings.setValue("workflow_log_section_expanded", window.workflow_log_section.is_expanded())
         window._settings.setValue("ome_zarr/chunk_size_px", int(window._current_ome_zarr_chunk_size()))
@@ -369,12 +395,19 @@ class LayoutStateController:
         window._suspend_collapsible_accordion = True
         try:
             window.dataset_section.set_expanded(True)
+            window.summary_section.set_expanded(True)
+            window.reference_section.set_expanded(True)
+            window.export_section.set_expanded(False)
             window.mask_section.set_expanded(True)
             window.chromatic_section.set_expanded(False)
             window.image_tools_section.set_expanded(True)
+            window.transforms_section.set_expanded(True)
             window.roi_editor_section.set_expanded(True)
             window.background_section.set_expanded(True)
             window.analysis_section.set_expanded(True)
+            window.spectra_fitting_section.set_expanded(True)
+            window.statistics_section.set_expanded(False)
+            window.results_export_section.set_expanded(False)
         finally:
             window._suspend_collapsible_accordion = False
         window.left_tabs.blockSignals(True)
@@ -401,12 +434,19 @@ class LayoutStateController:
         try:
             for section in [
                 window.dataset_section,
+                window.summary_section,
+                window.reference_section,
+                window.export_section,
                 window.mask_section,
                 window.chromatic_section,
                 window.image_tools_section,
+                window.transforms_section,
                 window.roi_editor_section,
                 window.background_section,
                 window.analysis_section,
+                window.spectra_fitting_section,
+                window.statistics_section,
+                window.results_export_section,
             ]:
                 section.set_expanded(True)
         finally:
@@ -419,12 +459,19 @@ class LayoutStateController:
         try:
             for section in [
                 window.dataset_section,
+                window.summary_section,
+                window.reference_section,
+                window.export_section,
                 window.mask_section,
                 window.chromatic_section,
                 window.image_tools_section,
+                window.transforms_section,
                 window.roi_editor_section,
                 window.background_section,
                 window.analysis_section,
+                window.spectra_fitting_section,
+                window.statistics_section,
+                window.results_export_section,
             ]:
                 section.set_expanded(False)
         finally:

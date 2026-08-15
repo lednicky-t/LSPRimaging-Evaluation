@@ -28,7 +28,7 @@ class ImageToolsController:
 
     def relink_after_preview(self) -> None:
         window = self.window
-        window._image_tools_preview_only = not bool(window.image_tools_section.is_applied())
+        window._image_tools_preview_only = not bool(window.transforms_section.is_applied())
 
     def ensure_reference_image_for_image_tools(self) -> bool:
         window = self.window
@@ -40,7 +40,7 @@ class ImageToolsController:
     def handle_image_tool_settings_changed(self, status: str, *, preserve_view: bool = False) -> None:
         window = self.window
         editing_spatial_tool = window._active_tool in ("rotate", "crop", "measure")
-        linked = bool(window.image_tools_section.is_applied())
+        linked = bool(window.transforms_section.is_applied())
         window._image_tools_preview_only = editing_spatial_tool or not linked
         window._capture_pending_image_view_ranges(preserve_view=preserve_view)
         window._invalidate_image_analysis_caches()

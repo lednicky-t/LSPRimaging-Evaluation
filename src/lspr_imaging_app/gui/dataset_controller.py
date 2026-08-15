@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 from PyQt6.QtWidgets import QFileDialog, QInputDialog, QMessageBox
@@ -28,6 +29,16 @@ class DatasetController:
 
     def load_dataset_from_text(self, *, reset_image_view: bool = True, on_done=None) -> None:
         self.load_dataset_from_folder(Path(self.window.folder_edit.text()), reset_image_view=reset_image_view, on_done=on_done)
+
+    def open_dataset_folder_in_explorer(self) -> None:
+        folder = Path(self.window.folder_edit.text())
+        if not folder.is_dir():
+            self.window._set_status_text(f"Cannot open folder - path does not exist: {folder}")
+            return
+        try:
+            os.startfile(str(folder))
+        except OSError as exc:
+            self.window._set_status_text(f"Could not open folder in File Explorer: {exc}")
 
     def has_restorable_session(self, folder: Path) -> bool:
         if (folder / "processing_profile.json").exists():
@@ -96,7 +107,6 @@ class DatasetController:
     def _set_dataset_load_controls_enabled(self, enabled: bool) -> None:
         window = self.window
         window.browse_button.setEnabled(enabled)
-        window.load_button.setEnabled(enabled)
 
     def _on_dataset_load_failed(self, on_done, message: str) -> None:
         window = self.window
@@ -155,7 +165,7 @@ class DatasetController:
         window._configure_navigation_inputs()
         window._sync_reference_selection_from_settings()
         window._update_analysis_control_state()
-        window.dataset_summary.setText(window._dataset_summary_text(dataset))
+        window._update_dataset_summary_labels(dataset)
 
         window.folder_edit.setText(str(dataset.folder))
         window.folder_edit.setToolTip(str(dataset.folder))
