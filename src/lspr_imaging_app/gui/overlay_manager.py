@@ -303,15 +303,20 @@ class OverlayManager:
             overlay.outline_line.setPen(pg.mkPen(QColor(255, 255, 255, 220), width=5.0))
             overlay.outline_left_tick.setPen(pg.mkPen(QColor(255, 255, 255, 220), width=4.2))
             overlay.outline_right_tick.setPen(pg.mkPen(QColor(255, 255, 255, 220), width=4.2))
+            overlay.dark_outline_line.setPen(pg.mkPen(QColor(0, 0, 0, 200), width=6.6))
+            overlay.dark_outline_left_tick.setPen(pg.mkPen(QColor(0, 0, 0, 200), width=5.8))
+            overlay.dark_outline_right_tick.setPen(pg.mkPen(QColor(0, 0, 0, 200), width=5.8))
         if overlay is None or w._showing_background_profile_main or w._current_processed_image is None or not bool(w._state.preprocessing.scale_bar_visible):
             if overlay is not None:
+                overlay.dark_outline_line.setVisible(False)
                 overlay.outline_line.setVisible(False)
                 overlay.line.setVisible(False)
+                overlay.dark_outline_left_tick.setVisible(False)
                 overlay.outline_left_tick.setVisible(False)
                 overlay.left_tick.setVisible(False)
+                overlay.dark_outline_right_tick.setVisible(False)
                 overlay.outline_right_tick.setVisible(False)
                 overlay.right_tick.setVisible(False)
-                overlay.outline_label.setVisible(False)
                 overlay.label.setVisible(False)
             return
         x_range, y_range = w.image_plot.vb.viewRange()
@@ -334,33 +339,41 @@ class OverlayManager:
         x0 = max(x_left + margin_x, x1 - float(bar_length_px))
         y = y_bottom - margin_y
         tick_half = float(np.clip(visible_height * 0.02, 4.0, 8.0))
+        overlay.dark_outline_line.setData([x0, x1], [y, y])
         overlay.outline_line.setData([x0, x1], [y, y])
         overlay.line.setData([x0, x1], [y, y])
+        overlay.dark_outline_left_tick.setData([x0, x0], [y - tick_half, y + tick_half])
         overlay.outline_left_tick.setData([x0, x0], [y - tick_half, y + tick_half])
         overlay.left_tick.setData([x0, x0], [y - tick_half, y + tick_half])
+        overlay.dark_outline_right_tick.setData([x1, x1], [y - tick_half, y + tick_half])
         overlay.outline_right_tick.setData([x1, x1], [y - tick_half, y + tick_half])
         overlay.right_tick.setData([x1, x1], [y - tick_half, y + tick_half])
-        overlay.outline_label.setHtml(
-            "<span style="
-            "'color:#f8fafc; font-size:10pt; font-weight:800;'"
-            f">{label_text}</span>"
-        )
+        # Solid chip instead of a text halo: two same-size overlapping TextItems
+        # can't form a real outline (the top one fully covers the one beneath),
+        # which is why the old rendering looked inconsistent across backgrounds.
         overlay.label.setHtml(
             "<span style="
-            "'color:#05070b; font-size:9pt; font-weight:800;'"
+            "'color:#f8fafc; "
+            "font-size:9.5pt; "
+            "font-weight:700; "
+            "background:rgba(15,23,42,0.78); "
+            "border:1px solid rgba(226,232,240,0.85); "
+            "border-radius:4px; "
+            "padding:1px 5px;'"
             f">{label_text}</span>"
         )
         label_x = (x0 + x1) * 0.5
         label_y = y - tick_half - max(visible_height * 0.015, 3.0)
-        overlay.outline_label.setPos(label_x, label_y)
         overlay.label.setPos(label_x, label_y)
+        overlay.dark_outline_line.setVisible(True)
         overlay.outline_line.setVisible(True)
         overlay.line.setVisible(True)
+        overlay.dark_outline_left_tick.setVisible(True)
         overlay.outline_left_tick.setVisible(True)
         overlay.left_tick.setVisible(True)
+        overlay.dark_outline_right_tick.setVisible(True)
         overlay.outline_right_tick.setVisible(True)
         overlay.right_tick.setVisible(True)
-        overlay.outline_label.setVisible(True)
         overlay.label.setVisible(True)
 
     # ------------------------------------------------------------------

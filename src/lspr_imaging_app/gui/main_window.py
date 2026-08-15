@@ -7033,30 +7033,43 @@ class MainWindow(MainWindowIcons, QMainWindow):
     def _ensure_scale_bar_overlay(self) -> ScaleBarOverlayBundle:
         if self._scale_bar_overlay is not None:
             return self._scale_bar_overlay
+        # Each bar/tick is drawn as three stacked strokes (dark halo under a light
+        # halo under the color line). A single light halo disappears on a bright
+        # background, so the dark ring guarantees contrast on light images while
+        # the light ring keeps doing the same job on dark images.
+        dark_outline_line = pg.PlotCurveItem(pen=pg.mkPen(QColor(0, 0, 0, 200), width=6.6))
         outline_line = pg.PlotCurveItem(pen=pg.mkPen(QColor(255, 255, 255, 220), width=5.0))
         line = pg.PlotCurveItem(pen=pg.mkPen(self._scale_bar_visual_color, width=2.4))
+        dark_outline_left_tick = pg.PlotCurveItem(pen=pg.mkPen(QColor(0, 0, 0, 200), width=5.8))
         outline_left_tick = pg.PlotCurveItem(pen=pg.mkPen(QColor(255, 255, 255, 220), width=4.2))
         left_tick = pg.PlotCurveItem(pen=pg.mkPen(self._scale_bar_visual_color, width=2.0))
+        dark_outline_right_tick = pg.PlotCurveItem(pen=pg.mkPen(QColor(0, 0, 0, 200), width=5.8))
         outline_right_tick = pg.PlotCurveItem(pen=pg.mkPen(QColor(255, 255, 255, 220), width=4.2))
         right_tick = pg.PlotCurveItem(pen=pg.mkPen(self._scale_bar_visual_color, width=2.0))
-        outline_label = pg.TextItem(anchor=(0.5, 1.0))
+        # Label uses a small solid chip (same convention as the ROI/landmark tags)
+        # instead of a halo, since overlapping two same-size text items can't
+        # produce a real outline - the top layer fully covers the one beneath it.
         label = pg.TextItem(anchor=(0.5, 1.0))
+        self.image_plot.addItem(dark_outline_line, ignoreBounds=True)
         self.image_plot.addItem(outline_line, ignoreBounds=True)
         self.image_plot.addItem(line, ignoreBounds=True)
+        self.image_plot.addItem(dark_outline_left_tick, ignoreBounds=True)
         self.image_plot.addItem(outline_left_tick, ignoreBounds=True)
         self.image_plot.addItem(left_tick, ignoreBounds=True)
+        self.image_plot.addItem(dark_outline_right_tick, ignoreBounds=True)
         self.image_plot.addItem(outline_right_tick, ignoreBounds=True)
         self.image_plot.addItem(right_tick, ignoreBounds=True)
-        self.image_plot.addItem(outline_label, ignoreBounds=True)
         self.image_plot.addItem(label, ignoreBounds=True)
         self._scale_bar_overlay = ScaleBarOverlayBundle(
+            dark_outline_line=dark_outline_line,
             outline_line=outline_line,
             line=line,
+            dark_outline_left_tick=dark_outline_left_tick,
             outline_left_tick=outline_left_tick,
             left_tick=left_tick,
+            dark_outline_right_tick=dark_outline_right_tick,
             outline_right_tick=outline_right_tick,
             right_tick=right_tick,
-            outline_label=outline_label,
             label=label,
         )
         return self._scale_bar_overlay

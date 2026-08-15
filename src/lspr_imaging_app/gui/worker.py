@@ -56,13 +56,15 @@ class MeasurementOverlayBundle:
 
 @dataclass(slots=True)
 class ScaleBarOverlayBundle:
+    dark_outline_line: pg.PlotCurveItem
     outline_line: pg.PlotCurveItem
     line: pg.PlotCurveItem
+    dark_outline_left_tick: pg.PlotCurveItem
     outline_left_tick: pg.PlotCurveItem
     left_tick: pg.PlotCurveItem
+    dark_outline_right_tick: pg.PlotCurveItem
     outline_right_tick: pg.PlotCurveItem
     right_tick: pg.PlotCurveItem
-    outline_label: pg.TextItem
     label: pg.TextItem
 
 
