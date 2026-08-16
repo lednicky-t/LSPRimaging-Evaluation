@@ -54,6 +54,11 @@ try:
 except Exception:  # pragma: no cover - optional icon dependency
     lucide = None
 
+# Qt's QWIDGETSIZE_MAX: the maximumWidth() every widget starts with before anyone
+# calls setMaximumWidth()/setFixedWidth() on it. Used to detect "nobody capped this
+# width on purpose yet" in _cap_spinbox_width_to_content().
+_QT_DEFAULT_MAX_WIDTH = 16777215
+
 
 class ClickableIconLabel(QLabel):
     clicked = pyqtSignal()
@@ -2168,11 +2173,27 @@ class MainWindowIcons:
         combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToContents)
         combo.setFixedWidth(max(minimum, widest + 10))
 
+    def _cap_spinbox_width_to_content(self, spinbox: QAbstractSpinBox) -> None:
+        # make_compact_spinbox() only sets a *minimum* width from the spin box's own
+        # content. Most of these rows are a QHBoxLayout nested into a QFormLayout field
+        # ("" label + row), and QFormLayout's default fieldGrowthPolicy
+        # (AllNonFixedFieldsGrow) stretches any field widget/layout that isn't Fixed to
+        # fill the leftover row width - so a spin box with no explicit maximum still
+        # balloons out to whatever space the row has, even though its own text (e.g. a
+        # single digit) needs far less. Suffixed boxes ("48 px") hide this because their
+        # sizeHint is already close to the row width; short ones ("7") show it clearly.
+        # Cap to sizeHint so it stays content-sized, unless a caller already gave it a
+        # deliberate custom maximum (e.g. the shared navigation spin box width).
+        if spinbox.maximumWidth() < _QT_DEFAULT_MAX_WIDTH:
+            return
+        spinbox.setMaximumWidth(spinbox.sizeHint().width())
+
     def _apply_right_aligned_control_text(self) -> None:
         for line_edit in self.findChildren(QLineEdit):
             line_edit.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         for spinbox in self.findChildren(QAbstractSpinBox):
             make_compact_spinbox(spinbox, height=APP_THEME.compact_icon_outer)
+            self._cap_spinbox_width_to_content(spinbox)
         for combo in self.findChildren(QComboBox):
             combo.setEditable(True)
             combo.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
