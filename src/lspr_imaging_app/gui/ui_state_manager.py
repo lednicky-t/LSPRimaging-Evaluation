@@ -218,6 +218,8 @@ class UIStateManager:
         window._settings.setValue("analysis/metric", str(window.analysis_metric_combo.currentData() or "centroid"))
         window._settings.setValue("analysis/spectral_cube_start", int(window.analysis_start_spectral_cube_spin.value()))
         window._settings.setValue("analysis/spectral_cube_end", int(window.analysis_end_spectral_cube_spin.value()))
+        window._settings.setValue("analysis/wavelength_min_nm", float(window.analysis_wavelength_min_spin.value()))
+        window._settings.setValue("analysis/wavelength_max_nm", float(window.analysis_wavelength_max_spin.value()))
         window._settings.setValue("analysis/live_preview", bool(window._analysis_live_preview_enabled))
         window._settings.setValue("histogram/log_y", bool(window._histogram_log_y_enabled))
         lower, upper = window.hist_region.getRegion()
@@ -280,7 +282,6 @@ class UIStateManager:
         window.analysis_stop_button.setPixmap(
             window._make_analysis_stop_icon(enabled and window._sensorgram_running).pixmap(APP_THEME.compact_icon_inner, APP_THEME.compact_icon_inner)
         )
-        window.analysis_roi_table_button.setEnabled(enabled and has_dataset)
 
     def update_chromatic_control_state(self) -> None:
         window = self._window

@@ -108,7 +108,18 @@ PANEL_HELP: dict[str, PanelHelpEntry] = {
     ),
     "spectra_fitting": PanelHelpEntry(
         title="Spectra fitting",
-        description="Choose the polynomial fit order and the extraction metric used to compute each ROI's absorbance value from its spectrum.",
+        description=(
+            "Choose the polynomial fit order and the extraction metric used to compute each ROI's absorbance value "
+            "from its spectrum.\n"
+            "Formula: A = log10(I_rROI / I_sROI) - absorbance from the sample ROI's mean intensity (I_sROI) and the "
+            "reference ROI's mean intensity (I_rROI).\n"
+            "Metric: Maximum reads the peak absorbance of the fitted curve; Centroid reads its intensity-weighted "
+            "center wavelength. None skips fitting - no polynomial, no fitted curve, no sensorgram point.\n"
+            "Tips:\n"
+            "- The current fitted result shows above the spectrum plot, not in this panel.\n"
+            "- A higher polynomial order follows noise more closely; a lower order is smoother but can miss a sharp peak.\n"
+            "- Use the Range row above (Spectra) to crop the wavelength window before fitting, e.g. to exclude a noisy edge."
+        ),
     ),
     "statistics": PanelHelpEntry(
         title="Statistics",

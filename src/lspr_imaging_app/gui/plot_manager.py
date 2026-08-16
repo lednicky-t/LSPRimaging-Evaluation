@@ -118,7 +118,6 @@ class PlotManager:
 
     def set_spectrum_summary_text(self, text: str) -> None:
         self._window.spectrum_summary_label.setText(text)
-        self._window.analysis_summary_label.setText(text)
 
     def clear_absorbance_spectrum(self, summary_text: str) -> None:
         self.clear_spectrum_series_items()
@@ -151,10 +150,15 @@ class PlotManager:
         return QColor(resolved_roi_color(roi, group, window._sample_visual_color) if roi is not None else window._sample_visual_color)
 
     def analysis_fit_result_from_spectrum(self, result: AbsorbanceSpectrumResult) -> FitResult | None:
+        if self._window._analysis_metric_key() == "none":
+            return None
+        wavelength_range = self._window._analysis_wavelength_range()
         fit = fit_absorbance_curve(
             result.wavelengths_nm,
             result.absorbance,
             poly_order=self._window._analysis_poly_order(),
+            wl_min=wavelength_range[0] if wavelength_range is not None else None,
+            wl_max=wavelength_range[1] if wavelength_range is not None else None,
         )
         if fit.fitted_wavelengths_nm.size == 0 or fit.fitted_absorbance.size == 0:
             return None

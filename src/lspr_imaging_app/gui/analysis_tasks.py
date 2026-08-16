@@ -928,6 +928,8 @@ def _sensorgram_metric_task(
     task_fn=None,
     spectral_cube_result_cache_get=None,
     spectral_cube_result_cache_store=None,
+    wl_min: float | None = None,
+    wl_max: float | None = None,
 ) -> SensorgramComputationResult:
     task_started = time.perf_counter()
     spectral_cube_payloads: list[tuple[int, tuple[object, ...]]] = []
@@ -1035,6 +1037,8 @@ def _sensorgram_metric_task(
             spectrum.wavelengths_nm,
             spectrum.absorbance,
             poly_order=poly_order,
+            wl_min=wl_min,
+            wl_max=wl_max,
         )
         metric_value, metric_signal = metric_value_from_fit(fit, metric_key)
         metric_float = float(metric_value) if metric_value is not None and np.isfinite(metric_value) else float("nan")

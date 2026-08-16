@@ -62,6 +62,7 @@ from PyQt6.QtWidgets import (
 from lspr_ui import (
     APP_THEME,
     BLUE_DARK_THEME,
+    DualHandleRangeSlider,
     GRAY_DARK_THEME,
     collapsible_pin_stylesheet,
     dark_image_toolbar_stylesheet,
@@ -93,6 +94,7 @@ from lspr_imaging_app.gui.ui_helpers import (
     read_bool_setting,
     read_float_setting,
     settings_bool,
+    settings_float,
     settings_int,
 )
 from lspr_imaging_app.gui.analysis_controller import AnalysisController
@@ -1362,34 +1364,57 @@ class MainWindow(MainWindowIcons, QMainWindow):
             parent=self,
         )
         self.analysis_stop_button.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.analysis_roi_table_button = self._free_standing_icon_label(
-            self._make_roi_list_icon(False),
-            "Show or hide the ROI table.",
-            size=APP_THEME.compact_icon_inner,
-            parent=self,
-        )
-        self.analysis_roi_table_button.setCursor(Qt.CursorShape.PointingHandCursor)
         self.analysis_poly_order_spin = QSpinBox(self)
         self.analysis_poly_order_spin.setRange(1, 12)
         self.analysis_poly_order_spin.setValue(self._settings_int("analysis/poly_order", 3, minimum=1, maximum=12))
         self.analysis_poly_order_spin.setKeyboardTracking(False)
         self.analysis_poly_order_spin.setToolTip("Polynomial order used for spectrum fitting.")
         self.analysis_metric_combo = QComboBox(self)
+        self.analysis_metric_combo.addItem("None", "none")
         self.analysis_metric_combo.addItem("Maximum", "maximum")
         self.analysis_metric_combo.addItem("Centroid", "centroid")
         stored_metric = str(self._settings.value("analysis/metric", "centroid") or "centroid").strip().lower()
         metric_index = max(self.analysis_metric_combo.findData(stored_metric), 0)
         self.analysis_metric_combo.setCurrentIndex(metric_index)
+
+        # "Spectra" range: wavelength window (nm) the absorbance spectrum is
+        # cropped to before fitting - mirrors sLSPR acq's own Range/Min/Max.
+        self.analysis_wavelength_min_spin = QDoubleSpinBox(self)
+        self.analysis_wavelength_min_spin.setEnabled(False)
+        self.analysis_wavelength_min_spin.setKeyboardTracking(False)
+        self.analysis_wavelength_min_spin.setSuffix(" nm")
+        self.analysis_wavelength_min_spin.setToolTip("Lowest wavelength included in the fitted spectrum.")
+        self.analysis_wavelength_max_spin = QDoubleSpinBox(self)
+        self.analysis_wavelength_max_spin.setEnabled(False)
+        self.analysis_wavelength_max_spin.setKeyboardTracking(False)
+        self.analysis_wavelength_max_spin.setSuffix(" nm")
+        self.analysis_wavelength_max_spin.setToolTip("Highest wavelength included in the fitted spectrum.")
+        self.analysis_wavelength_range_slider = DualHandleRangeSlider(parent=self)
+        self.analysis_wavelength_range_slider.setEnabled(False)
+        self.analysis_wavelength_range_slider.setToolTip("Wavelength range used to crop the absorbance spectrum before fitting.")
+        self.analysis_wavelength_select_all_button = QToolButton(self)
+        self.analysis_wavelength_select_all_button.setText("All")
+        self.analysis_wavelength_select_all_button.setToolTip("Use the full available wavelength range.")
+
+        # Spectral-cube (time-point) range: which cubes are included in the
+        # calculation. Same min/slider/max/All layout as the row above it.
         self.analysis_start_spectral_cube_spin = QSpinBox(self)
         self.analysis_start_spectral_cube_spin.setEnabled(False)
         self.analysis_start_spectral_cube_spin.setKeyboardTracking(False)
         self.analysis_end_spectral_cube_spin = QSpinBox(self)
         self.analysis_end_spectral_cube_spin.setEnabled(False)
         self.analysis_end_spectral_cube_spin.setKeyboardTracking(False)
-        self.analysis_formula_label = QLabel("A = log10(I_rROI / I_sROI)", self)
-        self.analysis_formula_label.setWordWrap(True)
-        self.analysis_summary_label = QLabel("Select ROIs to show absorbance spectrum.", self)
-        self.analysis_summary_label.setWordWrap(True)
+        self.analysis_spectral_cube_range_slider = DualHandleRangeSlider(parent=self)
+        self.analysis_spectral_cube_range_slider.setEnabled(False)
+        self.analysis_spectral_cube_range_slider.setToolTip("Range of spectral cubes included in the calculation.")
+        self.analysis_spectral_cube_select_all_button = QToolButton(self)
+        self.analysis_spectral_cube_select_all_button.setText("All")
+        self.analysis_spectral_cube_select_all_button.setToolTip("Use the full available spectral cube range.")
+        # Row label kept as a QLabel (not a plain string) so its text can be
+        # swapped for "Time" later, once spectral cubes are linked to an
+        # experiment plan's real timestamps - see _spectral_cube_axis_label().
+        self.analysis_spectral_cube_axis_label = QLabel(self._spectral_cube_axis_label(), self)
+
         self.spectrum_summary_label = QLabel("Select ROIs to show absorbance spectrum.", self)
         self.spectrum_summary_label.setWordWrap(True)
         self.spectrum_plot = pg.PlotWidget(parent=self)
@@ -1844,6 +1869,12 @@ class MainWindow(MainWindowIcons, QMainWindow):
         self.wavelength_spin.valueChanged.connect(self._on_wavelength_spin_changed)
         self.analysis_start_spectral_cube_spin.valueChanged.connect(self._analysis_controller.on_spectral_cube_range_changed)
         self.analysis_end_spectral_cube_spin.valueChanged.connect(self._analysis_controller.on_spectral_cube_range_changed)
+        self.analysis_spectral_cube_range_slider.valuesChanged.connect(self._analysis_controller.on_spectral_cube_range_slider_changed)
+        self.analysis_spectral_cube_select_all_button.clicked.connect(self._analysis_controller.select_all_spectral_cube_range)
+        self.analysis_wavelength_min_spin.valueChanged.connect(self._analysis_controller.on_wavelength_range_changed)
+        self.analysis_wavelength_max_spin.valueChanged.connect(self._analysis_controller.on_wavelength_range_changed)
+        self.analysis_wavelength_range_slider.valuesChanged.connect(self._analysis_controller.on_wavelength_range_slider_changed)
+        self.analysis_wavelength_select_all_button.clicked.connect(self._analysis_controller.select_all_wavelength_range)
 
     def _connect_chromatic(self) -> None:
         self.chromatic_apply_check.toggled.connect(self._update_chromatic_settings)
@@ -1884,12 +1915,11 @@ class MainWindow(MainWindowIcons, QMainWindow):
         self.analysis_preview_button.clicked.connect(self._toggle_analysis_live_preview)
         self.analysis_calculate_all_button.clicked.connect(self._analysis_controller.calculate_sensorgram)
         self.analysis_stop_button.clicked.connect(self._analysis_controller.stop_sensorgram)
-        self.analysis_roi_table_button.clicked.connect(
-            lambda: self.roi_list_action.setChecked(not self.roi_list_action.isChecked())
-        )
         self.roi_list_cached_button.toggled.connect(self._on_cached_rois_only_toggled)
         self.analysis_poly_order_spin.valueChanged.connect(self._analysis_controller.on_fit_settings_changed)
         self.analysis_metric_combo.currentIndexChanged.connect(self._analysis_controller.on_fit_settings_changed)
+        self.analysis_metric_combo.currentIndexChanged.connect(self._analysis_controller.sync_analysis_fitting_controls)
+        self._analysis_controller.sync_analysis_fitting_controls()
         self.calculate_spectrum_action.triggered.connect(self._refresh_absorbance_spectrum)
 
     def _connect_background_and_mask(self) -> None:
@@ -2011,6 +2041,16 @@ class MainWindow(MainWindowIcons, QMainWindow):
         self.show_reference_points_check.toggled.connect(self._on_show_reference_points_toggled)
         self.show_mask_check.toggled.connect(self._on_show_mask_toggled)
         self.show_highlight_check.toggled.connect(self._on_show_highlight_toggled)
+        # roi_list_action is created in _create_toolbar(), which runs after
+        # _build_layout() - so the "[Table]" title-row toggle can only be
+        # populated here, once the action actually exists (see
+        # roi_editor_header_extra in layout_builder.build_layout()).
+        from lspr_imaging_app.gui.layout_builder import _make_visibility_status_label
+
+        self.roi_editor_table_toggle_button = _make_visibility_status_label(
+            self, self.roi_list_action, self.roi_list_panel, "Table", "Show or hide the ROI table."
+        )
+        self.roi_editor_header_extra.layout().addWidget(self.roi_editor_table_toggle_button)
         self._refresh_roi_list_action_icon()
 
     def _connect_toolbar_and_ui(self) -> None:
@@ -2173,13 +2213,8 @@ class MainWindow(MainWindowIcons, QMainWindow):
 
     def _refresh_roi_list_action_icon(self) -> None:
         self.roi_list_action.setIcon(self._make_roi_list_icon(self.roi_list_action.isChecked()))
-        if hasattr(self, "analysis_roi_table_button"):
-            self.analysis_roi_table_button.setPixmap(
-                self._make_roi_list_icon(self.roi_list_action.isChecked()).pixmap(
-                    APP_THEME.compact_icon_inner,
-                    APP_THEME.compact_icon_inner,
-                )
-            )
+        if hasattr(self, "roi_editor_table_toggle_button"):
+            self.roi_editor_table_toggle_button.sync_appearance()
 
     def _refresh_roi_table_headers(self) -> None:
         roi_table_headers(self.roi_table)
@@ -2594,7 +2629,15 @@ class MainWindow(MainWindowIcons, QMainWindow):
             decimals = max((self._decimal_places(value) for value in self._wavelength_values), default=0)
             self.wavelength_spin.setDecimals(min(max(decimals, 0), 4))
         self._sync_analysis_spectral_cube_range_controls()
+        self._sync_analysis_wavelength_range_controls()
         self._sync_analysis_plots()
+
+    def _spectral_cube_axis_label(self) -> str:
+        """Display name for the spectral-cube (time-point) axis. Centralized
+        here so that once spectral cubes are linked to an experiment plan's
+        real timestamps, one place decides whether the UI says "Spectral
+        cube" or "Time" - not every call site individually."""
+        return "Spectral cube"
 
     def _analysis_metric_key(self) -> str:
         return self._analysis_controller._analysis_metric_key()
@@ -2613,6 +2656,12 @@ class MainWindow(MainWindowIcons, QMainWindow):
 
     def _sync_analysis_spectral_cube_range_controls(self) -> None:
         self._analysis_controller._sync_analysis_spectral_cube_range_controls()
+
+    def _sync_analysis_wavelength_range_controls(self) -> None:
+        self._analysis_controller._sync_analysis_wavelength_range_controls()
+
+    def _analysis_wavelength_range(self) -> tuple[float, float] | None:
+        return self._analysis_controller._analysis_wavelength_range()
 
     def _set_sensorgram_summary_text(self, text: str) -> None:
         self._analysis_controller._set_sensorgram_summary_text(text)
@@ -3442,6 +3491,9 @@ class MainWindow(MainWindowIcons, QMainWindow):
 
     def _settings_int(self, key: str, default: int, *, minimum: int | None = None, maximum: int | None = None) -> int:
         return settings_int(self._settings, key, default, minimum=minimum, maximum=maximum)
+
+    def _settings_float(self, key: str, default: float, *, minimum: float | None = None, maximum: float | None = None) -> float:
+        return settings_float(self._settings, key, default, minimum=minimum, maximum=maximum)
 
     def _settings_histogram_bin_size(self) -> int:
         value = self._settings.value("histogram_bin_size", None)
@@ -4600,7 +4652,6 @@ class MainWindow(MainWindowIcons, QMainWindow):
         self._set_help(self.collapse_left_panels_action, "Collapse all left workflow panels.")
         self._set_help(self.calculate_spectrum_action, "Calculate the absorbance spectrum for the current spectral cube and selected ROIs.")
         self._set_help(self.about_action, "Show basic app information.")
-        self._set_help(self.analysis_roi_table_button, "Show or hide the ROI table.")
 
 
     def _on_rotate_tool_toggled(self, checked: bool) -> None:

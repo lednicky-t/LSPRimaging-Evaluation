@@ -4,6 +4,7 @@ from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QFont
 from PyQt6.QtWidgets import (
     QFormLayout,
+    QGridLayout,
     QHBoxLayout,
     QLabel,
     QSizePolicy,
@@ -59,6 +60,69 @@ def _placeholder_label(text: str) -> QLabel:
     return label
 
 
+_ANALYSIS_RANGE_AXIS_LABEL_WIDTH = 64
+
+
+def _build_analysis_range_row(
+    *,
+    axis_label: QLabel,
+    min_widget: QWidget,
+    slider: QWidget,
+    max_widget: QWidget,
+    select_all_button: QToolButton,
+) -> QWidget:
+    """One [axis label][min][slider][max][All] row - used twice under the
+    "Range" row (wavelength "Spectra" crop, then the spectral-cube/time
+    selection), so both share this one layout instead of two near-copies."""
+    axis_label.setFixedWidth(_ANALYSIS_RANGE_AXIS_LABEL_WIDTH)
+    row = QWidget()
+    row_layout = QHBoxLayout(row)
+    row_layout.setContentsMargins(0, 0, 0, 0)
+    row_layout.setSpacing(6)
+    row_layout.addWidget(axis_label)
+    row_layout.addWidget(min_widget)
+    row_layout.addWidget(slider, 1)
+    row_layout.addWidget(max_widget)
+    row_layout.addWidget(select_all_button)
+    return row
+
+
+def _build_analysis_fitting_row(window) -> QWidget:
+    """Metric/Order row: labels on top, controls below - the same stacked
+    grid layout as sLSPR acq's own Fitting row (see acq's
+    gui/main_window_panels.py::_build_processing_fitting_stacked). Metric
+    leads (it is the dropdown that decides whether there is a fit at all);
+    Order only makes sense - and is only shown - once a metric is chosen,
+    see AnalysisController.sync_analysis_fitting_controls()."""
+    widget = QWidget(window)
+    grid = QGridLayout()
+    grid.setContentsMargins(0, 0, 0, 0)
+    grid.setHorizontalSpacing(6)
+    grid.setVerticalSpacing(4)
+    grid.setColumnStretch(2, 1)
+
+    section_label = QLabel("Fit")
+    section_label.setToolTip("Metric extracted from the fitted absorbance spectrum, and the fit used to get it.")
+    grid.addWidget(section_label, 1, 0, alignment=Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+
+    metric_title = QLabel("Metric")
+    metric_title.setToolTip("Value extracted from the fitted absorbance spectrum for the sensorgram. None disables fitting.")
+    window.analysis_metric_combo.setToolTip(metric_title.toolTip())
+    grid.addWidget(metric_title, 0, 1, alignment=Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignBottom)
+    grid.addWidget(window.analysis_metric_combo, 1, 1, alignment=Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+
+    order_title = QLabel("Order")
+    order_title.setToolTip("Polynomial order used for spectrum fitting.")
+    window.analysis_poly_order_spin.setToolTip(order_title.toolTip())
+    grid.addWidget(order_title, 0, 2, alignment=Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignBottom)
+    grid.addWidget(window.analysis_poly_order_spin, 1, 2, alignment=Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+
+    window._analysis_fit_order_title_widget = order_title
+    widget.setLayout(grid)
+    widget.setSizePolicy(QSizePolicy.Policy.MinimumExpanding, QSizePolicy.Policy.Fixed)
+    return widget
+
+
 def _nested_section_group(parent: QWidget, *sections: QWidget) -> QWidget:
     """Indent child CollapsibleSections so they read as nested under their
     parent section instead of sitting flush with it."""
@@ -111,6 +175,54 @@ def _make_apply_status_label(window: QWidget, target_section: CollapsibleSection
     # so a purely visual mirror like this one needs the always-fires path or it
     # falls out of sync with the section's own icon after a restore.
     target_section.add_applied_listener(lambda *_: refresh())
+    refresh()
+    return button
+
+
+def _make_visibility_status_label(window: QWidget, action, panel: QWidget, text: str, tooltip: str) -> QToolButton:
+    """A small clickable text indicator for a dock panel's shown/hidden state -
+    green when visible, gray when not. Clicking it toggles `action`, the same
+    checkable QAction the panel's own show/hide control uses. Same
+    bracketed-text style as _make_apply_status_label, just green/gray instead
+    of green/red since this reflects visibility, not an apply/skip state.
+
+    Mirrors `not panel.isHidden()` rather than action.isChecked() alone: Qt's
+    own dock-layout restore (LayoutStateController.sync_panel_visibility_after_show)
+    re-asserts the panel's *own* toggleViewAction() from the saved dock_state
+    blob without touching this app-specific `action`, so the two can disagree
+    right after startup - panel state is the ground truth. isHidden(), not
+    isVisible(): during startup the top-level window itself isn't shown yet,
+    which makes isVisible() false for every dock regardless of its own state
+    (see sync_panel_visibility_after_show's own comment on this exact trap).
+    """
+    theme = get_active_theme()
+    button = QToolButton(window)
+    button.setText(f"[{text}]")
+    button.setAutoRaise(True)
+    button.setCheckable(False)
+    button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
+    button.setCursor(Qt.CursorShape.PointingHandCursor)
+    button.setToolTip(tooltip)
+
+    def refresh() -> None:
+        color = theme.accent_green if not panel.isHidden() else theme.text_dim
+        button.setStyleSheet(
+            "QToolButton {"
+            f"  color: {color};"
+            "  background: transparent;"
+            "  border: none;"
+            "  font-weight: 600;"
+            "  padding: 4px 2px;"
+            "}"
+            "QToolButton:hover { text-decoration: underline; }"
+        )
+
+    button.clicked.connect(lambda *_: action.setChecked(not action.isChecked()))
+    action.toggled.connect(lambda *_: refresh())
+    panel.visibilityChanged.connect(lambda *_: refresh())
+    # Also callable directly for the same reason as _make_apply_status_label's
+    # add_applied_listener: some restore paths change state via blockSignals.
+    button.sync_appearance = refresh
     refresh()
     return button
 
@@ -408,43 +520,46 @@ def build_layout(window) -> None:
     analysis_top_layout.setVerticalSpacing(4)
     analysis_top_layout.setLabelAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
     analysis_scope_row = QHBoxLayout()
-    analysis_scope_row.addWidget(window.analysis_roi_table_button)
     analysis_scope_row.addWidget(window.analysis_refresh_button)
     analysis_scope_row.addWidget(window.analysis_calculate_all_button)
     analysis_scope_row.addWidget(window.analysis_stop_button)
     analysis_scope_row.addWidget(window.analysis_preview_button)
     analysis_scope_row.addStretch(1)
     analysis_top_layout.addRow("Selection", analysis_scope_row)
-    analysis_range_row = QHBoxLayout()
-    analysis_range_row.setContentsMargins(0, 0, 0, 0)
-    analysis_range_row.setSpacing(6)
-    analysis_range_row.addWidget(QLabel("Start"))
-    analysis_range_row.addWidget(window.analysis_start_spectral_cube_spin)
-    analysis_range_row.addSpacing(10)
-    analysis_range_row.addWidget(QLabel("End"))
-    analysis_range_row.addWidget(window.analysis_end_spectral_cube_spin)
-    analysis_range_row.addStretch(1)
-    analysis_top_layout.addRow("Spectral cubes", analysis_range_row)
+    analysis_range_group = QWidget(window)
+    analysis_range_group_layout = QVBoxLayout(analysis_range_group)
+    analysis_range_group_layout.setContentsMargins(0, 0, 0, 0)
+    analysis_range_group_layout.setSpacing(3)
+    analysis_range_group_layout.addWidget(
+        _build_analysis_range_row(
+            axis_label=QLabel("Spectra"),
+            min_widget=window.analysis_wavelength_min_spin,
+            slider=window.analysis_wavelength_range_slider,
+            max_widget=window.analysis_wavelength_max_spin,
+            select_all_button=window.analysis_wavelength_select_all_button,
+        )
+    )
+    analysis_range_group_layout.addWidget(
+        _build_analysis_range_row(
+            axis_label=window.analysis_spectral_cube_axis_label,
+            min_widget=window.analysis_start_spectral_cube_spin,
+            slider=window.analysis_spectral_cube_range_slider,
+            max_widget=window.analysis_end_spectral_cube_spin,
+            select_all_button=window.analysis_spectral_cube_select_all_button,
+        )
+    )
+    analysis_top_layout.addRow("Range", analysis_range_group)
 
-    # "Spectra fitting" nested section: the metric/formula definition itself.
+    # "Spectra fitting" nested section: just the metric/order controls - the
+    # formula and usage tips live in this section's help popout instead (see
+    # panel_help_registry.py's "spectra_fitting" entry), and the result is
+    # shown once, above the spectrum plot (spectrum_summary_label), not
+    # duplicated here.
     analysis_fitting_content = QWidget(window)
-    analysis_fitting_layout = QFormLayout(analysis_fitting_content)
+    analysis_fitting_layout = QVBoxLayout(analysis_fitting_content)
     analysis_fitting_layout.setContentsMargins(8, 8, 8, 8)
-    analysis_fitting_layout.setHorizontalSpacing(6)
-    analysis_fitting_layout.setVerticalSpacing(4)
-    analysis_fitting_layout.setLabelAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
-    analysis_fit_row = QHBoxLayout()
-    analysis_fit_row.setContentsMargins(0, 0, 0, 0)
-    analysis_fit_row.setSpacing(6)
-    analysis_fit_row.addWidget(QLabel("Order"))
-    analysis_fit_row.addWidget(window.analysis_poly_order_spin)
-    analysis_fit_row.addSpacing(10)
-    analysis_fit_row.addWidget(QLabel("Metric"))
-    analysis_fit_row.addWidget(window.analysis_metric_combo)
-    analysis_fit_row.addStretch(1)
-    analysis_fitting_layout.addRow("Fit", analysis_fit_row)
-    analysis_fitting_layout.addRow("Formula", window.analysis_formula_label)
-    analysis_fitting_layout.addRow("Result", window.analysis_summary_label)
+    analysis_fitting_layout.setSpacing(4)
+    analysis_fitting_layout.addWidget(_build_analysis_fitting_row(window))
 
     # "Statistics" nested section: averaging/smoothing controls - not designed yet.
     analysis_statistics_content = QWidget(window)
@@ -558,6 +673,15 @@ def build_layout(window) -> None:
         parent=window,
     )
 
+    # Empty for now - roi_list_action doesn't exist yet at this point in
+    # startup (built_layout() runs before _create_toolbar()). main_window's
+    # _connect_roi_editor() populates this with the "[Table]" toggle once the
+    # action exists, same header_extra pattern as image_tools_status_row above.
+    window.roi_editor_header_extra = QWidget(window)
+    roi_editor_header_extra_layout = QHBoxLayout(window.roi_editor_header_extra)
+    roi_editor_header_extra_layout.setContentsMargins(0, 0, 0, 0)
+    roi_editor_header_extra_layout.setSpacing(2)
+
     window.roi_editor_section = CollapsibleSection(
         "ROI editor",
         roi_editor_content,
@@ -565,6 +689,7 @@ def build_layout(window) -> None:
         applied=bool(window._read_bool_setting("controls/live_geometry", False)),
         apply_tooltip="Apply live ROI geometry recalculation while editing.",
         help_text=panel_help_text("roi_editor"),
+        header_extra=window.roi_editor_header_extra,
         parent=window,
     )
 

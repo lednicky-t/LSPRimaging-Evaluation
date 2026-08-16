@@ -1957,7 +1957,6 @@ class MainWindowIcons:
     def _populate_left_roi_editor_controls(self) -> None:
         self._clear_layout(self.left_roi_editor_layout)
         buttons = [
-            (self.roi_list_action, {"accent": "orange"}),
             (self.roi_edit_action, {"primary": True}),
             (self.roi_add_action, {"accent": "green"}),
             (self.roi_array_action, {"accent": "green"}),

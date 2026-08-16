@@ -370,6 +370,12 @@ class LayoutStateController:
             finally:
                 dock.blockSignals(False)
             window._append_workflow_log(f"Panel | sync {name} visible={visible}", level="debug")
+        # roi_editor_table_toggle_button ("[Table]") mirrors roi_list_panel the
+        # same defensive way as the toggleViewAction re-assert just above -
+        # nothing here changes roi_list_action's own checked state, so its
+        # signal-based refresh alone won't catch this restore path.
+        if hasattr(window, "roi_editor_table_toggle_button"):
+            window.roi_editor_table_toggle_button.sync_appearance()
         if hasattr(window, "workflow_log_section"):
             try:
                 window.workflow_log_section.set_expanded(True)

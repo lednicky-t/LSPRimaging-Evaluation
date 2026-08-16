@@ -21,6 +21,19 @@ def settings_int(settings, key: str, default: int, *, minimum: int | None = None
     return parsed
 
 
+def settings_float(settings, key: str, default: float, *, minimum: float | None = None, maximum: float | None = None) -> float:
+    value = settings.value(key, default)
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        parsed = default
+    if minimum is not None:
+        parsed = max(parsed, minimum)
+    if maximum is not None:
+        parsed = min(parsed, maximum)
+    return parsed
+
+
 def settings_bool(settings, key: str, default: bool) -> bool:
     value = settings.value(key, default)
     if isinstance(value, bool):

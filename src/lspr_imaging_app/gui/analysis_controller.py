@@ -114,6 +114,9 @@ class AnalysisController:
     def on_spectral_cube_range_changed(self, *_args) -> None:
         self.window._on_analysis_spectral_cube_range_changed(*_args)
 
+    def on_wavelength_range_changed(self, *_args) -> None:
+        self._on_analysis_wavelength_range_changed(*_args)
+
     def update_control_state(self) -> None:
         self.window._update_analysis_control_state()
 
@@ -167,6 +170,9 @@ class AnalysisController:
             return
         if self.window._chromatic_setup_active:
             self.clear_sensorgram("Sensorgram is hidden during chromatic setup.")
+            return
+        if self._analysis_metric_key() == "none":
+            self.clear_sensorgram("Select a metric to calculate the sensorgram.")
             return
         selected_roi_ids = self.window._selected_spectrum_roi_ids()
         if not selected_roi_ids:
@@ -332,6 +338,7 @@ class AnalysisController:
                 result,
             )
 
+        wavelength_range = self.window._analysis_wavelength_range()
         worker = FunctionWorker(
             _sensorgram_metric_task,
             spectral_cubes,
@@ -344,6 +351,8 @@ class AnalysisController:
             task_fn=task_fn,
             spectral_cube_result_cache_get=spectral_cube_result_cache_get,
             spectral_cube_result_cache_store=spectral_cube_result_cache_store,
+            wl_min=None if wavelength_range is None else wavelength_range[0],
+            wl_max=None if wavelength_range is None else wavelength_range[1],
         )
         worker.signals.progress.connect(self.window._update_busy_progress)
         worker.signals.partial.connect(
@@ -480,12 +489,14 @@ class AnalysisController:
                 )
             )
         dataset_key = str(self.window._state.dataset.folder)
+        wavelength_range = self.window._analysis_wavelength_range()
         return (
             dataset_key,
             tuple(selected_roi_ids),
             self.window._roi_signature(selected_source_rois),
             self.window._analysis_metric_key(),
             int(self.window._analysis_poly_order()),
+            None if wavelength_range is None else (round(wavelength_range[0], 6), round(wavelength_range[1], 6)),
             tuple(round(float(value), 6) for value in self.window._wavelength_values),
             tuple(spectral_cube_signatures),
             round(float(self.window._state.area_roi_settings.reference_inner_radius_px), 3),
@@ -1027,7 +1038,9 @@ class AnalysisController:
     def _on_analysis_fit_settings_changed(self, *_args) -> None:
         start_time = time.perf_counter()
         self.window._save_control_preferences()
-        if self.window._analysis_live_preview_enabled:
+        if self._analysis_metric_key() == "none":
+            self.clear_sensorgram("Select a metric to calculate the sensorgram.")
+        elif self.window._analysis_live_preview_enabled:
             self.window._schedule_sensorgram_refresh()
         else:
             self.window._mark_sensorgram_stale(
@@ -1064,12 +1077,67 @@ class AnalysisController:
             self.window.analysis_end_spectral_cube_spin.setValue(end)
             self.window.analysis_start_spectral_cube_spin.blockSignals(False)
             self.window.analysis_end_spectral_cube_spin.blockSignals(False)
+        low = int(self.window.analysis_start_spectral_cube_spin.value())
+        high = int(self.window.analysis_end_spectral_cube_spin.value())
+        if self.window.analysis_spectral_cube_range_slider.values() != (low, high):
+            self.window.analysis_spectral_cube_range_slider.setValues(low, high)
         if self.window._analysis_live_preview_enabled and not self.preview_sensorgram_from_cache():
             self.mark_stale(
                 f"{self.window._analysis_metric_label()} sensorgram is out of date | Press Calculate all spectral cubes"
             )
         elif not self.window._analysis_live_preview_enabled:
             self.window._mark_sensorgram_stale()
+
+    def on_spectral_cube_range_slider_changed(self, low: int, high: int) -> None:
+        start_spin = self.window.analysis_start_spectral_cube_spin
+        end_spin = self.window.analysis_end_spectral_cube_spin
+        if start_spin.value() != low:
+            start_spin.setValue(low)
+        if end_spin.value() != high:
+            end_spin.setValue(high)
+
+    def select_all_spectral_cube_range(self) -> None:
+        if not self.window._spectral_cube_values:
+            return
+        self.window.analysis_start_spectral_cube_spin.setValue(int(min(self.window._spectral_cube_values)))
+        self.window.analysis_end_spectral_cube_spin.setValue(int(max(self.window._spectral_cube_values)))
+
+    def _on_analysis_wavelength_range_changed(self, *_args) -> None:
+        min_spin = self.window.analysis_wavelength_min_spin
+        max_spin = self.window.analysis_wavelength_max_spin
+        if min_spin.value() > max_spin.value():
+            min_spin.blockSignals(True)
+            max_spin.blockSignals(True)
+            low = min(min_spin.value(), max_spin.value())
+            high = max(min_spin.value(), max_spin.value())
+            min_spin.setValue(low)
+            max_spin.setValue(high)
+            min_spin.blockSignals(False)
+            max_spin.blockSignals(False)
+        if self.window._wavelength_values:
+            low_index = min(range(len(self.window._wavelength_values)), key=lambda idx: abs(self.window._wavelength_values[idx] - min_spin.value()))
+            high_index = min(range(len(self.window._wavelength_values)), key=lambda idx: abs(self.window._wavelength_values[idx] - max_spin.value()))
+            if self.window.analysis_wavelength_range_slider.values() != (low_index, high_index):
+                self.window.analysis_wavelength_range_slider.setValues(low_index, high_index)
+        self.on_fit_settings_changed()
+
+    def on_wavelength_range_slider_changed(self, low_index: int, high_index: int) -> None:
+        if not self.window._wavelength_values:
+            return
+        low_value = float(self.window._wavelength_values[low_index])
+        high_value = float(self.window._wavelength_values[high_index])
+        min_spin = self.window.analysis_wavelength_min_spin
+        max_spin = self.window.analysis_wavelength_max_spin
+        if min_spin.value() != low_value:
+            min_spin.setValue(low_value)
+        if max_spin.value() != high_value:
+            max_spin.setValue(high_value)
+
+    def select_all_wavelength_range(self) -> None:
+        if not self.window._wavelength_values:
+            return
+        self.window.analysis_wavelength_min_spin.setValue(float(min(self.window._wavelength_values)))
+        self.window.analysis_wavelength_max_spin.setValue(float(max(self.window._wavelength_values)))
 
     def _calculate_sensorgram_for_range(self) -> None:
         if not self.window._analysis_enabled:
@@ -1080,6 +1148,9 @@ class AnalysisController:
             return
         if self.window._chromatic_setup_active:
             self.window._clear_sensorgram("Sensorgram is hidden during chromatic setup.")
+            return
+        if self._analysis_metric_key() == "none":
+            self.window._clear_sensorgram("Select a metric to calculate the sensorgram.")
             return
         selected_roi_ids = self.window._selected_spectrum_roi_ids()
         if not selected_roi_ids:
@@ -1462,6 +1533,9 @@ class AnalysisController:
         spectral_cube_enabled = bool(self.window._spectral_cube_values)
         self.window.analysis_start_spectral_cube_spin.setEnabled(spectral_cube_enabled)
         self.window.analysis_end_spectral_cube_spin.setEnabled(spectral_cube_enabled)
+        self.window.analysis_spectral_cube_range_slider.setEnabled(spectral_cube_enabled)
+        self.window.analysis_spectral_cube_select_all_button.setEnabled(spectral_cube_enabled)
+        self.window.analysis_spectral_cube_axis_label.setText(self.window._spectral_cube_axis_label())
         if not spectral_cube_enabled:
             return
 
@@ -1480,13 +1554,63 @@ class AnalysisController:
         self.window.analysis_end_spectral_cube_spin.setValue(stored_end)
         self.window.analysis_start_spectral_cube_spin.blockSignals(False)
         self.window.analysis_end_spectral_cube_spin.blockSignals(False)
+        self.window.analysis_spectral_cube_range_slider.setRange(spectral_cube_min, spectral_cube_max)
+        self.window.analysis_spectral_cube_range_slider.setValues(stored_start, stored_end)
+
+    def _analysis_wavelength_range(self) -> tuple[float, float] | None:
+        if not self.window._wavelength_values:
+            return None
+        return float(self.window.analysis_wavelength_min_spin.value()), float(self.window.analysis_wavelength_max_spin.value())
+
+    def _sync_analysis_wavelength_range_controls(self) -> None:
+        wavelength_enabled = bool(self.window._wavelength_values)
+        self.window.analysis_wavelength_min_spin.setEnabled(wavelength_enabled)
+        self.window.analysis_wavelength_max_spin.setEnabled(wavelength_enabled)
+        self.window.analysis_wavelength_range_slider.setEnabled(wavelength_enabled)
+        self.window.analysis_wavelength_select_all_button.setEnabled(wavelength_enabled)
+        if not wavelength_enabled:
+            return
+
+        wavelength_min = float(min(self.window._wavelength_values))
+        wavelength_max = float(max(self.window._wavelength_values))
+        decimals = max((self.window._decimal_places(value) for value in self.window._wavelength_values), default=0)
+        decimals = min(max(decimals, 0), 4)
+        stored_min = self.window._settings_float("analysis/wavelength_min_nm", wavelength_min, minimum=wavelength_min, maximum=wavelength_max)
+        stored_max = self.window._settings_float("analysis/wavelength_max_nm", wavelength_max, minimum=wavelength_min, maximum=wavelength_max)
+        if stored_min > stored_max:
+            stored_min, stored_max = stored_max, stored_min
+
+        self.window.analysis_wavelength_min_spin.blockSignals(True)
+        self.window.analysis_wavelength_max_spin.blockSignals(True)
+        self.window.analysis_wavelength_min_spin.setDecimals(decimals)
+        self.window.analysis_wavelength_max_spin.setDecimals(decimals)
+        self.window.analysis_wavelength_min_spin.setRange(wavelength_min, wavelength_max)
+        self.window.analysis_wavelength_max_spin.setRange(wavelength_min, wavelength_max)
+        self.window.analysis_wavelength_min_spin.setValue(stored_min)
+        self.window.analysis_wavelength_max_spin.setValue(stored_max)
+        self.window.analysis_wavelength_min_spin.blockSignals(False)
+        self.window.analysis_wavelength_max_spin.blockSignals(False)
+        low_index = min(range(len(self.window._wavelength_values)), key=lambda idx: abs(self.window._wavelength_values[idx] - stored_min))
+        high_index = min(range(len(self.window._wavelength_values)), key=lambda idx: abs(self.window._wavelength_values[idx] - stored_max))
+        self.window.analysis_wavelength_range_slider.setRange(0, max(len(self.window._wavelength_values) - 1, 0))
+        self.window.analysis_wavelength_range_slider.setValues(low_index, high_index)
+
+    def sync_analysis_fitting_controls(self) -> None:
+        """Show/hide Order to match the chosen Metric - mirrors sLSPR acq's
+        own sync_processing_crop_parameter_widget (main_window_processing.py):
+        with no metric chosen there is nothing to fit, so Order stays hidden."""
+        order_visible = self._analysis_metric_key() != "none"
+        self.window.analysis_poly_order_spin.setVisible(order_visible)
+        order_title = getattr(self.window, "_analysis_fit_order_title_widget", None)
+        if order_title is not None:
+            order_title.setVisible(order_visible)
 
     def _set_sensorgram_summary_text(self, text: str) -> None:
         self.window.sensorgram_summary_label.setText(text)
 
     def _update_sensorgram_plot_labels(self) -> None:
         self.window.sensorgram_plot.setLabel("left", self._analysis_metric_axis_label())
-        self.window.sensorgram_plot.setLabel("bottom", "Spectral cube")
+        self.window.sensorgram_plot.setLabel("bottom", self.window._spectral_cube_axis_label())
 
     def _analysis_plot_spectral_cube_range(self) -> tuple[int, int] | None:
         if not self.window._spectral_cube_values:
