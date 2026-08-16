@@ -4,6 +4,7 @@ import logging
 import time
 import numpy as np
 from copy import deepcopy
+from datetime import datetime
 from PyQt6.QtGui import QColor
 import pyqtgraph as pg
 
@@ -123,6 +124,48 @@ class AnalysisController:
     def update_plot_labels(self) -> None:
         self.window._update_sensorgram_plot_labels()
 
+    def _sensorgram_time_mode_metadata(self):
+        """The loaded `ImagingAcquisitionMetadata` if it has per-image timing
+        data (enough to plot the sensorgram against real elapsed time),
+        otherwise None - falls back to plotting by raw spectral_cube_index,
+        the behavior for every dataset without acquisition metadata loaded."""
+        dataset = self.window._state.dataset
+        metadata = getattr(dataset, "acquisition_metadata", None) if dataset is not None else None
+        if metadata is None or not metadata.image_timings:
+            return None
+        return metadata
+
+    @staticmethod
+    def _sensorgram_time_anchor_ms(metadata) -> int:
+        """t=0 for the elapsed-time axis: the dataset's recorded start time
+        if parseable (consistent with how comment-event/image timestamps are
+        already anchored), otherwise the earliest recorded image timing."""
+        if metadata.started_at_utc:
+            try:
+                return int(datetime.fromisoformat(metadata.started_at_utc.replace("Z", "+00:00")).timestamp() * 1000)
+            except ValueError:
+                pass
+        return min(timing.acquired_at_unix_ms for timing in metadata.image_timings)
+
+    def _sensorgram_x_values(self, spectral_cube_indices) -> np.ndarray:
+        """Map spectral cube indices to sensorgram x-axis display values:
+        elapsed seconds since the dataset's start when acquisition metadata
+        with per-image timing is loaded (NaN for any cube with no timing
+        entry, so it's dropped rather than plotted at a misleading raw-index
+        position), otherwise the raw cube indices themselves, unchanged from
+        today's behavior."""
+        indices = np.asarray(list(spectral_cube_indices), dtype=np.int64)
+        metadata = self._sensorgram_time_mode_metadata()
+        if metadata is None:
+            return indices.astype(np.float64)
+        anchor_ms = self._sensorgram_time_anchor_ms(metadata)
+        values = np.full(indices.shape, np.nan, dtype=np.float64)
+        for position, cube_index in enumerate(indices):
+            timing = metadata.earliest_timing_for_cube(int(cube_index))
+            if timing is not None:
+                values[position] = (timing.acquired_at_unix_ms - anchor_ms) / 1000.0
+        return values
+
     def clear_sensorgram(self, summary_text: str) -> None:
         self.window._sensorgram_spectral_cube_indices = np.asarray([], dtype=np.int32)
         self.window._sensorgram_metric_values = np.asarray([], dtype=np.float64)
@@ -137,16 +180,17 @@ class AnalysisController:
     def set_sensorgram_series(self, spectral_cube_indices, metric_values, *, summary_text: str | None = None) -> None:
         spectral_cubes = np.asarray(spectral_cube_indices, dtype=np.int32)
         metrics = np.asarray(metric_values, dtype=np.float64)
-        valid_mask = np.isfinite(spectral_cubes) & np.isfinite(metrics)
+        x_values = self._sensorgram_x_values(spectral_cubes)
+        valid_mask = np.isfinite(x_values) & np.isfinite(metrics)
         self.window._sensorgram_spectral_cube_indices = spectral_cubes.copy()
         self.window._sensorgram_metric_values = metrics.copy()
-        self.window.sensorgram_curve.setData(spectral_cubes[valid_mask], metrics[valid_mask])
+        self.window.sensorgram_curve.setData(x_values[valid_mask], metrics[valid_mask])
         self.update_plot_labels()
         self.update_selection_highlight(force=True)
         if np.any(valid_mask):
-            x_values = spectral_cubes[valid_mask].astype(np.float64, copy=False)
+            x_plotted = x_values[valid_mask]
             y_values = metrics[valid_mask].astype(np.float64, copy=False)
-            self.window.sensorgram_plot.setXRange(float(np.min(x_values)), float(np.max(x_values)), padding=0.03)
+            self.window.sensorgram_plot.setXRange(float(np.min(x_plotted)), float(np.max(x_plotted)), padding=0.03)
             y_min = float(np.min(y_values))
             y_max = float(np.max(y_values))
             y_span = max(y_max - y_min, 0.05)
@@ -449,7 +493,11 @@ class AnalysisController:
         if not np.isfinite(value):
             self.window.sensorgram_current_point.setData([], [])
             return
-        self.window.sensorgram_current_point.setData([int(self.window._sensorgram_spectral_cube_indices[index])], [value])
+        x_value = float(self._sensorgram_x_values([int(self.window._sensorgram_spectral_cube_indices[index])])[0])
+        if not np.isfinite(x_value):
+            self.window.sensorgram_current_point.setData([], [])
+            return
+        self.window.sensorgram_current_point.setData([x_value], [value])
 
     def mark_stale(self, reason: str | None = None) -> None:
         if self.window._sensorgram_running:
@@ -1640,15 +1688,30 @@ class AnalysisController:
             return None
         return float(min(self.window._wavelength_values)), float(max(self.window._wavelength_values))
 
+    def _sensorgram_axis_range(self) -> tuple[float, float] | None:
+        """The sensorgram plot's x-axis limits: elapsed-time range when
+        acquisition metadata with per-image timing is loaded, otherwise the
+        raw spectral-cube-index range (today's behavior, unchanged)."""
+        if not self.window._spectral_cube_values:
+            return None
+        index_range = (float(min(self.window._spectral_cube_values)), float(max(self.window._spectral_cube_values)))
+        if self._sensorgram_time_mode_metadata() is None:
+            return index_range
+        x_values = self._sensorgram_x_values(self.window._spectral_cube_values)
+        finite = x_values[np.isfinite(x_values)]
+        if finite.size == 0:
+            return index_range
+        return float(np.min(finite)), float(np.max(finite))
+
     def _sync_analysis_plot_axes(self) -> None:
-        spectral_cube_range = self._analysis_plot_spectral_cube_range()
         wavelength_range = self._analysis_plot_wavelength_range()
         if wavelength_range is not None:
             self.window.spectrum_plot.setLimits(xMin=wavelength_range[0], xMax=wavelength_range[1])
             self.window.spectrum_plot.setXRange(wavelength_range[0], wavelength_range[1], padding=0.03)
-        if spectral_cube_range is not None:
-            self.window.sensorgram_plot.setLimits(xMin=spectral_cube_range[0], xMax=spectral_cube_range[1])
-            self.window.sensorgram_plot.setXRange(float(spectral_cube_range[0]), float(spectral_cube_range[1]), padding=0.03)
+        sensorgram_range = self._sensorgram_axis_range()
+        if sensorgram_range is not None:
+            self.window.sensorgram_plot.setLimits(xMin=sensorgram_range[0], xMax=sensorgram_range[1])
+            self.window.sensorgram_plot.setXRange(sensorgram_range[0], sensorgram_range[1], padding=0.03)
 
     def _sync_analysis_plot_cursors(self) -> None:
         has_dataset = bool(self.window._spectral_cube_values) and bool(self.window._wavelength_values)
@@ -1665,10 +1728,13 @@ class AnalysisController:
         if current_wavelength is None:
             current_wavelength = float(self.window._wavelength_values[0])
         cursor_color = self.window._chromatic_wavelength_color(float(current_wavelength))
+        sensorgram_cursor_x = float(self._sensorgram_x_values([int(current_spectral_cube)])[0])
+        if not np.isfinite(sensorgram_cursor_x):
+            sensorgram_cursor_x = float(current_spectral_cube)
         self.window.spectrum_cursor_line.blockSignals(True)
         self.window.sensorgram_cursor_line.blockSignals(True)
         self.window.spectrum_cursor_line.setValue(float(current_wavelength))
-        self.window.sensorgram_cursor_line.setValue(float(current_spectral_cube))
+        self.window.sensorgram_cursor_line.setValue(sensorgram_cursor_x)
         self.window.spectrum_cursor_line.setPen(pg.mkPen(cursor_color, width=2.2))
         self.window.spectrum_cursor_line.blockSignals(False)
         self.window.sensorgram_cursor_line.blockSignals(False)
@@ -1697,11 +1763,17 @@ class AnalysisController:
     def _on_sensorgram_cursor_moved(self) -> None:
         if not self.window._spectral_cube_values:
             return
-        spectral_cube_index = float(self.window.sensorgram_cursor_line.value())
-        nearest_index = min(
-            range(len(self.window._spectral_cube_values)),
-            key=lambda idx: abs(float(self.window._spectral_cube_values[idx]) - spectral_cube_index),
-        )
+        cursor_x = float(self.window.sensorgram_cursor_line.value())
+        # Match against display x-values (elapsed time when in time mode,
+        # same values _sync_analysis_plot_cursors placed the cursor with) -
+        # any cube missing a timing entry falls back to its raw index so it
+        # can still be matched against, consistent with the cursor-set side.
+        display_x_values = self._sensorgram_x_values(self.window._spectral_cube_values)
+        missing = ~np.isfinite(display_x_values)
+        if np.any(missing):
+            display_x_values = display_x_values.copy()
+            display_x_values[missing] = np.asarray(self.window._spectral_cube_values, dtype=np.float64)[missing]
+        nearest_index = int(np.argmin(np.abs(display_x_values - cursor_x)))
         current_wavelength = self.window._current_wavelength()
         if current_wavelength is None and self.window._wavelength_values:
             current_wavelength = float(self.window._wavelength_values[self.window.wavelength_slider.value()])

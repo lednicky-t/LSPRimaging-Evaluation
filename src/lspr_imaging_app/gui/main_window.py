@@ -2707,9 +2707,11 @@ class MainWindow(MainWindowIcons, QMainWindow):
 
     def _spectral_cube_axis_label(self) -> str:
         """Display name for the spectral-cube (time-point) axis. Centralized
-        here so that once spectral cubes are linked to an experiment plan's
-        real timestamps, one place decides whether the UI says "Cube" or
-        "Time" - not every call site individually."""
+        here so that once spectral cubes are linked to real acquisition
+        timestamps, one place decides whether the UI says "Cube" or "Time" -
+        not every call site individually."""
+        if self._analysis_controller._sensorgram_time_mode_metadata() is not None:
+            return "Elapsed time (s)"
         return "Cube"
 
     def _analysis_fit_method_key(self) -> str:
