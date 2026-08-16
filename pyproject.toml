@@ -25,6 +25,7 @@ dependencies = [
     "lucide",
     "lspr-ui>=0.1.0",
     "lspr-core>=0.1.0",
+    "lspr-io>=0.1.0",
     "zarr>=3.2,<4",
 ]
 

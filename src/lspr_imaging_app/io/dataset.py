@@ -22,12 +22,16 @@ except Exception:  # pragma: no cover - optional acceleration path
     _tifffile_imread = None
     _tifffile_TiffFile = None
 
+from lspr_core import ImagingAcquisitionMetadata
+from lspr_io import is_imaging_measurement_file, read_imaging_acquisition_metadata
+
 from lspr_imaging_app.domain.exclusions import ImageExclusionRule, is_excluded
 from lspr_imaging_app.domain.models import ImageDataset, ImageKey, ImageRecord, PreprocessingSettings
+from lspr_imaging_app.io.image_naming import IMAGE_PATTERN
+from lspr_imaging_app.io.legacy_metadata import find_and_import_legacy_metadata
 from lspr_imaging_app.processing.preprocess import apply_spatial_preprocessing
 
 
-IMAGE_PATTERN = re.compile(r"WL(?P<wl>\d+(?:\.\d+)?)Frame(?P<spectral_cube_index>\d+)", re.IGNORECASE)
 OME_ZARR_META_FILENAME = ".zattrs"
 OME_ZARR_GROUP_FILENAME = ".zgroup"
 OME_ZARR_ARRAY_DIRNAME = "0"
@@ -81,6 +85,48 @@ def _require_ome_zarr_support():
 _LOGGER = logging.getLogger("lspr_imaging_app.workflow")
 
 
+_ACQUISITION_METADATA_SEARCH_LEVELS_UP = 3
+
+
+def find_native_imaging_measurement_file(dataset_folder: Path) -> Path | None:
+    """Search `dataset_folder` and a few ancestor directories for a native
+    `lspr_measurement` v6.4 HDF5 file (written by LSPRimaging Acquisition's
+    `ImagingMeasurementWriter`, which stores camera/illumination setup and
+    cube timing there but writes pixel data separately - see that writer's
+    module docstring). There's no fixed naming/location convention verified
+    against real acquisition-app output yet, so this takes the same
+    "sidecar somewhere nearby" approach as `find_legacy_metadata_files` and
+    validates each candidate's actual HDF5 content rather than trusting a
+    filename pattern.
+    """
+    candidate = dataset_folder
+    for _ in range(_ACQUISITION_METADATA_SEARCH_LEVELS_UP + 1):
+        if candidate.is_dir():
+            for extension in ("*.h5", "*.hdf5"):
+                for path in sorted(candidate.glob(extension)):
+                    if is_imaging_measurement_file(path):
+                        return path
+        if candidate.parent == candidate:
+            break
+        candidate = candidate.parent
+    return None
+
+
+def load_acquisition_metadata(dataset_folder: Path) -> ImagingAcquisitionMetadata | None:
+    """Load whatever camera/illumination/cube-timing metadata is available
+    for `dataset_folder`: a native v6.4 HDF5 file if one is found nearby,
+    otherwise the legacy `measureing_times.csv`/`metaData.txt` pair,
+    otherwise None (most datasets - including every OME-Zarr export made
+    before this existed - have neither, which is not an error).
+    """
+    native_path = find_native_imaging_measurement_file(dataset_folder)
+    if native_path is not None:
+        metadata = read_imaging_acquisition_metadata(native_path)
+        if metadata is not None:
+            return metadata
+    return find_and_import_legacy_metadata(dataset_folder)
+
+
 def load_dataset(folder: Path) -> ImageDataset:
     """Load `folder` as an `ImageDataset`, auto-detecting the format.
 
@@ -89,20 +135,27 @@ def load_dataset(folder: Path) -> ImageDataset:
     `load_ome_zarr_dataset`. Otherwise `folder` is treated as a flat
     directory of TIFF files named like `WL500Frame3.tif` (wavelength in nm,
     spectral cube index), parsed by `IMAGE_PATTERN`.
+
+    Either way, `load_acquisition_metadata` also looks nearby for camera/
+    illumination/cube-timing metadata (a native v6.4 file or legacy sidecar
+    files) and attaches it as `ImageDataset.acquisition_metadata` when found.
     """
     if is_ome_zarr_dataset(folder):
-        return load_ome_zarr_dataset(folder)
-    records: list[ImageRecord] = []
-    for path in sorted(folder.glob("*.tif*")):
-        match = IMAGE_PATTERN.search(path.stem)
-        if not match:
-            continue
-        wl = float(match.group("wl"))
-        spectral_cube_index = int(match.group("spectral_cube_index"))
-        records.append(ImageRecord(ImageKey(wavelength_nm=wl, spectral_cube_index=spectral_cube_index), path))
-    if not records:
-        raise FileNotFoundError(f"No matching TIFF files found in {folder}")
-    return ImageDataset(folder=folder, records=records, source_format="image_stack")
+        dataset = load_ome_zarr_dataset(folder)
+    else:
+        records: list[ImageRecord] = []
+        for path in sorted(folder.glob("*.tif*")):
+            match = IMAGE_PATTERN.search(path.stem)
+            if not match:
+                continue
+            wl = float(match.group("wl"))
+            spectral_cube_index = int(match.group("spectral_cube_index"))
+            records.append(ImageRecord(ImageKey(wavelength_nm=wl, spectral_cube_index=spectral_cube_index), path))
+        if not records:
+            raise FileNotFoundError(f"No matching TIFF files found in {folder}")
+        dataset = ImageDataset(folder=folder, records=records, source_format="image_stack")
+    dataset.acquisition_metadata = load_acquisition_metadata(folder)
+    return dataset
 
 
 def dataset_record_map(dataset: ImageDataset) -> dict[tuple[int, float], ImageRecord]:

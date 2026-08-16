@@ -4,6 +4,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 import numpy as np
+from lspr_core import ImagingAcquisitionMetadata
 
 from lspr_imaging_app.domain.exclusions import ImageExclusionRule
 
@@ -25,6 +26,7 @@ class ImageDataset:
     folder: Path
     records: list[ImageRecord]
     source_format: str = "image_stack"
+    acquisition_metadata: ImagingAcquisitionMetadata | None = None
 
     @property
     def wavelengths_nm(self) -> list[float]:
