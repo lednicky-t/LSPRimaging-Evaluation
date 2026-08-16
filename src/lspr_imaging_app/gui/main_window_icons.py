@@ -2213,6 +2213,7 @@ class MainWindowIcons:
         self._set_combo_width(self.mask_mode_combo, ["Local contrast"], minimum=96)
         self._set_combo_width(self.mask_draw_mode_combo, ["Erase"])
         self._set_combo_width(self.ome_zarr_shard_mode_combo, ["1 spectral cube"], minimum=220)
+        self._set_combo_width(self.analysis_fit_method_combo, ["None", "Poly", "Gauss"], minimum=70)
         self._set_combo_width(self.analysis_metric_combo, ["Maximum", "Centroid"], minimum=80)
         self._set_combo_width(self.chromatic_subpixel_precision_combo, ["1", "4", "9"], minimum=58)
         self._set_combo_width(self.chromatic_landmark_kind_combo, ["Corners", "Spots", "Both"], minimum=90)

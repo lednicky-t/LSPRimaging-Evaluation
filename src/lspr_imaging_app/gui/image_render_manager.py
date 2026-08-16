@@ -37,6 +37,7 @@ class ImageRenderManager:
         window.wavelength_spin.blockSignals(False)
         window._update_reference_controls()
         window._update_reference_summary()
+        window._update_metadata_status_label()
         window._update_sensorgram_current_point()
         record = window._record_map.get((spectral_cube_index, wavelength))
         if record is None:

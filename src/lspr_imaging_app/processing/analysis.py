@@ -106,3 +106,51 @@ def metric_value_from_fit(fit: FitResult, metric_key: str) -> tuple[float | None
             centroid_y = None
         return fit.centroid_nm, centroid_y
     return None, None
+
+
+def metric_value_from_spectrum(
+    wavelengths_nm, absorbance, metric_key: str, wl_min: float | None = None, wl_max: float | None = None
+) -> tuple[float | None, float | None]:
+    """Maximum/Centroid read straight off the raw absorbance points - no curve
+    fit involved. Mirrors metric_value_from_fit's two metrics but is used when
+    Fitting is "None": Maximum is a plain argmax and Centroid is the
+    intensity-weighted mean wavelength (trapezoidal), both of which are
+    well-defined without a fitted curve."""
+    x = np.asarray(wavelengths_nm, dtype=np.float64)
+    y = np.asarray(absorbance, dtype=np.float64)
+    valid_mask = np.isfinite(x) & np.isfinite(y)
+    x = x[valid_mask]
+    y = y[valid_mask]
+    if wl_min is not None:
+        mask = x >= float(wl_min)
+        x = x[mask]
+        y = y[mask]
+    if wl_max is not None:
+        mask = x <= float(wl_max)
+        x = x[mask]
+        y = y[mask]
+    if x.size == 0:
+        return None, None
+
+    order = np.argsort(x)
+    x = x[order]
+    y = y[order]
+
+    key = str(metric_key).strip().lower()
+    if key == "maximum":
+        peak_index = int(np.argmax(y))
+        return float(x[peak_index]), float(y[peak_index])
+    if key == "centroid":
+        if x.size < 2:
+            return float(x[0]), float(y[0])
+        area = float(np.trapezoid(y, x))
+        if not np.isfinite(area) or abs(area) < 1.0e-12:
+            return None, None
+        weighted_area = float(np.trapezoid(y * x, x))
+        centroid = weighted_area / area
+        if not np.isfinite(centroid):
+            return None, None
+        centroid = float(np.clip(centroid, float(x[0]), float(x[-1])))
+        centroid_y = float(np.interp(centroid, x, y))
+        return centroid, centroid_y
+    return None, None

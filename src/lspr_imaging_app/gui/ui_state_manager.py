@@ -214,6 +214,7 @@ class UIStateManager:
         window = self._window
         window._settings.setValue("controls/live_geometry", bool(window.roi_editor_section.is_applied()))
         window._settings.setValue("histogram_bin_size", int(window.histogram_bins_spin.value()))
+        window._settings.setValue("analysis/fit_method", str(window.analysis_fit_method_combo.currentData() or "none"))
         window._settings.setValue("analysis/poly_order", int(window.analysis_poly_order_spin.value()))
         window._settings.setValue("analysis/metric", str(window.analysis_metric_combo.currentData() or "centroid"))
         window._settings.setValue("analysis/spectral_cube_start", int(window.analysis_start_spectral_cube_spin.value()))

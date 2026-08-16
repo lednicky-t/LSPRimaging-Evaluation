@@ -264,22 +264,34 @@ def _build_illumination_settings(meta: dict, wavelengths_nm: list[float]) -> dic
     }
 
 
-def import_legacy_imaging_metadata(csv_path: Path, txt_path: Path) -> ImagingAcquisitionMetadata:
-    """Parse the two legacy sidecar files into the shared
-    `ImagingAcquisitionMetadata` shape. Raises if `metaData.txt`'s start
-    date/time can't be parsed - without it every image timestamp would be
-    meaningless, so this fails loudly rather than silently producing
-    zero-anchored timestamps.
-    """
-    meta = parse_meta_data_txt(txt_path)
-    if meta["started_at_utc"] is None:
-        raise ValueError(f"Could not parse a start date/time from {txt_path}")
-    start_dt = datetime.fromisoformat(meta["started_at_utc"].replace("Z", "+00:00"))
-    start_unix_ms = int(start_dt.timestamp() * 1000)
+_EMPTY_META: dict = {"user": "", "started_at_utc": None, "camera": {}, "filter_set_time_ms": None, "wavelength_table": []}
 
-    rows = parse_measuring_times_csv(csv_path)
+
+def import_legacy_imaging_metadata(csv_path: Path | None, txt_path: Path | None) -> ImagingAcquisitionMetadata:
+    """Parse the legacy sidecar file(s) into the shared
+    `ImagingAcquisitionMetadata` shape. Either argument may be None for a
+    partial import (e.g. a user explicitly imports just `metaData.txt` for
+    its camera/illumination values, without a matching measuring-times
+    file) - at least one is required.
+
+    Without `metaData.txt`'s start date/time there is no absolute anchor for
+    the CSV's elapsed-ms column, so `image_timings`/`comment_events` are left
+    empty rather than fabricated against a meaningless zero point - a
+    CSV-only import still contributes `wavelengths_nm` (from the image
+    filenames themselves), just not cube-to-time linkage.
+    """
+    if csv_path is None and txt_path is None:
+        raise ValueError("import_legacy_imaging_metadata needs at least one of csv_path or txt_path.")
+
+    meta = parse_meta_data_txt(txt_path) if txt_path is not None else _EMPTY_META
+    start_unix_ms: int | None = None
+    if meta["started_at_utc"] is not None:
+        start_dt = datetime.fromisoformat(meta["started_at_utc"].replace("Z", "+00:00"))
+        start_unix_ms = int(start_dt.timestamp() * 1000)
+
+    rows = parse_measuring_times_csv(csv_path) if csv_path is not None else []
     image_timings: list[ImagingCubeTiming] = []
-    wavelengths_seen: set[float] = set()
+    wavelengths_seen: set[float] = {real_wl for _defined_wl, real_wl, _exposure_ms in meta["wavelength_table"]}
     for row in rows:
         match = IMAGE_PATTERN.search(row["image_name"])
         if not match:
@@ -287,23 +299,27 @@ def import_legacy_imaging_metadata(csv_path: Path, txt_path: Path) -> ImagingAcq
         wavelength_nm = float(match.group("wl"))
         spectral_cube_index = int(match.group("spectral_cube_index"))
         wavelengths_seen.add(wavelength_nm)
-        image_timings.append(
-            ImagingCubeTiming(
-                spectral_cube_index=spectral_cube_index,
-                wavelength_nm=wavelength_nm,
-                acquired_at_unix_ms=start_unix_ms + row["elapsed_ms"],
+        if start_unix_ms is not None:
+            image_timings.append(
+                ImagingCubeTiming(
+                    spectral_cube_index=spectral_cube_index,
+                    wavelength_nm=wavelength_nm,
+                    acquired_at_unix_ms=start_unix_ms + row["elapsed_ms"],
+                )
             )
-        )
 
     wavelengths_nm = sorted(wavelengths_seen)
     return ImagingAcquisitionMetadata(
         source_format=SOURCE_FORMAT_LEGACY_MEASURING_TIMES_CSV,
         started_at_utc=meta["started_at_utc"],
+        operator=meta["user"] or None,
         wavelengths_nm=wavelengths_nm,
-        camera_settings_by_wavelength=_build_camera_settings(meta, wavelengths_nm),
-        illumination_settings_by_wavelength=_build_illumination_settings(meta, wavelengths_nm),
+        camera_settings_by_wavelength=_build_camera_settings(meta, wavelengths_nm) if txt_path is not None else {},
+        illumination_settings_by_wavelength=(
+            _build_illumination_settings(meta, wavelengths_nm) if txt_path is not None else {}
+        ),
         image_timings=image_timings,
-        comment_events=_build_comment_events(rows, start_unix_ms),
+        comment_events=_build_comment_events(rows, start_unix_ms) if (rows and start_unix_ms is not None) else [],
     )
 
 

@@ -29,6 +29,7 @@ from lspr_imaging_app.domain.exclusions import ImageExclusionRule, is_excluded
 from lspr_imaging_app.domain.models import ImageDataset, ImageKey, ImageRecord, PreprocessingSettings
 from lspr_imaging_app.io.image_naming import IMAGE_PATTERN
 from lspr_imaging_app.io.legacy_metadata import find_and_import_legacy_metadata
+from lspr_imaging_app.storage.workspace import load_acquisition_metadata_sidecar
 from lspr_imaging_app.processing.preprocess import apply_spatial_preprocessing
 
 
@@ -112,13 +113,30 @@ def find_native_imaging_measurement_file(dataset_folder: Path) -> Path | None:
     return None
 
 
+def acquisition_metadata_sidecar_path(dataset_folder: Path) -> Path:
+    return dataset_folder / "analysis" / "acquisition_metadata.json"
+
+
 def load_acquisition_metadata(dataset_folder: Path) -> ImagingAcquisitionMetadata | None:
     """Load whatever camera/illumination/cube-timing metadata is available
-    for `dataset_folder`: a native v6.4 HDF5 file if one is found nearby,
-    otherwise the legacy `measureing_times.csv`/`metaData.txt` pair,
-    otherwise None (most datasets - including every OME-Zarr export made
-    before this existed - have neither, which is not an error).
+    for `dataset_folder`, checking sources in order:
+
+    1. `analysis/acquisition_metadata.json` - a previously saved sidecar
+       (from an explicit "Import metadata..." action or edits made in the
+       metadata preview dialog). Checked first so user edits persist across
+       reloads instead of being silently overwritten by a fresh auto-detect.
+    2. A native v6.4 HDF5 file found nearby.
+    3. The legacy `measureing_times.csv`/`metaData.txt` pair found nearby.
+    4. None - most datasets (including every OME-Zarr export made before
+       this existed) have none of the above, which is not an error.
     """
+    sidecar_path = acquisition_metadata_sidecar_path(dataset_folder)
+    if sidecar_path.exists():
+        try:
+            return load_acquisition_metadata_sidecar(sidecar_path)
+        except (OSError, ValueError) as exc:
+            _LOGGER.warning("Could not read acquisition metadata sidecar %s: %s", sidecar_path, exc)
+
     native_path = find_native_imaging_measurement_file(dataset_folder)
     if native_path is not None:
         metadata = read_imaging_acquisition_metadata(native_path)

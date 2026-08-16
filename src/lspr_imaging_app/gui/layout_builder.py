@@ -63,6 +63,33 @@ def _placeholder_label(text: str) -> QLabel:
 _ANALYSIS_RANGE_AXIS_LABEL_WIDTH = 64
 
 
+def _style_range_select_all_button(button: QToolButton) -> None:
+    """Shrink an "All" button to match the Min/Max spin boxes it sits next to.
+
+    QToolButton's app-wide default (theme.py) uses a taller padding/bold font
+    meant for standalone toolbar buttons, which makes "All" look oversized
+    next to the compact QSpinBox/QDoubleSpinBox controls in the same row
+    (theme.py's QLineEdit/QComboBox/QSpinBox/QDoubleSpinBox rule: 2px 5px
+    padding, 18px min-height, 9pt font). This copies that sizing onto just
+    these two buttons rather than changing the shared QToolButton default,
+    which is used by many unrelated toolbar buttons across the app."""
+    theme = get_active_theme()
+    button.setStyleSheet(
+        "QToolButton {"
+        f"  background-color: {theme.control_bg};"
+        f"  color: {theme.text_primary};"
+        f"  border: 1px solid {theme.control_border};"
+        "  border-radius: 6px;"
+        "  padding: 2px 8px;"
+        "  min-height: 18px;"
+        "  font-size: 9pt;"
+        "  font-weight: 700;"
+        "}"
+        f"QToolButton:hover {{ background-color: {theme.control_bg_hover}; border-color: {theme.control_border_hover}; }}"
+        f"QToolButton:pressed {{ background-color: {theme.control_bg_pressed}; border-color: {theme.control_border_pressed}; }}"
+    )
+
+
 def _build_analysis_range_row(
     *,
     axis_label: QLabel,
@@ -75,6 +102,7 @@ def _build_analysis_range_row(
     "Range" row (wavelength "Spectra" crop, then the spectral-cube/time
     selection), so both share this one layout instead of two near-copies."""
     axis_label.setFixedWidth(_ANALYSIS_RANGE_AXIS_LABEL_WIDTH)
+    _style_range_select_all_button(select_all_button)
     row = QWidget()
     row_layout = QHBoxLayout(row)
     row_layout.setContentsMargins(0, 0, 0, 0)
@@ -88,34 +116,43 @@ def _build_analysis_range_row(
 
 
 def _build_analysis_fitting_row(window) -> QWidget:
-    """Metric/Order row: labels on top, controls below - the same stacked
-    grid layout as sLSPR acq's own Fitting row (see acq's
+    """Metric/Fitting/Order row: labels on top, controls below - the same
+    stacked grid layout as sLSPR acq's own Fitting row (see acq's
     gui/main_window_panels.py::_build_processing_fitting_stacked). Metric
-    leads (it is the dropdown that decides whether there is a fit at all);
-    Order only makes sense - and is only shown - once a metric is chosen,
-    see AnalysisController.sync_analysis_fitting_controls()."""
+    leads: Maximum/Centroid are well-defined straight off the raw absorbance
+    spectrum and stay usable with Fitting = None (see
+    metric_value_from_spectrum in processing/analysis.py), so it isn't gated
+    behind picking a fit method the way Order is. Order only makes sense -
+    and is only shown - for a polynomial fit, see
+    AnalysisController.sync_analysis_fitting_controls()."""
     widget = QWidget(window)
     grid = QGridLayout()
     grid.setContentsMargins(0, 0, 0, 0)
     grid.setHorizontalSpacing(6)
     grid.setVerticalSpacing(4)
-    grid.setColumnStretch(2, 1)
+    grid.setColumnStretch(4, 1)
 
     section_label = QLabel("Fit")
-    section_label.setToolTip("Metric extracted from the fitted absorbance spectrum, and the fit used to get it.")
+    section_label.setToolTip("Value read from the absorbance spectrum for the sensorgram, optionally off a curve fit.")
     grid.addWidget(section_label, 1, 0, alignment=Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
 
     metric_title = QLabel("Metric")
-    metric_title.setToolTip("Value extracted from the fitted absorbance spectrum for the sensorgram. None disables fitting.")
+    metric_title.setToolTip("Value extracted from the absorbance spectrum for the sensorgram. Works with or without a fit.")
     window.analysis_metric_combo.setToolTip(metric_title.toolTip())
     grid.addWidget(metric_title, 0, 1, alignment=Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignBottom)
     grid.addWidget(window.analysis_metric_combo, 1, 1, alignment=Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
 
+    fit_method_title = QLabel("Fitting")
+    fit_method_title.setToolTip("Curve fit applied to the absorbance spectrum before reading off the metric. None reads it off the raw spectrum instead.")
+    window.analysis_fit_method_combo.setToolTip(fit_method_title.toolTip())
+    grid.addWidget(fit_method_title, 0, 2, alignment=Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignBottom)
+    grid.addWidget(window.analysis_fit_method_combo, 1, 2, alignment=Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+
     order_title = QLabel("Order")
     order_title.setToolTip("Polynomial order used for spectrum fitting.")
     window.analysis_poly_order_spin.setToolTip(order_title.toolTip())
-    grid.addWidget(order_title, 0, 2, alignment=Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignBottom)
-    grid.addWidget(window.analysis_poly_order_spin, 1, 2, alignment=Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+    grid.addWidget(order_title, 0, 3, alignment=Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignBottom)
+    grid.addWidget(window.analysis_poly_order_spin, 1, 3, alignment=Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
 
     window._analysis_fit_order_title_widget = order_title
     widget.setLayout(grid)
@@ -314,13 +351,46 @@ def build_layout(window) -> None:
         parent=window,
     )
 
+    # "Metadata" nested section: import/export camera/illumination/cube-timing
+    # acquisition metadata (from a native measurement file or a legacy
+    # measureing_times.csv + metaData.txt export), a status indicator for
+    # what's loaded, and a live per-image acquired-time/comment label - the
+    # cube-to-time linkage this whole feature exists for.
+    metadata_io_row = QHBoxLayout()
+    metadata_io_row.setContentsMargins(0, 0, 0, 0)
+    metadata_io_row.setSpacing(4)
+    metadata_io_row.addStretch(1)
+    metadata_io_row.addWidget(window.metadata_export_button)
+    metadata_io_row.addWidget(window.metadata_import_button)
+    metadata_io_row_widget = QWidget(window)
+    metadata_io_row_widget.setLayout(metadata_io_row)
+
+    metadata_content = QWidget(window)
+    metadata_content_layout = QVBoxLayout(metadata_content)
+    metadata_content_layout.setContentsMargins(8, 8, 8, 8)
+    metadata_content_layout.setSpacing(6)
+    metadata_content_layout.addWidget(metadata_io_row_widget)
+    metadata_content_layout.addWidget(window.metadata_status_label)
+    metadata_content_layout.addWidget(window.metadata_current_cube_label)
+    metadata_content_layout.addWidget(window.metadata_preview_button)
+    window.metadata_section = CollapsibleSection(
+        "Metadata",
+        metadata_content,
+        expanded=False,
+        help_text=panel_help_text("metadata"),
+        title_color=_nested_title_color(),
+        parent=window,
+    )
+
     dataset_inner = QWidget(window)
     dataset_inner_layout = QVBoxLayout(dataset_inner)
     dataset_inner_layout.setContentsMargins(0, 0, 0, 0)
     dataset_inner_layout.setSpacing(4)
     dataset_inner_layout.addWidget(top_row_widget)
     dataset_inner_layout.addWidget(
-        _nested_section_group(window, window.summary_section, window.reference_section, window.export_section)
+        _nested_section_group(
+            window, window.summary_section, window.reference_section, window.export_section, window.metadata_section
+        )
     )
 
     mask_group = QWidget(window)
@@ -755,6 +825,7 @@ def build_layout(window) -> None:
             window.summary_section,
             window.reference_section,
             window.export_section,
+            window.metadata_section,
             window.image_tools_section,
             window.transforms_section,
             window.mask_section,

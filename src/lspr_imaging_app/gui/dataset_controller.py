@@ -166,6 +166,7 @@ class DatasetController:
         window._sync_reference_selection_from_settings()
         window._update_analysis_control_state()
         window._update_dataset_summary_labels(dataset)
+        window._update_metadata_status_labels(dataset)
 
         window.folder_edit.setText(str(dataset.folder))
         window.folder_edit.setToolTip(str(dataset.folder))

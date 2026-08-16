@@ -6,8 +6,9 @@ from dataclasses import asdict
 from pathlib import Path
 
 import numpy as np
+from lspr_core import ImagingAcquisitionMetadata
 
-from lspr_imaging_app.format_versions import PROCESSING_PROFILE_VERSION, ROI_EXPORT_VERSION
+from lspr_imaging_app.format_versions import ACQUISITION_METADATA_VERSION, PROCESSING_PROFILE_VERSION, ROI_EXPORT_VERSION
 from lspr_imaging_app.domain.exclusions import ImageExclusionRule
 from lspr_imaging_app.domain.models import (
     AreaRoi,
@@ -259,6 +260,35 @@ def load_roi_table(path: Path) -> tuple[list[AreaRoi], list[AreaRoiGroup], list[
     sample_visual_color = payload.get("sample_visual_color") or None
     reference_visual_color = payload.get("reference_visual_color") or None
     return area_rois, area_roi_groups, area_roi_arrays, sample_visual_color, reference_visual_color
+
+
+ACQUISITION_METADATA_SCHEMA_NAME = "lspri_acquisition_metadata"
+
+
+def build_acquisition_metadata_payload(metadata: ImagingAcquisitionMetadata) -> dict:
+    """Full-fidelity standalone sidecar payload for the shared
+    `lspr_core.ImagingAcquisitionMetadata` shape - the user-facing export/
+    backup format for whatever camera/illumination/cube-timing metadata is
+    currently loaded (from a native v6.4 file, a legacy import, or manual
+    edits in the metadata preview dialog), and also this app's own
+    re-importable format (see `io/metadata_import.py`'s file classifier).
+    """
+    return {
+        "schema_name": ACQUISITION_METADATA_SCHEMA_NAME,
+        "schema_version": ACQUISITION_METADATA_VERSION,
+        "metadata": metadata.model_dump(mode="json"),
+    }
+
+
+def save_acquisition_metadata_sidecar(path: Path, metadata: ImagingAcquisitionMetadata) -> None:
+    write_json_file(path, build_acquisition_metadata_payload(metadata))
+
+
+def load_acquisition_metadata_sidecar(path: Path) -> ImagingAcquisitionMetadata:
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(payload, dict) or "metadata" not in payload:
+        raise ValueError("Invalid acquisition metadata format.")
+    return ImagingAcquisitionMetadata.model_validate(payload["metadata"])
 
 
 def _encode_mask_settings(mask_settings: MaskSettings) -> dict:

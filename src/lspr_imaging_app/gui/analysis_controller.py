@@ -11,7 +11,7 @@ from lspr_imaging_app.domain.exclusions import is_cube_fully_excluded, is_exclud
 from lspr_imaging_app.domain.models import AreaRoi, AbsorbanceSpectrumResult
 from lspr_imaging_app.gui.worker import SensorgramComputationResult
 from lspr_imaging_app.gui.analysis_tasks import _roi_absorbance_signature
-from lspr_imaging_app.processing.analysis import metric_value_from_fit
+from lspr_imaging_app.processing.analysis import metric_value_from_fit, metric_value_from_spectrum
 
 
 class AnalysisController:
@@ -82,12 +82,12 @@ class AnalysisController:
         self.set_sensorgram_series(self.window._sensorgram_spectral_cube_indices, self.window._sensorgram_metric_values)
         summary = (
             f"{self.window._analysis_metric_label()} | Calculated {result.completed_count}/{result.total_count} spectral cubes"
-            f" | Polynomial order {self.window._analysis_poly_order()}"
+            f"{self._poly_order_summary_suffix()}"
         )
         if result.cancelled:
             summary = (
                 f"{self.window._analysis_metric_label()} | Stopped after {result.completed_count}/{result.total_count} spectral cubes"
-                f" | Polynomial order {self.window._analysis_poly_order()}"
+                f"{self._poly_order_summary_suffix()}"
             )
         self.window._set_sensorgram_summary_text(summary)
         if result.cancelled:
@@ -170,9 +170,6 @@ class AnalysisController:
             return
         if self.window._chromatic_setup_active:
             self.clear_sensorgram("Sensorgram is hidden during chromatic setup.")
-            return
-        if self._analysis_metric_key() == "none":
-            self.clear_sensorgram("Select a metric to calculate the sensorgram.")
             return
         selected_roi_ids = self.window._selected_spectrum_roi_ids()
         if not selected_roi_ids:
@@ -353,6 +350,7 @@ class AnalysisController:
             spectral_cube_result_cache_store=spectral_cube_result_cache_store,
             wl_min=None if wavelength_range is None else wavelength_range[0],
             wl_max=None if wavelength_range is None else wavelength_range[1],
+            fit_method_key=self._analysis_fit_method_key(),
         )
         worker.signals.progress.connect(self.window._update_busy_progress)
         worker.signals.partial.connect(
@@ -494,6 +492,7 @@ class AnalysisController:
             dataset_key,
             tuple(selected_roi_ids),
             self.window._roi_signature(selected_source_rois),
+            self.window._analysis_fit_method_key(),
             self.window._analysis_metric_key(),
             int(self.window._analysis_poly_order()),
             None if wavelength_range is None else (round(wavelength_range[0], 6), round(wavelength_range[1], 6)),
@@ -1038,9 +1037,7 @@ class AnalysisController:
     def _on_analysis_fit_settings_changed(self, *_args) -> None:
         start_time = time.perf_counter()
         self.window._save_control_preferences()
-        if self._analysis_metric_key() == "none":
-            self.clear_sensorgram("Select a metric to calculate the sensorgram.")
-        elif self.window._analysis_live_preview_enabled:
+        if self.window._analysis_live_preview_enabled:
             self.window._schedule_sensorgram_refresh()
         else:
             self.window._mark_sensorgram_stale(
@@ -1149,9 +1146,6 @@ class AnalysisController:
         if self.window._chromatic_setup_active:
             self.window._clear_sensorgram("Sensorgram is hidden during chromatic setup.")
             return
-        if self._analysis_metric_key() == "none":
-            self.window._clear_sensorgram("Select a metric to calculate the sensorgram.")
-            return
         selected_roi_ids = self.window._selected_spectrum_roi_ids()
         if not selected_roi_ids:
             self.window._clear_sensorgram("Select ROIs before calculating the sensorgram.")
@@ -1186,7 +1180,7 @@ class AnalysisController:
                     self.window._set_sensorgram_series(self.window._sensorgram_spectral_cube_indices, self.window._sensorgram_metric_values)
                     summary = (
                         f"{self.window._analysis_metric_label()} | Cached {cached_sensorgram.completed_count}/"
-                        f"{cached_sensorgram.total_count} spectral cubes | Polynomial order {self.window._analysis_poly_order()}"
+                        f"{cached_sensorgram.total_count} spectral cubes{self._poly_order_summary_suffix()}"
                     )
                     self.window._set_sensorgram_summary_text(summary)
                     self.window._set_status_text("Sensorgram cache used.")
@@ -1256,12 +1250,12 @@ class AnalysisController:
         )
         summary = (
             f"{self.window._analysis_metric_label()} | Calculated {result.completed_count}/{result.total_count} spectral cubes"
-            f" | Polynomial order {self.window._analysis_poly_order()}"
+            f"{self._poly_order_summary_suffix()}"
         )
         if result.cancelled:
             summary = (
                 f"{self.window._analysis_metric_label()} | Stopped after {result.completed_count}/{result.total_count} spectral cubes"
-                f" | Polynomial order {self.window._analysis_poly_order()}"
+                f"{self._poly_order_summary_suffix()}"
             )
         self.window._set_sensorgram_summary_text(summary)
         self.window._set_status_text("Sensorgram calculation stopped." if result.cancelled else "Sensorgram calculation finished.")
@@ -1431,10 +1425,17 @@ class AnalysisController:
             fit = self.window._analysis_fit_result_from_spectrum(primary_result)
             if fit is not None:
                 metric_value, metric_signal = metric_value_from_fit(fit, self.window._analysis_metric_key())
-                if metric_value is not None and metric_signal is not None and np.isfinite(metric_value) and np.isfinite(metric_signal):
-                    self.window.spectrum_metric_point.setData([float(metric_value)], [float(metric_signal)])
-                else:
-                    self.window.spectrum_metric_point.setData([], [])
+            elif self._analysis_fit_method_key() == "none":
+                wavelength_range = self._analysis_wavelength_range()
+                metric_value, metric_signal = metric_value_from_spectrum(
+                    primary_result.wavelengths_nm,
+                    primary_result.absorbance,
+                    self.window._analysis_metric_key(),
+                    wl_min=None if wavelength_range is None else wavelength_range[0],
+                    wl_max=None if wavelength_range is None else wavelength_range[1],
+                )
+            if metric_value is not None and metric_signal is not None and np.isfinite(metric_value) and np.isfinite(metric_signal):
+                self.window.spectrum_metric_point.setData([float(metric_value)], [float(metric_signal)])
             else:
                 self.window.spectrum_metric_point.setData([], [])
             current_wavelength = self.window._current_wavelength()
@@ -1462,10 +1463,9 @@ class AnalysisController:
                     f" | sample {current_sample_mean:.1f}, reference {current_reference_mean:.1f}"
                 )
             if metric_value is not None and np.isfinite(metric_value):
-                fit_text = (
-                    f" | {self.window._analysis_metric_label()} {float(metric_value):.3f} nm"
-                    f" | Poly {self.window._analysis_poly_order()}"
-                )
+                fit_text = f" | {self.window._analysis_metric_label()} {float(metric_value):.3f} nm"
+                if fit is not None:
+                    fit_text += f" | Poly {self.window._analysis_poly_order()}"
         else:
             self.window.spectrum_current_point.setData([], [])
             self.window.spectrum_metric_point.setData([], [])
@@ -1505,6 +1505,9 @@ class AnalysisController:
         self.window._clear_sensorgram("Analysis calculations are disabled for this panel.")
         self.window._set_status_text("Analysis calculations disabled.")
 
+    def _analysis_fit_method_key(self) -> str:
+        return str(self.window.analysis_fit_method_combo.currentData() or "none")
+
     def _analysis_metric_key(self) -> str:
         return str(self.window.analysis_metric_combo.currentData() or "centroid")
 
@@ -1519,6 +1522,16 @@ class AnalysisController:
 
     def _analysis_poly_order(self) -> int:
         return int(self.window.analysis_poly_order_spin.value())
+
+    def _poly_order_summary_suffix(self) -> str:
+        """' | Polynomial order N' for status/summary text - only when a poly
+        fit actually produced the metric, matching Order's own visibility
+        (sync_analysis_fitting_controls). Fitting = None reads the metric off
+        the raw spectrum, so mentioning a polynomial order there would be
+        misleading."""
+        if self._analysis_fit_method_key() != "poly":
+            return ""
+        return f" | Polynomial order {self._analysis_poly_order()}"
 
     def _current_analysis_spectral_cube_range(self) -> tuple[int, int] | None:
         if not self.window._spectral_cube_values:
@@ -1596,10 +1609,15 @@ class AnalysisController:
         self.window.analysis_wavelength_range_slider.setValues(low_index, high_index)
 
     def sync_analysis_fitting_controls(self) -> None:
-        """Show/hide Order to match the chosen Metric - mirrors sLSPR acq's
-        own sync_processing_crop_parameter_widget (main_window_processing.py):
-        with no metric chosen there is nothing to fit, so Order stays hidden."""
-        order_visible = self._analysis_metric_key() != "none"
+        """Show/hide Order to match the chosen Fitting method - mirrors sLSPR
+        acq's own sync_processing_crop_parameter_widget
+        (main_window_processing.py): Order is poly-specific, same as acq's
+        own poly_widgets_visible. Metric stays visible regardless of Fitting:
+        Maximum/Centroid are computed straight off the raw absorbance
+        spectrum when Fitting = None (metric_value_from_spectrum), so unlike
+        Order there is no state where Metric has nothing to show."""
+        fit_method = self._analysis_fit_method_key()
+        order_visible = fit_method == "poly"
         self.window.analysis_poly_order_spin.setVisible(order_visible)
         order_title = getattr(self.window, "_analysis_fit_order_title_widget", None)
         if order_title is not None:

@@ -150,7 +150,7 @@ class PlotManager:
         return QColor(resolved_roi_color(roi, group, window._sample_visual_color) if roi is not None else window._sample_visual_color)
 
     def analysis_fit_result_from_spectrum(self, result: AbsorbanceSpectrumResult) -> FitResult | None:
-        if self._window._analysis_metric_key() == "none":
+        if self._window._analysis_fit_method_key() == "none":
             return None
         wavelength_range = self._window._analysis_wavelength_range()
         fit = fit_absorbance_curve(
@@ -278,7 +278,7 @@ class PlotManager:
             [float(metric_value)],
             summary_text=(
                 f"{window._analysis_metric_label()} | Spectral cube {int(spectral_cube_index)} = {float(metric_value):.3f} nm"
-                f" | Polynomial order {window._analysis_poly_order()}"
+                f"{window._poly_order_summary_suffix()}"
             ),
         )
 

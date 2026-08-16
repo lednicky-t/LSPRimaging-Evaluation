@@ -27,7 +27,22 @@ from PyQt6.QtCore import (
     QThreadPool,
     QTimer,
 )
-from PyQt6.QtGui import QAction, QBrush, QColor, QFont, QIcon, QKeyEvent, QKeySequence, QPainter, QPainterPath, QPalette, QPen, QPixmap, QWheelEvent
+from PyQt6.QtGui import (
+    QAction,
+    QBrush,
+    QColor,
+    QFont,
+    QIcon,
+    QKeyEvent,
+    QKeySequence,
+    QPainter,
+    QPainterPath,
+    QPalette,
+    QPen,
+    QPixmap,
+    QStandardItemModel,
+    QWheelEvent,
+)
 from PyQt6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -76,6 +91,7 @@ from lspr_imaging_app.gui.roi_table_helpers import (
     roi_table_headers,
 )
 from lspr_imaging_app.gui.roi_table_controller import RoiTableController
+from lspr_imaging_app.gui.metadata_controller import MetadataController
 from lspr_imaging_app.gui.mask_controller import MaskController
 from lspr_imaging_app.gui.background_profile_controller import BackgroundProfileController
 from lspr_imaging_app.gui.chromatic_controller import ChromaticController
@@ -256,6 +272,7 @@ class MainWindow(MainWindowIcons, QMainWindow):
         self._dataset_controller = DatasetController(self)
         self._image_controller = ImageController(self)
         self._roi_table_controller = RoiTableController(self)
+        self._metadata_controller = MetadataController(self)
         self._mask_controller = MaskController(self)
         self._chromatic_controller = ChromaticController(self)
         self._analysis_controller = AnalysisController(self)
@@ -792,6 +809,24 @@ class MainWindow(MainWindowIcons, QMainWindow):
         self.reference_mode_combo.hide()
         self.set_reference_button = QPushButton("Use current", self)
         self.set_reference_button.hide()
+
+        self.metadata_import_button = self._make_icon_tool_button(
+            "file-import",
+            "#38bdf8",
+            "Import acquisition metadata: a measuring-times CSV, metaData.txt, a native measurement file, or a "
+            "previously exported metadata file. You can select multiple files at once - each one is identified "
+            "by its content, not its name.",
+        )
+        self.metadata_export_button = self._make_icon_tool_button(
+            "file-export", "#22c55e", "Export the currently loaded acquisition metadata as a JSON file."
+        )
+        self.metadata_status_label = QLabel("No metadata loaded", self)
+        self.metadata_status_label.setWordWrap(True)
+        self.metadata_current_cube_label = QLabel("", self)
+        self.metadata_current_cube_label.setWordWrap(True)
+        self.metadata_preview_button = QPushButton("Preview / edit...", self)
+        self.metadata_preview_button.setEnabled(False)
+
         self.startup_restore_timeout_actions: dict[int, QAction] = {}
 
     def _reveal_export_section(self) -> None:
@@ -1364,16 +1399,50 @@ class MainWindow(MainWindowIcons, QMainWindow):
             parent=self,
         )
         self.analysis_stop_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        # Fitting method: what curve is fit to the absorbance spectrum, mirrors
+        # sLSPR acq's own fit_method_combo (None/Poly/Gauss). Gauss is a
+        # placeholder for future work - processing/analysis.py only implements
+        # a polynomial fit today, so that item is present but disabled.
+        self.analysis_fit_method_combo = QComboBox(self)
+        self.analysis_fit_method_combo.addItem("None", "none")
+        self.analysis_fit_method_combo.addItem("Poly", "poly")
+        self.analysis_fit_method_combo.addItem("Gauss", "gaussian")
+        gauss_model = self.analysis_fit_method_combo.model()
+        gauss_item = gauss_model.item(2) if isinstance(gauss_model, QStandardItemModel) else None
+        if gauss_item is not None:
+            gauss_item.setFlags(gauss_item.flags() & ~Qt.ItemFlag.ItemIsEnabled)
+            gauss_item.setToolTip("Gaussian fitting is not implemented yet.")
+            # The app's own QSS (theme.py) styles QComboBox popups directly,
+            # which suppresses Qt's automatic dimming of disabled items - so
+            # without this, "Gauss" would look identical to the selectable
+            # items despite not being clickable. Setting its text color
+            # explicitly restores that visual cue.
+            gauss_item.setForeground(QBrush(QColor(get_active_theme().control_disabled_text)))
+        # Migration: "analysis/metric" used to double as the on/off switch via
+        # its own "none" option. Installs that had fitting turned off that way
+        # keep it off here instead of silently re-enabling it; everyone else
+        # defaults to "poly", matching today's always-fit-by-default behavior.
+        legacy_metric = str(self._settings.value("analysis/metric", "centroid") or "centroid").strip().lower()
+        fit_method_default = "none" if legacy_metric == "none" else "poly"
+        stored_fit_method = str(self._settings.value("analysis/fit_method", fit_method_default) or fit_method_default).strip().lower()
+        fit_method_index = max(self.analysis_fit_method_combo.findData(stored_fit_method), 0)
+        self.analysis_fit_method_combo.setCurrentIndex(fit_method_index)
+
         self.analysis_poly_order_spin = QSpinBox(self)
         self.analysis_poly_order_spin.setRange(1, 12)
         self.analysis_poly_order_spin.setValue(self._settings_int("analysis/poly_order", 3, minimum=1, maximum=12))
         self.analysis_poly_order_spin.setKeyboardTracking(False)
         self.analysis_poly_order_spin.setToolTip("Polynomial order used for spectrum fitting.")
+
+        # Metric: which point becomes the sensorgram value - read off the raw
+        # absorbance spectrum when Fitting = None, or off the fitted curve
+        # otherwise (metric_value_from_spectrum / metric_value_from_fit in
+        # processing/analysis.py). No longer carries "none" itself - see
+        # analysis_fit_method_combo above.
         self.analysis_metric_combo = QComboBox(self)
-        self.analysis_metric_combo.addItem("None", "none")
         self.analysis_metric_combo.addItem("Maximum", "maximum")
         self.analysis_metric_combo.addItem("Centroid", "centroid")
-        stored_metric = str(self._settings.value("analysis/metric", "centroid") or "centroid").strip().lower()
+        stored_metric = legacy_metric if legacy_metric in {"maximum", "centroid"} else "centroid"
         metric_index = max(self.analysis_metric_combo.findData(stored_metric), 0)
         self.analysis_metric_combo.setCurrentIndex(metric_index)
 
@@ -1916,9 +1985,10 @@ class MainWindow(MainWindowIcons, QMainWindow):
         self.analysis_calculate_all_button.clicked.connect(self._analysis_controller.calculate_sensorgram)
         self.analysis_stop_button.clicked.connect(self._analysis_controller.stop_sensorgram)
         self.roi_list_cached_button.toggled.connect(self._on_cached_rois_only_toggled)
+        self.analysis_fit_method_combo.currentIndexChanged.connect(self._analysis_controller.on_fit_settings_changed)
+        self.analysis_fit_method_combo.currentIndexChanged.connect(self._analysis_controller.sync_analysis_fitting_controls)
         self.analysis_poly_order_spin.valueChanged.connect(self._analysis_controller.on_fit_settings_changed)
         self.analysis_metric_combo.currentIndexChanged.connect(self._analysis_controller.on_fit_settings_changed)
-        self.analysis_metric_combo.currentIndexChanged.connect(self._analysis_controller.sync_analysis_fitting_controls)
         self._analysis_controller.sync_analysis_fitting_controls()
         self.calculate_spectrum_action.triggered.connect(self._refresh_absorbance_spectrum)
 
@@ -2029,6 +2099,9 @@ class MainWindow(MainWindowIcons, QMainWindow):
         self.roi_table.viewport().customContextMenuRequested.connect(self._roi_table_controller.show_context_menu)
         self.roi_export_button.clicked.connect(self._roi_table_controller.export_roi_table)
         self.roi_import_button.clicked.connect(self._roi_table_controller.import_roi_table)
+        self.metadata_import_button.clicked.connect(self._metadata_controller.import_metadata)
+        self.metadata_export_button.clicked.connect(self._metadata_controller.export_metadata)
+        self.metadata_preview_button.clicked.connect(self._metadata_controller.open_preview_dialog)
         self.remove_rois_action.triggered.connect(self._remove_selected_rois)
         self.group_rois_action.triggered.connect(self._group_selected_rois)
         self.ungroup_rois_action.triggered.connect(self._ungroup_selected_rois)
@@ -2635,9 +2708,12 @@ class MainWindow(MainWindowIcons, QMainWindow):
     def _spectral_cube_axis_label(self) -> str:
         """Display name for the spectral-cube (time-point) axis. Centralized
         here so that once spectral cubes are linked to an experiment plan's
-        real timestamps, one place decides whether the UI says "Spectral
-        cube" or "Time" - not every call site individually."""
-        return "Spectral cube"
+        real timestamps, one place decides whether the UI says "Cube" or
+        "Time" - not every call site individually."""
+        return "Cube"
+
+    def _analysis_fit_method_key(self) -> str:
+        return self._analysis_controller._analysis_fit_method_key()
 
     def _analysis_metric_key(self) -> str:
         return self._analysis_controller._analysis_metric_key()
@@ -2650,6 +2726,9 @@ class MainWindow(MainWindowIcons, QMainWindow):
 
     def _analysis_poly_order(self) -> int:
         return self._analysis_controller._analysis_poly_order()
+
+    def _poly_order_summary_suffix(self) -> str:
+        return self._analysis_controller._poly_order_summary_suffix()
 
     def _current_analysis_spectral_cube_range(self) -> tuple[int, int] | None:
         return self._analysis_controller._current_analysis_spectral_cube_range()
@@ -2842,6 +2921,57 @@ class MainWindow(MainWindowIcons, QMainWindow):
             self.summary_pixel_size_label.setText(
                 f"Pixel size: {zarr_summary.pixel_size_um[0]:.4f} x {zarr_summary.pixel_size_um[1]:.4f} um/px"
             )
+
+    def _update_metadata_status_labels(self, dataset=None) -> None:
+        dataset = self._state.dataset if dataset is None else dataset
+        metadata = getattr(dataset, "acquisition_metadata", None) if dataset is not None else None
+        if metadata is None:
+            self.metadata_status_label.setText("No metadata loaded")
+            self.metadata_preview_button.setEnabled(False)
+            self.metadata_current_cube_label.setText("")
+            return
+        source_label = {
+            "lspri_acquisition_v6_4": "native measurement file",
+            "legacy_measuring_times_csv": "legacy import",
+        }.get(metadata.source_format, metadata.source_format)
+        parts = [f"Loaded: {source_label}"]
+        if metadata.wavelengths_nm:
+            parts.append(f"{len(metadata.wavelengths_nm)} wavelengths")
+        if metadata.image_timings:
+            parts.append(f"{len(metadata.image_timings)} timed images")
+        if metadata.comment_events:
+            parts.append(f"{len(metadata.comment_events)} comment events")
+        self.metadata_status_label.setText(" | ".join(parts))
+        self.metadata_preview_button.setEnabled(True)
+        self._update_metadata_status_label()
+
+    def _update_metadata_status_label(self) -> None:
+        """Live "this image was acquired at <time>, comment: <text>" label
+        for whatever (spectral_cube_index, wavelength) is currently
+        displayed - the actual cube-to-time linkage the metadata import
+        exists for. Called once per settled image selection from
+        ImageRenderManager.refresh_image(), same trigger as
+        _update_reference_summary()."""
+        dataset = self._state.dataset
+        metadata = getattr(dataset, "acquisition_metadata", None) if dataset is not None else None
+        if metadata is None:
+            self.metadata_current_cube_label.setText("")
+            return
+        spectral_cube_index = self._current_spectral_cube()
+        wavelength = self._current_wavelength()
+        if spectral_cube_index is None or wavelength is None:
+            self.metadata_current_cube_label.setText("")
+            return
+        timing = metadata.timing_for(int(spectral_cube_index), float(wavelength))
+        if timing is None:
+            self.metadata_current_cube_label.setText("This image: no timing data loaded.")
+            return
+        acquired_dt = datetime.fromtimestamp(timing.acquired_at_unix_ms / 1000.0)
+        text = f"This image acquired: {acquired_dt.strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]}"
+        comment = metadata.comment_at(timing.acquired_at_unix_ms)
+        if comment:
+            text += f" | {comment}"
+        self.metadata_current_cube_label.setText(text)
 
     def _refresh_image(self) -> None:
         spectral_cube_index = self._current_spectral_cube()

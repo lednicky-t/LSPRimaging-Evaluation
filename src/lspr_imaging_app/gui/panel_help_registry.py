@@ -30,7 +30,7 @@ PANEL_HELP: dict[str, PanelHelpEntry] = {
         description=(
             "Browse for or type a dataset folder, then load it. The icon next to the title shows whether the "
             "loaded data is a raw ImageStack or an OME-Zarr stack. Nested tabs below hold the dataset Summary, "
-            "Reference selection, and Export controls."
+            "Reference selection, Export controls, and acquisition Metadata."
         ),
         shortcut_keys=("dataset",),
     ),
@@ -55,6 +55,19 @@ PANEL_HELP: dict[str, PanelHelpEntry] = {
             "per file), compression, and whether to skip excluded images. Progress shows here once export starts.\n"
             "Pixel data is always written as uint16 (matching the source 16-bit TIFF data) and pyramid levels are "
             "not written - neither is currently configurable."
+        ),
+    ),
+    "metadata": PanelHelpEntry(
+        title="Metadata",
+        description=(
+            "Camera/illumination setup and per-image acquisition time for this dataset - what links each "
+            "spectral cube to when it was actually recorded. Loaded automatically when a native measurement "
+            "file or a legacy measureing_times.csv/metaData.txt pair is found next to the dataset; the Import "
+            "button reads any mix of those, identified by content rather than filename (multiple files at "
+            "once are fine). Export writes the currently loaded metadata as a JSON file - re-importing that "
+            "same file restores it exactly, including any edits made in Preview / edit. The line below the "
+            "status shows the acquisition time (and pump-plan comment, if any) for whichever image is "
+            "currently displayed."
         ),
     ),
     "chromatic": PanelHelpEntry(
@@ -109,12 +122,15 @@ PANEL_HELP: dict[str, PanelHelpEntry] = {
     "spectra_fitting": PanelHelpEntry(
         title="Spectra fitting",
         description=(
-            "Choose the polynomial fit order and the extraction metric used to compute each ROI's absorbance value "
+            "Choose the curve fit, its order, and the extraction metric used to compute each ROI's absorbance value "
             "from its spectrum.\n"
             "Formula: A = log10(I_rROI / I_sROI) - absorbance from the sample ROI's mean intensity (I_sROI) and the "
             "reference ROI's mean intensity (I_rROI).\n"
-            "Metric: Maximum reads the peak absorbance of the fitted curve; Centroid reads its intensity-weighted "
-            "center wavelength. None skips fitting - no polynomial, no fitted curve, no sensorgram point.\n"
+            "Metric: Maximum and Centroid both work with or without a fit. Fitting: None reads the metric straight "
+            "off the raw absorbance spectrum - Maximum is the highest raw point, Centroid its intensity-weighted "
+            "center wavelength. Poly fits a polynomial of the chosen Order to the absorbance spectrum first and "
+            "reads the metric off that smoothed curve instead. Gauss is a placeholder for a future Gaussian fit - "
+            "not implemented yet.\n"
             "Tips:\n"
             "- The current fitted result shows above the spectrum plot, not in this panel.\n"
             "- A higher polynomial order follows noise more closely; a lower order is smoother but can miss a sharp peak.\n"

@@ -14,7 +14,12 @@ from lspr_imaging_app.domain.models import AbsorbanceSpectrumResult, AreaRoi, Ch
 from lspr_imaging_app.gui.worker import SensorgramComputationResult, SensorgramPointResult
 from lspr_imaging_app.io.dataset import dataset_load_plane_roi, export_ome_zarr_dataset, load_image_array
 from lspr_imaging_app.storage.workspace import load_preprocessing, load_processing_profile
-from lspr_imaging_app.processing.analysis import absorbance_from_means, fit_absorbance_curve, metric_value_from_fit
+from lspr_imaging_app.processing.analysis import (
+    absorbance_from_means,
+    fit_absorbance_curve,
+    metric_value_from_fit,
+    metric_value_from_spectrum,
+)
 from lspr_imaging_app.processing.chromatic import (
     ChromaticRegistrationResult,
     annulus_reach_box,
@@ -930,6 +935,7 @@ def _sensorgram_metric_task(
     spectral_cube_result_cache_store=None,
     wl_min: float | None = None,
     wl_max: float | None = None,
+    fit_method_key: str = "poly",
 ) -> SensorgramComputationResult:
     task_started = time.perf_counter()
     spectral_cube_payloads: list[tuple[int, tuple[object, ...]]] = []
@@ -1033,14 +1039,19 @@ def _sensorgram_metric_task(
                 cancelled=True,
             )
 
-        fit = fit_absorbance_curve(
-            spectrum.wavelengths_nm,
-            spectrum.absorbance,
-            poly_order=poly_order,
-            wl_min=wl_min,
-            wl_max=wl_max,
-        )
-        metric_value, metric_signal = metric_value_from_fit(fit, metric_key)
+        if fit_method_key == "none":
+            metric_value, metric_signal = metric_value_from_spectrum(
+                spectrum.wavelengths_nm, spectrum.absorbance, metric_key, wl_min=wl_min, wl_max=wl_max
+            )
+        else:
+            fit = fit_absorbance_curve(
+                spectrum.wavelengths_nm,
+                spectrum.absorbance,
+                poly_order=poly_order,
+                wl_min=wl_min,
+                wl_max=wl_max,
+            )
+            metric_value, metric_signal = metric_value_from_fit(fit, metric_key)
         metric_float = float(metric_value) if metric_value is not None and np.isfinite(metric_value) else float("nan")
         signal_float = float(metric_signal) if metric_signal is not None and np.isfinite(metric_signal) else float("nan")
 
