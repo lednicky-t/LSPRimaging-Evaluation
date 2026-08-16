@@ -170,6 +170,7 @@ class MaskController:
             from lspr_imaging_app.processing.roi_detection import ignored_pixel_mask
             mask = ignored_pixel_mask(raw_image, export_settings, external_mask=None)
         try:
+            destination.parent.mkdir(parents=True, exist_ok=True)
             Image.fromarray(np.where(mask, 255, 0).astype(np.uint8), mode="L").save(destination)
         except Exception as exc:
             QMessageBox.critical(window, "Save mask failed", str(exc))
@@ -683,26 +684,45 @@ class MaskController:
         window._save_processing_state_for_dataset()
         window._set_status_text(f"Mask updated. Save if you want to keep it on disk.{self.mask_change_status_suffix()}")
 
+    def _resolve_sidecar_path(self, record_path: Path, suffix: str) -> Path:
+        """Resolve a per-record sidecar file (mask/background) for `record_path`.
+
+        New sidecars are written under `analysis/masks/` instead of next to
+        the source TIFF. If an older dataset already has the file sitting
+        next to the image (the pre-`analysis/` layout), that existing file
+        is preferred so it keeps loading in place - it is never silently
+        moved or duplicated, only found where it already is.
+        """
+        dataset_folder = self.window._dataset_folder_path()
+        stem = record_path.stem
+        if dataset_folder is not None:
+            new_path = dataset_folder / "analysis" / "masks" / f"{stem}{suffix}"
+            if new_path.exists():
+                return new_path
+            legacy_path = record_path.with_name(f"{stem}{suffix}")
+            if legacy_path.exists():
+                return legacy_path
+            return new_path
+        return record_path.with_name(f"{stem}{suffix}")
+
     def current_mask_file_path(self) -> Path | None:
         window = self.window
         if window._current_record_path is None:
             return None
         reference_record = window._reference_record_for_record_path(window._current_record_path)
-        if reference_record is not None:
-            return reference_record.path.with_name(f"{reference_record.path.stem}_mask.png")
-        return window._current_record_path.with_name(f"{window._current_record_path.stem}_mask.png")
+        record_path = reference_record.path if reference_record is not None else window._current_record_path
+        return self.mask_file_path_for_record(record_path)
 
     def mask_file_path_for_record(self, record_path: Path) -> Path:
-        return record_path.with_name(f"{record_path.stem}_mask.png")
+        return self._resolve_sidecar_path(record_path, "_mask.png")
 
     def current_background_file_path(self) -> Path | None:
         window = self.window
         if window._current_record_path is None:
             return None
         reference_record = window._reference_record_for_record_path(window._current_record_path)
-        if reference_record is not None:
-            return reference_record.path.with_name(f"{reference_record.path.stem}_background.png")
-        return window._current_record_path.with_name(f"{window._current_record_path.stem}_background.png")
+        record_path = reference_record.path if reference_record is not None else window._current_record_path
+        return self._resolve_sidecar_path(record_path, "_background.png")
 
     def current_external_mask(self) -> np.ndarray | None:
         window = self.window
@@ -1019,6 +1039,7 @@ class MaskController:
             window._set_status_text("Background image is not available yet.")
             return
         try:
+            destination.parent.mkdir(parents=True, exist_ok=True)
             background_u16 = np.clip(np.rint(background), 0, 65535).astype(np.uint16, copy=False)
             Image.fromarray(background_u16, mode="I;16").save(destination)
         except Exception as exc:

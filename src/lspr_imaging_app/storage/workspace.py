@@ -7,7 +7,7 @@ from pathlib import Path
 
 import numpy as np
 
-from lspr_imaging_app.format_versions import PROCESSING_PROFILE_VERSION
+from lspr_imaging_app.format_versions import PROCESSING_PROFILE_VERSION, ROI_EXPORT_VERSION
 from lspr_imaging_app.domain.exclusions import ImageExclusionRule
 from lspr_imaging_app.domain.models import (
     AreaRoi,
@@ -82,6 +82,183 @@ def _encode_area_roi(area_roi: AreaRoi) -> dict:
     payload["sample_mask"] = _encode_roi_mask(area_roi.sample_mask)
     payload["reference_mask"] = _encode_roi_mask(area_roi.reference_mask)
     return payload
+
+
+def decode_area_rois(raw_rois: object) -> list[AreaRoi]:
+    """Decode an `area_rois` payload list (accepts pre-rename `detected_spots` field names).
+
+    Shared by `load_processing_profile` and `load_roi_table` so the two
+    JSON formats that both carry ROI geometry can't drift apart.
+    """
+    area_rois: list[AreaRoi] = []
+    if not isinstance(raw_rois, list):
+        return area_rois
+    for raw in raw_rois:
+        if not isinstance(raw, dict):
+            continue
+        area_rois.append(
+            AreaRoi(
+                area_roi_id=int(raw.get("area_roi_id", raw.get("spot_id", len(area_rois) + 1))),
+                center_x=float(raw.get("center_x", 0.0)),
+                center_y=float(raw.get("center_y", 0.0)),
+                sample_radius_px=float(raw.get("sample_radius_px", raw.get("radius_px", 0.0))),
+                sample_color_hex=(
+                    None
+                    if raw.get("sample_color_hex", raw.get("spot_color_hex")) in (None, "")
+                    else str(raw.get("sample_color_hex", raw.get("spot_color_hex")))
+                ),
+                reference_color_hex=(
+                    None
+                    if raw.get("reference_color_hex", raw.get("ring_color_hex")) in (None, "")
+                    else str(raw.get("reference_color_hex", raw.get("ring_color_hex")))
+                ),
+                sample_diameter_px=(
+                    None
+                    if raw.get("sample_diameter_px", raw.get("spot_diameter_px")) is None
+                    else float(raw.get("sample_diameter_px", raw.get("spot_diameter_px")))
+                ),
+                reference_inner_diameter_px=(
+                    None
+                    if raw.get("reference_inner_diameter_px", raw.get("ring_inner_diameter_px")) is None
+                    else float(raw.get("reference_inner_diameter_px", raw.get("ring_inner_diameter_px")))
+                ),
+                reference_outer_diameter_px=(
+                    None
+                    if raw.get("reference_outer_diameter_px", raw.get("ring_outer_diameter_px")) is None
+                    else float(raw.get("reference_outer_diameter_px", raw.get("ring_outer_diameter_px")))
+                ),
+                score=float(raw.get("score", 0.0)),
+                support_mean_radius_px=float(raw.get("support_mean_radius_px", 0.0)),
+                support_radius_std_px=float(raw.get("support_radius_std_px", 0.0)),
+                support_value_mean=float(raw.get("support_value_mean", 0.0)),
+                support_value_std=float(raw.get("support_value_std", 0.0)),
+                quality_score=float(raw.get("quality_score", 0.0)),
+                inferred=bool(raw.get("inferred", False)),
+                sample_geometry_type=str(raw.get("sample_geometry_type", "circle")),
+                sample_mask=_decode_roi_mask(raw.get("sample_mask")),
+                reference_geometry_type=str(raw.get("reference_geometry_type", "annulus")),
+                reference_mask=_decode_roi_mask(raw.get("reference_mask")),
+                array_id=(None if raw.get("array_id") in (None, "") else str(raw.get("array_id"))),
+                label=(None if raw.get("label") in (None, "") else str(raw.get("label"))),
+                created_by=str(raw.get("created_by", "user")),
+                notes=(None if raw.get("notes") in (None, "") else str(raw.get("notes"))),
+            )
+        )
+    return area_rois
+
+
+def decode_area_roi_groups(raw_groups: object) -> list[AreaRoiGroup]:
+    """Decode an `area_roi_groups` payload list (accepts pre-rename `spot_groups` field names)."""
+    area_roi_groups: list[AreaRoiGroup] = []
+    if not isinstance(raw_groups, list):
+        return area_roi_groups
+    for raw in raw_groups:
+        if not isinstance(raw, dict):
+            continue
+        ids_raw = raw.get("area_roi_ids", raw.get("spot_ids", []))
+        area_roi_ids = [int(x) for x in ids_raw] if isinstance(ids_raw, list) else []
+        area_roi_groups.append(
+            AreaRoiGroup(
+                group_id=str(raw.get("group_id", f"group_{len(area_roi_groups) + 1}")),
+                name=str(raw.get("name", f"Group {len(area_roi_groups) + 1}")),
+                sample_color_hex=str(
+                    raw.get("sample_color_hex", raw.get("spot_color_hex", raw.get("color_hex", "#f59e0b")))
+                ),
+                reference_color_hex=str(
+                    raw.get("reference_color_hex", raw.get("ring_color_hex", raw.get("color_hex", "#38bdf8")))
+                ),
+                area_roi_ids=area_roi_ids,
+            )
+        )
+    return area_roi_groups
+
+
+def decode_area_roi_arrays(raw_arrays: object) -> list[RoiArrayGroup]:
+    area_roi_arrays: list[RoiArrayGroup] = []
+    if not isinstance(raw_arrays, list):
+        return area_roi_arrays
+    for raw in raw_arrays:
+        if not isinstance(raw, dict):
+            continue
+        member_ids_raw = raw.get("member_area_roi_ids", [])
+        member_area_roi_ids = [int(x) for x in member_ids_raw] if isinstance(member_ids_raw, list) else []
+        area_roi_arrays.append(
+            RoiArrayGroup(
+                array_id=str(raw.get("array_id", f"array_{len(area_roi_arrays) + 1}")),
+                label=str(raw.get("label", f"Array {len(area_roi_arrays) + 1}")),
+                rows=int(raw.get("rows", 0)),
+                cols=int(raw.get("cols", 0)),
+                spacing_x_px=float(raw.get("spacing_x_px", 0.0)),
+                spacing_y_px=float(raw.get("spacing_y_px", 0.0)),
+                anchor_x_px=float(raw.get("anchor_x_px", 0.0)),
+                anchor_y_px=float(raw.get("anchor_y_px", 0.0)),
+                rotation_deg=float(raw.get("rotation_deg", 0.0)),
+                member_area_roi_ids=member_area_roi_ids,
+            )
+        )
+    return area_roi_arrays
+
+
+ROI_TABLE_SCHEMA_NAME = "lspri_roi_table"
+
+
+def build_roi_table_payload(
+    area_rois: list[AreaRoi],
+    area_roi_groups: list[AreaRoiGroup] | None = None,
+    area_roi_arrays: list[RoiArrayGroup] | None = None,
+    *,
+    sample_visual_color: str | None = None,
+    reference_visual_color: str | None = None,
+) -> dict:
+    """Full-fidelity standalone ROI table payload - the `roi_table.json` replacement for the old `roi_table_*.csv`.
+
+    Unlike the CSV it replaces, this can round-trip every ROI kind the app
+    supports (including freeform mask geometry), since it reuses the same
+    `AreaRoi` encoding as the processing profile instead of a hand-picked
+    column subset.
+    """
+    return {
+        "schema_name": ROI_TABLE_SCHEMA_NAME,
+        "schema_version": ROI_EXPORT_VERSION,
+        "sample_visual_color": sample_visual_color,
+        "reference_visual_color": reference_visual_color,
+        "area_rois": [_encode_area_roi(area_roi) for area_roi in area_rois],
+        "area_roi_groups": [asdict(group) for group in (area_roi_groups or [])],
+        "area_roi_arrays": [asdict(array_group) for array_group in (area_roi_arrays or [])],
+    }
+
+
+def save_roi_table(
+    path: Path,
+    area_rois: list[AreaRoi],
+    area_roi_groups: list[AreaRoiGroup] | None = None,
+    area_roi_arrays: list[RoiArrayGroup] | None = None,
+    *,
+    sample_visual_color: str | None = None,
+    reference_visual_color: str | None = None,
+) -> None:
+    write_json_file(
+        path,
+        build_roi_table_payload(
+            area_rois,
+            area_roi_groups,
+            area_roi_arrays,
+            sample_visual_color=sample_visual_color,
+            reference_visual_color=reference_visual_color,
+        ),
+    )
+
+
+def load_roi_table(path: Path) -> tuple[list[AreaRoi], list[AreaRoiGroup], list[RoiArrayGroup], str | None, str | None]:
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        raise ValueError("Invalid ROI table format.")
+    area_rois = decode_area_rois(payload.get("area_rois", []))
+    area_roi_groups = decode_area_roi_groups(payload.get("area_roi_groups", []))
+    area_roi_arrays = decode_area_roi_arrays(payload.get("area_roi_arrays", []))
+    sample_visual_color = payload.get("sample_visual_color") or None
+    reference_visual_color = payload.get("reference_visual_color") or None
+    return area_rois, area_roi_groups, area_roi_arrays, sample_visual_color, reference_visual_color
 
 
 def _encode_mask_settings(mask_settings: MaskSettings) -> dict:
@@ -557,106 +734,10 @@ def load_processing_profile(
     detection.reference_outer_radius_px = max(detection.reference_outer_radius_px, detection.reference_inner_radius_px)
 
     # Support old key "detected_spots" from pre-rename profiles.
-    raw_rois = payload.get("area_rois", payload.get("detected_spots", []))
-    area_rois: list[AreaRoi] = []
-    if isinstance(raw_rois, list):
-        for raw in raw_rois:
-            if not isinstance(raw, dict):
-                continue
-            area_rois.append(
-                AreaRoi(
-                    area_roi_id=int(raw.get("area_roi_id", raw.get("spot_id", len(area_rois) + 1))),
-                    center_x=float(raw.get("center_x", 0.0)),
-                    center_y=float(raw.get("center_y", 0.0)),
-                    sample_radius_px=float(raw.get("sample_radius_px", raw.get("radius_px", 0.0))),
-                    sample_color_hex=(
-                        None
-                        if raw.get("sample_color_hex", raw.get("spot_color_hex")) in (None, "")
-                        else str(raw.get("sample_color_hex", raw.get("spot_color_hex")))
-                    ),
-                    reference_color_hex=(
-                        None
-                        if raw.get("reference_color_hex", raw.get("ring_color_hex")) in (None, "")
-                        else str(raw.get("reference_color_hex", raw.get("ring_color_hex")))
-                    ),
-                    sample_diameter_px=(
-                        None
-                        if raw.get("sample_diameter_px", raw.get("spot_diameter_px")) is None
-                        else float(raw.get("sample_diameter_px", raw.get("spot_diameter_px")))
-                    ),
-                    reference_inner_diameter_px=(
-                        None
-                        if raw.get("reference_inner_diameter_px", raw.get("ring_inner_diameter_px")) is None
-                        else float(raw.get("reference_inner_diameter_px", raw.get("ring_inner_diameter_px")))
-                    ),
-                    reference_outer_diameter_px=(
-                        None
-                        if raw.get("reference_outer_diameter_px", raw.get("ring_outer_diameter_px")) is None
-                        else float(raw.get("reference_outer_diameter_px", raw.get("ring_outer_diameter_px")))
-                    ),
-                    score=float(raw.get("score", 0.0)),
-                    support_mean_radius_px=float(raw.get("support_mean_radius_px", 0.0)),
-                    support_radius_std_px=float(raw.get("support_radius_std_px", 0.0)),
-                    support_value_mean=float(raw.get("support_value_mean", 0.0)),
-                    support_value_std=float(raw.get("support_value_std", 0.0)),
-                    quality_score=float(raw.get("quality_score", 0.0)),
-                    inferred=bool(raw.get("inferred", False)),
-                    sample_geometry_type=str(raw.get("sample_geometry_type", "circle")),
-                    sample_mask=_decode_roi_mask(raw.get("sample_mask")),
-                    reference_geometry_type=str(raw.get("reference_geometry_type", "annulus")),
-                    reference_mask=_decode_roi_mask(raw.get("reference_mask")),
-                    array_id=(None if raw.get("array_id") in (None, "") else str(raw.get("array_id"))),
-                    label=(None if raw.get("label") in (None, "") else str(raw.get("label"))),
-                    created_by=str(raw.get("created_by", "user")),
-                    notes=(None if raw.get("notes") in (None, "") else str(raw.get("notes"))),
-                )
-            )
-
+    area_rois = decode_area_rois(payload.get("area_rois", payload.get("detected_spots", [])))
     # Support old key "spot_groups" from pre-rename profiles.
-    raw_groups = payload.get("area_roi_groups", payload.get("spot_groups", []))
-    area_roi_groups: list[AreaRoiGroup] = []
-    if isinstance(raw_groups, list):
-        for raw in raw_groups:
-            if not isinstance(raw, dict):
-                continue
-            ids_raw = raw.get("area_roi_ids", raw.get("spot_ids", []))
-            area_roi_ids = [int(x) for x in ids_raw] if isinstance(ids_raw, list) else []
-            area_roi_groups.append(
-                AreaRoiGroup(
-                    group_id=str(raw.get("group_id", f"group_{len(area_roi_groups) + 1}")),
-                    name=str(raw.get("name", f"Group {len(area_roi_groups) + 1}")),
-                    sample_color_hex=str(
-                        raw.get("sample_color_hex", raw.get("spot_color_hex", raw.get("color_hex", "#f59e0b")))
-                    ),
-                    reference_color_hex=str(
-                        raw.get("reference_color_hex", raw.get("ring_color_hex", raw.get("color_hex", "#38bdf8")))
-                    ),
-                    area_roi_ids=area_roi_ids,
-                )
-            )
-
-    raw_arrays = payload.get("area_roi_arrays", [])
-    area_roi_arrays: list[RoiArrayGroup] = []
-    if isinstance(raw_arrays, list):
-        for raw in raw_arrays:
-            if not isinstance(raw, dict):
-                continue
-            member_ids_raw = raw.get("member_area_roi_ids", [])
-            member_area_roi_ids = [int(x) for x in member_ids_raw] if isinstance(member_ids_raw, list) else []
-            area_roi_arrays.append(
-                RoiArrayGroup(
-                    array_id=str(raw.get("array_id", f"array_{len(area_roi_arrays) + 1}")),
-                    label=str(raw.get("label", f"Array {len(area_roi_arrays) + 1}")),
-                    rows=int(raw.get("rows", 0)),
-                    cols=int(raw.get("cols", 0)),
-                    spacing_x_px=float(raw.get("spacing_x_px", 0.0)),
-                    spacing_y_px=float(raw.get("spacing_y_px", 0.0)),
-                    anchor_x_px=float(raw.get("anchor_x_px", 0.0)),
-                    anchor_y_px=float(raw.get("anchor_y_px", 0.0)),
-                    rotation_deg=float(raw.get("rotation_deg", 0.0)),
-                    member_area_roi_ids=member_area_roi_ids,
-                )
-            )
+    area_roi_groups = decode_area_roi_groups(payload.get("area_roi_groups", payload.get("spot_groups", [])))
+    area_roi_arrays = decode_area_roi_arrays(payload.get("area_roi_arrays", []))
 
     raw_rois = payload.get("rois", [])
     rois: list[RoiDefinition] = []

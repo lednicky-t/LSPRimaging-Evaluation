@@ -94,12 +94,18 @@ CSV should not be forced to represent:
 
 ### Sidecar Strategy
 
-If a spreadsheet-friendly export is needed for complex ROIs, use:
+Implemented: `analysis/roi_table.json` (`schema_name="lspri_roi_table"`, versioned via
+`ROI_EXPORT_VERSION`, see `storage/workspace.py`'s `build_roi_table_payload`/`save_roi_table`/
+`load_roi_table`) replaced the old `roi_table_*.csv` snapshots. It carries full ROI geometry -
+including freeform mask shapes a CSV summary could never represent - by reusing the same
+`AreaRoi` encoding as the processing profile, so the two formats can't drift apart. There is
+no separate `roi_geometry.json`; one JSON file covers both roles.
 
-- `roi_table.csv` for readable summary data
-- `roi_geometry.json` for full geometry
-
-This is a good bridge format during migration.
+All of this app's own sidecar files (processing profile, ROI table, per-image masks/
+backgrounds, chromatic landmark exports) now live under `<dataset>/analysis/` instead of
+loose in the dataset root, so they don't mix with the raw source images. Older datasets
+saved before this change keep loading from their original flat layout (read-only fallback);
+the next save always writes to the new location without touching or deleting the old file.
 
 ## Suggested Format Rules
 

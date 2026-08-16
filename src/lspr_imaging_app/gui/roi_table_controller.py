@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import csv
 import logging
 from datetime import datetime
 from pathlib import Path
@@ -18,6 +17,7 @@ from lspr_imaging_app.gui.roi_table_helpers import (
     roi_table_headers,
     RoiTableRowData,
 )
+from lspr_imaging_app.storage.workspace import load_roi_table, save_roi_table
 
 
 class RoiTableController:
@@ -176,76 +176,41 @@ class RoiTableController:
                         roi.reference_color_hex or "",
                         f"{float(roi.center_x):.3f}",
                         f"{float(roi.center_y):.3f}",
+                        roi.sample_geometry_type,
+                        roi.reference_geometry_type,
                         "" if roi.sample_diameter_px is None else f"{float(roi.sample_diameter_px):.3f}",
                         "" if roi.reference_inner_diameter_px is None else f"{float(roi.reference_inner_diameter_px):.3f}",
                         "" if roi.reference_outer_diameter_px is None else f"{float(roi.reference_outer_diameter_px):.3f}",
+                        "1" if roi.sample_mask is not None else "0",
+                        "1" if roi.reference_mask is not None else "0",
                     ]
                 )
             )
         return "\n".join(parts)
 
-    def _roi_table_rows_snapshot(self) -> list[list[object]]:
-        rows: list[list[object]] = []
-        for order, roi in enumerate(sorted(self.window._state.area_rois, key=lambda item: item.area_roi_id)):
-            group = self.window._group_for_roi(roi.area_roi_id)
-            rows.append(
-                [
-                    roi.area_roi_id,
-                    group.name if group is not None else "",
-                    group.sample_color_hex if group is not None else "",
-                    group.reference_color_hex if group is not None else "",
-                    roi.sample_color_hex or "",
-                    roi.reference_color_hex or "",
-                    self.window._sample_visual_color.name(),
-                    self.window._reference_visual_color.name(),
-                    roi.center_x,
-                    roi.center_y,
-                    order,
-                    "" if roi.sample_diameter_px is None else roi.sample_diameter_px,
-                    "" if roi.reference_inner_diameter_px is None else roi.reference_inner_diameter_px,
-                    "" if roi.reference_outer_diameter_px is None else roi.reference_outer_diameter_px,
-                ]
-            )
-        return rows
-
-    def _roi_table_snapshot_path(self, folder: Path) -> Path:
-        stamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-        return folder / f"roi_table_{stamp}.csv"
-
-    def _latest_roi_table_path(self, folder: Path) -> Path | None:
-        candidates = sorted(folder.glob("roi_table_*.csv"), key=lambda path: path.stat().st_mtime if path.exists() else 0.0, reverse=True)
-        return candidates[0] if candidates else None
-
     def _save_roi_table_snapshot(self, *, force: bool = False) -> Path | None:
-        folder = self._dataset_folder()
-        if folder is None:
+        """Keep `analysis/roi_table.json` in sync with the current ROI table.
+
+        Always overwrites the same file (no timestamped history - use
+        `export_roi_table()` for a named backup copy). Full-fidelity: every
+        ROI kind the app supports round-trips here, unlike the old
+        `roi_table_*.csv` snapshots this replaced, which could only carry
+        circular sample/reference geometry.
+        """
+        path = self.window._roi_table_json_path()
+        if path is None:
             return None
-        folder.mkdir(parents=True, exist_ok=True)
         signature = self._roi_table_signature_snapshot()
-        if not force and self.window._last_saved_roi_table_signature == signature and self.window._last_saved_roi_table_path is not None:
-            return self.window._last_saved_roi_table_path
-        rows = self._roi_table_rows_snapshot()
-        path = self._roi_table_snapshot_path(folder)
-        with path.open("w", newline="", encoding="utf-8") as handle:
-            writer = csv.writer(handle)
-            writer.writerow([
-                "area_roi_id",
-                "group_name",
-                "group_sample_color",
-                "group_reference_color",
-                "sample_color",
-                "reference_color",
-                "sample_visual_color",
-                "reference_visual_color",
-                "center_x",
-                "center_y",
-                "area_roi_order",
-                "sample_diameter_px",
-                "reference_inner_diameter_px",
-                "reference_outer_diameter_px",
-            ])
-            if rows:
-                writer.writerows(rows)
+        if not force and self.window._last_saved_roi_table_signature == signature and self.window._last_saved_roi_table_path == path:
+            return path
+        save_roi_table(
+            path,
+            self.window._state.area_rois,
+            self.window._state.area_roi_groups,
+            self.window._state.area_roi_arrays,
+            sample_visual_color=self.window._sample_visual_color.name(),
+            reference_visual_color=self.window._reference_visual_color.name(),
+        )
         self.window._last_saved_roi_table_signature = signature
         self.window._last_saved_roi_table_path = path
         return path
@@ -454,36 +419,69 @@ class RoiTableController:
     def edit_diameter_cells_from_row(self, roi_id: int, row: int) -> None:
         self.window._edit_roi_diameter_cells_from_table(roi_id, row)
 
-    def export_csv(self) -> None:
-        path = self._save_roi_table_snapshot(force=True)
-        if path is None:
+    def export_roi_table(self) -> None:
+        """Save a separate, explicitly named backup copy (Save As).
+
+        `analysis/roi_table.json` is kept current automatically as you edit
+        ROIs, so this button is for a distinct snapshot you want to keep on
+        hand - e.g. before a batch re-detect - not for flushing the live file.
+        """
+        folder = self._dataset_folder()
+        if folder is None:
             self.window.status_label.setText("No dataset available for ROI table export.")
             return
-        self.window.status_label.setText(f"Saved ROI table snapshot to {path.name}.")
+        stamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+        default_path = folder / "analysis" / f"roi_table_backup_{stamp}.json"
+        path_str, _ = QFileDialog.getSaveFileName(
+            self.window,
+            "Save ROI table backup",
+            str(default_path),
+            "JSON Files (*.json)",
+        )
+        if not path_str:
+            return
+        path = Path(path_str)
+        save_roi_table(
+            path,
+            self.window._state.area_rois,
+            self.window._state.area_roi_groups,
+            self.window._state.area_roi_arrays,
+            sample_visual_color=self.window._sample_visual_color.name(),
+            reference_visual_color=self.window._reference_visual_color.name(),
+        )
+        self.window.status_label.setText(f"Saved ROI table backup to {path.name}.")
 
-    def import_csv(self) -> None:
+    def import_roi_table(self) -> None:
+        """Restore the ROI table from a `roi_table.json` file (full replace).
+
+        Full-fidelity JSON means there's no lossy subset left to merge
+        in-place the way the old CSV import did (it could only tweak colors
+        and diameters on ROIs that already existed) - this fully replaces
+        the current ROI table, including freeform mask geometry and array
+        recipes, protected by the usual undo point.
+        """
         folder = self._dataset_folder()
         if folder is None:
             self.window.status_label.setText("Load a dataset before importing an ROI table.")
             return
-        latest = self._latest_roi_table_path(folder)
+        default_path = self.window._roi_table_json_path()
         path: Path | None = None
-        if latest is not None:
+        if default_path is not None and default_path.exists():
             answer = QMessageBox.question(
                 self.window,
-                "Load latest ROI table",
-                f"Load the latest saved ROI table?\n\n{latest.name}\n\nChoose No to browse for another file.",
+                "Load ROI table",
+                f"Load the saved ROI table?\n\n{default_path.name}\n\nChoose No to browse for another file.",
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No | QMessageBox.StandardButton.Cancel,
                 QMessageBox.StandardButton.Yes,
             )
             if answer == QMessageBox.StandardButton.Yes:
-                path = latest
+                path = default_path
             elif answer == QMessageBox.StandardButton.No:
                 path_str, _ = QFileDialog.getOpenFileName(
                     self.window,
-                    "Load ROI table CSV",
-                    str(latest),
-                    "CSV Files (*.csv)",
+                    "Load ROI table",
+                    str(default_path.parent),
+                    "JSON Files (*.json)",
                 )
                 if not path_str:
                     return
@@ -493,60 +491,35 @@ class RoiTableController:
         else:
             path_str, _ = QFileDialog.getOpenFileName(
                 self.window,
-                "Load ROI table CSV",
-                str(folder),
-                "CSV Files (*.csv)",
+                "Load ROI table",
+                str(folder / "analysis"),
+                "JSON Files (*.json)",
             )
             if not path_str:
                 return
             path = Path(path_str)
-        with path.open("r", newline="", encoding="utf-8") as handle:
-            reader = csv.DictReader(handle)
-            rows = list(reader)
-        if not rows:
-            self.window.status_label.setText("CSV file is empty.")
+        try:
+            area_rois, area_roi_groups, area_roi_arrays, sample_color, reference_color = load_roi_table(path)
+        except Exception as exc:
+            self.window.status_label.setText(f"ROI table import failed: {exc}")
             return
-        self.window._push_undo_point("Import ROI list CSV")
-        groups_by_name = {group.name: group for group in self.window._state.area_roi_groups}
-        ordered_rows = sorted(rows, key=lambda row: int(row.get("area_roi_order", row.get("spot_order", row.get("area_roi_id", row.get("spot_id", 0)))) or 0))
-        for row in ordered_rows:
-            try:
-                roi_id = int(row.get("area_roi_id", row.get("spot_id", "")))
-            except ValueError:
-                continue
-            roi = self.window._roi_by_id(roi_id)
-            if roi is None:
-                continue
-            group_name = str(row.get("group_name", "")).strip()
-            group_sample_color = str(row.get("group_sample_color", row.get("group_spot_color", row.get("group_color", "")))).strip() or "#f59e0b"
-            group_reference_color = str(row.get("group_reference_color", row.get("group_ring_color", ""))).strip() or self.window._reference_visual_color.name()
-            if group_name:
-                group = groups_by_name.get(group_name)
-                if group is None:
-                    group = AreaRoiGroup(
-                        group_id=f"group_{len(groups_by_name) + 1}",
-                        name=group_name,
-                        sample_color_hex=group_sample_color,
-                        reference_color_hex=group_reference_color,
-                        area_roi_ids=[],
-                    )
-                    self.window._state.area_roi_groups.append(group)
-                    groups_by_name[group_name] = group
-                if roi_id not in group.area_roi_ids:
-                    group.area_roi_ids.append(roi_id)
-                group.sample_color_hex = group_sample_color
-                group.reference_color_hex = group_reference_color
-            roi.sample_diameter_px = None if row.get("sample_diameter_px", row.get("spot_diameter_px", "")) == "" else float(row.get("sample_diameter_px") or row.get("spot_diameter_px") or "")
-            roi.reference_inner_diameter_px = None if row.get("reference_inner_diameter_px", row.get("ring_inner_diameter_px", "")) == "" else float(row.get("reference_inner_diameter_px") or row.get("ring_inner_diameter_px") or "")
-            roi.reference_outer_diameter_px = None if row.get("reference_outer_diameter_px", row.get("ring_outer_diameter_px", "")) == "" else float(row.get("reference_outer_diameter_px") or row.get("ring_outer_diameter_px") or "")
-            if row.get("sample_color", row.get("spot_color", "")):
-                self.window._sample_visual_color = QColor(str(row.get("sample_color") or row.get("spot_color")))
-            if row.get("reference_color", row.get("ring_color", "")):
-                self.window._reference_visual_color = QColor(str(row.get("reference_color") or row.get("ring_color")))
+        if not area_rois:
+            self.window.status_label.setText("ROI table file has no ROIs.")
+            return
+        self.window._push_undo_point("Import ROI table")
+        self.window._state.area_rois = area_rois
+        self.window._state.area_roi_groups = area_roi_groups
+        self.window._state.area_roi_arrays = area_roi_arrays
+        self.window._reset_roi_id_counter_from_state()
+        if sample_color:
+            self.window._sample_visual_color = QColor(sample_color)
+        if reference_color:
+            self.window._reference_visual_color = QColor(reference_color)
+        self.window._selected_roi_ids.clear()
         self.window._update_color_button_styles()
         self.window._update_roi_overlays()
         self.window._update_roi_summary()
-        self.window._save_processing_state_for_dataset()
+        self.window._save_processing_state_for_dataset(force=True, reason="import ROI table")
         self.window._update_roi_table()
         self.window.status_label.setText(f"Loaded ROI table from {path.name}.")
 

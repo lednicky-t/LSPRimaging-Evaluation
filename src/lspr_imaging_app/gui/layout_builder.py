@@ -190,7 +190,6 @@ def build_layout(window) -> None:
         window.dataset_ome_zarr_options_row,
         window.dataset_ome_zarr_compression_row,
         window.dataset_ome_zarr_skip_excluded_row,
-        window.dataset_ome_zarr_info_row,
         window.dataset_ome_zarr_export_progress_row,
     ):
         export_content_layout.addWidget(row)
@@ -777,8 +776,12 @@ def build_layout(window) -> None:
         icon=window._make_cached_rois_icon(window._cached_rois_only_visible),
     )
     window.roi_list_cached_button.setChecked(window._cached_rois_only_visible)
-    window.roi_export_button = window._make_icon_tool_button("file-import", "#22c55e", "Save the ROI table to a CSV file.")
-    window.roi_import_button = window._make_icon_tool_button("file-export", "#38bdf8", "Load ROI table data from a CSV file.")
+    window.roi_export_button = window._make_icon_tool_button(
+        "file-export", "#22c55e", "Save a named backup of the ROI table (JSON). The live table is already saved automatically as you edit."
+    )
+    window.roi_import_button = window._make_icon_tool_button(
+        "file-import", "#38bdf8", "Load a saved ROI table (JSON), replacing the current one."
+    )
     roi_list_io_row.addWidget(window.roi_list_cached_button)
     roi_list_io_row.addStretch(1)
     roi_list_io_row.addWidget(window.roi_export_button)

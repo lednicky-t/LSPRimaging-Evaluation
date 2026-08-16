@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import csv
 import subprocess
 import sys
 import os
@@ -36,7 +35,6 @@ from PyQt6.QtWidgets import (
     QComboBox,
     QAbstractItemView,
     QDoubleSpinBox,
-    QFileDialog,
     QGridLayout,
     QHBoxLayout,
     QLabel,
@@ -619,12 +617,6 @@ class MainWindow(MainWindowIcons, QMainWindow):
             checkable=True,
         )
         self.ome_zarr_skip_excluded_button.toggled.connect(self._on_ome_zarr_skip_excluded_toggled)
-        self.ome_zarr_dtype_label = QLabel("Dtype: uint16", self)
-        self.ome_zarr_dtype_label.setObjectName("toolbarMiniLabel")
-        self.ome_zarr_dtype_label.setToolTip("Zarr export stores 16-bit TIFF data as uint16.")
-        self.ome_zarr_pyramid_label = QLabel("Pyramid: off", self)
-        self.ome_zarr_pyramid_label.setObjectName("toolbarMiniLabel")
-        self.ome_zarr_pyramid_label.setToolTip("Pyramid export is currently disabled.")
         self.dataset_ome_zarr_export_status_label = QLabel("Progress", self)
         self.dataset_ome_zarr_export_status_label.setObjectName("toolbarMiniLabel")
         self.dataset_ome_zarr_export_status_label.setToolTip("Current Zarr export progress.")
@@ -674,13 +666,6 @@ class MainWindow(MainWindowIcons, QMainWindow):
         dataset_ome_zarr_skip_excluded_layout.addWidget(self.ome_zarr_skip_excluded_label)
         dataset_ome_zarr_skip_excluded_layout.addWidget(self.ome_zarr_skip_excluded_button)
         dataset_ome_zarr_skip_excluded_layout.addStretch(1)
-        self.dataset_ome_zarr_info_row = QWidget(self)
-        dataset_ome_zarr_info_layout = QHBoxLayout(self.dataset_ome_zarr_info_row)
-        dataset_ome_zarr_info_layout.setContentsMargins(0, 0, 0, 0)
-        dataset_ome_zarr_info_layout.setSpacing(4)
-        dataset_ome_zarr_info_layout.addWidget(self.ome_zarr_dtype_label)
-        dataset_ome_zarr_info_layout.addWidget(self.ome_zarr_pyramid_label)
-        dataset_ome_zarr_info_layout.addStretch(1)
         self.dataset_ome_zarr_export_progress_row = QWidget(self)
         dataset_ome_zarr_export_progress_layout = QHBoxLayout(self.dataset_ome_zarr_export_progress_row)
         dataset_ome_zarr_export_progress_layout.setContentsMargins(0, 0, 0, 0)
@@ -2012,8 +1997,8 @@ class MainWindow(MainWindowIcons, QMainWindow):
         self.roi_table.cellDoubleClicked.connect(self._roi_table_controller.on_cell_double_clicked)
         self.roi_table.viewport().setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.roi_table.viewport().customContextMenuRequested.connect(self._roi_table_controller.show_context_menu)
-        self.roi_export_button.clicked.connect(self._roi_table_controller.export_csv)
-        self.roi_import_button.clicked.connect(self._roi_table_controller.import_csv)
+        self.roi_export_button.clicked.connect(self._roi_table_controller.export_roi_table)
+        self.roi_import_button.clicked.connect(self._roi_table_controller.import_roi_table)
         self.remove_rois_action.triggered.connect(self._remove_selected_rois)
         self.group_rois_action.triggered.connect(self._group_selected_rois)
         self.ungroup_rois_action.triggered.connect(self._ungroup_selected_rois)
@@ -2439,103 +2424,6 @@ class MainWindow(MainWindowIcons, QMainWindow):
         self._update_roi_overlays()
         self._update_roi_summary()
         self._update_roi_table()
-
-    def _export_roi_list_csv(self) -> None:
-        path_str, _ = QFileDialog.getSaveFileName(self, "Save ROI list CSV", "", "CSV Files (*.csv)")
-        if not path_str:
-            return
-        path = Path(path_str)
-        rows = sorted(self._state.area_rois, key=lambda roi: roi.area_roi_id)
-        with path.open("w", newline="", encoding="utf-8") as handle:
-            writer = csv.writer(handle)
-            writer.writerow([
-                "area_roi_id",
-                "group_name",
-                "group_sample_color",
-                "group_reference_color",
-                "sample_color",
-                "reference_color",
-                "center_x",
-                "center_y",
-                "area_roi_order",
-                "sample_diameter_px",
-                "reference_inner_diameter_px",
-                "reference_outer_diameter_px",
-            ])
-            for order, roi in enumerate(rows):
-                group = self._group_for_roi(roi.area_roi_id)
-                writer.writerow([
-                    roi.area_roi_id,
-                    group.name if group is not None else "",
-                    group.sample_color_hex if group is not None else "",
-                    group.reference_color_hex if group is not None else "",
-                    roi.sample_color_hex or "",
-                    roi.reference_color_hex or "",
-                    self._sample_visual_color.name(),
-                    self._reference_visual_color.name(),
-                    roi.center_x,
-                    roi.center_y,
-                    order,
-                    "" if roi.sample_diameter_px is None else roi.sample_diameter_px,
-                    "" if roi.reference_inner_diameter_px is None else roi.reference_inner_diameter_px,
-                    "" if roi.reference_outer_diameter_px is None else roi.reference_outer_diameter_px,
-                ])
-        self.status_label.setText(f"Saved ROI list to {path.name}.")
-
-    def _import_roi_list_csv(self) -> None:
-        path_str, _ = QFileDialog.getOpenFileName(self, "Load ROI list CSV", "", "CSV Files (*.csv)")
-        if not path_str:
-            return
-        path = Path(path_str)
-        with path.open("r", newline="", encoding="utf-8") as handle:
-            reader = csv.DictReader(handle)
-            rows = list(reader)
-        if not rows:
-            self.status_label.setText("CSV file is empty.")
-            return
-        self._push_undo_point("Import ROI list CSV")
-        groups_by_name = {group.name: group for group in self._state.area_roi_groups}
-        ordered_rows = sorted(rows, key=lambda row: int(row.get("spot_order", row.get("roi_id", 0)) or 0))
-        for row in ordered_rows:
-            try:
-                roi_id = int(row.get("roi_id", ""))
-            except ValueError:
-                continue
-            roi = self._roi_by_id(roi_id)
-            if roi is None:
-                continue
-            group_name = str(row.get("group_name", "")).strip()
-            group_color = str(row.get("group_color", "")).strip() or "#f59e0b"
-            group_reference_color = str(row.get("group_reference_color", "")).strip() or self._reference_visual_color.name()
-            if group_name:
-                group = groups_by_name.get(group_name)
-                if group is None:
-                    group = AreaRoiGroup(
-                        group_id=f"group_{len(groups_by_name) + 1}",
-                        name=group_name,
-                        sample_color_hex=group_color,
-                        reference_color_hex=group_reference_color,
-                        area_roi_ids=[],
-                    )
-                    self._state.area_roi_groups.append(group)
-                    groups_by_name[group_name] = group
-                if roi_id not in group.area_roi_ids:
-                    group.area_roi_ids.append(roi_id)
-                group.sample_color_hex = group_color
-                group.reference_color_hex = group_reference_color
-            roi.sample_diameter_px = None if row.get("sample_diameter_px", "") == "" else float(row["sample_diameter_px"])
-            roi.reference_inner_diameter_px = None if row.get("reference_inner_diameter_px", "") == "" else float(row["reference_inner_diameter_px"])
-            roi.reference_outer_diameter_px = None if row.get("reference_outer_diameter_px", "") == "" else float(row["reference_outer_diameter_px"])
-            if row.get("sample_color", ""):
-                self._sample_visual_color = QColor(str(row["sample_color"]))
-            if row.get("reference_color", ""):
-                self._reference_visual_color = QColor(str(row["reference_color"]))
-        self._update_color_button_styles()
-        self._update_roi_overlays()
-        self._update_roi_summary()
-        self._save_processing_state_for_dataset()
-        self._update_roi_table()
-        self.status_label.setText(f"Loaded ROI list from {path.name}.")
 
     def _roi_table_legacy_copy(self) -> None:
         self._roi_table_updating = True
@@ -3617,7 +3505,34 @@ class MainWindow(MainWindowIcons, QMainWindow):
             return str(folder)
         return f"...\\{parts[-2]}\\{parts[-1]}"
 
+    def _analysis_root(self) -> Path | None:
+        """Sidecar folder holding everything this app derives from a dataset.
+
+        Keeps the app's own state (processing profile, ROI table, masks) out
+        of the dataset root so it doesn't get mixed in with the raw TIFFs.
+        Raw source files never move; only files this app writes live here.
+        """
+        dataset = self._state.dataset
+        if dataset is None:
+            return None
+        return dataset.folder / "analysis"
+
     def _active_session_dir(self) -> Path | None:
+        root = self._analysis_root()
+        if root is None:
+            return None
+        if not self._active_session_name or self._active_session_name == "Default":
+            return root
+        return root / "sessions" / self._active_session_name
+
+    def _legacy_active_session_dir(self) -> Path | None:
+        """Pre-`analysis/` session dir, checked as a read-only fallback.
+
+        Older datasets have `preprocessing.json`/`processing_profile.json`
+        sitting directly in the dataset root (or `sessions/<name>/` there)
+        instead of under `analysis/`. Nothing here is ever written to -
+        new saves always go through `_active_session_dir()` above.
+        """
         dataset = self._state.dataset
         if dataset is None:
             return None
@@ -3626,13 +3541,15 @@ class MainWindow(MainWindowIcons, QMainWindow):
         return dataset.folder / "sessions" / self._active_session_name
 
     def _active_session_pointer_path(self) -> Path | None:
-        dataset = self._state.dataset
-        if dataset is None:
+        root = self._analysis_root()
+        if root is None:
             return None
-        return dataset.folder / "sessions" / "active_session.txt"
+        return root / "sessions" / "active_session.txt"
 
     def _load_active_session_name_for_folder(self, folder: Path) -> str:
-        pointer = folder / "sessions" / "active_session.txt"
+        pointer = folder / "analysis" / "sessions" / "active_session.txt"
+        if not pointer.exists():
+            pointer = folder / "sessions" / "active_session.txt"
         if pointer.exists():
             try:
                 name = pointer.read_text(encoding="utf-8").strip()
@@ -3657,12 +3574,23 @@ class MainWindow(MainWindowIcons, QMainWindow):
         dataset = self._state.dataset
         if dataset is None:
             return names
-        sessions_dir = dataset.folder / "sessions"
-        if sessions_dir.exists():
+        seen = set()
+        for sessions_dir in (dataset.folder / "analysis" / "sessions", dataset.folder / "sessions"):
+            if not sessions_dir.exists():
+                continue
             for child in sorted(sessions_dir.iterdir(), key=lambda p: p.name.lower()):
-                if child.is_dir() and (child / "processing_profile.json").exists():
+                if child.is_dir() and child.name not in seen and (child / "processing_profile.json").exists():
                     names.append(child.name)
+                    seen.add(child.name)
         return names
+
+    def _session_already_exists(self, name: str) -> bool:
+        dataset = self._state.dataset
+        if dataset is None:
+            return False
+        return (dataset.folder / "analysis" / "sessions" / name / "processing_profile.json").exists() or (
+            dataset.folder / "sessions" / name / "processing_profile.json"
+        ).exists()
 
     def _preprocessing_path(self) -> Path | None:
         session_dir = self._active_session_dir()
@@ -3675,6 +3603,24 @@ class MainWindow(MainWindowIcons, QMainWindow):
         if session_dir is None:
             return None
         return session_dir / "processing_profile.json"
+
+    def _legacy_preprocessing_path(self) -> Path | None:
+        session_dir = self._legacy_active_session_dir()
+        if session_dir is None:
+            return None
+        return session_dir / "preprocessing.json"
+
+    def _legacy_processing_profile_path(self) -> Path | None:
+        session_dir = self._legacy_active_session_dir()
+        if session_dir is None:
+            return None
+        return session_dir / "processing_profile.json"
+
+    def _roi_table_json_path(self) -> Path | None:
+        root = self._analysis_root()
+        if root is None:
+            return None
+        return root / "roi_table.json"
 
     def _dataset_folder_path(self) -> Path | None:
         dataset = self._state.dataset

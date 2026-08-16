@@ -1040,9 +1040,10 @@ class ChromaticController:
                 if int(mark.spectral_cube_index) == ref_cube and abs(float(mark.wavelength_nm) - ref_wavelength) < 1e-6:
                     reference_positions[int(mark.landmark_id)] = (float(mark.x_px), float(mark.y_px))
 
-        folder.mkdir(parents=True, exist_ok=True)
+        destination_folder = folder / "analysis" / "chromatic"
+        destination_folder.mkdir(parents=True, exist_ok=True)
         stamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-        path = folder / f"chromatic_landmarks_{stamp}.csv"
+        path = destination_folder / f"chromatic_landmarks_{stamp}.csv"
         ordered_marks = sorted(landmarks, key=lambda item: (item.spectral_cube_index, item.wavelength_nm, item.landmark_id))
         with path.open("w", newline="", encoding="utf-8") as handle:
             writer = csv.writer(handle)

@@ -52,7 +52,9 @@ PANEL_HELP: dict[str, PanelHelpEntry] = {
         title="Export",
         description=(
             "Write the current dataset to an OME-Zarr stack: chunk size, sharding (one image or one spectral cube "
-            "per file), compression, and whether to skip excluded images. Progress shows here once export starts."
+            "per file), compression, and whether to skip excluded images. Progress shows here once export starts.\n"
+            "Pixel data is always written as uint16 (matching the source 16-bit TIFF data) and pyramid levels are "
+            "not written - neither is currently configurable."
         ),
     ),
     "chromatic": PanelHelpEntry(

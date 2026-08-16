@@ -206,9 +206,10 @@ class DatasetController:
             return
         name = sanitize_ome_zarr_export_name(name)
 
-        default_parent = dataset.folder if dataset.folder.exists() else dataset.folder.parent
-        if not default_parent.exists():
-            default_parent = dataset.folder.parent if dataset.folder.parent.exists() else dataset.folder
+        # Default to the dataset's *parent* directory so a multi-GB zarr export
+        # doesn't land nested inside the raw dataset folder by default - the user
+        # can still browse elsewhere or back into the dataset folder itself.
+        default_parent = dataset.folder.parent if dataset.folder.parent.exists() else dataset.folder
         parent_dir = QFileDialog.getExistingDirectory(
             self.window,
             "Choose export location for Stack to Zarr",

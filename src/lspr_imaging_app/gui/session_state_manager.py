@@ -39,6 +39,20 @@ class SessionStateManager:
         window = self._window
         profile_path = window._processing_profile_path()
         preprocessing_path = window._preprocessing_path()
+        # New datasets (and datasets already saved once under this version)
+        # have their state under analysis/. Older datasets still have it
+        # sitting in the dataset root (or root/sessions/<name>/) - fall back
+        # to that read-only if the new location doesn't exist yet. The next
+        # save always writes to the new location, so this fallback is only
+        # ever needed once per dataset.
+        if profile_path is not None and not profile_path.exists():
+            legacy_profile_path = window._legacy_processing_profile_path()
+            if legacy_profile_path is not None and legacy_profile_path.exists():
+                profile_path = legacy_profile_path
+        if preprocessing_path is not None and not preprocessing_path.exists():
+            legacy_preprocessing_path = window._legacy_preprocessing_path()
+            if legacy_preprocessing_path is not None and legacy_preprocessing_path.exists():
+                preprocessing_path = legacy_preprocessing_path
         window._report_startup_progress(42, "Loading processing profile...")
         worker = FunctionWorker(_load_processing_state_task, profile_path, preprocessing_path)
         worker.signals.result.connect(
@@ -207,7 +221,7 @@ class SessionStateManager:
         if not ok:
             return
         name = _sanitize_session_name(name)
-        if name != "Default" and (dataset.folder / "sessions" / name / "processing_profile.json").exists():
+        if name != "Default" and window._session_already_exists(name):
             confirm = QMessageBox.question(
                 window,
                 "Session already exists",

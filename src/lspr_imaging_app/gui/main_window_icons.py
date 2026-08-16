@@ -489,7 +489,6 @@ class MainWindowIcons:
         self.ome_zarr_compression_button.setEnabled(not running)
         self.dataset_ome_zarr_controls_row.setEnabled(not running)
         self.dataset_ome_zarr_options_row.setEnabled(not running)
-        self.dataset_ome_zarr_info_row.setEnabled(not running)
         if running:
             self.dataset_ome_zarr_export_status_label.setText("Progress")
         self._sync_ome_zarr_chunk_controls()
@@ -628,7 +627,6 @@ class MainWindowIcons:
         self.ome_zarr_compression_button.setEnabled(True)
         self.dataset_ome_zarr_controls_row.setEnabled(True)
         self.dataset_ome_zarr_options_row.setEnabled(True)
-        self.dataset_ome_zarr_info_row.setEnabled(True)
         self._sync_ome_zarr_chunk_controls()
         self._append_workflow_log(
             f"OME-Zarr export {'failed' if failed else 'done'}{elapsed_text}",
