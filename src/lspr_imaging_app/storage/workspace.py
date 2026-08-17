@@ -284,11 +284,18 @@ def save_acquisition_metadata_sidecar(path: Path, metadata: ImagingAcquisitionMe
     write_json_file(path, build_acquisition_metadata_payload(metadata))
 
 
-def load_acquisition_metadata_sidecar(path: Path) -> ImagingAcquisitionMetadata:
-    payload = json.loads(path.read_text(encoding="utf-8"))
+def acquisition_metadata_from_payload(payload: dict) -> ImagingAcquisitionMetadata:
+    """Inverse of `build_acquisition_metadata_payload` - shared by the sidecar
+    JSON reader below and by `io/dataset.py`'s OME-Zarr `.zattrs` reader
+    (`load_ome_zarr_dataset`), since both store the same payload shape."""
     if not isinstance(payload, dict) or "metadata" not in payload:
         raise ValueError("Invalid acquisition metadata format.")
     return ImagingAcquisitionMetadata.model_validate(payload["metadata"])
+
+
+def load_acquisition_metadata_sidecar(path: Path) -> ImagingAcquisitionMetadata:
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    return acquisition_metadata_from_payload(payload)
 
 
 def _encode_mask_settings(mask_settings: MaskSettings) -> dict:

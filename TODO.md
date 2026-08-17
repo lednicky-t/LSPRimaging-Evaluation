@@ -6,22 +6,6 @@ Priority levels: `[high]` `[medium]` `[low]`
 
 ## Medium Priority
 
-### [medium] Mirror acquisition metadata into OME-Zarr export
-`Dataset > Metadata`'s loaded `ImagingAcquisitionMetadata` (camera/illumination settings,
-per-image cube timing, pump-plan comments - see `io/metadata_import.py`,
-`gui/metadata_controller.py`, built 2026-08-16) is not written into
-`export_ome_zarr_dataset`'s output. An exported dataset currently carries only the
-existing `lspr` attrs group (chunking/compression/dtype/image-tools), not the cube-to-time
-link or camera/illumination setup. Deferred from the original metadata-GUI build.
-- Write a compact form of `dataset.acquisition_metadata` into the exported `.zattrs`
-  alongside the existing `lspr` key (`io/dataset.py`'s `export_ome_zarr_dataset`).
-- Decide full per-image `image_timings` vs. a summarized per-cube form - probably per-cube
-  (`ImagingAcquisitionMetadata.earliest_timing_for_cube`, added 2026-08-17 for the
-  sensorgram time-axis) rather than per-image, since a large dataset's `image_timings` list
-  could be thousands of rows.
-- `load_ome_zarr_dataset` would need to read this back too, so a re-imported export keeps
-  its metadata without needing the original legacy files or native HDF5 nearby.
-
 ### [medium] Visually verify the Metadata section and sensorgram time-axis live
 Both the acquisition-metadata GUI (`Dataset > Metadata`: import/export/preview-edit,
 status label, live per-image time/comment label) and the sensorgram's real-elapsed-time

@@ -29,7 +29,11 @@ from lspr_imaging_app.domain.exclusions import ImageExclusionRule, is_excluded
 from lspr_imaging_app.domain.models import ImageDataset, ImageKey, ImageRecord, PreprocessingSettings
 from lspr_imaging_app.io.image_naming import IMAGE_PATTERN
 from lspr_imaging_app.io.legacy_metadata import find_and_import_legacy_metadata
-from lspr_imaging_app.storage.workspace import load_acquisition_metadata_sidecar
+from lspr_imaging_app.storage.workspace import (
+    acquisition_metadata_from_payload,
+    build_acquisition_metadata_payload,
+    load_acquisition_metadata_sidecar,
+)
 from lspr_imaging_app.processing.preprocess import apply_spatial_preprocessing
 
 
@@ -38,6 +42,7 @@ OME_ZARR_GROUP_FILENAME = ".zgroup"
 OME_ZARR_ARRAY_DIRNAME = "0"
 OME_ZARR_ARRAY_META_FILENAME = ".zarray"
 OME_ZARR_LSPR_KEY = "lspr"
+OME_ZARR_ACQUISITION_METADATA_KEY = "lspr_acquisition_metadata"
 _OME_ZARR_IMPORT_ERROR: ImportError | None = None
 
 # Adaptive worker-count tuning for export_ome_zarr_dataset (module-level so tests
@@ -515,7 +520,14 @@ def load_ome_zarr_dataset(folder: Path) -> ImageDataset:
             records.append(ImageRecord(ImageKey(wavelength_nm=float(wavelength_nm), spectral_cube_index=int(spectral_cube_index)), plane_path))
     if not records:
         raise FileNotFoundError(f"No OME-Zarr planes found in {folder}")
-    return ImageDataset(folder=root, records=records, source_format="ome_zarr")
+    acquisition_metadata = None
+    acquisition_metadata_payload = attrs.get(OME_ZARR_ACQUISITION_METADATA_KEY)
+    if isinstance(acquisition_metadata_payload, dict):
+        try:
+            acquisition_metadata = acquisition_metadata_from_payload(acquisition_metadata_payload)
+        except ValueError:
+            _LOGGER.warning("Ignoring malformed acquisition metadata in %s", folder)
+    return ImageDataset(folder=root, records=records, source_format="ome_zarr", acquisition_metadata=acquisition_metadata)
 
 
 def _format_seconds(seconds: float) -> str:
@@ -1073,6 +1085,15 @@ def export_ome_zarr_dataset(
     if write_pixel_size:
         lspr_attrs["pixel_size_um"] = {"x": scale_x, "y": scale_y}
     group.attrs[OME_ZARR_LSPR_KEY] = lspr_attrs
+
+    # Mirror any loaded acquisition metadata (camera/illumination settings,
+    # per-image timing, comment events - see `Dataset > Metadata`) into the
+    # export, in the same payload shape as the standalone sidecar file
+    # (`storage/workspace.py`'s `build_acquisition_metadata_payload`), so
+    # `load_ome_zarr_dataset` can restore it on a later re-import without
+    # needing the original legacy files or native HDF5 nearby.
+    if dataset.acquisition_metadata is not None:
+        group.attrs[OME_ZARR_ACQUISITION_METADATA_KEY] = build_acquisition_metadata_payload(dataset.acquisition_metadata)
 
     return destination
 
