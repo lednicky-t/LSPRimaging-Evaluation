@@ -5,9 +5,10 @@ from pathlib import Path
 
 from PyQt6.QtWidgets import QFileDialog, QInputDialog, QMessageBox
 
-from lspr_imaging_app.domain.models import AreaRoiDetectionSettings, MaskSettings
+from lspr_imaging_app.domain.models import AreaRoiDetectionSettings, ImageDataset, MaskSettings
 from lspr_imaging_app.gui.worker import FunctionWorker
 from lspr_imaging_app.io.dataset import (
+    DatasetLoadChoice,
     build_ome_zarr_export_folder_name,
     compare_ome_zarr_summaries,
     dataset_record_map,
@@ -15,6 +16,7 @@ from lspr_imaging_app.io.dataset import (
     load_dataset,
     read_existing_ome_zarr_summary,
     sanitize_ome_zarr_export_name,
+    summarize_dataset_candidate,
 )
 
 
@@ -117,12 +119,58 @@ class DatasetController:
         if on_done is not None:
             on_done()
 
-    def _on_dataset_loaded(self, folder: Path, reset_image_view: bool, on_done, dataset) -> None:
+    def _prompt_dataset_candidate_choice(self, choice: DatasetLoadChoice) -> ImageDataset | None:
+        """Ask the user which dataset to load when `load_dataset` found more
+        than one TIFF-stack/OME-Zarr candidate one level under the folder
+        they pointed at (see `discover_dataset_candidates`). Mirrors the
+        button-per-option `QMessageBox` style already used by
+        `_resolve_ome_zarr_destination_collision` for a similar choice.
+        Returns the chosen candidate (with `choice.acquisition_metadata`
+        attached) or None if the user cancelled.
+        """
         window = self.window
+        format_labels = {"image_stack": "TIFF image stack", "ome_zarr": "OME-Zarr"}
+        lines = [f"Found {len(choice.candidates)} datasets under {choice.parent_folder}:"]
+        for candidate in choice.candidates:
+            summary = summarize_dataset_candidate(candidate)
+            format_label = format_labels.get(summary.source_format, summary.source_format)
+            lines.append(
+                f"\n{candidate.folder.name}/  ({format_label})\n"
+                f"    {summary.image_count} images, {summary.spectral_cube_count} cubes x "
+                f"{summary.wavelength_count} wavelengths, {window._format_dataset_bytes(summary.total_bytes)}"
+            )
+        box = QMessageBox(window)
+        box.setWindowTitle("Choose a dataset to load")
+        box.setText("\n".join(lines) + "\n\nWhich one should be loaded?")
+        candidate_by_button = {
+            box.addButton(candidate.folder.name, QMessageBox.ButtonRole.AcceptRole): candidate
+            for candidate in choice.candidates
+        }
+        box.addButton("Cancel", QMessageBox.ButtonRole.RejectRole)
+        box.exec()
+        dataset = candidate_by_button.get(box.clickedButton())
+        if dataset is not None:
+            dataset.acquisition_metadata = choice.acquisition_metadata
+            dataset.home_folder = choice.parent_folder
+        return dataset
+
+    def _on_dataset_loaded(self, folder: Path, reset_image_view: bool, on_done, result) -> None:
+        window = self.window
+        if isinstance(result, DatasetLoadChoice):
+            dataset = self._prompt_dataset_candidate_choice(result)
+            if dataset is None:
+                window._dataset_load_in_flight = False
+                self._set_dataset_load_controls_enabled(True)
+                window._end_busy("Load cancelled.")
+                if on_done is not None:
+                    on_done()
+                return
+        else:
+            dataset = result
         progress = getattr(window, "_report_startup_progress", None)
 
         window._state.dataset = dataset
-        window._active_session_name = window._load_active_session_name_for_folder(dataset.folder)
+        window._active_session_name = window._load_active_session_name_for_folder(dataset.home)
         if callable(progress):
             progress(48, "Loading dataset records...")
         window._record_map = dataset_record_map(dataset)
@@ -168,8 +216,11 @@ class DatasetController:
         window._update_dataset_summary_labels(dataset)
         window._update_metadata_status_labels(dataset)
 
-        window.folder_edit.setText(str(dataset.folder))
-        window.folder_edit.setToolTip(str(dataset.folder))
+        window.folder_edit.setText(str(dataset.home))
+        window.folder_edit.setToolTip(
+            str(dataset.home) if dataset.home == dataset.folder
+            else f"{dataset.home}\n(images/OME-Zarr found in: {dataset.folder})"
+        )
         window._set_status_text(f"Loaded dataset from {folder.name}. Preparing the first image.")
         if callable(progress):
             progress(88, "Preparing the first image...")
@@ -201,16 +252,16 @@ class DatasetController:
             self.window,
             "Name this Stack to Zarr export",
             "Export name (used to build the destination folder name):",
-            text=dataset.folder.name,
+            text=dataset.home.name,
         )
         if not name_ok:
             return
         name = sanitize_ome_zarr_export_name(name)
 
-        # Default to the dataset's *parent* directory so a multi-GB zarr export
-        # doesn't land nested inside the raw dataset folder by default - the user
-        # can still browse elsewhere or back into the dataset folder itself.
-        default_parent = dataset.folder.parent if dataset.folder.parent.exists() else dataset.folder
+        # Default to the dataset's home folder (not the raw TIFF/OME-Zarr
+        # folder itself) so a multi-GB zarr export doesn't land nested inside
+        # it by default - the user can still browse elsewhere.
+        default_parent = dataset.home if dataset.home.exists() else dataset.folder
         parent_dir = QFileDialog.getExistingDirectory(
             self.window,
             "Choose export location for Stack to Zarr",

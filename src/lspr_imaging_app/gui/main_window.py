@@ -3693,13 +3693,16 @@ class MainWindow(MainWindowIcons, QMainWindow):
         """Sidecar folder holding everything this app derives from a dataset.
 
         Keeps the app's own state (processing profile, ROI table, masks) out
-        of the dataset root so it doesn't get mixed in with the raw TIFFs.
+        of the dataset root so it doesn't get mixed in with the raw TIFFs -
+        under `dataset.home` (see `ImageDataset.home`), not `dataset.folder`,
+        so it stays out of a discovered TIFF/OME-Zarr subfolder entirely
+        rather than merely being tucked into a subfolder of it.
         Raw source files never move; only files this app writes live here.
         """
         dataset = self._state.dataset
         if dataset is None:
             return None
-        return dataset.folder / "analysis"
+        return dataset.home / "analysis"
 
     def _active_session_dir(self) -> Path | None:
         root = self._analysis_root()
@@ -3714,8 +3717,12 @@ class MainWindow(MainWindowIcons, QMainWindow):
 
         Older datasets have `preprocessing.json`/`processing_profile.json`
         sitting directly in the dataset root (or `sessions/<name>/` there)
-        instead of under `analysis/`. Nothing here is ever written to -
-        new saves always go through `_active_session_dir()` above.
+        instead of under `analysis/`. Deliberately anchored to `dataset.folder`
+        rather than `dataset.home`: this predates the one-level-deep search
+        that can make the two differ, so any real legacy files are physically
+        sitting next to the raw images, not next to `dataset.home`. Nothing
+        here is ever written to - new saves always go through
+        `_active_session_dir()` above.
         """
         dataset = self._state.dataset
         if dataset is None:
@@ -3759,7 +3766,7 @@ class MainWindow(MainWindowIcons, QMainWindow):
         if dataset is None:
             return names
         seen = set()
-        for sessions_dir in (dataset.folder / "analysis" / "sessions", dataset.folder / "sessions"):
+        for sessions_dir in (dataset.home / "analysis" / "sessions", dataset.folder / "sessions"):
             if not sessions_dir.exists():
                 continue
             for child in sorted(sessions_dir.iterdir(), key=lambda p: p.name.lower()):
@@ -3772,7 +3779,7 @@ class MainWindow(MainWindowIcons, QMainWindow):
         dataset = self._state.dataset
         if dataset is None:
             return False
-        return (dataset.folder / "analysis" / "sessions" / name / "processing_profile.json").exists() or (
+        return (dataset.home / "analysis" / "sessions" / name / "processing_profile.json").exists() or (
             dataset.folder / "sessions" / name / "processing_profile.json"
         ).exists()
 
@@ -3807,9 +3814,13 @@ class MainWindow(MainWindowIcons, QMainWindow):
         return root / "roi_table.json"
 
     def _dataset_folder_path(self) -> Path | None:
+        """Base folder for this app's own saved state (analysis/ sidecar,
+        acquisition metadata sidecar, chromatic calibration) - `dataset.home`,
+        not `dataset.folder`, so it stays out of a discovered TIFF/OME-Zarr
+        subfolder (see `ImageDataset.home`)."""
         dataset = self._state.dataset
         if dataset is not None:
-            return dataset.folder
+            return dataset.home
         folder_text = self.folder_edit.text().strip()
         if not folder_text:
             return None

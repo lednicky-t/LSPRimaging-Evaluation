@@ -412,7 +412,7 @@ class SessionStateManager:
     def export_processing_profile(self) -> None:
         window = self._window
         dataset = window._state.dataset
-        default_dir = dataset.folder if dataset is not None else Path(window.folder_edit.text())
+        default_dir = dataset.home if dataset is not None else Path(window.folder_edit.text())
         destination, _ = QFileDialog.getSaveFileName(
             window,
             "Export processing settings",

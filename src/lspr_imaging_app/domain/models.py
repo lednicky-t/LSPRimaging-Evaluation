@@ -27,6 +27,21 @@ class ImageDataset:
     records: list[ImageRecord]
     source_format: str = "image_stack"
     acquisition_metadata: ImagingAcquisitionMetadata | None = None
+    home_folder: Path | None = None
+    """The folder this dataset was loaded *from*, when that differs from
+    `folder` (the actual TIFF/OME-Zarr location) - e.g. `load_dataset`
+    discovering the data one level below the folder it was pointed at (see
+    `io/dataset.py`'s `discover_dataset_candidates`). `None` when they're the
+    same (the common case: pointing directly at the data). Use the `home`
+    property rather than this field directly."""
+
+    @property
+    def home(self) -> Path:
+        """Where this app's own state (analysis/, sessions, ROI table, masks,
+        acquisition metadata sidecar) is saved - `home_folder` if set,
+        otherwise `folder`. Kept separate from `folder` so that data never
+        gets written into a raw TIFF/OME-Zarr folder it doesn't own."""
+        return self.home_folder if self.home_folder is not None else self.folder
 
     @property
     def wavelengths_nm(self) -> list[float]:

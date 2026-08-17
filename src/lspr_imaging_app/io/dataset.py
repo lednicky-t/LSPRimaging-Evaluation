@@ -150,34 +150,153 @@ def load_acquisition_metadata(dataset_folder: Path) -> ImagingAcquisitionMetadat
     return find_and_import_legacy_metadata(dataset_folder)
 
 
-def load_dataset(folder: Path) -> ImageDataset:
-    """Load `folder` as an `ImageDataset`, auto-detecting the format.
+def _has_tiff_stack(folder: Path) -> bool:
+    return folder.is_dir() and any(IMAGE_PATTERN.search(path.stem) for path in folder.glob("*.tif*"))
 
-    An OME-Zarr export (see `export_ome_zarr_dataset`) is detected by the
-    presence of its zarr metadata files and loaded via
-    `load_ome_zarr_dataset`. Otherwise `folder` is treated as a flat
-    directory of TIFF files named like `WL500Frame3.tif` (wavelength in nm,
-    spectral cube index), parsed by `IMAGE_PATTERN`.
 
-    Either way, `load_acquisition_metadata` also looks nearby for camera/
-    illumination/cube-timing metadata (a native v6.4 file or legacy sidecar
-    files) and attaches it as `ImageDataset.acquisition_metadata` when found.
-    """
+def _load_tiff_stack_dataset(folder: Path) -> ImageDataset:
+    """Load `folder` as a flat directory of TIFF files named like
+    `WL500Frame3.tif` (wavelength in nm, spectral cube index), parsed by
+    `IMAGE_PATTERN`. Raises `FileNotFoundError` if none match."""
+    records: list[ImageRecord] = []
+    for path in sorted(folder.glob("*.tif*")):
+        match = IMAGE_PATTERN.search(path.stem)
+        if not match:
+            continue
+        wl = float(match.group("wl"))
+        spectral_cube_index = int(match.group("spectral_cube_index"))
+        records.append(ImageRecord(ImageKey(wavelength_nm=wl, spectral_cube_index=spectral_cube_index), path))
+    if not records:
+        raise FileNotFoundError(f"No matching TIFF files found in {folder}")
+    return ImageDataset(folder=folder, records=records, source_format="image_stack")
+
+
+def _direct_dataset_candidate(folder: Path) -> ImageDataset | None:
+    """`folder` as an `ImageDataset` if it directly (not in a subfolder) holds
+    an OME-Zarr dataset or a TIFF stack, else `None`."""
     if is_ome_zarr_dataset(folder):
-        dataset = load_ome_zarr_dataset(folder)
-    else:
-        records: list[ImageRecord] = []
-        for path in sorted(folder.glob("*.tif*")):
-            match = IMAGE_PATTERN.search(path.stem)
-            if not match:
+        return load_ome_zarr_dataset(folder)
+    if _has_tiff_stack(folder):
+        return _load_tiff_stack_dataset(folder)
+    return None
+
+
+def discover_dataset_candidates(folder: Path) -> list[ImageDataset]:
+    """Find the dataset(s) `folder` refers to: `folder` itself if it directly
+    holds a TIFF stack or OME-Zarr dataset (today's only supported layout),
+    otherwise every TIFF-stack/OME-Zarr dataset found one level down, in
+    `folder`'s immediate subfolders. Real datasets often keep the metadata
+    files (`measureing_times.csv`/`metaData.txt`, a native v6.4 HDF5 file)
+    directly in a parent folder with the actual image data one level below
+    it, in a differently-named subfolder per dataset - this lets a caller
+    point at that parent instead of having to browse into the image
+    subfolder first (metadata is still found via `load_acquisition_metadata`
+    starting from `folder`, regardless of where the images end up).
+
+    Returns a list of fully-built `ImageDataset`s (records only - no pixel
+    data read), so a caller with multiple candidates can inspect them (e.g.
+    `summarize_dataset_candidate`) before picking one.
+    """
+    direct = _direct_dataset_candidate(folder)
+    if direct is not None:
+        return [direct]
+    if not folder.is_dir():
+        return []
+    candidates: list[ImageDataset] = []
+    for child in sorted((path for path in folder.iterdir() if path.is_dir()), key=lambda path: path.name):
+        candidate = _direct_dataset_candidate(child)
+        if candidate is not None:
+            candidates.append(candidate)
+    return candidates
+
+
+@dataclass
+class DatasetCandidateSummary:
+    folder: Path
+    source_format: str
+    image_count: int
+    spectral_cube_count: int
+    wavelength_count: int
+    total_bytes: int
+
+
+def summarize_dataset_candidate(dataset: ImageDataset) -> DatasetCandidateSummary:
+    """Cheap size/count summary of a discovered candidate, for a chooser UI
+    to show when `discover_dataset_candidates` finds more than one - mirrors
+    the size-on-disk logic `MainWindow._update_dataset_summary_labels` uses
+    for the same two formats (real files summed for a TIFF stack, the whole
+    dataset folder walked for OME-Zarr, since its records are synthetic
+    per-plane paths rather than real files)."""
+    if dataset.is_ome_zarr:
+        total_bytes = 0
+        for entry in dataset.folder.rglob("*"):
+            if not entry.is_file():
                 continue
-            wl = float(match.group("wl"))
-            spectral_cube_index = int(match.group("spectral_cube_index"))
-            records.append(ImageRecord(ImageKey(wavelength_nm=wl, spectral_cube_index=spectral_cube_index), path))
-        if not records:
-            raise FileNotFoundError(f"No matching TIFF files found in {folder}")
-        dataset = ImageDataset(folder=folder, records=records, source_format="image_stack")
-    dataset.acquisition_metadata = load_acquisition_metadata(folder)
+            try:
+                total_bytes += int(entry.stat().st_size)
+            except OSError:
+                continue
+    else:
+        total_bytes = 0
+        for record in dataset.records:
+            try:
+                total_bytes += int(record.path.stat().st_size)
+            except OSError:
+                continue
+    return DatasetCandidateSummary(
+        folder=dataset.folder,
+        source_format=dataset.source_format,
+        image_count=len(dataset.records),
+        spectral_cube_count=len(dataset.spectral_cube_indices),
+        wavelength_count=len(dataset.wavelengths_nm),
+        total_bytes=total_bytes,
+    )
+
+
+@dataclass
+class DatasetLoadChoice:
+    """Returned by `load_dataset` instead of an `ImageDataset` when more than
+    one TIFF-stack/OME-Zarr candidate is found - the GUI must prompt the user
+    to pick one of `candidates` (see `discover_dataset_candidates`) before
+    loading can finish. `acquisition_metadata` is already resolved (from
+    `parent_folder`, not any one candidate) since it doesn't depend on which
+    candidate gets picked."""
+
+    parent_folder: Path
+    candidates: list[ImageDataset]
+    acquisition_metadata: ImagingAcquisitionMetadata | None
+
+
+def load_dataset(folder: Path) -> ImageDataset | DatasetLoadChoice:
+    """Load `folder` as an `ImageDataset`, auto-detecting the format and
+    searching one level deep for it if `folder` doesn't directly hold one
+    (see `discover_dataset_candidates`).
+
+    Returns a `DatasetLoadChoice` instead of a single `ImageDataset` when
+    more than one candidate is found (e.g. a TIFF-stack subfolder *and* an
+    OME-Zarr subfolder) - the caller must resolve that before a dataset can
+    actually be loaded.
+
+    Either way, `load_acquisition_metadata` looks nearby (starting from
+    `folder`, not wherever a candidate's images end up) for camera/
+    illumination/cube-timing metadata (a native v6.4 file or legacy sidecar
+    files) and attaches it to the result. The returned dataset's
+    `home_folder` is always set to `folder` too - see `ImageDataset.home` -
+    so this app's own saved state (analysis/, sessions, ROI table, masks)
+    lands next to those metadata files instead of inside a discovered
+    TIFF/OME-Zarr subfolder.
+    """
+    candidates = discover_dataset_candidates(folder)
+    if not candidates:
+        raise FileNotFoundError(
+            f"No TIFF image stack or OME-Zarr dataset found in {folder} or its immediate subfolders."
+        )
+    metadata = load_acquisition_metadata(folder)
+    if len(candidates) > 1:
+        return DatasetLoadChoice(parent_folder=folder, candidates=candidates, acquisition_metadata=metadata)
+    dataset = candidates[0]
+    dataset.acquisition_metadata = metadata
+    dataset.home_folder = folder
     return dataset
 
 
