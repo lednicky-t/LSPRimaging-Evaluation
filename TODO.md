@@ -6,6 +6,50 @@ Priority levels: `[high]` `[medium]` `[low]`
 
 ## Medium Priority
 
+### [medium] Mirror acquisition metadata into OME-Zarr export
+`Dataset > Metadata`'s loaded `ImagingAcquisitionMetadata` (camera/illumination settings,
+per-image cube timing, pump-plan comments - see `io/metadata_import.py`,
+`gui/metadata_controller.py`, built 2026-08-16) is not written into
+`export_ome_zarr_dataset`'s output. An exported dataset currently carries only the
+existing `lspr` attrs group (chunking/compression/dtype/image-tools), not the cube-to-time
+link or camera/illumination setup. Deferred from the original metadata-GUI build.
+- Write a compact form of `dataset.acquisition_metadata` into the exported `.zattrs`
+  alongside the existing `lspr` key (`io/dataset.py`'s `export_ome_zarr_dataset`).
+- Decide full per-image `image_timings` vs. a summarized per-cube form - probably per-cube
+  (`ImagingAcquisitionMetadata.earliest_timing_for_cube`, added 2026-08-17 for the
+  sensorgram time-axis) rather than per-image, since a large dataset's `image_timings` list
+  could be thousands of rows.
+- `load_ome_zarr_dataset` would need to read this back too, so a re-imported export keeps
+  its metadata without needing the original legacy files or native HDF5 nearby.
+
+### [medium] Visually verify the Metadata section and sensorgram time-axis live
+Both the acquisition-metadata GUI (`Dataset > Metadata`: import/export/preview-edit,
+status label, live per-image time/comment label) and the sensorgram's real-elapsed-time
+x-axis (`gui/analysis_controller.py`'s `_sensorgram_x_values`, 2026-08-17) have only been
+tested headlessly (`tests/integration/test_lspri_metadata_gui.py`,
+`test_lspri_sensorgram_time_axis.py`) and via ad-hoc scripts against a real example
+dataset - never actually run and clicked through in the live app.
+- Launch `lspri-evaluation`, load a dataset with `measureing_times.csv`/`metaData.txt`
+  nearby, confirm the Metadata section's layout/wording reads sensibly and the buttons are
+  positioned/sized reasonably (not just functionally wired).
+- Click through Import (multi-file dialog), Export, and Preview/edit - confirm the edit
+  dialog's tables are usable at a glance, not just correct when driven programmatically.
+- Calculate a sensorgram against a dataset with metadata loaded and confirm the x-axis
+  genuinely reads as time (labels, cursor drag behavior) and looks right visually, not just
+  numerically correct in tests.
+
+### [medium] Read ROI/absorbance/sensorgram data back from a native v6.4 measurement file
+LSPRimaging Acquisition's `ImagingMeasurementWriter` (schema v6.4) also writes
+`processed/roi_definitions`, `processed/absorbance_spectra/{roi_id}`, and
+`processed/sensorgram/{roi_id}` - none of which `lspr_io.read_imaging_acquisition_metadata`
+(built 2026-08-16, covers only camera/illumination settings and cube timing) reads. Not
+started - flagged as a known gap, not yet scoped.
+- Would let eva restore ROI placements (and possibly a starting sensorgram/absorbance
+  preview) from a native acquisition session file, not just camera/timing metadata.
+- Needs its own reader function in `lspr_io` (parallel to `read_imaging_acquisition_metadata`,
+  not folded into it - different consumer, different shape) and a decision on how it
+  interacts with eva's own ROI system (`AreaRoi`/`AreaRoiGroup`) if the two ever disagree.
+
 ### [medium] Mask panel: control fields too wide
 Controls in the Mask panel are excessively wide. Evaluate each control group and resize to
 roughly half the current width where content allows:
