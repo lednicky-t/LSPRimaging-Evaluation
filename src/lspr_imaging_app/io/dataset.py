@@ -260,7 +260,10 @@ class DatasetLoadChoice:
     to pick one of `candidates` (see `discover_dataset_candidates`) before
     loading can finish. `acquisition_metadata` is already resolved (from
     `parent_folder`, not any one candidate) since it doesn't depend on which
-    candidate gets picked."""
+    candidate gets picked - but it may be `None` even when the chosen
+    candidate has its own embedded metadata (an OME-Zarr export), so the
+    caller must apply it the same "only overwrite if not None" way
+    `load_dataset` does, not unconditionally."""
 
     parent_folder: Path
     candidates: list[ImageDataset]
@@ -280,7 +283,10 @@ def load_dataset(folder: Path) -> ImageDataset | DatasetLoadChoice:
     Either way, `load_acquisition_metadata` looks nearby (starting from
     `folder`, not wherever a candidate's images end up) for camera/
     illumination/cube-timing metadata (a native v6.4 file or legacy sidecar
-    files) and attaches it to the result. The returned dataset's
+    files) and attaches it to the result *if it finds something* - an OME-Zarr
+    candidate may already carry its own embedded metadata (mirrored in at
+    export time, see `OME_ZARR_ACQUISITION_METADATA_KEY`), and a `None` result
+    from this external search must not stomp on that. The returned dataset's
     `home_folder` is always set to `folder` too - see `ImageDataset.home` -
     so this app's own saved state (analysis/, sessions, ROI table, masks)
     lands next to those metadata files instead of inside a discovered
@@ -295,7 +301,8 @@ def load_dataset(folder: Path) -> ImageDataset | DatasetLoadChoice:
     if len(candidates) > 1:
         return DatasetLoadChoice(parent_folder=folder, candidates=candidates, acquisition_metadata=metadata)
     dataset = candidates[0]
-    dataset.acquisition_metadata = metadata
+    if metadata is not None:
+        dataset.acquisition_metadata = metadata
     dataset.home_folder = folder
     return dataset
 

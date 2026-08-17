@@ -14,6 +14,12 @@ dependencies = [
     "pydantic>=2",
     "Pillow",
     "PyQt6>=6.11,<7",
+    # PyQt6-sip is normally just a transitive dependency of PyQt6, but 13.11.1
+    # on Python 3.14 has a reproducible access-violation crash (0xC0000005,
+    # inside sip.pyd itself) when closing the main window after a dataset is
+    # loaded - fixed in 13.12.0. Pinned explicitly so a fresh install doesn't
+    # silently resolve back to a known-bad version.
+    "PyQt6-sip>=13.12.0",
     "imagecodecs",
     "ome-zarr",
     "numcodecs",

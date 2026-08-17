@@ -59,10 +59,51 @@ def _parse_int(text: str, default: int) -> int:
         return default
 
 
+def _format_relative_ms(elapsed_ms: int) -> str:
+    """H:MM:SS.mmm (or M:SS.mmm under an hour) for a millisecond duration -
+    used instead of a calendar date when `metadata.started_at_utc` is None
+    (a CSV-only legacy import with no absolute acquisition start time, see
+    legacy_metadata.import_legacy_imaging_metadata), where a real date would
+    be a misleading fabrication rather than merely imprecise."""
+    sign = "-" if elapsed_ms < 0 else ""
+    total_ms = abs(int(elapsed_ms))
+    hours, remainder_ms = divmod(total_ms, 3_600_000)
+    minutes, remainder_ms = divmod(remainder_ms, 60_000)
+    seconds, millis = divmod(remainder_ms, 1000)
+    if hours:
+        return f"{sign}{hours:d}:{minutes:02d}:{seconds:02d}.{millis:03d}"
+    return f"{sign}{minutes:d}:{seconds:02d}.{millis:03d}"
+
+
+def _parse_relative_ms(text: str) -> int | None:
+    """Inverse of `_format_relative_ms`: "[+/-]H:MM:SS.mmm" or "M:SS.mmm" -> ms."""
+    text = text.strip().lstrip("+")
+    negative = text.startswith("-")
+    if negative:
+        text = text[1:]
+    parts = text.split(":")
+    if len(parts) == 2:
+        parts = ["0", *parts]
+    if len(parts) != 3:
+        return None
+    hours_text, minutes_text, seconds_text = parts
+    try:
+        total_ms = (int(hours_text) * 3600 + int(minutes_text) * 60) * 1000 + round(float(seconds_text) * 1000)
+    except ValueError:
+        return None
+    return -total_ms if negative else total_ms
+
+
 class MetadataEditDialog(QDialog):
     def __init__(self, metadata: ImagingAcquisitionMetadata, *, parent=None) -> None:
         super().__init__(parent)
         self._original = metadata
+        # No metaData.txt-style absolute start date (e.g. a CSV-only legacy
+        # import, see legacy_metadata.import_legacy_imaging_metadata) means
+        # every acquired_at_unix_ms here is an elapsed-since-start offset,
+        # not a real Unix timestamp - _format_time/_parse_time below must
+        # not render/parse those as calendar dates.
+        self._has_absolute_time = bool(metadata.started_at_utc)
         self.setWindowTitle("Acquisition metadata")
         self.resize(640, 640)
 
@@ -161,12 +202,14 @@ class MetadataEditDialog(QDialog):
                 item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
             table.setItem(row, column, item)
 
-    @staticmethod
-    def _format_time(acquired_at_unix_ms: int) -> str:
+    def _format_time(self, acquired_at_unix_ms: int) -> str:
+        if not self._has_absolute_time:
+            return f"+{_format_relative_ms(acquired_at_unix_ms)}"
         return datetime.fromtimestamp(acquired_at_unix_ms / 1000.0).strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
 
-    @staticmethod
-    def _parse_time(text: str) -> int | None:
+    def _parse_time(self, text: str) -> int | None:
+        if not self._has_absolute_time:
+            return _parse_relative_ms(text)
         for fmt in ("%Y-%m-%d %H:%M:%S.%f", "%Y-%m-%d %H:%M:%S"):
             try:
                 return int(datetime.strptime(text.strip(), fmt).timestamp() * 1000)
@@ -179,14 +222,25 @@ class MetadataEditDialog(QDialog):
         if not metadata.image_timings:
             return "No per-image timing data loaded (image timings are read-only here; re-import to change them)."
         timestamps = sorted(t.acquired_at_unix_ms for t in metadata.image_timings)
+        if not metadata.started_at_utc:
+            first = _format_relative_ms(timestamps[0])
+            last = _format_relative_ms(timestamps[-1])
+            return (
+                f"{len(metadata.image_timings)} timed images, +{first} → +{last} since acquisition start "
+                "(no absolute start date loaded; read-only here, re-import to change)."
+            )
         first = datetime.fromtimestamp(timestamps[0] / 1000.0).strftime("%Y-%m-%d %H:%M:%S")
         last = datetime.fromtimestamp(timestamps[-1] / 1000.0).strftime("%Y-%m-%d %H:%M:%S")
         return f"{len(metadata.image_timings)} timed images, {first} → {last} (read-only here; re-import to change)."
 
     def _add_comment_row(self) -> None:
+        # "now" only makes sense as a default when acquired_at_unix_ms values
+        # are real timestamps; for a relative-only import (no absolute start
+        # date) there's no meaningful "now" offset, so default to the start.
+        default_ms = int(datetime.now().timestamp() * 1000) if self._has_absolute_time else 0
         row = self._comments_table.rowCount()
         self._comments_table.insertRow(row)
-        self._set_row(self._comments_table, row, (self._format_time(int(datetime.now().timestamp() * 1000)), ""), first_column_editable=True)
+        self._set_row(self._comments_table, row, (self._format_time(default_ms), ""), first_column_editable=True)
 
     def _remove_selected_comment_row(self) -> None:
         rows = sorted({index.row() for index in self._comments_table.selectedIndexes()}, reverse=True)

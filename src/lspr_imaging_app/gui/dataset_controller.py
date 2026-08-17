@@ -126,7 +126,8 @@ class DatasetController:
         button-per-option `QMessageBox` style already used by
         `_resolve_ome_zarr_destination_collision` for a similar choice.
         Returns the chosen candidate (with `choice.acquisition_metadata`
-        attached) or None if the user cancelled.
+        attached if found - the candidate's own embedded metadata, if any,
+        is kept otherwise) or None if the user cancelled.
         """
         window = self.window
         format_labels = {"image_stack": "TIFF image stack", "ome_zarr": "OME-Zarr"}
@@ -150,7 +151,8 @@ class DatasetController:
         box.exec()
         dataset = candidate_by_button.get(box.clickedButton())
         if dataset is not None:
-            dataset.acquisition_metadata = choice.acquisition_metadata
+            if choice.acquisition_metadata is not None:
+                dataset.acquisition_metadata = choice.acquisition_metadata
             dataset.home_folder = choice.parent_folder
         return dataset
 

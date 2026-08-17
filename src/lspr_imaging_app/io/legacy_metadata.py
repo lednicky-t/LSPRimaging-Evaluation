@@ -274,11 +274,18 @@ def import_legacy_imaging_metadata(csv_path: Path | None, txt_path: Path | None)
     its camera/illumination values, without a matching measuring-times
     file) - at least one is required.
 
-    Without `metaData.txt`'s start date/time there is no absolute anchor for
-    the CSV's elapsed-ms column, so `image_timings`/`comment_events` are left
-    empty rather than fabricated against a meaningless zero point - a
-    CSV-only import still contributes `wavelengths_nm` (from the image
-    filenames themselves), just not cube-to-time linkage.
+    Without `metaData.txt`'s start date/time there is no absolute (real
+    calendar) anchor for the CSV's elapsed-ms column - but every consumer of
+    `acquired_at_unix_ms` (the sensorgram's elapsed-time axis, comment_at's
+    ordering) only ever needs *differences* between timings, not a real Unix
+    time; `analysis_controller._sensorgram_time_anchor_ms` already falls back
+    to the earliest recorded timing whenever `started_at_utc` is absent, for
+    exactly this case. So image_timings/comment_events are still built here,
+    anchored at a synthetic epoch (0) rather than left empty - `started_at_utc`
+    staying None is what tells a caller these are elapsed-since-start offsets,
+    not real timestamps, so it can display them as such (see
+    MainWindow._update_metadata_status_label, MetadataEditDialog._format_time)
+    instead of a misleading fake calendar date.
     """
     if csv_path is None and txt_path is None:
         raise ValueError("import_legacy_imaging_metadata needs at least one of csv_path or txt_path.")
@@ -288,6 +295,7 @@ def import_legacy_imaging_metadata(csv_path: Path | None, txt_path: Path | None)
     if meta["started_at_utc"] is not None:
         start_dt = datetime.fromisoformat(meta["started_at_utc"].replace("Z", "+00:00"))
         start_unix_ms = int(start_dt.timestamp() * 1000)
+    timing_anchor_ms = start_unix_ms if start_unix_ms is not None else 0
 
     rows = parse_measuring_times_csv(csv_path) if csv_path is not None else []
     image_timings: list[ImagingCubeTiming] = []
@@ -299,14 +307,13 @@ def import_legacy_imaging_metadata(csv_path: Path | None, txt_path: Path | None)
         wavelength_nm = float(match.group("wl"))
         spectral_cube_index = int(match.group("spectral_cube_index"))
         wavelengths_seen.add(wavelength_nm)
-        if start_unix_ms is not None:
-            image_timings.append(
-                ImagingCubeTiming(
-                    spectral_cube_index=spectral_cube_index,
-                    wavelength_nm=wavelength_nm,
-                    acquired_at_unix_ms=start_unix_ms + row["elapsed_ms"],
-                )
+        image_timings.append(
+            ImagingCubeTiming(
+                spectral_cube_index=spectral_cube_index,
+                wavelength_nm=wavelength_nm,
+                acquired_at_unix_ms=timing_anchor_ms + row["elapsed_ms"],
             )
+        )
 
     wavelengths_nm = sorted(wavelengths_seen)
     return ImagingAcquisitionMetadata(
@@ -319,7 +326,7 @@ def import_legacy_imaging_metadata(csv_path: Path | None, txt_path: Path | None)
             _build_illumination_settings(meta, wavelengths_nm) if txt_path is not None else {}
         ),
         image_timings=image_timings,
-        comment_events=_build_comment_events(rows, start_unix_ms) if (rows and start_unix_ms is not None) else [],
+        comment_events=_build_comment_events(rows, timing_anchor_ms) if rows else [],
     )
 
 

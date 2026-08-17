@@ -2947,6 +2947,22 @@ class MainWindow(MainWindowIcons, QMainWindow):
         self.metadata_preview_button.setEnabled(True)
         self._update_metadata_status_label()
 
+    @staticmethod
+    def _format_elapsed_ms_precise(elapsed_ms: int) -> str:
+        """H:MM:SS.mmm (or M:SS.mmm under an hour) for a millisecond duration
+        - used for acquisition-relative image/comment times when no absolute
+        start date was loaded (see
+        legacy_metadata.import_legacy_imaging_metadata), where a real
+        calendar date would be misleading rather than merely imprecise."""
+        sign = "-" if elapsed_ms < 0 else ""
+        total_ms = abs(int(elapsed_ms))
+        hours, remainder_ms = divmod(total_ms, 3_600_000)
+        minutes, remainder_ms = divmod(remainder_ms, 60_000)
+        seconds, millis = divmod(remainder_ms, 1000)
+        if hours:
+            return f"{sign}{hours:d}:{minutes:02d}:{seconds:02d}.{millis:03d}"
+        return f"{sign}{minutes:d}:{seconds:02d}.{millis:03d}"
+
     def _update_metadata_status_label(self) -> None:
         """Live "this image was acquired at <time>, comment: <text>" label
         for whatever (spectral_cube_index, wavelength) is currently
@@ -2968,8 +2984,11 @@ class MainWindow(MainWindowIcons, QMainWindow):
         if timing is None:
             self.metadata_current_cube_label.setText("This image: no timing data loaded.")
             return
-        acquired_dt = datetime.fromtimestamp(timing.acquired_at_unix_ms / 1000.0)
-        text = f"This image acquired: {acquired_dt.strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]}"
+        if metadata.started_at_utc:
+            acquired_dt = datetime.fromtimestamp(timing.acquired_at_unix_ms / 1000.0)
+            text = f"This image acquired: {acquired_dt.strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]}"
+        else:
+            text = f"This image acquired: +{self._format_elapsed_ms_precise(timing.acquired_at_unix_ms)} since start"
         comment = metadata.comment_at(timing.acquired_at_unix_ms)
         if comment:
             text += f" | {comment}"
@@ -3605,7 +3624,37 @@ class MainWindow(MainWindowIcons, QMainWindow):
         self._settings.setValue("histogram_bin_size", int(self.histogram_bins_spin.value()))
         self._save_layout_preferences()
         self._remove_workflow_logging()
+        self._wait_for_background_tasks_before_close()
         super().closeEvent(event)
+
+    def _wait_for_background_tasks_before_close(self, timeout_ms: int = 5000) -> None:
+        """Give any still-running `_thread_pool` task (image-cache build,
+        ROI/mask refresh, chromatic registration, export, ...) a bounded
+        chance to finish before the window actually closes and the
+        interpreter starts tearing down modules.
+
+        A task still reading OME-Zarr data at that point is a plausible
+        cause of the native access-violation crashes seen on close: zarr's
+        own background asyncio/IOCP event-loop thread (started the first
+        time this app reads a zarr store) is torn down by zarr's own
+        `atexit` hook with only a 200 ms grace period before it force-closes
+        the loop regardless of whether that thread is still using it - a
+        race with any of our own workers still mid-read. Waiting here first
+        does not eliminate that fragility (it lives in the zarr library),
+        but it removes the one collision this app can control.
+        """
+        active = self._thread_pool.activeThreadCount()
+        if active <= 0:
+            return
+        self._workflow_logger.info(
+            "Close | waiting up to %.1fs for %d background task(s) to finish", timeout_ms / 1000.0, active
+        )
+        if not self._thread_pool.waitForDone(timeout_ms):
+            self._workflow_logger.warning(
+                "Close | %d background task(s) still running after %.1fs wait",
+                self._thread_pool.activeThreadCount(),
+                timeout_ms / 1000.0,
+            )
 
     def prepare_initial_show(self) -> None:
         self._layout_state_controller.prepare_initial_show()

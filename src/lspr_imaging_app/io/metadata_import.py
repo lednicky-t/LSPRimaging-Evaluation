@@ -131,7 +131,10 @@ def import_metadata_files(paths: list[Path]) -> MetadataImportResult:
 
     metadata = import_legacy_imaging_metadata(csv_path, txt_path)
     if csv_path is not None and txt_path is None:
-        notes.append(f"Loaded timing/comments from {csv_path.name} - no metaData.txt selected, so cube times are not linked.")
+        notes.append(
+            f"Loaded timing/comments from {csv_path.name} - no metaData.txt selected, "
+            "so times are relative to acquisition start, not an absolute date."
+        )
     elif txt_path is not None and csv_path is None:
         notes.append(f"Loaded camera/illumination settings from {txt_path.name} - no measuring-times file selected.")
     else:
