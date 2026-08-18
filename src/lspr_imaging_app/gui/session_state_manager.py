@@ -454,7 +454,6 @@ class SessionStateManager:
             window._end_busy(f"Export failed: {exc}")
             QMessageBox.critical(window, "Export failed", str(exc))
         else:
-            window._set_status_text("Processing settings exported.")
             window._append_workflow_log("Processing settings exported.", level="success")
 
     def import_processing_profile(self) -> None:
@@ -519,8 +518,5 @@ class SessionStateManager:
             window._end_busy(f"Import failed: {exc}")
             QMessageBox.critical(window, "Import failed", str(exc))
         else:
-            window._set_status_text("Processing settings imported.")
             window._append_workflow_log("Processing settings imported.", level="success")
             window._end_busy(f"Imported processing settings from {source}")
-        finally:
-            window._end_busy("Processing settings imported.")

@@ -546,7 +546,20 @@ def _fast_read_zarr_plane(meta: dict, spectral_cube_pos: int, wavelength_pos: in
         with shard_path.open("rb") as f:
             f.seek(file_size - trailer_len)
             trailer = f.read(trailer_len)
-            index = np.frombuffer(trailer[:index_len], dtype=np.uint64)
+            index_bytes = trailer[:index_len]
+
+            import struct
+
+            from lspr_imaging_app.io._zarr_export_worker import _crc32c
+
+            stored_crc = struct.unpack("<I", trailer[index_len:])[0]
+            if _crc32c(index_bytes) != stored_crc:
+                # Corrupt/truncated shard index (torn write, bit rot, ...) -
+                # fall back to the standard zarr array read rather than trust
+                # an index we can't verify.
+                return None
+
+            index = np.frombuffer(index_bytes, dtype=np.uint64)
             offs_all = index[0::2]
             lens_all = index[1::2]
             base_ci = wl_local * n_inner_per_wl
@@ -630,6 +643,19 @@ def load_ome_zarr_dataset(folder: Path) -> ImageDataset:
         raise ValueError("OME-Zarr loader expects a 4D image stack shaped as [spectral_cube, wavelength, y, x].")
     spectral_cube_count, wavelength_count = int(shape[0]), int(shape[1])
     attrs = dict(zarr_group.attrs.asdict() if hasattr(zarr_group.attrs, "asdict") else dict(zarr_group.attrs))
+    if OME_ZARR_LSPR_KEY not in attrs:
+        # export_ome_zarr_dataset() creates the array (with its full declared
+        # shape) before writing any pixel data, and only writes this "lspr"
+        # attrs key at the very end, once every shard has been written
+        # successfully. Its absence means a previous export was cancelled or
+        # crashed partway through - the array shape/metadata looks complete,
+        # but the pixel data may be entirely missing (reads back as zero
+        # fill). Refuse to load it as if it were a finished dataset.
+        raise FileNotFoundError(
+            f"{folder} looks like an OME-Zarr export but is missing its completion metadata. "
+            "This usually means a previous export was cancelled or crashed before it finished - "
+            "delete this folder and export again."
+        )
     lspr_meta = attrs.get(OME_ZARR_LSPR_KEY, {}) if isinstance(attrs.get(OME_ZARR_LSPR_KEY, {}), dict) else {}
     # "frame_indices" is the legacy key name from before the frame -> spectral cube rename.
     legacy_indices = lspr_meta.get("frame_indices", list(range(spectral_cube_count)))

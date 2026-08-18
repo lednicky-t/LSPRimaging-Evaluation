@@ -65,6 +65,7 @@ class UndoManager:
             snapshot.wavelength_slider_value,
             repr(asdict(snapshot.state.preprocessing)),
             repr(asdict(snapshot.state.area_roi_settings)),
+            repr([asdict(roi) for roi in snapshot.state.rois]),
             repr([asdict(roi) for roi in snapshot.state.area_rois]),
             repr([asdict(group) for group in snapshot.state.area_roi_groups]),
             repr([asdict(array_group) for array_group in snapshot.state.area_roi_arrays]),

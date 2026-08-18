@@ -197,6 +197,33 @@ def _ome_zarr_export_task(
     )
 
 
+def _effective_reference_radii(
+    roi: AreaRoi,
+    default_inner_radius_px: float,
+    default_outer_radius_px: float,
+) -> tuple[float, float]:
+    """Reference-ring radii to use for one ROI.
+
+    Each ROI may carry its own reference_inner_diameter_px/outer_diameter_px
+    (set via the ROI table or the "Edit reference ROI region" dialog) to
+    override the shared area_roi_settings default for that ROI only. Falls
+    back to the shared default when the ROI has no override.
+    """
+    inner_radius = (
+        float(roi.reference_inner_diameter_px) / 2.0
+        if roi.reference_inner_diameter_px is not None
+        else float(default_inner_radius_px)
+    )
+    outer_radius = (
+        float(roi.reference_outer_diameter_px) / 2.0
+        if roi.reference_outer_diameter_px is not None
+        else float(default_outer_radius_px)
+    )
+    inner_radius = max(inner_radius, 0.0)
+    outer_radius = max(outer_radius, inner_radius)
+    return inner_radius, outer_radius
+
+
 def _selected_roi_masks_for_spectrum(
     image_shape: tuple[int, int],
     source_rois: list[AreaRoi],
@@ -229,8 +256,8 @@ def _selected_roi_masks_for_spectrum(
     if not effective_rois:
         return roi_mask, reference_mask
 
-    reference_inner_radius = float(max(reference_inner_radius_px, 0.0))
-    reference_outer_radius = float(max(reference_outer_radius_px, reference_inner_radius))
+    default_inner_radius = float(max(reference_inner_radius_px, 0.0))
+    default_outer_radius = float(max(reference_outer_radius_px, default_inner_radius))
     use_affine = affine_matrix is not None and not np.allclose(
         np.asarray(affine_matrix, dtype=np.float64),
         identity_affine_matrix(),
@@ -253,11 +280,12 @@ def _selected_roi_masks_for_spectrum(
             else:
                 roi_mask |= distance_sq <= float(roi.sample_radius_px) ** 2
 
+            inner_radius, outer_radius = _effective_reference_radii(roi, default_inner_radius, default_outer_radius)
             if roi.reference_geometry_type == "mask" and roi.reference_mask is not None:
                 reference_mask |= expand_mask_to_patch(roi.reference_mask, (px0, py0), (image_height, image_width))
-            elif roi.reference_geometry_type != "none" and reference_outer_radius > 0.0:
-                outer_mask = distance_sq <= reference_outer_radius**2
-                inner_mask = distance_sq < reference_inner_radius**2 if reference_inner_radius > 0.0 else np.zeros_like(outer_mask)
+            elif roi.reference_geometry_type != "none" and outer_radius > 0.0:
+                outer_mask = distance_sq <= outer_radius**2
+                inner_mask = distance_sq < inner_radius**2 if inner_radius > 0.0 else np.zeros_like(outer_mask)
                 reference_mask |= outer_mask & ~inner_mask
         reference_mask &= ~roi_mask
         return roi_mask, reference_mask
@@ -284,14 +312,15 @@ def _selected_roi_masks_for_spectrum(
                     float(roi.sample_radius_px),
                     affine_matrix,
                 )
+            inner_radius, outer_radius = _effective_reference_radii(roi, default_inner_radius, default_outer_radius)
             if roi.reference_geometry_type == "mask" and roi.reference_mask is not None:
                 reference_mask |= expand_mask(roi.reference_mask, (image_height, image_width))
-            elif roi.reference_geometry_type != "none" and reference_outer_radius > 0.0:
+            elif roi.reference_geometry_type != "none" and outer_radius > 0.0:
                 reference_mask |= transformed_annulus_mask(
                     (image_height, image_width),
                     (float(roi.center_x), float(roi.center_y)),
-                    float(reference_inner_radius),
-                    float(reference_outer_radius),
+                    float(inner_radius),
+                    float(outer_radius),
                     affine_matrix,
                 )
     else:
@@ -306,15 +335,16 @@ def _selected_roi_masks_for_spectrum(
                     float(roi.sample_radius_px),
                     affine_matrix,
                 )
+            inner_radius, outer_radius = _effective_reference_radii(roi, default_inner_radius, default_outer_radius)
             if roi.reference_geometry_type == "mask" and roi.reference_mask is not None:
                 reference_mask |= expand_mask_to_patch(roi.reference_mask, (px0, py0), (image_height, image_width))
-            elif roi.reference_geometry_type != "none" and reference_outer_radius > 0.0:
+            elif roi.reference_geometry_type != "none" and outer_radius > 0.0:
                 reference_mask |= transformed_annulus_mask_for_patch(
                     (px0, py0),
                     (image_height, image_width),
                     (float(roi.center_x), float(roi.center_y)),
-                    float(reference_inner_radius),
-                    float(reference_outer_radius),
+                    float(inner_radius),
+                    float(outer_radius),
                     affine_matrix,
                 )
     reference_mask &= ~roi_mask
@@ -346,7 +376,12 @@ def compute_roi_union_bounding_box(
     x_max, y_max = float("-inf"), float("-inf")
     for roi in selected_rois:
         cx, cy = float(roi.center_x), float(roi.center_y)
-        roi_reach = max(reference_outer, float(roi.sample_radius_px))
+        roi_reference_outer = (
+            float(roi.reference_outer_diameter_px) / 2.0
+            if roi.reference_outer_diameter_px is not None
+            else reference_outer
+        )
+        roi_reach = max(roi_reference_outer, float(roi.sample_radius_px))
         for matrix in matrices:
             matrix_arr = None if matrix is None else np.asarray(matrix, dtype=np.float64)
             if matrix_arr is None or np.allclose(matrix_arr, identity_affine_matrix(), atol=1e-9):

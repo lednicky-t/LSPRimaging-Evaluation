@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import base64
 import json
+import os
+import tempfile
 from dataclasses import asdict
 from pathlib import Path
 
@@ -27,8 +29,28 @@ from lspr_imaging_app.domain.models import (
 
 
 def write_json_file(path: Path, payload: dict) -> None:
+    """Write `payload` to `path` as JSON, atomically.
+
+    This backs the debounced session autosave (ROIs, masks, chromatic
+    models, analysis cache, ...), which can fire frequently during normal
+    use. Writing to a temp file in the same directory and swapping it in
+    with os.replace() (atomic on both POSIX and Windows) means a crash or
+    power loss mid-write leaves either the old file or the new one intact,
+    never a truncated/corrupt one.
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    data = json.dumps(payload, indent=2)
+    fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent))
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(data)
+        os.replace(tmp_name, path)
+    except BaseException:
+        try:
+            os.unlink(tmp_name)
+        except OSError:
+            pass
+        raise
 
 
 def _encode_mask_payload(mask: np.ndarray) -> dict:

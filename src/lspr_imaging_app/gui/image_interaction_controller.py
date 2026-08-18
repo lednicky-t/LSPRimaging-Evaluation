@@ -195,6 +195,7 @@ class ImageInteractionController:
                 w._crop_drag_anchor = None
                 w._crop_drag_origin = None
                 w._handle_image_tool_settings_changed("Crop moved.", preserve_view=True)
+                w._commit_prepared_undo_snapshot()
                 return True
 
         if watched is image_view.viewport() and w._active_tool == "chromatic_landmark":
@@ -296,6 +297,7 @@ class ImageInteractionController:
                 if allow_roi_move and w._selected_rectangle_roi_ids and hit_roi is not None:
                     if hit_roi.roi_id not in w._selected_rectangle_roi_ids:
                         w._select_rectangle_rois({hit_roi.roi_id}, additive=False)
+                    w._prepare_undo_snapshot("Move ROIs")
                     w._dragging_rectangle_rois = True
                     w._rectangle_drag_anchor = point
                     w._rectangle_drag_original_positions = {
@@ -334,6 +336,7 @@ class ImageInteractionController:
                 w._rectangle_drag_anchor = None
                 w._rectangle_drag_original_positions.clear()
                 w._sync_rectangle_stamp_overlays()
+                w._commit_prepared_undo_snapshot()
                 w._save_processing_state_for_dataset()
                 w._schedule_processing_state_save()
                 w.status_label.setText(f"Moved {len(w._selected_rectangle_roi_ids)} selected rectangle ROI(s).")

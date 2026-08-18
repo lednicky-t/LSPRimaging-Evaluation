@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from math import hypot
 
 import numpy as np
@@ -168,9 +169,37 @@ def refresh_roi_metrics(
     rois: list[AreaRoi],
     external_mask: np.ndarray | None = None,
 ) -> list[AreaRoi]:
+    """Recompute each ROI's contrast score at its current position and
+    radius, without moving it.
+
+    Unlike detect_rois/_refine_detected_roi, which search nearby positions
+    for a locally better center, this only re-scores each ROI where it
+    already is - used after the user finishes editing ROI positions/sizes or
+    the exclusion mask, so the ROI table's Score column reflects the current
+    image and geometry instead of a stale value from initial detection.
+    """
     if image.size == 0 or not rois:
         return rois
-    return rois
+    image_f32 = image.astype(np.float32, copy=False)
+    valid_mask = ~ignored_pixel_mask(image_f32, settings, external_mask=external_mask)
+    if not np.any(valid_mask):
+        return rois
+    sigma = max(float(settings.sample_radius_px) / 2.5, 1.0)
+    filtered, _ = _masked_gaussian_filter(image_f32, valid_mask, sigma=sigma)
+    return [
+        replace(
+            roi,
+            score=_roi_circular_contrast_score(
+                filtered=filtered,
+                valid_mask=valid_mask,
+                center_x=float(roi.center_x),
+                center_y=float(roi.center_y),
+                radius=float(roi.sample_radius_px),
+                mode=settings.mode,
+            ),
+        )
+        for roi in rois
+    ]
 
 
 def _masked_gaussian_filter(image: np.ndarray, valid_mask: np.ndarray, sigma: float) -> tuple[np.ndarray, np.ndarray]:

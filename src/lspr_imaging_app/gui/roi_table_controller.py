@@ -223,7 +223,7 @@ class RoiTableController:
             return
         if item.column() == 1:
             self.rename_group(roi_id, item.text().strip())
-        elif item.column() in {2, 3, 4}:
+        elif item.column() in {4, 5, 6}:
             self.edit_diameter_cells(roi_id, item.row())
 
     def on_cell_double_clicked(self, row: int, column: int) -> None:

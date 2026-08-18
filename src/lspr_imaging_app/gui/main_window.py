@@ -2479,6 +2479,7 @@ class MainWindow(MainWindowIcons, QMainWindow):
             return
         self._push_undo_point("Edit ROI diameter")
         roi.sample_diameter_px = float(value)
+        roi.sample_radius_px = max(float(value) / 2.0, 1.0)
         self._save_processing_state_for_dataset()
         self._update_roi_overlays()
         self._update_roi_summary()
@@ -2509,9 +2510,10 @@ class MainWindow(MainWindowIcons, QMainWindow):
         if roi is None:
             return
         try:
-            sample_diameter_text = self.roi_table.item(row, 2).text() if self.roi_table.item(row, 2) is not None else ""
-            reference_inner_text = self.roi_table.item(row, 3).text() if self.roi_table.item(row, 3) is not None else ""
-            reference_outer_text = self.roi_table.item(row, 4).text() if self.roi_table.item(row, 4) is not None else ""
+            # Columns: 0=id, 1=group, 2=C_s swatch, 3=C_r swatch, 4=D_s, 5=d_r, 6=D_r, 7=x, 8=y.
+            sample_diameter_text = self.roi_table.item(row, 4).text() if self.roi_table.item(row, 4) is not None else ""
+            reference_inner_text = self.roi_table.item(row, 5).text() if self.roi_table.item(row, 5) is not None else ""
+            reference_outer_text = self.roi_table.item(row, 6).text() if self.roi_table.item(row, 6) is not None else ""
             sample_diameter = float(sample_diameter_text)
             reference_inner = float(reference_inner_text)
             reference_outer = float(reference_outer_text)
@@ -2521,6 +2523,7 @@ class MainWindow(MainWindowIcons, QMainWindow):
             return
         self._push_undo_point("Edit ROI geometry")
         roi.sample_diameter_px = sample_diameter
+        roi.sample_radius_px = max(sample_diameter / 2.0, 1.0)
         roi.reference_inner_diameter_px = reference_inner
         roi.reference_outer_diameter_px = max(reference_outer, reference_inner)
         if self.roi_geometry_scope_button.isChecked():
@@ -6724,6 +6727,10 @@ class MainWindow(MainWindowIcons, QMainWindow):
         for group in self._state.area_roi_groups:
             group.area_roi_ids = [id_map.get(roi_id, roi_id) for roi_id in group.area_roi_ids]
             group.area_roi_ids = sorted(dict.fromkeys(group.area_roi_ids))
+        for array in self._state.area_roi_arrays:
+            # Order matters here (row-major/column-major grid recipe) - unlike
+            # group.area_roi_ids above, this must not be sorted/deduped.
+            array.member_area_roi_ids = [id_map.get(roi_id, roi_id) for roi_id in array.member_area_roi_ids]
         self._state.area_rois = ordered
         self._selected_roi_ids = {id_map.get(roi_id, roi_id) for roi_id in self._selected_roi_ids if roi_id in id_map}
         self._update_roi_overlays()
@@ -6955,6 +6962,15 @@ class MainWindow(MainWindowIcons, QMainWindow):
             if group.area_roi_ids:
                 updated_groups.append(group)
         self._state.area_roi_groups = updated_groups
+
+        updated_arrays = []
+        for array in self._state.area_roi_arrays:
+            array.member_area_roi_ids = [
+                roi_id_map[roi_id] for roi_id in array.member_area_roi_ids if roi_id in roi_id_map
+            ]
+            if array.member_area_roi_ids:
+                updated_arrays.append(array)
+        self._state.area_roi_arrays = updated_arrays
 
     def _remove_selected_rois(self) -> None:
         if self._roi_editor_mode == "rectangles" and self._selected_rectangle_roi_ids:
