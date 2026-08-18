@@ -43,12 +43,16 @@ class DatasetController:
             self.window._set_status_text(f"Could not open folder in File Explorer: {exc}")
 
     def has_restorable_session(self, folder: Path) -> bool:
-        if (folder / "processing_profile.json").exists():
-            return True
         active_name = self.window._load_active_session_name_for_folder(folder)
         if active_name and active_name != "Default":
-            return (folder / "sessions" / active_name / "processing_profile.json").exists()
-        return False
+            return (
+                (folder / "analysis" / "sessions" / active_name / "processing_profile.json").exists()
+                or (folder / "sessions" / active_name / "processing_profile.json").exists()
+            )
+        return (
+            (folder / "analysis" / "processing_profile.json").exists()
+            or (folder / "processing_profile.json").exists()
+        )
 
     def run_startup_restore_flow(self, *, on_done=None) -> None:
         progress = getattr(self.window, "_report_startup_progress", None)

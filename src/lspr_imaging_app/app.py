@@ -58,7 +58,13 @@ def _configure_logging() -> Path:
     console_logging_enabled = os.environ.get("LSPR_CONSOLE_LOG", "").strip().lower() in {"1", "true", "yes", "on"}
     if console_logging_enabled:
         stream_handler = logging.StreamHandler()
-        stream_handler.setLevel(logging.INFO)
+        # DEBUG, matching the file handler - the suite launcher's Console
+        # panel and "App exited unexpectedly" crash tail are both fed from
+        # this stream (see apps/suite_launcher's _forward_process_output),
+        # and every closeEvent()-time log line (panel visibility syncs,
+        # "Processing state saved") is DEBUG level - an INFO filter here
+        # silently hid exactly the detail those diagnostics exist to show.
+        stream_handler.setLevel(logging.DEBUG)
         stream_handler.setFormatter(formatter)
         root_logger.addHandler(stream_handler)
     root_logger._lspr_logging_configured = True  # type: ignore[attr-defined]
