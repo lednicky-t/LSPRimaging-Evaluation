@@ -436,17 +436,6 @@ def _ome_zarr_array_cached(root_str: str):
     return _ome_zarr_group_cached(root_str)[OME_ZARR_ARRAY_DIRNAME]
 
 
-def _ome_zarr_root_attrs(root: Path) -> dict:
-    attrs_path = root / OME_ZARR_META_FILENAME
-    if not attrs_path.exists():
-        return {}
-    try:
-        payload = json.loads(attrs_path.read_text(encoding="utf-8"))
-    except Exception:
-        return {}
-    return payload if isinstance(payload, dict) else {}
-
-
 @lru_cache(maxsize=16)
 def _ome_zarr_fast_read_metadata(root_str: str) -> dict | None:
     """Everything needed to read one plane directly from its zarr v3 shard

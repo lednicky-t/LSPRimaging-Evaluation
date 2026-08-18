@@ -40,7 +40,7 @@ class LayoutStateController:
         if window._window_geometry_restored:
             return
         geometry_rel = window._settings.value("window_geometry_rel")
-        available = self.best_restore_screen_geometry(None)
+        available = self.best_restore_screen_geometry(self._saved_window_geometry_rect())
         logging.getLogger("lspr_imaging_app.layout").debug(
             "restore window | saved_rel=%r | screen=%s",
             geometry_rel,
@@ -95,6 +95,24 @@ class LayoutStateController:
         window._startup_restore_window_maximized = window._settings_bool("window_is_maximized", False)
         window._startup_restore_window_fullscreen = window._settings_bool("window_is_fullscreen", False)
         window._window_geometry_restored = True
+
+    def _saved_window_geometry_rect(self) -> QRectF | None:
+        """The window's last-closed screen-pixel geometry (main_window.py's
+        closeEvent saves it as [x, y, width, height] under
+        "window_geometry_rect"), as a QRectF for
+        best_restore_screen_geometry's overlap match - the fallback used when
+        "window_screen_name" no longer names a currently-connected monitor
+        (renamed/unplugged/reordered)."""
+        raw = self.window._settings.value("window_geometry_rect")
+        if not (isinstance(raw, list) and len(raw) == 4):
+            return None
+        try:
+            x, y, width, height = (float(value) for value in raw)
+        except (TypeError, ValueError):
+            return None
+        if width <= 0.0 or height <= 0.0:
+            return None
+        return QRectF(x, y, width, height)
 
     def best_restore_screen_geometry(self, saved_rect: QRectF | None = None):
         window = self.window

@@ -40,16 +40,6 @@ def is_cube_fully_excluded(rules: Sequence[ImageExclusionRule], spectral_cube_in
     )
 
 
-def rule_for_scope(
-    rules: Sequence[ImageExclusionRule], spectral_cube_index: int | None, wavelength_nm: float | None
-) -> ImageExclusionRule | None:
-    """Find the existing rule with this exact scope, if any (for removal/replace)."""
-    for rule in rules:
-        if rule.spectral_cube_index == spectral_cube_index and rule.wavelength_nm == wavelength_nm:
-            return rule
-    return None
-
-
 def upsert_rule(
     rules: list[ImageExclusionRule],
     spectral_cube_index: int | None,

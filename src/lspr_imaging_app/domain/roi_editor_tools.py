@@ -45,7 +45,7 @@ def roi_top_left_from_center(
     return x, y
 
 
-def move_rectangle_roi(
+def move_roi_from_template(
     roi: RoiDefinition,
     *,
     center_x: float,
@@ -62,16 +62,6 @@ def move_rectangle_roi(
     )
     moved.shape = str(roi.shape)
     return moved
-
-
-def move_roi_from_template(
-    roi: RoiDefinition,
-    *,
-    center_x: float,
-    center_y: float,
-    image_shape: tuple[int, int] | tuple[int, int, int] | None = None,
-) -> RoiDefinition:
-    return move_rectangle_roi(roi, center_x=center_x, center_y=center_y, image_shape=image_shape)
 
 
 def clone_rectangle_template(
@@ -97,25 +87,6 @@ def clone_rectangle_template(
     return clone
 
 
-def clone_roi_template(
-    template: RoiDefinition,
-    *,
-    roi_id: str,
-    name: str | None = None,
-    center_x: float,
-    center_y: float,
-    image_shape: tuple[int, int] | tuple[int, int, int] | None = None,
-) -> RoiDefinition:
-    return clone_rectangle_template(
-        template,
-        roi_id=roi_id,
-        name=name,
-        center_x=center_x,
-        center_y=center_y,
-        image_shape=image_shape,
-    )
-
-
 def create_rois_from_template(
     template: RoiDefinition,
     *,
@@ -125,7 +96,7 @@ def create_rois_from_template(
     center_y: float,
     image_shape: tuple[int, int] | tuple[int, int, int] | None = None,
 ) -> RoiDefinition:
-    return clone_roi_template(
+    return clone_rectangle_template(
         template,
         roi_id=roi_id,
         name=name,
@@ -228,33 +199,6 @@ def clone_rectangle_template_grid(
     return clones
 
 
-def clone_roi_template_grid(
-    template: RoiDefinition,
-    *,
-    rows: int,
-    cols: int,
-    spacing_x: float,
-    spacing_y: float | None = None,
-    anchor_center_x: float = 0.0,
-    anchor_center_y: float = 0.0,
-    start_index: int = 1,
-    image_shape: tuple[int, int] | tuple[int, int, int] | None = None,
-    roi_id_factory: Callable[[int], str] | None = None,
-) -> list[RoiDefinition]:
-    return clone_rectangle_template_grid(
-        template,
-        rows=rows,
-        cols=cols,
-        spacing_x=spacing_x,
-        spacing_y=spacing_y,
-        anchor_center_x=anchor_center_x,
-        anchor_center_y=anchor_center_y,
-        start_index=start_index,
-        image_shape=image_shape,
-        roi_id_factory=roi_id_factory,
-    )
-
-
 def create_rois_from_template_grid(
     template: RoiDefinition,
     *,
@@ -268,7 +212,7 @@ def create_rois_from_template_grid(
     image_shape: tuple[int, int] | tuple[int, int, int] | None = None,
     roi_id_factory: Callable[[int], str] | None = None,
 ) -> list[RoiDefinition]:
-    return clone_roi_template_grid(
+    return clone_rectangle_template_grid(
         template,
         rows=rows,
         cols=cols,

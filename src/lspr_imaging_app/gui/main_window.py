@@ -115,7 +115,7 @@ from lspr_imaging_app.gui.ui_helpers import (
 )
 from lspr_imaging_app.gui.analysis_controller import AnalysisController
 from lspr_imaging_app.gui.dataset_controller import DatasetController
-from lspr_imaging_app.gui.image_controller import ImageController
+from lspr_imaging_app.gui.image_render_manager import ImageRenderManager
 from lspr_imaging_app.gui.image_exclusion_controller import ImageExclusionController
 from lspr_imaging_app.gui.image_interaction_controller import ImageInteractionController
 from lspr_imaging_app.gui.overlay_manager import OverlayManager
@@ -270,7 +270,7 @@ class MainWindow(MainWindowIcons, QMainWindow):
     def _init_controllers(self) -> None:
         self._workflow_log_controller = WorkflowLogController(self)
         self._dataset_controller = DatasetController(self)
-        self._image_controller = ImageController(self)
+        self._render_manager = ImageRenderManager(self)
         self._roi_table_controller = RoiTableController(self)
         self._metadata_controller = MetadataController(self)
         self._mask_controller = MaskController(self)
@@ -2292,12 +2292,6 @@ class MainWindow(MainWindowIcons, QMainWindow):
     def _refresh_roi_table_headers(self) -> None:
         roi_table_headers(self.roi_table)
 
-    def _on_roi_list_item_changed(self, item: QTableWidgetItem) -> None:
-        self._roi_table_controller._on_roi_list_item_changed(item)
-
-    def _on_roi_list_cell_double_clicked(self, row: int, column: int) -> None:
-        self._roi_table_controller._on_roi_list_cell_double_clicked(row, column)
-
     def _rename_roi_group_from_table(self, roi_id: int, new_name: str) -> None:
         current_group = self._group_for_roi(roi_id)
         if not new_name:
@@ -2535,60 +2529,6 @@ class MainWindow(MainWindowIcons, QMainWindow):
         self._update_roi_overlays()
         self._update_roi_summary()
         self._update_roi_table()
-
-    def _roi_table_legacy_copy(self) -> None:
-        self._roi_table_updating = True
-        self.roi_table.blockSignals(True)
-        self.roi_table.setRowCount(0)
-        rois = sorted(self._state.area_rois, key=lambda roi: roi.area_roi_id)
-        if not rois:
-            self.roi_table.blockSignals(False)
-            self._roi_table_updating = False
-            self._sync_roi_table_selection()
-            return
-        for roi in rois:
-            row = self.roi_table.rowCount()
-            self.roi_table.insertRow(row)
-            self.roi_table.setRowHeight(row, 18)
-            id_item = QTableWidgetItem(str(roi.area_roi_id))
-            id_item.setFlags(id_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
-            self.roi_table.setItem(row, 0, id_item)
-            group = self._group_for_roi(roi.area_roi_id)
-            group_name = group.name if group is not None else "—"
-            group_item = QTableWidgetItem(group_name)
-            group_item.setFlags(group_item.flags() | Qt.ItemFlag.ItemIsEditable)
-            if group is not None:
-                group_color = QColor(group.sample_color_hex)
-                if group_color.isValid():
-                    group_item.setForeground(group_color)
-                    group_item.setToolTip(f"{group.name} ({group.sample_color_hex})")
-            self.roi_table.setItem(row, 1, group_item)
-            sample_color_label = QLabel()
-            sample_color_label.setFixedSize(16, 16)
-            sample_color = getattr(self._state, "overlay_colors", {}).get("roi", QColor("#f8fafc")) if hasattr(self._state, "overlay_colors") else QColor("#f8fafc")
-            sample_color_label.setStyleSheet(f"background-color: {sample_color.name()}; border: 1px solid #2d2d2d;")
-            self.roi_table.setCellWidget(row, 2, sample_color_label)
-            reference_color_label = QLabel()
-            reference_color_label.setFixedSize(18, 18)
-            reference_color = getattr(self._state, "overlay_colors", {}).get("ring", QColor("#38bdf8")) if hasattr(self._state, "overlay_colors") else QColor("#38bdf8")
-            reference_color_label.setStyleSheet(f"background-color: {reference_color.name()}; border: 1px solid #2d2d2d;")
-            self.roi_table.setCellWidget(row, 3, reference_color_label)
-            if self._state.preprocessing.display_units == "um" and self._can_display_micrometers():
-                scale = self._microns_per_pixel_scalar()
-                pos_text = f"x: {roi.center_x * scale:.1f} y: {roi.center_y * scale:.1f}"
-            else:
-                pos_text = f"x: {roi.center_x:.1f} y: {roi.center_y:.1f}"
-            pos_item = QTableWidgetItem(pos_text)
-            pos_item.setFlags(pos_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
-            self.roi_table.setItem(row, 4, pos_item)
-        self.roi_table.resizeColumnsToContents()
-        self.roi_table.setColumnWidth(0, 38)
-        self.roi_table.setColumnWidth(1, 88)
-        self.roi_table.setColumnWidth(2, 22)
-        self.roi_table.setColumnWidth(3, 22)
-        self.roi_table.setColumnWidth(4, 126)
-        self.roi_table.horizontalHeader().setStretchLastSection(True)
-        self._sync_roi_table_selection()
 
     def _update_roi_table(self) -> None:
         if self._roi_refresh_timer.isActive():
@@ -3005,10 +2945,10 @@ class MainWindow(MainWindowIcons, QMainWindow):
             f"Image refresh | spectral_cube_index {spectral_cube_index if spectral_cube_index is not None else '-'} | wavelength {wavelength if wavelength is not None else '-'}",
             level="debug",
         )
-        self._image_controller.refresh_image()
+        self._render_manager.refresh_image()
 
     def _start_pending_image_refresh(self) -> None:
-        self._image_controller.start_pending_image_refresh()
+        self._render_manager.start_pending_image_refresh()
 
     def _on_image_refresh_ready(
         self,
@@ -3021,7 +2961,7 @@ class MainWindow(MainWindowIcons, QMainWindow):
         record_name: str,
         processed: np.ndarray,
     ) -> None:
-        self._image_controller.on_image_refresh_ready(
+        self._render_manager.on_image_refresh_ready(
             signature,
             cache_key,
             record_path,
@@ -3033,7 +2973,7 @@ class MainWindow(MainWindowIcons, QMainWindow):
         )
 
     def _on_image_refresh_failed(self, message: str) -> None:
-        self._image_controller.on_image_refresh_failed(message)
+        self._render_manager.on_image_refresh_failed(message)
 
     def _apply_loaded_image(
         self,
@@ -3044,7 +2984,7 @@ class MainWindow(MainWindowIcons, QMainWindow):
         wavelength: float,
         record_name: str,
     ) -> None:
-        self._image_controller.apply_loaded_image(processed, record_path, image_key, spectral_cube_index, wavelength, record_name)
+        self._render_manager.apply_loaded_image(processed, record_path, image_key, spectral_cube_index, wavelength, record_name)
 
     def _update_image_name_overlay(self, record_name: str | None) -> None:
         self.image_name_label.hide()
@@ -3991,7 +3931,7 @@ class MainWindow(MainWindowIcons, QMainWindow):
         self._ui_state_manager.save_visual_preferences()
 
     def _on_image_view_range_changed(self, *_args) -> None:
-        self._image_controller.on_image_view_range_changed(*_args)
+        self._render_manager.on_image_view_range_changed(*_args)
 
     def _save_control_preferences(self) -> None:
         self._ui_state_manager.save_control_preferences()
@@ -4123,10 +4063,10 @@ class MainWindow(MainWindowIcons, QMainWindow):
         return self._chromatic_controller.signature_for_image_key(image_key)
 
     def _display_rois(self, image_key: tuple[int, float] | None = None) -> list[AreaRoi]:
-        return self._image_controller.display_rois(image_key)
+        return self._render_manager.display_rois(image_key)
 
     def _rois_for_preprocessing(self, image_key: tuple[int, float] | None) -> list[AreaRoi]:
-        return self._image_controller.rois_for_preprocessing(image_key)
+        return self._render_manager.rois_for_preprocessing(image_key)
 
     def _roi_curve_points(
         self,
@@ -4134,7 +4074,7 @@ class MainWindow(MainWindowIcons, QMainWindow):
         display_roi: AreaRoi,
         radius_px: float,
     ) -> tuple[np.ndarray, np.ndarray]:
-        return self._image_controller.roi_curve_points(source_roi, display_roi, radius_px)
+        return self._render_manager.roi_curve_points(source_roi, display_roi, radius_px)
 
     def _set_view_overlay_visibility(
         self,
@@ -4145,7 +4085,7 @@ class MainWindow(MainWindowIcons, QMainWindow):
         reference_points_visible: bool,
         highlight_visible: bool,
     ) -> None:
-        self._image_controller.set_view_overlay_visibility(
+        self._render_manager.set_view_overlay_visibility(
             rois_visible=rois_visible,
             reference_rois_visible=reference_rois_visible,
             mask_visible=mask_visible,
@@ -4163,20 +4103,20 @@ class MainWindow(MainWindowIcons, QMainWindow):
         self._chromatic_controller.capture_view_ranges()
 
     def _capture_pending_image_view_ranges(self, *, preserve_view: bool = False) -> None:
-        self._image_controller.capture_pending_image_view_ranges(preserve_view=preserve_view)
+        self._render_manager.capture_pending_image_view_ranges(preserve_view=preserve_view)
 
     def _set_clamped_image_view_ranges(
         self,
         x_range: tuple[float, float],
         y_range: tuple[float, float],
     ) -> bool:
-        return self._image_controller.set_clamped_image_view_ranges(x_range, y_range)
+        return self._render_manager.set_clamped_image_view_ranges(x_range, y_range)
 
     def _restore_pending_image_view_after_load(self) -> bool:
-        return self._image_controller.restore_pending_image_view_after_load()
+        return self._render_manager.restore_pending_image_view_after_load()
 
     def _restore_saved_image_view_after_load(self) -> bool:
-        return self._image_controller.restore_saved_image_view_after_load()
+        return self._render_manager.restore_saved_image_view_after_load()
 
     def _restore_chromatic_view_after_load(self) -> bool:
         return self._chromatic_controller.restore_view_after_load()

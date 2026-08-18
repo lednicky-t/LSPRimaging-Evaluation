@@ -552,35 +552,6 @@ class RoiTableController:
         if visible:
             self.window._update_roi_table()
 
-
-
-
-    def _on_roi_list_item_changed(self, item: QTableWidgetItem) -> None:
-        if self.window._roi_table_updating:
-            return
-        roi_id = self.window._roi_list_roi_id_for_row(item.row())
-        if roi_id is None:
-            return
-        if item.column() == 1:
-            self.window._rename_roi_group_from_table(roi_id, item.text().strip())
-        elif item.column() in {2, 3, 4}:
-            self.window._edit_roi_diameter_cells_from_table(roi_id, item.row())
-
-
-    def _on_roi_list_cell_double_clicked(self, row: int, column: int) -> None:
-        roi_id = self.window._roi_list_roi_id_for_row(row)
-        if roi_id is None:
-            return
-        if column == 2:
-            self.window._edit_roi_color_from_table(roi_id)
-        elif column == 3:
-            self.window._edit_reference_color_from_table()
-        elif column == 4:
-            self.window._edit_roi_geometry_from_table(roi_id)
-        elif column == 5:
-            self.window._edit_reference_geometry_from_table(roi_id)
-
-
     def _on_roi_metrics_ready(
         self,
         request_id: int,
