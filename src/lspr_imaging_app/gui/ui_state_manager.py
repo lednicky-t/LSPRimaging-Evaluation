@@ -381,10 +381,10 @@ class UIStateManager:
             return
         window._ome_zarr_chunk_controls_syncing = True
         try:
-            size = window._current_ome_zarr_chunk_size()
+            size = window._dataset_controller._current_ome_zarr_chunk_size()
             window._settings.setValue("ome_zarr/chunk_size_px", int(size))
             window.ome_zarr_chunk_guide_button.setIcon(window._ome_zarr_grid_icon(window.ome_zarr_chunk_guide_button.isChecked()))
-            compression_enabled = window._current_ome_zarr_compression_enabled()
+            compression_enabled = window._dataset_controller._current_ome_zarr_compression_enabled()
             window._settings.setValue("ome_zarr/compression_enabled", bool(compression_enabled))
             window.ome_zarr_compression_label.setText(f"Compression: {'on' if compression_enabled else 'off'}")
             window.ome_zarr_compression_button.setIcon(window._ome_zarr_compression_icon(compression_enabled))

@@ -267,7 +267,7 @@ class LayoutStateController:
         window._settings.setValue("results_export_section_pinned", window.results_export_section.is_pinned())
         if hasattr(window, "workflow_log_section"):
             window._settings.setValue("workflow_log_section_expanded", window.workflow_log_section.is_expanded())
-        window._settings.setValue("ome_zarr/chunk_size_px", int(window._current_ome_zarr_chunk_size()))
+        window._settings.setValue("ome_zarr/chunk_size_px", int(window._dataset_controller._current_ome_zarr_chunk_size()))
         window._settings.setValue("ome_zarr/shard_mode", window.ome_zarr_shard_mode_combo.currentData())
         window._settings.setValue("ome_zarr/chunk_guide_visible", bool(window.ome_zarr_chunk_guide_button.isChecked()))
         window._settings.setValue("ome_zarr/compression_enabled", bool(window.ome_zarr_compression_button.isChecked()))

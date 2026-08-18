@@ -1,13 +1,5 @@
 from __future__ import annotations
 
-import os
-import shutil
-import threading
-import time
-from copy import deepcopy
-from pathlib import Path
-
-import numpy as np
 from PyQt6.QtCore import (
     QByteArray,
     QLineF,
@@ -25,7 +17,6 @@ from PyQt6.QtWidgets import (
     QLabel,
     QLineEdit,
     QMenu,
-    QMessageBox,
     QAbstractSpinBox,
     QSizePolicy,
     QToolButton,
@@ -39,14 +30,6 @@ from lspr_ui import (
     load_tabler_icon,
     make_compact_spinbox,
     transparent_icon_button_stylesheet,
-)
-from lspr_imaging_app.gui.ui_helpers import (
-    current_ome_zarr_compression_enabled,
-)
-from lspr_imaging_app.gui.analysis_tasks import _ome_zarr_export_task
-from lspr_imaging_app.gui.worker import FunctionWorker
-from lspr_imaging_app.io.dataset import (
-    dataset_is_ome_zarr,
 )
 
 try:
@@ -313,67 +296,6 @@ class MainWindowIcons:
         painter.end()
         return QIcon(pixmap)
 
-    def _update_dataset_stack_indicator(self, dataset=None) -> None:
-        # Compact title-row indicator next to the "Dataset" section header -
-        # shows "not loaded" rather than defaulting to the ImageStack look
-        # when nothing is loaded.
-        dataset = self._state.dataset if dataset is None else dataset
-        ome_zarr = dataset_is_ome_zarr(dataset)
-        if dataset is None:
-            self.dataset_type_icon.setPixmap(self._not_available_icon(size=16).pixmap(16, 16))
-            self.dataset_type_label.setText("not loaded")
-        else:
-            self.dataset_type_icon.setPixmap(self._dataset_stack_icon_pixmap(16, ome_zarr=ome_zarr))
-            self.dataset_type_label.setText("OME-Zarr" if ome_zarr else "ImageStack")
-
-    def _current_ome_zarr_chunk_size(self) -> int:
-        return max(int(self.ome_zarr_chunk_spin.value()), 4)
-
-    def _current_ome_zarr_compression_enabled(self) -> bool:
-        return current_ome_zarr_compression_enabled(self.ome_zarr_compression_button.isChecked())
-
-    def _current_ome_zarr_skip_excluded(self) -> bool:
-        return bool(self.ome_zarr_skip_excluded_button.isChecked())
-
-    def _on_ome_zarr_skip_excluded_toggled(self, checked: bool) -> None:
-        from PyQt6.QtWidgets import QMessageBox
-
-        if checked:
-            excluded_count = len(self._state.image_exclusions)
-            if excluded_count == 0:
-                confirm = QMessageBox.StandardButton.Yes
-            else:
-                confirm = QMessageBox.question(
-                    self,
-                    "Skip excluded images in export",
-                    f"{excluded_count} exclusion rule(s) are set. Exported planes they cover will be "
-                    "left empty (no pixel data) instead of containing real measurements.\n\n"
-                    "This cannot be undone once the export is written. Continue?",
-                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                    QMessageBox.StandardButton.No,
-                )
-            if confirm != QMessageBox.StandardButton.Yes:
-                self.ome_zarr_skip_excluded_button.blockSignals(True)
-                self.ome_zarr_skip_excluded_button.setChecked(False)
-                self.ome_zarr_skip_excluded_button.blockSignals(False)
-                checked = False
-        color = "#ef4444" if checked else "#94a3b8"
-        self.ome_zarr_skip_excluded_button.setIcon(self._mask_panel_icon("alert-triangle", color=color, size=APP_THEME.icon_button_inner))
-
-    def _sync_ome_zarr_chunk_controls(self) -> None:
-        self._ui_state_manager.sync_ome_zarr_chunk_controls()
-
-    def _current_ome_zarr_shard_mode(self) -> str:
-        return str(self.ome_zarr_shard_mode_combo.currentData() or "per_image")
-
-    def _on_ome_zarr_chunk_size_changed(self, _value: int) -> None:
-        self._sync_ome_zarr_chunk_controls()
-        self._save_layout_preferences()
-
-    def _on_ome_zarr_shard_mode_changed(self, _index: int) -> None:
-        self._settings.setValue("ome_zarr/shard_mode", self.ome_zarr_shard_mode_combo.currentData())
-        self._save_layout_preferences()
-
     def _ome_zarr_grid_icon(self, active: bool) -> QIcon:
         color = "#22c55e" if active else "#94a3b8"
         icon = self._tabler_icon("grid-4x4", color, 24, stroke_width=2.1)
@@ -394,14 +316,6 @@ class MainWindowIcons:
                 painter.drawRect(x, y, 2, 2)
         painter.end()
         return QIcon(pixmap)
-
-    def _on_ome_zarr_chunk_guide_toggled(self, checked: bool) -> None:
-        self.ome_zarr_chunk_guide_button.setIcon(self._ome_zarr_grid_icon(bool(checked)))
-        self._update_ome_zarr_chunk_guide_overlay()
-
-    def _on_ome_zarr_compression_toggled(self, checked: bool) -> None:
-        self.ome_zarr_compression_button.setIcon(self._ome_zarr_compression_icon(bool(checked)))
-        self._sync_ome_zarr_chunk_controls()
 
     def _ome_zarr_compression_icon(self, active: bool) -> QIcon:
         color = "#22c55e" if active else "#94a3b8"
@@ -438,230 +352,6 @@ class MainWindowIcons:
         painter.drawRoundedRect(QRectF(6.0 * scale, 6.0 * scale, 12.0 * scale, 12.0 * scale), 2.8 * scale, 2.8 * scale)
         painter.end()
         return QIcon(pixmap)
-
-    @staticmethod
-    def _folder_size_bytes(path: Path) -> int:
-        total = 0
-        if not path.exists():
-            return total
-        if path.is_file():
-            try:
-                return int(path.stat().st_size)
-            except Exception:
-                return total
-        for root, _dirs, files in os.walk(path):
-            for name in files:
-                file_path = Path(root) / name
-                try:
-                    total += int(file_path.stat().st_size)
-                except Exception:
-                    continue
-        return total
-
-    @staticmethod
-    def _format_bytes(num_bytes: int) -> str:
-        value = float(max(int(num_bytes), 0))
-        units = ["B", "KB", "MB", "GB", "TB"]
-        for unit in units:
-            if value < 1024.0 or unit == units[-1]:
-                if unit == "B":
-                    return f"{int(value)} {unit}"
-                return f"{value:.1f} {unit}"
-            value /= 1024.0
-        return f"{value:.1f} TB"
-
-    @staticmethod
-    def _format_duration(seconds: float) -> str:
-        total_seconds = max(int(round(float(seconds))), 0)
-        hours, remainder = divmod(total_seconds, 3600)
-        minutes, seconds = divmod(remainder, 60)
-        if hours > 0:
-            return f"{hours:d}:{minutes:02d}:{seconds:02d}"
-        return f"{minutes:02d}:{seconds:02d}"
-
-    def _set_ome_zarr_export_ui_running(self, running: bool) -> None:
-        self._ome_zarr_export_running = bool(running)
-        self.dataset_ome_zarr_export_progress_row.setVisible(bool(running))
-        self.dataset_ome_zarr_export_progress_bar.setValue(0 if running else 0)
-        self.dataset_ome_zarr_export_progress_bar.setFormat("%p%")
-        self.dataset_ome_zarr_export_eta_label.setText("ETA: --:--")
-        self.dataset_ome_zarr_export_stop_button.setVisible(bool(running))
-        self.dataset_ome_zarr_export_stop_button.setEnabled(bool(running))
-        self.dataset_ome_zarr_export_button.setEnabled(not running and self._state.dataset is not None)
-        self.ome_zarr_chunk_spin.setEnabled(not running)
-        self.ome_zarr_chunk_guide_button.setEnabled(not running)
-        self.ome_zarr_shard_mode_combo.setEnabled(not running)
-        self.ome_zarr_compression_button.setEnabled(not running)
-        self.dataset_ome_zarr_controls_row.setEnabled(not running)
-        self.dataset_ome_zarr_options_row.setEnabled(not running)
-        if running:
-            self.dataset_ome_zarr_export_status_label.setText("Progress")
-        self._sync_ome_zarr_chunk_controls()
-
-    def _start_ome_zarr_export(
-        self,
-        destination: Path,
-        chunk_size_px: int,
-        *,
-        compression_enabled: bool = True,
-        shard_mode: str = "per_image",
-        skip_excluded_images: bool = False,
-    ) -> None:
-        dataset = self._state.dataset
-        if dataset is None:
-            self._set_status_text("Load a dataset before exporting Stack to Zarr.")
-            return
-        if self._ome_zarr_export_running:
-            self._set_status_text("Stack to Zarr export is already running.")
-            return
-        # Snapshot preprocessing now so later edits in the GUI (while export runs
-        # in the background) can't change the settings mid-export.
-        preprocessing_snapshot = deepcopy(self._state.preprocessing)
-        self._ome_zarr_export_request_id += 1
-        request_id = self._ome_zarr_export_request_id
-        self._ome_zarr_export_cancel_event = threading.Event()
-        self._ome_zarr_export_destination = destination
-        self._ome_zarr_export_started_at = time.perf_counter()
-        self._set_ome_zarr_export_ui_running(True)
-        self._set_status_text(f"Exporting Stack to Zarr to {destination.name}...")
-        self._begin_busy("Exporting Stack to Zarr...", determinate=True)
-        excluded_rules_snapshot = deepcopy(self._state.image_exclusions) if skip_excluded_images else None
-        adaptive_enabled = self._ome_zarr_adaptive_enabled()
-        adaptive_batch_mb = self._ome_zarr_adaptive_batch_mb()
-        worker = FunctionWorker(
-            _ome_zarr_export_task,
-            dataset,
-            destination,
-            int(chunk_size_px),
-            bool(compression_enabled),
-            preprocessing_snapshot,
-            shard_mode,
-            excluded_rules=excluded_rules_snapshot,
-            skip_excluded=bool(skip_excluded_images),
-            cancel_event=self._ome_zarr_export_cancel_event,
-            adaptive_workers_enabled=adaptive_enabled,
-            adaptive_batch_mb=adaptive_batch_mb,
-            supports_progress=True,
-        )
-        tools_text = "applied" if bool(getattr(preprocessing_snapshot, "image_tools_enabled", False)) else "ignored"
-        shard_text = "per_spectral_cube" if shard_mode == "per_spectral_cube" else "per_image"
-        excluded_text = f"on ({len(excluded_rules_snapshot)} rules)" if skip_excluded_images else "off"
-        adaptive_text = f"on ({adaptive_batch_mb}MB)" if adaptive_enabled else "off"
-        self._append_workflow_log(
-            f"OME-Zarr export start | chunks {chunk_size_px}px | shard {shard_text} | compression {'on' if compression_enabled else 'off'} | image tools {tools_text} | skip excluded {excluded_text} | adaptive tuning {adaptive_text}",
-            level="info",
-        )
-        worker.signals.progress.connect(self._update_busy_progress)
-        worker.signals.progress.connect(
-            lambda percent, text, request_id=request_id: self._on_ome_zarr_export_progress(request_id, percent, text)
-        )
-        worker.signals.result.connect(lambda result, request_id=request_id: self._on_ome_zarr_export_finished(request_id, result))
-        worker.signals.error.connect(lambda message, request_id=request_id: self._on_ome_zarr_export_failed(request_id, message))
-        # Run in a dedicated daemon thread instead of QThreadPool so the export is
-        # fully independent of the GUI thread pool (Qt tasks like image loading keep
-        # their pool slots) and Qt signals are delivered via queued connections.
-        self._ome_zarr_export_thread = threading.Thread(target=worker.run, daemon=True, name="ome-zarr-export")
-        self._ome_zarr_export_thread.start()
-
-    def _stop_ome_zarr_export(self) -> None:
-        if not self._ome_zarr_export_running or self._ome_zarr_export_cancel_event is None:
-            return
-        self._ome_zarr_export_cancel_event.set()
-        self._set_status_text("Stopping Stack to Zarr export...")
-        self.dataset_ome_zarr_export_eta_label.setText("ETA: stopping...")
-
-    def _show_ome_zarr_adaptive_tuning_info(self) -> None:
-        QMessageBox.information(
-            self,
-            "Adaptive worker tuning",
-            "Stack-to-Zarr export writes many shard files in parallel using several "
-            "worker processes — normally one per CPU core, since compressing image "
-            "data is CPU-intensive.\n\n"
-            "Adaptive worker tuning periodically checks, using real timing from the "
-            "export itself, whether time is being spent waiting on the disk (reading "
-            "source images, writing shard files) or on compression (CPU work). If "
-            "it's mostly waiting on disk — common with slower drives, network "
-            "drives, or antivirus scanning every new file — it adds a few extra "
-            "worker processes so the CPU stays busy while others wait. On a fast "
-            "local SSD, it typically makes no change.\n\n"
-            "Checks happen after a configurable amount of data has been processed "
-            "(default 1 GB, see \"Sample size for tuning decisions\"). A larger "
-            "sample avoids mistaking a fast drive's temporary write-cache burst for "
-            "its true sustained speed.\n\n"
-            "Turn this off for a fixed, predictable worker count (equal to your "
-            "CPU's core count) on every export — useful when comparing export times.",
-        )
-
-    def _on_ome_zarr_export_progress(self, request_id: int, percent: int, text: str) -> None:
-        if request_id != self._ome_zarr_export_request_id or not self._ome_zarr_export_running:
-            return
-        if text.startswith("ADAPTIVE_FLIP: "):
-            self._append_workflow_log(text.removeprefix("ADAPTIVE_FLIP: "), level="info")
-            return
-        current_percent = int(np.clip(percent, 0, 100))
-        self.dataset_ome_zarr_export_progress_bar.setValue(current_percent)
-        self.dataset_ome_zarr_export_progress_bar.setFormat(f"{current_percent}%")
-        eta_text = "ETA: --:--"
-        if self._ome_zarr_export_started_at is not None and current_percent > 0:
-            elapsed = max(time.perf_counter() - self._ome_zarr_export_started_at, 1e-6)
-            remaining = max((elapsed * (100.0 - current_percent)) / max(float(current_percent), 1.0), 0.0)
-            eta_text = f"ETA: {self._format_elapsed_seconds(remaining) or '0:00'}"
-        self.dataset_ome_zarr_export_eta_label.setText(eta_text)
-        self._set_status_text(text)
-
-    def _finish_ome_zarr_export(self, request_id: int, message: str | None = None, *, failed: bool = False) -> None:
-        if request_id != self._ome_zarr_export_request_id:
-            return
-        elapsed_text = ""
-        if self._ome_zarr_export_started_at is not None:
-            elapsed_text = f" in {self._format_duration(time.perf_counter() - self._ome_zarr_export_started_at)}"
-        self._ome_zarr_export_running = False
-        self._end_busy()
-        self._ome_zarr_export_started_at = None
-        self._ome_zarr_export_cancel_event = None
-        self.dataset_ome_zarr_export_progress_bar.setValue(0)
-        self.dataset_ome_zarr_export_progress_bar.setFormat("%p%")
-        self.dataset_ome_zarr_export_eta_label.setText("ETA: --:--")
-        self.dataset_ome_zarr_export_progress_row.hide()
-        self.dataset_ome_zarr_export_stop_button.setVisible(False)
-        self.dataset_ome_zarr_export_stop_button.setEnabled(False)
-        self.dataset_ome_zarr_export_button.setEnabled(self._state.dataset is not None)
-        self.ome_zarr_chunk_spin.setEnabled(True)
-        self.ome_zarr_chunk_guide_button.setEnabled(True)
-        self.ome_zarr_shard_mode_combo.setEnabled(True)
-        self.ome_zarr_compression_button.setEnabled(True)
-        self.dataset_ome_zarr_controls_row.setEnabled(True)
-        self.dataset_ome_zarr_options_row.setEnabled(True)
-        self._sync_ome_zarr_chunk_controls()
-        self._append_workflow_log(
-            f"OME-Zarr export {'failed' if failed else 'done'}{elapsed_text}",
-            level="warning" if failed else "success",
-        )
-        if message:
-            self._set_status_text(f"{message}{elapsed_text}")
-        if failed and self._ome_zarr_export_destination is not None:
-            try:
-                if self._ome_zarr_export_destination.exists():
-                    shutil.rmtree(self._ome_zarr_export_destination, ignore_errors=True)
-            except Exception:
-                pass
-        self._ome_zarr_export_destination = None
-
-    def _on_ome_zarr_export_finished(self, request_id: int, result: Path) -> None:
-        if request_id != self._ome_zarr_export_request_id:
-            return
-        destination = Path(result)
-        size_text = self._format_bytes(self._folder_size_bytes(destination))
-        self._finish_ome_zarr_export(request_id, f"Done. Exported {destination.name} ({size_text}).")
-
-    def _on_ome_zarr_export_failed(self, request_id: int, message: str) -> None:
-        if request_id != self._ome_zarr_export_request_id:
-            return
-        if "cancelled" in message.lower():
-            self._finish_ome_zarr_export(request_id, "Stack to Zarr export cancelled.", failed=True)
-            return
-        self._finish_ome_zarr_export(request_id, f"Stack to Zarr export failed: {message}", failed=True)
-        QMessageBox.critical(self, "Stack to Zarr export failed", message)
 
     @staticmethod
     def _dataset_transfer_icon(action: str, color: str = "#f8fafc", size: int = 24) -> QIcon:
@@ -2064,7 +1754,7 @@ class MainWindowIcons:
         self._set_ome_zarr_adaptive_batch_mb(current_batch_mb)
         zarr_tuning_menu.addSeparator()
         zarr_tuning_info_action = zarr_tuning_menu.addAction(self._tabler_icon("info-circle"), "What is this?")
-        zarr_tuning_info_action.triggered.connect(self._show_ome_zarr_adaptive_tuning_info)
+        zarr_tuning_info_action.triggered.connect(self._dataset_controller._show_ome_zarr_adaptive_tuning_info)
 
         file_menu.addSeparator()
         file_menu.addAction("E&xit", self.close)

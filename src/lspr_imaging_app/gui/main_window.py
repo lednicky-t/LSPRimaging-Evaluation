@@ -19,7 +19,6 @@ import pyqtgraph as pg
 from PyQt6.QtCore import (
     QByteArray,
     QItemSelectionModel,
-    QPoint,
     QRectF,
     QSize,
     QSettings,
@@ -58,7 +57,6 @@ from PyQt6.QtWidgets import (
     QFrame,
     QMessageBox,
     QInputDialog,
-    QMenu,
     QPushButton,
     QButtonGroup,
     QGraphicsPathItem,
@@ -122,12 +120,10 @@ from lspr_imaging_app.gui.overlay_manager import OverlayManager
 from lspr_imaging_app.gui.undo_manager import UndoManager
 from lspr_imaging_app.gui.layout_state_controller import LayoutStateController
 from lspr_imaging_app.gui.image_tools_controller import ImageToolsController
-from lspr_imaging_app.domain.roi_editor_tools import (
-    create_rois_from_template,
-    create_rois_from_template_grid,
-    move_roi_from_template,
-    roi_top_left_from_center,
-)
+from lspr_imaging_app.gui.rectangle_stamp_mixin import RectangleStampMixin
+from lspr_imaging_app.gui.roi_geometry_mixin import RoiGeometryMixin
+from lspr_imaging_app.gui.histogram_mask_mixin import HistogramMaskMixin
+from lspr_imaging_app.gui.measurement_calibration_mixin import MeasurementCalibrationMixin
 from lspr_imaging_app.domain.exclusions import is_excluded
 from lspr_imaging_app.processing.reference_selection import bimodal_dip_contrast
 from lspr_imaging_app.version import version_string
@@ -147,10 +143,6 @@ from lspr_imaging_app.io.dataset import (
     load_image_array,
     load_image_shape,
     read_existing_ome_zarr_summary,
-)
-from lspr_imaging_app.processing.chromatic import (
-    transformed_annulus_mask,
-    transformed_disk_mask,
 )
 from lspr_imaging_app.processing.preprocess import (
     apply_preprocessing,
@@ -223,7 +215,7 @@ class _WheelHorizontalScrollArea(QScrollArea):
             super().wheelEvent(event)
 
 
-class MainWindow(MainWindowIcons, QMainWindow):
+class MainWindow(MainWindowIcons, RectangleStampMixin, RoiGeometryMixin, HistogramMaskMixin, MeasurementCalibrationMixin, QMainWindow):
     SETTINGS_ORG = "LSPR"
     SETTINGS_APP = "LSPRImaging"
     HISTOGRAM_MIN_INTENSITY = 0.0
@@ -598,7 +590,7 @@ class MainWindow(MainWindowIcons, QMainWindow):
             icon=self._ome_zarr_grid_icon(False),
         )
         self.ome_zarr_chunk_guide_button.setChecked(self._settings_bool("ome_zarr/chunk_guide_visible", False))
-        self.ome_zarr_chunk_guide_button.toggled.connect(self._on_ome_zarr_chunk_guide_toggled)
+        self.ome_zarr_chunk_guide_button.toggled.connect(self._dataset_controller._on_ome_zarr_chunk_guide_toggled)
         self.ome_zarr_shard_label = QLabel("Shard", self)
         self.ome_zarr_shard_label.setObjectName("toolbarMiniLabel")
         self.ome_zarr_shard_label.setToolTip("How many images are packed into a single shard file on disk.")
@@ -625,7 +617,7 @@ class MainWindow(MainWindowIcons, QMainWindow):
             icon=self._ome_zarr_compression_icon(bool(self._settings_bool("ome_zarr/compression_enabled", True))),
         )
         self.ome_zarr_compression_button.setChecked(self._settings_bool("ome_zarr/compression_enabled", True))
-        self.ome_zarr_compression_button.toggled.connect(self._on_ome_zarr_compression_toggled)
+        self.ome_zarr_compression_button.toggled.connect(self._dataset_controller._on_ome_zarr_compression_toggled)
         self.ome_zarr_skip_excluded_label = QLabel("Skip excluded", self)
         self.ome_zarr_skip_excluded_label.setObjectName("toolbarMiniLabel")
         self.ome_zarr_skip_excluded_label.setToolTip("Omit pixel data for excluded images/wavelengths/spectral cubes from the export.")
@@ -635,7 +627,7 @@ class MainWindow(MainWindowIcons, QMainWindow):
             "Skip excluded images: leave excluded planes empty in the exported file instead of writing their pixel data.",
             checkable=True,
         )
-        self.ome_zarr_skip_excluded_button.toggled.connect(self._on_ome_zarr_skip_excluded_toggled)
+        self.ome_zarr_skip_excluded_button.toggled.connect(self._dataset_controller._on_ome_zarr_skip_excluded_toggled)
         self.dataset_ome_zarr_export_status_label = QLabel("Progress", self)
         self.dataset_ome_zarr_export_status_label.setObjectName("toolbarMiniLabel")
         self.dataset_ome_zarr_export_status_label.setToolTip("Current Zarr export progress.")
@@ -776,7 +768,7 @@ class MainWindow(MainWindowIcons, QMainWindow):
         summary_ome_zarr_layout.addWidget(self.summary_crop_label)
         summary_ome_zarr_layout.addWidget(self.summary_pixel_size_label)
 
-        self._update_dataset_stack_indicator(None)
+        self._dataset_controller._update_dataset_stack_indicator(None)
         self._update_dataset_summary_labels(None)
         self.reference_auto_button = QToolButton(self)
         self.reference_auto_button.setCheckable(True)
@@ -1921,9 +1913,9 @@ class MainWindow(MainWindowIcons, QMainWindow):
         self.browse_button.clicked.connect(self._dataset_controller.browse_folder)
         self.open_explorer_button.clicked.connect(self._dataset_controller.open_dataset_folder_in_explorer)
         self.dataset_ome_zarr_export_button.clicked.connect(self._dataset_controller.export_current_dataset_to_ome_zarr)
-        self.dataset_ome_zarr_export_stop_button.clicked.connect(self._stop_ome_zarr_export)
-        self.ome_zarr_chunk_spin.valueChanged.connect(self._on_ome_zarr_chunk_size_changed)
-        self.ome_zarr_shard_mode_combo.currentIndexChanged.connect(self._on_ome_zarr_shard_mode_changed)
+        self.dataset_ome_zarr_export_stop_button.clicked.connect(self._dataset_controller._stop_ome_zarr_export)
+        self.ome_zarr_chunk_spin.valueChanged.connect(self._dataset_controller._on_ome_zarr_chunk_size_changed)
+        self.ome_zarr_shard_mode_combo.currentIndexChanged.connect(self._dataset_controller._on_ome_zarr_shard_mode_changed)
         self.export_settings_button.clicked.connect(self._export_processing_profile)
         self.import_settings_button.clicked.connect(self._import_processing_profile)
         self.reference_auto_button.clicked.connect(lambda _checked=False: self._set_reference_mode("auto"))
@@ -5150,89 +5142,6 @@ class MainWindow(MainWindowIcons, QMainWindow):
     def _switch_chromatic_feature(self, direction: int) -> bool:
         return self._chromatic_controller.switch_feature(direction)
 
-    def _move_selected_rois(self, dx: float, dy: float) -> None:
-        if not self._selected_roi_ids:
-            return
-        self._append_workflow_log(f"ROIs | move {len(self._selected_roi_ids)} by dx={dx:g}, dy={dy:g}", level="debug")
-        self._prepare_undo_snapshot("Move ROIs")
-        for roi in self._state.area_rois:
-            if roi.area_roi_id not in self._selected_roi_ids:
-                continue
-            roi.center_x, roi.center_y = self._clamp_roi_position(roi, roi.center_x + dx, roi.center_y + dy)
-        self._update_roi_overlays()
-        self._mark_roi_edit_refresh_pending()
-        self._save_processing_state_for_dataset()
-        self._schedule_processing_state_save()
-
-    def _add_roi_at(self, point: tuple[float, float]) -> None:
-        if self._current_processed_image is None:
-            self.status_label.setText("No image available for adding ROIs.")
-            return
-        self._push_undo_point("Add ROI")
-        radius = float(max(self._state.area_roi_settings.sample_radius_px, 1))
-        provisional = AreaRoi(
-            area_roi_id=len(self._state.area_rois) + 1,
-            center_x=point[0],
-            center_y=point[1],
-            sample_radius_px=radius,
-            score=0.0,
-        )
-        provisional.center_x, provisional.center_y = self._clamp_roi_position(provisional, provisional.center_x, provisional.center_y)
-        self._state.area_rois.append(provisional)
-        self._selected_roi_ids = {provisional.area_roi_id}
-        self._update_roi_overlays()
-        self._update_roi_table()
-        self._mark_roi_edit_refresh_pending()
-        self._update_roi_summary()
-        self._save_processing_state_for_dataset()
-        self._schedule_processing_state_save()
-        self.status_label.setText(f"Added ROI {provisional.area_roi_id}.")
-
-    def _add_roi_array_at(self, point: tuple[float, float]) -> None:
-        if self._current_processed_image is None:
-            self.status_label.setText("No image available for adding ROI array.")
-            return
-        rows = int(self.array_rows_spin.value())
-        cols = int(self.array_cols_spin.value())
-        spacing = max(float(self._length_display_to_px(float(self.array_spacing_spin.value()))), 0.0)
-        if rows <= 0 or cols <= 0 or spacing <= 0.0:
-            self.status_label.setText("Set array rows, columns, and spacing before stamping an ROI array.")
-            return
-        radius = float(max(self._state.area_roi_settings.sample_radius_px, 1))
-        image_height, image_width = self._current_processed_image.shape[:2]
-        step = spacing
-        start_x = float(point[0]) - (cols - 1) * step / 2.0
-        start_y = float(point[1]) - (rows - 1) * step / 2.0
-        self._push_undo_point("Add ROI array")
-        next_id = len(self._state.area_rois) + 1
-        new_rois: list[AreaRoi] = []
-        for row in range(rows):
-            for col in range(cols):
-                cx = start_x + col * step
-                cy = start_y + row * step
-                cx = float(min(max(cx, radius), max(float(image_width - 1) - radius, radius)))
-                cy = float(min(max(cy, radius), max(float(image_height - 1) - radius, radius)))
-                roi = AreaRoi(area_roi_id=next_id, center_x=cx, center_y=cy, sample_radius_px=radius, score=0.0)
-                new_rois.append(roi)
-                next_id += 1
-        self._state.area_rois.extend(new_rois)
-        self._selected_roi_ids = {s.area_roi_id for s in new_rois}
-        self._update_roi_overlays()
-        self._update_roi_table()
-        self._update_roi_summary()
-        self._save_processing_state_for_dataset()
-        self._schedule_processing_state_save()
-        self.status_label.setText(f"Added ROI array: {len(new_rois)} ROIs.")
-
-    def _clamp_roi_position(self, roi: AreaRoi, x: float, y: float) -> tuple[float, float]:
-        if self._current_processed_image is None:
-            return x, y
-        image_height, image_width = self._current_processed_image.shape[:2]
-        radius = max(float(roi.sample_radius_px), 1.0)
-        clamped_x = min(max(x, radius), max(float(image_width - 1) - radius, radius))
-        clamped_y = min(max(y, radius), max(float(image_height - 1) - radius, radius))
-        return clamped_x, clamped_y
-
     def _request_roi_metrics_refresh(
         self,
         *,
@@ -5636,501 +5545,6 @@ class MainWindow(MainWindowIcons, QMainWindow):
 
     def _sync_crop_visibility(self) -> None:
         self._image_tools_controller.sync_crop_visibility()
-
-    def _next_roi_id(self) -> str:
-        self._roi_id_counter += 1
-        return f"roi_{self._roi_id_counter}"
-
-    def _reset_roi_id_counter_from_state(self) -> None:
-        max_index = 0
-        for roi in self._state.rois:
-            if roi.roi_id.startswith("roi_"):
-                suffix = roi.roi_id[4:]
-                if suffix.isdigit():
-                    max_index = max(max_index, int(suffix))
-        self._roi_id_counter = max_index
-
-    def _active_rectangle_template(self) -> RoiDefinition:
-        if self._roi_editor_mode == "circles":
-            sample_diameter = max(float(self._length_display_to_px(float(self.sample_diameter_spin.value()))), 2.0)
-            reference_inner_diameter = max(float(self._length_display_to_px(float(self.reference_inner_diameter_spin.value()))), 0.0)
-            reference_outer_diameter = max(
-                float(self._length_display_to_px(float(self.reference_outer_diameter_spin.value()))),
-                reference_inner_diameter,
-            )
-            padding = max((reference_inner_diameter - sample_diameter) / 2.0, 0.0)
-            width = max((reference_outer_diameter - reference_inner_diameter) / 2.0, 0.0)
-            return RoiDefinition(
-                roi_id="circle_template",
-                name="Circle ROI",
-                shape="circle",
-                center_x=float(self._rectangle_template.center_x),
-                center_y=float(self._rectangle_template.center_y),
-                size_x=sample_diameter,
-                size_y=sample_diameter,
-                background_padding_px=padding,
-                background_width_px=width,
-                enabled=True,
-            )
-        self._rectangle_template.shape = "rectangle"
-        return self._rectangle_template
-
-    def _ensure_rectangle_roi(self) -> pg.RectROI | None:
-        if self._current_processed_image is None:
-            return None
-        roi = self._active_rectangle_template()
-        image_height, image_width = self._current_processed_image.shape[:2]
-        width = max(float(roi.size_x), 2.0)
-        height = max(float(roi.size_y), 2.0)
-        x = float(np.clip(float(roi.center_x) - width / 2.0, 0.0, max(float(image_width) - width, 0.0)))
-        y = float(np.clip(float(roi.center_y) - height / 2.0, 0.0, max(float(image_height) - height, 0.0)))
-        if self._rectangle_roi is None:
-            if str(roi.shape).lower() in {"circle", "ellipse"}:
-                self._rectangle_roi = pg.EllipseROI(
-                    [x, y],
-                    [width, height],
-                    pen=pg.mkPen("#f59e0b", width=2),
-                    movable=True,
-                    resizable=True,
-                    rotatable=False,
-                )
-                for _h in list(self._rectangle_roi.handles):
-                    if _h["type"] == "r":
-                        self._rectangle_roi.removeHandle(_h["item"])
-            else:
-                self._rectangle_roi = pg.RectROI(
-                    [x, y],
-                    [width, height],
-                    pen=pg.mkPen("#f59e0b", width=2),
-                    movable=True,
-                    resizable=True,
-                    rotatable=False,
-                    sideScalers=True,
-                )
-            self._rectangle_roi.handleSize = 10
-            self._rectangle_roi.sigRegionChanged.connect(lambda *_args: self._rectangle_roi_changed(finished=False))
-            self._rectangle_roi.sigRegionChangeFinished.connect(lambda *_args: self._rectangle_roi_changed(finished=True))
-            self.image_plot.addItem(self._rectangle_roi)
-            self._rectangle_roi.setZValue(1.2)
-        self._suspend_rectangle_sync = True
-        self._rectangle_roi.setPos((x, y))
-        self._rectangle_roi.setSize((width, height))
-        self._suspend_rectangle_sync = False
-        return self._rectangle_roi
-
-    def _sync_rectangle_roi_visibility(self) -> None:
-        if self._rectangle_roi is None:
-            self._ensure_rectangle_roi()
-        if self._rectangle_roi is not None:
-            self._rectangle_roi.setVisible(
-                self._roi_editor_mode == "rectangles"
-                and not self._showing_background_profile_main
-                and self._current_processed_image is not None
-            )
-        self._update_guide_overlays()
-
-    def _sync_rectangle_roi_from_definition(self) -> None:
-        roi = self._active_rectangle_template()
-        if self._rectangle_roi is None:
-            self._ensure_rectangle_roi()
-        if self._rectangle_roi is None:
-            return
-        image_height, image_width = self._current_processed_image.shape[:2] if self._current_processed_image is not None else (0, 0)
-        width = max(float(roi.size_x), 2.0)
-        height = max(float(roi.size_y), 2.0)
-        x = float(np.clip(float(roi.center_x) - width / 2.0, 0.0, max(float(image_width) - width, 0.0)))
-        y = float(np.clip(float(roi.center_y) - height / 2.0, 0.0, max(float(image_height) - height, 0.0)))
-        self._suspend_rectangle_sync = True
-        self._rectangle_roi.setPos((x, y))
-        self._rectangle_roi.setSize((width, height))
-        self._suspend_rectangle_sync = False
-        self._update_rectangle_roi_summary()
-
-    def _rectangle_roi_changed(self, *, finished: bool) -> None:
-        if self._suspend_rectangle_sync or self._rectangle_roi is None:
-            return
-        pos = self._rectangle_roi.pos()
-        size = self._rectangle_roi.size()
-        roi = self._active_rectangle_template()
-        roi.shape = str(roi.shape or "rectangle")
-        roi.center_x = float(pos.x() + size.x() / 2.0)
-        roi.center_y = float(pos.y() + size.y() / 2.0)
-        roi.size_x = max(float(size.x()), 2.0)
-        roi.size_y = max(float(size.y()), 2.0)
-        if self._roi_editor_mode == "circles":
-            self._rectangle_template.center_x = roi.center_x
-            self._rectangle_template.center_y = roi.center_y
-            self.sample_diameter_spin.blockSignals(True)
-            self.sample_diameter_spin.setValue(self._length_px_to_display(float(max(roi.size_x, roi.size_y))))
-            self.sample_diameter_spin.blockSignals(False)
-            self._state.area_roi_settings.sample_radius_px = max(float(roi.size_x), 1.0) / 2.0
-            self._state.area_roi_settings.reference_inner_radius_px = max(
-                float(roi.size_x) / 2.0 + float(roi.background_padding_px),
-                float(roi.size_x) / 2.0,
-            )
-            self._state.area_roi_settings.reference_outer_radius_px = max(
-                float(self._state.area_roi_settings.reference_inner_radius_px) + float(roi.background_width_px),
-                float(self._state.area_roi_settings.reference_inner_radius_px),
-            )
-        if finished:
-            self._push_undo_point("Rectangle ROI")
-            self._save_processing_state_for_dataset()
-        if self._roi_editor_mode == "circles":
-            self._update_roi_detection_labels(sync_controls=False)
-        else:
-            self._update_rectangle_roi_controls(sync_roi=False)
-        self._update_rectangle_roi_summary()
-
-    def _update_rectangle_roi_controls(self, *, sync_roi: bool = True) -> None:
-        roi = self._active_rectangle_template()
-        if sync_roi:
-            self._sync_rectangle_roi_from_definition()
-        self.rectangle_name_edit.blockSignals(True)
-        self.rectangle_name_edit.setText(roi.name)
-        self.rectangle_name_edit.blockSignals(False)
-        self.rectangle_width_spin.blockSignals(True)
-        self.rectangle_height_spin.blockSignals(True)
-        self.rectangle_padding_spin.blockSignals(True)
-        self.rectangle_background_width_spin.blockSignals(True)
-        self.rectangle_width_spin.setValue(self._length_px_to_display(float(roi.size_x)))
-        self.rectangle_height_spin.setValue(self._length_px_to_display(float(roi.size_y)))
-        self.rectangle_padding_spin.setValue(self._length_px_to_display(float(roi.background_padding_px)))
-        self.rectangle_background_width_spin.setValue(self._length_px_to_display(float(roi.background_width_px)))
-        self.rectangle_width_spin.blockSignals(False)
-        self.rectangle_height_spin.blockSignals(False)
-        self.rectangle_padding_spin.blockSignals(False)
-        self.rectangle_background_width_spin.blockSignals(False)
-
-    def _update_rectangle_roi_summary(self) -> None:
-        roi = self._active_rectangle_template()
-        if self._roi_editor_mode == "circles":
-            self.rectangle_summary_label.setText(
-                (
-                    f"Template center=({self._length_px_to_display(float(roi.center_x)):.1f}, "
-                    f"{self._length_px_to_display(float(roi.center_y)):.1f}) "
-                    f"ROI D={self._length_px_to_display(float(roi.size_x)):.1f} "
-                    f"Ring pad={self._length_px_to_display(float(roi.background_padding_px)):.1f} "
-                    f"Ring width={self._length_px_to_display(float(roi.background_width_px)):.1f}"
-                )
-            )
-        else:
-            self.rectangle_summary_label.setText(
-                (
-                    f"Center=({self._length_px_to_display(float(roi.center_x)):.1f}, "
-                    f"{self._length_px_to_display(float(roi.center_y)):.1f}) "
-                    f"Size={self._length_px_to_display(float(roi.size_x)):.1f}x{self._length_px_to_display(float(roi.size_y)):.1f}"
-                )
-            )
-
-    def _commit_rectangle_roi_edits(self) -> None:
-        roi = self._active_rectangle_template()
-        if self._roi_editor_mode == "circles":
-            roi.name = roi.name.strip() or "Circle ROI"
-            roi.size_x = max(float(self._length_display_to_px(float(self.sample_diameter_spin.value()))), 2.0)
-            roi.size_y = float(roi.size_x)
-            roi.background_padding_px = max(
-                float(self._length_display_to_px(float(self.reference_inner_diameter_spin.value()))) - float(roi.size_x),
-                0.0,
-            ) / 2.0
-            roi.background_width_px = max(
-                float(self._length_display_to_px(float(self.reference_outer_diameter_spin.value())))
-                - float(self._length_display_to_px(float(self.reference_inner_diameter_spin.value()))),
-                0.0,
-            ) / 2.0
-            self._update_roi_detection_labels(sync_controls=False)
-        else:
-            roi.name = self.rectangle_name_edit.text().strip() or roi.name
-            roi.size_x = max(float(self._length_display_to_px(float(self.rectangle_width_spin.value()))), 2.0)
-            roi.size_y = max(float(self._length_display_to_px(float(self.rectangle_height_spin.value()))), 2.0)
-            roi.background_padding_px = max(float(self._length_display_to_px(float(self.rectangle_padding_spin.value()))), 0.0)
-            roi.background_width_px = max(float(self._length_display_to_px(float(self.rectangle_background_width_spin.value()))), 0.0)
-        self._sync_rectangle_roi_from_definition()
-        self._save_processing_state_for_dataset()
-
-    def _create_rectangle_stamp(self, roi: RoiDefinition) -> pg.RectROI | None:
-        if self._current_processed_image is None:
-            return None
-        image_height, image_width = self._current_processed_image.shape[:2]
-        width = max(float(roi.size_x), 2.0)
-        height = max(float(roi.size_y), 2.0)
-        x = float(np.clip(float(roi.center_x) - width / 2.0, 0.0, max(float(image_width) - width, 0.0)))
-        y = float(np.clip(float(roi.center_y) - height / 2.0, 0.0, max(float(image_height) - height, 0.0)))
-        if str(roi.shape).lower() in {"circle", "ellipse"}:
-            item = pg.EllipseROI(
-                [x, y],
-                [width, height],
-                pen=pg.mkPen("#f59e0b", width=2),
-                movable=True,
-                resizable=True,
-                rotatable=False,
-            )
-            for _h in list(item.handles):
-                if _h["type"] == "r":
-                    item.removeHandle(_h["item"])
-        else:
-            item = pg.RectROI(
-                [x, y],
-                [width, height],
-                pen=pg.mkPen("#f59e0b", width=2),
-                movable=True,
-                resizable=True,
-                rotatable=False,
-                sideScalers=True,
-            )
-        item.handleSize = 10
-        item.sigRegionChanged.connect(lambda *_args, roi=roi: self._rectangle_stamp_changed(roi, finished=False))
-        item.sigRegionChangeFinished.connect(lambda *_args, roi=roi: self._rectangle_stamp_changed(roi, finished=True))
-        self.image_plot.addItem(item)
-        item.setZValue(1.15)
-        return item
-
-    def _sync_rectangle_stamp_overlays(self) -> None:
-        for item in self._rectangle_stamp_items:
-            self.image_plot.removeItem(item)
-        self._rectangle_stamp_items.clear()
-        for inner_c, outer_c in self._rectangle_stamp_ring_items.values():
-            if inner_c is not None:
-                self.image_plot.removeItem(inner_c)
-            if outer_c is not None:
-                self.image_plot.removeItem(outer_c)
-        self._rectangle_stamp_ring_items.clear()
-        if self._current_processed_image is None:
-            return
-        theta = np.linspace(0, 2 * np.pi, 200, dtype=np.float32)
-        theta = np.append(theta, theta[0])
-        for roi in self._state.rois:
-            if str(roi.shape) not in {"rectangle", "circle", "ellipse"}:
-                continue
-            item = self._create_rectangle_stamp(roi)
-            if item is None:
-                continue
-            setattr(item, "roi_id", roi.roi_id)
-            self._rectangle_stamp_items.append(item)
-            if str(roi.shape).lower() in {"circle", "ellipse"} and float(roi.background_width_px) > 0:
-                inner_r = float(roi.size_x) / 2.0 + float(roi.background_padding_px)
-                outer_r = inner_r + float(roi.background_width_px)
-                inner_curve: pg.PlotCurveItem | None = None
-                if inner_r > 0:
-                    inner_curve = pg.PlotCurveItem()
-                    inner_curve.setSkipFiniteCheck(True)
-                    inner_curve.setData(
-                        float(roi.center_x) + inner_r * np.cos(theta),
-                        float(roi.center_y) + inner_r * np.sin(theta),
-                    )
-                    inner_curve.setPen(pg.mkPen("#f59e0b", width=1.2, style=Qt.PenStyle.DashLine))
-                    self.image_plot.addItem(inner_curve, ignoreBounds=True)
-                    inner_curve.setZValue(1.14)
-                outer_curve = pg.PlotCurveItem()
-                outer_curve.setSkipFiniteCheck(True)
-                outer_curve.setData(
-                    float(roi.center_x) + outer_r * np.cos(theta),
-                    float(roi.center_y) + outer_r * np.sin(theta),
-                )
-                outer_curve.setPen(pg.mkPen("#f59e0b", width=1.2, style=Qt.PenStyle.DotLine))
-                self.image_plot.addItem(outer_curve, ignoreBounds=True)
-                outer_curve.setZValue(1.14)
-                self._rectangle_stamp_ring_items[roi.roi_id] = (inner_curve, outer_curve)
-        self._update_rectangle_stamp_visuals()
-
-    def _update_rectangle_stamp_ring_position(self, roi: "RoiDefinition") -> None:
-        ring_pair = self._rectangle_stamp_ring_items.get(roi.roi_id)
-        if ring_pair is None:
-            return
-        inner_curve, outer_curve = ring_pair
-        theta = np.linspace(0, 2 * np.pi, 200, dtype=np.float32)
-        theta = np.append(theta, theta[0])
-        inner_r = float(roi.size_x) / 2.0 + float(roi.background_padding_px)
-        outer_r = inner_r + float(roi.background_width_px)
-        cx, cy = float(roi.center_x), float(roi.center_y)
-        if inner_curve is not None:
-            inner_curve.setData(cx + inner_r * np.cos(theta), cy + inner_r * np.sin(theta))
-        if outer_curve is not None:
-            outer_curve.setData(cx + outer_r * np.cos(theta), cy + outer_r * np.sin(theta))
-
-    def _update_rectangle_stamp_visuals(self) -> None:
-        selected_pen = pg.mkPen("#fbbf24", width=2.8)
-        normal_pen = pg.mkPen("#f59e0b", width=2)
-        selected_ring_inner = pg.mkPen("#fbbf24", width=1.4, style=Qt.PenStyle.DashLine)
-        selected_ring_outer = pg.mkPen("#fbbf24", width=1.4, style=Qt.PenStyle.DotLine)
-        normal_ring_inner = pg.mkPen("#f59e0b", width=1.2, style=Qt.PenStyle.DashLine)
-        normal_ring_outer = pg.mkPen("#f59e0b", width=1.2, style=Qt.PenStyle.DotLine)
-        for item in self._rectangle_stamp_items:
-            roi_id = str(getattr(item, "roi_id", ""))
-            selected = roi_id in self._selected_rectangle_roi_ids
-            item.setPen(selected_pen if selected else normal_pen)
-            ring_pair = self._rectangle_stamp_ring_items.get(roi_id)
-            if ring_pair is not None:
-                inner_c, outer_c = ring_pair
-                if inner_c is not None:
-                    inner_c.setPen(selected_ring_inner if selected else normal_ring_inner)
-                if outer_c is not None:
-                    outer_c.setPen(selected_ring_outer if selected else normal_ring_outer)
-
-    def _rectangle_stamp_at(self, point: tuple[float, float]) -> RoiDefinition | None:
-        x = float(point[0])
-        y = float(point[1])
-        for roi in reversed(self._state.rois):
-            if str(roi.shape) not in {"rectangle", "circle", "ellipse"}:
-                continue
-            left, top = roi_top_left_from_center(
-                float(roi.center_x),
-                float(roi.center_y),
-                float(roi.size_x),
-                float(roi.size_y),
-                self._current_processed_image.shape if self._current_processed_image is not None else None,
-            )
-            right = left + float(roi.size_x)
-            bottom = top + float(roi.size_y)
-            if left <= x <= right and top <= y <= bottom:
-                return roi
-        return None
-
-    def _select_rectangle_rois(self, roi_ids: set[str], *, additive: bool = False) -> None:
-        if additive:
-            self._selected_rectangle_roi_ids.update(roi_ids)
-        else:
-            self._selected_rectangle_roi_ids.clear()
-            self._selected_rectangle_roi_ids.update(roi_ids)
-        self._update_rectangle_stamp_visuals()
-
-    def _clear_rectangle_roi_selection(self) -> None:
-        if not self._selected_rectangle_roi_ids:
-            return
-        self._selected_rectangle_roi_ids.clear()
-        self._update_rectangle_stamp_visuals()
-
-    def _move_selected_rectangle_rois(self, dx: float, dy: float) -> None:
-        if not self._selected_rectangle_roi_ids:
-            return
-        self._push_undo_point("Move ROIs")
-        updated = False
-        for roi in self._state.rois:
-            if roi.roi_id not in self._selected_rectangle_roi_ids:
-                continue
-            moved = move_roi_from_template(
-                roi,
-                center_x=float(roi.center_x) + float(dx),
-                center_y=float(roi.center_y) + float(dy),
-                image_shape=self._current_processed_image.shape if self._current_processed_image is not None else None,
-            )
-            roi.center_x = moved.center_x
-            roi.center_y = moved.center_y
-            updated = True
-        if updated:
-            self._sync_rectangle_stamp_overlays()
-            self._save_processing_state_for_dataset()
-            self._schedule_processing_state_save()
-
-    def _remove_selected_rectangle_rois(self) -> None:
-        if not self._selected_rectangle_roi_ids:
-            self.status_label.setText("Select ROI(s) first to remove them.")
-            return
-        self._push_undo_point("Remove ROIs")
-        removed_count = len(self._selected_rectangle_roi_ids)
-        self._state.rois = [
-            roi for roi in self._state.rois if roi.roi_id not in self._selected_rectangle_roi_ids
-        ]
-        self._selected_rectangle_roi_ids.clear()
-        self._sync_rectangle_stamp_overlays()
-        self._save_processing_state_for_dataset()
-        self._schedule_processing_state_save()
-        self.status_label.setText(f"Removed {removed_count} selected rectangle ROI(s).")
-
-    def _rectangle_stamp_changed(self, roi: RoiDefinition, *, finished: bool) -> None:
-        item = next((stamp for stamp in self._rectangle_stamp_items if getattr(stamp, "roi_id", None) == roi.roi_id), None)
-        if item is None:
-            return
-        pos = item.pos()
-        size = item.size()
-        updated = move_roi_from_template(
-            roi,
-            center_x=float(pos.x() + size.x() / 2.0),
-            center_y=float(pos.y() + size.y() / 2.0),
-            image_shape=self._current_processed_image.shape if self._current_processed_image is not None else None,
-        )
-        roi.center_x = updated.center_x
-        roi.center_y = updated.center_y
-        roi.size_x = max(float(size.x()), 2.0)
-        roi.size_y = max(float(size.y()), 2.0)
-        self._update_rectangle_stamp_ring_position(roi)
-        if finished:
-            self._push_undo_point("ROI")
-            self._save_processing_state_for_dataset()
-        if self._roi_editor_mode == "circles":
-            self._update_roi_detection_labels(sync_controls=False)
-        else:
-            self._update_rectangle_roi_controls(sync_roi=False)
-
-    def _add_rectangle_roi_at(self, point: tuple[float, float]) -> None:
-        if self._current_processed_image is None:
-            self.status_label.setText("No image available for adding ROIs.")
-            return
-        template = self._active_rectangle_template()
-        if self._roi_editor_mode == "freehand":
-            self.status_label.setText("Freehand ROI tools are not implemented yet.")
-            return
-        roi_id = self._next_roi_id()
-        if self._roi_editor_mode == "circles":
-            template_name = template.name.strip() or f"Circle ROI {len(self._state.rois) + 1}"
-        else:
-            template_name = template.name.strip() or f"Rectangle ROI {len(self._state.rois) + 1}"
-        clone = create_rois_from_template(
-            template,
-            roi_id=roi_id,
-            name=template_name,
-            center_x=float(point[0]),
-            center_y=float(point[1]),
-            image_shape=self._current_processed_image.shape,
-        )
-        self._push_undo_point("Add ROI")
-        self._state.rois.append(clone)
-        self._select_rectangle_rois({clone.roi_id}, additive=False)
-        self._sync_rectangle_stamp_overlays()
-        self._update_rectangle_roi_summary()
-        self._save_processing_state_for_dataset()
-        self._schedule_processing_state_save()
-        self.status_label.setText(f"Added ROI {clone.roi_id}.")
-
-    def _add_stamp_array_at(self, point: tuple[float, float]) -> None:
-        if self._current_processed_image is None:
-            self.status_label.setText("No image available for adding ROI arrays.")
-            return
-        template = self._active_rectangle_template()
-        if self._roi_editor_mode == "freehand":
-            self.status_label.setText("Freehand ROI arrays are not implemented yet.")
-            return
-        rows = int(self.array_rows_spin.value())
-        cols = int(self.array_cols_spin.value())
-        spacing = max(float(self._length_display_to_px(float(self.array_spacing_spin.value()))), 0.0)
-        if rows <= 0 or cols <= 0 or spacing <= 0.0:
-            self.status_label.setText("Set array rows, columns, and spacing before stamping an ROI array.")
-            return
-        count = rows * cols
-        start_index = self._roi_id_counter + 1
-        self._roi_id_counter += count
-        clones = create_rois_from_template_grid(
-            template,
-            rows=rows,
-            cols=cols,
-            spacing_x=spacing,
-            spacing_y=spacing,
-            anchor_center_x=float(point[0]),
-            anchor_center_y=float(point[1]),
-            start_index=start_index,
-            image_shape=self._current_processed_image.shape,
-            roi_id_factory=lambda index: f"roi_{index}",
-        )
-        if not clones:
-            self._roi_id_counter -= count
-            return
-        self._push_undo_point("Add ROI array")
-        self._state.rois.extend(clones)
-        self._select_rectangle_rois({roi.roi_id for roi in clones}, additive=False)
-        self._sync_rectangle_stamp_overlays()
-        self._update_rectangle_roi_summary()
-        self._save_processing_state_for_dataset()
-        self._schedule_processing_state_save()
-        self.status_label.setText(f"Added ROI array with {len(clones)} ROI(s).")
 
     def _on_roi_editor_tab_changed(self, index: int) -> None:
         modes = ("circles", "rectangles", "freehand")
@@ -6649,96 +6063,6 @@ class MainWindow(MainWindowIcons, QMainWindow):
         worker.signals.error.connect(lambda message: self._on_detect_rois_failed(message))
         self._thread_pool.start(worker)
 
-    def _reorder_rois_by_position(self) -> None:
-        if not self._state.area_rois:
-            self.status_label.setText("No ROIs available to reorder.")
-            return
-        self._push_undo_point("Reorder ROIs by position")
-        rows = max(int(self._state.area_roi_settings.array_rows), 0)
-        cols = max(int(self._state.area_roi_settings.array_cols), 0)
-        rois = list(self._state.area_rois)
-        if rows > 0 and cols > 0 and rows * cols == len(rois):
-            ordered = self._order_rois_as_array(rois, rows=rows, cols=cols)
-        else:
-            ordered = self._order_rois_as_array(rois, rows=rows if rows > 0 else None, cols=cols if cols > 0 else None)
-        id_map = {roi.area_roi_id: new_id for new_id, roi in enumerate(ordered, start=1)}
-        for new_id, roi in enumerate(ordered, start=1):
-            roi.area_roi_id = new_id
-        for group in self._state.area_roi_groups:
-            group.area_roi_ids = [id_map.get(roi_id, roi_id) for roi_id in group.area_roi_ids]
-            group.area_roi_ids = sorted(dict.fromkeys(group.area_roi_ids))
-        for array in self._state.area_roi_arrays:
-            # Order matters here (row-major/column-major grid recipe) - unlike
-            # group.area_roi_ids above, this must not be sorted/deduped.
-            array.member_area_roi_ids = [id_map.get(roi_id, roi_id) for roi_id in array.member_area_roi_ids]
-        self._state.area_rois = ordered
-        self._selected_roi_ids = {id_map.get(roi_id, roi_id) for roi_id in self._selected_roi_ids if roi_id in id_map}
-        self._update_roi_overlays()
-        self._update_roi_summary()
-        self._update_selection_dependent_plots(force=True)
-        self._save_processing_state_for_dataset()
-        self._update_roi_table()
-        self.status_label.setText("Reordered ROIs by image position.")
-
-    def _roi_reorder_row_band(self) -> float:
-        spacing = max(float(self._state.area_roi_settings.array_spacing_px), 0.0)
-        diameters = [
-            float(roi.sample_diameter_px)
-            for roi in self._state.area_rois
-            if roi.sample_diameter_px is not None and float(roi.sample_diameter_px) > 0.0
-        ]
-        if diameters:
-            diameter_scale = float(np.median(np.asarray(diameters, dtype=np.float64)))
-        else:
-            diameter_scale = float(max(self._state.area_roi_settings.sample_radius_px * 2.0, 1.0))
-        band_from_spacing = spacing * 0.45 if spacing > 0.0 else 0.0
-        band_from_diameter = diameter_scale * 0.75
-        return float(max(band_from_spacing, band_from_diameter, 5.0))
-
-    def _order_rois_as_array(
-        self,
-        rois: list[AreaRoi],
-        *,
-        rows: int | None,
-        cols: int | None,
-    ) -> list[AreaRoi]:
-        if not rois:
-            return []
-        sorted_rois = sorted(rois, key=lambda roi: (float(roi.center_y), float(roi.center_x), int(roi.area_roi_id)))
-        row_band = self._roi_reorder_row_band()
-        row_groups: list[list[AreaRoi]] = []
-        row_centers: list[float] = []
-
-        for roi in sorted_rois:
-            y = float(roi.center_y)
-            best_index = -1
-            best_distance = float("inf")
-            for index, center_y in enumerate(row_centers):
-                distance = abs(y - center_y)
-                if distance < best_distance:
-                    best_distance = distance
-                    best_index = index
-            if best_index >= 0 and best_distance <= row_band:
-                row_groups[best_index].append(roi)
-                row_centers[best_index] = float(np.mean([float(item.center_y) for item in row_groups[best_index]]))
-            else:
-                row_groups.append([roi])
-                row_centers.append(y)
-
-        if rows is not None and rows > 0 and len(row_groups) != rows:
-            row_groups = [list(group) for group in np.array_split(np.asarray(sorted_rois, dtype=object), rows)]
-
-        row_groups = [sorted(group, key=lambda roi: (float(roi.center_x), int(roi.area_roi_id))) for group in row_groups]
-        row_groups.sort(key=lambda group: float(np.mean([float(roi.center_y) for roi in group])) if group else 0.0)
-
-        ordered: list[AreaRoi] = []
-        for row_group in row_groups:
-            if cols is not None and cols > 0:
-                ordered.extend(row_group[:cols])
-            else:
-                ordered.extend(row_group)
-        return ordered
-
     def _on_detect_rois_ready(
         self,
         request_id: int,
@@ -6802,188 +6126,6 @@ class MainWindow(MainWindowIcons, QMainWindow):
         )
         if not self._dragging_rois and not self._roi_edit_refresh_pending and not self._analysis_live_preview_enabled:
             self._schedule_absorbance_spectrum_refresh()
-
-    def _group_for_roi(self, roi_id: int) -> AreaRoiGroup | None:
-        for group in self._state.area_roi_groups:
-            if roi_id in group.area_roi_ids:
-                return group
-        return None
-
-    def _groups_for_roi(self, roi_id: int) -> list[AreaRoiGroup]:
-        return [group for group in self._state.area_roi_groups if roi_id in group.area_roi_ids]
-
-    def _select_group_members_for_roi(self, roi_id: int) -> bool:
-        groups = self._groups_for_roi(roi_id)
-        if not groups:
-            return False
-        selected_ids = {int(member_id) for group in groups for member_id in group.area_roi_ids}
-        if not selected_ids:
-            return False
-        if selected_ids == self._selected_roi_ids:
-            return True
-        self._selected_roi_ids = selected_ids
-        self._update_roi_overlays()
-        self._update_roi_summary()
-        self._sync_roi_table_selection()
-        self._update_selection_dependent_plots(prompt_live_preview=True)
-        return True
-
-    def _ungroup_selected_rois(self) -> None:
-        if not self._selected_roi_ids:
-            self.status_label.setText("Select ROI(s) first to ungroup them.")
-            return
-        if not any(group.area_roi_ids for group in self._state.area_roi_groups):
-            self.status_label.setText("No grouped ROIs are selected.")
-            return
-        self._append_workflow_log(f"Groups | ungroup {len(self._selected_roi_ids)} ROI(s)", level="warning")
-        self._push_undo_point("Ungroup ROIs")
-        selected_ids = set(self._selected_roi_ids)
-        for group in self._state.area_roi_groups:
-            group.area_roi_ids = [roi_id for roi_id in group.area_roi_ids if roi_id not in selected_ids]
-        self._state.area_roi_groups = [group for group in self._state.area_roi_groups if group.area_roi_ids]
-        self._update_roi_overlays()
-        self._update_roi_summary()
-        self._update_roi_table()
-        self._save_processing_state_for_dataset()
-        self.status_label.setText("Removed selected ROIs from their groups.")
-
-    def _destroy_groups_for_roi(self, roi_id: int) -> None:
-        groups = self._groups_for_roi(roi_id)
-        if not groups:
-            self.status_label.setText("No group is assigned to the selected ROI.")
-            return
-        self._push_undo_point("Destroy group")
-        self._append_workflow_log(f"Groups | destroy for ROI {roi_id}", level="warning")
-        group_names = [group.name for group in groups if group.name]
-        remaining_groups = [group for group in self._state.area_roi_groups if group not in groups]
-        self._state.area_roi_groups = remaining_groups
-        self._update_roi_overlays()
-        self._update_roi_summary()
-        self._update_roi_table()
-        self._save_processing_state_for_dataset()
-        group_text = ", ".join(group_names) if group_names else "group"
-        self.status_label.setText(f"Destroyed {group_text}; member ROIs are now free.")
-
-    def _show_analysis_roi_context_menu(self, roi_id: int, global_pos: QPoint) -> None:
-        menu = QMenu(self)
-        menu.setToolTipsVisible(True)
-        group_action = menu.addAction("Group...")
-        select_group_action = None
-        ungroup_action = None
-        destroy_group_action = None
-        groups = self._groups_for_roi(roi_id)
-        if groups:
-            select_group_action = menu.addAction("Select group members")
-            ungroup_action = menu.addAction("Ungroup")
-            destroy_group_action = menu.addAction("Destroy group")
-            menu.addSeparator()
-        action = menu.exec(global_pos)
-        if action is None:
-            return
-        if action is group_action:
-            self._group_selected_rois()
-        elif select_group_action is not None and action is select_group_action:
-            if self._select_group_members_for_roi(roi_id):
-                self.status_label.setText(f"Selected group members for ROI {roi_id}.")
-        elif ungroup_action is not None and action is ungroup_action:
-            self._ungroup_selected_rois()
-        elif destroy_group_action is not None and action is destroy_group_action:
-            self._destroy_groups_for_roi(roi_id)
-
-    def _reindex_detected_rois(self) -> None:
-        roi_id_map: dict[int, int] = {}
-        for new_id, roi in enumerate(self._state.area_rois, start=1):
-            roi_id_map[roi.area_roi_id] = new_id
-            roi.area_roi_id = new_id
-
-        updated_groups: list[AreaRoiGroup] = []
-        for group in self._state.area_roi_groups:
-            group.area_roi_ids = [roi_id_map[roi_id] for roi_id in group.area_roi_ids if roi_id in roi_id_map]
-            if group.area_roi_ids:
-                updated_groups.append(group)
-        self._state.area_roi_groups = updated_groups
-
-        updated_arrays = []
-        for array in self._state.area_roi_arrays:
-            array.member_area_roi_ids = [
-                roi_id_map[roi_id] for roi_id in array.member_area_roi_ids if roi_id in roi_id_map
-            ]
-            if array.member_area_roi_ids:
-                updated_arrays.append(array)
-        self._state.area_roi_arrays = updated_arrays
-
-    def _remove_selected_rois(self) -> None:
-        if self._roi_editor_mode == "rectangles" and self._selected_rectangle_roi_ids:
-            self._remove_selected_rectangle_rois()
-            return
-        if not self._selected_roi_ids:
-            self.status_label.setText("Select ROI(s) first to remove them.")
-            return
-        self._append_workflow_log(f"ROIs | remove {len(self._selected_roi_ids)} selected", level="warning")
-        self._push_undo_point("Remove ROIs")
-        removed_count = len(self._selected_roi_ids)
-        self._state.area_rois = [
-            roi for roi in self._state.area_rois if roi.area_roi_id not in self._selected_roi_ids
-        ]
-        self._reindex_detected_rois()
-        self._selected_roi_ids.clear()
-        self._update_roi_overlays()
-        if self._active_tool == "roi":
-            self._mark_roi_edit_refresh_pending()
-        else:
-            self._schedule_histogram_refresh()
-        self._update_roi_summary()
-        if self._active_tool != "roi":
-            self._save_processing_state_for_dataset()
-        self.status_label.setText(f"Removed {removed_count} selected ROI(s).")
-
-    def _group_selected_rois(self) -> None:
-        if not self._selected_roi_ids:
-            self.status_label.setText("Select ROI(s) first to create a group.")
-            return
-
-        current_group = self._group_for_roi(min(self._selected_roi_ids))
-        default_name = current_group.name if current_group is not None else f"Group {len(self._state.area_roi_groups) + 1}"
-        name, accepted = QInputDialog.getText(self, "ROI group", "Group name", text=default_name)
-        if not accepted:
-            return
-        name = name.strip()
-        if not name:
-            self.status_label.setText("Group creation cancelled: name is required.")
-            return
-
-        initial_color = QColor(current_group.sample_color_hex) if current_group is not None else QColor("#f59e0b")
-        color = QColorDialog.getColor(initial_color, self, "ROI group color")
-        if not color.isValid():
-            return
-        self._push_undo_point("Group ROIs")
-        self._append_workflow_log(
-            f"Groups | create '{name}' with {len(self._selected_roi_ids)} ROI(s)",
-            level="success",
-        )
-
-        for group in self._state.area_roi_groups:
-            group.area_roi_ids = [roi_id for roi_id in group.area_roi_ids if roi_id not in self._selected_roi_ids]
-        self._state.area_roi_groups = [group for group in self._state.area_roi_groups if group.area_roi_ids]
-
-        target_group = next((group for group in self._state.area_roi_groups if group.name == name), None)
-        if target_group is None:
-            target_group = AreaRoiGroup(
-                group_id=f"group_{len(self._state.area_roi_groups) + 1}",
-                name=name,
-                sample_color_hex=color.name(),
-                reference_color_hex=self._reference_visual_color.name(),
-                area_roi_ids=sorted(self._selected_roi_ids),
-            )
-            self._state.area_roi_groups.append(target_group)
-        else:
-            target_group.sample_color_hex = color.name()
-            target_group.area_roi_ids = sorted(set(target_group.area_roi_ids).union(self._selected_roi_ids))
-
-        self._update_roi_overlays()
-        self._update_roi_summary()
-        self._save_processing_state_for_dataset()
-        self.status_label.setText(f"Grouped {len(self._selected_roi_ids)} ROI(s) as '{name}'.")
 
     def _clear_roi_selection(self) -> None:
         self._selected_roi_ids.clear()
@@ -7106,7 +6248,7 @@ class MainWindow(MainWindowIcons, QMainWindow):
         ):
             return
         image_height, image_width = self._current_processed_image.shape[:2]
-        chunk_size = max(int(self._current_ome_zarr_chunk_size()), 1)
+        chunk_size = max(int(self._dataset_controller._current_ome_zarr_chunk_size()), 1)
         pen = pg.mkPen(QColor(56, 189, 248, 120), width=1.0, style=Qt.PenStyle.DashLine)
         for x in range(chunk_size, max(int(image_width), 1), chunk_size):
             line = pg.InfiniteLine(angle=90, pos=float(x), pen=pen, movable=False)
@@ -7118,126 +6260,6 @@ class MainWindow(MainWindowIcons, QMainWindow):
             line.setZValue(14)
             self.image_plot.addItem(line, ignoreBounds=True)
             self._ome_zarr_chunk_overlay_items.append(line)
-
-    def _hide_measurement_overlay(self) -> None:
-        self._overlay_manager._hide_measurement_overlay()
-
-    def _ensure_measurement_overlay(self) -> MeasurementOverlayBundle:
-        return self._overlay_manager._ensure_measurement_overlay()
-
-    def _update_measurement_overlay(self) -> None:
-        self._overlay_manager._update_measurement_overlay()
-
-    def _on_measurement_marker_moved(self, *_args) -> None:
-        self._overlay_manager._on_measurement_marker_moved(*_args)
-
-    def _update_measurement_status_label(
-        self,
-        *,
-        dx_px: float | None = None,
-        dy_px: float | None = None,
-        distance_px: float | None = None,
-    ) -> None:
-        self._overlay_manager._update_measurement_status_label(dx_px=dx_px, dy_px=dy_px, distance_px=distance_px)
-
-    def _apply_measurement_calibration(self) -> None:
-        dx_px, dy_px, _distance_px = self._measurement_delta_components_px()
-        dx_um = float(self.measurement_um_x_spin.value())
-        dy_um = float(self.measurement_um_y_spin.value())
-        if dx_um <= 0.0 and dy_um <= 0.0:
-            self._set_status_text("Enter a real Δx and/or Δy in µm before applying calibration.")
-            return
-        if dx_um > 0.0 and abs(dx_px) < 1e-6:
-            self._set_status_text("Δx between the ruler guides is zero, so Δx calibration cannot be applied.")
-            return
-        if dy_um > 0.0 and abs(dy_px) < 1e-6:
-            self._set_status_text("Δy between the ruler guides is zero, so Δy calibration cannot be applied.")
-            return
-        self._push_undo_point("Measurement calibration")
-        if dx_um > 0.0:
-            self._state.preprocessing.microns_per_pixel_x = abs(dx_um / dx_px)
-        if dy_um > 0.0:
-            self._state.preprocessing.microns_per_pixel_y = abs(dy_um / dy_px)
-        if dx_um > 0.0 and dy_um <= 0.0:
-            self._state.preprocessing.microns_per_pixel_y = self._state.preprocessing.microns_per_pixel_x
-        if dy_um > 0.0 and dx_um <= 0.0:
-            self._state.preprocessing.microns_per_pixel_x = self._state.preprocessing.microns_per_pixel_y
-        self._state.preprocessing.calibration_enabled = True
-        self._state.preprocessing.display_units = "um"
-        self._update_display_unit_controls()
-        self._sync_roi_detection_controls()
-        self._save_processing_state_for_dataset()
-        self._set_status_text("Measurement calibration applied in memory. Display units switched to micrometers.")
-
-    def _sync_measurement_visibility(self) -> None:
-        if hasattr(self, "measurement_info_row"):
-            self.measurement_info_row.setVisible(self._active_tool == "measure")
-        self._update_measurement_overlay()
-        self._refresh_scale_bar_overlay()
-
-    def _ensure_scale_bar_overlay(self) -> ScaleBarOverlayBundle:
-        if self._scale_bar_overlay is not None:
-            return self._scale_bar_overlay
-        # Each bar/tick is drawn as three stacked strokes (dark halo under a light
-        # halo under the color line). A single light halo disappears on a bright
-        # background, so the dark ring guarantees contrast on light images while
-        # the light ring keeps doing the same job on dark images.
-        dark_outline_line = pg.PlotCurveItem(pen=pg.mkPen(QColor(0, 0, 0, 200), width=6.6))
-        outline_line = pg.PlotCurveItem(pen=pg.mkPen(QColor(255, 255, 255, 220), width=5.0))
-        line = pg.PlotCurveItem(pen=pg.mkPen(self._scale_bar_visual_color, width=2.4))
-        dark_outline_left_tick = pg.PlotCurveItem(pen=pg.mkPen(QColor(0, 0, 0, 200), width=5.8))
-        outline_left_tick = pg.PlotCurveItem(pen=pg.mkPen(QColor(255, 255, 255, 220), width=4.2))
-        left_tick = pg.PlotCurveItem(pen=pg.mkPen(self._scale_bar_visual_color, width=2.0))
-        dark_outline_right_tick = pg.PlotCurveItem(pen=pg.mkPen(QColor(0, 0, 0, 200), width=5.8))
-        outline_right_tick = pg.PlotCurveItem(pen=pg.mkPen(QColor(255, 255, 255, 220), width=4.2))
-        right_tick = pg.PlotCurveItem(pen=pg.mkPen(self._scale_bar_visual_color, width=2.0))
-        # Label uses a small solid chip (same convention as the ROI/landmark tags)
-        # instead of a halo, since overlapping two same-size text items can't
-        # produce a real outline - the top layer fully covers the one beneath it.
-        label = pg.TextItem(anchor=(0.5, 1.0))
-        self.image_plot.addItem(dark_outline_line, ignoreBounds=True)
-        self.image_plot.addItem(outline_line, ignoreBounds=True)
-        self.image_plot.addItem(line, ignoreBounds=True)
-        self.image_plot.addItem(dark_outline_left_tick, ignoreBounds=True)
-        self.image_plot.addItem(outline_left_tick, ignoreBounds=True)
-        self.image_plot.addItem(left_tick, ignoreBounds=True)
-        self.image_plot.addItem(dark_outline_right_tick, ignoreBounds=True)
-        self.image_plot.addItem(outline_right_tick, ignoreBounds=True)
-        self.image_plot.addItem(right_tick, ignoreBounds=True)
-        self.image_plot.addItem(label, ignoreBounds=True)
-        self._scale_bar_overlay = ScaleBarOverlayBundle(
-            dark_outline_line=dark_outline_line,
-            outline_line=outline_line,
-            line=line,
-            dark_outline_left_tick=dark_outline_left_tick,
-            outline_left_tick=outline_left_tick,
-            left_tick=left_tick,
-            dark_outline_right_tick=dark_outline_right_tick,
-            outline_right_tick=outline_right_tick,
-            right_tick=right_tick,
-            label=label,
-        )
-        return self._scale_bar_overlay
-
-    @staticmethod
-
-    def _nice_scale_bar_value(target: float) -> float:
-        if target <= 0.0:
-            return 1.0
-        exponent = np.floor(np.log10(target))
-        base = target / (10.0 ** exponent)
-        if base < 1.5:
-            nice_base = 1.0
-        elif base < 3.5:
-            nice_base = 2.0
-        elif base < 7.5:
-            nice_base = 5.0
-        else:
-            nice_base = 10.0
-        return float(nice_base * (10.0 ** exponent))
-
-    def _refresh_scale_bar_overlay(self) -> None:
-        self._overlay_manager._refresh_scale_bar_overlay()
 
     def _update_ignore_mask_overlay(self) -> None:
         self._overlay_manager._update_ignore_mask_overlay()
@@ -7318,66 +6340,6 @@ class MainWindow(MainWindowIcons, QMainWindow):
         color: QColor,
     ) -> None:
         self._plot_manager.update_area_histogram_peak_label(curve, label, text, color)
-
-    def _roi_area_masks(self, image: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-        signature = self._histogram_source_signature(image)
-        if self._roi_mask_cache_signature == signature and self._roi_mask_cache_values is not None:
-            return self._roi_mask_cache_values
-
-        image_f32 = image.astype(np.float32, copy=False)
-        image_height, image_width = image_f32.shape[:2]
-        ignored_mask = self._ignored_mask(image_f32)
-        roi_mask = np.zeros((image_height, image_width), dtype=bool)
-        reference_mask = np.zeros((image_height, image_width), dtype=bool)
-        display_rois = self._display_rois()
-        if display_rois:
-            affine_matrix = self._chromatic_affine_for_image_key(self._current_image_key)
-            reference_inner_radius = float(max(self._state.area_roi_settings.reference_inner_radius_px, 0.0))
-            reference_outer_radius = float(max(self._state.area_roi_settings.reference_outer_radius_px, reference_inner_radius))
-            if affine_matrix is None or self._is_current_reference_image():
-                yy, xx = np.indices((image_height, image_width), dtype=np.float32)
-                for roi in display_rois:
-                    distance_sq = (xx - float(roi.center_x)) ** 2 + (yy - float(roi.center_y)) ** 2
-                    roi_mask |= distance_sq <= float(roi.sample_radius_px) ** 2
-                    if reference_outer_radius > 0.0:
-                        outer_mask = distance_sq <= reference_outer_radius ** 2
-                        inner_mask = distance_sq < reference_inner_radius ** 2 if reference_inner_radius > 0.0 else np.zeros_like(outer_mask)
-                        reference_mask |= outer_mask & ~inner_mask
-            else:
-                source_roi_map = {roi.area_roi_id: roi for roi in self._state.area_rois}
-                for roi in display_rois:
-                    source_roi = source_roi_map.get(roi.area_roi_id, roi)
-                    roi_mask |= transformed_disk_mask(
-                        (image_height, image_width),
-                        (float(source_roi.center_x), float(source_roi.center_y)),
-                        float(source_roi.sample_radius_px),
-                        affine_matrix,
-                    )
-                    if reference_outer_radius > 0.0:
-                        reference_mask |= transformed_annulus_mask(
-                            (image_height, image_width),
-                            (float(source_roi.center_x), float(source_roi.center_y)),
-                            float(reference_inner_radius),
-                            float(reference_outer_radius),
-                            affine_matrix,
-                        )
-        roi_mask &= ~ignored_mask
-        reference_mask &= ~ignored_mask
-        reference_mask &= ~roi_mask
-        residual_mask = ~(roi_mask | reference_mask | ignored_mask)
-        cached = (roi_mask, reference_mask, ignored_mask, residual_mask)
-        self._roi_mask_cache_signature = signature
-        self._roi_mask_cache_values = cached
-        return cached
-
-    def _roi_intensity_values(self, image: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-        image_f32 = image.astype(np.float32, copy=False)
-        roi_mask, reference_mask, ignored_mask, _residual_mask = self._roi_area_masks(image_f32)
-        return (
-            image_f32[roi_mask],
-            image_f32[reference_mask],
-            image_f32[ignored_mask],
-        )
 
     def _on_histogram_region_changed(self) -> None:
         self._overlay_manager._on_histogram_region_changed()

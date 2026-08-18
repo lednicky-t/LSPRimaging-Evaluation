@@ -226,7 +226,7 @@ class ImageRenderManager:
         window._apply_main_image_content()
         window._update_reference_star_overlay()
         window._update_image_exclusion_indicator(spectral_cube_index, wavelength)
-        window._sync_ome_zarr_chunk_controls()
+        window._dataset_controller._sync_ome_zarr_chunk_controls()
         window._update_ome_zarr_chunk_guide_overlay()
         restored_view = window._restore_chromatic_view_after_load()
         if not restored_view:
