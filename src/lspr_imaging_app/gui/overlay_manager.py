@@ -197,7 +197,11 @@ class OverlayManager:
 
     def _update_landmark_overlays(self) -> None:
         w = self.window
-        if w._showing_background_profile_main:
+        # The master "show reference points" toggle must gate everything
+        # below it, including the "show all across wavelengths" mode -- this
+        # check used to run after the all-mode check, so turning all-mode on
+        # could display landmarks even with the master toggle off.
+        if w._showing_background_profile_main or not w._reference_points_visible:
             for bundle in w._landmark_overlay_items.values():
                 bundle.curve.setVisible(False)
                 bundle.label.setVisible(False)
@@ -213,17 +217,6 @@ class OverlayManager:
                 bundle.curve.setVisible(False)
                 bundle.label.setVisible(False)
             w._update_chromatic_all_landmark_overlays()
-            return
-
-        if not w._reference_points_visible:
-            for bundle in w._landmark_overlay_items.values():
-                bundle.curve.setVisible(False)
-                bundle.label.setVisible(False)
-            for bundle in w._chromatic_all_landmark_overlay_items.values():
-                bundle.points.setVisible(False)
-                if bundle.active_cross is not None:
-                    bundle.active_cross.setVisible(False)
-                bundle.label.setVisible(False)
             return
 
         w._clear_chromatic_all_landmark_overlays()

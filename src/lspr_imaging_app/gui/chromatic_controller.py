@@ -346,17 +346,32 @@ class ChromaticController:
         window = self.window
         return list(range(1, max(int(window._state.preprocessing.chromatic_feature_count), 1) + 1))
 
+    def candidate_chromatic_wavelengths(self, spectral_cube_index: int) -> list[float]:
+        """Wavelengths eligible for chromatic landmark sampling.
+
+        Excludes wavelength 0 nm -- the broadband/no-filter reference frame
+        some acquisitions capture at every timepoint alongside the narrowband
+        LCTF wavelengths. Its very different illumination character breaks
+        the phase-correlation tracking used to follow landmarks from one
+        sampled wavelength to the next, which otherwise silently corrupts
+        every landmark position once the sweep passes through it. Also
+        excludes any exclusion-marked wavelengths, as before.
+        """
+        window = self.window
+        return [
+            wavelength
+            for wavelength in window._wavelength_values
+            if float(wavelength) != 0.0
+            and not is_excluded(window._state.image_exclusions, int(spectral_cube_index), float(wavelength))
+        ]
+
     def sample_image_keys(self) -> list[tuple[int, float]]:
         window = self.window
         reference_key = window._reference_image_key()
         if reference_key is None:
             return []
         spectral_cube_index = int(reference_key[0])
-        candidate_wavelengths = [
-            wavelength
-            for wavelength in window._wavelength_values
-            if not is_excluded(window._state.image_exclusions, spectral_cube_index, float(wavelength))
-        ]
+        candidate_wavelengths = self.candidate_chromatic_wavelengths(spectral_cube_index)
         return [(spectral_cube_index, wavelength) for wavelength in _sampled_wavelengths(candidate_wavelengths, window._state.preprocessing.chromatic_sample_image_count)]
 
     def is_sample_image_key(self, image_key: tuple[int, float] | None) -> bool:
@@ -724,13 +739,12 @@ class ChromaticController:
         current_spectral_cube = window._current_spectral_cube()
         if current_spectral_cube is None:
             current_spectral_cube = window._spectral_cube_values[0] if window._spectral_cube_values else 0
-        candidate_wavelengths = [
-            wavelength
-            for wavelength in window._wavelength_values
-            if not is_excluded(window._state.image_exclusions, int(current_spectral_cube), float(wavelength))
-        ]
+        candidate_wavelengths = self.candidate_chromatic_wavelengths(int(current_spectral_cube))
         if not candidate_wavelengths:
-            window._set_status_text("All wavelengths for this spectral cube are excluded; pick a different spectral cube.")
+            window._set_status_text(
+                "No narrowband wavelengths are available for this spectral cube (all excluded, or only a "
+                "broadband/0 nm frame is present); pick a different spectral cube."
+            )
             return
         sample_minimum = 1 if len(candidate_wavelengths) <= 1 else 3
         sample_count = window._normalized_odd_count(
@@ -1137,6 +1151,8 @@ class ChromaticController:
             if landmark_id not in current_ids:
                 bundle = window._chromatic_all_landmark_overlay_items.pop(landmark_id)
                 window.image_plot.removeItem(bundle.points)
+                if bundle.active_cross is not None:
+                    window.image_plot.removeItem(bundle.active_cross)
                 window.image_plot.removeItem(bundle.label)
 
         for landmark_id, items in grouped.items():
@@ -1293,9 +1309,15 @@ class ChromaticController:
 
 
     def _on_chromatic_reference_points_all_toggled(self, checked: bool) -> None:
-        self.window._chromatic_reference_points_all_visible = bool(checked)
-        self.window._update_landmark_overlays()
-        self.window._schedule_processing_state_save()
+        window = self.window
+        window._chromatic_reference_points_all_visible = bool(checked)
+        if checked and not window._reference_points_visible:
+            window._reference_points_visible = True
+            window.show_reference_points_check.blockSignals(True)
+            window.show_reference_points_check.setChecked(True)
+            window.show_reference_points_check.blockSignals(False)
+        window._update_landmark_overlays()
+        window._schedule_processing_state_save()
 
 
     def _on_chromatic_landmark_id_changed(self, value: int) -> None:
