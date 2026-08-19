@@ -119,27 +119,70 @@ PANEL_HELP: dict[str, PanelHelpEntry] = {
         description="Calculate spectra and sensorgrams for the selected ROIs.",
         shortcut_keys=("table",),
     ),
-    "spectra_fitting": PanelHelpEntry(
-        title="Spectra fitting",
+    "roi_math": PanelHelpEntry(
+        title="ROI's math",
         description=(
-            "Choose the curve fit, its order, and the extraction metric used to compute each ROI's absorbance value "
-            "from its spectrum.\n"
-            "Formula: A = log10(I_rROI / I_sROI) - absorbance from the sample ROI's mean intensity (I_sROI) and the "
-            "reference ROI's mean intensity (I_rROI).\n"
+            "Choose how each ROI pair's masked pixels become the per-wavelength sample and reference values, and "
+            "how those two values combine into the final value used everywhere below (the absorbance spectrum, "
+            "and in turn the sensorgram).\n"
+            "Reduction: Mean is the plain pixel average (the previous, still-default behavior). Median is more "
+            "robust to a single hot/dead pixel or cosmic-ray hit inside the mask. Trimmed mean drops the top/bottom "
+            "Trim % of pixel values before averaging - a middle ground between Mean and Median. Local background "
+            "(plane fit) fits a tilted plane to the reference ROI's pixels and evaluates it at the sample ROI's "
+            "location instead of using the reference ring's raw mean - this corrects for a spatial illumination "
+            "gradient between the sample and reference apertures (useful when they sit in different rows/columns "
+            "under uneven illumination); the sample side still uses a plain mean in this mode.\n"
+            "Formula: Absorbance (A = -log10(Is/Ir), the default) - Ratio (Is/Ir) - Relative change ((Ir-Is)/Ir) - "
+            "mOD absorbance (A in milli-absorbance units). Is/Ir are the sample/reference values from Reduction "
+            "above.\n"
+            "Tips:\n"
+            "- Reduction and Formula apply to every ROI pair and every wavelength - there's no per-ROI override yet.\n"
+            "- Not covered here: per-wavelength illumination-spectrum correction (TODO, future work). Since every "
+            "formula is a sample/reference ratio, most illumination intensity variation already cancels out; this "
+            "would only matter for a non-ratio metric or if the sample/reference light paths differ spectrally."
+        ),
+    ),
+    "metric_trace": PanelHelpEntry(
+        title="Metric trace",
+        description=(
+            "Choose the curve fit, its order, and the extraction metric used to reduce each ROI's already-computed "
+            "absorbance spectrum (see ROI's math above) to one value per time point - the sensorgram.\n"
             "Metric: Maximum and Centroid both work with or without a fit. Fitting: None reads the metric straight "
             "off the raw absorbance spectrum - Maximum is the highest raw point, Centroid its intensity-weighted "
             "center wavelength. Poly fits a polynomial of the chosen Order to the absorbance spectrum first and "
-            "reads the metric off that smoothed curve instead. Gauss is a placeholder for a future Gaussian fit - "
-            "not implemented yet.\n"
+            "reads the metric off that smoothed curve instead. Gauss fits a Gaussian peak (amplitude, center, "
+            "width, offset) instead of a polynomial - a better match when the peak itself is close to symmetric, "
+            "and less prone to the wobble a high polynomial order can pick up between points.\n"
             "Tips:\n"
             "- The current fitted result shows above the spectrum plot, not in this panel.\n"
             "- A higher polynomial order follows noise more closely; a lower order is smoother but can miss a sharp peak.\n"
+            "- Gauss has no Order setting - it always fits the same 4-parameter peak shape.\n"
             "- Use the Range row above (Spectra) to crop the wavelength window before fitting, e.g. to exclude a noisy edge."
         ),
     ),
     "statistics": PanelHelpEntry(
         title="Statistics",
-        description="Averaging, smoothing, and axis-selection tools for post-processing computed spectra and sensorgrams. Not implemented yet.",
+        description=(
+            "Post-processing applied to the already-computed sensorgram trace - never the raw spectrum, and never "
+            "raw pixels. Order applied: Spikes, then Smoothing, then Baseline.\n"
+            "Smoothing: None leaves the trace as calculated. Savitzky-Golay preserves peak/step shape better than "
+            "a plain moving average - good for step-response sensorgrams. Only applied over time; spectral "
+            "smoothing (wavelength axis) isn't offered here since typical wavelength spacing (10-20 nm) is too "
+            "sparse for a smoothing window to mean much.\n"
+            "Spikes: replaces single-frame transients (bubbles, focus glitches) rather than real kinetics. Hampel "
+            "only replaces points that are statistical outliers (a set number of scaled-MADs from the local "
+            "median); Running median replaces every point unconditionally, more aggressive.\n"
+            "Baseline: subtracts the trace's own mean over a Start-End window (in the sensorgram's current x-axis "
+            "units) so it reads as relative shift from that window rather than an absolute value.\n"
+            "Group: when the current ROI selection belongs to a multi-member group (see ROI editor grouping), "
+            "shows that group's mean/median trace alongside the individual one, with an SD/SEM spread band - use "
+            "\"Calculate group\" to compute any member traces not already cached.\n"
+            "Tips:\n"
+            "- A larger Smoothing window is smoother but can blur a real, fast step transition - keep it well "
+            "under your typical step spacing.\n"
+            "- Not covered here: per-wavelength illumination-spectrum correction (TODO, future work) - see the "
+            "ROI's math help entry."
+        ),
     ),
     "results_export": PanelHelpEntry(
         title="Results / Export",

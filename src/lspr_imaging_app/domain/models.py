@@ -174,6 +174,13 @@ class AreaRoiDetectionSettings:
     array_rows: int = 0
     array_cols: int = 0
     array_spacing_px: int = 0
+    # ROI's math: how each ROI pair's masked pixels become the per-wavelength
+    # sample/reference value ("mean"/"median"/"trimmed_mean"/"plane_fit"), and
+    # how those two values combine into the final value. Shared across every
+    # ROI pair - no per-ROI override yet, see processing/roi_math.py.
+    reduction_method: str = "mean"
+    trimmed_mean_fraction: float = 0.10
+    formula_key: str = "absorbance"
 
 
 @dataclass(slots=True)
@@ -199,6 +206,12 @@ class AbsorbanceSpectrumResult:
     fit_seconds: float = 0.0
     total_seconds: float = 0.0
     area_roi_results: dict[int, "AbsorbanceSpectrumResult"] = field(default_factory=dict)
+    # Self-describing: the ROI's-math settings actually in effect when this
+    # result was computed, so a cached result stays meaningful even if the
+    # live settings have since changed. Defaults match the pre-existing
+    # hardcoded behavior (plain mean, A = log10(reference/sample)).
+    reduction_method: str = "mean"
+    formula_key: str = "absorbance"
 
 
 @dataclass(slots=True)
@@ -314,6 +327,41 @@ class RoiDefinition:
 
 
 @dataclass(slots=True)
+class StatisticsSettings:
+    """Post-processing applied to an already-computed sensorgram trace (see
+    processing/trace_statistics.py) - never touches raw pixels, so none of
+    this affects the ROI's-math/Metric-trace cache signatures. Persisted with
+    the dataset's saved session (same reasoning as AreaRoiDetectionSettings'
+    reduction/formula fields): these reshape what the plotted numbers mean
+    (a baseline-corrected trace reads as relative shift, not absolute value),
+    so they should travel with the session rather than being a silent
+    per-machine QSettings preference.
+
+    smoothing/spike-rejection order: spike rejection runs first (cleans
+    transient outliers before smoothing blends them into neighbors), then
+    smoothing, then baseline correction (a simple offset, applied last).
+
+    baseline_window_start/end are in the sensorgram's current x-axis units -
+    elapsed seconds if acquisition timing metadata is loaded, otherwise raw
+    spectral-cube index (see AnalysisController._sensorgram_x_values).
+    """
+
+    smoothing_method: str = "none"  # "none" | "savgol" | "moving_average"
+    smoothing_window: int = 15
+    smoothing_polyorder: int = 2
+    spike_rejection_enabled: bool = False
+    spike_rejection_method: str = "hampel"  # "hampel" | "running_median"
+    spike_rejection_window: int = 5
+    spike_rejection_threshold: float = 3.5
+    baseline_enabled: bool = False
+    baseline_window_start: float | None = None
+    baseline_window_end: float | None = None
+    group_stats_enabled: bool = False
+    group_stats_center: str = "mean"  # "mean" | "median"
+    group_stats_band: str = "sd"  # "sd" | "sem"
+
+
+@dataclass(slots=True)
 class AnalysisState:
     dataset: ImageDataset | None = None
     rois: list[RoiDefinition] = field(default_factory=list)
@@ -326,3 +374,4 @@ class AnalysisState:
     chromatic_landmarks: list[ChromaticLandmarkObservation] = field(default_factory=list)
     mask: MaskSettings = field(default_factory=MaskSettings)
     image_exclusions: list[ImageExclusionRule] = field(default_factory=list)
+    statistics_settings: StatisticsSettings = field(default_factory=StatisticsSettings)

@@ -39,7 +39,6 @@ from PyQt6.QtGui import (
     QPalette,
     QPen,
     QPixmap,
-    QStandardItemModel,
     QWheelEvent,
 )
 from PyQt6.QtWidgets import (
@@ -1391,25 +1390,50 @@ class MainWindow(MainWindowIcons, RectangleStampMixin, RoiGeometryMixin, Histogr
             parent=self,
         )
         self.analysis_stop_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        # ROI's math: how each ROI pair's masked sample/reference pixels become
+        # one value each (Reduction) and how those two values combine into the
+        # final per-wavelength value (Formula) - see processing/roi_math.py and
+        # processing/analysis.py::formula_value. Session-scoped via
+        # area_roi_settings (not QSettings): unlike fit_method/metric/poly_order
+        # below, these change what a cached absorbance value actually means, so
+        # they persist with the dataset's saved profile - see
+        # storage/workspace.py and AnalysisController.refresh_roi_math_controls_from_state.
+        self.analysis_reduction_method_combo = QComboBox(self)
+        self.analysis_reduction_method_combo.addItem("Mean", "mean")
+        self.analysis_reduction_method_combo.addItem("Median", "median")
+        self.analysis_reduction_method_combo.addItem("Trimmed mean", "trimmed_mean")
+        self.analysis_reduction_method_combo.addItem("Local background (plane fit)", "plane_fit")
+        reduction_method_index = max(
+            self.analysis_reduction_method_combo.findData(str(self._state.area_roi_settings.reduction_method or "mean")), 0
+        )
+        self.analysis_reduction_method_combo.setCurrentIndex(reduction_method_index)
+
+        self.analysis_trimmed_mean_spin = QSpinBox(self)
+        self.analysis_trimmed_mean_spin.setRange(0, 45)
+        self.analysis_trimmed_mean_spin.setSuffix("%")
+        self.analysis_trimmed_mean_spin.setValue(int(round(float(self._state.area_roi_settings.trimmed_mean_fraction) * 100.0)))
+        self.analysis_trimmed_mean_spin.setKeyboardTracking(False)
+        self.analysis_trimmed_mean_spin.setToolTip("Fraction trimmed from each tail before averaging. Only used by Trimmed mean.")
+
+        self.analysis_formula_combo = QComboBox(self)
+        self.analysis_formula_combo.addItem("Absorbance (-log10)", "absorbance")
+        self.analysis_formula_combo.addItem("Ratio (Is/Ir)", "ratio")
+        self.analysis_formula_combo.addItem("Relative change", "relative_change")
+        self.analysis_formula_combo.addItem("mOD absorbance", "mod_absorbance")
+        formula_index = max(
+            self.analysis_formula_combo.findData(str(self._state.area_roi_settings.formula_key or "absorbance")), 0
+        )
+        self.analysis_formula_combo.setCurrentIndex(formula_index)
+
         # Fitting method: what curve is fit to the absorbance spectrum, mirrors
-        # sLSPR acq's own fit_method_combo (None/Poly/Gauss). Gauss is a
-        # placeholder for future work - processing/analysis.py only implements
-        # a polynomial fit today, so that item is present but disabled.
+        # sLSPR acq's own fit_method_combo (None/Poly/Gauss). Gauss fits a
+        # Gaussian peak via scipy.optimize.curve_fit (processing/analysis.py
+        # ::fit_gaussian_curve) - useful when the absorbance peak is closer
+        # to a symmetric bump than Poly's arbitrary-order polynomial assumes.
         self.analysis_fit_method_combo = QComboBox(self)
         self.analysis_fit_method_combo.addItem("None", "none")
         self.analysis_fit_method_combo.addItem("Poly", "poly")
         self.analysis_fit_method_combo.addItem("Gauss", "gaussian")
-        gauss_model = self.analysis_fit_method_combo.model()
-        gauss_item = gauss_model.item(2) if isinstance(gauss_model, QStandardItemModel) else None
-        if gauss_item is not None:
-            gauss_item.setFlags(gauss_item.flags() & ~Qt.ItemFlag.ItemIsEnabled)
-            gauss_item.setToolTip("Gaussian fitting is not implemented yet.")
-            # The app's own QSS (theme.py) styles QComboBox popups directly,
-            # which suppresses Qt's automatic dimming of disabled items - so
-            # without this, "Gauss" would look identical to the selectable
-            # items despite not being clickable. Setting its text color
-            # explicitly restores that visual cue.
-            gauss_item.setForeground(QBrush(QColor(get_active_theme().control_disabled_text)))
         # Migration: "analysis/metric" used to double as the on/off switch via
         # its own "none" option. Installs that had fitting turned off that way
         # keep it off here instead of silently re-enabling it; everyone else
@@ -1437,6 +1461,92 @@ class MainWindow(MainWindowIcons, RectangleStampMixin, RoiGeometryMixin, Histogr
         stored_metric = legacy_metric if legacy_metric in {"maximum", "centroid"} else "centroid"
         metric_index = max(self.analysis_metric_combo.findData(stored_metric), 0)
         self.analysis_metric_combo.setCurrentIndex(metric_index)
+
+        # Statistics: post-processing applied to the already-computed
+        # sensorgram trace (smoothing/spike-rejection/baseline/group
+        # averaging) - never touches raw pixels. Session-scoped via
+        # statistics_settings, same reasoning as ROI's math above - see
+        # processing/trace_statistics.py and storage/workspace.py.
+        statistics_settings = self._state.statistics_settings
+        self.analysis_smoothing_method_combo = QComboBox(self)
+        self.analysis_smoothing_method_combo.addItem("None", "none")
+        self.analysis_smoothing_method_combo.addItem("Savitzky-Golay", "savgol")
+        self.analysis_smoothing_method_combo.addItem("Moving average", "moving_average")
+        smoothing_method_index = max(
+            self.analysis_smoothing_method_combo.findData(str(statistics_settings.smoothing_method or "none")), 0
+        )
+        self.analysis_smoothing_method_combo.setCurrentIndex(smoothing_method_index)
+
+        self.analysis_smoothing_window_spin = QSpinBox(self)
+        self.analysis_smoothing_window_spin.setRange(3, 1001)
+        self.analysis_smoothing_window_spin.setSingleStep(2)
+        self.analysis_smoothing_window_spin.setValue(int(statistics_settings.smoothing_window))
+        self.analysis_smoothing_window_spin.setKeyboardTracking(False)
+
+        self.analysis_smoothing_polyorder_spin = QSpinBox(self)
+        self.analysis_smoothing_polyorder_spin.setRange(1, 6)
+        self.analysis_smoothing_polyorder_spin.setValue(int(statistics_settings.smoothing_polyorder))
+        self.analysis_smoothing_polyorder_spin.setKeyboardTracking(False)
+
+        self.analysis_spike_rejection_check = QCheckBox(self)
+        self.analysis_spike_rejection_check.setChecked(bool(statistics_settings.spike_rejection_enabled))
+
+        self.analysis_spike_rejection_method_combo = QComboBox(self)
+        self.analysis_spike_rejection_method_combo.addItem("Hampel", "hampel")
+        self.analysis_spike_rejection_method_combo.addItem("Running median", "running_median")
+        spike_method_index = max(
+            self.analysis_spike_rejection_method_combo.findData(str(statistics_settings.spike_rejection_method or "hampel")), 0
+        )
+        self.analysis_spike_rejection_method_combo.setCurrentIndex(spike_method_index)
+
+        self.analysis_spike_rejection_window_spin = QSpinBox(self)
+        self.analysis_spike_rejection_window_spin.setRange(3, 101)
+        self.analysis_spike_rejection_window_spin.setSingleStep(2)
+        self.analysis_spike_rejection_window_spin.setValue(int(statistics_settings.spike_rejection_window))
+        self.analysis_spike_rejection_window_spin.setKeyboardTracking(False)
+
+        self.analysis_spike_rejection_threshold_spin = QDoubleSpinBox(self)
+        self.analysis_spike_rejection_threshold_spin.setRange(0.5, 20.0)
+        self.analysis_spike_rejection_threshold_spin.setDecimals(1)
+        self.analysis_spike_rejection_threshold_spin.setSingleStep(0.5)
+        self.analysis_spike_rejection_threshold_spin.setValue(float(statistics_settings.spike_rejection_threshold))
+        self.analysis_spike_rejection_threshold_spin.setKeyboardTracking(False)
+
+        self.analysis_baseline_check = QCheckBox(self)
+        self.analysis_baseline_check.setChecked(bool(statistics_settings.baseline_enabled))
+
+        self.analysis_baseline_start_spin = QDoubleSpinBox(self)
+        self.analysis_baseline_start_spin.setRange(-1.0e9, 1.0e9)
+        self.analysis_baseline_start_spin.setDecimals(2)
+        self.analysis_baseline_start_spin.setValue(float(statistics_settings.baseline_window_start or 0.0))
+        self.analysis_baseline_start_spin.setKeyboardTracking(False)
+
+        self.analysis_baseline_end_spin = QDoubleSpinBox(self)
+        self.analysis_baseline_end_spin.setRange(-1.0e9, 1.0e9)
+        self.analysis_baseline_end_spin.setDecimals(2)
+        self.analysis_baseline_end_spin.setValue(float(statistics_settings.baseline_window_end or 0.0))
+        self.analysis_baseline_end_spin.setKeyboardTracking(False)
+
+        self.analysis_group_stats_check = QCheckBox(self)
+        self.analysis_group_stats_check.setChecked(bool(statistics_settings.group_stats_enabled))
+
+        self.analysis_group_stats_center_combo = QComboBox(self)
+        self.analysis_group_stats_center_combo.addItem("Mean", "mean")
+        self.analysis_group_stats_center_combo.addItem("Median", "median")
+        group_center_index = max(
+            self.analysis_group_stats_center_combo.findData(str(statistics_settings.group_stats_center or "mean")), 0
+        )
+        self.analysis_group_stats_center_combo.setCurrentIndex(group_center_index)
+
+        self.analysis_group_stats_band_combo = QComboBox(self)
+        self.analysis_group_stats_band_combo.addItem("SD", "sd")
+        self.analysis_group_stats_band_combo.addItem("SEM", "sem")
+        group_band_index = max(
+            self.analysis_group_stats_band_combo.findData(str(statistics_settings.group_stats_band or "sd")), 0
+        )
+        self.analysis_group_stats_band_combo.setCurrentIndex(group_band_index)
+
+        self.analysis_calculate_group_button = QPushButton("Calculate group", self)
 
         # "Spectra" range: wavelength window (nm) the absorbance spectrum is
         # cropped to before fitting - mirrors sLSPR acq's own Range/Min/Max.
@@ -1546,6 +1656,39 @@ class MainWindow(MainWindowIcons, RectangleStampMixin, RoiGeometryMixin, Histogr
         self.sensorgram_cursor_line.setZValue(20)
         self.sensorgram_cursor_line.hide()
         self.sensorgram_plot.addItem(self.sensorgram_cursor_line)
+        # Statistics overlays: the smoothed/spike-rejected/baseline-corrected
+        # trace (dashed, distinct from the raw curve), and the group
+        # mean/median trace + spread band, shown alongside (not replacing)
+        # the raw sensorgram_curve above. Hidden until Statistics actually
+        # produces something to show, see AnalysisController._update_statistics_overlays.
+        self.sensorgram_processed_curve = self.sensorgram_plot.plot(
+            [],
+            [],
+            pen=pg.mkPen("#f59e0b", width=2.0, style=Qt.PenStyle.DashLine),
+        )
+        self.sensorgram_processed_curve.hide()
+        self.sensorgram_group_curve = self.sensorgram_plot.plot(
+            [],
+            [],
+            pen=pg.mkPen("#a855f7", width=2.2),
+            symbol="o",
+            symbolSize=5,
+            symbolBrush=pg.mkBrush("#a855f7"),
+            symbolPen=pg.mkPen("#e9d5ff", width=1.0),
+        )
+        self.sensorgram_group_curve.hide()
+        # FillBetweenItem needs two backbone curves with no visible pen of
+        # their own - same idiom as residual_fill_item/histogram_curve above.
+        self.sensorgram_group_band_low_curve = self.sensorgram_plot.plot([], [], pen=None)
+        self.sensorgram_group_band_high_curve = self.sensorgram_plot.plot([], [], pen=None)
+        self.sensorgram_group_band_fill_item = pg.FillBetweenItem(
+            self.sensorgram_group_band_low_curve.curve,
+            self.sensorgram_group_band_high_curve.curve,
+            brush=pg.mkBrush(168, 85, 247, 50),
+        )
+        self.sensorgram_group_band_fill_item.setZValue(-1)
+        self.sensorgram_group_band_fill_item.hide()
+        self.sensorgram_plot.addItem(self.sensorgram_group_band_fill_item)
         self.array_rows_spin = QSpinBox(self)
         self.array_rows_spin.setRange(0, 100)
         self.array_cols_spin = QSpinBox(self)
@@ -1904,6 +2047,7 @@ class MainWindow(MainWindowIcons, RectangleStampMixin, RoiGeometryMixin, Histogr
         self._connect_dataset_and_nav()
         self._connect_chromatic()
         self._connect_analysis_and_histogram()
+        self._connect_analysis_statistics()
         self._connect_background_and_mask()
         self._connect_roi_editor()
         self._connect_toolbar_and_ui()
@@ -1982,7 +2126,34 @@ class MainWindow(MainWindowIcons, RectangleStampMixin, RoiGeometryMixin, Histogr
         self.analysis_poly_order_spin.valueChanged.connect(self._analysis_controller.on_fit_settings_changed)
         self.analysis_metric_combo.currentIndexChanged.connect(self._analysis_controller.on_fit_settings_changed)
         self._analysis_controller.sync_analysis_fitting_controls()
+        self.analysis_reduction_method_combo.currentIndexChanged.connect(self._analysis_controller.on_roi_math_settings_changed)
+        self.analysis_reduction_method_combo.currentIndexChanged.connect(self._analysis_controller.sync_analysis_roi_math_controls)
+        self.analysis_trimmed_mean_spin.valueChanged.connect(self._analysis_controller.on_roi_math_settings_changed)
+        self.analysis_formula_combo.currentIndexChanged.connect(self._analysis_controller.on_roi_math_settings_changed)
+        self._analysis_controller.sync_analysis_roi_math_controls()
         self.calculate_spectrum_action.triggered.connect(self._refresh_absorbance_spectrum)
+
+    def _connect_analysis_statistics(self) -> None:
+        self.analysis_smoothing_method_combo.currentIndexChanged.connect(self._analysis_controller.on_statistics_settings_changed)
+        self.analysis_smoothing_method_combo.currentIndexChanged.connect(self._analysis_controller.sync_statistics_controls)
+        self.analysis_smoothing_window_spin.valueChanged.connect(self._analysis_controller.on_statistics_settings_changed)
+        self.analysis_smoothing_polyorder_spin.valueChanged.connect(self._analysis_controller.on_statistics_settings_changed)
+        self.analysis_spike_rejection_check.toggled.connect(self._analysis_controller.on_statistics_settings_changed)
+        self.analysis_spike_rejection_check.toggled.connect(self._analysis_controller.sync_statistics_controls)
+        self.analysis_spike_rejection_method_combo.currentIndexChanged.connect(self._analysis_controller.on_statistics_settings_changed)
+        self.analysis_spike_rejection_method_combo.currentIndexChanged.connect(self._analysis_controller.sync_statistics_controls)
+        self.analysis_spike_rejection_window_spin.valueChanged.connect(self._analysis_controller.on_statistics_settings_changed)
+        self.analysis_spike_rejection_threshold_spin.valueChanged.connect(self._analysis_controller.on_statistics_settings_changed)
+        self.analysis_baseline_check.toggled.connect(self._analysis_controller.on_statistics_settings_changed)
+        self.analysis_baseline_check.toggled.connect(self._analysis_controller.sync_statistics_controls)
+        self.analysis_baseline_start_spin.valueChanged.connect(self._analysis_controller.on_statistics_settings_changed)
+        self.analysis_baseline_end_spin.valueChanged.connect(self._analysis_controller.on_statistics_settings_changed)
+        self.analysis_group_stats_check.toggled.connect(self._analysis_controller.on_statistics_settings_changed)
+        self.analysis_group_stats_check.toggled.connect(self._analysis_controller.sync_statistics_controls)
+        self.analysis_group_stats_center_combo.currentIndexChanged.connect(self._analysis_controller.on_statistics_settings_changed)
+        self.analysis_group_stats_band_combo.currentIndexChanged.connect(self._analysis_controller.on_statistics_settings_changed)
+        self.analysis_calculate_group_button.clicked.connect(self._analysis_controller.calculate_group_sensorgram)
+        self._analysis_controller.sync_statistics_controls()
 
     def _connect_background_and_mask(self) -> None:
         self.background_removal_link.toggled.connect(self.background_section.set_applied)
@@ -3437,7 +3608,8 @@ class MainWindow(MainWindowIcons, RectangleStampMixin, RoiGeometryMixin, Histogr
             getattr(self, "roi_editor_section", None),
             getattr(self, "background_section", None),
             getattr(self, "analysis_section", None),
-            getattr(self, "spectra_fitting_section", None),
+            getattr(self, "roi_math_section", None),
+            getattr(self, "metric_trace_section", None),
             getattr(self, "statistics_section", None),
             getattr(self, "results_export_section", None),
         )

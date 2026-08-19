@@ -25,6 +25,7 @@ from lspr_imaging_app.domain.models import (
     RoiArrayGroup,
     RoiDefinition,
     RoiMask,
+    StatisticsSettings,
 )
 
 
@@ -495,6 +496,7 @@ def build_processing_profile_payload(
     mask_settings: MaskSettings | None = None,
     image_exclusions: list[ImageExclusionRule] | None = None,
     area_roi_arrays: list[RoiArrayGroup] | None = None,
+    statistics_settings: StatisticsSettings | None = None,
 ) -> dict:
     payload = {
         "profile_type": "lspr_imaging_processing",
@@ -546,6 +548,7 @@ def build_processing_profile_payload(
         "chromatic_models": [asdict(model) for model in (chromatic_models or [])],
         "chromatic_landmarks": [asdict(mark) for mark in (chromatic_landmarks or [])],
         "image_exclusions": [asdict(rule) for rule in (image_exclusions or [])],
+        "statistics_settings": asdict(statistics_settings or StatisticsSettings()),
     }
     if mask_settings is not None:
         payload["mask_settings"] = _encode_mask_settings(mask_settings)
@@ -576,6 +579,7 @@ def save_processing_profile(
     mask_settings: MaskSettings | None = None,
     image_exclusions: list[ImageExclusionRule] | None = None,
     area_roi_arrays: list[RoiArrayGroup] | None = None,
+    statistics_settings: StatisticsSettings | None = None,
 ) -> None:
     write_json_file(
         path,
@@ -592,6 +596,7 @@ def save_processing_profile(
             mask_settings=mask_settings,
             image_exclusions=image_exclusions,
             area_roi_arrays=area_roi_arrays,
+            statistics_settings=statistics_settings,
         ),
     )
 
@@ -632,6 +637,7 @@ def load_processing_profile(
     MaskSettings,
     list[ImageExclusionRule],
     list[RoiArrayGroup],
+    StatisticsSettings,
 ]:
     payload = json.loads(path.read_text(encoding="utf-8"))
     preprocessing_payload = payload.get("preprocessing", payload)
@@ -780,6 +786,9 @@ def load_processing_profile(
         array_rows=int(raw_detection.get("array_rows", 0)),
         array_cols=int(raw_detection.get("array_cols", 0)),
         array_spacing_px=int(raw_detection.get("array_spacing_px", raw_detection.get("min_distance_px", 0))),
+        reduction_method=str(raw_detection.get("reduction_method", "mean")),
+        trimmed_mean_fraction=float(raw_detection.get("trimmed_mean_fraction", 0.10)),
+        formula_key=str(raw_detection.get("formula_key", "absorbance")),
     )
     if detection.ignored_intensity_min_value is None and detection.ignored_intensity_max_value is None:
         legacy_threshold = detection.ignored_intensity_value
@@ -902,6 +911,33 @@ def load_processing_profile(
                 )
             )
 
+    raw_statistics_settings = payload.get("statistics_settings", {})
+    if not isinstance(raw_statistics_settings, dict):
+        raw_statistics_settings = {}
+    statistics_settings = StatisticsSettings(
+        smoothing_method=str(raw_statistics_settings.get("smoothing_method", "none")),
+        smoothing_window=int(raw_statistics_settings.get("smoothing_window", 15)),
+        smoothing_polyorder=int(raw_statistics_settings.get("smoothing_polyorder", 2)),
+        spike_rejection_enabled=bool(raw_statistics_settings.get("spike_rejection_enabled", False)),
+        spike_rejection_method=str(raw_statistics_settings.get("spike_rejection_method", "hampel")),
+        spike_rejection_window=int(raw_statistics_settings.get("spike_rejection_window", 5)),
+        spike_rejection_threshold=float(raw_statistics_settings.get("spike_rejection_threshold", 3.5)),
+        baseline_enabled=bool(raw_statistics_settings.get("baseline_enabled", False)),
+        baseline_window_start=(
+            None
+            if raw_statistics_settings.get("baseline_window_start") is None
+            else float(raw_statistics_settings.get("baseline_window_start"))
+        ),
+        baseline_window_end=(
+            None
+            if raw_statistics_settings.get("baseline_window_end") is None
+            else float(raw_statistics_settings.get("baseline_window_end"))
+        ),
+        group_stats_enabled=bool(raw_statistics_settings.get("group_stats_enabled", False)),
+        group_stats_center=str(raw_statistics_settings.get("group_stats_center", "mean")),
+        group_stats_band=str(raw_statistics_settings.get("group_stats_band", "sd")),
+    )
+
     return (
         preprocessing,
         detection,
@@ -915,4 +951,5 @@ def load_processing_profile(
         mask_settings,
         image_exclusions,
         area_roi_arrays,
+        statistics_settings,
     )

@@ -160,6 +160,209 @@ def _build_analysis_fitting_row(window) -> QWidget:
     return widget
 
 
+def _build_roi_math_row(window) -> QWidget:
+    """Reduction/Trim/Formula row: same stacked grid layout as
+    _build_analysis_fitting_row above. This is the panel that turns each ROI
+    pair's raw masked pixels into the per-wavelength sample/reference value
+    (Reduction, with Trim % only meaningful for Trimmed mean) and then into
+    the final value (Formula) - the step "Metric trace" below now assumes is
+    already done. Trim % visibility is gated the same way Order is in the
+    Metric trace row, see AnalysisController.sync_analysis_roi_math_controls()."""
+    widget = QWidget(window)
+    grid = QGridLayout()
+    grid.setContentsMargins(0, 0, 0, 0)
+    grid.setHorizontalSpacing(6)
+    grid.setVerticalSpacing(4)
+    grid.setColumnStretch(4, 1)
+
+    section_label = QLabel("ROI's math")
+    section_label.setToolTip(
+        "How each ROI pair's masked pixels become the per-wavelength sample/reference value, "
+        "and how those two values combine into the final value."
+    )
+    grid.addWidget(section_label, 1, 0, alignment=Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+
+    reduction_title = QLabel("Reduction")
+    reduction_title.setToolTip("How the sample and reference ROI's masked pixels are each collapsed to one value.")
+    window.analysis_reduction_method_combo.setToolTip(reduction_title.toolTip())
+    grid.addWidget(reduction_title, 0, 1, alignment=Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignBottom)
+    grid.addWidget(window.analysis_reduction_method_combo, 1, 1, alignment=Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+
+    trim_title = QLabel("Trim %")
+    trim_title.setToolTip("Fraction trimmed from each tail before averaging. Only used by Trimmed mean.")
+    window.analysis_trimmed_mean_spin.setToolTip(trim_title.toolTip())
+    grid.addWidget(trim_title, 0, 2, alignment=Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignBottom)
+    grid.addWidget(window.analysis_trimmed_mean_spin, 1, 2, alignment=Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+
+    formula_title = QLabel("Formula")
+    formula_title.setToolTip("How the sample and reference values combine into the final per-wavelength value.")
+    window.analysis_formula_combo.setToolTip(formula_title.toolTip())
+    grid.addWidget(formula_title, 0, 3, alignment=Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignBottom)
+    grid.addWidget(window.analysis_formula_combo, 1, 3, alignment=Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+
+    window._analysis_trim_fraction_title_widget = trim_title
+    widget.setLayout(grid)
+    widget.setSizePolicy(QSizePolicy.Policy.MinimumExpanding, QSizePolicy.Policy.Fixed)
+    return widget
+
+
+def _build_statistics_smoothing_row(window) -> QWidget:
+    """Smoothing method/window/order row - "None" (the default) is the
+    off-switch, same precedent as Metric trace's Fitting combo. Order is
+    only shown for Savitzky-Golay, same visibility-gating idea as Metric
+    trace's own Order, see AnalysisController.sync_statistics_controls()."""
+    widget = QWidget(window)
+    grid = QGridLayout()
+    grid.setContentsMargins(0, 0, 0, 0)
+    grid.setHorizontalSpacing(6)
+    grid.setVerticalSpacing(4)
+    grid.setColumnStretch(3, 1)
+
+    section_label = QLabel("Smoothing")
+    section_label.setToolTip("Smooths the sensorgram trace over time. Not applied to the wavelength spectrum.")
+    grid.addWidget(section_label, 1, 0, alignment=Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+
+    method_title = QLabel("Method")
+    method_title.setToolTip("None leaves the trace as calculated. Savitzky-Golay preserves peak/step shape better than a plain moving average.")
+    window.analysis_smoothing_method_combo.setToolTip(method_title.toolTip())
+    grid.addWidget(method_title, 0, 1, alignment=Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignBottom)
+    grid.addWidget(window.analysis_smoothing_method_combo, 1, 1, alignment=Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+
+    window_title = QLabel("Window")
+    window_title.setToolTip("Number of points averaged/fit at each step. Larger = smoother but can blur real step transitions.")
+    window.analysis_smoothing_window_spin.setToolTip(window_title.toolTip())
+    grid.addWidget(window_title, 0, 2, alignment=Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignBottom)
+    grid.addWidget(window.analysis_smoothing_window_spin, 1, 2, alignment=Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+
+    order_title = QLabel("Order")
+    order_title.setToolTip("Polynomial order used by Savitzky-Golay smoothing.")
+    window.analysis_smoothing_polyorder_spin.setToolTip(order_title.toolTip())
+    grid.addWidget(order_title, 0, 3, alignment=Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignBottom)
+    grid.addWidget(window.analysis_smoothing_polyorder_spin, 1, 3, alignment=Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+
+    window._analysis_smoothing_order_title_widget = order_title
+    widget.setLayout(grid)
+    widget.setSizePolicy(QSizePolicy.Policy.MinimumExpanding, QSizePolicy.Policy.Fixed)
+    return widget
+
+
+def _build_statistics_spike_row(window) -> QWidget:
+    """Spike-rejection row - the Enabled checkbox itself is the row label,
+    since "which method" only matters once it's on. Threshold is Hampel-only,
+    see AnalysisController.sync_statistics_controls()."""
+    widget = QWidget(window)
+    grid = QGridLayout()
+    grid.setContentsMargins(0, 0, 0, 0)
+    grid.setHorizontalSpacing(6)
+    grid.setVerticalSpacing(4)
+    grid.setColumnStretch(4, 1)
+
+    window.analysis_spike_rejection_check.setText("Spikes")
+    window.analysis_spike_rejection_check.setToolTip(
+        "Replace single-frame transients (bubbles, focus glitches) with a local median, without smearing real kinetics."
+    )
+    grid.addWidget(window.analysis_spike_rejection_check, 1, 0, alignment=Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+
+    method_title = QLabel("Method")
+    method_title.setToolTip("Hampel only replaces points that are statistical outliers. Running median replaces every point unconditionally.")
+    window.analysis_spike_rejection_method_combo.setToolTip(method_title.toolTip())
+    grid.addWidget(method_title, 0, 1, alignment=Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignBottom)
+    grid.addWidget(window.analysis_spike_rejection_method_combo, 1, 1, alignment=Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+
+    window_title = QLabel("Window")
+    window_title.setToolTip("Number of neighboring points used to judge each point.")
+    window.analysis_spike_rejection_window_spin.setToolTip(window_title.toolTip())
+    grid.addWidget(window_title, 0, 2, alignment=Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignBottom)
+    grid.addWidget(window.analysis_spike_rejection_window_spin, 1, 2, alignment=Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+
+    threshold_title = QLabel("Threshold")
+    threshold_title.setToolTip("How many scaled-MADs from the local median counts as an outlier. Lower = more aggressive. Hampel only.")
+    window.analysis_spike_rejection_threshold_spin.setToolTip(threshold_title.toolTip())
+    grid.addWidget(threshold_title, 0, 3, alignment=Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignBottom)
+    grid.addWidget(window.analysis_spike_rejection_threshold_spin, 1, 3, alignment=Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+
+    window._analysis_spike_threshold_title_widget = threshold_title
+    widget.setLayout(grid)
+    widget.setSizePolicy(QSizePolicy.Policy.MinimumExpanding, QSizePolicy.Policy.Fixed)
+    return widget
+
+
+def _build_statistics_baseline_row(window) -> QWidget:
+    """Baseline-correction row - subtracts the trace's own mean value over a
+    user-picked x-axis window (elapsed seconds, or spectral-cube index if no
+    acquisition timing is loaded) so the trace reads as relative shift from
+    that reference window rather than an absolute value."""
+    widget = QWidget(window)
+    grid = QGridLayout()
+    grid.setContentsMargins(0, 0, 0, 0)
+    grid.setHorizontalSpacing(6)
+    grid.setVerticalSpacing(4)
+    grid.setColumnStretch(3, 1)
+
+    window.analysis_baseline_check.setText("Baseline")
+    window.analysis_baseline_check.setToolTip(
+        "Subtract the trace's own mean over the Start-End window below, so it reads as relative shift from that window."
+    )
+    grid.addWidget(window.analysis_baseline_check, 1, 0, alignment=Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+
+    start_title = QLabel("Start")
+    start_title.setToolTip("Baseline window start, in the sensorgram's current x-axis units.")
+    window.analysis_baseline_start_spin.setToolTip(start_title.toolTip())
+    grid.addWidget(start_title, 0, 1, alignment=Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignBottom)
+    grid.addWidget(window.analysis_baseline_start_spin, 1, 1, alignment=Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+
+    end_title = QLabel("End")
+    end_title.setToolTip("Baseline window end, in the sensorgram's current x-axis units.")
+    window.analysis_baseline_end_spin.setToolTip(end_title.toolTip())
+    grid.addWidget(end_title, 0, 2, alignment=Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignBottom)
+    grid.addWidget(window.analysis_baseline_end_spin, 1, 2, alignment=Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+
+    widget.setLayout(grid)
+    widget.setSizePolicy(QSizePolicy.Policy.MinimumExpanding, QSizePolicy.Policy.Fixed)
+    return widget
+
+
+def _build_statistics_group_row(window) -> QWidget:
+    """Group-statistics row - aggregates each selected ROI pair's own
+    already-computed trace across an AreaRoiGroup's members into a center
+    trace + SD/SEM band, shown alongside (not replacing) the individual
+    trace. "Calculate group" computes any member traces not already cached."""
+    widget = QWidget(window)
+    grid = QGridLayout()
+    grid.setContentsMargins(0, 0, 0, 0)
+    grid.setHorizontalSpacing(6)
+    grid.setVerticalSpacing(4)
+    grid.setColumnStretch(4, 1)
+
+    window.analysis_group_stats_check.setText("Group")
+    window.analysis_group_stats_check.setToolTip(
+        "When the current ROI selection belongs to a multi-member group, show the group's mean/median trace "
+        "alongside the individual one, with a spread band."
+    )
+    grid.addWidget(window.analysis_group_stats_check, 1, 0, alignment=Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+
+    center_title = QLabel("Center")
+    center_title.setToolTip("Mean or median across the group's member traces at each time point.")
+    window.analysis_group_stats_center_combo.setToolTip(center_title.toolTip())
+    grid.addWidget(center_title, 0, 1, alignment=Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignBottom)
+    grid.addWidget(window.analysis_group_stats_center_combo, 1, 1, alignment=Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+
+    band_title = QLabel("Band")
+    band_title.setToolTip("SD = spread of the members themselves. SEM = SD / sqrt(member count), how well the mean is known.")
+    window.analysis_group_stats_band_combo.setToolTip(band_title.toolTip())
+    grid.addWidget(band_title, 0, 2, alignment=Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignBottom)
+    grid.addWidget(window.analysis_group_stats_band_combo, 1, 2, alignment=Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+
+    window.analysis_calculate_group_button.setToolTip(
+        "Calculate the sensorgram for every member of the current selection's group (reusing any already-cached member traces)."
+    )
+    grid.addWidget(window.analysis_calculate_group_button, 1, 3, alignment=Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+
+    widget.setLayout(grid)
+    widget.setSizePolicy(QSizePolicy.Policy.MinimumExpanding, QSizePolicy.Policy.Fixed)
+    return widget
+
+
 def _nested_section_group(parent: QWidget, *sections: QWidget) -> QWidget:
     """Indent child CollapsibleSections so they read as nested under their
     parent section instead of sitting flush with it."""
@@ -620,9 +823,19 @@ def build_layout(window) -> None:
     )
     analysis_top_layout.addRow("Range", analysis_range_group)
 
-    # "Spectra fitting" nested section: just the metric/order controls - the
+    # "ROI's math" nested section: reduction method + formula controls that
+    # turn each ROI pair's masked pixels into the per-wavelength value -
+    # usage tips live in this section's help popout (see
+    # panel_help_registry.py's "roi_math" entry).
+    analysis_roi_math_content = QWidget(window)
+    analysis_roi_math_layout = QVBoxLayout(analysis_roi_math_content)
+    analysis_roi_math_layout.setContentsMargins(8, 8, 8, 8)
+    analysis_roi_math_layout.setSpacing(4)
+    analysis_roi_math_layout.addWidget(_build_roi_math_row(window))
+
+    # "Metric trace" nested section: just the metric/order controls - the
     # formula and usage tips live in this section's help popout instead (see
-    # panel_help_registry.py's "spectra_fitting" entry), and the result is
+    # panel_help_registry.py's "metric_trace" entry), and the result is
     # shown once, above the spectrum plot (spectrum_summary_label), not
     # duplicated here.
     analysis_fitting_content = QWidget(window)
@@ -631,14 +844,19 @@ def build_layout(window) -> None:
     analysis_fitting_layout.setSpacing(4)
     analysis_fitting_layout.addWidget(_build_analysis_fitting_row(window))
 
-    # "Statistics" nested section: averaging/smoothing controls - not designed yet.
+    # "Statistics" nested section: post-processing applied to the already-
+    # computed sensorgram trace (never raw pixels) - smoothing/spike
+    # rejection/baseline on a single trace, plus group averaging across
+    # replicate ROI pairs. See processing/trace_statistics.py and
+    # panel_help_registry.py's "statistics" entry.
     analysis_statistics_content = QWidget(window)
     analysis_statistics_layout = QVBoxLayout(analysis_statistics_content)
-    analysis_statistics_layout.setContentsMargins(12, 12, 12, 12)
-    analysis_statistics_layout.addWidget(
-        _placeholder_label("Statistics tools (averaging, smoothing, axis selection) — coming soon.")
-    )
-    analysis_statistics_layout.addStretch(1)
+    analysis_statistics_layout.setContentsMargins(8, 8, 8, 8)
+    analysis_statistics_layout.setSpacing(6)
+    analysis_statistics_layout.addWidget(_build_statistics_smoothing_row(window))
+    analysis_statistics_layout.addWidget(_build_statistics_spike_row(window))
+    analysis_statistics_layout.addWidget(_build_statistics_baseline_row(window))
+    analysis_statistics_layout.addWidget(_build_statistics_group_row(window))
 
     window.image_toolbar = QWidget(window)
     window.image_toolbar.setObjectName("imageToolbar")
@@ -763,13 +981,21 @@ def build_layout(window) -> None:
         parent=window,
     )
 
-    # "Analysis" nests Spectra fitting / Statistics as child sections
-    # underneath the scope/range controls that stay pinned above them.
-    window.spectra_fitting_section = CollapsibleSection(
-        "Spectra fitting",
+    # "Analysis" nests ROI's math / Metric trace / Statistics as child
+    # sections underneath the scope/range controls that stay pinned above them.
+    window.roi_math_section = CollapsibleSection(
+        "ROI's math",
+        analysis_roi_math_content,
+        expanded=True,
+        help_text=panel_help_text("roi_math"),
+        title_color=_nested_title_color(),
+        parent=window,
+    )
+    window.metric_trace_section = CollapsibleSection(
+        "Metric trace",
         analysis_fitting_content,
         expanded=True,
-        help_text=panel_help_text("spectra_fitting"),
+        help_text=panel_help_text("metric_trace"),
         title_color=_nested_title_color(),
         parent=window,
     )
@@ -787,7 +1013,7 @@ def build_layout(window) -> None:
     analysis_inner_layout.setSpacing(4)
     analysis_inner_layout.addWidget(analysis_top_widget)
     analysis_inner_layout.addWidget(
-        _nested_section_group(window, window.spectra_fitting_section, window.statistics_section)
+        _nested_section_group(window, window.roi_math_section, window.metric_trace_section, window.statistics_section)
     )
     window.analysis_section = CollapsibleSection(
         "Analysis",
@@ -833,7 +1059,8 @@ def build_layout(window) -> None:
             window.background_section,
             window.roi_editor_section,
             window.analysis_section,
-            window.spectra_fitting_section,
+            window.roi_math_section,
+            window.metric_trace_section,
             window.statistics_section,
             window.results_export_section,
         ]

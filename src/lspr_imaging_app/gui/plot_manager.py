@@ -6,7 +6,7 @@ from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QColor
 
 from lspr_imaging_app.domain.models import AbsorbanceSpectrumResult, FitResult
-from lspr_imaging_app.processing.analysis import fit_absorbance_curve
+from lspr_imaging_app.processing.analysis import fit_curve_for_method
 from lspr_imaging_app.processing.chromatic import transformed_annulus_mask, transformed_disk_mask
 from lspr_imaging_app.processing.roi_detection import ignored_pixel_mask
 from lspr_imaging_app.gui.roi_overlay_helpers import resolved_roi_color
@@ -153,9 +153,10 @@ class PlotManager:
         if self._window._analysis_fit_method_key() == "none":
             return None
         wavelength_range = self._window._analysis_wavelength_range()
-        fit = fit_absorbance_curve(
+        fit = fit_curve_for_method(
             result.wavelengths_nm,
             result.absorbance,
+            self._window._analysis_fit_method_key(),
             poly_order=self._window._analysis_poly_order(),
             wl_min=wavelength_range[0] if wavelength_range is not None else None,
             wl_max=wavelength_range[1] if wavelength_range is not None else None,

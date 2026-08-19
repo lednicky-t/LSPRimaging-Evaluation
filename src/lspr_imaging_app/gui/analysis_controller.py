@@ -13,6 +13,14 @@ from lspr_imaging_app.domain.models import AreaRoi, AbsorbanceSpectrumResult
 from lspr_imaging_app.gui.worker import SensorgramComputationResult
 from lspr_imaging_app.gui.analysis_tasks import _roi_absorbance_signature
 from lspr_imaging_app.processing.analysis import metric_value_from_fit, metric_value_from_spectrum
+from lspr_imaging_app.processing.trace_statistics import (
+    aggregate_group_traces,
+    normalize_to_baseline_window,
+    reject_spikes_hampel,
+    reject_spikes_running_median,
+    smooth_moving_average,
+    smooth_savgol,
+)
 
 
 class AnalysisController:
@@ -173,6 +181,9 @@ class AnalysisController:
         self.window._pending_sensorgram_payload = None
         self.window.sensorgram_curve.setData([], [])
         self.window.sensorgram_current_point.setData([], [])
+        self.window.sensorgram_processed_curve.hide()
+        self.window.sensorgram_group_curve.hide()
+        self.window.sensorgram_group_band_fill_item.hide()
         self.update_plot_labels()
         self.update_selection_highlight(force=True)
         self.window.sensorgram_summary_label.setText(summary_text)
@@ -198,6 +209,7 @@ class AnalysisController:
         self.update_current_point()
         if summary_text is not None:
             self.window.sensorgram_summary_label.setText(summary_text)
+        self._update_statistics_overlays()
 
     def prepare_absorbance_spectrum_payload(self):
         return self._prepare_absorbance_spectrum_payload()
@@ -380,6 +392,7 @@ class AnalysisController:
             )
 
         wavelength_range = self.window._analysis_wavelength_range()
+        reduction_method, trimmed_mean_fraction, formula_key = self._roi_math_signature_elements()
         worker = FunctionWorker(
             _sensorgram_metric_task,
             spectral_cubes,
@@ -395,6 +408,9 @@ class AnalysisController:
             wl_min=None if wavelength_range is None else wavelength_range[0],
             wl_max=None if wavelength_range is None else wavelength_range[1],
             fit_method_key=self._analysis_fit_method_key(),
+            reduction_method=reduction_method,
+            trimmed_mean_fraction=trimmed_mean_fraction,
+            formula_key=formula_key,
         )
         worker.signals.progress.connect(self.window._update_busy_progress)
         worker.signals.partial.connect(
@@ -450,6 +466,14 @@ class AnalysisController:
         else:
             timing = self.window._compact_timing_text(("prep", result.prep_seconds), ("fit", result.fit_seconds))
             self.window._set_status_text(f"SG | {timing}" if timing else "SG | done")
+        if getattr(self, "_group_calculation_active", False):
+            # A "Calculate group" run is mid-flight: this result was one
+            # member's own trace, now cached under its own signature above.
+            # Advance to the next member (or finish and restore the actual
+            # current-selection display) instead of the normal pending-
+            # refresh check below, which is for a real user-driven change.
+            self._on_group_member_sensorgram_ready()
+            return
         if self.window._pending_sensorgram_payload is not None:
             self.start_pending_sensorgram_refresh()
 
@@ -465,6 +489,11 @@ class AnalysisController:
         self.window._update_analysis_control_state()
         self.window._set_sensorgram_summary_text(f"Sensorgram failed: {message}")
         self.window._background_error("Sensorgram", message)
+        if getattr(self, "_group_calculation_active", False):
+            # Skip the failed member rather than stalling the queue forever;
+            # it just won't be part of the aggregated band.
+            self._on_group_member_sensorgram_ready()
+            return
         if self.window._pending_sensorgram_payload is not None:
             self.start_pending_sensorgram_refresh()
 
@@ -515,6 +544,19 @@ class AnalysisController:
     # (moved from MainWindow)
     # ------------------------------------------------------------------
 
+    def _roi_math_signature_elements(self) -> tuple[str, float, str]:
+        """(reduction_method, trimmed_mean_fraction, formula_key) - the three
+        ROI's-math settings that change what a ROI pair's masked pixels
+        reduce to. Appended to every cache signature whose cached value would
+        otherwise go stale when the user changes Reduction/Formula without
+        anything else changing."""
+        settings = self.window._state.area_roi_settings
+        return (
+            str(settings.reduction_method),
+            round(float(settings.trimmed_mean_fraction), 4),
+            str(settings.formula_key),
+        )
+
     def _sensorgram_signature_for_selection(
         self,
         spectral_cubes: list[int],
@@ -548,6 +590,7 @@ class AnalysisController:
             tuple(spectral_cube_signatures),
             round(float(self.window._state.area_roi_settings.reference_inner_radius_px), 3),
             round(float(self.window._state.area_roi_settings.reference_outer_radius_px), 3),
+            *self._roi_math_signature_elements(),
         )
 
     def _sensorgram_spectral_cube_payload_signature(
@@ -570,6 +613,7 @@ class AnalysisController:
             ),
             round(float(self.window._state.area_roi_settings.reference_inner_radius_px), 3),
             round(float(self.window._state.area_roi_settings.reference_outer_radius_px), 3),
+            *self._roi_math_signature_elements(),
         )
 
     def _cached_sensorgram_spectral_cube_payload(
@@ -658,6 +702,7 @@ class AnalysisController:
                 self.window._chromatic_signature_for_image_key((int(spectral_cube_index), float(wavelength)))
                 for wavelength in self.window._wavelength_values
             ),
+            *self._roi_math_signature_elements(),
         )
 
     def _absorbance_spectrum_signature(self) -> tuple[object, ...] | None:
@@ -692,6 +737,8 @@ class AnalysisController:
             roi_seconds=float(first_result.roi_seconds),
             fit_seconds=float(first_result.fit_seconds),
             total_seconds=float(first_result.total_seconds),
+            reduction_method=str(first_result.reduction_method),
+            formula_key=str(first_result.formula_key),
             area_roi_results=roi_results,
         )
 
@@ -708,6 +755,8 @@ class AnalysisController:
             "roi_seconds": float(result.roi_seconds),
             "fit_seconds": float(result.fit_seconds),
             "total_seconds": float(result.total_seconds),
+            "reduction_method": str(result.reduction_method),
+            "formula_key": str(result.formula_key),
             "area_roi_results": {
                 str(int(roi_id)): AnalysisController._serialize_absorbance_result(roi_result)
                 for roi_id, roi_result in (result.area_roi_results or {}).items()
@@ -745,6 +794,8 @@ class AnalysisController:
             roi_seconds=float(payload.get("roi_seconds", 0.0)),
             fit_seconds=float(payload.get("fit_seconds", 0.0)),
             total_seconds=float(payload.get("total_seconds", 0.0)),
+            reduction_method=str(payload.get("reduction_method", "mean")),
+            formula_key=str(payload.get("formula_key", "absorbance")),
             area_roi_results=roi_results,
         )
 
@@ -1671,6 +1722,372 @@ class AnalysisController:
         if order_title is not None:
             order_title.setVisible(order_visible)
 
+    def sync_analysis_roi_math_controls(self) -> None:
+        """Show/hide Trim % to match the chosen Reduction method - only
+        Trimmed mean uses it, same visibility-gating pattern as
+        sync_analysis_fitting_controls's Order widget above."""
+        is_trimmed_mean = str(self.window.analysis_reduction_method_combo.currentData() or "mean") == "trimmed_mean"
+        self.window.analysis_trimmed_mean_spin.setVisible(is_trimmed_mean)
+        trim_title = getattr(self.window, "_analysis_trim_fraction_title_widget", None)
+        if trim_title is not None:
+            trim_title.setVisible(is_trimmed_mean)
+
+    def on_roi_math_settings_changed(self, *_args) -> None:
+        """Reduction method / Trim % / Formula changed - these are session-
+        scoped (area_roi_settings, not QSettings, see storage/workspace.py)
+        since they change what a cached absorbance value means, unlike
+        fit_method/metric/poly_order. Written back into state here, then the
+        same cache-check-or-refresh logic as a fit-settings change applies
+        (the changed reduction/formula are now part of the cache signature -
+        see AnalysisController._roi_math_signature_elements - so a stale
+        result will already miss and trigger a real recompute)."""
+        settings = self.window._state.area_roi_settings
+        settings.reduction_method = str(self.window.analysis_reduction_method_combo.currentData() or "mean")
+        settings.trimmed_mean_fraction = float(self.window.analysis_trimmed_mean_spin.value()) / 100.0
+        settings.formula_key = str(self.window.analysis_formula_combo.currentData() or "absorbance")
+        self.sync_analysis_roi_math_controls()
+        self.window._schedule_processing_state_save()
+        self._on_analysis_fit_settings_changed(*_args)
+
+    def refresh_roi_math_controls_from_state(self) -> None:
+        """Push area_roi_settings' reduction/trim/formula into the ROI's-math
+        widgets without re-triggering on_roi_math_settings_changed - called
+        whenever a session/profile load replaces area_roi_settings wholesale,
+        so the panel doesn't keep showing stale (default) values after
+        loading a session that used a non-default Reduction or Formula."""
+        window = self.window
+        settings = window._state.area_roi_settings
+        window.analysis_reduction_method_combo.blockSignals(True)
+        window.analysis_trimmed_mean_spin.blockSignals(True)
+        window.analysis_formula_combo.blockSignals(True)
+        try:
+            reduction_index = max(window.analysis_reduction_method_combo.findData(str(settings.reduction_method or "mean")), 0)
+            window.analysis_reduction_method_combo.setCurrentIndex(reduction_index)
+            window.analysis_trimmed_mean_spin.setValue(int(round(float(settings.trimmed_mean_fraction) * 100.0)))
+            formula_index = max(window.analysis_formula_combo.findData(str(settings.formula_key or "absorbance")), 0)
+            window.analysis_formula_combo.setCurrentIndex(formula_index)
+        finally:
+            window.analysis_reduction_method_combo.blockSignals(False)
+            window.analysis_trimmed_mean_spin.blockSignals(False)
+            window.analysis_formula_combo.blockSignals(False)
+        self.sync_analysis_roi_math_controls()
+
+    # ------------------------------------------------------------------
+    # Statistics: post-processing applied to the already-computed
+    # sensorgram trace (smoothing/spike-rejection/baseline/group
+    # averaging) - never raw pixels, so no cache-signature changes are
+    # needed anywhere here (see processing/trace_statistics.py).
+    # ------------------------------------------------------------------
+
+    def sync_statistics_controls(self) -> None:
+        """Show/enable only the controls that matter for the current
+        settings - Order only for Savitzky-Golay smoothing, Threshold only
+        for Hampel spike rejection, and the method/param controls for each
+        block only while its own toggle is on. Same visibility-gating idea
+        as sync_analysis_fitting_controls/sync_analysis_roi_math_controls."""
+        window = self.window
+        is_savgol = str(window.analysis_smoothing_method_combo.currentData() or "none") == "savgol"
+        window.analysis_smoothing_polyorder_spin.setVisible(is_savgol)
+        order_title = getattr(window, "_analysis_smoothing_order_title_widget", None)
+        if order_title is not None:
+            order_title.setVisible(is_savgol)
+        window.analysis_smoothing_window_spin.setEnabled(
+            str(window.analysis_smoothing_method_combo.currentData() or "none") != "none"
+        )
+
+        spike_enabled = bool(window.analysis_spike_rejection_check.isChecked())
+        window.analysis_spike_rejection_method_combo.setEnabled(spike_enabled)
+        window.analysis_spike_rejection_window_spin.setEnabled(spike_enabled)
+        is_hampel = str(window.analysis_spike_rejection_method_combo.currentData() or "hampel") == "hampel"
+        window.analysis_spike_rejection_threshold_spin.setVisible(is_hampel)
+        threshold_title = getattr(window, "_analysis_spike_threshold_title_widget", None)
+        if threshold_title is not None:
+            threshold_title.setVisible(is_hampel)
+        window.analysis_spike_rejection_threshold_spin.setEnabled(spike_enabled)
+
+        baseline_enabled = bool(window.analysis_baseline_check.isChecked())
+        window.analysis_baseline_start_spin.setEnabled(baseline_enabled)
+        window.analysis_baseline_end_spin.setEnabled(baseline_enabled)
+
+        group_enabled = bool(window.analysis_group_stats_check.isChecked())
+        window.analysis_group_stats_center_combo.setEnabled(group_enabled)
+        window.analysis_group_stats_band_combo.setEnabled(group_enabled)
+        window.analysis_calculate_group_button.setEnabled(group_enabled)
+
+    def on_statistics_settings_changed(self, *_args) -> None:
+        """Any Statistics control changed - write back to state (session-
+        scoped, same reasoning as ROI's math), then just recompute the
+        overlays from the already-stored raw sensorgram arrays. No cache
+        invalidation is needed: this never touches the pixel-level or
+        fitted-trace caches, only how the already-computed trace is drawn."""
+        window = self.window
+        settings = window._state.statistics_settings
+        settings.smoothing_method = str(window.analysis_smoothing_method_combo.currentData() or "none")
+        settings.smoothing_window = int(window.analysis_smoothing_window_spin.value())
+        settings.smoothing_polyorder = int(window.analysis_smoothing_polyorder_spin.value())
+        settings.spike_rejection_enabled = bool(window.analysis_spike_rejection_check.isChecked())
+        settings.spike_rejection_method = str(window.analysis_spike_rejection_method_combo.currentData() or "hampel")
+        settings.spike_rejection_window = int(window.analysis_spike_rejection_window_spin.value())
+        settings.spike_rejection_threshold = float(window.analysis_spike_rejection_threshold_spin.value())
+        settings.baseline_enabled = bool(window.analysis_baseline_check.isChecked())
+        settings.baseline_window_start = float(window.analysis_baseline_start_spin.value())
+        settings.baseline_window_end = float(window.analysis_baseline_end_spin.value())
+        settings.group_stats_enabled = bool(window.analysis_group_stats_check.isChecked())
+        settings.group_stats_center = str(window.analysis_group_stats_center_combo.currentData() or "mean")
+        settings.group_stats_band = str(window.analysis_group_stats_band_combo.currentData() or "sd")
+        self.sync_statistics_controls()
+        window._schedule_processing_state_save()
+        self._update_statistics_overlays()
+
+    def refresh_statistics_controls_from_state(self) -> None:
+        """Push statistics_settings into the Statistics widgets without
+        re-triggering on_statistics_settings_changed - called whenever a
+        session/profile load replaces statistics_settings wholesale, same
+        pattern as refresh_roi_math_controls_from_state."""
+        window = self.window
+        settings = window._state.statistics_settings
+        widgets = (
+            window.analysis_smoothing_method_combo,
+            window.analysis_smoothing_window_spin,
+            window.analysis_smoothing_polyorder_spin,
+            window.analysis_spike_rejection_check,
+            window.analysis_spike_rejection_method_combo,
+            window.analysis_spike_rejection_window_spin,
+            window.analysis_spike_rejection_threshold_spin,
+            window.analysis_baseline_check,
+            window.analysis_baseline_start_spin,
+            window.analysis_baseline_end_spin,
+            window.analysis_group_stats_check,
+            window.analysis_group_stats_center_combo,
+            window.analysis_group_stats_band_combo,
+        )
+        for widget in widgets:
+            widget.blockSignals(True)
+        try:
+            smoothing_index = max(window.analysis_smoothing_method_combo.findData(str(settings.smoothing_method or "none")), 0)
+            window.analysis_smoothing_method_combo.setCurrentIndex(smoothing_index)
+            window.analysis_smoothing_window_spin.setValue(int(settings.smoothing_window))
+            window.analysis_smoothing_polyorder_spin.setValue(int(settings.smoothing_polyorder))
+            window.analysis_spike_rejection_check.setChecked(bool(settings.spike_rejection_enabled))
+            spike_index = max(
+                window.analysis_spike_rejection_method_combo.findData(str(settings.spike_rejection_method or "hampel")), 0
+            )
+            window.analysis_spike_rejection_method_combo.setCurrentIndex(spike_index)
+            window.analysis_spike_rejection_window_spin.setValue(int(settings.spike_rejection_window))
+            window.analysis_spike_rejection_threshold_spin.setValue(float(settings.spike_rejection_threshold))
+            window.analysis_baseline_check.setChecked(bool(settings.baseline_enabled))
+            window.analysis_baseline_start_spin.setValue(float(settings.baseline_window_start or 0.0))
+            window.analysis_baseline_end_spin.setValue(float(settings.baseline_window_end or 0.0))
+            window.analysis_group_stats_check.setChecked(bool(settings.group_stats_enabled))
+            group_center_index = max(
+                window.analysis_group_stats_center_combo.findData(str(settings.group_stats_center or "mean")), 0
+            )
+            window.analysis_group_stats_center_combo.setCurrentIndex(group_center_index)
+            group_band_index = max(window.analysis_group_stats_band_combo.findData(str(settings.group_stats_band or "sd")), 0)
+            window.analysis_group_stats_band_combo.setCurrentIndex(group_band_index)
+        finally:
+            for widget in widgets:
+                widget.blockSignals(False)
+        self.sync_statistics_controls()
+        self._update_statistics_overlays()
+
+    def _update_statistics_overlays(self) -> None:
+        self._update_processed_trace_overlay()
+        self._update_group_overlay()
+
+    def _update_processed_trace_overlay(self) -> None:
+        """Spike-rejection -> smoothing -> baseline, in that order (clean
+        transients before smoothing blends them into neighbors; baseline is
+        a simple offset applied last), drawn on sensorgram_processed_curve.
+        Hidden whenever nothing is actually active, so an unused overlay
+        doesn't sit on top of the raw trace."""
+        window = self.window
+        settings = window._state.statistics_settings
+        spectral_cubes = window._sensorgram_spectral_cube_indices
+        values = window._sensorgram_metric_values
+        if spectral_cubes.size == 0:
+            window.sensorgram_processed_curve.hide()
+            return
+        x_values = self._sensorgram_x_values(spectral_cubes)
+        valid = np.isfinite(x_values) & np.isfinite(values)
+        if not np.any(valid):
+            window.sensorgram_processed_curve.hide()
+            return
+        order = np.argsort(x_values[valid])
+        x = x_values[valid][order]
+        y = values[valid][order].astype(np.float64, copy=True)
+
+        active = False
+        if settings.spike_rejection_enabled:
+            active = True
+            if settings.spike_rejection_method == "running_median":
+                y = reject_spikes_running_median(y, window=settings.spike_rejection_window)
+            else:
+                y = reject_spikes_hampel(y, window=settings.spike_rejection_window, threshold=settings.spike_rejection_threshold)
+        if settings.smoothing_method == "savgol":
+            active = True
+            y = smooth_savgol(y, window=settings.smoothing_window, polyorder=settings.smoothing_polyorder)
+        elif settings.smoothing_method == "moving_average":
+            active = True
+            y = smooth_moving_average(y, window=settings.smoothing_window)
+        if settings.baseline_enabled:
+            active = True
+            y, _baseline = normalize_to_baseline_window(x, y, settings.baseline_window_start, settings.baseline_window_end)
+
+        if not active:
+            window.sensorgram_processed_curve.hide()
+            return
+        finite = np.isfinite(y)
+        if not np.any(finite):
+            window.sensorgram_processed_curve.hide()
+            return
+        window.sensorgram_processed_curve.setData(x[finite], y[finite])
+        window.sensorgram_processed_curve.show()
+
+    # ------------------------------------------------------------------
+    # Group statistics: aggregates each member ROI pair's own already-
+    # computed sensorgram trace across an AreaRoiGroup, shown alongside
+    # (not replacing) the individually-selected trace above.
+    # ------------------------------------------------------------------
+
+    def _group_members_for_current_selection(self) -> tuple[str, list[AreaRoi]] | None:
+        """(group_name, member_area_rois) if the current selection is
+        exactly one ROI pair belonging to a group with >=2 members, else
+        None - group stats only make sense for a genuine multi-member group,
+        not a lone ROI or an already-multi-selected combined view."""
+        selected_roi_ids = self.window._selected_spectrum_roi_ids()
+        if len(selected_roi_ids) != 1:
+            return None
+        group = self.window._group_for_roi(int(selected_roi_ids[0]))
+        if group is None or len(group.area_roi_ids) < 2:
+            return None
+        member_ids = {int(roi_id) for roi_id in group.area_roi_ids}
+        members = [roi for roi in self.window._state.area_rois if int(roi.area_roi_id) in member_ids]
+        if len(members) < 2:
+            return None
+        return group.name, members
+
+    @staticmethod
+    def _member_trace_aligned(result: SensorgramComputationResult, spectral_cubes: list[int]) -> np.ndarray:
+        """Reindex a member's own (spectral_cube_indices, metric_signal)
+        onto the group's full requested spectral-cube list, NaN where that
+        member has no value for a given cube - keeps every member's array
+        the same length/order for aggregate_group_traces regardless of
+        whether one member happened to skip/fail a different frame."""
+        value_by_cube = {
+            int(index): float(value) for index, value in zip(result.spectral_cube_indices, result.metric_signal)
+        }
+        return np.asarray([value_by_cube.get(int(cube), float("nan")) for cube in spectral_cubes], dtype=np.float64)
+
+    def _update_group_overlay(self) -> None:
+        """Draws whatever is already available from cache - never triggers a
+        computation itself (see calculate_group_sensorgram for that). Called
+        after every sensorgram update and after a group calculation
+        finishes, so the band reflects whatever member traces exist right
+        now, live."""
+        window = self.window
+        settings = window._state.statistics_settings
+        if not settings.group_stats_enabled:
+            window.sensorgram_group_curve.hide()
+            window.sensorgram_group_band_fill_item.hide()
+            return
+        group_info = self._group_members_for_current_selection()
+        spectral_cubes = self.available_analysis_spectral_cubes()
+        if group_info is None or not spectral_cubes:
+            window.sensorgram_group_curve.hide()
+            window.sensorgram_group_band_fill_item.hide()
+            return
+        _group_name, members = group_info
+        member_traces: dict[int, np.ndarray] = {}
+        for member_roi in members:
+            member_id = int(member_roi.area_roi_id)
+            signature = self._sensorgram_signature_for_selection(spectral_cubes, (member_id,), [member_roi])
+            result = None if signature is None else window._sensorgram_cache.get(signature)
+            if result is None:
+                continue
+            member_traces[member_id] = self._member_trace_aligned(result, spectral_cubes)
+        if len(member_traces) < 2:
+            window.sensorgram_group_curve.hide()
+            window.sensorgram_group_band_fill_item.hide()
+            return
+        x_values = self._sensorgram_x_values(spectral_cubes)
+        center, low, high = aggregate_group_traces(
+            member_traces, center=settings.group_stats_center, band=settings.group_stats_band
+        )
+        valid = np.isfinite(x_values) & np.isfinite(center) & np.isfinite(low) & np.isfinite(high)
+        if not np.any(valid):
+            window.sensorgram_group_curve.hide()
+            window.sensorgram_group_band_fill_item.hide()
+            return
+        window.sensorgram_group_curve.setData(x_values[valid], center[valid])
+        window.sensorgram_group_band_low_curve.setData(x_values[valid], low[valid])
+        window.sensorgram_group_band_high_curve.setData(x_values[valid], high[valid])
+        window.sensorgram_group_curve.show()
+        window.sensorgram_group_band_fill_item.show()
+
+    def calculate_group_sensorgram(self) -> None:
+        """"Calculate group" button: computes (or reuses already-cached)
+        every member's own single-ROI sensorgram, one at a time - reusing
+        the normal single-ROI worker path (_start_sensorgram_worker) rather
+        than a separate parallel implementation, so each member's result
+        lands in the same window._sensorgram_cache the individual view
+        already reads from. The visible primary trace flickers through each
+        member while this runs (the same worker that updates the display is
+        what's being reused per member) and is restored to the actual
+        current selection once the whole group is done, see
+        _finish_group_calculation."""
+        group_info = self._group_members_for_current_selection()
+        if group_info is None:
+            self.window._set_status_text("Select a ROI pair that belongs to a multi-member group first.")
+            return
+        spectral_cubes = self.available_analysis_spectral_cubes()
+        if not spectral_cubes:
+            self.window._set_status_text("No spectral cubes are available in the selected range.")
+            return
+        _group_name, members = group_info
+        self._group_calculation_spectral_cubes = spectral_cubes
+        self._group_calculation_members_by_id = {int(m.area_roi_id): m for m in members}
+        self._group_calculation_pending_member_ids = list(self._group_calculation_members_by_id.keys())
+        self._group_calculation_active = True
+        self.window._set_status_text(f"Calculating group ({len(members)} members)...")
+        self._advance_group_calculation()
+
+    def _advance_group_calculation(self) -> None:
+        spectral_cubes = getattr(self, "_group_calculation_spectral_cubes", None)
+        pending = getattr(self, "_group_calculation_pending_member_ids", None)
+        members_by_id = getattr(self, "_group_calculation_members_by_id", None)
+        if not spectral_cubes or pending is None or members_by_id is None:
+            self._group_calculation_active = False
+            return
+        while pending:
+            member_id = pending[0]
+            member_roi = members_by_id[member_id]
+            signature = self._sensorgram_signature_for_selection(spectral_cubes, (member_id,), [member_roi])
+            if signature is None:
+                pending.pop(0)
+                continue
+            if self.window._sensorgram_cache.get(signature) is not None:
+                pending.pop(0)
+                continue
+            self._start_sensorgram_worker(signature, spectral_cubes, (member_id,), [member_roi])
+            return
+        self._finish_group_calculation()
+
+    def _on_group_member_sensorgram_ready(self) -> None:
+        pending = getattr(self, "_group_calculation_pending_member_ids", None)
+        if pending:
+            pending.pop(0)
+        self._advance_group_calculation()
+
+    def _finish_group_calculation(self) -> None:
+        self._group_calculation_active = False
+        member_count = len(getattr(self, "_group_calculation_members_by_id", {}) or {})
+        self.window._set_status_text(f"Group calculated ({member_count} members).")
+        # Restore the actual current selection's own trace/view - group
+        # member calculations reused the same worker/display path, so the
+        # plot currently shows whichever member finished last.
+        self.calculate_sensorgram_for_range()
+
     def _set_sensorgram_summary_text(self, text: str) -> None:
         self.window.sensorgram_summary_label.setText(text)
 
@@ -1969,6 +2386,7 @@ class AnalysisController:
         spectral_cube_index = self.window._current_spectral_cube()
         if spectral_cube_index is None or not self.window._wavelength_values:
             return None
+        reduction_method, trimmed_mean_fraction, formula_key = self._roi_math_signature_elements()
         return _roi_absorbance_signature(
             int(spectral_cube_index),
             tuple(float(value) for value in self.window._wavelength_values),
@@ -1977,6 +2395,9 @@ class AnalysisController:
                 self.window._chromatic_signature_for_image_key((int(spectral_cube_index), float(wavelength)))
                 for wavelength in self.window._wavelength_values
             ),
+            reduction_method,
+            trimmed_mean_fraction,
+            formula_key,
         )
 
     def _roi_has_cached_absorbance(self, roi: AreaRoi) -> bool:
@@ -2168,10 +2589,14 @@ class AnalysisController:
             self.window._set_status_text("Updating absorbance spectrum...")
         else:
             self.window._begin_busy("Updating absorbance spectrum...", determinate=True)
+        reduction_method, trimmed_mean_fraction, formula_key = self._roi_math_signature_elements()
         worker = FunctionWorker(
             task_fn,
             *payload,
             supports_progress=True,
+            reduction_method=reduction_method,
+            trimmed_mean_fraction=trimmed_mean_fraction,
+            formula_key=formula_key,
         )
         worker.signals.progress.connect(self.window._update_busy_progress)
         worker.signals.result.connect(

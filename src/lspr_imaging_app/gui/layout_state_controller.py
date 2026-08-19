@@ -203,8 +203,10 @@ class LayoutStateController:
             window.background_section.set_expanded(window._settings_bool("background_section_expanded", True))
             window.analysis_section.set_pinned(window._settings_bool("analysis_section_pinned", False))
             window.analysis_section.set_expanded(window._settings_bool("analysis_section_expanded", True))
-            window.spectra_fitting_section.set_pinned(window._settings_bool("spectra_fitting_section_pinned", False))
-            window.spectra_fitting_section.set_expanded(window._settings_bool("spectra_fitting_section_expanded", True))
+            window.roi_math_section.set_pinned(window._settings_bool("roi_math_section_pinned", False))
+            window.roi_math_section.set_expanded(window._settings_bool("roi_math_section_expanded", True))
+            window.metric_trace_section.set_pinned(window._settings_bool("metric_trace_section_pinned", False))
+            window.metric_trace_section.set_expanded(window._settings_bool("metric_trace_section_expanded", True))
             window.statistics_section.set_pinned(window._settings_bool("statistics_section_pinned", False))
             window.statistics_section.set_expanded(window._settings_bool("statistics_section_expanded", False))
             window.results_export_section.set_pinned(window._settings_bool("results_export_section_pinned", False))
@@ -259,8 +261,10 @@ class LayoutStateController:
         window._settings.setValue("analysis_section_expanded", window.analysis_section.is_expanded())
         window._settings.setValue("analysis_section_pinned", window.analysis_section.is_pinned())
         window._settings.setValue("analysis_section_applied", window._analysis_enabled)
-        window._settings.setValue("spectra_fitting_section_expanded", window.spectra_fitting_section.is_expanded())
-        window._settings.setValue("spectra_fitting_section_pinned", window.spectra_fitting_section.is_pinned())
+        window._settings.setValue("roi_math_section_expanded", window.roi_math_section.is_expanded())
+        window._settings.setValue("roi_math_section_pinned", window.roi_math_section.is_pinned())
+        window._settings.setValue("metric_trace_section_expanded", window.metric_trace_section.is_expanded())
+        window._settings.setValue("metric_trace_section_pinned", window.metric_trace_section.is_pinned())
         window._settings.setValue("statistics_section_expanded", window.statistics_section.is_expanded())
         window._settings.setValue("statistics_section_pinned", window.statistics_section.is_pinned())
         window._settings.setValue("results_export_section_expanded", window.results_export_section.is_expanded())
@@ -429,7 +433,8 @@ class LayoutStateController:
             window.roi_editor_section.set_expanded(True)
             window.background_section.set_expanded(True)
             window.analysis_section.set_expanded(True)
-            window.spectra_fitting_section.set_expanded(True)
+            window.roi_math_section.set_expanded(True)
+            window.metric_trace_section.set_expanded(True)
             window.statistics_section.set_expanded(False)
             window.results_export_section.set_expanded(False)
         finally:
@@ -468,7 +473,8 @@ class LayoutStateController:
                 window.roi_editor_section,
                 window.background_section,
                 window.analysis_section,
-                window.spectra_fitting_section,
+                window.roi_math_section,
+                window.metric_trace_section,
                 window.statistics_section,
                 window.results_export_section,
             ]:
@@ -493,7 +499,8 @@ class LayoutStateController:
                 window.roi_editor_section,
                 window.background_section,
                 window.analysis_section,
-                window.spectra_fitting_section,
+                window.roi_math_section,
+                window.metric_trace_section,
                 window.statistics_section,
                 window.results_export_section,
             ]:

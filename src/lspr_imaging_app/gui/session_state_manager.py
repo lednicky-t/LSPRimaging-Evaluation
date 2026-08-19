@@ -6,7 +6,7 @@ from pathlib import Path
 import numpy as np
 from PyQt6.QtWidgets import QFileDialog, QInputDialog, QMessageBox
 
-from lspr_imaging_app.domain.models import AreaRoiDetectionSettings, CropDefinition, MaskSettings
+from lspr_imaging_app.domain.models import AreaRoiDetectionSettings, CropDefinition, MaskSettings, StatisticsSettings
 from lspr_imaging_app.gui.analysis_tasks import _load_processing_state_task
 from lspr_imaging_app.gui.worker import FunctionWorker
 from lspr_imaging_app.storage.workspace import (
@@ -86,9 +86,15 @@ class SessionStateManager:
                 mask_settings,
                 image_exclusions,
                 area_roi_arrays,
+                statistics_settings,
             ) = payload
             window._state.preprocessing = preprocessing
             window._state.area_roi_settings = area_roi_settings
+            window._state.statistics_settings = statistics_settings
+            if hasattr(window, "analysis_reduction_method_combo"):
+                window._analysis_controller.refresh_roi_math_controls_from_state()
+            if hasattr(window, "analysis_smoothing_method_combo"):
+                window._analysis_controller.refresh_statistics_controls_from_state()
             window._state.mask = mask_settings
             window._state.area_rois = area_rois
             window._state.area_roi_groups = area_roi_groups
@@ -147,6 +153,11 @@ class SessionStateManager:
         if outcome == "preprocessing":
             window._state.preprocessing = payload
             window._state.area_roi_settings = AreaRoiDetectionSettings()
+            window._state.statistics_settings = StatisticsSettings()
+            if hasattr(window, "analysis_reduction_method_combo"):
+                window._analysis_controller.refresh_roi_math_controls_from_state()
+            if hasattr(window, "analysis_smoothing_method_combo"):
+                window._analysis_controller.refresh_statistics_controls_from_state()
             window._state.mask = MaskSettings()
             window._state.area_rois.clear()
             window._state.area_roi_groups.clear()
@@ -193,6 +204,11 @@ class SessionStateManager:
         window._state.preprocessing.reference_wavelength_nm = None
         window._state.preprocessing.reference_spectral_cube_index = 0
         window._state.area_roi_settings = AreaRoiDetectionSettings()
+        window._state.statistics_settings = StatisticsSettings()
+        if hasattr(window, "analysis_reduction_method_combo"):
+            window._analysis_controller.refresh_roi_math_controls_from_state()
+        if hasattr(window, "analysis_smoothing_method_combo"):
+            window._analysis_controller.refresh_statistics_controls_from_state()
         window._state.mask = MaskSettings()
         window._state.area_rois.clear()
         window._state.area_roi_groups.clear()
@@ -333,6 +349,7 @@ class SessionStateManager:
                 mask_settings=window._state.mask,
                 image_exclusions=window._state.image_exclusions,
                 area_roi_arrays=window._state.area_roi_arrays,
+                statistics_settings=window._state.statistics_settings,
             )
         except Exception as exc:
             window._append_workflow_log(
@@ -437,6 +454,7 @@ class SessionStateManager:
                 mask_settings=window._state.mask,
                 image_exclusions=window._state.image_exclusions,
                 area_roi_arrays=window._state.area_roi_arrays,
+                statistics_settings=window._state.statistics_settings,
             )
             session_mask_payload = window._session_mask_payload()
             if session_mask_payload is None:
@@ -482,9 +500,11 @@ class SessionStateManager:
                 mask_settings,
                 image_exclusions,
                 area_roi_arrays,
+                statistics_settings,
             ) = load_processing_profile(Path(source))
             window._state.preprocessing = preprocessing
             window._state.area_roi_settings = area_roi_settings
+            window._state.statistics_settings = statistics_settings
             window._state.area_rois = area_rois
             window._state.area_roi_groups = area_roi_groups
             window._state.area_roi_arrays = area_roi_arrays
@@ -494,6 +514,10 @@ class SessionStateManager:
             window._state.chromatic_landmarks = chromatic_landmarks
             window._state.image_exclusions = image_exclusions
             window._state.mask = mask_settings
+            if hasattr(window, "analysis_reduction_method_combo"):
+                window._analysis_controller.refresh_roi_math_controls_from_state()
+            if hasattr(window, "analysis_smoothing_method_combo"):
+                window._analysis_controller.refresh_statistics_controls_from_state()
             if session_mask is not None:
                 restored_mask = session_mask.get("mask")
                 restored_record_path = session_mask.get("record_path")

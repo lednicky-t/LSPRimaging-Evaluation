@@ -15,8 +15,8 @@ from lspr_imaging_app.gui.worker import SensorgramComputationResult, SensorgramP
 from lspr_imaging_app.io.dataset import dataset_load_plane_roi, export_ome_zarr_dataset, load_image_array
 from lspr_imaging_app.storage.workspace import load_preprocessing, load_processing_profile
 from lspr_imaging_app.processing.analysis import (
-    absorbance_from_means,
-    fit_absorbance_curve,
+    fit_curve_for_method,
+    formula_value,
     metric_value_from_fit,
     metric_value_from_spectrum,
 )
@@ -44,6 +44,7 @@ from lspr_imaging_app.processing.preprocess import (
 )
 from lspr_imaging_app.processing.reference_selection import bimodal_dip_contrast
 from lspr_imaging_app.processing.roi_detection import detect_rois, ignored_pixel_mask, refresh_roi_metrics
+from lspr_imaging_app.processing.roi_math import reduce_sample_and_reference
 from lspr_imaging_app.processing.roi_rasterize import expand_mask, expand_mask_to_patch
 
 
@@ -425,6 +426,9 @@ def _roi_absorbance_signature(
     wavelength_values: tuple[float, ...],
     roi: AreaRoi,
     chromatic_signatures: tuple[object, ...],
+    reduction_method: str = "mean",
+    trimmed_mean_fraction: float = 0.10,
+    formula_key: str = "absorbance",
 ) -> tuple[object, ...]:
     return (
         int(spectral_cube_index),
@@ -440,6 +444,9 @@ def _roi_absorbance_signature(
         _roi_mask_signature(roi.sample_mask),
         _roi_mask_signature(roi.reference_mask),
         chromatic_signatures,
+        str(reduction_method),
+        round(float(trimmed_mean_fraction), 4),
+        str(formula_key),
     )
 
 
@@ -505,6 +512,9 @@ def _absorbance_spectrum_task(
     mask_state,
     cancel_event: threading.Event | None = None,
     progress_callback=None,
+    reduction_method: str = "mean",
+    trimmed_mean_fraction: float = 0.10,
+    formula_key: str = "absorbance",
 ) -> AbsorbanceSpectrumResult:
     task_started = time.perf_counter()
     load_seconds = 0.0
@@ -645,6 +655,8 @@ def _absorbance_spectrum_task(
                 prepared_measurements.append(future.result())
         prepared_measurements.sort(key=lambda item: item[0])
 
+    is_plane_fit = str(reduction_method).strip().lower() == "plane_fit"
+
     for index, wavelength_nm, processed, affine_matrix, external_mask, load_duration in prepared_measurements:
         if cancel_event is not None and cancel_event.is_set():
             return AbsorbanceSpectrumResult(
@@ -657,6 +669,8 @@ def _absorbance_spectrum_task(
                 load_seconds=load_seconds,
                 roi_seconds=roi_seconds,
                 total_seconds=time.perf_counter() - task_started,
+                reduction_method=str(reduction_method),
+                formula_key=str(formula_key),
             )
         load_seconds += float(load_duration)
 
@@ -664,31 +678,15 @@ def _absorbance_spectrum_task(
         current_shape = tuple(int(value) for value in processed.shape[:2])
         roi_mask_cache_entry = _build_roi_mask_cache(current_shape, selected_rois, selected_roi_ids, affine_matrix)
         ignored_mask = ignored_pixel_mask(processed, measurement_settings, external_mask=external_mask)
-        combined_roi_mask, combined_reference_mask = roi_mask_cache_entry["combined"]  # type: ignore[index]
-        roi_mask = np.array(combined_roi_mask, dtype=bool, copy=True)
-        reference_mask = np.array(combined_reference_mask, dtype=bool, copy=True)
-        roi_mask &= ~ignored_mask
-        reference_mask &= ~ignored_mask
-        reference_mask &= ~roi_mask
 
-        sample_pixels = processed[roi_mask]
-        reference_pixels = processed[reference_mask]
-        if sample_pixels.size == 0 or reference_pixels.size == 0:
-            sample_mean = float("nan")
-            reference_mean = float("nan")
-            absorbance = float("nan")
-        else:
-            sample_mean = float(np.mean(sample_pixels))
-            reference_mean = float(np.mean(reference_pixels))
-            absorbance = absorbance_from_means(sample_mean, reference_mean)
-
-        wavelengths.append(float(wavelength_nm))
-        absorbance_values.append(absorbance)
-        sample_mean_values.append(sample_mean)
-        reference_mean_values.append(reference_mean)
-        sample_pixel_counts.append(int(sample_pixels.size))
-        reference_pixel_counts.append(int(reference_pixels.size))
-
+        # Per-ROI values are computed first (not just for the per-ROI result
+        # bag): when reduction_method is "plane_fit" there is no single plane
+        # to fit across a pooled multi-ROI selection (each ROI has its own
+        # reference ring and sample center), so the "combined" value below
+        # averages these per-ROI results instead of pooling pixels.
+        per_roi_absorbance_this_wavelength: list[float] = []
+        per_roi_sample_mean_this_wavelength: list[float] = []
+        per_roi_reference_mean_this_wavelength: list[float] = []
         for roi in selected_rois:
             per_roi_masks = roi_mask_cache_entry["per_roi"]  # type: ignore[index]
             roi_mask_template, reference_mask_template = per_roi_masks[int(roi.area_roi_id)]
@@ -705,9 +703,20 @@ def _absorbance_spectrum_task(
                 reference_mean_single = float("nan")
                 absorbance_single = float("nan")
             else:
-                sample_mean_single = float(np.mean(sample_pixels_single))
-                reference_mean_single = float(np.mean(reference_pixels_single))
-                absorbance_single = absorbance_from_means(sample_mean_single, reference_mean_single)
+                reference_yy_single, reference_xx_single = (
+                    np.where(reference_mask_single) if is_plane_fit else (None, None)
+                )
+                sample_mean_single, reference_mean_single = reduce_sample_and_reference(
+                    sample_pixels_single,
+                    reference_pixels_single,
+                    reduction_method,
+                    trimmed_mean_fraction=trimmed_mean_fraction,
+                    reference_xx=reference_xx_single,
+                    reference_yy=reference_yy_single,
+                    sample_x=roi.center_x,
+                    sample_y=roi.center_y,
+                )
+                absorbance_single = formula_value(sample_mean_single, reference_mean_single, formula_key)
 
             accumulator = roi_accumulators[int(roi.area_roi_id)]
             accumulator["wavelengths"].append(float(wavelength_nm))
@@ -716,6 +725,45 @@ def _absorbance_spectrum_task(
             accumulator["reference_mean"].append(reference_mean_single)
             accumulator["sample_pixel_count"].append(int(sample_pixels_single.size))
             accumulator["reference_pixel_count"].append(int(reference_pixels_single.size))
+            if np.isfinite(absorbance_single):
+                per_roi_absorbance_this_wavelength.append(absorbance_single)
+                per_roi_sample_mean_this_wavelength.append(sample_mean_single)
+                per_roi_reference_mean_this_wavelength.append(reference_mean_single)
+
+        combined_roi_mask, combined_reference_mask = roi_mask_cache_entry["combined"]  # type: ignore[index]
+        roi_mask = np.array(combined_roi_mask, dtype=bool, copy=True)
+        reference_mask = np.array(combined_reference_mask, dtype=bool, copy=True)
+        roi_mask &= ~ignored_mask
+        reference_mask &= ~ignored_mask
+        reference_mask &= ~roi_mask
+        sample_pixels = processed[roi_mask]
+        reference_pixels = processed[reference_mask]
+
+        if is_plane_fit:
+            if per_roi_absorbance_this_wavelength:
+                sample_mean = float(np.mean(per_roi_sample_mean_this_wavelength))
+                reference_mean = float(np.mean(per_roi_reference_mean_this_wavelength))
+                absorbance = float(np.mean(per_roi_absorbance_this_wavelength))
+            else:
+                sample_mean = float("nan")
+                reference_mean = float("nan")
+                absorbance = float("nan")
+        elif sample_pixels.size == 0 or reference_pixels.size == 0:
+            sample_mean = float("nan")
+            reference_mean = float("nan")
+            absorbance = float("nan")
+        else:
+            sample_mean, reference_mean = reduce_sample_and_reference(
+                sample_pixels, reference_pixels, reduction_method, trimmed_mean_fraction=trimmed_mean_fraction,
+            )
+            absorbance = formula_value(sample_mean, reference_mean, formula_key)
+
+        wavelengths.append(float(wavelength_nm))
+        absorbance_values.append(absorbance)
+        sample_mean_values.append(sample_mean)
+        reference_mean_values.append(reference_mean)
+        sample_pixel_counts.append(int(sample_pixels.size))
+        reference_pixel_counts.append(int(reference_pixels.size))
         roi_seconds += time.perf_counter() - roi_started
 
         if progress_callback is not None:
@@ -734,6 +782,8 @@ def _absorbance_spectrum_task(
             reference_mean=np.asarray(data["reference_mean"], dtype=np.float64),
             sample_pixel_count=np.asarray(data["sample_pixel_count"], dtype=np.int32),
             reference_pixel_count=np.asarray(data["reference_pixel_count"], dtype=np.int32),
+            reduction_method=str(reduction_method),
+            formula_key=str(formula_key),
         )
 
     result = AbsorbanceSpectrumResult(
@@ -743,6 +793,8 @@ def _absorbance_spectrum_task(
         reference_mean=np.asarray(reference_mean_values, dtype=np.float64),
         sample_pixel_count=np.asarray(sample_pixel_counts, dtype=np.int32),
         reference_pixel_count=np.asarray(reference_pixel_counts, dtype=np.int32),
+        reduction_method=str(reduction_method),
+        formula_key=str(formula_key),
         load_seconds=load_seconds,
         roi_seconds=roi_seconds,
         total_seconds=time.perf_counter() - task_started,
@@ -774,6 +826,9 @@ def _absorbance_spectrum_fast_task(
     background_mask_settings=None,
     cancel_event: threading.Event | None = None,
     progress_callback=None,
+    reduction_method: str = "mean",
+    trimmed_mean_fraction: float = 0.10,
+    formula_key: str = "absorbance",
 ) -> AbsorbanceSpectrumResult:
     """Fast multi-ROI absorbance spectrum using OME-Zarr chunk-aware spatial reads.
 
@@ -810,6 +865,7 @@ def _absorbance_spectrum_fast_task(
     task_started = time.perf_counter()
     x0, y0, x1, y1 = box
     patch_h, patch_w = y1 - y0, x1 - x0
+    is_plane_fit = str(reduction_method).strip().lower() == "plane_fit"
     flatten_background_enabled = bool(getattr(preprocessing, "flatten_background_enabled", False))
     if not flatten_background_enabled:
         raw_x0, raw_y0, raw_x1, raw_y1 = raw_bounding_box_for_processed_box(raw_shape, preprocessing, box)
@@ -859,7 +915,12 @@ def _absorbance_spectrum_fast_task(
             if mask_full.shape[0] >= y1 and mask_full.shape[1] >= x1:
                 ignored_patch = mask_full[y0:y1, x0:x1]
 
-        def _means_for(rois_subset: list[AreaRoi], ids_subset: tuple[int, ...]) -> tuple[float, float, float, int, int]:
+        def _means_for(
+            rois_subset: list[AreaRoi],
+            ids_subset: tuple[int, ...],
+            sample_x: float | None = None,
+            sample_y: float | None = None,
+        ) -> tuple[float, float, float, int, int]:
             roi_mask, reference_mask = _selected_roi_masks_for_spectrum(
                 (patch_h, patch_w), rois_subset, ids_subset, reference_inner_radius_px, reference_outer_radius_px,
                 affine_matrix, patch_origin_xy=(x0, y0),
@@ -871,14 +932,55 @@ def _absorbance_spectrum_fast_task(
             reference_pixels = patch[reference_mask]
             if sample_pixels.size == 0 or reference_pixels.size == 0:
                 return float("nan"), float("nan"), float("nan"), int(sample_pixels.size), int(reference_pixels.size)
-            sm = float(np.mean(sample_pixels))
-            rm = float(np.mean(reference_pixels))
-            return absorbance_from_means(sm, rm), sm, rm, int(sample_pixels.size), int(reference_pixels.size)
+            if is_plane_fit and sample_x is not None and sample_y is not None:
+                # Patch-local indices from np.where must be shifted back by the
+                # patch's (x0, y0) origin so the plane is evaluated in the same
+                # absolute coordinate frame as roi.center_x/roi.center_y - a
+                # mismatch here would silently produce plausible-looking wrong
+                # numbers rather than crashing.
+                reference_row_idx, reference_col_idx = np.where(reference_mask)
+                reference_yy = reference_row_idx.astype(np.float64) + float(y0)
+                reference_xx = reference_col_idx.astype(np.float64) + float(x0)
+                sm, rm = reduce_sample_and_reference(
+                    sample_pixels, reference_pixels, reduction_method,
+                    trimmed_mean_fraction=trimmed_mean_fraction,
+                    reference_xx=reference_xx, reference_yy=reference_yy,
+                    sample_x=sample_x, sample_y=sample_y,
+                )
+            elif is_plane_fit:
+                # Pooled multi-ROI call: no single sample location to evaluate a
+                # plane at. Only the pixel counts from this call are used by the
+                # caller in that case - the absorbance/means are replaced by the
+                # average of each ROI's own plane-fit result (see below).
+                sm, rm = reduce_sample_and_reference(sample_pixels, reference_pixels, "mean")
+            else:
+                sm, rm = reduce_sample_and_reference(
+                    sample_pixels, reference_pixels, reduction_method, trimmed_mean_fraction=trimmed_mean_fraction,
+                )
+            return formula_value(sm, rm, formula_key), sm, rm, int(sample_pixels.size), int(reference_pixels.size)
 
-        combined = _means_for(selected_rois, selected_roi_ids)
         per_roi = {
-            int(roi.area_roi_id): _means_for([roi], (int(roi.area_roi_id),)) for roi in selected_rois
+            int(roi.area_roi_id): _means_for([roi], (int(roi.area_roi_id),), roi.center_x, roi.center_y)
+            for roi in selected_rois
         }
+        if is_plane_fit:
+            # Plane-fit is inherently per-ROI - average each selected ROI's own
+            # plane-fit absorbance instead of pooling pixels across ROIs (see
+            # the slow-path _absorbance_spectrum_task for the same reasoning).
+            pooled_counts = _means_for(selected_rois, selected_roi_ids)
+            finite_entries = [entry for entry in per_roi.values() if np.isfinite(entry[0])]
+            if finite_entries:
+                combined = (
+                    float(np.mean([entry[0] for entry in finite_entries])),
+                    float(np.mean([entry[1] for entry in finite_entries])),
+                    float(np.mean([entry[2] for entry in finite_entries])),
+                    pooled_counts[3],
+                    pooled_counts[4],
+                )
+            else:
+                combined = (float("nan"), float("nan"), float("nan"), pooled_counts[3], pooled_counts[4])
+        else:
+            combined = _means_for(selected_rois, selected_roi_ids)
         return (index, float(wavelength_nm), combined, per_roi)
 
     worker_count = max(1, min(max(int(os.cpu_count() or 2) // 2, 2), 8, len(measurement_payload)))
@@ -944,6 +1046,8 @@ def _absorbance_spectrum_fast_task(
             reference_mean=np.asarray(data["reference_mean"], dtype=np.float64),
             sample_pixel_count=np.asarray(data["sample_pixel_count"], dtype=np.int32),
             reference_pixel_count=np.asarray(data["reference_pixel_count"], dtype=np.int32),
+            reduction_method=str(reduction_method),
+            formula_key=str(formula_key),
         )
 
     return AbsorbanceSpectrumResult(
@@ -953,6 +1057,8 @@ def _absorbance_spectrum_fast_task(
         reference_mean=np.asarray(reference_mean_values, dtype=np.float64),
         sample_pixel_count=np.asarray(sample_pixel_counts, dtype=np.int32),
         reference_pixel_count=np.asarray(reference_pixel_counts, dtype=np.int32),
+        reduction_method=str(reduction_method),
+        formula_key=str(formula_key),
         total_seconds=time.perf_counter() - task_started,
         area_roi_results=roi_results,
     )
@@ -972,6 +1078,9 @@ def _sensorgram_metric_task(
     wl_min: float | None = None,
     wl_max: float | None = None,
     fit_method_key: str = "poly",
+    reduction_method: str = "mean",
+    trimmed_mean_fraction: float = 0.10,
+    formula_key: str = "absorbance",
 ) -> SensorgramComputationResult:
     task_started = time.perf_counter()
     spectral_cube_payloads: list[tuple[int, tuple[object, ...]]] = []
@@ -1062,6 +1171,9 @@ def _sensorgram_metric_task(
                 *payload,
                 cancel_event=cancel_event,
                 progress_callback=spectral_cube_progress_callback,
+                reduction_method=reduction_method,
+                trimmed_mean_fraction=trimmed_mean_fraction,
+                formula_key=formula_key,
             )
             if spectral_cube_result_cache_store is not None:
                 spectral_cube_result_cache_store(spectral_cube_index, spectrum)
@@ -1080,9 +1192,10 @@ def _sensorgram_metric_task(
                 spectrum.wavelengths_nm, spectrum.absorbance, metric_key, wl_min=wl_min, wl_max=wl_max
             )
         else:
-            fit = fit_absorbance_curve(
+            fit = fit_curve_for_method(
                 spectrum.wavelengths_nm,
                 spectrum.absorbance,
+                fit_method_key,
                 poly_order=poly_order,
                 wl_min=wl_min,
                 wl_max=wl_max,
