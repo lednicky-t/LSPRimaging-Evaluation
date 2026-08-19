@@ -100,7 +100,7 @@ class RoiGeometryMixin:
         clamped_y = min(max(y, radius), max(float(image_height - 1) - radius, radius))
         return clamped_x, clamped_y
 
-    def _reorder_rois_by_position(self) -> None:
+    def _reorder_rois_by_position(self, *, column_major: bool = False) -> None:
         if not self._state.area_rois:
             self.status_label.setText("No ROIs available to reorder.")
             return
@@ -108,10 +108,11 @@ class RoiGeometryMixin:
         rows = max(int(self._state.area_roi_settings.array_rows), 0)
         cols = max(int(self._state.area_roi_settings.array_cols), 0)
         rois = list(self._state.area_rois)
+        order_func = self._order_rois_as_array_column_major if column_major else self._order_rois_as_array
         if rows > 0 and cols > 0 and rows * cols == len(rois):
-            ordered = self._order_rois_as_array(rois, rows=rows, cols=cols)
+            ordered = order_func(rois, rows=rows, cols=cols)
         else:
-            ordered = self._order_rois_as_array(rois, rows=rows if rows > 0 else None, cols=cols if cols > 0 else None)
+            ordered = order_func(rois, rows=rows if rows > 0 else None, cols=cols if cols > 0 else None)
         id_map = {roi.area_roi_id: new_id for new_id, roi in enumerate(ordered, start=1)}
         for new_id, roi in enumerate(ordered, start=1):
             roi.area_roi_id = new_id
@@ -129,7 +130,10 @@ class RoiGeometryMixin:
         self._update_selection_dependent_plots(force=True)
         self._save_processing_state_for_dataset()
         self._update_roi_table()
-        self.status_label.setText("Reordered ROIs by image position.")
+        self.status_label.setText(
+            "Reordered ROIs by image position, column by column." if column_major
+            else "Reordered ROIs by image position, row by row."
+        )
 
     def _roi_reorder_row_band(self) -> float:
         spacing = max(float(self._state.area_roi_settings.array_spacing_px), 0.0)
@@ -188,6 +192,54 @@ class RoiGeometryMixin:
                 ordered.extend(row_group[:cols])
             else:
                 ordered.extend(row_group)
+        return ordered
+
+    def _order_rois_as_array_column_major(
+        self,
+        rois: list[AreaRoi],
+        *,
+        rows: int | None,
+        cols: int | None,
+    ) -> list[AreaRoi]:
+        """Mirrors _order_rois_as_array with x/y (and rows/cols) swapped
+        throughout: groups ROIs into columns first, then numbers top-to-
+        bottom within each column, left column to right column - instead of
+        row-major's rows-first, left-to-right-within-row numbering."""
+        if not rois:
+            return []
+        sorted_rois = sorted(rois, key=lambda roi: (float(roi.center_x), float(roi.center_y), int(roi.area_roi_id)))
+        col_band = self._roi_reorder_row_band()
+        col_groups: list[list[AreaRoi]] = []
+        col_centers: list[float] = []
+
+        for roi in sorted_rois:
+            x = float(roi.center_x)
+            best_index = -1
+            best_distance = float("inf")
+            for index, center_x in enumerate(col_centers):
+                distance = abs(x - center_x)
+                if distance < best_distance:
+                    best_distance = distance
+                    best_index = index
+            if best_index >= 0 and best_distance <= col_band:
+                col_groups[best_index].append(roi)
+                col_centers[best_index] = float(np.mean([float(item.center_x) for item in col_groups[best_index]]))
+            else:
+                col_groups.append([roi])
+                col_centers.append(x)
+
+        if cols is not None and cols > 0 and len(col_groups) != cols:
+            col_groups = [list(group) for group in np.array_split(np.asarray(sorted_rois, dtype=object), cols)]
+
+        col_groups = [sorted(group, key=lambda roi: (float(roi.center_y), int(roi.area_roi_id))) for group in col_groups]
+        col_groups.sort(key=lambda group: float(np.mean([float(roi.center_x) for roi in group])) if group else 0.0)
+
+        ordered: list[AreaRoi] = []
+        for col_group in col_groups:
+            if rows is not None and rows > 0:
+                ordered.extend(col_group[:rows])
+            else:
+                ordered.extend(col_group)
         return ordered
 
     def _group_for_roi(self, roi_id: int) -> AreaRoiGroup | None:

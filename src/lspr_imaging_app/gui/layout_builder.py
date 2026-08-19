@@ -23,36 +23,6 @@ from lspr_imaging_app.gui.main_window import CollapsibleSection
 from lspr_imaging_app.gui.panel_help_registry import panel_help_text
 
 
-def _visible_tab_stylesheet() -> str:
-    return (
-        "QTabWidget::pane {"
-        "  border: 1px solid #334155;"
-        "  border-top: none;"
-        "  background: transparent;"
-        "}"
-        "QTabBar::tab {"
-        "  padding: 5px 14px;"
-        "  min-width: 64px;"
-        "  border: 1px solid #334155;"
-        "  border-bottom: none;"
-        "  border-radius: 4px 4px 0 0;"
-        "  background: #1e293b;"
-        "  color: #94a3b8;"
-        "  margin-right: 2px;"
-        "}"
-        "QTabBar::tab:selected {"
-        "  background: #0f172a;"
-        "  color: #f1f5f9;"
-        "  border-color: #475569;"
-        "  font-weight: 600;"
-        "}"
-        "QTabBar::tab:hover:!selected {"
-        "  background: #263245;"
-        "  color: #cbd5e1;"
-        "}"
-    )
-
-
 def _placeholder_label(text: str) -> QLabel:
     label = QLabel(text)
     label.setWordWrap(True)
@@ -709,9 +679,11 @@ def build_layout(window) -> None:
     detection_buttons = QHBoxLayout()
     detection_buttons.setContentsMargins(0, 0, 0, 0)
     detection_buttons.setSpacing(4)
+    detection_buttons.addWidget(window.roi_detection_full_auto_button)
     detection_buttons.addWidget(window.detect_rois_button)
     detection_buttons.addWidget(window.roi_corner_select_button)
     detection_buttons.addWidget(window.reorder_rois_button)
+    detection_buttons.addWidget(window.reorder_rois_column_button)
     detection_buttons.addWidget(window.clear_rois_button)
     detection_buttons.addStretch(1)
     circle_editor_layout.addRow("", detection_buttons)
@@ -729,15 +701,55 @@ def build_layout(window) -> None:
     freehand_editor_layout.addWidget(_placeholder_label("Polygon / freehand ROI editing — coming soon."))
     freehand_editor_layout.addStretch(1)
 
-    window.roi_editor_tabs = QTabWidget(window)
-    window.roi_editor_tabs.setTabPosition(QTabWidget.TabPosition.North)
-    window.roi_editor_tabs.setMovable(False)
-    window.roi_editor_tabs.setStyleSheet(_visible_tab_stylesheet())
-    window.roi_editor_tabs.addTab(circle_editor_group, "Circles")
-    window.roi_editor_tabs.addTab(rectangle_editor_group, "Rectangles")
-    window.roi_editor_tabs.addTab(freehand_editor_group, "Freehand")
-    window.roi_editor_tabs.currentChanged.connect(window._on_roi_editor_tab_changed)
-    window.roi_editor_tabs.setCurrentIndex(0)
+    # Circles/Rectangles/Freehand used to be a horizontal QTabWidget. They're
+    # now three nested CollapsibleSections (same vertical accordion look as
+    # "Image tools"/"Analysis") that enforce single-open exclusivity between
+    # themselves via window._on_roi_editor_mode_section_toggled, so they still
+    # behave like tabs - exactly one "mode" active at a time - which
+    # _roi_editor_mode elsewhere in the app (rectangle_stamp_mixin,
+    # image_interaction_controller, etc.) depends on.
+    window.roi_editor_circle_section = CollapsibleSection(
+        "Circles",
+        circle_editor_group,
+        expanded=True,
+        show_help=False,
+        show_pin=False,
+        title_color=_nested_title_color(),
+        parent=window,
+    )
+    window.roi_editor_rectangle_section = CollapsibleSection(
+        "Rectangles",
+        rectangle_editor_group,
+        expanded=False,
+        show_help=False,
+        show_pin=False,
+        title_color=_nested_title_color(),
+        parent=window,
+    )
+    window.roi_editor_freehand_section = CollapsibleSection(
+        "Freehand",
+        freehand_editor_group,
+        expanded=False,
+        show_help=False,
+        show_pin=False,
+        title_color=_nested_title_color(),
+        parent=window,
+    )
+    window.roi_editor_circle_section.expanded_changed.connect(
+        lambda expanded: window._on_roi_editor_mode_section_toggled("circles", expanded)
+    )
+    window.roi_editor_rectangle_section.expanded_changed.connect(
+        lambda expanded: window._on_roi_editor_mode_section_toggled("rectangles", expanded)
+    )
+    window.roi_editor_freehand_section.expanded_changed.connect(
+        lambda expanded: window._on_roi_editor_mode_section_toggled("freehand", expanded)
+    )
+    roi_editor_mode_group = _nested_section_group(
+        window,
+        window.roi_editor_circle_section,
+        window.roi_editor_rectangle_section,
+        window.roi_editor_freehand_section,
+    )
 
     roi_editor_content = QWidget(window)
     roi_editor_content_layout = QVBoxLayout(roi_editor_content)
@@ -749,7 +761,7 @@ def build_layout(window) -> None:
     window.left_roi_editor_layout.setSpacing(8)
     roi_editor_content_layout.addWidget(window.left_roi_editor_row)
     roi_editor_content_layout.addWidget(window._build_array_row())
-    roi_editor_content_layout.addWidget(window.roi_editor_tabs)
+    roi_editor_content_layout.addWidget(roi_editor_mode_group)
 
     background_group = QWidget(window)
     background_layout = QFormLayout(background_group)
@@ -1093,9 +1105,19 @@ def build_layout(window) -> None:
     histogram_layout = QVBoxLayout(histogram_content)
     histogram_layout.setContentsMargins(8, 8, 8, 8)
     histogram_layout.addWidget(window.histogram_plot)
+    histogram_highlight_readout = QHBoxLayout()
+    histogram_highlight_readout.setContentsMargins(0, 0, 0, 0)
+    histogram_highlight_readout.setSpacing(1)
+    histogram_highlight_readout.addWidget(window.histogram_highlight_prefix_label)
+    histogram_highlight_readout.addWidget(window.histogram_highlight_min_edit)
+    histogram_highlight_readout.addWidget(window.histogram_highlight_separator_label)
+    histogram_highlight_readout.addWidget(window.histogram_highlight_max_edit)
+    histogram_highlight_readout.addWidget(window.histogram_highlight_suffix_label)
+
     histogram_controls = QHBoxLayout()
     histogram_controls.setContentsMargins(0, 1, 0, 0)
     histogram_controls.setSpacing(8)
+    histogram_controls.addLayout(histogram_highlight_readout)
     histogram_controls.addStretch(1)
     histogram_mini_label = QLabel("Bin", histogram_content)
     histogram_mini_label.setObjectName("toolbarMiniLabel")

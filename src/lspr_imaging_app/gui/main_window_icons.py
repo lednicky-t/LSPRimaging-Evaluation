@@ -9,7 +9,7 @@ from PyQt6.QtCore import (
     Qt,
     pyqtSignal,
 )
-from PyQt6.QtGui import QAction, QActionGroup, QBrush, QColor, QFont, QIcon, QKeySequence, QPainter, QPainterPath, QPen, QPixmap
+from PyQt6.QtGui import QAction, QActionGroup, QBrush, QColor, QFont, QIcon, QKeySequence, QPainter, QPainterPath, QPen, QPixmap, QTransform
 from PyQt6.QtSvg import QSvgRenderer
 from PyQt6.QtWidgets import (
     QComboBox,
@@ -207,6 +207,19 @@ class MainWindowIcons:
   <path d="M9 19H5v-4" />
 </svg>"""
         return MainWindowIcons._svg_icon_from_markup(svg, size=size)
+
+    @staticmethod
+    def _make_rotated_tabler_icon(name: str, color: str = "#f8fafc", size: int = 24, *, degrees: float = 90.0) -> QIcon:
+        """A vendored Tabler icon rotated by `degrees` - used for the
+        reorder-by-column button, so it reads as "the same sort operation
+        as reorder-by-row, applied to the other axis" rather than needing a
+        whole new glyph vendored just for that distinction."""
+        base = load_tabler_icon(name, color=color, size=size)
+        pixmap = base.pixmap(size, size)
+        if pixmap.isNull():
+            return base
+        rotated = pixmap.transformed(QTransform().rotate(degrees), Qt.TransformationMode.SmoothTransformation)
+        return QIcon(rotated)
 
     @staticmethod
     def _tabler_icon(
@@ -1638,6 +1651,7 @@ class MainWindowIcons:
     def _populate_left_roi_editor_controls(self) -> None:
         self._clear_layout(self.left_roi_editor_layout)
         buttons = [
+            (self.roi_auto_histogram_action, {"accent": "blue"}),
             (self.roi_edit_action, {"primary": True}),
             (self.roi_add_action, {"accent": "green"}),
             (self.roi_array_action, {"accent": "green"}),

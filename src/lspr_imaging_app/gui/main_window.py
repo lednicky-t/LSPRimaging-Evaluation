@@ -30,6 +30,7 @@ from PyQt6.QtGui import (
     QAction,
     QBrush,
     QColor,
+    QDoubleValidator,
     QFont,
     QIcon,
     QKeyEvent,
@@ -125,6 +126,7 @@ from lspr_imaging_app.gui.histogram_mask_mixin import HistogramMaskMixin
 from lspr_imaging_app.gui.measurement_calibration_mixin import MeasurementCalibrationMixin
 from lspr_imaging_app.domain.exclusions import is_excluded
 from lspr_imaging_app.processing.reference_selection import bimodal_dip_contrast
+from lspr_imaging_app.processing.roi_histogram import estimate_roi_intensity_range
 from lspr_imaging_app.version import version_string
 from lspr_imaging_app.domain.models import (
     AnalysisState,
@@ -179,6 +181,7 @@ from .worker import (
 # an earlier "unused import" cleanup pass. Do not remove without checking for that pattern.
 from .analysis_tasks import (
     _auto_chromatic_landmarks_task,  # noqa: F401 - re-exported, see comment above
+    _detect_rois_fully_automatic_task,
     _detect_rois_task,
     _estimate_chromatic_models_task,  # noqa: F401 - re-exported, see comment above
     _process_image_task,  # noqa: F401 - re-exported, see comment above
@@ -1026,13 +1029,60 @@ class MainWindow(MainWindowIcons, RectangleStampMixin, RoiGeometryMixin, Histogr
         self.hist_region = pg.LinearRegionItem(values=(0.0, 1.0), brush=pg.mkBrush(56, 189, 248, 35))
         self.hist_region.setZValue(10)
         self.hist_region.setToolTip(
-            "Histogram highlight range. This also sets the intensity range that 'Auto-locate ROIs' "
-            "searches within — if it doesn't cover your sample ROI intensities, detection will find 0 ROIs."
+            "Histogram highlight range. This also sets the intensity range that semi-automatic ROI "
+            "detection searches within — if it doesn't cover your sample ROI intensities, detection will "
+            "find 0 ROIs. Editable via the \"Highlight [min, max]\" fields under the histogram, the wand "
+            "icon in the ROI tools row, or by dragging this band."
         )
         self.histogram_plot.addItem(self.hist_region)
         self.hist_region_label = pg.TextItem(anchor=(0.5, 1.0))
         self.hist_region_label.setZValue(13)
         self.histogram_plot.addItem(self.hist_region_label)
+
+        # Editable "Highlight [min, max]" readout for hist_region, styled to
+        # read as plain text (no border/background) so it sits next to "Bin"
+        # in the histogram's control row without looking like a form field.
+        # Committing a value here goes through hist_region.setRegion(), which
+        # already triggers the same sigRegionChangeFinished ->
+        # _on_histogram_region_changed path a manual drag does - so undo,
+        # settings, save, and overlay refresh all stay in sync automatically.
+        # _update_histogram_region_labels() keeps these in sync the other way
+        # (dragging the band, or the auto-range action, updates the text).
+        # Own inline style rather than the shared "toolbarMiniLabel" objectName
+        # (used by "Bin" etc. at a much smaller size) - these numbers need to
+        # actually be readable.
+        highlight_label_style = f"color: {get_active_theme().text_muted}; font-size: 11px; font-weight: 600;"
+        highlight_edit_style = (
+            "QLineEdit { border: none; background: transparent; "
+            f"color: {get_active_theme().text_primary}; font-size: 11px; font-weight: 700; padding: 0; }}"
+        )
+        self.histogram_highlight_prefix_label = QLabel("Highlight [", self)
+        self.histogram_highlight_prefix_label.setStyleSheet(highlight_label_style)
+        self.histogram_highlight_min_edit = QLineEdit(self)
+        self.histogram_highlight_min_edit.setValidator(
+            QDoubleValidator(self.HISTOGRAM_MIN_INTENSITY, self.HISTOGRAM_MAX_INTENSITY, 0, self.histogram_highlight_min_edit)
+        )
+        self.histogram_highlight_min_edit.setFixedWidth(40)
+        self.histogram_highlight_min_edit.setAlignment(Qt.AlignmentFlag.AlignLeft)
+        self.histogram_highlight_min_edit.setStyleSheet(highlight_edit_style)
+        self.histogram_highlight_min_edit.setToolTip(
+            "Lower bound of the histogram highlight range. Type a value and press Enter to apply it."
+        )
+        self.histogram_highlight_separator_label = QLabel(",", self)
+        self.histogram_highlight_separator_label.setStyleSheet(highlight_label_style)
+        self.histogram_highlight_max_edit = QLineEdit(self)
+        self.histogram_highlight_max_edit.setValidator(
+            QDoubleValidator(self.HISTOGRAM_MIN_INTENSITY, self.HISTOGRAM_MAX_INTENSITY, 0, self.histogram_highlight_max_edit)
+        )
+        self.histogram_highlight_max_edit.setFixedWidth(40)
+        self.histogram_highlight_max_edit.setAlignment(Qt.AlignmentFlag.AlignLeft)
+        self.histogram_highlight_max_edit.setStyleSheet(highlight_edit_style)
+        self.histogram_highlight_max_edit.setToolTip(
+            "Upper bound of the histogram highlight range. Type a value and press Enter to apply it."
+        )
+        self.histogram_highlight_suffix_label = QLabel("]", self)
+        self.histogram_highlight_suffix_label.setStyleSheet(highlight_label_style)
+
         self.ignore_region = pg.LinearRegionItem(values=(0.0, 1.0), brush=pg.mkBrush(239, 68, 68, 35))
         self.ignore_region.setZValue(11)
         self.histogram_plot.addItem(self.ignore_region)
@@ -1336,15 +1386,26 @@ class MainWindow(MainWindowIcons, RectangleStampMixin, RoiGeometryMixin, Histogr
         self._set_mask_preview_button_icon(self.local_contrast_mask_show_button, self.local_contrast_mask_show_button.isChecked())
         self._set_mask_preview_button_icon(self.morphology_mask_show_button, self.morphology_mask_show_button.isChecked())
 
+        self.roi_detection_full_auto_button = self._make_icon_tool_button(
+            "robot",
+            "#f8fafc",
+            "Fully automatic: detect the periodic circle array directly from the image - diameter, rows, "
+            "columns, spacing, and reference ring are all inferred, no manual values needed. Falls back to "
+            "a status message (not a guess) if no clear periodic array is found.",
+            icon=self._chromatic_auto_icon(False),
+        )
+        self.roi_detection_full_auto_button.setEnabled(False)
         self.roi_detection_auto_button = self._make_icon_tool_button(
             "grid-dots",
             "#22c55e",
-            "Mode A: automatically detect ROIs from the known array grid and spacing.",
+            "Semi-automatic: detect ROIs using the array grid/spacing settings below. First drag the "
+            "histogram highlight range (the blue band on the intensity histogram) to cover your sample "
+            "circles' intensities — candidates outside that range are never found.",
         )
         self.roi_corner_select_button = self._make_icon_tool_button(
             "layout-grid",
             "#94a3b8",
-            "Mode B: corner-seeded detection (coming later).",
+            "Corner-seeded detection (coming later): select the four array corners first, then fill the grid.",
             icon=self._make_corner_seed_icon("#94a3b8"),
         )
         self.roi_corner_select_button.setEnabled(False)
@@ -1706,7 +1767,13 @@ class MainWindow(MainWindowIcons, RectangleStampMixin, RoiGeometryMixin, Histogr
         self.ignore_marked_check = QPushButton("Apply mask", self)
         self.ignore_marked_check.setCheckable(True)
         self.detect_rois_button = self.roi_detection_auto_button
-        self.reorder_rois_button = self._make_icon_tool_button("sort-ascending-numbers", "#f8fafc", "Reorder ROIs by image position so the top-left ROI becomes ID 1.")
+        self.reorder_rois_button = self._make_icon_tool_button("sort-ascending-numbers", "#f8fafc", "Reorder ROIs by row: number left-to-right within each row, top row to bottom row, so the top-left ROI becomes ID 1.")
+        self.reorder_rois_column_button = self._make_icon_tool_button(
+            "sort-ascending-numbers",
+            "#f8fafc",
+            "Reorder ROIs by column: number top-to-bottom within each column, left column to right column, so the top-left ROI becomes ID 1.",
+            icon=self._make_rotated_tabler_icon("sort-ascending-numbers", "#f8fafc"),
+        )
         self.clear_rois_button = self._make_icon_tool_button("trash-x", "#ef4444", "Remove all detected ROIs and groups from the current dataset.")
         self.clear_roi_selection_button = QPushButton("Clear selection", self)
 
@@ -1825,6 +1892,13 @@ class MainWindow(MainWindowIcons, RectangleStampMixin, RoiGeometryMixin, Histogr
         self.flip_vertical_action.setChecked(self._state.preprocessing.flip_vertical)
         self.flip_vertical_action.setToolTip("Flip the reference image vertically.")
 
+        self.roi_auto_histogram_action = QAction(self._tabler_icon("wand"), "Auto range", self)
+        self.roi_auto_histogram_action.setEnabled(False)
+        self.roi_auto_histogram_action.setToolTip(
+            "Auto-set histogram range: find the ROI (sample) peak in the reference image's histogram and "
+            "set the highlight range to it automatically, instead of dragging it by hand. Assumes a bimodal "
+            "histogram (bright background + darker ROIs) with a debris band near the bottom of the range."
+        )
         self.roi_edit_action = QAction(self._make_roi_edit_icon(), "Manual edit", self)
         self.roi_edit_action.setCheckable(True)
         self.roi_edit_action.setToolTip("Left-click or right-click to select ROIs in the active ROI tab. Ctrl-click for group selection. Left-drag in Move mode to correct ROIs.")
@@ -2102,6 +2176,8 @@ class MainWindow(MainWindowIcons, RectangleStampMixin, RoiGeometryMixin, Histogr
         self.hist_region.sigRegionChanged.connect(self._update_selected_intensity_overlay)
         self.hist_region.sigRegionChanged.connect(self._update_histogram_region_labels)
         self.hist_region.sigRegionChangeFinished.connect(self._on_histogram_region_changed)
+        self.histogram_highlight_min_edit.editingFinished.connect(self._on_histogram_highlight_edit_committed)
+        self.histogram_highlight_max_edit.editingFinished.connect(self._on_histogram_highlight_edit_committed)
         self.ignore_region.sigRegionChanged.connect(self._preview_ignore_region_overlay)
         self.ignore_region.sigRegionChanged.connect(self._update_histogram_region_labels)
         self.ignore_region.sigRegionChangeFinished.connect(self._on_ignore_region_changed)
@@ -2242,8 +2318,10 @@ class MainWindow(MainWindowIcons, RectangleStampMixin, RoiGeometryMixin, Histogr
         self.array_rows_spin.valueChanged.connect(self._update_roi_detection_settings)
         self.array_cols_spin.valueChanged.connect(self._update_roi_detection_settings)
         self.array_spacing_spin.valueChanged.connect(self._update_roi_detection_settings)
+        self.roi_detection_full_auto_button.clicked.connect(self._detect_rois_fully_automatic)
         self.detect_rois_button.clicked.connect(self._detect_rois)
         self.reorder_rois_button.clicked.connect(self._reorder_rois_by_position)
+        self.reorder_rois_column_button.clicked.connect(lambda *_args: self._reorder_rois_by_position(column_major=True))
         self.clear_rois_button.clicked.connect(self._clear_detected_rois)
         self.clear_roi_selection_button.clicked.connect(self._clear_roi_selection)
         self.roi_array_action.toggled.connect(self._on_roi_array_toggled)
@@ -2259,6 +2337,7 @@ class MainWindow(MainWindowIcons, RectangleStampMixin, RoiGeometryMixin, Histogr
         self.metadata_import_button.clicked.connect(self._metadata_controller.import_metadata)
         self.metadata_export_button.clicked.connect(self._metadata_controller.export_metadata)
         self.metadata_preview_button.clicked.connect(self._metadata_controller.open_preview_dialog)
+        self.roi_auto_histogram_action.triggered.connect(self._auto_set_roi_histogram_range)
         self.remove_rois_action.triggered.connect(self._remove_selected_rois)
         self.group_rois_action.triggered.connect(self._group_selected_rois)
         self.ungroup_rois_action.triggered.connect(self._ungroup_selected_rois)
@@ -4854,15 +4933,27 @@ class MainWindow(MainWindowIcons, RectangleStampMixin, RoiGeometryMixin, Histogr
         self._set_help(self.array_spacing_spin, "Expected spacing between neighboring array ROIs in pixels.")
         self._set_help(self.ignore_marked_check, "Ignore pixels defined by the current mask controls and any loaded mask image.")
         self._set_help(
-            self.detect_rois_button,
-            "Mode A: automatically detect array ROIs. Requires the histogram highlight range "
-            "(blue band) to cover your sample ROI intensities first, or you'll get 0 ROIs.",
-            "Mode A: automatically detect array ROIs on the current reference image. Detection only "
-            "searches within the histogram highlight range (the blue band on the histogram plot) — set "
-            "that range to cover your sample ROI intensities before clicking this, or detection will report 0 ROIs.",
+            self.roi_detection_full_auto_button,
+            "Fully automatic: detect the periodic circle array directly from the image, with no manual "
+            "values needed.",
+            "Fully automatic: detects the periodic circle array directly from the image - diameter, rows, "
+            "columns, and spacing are all inferred from the detected blobs, and the reference ring is "
+            "sized automatically to match the sample circle's area. No manual diameter, array, or "
+            "histogram-range setup needed first. If no clear periodic array is found, nothing is changed "
+            "and the status bar explains why - try semi-automatic detection in that case.",
         )
-        self._set_help(self.roi_corner_select_button, "Mode B: select the four array corners first, then fill the grid. Coming later.")
-        self._set_help(self.reorder_rois_button, "Reorder detected ROIs by image position so the top-left ROI becomes ID 1.")
+        self._set_help(
+            self.detect_rois_button,
+            "Semi-automatic: detect array ROIs. Requires the histogram highlight range "
+            "(blue band) to cover your sample ROI intensities first, or you'll get 0 ROIs.",
+            "Semi-automatic: detect array ROIs on the current reference image, using the array grid/spacing "
+            "settings and circle diameter above. Detection only searches within the histogram highlight range "
+            "(the blue band on the histogram plot) — set that range to cover your sample ROI intensities before "
+            "clicking this, or detection will report 0 ROIs.",
+        )
+        self._set_help(self.roi_corner_select_button, "Corner-seeded detection: select the four array corners first, then fill the grid. Coming later.")
+        self._set_help(self.reorder_rois_button, "Reorder detected ROIs by row: left-to-right within each row, top row to bottom row.")
+        self._set_help(self.reorder_rois_column_button, "Reorder detected ROIs by column: top-to-bottom within each column, left column to right column.")
         self._set_help(self.clear_rois_button, "Remove all detected ROIs and groups from the current dataset.")
         self._set_help(self.clear_roi_selection_button, "Clear the current ROI selection.")
         self._set_help(self.show_rois_check, "Show or hide the ROI overlays.")
@@ -4874,9 +4965,9 @@ class MainWindow(MainWindowIcons, RectangleStampMixin, RoiGeometryMixin, Histogr
         self._set_help(
             self.show_highlight_check,
             "Show or hide the histogram highlight overlay. Note: the highlighted range is also the "
-            "intensity range 'Auto-locate ROIs' searches within.",
+            "intensity range semi-automatic ROI detection searches within.",
             "Show or hide the histogram highlight overlay for the selected histogram range. This range "
-            "is also used by 'Auto-locate ROIs' (Mode A) as the intensity bounds for sample ROI candidates — "
+            "is also used by the semi-automatic ROI detection as the intensity bounds for sample ROI candidates — "
             "if it doesn't cover your sample ROI intensities, automatic ROI detection will find 0 ROIs.",
         )
         self._set_help(self.measurement_unit_button, "Switch the displayed length units between pixels and micrometers.")
@@ -4913,6 +5004,16 @@ class MainWindow(MainWindowIcons, RectangleStampMixin, RoiGeometryMixin, Histogr
         self._set_help(self.measurement_um_x_spin, "Real horizontal distance between the ruler crosses in micrometers.")
         self._set_help(self.measurement_um_y_spin, "Real vertical distance between the ruler crosses in micrometers.")
         self._set_help(self.measurement_apply_button, "Apply the entered micrometer distances to calibrate the image in memory.")
+        self._set_help(
+            self.roi_auto_histogram_action,
+            "Auto-set histogram range: find the ROI (sample) peak in the reference image's histogram and "
+            "set the highlight range to it automatically.",
+            "Auto-set histogram range: analyzes the reference image's histogram for a bimodal split - a "
+            "bright background peak and a darker ROI peak - and moves the highlight range (the blue band) "
+            "to bracket the ROI peak automatically. Ignores a debris/dust band near the bottom of the "
+            "sensor range. If no separable ROI peak is found, the range is left as-is and the status bar "
+            "explains why - set it by hand in that case.",
+        )
         self._set_help(
             self.roi_edit_action,
             "Enable manual ROI editing mode.",
@@ -5714,12 +5815,28 @@ class MainWindow(MainWindowIcons, RectangleStampMixin, RoiGeometryMixin, Histogr
     def _sync_crop_visibility(self) -> None:
         self._image_tools_controller.sync_crop_visibility()
 
-    def _on_roi_editor_tab_changed(self, index: int) -> None:
-        modes = ("circles", "rectangles", "freehand")
-        self._roi_editor_mode = modes[index] if 0 <= index < len(modes) else "circles"
-        if self._roi_editor_mode == "circles":
+    def _on_roi_editor_mode_section_toggled(self, mode: str, expanded: bool) -> None:
+        """Circles/Rectangles/Freehand are three CollapsibleSections that
+        behave like tabs: exactly one stays open at a time, driving
+        self._roi_editor_mode. Expanding one collapses the other two;
+        collapsing the only open one re-opens it immediately, since
+        _roi_editor_mode always needs a definite value."""
+        sections = {
+            "circles": self.roi_editor_circle_section,
+            "rectangles": self.roi_editor_rectangle_section,
+            "freehand": self.roi_editor_freehand_section,
+        }
+        if not expanded:
+            if not any(section.is_expanded() for section in sections.values()):
+                sections[mode].set_expanded(True)
+            return
+        for other_mode, section in sections.items():
+            if other_mode != mode and section.is_expanded():
+                section.set_expanded(False)
+        self._roi_editor_mode = mode
+        if mode == "circles":
             self._update_roi_detection_labels(sync_controls=True)
-        elif self._roi_editor_mode == "rectangles":
+        elif mode == "rectangles":
             self._update_rectangle_roi_controls(sync_roi=True)
         self._sync_rectangle_roi_visibility()
         self._update_guide_overlays()
@@ -6200,6 +6317,116 @@ class MainWindow(MainWindowIcons, RectangleStampMixin, RoiGeometryMixin, Histogr
         self.reference_outer_diameter_spin.interpretText()
         self._update_geometry_settings(save=True, recalculate=self.roi_editor_section.is_applied(), normalize_relation=True)
 
+    def _auto_set_roi_histogram_range(self) -> None:
+        """Auto-locate the ROI (sample) peak in the reference image's
+        histogram and move the highlight range (hist_region) to it -
+        equivalent to the user dragging the blue band by hand, since setting
+        hist_region here triggers the same sigRegionChangeFinished ->
+        _on_histogram_region_changed path (undo point, settings write, save,
+        overlay refresh) that a manual drag does. See
+        processing/roi_histogram.estimate_roi_intensity_range for the
+        bimodal-histogram assumptions this relies on."""
+        if self._current_processed_image is None:
+            self._set_status_text("No image available for histogram analysis.")
+            return
+        if not self._is_current_reference_image():
+            self._set_status_text("Switch to the reference image before auto-setting the histogram range.")
+            return
+        image_values, _sample_values, _reference_values, _mask_values = self._plot_manager.histogram_source_values(
+            self._current_processed_image
+        )
+        result = estimate_roi_intensity_range(
+            image_values,
+            intensity_min=self.HISTOGRAM_MIN_INTENSITY,
+            intensity_max=self.HISTOGRAM_MAX_INTENSITY,
+        )
+        if result is None:
+            self._set_status_text(
+                "Could not find a separate ROI peak in the histogram — set the highlight range by hand."
+            )
+            return
+        lower, upper = result
+        self.hist_region.setRegion((lower, upper))
+        self._set_status_text(f"Histogram range auto-set to {lower:.0f}–{upper:.0f}.")
+
+    def _detect_rois_fully_automatic(self) -> None:
+        """Infers array geometry and the reference ring directly from the
+        reference image (processing/roi_array_geometry.py), auto-sets the
+        histogram range the same way the wand button does, then runs the
+        same detect_rois pipeline semi-automatic detection uses. See
+        analysis_tasks._detect_rois_fully_automatic_task for the actual
+        estimation/detection sequence - this method only handles the
+        GUI-thread side: launching the worker and, on success, pushing the
+        inferred values into the existing settings/widgets so the panel
+        shows exactly what was auto-detected."""
+        if self._current_processed_image is None:
+            self.status_label.setText("No image available for ROI detection.")
+            return
+        if not self._is_current_reference_image():
+            self.status_label.setText("Switch to the reference image before detecting ROIs.")
+            return
+        self._push_undo_point("Detect ROIs (fully automatic)")
+        self._roi_detection_request_id += 1
+        request_id = self._roi_detection_request_id
+        image_key = self._current_image_key
+        image = self._current_processed_image
+        settings = deepcopy(self._state.area_roi_settings)
+        worker = FunctionWorker(
+            _detect_rois_fully_automatic_task,
+            image,
+            settings,
+            self._current_external_mask(),
+            self._rotation_fill_mask(),
+            self.HISTOGRAM_MIN_INTENSITY,
+            self.HISTOGRAM_MAX_INTENSITY,
+            supports_progress=True,
+        )
+        self._begin_busy("Finding circle array...")
+        worker.signals.progress.connect(self._update_busy_progress)
+        worker.signals.result.connect(
+            lambda result,
+            request_id=request_id,
+            image_key=image_key: self._on_detect_rois_fully_automatic_ready(request_id, image_key, result)
+        )
+        worker.signals.error.connect(lambda message: self._on_detect_rois_failed(message))
+        self._thread_pool.start(worker)
+
+    def _on_detect_rois_fully_automatic_ready(
+        self,
+        request_id: int,
+        image_key: tuple[int, float] | None,
+        result: tuple,
+    ) -> None:
+        self._end_busy()
+        if request_id != self._roi_detection_request_id:
+            return
+        if self._current_image_key != image_key:
+            return
+        geometry, intensity_range, resolved_settings, detected_rois, diagnostics = result
+        if geometry is None:
+            reason = diagnostics.get("reason") if isinstance(diagnostics, dict) else None
+            detail = f" {reason}" if reason else ""
+            self._set_status_text(
+                f"Fully automatic detection couldn't find a clear periodic circle array.{detail} "
+                "Try semi-automatic detection instead."
+            )
+            self._append_workflow_log(f"Fully automatic ROI detection: no array found | {diagnostics}", level="warning")
+            return
+        self._state.area_roi_settings = resolved_settings
+        self._sync_roi_detection_controls()
+        if intensity_range is not None:
+            lower, upper = intensity_range
+            self.hist_region.blockSignals(True)
+            self.hist_region.setRegion((lower, upper))
+            self.hist_region.blockSignals(False)
+            self._update_histogram_region_labels()
+        self._on_detect_rois_ready(request_id, image_key, detected_rois)
+        self._set_status_text(
+            f"Fully automatic: found a {geometry.rows}x{geometry.cols} array "
+            f"(spacing {geometry.spacing_px:.0f} px, diameter {geometry.radius_px * 2.0:.0f} px) — "
+            f"detected {len(detected_rois)} ROIs."
+        )
+
     def _detect_rois(self) -> None:
         if self._current_processed_image is None:
             self.status_label.setText("No image available for ROI detection.")
@@ -6534,6 +6761,11 @@ class MainWindow(MainWindowIcons, RectangleStampMixin, RoiGeometryMixin, Histogr
         if highlight_lower > highlight_upper:
             highlight_lower, highlight_upper = highlight_upper, highlight_lower
         highlight_center = 0.5 * (highlight_lower + highlight_upper)
+        # Don't stomp on a value the user is actively typing.
+        if not self.histogram_highlight_min_edit.hasFocus():
+            self.histogram_highlight_min_edit.setText(f"{highlight_lower:.0f}")
+        if not self.histogram_highlight_max_edit.hasFocus():
+            self.histogram_highlight_max_edit.setText(f"{highlight_upper:.0f}")
         self.hist_region_label.setHtml(
             "<span style="
             f"'color:{self._highlight_visual_color.name()}; "
@@ -6545,6 +6777,25 @@ class MainWindow(MainWindowIcons, RectangleStampMixin, RoiGeometryMixin, Histogr
         self.hist_region_label.setVisible(True)
 
         self.ignore_region_label.setVisible(False)
+
+    def _on_histogram_highlight_edit_committed(self) -> None:
+        """Applies a typed "Highlight [min, max]" value the same way a manual
+        band drag does: through hist_region.setRegion(), whose
+        sigRegionChangeFinished triggers _on_histogram_region_changed (undo
+        point, settings write, save, overlay refresh). Invalid text just
+        reverts the field to the current region instead of raising."""
+        try:
+            lower = float(self.histogram_highlight_min_edit.text())
+            upper = float(self.histogram_highlight_max_edit.text())
+        except ValueError:
+            self._update_histogram_region_labels()
+            return
+        if lower > upper:
+            lower, upper = upper, lower
+        lower = float(np.clip(lower, self.HISTOGRAM_MIN_INTENSITY, self.HISTOGRAM_MAX_INTENSITY))
+        upper = float(np.clip(upper, self.HISTOGRAM_MIN_INTENSITY, self.HISTOGRAM_MAX_INTENSITY))
+        self.hist_region.setRegion((lower, upper))
+        self._update_histogram_region_labels()
 
     def _choose_overlay_color(self, target: str) -> None:
         initial = (

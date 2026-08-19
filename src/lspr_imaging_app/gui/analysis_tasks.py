@@ -10,7 +10,7 @@ from pathlib import Path
 
 import numpy as np
 
-from lspr_imaging_app.domain.models import AbsorbanceSpectrumResult, AreaRoi, ChromaticTransformModel
+from lspr_imaging_app.domain.models import AbsorbanceSpectrumResult, AreaRoi, AreaRoiDetectionSettings, ChromaticTransformModel
 from lspr_imaging_app.gui.worker import SensorgramComputationResult, SensorgramPointResult
 from lspr_imaging_app.io.dataset import dataset_load_plane_roi, export_ome_zarr_dataset, load_image_array
 from lspr_imaging_app.storage.workspace import load_preprocessing, load_processing_profile
@@ -43,7 +43,9 @@ from lspr_imaging_app.processing.preprocess import (
     estimate_background_profile,
 )
 from lspr_imaging_app.processing.reference_selection import bimodal_dip_contrast
+from lspr_imaging_app.processing.roi_array_geometry import ArrayGeometryEstimate, estimate_array_geometry, estimate_reference_ring_radii
 from lspr_imaging_app.processing.roi_detection import detect_rois, ignored_pixel_mask, refresh_roi_metrics
+from lspr_imaging_app.processing.roi_histogram import estimate_roi_intensity_range
 from lspr_imaging_app.processing.roi_math import reduce_sample_and_reference
 from lspr_imaging_app.processing.roi_rasterize import expand_mask, expand_mask_to_patch
 
@@ -138,6 +140,73 @@ def _detect_rois_task(
         rotation_fill_mask=rotation_fill_mask,
         progress_callback=progress_callback,
     )
+
+
+def _detect_rois_fully_automatic_task(
+    image: np.ndarray,
+    settings: AreaRoiDetectionSettings,
+    external_mask: np.ndarray | None,
+    rotation_fill_mask: np.ndarray | None,
+    histogram_intensity_min: float,
+    histogram_intensity_max: float,
+    progress_callback=None,
+) -> tuple[ArrayGeometryEstimate | None, tuple[float, float] | None, AreaRoiDetectionSettings | None, list[AreaRoi], dict]:
+    """Infers array geometry (diameter, rows, cols, spacing) and the
+    reference ring directly from image content (roi_array_geometry.py),
+    auto-sets the histogram intensity range the same way the "wand" button
+    does (roi_histogram.py), then hands off to the existing, tested
+    detect_rois pipeline for the actual subpixel placement/scoring - this
+    function's only job is estimating the parameters semi-automatic
+    detection would otherwise need set by hand.
+
+    Returns (geometry_estimate, intensity_range, settings_used, detected_rois,
+    diagnostics). geometry_estimate is None if no confident periodic array
+    was found, in which case the other three are (None, None, []) and the
+    caller should fall back to semi-automatic detection instead of guessing;
+    diagnostics["reason"] explains why in that case (see
+    estimate_array_geometry's docstring).
+    """
+    if progress_callback is not None:
+        progress_callback(5, "Fully automatic: finding the circle array...")
+    valid_mask = ~ignored_pixel_mask(image, settings, external_mask=external_mask, rotation_fill_mask=rotation_fill_mask)
+    diagnostics: dict = {}
+    geometry = estimate_array_geometry(image, valid_mask=valid_mask, diagnostics=diagnostics)
+    if geometry is None:
+        return None, None, None, [], diagnostics
+
+    if progress_callback is not None:
+        progress_callback(30, "Fully automatic: setting histogram range...")
+    intensity_range = estimate_roi_intensity_range(
+        image[valid_mask],
+        intensity_min=histogram_intensity_min,
+        intensity_max=histogram_intensity_max,
+    )
+
+    resolved_settings = deepcopy(settings)
+    resolved_settings.sample_radius_px = geometry.radius_px
+    resolved_settings.array_rows = geometry.rows
+    resolved_settings.array_cols = geometry.cols
+    resolved_settings.array_spacing_px = int(round(geometry.spacing_px))
+    resolved_settings.reference_inner_radius_px, resolved_settings.reference_outer_radius_px = estimate_reference_ring_radii(
+        geometry.radius_px
+    )
+    if intensity_range is not None:
+        resolved_settings.intensity_min_value, resolved_settings.intensity_max_value = intensity_range
+
+    if progress_callback is not None:
+        progress_callback(45, "Fully automatic: placing ROIs...")
+    detected_rois = detect_rois(
+        image,
+        resolved_settings,
+        external_mask=external_mask,
+        rotation_fill_mask=rotation_fill_mask,
+        progress_callback=(
+            None
+            if progress_callback is None
+            else lambda percent, text: progress_callback(45 + int(percent * 0.55), text)
+        ),
+    )
+    return geometry, intensity_range, resolved_settings, detected_rois, diagnostics
 
 
 def _background_profile_task(

@@ -193,6 +193,8 @@ class ImageRenderManager:
         window._refresh_mask_previews()
         is_reference_view = window._is_current_reference_image()
         window.detect_rois_button.setEnabled(is_reference_view)
+        window.roi_detection_full_auto_button.setEnabled(is_reference_view)
+        window.roi_auto_histogram_action.setEnabled(is_reference_view)
         if not is_reference_view:
             window.mask_pencil_check.blockSignals(True)
             window.mask_pencil_check.setChecked(False)
