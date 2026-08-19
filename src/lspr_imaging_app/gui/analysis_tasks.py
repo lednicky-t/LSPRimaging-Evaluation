@@ -29,6 +29,7 @@ from lspr_imaging_app.processing.chromatic import (
     fit_affine_matrix,
     fit_similarity_matrix,
     identity_affine_matrix,
+    prepare_registration_image,
     transformed_annulus_mask,
     transformed_annulus_mask_for_patch,
     transformed_disk_mask,
@@ -1357,6 +1358,10 @@ def _estimate_chromatic_models_task(
         raise ValueError("Reference image is missing from the dataset.")
     reference_raw = load_image_array(reference_path)
     reference_processed = apply_spatial_preprocessing(reference_raw, preprocessing)
+    # Computed once and reused below: estimate_affine_chromatic_transform would
+    # otherwise redo this full-image band-pass (two Gaussian blurs + two Sobel
+    # passes) for the same reference image on every wavelength in the loop.
+    reference_prepared = prepare_registration_image(reference_processed)
     tile_size = int(max(preprocessing.chromatic_tile_size_px, 24))
     search_radius = int(max(preprocessing.chromatic_search_radius_px, 6))
     total = max(len(record_specs), 1)
@@ -1382,6 +1387,7 @@ def _estimate_chromatic_models_task(
                 tile_size_px=tile_size,
                 search_radius_px=search_radius,
                 subpixel_precision=int(getattr(preprocessing, "chromatic_subpixel_precision", 4)),
+                reference_prepared=reference_prepared,
             )
         models.append(
             ChromaticTransformModel(

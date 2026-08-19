@@ -697,6 +697,7 @@ def estimate_affine_chromatic_transform(
     search_radius_px: int = 24,
     spacing_px: int | None = None,
     subpixel_precision: int = 1,
+    reference_prepared: np.ndarray | None = None,
 ) -> ChromaticRegistrationResult:
     """Estimate the affine transform mapping `target_image` onto `reference_image`.
 
@@ -713,8 +714,15 @@ def estimate_affine_chromatic_transform(
     Falls back to a pure-translation matrix (no rotation/scale) if fewer than
     3 tie points survive, since an affine fit needs at least 3 non-collinear
     correspondences.
+
+    `reference_prepared`, if given, is used instead of recomputing
+    `prepare_registration_image(reference_image)` -- for a caller estimating
+    transforms for many target images against the same reference in one run
+    (one call per wavelength), this skips repeating the full-image Gaussian/
+    Sobel band-pass every time. Must be exactly `prepare_registration_image(reference_image)`'s
+    own output; passing anything else silently registers against the wrong image.
     """
-    reference = prepare_registration_image(reference_image)
+    reference = prepare_registration_image(reference_image) if reference_prepared is None else reference_prepared
     target = prepare_registration_image(target_image)
     if mode == "robust":
         global_shift_x, global_shift_y, _global_score = multiscale_phase_correlation_shift(reference, target)
