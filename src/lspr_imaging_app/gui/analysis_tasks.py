@@ -1360,8 +1360,16 @@ def _estimate_chromatic_models_task(
         # otherwise this can pick a "sample wavelength" that was never offered
         # to the user for landmark-marking (excluded on the reference cube but
         # not elsewhere), producing a spurious "missing reference point" error.
+        # Also drop 0 nm (broadband/no-filter frame) here, mirroring
+        # ChromaticController.candidate_chromatic_wavelengths -- the UI never
+        # lets the user mark landmarks on it, so it must never be selected as
+        # a sample wavelength either.
         reference_cube_wavelengths = sorted(
-            {float(wavelength) for spectral_cube_index, wavelength, _path in record_specs if int(spectral_cube_index) == reference_spectral_cube}
+            {
+                float(wavelength)
+                for spectral_cube_index, wavelength, _path in record_specs
+                if int(spectral_cube_index) == reference_spectral_cube and float(wavelength) != 0.0
+            }
         )
         sampled_wavelengths = _sampled_wavelengths(
             reference_cube_wavelengths,

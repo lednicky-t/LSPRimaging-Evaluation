@@ -924,7 +924,7 @@ class MainWindow(MainWindowIcons, RectangleStampMixin, RoiGeometryMixin, Histogr
             "Automatic ref.points finder: detect the chromatic reference points on the first sampled image and track them across the other sampled wavelengths."
         )
         self.chromatic_reference_points_all_button = self._create_view_toggle_button(
-            "reference_points_all",
+            "reference_points",
             self._chromatic_reference_points_all_visible,
             "Show all chromatic reference points across the sampled wavelengths. When chromatic transforms are linked, the points are transformed into the current image space.",
         )
@@ -5130,12 +5130,14 @@ class MainWindow(MainWindowIcons, RectangleStampMixin, RoiGeometryMixin, Histogr
 
     def _on_show_reference_points_toggled(self, checked: bool) -> None:
         self._reference_points_visible = checked
-        if not checked and self._chromatic_reference_points_all_visible:
-            self._chromatic_reference_points_all_visible = False
-            if hasattr(self, "chromatic_reference_points_all_button"):
-                self.chromatic_reference_points_all_button.blockSignals(True)
-                self.chromatic_reference_points_all_button.setChecked(False)
-                self.chromatic_reference_points_all_button.blockSignals(False)
+        if hasattr(self, "chromatic_reference_points_all_button") and self._chromatic_reference_points_all_visible != checked:
+            self._chromatic_reference_points_all_visible = checked
+            self.chromatic_reference_points_all_button.blockSignals(True)
+            self.chromatic_reference_points_all_button.setChecked(checked)
+            self.chromatic_reference_points_all_button.blockSignals(False)
+            # blockSignals also silences the toggled->_update_view_toggle_icon
+            # connection, so the button's green/gray icon needs updating by hand.
+            self._update_view_toggle_icon(self.chromatic_reference_points_all_button, "reference_points", checked)
         self._update_landmark_overlays()
         self._save_visual_preferences()
 

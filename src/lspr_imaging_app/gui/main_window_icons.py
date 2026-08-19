@@ -1218,10 +1218,6 @@ class MainWindowIcons:
             icon = self._tabler_icon(icon_name, color, 24, stroke_width=2.1)
             if not icon.isNull():
                 return icon
-        elif kind == "reference_points_all":
-            icon = self._tabler_icon("map-pins", color, 24, stroke_width=2.1)
-            if not icon.isNull():
-                return icon
         elif kind == "mask":
             icon_name = "mask" if visible else "mask-off"
             icon = self._tabler_icon(icon_name, color, 24, stroke_width=2.1)
@@ -1252,13 +1248,6 @@ class MainWindowIcons:
             painter.drawLine(QLineF(12.0, 11.5, 12.0, 18.2))
             painter.drawLine(QLineF(12.0, 18.2, 9.0, 14.0))
             painter.drawLine(QLineF(12.0, 18.2, 15.0, 14.0))
-        elif kind == "reference_points_all":
-            painter.drawEllipse(QRectF(6.0, 4.0, 5.5, 5.5))
-            painter.drawEllipse(QRectF(12.0, 4.0, 5.5, 5.5))
-            painter.drawEllipse(QRectF(9.0, 11.0, 5.5, 5.5))
-            painter.drawLine(QLineF(8.8, 9.2, 7.5, 14.2))
-            painter.drawLine(QLineF(12.2, 9.2, 13.5, 14.2))
-            painter.drawLine(QLineF(10.5, 9.2, 10.5, 16.0))
         elif kind == "mask":
             painter.drawRoundedRect(QRectF(4.5, 4.5, 15.0, 15.0), 3.0, 3.0)
         elif kind == "histogram_log":
@@ -1323,7 +1312,7 @@ class MainWindowIcons:
             (getattr(self, "show_reference_points_check", None), "reference_points", self._reference_points_visible),
             (
                 getattr(self, "chromatic_reference_points_all_button", None),
-                "reference_points_all",
+                "reference_points",
                 self._chromatic_reference_points_all_visible,
             ),
             (getattr(self, "show_mask_check", None), "mask", self._mask_visible),

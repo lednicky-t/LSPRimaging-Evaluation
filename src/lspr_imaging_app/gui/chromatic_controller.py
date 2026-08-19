@@ -1311,11 +1311,14 @@ class ChromaticController:
     def _on_chromatic_reference_points_all_toggled(self, checked: bool) -> None:
         window = self.window
         window._chromatic_reference_points_all_visible = bool(checked)
-        if checked and not window._reference_points_visible:
-            window._reference_points_visible = True
+        if window._reference_points_visible != checked:
+            window._reference_points_visible = bool(checked)
             window.show_reference_points_check.blockSignals(True)
-            window.show_reference_points_check.setChecked(True)
+            window.show_reference_points_check.setChecked(bool(checked))
             window.show_reference_points_check.blockSignals(False)
+            # blockSignals also silences the toggled->_update_view_toggle_icon
+            # connection, so the button's green/gray icon needs updating by hand.
+            window._update_view_toggle_icon(window.show_reference_points_check, "reference_points", bool(checked))
         window._update_landmark_overlays()
         window._schedule_processing_state_save()
 
