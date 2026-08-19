@@ -270,6 +270,49 @@ class DatasetLoadChoice:
     acquisition_metadata: ImagingAcquisitionMetadata | None
 
 
+_DATASET_CHOICE_POINTER_NAME = "dataset_choice.txt"
+
+
+def _dataset_choice_pointer_path(parent_folder: Path) -> Path:
+    return parent_folder / "analysis" / _DATASET_CHOICE_POINTER_NAME
+
+
+def save_dataset_choice(parent_folder: Path, candidate_folder_name: str) -> None:
+    """Remember which candidate the user picked the last time `load_dataset`
+    found more than one TIFF-stack/OME-Zarr dataset under `parent_folder`
+    (see `DatasetLoadChoice`), so `resolve_remembered_dataset_choice` can
+    apply it automatically next time instead of prompting again - most
+    usefully during the startup session-restore flow, which otherwise would
+    have to ask on every launch."""
+    pointer = _dataset_choice_pointer_path(parent_folder)
+    try:
+        pointer.parent.mkdir(parents=True, exist_ok=True)
+        pointer.write_text(candidate_folder_name, encoding="utf-8")
+    except OSError:
+        pass
+
+
+def resolve_remembered_dataset_choice(choice: DatasetLoadChoice) -> ImageDataset | None:
+    """Auto-pick the candidate remembered from a previous `save_dataset_choice`
+    call for this same ambiguous folder. Returns None if nothing was
+    remembered yet, or if the remembered candidate isn't among the ones found
+    this time (e.g. it was deleted or renamed) - the caller must fall back to
+    prompting the user in that case."""
+    pointer = _dataset_choice_pointer_path(choice.parent_folder)
+    if not pointer.exists():
+        return None
+    try:
+        remembered_name = pointer.read_text(encoding="utf-8").strip()
+    except OSError:
+        return None
+    if not remembered_name:
+        return None
+    for candidate in choice.candidates:
+        if candidate.folder.name == remembered_name:
+            return candidate
+    return None
+
+
 def load_dataset(folder: Path) -> ImageDataset | DatasetLoadChoice:
     """Load `folder` as an `ImageDataset`, auto-detecting the format and
     searching one level deep for it if `folder` doesn't directly hold one

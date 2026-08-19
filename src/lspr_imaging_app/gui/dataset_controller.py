@@ -24,7 +24,9 @@ from lspr_imaging_app.io.dataset import (
     describe_new_ome_zarr_export,
     load_dataset,
     read_existing_ome_zarr_summary,
+    resolve_remembered_dataset_choice,
     sanitize_ome_zarr_export_name,
+    save_dataset_choice,
     summarize_dataset_candidate,
 )
 
@@ -167,12 +169,22 @@ class DatasetController:
             if choice.acquisition_metadata is not None:
                 dataset.acquisition_metadata = choice.acquisition_metadata
             dataset.home_folder = choice.parent_folder
+            if getattr(window, "_remember_dataset_format_choice", lambda: True)():
+                save_dataset_choice(choice.parent_folder, dataset.folder.name)
         return dataset
 
     def _on_dataset_loaded(self, folder: Path, reset_image_view: bool, on_done, result) -> None:
         window = self.window
         if isinstance(result, DatasetLoadChoice):
-            dataset = self._prompt_dataset_candidate_choice(result)
+            dataset = None
+            if getattr(window, "_remember_dataset_format_choice", lambda: True)():
+                dataset = resolve_remembered_dataset_choice(result)
+                if dataset is not None:
+                    if result.acquisition_metadata is not None:
+                        dataset.acquisition_metadata = result.acquisition_metadata
+                    dataset.home_folder = result.parent_folder
+            if dataset is None:
+                dataset = self._prompt_dataset_candidate_choice(result)
             if dataset is None:
                 window._dataset_load_in_flight = False
                 self._set_dataset_load_controls_enabled(True)

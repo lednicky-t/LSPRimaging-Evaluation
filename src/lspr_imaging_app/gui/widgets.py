@@ -205,6 +205,9 @@ class CollapsibleSection(QWidget):
     def _make_apply_icon(self, applied: bool) -> QIcon:
         return PanelContainer._make_apply_icon(self, applied)
 
+    def set_title(self, title: str) -> None:
+        self._toggle.setText(title)
+
     def is_expanded(self) -> bool:
         return self._toggle.isChecked()
 

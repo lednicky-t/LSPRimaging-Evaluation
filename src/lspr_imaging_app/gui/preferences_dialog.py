@@ -56,6 +56,13 @@ class PreferencesDialog(QDialog):
             "expanded. Takes effect on the next launch; the log panel can always be expanded "
             "or collapsed manually from the Workflow tab."
         )
+        self.remember_dataset_format_check = QCheckBox("Remember dataset format choice")
+        self.remember_dataset_format_check.setToolTip(
+            "When a dataset folder contains both a TIFF image stack and an OME-Zarr export, "
+            "reuse whichever one you picked last time instead of asking again - most useful so "
+            "restoring the previous session on launch doesn't have to prompt. Turn off to always "
+            "be asked."
+        )
 
         # OME-Zarr export
         self.zarr_adaptive_enabled_check = QCheckBox("Adaptive worker tuning enabled")
@@ -106,6 +113,7 @@ class PreferencesDialog(QDialog):
         startup_layout.setVerticalSpacing(8)
         startup_layout.addRow("Restore previous session", self.startup_restore_combo)
         startup_layout.addRow(self.log_panel_open_check)
+        startup_layout.addRow(self.remember_dataset_format_check)
 
         zarr_box = QGroupBox("OME-Zarr export: adaptive worker tuning")
         zarr_layout = QFormLayout(zarr_box)
@@ -174,6 +182,9 @@ class PreferencesDialog(QDialog):
         if hasattr(window, "_startup_log_panel_open"):
             self.log_panel_open_check.setChecked(bool(window._startup_log_panel_open()))
 
+        if hasattr(window, "_remember_dataset_format_choice"):
+            self.remember_dataset_format_check.setChecked(bool(window._remember_dataset_format_choice()))
+
         if hasattr(window, "_ome_zarr_adaptive_enabled"):
             self.zarr_adaptive_enabled_check.setChecked(bool(window._ome_zarr_adaptive_enabled()))
 
@@ -196,6 +207,9 @@ class PreferencesDialog(QDialog):
 
         if hasattr(window, "_set_startup_log_panel_open"):
             window._set_startup_log_panel_open(self.log_panel_open_check.isChecked())
+
+        if hasattr(window, "_set_remember_dataset_format_choice"):
+            window._set_remember_dataset_format_choice(self.remember_dataset_format_check.isChecked())
 
         if hasattr(window, "_set_ome_zarr_adaptive_enabled"):
             window._set_ome_zarr_adaptive_enabled(self.zarr_adaptive_enabled_check.isChecked())

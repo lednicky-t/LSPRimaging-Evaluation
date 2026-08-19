@@ -211,9 +211,9 @@ class MainWindowIcons:
     @staticmethod
     def _make_rotated_tabler_icon(name: str, color: str = "#f8fafc", size: int = 24, *, degrees: float = 90.0) -> QIcon:
         """A vendored Tabler icon rotated by `degrees` - used for the
-        reorder-by-column button, so it reads as "the same sort operation
-        as reorder-by-row, applied to the other axis" rather than needing a
-        whole new glyph vendored just for that distinction."""
+        reorder-by-row button (270 degrees), so it reads as "the same sort
+        operation as reorder-by-column, applied to the other axis" rather
+        than needing a whole new glyph vendored just for that distinction."""
         base = load_tabler_icon(name, color=color, size=size)
         pixmap = base.pixmap(size, size)
         if pixmap.isNull():
@@ -1660,6 +1660,7 @@ class MainWindowIcons:
         ]
         for action, kwargs in buttons:
             self.left_roi_editor_layout.addWidget(self._create_left_roi_editor_button(action, **kwargs))
+        self.left_roi_editor_layout.addWidget(self.clear_rois_button)
         self.left_roi_editor_layout.addWidget(self.roi_editor_labels_button)
         self.left_roi_editor_layout.addStretch(1)
 

@@ -672,8 +672,8 @@ def build_layout(window) -> None:
     circle_editor_layout.setVerticalSpacing(4)
     circle_editor_layout.setLabelAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
     circle_editor_layout.addRow("", window._make_section_separator())
-    circle_editor_layout.addRow("Sample diameter", window._build_roi_geometry_row())
-    circle_editor_layout.addRow("Reference ring", window._build_reference_row())
+    circle_editor_layout.addRow("Sample circle:", window._build_roi_geometry_row())
+    circle_editor_layout.addRow("Reference ring:", window._build_reference_row())
     circle_editor_layout.addRow("Areas", window.roi_geometry_area_label)
     circle_editor_layout.addRow("", window._make_section_separator())
     detection_buttons = QHBoxLayout()
@@ -684,10 +684,8 @@ def build_layout(window) -> None:
     detection_buttons.addWidget(window.roi_corner_select_button)
     detection_buttons.addWidget(window.reorder_rois_button)
     detection_buttons.addWidget(window.reorder_rois_column_button)
-    detection_buttons.addWidget(window.clear_rois_button)
     detection_buttons.addStretch(1)
     circle_editor_layout.addRow("", detection_buttons)
-    circle_editor_layout.addRow("Result", window.roi_summary)
 
     rectangle_editor_group = QWidget(window)
     rectangle_editor_layout = QVBoxLayout(rectangle_editor_group)
@@ -709,7 +707,7 @@ def build_layout(window) -> None:
     # _roi_editor_mode elsewhere in the app (rectangle_stamp_mixin,
     # image_interaction_controller, etc.) depends on.
     window.roi_editor_circle_section = CollapsibleSection(
-        "Circles",
+        f"Circles ({len(window._state.area_rois)})",
         circle_editor_group,
         expanded=True,
         show_help=False,
@@ -717,8 +715,12 @@ def build_layout(window) -> None:
         title_color=_nested_title_color(),
         parent=window,
     )
+    # Rectangles/Freehand ROI storage doesn't exist yet (both panels are still
+    # "coming soon" placeholders - see rectangle_editor_group/freehand_editor_group
+    # above), so their count is always 0 for now; window._update_roi_summary()
+    # is what keeps the Circles count current as area_rois changes.
     window.roi_editor_rectangle_section = CollapsibleSection(
-        "Rectangles",
+        "Rectangles (0)",
         rectangle_editor_group,
         expanded=False,
         show_help=False,
@@ -727,7 +729,7 @@ def build_layout(window) -> None:
         parent=window,
     )
     window.roi_editor_freehand_section = CollapsibleSection(
-        "Freehand",
+        "Freehand (0)",
         freehand_editor_group,
         expanded=False,
         show_help=False,

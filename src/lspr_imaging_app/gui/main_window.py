@@ -976,8 +976,8 @@ class MainWindow(MainWindowIcons, RectangleStampMixin, RoiGeometryMixin, Histogr
         )
 
     def _init_status_and_histogram_widgets(self) -> None:
-        self.roi_summary = QLabel("No ROIs detected.", self)
-        self.roi_summary.setWordWrap(True)
+        self.roi_summary = QLabel("No ROIs", self)
+        self.roi_summary.setWordWrap(False)
         self.status_label = QLabel("Ready.", self)
         self.status_label.setWordWrap(True)
         self._status_bar_message = QLabel("Ready.", self)
@@ -1767,13 +1767,13 @@ class MainWindow(MainWindowIcons, RectangleStampMixin, RoiGeometryMixin, Histogr
         self.ignore_marked_check = QPushButton("Apply mask", self)
         self.ignore_marked_check.setCheckable(True)
         self.detect_rois_button = self.roi_detection_auto_button
-        self.reorder_rois_button = self._make_icon_tool_button("sort-ascending-numbers", "#f8fafc", "Reorder ROIs by row: number left-to-right within each row, top row to bottom row, so the top-left ROI becomes ID 1.")
-        self.reorder_rois_column_button = self._make_icon_tool_button(
+        self.reorder_rois_button = self._make_icon_tool_button(
             "sort-ascending-numbers",
             "#f8fafc",
-            "Reorder ROIs by column: number top-to-bottom within each column, left column to right column, so the top-left ROI becomes ID 1.",
-            icon=self._make_rotated_tabler_icon("sort-ascending-numbers", "#f8fafc"),
+            "Reorder ROIs by row: number left-to-right within each row, top row to bottom row, so the top-left ROI becomes ID 1.",
+            icon=self._make_rotated_tabler_icon("sort-ascending-numbers", "#f8fafc", degrees=270.0),
         )
+        self.reorder_rois_column_button = self._make_icon_tool_button("sort-ascending-numbers", "#f8fafc", "Reorder ROIs by column: number top-to-bottom within each column, left column to right column, so the top-left ROI becomes ID 1.")
         self.clear_rois_button = self._make_icon_tool_button("trash-x", "#ef4444", "Remove all detected ROIs and groups from the current dataset.")
         self.clear_roi_selection_button = QPushButton("Clear selection", self)
 
@@ -2360,6 +2360,7 @@ class MainWindow(MainWindowIcons, RectangleStampMixin, RoiGeometryMixin, Histogr
             self, self.roi_list_action, self.roi_list_panel, "Table", "Show or hide the ROI table."
         )
         self.roi_editor_header_extra.layout().addWidget(self.roi_editor_table_toggle_button)
+        self.roi_editor_header_extra.layout().addWidget(self.roi_summary)
         self._refresh_roi_list_action_icon()
 
     def _connect_toolbar_and_ui(self) -> None:
@@ -4121,6 +4122,12 @@ class MainWindow(MainWindowIcons, RectangleStampMixin, RoiGeometryMixin, Histogr
 
     def _set_startup_log_panel_open(self, open_on_startup: bool) -> None:
         self._settings.setValue("startup/log_panel_open", bool(open_on_startup))
+
+    def _remember_dataset_format_choice(self) -> bool:
+        return self._settings_bool("startup/remember_dataset_format_choice", True)
+
+    def _set_remember_dataset_format_choice(self, enabled: bool) -> None:
+        self._settings.setValue("startup/remember_dataset_format_choice", bool(enabled))
 
     def _ome_zarr_adaptive_enabled(self) -> bool:
         return str(self._settings.value("export/ome_zarr_adaptive_enabled", "true")).strip().lower() != "false"
@@ -5902,27 +5909,33 @@ class MainWindow(MainWindowIcons, RectangleStampMixin, RoiGeometryMixin, Histogr
         return row
 
     def _build_roi_geometry_row(self) -> QWidget:
+        # A plain QHBoxLayout, not a QGridLayout: with a grid, an empty
+        # unstretched column between the spin box and the scope toggle had no
+        # fixed width, so the toggle's position (and the row's total size
+        # hint) drifted as the panel resized. addStretch(1) between the
+        # tight left-aligned label+spin and the toggle pins the toggle to
+        # the row's right edge instead, matching the other control rows in
+        # this panel (e.g. detection_buttons below).
         row = QWidget(self)
-        layout = QGridLayout(row)
+        layout = QHBoxLayout(row)
         layout.setContentsMargins(0, 0, 0, 0)
-        layout.setHorizontalSpacing(6)
-        layout.setVerticalSpacing(0)
+        layout.setSpacing(6)
         self.sample_diameter_spin.setRange(2, 1000)
         self.sample_diameter_spin.setButtonSymbols(QSpinBox.ButtonSymbols.UpDownArrows)
         self.sample_diameter_spin.setFocusPolicy(Qt.FocusPolicy.WheelFocus)
         self.sample_diameter_spin.setAccelerated(True)
         self.sample_diameter_spin.setKeyboardTracking(True)
-        layout.addWidget(self.roi_geometry_scope_button, 0, 0, 2, 1)
-        layout.addWidget(QLabel("D_s"), 0, 1)
-        layout.addWidget(self.sample_diameter_spin, 0, 4)
+        layout.addWidget(QLabel("D_s"), 0, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        layout.addWidget(self.sample_diameter_spin, 0, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        layout.addStretch(1)
+        layout.addWidget(self.roi_geometry_scope_button, 0, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         return row
 
     def _build_reference_row(self) -> QWidget:
         row = QWidget(self)
-        layout = QGridLayout(row)
+        layout = QHBoxLayout(row)
         layout.setContentsMargins(0, 0, 0, 0)
-        layout.setHorizontalSpacing(6)
-        layout.setVerticalSpacing(0)
+        layout.setSpacing(6)
         self.reference_inner_diameter_spin.setButtonSymbols(QSpinBox.ButtonSymbols.UpDownArrows)
         self.reference_outer_diameter_spin.setButtonSymbols(QSpinBox.ButtonSymbols.UpDownArrows)
         self.reference_inner_diameter_spin.setFocusPolicy(Qt.FocusPolicy.WheelFocus)
@@ -5931,11 +5944,12 @@ class MainWindow(MainWindowIcons, RectangleStampMixin, RoiGeometryMixin, Histogr
         self.reference_outer_diameter_spin.setAccelerated(True)
         self.reference_inner_diameter_spin.setKeyboardTracking(False)
         self.reference_outer_diameter_spin.setKeyboardTracking(False)
-        layout.addWidget(self.reference_geometry_scope_button, 0, 0, 2, 1)
-        layout.addWidget(QLabel("d_r"), 0, 1)
-        layout.addWidget(self.reference_inner_diameter_spin, 0, 2)
-        layout.addWidget(QLabel("D_r"), 0, 3)
-        layout.addWidget(self.reference_outer_diameter_spin, 0, 4)
+        layout.addWidget(QLabel("d_r"), 0, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        layout.addWidget(self.reference_inner_diameter_spin, 0, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        layout.addWidget(QLabel("D_r"), 0, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        layout.addWidget(self.reference_outer_diameter_spin, 0, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        layout.addStretch(1)
+        layout.addWidget(self.reference_geometry_scope_button, 0, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         return row
 
     def _build_rectangle_row(self) -> QWidget:
@@ -6497,8 +6511,10 @@ class MainWindow(MainWindowIcons, RectangleStampMixin, RoiGeometryMixin, Histogr
 
     def _update_roi_summary(self) -> None:
         count = len(self._state.area_rois)
+        self.roi_editor_circle_section.set_title(f"Circles ({count})")
         if count == 0:
-            self.roi_summary.setText("No ROIs detected.")
+            self.roi_summary.setText("No ROIs")
+            self.roi_summary.setToolTip("No ROIs detected.")
             self._clear_absorbance_spectrum("Detect ROIs to show absorbance spectrum.")
             return
         selected_details = ""
@@ -6517,8 +6533,10 @@ class MainWindow(MainWindowIcons, RectangleStampMixin, RoiGeometryMixin, Histogr
                     dx = float(display_roi.center_x - source_roi.center_x)
                     dy = float(display_roi.center_y - source_roi.center_y)
                     selected_details += f"\nShift from ref: dx={dx:+.1f}, dy={dy:+.1f} px"
-        self.roi_summary.setText(
-            f"Detected ROIs: {count}\nGroups: {len(self._state.area_roi_groups)}{selected_details}"
+        group_count = len(self._state.area_roi_groups)
+        self.roi_summary.setText(f"{count} ROIs, {group_count} groups")
+        self.roi_summary.setToolTip(
+            f"Detected ROIs: {count}\nGroups: {group_count}{selected_details}"
         )
         if not self._dragging_rois and not self._roi_edit_refresh_pending and not self._analysis_live_preview_enabled:
             self._schedule_absorbance_spectrum_refresh()
