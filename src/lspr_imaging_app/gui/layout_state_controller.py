@@ -212,7 +212,7 @@ class LayoutStateController:
             window.results_export_section.set_pinned(window._settings_bool("results_export_section_pinned", False))
             window.results_export_section.set_expanded(window._settings_bool("results_export_section_expanded", False))
             if hasattr(window, "workflow_log_section"):
-                window.workflow_log_section.set_expanded(True)
+                window.workflow_log_section.set_expanded(window._startup_log_panel_open())
             window._analysis_enabled = window._settings_bool("analysis_section_applied", window._analysis_enabled)
             window._set_section_applied(window.analysis_section, window._analysis_enabled)
         finally:
@@ -400,7 +400,7 @@ class LayoutStateController:
             window.roi_editor_table_toggle_button.sync_appearance()
         if hasattr(window, "workflow_log_section"):
             try:
-                window.workflow_log_section.set_expanded(True)
+                window.workflow_log_section.set_expanded(window._startup_log_panel_open())
             except Exception:
                 pass
 

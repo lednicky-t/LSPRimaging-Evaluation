@@ -32,6 +32,8 @@ from lspr_ui import (
     transparent_icon_button_stylesheet,
 )
 
+from .preferences_dialog import show_preferences_dialog_for
+
 try:
     import lucide
 except Exception:  # pragma: no cover - optional icon dependency
@@ -1694,67 +1696,8 @@ class MainWindowIcons:
         file_menu.addAction("Import processing profile", self._import_processing_profile)
         file_menu.addSeparator()
 
-        preferences_menu = file_menu.addMenu("Preferences")
-        self.theme_blue_action = preferences_menu.addAction("Blue Dark Theme")
-        self.theme_blue_action.setCheckable(True)
-        self.theme_gray_action = preferences_menu.addAction("Gray Dark Theme")
-        self.theme_gray_action.setCheckable(True)
-        self.theme_blue_action.triggered.connect(lambda checked: checked and self._set_ui_theme("blue"))
-        self.theme_gray_action.triggered.connect(lambda checked: checked and self._set_ui_theme("gray"))
-        theme_group = QActionGroup(self)
-        theme_group.setExclusive(True)
-        theme_group.addAction(self.theme_blue_action)
-        theme_group.addAction(self.theme_gray_action)
-        current_theme = str(self._settings.value("ui/theme", "blue"))
-        self.theme_gray_action.setChecked(current_theme == "gray")
-        self.theme_blue_action.setChecked(current_theme != "gray")
-        preferences_menu.addSeparator()
-        startup_restore_menu = preferences_menu.addMenu("Startup restore")
-        startup_restore_group = QActionGroup(self)
-        startup_restore_group.setExclusive(True)
-        self.startup_restore_timeout_actions = {}
-        for seconds, label in ((5, "Prompt restore (5s)"), (0, "Auto restore (0s)")):
-            action = startup_restore_menu.addAction(label)
-            action.setCheckable(True)
-            action.triggered.connect(lambda checked, value=seconds: checked and self._set_startup_restore_timeout_seconds(value))
-            startup_restore_group.addAction(action)
-            self.startup_restore_timeout_actions[seconds] = action
-        current_timeout = self._startup_restore_timeout_seconds()
-        if current_timeout not in self.startup_restore_timeout_actions:
-            current_timeout = 5
-        self._set_startup_restore_timeout_seconds(current_timeout)
-
-        preferences_menu.addSeparator()
-        zarr_tuning_menu = preferences_menu.addMenu("OME-Zarr export: adaptive worker tuning")
-        self.zarr_adaptive_enabled_action = zarr_tuning_menu.addAction("Enabled")
-        self.zarr_adaptive_enabled_action.setCheckable(True)
-        self.zarr_adaptive_enabled_action.setChecked(self._ome_zarr_adaptive_enabled())
-        self.zarr_adaptive_enabled_action.triggered.connect(self._set_ome_zarr_adaptive_enabled)
-        zarr_tuning_menu.addSeparator()
-        batch_size_menu = zarr_tuning_menu.addMenu("Sample size for tuning decisions")
-        batch_size_group = QActionGroup(self)
-        batch_size_group.setExclusive(True)
-        self.zarr_adaptive_batch_actions = {}
-        _ZARR_ADAPTIVE_BATCH_OPTIONS = [
-            (256, "256 MB"),
-            (512, "512 MB"),
-            (1024, "1 GB (default)"),
-            (2048, "2 GB"),
-            (4096, "4 GB"),
-        ]
-        for mb, label in _ZARR_ADAPTIVE_BATCH_OPTIONS:
-            action = batch_size_menu.addAction(label)
-            action.setCheckable(True)
-            action.triggered.connect(lambda checked, value=mb: checked and self._set_ome_zarr_adaptive_batch_mb(value))
-            batch_size_group.addAction(action)
-            self.zarr_adaptive_batch_actions[mb] = action
-        current_batch_mb = self._ome_zarr_adaptive_batch_mb()
-        if current_batch_mb not in self.zarr_adaptive_batch_actions:
-            current_batch_mb = 1024
-        self._set_ome_zarr_adaptive_batch_mb(current_batch_mb)
-        zarr_tuning_menu.addSeparator()
-        zarr_tuning_info_action = zarr_tuning_menu.addAction(self._tabler_icon("info-circle"), "What is this?")
-        zarr_tuning_info_action.triggered.connect(self._dataset_controller._show_ome_zarr_adaptive_tuning_info)
+        preferences_action = file_menu.addAction("Preferences...", lambda: show_preferences_dialog_for(self))
+        preferences_action.setToolTip("Open the application preferences window (theme, startup, OME-Zarr export tuning).")
 
         file_menu.addSeparator()
         file_menu.addAction("E&xit", self.close)

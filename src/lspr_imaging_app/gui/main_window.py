@@ -818,8 +818,6 @@ class MainWindow(MainWindowIcons, RectangleStampMixin, RoiGeometryMixin, Histogr
         self.metadata_preview_button = QPushButton("Preview / edit...", self)
         self.metadata_preview_button.setEnabled(False)
 
-        self.startup_restore_timeout_actions: dict[int, QAction] = {}
-
     def _reveal_export_section(self) -> None:
         if hasattr(self, "export_section"):
             self.export_section.set_expanded(True)
@@ -4042,10 +4040,12 @@ class MainWindow(MainWindowIcons, RectangleStampMixin, RoiGeometryMixin, Histogr
     def _set_startup_restore_timeout_seconds(self, seconds: int) -> None:
         timeout = max(int(seconds), 0)
         self._settings.setValue("startup/restore_previous_session_timeout_s", timeout)
-        for value, action in getattr(self, "startup_restore_timeout_actions", {}).items():
-            action.blockSignals(True)
-            action.setChecked(int(value) == timeout)
-            action.blockSignals(False)
+
+    def _startup_log_panel_open(self) -> bool:
+        return self._settings_bool("startup/log_panel_open", True)
+
+    def _set_startup_log_panel_open(self, open_on_startup: bool) -> None:
+        self._settings.setValue("startup/log_panel_open", bool(open_on_startup))
 
     def _ome_zarr_adaptive_enabled(self) -> bool:
         return str(self._settings.value("export/ome_zarr_adaptive_enabled", "true")).strip().lower() != "false"
@@ -4058,10 +4058,6 @@ class MainWindow(MainWindowIcons, RectangleStampMixin, RoiGeometryMixin, Histogr
 
     def _set_ome_zarr_adaptive_batch_mb(self, value: int) -> None:
         self._settings.setValue("export/ome_zarr_adaptive_batch_mb", int(value))
-        for v, action in getattr(self, "zarr_adaptive_batch_actions", {}).items():
-            action.blockSignals(True)
-            action.setChecked(int(v) == int(value))
-            action.blockSignals(False)
 
     def _set_ui_scale_factor(self, value: str) -> None:
         self._settings.setValue("ui/scale_factor", value)
