@@ -111,6 +111,12 @@ def detect_rois(
     image_height, image_width = image.shape[:2]
     total_scored = max(len(scored), 1)
     for index, (score, x, y) in enumerate(scored, start=1):
+        if score <= 0.0:
+            # scored is sorted descending, so no later candidate can score
+            # higher; a non-positive score means no contrast in the
+            # requested (bright/dark) direction, matching the same floor
+            # _refine_roi_center applies below.
+            break
         if any(hypot(x - roi.center_x, y - roi.center_y) < min_distance for roi in accepted):
             continue
         accepted.append(
