@@ -443,7 +443,18 @@ class OverlayManager:
         else:
             w.ignore_mask_item.hide()
 
-        w.histogram_mask_item.hide()
+        if w._mask_histogram_preview is not None:
+            hist_preview_mask = apply_spatial_mask(w._mask_histogram_preview, w._state.preprocessing)
+            if hist_preview_mask.shape == mask.shape and np.any(hist_preview_mask):
+                hist_overlay = np.zeros((*hist_preview_mask.shape, 4), dtype=np.uint8)
+                hist_color = np.array([250, 204, 21, 110], dtype=np.uint8)
+                hist_overlay[hist_preview_mask] = hist_color
+                w.histogram_mask_item.setImage(np.transpose(hist_overlay, (1, 0, 2)), autoLevels=False)
+                w.histogram_mask_item.show()
+            else:
+                w.histogram_mask_item.hide()
+        else:
+            w.histogram_mask_item.hide()
 
         if w._mask_figure_preview is not None:
             preview_mask = apply_spatial_mask(w._mask_figure_preview, w._state.preprocessing)
