@@ -148,7 +148,12 @@ yet addressed:
   which - if a relative/local-contrast/morphology mask preview is toggled on *and* a
   non-zero rotation angle is configured - runs `ndimage.rotate` on the full image on every
   mouse-move during the stroke. Narrow combination (needs rotation + a mask preview +
-  active painting simultaneously), but a real, localized lag when it applies.
+  active painting simultaneously), but a real, localized lag when it applies. Root cause
+  pinned down 2026-08-19: `overlay_manager.py`'s `_update_ignore_mask_overlay` calls the
+  sibling `ignored_mask()` through a signature-checked cache (`plot_manager.py`), but the
+  `apply_spatial_mask(...)` call right next to it is not cached at all - giving that call
+  the same kind of signature cache should fix this without touching the rotation logic
+  itself.
 - **`import_processing_profile()` / `export_processing_profile()` still synchronous**:
   these two explicit File-menu actions do `load_processing_profile()` /
   `save_processing_profile()` (JSON parse/serialize, potentially large with a big analysis
@@ -159,6 +164,13 @@ yet addressed:
   pattern (`analysis_tasks.py`) can likely be reused directly for
   `import_processing_profile`; `export_processing_profile` would need an analogous
   background dispatch for `save_processing_profile`.
+- **Background-image load/save also synchronous** (found 2026-08-19 while looking at the
+  item above): `mask_controller.py`'s `load_background_from_file`, `_on_save_background_ready`,
+  and `auto_load_mask_for_current_record` call `PIL.Image.open(...)`/`.save(...)` directly on
+  the GUI thread - same class of gap as the processing-profile import/export item, just for a
+  background reference image instead of the JSON profile. Likely low-impact unless someone
+  loads an unusually large background file, but cheap to fix alongside that item if it's ever
+  touched.
 
 ---
 
