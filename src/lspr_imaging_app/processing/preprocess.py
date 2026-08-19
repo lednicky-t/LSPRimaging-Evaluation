@@ -78,6 +78,13 @@ def apply_preprocessing(
             processed = np.where(processed_exclusion_mask, 0, processed)
 
     if settings.flatten_background_enabled:
+        # Rotation-fill pixels (see rotation_fill_pixel_mask) are excluded from
+        # the background estimate unconditionally - unlike the mask/ROI
+        # exclusions above, this isn't optional curation the
+        # flatten_background_exclude_mask toggle should gate: those pixels
+        # never had a real measurement, so letting them pull on the local
+        # background average is never correct, toggle or not.
+        rotation_mask = rotation_fill_pixel_mask(image.shape[:2], settings, skip_crop=skip_crop)
         processed = flatten_background(
             processed,
             sigma_px=float(settings.flatten_background_sigma_px),
@@ -85,6 +92,7 @@ def apply_preprocessing(
             rois=rois if settings.flatten_background_exclude_area_rois else None,
             mask_settings=mask_settings if settings.flatten_background_exclude_mask else None,
             external_mask=processed_exclusion_mask if settings.flatten_background_exclude_mask else None,
+            rotation_fill_mask=rotation_mask,
             region=region,
             exclusion_dilation_px=int(getattr(settings, "flatten_background_exclusion_dilation_px", 0)),
         )
@@ -119,6 +127,31 @@ def apply_spatial_mask(
         return None
     transformed = _apply_spatial_transform(mask.astype(np.float32, copy=False), settings, order=0, mode="constant", cval=0.0)
     return transformed >= 0.5
+
+
+def rotation_fill_pixel_mask(
+    raw_shape: tuple[int, int],
+    settings: PreprocessingSettings,
+    *,
+    skip_crop: bool = False,
+) -> np.ndarray | None:
+    """Boolean mask, in the same processed-image space apply_spatial_preprocessing
+    returns, marking pixels rotation padding synthesized - no source
+    measurement behind them at all, independent of whether rotation_fill_dark
+    shows that padding as black (constant fill) or as a stretched copy of the
+    nearest edge pixel ("nearest" fill, see apply_spatial_preprocessing):
+    either way it isn't real data.
+
+    Returns None when no rotation is active - flip and crop alone never add
+    pixels the source image didn't have, so there's nothing to mark.
+    """
+    if not bool(getattr(settings, "image_tools_enabled", True)):
+        return None
+    if abs(float(settings.rotation_angle_deg)) <= 1e-9:
+        return None
+    valid_source = np.ones(raw_shape, dtype=np.float32)
+    transformed = _apply_spatial_transform(valid_source, settings, order=0, mode="constant", cval=0.0, skip_crop=skip_crop)
+    return transformed < 0.5
 
 
 def spatial_coordinate_maps(
@@ -479,6 +512,7 @@ def flatten_background(
     rois: list[AreaRoi] | None = None,
     mask_settings: AreaRoiDetectionSettings | None = None,
     external_mask: np.ndarray | None = None,
+    rotation_fill_mask: np.ndarray | None = None,
     region: tuple[int, int, int, int] | None = None,
     exclusion_dilation_px: int = 0,
 ) -> np.ndarray:
@@ -520,11 +554,12 @@ def flatten_background(
             rois=rois,
             mask_settings=mask_settings,
             external_mask=external_mask,
+            rotation_fill_mask=rotation_fill_mask,
             exclusion_dilation_px=dilation_px,
         )
         valid_mask = ~_combined_exclusion_mask(
             image_f32, rois=rois, mask_settings=mask_settings, external_mask=external_mask,
-            dilation_px=dilation_px,
+            rotation_fill_mask=rotation_fill_mask, dilation_px=dilation_px,
         )
         baseline = float(np.median(background_full[valid_mask])) if np.any(valid_mask) else float(np.median(background_full))
         if region is None:
@@ -544,6 +579,7 @@ def flatten_background(
         rois=rois,
         mask_settings=mask_settings,
         external_mask=external_mask,
+        rotation_fill_mask=rotation_fill_mask,
         region=region,
         exclusion_dilation_px=dilation_px,
     )
@@ -554,6 +590,7 @@ def flatten_background(
         rois=rois,
         mask_settings=mask_settings,
         external_mask=external_mask,
+        rotation_fill_mask=rotation_fill_mask,
         exclusion_dilation_px=dilation_px,
     )
     x0, y0, x1, y1 = region
@@ -569,6 +606,7 @@ def estimate_background_profile(
     rois: list[AreaRoi] | None = None,
     mask_settings: AreaRoiDetectionSettings | None = None,
     external_mask: np.ndarray | None = None,
+    rotation_fill_mask: np.ndarray | None = None,
     region: tuple[int, int, int, int] | None = None,
     exclusion_dilation_px: int = 0,
 ) -> np.ndarray:
@@ -586,6 +624,7 @@ def estimate_background_profile(
         rois=rois,
         mask_settings=mask_settings,
         external_mask=external_mask,
+        rotation_fill_mask=rotation_fill_mask,
         dilation_px=exclusion_dilation_px,
     )
     valid_mask = ~exclusion_mask
@@ -625,6 +664,7 @@ def _background_baseline(
     rois: list[AreaRoi] | None = None,
     mask_settings: AreaRoiDetectionSettings | None = None,
     external_mask: np.ndarray | None = None,
+    rotation_fill_mask: np.ndarray | None = None,
     exclusion_dilation_px: int = 0,
 ) -> float:
     """The scalar re-centering value flatten_background adds back after
@@ -644,6 +684,7 @@ def _background_baseline(
         rois=rois,
         mask_settings=mask_settings,
         external_mask=external_mask,
+        rotation_fill_mask=rotation_fill_mask,
         dilation_px=exclusion_dilation_px,
     )
     valid_mask = ~exclusion_mask
@@ -655,6 +696,7 @@ def _background_baseline(
             rois=rois,
             mask_settings=mask_settings,
             external_mask=external_mask,
+            rotation_fill_mask=rotation_fill_mask,
             exclusion_dilation_px=exclusion_dilation_px,
         )
         return float(np.median(background[valid_mask])) if np.any(valid_mask) else float(np.median(background))
@@ -795,6 +837,7 @@ def _combined_exclusion_mask(
     rois: list[AreaRoi] | None = None,
     mask_settings: AreaRoiDetectionSettings | None = None,
     external_mask: np.ndarray | None = None,
+    rotation_fill_mask: np.ndarray | None = None,
     dilation_px: int = 0,
 ) -> np.ndarray:
     exclusion_mask = _roi_exclusion_mask(image.shape[:2], rois)
@@ -804,6 +847,11 @@ def _combined_exclusion_mask(
             mask_settings,
             external_mask=external_mask,
         )
+    # Rotation-fill pixels are folded in unconditionally, independent of
+    # mask_settings/external_mask above - see the comment on the
+    # flatten_background call site in apply_preprocessing for why.
+    if rotation_fill_mask is not None and rotation_fill_mask.shape == exclusion_mask.shape:
+        exclusion_mask = exclusion_mask | rotation_fill_mask
     dilation = max(int(dilation_px), 0)
     if dilation > 0 and np.any(exclusion_mask):
         exclusion_mask = ndimage.binary_dilation(exclusion_mask, iterations=dilation)

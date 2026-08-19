@@ -333,6 +333,8 @@ class MainWindow(MainWindowIcons, RectangleStampMixin, RoiGeometryMixin, Histogr
         self._processed_to_raw_map_signature: tuple[object, ...] | None = None
         self._processed_to_raw_x_map: np.ndarray | None = None
         self._processed_to_raw_y_map: np.ndarray | None = None
+        self._rotation_fill_mask_signature: tuple[object, ...] | None = None
+        self._rotation_fill_mask_value: np.ndarray | None = None
         self._roi_overlay_items: dict[int, RoiOverlayBundle] = {}
         self._guide_overlay_items: dict[int, GuideOverlayBundle] = {}
         self._ome_zarr_chunk_overlay_items: list[pg.InfiniteLine] = []
@@ -5327,7 +5329,9 @@ class MainWindow(MainWindowIcons, RectangleStampMixin, RoiGeometryMixin, Histogr
         image = self._current_processed_image
         settings = deepcopy(self._state.area_roi_settings)
         rois = deepcopy(self._state.area_rois)
-        worker = FunctionWorker(_refresh_roi_metrics_task, image, settings, rois, self._current_external_mask())
+        worker = FunctionWorker(
+            _refresh_roi_metrics_task, image, settings, rois, self._current_external_mask(), self._rotation_fill_mask()
+        )
         self._begin_busy("Refreshing ROI metrics...")
         self._append_workflow_log("ROI metrics refresh start", level="info")
         worker.signals.result.connect(
@@ -6219,6 +6223,7 @@ class MainWindow(MainWindowIcons, RectangleStampMixin, RoiGeometryMixin, Histogr
             image,
             settings,
             self._current_external_mask(),
+            self._rotation_fill_mask(),
             supports_progress=True,
         )
         self._begin_busy("Detecting ROIs...")
@@ -6762,6 +6767,9 @@ class MainWindow(MainWindowIcons, RectangleStampMixin, RoiGeometryMixin, Histogr
 
     def _processed_to_raw_maps(self) -> tuple[np.ndarray, np.ndarray] | None:
         return self._mask_controller.processed_to_raw_maps()
+
+    def _rotation_fill_mask(self) -> np.ndarray | None:
+        return self._mask_controller.rotation_fill_mask()
 
     def _set_current_file_mask(
         self,

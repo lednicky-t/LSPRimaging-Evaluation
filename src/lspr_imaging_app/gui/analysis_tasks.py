@@ -119,17 +119,25 @@ def _refresh_roi_metrics_task(
     settings,
     rois,
     external_mask: np.ndarray | None,
+    rotation_fill_mask: np.ndarray | None = None,
 ) -> list[AreaRoi]:
-    return refresh_roi_metrics(image, settings, rois, external_mask=external_mask)
+    return refresh_roi_metrics(image, settings, rois, external_mask=external_mask, rotation_fill_mask=rotation_fill_mask)
 
 
 def _detect_rois_task(
     image: np.ndarray,
     settings,
     external_mask: np.ndarray | None,
+    rotation_fill_mask: np.ndarray | None = None,
     progress_callback=None,
 ) -> list[AreaRoi]:
-    return detect_rois(image, settings, external_mask=external_mask, progress_callback=progress_callback)
+    return detect_rois(
+        image,
+        settings,
+        external_mask=external_mask,
+        rotation_fill_mask=rotation_fill_mask,
+        progress_callback=progress_callback,
+    )
 
 
 def _background_profile_task(

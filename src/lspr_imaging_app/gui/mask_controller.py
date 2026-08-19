@@ -12,7 +12,12 @@ from lspr_imaging_app.domain.models import MaskSettings
 from lspr_imaging_app.gui.analysis_tasks import _mask_candidate_task
 from lspr_imaging_app.gui.worker import FunctionWorker
 from lspr_imaging_app.io.dataset import dataset_load_plane, dataset_plane_shape, load_image_array, load_image_shape
-from lspr_imaging_app.processing.preprocess import apply_spatial_mask, create_figure_mask, spatial_coordinate_maps
+from lspr_imaging_app.processing.preprocess import (
+    apply_spatial_mask,
+    create_figure_mask,
+    rotation_fill_pixel_mask,
+    spatial_coordinate_maps,
+)
 
 
 class MaskController:
@@ -816,6 +821,34 @@ class MaskController:
         window._processed_to_raw_x_map = x_map
         window._processed_to_raw_y_map = y_map
         return x_map, y_map
+
+    def rotation_fill_mask(self) -> np.ndarray | None:
+        """Processed-space mask of pixels the rotate/flip/crop tool
+        synthesized (see processing.preprocess.rotation_fill_pixel_mask) for
+        the currently displayed record - None when no rotation is active.
+        Mirrors processed_to_raw_maps' caching (same raw-shape lookup, same
+        signature shape) since both derive from the same raw-shape + current
+        PreprocessingSettings inputs.
+        """
+        window = self.window
+        if window._current_record_path is None or window._current_processed_image is None:
+            return None
+        current_key = window._image_key_for_record_path(window._current_record_path)
+        if current_key is not None and window._state.dataset is not None:
+            raw_shape = dataset_plane_shape(window._state.dataset, int(current_key[0]), float(current_key[1]))
+        else:
+            raw_shape = load_image_shape(str(window._current_record_path))
+        signature = (
+            str(window._current_record_path),
+            raw_shape,
+            window._raw_preprocessing_signature(),
+        )
+        if window._rotation_fill_mask_signature == signature:
+            return window._rotation_fill_mask_value
+        mask = rotation_fill_pixel_mask(raw_shape, window._state.preprocessing)
+        window._rotation_fill_mask_signature = signature
+        window._rotation_fill_mask_value = mask
+        return mask
 
     def set_current_file_mask(
         self,

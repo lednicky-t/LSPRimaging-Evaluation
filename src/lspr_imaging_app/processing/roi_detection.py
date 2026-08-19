@@ -13,13 +13,22 @@ def ignored_pixel_mask(
     image: np.ndarray,
     settings: AreaRoiDetectionSettings,
     external_mask: np.ndarray | None = None,
+    rotation_fill_mask: np.ndarray | None = None,
 ) -> np.ndarray:
+    """`external_mask` (the user's painted/histogram/relative/local-contrast
+    mask) only counts when `ignore_marked_pixels` is on - that's an explicit,
+    tested behavior (see TestDetectRoisIgnoreMask). `rotation_fill_mask` is
+    different: it marks pixels the rotate/flip/crop tool synthesized (no
+    source measurement behind them at all, see
+    preprocess.rotation_fill_pixel_mask), so it's always excluded regardless
+    of that toggle - there's no scenario where counting them is correct.
+    """
     image_shape = image.shape[:2]
-    combined_mask = _normalized_external_mask(image_shape, external_mask)
+    combined_mask = _normalized_external_mask(image_shape, rotation_fill_mask)
     if image.size == 0:
         return combined_mask
-    if not settings.ignore_marked_pixels:
-        return np.zeros(image_shape, dtype=bool)
+    if settings.ignore_marked_pixels:
+        combined_mask = combined_mask | _normalized_external_mask(image_shape, external_mask)
     return combined_mask
 
 
@@ -40,6 +49,7 @@ def detect_rois(
     settings: AreaRoiDetectionSettings,
     external_mask: np.ndarray | None = None,
     progress_callback=None,
+    rotation_fill_mask: np.ndarray | None = None,
 ) -> list[AreaRoi]:
     if image.size == 0:
         return []
@@ -50,7 +60,7 @@ def detect_rois(
 
     report_progress(5, "ROI detection: preparing mask...")
     image_f32 = image.astype(np.float32, copy=False)
-    valid_mask = ~ignored_pixel_mask(image_f32, settings, external_mask=external_mask)
+    valid_mask = ~ignored_pixel_mask(image_f32, settings, external_mask=external_mask, rotation_fill_mask=rotation_fill_mask)
     if not np.any(valid_mask):
         report_progress(100, "ROI detection: no valid pixels.")
         return []
@@ -174,6 +184,7 @@ def refresh_roi_metrics(
     settings: AreaRoiDetectionSettings,
     rois: list[AreaRoi],
     external_mask: np.ndarray | None = None,
+    rotation_fill_mask: np.ndarray | None = None,
 ) -> list[AreaRoi]:
     """Recompute each ROI's contrast score at its current position and
     radius, without moving it.
@@ -187,7 +198,7 @@ def refresh_roi_metrics(
     if image.size == 0 or not rois:
         return rois
     image_f32 = image.astype(np.float32, copy=False)
-    valid_mask = ~ignored_pixel_mask(image_f32, settings, external_mask=external_mask)
+    valid_mask = ~ignored_pixel_mask(image_f32, settings, external_mask=external_mask, rotation_fill_mask=rotation_fill_mask)
     if not np.any(valid_mask):
         return rois
     sigma = max(float(settings.sample_radius_px) / 2.5, 1.0)

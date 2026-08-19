@@ -389,6 +389,7 @@ class PlotManager:
             image_f32,
             window._state.area_roi_settings,
             external_mask=window._current_external_mask(),
+            rotation_fill_mask=window._rotation_fill_mask(),
         )
         window._ignored_mask_cache_signature = signature
         window._ignored_mask_cache_value = ignored_mask
@@ -399,8 +400,17 @@ class PlotManager:
         signature = self.histogram_source_signature(image)
         if window._histogram_source_cache_signature == signature and window._histogram_source_cache_values is not None:
             return window._histogram_source_cache_values
+        image_f32 = image.astype(np.float32, copy=False)
+        # Excludes rotation-fill padding unconditionally, plus any painted/
+        # histogram/relative/local-contrast mask when "ignore marked pixels"
+        # is on (see ignored_pixel_mask) - previously this curve ravel()'d
+        # the whole image regardless, so rotation-fill corners (and, more
+        # generally, anything the user had masked) always showed up here
+        # even though ROI statistics already excluded them.
+        excluded_mask = self.ignored_mask(image_f32)
+        source_values = image_f32[~excluded_mask] if excluded_mask.shape == image_f32.shape[:2] else image_f32.ravel()
         image_values = np.clip(
-            image.astype(np.float32, copy=False).ravel(),
+            source_values,
             window.HISTOGRAM_MIN_INTENSITY,
             window.HISTOGRAM_MAX_INTENSITY,
         )
