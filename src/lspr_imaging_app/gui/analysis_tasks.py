@@ -597,7 +597,7 @@ def _absorbance_spectrum_task(
     roi_accumulators: dict[int, dict[str, list[float] | list[int]]] = {
         int(roi.area_roi_id): {
             "wavelengths": [],
-            "absorbance": [],
+            "formula_values": [],
             "sample_mean": [],
             "reference_mean": [],
             "sample_pixel_count": [],
@@ -606,7 +606,7 @@ def _absorbance_spectrum_task(
         for roi in selected_rois
     }
     wavelengths: list[float] = []
-    absorbance_values: list[float] = []
+    formula_values: list[float] = []
     sample_mean_values: list[float] = []
     reference_mean_values: list[float] = []
     sample_pixel_counts: list[int] = []
@@ -728,7 +728,7 @@ def _absorbance_spectrum_task(
         if cancel_event is not None and cancel_event.is_set():
             return AbsorbanceSpectrumResult(
                 wavelengths_nm=np.asarray([], dtype=np.float64),
-                absorbance=np.asarray([], dtype=np.float64),
+                formula_values=np.asarray([], dtype=np.float64),
                 sample_mean=np.asarray([], dtype=np.float64),
                 reference_mean=np.asarray([], dtype=np.float64),
                 sample_pixel_count=np.asarray([], dtype=np.int32),
@@ -758,7 +758,7 @@ def _absorbance_spectrum_task(
         # (pooling pixels before the sample/reference ratio is not the same
         # calculation as averaging each ROI's own ratio afterward, and isn't
         # physically meaningful across different sample/reference apertures).
-        per_roi_absorbance_this_wavelength: list[float] = []
+        per_roi_formula_values_this_wavelength: list[float] = []
         per_roi_sample_mean_this_wavelength: list[float] = []
         per_roi_reference_mean_this_wavelength: list[float] = []
         sample_pixel_count_total = 0
@@ -781,7 +781,7 @@ def _absorbance_spectrum_task(
             if sample_pixels_single.size == 0 or reference_pixels_single.size == 0:
                 sample_mean_single = float("nan")
                 reference_mean_single = float("nan")
-                absorbance_single = float("nan")
+                formula_value_single = float("nan")
             else:
                 reference_yy_single, reference_xx_single = (
                     np.where(reference_mask_single) if is_plane_fit else (None, None)
@@ -796,33 +796,33 @@ def _absorbance_spectrum_task(
                     sample_x=roi.center_x,
                     sample_y=roi.center_y,
                 )
-                absorbance_single = formula_value(sample_mean_single, reference_mean_single, formula_key)
+                formula_value_single = formula_value(sample_mean_single, reference_mean_single, formula_key)
 
             accumulator = roi_accumulators[int(roi.area_roi_id)]
             accumulator["wavelengths"].append(float(wavelength_nm))
-            accumulator["absorbance"].append(absorbance_single)
+            accumulator["formula_values"].append(formula_value_single)
             accumulator["sample_mean"].append(sample_mean_single)
             accumulator["reference_mean"].append(reference_mean_single)
             accumulator["sample_pixel_count"].append(int(sample_pixels_single.size))
             accumulator["reference_pixel_count"].append(int(reference_pixels_single.size))
             sample_pixel_count_total += int(sample_pixels_single.size)
             reference_pixel_count_total += int(reference_pixels_single.size)
-            if np.isfinite(absorbance_single):
-                per_roi_absorbance_this_wavelength.append(absorbance_single)
+            if np.isfinite(formula_value_single):
+                per_roi_formula_values_this_wavelength.append(formula_value_single)
                 per_roi_sample_mean_this_wavelength.append(sample_mean_single)
                 per_roi_reference_mean_this_wavelength.append(reference_mean_single)
 
-        if per_roi_absorbance_this_wavelength:
+        if per_roi_formula_values_this_wavelength:
             sample_mean = float(np.mean(per_roi_sample_mean_this_wavelength))
             reference_mean = float(np.mean(per_roi_reference_mean_this_wavelength))
-            absorbance = float(np.mean(per_roi_absorbance_this_wavelength))
+            formula_value_combined = float(np.mean(per_roi_formula_values_this_wavelength))
         else:
             sample_mean = float("nan")
             reference_mean = float("nan")
-            absorbance = float("nan")
+            formula_value_combined = float("nan")
 
         wavelengths.append(float(wavelength_nm))
-        absorbance_values.append(absorbance)
+        formula_values.append(formula_value_combined)
         sample_mean_values.append(sample_mean)
         reference_mean_values.append(reference_mean)
         sample_pixel_counts.append(sample_pixel_count_total)
@@ -840,7 +840,7 @@ def _absorbance_spectrum_task(
         data = roi_accumulators[int(roi.area_roi_id)]
         roi_results[int(roi.area_roi_id)] = AbsorbanceSpectrumResult(
             wavelengths_nm=np.asarray(data["wavelengths"], dtype=np.float64),
-            absorbance=np.asarray(data["absorbance"], dtype=np.float64),
+            formula_values=np.asarray(data["formula_values"], dtype=np.float64),
             sample_mean=np.asarray(data["sample_mean"], dtype=np.float64),
             reference_mean=np.asarray(data["reference_mean"], dtype=np.float64),
             sample_pixel_count=np.asarray(data["sample_pixel_count"], dtype=np.int32),
@@ -851,7 +851,7 @@ def _absorbance_spectrum_task(
 
     result = AbsorbanceSpectrumResult(
         wavelengths_nm=np.asarray(wavelengths, dtype=np.float64),
-        absorbance=np.asarray(absorbance_values, dtype=np.float64),
+        formula_values=np.asarray(formula_values, dtype=np.float64),
         sample_mean=np.asarray(sample_mean_values, dtype=np.float64),
         reference_mean=np.asarray(reference_mean_values, dtype=np.float64),
         sample_pixel_count=np.asarray(sample_pixel_counts, dtype=np.int32),
@@ -935,7 +935,7 @@ def _absorbance_spectrum_fast_task(
 
     roi_accumulators: dict[int, dict[str, list]] = {
         int(roi.area_roi_id): {
-            "wavelengths": [], "absorbance": [], "sample_mean": [], "reference_mean": [],
+            "wavelengths": [], "formula_values": [], "sample_mean": [], "reference_mean": [],
             "sample_pixel_count": [], "reference_pixel_count": [],
         }
         for roi in selected_rois
@@ -1086,7 +1086,7 @@ def _absorbance_spectrum_fast_task(
                     )
 
     wavelengths_out: list[float] = []
-    absorbance_values: list[float] = []
+    formula_values: list[float] = []
     sample_mean_values: list[float] = []
     reference_mean_values: list[float] = []
     sample_pixel_counts: list[int] = []
@@ -1095,18 +1095,18 @@ def _absorbance_spectrum_fast_task(
     for r in results:
         if r is None:
             continue
-        _, wl, (abs_val, sm, rm, spc, rpc), per_roi = r
+        _, wl, (formula_val, sm, rm, spc, rpc), per_roi = r
         wavelengths_out.append(float(wl))
-        absorbance_values.append(float(abs_val))
+        formula_values.append(float(formula_val))
         sample_mean_values.append(float(sm))
         reference_mean_values.append(float(rm))
         sample_pixel_counts.append(int(spc))
         reference_pixel_counts.append(int(rpc))
         for roi in selected_rois:
-            roi_abs, roi_sm, roi_rm, roi_spc, roi_rpc = per_roi[int(roi.area_roi_id)]
+            roi_formula_val, roi_sm, roi_rm, roi_spc, roi_rpc = per_roi[int(roi.area_roi_id)]
             accumulator = roi_accumulators[int(roi.area_roi_id)]
             accumulator["wavelengths"].append(float(wl))
-            accumulator["absorbance"].append(float(roi_abs))
+            accumulator["formula_values"].append(float(roi_formula_val))
             accumulator["sample_mean"].append(float(roi_sm))
             accumulator["reference_mean"].append(float(roi_rm))
             accumulator["sample_pixel_count"].append(int(roi_spc))
@@ -1117,7 +1117,7 @@ def _absorbance_spectrum_fast_task(
         data = roi_accumulators[int(roi.area_roi_id)]
         roi_results[int(roi.area_roi_id)] = AbsorbanceSpectrumResult(
             wavelengths_nm=np.asarray(data["wavelengths"], dtype=np.float64),
-            absorbance=np.asarray(data["absorbance"], dtype=np.float64),
+            formula_values=np.asarray(data["formula_values"], dtype=np.float64),
             sample_mean=np.asarray(data["sample_mean"], dtype=np.float64),
             reference_mean=np.asarray(data["reference_mean"], dtype=np.float64),
             sample_pixel_count=np.asarray(data["sample_pixel_count"], dtype=np.int32),
@@ -1128,7 +1128,7 @@ def _absorbance_spectrum_fast_task(
 
     return AbsorbanceSpectrumResult(
         wavelengths_nm=np.asarray(wavelengths_out, dtype=np.float64),
-        absorbance=np.asarray(absorbance_values, dtype=np.float64),
+        formula_values=np.asarray(formula_values, dtype=np.float64),
         sample_mean=np.asarray(sample_mean_values, dtype=np.float64),
         reference_mean=np.asarray(reference_mean_values, dtype=np.float64),
         sample_pixel_count=np.asarray(sample_pixel_counts, dtype=np.int32),
@@ -1265,12 +1265,12 @@ def _sensorgram_metric_task(
 
         if fit_method_key == "none":
             metric_value, metric_signal = metric_value_from_spectrum(
-                spectrum.wavelengths_nm, spectrum.absorbance, metric_key, wl_min=wl_min, wl_max=wl_max
+                spectrum.wavelengths_nm, spectrum.formula_values, metric_key, wl_min=wl_min, wl_max=wl_max
             )
         else:
             fit = fit_curve_for_method(
                 spectrum.wavelengths_nm,
-                spectrum.absorbance,
+                spectrum.formula_values,
                 fit_method_key,
                 poly_order=poly_order,
                 wl_min=wl_min,

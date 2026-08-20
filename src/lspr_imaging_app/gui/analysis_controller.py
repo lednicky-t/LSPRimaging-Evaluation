@@ -729,7 +729,7 @@ class AnalysisController:
             return None
         return AbsorbanceSpectrumResult(
             wavelengths_nm=np.asarray(first_result.wavelengths_nm, dtype=np.float64),
-            absorbance=np.asarray(first_result.absorbance, dtype=np.float64),
+            formula_values=np.asarray(first_result.formula_values, dtype=np.float64),
             sample_mean=np.asarray(first_result.sample_mean, dtype=np.float64),
             reference_mean=np.asarray(first_result.reference_mean, dtype=np.float64),
             sample_pixel_count=np.asarray(first_result.sample_pixel_count, dtype=np.int32),
@@ -747,7 +747,7 @@ class AnalysisController:
     def _serialize_absorbance_result(result: AbsorbanceSpectrumResult) -> dict:
         return {
             "wavelengths_nm": [float(value) for value in np.asarray(result.wavelengths_nm, dtype=np.float64)],
-            "absorbance": [float(value) for value in np.asarray(result.absorbance, dtype=np.float64)],
+            "formula_values": [float(value) for value in np.asarray(result.formula_values, dtype=np.float64)],
             "sample_mean": [float(value) for value in np.asarray(result.sample_mean, dtype=np.float64)],
             "reference_mean": [float(value) for value in np.asarray(result.reference_mean, dtype=np.float64)],
             "sample_pixel_count": [int(value) for value in np.asarray(result.sample_pixel_count, dtype=np.int32)],
@@ -769,7 +769,7 @@ class AnalysisController:
         if not isinstance(payload, dict):
             return AbsorbanceSpectrumResult(
                 wavelengths_nm=np.asarray([], dtype=np.float64),
-                absorbance=np.asarray([], dtype=np.float64),
+                formula_values=np.asarray([], dtype=np.float64),
                 sample_mean=np.asarray([], dtype=np.float64),
                 reference_mean=np.asarray([], dtype=np.float64),
                 sample_pixel_count=np.asarray([], dtype=np.int32),
@@ -786,7 +786,11 @@ class AnalysisController:
                 roi_results[roi_id] = AnalysisController._deserialize_absorbance_result(value)
         return AbsorbanceSpectrumResult(
             wavelengths_nm=np.asarray(payload.get("wavelengths_nm", []), dtype=np.float64),
-            absorbance=np.asarray(payload.get("absorbance", []), dtype=np.float64),
+            # "formula_values" is the current key; "absorbance" is the pre-rename
+            # key still present in session files saved before this field was
+            # renamed (it always held whatever formula was selected, not
+            # necessarily actual absorbance - only the label was misleading).
+            formula_values=np.asarray(payload.get("formula_values", payload.get("absorbance", [])), dtype=np.float64),
             sample_mean=np.asarray(payload.get("sample_mean") or payload.get("spot_mean", []), dtype=np.float64),
             reference_mean=np.asarray(payload.get("reference_mean") or payload.get("ring_mean", []), dtype=np.float64),
             sample_pixel_count=np.asarray(payload.get("sample_pixel_count") or payload.get("spot_pixel_count", []), dtype=np.int32),
@@ -1530,7 +1534,7 @@ class AnalysisController:
                 wavelength_range = self._analysis_wavelength_range()
                 metric_value, metric_signal = metric_value_from_spectrum(
                     primary_result.wavelengths_nm,
-                    primary_result.absorbance,
+                    primary_result.formula_values,
                     self.window._analysis_metric_key(),
                     wl_min=None if wavelength_range is None else wavelength_range[0],
                     wl_max=None if wavelength_range is None else wavelength_range[1],
@@ -1547,7 +1551,7 @@ class AnalysisController:
                         index
                         for index, wavelength_nm in enumerate(primary_result.wavelengths_nm)
                         if abs(float(wavelength_nm) - float(current_wavelength)) < 1e-6
-                        and np.isfinite(primary_result.absorbance[index])
+                        and np.isfinite(primary_result.formula_values[index])
                     ),
                     None,
                 )
@@ -1555,7 +1559,7 @@ class AnalysisController:
                 self.window.spectrum_current_point.setData([], [])
             else:
                 current_x = float(primary_result.wavelengths_nm[current_point_index])
-                current_y = float(primary_result.absorbance[current_point_index])
+                current_y = float(primary_result.formula_values[current_point_index])
                 self.window.spectrum_current_point.setData([current_x], [current_y])
                 current_sample_mean = float(primary_result.sample_mean[current_point_index])
                 current_reference_mean = float(primary_result.reference_mean[current_point_index])

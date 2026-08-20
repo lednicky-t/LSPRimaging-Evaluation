@@ -85,14 +85,14 @@ def fit_absorbance_curve(
     )
     candidate_y = np.asarray(polynomial(candidate_x), dtype=np.float64)
     peak_wavelength = None
-    peak_absorbance = None
+    peak_value = None
     finite_candidate_mask = np.isfinite(candidate_x) & np.isfinite(candidate_y)
     if np.any(finite_candidate_mask):
         candidate_x = candidate_x[finite_candidate_mask]
         candidate_y = candidate_y[finite_candidate_mask]
         peak_index = int(np.argmax(candidate_y))
         peak_wavelength = float(candidate_x[peak_index])
-        peak_absorbance = float(candidate_y[peak_index])
+        peak_value = float(candidate_y[peak_index])
 
     centroid = None
     integral = polynomial.integ()
@@ -106,11 +106,11 @@ def fit_absorbance_curve(
 
     return FitResult(
         fitted_wavelengths_nm=np.asarray(fitted_x, dtype=np.float64),
-        fitted_absorbance=np.asarray(fitted_y, dtype=np.float64),
+        fitted_values=np.asarray(fitted_y, dtype=np.float64),
         coefficients=np.asarray(polynomial.coef, dtype=np.float64),
         peak_wavelength_nm=peak_wavelength,
         centroid_nm=centroid,
-        peak_absorbance=peak_absorbance,
+        peak_value=peak_value,
     )
 
 
@@ -192,7 +192,7 @@ def fit_gaussian_curve(
     fitted_y = np.asarray(_gaussian_model(fitted_x, amplitude, center, sigma, offset), dtype=np.float64)
 
     peak_wavelength = float(np.clip(center, x_min, x_max))
-    peak_absorbance = float(_gaussian_model(np.asarray([peak_wavelength]), amplitude, center, sigma, offset)[0])
+    peak_value = float(_gaussian_model(np.asarray([peak_wavelength]), amplitude, center, sigma, offset)[0])
 
     centroid = None
     area = float(np.trapezoid(fitted_y, fitted_x))
@@ -204,11 +204,11 @@ def fit_gaussian_curve(
 
     return FitResult(
         fitted_wavelengths_nm=np.asarray(fitted_x, dtype=np.float64),
-        fitted_absorbance=fitted_y,
+        fitted_values=fitted_y,
         coefficients=np.asarray([amplitude, center, sigma, offset], dtype=np.float64),
         peak_wavelength_nm=peak_wavelength,
         centroid_nm=centroid,
-        peak_absorbance=peak_absorbance,
+        peak_value=peak_value,
     )
 
 
@@ -233,12 +233,12 @@ def fit_curve_for_method(
 def metric_value_from_fit(fit: FitResult, metric_key: str) -> tuple[float | None, float | None]:
     key = str(metric_key).strip().lower()
     if key == "maximum":
-        return fit.peak_wavelength_nm, fit.peak_absorbance
+        return fit.peak_wavelength_nm, fit.peak_value
     if key == "centroid":
         if fit.centroid_nm is None:
             return None, None
-        if fit.fitted_wavelengths_nm.size and fit.fitted_absorbance.size:
-            centroid_y = float(np.interp(fit.centroid_nm, fit.fitted_wavelengths_nm, fit.fitted_absorbance))
+        if fit.fitted_wavelengths_nm.size and fit.fitted_values.size:
+            centroid_y = float(np.interp(fit.centroid_nm, fit.fitted_wavelengths_nm, fit.fitted_values))
         else:
             centroid_y = None
         return fit.centroid_nm, centroid_y

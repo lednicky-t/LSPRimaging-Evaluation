@@ -155,13 +155,13 @@ class PlotManager:
         wavelength_range = self._window._analysis_wavelength_range()
         fit = fit_curve_for_method(
             result.wavelengths_nm,
-            result.absorbance,
+            result.formula_values,
             self._window._analysis_fit_method_key(),
             poly_order=self._window._analysis_poly_order(),
             wl_min=wavelength_range[0] if wavelength_range is not None else None,
             wl_max=wavelength_range[1] if wavelength_range is not None else None,
         )
-        if fit.fitted_wavelengths_nm.size == 0 or fit.fitted_absorbance.size == 0:
+        if fit.fitted_wavelengths_nm.size == 0 or fit.fitted_values.size == 0:
             return None
         return fit
 
@@ -176,12 +176,12 @@ class PlotManager:
     ) -> tuple[np.ndarray, np.ndarray, np.ndarray | None, np.ndarray | None] | None:
         window = self._window
         wavelengths = np.asarray(result.wavelengths_nm, dtype=np.float64)
-        absorbance = np.asarray(result.absorbance, dtype=np.float64)
-        valid_mask = np.isfinite(wavelengths) & np.isfinite(absorbance)
+        formula_values = np.asarray(result.formula_values, dtype=np.float64)
+        valid_mask = np.isfinite(wavelengths) & np.isfinite(formula_values)
         if not np.any(valid_mask):
             return None
         x_values = wavelengths[valid_mask]
-        y_values = absorbance[valid_mask]
+        y_values = formula_values[valid_mask]
         order = np.argsort(x_values)
         x_values = x_values[order]
         y_values = y_values[order]
@@ -211,10 +211,10 @@ class PlotManager:
         )
         fit_item = None
         fit = self.analysis_fit_result_from_spectrum(result)
-        if fit is not None and fit.fitted_wavelengths_nm.size and fit.fitted_absorbance.size:
+        if fit is not None and fit.fitted_wavelengths_nm.size and fit.fitted_values.size:
             fit_item = window.spectrum_plot.plot(
                 fit.fitted_wavelengths_nm,
-                fit.fitted_absorbance,
+                fit.fitted_values,
                 pen=pg.mkPen(
                     fit_color if not highlighted else fit_symbol_color,
                     width=fit_width,
@@ -248,7 +248,7 @@ class PlotManager:
             x_values,
             y_values,
             fit.fitted_wavelengths_nm if fit is not None else None,
-            fit.fitted_absorbance if fit is not None else None,
+            fit.fitted_values if fit is not None else None,
         )
 
     def set_sensorgram_series(

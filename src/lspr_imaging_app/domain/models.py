@@ -186,17 +186,19 @@ class AreaRoiDetectionSettings:
 @dataclass(slots=True)
 class FitResult:
     fitted_wavelengths_nm: np.ndarray
-    fitted_absorbance: np.ndarray
+    fitted_values: np.ndarray
     coefficients: np.ndarray
     peak_wavelength_nm: float | None
     centroid_nm: float | None
-    peak_absorbance: float | None
+    peak_value: float | None
 
 
 @dataclass(slots=True)
 class AbsorbanceSpectrumResult:
     wavelengths_nm: np.ndarray
-    absorbance: np.ndarray
+    # Whatever formula (formula_key below) actually computed - "absorbance"
+    # (-log10) is only the default. See processing/analysis.py:formula_value.
+    formula_values: np.ndarray
     sample_mean: np.ndarray
     reference_mean: np.ndarray
     sample_pixel_count: np.ndarray
