@@ -73,6 +73,7 @@ class AnalysisController:
             self.window._roi_absorbance_cache.move_to_end(signature)
             while len(self.window._roi_absorbance_cache) > self.window.ROI_ABSORBANCE_CACHE_SIZE:
                 self.window._roi_absorbance_cache.popitem(last=False)
+        self._refresh_cached_roi_ids_snapshot()
 
     def _apply_cached_sensorgram_result(self, signature, result, *, preview: bool = False) -> None:
         self.window._sensorgram_running = False
@@ -1400,6 +1401,7 @@ class AnalysisController:
             while len(self.window._absorbance_spectral_cube_cache) > self.window.ABSORBANCE_SPECTRAL_CUBE_CACHE_SIZE:
                 self.window._absorbance_spectral_cube_cache.popitem(last=False)
             self.window._append_workflow_log("Spec spectral_cube_index cache store", level="debug")
+        self._store_roi_absorbance_cache(result)
         self.window._absorbance_spectrum_dirty = False
         fit_seconds = self._apply_absorbance_spectrum_result(result) or 0.0
         result.fit_seconds = float(fit_seconds)
@@ -2212,6 +2214,7 @@ class AnalysisController:
         self.window._absorbance_spectral_cube_cache.clear()
         self.window._roi_absorbance_cache.clear()
         self.window._absorbance_spectrum_dirty = True
+        self.window._cached_roi_ids.clear()
 
     def _invalidate_caches_for_exclusion_change(self) -> None:
         """Clear every cached absorbance/sensorgram result.
@@ -2404,6 +2407,19 @@ class AnalysisController:
         signature = self._roi_absorbance_signature(roi)
         return signature is not None and self.window._roi_absorbance_cache.get(signature) is not None
 
+    def _refresh_cached_roi_ids_snapshot(self) -> None:
+        """Recompute the "which ROIs are already calculated" snapshot the ROI
+        table/overlay read for their blue/white indicator.
+
+        This is the only place that calls `_roi_has_cached_absorbance` for the
+        whole ROI list. Call it after `_roi_absorbance_cache` actually changes
+        (populated or cleared) - never from ROI selection/editing code, which
+        should only ever read `self.window._cached_roi_ids`.
+        """
+        self.window._cached_roi_ids = {
+            int(roi.area_roi_id) for roi in self.window._state.area_rois if self._roi_has_cached_absorbance(roi)
+        }
+
     @staticmethod
     def _analysis_cache_signature_to_json(value):
         if isinstance(value, tuple):
@@ -2526,6 +2542,7 @@ class AnalysisController:
                 if signature is None:
                     continue
                 self.window._sensorgram_cache[signature] = result
+        self._refresh_cached_roi_ids_snapshot()
 
     def _toggle_analysis_live_preview(self) -> None:
         self.window._analysis_live_preview_enabled = not self.window._analysis_live_preview_enabled

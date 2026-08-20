@@ -435,6 +435,15 @@ class MainWindow(MainWindowIcons, RectangleStampMixin, RoiGeometryMixin, Histogr
         self._absorbance_spectrum_dirty = True
         self._absorbance_spectrum_started_at: float | None = None
         self._roi_absorbance_cache: OrderedDict[tuple[object, ...], AbsorbanceSpectrumResult] = OrderedDict()
+        # Snapshot of which ROI ids currently have cached absorbance data, used by the
+        # ROI table/overlay "calculated" indicator. Deliberately NOT recomputed on every
+        # selection/edit (see _refresh_cached_roi_ids_snapshot): checking cache membership
+        # for every ROI means scanning every wavelength's chromatic-correction signature,
+        # which is too slow to redo on every click. It's refreshed only at explicit
+        # moments (cache populated/cleared, dataset/session load, toggling the "cached
+        # ROIs only" button) so ROI editing itself never touches the absorbance/chromatic
+        # machinery.
+        self._cached_roi_ids: set[int] = set()
         self._analysis_live_preview_enabled = self._settings_bool("analysis/live_preview", False)
         self._histogram_log_y_enabled = self._settings_bool("histogram/log_y", False)
         self._histogram_startup_autoscale_pending = False
@@ -5042,7 +5051,13 @@ class MainWindow(MainWindowIcons, RectangleStampMixin, RoiGeometryMixin, Histogr
         self._set_help(self.remove_rois_action, "Remove the selected ROIs.")
         self._set_help(self.group_rois_action, "Group selected ROIs.")
         self._set_help(self.ungroup_rois_action, "Ungroup selected ROIs.")
-        self._set_help(self.roi_list_cached_button, "Show only the ROIs that already have cached absorbance data.")
+        self._set_help(
+            self.roi_list_cached_button,
+            "Highlight ROIs with cached absorbance data: their label/row text turns blue once "
+            "calculated, and stays white until then. This status only refreshes when data loads, "
+            "when a calculation finishes, or when you toggle this button - not live while you "
+            "edit ROIs, so the ROI editor stays fast regardless of dataset size.",
+        )
         self._set_help(self.analysis_preview_button, "Live preview: update the spectrum and sensorgram automatically when ROI selection changes.")
         self._set_help(self.shortcuts_action, "Show the main keyboard shortcuts.", shortcuts_text())
         self._set_help(self.reset_layout_action, "Restore default splitter sizes and panel states.")
@@ -5600,6 +5615,9 @@ class MainWindow(MainWindowIcons, RectangleStampMixin, RoiGeometryMixin, Histogr
 
     def _roi_has_cached_absorbance(self, roi: AreaRoi) -> bool:
         return self._analysis_controller._roi_has_cached_absorbance(roi)
+
+    def _refresh_cached_roi_ids_snapshot(self) -> None:
+        self._analysis_controller._refresh_cached_roi_ids_snapshot()
 
     @staticmethod
     def _analysis_cache_signature_to_json(value):

@@ -10,10 +10,10 @@ from PyQt6.QtWidgets import QFileDialog, QMenu, QMessageBox, QTableWidgetItem
 
 from lspr_imaging_app.domain.models import AreaRoi, AreaRoiGroup, RoiArrayGroup
 from lspr_imaging_app.domain.roi_editor_tools import build_roi_array_group
+from lspr_imaging_app.gui.roi_overlay_helpers import CACHED_ROI_INDICATOR_COLOR
 from lspr_imaging_app.gui.roi_table_helpers import (
     append_roi_table_row,
     format_xy_value,
-    make_color_swatch_icon,
     roi_table_headers,
     RoiTableRowData,
 )
@@ -33,32 +33,29 @@ class RoiTableController:
             item.setForeground(QBrush())
             item.setBackground(QBrush())
 
-    def _dim_uncached_row(self, row: int, *, sample_color: QColor, reference_color: QColor) -> None:
-        dim_foreground = QBrush(QColor("#64748b"))
+    def _style_calculated_row(self, row: int, *, calculated: bool) -> None:
+        """Blue text = this ROI's absorbance is already calculated; default
+        (white) text = not yet. Only applied while the "cached ROIs only"
+        button is on - see its help text."""
+        foreground = QBrush(QColor(CACHED_ROI_INDICATOR_COLOR)) if calculated else QBrush()
         for column in range(self.window.roi_table.columnCount()):
             item = self.window.roi_table.item(row, column)
             if item is None:
                 continue
-            item.setForeground(dim_foreground)
-            item.setBackground(QBrush(QColor("#111827")) if column in {0, 1, 4, 5, 6, 7, 8} else item.background())
-            if column == 2:
-                item.setIcon(make_color_swatch_icon(sample_color.darker(170)))
-            elif column == 3:
-                item.setIcon(make_color_swatch_icon(reference_color.darker(170)))
+            item.setForeground(foreground)
 
     def refresh_cached_row_styles(self) -> None:
+        """Re-applies the calculated/not-yet-calculated row coloring from the
+        `_cached_roi_ids` snapshot (see `_refresh_cached_roi_ids_snapshot`).
+
+        Deliberately does NOT itself query the absorbance cache - that
+        snapshot is refreshed only at explicit moments (dataset/session load,
+        a calculation finishing, toggling "cached ROIs only"), not on every
+        call here, so this can run on every selection change/overlay refresh
+        without touching the absorbance/chromatic machinery.
+        """
         if self.window.roi_table.rowCount() == 0:
             return
-        rois = sorted(self.window._state.area_rois, key=lambda roi: roi.area_roi_id)
-        if not rois:
-            return
-        group_by_roi: dict[int, AreaRoiGroup] = {}
-        for group in self.window._state.area_roi_groups:
-            for roi_id in group.area_roi_ids:
-                group_by_roi[int(roi_id)] = group
-        cached_roi_ids = {int(roi.area_roi_id) for roi in rois if self.window._roi_has_cached_absorbance(roi)}
-        sample_color = QColor(self.window._sample_visual_color)
-        reference_color = QColor(self.window._reference_visual_color)
         self.window._roi_table_updating = True
         self.window.roi_table.blockSignals(True)
         try:
@@ -66,21 +63,9 @@ class RoiTableController:
                 roi_id = self.roi_id_for_row(row)
                 if roi_id is None:
                     continue
-                roi = self.window._roi_by_id(roi_id)
-                if roi is None:
-                    continue
-                group = group_by_roi.get(int(roi_id))
-                sample_row_color = QColor(roi.sample_color_hex) if roi.sample_color_hex and QColor(roi.sample_color_hex).isValid() else (QColor(group.sample_color_hex) if group is not None and QColor(group.sample_color_hex).isValid() else sample_color)
-                reference_row_color = QColor(roi.reference_color_hex) if roi.reference_color_hex and QColor(roi.reference_color_hex).isValid() else (QColor(group.reference_color_hex) if group is not None and QColor(group.reference_color_hex).isValid() else reference_color)
                 self._clear_row_style(row)
-                sample_item = self.window.roi_table.item(row, 2)
-                if sample_item is not None:
-                    sample_item.setIcon(make_color_swatch_icon(sample_row_color))
-                reference_item = self.window.roi_table.item(row, 3)
-                if reference_item is not None:
-                    reference_item.setIcon(make_color_swatch_icon(reference_row_color))
-                if self.window._cached_rois_only_visible and int(roi_id) not in cached_roi_ids and int(roi_id) not in self.window._selected_roi_ids:
-                    self._dim_uncached_row(row, sample_color=sample_row_color, reference_color=reference_row_color)
+                if self.window._cached_rois_only_visible:
+                    self._style_calculated_row(row, calculated=int(roi_id) in self.window._cached_roi_ids)
         finally:
             self.window.roi_table.blockSignals(False)
             self.window._roi_table_updating = False
@@ -331,7 +316,7 @@ class RoiTableController:
             for group in self.window._state.area_roi_groups:
                 for roi_id in group.area_roi_ids:
                     group_by_roi[int(roi_id)] = group
-            cached_roi_ids = {int(roi.area_roi_id) for roi in rois if self.window._roi_has_cached_absorbance(roi)}
+            cached_roi_ids = self.window._cached_roi_ids
             self.refresh_headers()
             if not rois:
                 return
@@ -384,9 +369,8 @@ class RoiTableController:
                     roi_cached = int(roi.area_roi_id) in cached_roi_ids
                     if roi_cached:
                         cached_rows += 1
-                    if self.window._cached_rois_only_visible and not roi_cached:
-                        if roi.area_roi_id not in self.window._selected_roi_ids:
-                            self._dim_uncached_row(row, sample_color=sample_row_color, reference_color=reference_row_color)
+                    if self.window._cached_rois_only_visible:
+                        self._style_calculated_row(row, calculated=roi_cached)
                 except Exception:
                     logger.exception("ROI table row build failed | area_roi_id=%s", int(roi.area_roi_id))
             self.window.roi_table.setColumnWidth(0, 34)
@@ -575,6 +559,7 @@ class RoiTableController:
         self.window._cached_rois_only_visible = bool(checked)
         self.window._settings.setValue("layout/cached_rois_only_visible", bool(checked))
         self.window.roi_list_cached_button.setIcon(self.window._make_cached_rois_icon(bool(checked)))
+        self.window._refresh_cached_roi_ids_snapshot()
         self.window._roi_table_controller.refresh_cached_row_styles()
         self.window._update_roi_overlays()
         self.window._refresh_visible_spectrum_from_cache()

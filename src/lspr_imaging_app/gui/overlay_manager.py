@@ -10,7 +10,7 @@ from lspr_imaging_app.gui.worker import (
     MeasurementOverlayBundle,
     RoiOverlayBundle,
 )
-from lspr_imaging_app.gui.roi_overlay_helpers import resolved_reference_color, resolved_roi_color
+from lspr_imaging_app.gui.roi_overlay_helpers import CACHED_ROI_INDICATOR_COLOR, resolved_reference_color, resolved_roi_color
 from lspr_imaging_app.processing.preprocess import apply_spatial_mask
 
 
@@ -66,22 +66,12 @@ class OverlayManager:
             pen_color.setAlphaF(w._alpha01(w._roi_alpha))
             fill_color = resolved_roi_color(roi, group, w._sample_visual_color)
             fill_color.setAlphaF(w._alpha01(max(w._roi_alpha * 0.22, 0.08)))
-            roi_signature = w._roi_absorbance_signature(source_roi)
-            roi_cached = bool(roi_signature is not None and w._roi_absorbance_cache.get(roi_signature) is not None)
-            if w._cached_rois_only_visible and not roi_cached and roi.area_roi_id not in w._selected_roi_ids:
-                dim_pen = QColor("#94a3b8")
-                dim_pen.setAlphaF(w._alpha01(0.16))
-                dim_fill = QColor("#94a3b8")
-                dim_fill.setAlphaF(w._alpha01(0.04))
-                pen_color = dim_pen
-                fill_color = dim_fill
-            elif w._cached_rois_only_visible and roi_cached and roi.area_roi_id not in w._selected_roi_ids:
-                cached_pen = QColor("#22c55e")
-                cached_pen.setAlphaF(w._alpha01(max(w._roi_alpha, 0.9)))
-                cached_fill = QColor("#22c55e")
-                cached_fill.setAlphaF(w._alpha01(max(w._roi_alpha * 0.16, 0.06)))
-                pen_color = cached_pen
-                fill_color = cached_fill
+            # "Already calculated" status reads from a snapshot (`_cached_roi_ids`),
+            # never recomputed here - see `_refresh_cached_roi_ids_snapshot` for why:
+            # checking the absorbance cache directly is too slow to redo on every
+            # selection/edit. The marker/curve itself no longer changes appearance
+            # for this status; only the label text color does, below.
+            roi_cached = int(roi.area_roi_id) in w._cached_roi_ids
             pen = pg.mkPen(pen_color, width=2)
             brush = pg.mkBrush(fill_color)
             if roi.inferred:
@@ -159,11 +149,12 @@ class OverlayManager:
             label = w._array_label_for_roi(roi.area_roi_id)
             if label is not None and w._roi_labels_visible:
                 is_selected = roi.area_roi_id in w._selected_roi_ids
-                if w._cached_rois_only_visible and not roi_cached and not is_selected:
-                    if bundle.label is not None:
-                        bundle.label.setVisible(False)
-                    continue
-                label_color = "#f8fafc" if is_selected else "#ffffff"
+                if is_selected:
+                    label_color = "#f8fafc"
+                elif w._cached_rois_only_visible and roi_cached:
+                    label_color = CACHED_ROI_INDICATOR_COLOR
+                else:
+                    label_color = "#ffffff"
                 label_background = "#0f766e" if is_selected else "#0f172a"
                 label_border = "#5eead4" if is_selected else "#94a3b8"
                 label_text = label
@@ -189,7 +180,12 @@ class OverlayManager:
                 bundle.label.setVisible(False)
         self._update_guide_overlays()
         if w.roi_table.isVisible():
-            w._update_roi_table()
+            # Restyle only (calculated/not-yet color) - row content and
+            # selection highlighting don't change from a plain overlay
+            # refresh (callers that change selection already call
+            # _sync_roi_table_selection separately), so a full table rebuild
+            # here would be pure waste; see roi_table_controller.
+            w._roi_table_controller.refresh_cached_row_styles()
 
     # ------------------------------------------------------------------
     # Landmark overlays
