@@ -745,15 +745,24 @@ def _absorbance_spectrum_task(
         current_shape = tuple(int(value) for value in processed.shape[:2])
         roi_mask_cache_entry = _build_roi_mask_cache(current_shape, selected_rois, selected_roi_ids, affine_matrix)
         ignored_mask = ignored_pixel_mask(processed, measurement_settings, external_mask=external_mask)
+        # Union of every selected ROI's own sample area, used only to keep a
+        # neighbor's sample pixels out of THIS roi's reference ring below -
+        # not for pooling pixels across ROIs (see the comment further down).
+        all_selected_sample_mask, _unused_combined_reference_mask = roi_mask_cache_entry["combined"]  # type: ignore[index]
 
-        # Per-ROI values are computed first (not just for the per-ROI result
-        # bag): when reduction_method is "plane_fit" there is no single plane
-        # to fit across a pooled multi-ROI selection (each ROI has its own
-        # reference ring and sample center), so the "combined" value below
-        # averages these per-ROI results instead of pooling pixels.
+        # Sample and reference ROIs are always reduced to one absorbance value
+        # per ROI, independently - never by pooling pixels from multiple ROIs
+        # into one sample/reference mean first. When multiple ROIs are
+        # selected, the "combined" value below is the average of these
+        # per-ROI absorbance values, not a value computed from pooled pixels
+        # (pooling pixels before the sample/reference ratio is not the same
+        # calculation as averaging each ROI's own ratio afterward, and isn't
+        # physically meaningful across different sample/reference apertures).
         per_roi_absorbance_this_wavelength: list[float] = []
         per_roi_sample_mean_this_wavelength: list[float] = []
         per_roi_reference_mean_this_wavelength: list[float] = []
+        sample_pixel_count_total = 0
+        reference_pixel_count_total = 0
         for roi in selected_rois:
             per_roi_masks = roi_mask_cache_entry["per_roi"]  # type: ignore[index]
             roi_mask_template, reference_mask_template = per_roi_masks[int(roi.area_roi_id)]
@@ -761,7 +770,11 @@ def _absorbance_spectrum_task(
             reference_mask_single = np.array(reference_mask_template, dtype=bool, copy=True)
             roi_mask_single &= ~ignored_mask
             reference_mask_single &= ~ignored_mask
-            reference_mask_single &= ~roi_mask_single
+            # Exclude every selected ROI's sample area, not just this one's -
+            # otherwise a nearby selected ROI's (often much brighter) sample
+            # spot can fall inside this ROI's reference ring and bias its
+            # reference mean.
+            reference_mask_single &= ~all_selected_sample_mask
 
             sample_pixels_single = processed[roi_mask_single]
             reference_pixels_single = processed[reference_mask_single]
@@ -792,45 +805,28 @@ def _absorbance_spectrum_task(
             accumulator["reference_mean"].append(reference_mean_single)
             accumulator["sample_pixel_count"].append(int(sample_pixels_single.size))
             accumulator["reference_pixel_count"].append(int(reference_pixels_single.size))
+            sample_pixel_count_total += int(sample_pixels_single.size)
+            reference_pixel_count_total += int(reference_pixels_single.size)
             if np.isfinite(absorbance_single):
                 per_roi_absorbance_this_wavelength.append(absorbance_single)
                 per_roi_sample_mean_this_wavelength.append(sample_mean_single)
                 per_roi_reference_mean_this_wavelength.append(reference_mean_single)
 
-        combined_roi_mask, combined_reference_mask = roi_mask_cache_entry["combined"]  # type: ignore[index]
-        roi_mask = np.array(combined_roi_mask, dtype=bool, copy=True)
-        reference_mask = np.array(combined_reference_mask, dtype=bool, copy=True)
-        roi_mask &= ~ignored_mask
-        reference_mask &= ~ignored_mask
-        reference_mask &= ~roi_mask
-        sample_pixels = processed[roi_mask]
-        reference_pixels = processed[reference_mask]
-
-        if is_plane_fit:
-            if per_roi_absorbance_this_wavelength:
-                sample_mean = float(np.mean(per_roi_sample_mean_this_wavelength))
-                reference_mean = float(np.mean(per_roi_reference_mean_this_wavelength))
-                absorbance = float(np.mean(per_roi_absorbance_this_wavelength))
-            else:
-                sample_mean = float("nan")
-                reference_mean = float("nan")
-                absorbance = float("nan")
-        elif sample_pixels.size == 0 or reference_pixels.size == 0:
+        if per_roi_absorbance_this_wavelength:
+            sample_mean = float(np.mean(per_roi_sample_mean_this_wavelength))
+            reference_mean = float(np.mean(per_roi_reference_mean_this_wavelength))
+            absorbance = float(np.mean(per_roi_absorbance_this_wavelength))
+        else:
             sample_mean = float("nan")
             reference_mean = float("nan")
             absorbance = float("nan")
-        else:
-            sample_mean, reference_mean = reduce_sample_and_reference(
-                sample_pixels, reference_pixels, reduction_method, trimmed_mean_fraction=trimmed_mean_fraction,
-            )
-            absorbance = formula_value(sample_mean, reference_mean, formula_key)
 
         wavelengths.append(float(wavelength_nm))
         absorbance_values.append(absorbance)
         sample_mean_values.append(sample_mean)
         reference_mean_values.append(reference_mean)
-        sample_pixel_counts.append(int(sample_pixels.size))
-        reference_pixel_counts.append(int(reference_pixels.size))
+        sample_pixel_counts.append(sample_pixel_count_total)
+        reference_pixel_counts.append(reference_pixel_count_total)
         roi_seconds += time.perf_counter() - roi_started
 
         if progress_callback is not None:
@@ -987,11 +983,17 @@ def _absorbance_spectrum_fast_task(
             ids_subset: tuple[int, ...],
             sample_x: float | None = None,
             sample_y: float | None = None,
+            extra_exclude_mask: np.ndarray | None = None,
         ) -> tuple[float, float, float, int, int]:
             roi_mask, reference_mask = _selected_roi_masks_for_spectrum(
                 (patch_h, patch_w), rois_subset, ids_subset, reference_inner_radius_px, reference_outer_radius_px,
                 affine_matrix, patch_origin_xy=(x0, y0),
             )
+            if extra_exclude_mask is not None:
+                # Keeps a neighboring selected ROI's sample pixels out of THIS
+                # roi's reference ring - see _absorbance_spectrum_task for the
+                # full reasoning (same fix, fast-zarr-path version).
+                reference_mask = reference_mask & ~extra_exclude_mask
             if ignored_patch is not None:
                 roi_mask = roi_mask & ~ignored_patch
                 reference_mask = reference_mask & ~ignored_patch
@@ -999,7 +1001,7 @@ def _absorbance_spectrum_fast_task(
             reference_pixels = patch[reference_mask]
             if sample_pixels.size == 0 or reference_pixels.size == 0:
                 return float("nan"), float("nan"), float("nan"), int(sample_pixels.size), int(reference_pixels.size)
-            if is_plane_fit and sample_x is not None and sample_y is not None:
+            if is_plane_fit:
                 # Patch-local indices from np.where must be shifted back by the
                 # patch's (x0, y0) origin so the plane is evaluated in the same
                 # absolute coordinate frame as roi.center_x/roi.center_y - a
@@ -1014,40 +1016,47 @@ def _absorbance_spectrum_fast_task(
                     reference_xx=reference_xx, reference_yy=reference_yy,
                     sample_x=sample_x, sample_y=sample_y,
                 )
-            elif is_plane_fit:
-                # Pooled multi-ROI call: no single sample location to evaluate a
-                # plane at. Only the pixel counts from this call are used by the
-                # caller in that case - the absorbance/means are replaced by the
-                # average of each ROI's own plane-fit result (see below).
-                sm, rm = reduce_sample_and_reference(sample_pixels, reference_pixels, "mean")
             else:
                 sm, rm = reduce_sample_and_reference(
                     sample_pixels, reference_pixels, reduction_method, trimmed_mean_fraction=trimmed_mean_fraction,
                 )
             return formula_value(sm, rm, formula_key), sm, rm, int(sample_pixels.size), int(reference_pixels.size)
 
+        # Union of every selected ROI's own sample area, used only for the
+        # reference-ring exclusion above - not for pooling pixels. With one
+        # selected ROI this is unnecessary (its own mask already excludes
+        # itself), so it's skipped.
+        all_selected_sample_mask = None
+        if len(selected_rois) > 1:
+            all_selected_sample_mask, _unused_reference_mask = _selected_roi_masks_for_spectrum(
+                (patch_h, patch_w), selected_rois, selected_roi_ids, reference_inner_radius_px, reference_outer_radius_px,
+                affine_matrix, patch_origin_xy=(x0, y0),
+            )
+
+        # Sample and reference ROIs are always reduced to one absorbance value
+        # per ROI, independently - never by pooling pixels from multiple ROIs
+        # first (see _absorbance_spectrum_task for the full reasoning). The
+        # "combined" value below, used when several ROIs are selected
+        # together, is the average of these per-ROI absorbance values.
         per_roi = {
-            int(roi.area_roi_id): _means_for([roi], (int(roi.area_roi_id),), roi.center_x, roi.center_y)
+            int(roi.area_roi_id): _means_for(
+                [roi], (int(roi.area_roi_id),), roi.center_x, roi.center_y, extra_exclude_mask=all_selected_sample_mask
+            )
             for roi in selected_rois
         }
-        if is_plane_fit:
-            # Plane-fit is inherently per-ROI - average each selected ROI's own
-            # plane-fit absorbance instead of pooling pixels across ROIs (see
-            # the slow-path _absorbance_spectrum_task for the same reasoning).
-            pooled_counts = _means_for(selected_rois, selected_roi_ids)
-            finite_entries = [entry for entry in per_roi.values() if np.isfinite(entry[0])]
-            if finite_entries:
-                combined = (
-                    float(np.mean([entry[0] for entry in finite_entries])),
-                    float(np.mean([entry[1] for entry in finite_entries])),
-                    float(np.mean([entry[2] for entry in finite_entries])),
-                    pooled_counts[3],
-                    pooled_counts[4],
-                )
-            else:
-                combined = (float("nan"), float("nan"), float("nan"), pooled_counts[3], pooled_counts[4])
+        finite_entries = [entry for entry in per_roi.values() if np.isfinite(entry[0])]
+        total_sample_px = sum(int(entry[3]) for entry in per_roi.values())
+        total_reference_px = sum(int(entry[4]) for entry in per_roi.values())
+        if finite_entries:
+            combined = (
+                float(np.mean([entry[0] for entry in finite_entries])),
+                float(np.mean([entry[1] for entry in finite_entries])),
+                float(np.mean([entry[2] for entry in finite_entries])),
+                total_sample_px,
+                total_reference_px,
+            )
         else:
-            combined = _means_for(selected_rois, selected_roi_ids)
+            combined = (float("nan"), float("nan"), float("nan"), total_sample_px, total_reference_px)
         return (index, float(wavelength_nm), combined, per_roi)
 
     worker_count = max(1, min(max(int(os.cpu_count() or 2) // 2, 2), 8, len(measurement_payload)))
