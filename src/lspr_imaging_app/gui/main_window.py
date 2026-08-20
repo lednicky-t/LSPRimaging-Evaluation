@@ -185,7 +185,6 @@ from .analysis_tasks import (
     _detect_rois_task,
     _estimate_chromatic_models_task,  # noqa: F401 - re-exported, see comment above
     _process_image_task,  # noqa: F401 - re-exported, see comment above
-    _refresh_roi_metrics_task,
     _score_reference_candidates_task,
 )
 # Plain `pyflakes` (unlike ruff) does not honor `# noqa`, so it still flags the three
@@ -417,11 +416,12 @@ class MainWindow(MainWindowIcons, RectangleStampMixin, RoiGeometryMixin, Histogr
         self._active_session_name: str = "Default"
         self._last_saved_roi_table_signature: str | None = None
         self._last_saved_roi_table_path: Path | None = None
+        self._roi_table_write_busy = False
+        self._roi_table_write_pending: tuple[object, ...] | None = None
         self._image_refresh_running = False
         self._pending_image_refresh_payload: tuple[object, ...] | None = None
         self._latest_image_refresh_signature: tuple[object, ...] | None = None
         self._image_refresh_started_at: float | None = None
-        self._roi_metrics_request_id = 0
         self._roi_detection_request_id = 0
         self._background_profile_in_flight: set[tuple[object, ...]] = set()
         self._background_profile_pending: dict[tuple[object, ...], list] = {}
@@ -5416,65 +5416,6 @@ class MainWindow(MainWindowIcons, RectangleStampMixin, RoiGeometryMixin, Histogr
     def _switch_chromatic_feature(self, direction: int) -> bool:
         return self._chromatic_controller.switch_feature(direction)
 
-    def _request_roi_metrics_refresh(
-        self,
-        *,
-        save_after: bool,
-        status_text: str | None = None,
-        refresh_histogram: bool = True,
-    ) -> bool:
-        if self._current_processed_image is None or not self._state.area_rois or not self._is_current_reference_image():
-            return False
-        image_key = self._current_image_key
-        if image_key is None:
-            return False
-        self._roi_metrics_request_id += 1
-        request_id = self._roi_metrics_request_id
-        image = self._current_processed_image
-        settings = deepcopy(self._state.area_roi_settings)
-        rois = deepcopy(self._state.area_rois)
-        worker = FunctionWorker(
-            _refresh_roi_metrics_task, image, settings, rois, self._current_external_mask(), self._rotation_fill_mask()
-        )
-        self._begin_busy("Refreshing ROI metrics...")
-        self._append_workflow_log("ROI metrics refresh start", level="info")
-        worker.signals.result.connect(
-            lambda refreshed_rois,
-            request_id=request_id,
-            image_key=image_key,
-            save_after=save_after,
-            status_text=status_text,
-            refresh_histogram=refresh_histogram: self._on_roi_metrics_ready(
-                request_id,
-                image_key,
-                refreshed_rois,
-                save_after,
-                status_text,
-                refresh_histogram,
-            )
-        )
-        worker.signals.error.connect(lambda message: self._on_roi_metrics_failed(message))
-        self._thread_pool.start(worker)
-        return True
-
-    def _on_roi_metrics_ready(
-        self,
-        request_id: int,
-        image_key: tuple[int, float],
-        refreshed_rois: list[AreaRoi],
-        save_after: bool,
-        status_text: str | None,
-        refresh_histogram: bool,
-    ) -> None:
-        self._roi_table_controller._on_roi_metrics_ready(request_id, image_key, refreshed_rois, save_after, status_text, refresh_histogram)
-
-    def _on_roi_metrics_failed(self, message: str) -> None:
-        self._roi_table_controller._on_roi_metrics_failed(message)
-
-    def _refresh_roi_metrics_if_enabled(self) -> bool:
-        if not self.roi_editor_section.is_applied() or self._current_processed_image is None or not self._is_current_reference_image():
-            return False
-        return self._request_roi_metrics_refresh(save_after=False, refresh_histogram=False)
 
     def _mark_roi_edit_refresh_pending(self) -> None:
         if self._active_tool == "roi":
@@ -5485,6 +5426,13 @@ class MainWindow(MainWindowIcons, RectangleStampMixin, RoiGeometryMixin, Histogr
             self.status_label.setText("ROI positions updated. Fit refresh is deferred until Edit ROIs is turned off.")
 
     def _finalize_roi_edit_refresh(self) -> None:
+        # Used to end with a _request_roi_metrics_refresh() call - that only
+        # recomputes AreaRoi.score (placement quality), which nothing reads
+        # once a spot is already placed (only Detect ROIs itself consumes a
+        # fresh score, and it computes its own rather than reusing this
+        # one), so dragging an ROI no longer triggers that recompute. The
+        # cache invalidation and histogram refresh below are unrelated to
+        # score and still need to happen after a position change.
         if not self._roi_edit_refresh_pending:
             return
         self._roi_edit_refresh_pending = False
@@ -5492,16 +5440,11 @@ class MainWindow(MainWindowIcons, RectangleStampMixin, RoiGeometryMixin, Histogr
         self._invalidate_background_profile_cache()
         if self._showing_background_profile_main:
             self._update_background_profile_preview()
-        if self._request_roi_metrics_refresh(
-            save_after=True,
-            status_text="ROI fit metrics refreshed after leaving Edit ROIs.",
-            refresh_histogram=True,
-        ):
-            return
+        self._invalidate_image_analysis_caches()
         self._schedule_histogram_refresh()
         self._update_roi_summary()
         self._save_processing_state_for_dataset()
-        self.status_label.setText("ROI fit metrics refreshed after leaving Edit ROIs.")
+        self.status_label.setText("ROI positions updated.")
 
     def _refresh_histogram_if_available(self) -> None:
         self._overlay_manager._refresh_histogram_if_available()
@@ -6281,8 +6224,11 @@ class MainWindow(MainWindowIcons, RectangleStampMixin, RoiGeometryMixin, Histogr
                 if roi.reference_outer_diameter_px is not None:
                     roi.reference_outer_diameter_px = float(2 * self._state.area_roi_settings.reference_outer_radius_px)
 
-        if recalculate and self._current_processed_image is not None:
-            self._request_roi_metrics_refresh(save_after=False, refresh_histogram=False)
+        # recalculate no longer triggers a placement-score recompute here -
+        # AreaRoi.score (from refresh_roi_metrics) only matters while a spot
+        # is being found by Detect ROIs; once it's placed, editing its
+        # geometry by hand has nothing downstream that reads a refreshed
+        # score, so this flag now only gates the histogram-refresh timing.
         self._update_roi_overlays()
         if recalculate:
             self._schedule_histogram_refresh()
@@ -6318,11 +6264,6 @@ class MainWindow(MainWindowIcons, RectangleStampMixin, RoiGeometryMixin, Histogr
         self._update_roi_table()
         if save:
             self._save_processing_state_for_dataset()
-
-    def _refresh_roi_geometry(self) -> None:
-        self._apply_roi_geometry_preview(recalculate=True)
-        self._save_processing_state_for_dataset()
-        self.status_label.setText("ROI geometry refreshed.")
 
     def _commit_roi_geometry_edits(self) -> None:
         self._push_undo_point("ROI geometry")

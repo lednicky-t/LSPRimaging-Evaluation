@@ -44,7 +44,7 @@ from lspr_imaging_app.processing.preprocess import (
 )
 from lspr_imaging_app.processing.reference_selection import bimodal_dip_contrast
 from lspr_imaging_app.processing.roi_array_geometry import ArrayGeometryEstimate, estimate_array_geometry, estimate_reference_ring_radii
-from lspr_imaging_app.processing.roi_detection import detect_rois, ignored_pixel_mask, refresh_roi_metrics
+from lspr_imaging_app.processing.roi_detection import detect_rois, ignored_pixel_mask
 from lspr_imaging_app.processing.roi_histogram import estimate_roi_intensity_range
 from lspr_imaging_app.processing.roi_math import reduce_sample_and_reference
 from lspr_imaging_app.processing.roi_rasterize import expand_mask, expand_mask_to_patch
@@ -114,16 +114,6 @@ def _score_reference_candidates_task(path_strs: list[str]) -> dict[str, float]:
             continue
         scores[path_str] = bimodal_dip_contrast(image)
     return scores
-
-
-def _refresh_roi_metrics_task(
-    image: np.ndarray,
-    settings,
-    rois,
-    external_mask: np.ndarray | None,
-    rotation_fill_mask: np.ndarray | None = None,
-) -> list[AreaRoi]:
-    return refresh_roi_metrics(image, settings, rois, external_mask=external_mask, rotation_fill_mask=rotation_fill_mask)
 
 
 def _detect_rois_task(

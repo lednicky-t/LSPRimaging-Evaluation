@@ -17,7 +17,8 @@ from lspr_imaging_app.gui.roi_table_helpers import (
     roi_table_headers,
     RoiTableRowData,
 )
-from lspr_imaging_app.storage.workspace import load_roi_table, save_roi_table
+from lspr_imaging_app.gui.worker import FunctionWorker
+from lspr_imaging_app.storage.workspace import build_roi_table_payload, load_roi_table, save_roi_table, write_json_file
 
 
 class RoiTableController:
@@ -188,7 +189,7 @@ class RoiTableController:
             )
         return "\n".join(parts)
 
-    def _save_roi_table_snapshot(self, *, force: bool = False) -> Path | None:
+    def _save_roi_table_snapshot(self, *, force: bool = False) -> None:
         """Keep `analysis/roi_table.json` in sync with the current ROI table.
 
         Always overwrites the same file (no timestamped history - use
@@ -196,24 +197,64 @@ class RoiTableController:
         ROI kind the app supports round-trips here, unlike the old
         `roi_table_*.csv` snapshots this replaced, which could only carry
         circular sample/reference geometry.
+
+        Building the payload (dataclass -> dict) is cheap, synchronous,
+        in-memory work, so it happens here on the GUI thread. The actual
+        json.dumps + disk write is dispatched to a background worker instead,
+        mirroring SessionStateManager.save_processing_state_for_dataset -
+        this fires from a 25ms-debounced timer after nearly every ROI edit,
+        so writing synchronously here was stalling the GUI on every tweak.
         """
         path = self.window._roi_table_json_path()
         if path is None:
-            return None
+            return
         signature = self._roi_table_signature_snapshot()
         if not force and self.window._last_saved_roi_table_signature == signature and self.window._last_saved_roi_table_path == path:
-            return path
-        save_roi_table(
-            path,
+            return
+        payload = build_roi_table_payload(
             self.window._state.area_rois,
             self.window._state.area_roi_groups,
             self.window._state.area_roi_arrays,
             sample_visual_color=self.window._sample_visual_color.name(),
             reference_visual_color=self.window._reference_visual_color.name(),
         )
+        pending = (path, payload, signature)
+        if self.window._roi_table_write_busy:
+            # A previous snapshot write is still in flight; this newest
+            # payload already reflects every edit made so far, so just
+            # replace whatever was pending instead of starting a second,
+            # unordered write that could finish before or after this one.
+            self.window._roi_table_write_pending = pending
+            return
+        self._start_roi_table_write(pending)
+
+    def _start_roi_table_write(self, pending: tuple) -> None:
+        path, payload, signature = pending
+        self.window._roi_table_write_busy = True
+        worker = FunctionWorker(write_json_file, path, payload)
+        worker.signals.result.connect(
+            lambda _result, path=path, signature=signature: self._on_roi_table_write_done(path, signature)
+        )
+        worker.signals.error.connect(lambda message, path=path: self._on_roi_table_write_failed(path, message))
+        self.window._thread_pool.start(worker)
+
+    def _on_roi_table_write_done(self, path: Path, signature: str) -> None:
         self.window._last_saved_roi_table_signature = signature
         self.window._last_saved_roi_table_path = path
-        return path
+        self._finish_roi_table_write()
+
+    def _on_roi_table_write_failed(self, path: Path, message: str) -> None:
+        logging.getLogger("lspr_imaging_app.workflow").error(
+            "ROI table snapshot save failed | path=%s | %s", path.name, message
+        )
+        self._finish_roi_table_write()
+
+    def _finish_roi_table_write(self) -> None:
+        self.window._roi_table_write_busy = False
+        pending = self.window._roi_table_write_pending
+        if pending is not None:
+            self.window._roi_table_write_pending = None
+            self._start_roi_table_write(pending)
 
     def on_item_changed(self, item: QTableWidgetItem) -> None:
         if self.window._roi_table_updating:
@@ -348,7 +389,6 @@ class RoiTableController:
                             self._dim_uncached_row(row, sample_color=sample_row_color, reference_color=reference_row_color)
                 except Exception:
                     logger.exception("ROI table row build failed | area_roi_id=%s", int(roi.area_roi_id))
-            self.window.roi_table.resizeColumnsToContents()
             self.window.roi_table.setColumnWidth(0, 34)
             self.window.roi_table.setColumnWidth(1, 96)
             self.window.roi_table.setColumnWidth(2, 22)
@@ -552,40 +592,6 @@ class RoiTableController:
         if visible:
             self.window._update_roi_table()
 
-    def _on_roi_metrics_ready(
-        self,
-        request_id: int,
-        image_key: tuple[int, float],
-        refreshed_rois: list[AreaRoi],
-        save_after: bool,
-        status_text: str | None,
-        refresh_histogram: bool,
-    ) -> None:
-        self.window._end_busy()
-        if request_id != self.window._roi_metrics_request_id:
-            return
-        if self.window._current_image_key != image_key:
-            return
-        self.window._state.area_rois = refreshed_rois
-        if refresh_histogram:
-            self.window._invalidate_image_analysis_caches()
-            self.window._schedule_histogram_refresh()
-        self.window._update_roi_overlays()
-        self.window._update_roi_summary()
-        self.window._append_workflow_log(
-            f"ROI metrics refresh done | rois {len(refreshed_rois)}",
-            level="success",
-        )
-        if save_after:
-            self.window._schedule_processing_state_save()
-        if status_text:
-            self.window._set_status_text(status_text)
-
-
-    def _on_roi_metrics_failed(self, message: str) -> None:
-        self.window._end_busy()
-        self.window._append_workflow_log(f"ROI metrics refresh failed | {message}", level="error")
-        self.window._background_error("ROI metric refresh", message)
 
 
     def _build_array_group_from_detection(self, detected_rois: list[AreaRoi]) -> list[RoiArrayGroup]:

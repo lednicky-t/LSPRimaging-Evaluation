@@ -253,15 +253,11 @@ class ImageRenderManager:
             window._schedule_processing_state_save()
             window._refresh_visible_spectrum_from_cache()
             window._analysis_controller.preview_sensorgram_from_cache()
-        if (
-            window._is_current_reference_image()
-            and not window._chromatic_setup_active
-            and not bool(getattr(window, "_image_tools_preview_only", False))
-        ):
-            window._request_roi_metrics_refresh(
-                save_after=False,
-                refresh_histogram=False,
-            )
+        # Used to also call _request_roi_metrics_refresh() here to recompute
+        # AreaRoi.score against the newly-shown reference image - removed
+        # since nothing reads a placed ROI's score outside of Detect ROIs
+        # itself, which computes its own fresh scores rather than reusing
+        # this one (see _apply_roi_geometry_preview for the same reasoning).
 
     def on_image_view_range_changed(self, *_args) -> None:
         window = self.window

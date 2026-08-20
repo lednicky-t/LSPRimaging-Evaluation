@@ -138,7 +138,6 @@ class UndoManager:
             window._pending_image_refresh_payload = None
             window._latest_image_refresh_signature = None
             window._roi_detection_request_id += 1
-            window._roi_metrics_request_id += 1
             window._showing_background_profile_main = False
             window._state = deepcopy(snapshot.state)
             window._reset_roi_id_counter_from_state()
