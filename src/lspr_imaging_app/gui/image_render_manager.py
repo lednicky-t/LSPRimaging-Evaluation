@@ -6,7 +6,7 @@ import time
 
 import numpy as np
 
-from lspr_imaging_app.processing.chromatic import transformed_circle_points, transform_rois_affine
+from lspr_imaging_app.processing.chromatic import transformed_circle_points, transform_rois_affine, warp_boolean_mask_affine
 
 
 class ImageRenderManager:
@@ -95,6 +95,15 @@ class ImageRenderManager:
         from lspr_imaging_app.gui.main_window import FunctionWorker, _process_image_task
 
         external_mask, external_mask_processed = window._effective_external_mask_for_record(record_path, processed_space=True)
+        if external_mask is not None:
+            # Ignore-mask geometry is authored once, independent of wavelength; carry
+            # it into this image_key's corrected geometry so background flattening's
+            # "exclude mask" region stays aligned with the feature it was drawn over,
+            # the same way the absorbance/sensorgram payload builders in
+            # analysis_controller.py already do for the final ROI calculation.
+            affine_matrix = window._chromatic_affine_for_image_key(image_key)
+            if affine_matrix is not None:
+                external_mask = warp_boolean_mask_affine(np.asarray(external_mask, dtype=bool), affine_matrix)
         skip_crop = bool(getattr(window, "_image_tools_preview_only", False))
         window._pending_image_refresh_payload = None
         window._image_refresh_running = True
@@ -188,6 +197,15 @@ class ImageRenderManager:
         window._auto_load_mask_for_current_record()
         window._invalidate_per_frame_display_caches()
         window._invalidate_background_profile_cache()
+        # Circle/annulus ROI overlays are drawn at a per-wavelength position
+        # (via the chromatic affine, see display_rois/roi_curve_points above)
+        # but that transformed position is only ever pushed to the on-screen
+        # curve items by an explicit _update_roi_overlays() call - without
+        # this, the overlay stays wherever it was last drawn and never
+        # visibly follows the wavelength, even though ROI pixel sampling for
+        # the actual calculation already uses the correct per-wavelength
+        # position.
+        window._update_roi_overlays()
         window._update_geometry_control_ranges(processed.shape)
         window._update_mask_file_button_state()
         window._refresh_mask_previews()

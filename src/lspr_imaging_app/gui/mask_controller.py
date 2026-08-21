@@ -12,6 +12,7 @@ from lspr_imaging_app.domain.models import MaskSettings
 from lspr_imaging_app.gui.analysis_tasks import _mask_candidate_task
 from lspr_imaging_app.gui.worker import FunctionWorker
 from lspr_imaging_app.io.dataset import dataset_load_plane, dataset_plane_shape, load_image_array, load_image_shape
+from lspr_imaging_app.processing.chromatic import warp_boolean_mask_affine
 from lspr_imaging_app.processing.preprocess import (
     apply_spatial_mask,
     create_figure_mask,
@@ -734,6 +735,20 @@ class MaskController:
         if window._current_record_path is None:
             return None
         processed_mask, _processed = self.effective_external_mask_for_record(window._current_record_path, processed_space=True)
+        if processed_mask is None:
+            return None
+        # Ignore-mask geometry is authored once, independent of wavelength; when
+        # chromatic correction is on, carry it into the currently displayed
+        # wavelength's corrected geometry, the same way circle/annulus ROI
+        # overlays already follow the per-wavelength affine (see
+        # image_render_manager.display_rois). Every caller of this method reads
+        # "the mask for what's on screen right now" (the overlay, the histogram
+        # panel, or ROI detection - which only ever runs on the reference image,
+        # where this affine is always identity), so this is safe everywhere it's
+        # used.
+        affine_matrix = window._chromatic_affine_for_image_key(window._current_image_key)
+        if affine_matrix is not None:
+            processed_mask = warp_boolean_mask_affine(processed_mask, affine_matrix)
         return processed_mask
 
     def effective_external_mask_for_record(

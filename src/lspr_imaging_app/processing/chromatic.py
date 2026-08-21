@@ -966,6 +966,28 @@ def warp_image_affine(
     )
 
 
+def warp_boolean_mask_affine(
+    mask: np.ndarray,
+    affine_matrix: np.ndarray,
+    *,
+    output_shape: tuple[int, int] | None = None,
+) -> np.ndarray:
+    """Warp a boolean mask through a chromatic affine (nearest-neighbor, so the
+    result stays a clean boolean array) -- lets a full-image mask (e.g. the
+    ignore-mask) follow a specific wavelength's per-wavelength-corrected
+    geometry, the same way transformed_disk_mask/transformed_annulus_mask
+    already do for circle/annulus ROIs.
+    """
+    warped = warp_image_affine(
+        mask.astype(np.float32, copy=False),
+        affine_matrix,
+        output_shape=output_shape,
+        order=0,
+        cval=0.0,
+    )
+    return warped >= 0.5
+
+
 def transformed_circle_points(
     center_xy: tuple[float, float],
     radius_px: float,

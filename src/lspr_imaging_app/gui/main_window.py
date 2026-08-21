@@ -125,6 +125,7 @@ from lspr_imaging_app.gui.roi_geometry_mixin import RoiGeometryMixin
 from lspr_imaging_app.gui.histogram_mask_mixin import HistogramMaskMixin
 from lspr_imaging_app.gui.measurement_calibration_mixin import MeasurementCalibrationMixin
 from lspr_imaging_app.domain.exclusions import is_excluded
+from lspr_imaging_app.processing.chromatic import warp_boolean_mask_affine
 from lspr_imaging_app.processing.reference_selection import bimodal_dip_contrast
 from lspr_imaging_app.processing.roi_histogram import estimate_roi_intensity_range
 from lspr_imaging_app.version import version_string
@@ -3338,6 +3339,10 @@ class MainWindow(MainWindowIcons, RectangleStampMixin, RoiGeometryMixin, Histogr
         mask_settings = self._state.area_roi_settings if self._state.preprocessing.flatten_background_exclude_mask else None
         rois = self._rois_for_preprocessing(image_key)
         external_mask, external_mask_processed = self._effective_external_mask_for_record(record.path, processed_space=True)
+        if external_mask is not None:
+            affine_matrix = self._chromatic_affine_for_image_key(image_key)
+            if affine_matrix is not None:
+                external_mask = warp_boolean_mask_affine(np.asarray(external_mask, dtype=bool), affine_matrix)
         processed = apply_preprocessing(
             raw_image,
             self._state.preprocessing,

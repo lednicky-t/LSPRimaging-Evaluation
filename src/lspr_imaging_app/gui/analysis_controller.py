@@ -13,6 +13,7 @@ from lspr_imaging_app.domain.models import AreaRoi, AbsorbanceSpectrumResult
 from lspr_imaging_app.gui.worker import SensorgramComputationResult
 from lspr_imaging_app.gui.analysis_tasks import _roi_absorbance_signature
 from lspr_imaging_app.processing.analysis import metric_value_from_fit, metric_value_from_spectrum
+from lspr_imaging_app.processing.chromatic import warp_boolean_mask_affine
 from lspr_imaging_app.processing.trace_statistics import (
     aggregate_group_traces,
     normalize_to_baseline_window,
@@ -863,6 +864,15 @@ class AnalysisController:
             if affine_matrix is not None:
                 affine_matrix = np.asarray(affine_matrix, dtype=np.float64)
             external_mask, external_mask_processed = self.window._effective_external_mask_for_record(record.path, processed_space=True)
+            if external_mask is not None:
+                external_mask = np.asarray(external_mask, dtype=bool)
+                # Ignore-mask geometry is authored/stored independent of wavelength; when
+                # chromatic correction is on, carry it into this wavelength's corrected
+                # geometry the same way circle/annulus ROIs already are (affine_matrix
+                # above), so the excluded pixels stay aligned with the real feature they
+                # were drawn over instead of a fixed pixel location.
+                if affine_matrix is not None:
+                    external_mask = warp_boolean_mask_affine(external_mask, affine_matrix)
             measurement_payload.append(
                 (
                     float(wavelength),
@@ -870,7 +880,7 @@ class AnalysisController:
                     preprocessing_rois,
                     affine_matrix,
                     bool(external_mask_processed),
-                    None if external_mask is None else np.asarray(external_mask, dtype=bool),
+                    external_mask,
                 )
             )
         if not measurement_payload:
@@ -939,11 +949,21 @@ class AnalysisController:
             external_mask = None
             if exclude_marked_pixels:
                 external_mask, _ = self.window._effective_external_mask_for_record(record.path, processed_space=True)
+                if external_mask is not None:
+                    external_mask = np.asarray(external_mask, dtype=bool)
+                    # Same per-wavelength chromatic warp as the slow/absorbance
+                    # payload builder above - must happen here, before the mask is
+                    # sliced into a wavelength-specific patch box downstream (the
+                    # box itself is computed in per-wavelength-transformed space
+                    # since the ROIs move; warping after slicing would read the
+                    # wrong region of the unwarped mask).
+                    if affine_matrix is not None:
+                        external_mask = warp_boolean_mask_affine(external_mask, affine_matrix)
             measurement_payload.append(
                 (
                     float(wavelength),
                     affine_matrix,
-                    None if external_mask is None else np.asarray(external_mask, dtype=bool),
+                    external_mask,
                 )
             )
             affine_matrices.append(affine_matrix)
