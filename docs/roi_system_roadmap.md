@@ -39,12 +39,15 @@ a single dataclass that bakes one sample region and one reference region togethe
   `transformed_annulus_mask` in `processing/chromatic.py` is exactly the "store one ROI, apply a
   per-frame transform" pattern the general spec asks for (its §9). This does **not** need to be
   rebuilt — new geometry types just need their own `transformed_*_mask` variant.
-- **A second, disconnected editor exists**: `RoiDefinition` (`state.rois`, not `state.area_rois`)
-  in `main_window.py`, with Circles / Rectangles / Freehand tabs — matching the tab layout
-  `roi_implementation_direction.md` asked for. But: only circle/ellipse gets a background-ring
-  overlay (rectangle has no reference-region concept), Freehand is a stub ("not implemented
-  yet"), and **this system has zero references from `analysis_tasks.py`** — it does not drive
-  any real spectrum computation. It is unfinished scaffolding, not a working parallel path.
+- **A second, disconnected editor existed and was removed (2026-08-21)**: `RoiDefinition`
+  (`state.rois`, not `state.area_rois`) in `main_window.py`, with Circles / Rectangles / Freehand
+  tabs — matching the tab layout `roi_implementation_direction.md` asked for. It never became
+  reachable: the Rectangles/Freehand panels were permanent "coming soon" placeholders, their edit
+  widgets were instantiated but never added to any visible layout, and the system had zero
+  references from `analysis_tasks.py` — it never drove any real spectrum computation. Confirmed
+  unfinished scaffolding, not a working parallel path, and deleted outright rather than kept
+  around unreachable. Phase 2 below now needs to build the rectangle editor UI from scratch
+  instead of "wiring" this scaffolding.
 - **Storage is JSON, not HDF5.** `analysis/roi_table.json` (`schema_name="lspri_roi_table"`,
   versioned via `ROI_EXPORT_VERSION`) already round-trips every `AreaRoi` field including mask
   geometry, per `format_versioning.md`. There is no `h5py` usage anywhere in this app — its
@@ -122,11 +125,9 @@ unwired `RoiDefinition` editor.
 - Extend `AreaRoiDetectionSettings`/`AreaRoi` parameter fields for rectangle sample size and
   rectangle reference offset/size (mirroring how circle uses `sample_radius_px` +
   `reference_inner_radius_px`/`reference_outer_radius_px`).
-- Wire the *existing* Rectangles tab in `main_window.py` to create real `AreaRoi` pairs instead
-  of `RoiDefinition` overlay objects — this reuses UI that's already built, it just currently
-  writes to the wrong list (`state.rois` instead of `state.area_rois`).
-- Retire `state.rois`/`RoiDefinition` once its Circles/Rectangles functionality is absorbed —
-  don't maintain two parallel ROI systems (violates maintainability priority).
+- Build a rectangle editor UI in `main_window.py` that creates real `AreaRoi` pairs directly (the
+  unreachable `RoiDefinition`/`state.rois` scaffolding that used to sketch this has been deleted
+  — see "Current state" above — so this is new UI work, not a wiring job).
 - **Tests:** extend `test_lspri_roi_rasterize.py` with rectangle cases; extend
   `test_lspri_roi_table_storage.py` round-trip for rectangle geometry.
 - **Sign-off needed:** this touches the shared `AreaRoi` model and the absorbance pipeline —

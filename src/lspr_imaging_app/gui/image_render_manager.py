@@ -218,8 +218,6 @@ class ImageRenderManager:
             window.mask_pencil_check.setChecked(False)
             window.mask_pencil_check.blockSignals(False)
         window._sync_roi_edit_capabilities()
-        window._sync_rectangle_roi_from_definition()
-        window._sync_rectangle_roi_visibility()
         if hasattr(window, "rotation_fill_dark_button"):
             window.rotation_fill_dark_button.blockSignals(True)
             window.rotation_fill_dark_button.setChecked(window._state.preprocessing.rotation_fill_dark)

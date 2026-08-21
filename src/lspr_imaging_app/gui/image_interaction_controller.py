@@ -8,8 +8,6 @@ from PyQt6.QtCore import QEvent, QPointF, QRectF, Qt
 from PyQt6.QtGui import QKeyEvent, QKeySequence
 from PyQt6.QtWidgets import QRubberBand
 
-from lspr_imaging_app.domain.roi_editor_tools import move_roi_from_template
-
 
 class ImageInteractionController:
     """Handles all image-viewport mouse/keyboard interaction for MainWindow.
@@ -261,95 +259,8 @@ class ImageInteractionController:
                 w._finalize_mask_edit()
                 return True
 
-        if watched is w.image_view.viewport() and w._active_tool == "roi" and w._roi_editor_mode in {"rectangles"}:
-            allow_roi_add = w.roi_add_action.isChecked()
-            allow_roi_array = w.roi_array_action.isChecked()
-            allow_roi_move = w.roi_move_action.isChecked()
-            if event.type() == QEvent.Type.MouseButtonPress and event.button() == Qt.MouseButton.LeftButton:
-                point = self._image_point_from_mouse_event(event)
-                if point is None:
-                    return False
-                if allow_roi_array:
-                    w._add_stamp_array_at(point)
-                    return True
-                if allow_roi_add:
-                    w._add_rectangle_roi_at(point)
-                    return True
-                hit_roi = w._rectangle_stamp_at(point)
-                if hit_roi is None:
-                    w._clear_rectangle_roi_selection()
-                    return True
-                additive = bool(event.modifiers() & Qt.KeyboardModifier.ShiftModifier)
-                if additive:
-                    w._select_rectangle_rois({hit_roi.roi_id}, additive=True)
-                else:
-                    w._select_rectangle_rois({hit_roi.roi_id}, additive=False)
-                w._roi_selection_drag_start = point
-                w._roi_selection_drag_button = Qt.MouseButton.LeftButton
-                w._roi_selection_pressed_id = None
-                w._roi_selection_drag_modifiers = event.modifiers()
-                return True
-            if event.type() == QEvent.Type.MouseButtonPress and event.button() == Qt.MouseButton.RightButton:
-                point = self._image_point_from_mouse_event(event)
-                if point is None:
-                    return False
-                hit_roi = w._rectangle_stamp_at(point)
-                if allow_roi_move and w._selected_rectangle_roi_ids and hit_roi is not None:
-                    if hit_roi.roi_id not in w._selected_rectangle_roi_ids:
-                        w._select_rectangle_rois({hit_roi.roi_id}, additive=False)
-                    w._prepare_undo_snapshot("Move ROIs")
-                    w._dragging_rectangle_rois = True
-                    w._rectangle_drag_anchor = point
-                    w._rectangle_drag_original_positions = {
-                        roi.roi_id: (roi.center_x, roi.center_y)
-                        for roi in w._state.rois
-                        if roi.roi_id in w._selected_rectangle_roi_ids
-                    }
-                    w._roi_selection_drag_button = Qt.MouseButton.RightButton
-                    w._roi_selection_drag_start = None
-                    w._roi_selection_pressed_id = None
-                    w._roi_selection_drag_modifiers = Qt.KeyboardModifier.NoModifier
-                    return True
-                return True
-            if event.type() == QEvent.Type.MouseMove and w._dragging_rectangle_rois and w._rectangle_drag_anchor is not None:
-                point = self._image_point_from_mouse_event(event)
-                if point is None:
-                    return True
-                dx = point[0] - w._rectangle_drag_anchor[0]
-                dy = point[1] - w._rectangle_drag_anchor[1]
-                for roi in w._state.rois:
-                    if roi.roi_id not in w._selected_rectangle_roi_ids or roi.roi_id not in w._rectangle_drag_original_positions:
-                        continue
-                    base_x, base_y = w._rectangle_drag_original_positions[roi.roi_id]
-                    moved = move_roi_from_template(
-                        roi,
-                        center_x=base_x + dx,
-                        center_y=base_y + dy,
-                        image_shape=w._current_processed_image.shape if w._current_processed_image is not None else None,
-                    )
-                    roi.center_x = moved.center_x
-                    roi.center_y = moved.center_y
-                w._sync_rectangle_stamp_overlays()
-                return True
-            if event.type() == QEvent.Type.MouseButtonRelease and event.button() == Qt.MouseButton.RightButton and w._dragging_rectangle_rois:
-                w._dragging_rectangle_rois = False
-                w._rectangle_drag_anchor = None
-                w._rectangle_drag_original_positions.clear()
-                w._sync_rectangle_stamp_overlays()
-                w._commit_prepared_undo_snapshot()
-                w._save_processing_state_for_dataset()
-                w._schedule_processing_state_save()
-                w.status_label.setText(f"Moved {len(w._selected_rectangle_roi_ids)} selected rectangle ROI(s).")
-                return True
-            if event.type() == QEvent.Type.MouseButtonRelease and event.button() == Qt.MouseButton.LeftButton and w._roi_selection_drag_start is not None:
-                w._roi_selection_drag_start = None
-                w._roi_selection_drag_button = None
-                w._roi_selection_pressed_id = None
-                w._roi_selection_drag_modifiers = Qt.KeyboardModifier.NoModifier
-                return True
-
         selection_mode_active = (
-            (w._active_tool == "roi" and w._roi_editor_mode not in {"rectangles"})
+            (w._active_tool == "roi")
             or (w._analysis_enabled and w._state.dataset is not None)
         )
         if watched is w.image_view.viewport() and selection_mode_active:
@@ -360,14 +271,11 @@ class ImageInteractionController:
                 point = self._image_point_from_mouse_event(event)
                 if point is None:
                     return False
-                if allow_roi_array and w._roi_editor_mode not in {"rectangles"}:
+                if allow_roi_array:
                     w._add_roi_array_at(point)
                     return True
                 if allow_roi_add:
-                    if w._roi_editor_mode == "rectangles":
-                        w._add_rectangle_roi_at(point)
-                    else:
-                        w._add_roi_at(point)
+                    w._add_roi_at(point)
                     return True
                 roi_id = w._find_roi_id_at(point)
                 modifiers = event.modifiers()
@@ -492,9 +400,11 @@ class ImageInteractionController:
                 w._roi_selection_drag_button = None
                 w._roi_overlay_refresh_timer.stop()
                 w._update_roi_overlays()
+                # _mark_roi_edit_refresh_pending() already saves+schedules
+                # when the ROI tool is active, which this drag path requires
+                # (see allow_roi_move above) - see roi_geometry_mixin.py's
+                # _move_selected_rois for the matching keyboard-nudge fix.
                 w._mark_roi_edit_refresh_pending()
-                w._save_processing_state_for_dataset()
-                w._schedule_processing_state_save()
                 w.status_label.setText(f"Moved {len(w._selected_roi_ids)} selected ROIs.")
                 return True
 

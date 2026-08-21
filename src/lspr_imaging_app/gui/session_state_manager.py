@@ -78,7 +78,6 @@ class SessionStateManager:
                 area_roi_settings,
                 area_rois,
                 area_roi_groups,
-                rois,
                 chromatic_models,
                 chromatic_landmarks,
                 analysis_cache,
@@ -99,8 +98,6 @@ class SessionStateManager:
             window._state.area_rois = area_rois
             window._state.area_roi_groups = area_roi_groups
             window._state.area_roi_arrays = area_roi_arrays
-            window._state.rois = rois
-            window._reset_roi_id_counter_from_state()
             window._current_file_mask = None
             window._current_file_mask_path = None
             window._current_file_mask_session_source_path = None
@@ -122,8 +119,6 @@ class SessionStateManager:
             window._state.chromatic_landmarks = chromatic_landmarks
             window._state.image_exclusions = image_exclusions
             window._restore_analysis_caches(analysis_cache)
-            window._selected_rectangle_roi_ids.clear()
-            window._sync_rectangle_stamp_overlays()
             window._append_workflow_log(
                 f"Mask settings restore | histogram={bool(mask_settings.histogram_enabled)} figure={bool(mask_settings.figure_enabled)}",
                 level="debug",
@@ -161,15 +156,12 @@ class SessionStateManager:
             window._state.mask = MaskSettings()
             window._state.area_rois.clear()
             window._state.area_roi_groups.clear()
-            window._state.rois.clear()
             window._state.chromatic_models.clear()
             window._state.chromatic_landmarks.clear()
             window._state.image_exclusions.clear()
             window._current_file_mask = None
             window._current_file_mask_path = None
             window._current_file_mask_session_source_path = None
-            window._selected_rectangle_roi_ids.clear()
-            window._sync_rectangle_stamp_overlays()
             window._update_roi_table()
             window._normalize_mask_application_state()
             if on_done is not None:
@@ -212,15 +204,12 @@ class SessionStateManager:
         window._state.mask = MaskSettings()
         window._state.area_rois.clear()
         window._state.area_roi_groups.clear()
-        window._state.rois.clear()
         window._state.chromatic_models.clear()
         window._state.chromatic_landmarks.clear()
         window._state.image_exclusions.clear()
         window._current_file_mask = None
         window._current_file_mask_path = None
         window._current_file_mask_session_source_path = None
-        window._selected_rectangle_roi_ids.clear()
-        window._sync_rectangle_stamp_overlays()
         window._update_roi_table()
 
     def new_session(self) -> None:
@@ -290,6 +279,24 @@ class SessionStateManager:
         window._append_workflow_log(f"Session loaded | name={name}", level="success")
 
     def save_processing_state_for_dataset(self, *, force: bool = False, reason: str | None = None) -> None:
+        # Interactive edits (ROI drags, arrow-key nudges, mask brush strokes,
+        # spinbox ticks, ...) call this on every single change - sometimes
+        # many times a second. Persisting immediately meant rebuilding the
+        # whole processing-profile payload (including a copy of the file
+        # mask) synchronously on the GUI thread for every one of those,
+        # which is what made interactive editing feel sluggish. This is an
+        # evaluation app working from data that's never mutated in place, so
+        # nothing is lost by coalescing a burst of edits into one write a
+        # couple of seconds after the user stops - only an explicit
+        # force=True checkpoint (session/dataset switch, app close,
+        # import/export) needs a guaranteed write before something else
+        # happens, so only that path bypasses the debounce.
+        if not force:
+            self._window._schedule_processing_state_save()
+            return
+        self.persist_processing_state_now(force=True, reason=reason)
+
+    def persist_processing_state_now(self, *, force: bool = False, reason: str | None = None) -> None:
         window = self._window
         if window._processing_state_save_timer.isActive():
             window._processing_state_save_timer.stop()
@@ -341,7 +348,6 @@ class SessionStateManager:
                 window._state.area_roi_settings,
                 window._state.area_rois,
                 window._state.area_roi_groups,
-                window._state.rois,
                 window._state.chromatic_models,
                 window._state.chromatic_landmarks,
                 window._analysis_cache_payload(),
@@ -446,7 +452,6 @@ class SessionStateManager:
                 window._state.area_roi_settings,
                 window._state.area_rois,
                 window._state.area_roi_groups,
-                window._state.rois,
                 window._state.chromatic_models,
                 window._state.chromatic_landmarks,
                 window._analysis_cache_payload(),
@@ -492,7 +497,6 @@ class SessionStateManager:
                 area_roi_settings,
                 area_rois,
                 area_roi_groups,
-                rois,
                 chromatic_models,
                 chromatic_landmarks,
                 analysis_cache,
@@ -508,8 +512,6 @@ class SessionStateManager:
             window._state.area_rois = area_rois
             window._state.area_roi_groups = area_roi_groups
             window._state.area_roi_arrays = area_roi_arrays
-            window._state.rois = rois
-            window._reset_roi_id_counter_from_state()
             window._state.chromatic_models = chromatic_models
             window._state.chromatic_landmarks = chromatic_landmarks
             window._state.image_exclusions = image_exclusions
@@ -537,7 +539,7 @@ class SessionStateManager:
             window._refresh_image_exclusion_manage_dialog()
             window._current_image_key = None
             window._refresh_image()
-            window._save_processing_state_for_dataset()
+            window._save_processing_state_for_dataset(force=True, reason="import processing profile")
         except Exception as exc:
             window._end_busy(f"Import failed: {exc}")
             QMessageBox.critical(window, "Import failed", str(exc))

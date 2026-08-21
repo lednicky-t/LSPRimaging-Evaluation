@@ -25,9 +25,13 @@ class OverlayManager:
     # ------------------------------------------------------------------
 
     def _refresh_roi_overlays_during_drag(self) -> None:
-        self._update_roi_overlays(update_hidden_details=False)
+        # Only the ROI(s) actually being dragged need their bundle rebuilt -
+        # every other ROI's curve/label is unaffected by someone else's
+        # position, so re-touching them here would be pure waste (see
+        # _update_roi_overlays's roi_ids param).
+        self._update_roi_overlays(update_hidden_details=False, roi_ids=set(self.window._selected_roi_ids))
 
-    def _update_roi_overlays(self, *, update_hidden_details: bool = True) -> None:
+    def _update_roi_overlays(self, *, update_hidden_details: bool = True, roi_ids: set[int] | None = None) -> None:
         w = self.window
         display_rois = w._display_rois()
         source_roi_map = {roi.area_roi_id: roi for roi in w._state.area_rois}
@@ -52,6 +56,12 @@ class OverlayManager:
         reference_inner_radius = float(max(w._state.area_roi_settings.reference_inner_radius_px, 0))
         reference_outer_radius = float(max(w._state.area_roi_settings.reference_outer_radius_px, w._state.area_roi_settings.reference_inner_radius_px))
         for roi in display_rois:
+            if roi_ids is not None and roi.area_roi_id not in roi_ids:
+                # Scoped refresh (interactive move in progress): this ROI's
+                # position/selection didn't change, and nothing else its
+                # bundle depends on (its own color, group, the reference-ring
+                # toggle) could have either - skip the rebuild entirely.
+                continue
             source_roi = source_roi_map.get(roi.area_roi_id, roi)
             bundle = w._roi_overlay_items.get(roi.area_roi_id)
             if bundle is None:
@@ -179,7 +189,11 @@ class OverlayManager:
             elif update_hidden_details and bundle.label is not None:
                 bundle.label.setVisible(False)
         self._update_guide_overlays()
-        if w.roi_table.isVisible():
+        # A scoped (roi_ids-restricted) refresh only ever repositions ROIs
+        # already in the table - the calculated/not-yet coloring this
+        # restyles is keyed off _cached_roi_ids, which a position change
+        # never touches, so skip it entirely during interactive moves.
+        if roi_ids is None and w.roi_table.isVisible():
             # Restyle only (calculated/not-yet color) - row content and
             # selection highlighting don't change from a plain overlay
             # refresh (callers that change selection already call

@@ -100,7 +100,7 @@ PANEL_HELP: dict[str, PanelHelpEntry] = {
     "roi_editor": PanelHelpEntry(
         title="ROI editor",
         description=(
-            "Control circular ROI detection, rectangle ROI editing, move/add/remove, grouping, and the array-based ordering tools."
+            "Control circular ROI detection, move/add/remove, grouping, and the array-based ordering tools."
         ),
         shortcut_keys=("roi_editor", "array_detect"),
     ),

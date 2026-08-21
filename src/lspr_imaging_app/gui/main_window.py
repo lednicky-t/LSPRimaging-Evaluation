@@ -49,7 +49,6 @@ from PyQt6.QtWidgets import (
     QComboBox,
     QAbstractItemView,
     QDoubleSpinBox,
-    QGridLayout,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -120,7 +119,6 @@ from lspr_imaging_app.gui.overlay_manager import OverlayManager
 from lspr_imaging_app.gui.undo_manager import UndoManager
 from lspr_imaging_app.gui.layout_state_controller import LayoutStateController
 from lspr_imaging_app.gui.image_tools_controller import ImageToolsController
-from lspr_imaging_app.gui.rectangle_stamp_mixin import RectangleStampMixin
 from lspr_imaging_app.gui.roi_geometry_mixin import RoiGeometryMixin
 from lspr_imaging_app.gui.histogram_mask_mixin import HistogramMaskMixin
 from lspr_imaging_app.gui.measurement_calibration_mixin import MeasurementCalibrationMixin
@@ -138,7 +136,6 @@ from lspr_imaging_app.domain.models import (
     AreaRoiGroup,
     FitResult,
     MaskSettings,
-    RoiDefinition,
 )
 from lspr_imaging_app.io.dataset import (
     dataset_is_ome_zarr,
@@ -217,7 +214,7 @@ class _WheelHorizontalScrollArea(QScrollArea):
             super().wheelEvent(event)
 
 
-class MainWindow(MainWindowIcons, RectangleStampMixin, RoiGeometryMixin, HistogramMaskMixin, MeasurementCalibrationMixin, QMainWindow):
+class MainWindow(MainWindowIcons, RoiGeometryMixin, HistogramMaskMixin, MeasurementCalibrationMixin, QMainWindow):
     SETTINGS_ORG = "LSPR"
     SETTINGS_APP = "LSPRImaging"
     HISTOGRAM_MIN_INTENSITY = 0.0
@@ -243,7 +240,6 @@ class MainWindow(MainWindowIcons, RectangleStampMixin, RoiGeometryMixin, Histogr
         super().__init__()
         self._fast_startup = bool(fast_startup)
         self._state = AnalysisState()
-        self._roi_id_counter: int = 0
         self._record_map: dict[tuple[int, float], object] = {}
         self._record_key_by_path: dict[Path, tuple[int, float]] = {}
         self._settings = QSettings(self.SETTINGS_ORG, self.SETTINGS_APP)
@@ -302,18 +298,10 @@ class MainWindow(MainWindowIcons, RectangleStampMixin, RoiGeometryMixin, Histogr
         self._chromatic_grid_roi: pg.RectROI | None = None
         self._chromatic_grid_overlay_item: pg.PlotCurveItem | None = None
         self._suspend_chromatic_grid_sync = False
-        self._rectangle_roi: pg.RectROI | None = None
-        self._rectangle_stamp_items: list[pg.RectROI] = []
-        self._rectangle_stamp_ring_items: dict[str, tuple[pg.PlotCurveItem | None, pg.PlotCurveItem | None]] = {}
-        self._selected_rectangle_roi_ids: set[str] = set()
         self._crop_overlay_item: QGraphicsPathItem | None = None
         self._exclusion_overlay_item: QGraphicsPathItem | None = None
         self._active_tool: str | None = None
         self._suspend_crop_sync = False
-        self._suspend_rectangle_sync = False
-        self._dragging_rectangle_rois = False
-        self._rectangle_drag_anchor: tuple[float, float] | None = None
-        self._rectangle_drag_original_positions: dict[str, tuple[float, float]] = {}
         self._dragging_crop = False
         self._crop_drag_anchor: tuple[float, float] | None = None
         self._crop_drag_origin: tuple[float, float] | None = None
@@ -538,12 +526,32 @@ class MainWindow(MainWindowIcons, RectangleStampMixin, RoiGeometryMixin, Histogr
         self._sensorgram_refresh_timer.timeout.connect(self._refresh_sensorgram)
         self._processing_state_save_timer = QTimer(self)
         self._processing_state_save_timer.setSingleShot(True)
-        self._processing_state_save_timer.setInterval(220)
-        self._processing_state_save_timer.timeout.connect(self._save_processing_state_for_dataset)
+        # A few seconds, not milliseconds: this fires the real disk write.
+        # GUI responsiveness during interactive edits (drags, key-repeat,
+        # brush strokes) takes priority over how quickly settings hit disk -
+        # nothing here is irreplaceable raw data, so coalescing a burst of
+        # edits into one write well after the user pauses is fine. See
+        # SessionStateManager.save_processing_state_for_dataset.
+        self._processing_state_save_timer.setInterval(2500)
+        self._processing_state_save_timer.timeout.connect(self._persist_processing_state_now)
         self._roi_state_save_timer = QTimer(self)
         self._roi_state_save_timer.setSingleShot(True)
-        self._roi_state_save_timer.setInterval(250)
-        self._roi_state_save_timer.timeout.connect(self._save_processing_state_for_dataset)
+        self._roi_state_save_timer.setInterval(2500)
+        self._roi_state_save_timer.timeout.connect(self._persist_processing_state_now)
+        self._roi_move_undo_commit_timer = QTimer(self)
+        self._roi_move_undo_commit_timer.setSingleShot(True)
+        # Keyboard ROI nudging calls _prepare_undo_snapshot()/commit on every
+        # arrow-key repeat. prepare() is cheap once a snapshot is already
+        # pending (see UndoManager.prepare), but only if commit doesn't run
+        # in between and clear it - committing immediately on every repeat
+        # (as the mouse-drag-release path does, correctly, since it only
+        # fires once per gesture) defeated that and made every single
+        # keystroke pay for a deepcopy() of the whole app state plus a mask
+        # copy. Debouncing the commit means a whole burst of nudges shares
+        # one prepared snapshot - one deepcopy, one undo entry - the same
+        # way a mouse drag already collapses to one.
+        self._roi_move_undo_commit_timer.setInterval(600)
+        self._roi_move_undo_commit_timer.timeout.connect(self._commit_prepared_undo_snapshot)
         self._roi_refresh_timer = QTimer(self)
         self._roi_refresh_timer.setSingleShot(True)
         self._roi_refresh_timer.setInterval(25)
@@ -1123,24 +1131,6 @@ class MainWindow(MainWindowIcons, RectangleStampMixin, RoiGeometryMixin, Histogr
         self.sample_diameter_spin = ResponsiveDoubleSpinBox(self)
         self.reference_inner_diameter_spin = ResponsiveDoubleSpinBox(self)
         self.reference_outer_diameter_spin = ResponsiveDoubleSpinBox(self)
-        self.rectangle_name_edit = QLineEdit(self)
-        self.rectangle_width_spin = ResponsiveDoubleSpinBox(self)
-        self.rectangle_height_spin = ResponsiveDoubleSpinBox(self)
-        self.rectangle_padding_spin = ResponsiveDoubleSpinBox(self)
-        self.rectangle_background_width_spin = ResponsiveDoubleSpinBox(self)
-        self.rectangle_summary_label = QLabel("No rectangle ROI yet.", self)
-        self._rectangle_template = RoiDefinition(
-            roi_id="rectangle_template",
-            name="Rectangle ROI",
-            shape="rectangle",
-            center_x=0.0,
-            center_y=0.0,
-            size_x=80.0,
-            size_y=60.0,
-            background_padding_px=10.0,
-            background_width_px=12.0,
-            enabled=True,
-        )
         self.roi_geometry_scope_button = self._make_relation_scope_button(True, "Apply sample diameter to all ROIs when on, or only selected ROIs when off.")
         self.reference_geometry_scope_button = self._make_relation_scope_button(True, "Apply reference diameters to all ROIs when on, or only selected ROIs when off.")
         self.roi_geometry_area_label = QLabel("A_s = -, A_r = -, A_diff = -", self)
@@ -2320,11 +2310,6 @@ class MainWindow(MainWindowIcons, RectangleStampMixin, RoiGeometryMixin, Histogr
         self.reference_inner_diameter_spin.editingFinished.connect(self._commit_roi_geometry_edits)
         self.reference_outer_diameter_spin.valueChanged.connect(self._on_reference_outer_diameter_spin_changed)
         self.reference_outer_diameter_spin.editingFinished.connect(self._commit_roi_geometry_edits)
-        self.rectangle_name_edit.editingFinished.connect(self._commit_rectangle_roi_edits)
-        self.rectangle_width_spin.valueChanged.connect(lambda *_args: self._commit_rectangle_roi_edits())
-        self.rectangle_height_spin.valueChanged.connect(lambda *_args: self._commit_rectangle_roi_edits())
-        self.rectangle_padding_spin.valueChanged.connect(lambda *_args: self._commit_rectangle_roi_edits())
-        self.rectangle_background_width_spin.valueChanged.connect(lambda *_args: self._commit_rectangle_roi_edits())
         self.array_rows_spin.valueChanged.connect(self._update_roi_detection_settings)
         self.array_cols_spin.valueChanged.connect(self._update_roi_detection_settings)
         self.array_spacing_spin.valueChanged.connect(self._update_roi_detection_settings)
@@ -3786,7 +3771,10 @@ class MainWindow(MainWindowIcons, RectangleStampMixin, RoiGeometryMixin, Histogr
     def closeEvent(self, event) -> None:  # type: ignore[override]
         if self._ome_zarr_export_running and self._ome_zarr_export_cancel_event is not None:
             self._ome_zarr_export_cancel_event.set()
-        self._save_processing_state_for_dataset()
+        # Closing ends the debounce window for good, so this must flush
+        # immediately (force=True) rather than merely schedule - anything
+        # still pending would otherwise never get written.
+        self._save_processing_state_for_dataset(force=True, reason="app close")
         self._save_visual_preferences()
         geometry = self.normalGeometry() if self.isMaximized() or self.isFullScreen() else self.geometry()
         self._settings.setValue(
@@ -4112,6 +4100,9 @@ class MainWindow(MainWindowIcons, RectangleStampMixin, RoiGeometryMixin, Histogr
     def _save_processing_state_for_dataset(self, *, force: bool = False, reason: str | None = None) -> None:
         self._session_state_manager.save_processing_state_for_dataset(force=force, reason=reason)
 
+    def _persist_processing_state_now(self) -> None:
+        self._session_state_manager.persist_processing_state_now()
+
     def _export_processing_profile(self) -> None:
         self._session_state_manager.export_processing_profile()
 
@@ -4170,7 +4161,10 @@ class MainWindow(MainWindowIcons, RectangleStampMixin, RoiGeometryMixin, Histogr
             QMessageBox.StandardButton.Yes,
         )
         if reply == QMessageBox.StandardButton.Yes:
-            self._save_processing_state_for_dataset()
+            # The dialog promises the session is "saved and restored
+            # automatically" - the relaunched process reads this file back
+            # almost immediately, so it must be force=True, not scheduled.
+            self._save_processing_state_for_dataset(force=True, reason="UI scale restart")
             subprocess.Popen([sys.executable] + sys.argv)
             self.close()
 
@@ -5437,12 +5431,14 @@ class MainWindow(MainWindowIcons, RectangleStampMixin, RoiGeometryMixin, Histogr
         return self._chromatic_controller.switch_feature(direction)
 
 
-    def _mark_roi_edit_refresh_pending(self) -> None:
+    def _mark_roi_edit_refresh_pending(self, *, commit_undo: bool = True) -> None:
         if self._active_tool == "roi":
-            self._commit_prepared_undo_snapshot()
+            if commit_undo:
+                self._commit_prepared_undo_snapshot()
+            else:
+                self._roi_move_undo_commit_timer.start()
             self._roi_edit_refresh_pending = True
             self._save_processing_state_for_dataset()
-            self._schedule_processing_state_save()
             self.status_label.setText("ROI positions updated. Fit refresh is deferred until Edit ROIs is turned off.")
 
     def _finalize_roi_edit_refresh(self) -> None:
@@ -5456,6 +5452,8 @@ class MainWindow(MainWindowIcons, RectangleStampMixin, RoiGeometryMixin, Histogr
         if not self._roi_edit_refresh_pending:
             return
         self._roi_edit_refresh_pending = False
+        if self._roi_move_undo_commit_timer.isActive():
+            self._roi_move_undo_commit_timer.stop()
         self._commit_prepared_undo_snapshot()
         self._invalidate_background_profile_cache()
         if self._showing_background_profile_main:
@@ -5789,29 +5787,16 @@ class MainWindow(MainWindowIcons, RectangleStampMixin, RoiGeometryMixin, Histogr
         self._image_tools_controller.sync_crop_visibility()
 
     def _on_roi_editor_mode_section_toggled(self, mode: str, expanded: bool) -> None:
-        """Circles/Rectangles/Freehand are three CollapsibleSections that
-        behave like tabs: exactly one stays open at a time, driving
-        self._roi_editor_mode. Expanding one collapses the other two;
-        collapsing the only open one re-opens it immediately, since
-        _roi_editor_mode always needs a definite value."""
-        sections = {
-            "circles": self.roi_editor_circle_section,
-            "rectangles": self.roi_editor_rectangle_section,
-            "freehand": self.roi_editor_freehand_section,
-        }
+        """Circles is the only ROI-editor CollapsibleSection now (Rectangles/
+        Freehand were unreachable "coming soon" placeholders, removed) - this
+        just keeps it from collapsing to nothing, since self._roi_editor_mode
+        always needs a definite value."""
         if not expanded:
-            if not any(section.is_expanded() for section in sections.values()):
-                sections[mode].set_expanded(True)
+            if not self.roi_editor_circle_section.is_expanded():
+                self.roi_editor_circle_section.set_expanded(True)
             return
-        for other_mode, section in sections.items():
-            if other_mode != mode and section.is_expanded():
-                section.set_expanded(False)
         self._roi_editor_mode = mode
-        if mode == "circles":
-            self._update_roi_detection_labels(sync_controls=True)
-        elif mode == "rectangles":
-            self._update_rectangle_roi_controls(sync_roi=True)
-        self._sync_rectangle_roi_visibility()
+        self._update_roi_detection_labels(sync_controls=True)
         self._update_guide_overlays()
 
     def _crop_rect_contains_point(self, point: tuple[float, float]) -> bool:
@@ -5916,39 +5901,6 @@ class MainWindow(MainWindowIcons, RectangleStampMixin, RoiGeometryMixin, Histogr
         layout.addWidget(self.reference_outer_diameter_spin, 0, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
         layout.addStretch(1)
         layout.addWidget(self.reference_geometry_scope_button, 0, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-        return row
-
-    def _build_rectangle_row(self) -> QWidget:
-        row = QWidget(self)
-        layout = QGridLayout(row)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setHorizontalSpacing(6)
-        layout.setVerticalSpacing(0)
-        for spinbox in (
-            self.rectangle_width_spin,
-            self.rectangle_height_spin,
-            self.rectangle_padding_spin,
-            self.rectangle_background_width_spin,
-        ):
-            spinbox.setDecimals(2)
-            spinbox.setSingleStep(0.5)
-            spinbox.setFocusPolicy(Qt.FocusPolicy.WheelFocus)
-            spinbox.setAccelerated(True)
-            spinbox.setKeyboardTracking(False)
-            spinbox.setMaximumWidth(84)
-        self.rectangle_name_edit.setPlaceholderText("Rectangle ROI name")
-        self.rectangle_name_edit.setMaximumWidth(160)
-        layout.addWidget(QLabel("Name"), 0, 0)
-        layout.addWidget(self.rectangle_name_edit, 0, 1, 1, 4)
-        layout.addWidget(QLabel("W"), 1, 0)
-        layout.addWidget(self.rectangle_width_spin, 1, 1)
-        layout.addWidget(QLabel("H"), 1, 2)
-        layout.addWidget(self.rectangle_height_spin, 1, 3)
-        layout.addWidget(QLabel("Pad"), 2, 0)
-        layout.addWidget(self.rectangle_padding_spin, 2, 1)
-        layout.addWidget(QLabel("BG"), 2, 2)
-        layout.addWidget(self.rectangle_background_width_spin, 2, 3)
-        layout.addWidget(self.rectangle_summary_label, 3, 0, 1, 5)
         return row
 
     def _build_array_row(self) -> QWidget:
@@ -6117,13 +6069,6 @@ class MainWindow(MainWindowIcons, RectangleStampMixin, RoiGeometryMixin, Histogr
         self.sample_diameter_spin.setMaximum(display_max)
         self.reference_inner_diameter_spin.setMaximum(display_max)
         self.reference_outer_diameter_spin.setMaximum(display_max)
-        for spinbox in (
-            self.rectangle_width_spin,
-            self.rectangle_height_spin,
-            self.rectangle_padding_spin,
-            self.rectangle_background_width_spin,
-        ):
-            spinbox.setMaximum(display_max)
         self.array_spacing_spin.setMaximum(display_max)
 
     def _update_roi_detection_settings(self) -> None:
@@ -6519,8 +6464,8 @@ class MainWindow(MainWindowIcons, RectangleStampMixin, RoiGeometryMixin, Histogr
     def _refresh_roi_overlays_during_drag(self) -> None:
         self._overlay_manager._refresh_roi_overlays_during_drag()
 
-    def _update_roi_overlays(self, *, update_hidden_details: bool = True) -> None:
-        self._overlay_manager._update_roi_overlays(update_hidden_details=update_hidden_details)
+    def _update_roi_overlays(self, *, update_hidden_details: bool = True, roi_ids: set[int] | None = None) -> None:
+        self._overlay_manager._update_roi_overlays(update_hidden_details=update_hidden_details, roi_ids=roi_ids)
 
     def _remove_roi_overlay_bundle(self, roi_id: int) -> None:
         bundle = self._roi_overlay_items.pop(roi_id, None)

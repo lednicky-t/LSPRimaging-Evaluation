@@ -534,7 +534,6 @@ class RoiTableController:
         self.window._state.area_rois = area_rois
         self.window._state.area_roi_groups = area_roi_groups
         self.window._state.area_roi_arrays = area_roi_arrays
-        self.window._reset_roi_id_counter_from_state()
         if sample_color:
             self.window._sample_visual_color = QColor(sample_color)
         if reference_color:

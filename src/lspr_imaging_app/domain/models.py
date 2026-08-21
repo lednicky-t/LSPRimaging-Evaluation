@@ -315,20 +315,6 @@ class ChromaticLandmarkObservation:
 
 
 @dataclass(slots=True)
-class RoiDefinition:
-    roi_id: str
-    name: str
-    shape: str = "ellipse"
-    center_x: float = 0.0
-    center_y: float = 0.0
-    size_x: float = 10.0
-    size_y: float = 10.0
-    background_padding_px: float = 10.0
-    background_width_px: float = 12.0
-    enabled: bool = True
-
-
-@dataclass(slots=True)
 class StatisticsSettings:
     """Post-processing applied to an already-computed sensorgram trace (see
     processing/trace_statistics.py) - never touches raw pixels, so none of
@@ -366,7 +352,6 @@ class StatisticsSettings:
 @dataclass(slots=True)
 class AnalysisState:
     dataset: ImageDataset | None = None
-    rois: list[RoiDefinition] = field(default_factory=list)
     preprocessing: PreprocessingSettings = field(default_factory=PreprocessingSettings)
     area_roi_settings: AreaRoiDetectionSettings = field(default_factory=AreaRoiDetectionSettings)
     area_rois: list[AreaRoi] = field(default_factory=list)

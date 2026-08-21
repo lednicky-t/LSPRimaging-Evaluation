@@ -23,7 +23,6 @@ from lspr_imaging_app.domain.models import (
     MaskSettings,
     PreprocessingSettings,
     RoiArrayGroup,
-    RoiDefinition,
     RoiMask,
     StatisticsSettings,
 )
@@ -488,7 +487,6 @@ def build_processing_profile_payload(
     area_roi_settings: AreaRoiDetectionSettings,
     area_rois: list[AreaRoi],
     area_roi_groups: list[AreaRoiGroup] | None = None,
-    rois: list[RoiDefinition] | None = None,
     chromatic_models: list[ChromaticTransformModel] | None = None,
     chromatic_landmarks: list[ChromaticLandmarkObservation] | None = None,
     analysis_cache: dict | None = None,
@@ -544,7 +542,6 @@ def build_processing_profile_payload(
         "area_rois": [_encode_area_roi(area_roi) for area_roi in area_rois],
         "area_roi_groups": [asdict(group) for group in (area_roi_groups or [])],
         "area_roi_arrays": [asdict(array_group) for array_group in (area_roi_arrays or [])],
-        "rois": [asdict(roi) for roi in (rois or [])],
         "chromatic_models": [asdict(model) for model in (chromatic_models or [])],
         "chromatic_landmarks": [asdict(mark) for mark in (chromatic_landmarks or [])],
         "image_exclusions": [asdict(rule) for rule in (image_exclusions or [])],
@@ -571,7 +568,6 @@ def save_processing_profile(
     area_roi_settings: AreaRoiDetectionSettings,
     area_rois: list[AreaRoi],
     area_roi_groups: list[AreaRoiGroup] | None = None,
-    rois: list[RoiDefinition] | None = None,
     chromatic_models: list[ChromaticTransformModel] | None = None,
     chromatic_landmarks: list[ChromaticLandmarkObservation] | None = None,
     analysis_cache: dict | None = None,
@@ -588,7 +584,6 @@ def save_processing_profile(
             area_roi_settings,
             area_rois,
             area_roi_groups,
-            rois,
             chromatic_models,
             chromatic_landmarks,
             analysis_cache,
@@ -629,7 +624,6 @@ def load_processing_profile(
     AreaRoiDetectionSettings,
     list[AreaRoi],
     list[AreaRoiGroup],
-    list[RoiDefinition],
     list[ChromaticTransformModel],
     list[ChromaticLandmarkObservation],
     dict,
@@ -807,27 +801,6 @@ def load_processing_profile(
     area_roi_groups = decode_area_roi_groups(payload.get("area_roi_groups", payload.get("spot_groups", [])))
     area_roi_arrays = decode_area_roi_arrays(payload.get("area_roi_arrays", []))
 
-    raw_rois = payload.get("rois", [])
-    rois: list[RoiDefinition] = []
-    if isinstance(raw_rois, list):
-        for raw in raw_rois:
-            if not isinstance(raw, dict):
-                continue
-            rois.append(
-                RoiDefinition(
-                    roi_id=str(raw.get("roi_id", f"roi_{len(rois) + 1}")),
-                    name=str(raw.get("name", f"ROI {len(rois) + 1}")),
-                    shape=str(raw.get("shape", "ellipse")),
-                    center_x=float(raw.get("center_x", 0.0)),
-                    center_y=float(raw.get("center_y", 0.0)),
-                    size_x=float(raw.get("size_x", 10.0)),
-                    size_y=float(raw.get("size_y", 10.0)),
-                    background_padding_px=float(raw.get("background_padding_px", 10.0)),
-                    background_width_px=float(raw.get("background_width_px", 12.0)),
-                    enabled=bool(raw.get("enabled", True)),
-                )
-            )
-
     raw_models = payload.get("chromatic_models", [])
     chromatic_models: list[ChromaticTransformModel] = []
     if isinstance(raw_models, list):
@@ -943,7 +916,6 @@ def load_processing_profile(
         detection,
         area_rois,
         area_roi_groups,
-        rois,
         chromatic_models,
         chromatic_landmarks,
         analysis_cache,

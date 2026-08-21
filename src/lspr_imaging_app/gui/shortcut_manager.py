@@ -82,33 +82,6 @@ class ShortcutManager:
             window._adjust_rotation(step)
             event.accept()
             return True
-        if window._active_tool == "roi" and window._roi_editor_mode == "rectangles":
-            if event.key() in {Qt.Key.Key_Delete, Qt.Key.Key_Backspace}:
-                window._remove_selected_rectangle_rois()
-                event.accept()
-                return True
-            if event.key() in {
-                Qt.Key.Key_Left,
-                Qt.Key.Key_Right,
-                Qt.Key.Key_Up,
-                Qt.Key.Key_Down,
-            } and window.roi_move_action.isChecked() and window._selected_rectangle_roi_ids:
-                step = 1.0
-                if event.modifiers() & Qt.KeyboardModifier.ControlModifier:
-                    step = 5.0
-                dx = 0.0
-                dy = 0.0
-                if event.key() == Qt.Key.Key_Left:
-                    dx = -step
-                elif event.key() == Qt.Key.Key_Right:
-                    dx = step
-                elif event.key() == Qt.Key.Key_Up:
-                    dy = -step
-                elif event.key() == Qt.Key.Key_Down:
-                    dy = step
-                window._move_selected_rectangle_rois(dx, dy)
-                event.accept()
-                return True
         if window._active_tool == "roi" and event.key() in {
             Qt.Key.Key_Left,
             Qt.Key.Key_Right,

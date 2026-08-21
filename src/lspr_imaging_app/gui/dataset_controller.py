@@ -105,6 +105,10 @@ class DatasetController:
         progress = getattr(window, "_report_startup_progress", None)
         if window._state.dataset is not None:
             window._push_undo_point("Load dataset")
+            # Flush whatever's still pending for the outgoing dataset before
+            # its state gets replaced below - mirrors the pre-switch flush
+            # in SessionStateManager.load_session.
+            window._save_processing_state_for_dataset(force=True, reason="switch dataset")
         window._leave_chromatic_setup_mode()
         window._dataset_load_in_flight = True
         self._set_dataset_load_controls_enabled(False)

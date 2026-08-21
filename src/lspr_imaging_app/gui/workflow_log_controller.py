@@ -294,16 +294,6 @@ class WorkflowLogController:
     def update_status_hint(self) -> None:
         window = self.window
         if window._active_tool == "roi":
-            if window._roi_editor_mode == "rectangles":
-                if window.roi_move_action.isChecked():
-                    self.set_status_hint("Left-click selects ROIs, right-drag moves them, Delete removes selected ROIs.")
-                elif window.roi_add_action.isChecked():
-                    self.set_status_hint("Left-click adds a rectangle ROI stamp from the active template.")
-                elif window.roi_array_action.isChecked():
-                    self.set_status_hint("Left-click stamps a rectangle ROI array from the active template.")
-                else:
-                    self.set_status_hint("Left-click selects ROIs. Shift adds to the selection, Delete removes them.")
-                return
             if window._roi_editor_mode == "circles":
                 if window.roi_move_action.isChecked():
                     self.set_status_hint("Left-click selects, right-drag moves. Arrow keys nudge. Delete removes.")

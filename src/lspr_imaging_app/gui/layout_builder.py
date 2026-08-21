@@ -687,25 +687,14 @@ def build_layout(window) -> None:
     detection_buttons.addStretch(1)
     circle_editor_layout.addRow("", detection_buttons)
 
-    rectangle_editor_group = QWidget(window)
-    rectangle_editor_layout = QVBoxLayout(rectangle_editor_group)
-    rectangle_editor_layout.setContentsMargins(12, 12, 12, 12)
-    rectangle_editor_layout.addWidget(_placeholder_label("Rectangle ROI editing — coming soon."))
-    rectangle_editor_layout.addStretch(1)
-
-    freehand_editor_group = QWidget(window)
-    freehand_editor_layout = QVBoxLayout(freehand_editor_group)
-    freehand_editor_layout.setContentsMargins(12, 12, 12, 12)
-    freehand_editor_layout.addWidget(_placeholder_label("Polygon / freehand ROI editing — coming soon."))
-    freehand_editor_layout.addStretch(1)
-
-    # Circles/Rectangles/Freehand used to be a horizontal QTabWidget. They're
-    # now three nested CollapsibleSections (same vertical accordion look as
-    # "Image tools"/"Analysis") that enforce single-open exclusivity between
-    # themselves via window._on_roi_editor_mode_section_toggled, so they still
-    # behave like tabs - exactly one "mode" active at a time - which
-    # _roi_editor_mode elsewhere in the app (rectangle_stamp_mixin,
-    # image_interaction_controller, etc.) depends on.
+    # Circles used to sit alongside Rectangles/Freehand as three nested
+    # CollapsibleSections (same vertical accordion look as "Image
+    # tools"/"Analysis") behaving like tabs, driving window._roi_editor_mode.
+    # Rectangles/Freehand were always "coming soon" placeholders with no
+    # working controls behind them - removed as unreachable dead code, see
+    # docs/roi_system_roadmap.md. Circles is kept as its own CollapsibleSection
+    # (rather than flattened into the panel) so _on_roi_editor_mode_section_toggled
+    # can still keep it from collapsing to nothing.
     window.roi_editor_circle_section = CollapsibleSection(
         f"Circles ({len(window._state.area_rois)})",
         circle_editor_group,
@@ -715,42 +704,12 @@ def build_layout(window) -> None:
         title_color=_nested_title_color(),
         parent=window,
     )
-    # Rectangles/Freehand ROI storage doesn't exist yet (both panels are still
-    # "coming soon" placeholders - see rectangle_editor_group/freehand_editor_group
-    # above), so their count is always 0 for now; window._update_roi_summary()
-    # is what keeps the Circles count current as area_rois changes.
-    window.roi_editor_rectangle_section = CollapsibleSection(
-        "Rectangles (0)",
-        rectangle_editor_group,
-        expanded=False,
-        show_help=False,
-        show_pin=False,
-        title_color=_nested_title_color(),
-        parent=window,
-    )
-    window.roi_editor_freehand_section = CollapsibleSection(
-        "Freehand (0)",
-        freehand_editor_group,
-        expanded=False,
-        show_help=False,
-        show_pin=False,
-        title_color=_nested_title_color(),
-        parent=window,
-    )
     window.roi_editor_circle_section.expanded_changed.connect(
         lambda expanded: window._on_roi_editor_mode_section_toggled("circles", expanded)
-    )
-    window.roi_editor_rectangle_section.expanded_changed.connect(
-        lambda expanded: window._on_roi_editor_mode_section_toggled("rectangles", expanded)
-    )
-    window.roi_editor_freehand_section.expanded_changed.connect(
-        lambda expanded: window._on_roi_editor_mode_section_toggled("freehand", expanded)
     )
     roi_editor_mode_group = _nested_section_group(
         window,
         window.roi_editor_circle_section,
-        window.roi_editor_rectangle_section,
-        window.roi_editor_freehand_section,
     )
 
     roi_editor_content = QWidget(window)

@@ -26,10 +26,27 @@ class RoiGeometryMixin:
             if roi.area_roi_id not in self._selected_roi_ids:
                 continue
             roi.center_x, roi.center_y = self._clamp_roi_position(roi, roi.center_x + dx, roi.center_y + dy)
-        self._update_roi_overlays()
-        self._mark_roi_edit_refresh_pending()
-        self._save_processing_state_for_dataset()
-        self._schedule_processing_state_save()
+        # Only the moved ROI(s) need their overlay bundle rebuilt - with many
+        # ROIs on screen, redrawing every curve/label and restyling the whole
+        # ROI table (the unscoped default) on every single arrow-key repeat
+        # is what made nudging feel sluggish independent of the save-timing
+        # fix above.
+        self._update_roi_overlays(roi_ids=set(self._selected_roi_ids))
+        # _mark_roi_edit_refresh_pending() already saves+schedules when the
+        # ROI tool is active, which is the only context this method runs in
+        # (see shortcut_manager.py's `_active_tool == "roi"` guard) - calling
+        # save again here duplicated a full processing-state payload build
+        # (including a copy of the file mask) on every single arrow-key
+        # nudge, which made keyboard ROI moves feel sluggish.
+        # commit_undo=False: committing on every repeat (the default, right
+        # for the once-per-gesture callers) would clear the prepared undo
+        # snapshot every keystroke, forcing _prepare_undo_snapshot() above to
+        # deepcopy() the whole app state again on the very next repeat
+        # instead of reusing the pending one - by far the most expensive
+        # single thing in this whole path. Deferring the commit lets a
+        # burst of nudges share one snapshot, the same way a mouse drag
+        # already does.
+        self._mark_roi_edit_refresh_pending(commit_undo=False)
 
     def _add_roi_at(self, point: tuple[float, float]) -> None:
         if self._current_processed_image is None:
@@ -49,10 +66,10 @@ class RoiGeometryMixin:
         self._selected_roi_ids = {provisional.area_roi_id}
         self._update_roi_overlays()
         self._update_roi_table()
-        self._mark_roi_edit_refresh_pending()
         self._update_roi_summary()
-        self._save_processing_state_for_dataset()
-        self._schedule_processing_state_save()
+        # _mark_roi_edit_refresh_pending() already saves when the ROI tool
+        # is active, which is the only context this method runs in.
+        self._mark_roi_edit_refresh_pending()
         self.status_label.setText(f"Added ROI {provisional.area_roi_id}.")
 
     def _add_roi_array_at(self, point: tuple[float, float]) -> None:
@@ -352,9 +369,6 @@ class RoiGeometryMixin:
         self._state.area_roi_arrays = updated_arrays
 
     def _remove_selected_rois(self) -> None:
-        if self._roi_editor_mode == "rectangles" and self._selected_rectangle_roi_ids:
-            self._remove_selected_rectangle_rois()
-            return
         if not self._selected_roi_ids:
             self.status_label.setText("Select ROI(s) first to remove them.")
             return

@@ -65,7 +65,6 @@ class UndoManager:
             snapshot.wavelength_slider_value,
             repr(asdict(snapshot.state.preprocessing)),
             repr(asdict(snapshot.state.area_roi_settings)),
-            repr([asdict(roi) for roi in snapshot.state.rois]),
             repr([asdict(roi) for roi in snapshot.state.area_rois]),
             repr([asdict(group) for group in snapshot.state.area_roi_groups]),
             repr([asdict(array_group) for array_group in snapshot.state.area_roi_arrays]),
@@ -140,7 +139,6 @@ class UndoManager:
             window._roi_detection_request_id += 1
             window._showing_background_profile_main = False
             window._state = deepcopy(snapshot.state)
-            window._reset_roi_id_counter_from_state()
             window.folder_edit.setText(snapshot.folder_text)
             window._selected_roi_ids = set(snapshot.selected_roi_ids)
             window._sample_visual_color = QColor(snapshot.sample_visual_color)
@@ -161,11 +159,9 @@ class UndoManager:
             window._current_file_mask = None if snapshot.file_mask is None else snapshot.file_mask.copy()
             window._current_file_mask_path = None if snapshot.file_mask_path is None else Path(snapshot.file_mask_path)
             window._external_mask_revision = int(snapshot.file_mask_revision)
-            window._selected_rectangle_roi_ids.clear()
             window._processed_image_cache.clear()
             window._invalidate_image_analysis_caches()
             window._invalidate_background_profile_cache()
-            window._sync_rectangle_stamp_overlays()
 
             dataset = window._state.dataset
             window._record_map = dataset_record_map(dataset) if dataset is not None else {}
