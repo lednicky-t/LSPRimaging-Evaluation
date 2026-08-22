@@ -873,6 +873,7 @@ class AnalysisController:
                 # were drawn over instead of a fixed pixel location.
                 if affine_matrix is not None:
                     external_mask = warp_boolean_mask_affine(external_mask, affine_matrix)
+                external_mask = self.window._apply_mask_wavelength_diff(external_mask, image_key)
             measurement_payload.append(
                 (
                     float(wavelength),
@@ -959,6 +960,7 @@ class AnalysisController:
                     # wrong region of the unwarped mask).
                     if affine_matrix is not None:
                         external_mask = warp_boolean_mask_affine(external_mask, affine_matrix)
+                    external_mask = self.window._apply_mask_wavelength_diff(external_mask, image_key)
             measurement_payload.append(
                 (
                     float(wavelength),

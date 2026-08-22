@@ -92,7 +92,11 @@ class ShortcutManager:
                 if window._select_neighbor_roi(event.key()):
                     event.accept()
                     return True
-            elif window._is_current_reference_image() and window.roi_move_action.isChecked() and window._selected_roi_ids:
+            elif (
+                (window._is_current_reference_image() or bool(window._state.preprocessing.chromatic_correction_enabled))
+                and window.roi_move_action.isChecked()
+                and window._selected_roi_ids
+            ):
                 step = 1.0
                 if event.modifiers() & Qt.KeyboardModifier.ControlModifier:
                     step = 5.0

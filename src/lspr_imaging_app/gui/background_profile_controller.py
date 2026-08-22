@@ -62,6 +62,7 @@ class BackgroundProfileController:
             affine_matrix = self.window._chromatic_affine_for_image_key(self.window._current_image_key)
             if affine_matrix is not None:
                 external_mask = warp_boolean_mask_affine(np.asarray(external_mask, dtype=bool), affine_matrix)
+            external_mask = self.window._apply_mask_wavelength_diff(external_mask, self.window._current_image_key)
         return _background_profile_task(
             str(self.window._current_record_path),
             (preprocessing, mask_settings, external_mask_processed),
@@ -116,6 +117,7 @@ class BackgroundProfileController:
             affine_matrix = window._chromatic_affine_for_image_key(window._current_image_key)
             if affine_matrix is not None:
                 external_mask = warp_boolean_mask_affine(np.asarray(external_mask, dtype=bool), affine_matrix)
+            external_mask = window._apply_mask_wavelength_diff(external_mask, window._current_image_key)
         worker = FunctionWorker(
             _background_profile_task,
             str(window._current_record_path),

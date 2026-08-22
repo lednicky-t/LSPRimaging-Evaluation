@@ -12,7 +12,7 @@ from lspr_imaging_app.domain.models import MaskSettings
 from lspr_imaging_app.gui.analysis_tasks import _mask_candidate_task
 from lspr_imaging_app.gui.worker import FunctionWorker
 from lspr_imaging_app.io.dataset import dataset_load_plane, dataset_plane_shape, load_image_array, load_image_shape
-from lspr_imaging_app.processing.chromatic import warp_boolean_mask_affine
+from lspr_imaging_app.processing.chromatic import apply_mask_wavelength_diff, warp_boolean_mask_affine
 from lspr_imaging_app.processing.preprocess import (
     apply_spatial_mask,
     create_figure_mask,
@@ -45,7 +45,12 @@ class MaskController:
     def on_pencil_toggled(self, checked: bool) -> None:
         window = self.window
         if checked:
-            if not window._is_current_reference_image():
+            # Off-reference painting is allowed once chromatic correction is on -
+            # it writes into that wavelength's own diff instead of the canonical
+            # mask (see apply_mask_brush) - the same relaxation already applied to
+            # ROI move. Without CC there's no per-wavelength identity to write
+            # into, so this stays reference-only exactly as before.
+            if not window._is_current_reference_image() and not window._state.preprocessing.chromatic_correction_enabled:
                 window.mask_pencil_check.blockSignals(True)
                 window.mask_pencil_check.setChecked(False)
                 window.mask_pencil_check.blockSignals(False)
@@ -597,6 +602,7 @@ class MaskController:
         return {
             "record_path": str(mask_record_path),
             "mask": window._current_file_mask.copy(),
+            "wavelength_diffs": dict(window._current_file_mask_wavelength_diffs),
         }
 
     def manual_mask_required(self, *, create_if_missing: bool) -> np.ndarray | None:
@@ -633,37 +639,67 @@ class MaskController:
         brush_radius = max(float(window.mask_brush_size_spin.value()) / 2.0, 0.5)
         center_x = float(point[0])
         center_y = float(point[1])
-        height, width = mask.shape
-        x_min = max(int(np.floor(center_x - brush_radius)), 0)
-        x_max = min(int(np.ceil(center_x + brush_radius)) + 1, width)
-        y_min = max(int(np.floor(center_y - brush_radius)), 0)
-        y_max = min(int(np.ceil(center_y + brush_radius)) + 1, height)
-        if x_min >= x_max or y_min >= y_max:
-            return
-        yy, xx = np.ogrid[y_min:y_max, x_min:x_max]
-        brush_mask = (xx - center_x) ** 2 + (yy - center_y) ** 2 <= brush_radius**2
-        coord_maps = self.processed_to_raw_maps()
-        if coord_maps is None:
-            return
-        x_map, y_map = coord_maps
-        raw_x = np.rint(x_map[y_min:y_max, x_min:x_max][brush_mask]).astype(np.int32, copy=False)
-        raw_y = np.rint(y_map[y_min:y_max, x_min:x_max][brush_mask]).astype(np.int32, copy=False)
-        valid = (
-            (raw_x >= 0)
-            & (raw_y >= 0)
-            & (raw_x < mask.shape[1])
-            & (raw_y < mask.shape[0])
-        )
-        if not np.any(valid):
-            return
         draw_mode = str(window.mask_draw_mode_combo.currentData() or "add")
-        if draw_mode == "erase":
-            mask[raw_y[valid], raw_x[valid]] = False
+        new_value = draw_mode != "erase"
+        on_reference = window._is_current_reference_image()
+        cc_enabled = bool(window._state.preprocessing.chromatic_correction_enabled)
+
+        if on_reference or not cc_enabled:
+            # Canonical edit, in raw pixel space (unchanged from before this
+            # per-wavelength diff mechanism existed).
+            height, width = mask.shape
+            x_min = max(int(np.floor(center_x - brush_radius)), 0)
+            x_max = min(int(np.ceil(center_x + brush_radius)) + 1, width)
+            y_min = max(int(np.floor(center_y - brush_radius)), 0)
+            y_max = min(int(np.ceil(center_y + brush_radius)) + 1, height)
+            if x_min >= x_max or y_min >= y_max:
+                return
+            yy, xx = np.ogrid[y_min:y_max, x_min:x_max]
+            brush_mask = (xx - center_x) ** 2 + (yy - center_y) ** 2 <= brush_radius**2
+            coord_maps = self.processed_to_raw_maps()
+            if coord_maps is None:
+                return
+            x_map, y_map = coord_maps
+            raw_x = np.rint(x_map[y_min:y_max, x_min:x_max][brush_mask]).astype(np.int32, copy=False)
+            raw_y = np.rint(y_map[y_min:y_max, x_min:x_max][brush_mask]).astype(np.int32, copy=False)
+            valid = (
+                (raw_x >= 0)
+                & (raw_y >= 0)
+                & (raw_x < mask.shape[1])
+                & (raw_y < mask.shape[0])
+            )
+            if not np.any(valid):
+                return
+            mask[raw_y[valid], raw_x[valid]] = new_value
+            touched = int(np.count_nonzero(valid))
         else:
-            mask[raw_y[valid], raw_x[valid]] = True
+            # Off-reference, CC-enabled edit: the brush point is already in this
+            # wavelength's own displayed/processed pixel grid - the same grid
+            # apply_wavelength_diff applies its diff onto - so no raw-space
+            # conversion is needed at all, just record the touched pixels.
+            image_key = window._current_image_key
+            if image_key is None:
+                return
+            proc_height, proc_width = window._current_processed_image.shape[:2]
+            x_min = max(int(np.floor(center_x - brush_radius)), 0)
+            x_max = min(int(np.ceil(center_x + brush_radius)) + 1, proc_width)
+            y_min = max(int(np.floor(center_y - brush_radius)), 0)
+            y_max = min(int(np.ceil(center_y + brush_radius)) + 1, proc_height)
+            if x_min >= x_max or y_min >= y_max:
+                return
+            yy, xx = np.ogrid[y_min:y_max, x_min:x_max]
+            brush_mask = (xx - center_x) ** 2 + (yy - center_y) ** 2 <= brush_radius**2
+            local_rows, local_cols = np.nonzero(brush_mask)
+            if local_rows.size == 0:
+                return
+            diff = window._current_file_mask_wavelength_diffs.setdefault(image_key, {})
+            for row, col in zip((local_rows + y_min).tolist(), (local_cols + x_min).tolist()):
+                diff[(row, col)] = new_value
+            touched = int(local_rows.size)
+
         window._append_workflow_log_throttled(
             "mask_brush",
-            f"Mask brush | mode={draw_mode} | points={int(np.count_nonzero(valid))} | point=({center_x:.1f},{center_y:.1f})",
+            f"Mask brush | mode={draw_mode} | points={touched} | point=({center_x:.1f},{center_y:.1f})",
             level="debug",
             min_interval=0.5,
         )
@@ -749,7 +785,19 @@ class MaskController:
         affine_matrix = window._chromatic_affine_for_image_key(window._current_image_key)
         if affine_matrix is not None:
             processed_mask = warp_boolean_mask_affine(processed_mask, affine_matrix)
-        return processed_mask
+        return self.apply_wavelength_diff(processed_mask, window._current_image_key)
+
+    def apply_wavelength_diff(self, mask: np.ndarray | None, image_key: tuple[int, float] | None) -> np.ndarray | None:
+        """Layer this wavelength's manual ignore-mask diff (see apply_mask_brush)
+        on top of `mask`, which must already be in that wavelength's own
+        processed/warped pixel space. Shared by every consumer that resolves
+        the effective mask for a specific wavelength - see the module-level
+        callers in analysis_controller.py and background_profile_controller.py."""
+        window = self.window
+        if mask is None or image_key is None:
+            return mask
+        diff = window._current_file_mask_wavelength_diffs.get(image_key)
+        return apply_mask_wavelength_diff(mask, diff)
 
     def effective_external_mask_for_record(
         self,
@@ -899,6 +947,11 @@ class MaskController:
         window._current_file_mask = None if normalized is None else normalized.copy()
         window._current_file_mask_path = normalized_path
         window._current_file_mask_session_source_path = None
+        # A different base raster invalidates any existing per-wavelength diffs -
+        # they were relative to the old mask's content. Callers restoring a saved
+        # session set this back explicitly right after calling this method (see
+        # session_state_manager.py).
+        window._current_file_mask_wavelength_diffs = {}
         window._external_mask_revision += 1
         window._append_workflow_log_throttled(
             "current_file_mask_set",
@@ -1111,7 +1164,15 @@ class MaskController:
     def update_mask_file_button_state(self) -> None:
         window = self.window
         has_image = window._current_processed_image is not None
-        editable_mask = has_image and (window._is_current_reference_image() or not window._state.preprocessing.chromatic_correction_enabled)
+        on_reference = window._is_current_reference_image()
+        cc_enabled = bool(window._state.preprocessing.chromatic_correction_enabled)
+        editable_mask = has_image and (on_reference or not cc_enabled)
+        # The pencil (incremental edit) tools get their own, looser gate: whole-
+        # raster operations above stay reference-anchored (same as ROI creation),
+        # but painting itself is also allowed off-reference once CC is on, since
+        # that now writes into a per-wavelength diff instead of the canonical
+        # mask - see apply_mask_brush/on_pencil_toggled.
+        pencil_editable = has_image and (on_reference or cc_enabled)
         window.mask_create_new_button.setEnabled(editable_mask)
         window.mask_load_from_file_button.setEnabled(editable_mask)
         window.mask_save_button.setEnabled(editable_mask)
@@ -1135,11 +1196,11 @@ class MaskController:
         window.background_load_from_file_button.setEnabled(editable_mask)
         window.background_save_button.setEnabled(editable_mask)
         window.mask_morph_radius_spin.setEnabled(has_image)
-        window.mask_pencil_check.setEnabled(editable_mask)
-        window.mask_draw_mode_combo.setEnabled(editable_mask)
-        window.mask_draw_add_button.setEnabled(editable_mask and window.mask_pencil_check.isChecked())
-        window.mask_draw_remove_button.setEnabled(editable_mask and window.mask_pencil_check.isChecked())
-        window.mask_brush_size_spin.setEnabled(editable_mask)
+        window.mask_pencil_check.setEnabled(pencil_editable)
+        window.mask_draw_mode_combo.setEnabled(pencil_editable)
+        window.mask_draw_add_button.setEnabled(pencil_editable and window.mask_pencil_check.isChecked())
+        window.mask_draw_remove_button.setEnabled(pencil_editable and window.mask_pencil_check.isChecked())
+        window.mask_brush_size_spin.setEnabled(pencil_editable)
         default_path = self.current_mask_file_path()
         default_name = default_path.name if default_path is not None else "current_image_mask.png"
         if window._current_file_mask_path is not None:

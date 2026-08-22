@@ -257,6 +257,17 @@ class AreaRoi:
     label: str | None = None
     created_by: str = "user"
     notes: str | None = None
+    # Per-wavelength position overrides, keyed by the same (spectral_cube_index,
+    # wavelength_nm) tuple used everywhere else as the image identity. Populated
+    # wholesale from center_x/center_y via the chromatic-correction affine
+    # whenever CC is enabled or re-fit (see ChromaticController.update_settings
+    # -> processing.chromatic.populate_dense_roi_positions), and overwritten
+    # entirely on every re-fit. A manual nudge while viewing a non-reference
+    # wavelength writes into this dict instead of center_x/center_y (see
+    # RoiGeometryMixin._set_roi_position_for_current_view) and survives until
+    # the next re-fit. None/missing entries fall back to the affine-derived
+    # position, so CC-disabled datasets and pre-existing ROIs are unaffected.
+    per_wavelength: dict[tuple[int, float], tuple[float, float]] | None = None
 
 
 @dataclass(slots=True)

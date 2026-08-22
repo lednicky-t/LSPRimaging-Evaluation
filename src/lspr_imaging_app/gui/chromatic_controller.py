@@ -20,6 +20,7 @@ from lspr_imaging_app.processing.chromatic import (
     default_landmark_anchors,
     identity_affine_matrix,
     invert_affine_matrix,
+    populate_dense_roi_positions,
     _landmark_regions,
 )
 
@@ -613,6 +614,18 @@ class ChromaticController:
         next_index = min(max(current_index + int(direction), 0), len(feature_ids) - 1)
         return self.select_feature(feature_ids[next_index], center_view=True)
 
+    def refresh_dense_roi_positions(self, rois: list | None = None) -> None:
+        """(Re)populate `AreaRoi.per_wavelength` for `rois` (default: all ROIs)
+        from their canonical center through every fitted chromatic model.
+        Overwrites any existing entries, including manual per-wavelength
+        nudges -- see processing.chromatic.populate_dense_roi_positions."""
+        window = self.window
+        target_rois = window._state.area_rois if rois is None else rois
+        image_keys = [
+            (int(model.spectral_cube_index), float(model.wavelength_nm)) for model in window._state.chromatic_models
+        ]
+        populate_dense_roi_positions(target_rois, image_keys, self.affine_for_image_key)
+
     def update_settings(self) -> None:
         window = self.window
         window._push_undo_point("Chromatic correction")
@@ -621,6 +634,8 @@ class ChromaticController:
         window.chromatic_apply_check.setIcon(window._make_link_toggle_icon(bool(window.chromatic_apply_check.isChecked())))
         window._set_section_applied(window.chromatic_section, bool(window._state.preprocessing.chromatic_correction_enabled))
         window._state.preprocessing.chromatic_registration_mode = "landmark_radial"
+        if window._state.preprocessing.chromatic_correction_enabled:
+            self.refresh_dense_roi_positions()
         window._invalidate_image_analysis_caches()
         window._invalidate_background_profile_cache()
         self.update_control_state()
@@ -628,6 +643,7 @@ class ChromaticController:
         window._schedule_processing_state_save()
         window._current_image_key = None
         window._schedule_image_refresh()
+        window._sync_roi_edit_capabilities()
 
     def clear_models(self, *, push_undo: bool = True) -> None:
         window = self.window
@@ -645,6 +661,7 @@ class ChromaticController:
         window._schedule_processing_state_save()
         window._current_image_key = None
         window._schedule_image_refresh()
+        window._sync_roi_edit_capabilities()
         window._set_status_text("Cleared chromatic transforms.")
 
     def on_transform_button_clicked(self) -> None:
@@ -998,6 +1015,10 @@ class ChromaticController:
         window.chromatic_apply_check.blockSignals(True)
         window.chromatic_apply_check.setChecked(False)
         window.chromatic_apply_check.blockSignals(False)
+        # A fresh transform makes every existing per-wavelength mask diff stale
+        # (they were relative to the old geometry) - discard them, same "re-fit
+        # wins" rule already applied to AreaRoi.per_wavelength.
+        window._current_file_mask_wavelength_diffs.clear()
         self.leave_setup_mode()
         window._invalidate_image_analysis_caches()
         window._invalidate_background_profile_cache()

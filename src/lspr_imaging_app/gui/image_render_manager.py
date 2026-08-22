@@ -6,7 +6,29 @@ import time
 
 import numpy as np
 
-from lspr_imaging_app.processing.chromatic import transformed_circle_points, transform_rois_affine, warp_boolean_mask_affine
+from lspr_imaging_app.processing.chromatic import (
+    apply_affine_to_points,
+    transformed_circle_points,
+    transform_rois_affine,
+    warp_boolean_mask_affine,
+)
+
+
+def _apply_dense_overrides(transformed: list, original: list, image_key: tuple[int, float] | None) -> list:
+    """Overwrite each transformed ROI's center with its persisted per-wavelength
+    override (AreaRoi.per_wavelength), where one exists for `image_key`. Leaves
+    ROIs without an override exactly as the affine-derived transform produced
+    them, so this is a no-op until an ROI actually has a manual per-wavelength
+    edit or a dense-populated entry for this wavelength."""
+    if image_key is None:
+        return transformed
+    for transformed_roi, original_roi in zip(transformed, original):
+        if not original_roi.per_wavelength:
+            continue
+        override = original_roi.per_wavelength.get(image_key)
+        if override is not None:
+            transformed_roi.center_x, transformed_roi.center_y = override
+    return transformed
 
 
 class ImageRenderManager:
@@ -213,7 +235,7 @@ class ImageRenderManager:
         window.detect_rois_button.setEnabled(is_reference_view)
         window.roi_detection_full_auto_button.setEnabled(is_reference_view)
         window.roi_auto_histogram_action.setEnabled(is_reference_view)
-        if not is_reference_view:
+        if not is_reference_view and not window._state.preprocessing.chromatic_correction_enabled:
             window.mask_pencil_check.blockSignals(True)
             window.mask_pencil_check.setChecked(False)
             window.mask_pencil_check.blockSignals(False)
@@ -295,6 +317,7 @@ class ImageRenderManager:
         signature = (
             target_key,
             window._roi_signature(window._state.area_rois),
+            window._roi_override_signature(window._state.area_rois, target_key),
             window._chromatic_signature_for_image_key(target_key),
             None if window._current_processed_image is None else window._current_processed_image.shape[:2],
         )
@@ -306,6 +329,7 @@ class ImageRenderManager:
         else:
             clamp_shape = window._current_processed_image.shape[:2] if window._current_processed_image is not None else None
             transformed = transform_rois_affine(window._state.area_rois, affine_matrix, clamp_shape=clamp_shape)
+            transformed = _apply_dense_overrides(transformed, window._state.area_rois, target_key)
         window._display_roi_cache_signature = signature
         window._display_roi_cache_value = transformed
         return transformed
@@ -319,7 +343,8 @@ class ImageRenderManager:
         affine_matrix = window._chromatic_affine_for_image_key(image_key)
         if affine_matrix is None:
             return window._state.area_rois
-        return transform_rois_affine(window._state.area_rois, affine_matrix)
+        transformed = transform_rois_affine(window._state.area_rois, affine_matrix)
+        return _apply_dense_overrides(transformed, window._state.area_rois, image_key)
 
     def roi_curve_points(
         self,
@@ -334,12 +359,25 @@ class ImageRenderManager:
             xs = display_roi.center_x + float(radius_px) * np.cos(theta)
             ys = display_roi.center_y + float(radius_px) * np.sin(theta)
             return xs, ys
-        return transformed_circle_points(
+        xs, ys = transformed_circle_points(
             (float(source_roi.center_x), float(source_roi.center_y)),
             float(radius_px),
             affine_matrix,
             window._roi_overlay_theta,
         )
+        # display_roi.center may carry a persisted per-wavelength override
+        # (AreaRoi.per_wavelength) that differs from the plain affine-derived
+        # position above - shift the warped outline to match it so the drawn
+        # circle/ellipse tracks a manual nudge instead of silently reverting
+        # to the CC-derived spot. A no-op when there's no override, since
+        # display_roi.center then equals the affine-derived point exactly.
+        derived_center = apply_affine_to_points(
+            np.asarray([[float(source_roi.center_x), float(source_roi.center_y)]], dtype=np.float64),
+            affine_matrix,
+        )[0]
+        dx = float(display_roi.center_x) - float(derived_center[0])
+        dy = float(display_roi.center_y) - float(derived_center[1])
+        return xs + dx, ys + dy
 
     def set_view_overlay_visibility(
         self,

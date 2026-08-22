@@ -304,7 +304,10 @@ class ImageInteractionController:
                 if point is None:
                     return False
                 roi_id = w._find_roi_id_at(point)
-                if allow_roi_move and w._is_current_reference_image() and roi_id is not None:
+                roi_move_allowed = w._is_current_reference_image() or bool(
+                    w._state.preprocessing.chromatic_correction_enabled
+                )
+                if allow_roi_move and roi_move_allowed and roi_id is not None:
                     if w._selected_roi_ids:
                         drag_roi_ids = set(w._selected_roi_ids)
                     else:
@@ -318,7 +321,7 @@ class ImageInteractionController:
                     w._dragging_rois = True
                     w._drag_anchor = point
                     w._drag_original_positions = {
-                        roi.area_roi_id: (roi.center_x, roi.center_y)
+                        roi.area_roi_id: w._roi_display_position(roi, w._current_image_key)
                         for roi in w._state.area_rois
                         if roi.area_roi_id in drag_roi_ids
                     }
@@ -361,7 +364,8 @@ class ImageInteractionController:
                     if roi.area_roi_id not in w._selected_roi_ids or roi.area_roi_id not in w._drag_original_positions:
                         continue
                     base_x, base_y = w._drag_original_positions[roi.area_roi_id]
-                    roi.center_x, roi.center_y = w._clamp_roi_position(roi, base_x + dx, base_y + dy)
+                    new_x, new_y = w._clamp_roi_position(roi, base_x + dx, base_y + dy)
+                    w._set_roi_position_for_current_view(roi, new_x, new_y)
                 w._schedule_roi_overlay_refresh()
                 return True
 

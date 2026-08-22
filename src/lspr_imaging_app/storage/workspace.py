@@ -79,6 +79,50 @@ def _decode_mask_payload(payload: dict) -> np.ndarray | None:
         return None
 
 
+def _encode_mask_wavelength_diffs(diffs: dict[tuple[int, float], dict[tuple[int, int], bool]] | None) -> list[dict] | None:
+    if not diffs:
+        return None
+    encoded = []
+    for (cube_index, wavelength_nm), pixel_diff in diffs.items():
+        if not pixel_diff:
+            continue
+        encoded.append(
+            {
+                "cube_index": int(cube_index),
+                "wavelength_nm": float(wavelength_nm),
+                "pixels": [[int(row), int(col), bool(value)] for (row, col), value in pixel_diff.items()],
+            }
+        )
+    return encoded or None
+
+
+def _decode_mask_wavelength_diffs(raw: object) -> dict[tuple[int, float], dict[tuple[int, int], bool]] | None:
+    if not isinstance(raw, list) or not raw:
+        return None
+    decoded: dict[tuple[int, float], dict[tuple[int, int], bool]] = {}
+    for entry in raw:
+        if not isinstance(entry, dict):
+            continue
+        try:
+            key = (int(entry["cube_index"]), float(entry["wavelength_nm"]))
+        except (KeyError, TypeError, ValueError):
+            continue
+        pixels = entry.get("pixels")
+        if not isinstance(pixels, list):
+            continue
+        pixel_diff: dict[tuple[int, int], bool] = {}
+        for item in pixels:
+            if not (isinstance(item, list) and len(item) == 3):
+                continue
+            try:
+                pixel_diff[(int(item[0]), int(item[1]))] = bool(item[2])
+            except (TypeError, ValueError):
+                continue
+        if pixel_diff:
+            decoded[key] = pixel_diff
+    return decoded or None
+
+
 def _encode_roi_mask(roi_mask: RoiMask | None) -> dict | None:
     if roi_mask is None:
         return None
@@ -97,13 +141,45 @@ def _decode_roi_mask(payload: object) -> RoiMask | None:
     return RoiMask(x0=int(payload.get("x0", 0)), y0=int(payload.get("y0", 0)), mask=mask)
 
 
+def _encode_per_wavelength_positions(per_wavelength: dict[tuple[int, float], tuple[float, float]] | None) -> list[dict] | None:
+    if not per_wavelength:
+        return None
+    return [
+        {
+            "cube_index": int(cube_index),
+            "wavelength_nm": float(wavelength_nm),
+            "x": float(position[0]),
+            "y": float(position[1]),
+        }
+        for (cube_index, wavelength_nm), position in per_wavelength.items()
+    ]
+
+
+def _decode_per_wavelength_positions(raw: object) -> dict[tuple[int, float], tuple[float, float]] | None:
+    if not isinstance(raw, list) or not raw:
+        return None
+    decoded: dict[tuple[int, float], tuple[float, float]] = {}
+    for entry in raw:
+        if not isinstance(entry, dict):
+            continue
+        try:
+            key = (int(entry["cube_index"]), float(entry["wavelength_nm"]))
+            decoded[key] = (float(entry["x"]), float(entry["y"]))
+        except (KeyError, TypeError, ValueError):
+            continue
+    return decoded or None
+
+
 def _encode_area_roi(area_roi: AreaRoi) -> dict:
-    # asdict() would put the raw sample_mask/reference_mask ndarrays straight
-    # into the payload, which json.dumps can't serialize -- replace them with
-    # the same bitpacked encoding used for MaskSettings' masks.
+    # asdict() would put the raw sample_mask/reference_mask ndarrays, and the
+    # tuple-keyed per_wavelength dict, straight into the payload -- none of
+    # which json.dumps can serialize as-is. Replace them with JSON-safe forms
+    # (bitpacked encoding for the masks, a list of records for per_wavelength,
+    # since JSON object keys must be strings).
     payload = asdict(area_roi)
     payload["sample_mask"] = _encode_roi_mask(area_roi.sample_mask)
     payload["reference_mask"] = _encode_roi_mask(area_roi.reference_mask)
+    payload["per_wavelength"] = _encode_per_wavelength_positions(area_roi.per_wavelength)
     return payload
 
 
@@ -165,6 +241,7 @@ def decode_area_rois(raw_rois: object) -> list[AreaRoi]:
                 label=(None if raw.get("label") in (None, "") else str(raw.get("label"))),
                 created_by=str(raw.get("created_by", "user")),
                 notes=(None if raw.get("notes") in (None, "") else str(raw.get("notes"))),
+                per_wavelength=_decode_per_wavelength_positions(raw.get("per_wavelength")),
             )
         )
     return area_rois
@@ -558,6 +635,7 @@ def build_processing_profile_payload(
             payload["session_mask"] = {
                 "record_path": None if record_path is None else str(record_path),
                 "mask": _encode_mask_payload(np.asarray(mask, dtype=bool)),
+                "wavelength_diffs": _encode_mask_wavelength_diffs(session_mask.get("wavelength_diffs")),
             }
     return payload
 
@@ -865,6 +943,7 @@ def load_processing_profile(
             session_mask = {
                 "record_path": None if record_path is None else str(record_path),
                 "mask": decoded_mask,
+                "wavelength_diffs": _decode_mask_wavelength_diffs(session_mask_payload.get("wavelength_diffs")),
             }
 
     raw_exclusions = payload.get("image_exclusions", [])

@@ -184,6 +184,8 @@ def track_landmarks(
     patch_radius_px: int = 10,
     subpixel_precision: int = 1,
     predicted_positions: dict[int, tuple[float, float]] | None = None,
+    reference_prepared: np.ndarray | None = None,
+    target_prepared: np.ndarray | None = None,
 ) -> dict[int, tuple[float, float]]:
     """Follow `reference_landmarks` from `reference_image` into `target_image`.
 
@@ -200,11 +202,20 @@ def track_landmarks(
     `auto_track_landmarks_over_wavelengths`) -- letting the search start from
     a much better prior once one is available, instead of just the last
     tracked position.
+
+    `reference_prepared`/`target_prepared`, if given, are used instead of
+    recomputing `prepare_registration_image` on `reference_image`/`target_image`
+    -- for a caller stepping through a wavelength sequence where each image
+    serves as both a step's target and the next step's reference (see
+    `auto_track_landmarks_over_wavelengths`), this avoids redoing the same
+    full-image band-pass filter twice per image.
     """
     if not reference_landmarks:
         return {}
-    reference_prepared = prepare_registration_image(reference_image)
-    target_prepared = prepare_registration_image(target_image)
+    if reference_prepared is None:
+        reference_prepared = prepare_registration_image(reference_image)
+    if target_prepared is None:
+        target_prepared = prepare_registration_image(target_image)
     shift_x, shift_y, _score = multiscale_phase_correlation_shift(reference_prepared, target_prepared)
     image_height, image_width = target_prepared.shape[:2]
     half = max(int(patch_radius_px), 4)
@@ -387,6 +398,8 @@ def track_spot_landmarks(
     search_radius_px: int = 12,
     predicted_positions: dict[int, tuple[float, float]] | None = None,
     area_roi_settings: AreaRoiDetectionSettings | None = None,
+    reference_prepared: np.ndarray | None = None,
+    target_prepared: np.ndarray | None = None,
 ) -> dict[int, tuple[float, float]]:
     """Follow `reference_landmarks` from `reference_image` into `target_image`
     by re-locating each one's spot centroid, instead of `track_landmarks`'s
@@ -408,11 +421,17 @@ def track_spot_landmarks(
     only returns genuine, already-validated particles. Falls back to the
     local search if no settings are given, and to the search center itself
     if no particle is found within `search_radius_px`.
+
+    `reference_prepared`/`target_prepared`, if given, are used instead of
+    recomputing `prepare_registration_image` for the global-shift step -- see
+    `track_landmarks`.
     """
     if not reference_landmarks:
         return {}
-    reference_prepared = prepare_registration_image(reference_image)
-    target_prepared = prepare_registration_image(target_image)
+    if reference_prepared is None:
+        reference_prepared = prepare_registration_image(reference_image)
+    if target_prepared is None:
+        target_prepared = prepare_registration_image(target_image)
     shift_x, shift_y, _score = multiscale_phase_correlation_shift(reference_prepared, target_prepared)
     target_f32 = target_image.astype(np.float32, copy=False)
     image_height, image_width = target_f32.shape[:2]
@@ -639,8 +658,16 @@ def auto_track_landmarks_over_wavelengths(
     }
 
     previous_image = first_image
+    # Computed once per sampled image and carried over as next step's
+    # reference -- each image serves as one step's target and the next
+    # step's reference, so without this every image's full-image band-pass
+    # filter (prepare_registration_image, the priciest part of a tracking
+    # step) would otherwise be recomputed twice, and up to four times when
+    # kind="both" runs both trackers against the same pair.
+    previous_prepared = prepare_registration_image(first_image)
     total_steps = max(len(ordered) - 1, 1)
     for step_index, (wavelength, image) in enumerate(ordered[1:], start=1):
+        current_prepared = prepare_registration_image(image)
         predicted_by_feature: dict[int, tuple[float, float]] = {}
         for feature_id, history in trajectories.items():
             predicted = _predict_trend_position(history, wavelength)
@@ -657,6 +684,8 @@ def auto_track_landmarks_over_wavelengths(
                 patch_radius_px=patch_radius_px,
                 subpixel_precision=subpixel_precision,
                 predicted_positions=predicted_by_feature,
+                reference_prepared=previous_prepared,
+                target_prepared=current_prepared,
             ).items():
                 candidates_by_feature[feature_id].append(point)
         if kind in ("centroid", "both"):
@@ -668,6 +697,8 @@ def auto_track_landmarks_over_wavelengths(
                 spot_mode=spot_mode,
                 predicted_positions=predicted_by_feature,
                 area_roi_settings=area_roi_settings,
+                reference_prepared=previous_prepared,
+                target_prepared=current_prepared,
             ).items():
                 candidates_by_feature[feature_id].append(point)
 
@@ -678,6 +709,7 @@ def auto_track_landmarks_over_wavelengths(
             next_points[feature_id] = chosen
             history.append((wavelength, chosen[0], chosen[1]))
         current = next_points
+        previous_prepared = current_prepared
         previous_image = image
         if progress_callback is not None:
             progress_callback(step_index, total_steps)
@@ -988,6 +1020,25 @@ def warp_boolean_mask_affine(
     return warped >= 0.5
 
 
+def apply_mask_wavelength_diff(mask: np.ndarray, diff: dict[tuple[int, int], bool] | None) -> np.ndarray:
+    """Apply a sparse per-wavelength ignore-mask diff - `{(row, col): value}`,
+    already in `mask`'s own pixel space - on top of `mask`. Non-mutating; a
+    no-op when `diff` is empty/None, which is the common case (most
+    wavelengths have no manual edits - see MaskController.apply_wavelength_diff,
+    the mask analogue of AreaRoi.per_wavelength for ROI positions). Entries
+    outside `mask`'s bounds are ignored rather than raising, since a diff can
+    outlive a preprocessing change that shrinks the image (e.g. a new crop).
+    """
+    if not diff:
+        return mask
+    result = mask.copy()
+    height, width = result.shape[:2]
+    for (row, col), value in diff.items():
+        if 0 <= row < height and 0 <= col < width:
+            result[row, col] = bool(value)
+    return result
+
+
 def transformed_circle_points(
     center_xy: tuple[float, float],
     radius_px: float,
@@ -1221,6 +1272,34 @@ def transform_rois_affine(
             transformed_roi.center_y = float(np.clip(transformed_roi.center_y, 0.0, max_y))
         transformed.append(transformed_roi)
     return transformed
+
+
+def populate_dense_roi_positions(
+    rois: list[AreaRoi],
+    image_keys: list[tuple[int, float]],
+    affine_lookup,
+) -> None:
+    """(Re)build each ROI's full `per_wavelength` position vector in place.
+
+    Called whenever chromatic correction is (re-)enabled or its models are
+    re-fit (see ChromaticController.update_settings). For every `image_key`,
+    maps each ROI's canonical `(center_x, center_y)` through `affine_lookup(key)`
+    and stores the result -- overwriting any prior entry, including manual
+    per-wavelength nudges, which is the intended "re-fit wins" behavior (no
+    "manual vs derived" tracking; see AreaRoi.per_wavelength).
+    """
+    if not rois or not image_keys:
+        return
+    source_points = np.asarray([(roi.center_x, roi.center_y) for roi in rois], dtype=np.float64)
+    for key in image_keys:
+        affine_matrix = affine_lookup(key)
+        if affine_matrix is None:
+            continue
+        target_points = apply_affine_to_points(source_points, affine_matrix)
+        for roi, point in zip(rois, target_points):
+            if roi.per_wavelength is None:
+                roi.per_wavelength = {}
+            roi.per_wavelength[key] = (float(point[0]), float(point[1]))
 
 
 def _corner_response(image: np.ndarray) -> np.ndarray:

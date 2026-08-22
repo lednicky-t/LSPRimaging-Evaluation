@@ -101,6 +101,7 @@ class SessionStateManager:
             window._current_file_mask = None
             window._current_file_mask_path = None
             window._current_file_mask_session_source_path = None
+            window._current_file_mask_wavelength_diffs = {}
             window._append_workflow_log(
                 f"Mask settings restore | histogram={bool(mask_settings.histogram_enabled)} figure={bool(mask_settings.figure_enabled)}",
                 level="debug",
@@ -113,6 +114,7 @@ class SessionStateManager:
                     window._current_file_mask_session_source_path = (
                         None if restored_record_path is None else Path(str(restored_record_path))
                     )
+                    window._current_file_mask_wavelength_diffs = session_mask.get("wavelength_diffs") or {}
             window._report_startup_progress(48, "Restoring ROI groups...")
             window._report_startup_progress(54, "Restoring chromatic transforms...")
             window._state.chromatic_models = chromatic_models
@@ -528,6 +530,7 @@ class SessionStateManager:
                     window._current_file_mask_session_source_path = (
                         None if restored_record_path is None else Path(str(restored_record_path))
                     )
+                    window._current_file_mask_wavelength_diffs = session_mask.get("wavelength_diffs") or {}
             window._restore_analysis_caches(analysis_cache)
             window._update_roi_table()
             window._restore_control_preferences()

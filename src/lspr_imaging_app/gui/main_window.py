@@ -314,6 +314,11 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, HistogramMaskMixin, Measurem
         self._current_file_mask: np.ndarray | None = None
         self._current_file_mask_path: Path | None = None
         self._current_file_mask_session_source_path: Path | None = None
+        # Sparse per-wavelength ignore-mask edits: image_key -> {(row, col): value}.
+        # Applied on top of the live chromatic-warped reference mask wherever it's
+        # consumed (see MaskController.apply_wavelength_diff) - see AreaRoi.per_wavelength
+        # for the analogous, denser mechanism used for ROI positions.
+        self._current_file_mask_wavelength_diffs: dict[tuple[int, float], dict[tuple[int, int], bool]] = {}
         self._mask_histogram_preview: np.ndarray | None = None
         self._mask_figure_preview: np.ndarray | None = None
         self._mask_morphology_operation: str | None = None
@@ -3254,6 +3259,26 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, HistogramMaskMixin, Measurem
             for roi in roi_list
         )
 
+    def _roi_override_signature(
+        self, rois: list[AreaRoi] | None, image_key: tuple[int, float] | None
+    ) -> tuple[object, ...]:
+        """The `per_wavelength` override in effect for `image_key`, per ROI -
+        folded into display_rois()'s cache signature so a manual per-wavelength
+        nudge or a chromatic re-fit (which repopulates per_wavelength wholesale)
+        actually invalidates the cached overlay instead of it silently going
+        stale. `_roi_signature` alone can't see this: it only hashes the
+        canonical center/radius, not per-wavelength overrides."""
+        roi_list = self._state.area_rois if rois is None else rois
+        if image_key is None:
+            return ()
+        return tuple(
+            (
+                roi.area_roi_id,
+                None if not roi.per_wavelength else roi.per_wavelength.get(image_key),
+            )
+            for roi in roi_list
+        )
+
     def _preprocessing_signature(self, image_key: tuple[int, float] | None = None) -> tuple[object, ...]:
         crop = self._state.preprocessing.crop
         chromatic_signature = self._chromatic_signature_for_image_key(image_key)
@@ -5144,23 +5169,35 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, HistogramMaskMixin, Measurem
         self._mask_controller.set_draw_mode(mode)
 
     def _sync_roi_edit_capabilities(self) -> None:
-        editable = self._active_tool == "roi" and self._is_current_reference_image()
-        self.roi_add_action.setEnabled(editable)
-        self.roi_move_action.setEnabled(editable)
-        self.roi_array_action.setEnabled(editable)
-        self.remove_rois_action.setEnabled(editable)
-        self.group_rois_action.setEnabled(editable)
-        self.ungroup_rois_action.setEnabled(editable)
-        if not editable:
+        # ROI creation (add/array-stamp) and removal/grouping stay anchored to
+        # the reference image - new ROIs are always authored in reference
+        # space (see AreaRoi.per_wavelength). Moving an *existing* ROI is also
+        # allowed while viewing a non-reference wavelength once chromatic
+        # correction is enabled, so the maintainer can independently nudge a
+        # per-wavelength position (see RoiGeometryMixin._roi_display_position/
+        # _set_roi_position_for_current_view).
+        on_reference = self._is_current_reference_image()
+        creation_editable = self._active_tool == "roi" and on_reference
+        move_editable = self._active_tool == "roi" and (
+            on_reference or bool(self._state.preprocessing.chromatic_correction_enabled)
+        )
+        self.roi_add_action.setEnabled(creation_editable)
+        self.roi_move_action.setEnabled(move_editable)
+        self.roi_array_action.setEnabled(creation_editable)
+        self.remove_rois_action.setEnabled(creation_editable)
+        self.group_rois_action.setEnabled(creation_editable)
+        self.ungroup_rois_action.setEnabled(creation_editable)
+        if not creation_editable:
             self.roi_add_action.blockSignals(True)
             self.roi_add_action.setChecked(False)
             self.roi_add_action.blockSignals(False)
-            self.roi_move_action.blockSignals(True)
-            self.roi_move_action.setChecked(False)
-            self.roi_move_action.blockSignals(False)
             self.roi_array_action.blockSignals(True)
             self.roi_array_action.setChecked(False)
             self.roi_array_action.blockSignals(False)
+        if not move_editable:
+            self.roi_move_action.blockSignals(True)
+            self.roi_move_action.setChecked(False)
+            self.roi_move_action.blockSignals(False)
         self._sync_rotation_visibility()
         self._sync_crop_visibility()
         self._update_status_hint()
@@ -6925,6 +6962,11 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, HistogramMaskMixin, Measurem
 
     def _current_external_mask(self) -> np.ndarray | None:
         return self._mask_controller.current_external_mask()
+
+    def _apply_mask_wavelength_diff(
+        self, mask: np.ndarray | None, image_key: tuple[int, float] | None
+    ) -> np.ndarray | None:
+        return self._mask_controller.apply_wavelength_diff(mask, image_key)
 
     def _effective_external_mask_for_record(
         self,

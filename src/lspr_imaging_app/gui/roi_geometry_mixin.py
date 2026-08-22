@@ -6,6 +6,7 @@ from PyQt6.QtGui import QColor
 from PyQt6.QtWidgets import QColorDialog, QInputDialog, QMenu
 
 from lspr_imaging_app.domain.models import AreaRoi, AreaRoiGroup
+from lspr_imaging_app.processing.chromatic import apply_affine_to_points
 
 
 class RoiGeometryMixin:
@@ -17,6 +18,47 @@ class RoiGeometryMixin:
     class.
     """
 
+    def _roi_display_position(self, roi: AreaRoi, image_key: tuple[int, float] | None) -> tuple[float, float]:
+        """The on-screen position for `roi` at `image_key`: an explicit
+        per-wavelength override if one exists, else the canonical position
+        transformed through that wavelength's chromatic affine (identity on
+        the reference wavelength). Used as the basis for a manual nudge/drag
+        so edits move the ROI from where it's actually showing, not from its
+        (possibly different) reference-space position."""
+        if image_key is not None and roi.per_wavelength:
+            override = roi.per_wavelength.get(image_key)
+            if override is not None:
+                return override
+        if image_key is None or self._is_reference_image_key(image_key):
+            return roi.center_x, roi.center_y
+        affine_matrix = self._chromatic_affine_for_image_key(image_key)
+        if affine_matrix is None:
+            return roi.center_x, roi.center_y
+        point = np.asarray([[roi.center_x, roi.center_y]], dtype=np.float64)
+        transformed = apply_affine_to_points(point, affine_matrix)[0]
+        return float(transformed[0]), float(transformed[1])
+
+    def _set_roi_position_for_current_view(self, roi: AreaRoi, new_x: float, new_y: float) -> None:
+        """Write a manual position edit for `roi`. On the reference image, or
+        whenever chromatic correction isn't enabled (there's no separate
+        per-wavelength identity to write into), this is the canonical
+        center_x/center_y - same as before this per-wavelength override
+        existed. Otherwise the edit is independent of the canonical position:
+        it's stored in per_wavelength for the currently displayed wavelength
+        only, and survives until the next chromatic re-fit (see
+        AreaRoi.per_wavelength / ChromaticController.refresh_dense_roi_positions)."""
+        image_key = self._current_image_key
+        if (
+            image_key is None
+            or self._is_reference_image_key(image_key)
+            or not self._state.preprocessing.chromatic_correction_enabled
+        ):
+            roi.center_x, roi.center_y = new_x, new_y
+            return
+        if roi.per_wavelength is None:
+            roi.per_wavelength = {}
+        roi.per_wavelength[image_key] = (new_x, new_y)
+
     def _move_selected_rois(self, dx: float, dy: float) -> None:
         if not self._selected_roi_ids:
             return
@@ -25,7 +67,9 @@ class RoiGeometryMixin:
         for roi in self._state.area_rois:
             if roi.area_roi_id not in self._selected_roi_ids:
                 continue
-            roi.center_x, roi.center_y = self._clamp_roi_position(roi, roi.center_x + dx, roi.center_y + dy)
+            base_x, base_y = self._roi_display_position(roi, self._current_image_key)
+            new_x, new_y = self._clamp_roi_position(roi, base_x + dx, base_y + dy)
+            self._set_roi_position_for_current_view(roi, new_x, new_y)
         # Only the moved ROI(s) need their overlay bundle rebuilt - with many
         # ROIs on screen, redrawing every curve/label and restyling the whole
         # ROI table (the unscoped default) on every single arrow-key repeat
@@ -63,6 +107,8 @@ class RoiGeometryMixin:
         )
         provisional.center_x, provisional.center_y = self._clamp_roi_position(provisional, provisional.center_x, provisional.center_y)
         self._state.area_rois.append(provisional)
+        if self._state.preprocessing.chromatic_correction_enabled:
+            self._chromatic_controller.refresh_dense_roi_positions([provisional])
         self._selected_roi_ids = {provisional.area_roi_id}
         self._update_roi_overlays()
         self._update_roi_table()
@@ -100,6 +146,8 @@ class RoiGeometryMixin:
                 new_rois.append(roi)
                 next_id += 1
         self._state.area_rois.extend(new_rois)
+        if self._state.preprocessing.chromatic_correction_enabled:
+            self._chromatic_controller.refresh_dense_roi_positions(new_rois)
         self._selected_roi_ids = {s.area_roi_id for s in new_rois}
         self._update_roi_overlays()
         self._update_roi_table()
