@@ -29,7 +29,7 @@ Alvey Vision Conference, 1988) in place of template matching.
 
 from __future__ import annotations
 
-from copy import deepcopy
+from copy import copy
 from dataclasses import dataclass
 
 import numpy as np
@@ -1263,7 +1263,22 @@ def transform_rois_affine(
     for index, roi in enumerate(rois):
         target_x = float(target_points[index, 0])
         target_y = float(target_points[index, 1])
-        transformed_roi = deepcopy(roi)
+        # Shallow copy, not deepcopy: only center_x/center_y/sample_radius_px
+        # get reassigned below (rebinding a scalar attribute on the copy
+        # never touches the original), and every caller of this function's
+        # result (ROI overlay rendering, rois_for_preprocessing's exclusion
+        # mask) only ever reads those three fields off the transformed
+        # copy - never per_wavelength, which stays shared by reference and
+        # is never mutated through it. AreaRoi.per_wavelength can hold tens
+        # of thousands of entries on a chromatically-registered dataset (see
+        # ChromaticController.refresh_dense_roi_positions), and this runs
+        # once per ROI on *every* call - deep-copying it here (discarding
+        # the copy unused every time) was the same wasted-deepcopy pattern
+        # already found and fixed at two other call sites this session,
+        # just in the overlay-rendering path instead, which only shows up
+        # once chromatic correction is actually enabled - measured ~4s for
+        # 160 ROIs, i.e. all of "ROI overlay rebuild"'s cost.
+        transformed_roi = copy(roi)
         transformed_roi.center_x = target_x
         transformed_roi.center_y = target_y
         transformed_roi.sample_radius_px = max(float(roi.sample_radius_px) * scale, 1.0)

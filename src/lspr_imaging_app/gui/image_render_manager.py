@@ -3,8 +3,10 @@ from __future__ import annotations
 from copy import deepcopy
 from pathlib import Path
 import time
+from types import SimpleNamespace
 
 import numpy as np
+from PyQt6.QtCore import QTimer
 
 from lspr_imaging_app.processing.chromatic import (
     apply_affine_to_points,
@@ -12,6 +14,27 @@ from lspr_imaging_app.processing.chromatic import (
     transform_rois_affine,
     warp_boolean_mask_affine,
 )
+
+
+def _current_zoom_factor(window) -> float | None:
+    """How zoomed in the image view currently is: 1.0x means the full image
+    is visible, >1.0x means a smaller region fills the viewport. None if
+    there's no image or the view range can't be read. Added to the stage
+    timing logs specifically to test a maintainer report ("switching feels
+    slow when the view is zoomed in") that didn't show up in any existing
+    per-stage timing - if zoom level correlates with a slow switch, this
+    makes that visible directly in the log instead of needing it described
+    separately every time."""
+    if window._current_processed_image is None:
+        return None
+    image_height, image_width = window._current_processed_image.shape[:2]
+    try:
+        (x0, x1), (y0, y1) = window.image_plot.vb.viewRange()
+    except Exception:
+        return None
+    view_width = max(float(x1) - float(x0), 1e-6)
+    view_height = max(float(y1) - float(y0), 1e-6)
+    return max(float(image_width) / view_width, float(image_height) / view_height)
 
 
 def _apply_dense_overrides(transformed: list, original: list, image_key: tuple[int, float] | None) -> list:
@@ -40,6 +63,24 @@ class ImageRenderManager:
         dataset = window._state.dataset
         if dataset is None:
             return
+        # Stage timing - see apply_preprocessing's log_stage_timing docstring
+        # for why this is safe to always compute (once per switch, negligible
+        # perf_counter overhead) and only visible in the console when Debug
+        # mode is on. Added because "Image load"/"Image apply" only measure
+        # from dispatch onward - this whole synchronous prep block (widget
+        # syncs, reference-image resolution, the deepcopy calls below) runs
+        # *before* dispatch and was previously invisible to any timer, so a
+        # multi-second stall here couldn't be distinguished from one in the
+        # background compute or the GUI-thread apply.
+        stage_started_at = time.perf_counter()
+        stage_timings: list[tuple[str, float]] = []
+
+        def _mark_stage(label: str) -> None:
+            nonlocal stage_started_at
+            now = time.perf_counter()
+            stage_timings.append((label, (now - stage_started_at) * 1000.0))
+            stage_started_at = now
+
         spectral_cube_index = window._current_spectral_cube()
         wavelength = window._current_wavelength()
         if spectral_cube_index is None or wavelength is None:
@@ -51,6 +92,7 @@ class ImageRenderManager:
                 window._state.preprocessing.reference_mode = "auto"
                 window._state.preprocessing.reference_spectral_cube_index = int(auto_spectral_cube)
                 window._state.preprocessing.reference_wavelength_nm = float(auto_wavelength)
+        _mark_stage("reference_resolve")
         window.spectral_cube_spin.blockSignals(True)
         window.spectral_cube_spin.setValue(int(spectral_cube_index))
         window.spectral_cube_spin.blockSignals(False)
@@ -59,8 +101,11 @@ class ImageRenderManager:
         window.wavelength_spin.blockSignals(False)
         window._update_reference_controls()
         window._update_reference_summary()
+        _mark_stage("reference_ui")
         window._update_metadata_status_label()
+        _mark_stage("metadata_label")
         window._update_sensorgram_current_point()
+        _mark_stage("sensorgram_point")
         record = window._record_map.get((spectral_cube_index, wavelength))
         if record is None:
             window.status_label.setText("Selected spectral cube/wavelength combination is missing.")
@@ -69,13 +114,43 @@ class ImageRenderManager:
         if window._current_image_key == image_key:
             return
         preprocessing = deepcopy(window._state.preprocessing)
+        _mark_stage("deepcopy_preprocessing")
         mask_settings = deepcopy(window._state.area_roi_settings) if preprocessing.flatten_background_exclude_mask else None
-        rois = deepcopy(window._rois_for_preprocessing(image_key))
+        _mark_stage("deepcopy_mask_settings")
+        if preprocessing.flatten_background_enabled and preprocessing.flatten_background_exclude_area_rois:
+            # Lightweight per-ROI snapshot - just the 3 fields
+            # flatten_background's exclusion mask actually reads (see
+            # preprocess._roi_exclusion_mask) - not deepcopy(AreaRoi). An
+            # AreaRoi can carry a `per_wavelength` dict with one entry per
+            # (spectral_cube, wavelength) in the *entire* dataset (see
+            # ChromaticController.refresh_dense_roi_positions, populated
+            # whenever chromatic correction was last enabled/re-fit, and
+            # persisting regardless of CC's current on/off state - a dataset
+            # with hundreds of spectral cubes means thousands of entries per
+            # ROI). Deep-copying that on every single wavelength switch -
+            # even when background flattening is off and none of it is even
+            # read - measured at ~3.3s on a real dataset, the dominant cost
+            # of the whole switch.
+            rois = [
+                SimpleNamespace(center_x=roi.center_x, center_y=roi.center_y, sample_radius_px=roi.sample_radius_px)
+                for roi in window._rois_for_preprocessing(image_key)
+            ]
+        else:
+            rois = None
+        _mark_stage("deepcopy_rois")
         _external_mask, external_mask_processed = window._effective_external_mask_for_record(record.path, processed_space=True)
+        _mark_stage("external_mask")
         cache_key = window._processed_image_cache_key(record.path, image_key)
         signature = cache_key
         window._latest_image_refresh_signature = signature
         cached = window._get_processed_image_from_cache(cache_key)
+        _mark_stage("cache_lookup")
+        total_ms = sum(elapsed for _label, elapsed in stage_timings)
+        window._workflow_logger.debug(
+            "Image refresh prep stages | "
+            + " ".join(f"{label}={elapsed:.0f}ms" for label, elapsed in stage_timings)
+            + f" total={total_ms:.0f}ms"
+        )
         if cached is not None:
             started_at = time.perf_counter()
             window._apply_loaded_image(cached, record.path, image_key, spectral_cube_index, wavelength, record.path.name)
@@ -219,8 +294,31 @@ class ImageRenderManager:
             apply_elapsed = window._format_elapsed_seconds(time.perf_counter() - apply_started_at)
             if apply_elapsed:
                 window._append_workflow_log_throttled("image_apply", f"Image apply | {apply_elapsed}", level="debug", min_interval=2.0)
+            self._log_post_apply_idle_gap()
         if window._pending_image_refresh_payload is not None:
             self.start_pending_image_refresh()
+
+    def _log_post_apply_idle_gap(self) -> None:
+        """Schedules a zero-delay callback to measure how long Qt's event
+        loop took to become idle again after apply_loaded_image() just
+        returned - the actual screen repaint (image + all ROI overlay
+        curves/labels) happens as pending paint events Qt processes *after*
+        this Python call stack returns control to the event loop, so no
+        timer inside apply_loaded_image can see that cost at all. Exists
+        because a maintainer report ("switching feels slow when the view is
+        zoomed in") didn't show up in any existing stage timing - if it's
+        real, a Qt-side repaint cost invisible to Python-level timing is the
+        most likely place left for it to be hiding."""
+        window = self.window
+        return_at = time.perf_counter()
+
+        def _report() -> None:
+            idle_gap_ms = (time.perf_counter() - return_at) * 1000.0
+            zoom_factor = _current_zoom_factor(window)
+            zoom_text = "n/a" if zoom_factor is None else f"{zoom_factor:.1f}x"
+            window._workflow_logger.debug(f"Image apply post-return idle gap | {idle_gap_ms:.0f}ms zoom={zoom_text}")
+
+        QTimer.singleShot(0, _report)
 
     def on_image_refresh_failed(self, message: str) -> None:
         window = self.window
@@ -368,10 +466,12 @@ class ImageRenderManager:
             window._analysis_controller.preview_sensorgram_from_cache()
         _mark_stage("status_and_preview")
         total_ms = sum(elapsed for _label, elapsed in stage_timings)
+        zoom_factor = _current_zoom_factor(window)
+        zoom_text = "n/a" if zoom_factor is None else f"{zoom_factor:.1f}x"
         window._workflow_logger.debug(
             "Image apply stages | "
             + " ".join(f"{label}={elapsed:.0f}ms" for label, elapsed in stage_timings)
-            + f" total={total_ms:.0f}ms"
+            + f" total={total_ms:.0f}ms zoom={zoom_text}"
         )
         # Used to also call _request_roi_metrics_refresh() here to recompute
         # AreaRoi.score against the newly-shown reference image - removed

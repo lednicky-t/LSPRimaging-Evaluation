@@ -325,11 +325,20 @@ class SessionStateManager:
                 level="debug",
             )
         if (
-            not force
-            and window._last_saved_processing_signature == signature
+            window._last_saved_processing_signature == signature
             and window._last_saved_preprocessing_path == path
             and window._last_saved_profile_path == profile_path
         ):
+            # `force` only ever meant "don't wait for the debounce timer" (see
+            # save_processing_state_for_dataset's docstring: "bypasses the
+            # debounce"), not "rewrite even if nothing changed" - those are
+            # separate concerns that used to be conflated here. Skipping this
+            # rebuild+write when content is genuinely identical (regardless of
+            # force) matters now that a real dataset's ROI per_wavelength data
+            # makes rebuilding the payload just to compare it a multi-second
+            # cost in its own right (see _roi_signature_entry) - closeEvent's
+            # force=True save was unconditionally paying that cost on every
+            # close, even when nothing had changed since the last autosave.
             window._append_workflow_log_throttled(
                 "processing_state_save_skipped",
                 f"Processing state save skipped | path={profile_path.name} | unchanged",

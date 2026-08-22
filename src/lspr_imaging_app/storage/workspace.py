@@ -4,7 +4,7 @@ import base64
 import json
 import os
 import tempfile
-from dataclasses import asdict
+from dataclasses import asdict, fields
 from pathlib import Path
 
 import numpy as np
@@ -171,15 +171,49 @@ def _decode_per_wavelength_positions(raw: object) -> dict[tuple[int, float], tup
 
 
 def _encode_area_roi(area_roi: AreaRoi) -> dict:
-    # asdict() would put the raw sample_mask/reference_mask ndarrays, and the
-    # tuple-keyed per_wavelength dict, straight into the payload -- none of
-    # which json.dumps can serialize as-is. Replace them with JSON-safe forms
-    # (bitpacked encoding for the masks, a list of records for per_wavelength,
-    # since JSON object keys must be strings).
-    payload = asdict(area_roi)
+    # Shallow field enumeration, not asdict() - asdict() recursively
+    # deep-copies every field, including per_wavelength (one entry per
+    # (spectral_cube, wavelength) the ROI has ever been chromatically
+    # registered against - can be tens of thousands of entries per ROI on a
+    # large dataset, see AreaRoi.per_wavelength) and the mask arrays, even
+    # though both get overwritten immediately below with their own
+    # JSON-safe encoding anyway - the deep-copied value is thrown away
+    # unused. Every other AreaRoi field is a plain scalar (int/float/str/
+    # bool/None), so a shallow getattr() per field is exactly as correct as
+    # asdict() for them, just without paying to deep-copy the two fields
+    # whose copy is discarded. Measured ~2s of ~3.6s per 160 ROIs on a real
+    # dataset was this exact deepcopy, paid on every close (closeEvent's
+    # force=True save) and on every debounced autosave's unchanged-check
+    # (_processing_state_signature also calls this).
+    payload = {field.name: getattr(area_roi, field.name) for field in fields(area_roi)}
     payload["sample_mask"] = _encode_roi_mask(area_roi.sample_mask)
     payload["reference_mask"] = _encode_roi_mask(area_roi.reference_mask)
     payload["per_wavelength"] = _encode_per_wavelength_positions(area_roi.per_wavelength)
+    return payload
+
+
+def _roi_signature_entry(area_roi: AreaRoi) -> dict:
+    """Like `_encode_area_roi`, but `per_wavelength` collapses to a cheap
+    (count, hash) fingerprint instead of the full list of records - for
+    `MainWindow._processing_state_signature`'s "did anything change" check
+    only, never for the actual saved payload (which always goes through
+    `_encode_area_roi` for a full, faithful encoding). Mirrors that
+    signature's own `_mask_signature` helper, which already uses a
+    shape+nonzero-count proxy instead of full mask-array content for the
+    same reason: a full `per_wavelength` dict can hold tens of thousands of
+    entries, and json.dumps-ing that into a comparison string on every
+    debounced autosave check was exactly as expensive as just doing the
+    real save - defeating the point of checking first. A hash collision
+    would only cause one save to be wrongly skipped; the next real edit's
+    differing signature still triggers one.
+    """
+    payload = {field.name: getattr(area_roi, field.name) for field in fields(area_roi)}
+    payload["sample_mask"] = _encode_roi_mask(area_roi.sample_mask)
+    payload["reference_mask"] = _encode_roi_mask(area_roi.reference_mask)
+    per_wavelength = area_roi.per_wavelength
+    payload["per_wavelength"] = (
+        None if not per_wavelength else (len(per_wavelength), hash(frozenset(per_wavelength.items())))
+    )
     return payload
 
 
