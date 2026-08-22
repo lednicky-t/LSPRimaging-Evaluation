@@ -1269,15 +1269,11 @@ def transform_rois_affine(
         # result (ROI overlay rendering, rois_for_preprocessing's exclusion
         # mask) only ever reads those three fields off the transformed
         # copy - never per_wavelength, which stays shared by reference and
-        # is never mutated through it. AreaRoi.per_wavelength can hold tens
-        # of thousands of entries on a chromatically-registered dataset (see
-        # ChromaticController.refresh_dense_roi_positions), and this runs
-        # once per ROI on *every* call - deep-copying it here (discarding
-        # the copy unused every time) was the same wasted-deepcopy pattern
-        # already found and fixed at two other call sites this session,
-        # just in the overlay-rendering path instead, which only shows up
-        # once chromatic correction is actually enabled - measured ~4s for
-        # 160 ROIs, i.e. all of "ROI overlay rebuild"'s cost.
+        # is never mutated through it. Deep-copying it here on every ROI on
+        # every call, just to discard the copy unused, was a real cost when
+        # per_wavelength held one entry per (cube, wavelength) in the whole
+        # dataset under the old eager-population design; it's just a handful
+        # of manual nudges now, but the shallow copy is still the right call.
         transformed_roi = copy(roi)
         transformed_roi.center_x = target_x
         transformed_roi.center_y = target_y
@@ -1287,34 +1283,6 @@ def transform_rois_affine(
             transformed_roi.center_y = float(np.clip(transformed_roi.center_y, 0.0, max_y))
         transformed.append(transformed_roi)
     return transformed
-
-
-def populate_dense_roi_positions(
-    rois: list[AreaRoi],
-    image_keys: list[tuple[int, float]],
-    affine_lookup,
-) -> None:
-    """(Re)build each ROI's full `per_wavelength` position vector in place.
-
-    Called whenever chromatic correction is (re-)enabled or its models are
-    re-fit (see ChromaticController.update_settings). For every `image_key`,
-    maps each ROI's canonical `(center_x, center_y)` through `affine_lookup(key)`
-    and stores the result -- overwriting any prior entry, including manual
-    per-wavelength nudges, which is the intended "re-fit wins" behavior (no
-    "manual vs derived" tracking; see AreaRoi.per_wavelength).
-    """
-    if not rois or not image_keys:
-        return
-    source_points = np.asarray([(roi.center_x, roi.center_y) for roi in rois], dtype=np.float64)
-    for key in image_keys:
-        affine_matrix = affine_lookup(key)
-        if affine_matrix is None:
-            continue
-        target_points = apply_affine_to_points(source_points, affine_matrix)
-        for roi, point in zip(rois, target_points):
-            if roi.per_wavelength is None:
-                roi.per_wavelength = {}
-            roi.per_wavelength[key] = (float(point[0]), float(point[1]))
 
 
 def _corner_response(image: np.ndarray) -> np.ndarray:

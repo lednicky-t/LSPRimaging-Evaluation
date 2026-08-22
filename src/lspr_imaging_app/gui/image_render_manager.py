@@ -120,17 +120,11 @@ class ImageRenderManager:
         if preprocessing.flatten_background_enabled and preprocessing.flatten_background_exclude_area_rois:
             # Lightweight per-ROI snapshot - just the 3 fields
             # flatten_background's exclusion mask actually reads (see
-            # preprocess._roi_exclusion_mask) - not deepcopy(AreaRoi). An
-            # AreaRoi can carry a `per_wavelength` dict with one entry per
-            # (spectral_cube, wavelength) in the *entire* dataset (see
-            # ChromaticController.refresh_dense_roi_positions, populated
-            # whenever chromatic correction was last enabled/re-fit, and
-            # persisting regardless of CC's current on/off state - a dataset
-            # with hundreds of spectral cubes means thousands of entries per
-            # ROI). Deep-copying that on every single wavelength switch -
-            # even when background flattening is off and none of it is even
-            # read - measured at ~3.3s on a real dataset, the dominant cost
-            # of the whole switch.
+            # preprocess._roi_exclusion_mask) - not deepcopy(AreaRoi). AreaRoi
+            # can carry sample_mask/reference_mask (RoiMask numpy arrays) that
+            # this preprocessing step never reads; deep-copying those on every
+            # single wavelength switch, even when background flattening is off,
+            # is needless work this snapshot avoids.
             rois = [
                 SimpleNamespace(center_x=roi.center_x, center_y=roi.center_y, sample_radius_px=roi.sample_radius_px)
                 for roi in window._rois_for_preprocessing(image_key)

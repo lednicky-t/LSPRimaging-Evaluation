@@ -45,8 +45,8 @@ class RoiGeometryMixin:
         center_x/center_y - same as before this per-wavelength override
         existed. Otherwise the edit is independent of the canonical position:
         it's stored in per_wavelength for the currently displayed wavelength
-        only, and survives until the next chromatic re-fit (see
-        AreaRoi.per_wavelength / ChromaticController.refresh_dense_roi_positions)."""
+        only, and survives until the next chromatic re-fit, which discards it
+        (see AreaRoi.per_wavelength / ChromaticController._on_models_ready)."""
         image_key = self._current_image_key
         if (
             image_key is None
@@ -107,8 +107,6 @@ class RoiGeometryMixin:
         )
         provisional.center_x, provisional.center_y = self._clamp_roi_position(provisional, provisional.center_x, provisional.center_y)
         self._state.area_rois.append(provisional)
-        if self._state.preprocessing.chromatic_correction_enabled:
-            self._chromatic_controller.refresh_dense_roi_positions([provisional])
         self._selected_roi_ids = {provisional.area_roi_id}
         self._update_roi_overlays()
         self._update_roi_table()
@@ -146,8 +144,6 @@ class RoiGeometryMixin:
                 new_rois.append(roi)
                 next_id += 1
         self._state.area_rois.extend(new_rois)
-        if self._state.preprocessing.chromatic_correction_enabled:
-            self._chromatic_controller.refresh_dense_roi_positions(new_rois)
         self._selected_roi_ids = {s.area_roi_id for s in new_rois}
         self._update_roi_overlays()
         self._update_roi_table()

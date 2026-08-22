@@ -258,15 +258,17 @@ class AreaRoi:
     created_by: str = "user"
     notes: str | None = None
     # Per-wavelength position overrides, keyed by the same (spectral_cube_index,
-    # wavelength_nm) tuple used everywhere else as the image identity. Populated
-    # wholesale from center_x/center_y via the chromatic-correction affine
-    # whenever CC is enabled or re-fit (see ChromaticController.update_settings
-    # -> processing.chromatic.populate_dense_roi_positions), and overwritten
-    # entirely on every re-fit. A manual nudge while viewing a non-reference
-    # wavelength writes into this dict instead of center_x/center_y (see
-    # RoiGeometryMixin._set_roi_position_for_current_view) and survives until
-    # the next re-fit. None/missing entries fall back to the affine-derived
-    # position, so CC-disabled datasets and pre-existing ROIs are unaffected.
+    # wavelength_nm) tuple used everywhere else as the image identity. Only one
+    # position is stored for an ROI at all - center_x/center_y, on the reference
+    # image. Every other (cube, wavelength) position is computed on demand from that center
+    # through the chromatic-correction affine for that key (see
+    # ChromaticController.affine_for_image_key, ImageRenderManager.display_rois)
+    # and is never written back here. The one exception is a manual nudge while
+    # viewing a non-reference wavelength, which writes into this dict instead of
+    # center_x/center_y (see RoiGeometryMixin._set_roi_position_for_current_view)
+    # and survives until the next chromatic re-fit clears window._state.chromatic_models
+    # out from under it. So in practice this dict is empty for the overwhelming
+    # majority of ROIs and only ever holds a handful of deliberate manual edits.
     per_wavelength: dict[tuple[int, float], tuple[float, float]] | None = None
 
 

@@ -20,13 +20,14 @@ from lspr_imaging_app.processing.chromatic import (
     default_landmark_anchors,
     identity_affine_matrix,
     invert_affine_matrix,
-    populate_dense_roi_positions,
     _landmark_regions,
 )
 
 class ChromaticController:
     def __init__(self, window) -> None:
         self.window = window
+        self._model_index_cache: dict[tuple[int, float], ChromaticTransformModel] | None = None
+        self._model_index_cache_key: int | None = None
 
     def feature_count_options(self) -> tuple[int, ...]:
         return (5, 15, 30)
@@ -89,14 +90,22 @@ class ChromaticController:
         window.chromatic_landmark_model_combo.blockSignals(False)
 
     def model_for_image_key(self, image_key: tuple[int, float] | None) -> ChromaticTransformModel | None:
-        window = self.window
         if image_key is None:
             return None
+        models = self.window._state.chromatic_models
+        # Indexed by id(models) rather than a version counter: chromatic_models is
+        # always replaced wholesale (window._state.chromatic_models = models), never
+        # mutated in place, so identity is a valid cache-invalidation key. A linear
+        # scan here previously made every lookup O(len(models)) - with one model per
+        # (cube, wavelength) record and every ROI display/preprocessing read going
+        # through this lookup, that added up fast.
+        if self._model_index_cache_key != id(models):
+            self._model_index_cache = {
+                (int(model.spectral_cube_index), float(model.wavelength_nm)): model for model in models
+            }
+            self._model_index_cache_key = id(models)
         spectral_cube_index, wavelength = image_key
-        for model in window._state.chromatic_models:
-            if int(model.spectral_cube_index) == int(spectral_cube_index) and abs(float(model.wavelength_nm) - float(wavelength)) < 1e-6:
-                return model
-        return None
+        return self._model_index_cache.get((int(spectral_cube_index), float(wavelength)))
 
     def affine_for_image_key(self, image_key: tuple[int, float] | None) -> np.ndarray | None:
         window = self.window
@@ -614,18 +623,6 @@ class ChromaticController:
         next_index = min(max(current_index + int(direction), 0), len(feature_ids) - 1)
         return self.select_feature(feature_ids[next_index], center_view=True)
 
-    def refresh_dense_roi_positions(self, rois: list | None = None) -> None:
-        """(Re)populate `AreaRoi.per_wavelength` for `rois` (default: all ROIs)
-        from their canonical center through every fitted chromatic model.
-        Overwrites any existing entries, including manual per-wavelength
-        nudges -- see processing.chromatic.populate_dense_roi_positions."""
-        window = self.window
-        target_rois = window._state.area_rois if rois is None else rois
-        image_keys = [
-            (int(model.spectral_cube_index), float(model.wavelength_nm)) for model in window._state.chromatic_models
-        ]
-        populate_dense_roi_positions(target_rois, image_keys, self.affine_for_image_key)
-
     def update_settings(self) -> None:
         window = self.window
         window._push_undo_point("Chromatic correction")
@@ -634,8 +631,6 @@ class ChromaticController:
         window.chromatic_apply_check.setIcon(window._make_link_toggle_icon(bool(window.chromatic_apply_check.isChecked())))
         window._set_section_applied(window.chromatic_section, bool(window._state.preprocessing.chromatic_correction_enabled))
         window._state.preprocessing.chromatic_registration_mode = "landmark_radial"
-        if window._state.preprocessing.chromatic_correction_enabled:
-            self.refresh_dense_roi_positions()
         window._invalidate_image_analysis_caches()
         window._invalidate_background_profile_cache()
         self.update_control_state()
@@ -652,6 +647,10 @@ class ChromaticController:
         window._append_workflow_log("Clearing chromatic transforms.", level="warning")
         window._state.chromatic_models.clear()
         window._state.preprocessing.chromatic_correction_enabled = False
+        # No transform left to be relative to - any manual per-wavelength nudge
+        # (AreaRoi.per_wavelength) would otherwise linger with nothing backing it.
+        for roi in window._state.area_rois:
+            roi.per_wavelength = None
         window.chromatic_apply_check.blockSignals(True)
         window.chromatic_apply_check.setChecked(False)
         window.chromatic_apply_check.blockSignals(False)
@@ -1015,10 +1014,14 @@ class ChromaticController:
         window.chromatic_apply_check.blockSignals(True)
         window.chromatic_apply_check.setChecked(False)
         window.chromatic_apply_check.blockSignals(False)
-        # A fresh transform makes every existing per-wavelength mask diff stale
-        # (they were relative to the old geometry) - discard them, same "re-fit
-        # wins" rule already applied to AreaRoi.per_wavelength.
+        # A fresh transform makes every existing per-wavelength mask diff, and
+        # every ROI's manual per-wavelength nudge (AreaRoi.per_wavelength - the
+        # only thing it ever stores now), stale: both were relative to the old
+        # geometry. "Re-fit wins" - discard them so a stale nudge from a
+        # previous fit can't silently keep overriding the new one's position.
         window._current_file_mask_wavelength_diffs.clear()
+        for roi in window._state.area_rois:
+            roi.per_wavelength = None
         self.leave_setup_mode()
         window._invalidate_image_analysis_caches()
         window._invalidate_background_profile_cache()
