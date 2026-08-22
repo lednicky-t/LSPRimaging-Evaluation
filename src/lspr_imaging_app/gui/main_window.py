@@ -126,6 +126,7 @@ from lspr_imaging_app.domain.exclusions import is_excluded
 from lspr_imaging_app.processing.chromatic import warp_boolean_mask_affine
 from lspr_imaging_app.processing.reference_selection import bimodal_dip_contrast
 from lspr_imaging_app.processing.roi_histogram import estimate_roi_intensity_range
+from lspr_imaging_app.storage.workspace import _encode_area_roi
 from lspr_imaging_app.version import version_string
 from lspr_imaging_app.domain.models import (
     AnalysisState,
@@ -4113,7 +4114,7 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, HistogramMaskMixin, Measurem
             "preprocessing": asdict(self._state.preprocessing),
             "area_roi_settings": asdict(self._state.area_roi_settings),
             "mask_settings": _mask_signature(self._state.mask),
-            "detected_rois": [asdict(roi) for roi in self._state.area_rois],
+            "detected_rois": [_encode_area_roi(roi) for roi in self._state.area_rois],
             "area_roi_groups": [asdict(group) for group in self._state.area_roi_groups],
             "chromatic_models": [asdict(model) for model in self._state.chromatic_models],
             "chromatic_landmarks": [asdict(landmark) for landmark in self._state.chromatic_landmarks],
