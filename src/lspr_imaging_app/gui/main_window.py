@@ -1849,6 +1849,35 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, HistogramMaskMixin, Measurem
         self.image_plot.addItem(self.ignore_mask_item)
         self.image_plot.addItem(self.histogram_mask_item)
         self.image_plot.addItem(self.figure_mask_item)
+        # Crosshair cursor readout (x, y, intensity under the mouse) - same
+        # idea and vendored icon as sLSPR acq's spectrum/sensorgram cursor
+        # readout (see gui/plot_controller.handle_spectrum_mouse_moved), but
+        # toggled from a toolbar button here instead of click-on-label, since
+        # this view has no existing corner-overlay-label click-to-toggle
+        # convention to hook into. Starts hidden, same as sLSPR acq's.
+        self._image_cursor_readout_enabled = False
+        self._image_cursor_last_values: tuple[float, float, float | None] | None = None
+        self.image_cursor_vline = pg.InfiniteLine(angle=90, movable=False, pen=pg.mkPen(QColor(56, 189, 248, 220), width=1))
+        self.image_cursor_hline = pg.InfiniteLine(angle=0, movable=False, pen=pg.mkPen(QColor(56, 189, 248, 220), width=1))
+        self.image_cursor_vline.setVisible(False)
+        self.image_cursor_hline.setVisible(False)
+        self.image_plot.addItem(self.image_cursor_vline, ignoreBounds=True)
+        self.image_plot.addItem(self.image_cursor_hline, ignoreBounds=True)
+        self.image_cursor_readout_label = QLabel(self.image_view.viewport())
+        self.image_cursor_readout_label.setObjectName("imageCursorReadoutLabel")
+        self.image_cursor_readout_label.setStyleSheet(
+            "QLabel#imageCursorReadoutLabel { background: rgba(15, 23, 42, 210); color: #f8fafc; "
+            "border: 1px solid #38bdf8; border-radius: 4px; padding: 3px 7px; "
+            "font-size: 10pt; font-weight: 600; }"
+        )
+        self.image_cursor_readout_label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        self.image_cursor_readout_label.hide()
+        self.image_cursor_proxy = pg.SignalProxy(
+            self.image_plot.scene().sigMouseMoved,
+            rateLimit=60,
+            slot=self._handle_image_cursor_mouse_moved,
+        )
+        self.image_plot.vb.sigResized.connect(self._reposition_image_cursor_readout)
         self.image_name_label = QLabel(self)
         self.image_name_label.setObjectName("imageNameLabel")
         self.image_name_label.hide()
@@ -1867,6 +1896,7 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, HistogramMaskMixin, Measurem
         self.measurement_um_y_spin.setSingleStep(1.0)
         self.measurement_unit_button = self._create_unit_toggle_button()
         self.scale_bar_toggle_button = self._create_scale_bar_toggle_button(bool(self._state.preprocessing.scale_bar_visible))
+        self.cursor_readout_toggle_button = self._create_cursor_readout_toggle_button(self._image_cursor_readout_enabled)
         self.scale_bar_color_button = QToolButton(self)
         self.scale_bar_color_button.setText("")
         self.scale_bar_color_button.setFixedSize(14, 14)
@@ -2073,6 +2103,7 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, HistogramMaskMixin, Measurem
         bottom_view_content_layout.addWidget(self.scale_bar_color_button, 0)
         bottom_view_content_layout.addWidget(self.scale_bar_toggle_button, 0)
         bottom_view_content_layout.addStretch(1)
+        bottom_view_content_layout.addWidget(self.cursor_readout_toggle_button, 0)
         bottom_view_layout.addWidget(self._make_scrollable_icon_row(bottom_view_content), 1)
 
         self._populate_left_roi_editor_controls()
@@ -2412,6 +2443,7 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, HistogramMaskMixin, Measurem
         self.measurement_apply_button.clicked.connect(self._apply_measurement_calibration)
         self.measurement_unit_button.clicked.connect(self._toggle_display_units)
         self.scale_bar_toggle_button.toggled.connect(self._on_scale_bar_toggled)
+        self.cursor_readout_toggle_button.toggled.connect(self._toggle_image_cursor_readout)
         self.undo_action.triggered.connect(self._undo)
         self.redo_action.triggered.connect(self._redo)
         self._configure_control_help()
@@ -5143,6 +5175,11 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, HistogramMaskMixin, Measurem
         self._set_help(self.measurement_unit_button, "Switch the displayed length units between pixels and micrometers.")
         self._set_help(self.scale_bar_toggle_button, "Show or hide the image scale bar.")
         self._set_help(
+            self.cursor_readout_toggle_button,
+            "Show a crosshair cursor with a live x, y, intensity readout under the mouse pointer. "
+            "Right-click the image to copy the current reading.",
+        )
+        self._set_help(
             self.background_profile_hold_button,
             "Toggle the background profile preview.",
             "Show or hide the estimated background profile instead of the processed image. "
@@ -5503,6 +5540,15 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, HistogramMaskMixin, Measurem
 
     def _selection_drag_threshold(self) -> float:
         return self._image_interaction._selection_drag_threshold()
+
+    def _toggle_image_cursor_readout(self, checked: bool) -> None:
+        self._image_interaction.toggle_cursor_readout(checked)
+
+    def _handle_image_cursor_mouse_moved(self, event) -> None:
+        self._image_interaction.handle_cursor_mouse_moved(event)
+
+    def _reposition_image_cursor_readout(self) -> None:
+        self._image_interaction.reposition_cursor_readout()
 
     def _find_roi_id_at(self, point: tuple[float, float]) -> int | None:
         nearest_id: int | None = None

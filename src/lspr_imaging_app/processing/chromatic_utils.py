@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from lspr_imaging_app.processing.chromatic import (
     apply_affine_to_points,
+    compose_affine_matrices,
     compose_similarity_matrix,
     default_landmark_anchors,
     detect_regional_landmarks,
@@ -22,6 +23,7 @@ from lspr_imaging_app.processing.chromatic import (
 
 __all__ = [
     "apply_affine_to_points",
+    "compose_affine_matrices",
     "compose_similarity_matrix",
     "default_landmark_anchors",
     "detect_regional_landmarks",

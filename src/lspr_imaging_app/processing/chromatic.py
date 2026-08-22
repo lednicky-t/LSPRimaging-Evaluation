@@ -970,6 +970,29 @@ def invert_affine_matrix(affine_matrix: np.ndarray) -> np.ndarray:
     return np.column_stack((inverse_linear, inverse_translation))
 
 
+def compose_affine_matrices(outer: np.ndarray, inner: np.ndarray) -> np.ndarray:
+    """Chain two 2x3 affines into the single matrix equivalent to applying
+    `inner` first, then `outer`:
+    `apply_affine_to_points(p, compose_affine_matrices(outer, inner))
+    == apply_affine_to_points(apply_affine_to_points(p, inner), outer)`.
+
+    Standard affine composition: if `inner(x) = B x + b` and `outer(x) = A x + a`,
+    then `outer(inner(x)) = A(Bx + b) + a = (AB) x + (Ab + a)`. Used to re-anchor a
+    chain of landmark-fitted transforms onto a wavelength that was never itself
+    landmark-marked -- e.g. `compose_affine_matrices(anchor_to_target, reference_to_anchor)`
+    turns a landmark-fitted "anchor -> target" transform into a "true reference ->
+    target" one, via a reference<->anchor transform obtained separately (typically
+    itself interpolated, since the reference wavelength need not be landmark-marked).
+    """
+    outer_linear = np.asarray(outer[:, :2], dtype=np.float64)
+    outer_translation = np.asarray(outer[:, 2], dtype=np.float64)
+    inner_linear = np.asarray(inner[:, :2], dtype=np.float64)
+    inner_translation = np.asarray(inner[:, 2], dtype=np.float64)
+    composed_linear = outer_linear @ inner_linear
+    composed_translation = outer_linear @ inner_translation + outer_translation
+    return np.column_stack((composed_linear, composed_translation))
+
+
 def warp_image_affine(
     image: np.ndarray,
     affine_matrix: np.ndarray,

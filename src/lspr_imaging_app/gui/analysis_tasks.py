@@ -25,10 +25,12 @@ from lspr_imaging_app.processing.chromatic import (
     annulus_reach_box,
     apply_affine_to_points,
     auto_track_landmarks_over_wavelengths,
+    compose_affine_matrices,
     estimate_affine_chromatic_transform,
     fit_affine_matrix,
     fit_similarity_matrix,
     identity_affine_matrix,
+    invert_affine_matrix,
     prepare_registration_image,
     transformed_annulus_mask,
     transformed_annulus_mask_for_patch,
@@ -1492,22 +1494,48 @@ def _estimate_chromatic_models_task(
             marks = landmarks_by_wavelength.setdefault(float(wavelength), {})
             marks[int(landmark_id)] = (float(x_px), float(y_px))
 
-        reference_landmarks = landmarks_by_wavelength.get(reference_wavelength, {})
-        missing_reference = [feature_id for feature_id in expected_feature_ids if feature_id not in reference_landmarks]
-        if missing_reference:
+        # The reference wavelength need not itself be landmark-marked - the
+        # sampled/marked wavelengths are their own independent evenly-spaced
+        # grid (chromatic_sample_image_count), unrelated to whatever the
+        # reference is currently set to. Fitting therefore anchors on a
+        # landmark-marked sample instead (the one nearest the reference, to
+        # keep the one extra interpolation step this needs as short as
+        # possible), then every anchor-relative transform - whether directly
+        # fit or itself interpolated - is re-expressed relative to the true
+        # reference by composing it with a reference<->anchor transform (see
+        # compose_affine_matrices). This is the ordinary "translate a
+        # measurement between two arbitrary basepoints" trick: anchor->target
+        # composed with reference->anchor gives reference->target, with no
+        # requirement that the reference itself was ever directly measured.
+        # When the reference *is* one of the landmark-marked samples (the
+        # common case), landmark_anchor_wavelength lands exactly on it,
+        # reference_to_anchor collapses to identity, and every result is
+        # numerically identical to the anchor-relative matrix alone - i.e.
+        # this subsumes the old (buggy) reference-anchored-only behavior
+        # rather than changing it when the old assumption already held.
+        complete_sample_wavelengths = [
+            wavelength
+            for wavelength in sampled_wavelengths
+            if all(feature_id in landmarks_by_wavelength.get(float(wavelength), {}) for feature_id in expected_feature_ids)
+        ]
+        if not complete_sample_wavelengths:
             raise ValueError(
-                f"Reference wavelength {reference_wavelength:g} nm is missing reference point(s): "
-                + ", ".join(str(feature_id) for feature_id in missing_reference)
+                f"Mark all {len(expected_feature_ids)} reference points on at least one sampled wavelength image "
+                "before estimating chromatic transforms."
             )
+        landmark_anchor_wavelength = float(
+            min(complete_sample_wavelengths, key=lambda wavelength: abs(float(wavelength) - reference_wavelength))
+        )
+        anchor_landmarks = landmarks_by_wavelength[landmark_anchor_wavelength]
+        anchor_points = np.asarray(
+            [anchor_landmarks[feature_id] for feature_id in expected_feature_ids],
+            dtype=np.float64,
+        )
 
         sample_matrices: dict[float, np.ndarray] = {}
         sample_rmse: dict[float, float] = {}
         direct_feature_counts: dict[float, int] = {}
         total = max(len(sampled_wavelengths), 1)
-        reference_points = np.asarray(
-            [reference_landmarks[feature_id] for feature_id in expected_feature_ids],
-            dtype=np.float64,
-        )
         for index, wavelength in enumerate(sampled_wavelengths, start=1):
             marks = landmarks_by_wavelength.get(float(wavelength), {})
             missing = [feature_id for feature_id in expected_feature_ids if feature_id not in marks]
@@ -1516,16 +1544,16 @@ def _estimate_chromatic_models_task(
                     f"Sample wavelength {wavelength:g} nm is missing reference point(s): "
                     + ", ".join(str(feature_id) for feature_id in missing)
                 )
-            if abs(float(wavelength) - reference_wavelength) < 1e-6:
+            if abs(float(wavelength) - landmark_anchor_wavelength) < 1e-6:
                 matrix = identity_affine_matrix()
                 rmse = 0.0
             else:
                 target_points = np.asarray([marks[feature_id] for feature_id in expected_feature_ids], dtype=np.float64)
                 if landmark_model == "similarity" and len(expected_feature_ids) >= 2:
-                    matrix = fit_similarity_matrix(reference_points, target_points)
+                    matrix = fit_similarity_matrix(anchor_points, target_points)
                 else:
-                    matrix = fit_affine_matrix(reference_points, target_points)
-                residuals = np.sqrt(np.sum((apply_affine_to_points(reference_points, matrix) - target_points) ** 2, axis=1))
+                    matrix = fit_affine_matrix(anchor_points, target_points)
+                residuals = np.sqrt(np.sum((apply_affine_to_points(anchor_points, matrix) - target_points) ** 2, axis=1))
                 rmse = float(np.sqrt(np.mean(residuals**2))) if residuals.size else 0.0
             sample_matrices[float(wavelength)] = matrix
             sample_rmse[float(wavelength)] = rmse
@@ -1545,29 +1573,38 @@ def _estimate_chromatic_models_task(
         sample_axis = np.asarray(sorted_sample_wavelengths, dtype=np.float64)
         matrix_values_array = np.asarray(matrix_values, dtype=np.float64)
 
+        def _anchor_relative_matrix(wavelength_f64: float) -> np.ndarray:
+            if wavelength_f64 in sample_matrices:
+                return sample_matrices[wavelength_f64]
+            interpolated_matrix = np.empty((2, 3), dtype=np.float64)
+            for row in range(2):
+                for col in range(3):
+                    interpolated_matrix[row, col] = float(
+                        np.interp(wavelength_f64, sample_axis, matrix_values_array[:, row, col])
+                    )
+            return interpolated_matrix
+
+        # The one genuinely new interpolation this scheme needs: the anchor's
+        # own transform *to* the true reference wavelength, estimated the
+        # same way any other non-sampled wavelength's transform already is
+        # (or read off directly, if the reference happens to coincide with a
+        # sampled wavelength).
+        anchor_to_reference = _anchor_relative_matrix(reference_wavelength)
+        reference_to_anchor = invert_affine_matrix(anchor_to_reference)
+
         matrices_by_wavelength: dict[float, np.ndarray] = {}
         rmse_by_wavelength: dict[float, float] = {}
         feature_counts_by_wavelength: dict[float, int] = {}
         for wavelength in all_wavelengths:
             wavelength_f64 = float(wavelength)
+            anchor_relative = _anchor_relative_matrix(wavelength_f64)
+            matrices_by_wavelength[wavelength_f64] = compose_affine_matrices(anchor_relative, reference_to_anchor)
             if wavelength_f64 in sample_matrices:
-                matrices_by_wavelength[wavelength_f64] = sample_matrices[wavelength_f64]
                 rmse_by_wavelength[wavelength_f64] = sample_rmse[wavelength_f64]
                 feature_counts_by_wavelength[wavelength_f64] = direct_feature_counts[wavelength_f64]
-                continue
-            interpolated_matrix = np.empty((2, 3), dtype=np.float64)
-            for row in range(2):
-                for col in range(3):
-                    interpolated_matrix[row, col] = float(
-                        np.interp(
-                            wavelength_f64,
-                            sample_axis,
-                            matrix_values_array[:, row, col],
-                        )
-                    )
-            matrices_by_wavelength[wavelength_f64] = interpolated_matrix
-            rmse_by_wavelength[wavelength_f64] = float(np.interp(wavelength_f64, sample_axis, np.asarray(rmse_values, dtype=np.float64)))
-            feature_counts_by_wavelength[wavelength_f64] = len(expected_feature_ids)
+            else:
+                rmse_by_wavelength[wavelength_f64] = float(np.interp(wavelength_f64, sample_axis, np.asarray(rmse_values, dtype=np.float64)))
+                feature_counts_by_wavelength[wavelength_f64] = len(expected_feature_ids)
 
         landmark_model_kind = "landmark_similarity" if landmark_model == "similarity" else "landmark_affine"
         for spectral_cube_index, wavelength, _path_str in record_specs:

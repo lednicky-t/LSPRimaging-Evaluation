@@ -6,7 +6,7 @@ import numpy as np
 import pyqtgraph as pg
 from PyQt6.QtCore import QEvent, QPointF, QRectF, Qt
 from PyQt6.QtGui import QKeyEvent, QKeySequence
-from PyQt6.QtWidgets import QRubberBand
+from PyQt6.QtWidgets import QApplication, QMenu, QRubberBand
 
 
 class ImageInteractionController:
@@ -339,6 +339,9 @@ class ImageInteractionController:
                         w._update_selection_dependent_plots(prompt_live_preview=True)
                     w._show_analysis_roi_context_menu(roi_id, event.globalPosition().toPoint())
                     return True
+                if roi_id is None and getattr(w, "_image_cursor_readout_enabled", False):
+                    self.show_cursor_readout_context_menu(event.globalPosition().toPoint())
+                    return True
                 return True
 
             if event.type() == QEvent.Type.MouseButtonDblClick and event.button() == Qt.MouseButton.RightButton:
@@ -531,3 +534,84 @@ class ImageInteractionController:
         x = float(point[0])
         y = float(point[1])
         return x0 <= x <= x1 and y0 <= y <= y1
+
+    # ------------------------------------------------------------------
+    # Crosshair cursor readout (x, y, intensity) - same idea as sLSPR acq's
+    # spectrum/sensorgram cursor readout (see that app's
+    # gui/plot_controller.handle_spectrum_mouse_moved), ported to the image
+    # view: a crosshair pair plus a floating label, both driven off a rate-
+    # limited pg.SignalProxy on the plot scene's sigMouseMoved so it doesn't
+    # interfere with the MouseMove handling other tools (pan/crop/mask/ROI
+    # drag) already do through MainWindow.eventFilter.
+    # ------------------------------------------------------------------
+
+    def toggle_cursor_readout(self, checked: bool) -> None:
+        w = self.window
+        w._image_cursor_readout_enabled = bool(checked)
+        w.image_cursor_vline.setVisible(w._image_cursor_readout_enabled)
+        w.image_cursor_hline.setVisible(w._image_cursor_readout_enabled)
+        if w._image_cursor_readout_enabled:
+            w.image_cursor_readout_label.show()
+            self.reposition_cursor_readout()
+        else:
+            w.image_cursor_readout_label.hide()
+            w._image_cursor_last_values = None
+
+    def handle_cursor_mouse_moved(self, event) -> None:
+        w = self.window
+        if not getattr(w, "_image_cursor_readout_enabled", False):
+            return
+        pos = event[0]
+        if not w.image_plot.sceneBoundingRect().contains(pos):
+            return
+        mouse_point = w.image_plot.vb.mapSceneToView(pos)
+        x = float(mouse_point.x())
+        y = float(mouse_point.y())
+        intensity_text = "-"
+        intensity_value: float | None = None
+        image = w._current_processed_image
+        if image is not None:
+            # Same (x=col, y=row) convention _image_point_from_mouse_event's
+            # callers already rely on for ROI center_x/center_y (image_item
+            # is fed image.T - see image_render_manager/background_profile_controller
+            # setImage calls - so the plot's x axis is the array's column axis).
+            col = int(np.floor(x + 0.5))
+            row = int(np.floor(y + 0.5))
+            height, width = image.shape[:2]
+            if 0 <= row < height and 0 <= col < width:
+                intensity_value = float(image[row, col])
+                intensity_text = f"{intensity_value:.1f}"
+        w.image_cursor_vline.setPos(x)
+        w.image_cursor_hline.setPos(y)
+        w.image_cursor_readout_label.setText(f"x={x:.1f}px  y={y:.1f}px  I={intensity_text}")
+        w.image_cursor_readout_label.adjustSize()
+        self.reposition_cursor_readout()
+        # Raw values behind the display text - RMB's "Copy" action (see
+        # show_cursor_readout_context_menu) formats these itself rather than
+        # parsing the label back apart, and keeps full float precision that
+        # the label's ".1f" rounds away.
+        w._image_cursor_last_values = (x, y, intensity_value)
+
+    def reposition_cursor_readout(self) -> None:
+        w = self.window
+        label = getattr(w, "image_cursor_readout_label", None)
+        if label is None or not label.isVisible():
+            return
+        viewport = w.image_view.viewport()
+        margin = 8
+        label.move(max(viewport.width() - label.width() - margin, margin), margin)
+
+    def show_cursor_readout_context_menu(self, global_pos) -> None:
+        w = self.window
+        values = getattr(w, "_image_cursor_last_values", None)
+        menu = QMenu(w)
+        copy_action = menu.addAction("Copy x, y, intensity")
+        copy_action.setEnabled(values is not None)
+        chosen = menu.exec(global_pos)
+        if chosen is not copy_action or values is None:
+            return
+        x, y, intensity_value = values
+        intensity_text = "-" if intensity_value is None else f"{intensity_value:.3f}"
+        text = f"x={x:.3f}\ty={y:.3f}\tI={intensity_text}"
+        QApplication.clipboard().setText(text)
+        w._set_status_text(f"Copied cursor readout: {text}")

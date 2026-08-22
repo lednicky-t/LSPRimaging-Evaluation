@@ -1403,6 +1403,31 @@ class MainWindowIcons:
         button.toggled.connect(lambda checked, target=button: target.setIcon(self._make_scale_bar_icon(bool(checked))))
         return button
 
+    def _make_cursor_readout_icon(self, active: bool, *, size: int = 24) -> QIcon:
+        # Same vendored "crosshair" glyph sLSPR acq uses for its spectrum/
+        # sensorgram cursor readout toggle (see apps/sLSPR/acq's
+        # icon_helpers.crosshair_cursor_icon) - green when active to match
+        # this row's other toggle icons (_make_scale_bar_icon etc.).
+        color = "#22c55e" if active else "#f8fafc"
+        return self._tabler_icon("crosshair", color, size)
+
+    def _create_cursor_readout_toggle_button(self, active: bool) -> QToolButton:
+        button = QToolButton(self)
+        button.setObjectName("toolbarPlainIconButton")
+        button.setAutoRaise(True)
+        button.setCheckable(True)
+        button.setChecked(bool(active))
+        button.setIcon(self._make_cursor_readout_icon(bool(active)))
+        button.setIconSize(QSize(APP_THEME.plain_icon_inner, APP_THEME.plain_icon_inner))
+        button.setFixedSize(APP_THEME.plain_icon_outer, APP_THEME.plain_icon_outer)
+        button.setToolTip(
+            "Show a crosshair cursor with a live x, y, intensity readout under the mouse pointer. "
+            "Right-click the image to copy the current reading."
+        )
+        button.setStyleSheet(transparent_icon_button_stylesheet())
+        button.toggled.connect(lambda checked, target=button: target.setIcon(self._make_cursor_readout_icon(bool(checked))))
+        return button
+
     def _create_unit_toggle_button(self) -> QToolButton:
         button = QToolButton(self)
         button.setObjectName("toolbarPlainIconButton")

@@ -914,8 +914,19 @@ class ChromaticController:
                         f"chromatic transforms. Missing on the best sample: {missing_text}."
                     )
                 return
-            if reference_key not in complete_samples:
-                reference_key = complete_samples[0]
+            # reference_key is deliberately left as the user's actual chosen
+            # reference wavelength here, even if it has no landmark marks of
+            # its own (very common: the sampled/landmark-marked wavelengths
+            # are their own independent evenly-spaced grid, chosen by
+            # chromatic_sample_image_count, not tied to the reference). The
+            # fit anchors on a landmark-marked sample instead and composes
+            # its way back to this true reference - see
+            # _estimate_chromatic_models_task's landmark_anchor_wavelength.
+            # Previously this silently substituted reference_key for
+            # complete_samples[0] when they didn't match, which left every
+            # transform correct relative to that substitute but wrong
+            # relative to the reference actually shown in the GUI (which
+            # never changed) - see the 2026-08-22 investigation.
         window._push_undo_point("Chromatic correction")
         window._chromatic_registration_request_id += 1
         request_id = window._chromatic_registration_request_id
@@ -1055,6 +1066,13 @@ class ChromaticController:
         leftover per-point error has spatial structure (e.g. grows with distance from center,
         or points a consistent direction) that would justify a different correction model, versus
         being unstructured noise.
+
+        A landmark's "reference-wavelength position" (used as the residual's starting point) is
+        its own direct mark there if one exists, else an estimate: each of its other marked
+        observations mapped back through that wavelength's own reference->wavelength model
+        (inverted), averaged across every sampled wavelength it was marked at. This is the normal
+        case, since the sampled/landmark-marked wavelengths are their own independent grid,
+        unrelated to whatever the reference happens to be set to.
         """
         window = self.window
         folder = window._dataset_folder_path()
@@ -1077,6 +1095,38 @@ class ChromaticController:
             for mark in landmarks:
                 if int(mark.spectral_cube_index) == ref_cube and abs(float(mark.wavelength_nm) - ref_wavelength) < 1e-6:
                     reference_positions[int(mark.landmark_id)] = (float(mark.x_px), float(mark.y_px))
+            # A landmark with no direct mark at the reference wavelength (the
+            # common case - the sampled/landmark-marked wavelengths are their
+            # own independent grid, unrelated to whatever the reference is set
+            # to; see _estimate_chromatic_models_task's landmark_anchor_wavelength)
+            # still has an estimated reference position available: map each of
+            # its other marked observations back through that wavelength's own
+            # reference->wavelength model (inverted), then average across every
+            # sampled wavelength it was marked at, for robustness. Same
+            # composition machinery the estimation itself used to re-anchor
+            # onto the reference, just run in reverse.
+            estimates_by_landmark: dict[int, list[tuple[float, float]]] = {}
+            for mark in landmarks:
+                landmark_id = int(mark.landmark_id)
+                if landmark_id in reference_positions or int(mark.spectral_cube_index) != ref_cube:
+                    continue
+                model = models_by_key.get((ref_cube, float(mark.wavelength_nm)))
+                if model is None:
+                    continue
+                matrix = np.asarray(model.affine_matrix, dtype=np.float64)
+                try:
+                    inverse_matrix = invert_affine_matrix(matrix)
+                except np.linalg.LinAlgError:
+                    continue
+                estimated = apply_affine_to_points(
+                    np.asarray([[float(mark.x_px), float(mark.y_px)]], dtype=np.float64), inverse_matrix
+                )[0]
+                estimates_by_landmark.setdefault(landmark_id, []).append((float(estimated[0]), float(estimated[1])))
+            for landmark_id, estimates in estimates_by_landmark.items():
+                reference_positions[landmark_id] = (
+                    float(np.mean([point[0] for point in estimates])),
+                    float(np.mean([point[1] for point in estimates])),
+                )
 
         destination_folder = folder / "analysis" / "chromatic"
         destination_folder.mkdir(parents=True, exist_ok=True)
@@ -1323,13 +1373,99 @@ class ChromaticController:
             self.window.chromatic_progress_label.setText("Edit the radial workflow to choose sampled wavelengths.")
         if model_count == 0:
             return
+        # Once transforms exist, the Progress row's own job (sample-by-sample
+        # marking progress) is done - collapse everything meaningful into one
+        # line on the Status row instead of splitting "estimated" (Status)
+        # from a redundant image count/RMSE/applied-state sentence (Progress).
+        # model_count itself (one entry per dataset image, not per unique
+        # wavelength - see _estimate_chromatic_models_task's final loop,
+        # which reuses each wavelength's matrix across every spectral cube)
+        # isn't shown here: it was never a meaningful diagnostic, just an
+        # artifact of how models are keyed for O(1) lookup.
+        self.window.chromatic_progress_label.setText("")
+        applied = bool(self.window._state.preprocessing.chromatic_correction_enabled)
+        lines = ["Transforms estimated.", "Applied." if applied else "Not applied."]
+        shift_info = self.max_shift_px()
+        if shift_info is not None:
+            shift_px, shift_wavelength, is_direct = shift_info
+            shift_text = f"{shift_px:.1f} px" if is_direct else f"({shift_px:.1f} px)"
+            segment = f"Largest shift {shift_text} at {shift_wavelength:g} nm"
+            if self.window._can_display_micrometers():
+                shift_um = shift_px * self.window._microns_per_pixel_scalar()
+                um_text = f"{shift_um:.2f} um" if is_direct else f"({shift_um:.2f} um)"
+                segment += f" ({um_text})"
+            lines.append(segment)
+        self.window.chromatic_summary.setText(" | ".join(lines))
         rmses = [float(model.rmse_px) for model in self.window._state.chromatic_models if model.rmse_px > 0.0]
         rmse_text = f"{float(np.mean(rmses)):.2f} px" if rmses else "0.00 px"
-        self.window.chromatic_summary.setText("Transforms estimated.")
-        self.window.chromatic_progress_label.setText(
-            f"Transforms ready for {model_count} image(s) | mean fit RMSE: {rmse_text} | "
-            f"{'applied' if self.window._state.preprocessing.chromatic_correction_enabled else 'ready to apply'}"
+        bracket_note = "" if shift_info is None or shift_info[2] else " Bracketed values fall between sampled wavelengths (interpolated, not directly fit)."
+        self.window.chromatic_summary.setToolTip(
+            f"{model_count} image(s) covered | mean landmark-fit RMSE: {rmse_text}.{bracket_note}"
         )
+
+    def _directly_fit_sample_wavelengths(self) -> set[float]:
+        """Wavelengths among the current sampled/landmark set that have every
+        reference point marked - i.e. would get a direct landmark fit rather
+        than an interpolated one if transforms were (re-)estimated right now.
+        Mirrors estimate_models()'s own complete_samples check; used only to
+        label a displayed value as directly fit vs interpolated, so it's fine
+        that this reflects the *current* sample/reference settings rather than
+        whatever was in effect when the currently-loaded models were actually
+        estimated (same caveat already applies to can_estimate/filled_samples
+        above).
+        """
+        window = self.window
+        feature_ids = self.expected_feature_ids()
+        directly_fit: set[float] = set()
+        for sample_key in self.sample_image_keys():
+            marks = {
+                int(mark.landmark_id)
+                for mark in window._state.chromatic_landmarks
+                if int(mark.spectral_cube_index) == int(sample_key[0]) and abs(float(mark.wavelength_nm) - float(sample_key[1])) < 1e-6
+            }
+            if all(feature_id in marks for feature_id in feature_ids):
+                directly_fit.add(float(sample_key[1]))
+        return directly_fit
+
+    def max_shift_px(self) -> tuple[float, float, bool] | None:
+        """The single largest displacement (px) any current chromatic model
+        implies anywhere in the frame, and the wavelength it occurs at.
+
+        For an affine map, `predicted(p) - p` is itself an affine function of
+        `p`, so its magnitude over a rectangle is maximized at one of the 4
+        corners (a convex function's max over a convex region is at a vertex) -
+        no need to sample the interior. Returns
+        `(max_shift_px, wavelength_nm, is_directly_fit)`, or `None` if there's
+        no image/models to measure against.
+        """
+        window = self.window
+        models = window._state.chromatic_models
+        image = window._current_processed_image
+        if not models or image is None:
+            return None
+        height, width = image.shape[:2]
+        corners = np.array(
+            [[0.0, 0.0], [width - 1.0, 0.0], [0.0, height - 1.0], [width - 1.0, height - 1.0]],
+            dtype=np.float64,
+        )
+        directly_fit = self._directly_fit_sample_wavelengths()
+        best: tuple[float, float, bool] | None = None
+        seen_wavelengths: set[float] = set()
+        for model in models:
+            wavelength = float(model.wavelength_nm)
+            if wavelength in seen_wavelengths:
+                # Every spectral cube shares the same matrix for a given
+                # wavelength (chromatic aberration is a property of the
+                # optics, not the sample) - no need to re-measure it per cube.
+                continue
+            seen_wavelengths.add(wavelength)
+            matrix = np.asarray(model.affine_matrix, dtype=np.float64)
+            predicted = apply_affine_to_points(corners, matrix)
+            local_max = float(np.max(np.hypot(predicted[:, 0] - corners[:, 0], predicted[:, 1] - corners[:, 1])))
+            if best is None or local_max > best[0]:
+                is_direct = any(abs(wavelength - sample_wavelength) < 1e-6 for sample_wavelength in directly_fit)
+                best = (local_max, wavelength, is_direct)
+        return best
 
 
     def _on_chromatic_reference_points_all_toggled(self, checked: bool) -> None:
