@@ -437,6 +437,134 @@ def _make_visibility_status_label(window: QWidget, action, panel: QWidget, text:
     return button
 
 
+def _make_workflow_log_debug_toggle(window: QWidget) -> QToolButton:
+    """Bracketed [Normal]/[Debug] label in the Console title row, same style
+    as _make_apply_status_label/_make_visibility_status_label. "Normal" hides
+    DEBUG-level entries (image apply/load timing, cache hit/build batches,
+    ROI table refresh counts, ...) so the console only shows what a user
+    (not a developer) needs day to day; "Debug" shows everything, for
+    diagnosing something like a slow wavelength switch."""
+    theme = get_active_theme()
+    button = QToolButton(window)
+    button.setAutoRaise(True)
+    button.setCheckable(False)
+    button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
+    button.setCursor(Qt.CursorShape.PointingHandCursor)
+    button.setToolTip("Switch the console between Normal (user-facing messages) and Debug (adds timing/cache diagnostics).")
+
+    def refresh() -> None:
+        enabled = bool(getattr(window, "_workflow_log_debug_enabled", False))
+        button.setText("[Debug]" if enabled else "[Normal]")
+        color = theme.accent_gold if enabled else theme.text_dim
+        button.setStyleSheet(
+            "QToolButton {"
+            f"  color: {color};"
+            "  background: transparent;"
+            "  border: none;"
+            "  font-weight: 600;"
+            "  padding: 4px 2px;"
+            "}"
+            "QToolButton:hover { text-decoration: underline; }"
+        )
+
+    button.clicked.connect(
+        lambda *_: window._set_workflow_log_debug_enabled(not getattr(window, "_workflow_log_debug_enabled", False))
+    )
+    button.sync_appearance = refresh
+    refresh()
+    return button
+
+
+def _make_metadata_cube_time_toggle(window: QWidget) -> QToolButton:
+    """Bracketed [Cube]/[Time] label in the Metadata section title row -
+    switches whatever displays a spectral-cube position (currently the
+    spectral-cube spinbox, see CubeTimeSpinBox in widgets.py) between showing
+    the raw cube index and its elapsed acquisition time. Color indicates
+    whether switching is even possible right now (gold: acquisition metadata
+    with real per-image timing is loaded, so Time mode has something to
+    show; text_dim: only Cube is available, e.g. no metadata imported yet) -
+    not which mode is currently selected, which the bracket text already
+    says. Same style as _make_workflow_log_debug_toggle."""
+    theme = get_active_theme()
+    button = QToolButton(window)
+    button.setAutoRaise(True)
+    button.setCheckable(False)
+    button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
+    button.setCursor(Qt.CursorShape.PointingHandCursor)
+    button.setToolTip(
+        "Switch the spectral-cube position between raw index and elapsed acquisition time. "
+        "Only available once acquisition metadata with per-image timing is loaded."
+    )
+
+    def refresh() -> None:
+        available = window._cube_time_toggle_available()
+        mode = getattr(window, "_cube_time_display_mode", "cube")
+        button.setText("[Time]" if mode == "time" else "[Cube]")
+        color = theme.accent_gold if available else theme.text_dim
+        button.setStyleSheet(
+            "QToolButton {"
+            f"  color: {color};"
+            "  background: transparent;"
+            "  border: none;"
+            "  font-weight: 600;"
+            "  padding: 4px 2px;"
+            "}"
+            "QToolButton:hover { text-decoration: underline; }"
+        )
+
+    button.clicked.connect(lambda *_: window._toggle_cube_time_display_mode())
+    button.sync_appearance = refresh
+    refresh()
+    return button
+
+
+def _make_cube_slider_title_toggle(window: QWidget, width: int) -> QToolButton:
+    """Second entry point for the same Cube/Time toggle
+    _make_metadata_cube_time_toggle controls, replacing the plain-QLabel
+    "Cube" title that used to sit above the spectral-cube slider. Deliberately
+    plain "Cube"/"Time" text (no brackets) rather than the Metadata section
+    toggle's bracketed style: this one replaces a label already anchored
+    directly to its own slider, not a section title row, so the bracket
+    convention (used for labels sitting *next to* something else's title)
+    doesn't apply here. Explicitly reproduces QLabel#toolbarMiniLabel's font
+    (8px/600) rather than relying on that QSS rule, which is scoped to the
+    QLabel type and so has no effect on a QToolButton."""
+    theme = get_active_theme()
+    button = QToolButton(window)
+    button.setAutoRaise(True)
+    button.setCheckable(False)
+    button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
+    button.setFixedWidth(width)
+    button.setCursor(Qt.CursorShape.PointingHandCursor)
+
+    def refresh() -> None:
+        available = window._cube_time_toggle_available()
+        mode = getattr(window, "_cube_time_display_mode", "cube")
+        button.setText("Time" if mode == "time" else "Cube")
+        button.setToolTip(
+            "Spectral cube position | click to switch to elapsed acquisition time."
+            if available
+            else "Spectral cube index | switching to elapsed time needs acquisition timing metadata loaded."
+        )
+        color = theme.accent_gold if available else theme.text_muted
+        button.setStyleSheet(
+            "QToolButton {"
+            f"  color: {color};"
+            "  background: transparent;"
+            "  border: none;"
+            "  font-size: 8px;"
+            "  font-weight: 600;"
+            "  padding: 0px;"
+            "}"
+            "QToolButton:hover { text-decoration: underline; }"
+        )
+
+    button.clicked.connect(lambda *_: window._toggle_cube_time_display_mode())
+    button.sync_appearance = refresh
+    refresh()
+    return button
+
+
 def build_layout(window) -> None:
     top_row_widget = QWidget(window)
     top_row = QHBoxLayout(top_row_widget)
@@ -546,12 +674,15 @@ def build_layout(window) -> None:
     metadata_content_layout.addWidget(window.metadata_status_label)
     metadata_content_layout.addWidget(window.metadata_current_cube_label)
     metadata_content_layout.addWidget(window.metadata_preview_button)
+    window.metadata_cube_time_toggle = _make_metadata_cube_time_toggle(window)
+    window._refresh_metadata_cube_time_toggle = window.metadata_cube_time_toggle.sync_appearance
     window.metadata_section = CollapsibleSection(
         "Metadata",
         metadata_content,
         expanded=False,
         help_text=panel_help_text("metadata"),
         title_color=_nested_title_color(),
+        header_extra=window.metadata_cube_time_toggle,
         parent=window,
     )
 
@@ -1110,11 +1241,9 @@ def build_layout(window) -> None:
     image_slicer_layout.setContentsMargins(0, 0, 0, 0)
     image_slicer_layout.setSpacing(6)
     slicer_mini_label_width = 36
-    spectral_cube_mini_label = QLabel("Cube", image_slicer_row)
-    spectral_cube_mini_label.setObjectName("toolbarMiniLabel")
-    spectral_cube_mini_label.setFixedWidth(slicer_mini_label_width)
-    spectral_cube_mini_label.setToolTip("Spectral cube index")
-    image_slicer_layout.addWidget(spectral_cube_mini_label)
+    window.cube_slider_title_toggle = _make_cube_slider_title_toggle(window, slicer_mini_label_width)
+    window._refresh_cube_slider_title_toggle = window.cube_slider_title_toggle.sync_appearance
+    image_slicer_layout.addWidget(window.cube_slider_title_toggle)
     image_slicer_layout.addWidget(window.spectral_cube_slider, 1)
     image_slicer_layout.addWidget(window.spectral_cube_spin)
     wavelength_mini_label = QLabel("λ", image_slicer_row)
@@ -1221,7 +1350,10 @@ def build_layout(window) -> None:
     window.workflow_log_copy_button.clicked.connect(window._copy_workflow_log)
     window.workflow_log_clear_button = window._make_icon_tool_button("trash-2", "#ef4444", "Clear the workflow log.")
     window.workflow_log_clear_button.clicked.connect(lambda *_: window.workflow_log_view.clear())
+    window.workflow_log_debug_button = _make_workflow_log_debug_toggle(window)
+    window._refresh_workflow_log_debug_button = window.workflow_log_debug_button.sync_appearance
     workflow_log_row.addWidget(workflow_log_label, 0)
+    workflow_log_row.addWidget(window.workflow_log_debug_button, 0)
     workflow_log_row.addStretch(1)
     workflow_log_row.addWidget(window.workflow_log_autoscroll_button, 0)
     workflow_log_row.addWidget(window.workflow_log_copy_button, 0)

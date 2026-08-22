@@ -81,13 +81,42 @@ def _load_processing_state_task(
     return "defaults", None, profile_error, None
 
 
-def _process_image_task(path_str: str, preprocessing, rois, external_mask: np.ndarray | None, mask_state) -> np.ndarray:
+def _process_image_task(
+    path_str: str,
+    preprocessing,
+    rois,
+    external_mask: np.ndarray | None,
+    mask_state,
+    dispatch_started_at: float | None = None,
+) -> tuple[np.ndarray, float | None]:
+    # Timed unconditionally (one call per wavelength switch, not a hot loop -
+    # see apply_preprocessing's log_stage_timing docstring for the same
+    # reasoning). Separates three things that all fold into the "Image load"
+    # total logged by on_image_refresh_ready: how long this task sat queued
+    # on the thread pool before actually starting (queue), reading/decoding
+    # the raw TIFF (read), and mask/spatial/flatten processing (already
+    # logged separately inside apply_preprocessing) - without this split, a
+    # slow switch's "Image load" number couldn't be attributed to any of the
+    # three.
+    raw_load_started_at = time.perf_counter()
+    queue_wait_ms = (raw_load_started_at - dispatch_started_at) * 1000.0 if dispatch_started_at is not None else None
     raw_image = load_image_array(path_str)
+    raw_load_elapsed_ms = (time.perf_counter() - raw_load_started_at) * 1000.0
+    queue_text = f"{queue_wait_ms:.0f}ms" if queue_wait_ms is not None else "n/a"
+    logging.getLogger("lspr_imaging_app.workflow").debug(
+        f"Image raw load | queue={queue_text} read={raw_load_elapsed_ms:.0f}ms | {Path(path_str).name}"
+    )
     mask_settings = preprocessing[1] if isinstance(preprocessing, tuple) else None
     external_mask_processed = bool(preprocessing[2]) if isinstance(preprocessing, tuple) and len(preprocessing) > 2 else False
     skip_crop = bool(preprocessing[3]) if isinstance(preprocessing, tuple) and len(preprocessing) > 3 else False
     preprocessing_settings = preprocessing[0] if isinstance(preprocessing, tuple) else preprocessing
-    return apply_preprocessing(
+    # This is the single-image display-refresh path (one call per wavelength
+    # switch, see image_render_manager.start_pending_image_refresh) - unlike
+    # apply_preprocessing's other, per-frame-loop callers, a stage-timing log
+    # line here is cheap and directly answers "which stage (mask/spatial
+    # transform/flatten-background) is actually slow" for a switch that felt
+    # slow. See apply_preprocessing's log_stage_timing docstring.
+    processed = apply_preprocessing(
         raw_image,
         preprocessing_settings,
         rois=rois,
@@ -96,7 +125,17 @@ def _process_image_task(path_str: str, preprocessing, rois, external_mask: np.nd
         external_mask_processed=external_mask_processed,
         mask_state=mask_state,
         skip_crop=skip_crop,
+        log_stage_timing=True,
     )
+    # Reported back to the GUI thread (not just logged here) so
+    # on_image_refresh_ready can split "Image load" into what this worker
+    # itself spent vs. pure wait for the GUI thread to actually pick up the
+    # finished result - the two have very different causes (this function's
+    # own cost vs. the GUI thread being busy with something else) and
+    # collapsing them into one number was hiding which one was the actual
+    # problem on a slow switch.
+    background_total_ms = (time.perf_counter() - dispatch_started_at) * 1000.0 if dispatch_started_at is not None else None
+    return processed, background_total_ms
 
 
 def _mask_candidate_task(path_str: str, mask_settings, tool_key: str) -> np.ndarray:

@@ -155,6 +155,7 @@ from .widgets import (
     BusySpinner,
     CollapsibleSection,  # also re-exported: layout_builder.py imports it from here, not from widgets directly
     CompactWedgeSlider,
+    CubeTimeSpinBox,
     PanelContainer,
     ResponsiveDoubleSpinBox,
     ShineProgressBar,
@@ -221,7 +222,8 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, HistogramMaskMixin, Measurem
     HISTOGRAM_MIN_INTENSITY = 0.0
     HISTOGRAM_MAX_INTENSITY = 65535.0
     HISTOGRAM_LOG_Y_FLOOR = 0.1
-    PROCESSED_IMAGE_CACHE_SIZE = 6
+    PRIMARY_CUBE_IMAGE_CACHE_MIN_SIZE = 40
+    SECONDARY_CUBE_IMAGE_CACHE_SIZE = 5
     MASK_CANDIDATE_CACHE_SIZE = 6
     ABSORBANCE_SPECTRUM_CACHE_SIZE = 48
     ABSORBANCE_SPECTRAL_CUBE_CACHE_SIZE = 48
@@ -293,6 +295,8 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, HistogramMaskMixin, Measurem
         self._previous_image_key: tuple[int, float] | None = None
         self._spectral_cube_values: list[int] = []
         self._wavelength_values: list[float] = []
+        self._workflow_log_debug_enabled = False
+        self._cube_time_display_mode = "cube"  # "cube" or "time" - see _toggle_cube_time_display_mode
         self._thread_pool = QThreadPool(self)
         self._thread_pool.setMaxThreadCount(max(4, min(6, os.cpu_count() or 4)))
         self._current_record_path: Path | None = None
@@ -381,7 +385,15 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, HistogramMaskMixin, Measurem
         self._roi_overlay_refresh_timer.setSingleShot(True)
         self._roi_overlay_refresh_timer.setInterval(16)
         self._roi_overlay_refresh_timer.timeout.connect(self._refresh_roi_overlays_during_drag)
-        self._processed_image_cache: OrderedDict[tuple[object, ...], np.ndarray] = OrderedDict()
+        # Two-tier cache: the primary (first) spectral cube is the one used
+        # for ROI placement, chromatic-correction estimation, and mask setup,
+        # so it's revisited constantly - it gets a cache sized to hold every
+        # wavelength in it. Every other spectral cube (a quick look at another
+        # time point) shares one small LRU cache, just big enough to survive
+        # "look, then come back" without paying to hold a whole extra cube.
+        # See _processed_image_cache_for_key.
+        self._processed_image_cache_primary: OrderedDict[tuple[object, ...], np.ndarray] = OrderedDict()
+        self._processed_image_cache_secondary: OrderedDict[tuple[object, ...], np.ndarray] = OrderedDict()
         self._mask_candidate_cache: OrderedDict[tuple[object, ...], np.ndarray] = OrderedDict()
         self._mask_candidate_in_flight: set[tuple[object, ...]] = set()
         self._mask_candidate_pending: dict[tuple[object, ...], list] = {}
@@ -401,6 +413,8 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, HistogramMaskMixin, Measurem
         self._sensorgram_cache: OrderedDict[tuple[object, ...], SensorgramComputationResult] = OrderedDict()
         self._sensorgram_spectral_cube_payload_cache: OrderedDict[tuple[object, ...], tuple[object, ...]] = OrderedDict()
         self._sensorgram_spectral_cube_result_cache: OrderedDict[tuple[object, ...], AbsorbanceSpectrumResult] = OrderedDict()
+        self._acquisition_timing_index_cache: tuple[int, dict[int, object], dict[tuple[int, float], object]] | None = None
+        self._sensorgram_axis_range_cache: tuple[object, tuple[float, float]] | None = None
         self._analysis_cache_lock = threading.Lock()
         self._last_absorbance_fit_seconds: float | None = None
         self._last_saved_processing_signature: str | None = None
@@ -1786,8 +1800,9 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, HistogramMaskMixin, Measurem
 
         self.spectral_cube_slider = QSlider(Qt.Orientation.Horizontal, self)
         self.spectral_cube_slider.setEnabled(False)
-        self.spectral_cube_spin = QSpinBox(self)
+        self.spectral_cube_spin = CubeTimeSpinBox(self)
         self.spectral_cube_spin.setEnabled(False)
+        self.spectral_cube_spin.set_text_override_provider(self._cube_time_display_text_for)
         self.wavelength_slider = QSlider(Qt.Orientation.Horizontal, self)
         self.wavelength_slider.setEnabled(False)
         self.wavelength_spin = QDoubleSpinBox(self)
@@ -3109,6 +3124,13 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, HistogramMaskMixin, Measurem
     def _update_metadata_status_labels(self, dataset=None) -> None:
         dataset = self._state.dataset if dataset is None else dataset
         metadata = getattr(dataset, "acquisition_metadata", None) if dataset is not None else None
+        if metadata is None or not metadata.image_timings:
+            # Metadata just got cleared/reloaded without timing data - Time
+            # mode has nothing left to show, so fall back to Cube rather than
+            # leave the toggle stuck showing "[Time]" for a feature that's no
+            # longer available.
+            self._cube_time_display_mode = "cube"
+        self._refresh_cube_time_display()
         if metadata is None:
             self.metadata_status_label.setText("No metadata loaded")
             self.metadata_preview_button.setEnabled(False)
@@ -3145,13 +3167,72 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, HistogramMaskMixin, Measurem
             return f"{sign}{hours:d}:{minutes:02d}:{seconds:02d}.{millis:03d}"
         return f"{sign}{minutes:d}:{seconds:02d}.{millis:03d}"
 
+    def _cube_time_toggle_available(self) -> bool:
+        """Whether Cube/Time switching is currently meaningful: acquisition
+        metadata with real per-image timing must be loaded, or there is
+        nothing to switch to. Same "is real elapsed time available" check
+        the sensorgram plot's time axis already uses (see
+        AnalysisController._sensorgram_time_mode_metadata) - the two are the
+        same feature (this toggle and the sensorgram plot were the same
+        Cube-vs-Time question before this toggle existed to make it
+        explicit)."""
+        return self._analysis_controller._sensorgram_time_mode_metadata() is not None
+
+    def _toggle_cube_time_display_mode(self) -> None:
+        if not self._cube_time_toggle_available():
+            return
+        self._cube_time_display_mode = "time" if self._cube_time_display_mode == "cube" else "cube"
+        self._refresh_cube_time_display()
+
+    def _cube_time_display_text_for(self, spectral_cube_index: int) -> str | None:
+        """Elapsed-time text (H:MM:SS, or M:SS under an hour) for
+        `spectral_cube_index` - CubeTimeSpinBox's override provider, called
+        by Qt to decide what the spin box should show for a given value.
+        Returning None (Cube mode, no metadata, or no timing entry for this
+        specific cube) falls back to the plain integer cube index - the
+        spin's stored value and stepping are untouched either way, this only
+        ever changes what's displayed."""
+        if self._cube_time_display_mode != "time":
+            return None
+        dataset = self._state.dataset
+        metadata = getattr(dataset, "acquisition_metadata", None) if dataset is not None else None
+        if metadata is None or not metadata.image_timings:
+            return None
+        per_cube_earliest = self._analysis_controller._earliest_timing_by_cube_index(metadata)
+        timing = per_cube_earliest.get(int(spectral_cube_index))
+        if timing is None:
+            return None
+        anchor_ms = self._analysis_controller._sensorgram_time_anchor_ms(metadata)
+        elapsed_seconds = (timing.acquired_at_unix_ms - anchor_ms) / 1000.0
+        return self._format_elapsed_seconds(elapsed_seconds) or "0:00"
+
+    def _refresh_cube_time_display(self) -> None:
+        """Repaints everything the Cube/Time toggle affects: the spectral-cube
+        spinbox's displayed text, and both clickable affordances (the
+        Metadata section's [Cube]/[Time] label and the "Cube" slider-title
+        label - see layout_builder.py's metadata_cube_time_toggle and
+        spectral_cube_mini_label). Call after anything that could change
+        what any of them should show: the mode was toggled, the displayed
+        cube changed, or availability changed (dataset/metadata loaded,
+        cleared, or imported)."""
+        self.spectral_cube_spin.refresh_display()
+        for refresh in (
+            getattr(self, "_refresh_metadata_cube_time_toggle", None),
+            getattr(self, "_refresh_cube_slider_title_toggle", None),
+        ):
+            if callable(refresh):
+                refresh()
+
     def _update_metadata_status_label(self) -> None:
         """Live "this image was acquired at <time>, comment: <text>" label
         for whatever (spectral_cube_index, wavelength) is currently
         displayed - the actual cube-to-time linkage the metadata import
         exists for. Called once per settled image selection from
         ImageRenderManager.refresh_image(), same trigger as
-        _update_reference_summary()."""
+        _update_reference_summary(). Also the trigger point for refreshing
+        the Cube/Time toggle's spinbox text - the displayed cube just
+        settled, same as everything else this method reacts to."""
+        self._refresh_cube_time_display()
         dataset = self._state.dataset
         metadata = getattr(dataset, "acquisition_metadata", None) if dataset is not None else None
         if metadata is None:
@@ -3162,7 +3243,12 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, HistogramMaskMixin, Measurem
         if spectral_cube_index is None or wavelength is None:
             self.metadata_current_cube_label.setText("")
             return
-        timing = metadata.timing_for(int(spectral_cube_index), float(wavelength))
+        # Indexed lookup (built once per metadata object, see
+        # AnalysisController._acquisition_timing_index), not
+        # metadata.timing_for() directly - that rescans the entire
+        # image_timings list on every call, and this label refreshes on
+        # every single wavelength switch.
+        timing = self._analysis_controller._timing_for_frame(metadata, int(spectral_cube_index), float(wavelength))
         if timing is None:
             self.metadata_current_cube_label.setText("This image: no timing data loaded.")
             return
@@ -3328,18 +3414,57 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, HistogramMaskMixin, Measurem
             self._preprocessing_signature(image_key),
         )
 
+    def _processed_image_cache_for_key(
+        self, image_key: tuple[int, float]
+    ) -> tuple[OrderedDict[tuple[object, ...], np.ndarray], int, str]:
+        """Routes a processed-image cache lookup/store to the right tier: the
+        primary (first) spectral cube - the one used for ROI placement,
+        chromatic-correction estimation, and mask setup, so it's revisited
+        constantly - gets a cache sized to hold every wavelength in it. Every
+        other spectral cube (a quick look at another time point) shares one
+        small LRU cache, just big enough to survive "look, then come back"
+        without paying to hold a whole extra cube's worth of processed
+        images."""
+        spectral_cube_index = int(image_key[0])
+        primary_index = min(self._spectral_cube_values) if self._spectral_cube_values else None
+        if primary_index is not None and spectral_cube_index == primary_index:
+            cache_size = max(len(self._wavelength_values), self.PRIMARY_CUBE_IMAGE_CACHE_MIN_SIZE)
+            return self._processed_image_cache_primary, cache_size, "primary"
+        return self._processed_image_cache_secondary, self.SECONDARY_CUBE_IMAGE_CACHE_SIZE, "secondary"
+
+    def _clear_processed_image_cache(self) -> None:
+        self._processed_image_cache_primary.clear()
+        self._processed_image_cache_secondary.clear()
+
     def _get_processed_image_from_cache(self, cache_key: tuple[object, ...]) -> np.ndarray | None:
-        cached = self._processed_image_cache.get(cache_key)
+        cache, _cache_size, tier = self._processed_image_cache_for_key(cache_key[1])
+        cached = cache.get(cache_key)
         if cached is None:
             return None
-        self._processed_image_cache.move_to_end(cache_key)
+        cache.move_to_end(cache_key)
+        self._workflow_logger.debug(f"Processed image cache hit | tier={tier}")
         return cached
 
     def _store_processed_image_in_cache(self, cache_key: tuple[object, ...], processed: np.ndarray) -> None:
-        self._processed_image_cache[cache_key] = processed
-        self._processed_image_cache.move_to_end(cache_key)
-        while len(self._processed_image_cache) > self.PROCESSED_IMAGE_CACHE_SIZE:
-            self._processed_image_cache.popitem(last=False)
+        cache, cache_size, tier = self._processed_image_cache_for_key(cache_key[1])
+        cache[cache_key] = processed
+        cache.move_to_end(cache_key)
+        while len(cache) > cache_size:
+            cache.popitem(last=False)
+        if self._workflow_log_debug_enabled:
+            # Only summed when Debug mode is actually on - cheap (O(cache
+            # size), at most ~100 arrays), but there's no reason to walk the
+            # cache on every single store when nobody's going to see the
+            # number. Answers "how much RAM is the two-tier cache actually
+            # using right now", which the cache-size change this was added
+            # alongside made worth being able to check directly instead of
+            # guessing from the nominal per-frame byte estimate.
+            cache_bytes = sum(int(arr.nbytes) for arr in cache.values())
+            self._workflow_logger.debug(
+                f"Processed image cache built | tier={tier} count={len(cache)}/{cache_size} ~{cache_bytes / (1024 * 1024):.1f}MB"
+            )
+        else:
+            self._workflow_logger.debug(f"Processed image cache built | tier={tier}")
 
     def _cached_processed_image(self, record, image_key: tuple[int, float]) -> np.ndarray:
         cache_key = self._processed_image_cache_key(record.path, image_key)
@@ -3417,6 +3542,9 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, HistogramMaskMixin, Measurem
 
     def _set_workflow_log_autoscroll_enabled(self, enabled: bool) -> None:
         self._workflow_log_controller.set_workflow_log_autoscroll_enabled(enabled)
+
+    def _set_workflow_log_debug_enabled(self, enabled: bool) -> None:
+        self._workflow_log_controller.set_workflow_log_debug_enabled(enabled)
 
     def _copy_workflow_log(self) -> None:
         self._workflow_log_controller.copy_workflow_log()
@@ -3626,11 +3754,11 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, HistogramMaskMixin, Measurem
     def _invalidate_background_profile_cache(self) -> None:
         self._bg_profile._invalidate_background_profile_cache()
 
-    def _apply_main_image_content(self) -> None:
-        self._bg_profile._apply_main_image_content()
+    def _apply_main_image_content(self, *, skip_roi_overlay_refresh: bool = False) -> None:
+        self._bg_profile._apply_main_image_content(skip_roi_overlay_refresh=skip_roi_overlay_refresh)
 
-    def _sync_main_view_mode(self) -> None:
-        self._bg_profile._sync_main_view_mode()
+    def _sync_main_view_mode(self, *, skip_roi_overlay_refresh: bool = False) -> None:
+        self._bg_profile._sync_main_view_mode(skip_roi_overlay_refresh=skip_roi_overlay_refresh)
 
     def _sync_background_profile_buttons(self, checked: bool) -> None:
         self._bg_profile._sync_background_profile_buttons(checked)
@@ -5105,9 +5233,16 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, HistogramMaskMixin, Measurem
 
     def _on_roi_edit_tool_toggled(self, checked: bool) -> None:
         if checked:
-            reference_key = self._reference_image_key()
-            if reference_key is not None and self._current_image_key != reference_key:
-                self._set_current_spectral_cube_and_wavelength(int(reference_key[0]), float(reference_key[1]))
+            # Deliberately does NOT force-navigate to the reference image.
+            # ROI *creation* (add/array-stamp) still requires the reference
+            # view - _sync_roi_edit_capabilities() below disables those
+            # controls on a non-reference wavelength - but *moving* an
+            # existing ROI is intentionally supported while viewing any
+            # wavelength once chromatic correction is enabled (see
+            # _roi_display_position/_set_roi_position_for_current_view),
+            # so jumping away here would fight that feature. Use the
+            # explicit "Jump to reference image" button when reference-only
+            # actions are needed.
             self.mask_pencil_check.blockSignals(True)
             self.mask_pencil_check.setChecked(False)
             self.mask_pencil_check.blockSignals(False)

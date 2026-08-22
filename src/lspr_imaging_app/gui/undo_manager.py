@@ -159,7 +159,7 @@ class UndoManager:
             window._current_file_mask = None if snapshot.file_mask is None else snapshot.file_mask.copy()
             window._current_file_mask_path = None if snapshot.file_mask_path is None else Path(snapshot.file_mask_path)
             window._external_mask_revision = int(snapshot.file_mask_revision)
-            window._processed_image_cache.clear()
+            window._clear_processed_image_cache()
             window._invalidate_image_analysis_caches()
             window._invalidate_background_profile_cache()
 

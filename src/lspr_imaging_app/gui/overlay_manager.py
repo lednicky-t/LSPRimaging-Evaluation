@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import time
+
 import numpy as np
 import pyqtgraph as pg
 from PyQt6.QtCore import Qt, QRectF
@@ -33,6 +35,14 @@ class OverlayManager:
 
     def _update_roi_overlays(self, *, update_hidden_details: bool = True, roi_ids: set[int] | None = None) -> None:
         w = self.window
+        # Only timed for a full (unscoped) rebuild, gated on Debug mode being
+        # on right now - a scoped rebuild (roi_ids given) fires many times a
+        # second during an interactive drag (see
+        # _refresh_roi_overlays_during_drag), where even a throttled log call
+        # per call site would add needless overhead to the one thing this
+        # split (full vs. scoped) exists to keep fast.
+        timing_enabled = roi_ids is None and bool(getattr(w, "_workflow_log_debug_enabled", False))
+        rebuild_started_at = time.perf_counter() if timing_enabled else 0.0
         display_rois = w._display_rois()
         source_roi_map = {roi.area_roi_id: roi for roi in w._state.area_rois}
         if w._showing_background_profile_main:
@@ -200,6 +210,16 @@ class OverlayManager:
             # _sync_roi_table_selection separately), so a full table rebuild
             # here would be pure waste; see roi_table_controller.
             w._roi_table_controller.refresh_cached_row_styles()
+        if timing_enabled:
+            # Millisecond precision, not _format_elapsed_seconds (rounds to
+            # whole seconds) - a 170-ROI rebuild is typically tens of
+            # milliseconds, which would otherwise always read "0:00".
+            w._append_workflow_log_throttled(
+                "roi_overlay_rebuild",
+                f"ROI overlay rebuild | {len(display_rois)} rois | {(time.perf_counter() - rebuild_started_at) * 1000.0:.0f}ms",
+                level="debug",
+                min_interval=1.0,
+            )
 
     # ------------------------------------------------------------------
     # Landmark overlays

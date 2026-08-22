@@ -185,7 +185,7 @@ class BackgroundProfileController:
         self.window._background_profile_cache_image = None
 
 
-    def _apply_main_image_content(self) -> None:
+    def _apply_main_image_content(self, *, skip_roi_overlay_refresh: bool = False) -> None:
         if self.window._showing_background_profile_main and self.window._background_profile_cache_image is not None:
             levels = self._background_profile_display_levels()
             if levels is not None:
@@ -194,7 +194,7 @@ class BackgroundProfileController:
                 self.window.image_item.setImage(self.window._background_profile_cache_image.T, autoLevels=True)
         elif self.window._current_processed_image is not None:
             self.window.image_item.setImage(self.window._current_processed_image.T, autoLevels=True)
-        self._sync_main_view_mode()
+        self._sync_main_view_mode(skip_roi_overlay_refresh=skip_roi_overlay_refresh)
         self.window._update_reference_star_overlay()
 
 
@@ -213,7 +213,7 @@ class BackgroundProfileController:
         return (vmin, vmax)
 
 
-    def _sync_main_view_mode(self) -> None:
+    def _sync_main_view_mode(self, *, skip_roi_overlay_refresh: bool = False) -> None:
         showing_profile = self.window._showing_background_profile_main and self.window._background_profile_cache_image is not None
         if showing_profile:
             self.window.intensity_highlight_item.hide()
@@ -245,7 +245,16 @@ class BackgroundProfileController:
         self.window._update_ignore_mask_overlay()
         self.window._sync_rotation_visibility()
         self.window._sync_crop_visibility()
-        self.window._update_roi_overlays()
+        if not skip_roi_overlay_refresh:
+            # image_render_manager.apply_loaded_image() already did a full
+            # _update_roi_overlays() rebuild moments earlier as part of
+            # switching to the new wavelength - reaching here right after
+            # that (rather than via a standalone background-profile
+            # view toggle, which needs this to restore overlays hidden by
+            # the `showing_profile` branch above) would otherwise redo the
+            # exact same 160-ROI rebuild a second time for nothing. See
+            # apply_loaded_image's call to _apply_main_image_content.
+            self.window._update_roi_overlays()
         self.window._update_landmark_overlays()
         self.window._update_guide_overlays()
         self.window._sync_measurement_visibility()

@@ -21,6 +21,7 @@ from PyQt6.QtWidgets import (
     QLabel,
     QMessageBox,
     QProgressBar,
+    QSpinBox,
     QStyleOptionProgressBar,
     QToolButton,
     QVBoxLayout,
@@ -45,6 +46,40 @@ class ResponsiveDoubleSpinBox(QDoubleSpinBox):
         minimum = float(self.minimum())
         maximum = float(self.maximum())
         self.setValue(float(np.clip(target, minimum, maximum)))
+
+
+class CubeTimeSpinBox(QSpinBox):
+    """A QSpinBox whose displayed text can be swapped for a caller-supplied
+    string (e.g. an elapsed-time readout) while its stored value and
+    stepping/typing behavior stay ordinary integer cube-index arithmetic,
+    completely unchanged - display only. Set the swap-in via
+    `set_text_override_provider(fn)`, where `fn(value) -> str | None` returns
+    the override text for a given value, or None to fall back to the plain
+    integer display. Call `refresh_display()` after anything that could
+    change what the provider would return for the same value (e.g. toggling
+    Cube/Time mode) - Qt only calls `textFromValue` on its own when the
+    stored value itself changes, not when this widget's display should
+    change for some other reason."""
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self._text_override_provider: Callable[[int], str | None] | None = None
+
+    def set_text_override_provider(self, provider: Callable[[int], str | None] | None) -> None:
+        self._text_override_provider = provider
+        self.refresh_display()
+
+    def refresh_display(self) -> None:
+        line_edit = self.lineEdit()
+        if line_edit is not None:
+            line_edit.setText(self.textFromValue(self.value()))
+
+    def textFromValue(self, value: int) -> str:  # type: ignore[override]
+        if self._text_override_provider is not None:
+            override = self._text_override_provider(value)
+            if override is not None:
+                return override
+        return super().textFromValue(value)
 
 
 class CollapsibleSection(QWidget):

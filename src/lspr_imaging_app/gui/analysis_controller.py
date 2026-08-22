@@ -157,6 +157,64 @@ class AnalysisController:
                 pass
         return min(timing.acquired_at_unix_ms for timing in metadata.image_timings)
 
+    def _acquisition_timing_index(self, metadata) -> tuple[dict[int, object], dict[tuple[int, float], object]]:
+        """(per_cube_earliest, per_frame) built together in one pass over
+        `metadata.image_timings`, cached on the window keyed by id(metadata) -
+        a freshly loaded/reloaded dataset always gets a new metadata object,
+        so this self-invalidates without needing an explicit clear call.
+
+        `per_cube_earliest`: {spectral_cube_index: earliest ImagingCubeTiming
+        for that cube} - one representative timestamp per cube (when its
+        sweep began), for anything plotting/navigating by cube (sensorgram
+        x-axis, the Cube/Time toggle).
+
+        `per_frame`: {(spectral_cube_index, wavelength_nm): ImagingCubeTiming}
+        - the full per-image timing, for anything asking "when was this
+        exact frame taken" (the "This image acquired" status label).
+
+        Both replace linear scans that used to run on every wavelength
+        switch: `ImagingCubeTiming.earliest_timing_for_cube()` and
+        `.timing_for()` (packages/lspr_core) each re-scan the *entire*
+        `image_timings` list - O(wavelengths x cubes) - per call, since
+        `image_timings` is flat per-(cube, wavelength), not indexed by
+        either key. `_sensorgram_axis_range` used to call
+        `earliest_timing_for_cube()` once per spectral cube in the whole
+        dataset every switch, making that one call O(cubes^2 x wavelengths) -
+        measured at ~190ms on a 200-cube x 65-wavelength dataset (13,000
+        timing entries), matching almost exactly a "chromatic"-labeled stage
+        cost seen on a real slow-switch log (mislabeled - the actual cost was
+        here, not chromatic sync). This builds both dicts with one O(cubes x
+        wavelengths) pass instead, without touching lspr_core (a separate,
+        shared package the acquisition app also depends on - changing its
+        model wasn't necessary here)."""
+        window = self.window
+        cache = getattr(window, "_acquisition_timing_index_cache", None)
+        if cache is not None and cache[0] == id(metadata):
+            return cache[1], cache[2]
+        per_cube_earliest: dict[int, object] = {}
+        per_frame: dict[tuple[int, float], object] = {}
+        for timing in metadata.image_timings:
+            cube_index = int(timing.spectral_cube_index)
+            wavelength_nm = float(timing.wavelength_nm)
+            per_frame[(cube_index, wavelength_nm)] = timing
+            existing = per_cube_earliest.get(cube_index)
+            if existing is None or timing.acquired_at_unix_ms < existing.acquired_at_unix_ms:
+                per_cube_earliest[cube_index] = timing
+        window._acquisition_timing_index_cache = (id(metadata), per_cube_earliest, per_frame)
+        return per_cube_earliest, per_frame
+
+    def _earliest_timing_by_cube_index(self, metadata) -> dict[int, object]:
+        per_cube_earliest, _per_frame = self._acquisition_timing_index(metadata)
+        return per_cube_earliest
+
+    def _timing_for_frame(self, metadata, spectral_cube_index: int, wavelength_nm: float):
+        """The exact per-image timing for one (cube, wavelength) frame, or
+        None if this metadata has no entry for it - the indexed equivalent of
+        `ImagingAcquisitionMetadata.timing_for()`, see
+        `_acquisition_timing_index`'s docstring for why."""
+        _per_cube_earliest, per_frame = self._acquisition_timing_index(metadata)
+        return per_frame.get((int(spectral_cube_index), float(wavelength_nm)))
+
     def _sensorgram_x_values(self, spectral_cube_indices) -> np.ndarray:
         """Map spectral cube indices to sensorgram x-axis display values:
         elapsed seconds since the dataset's start when acquisition metadata
@@ -169,9 +227,10 @@ class AnalysisController:
         if metadata is None:
             return indices.astype(np.float64)
         anchor_ms = self._sensorgram_time_anchor_ms(metadata)
+        timing_by_cube = self._earliest_timing_by_cube_index(metadata)
         values = np.full(indices.shape, np.nan, dtype=np.float64)
         for position, cube_index in enumerate(indices):
-            timing = metadata.earliest_timing_for_cube(int(cube_index))
+            timing = timing_by_cube.get(int(cube_index))
             if timing is not None:
                 values[position] = (timing.acquired_at_unix_ms - anchor_ms) / 1000.0
         return values
@@ -2136,17 +2195,34 @@ class AnalysisController:
     def _sensorgram_axis_range(self) -> tuple[float, float] | None:
         """The sensorgram plot's x-axis limits: elapsed-time range when
         acquisition metadata with per-image timing is loaded, otherwise the
-        raw spectral-cube-index range (today's behavior, unchanged)."""
-        if not self.window._spectral_cube_values:
+        raw spectral-cube-index range (today's behavior, unchanged).
+
+        Cached on the window: this result depends only on the dataset's full
+        spectral-cube set and its acquisition metadata, neither of which
+        changes when the user switches wavelength - yet this used to get
+        recomputed from scratch on every single switch anyway, as part of
+        apply_loaded_image's general "resync everything to the new image"
+        step, even though nothing about a wavelength switch actually
+        invalidates it. The cache key (metadata identity + the cube list
+        itself) naturally recomputes only when either really changes (a new
+        dataset load, or edits to which cubes exist)."""
+        window = self.window
+        if not window._spectral_cube_values:
             return None
-        index_range = (float(min(self.window._spectral_cube_values)), float(max(self.window._spectral_cube_values)))
-        if self._sensorgram_time_mode_metadata() is None:
-            return index_range
-        x_values = self._sensorgram_x_values(self.window._spectral_cube_values)
-        finite = x_values[np.isfinite(x_values)]
-        if finite.size == 0:
-            return index_range
-        return float(np.min(finite)), float(np.max(finite))
+        metadata = self._sensorgram_time_mode_metadata()
+        cache_key = (id(metadata) if metadata is not None else None, tuple(window._spectral_cube_values))
+        cache = getattr(window, "_sensorgram_axis_range_cache", None)
+        if cache is not None and cache[0] == cache_key:
+            return cache[1]
+        index_range = (float(min(window._spectral_cube_values)), float(max(window._spectral_cube_values)))
+        if metadata is None:
+            result = index_range
+        else:
+            x_values = self._sensorgram_x_values(window._spectral_cube_values)
+            finite = x_values[np.isfinite(x_values)]
+            result = index_range if finite.size == 0 else (float(np.min(finite)), float(np.max(finite)))
+        window._sensorgram_axis_range_cache = (cache_key, result)
+        return result
 
     def _sync_analysis_plot_axes(self) -> None:
         wavelength_range = self._analysis_plot_wavelength_range()

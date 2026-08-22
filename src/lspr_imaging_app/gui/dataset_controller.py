@@ -212,7 +212,7 @@ class DatasetController:
         window._current_record_path = None
         window._current_file_mask = None
         window._current_file_mask_path = None
-        window._processed_image_cache.clear()
+        window._clear_processed_image_cache()
         window._processed_shape_cache.clear()
         window._invalidate_image_analysis_caches()
         window._invalidate_background_profile_cache()
@@ -484,7 +484,7 @@ class DatasetController:
         window._current_file_mask = None
         window._current_file_mask_path = None
         window._current_file_mask_session_source_path = None
-        window._processed_image_cache.clear()
+        window._clear_processed_image_cache()
         window._processed_shape_cache.clear()
         window._invalidate_image_analysis_caches()
         window._invalidate_background_profile_cache()
@@ -724,7 +724,11 @@ class DatasetController:
         if request_id != window._ome_zarr_export_request_id or not window._ome_zarr_export_running:
             return
         if text.startswith("ADAPTIVE_FLIP: "):
-            window._append_workflow_log(text.removeprefix("ADAPTIVE_FLIP: "), level="info")
+            # Internal worker-rebalancing decision, not an operator-actionable
+            # event (the export keeps running the same either way) - the
+            # user-facing summary of what adaptive tuning did overall still
+            # comes through _finish_ome_zarr_export's start/done messages.
+            window._append_workflow_log(text.removeprefix("ADAPTIVE_FLIP: "), level="debug")
             return
         current_percent = int(np.clip(percent, 0, 100))
         window.dataset_ome_zarr_export_progress_bar.setValue(current_percent)

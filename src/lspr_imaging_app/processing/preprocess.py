@@ -1,10 +1,15 @@
 from __future__ import annotations
 
+import logging
+import time
+
 import numpy as np
 from scipy import ndimage
 
 from lspr_imaging_app.domain.models import AreaRoi, AreaRoiDetectionSettings, MaskSettings, PreprocessingSettings
 from lspr_imaging_app.processing.roi_detection import ignored_pixel_mask
+
+_LOGGER = logging.getLogger(__name__)
 
 
 def apply_preprocessing(
@@ -17,6 +22,7 @@ def apply_preprocessing(
     mask_state: MaskSettings | None = None,
     region: tuple[int, int, int, int] | None = None,
     skip_crop: bool = False,
+    log_stage_timing: bool = False,
 ) -> np.ndarray:
     """`region` (x0, y0, x1, y1), if given, only affects what's *returned* —
     masking and the rotate/flip/crop step always run on the whole image
@@ -32,7 +38,19 @@ def apply_preprocessing(
     canvas its coordinates are defined against (see the CLAUDE.md pitfall on
     `image_tools_enabled`: getting this canvas wrong is what causes crop
     settings to compound into an over-cropped image on session restore).
+
+    `log_stage_timing`, if set, emits one DEBUG log line breaking the call
+    down into mask/spatial-transform/flatten-background time (stays invisible
+    in the console unless Debug mode is on - see
+    workflow_log_controller.append_workflow_log_entry - but always reaches
+    the session log file, matching every other DEBUG line). Opt-in and
+    defaults off: this function also runs inside tight per-frame loops (batch
+    sensorgram/absorbance calculations, patch-based ROI reads), where a log
+    line per call would flood the log for no benefit - only the single-image
+    display refresh path (_process_image_task) passes True.
     """
+    stage_started_at = time.perf_counter() if log_stage_timing else 0.0
+
     # Apply mask to raw image before spatial preprocessing
     masked_image = image
 
@@ -59,6 +77,10 @@ def apply_preprocessing(
     if external_mask is not None and not external_mask_processed:
         masked_image = np.where(external_mask.astype(bool), 0, masked_image)
 
+    if log_stage_timing:
+        mask_elapsed = time.perf_counter() - stage_started_at
+        stage_started_at = time.perf_counter()
+
     processed = apply_spatial_preprocessing(masked_image, settings, skip_crop=skip_crop)
 
     # A pre-transformed external mask (caller already rotated/flipped/cropped
@@ -77,7 +99,12 @@ def apply_preprocessing(
             processed_exclusion_mask = candidate
             processed = np.where(processed_exclusion_mask, 0, processed)
 
+    if log_stage_timing:
+        spatial_elapsed = time.perf_counter() - stage_started_at
+
     if settings.flatten_background_enabled:
+        if log_stage_timing:
+            stage_started_at = time.perf_counter()
         # Rotation-fill pixels (see rotation_fill_pixel_mask) are excluded from
         # the background estimate unconditionally - unlike the mask/ROI
         # exclusions above, this isn't optional curation the
@@ -96,7 +123,21 @@ def apply_preprocessing(
             region=region,
             exclusion_dilation_px=int(getattr(settings, "flatten_background_exclusion_dilation_px", 0)),
         )
+        if log_stage_timing:
+            flatten_elapsed = time.perf_counter() - stage_started_at
+            _LOGGER.debug(
+                "Image process stages | mask=%.0fms spatial=%.0fms flatten=%.0fms total=%.0fms | rois=%d",
+                mask_elapsed * 1000.0, spatial_elapsed * 1000.0, flatten_elapsed * 1000.0,
+                (mask_elapsed + spatial_elapsed + flatten_elapsed) * 1000.0,
+                len(rois) if rois else 0,
+            )
         return processed
+
+    if log_stage_timing:
+        _LOGGER.debug(
+            "Image process stages | mask=%.0fms spatial=%.0fms flatten=off total=%.0fms",
+            mask_elapsed * 1000.0, spatial_elapsed * 1000.0, (mask_elapsed + spatial_elapsed) * 1000.0,
+        )
 
     if region is not None:
         x0, y0, x1, y1 = region

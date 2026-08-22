@@ -1361,7 +1361,7 @@ class ChromaticController:
                     self.window._set_status_text("Chromatic edit activated. Navigating to the first sampled wavelength image.")
                     self.window._append_workflow_log(
                         "Chromatic edit activated | navigated to first sampled wavelength image",
-                        level="info",
+                        level="debug",
                     )
                 else:
                     self.window._set_status_text("Start the radial workflow before editing chromatic reference points.")
@@ -1402,10 +1402,10 @@ class ChromaticController:
                 f"Chromatic reference point editor active. Click to place point {self.window._chromatic_landmark_marker_id}, "
                 "drag to adjust, PageUp/PageDown to switch reference points."
             )
-            self.window._append_workflow_log("Chromatic edit activated", level="info")
+            self.window._append_workflow_log("Chromatic edit activated", level="debug")
         elif self.window._active_tool == "chromatic_landmark":
             self.window._active_tool = None
-            self.window._append_workflow_log("Chromatic edit deactivated", level="info")
+            self.window._append_workflow_log("Chromatic edit deactivated", level="debug")
         self.window._update_landmark_overlays()
         self.sync_grid_visibility()
 

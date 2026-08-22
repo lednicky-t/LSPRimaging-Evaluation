@@ -140,9 +140,10 @@ class ImageRenderManager:
             rois,
             external_mask,
             window._state.mask if window._mask_section_applied() else None,
+            window._image_refresh_started_at,
         )
         worker.signals.result.connect(
-            lambda processed,
+            lambda result,
             signature=signature,
             cache_key=cache_key,
             record_path=record_path,
@@ -157,7 +158,8 @@ class ImageRenderManager:
                 spectral_cube_index,
                 wavelength,
                 record_name,
-                processed,
+                result[0],
+                result[1],
             )
         )
         worker.signals.error.connect(lambda message: self.on_image_refresh_failed(message))
@@ -173,6 +175,7 @@ class ImageRenderManager:
         wavelength: float,
         record_name: str,
         processed: np.ndarray,
+        background_total_ms: float | None,
     ) -> None:
         window = self.window
         window._image_refresh_running = False
@@ -181,15 +184,41 @@ class ImageRenderManager:
         window._end_busy()
         window._sync_busy_cursor_state()
         window._store_processed_image_in_cache(cache_key, processed)
+        # Measured and logged *before* apply_loaded_image runs below - this
+        # used to be computed after it (a bug: "Image load" silently included
+        # the entirety of "Image apply" inside it, despite the comment here
+        # claiming otherwise). background_total_ms (reported by
+        # _process_image_task itself: queue + raw-TIFF-read + apply_preprocessing,
+        # already broken down further by the "Image raw load" and "Image
+        # process stages" lines) vs. gui_wait_ms (everything else in this
+        # total - i.e. how long the finished result sat waiting for the GUI
+        # thread to actually become free and process the queued cross-thread
+        # signal) are two very different problems with different causes, so
+        # collapsing them into one "Image load" number was hiding which one
+        # actually mattered on a slow switch.
+        if started_at is not None:
+            total_since_dispatch_ms = (time.perf_counter() - started_at) * 1000.0
+            elapsed = window._format_elapsed_seconds(total_since_dispatch_ms / 1000.0)
+            if elapsed:
+                window._set_status_text(f"Img spectral cube {spectral_cube_index} {wavelength:g}nm | load {elapsed}")
+                if background_total_ms is None:
+                    window._append_workflow_log_throttled(
+                        "image_load", f"Image load | total={total_since_dispatch_ms:.0f}ms", level="debug", min_interval=2.0
+                    )
+                else:
+                    gui_wait_ms = max(total_since_dispatch_ms - background_total_ms, 0.0)
+                    window._append_workflow_log_throttled(
+                        "image_load",
+                        f"Image load | background={background_total_ms:.0f}ms gui_wait={gui_wait_ms:.0f}ms total={total_since_dispatch_ms:.0f}ms",
+                        level="debug",
+                        min_interval=2.0,
+                    )
         apply_started_at = time.perf_counter()
         if signature == window._latest_image_refresh_signature:
             self.apply_loaded_image(processed, record_path, image_key, spectral_cube_index, wavelength, record_name)
             apply_elapsed = window._format_elapsed_seconds(time.perf_counter() - apply_started_at)
             if apply_elapsed:
                 window._append_workflow_log_throttled("image_apply", f"Image apply | {apply_elapsed}", level="debug", min_interval=2.0)
-        elapsed = window._format_elapsed_seconds(time.perf_counter() - started_at) if started_at is not None else ""
-        if elapsed:
-            window._set_status_text(f"Img spectral cube {spectral_cube_index} {wavelength:g}nm | load {elapsed}")
         if window._pending_image_refresh_payload is not None:
             self.start_pending_image_refresh()
 
@@ -213,12 +242,30 @@ class ImageRenderManager:
         record_name: str,
     ) -> None:
         window = self.window
+        # Stage timing, one line at the end - see apply_preprocessing's
+        # log_stage_timing docstring for why this is safe to always compute
+        # (one call per wavelength switch, negligible perf_counter overhead)
+        # and only visible in the console when Debug mode is on. "Image
+        # apply" (on_image_refresh_ready) already reports this function's
+        # total; this breaks that total down by what it's actually spending
+        # time on, since the total alone couldn't say whether a slow apply
+        # was overlays, chromatic sync, histogram, or something else.
+        stage_started_at = time.perf_counter()
+        stage_timings: list[tuple[str, float]] = []
+
+        def _mark_stage(label: str) -> None:
+            nonlocal stage_started_at
+            now = time.perf_counter()
+            stage_timings.append((label, (now - stage_started_at) * 1000.0))
+            stage_started_at = now
+
         window._current_processed_image = processed
         window._current_record_path = record_path
         window._current_image_key = image_key
         window._auto_load_mask_for_current_record()
         window._invalidate_per_frame_display_caches()
         window._invalidate_background_profile_cache()
+        _mark_stage("setup")
         # Circle/annulus ROI overlays are drawn at a per-wavelength position
         # (via the chromatic affine, see display_rois/roi_curve_points above)
         # but that transformed position is only ever pushed to the on-screen
@@ -226,11 +273,16 @@ class ImageRenderManager:
         # this, the overlay stays wherever it was last drawn and never
         # visibly follows the wavelength, even though ROI pixel sampling for
         # the actual calculation already uses the correct per-wavelength
-        # position.
+        # position. (Its own cost is reported separately by
+        # OverlayManager._update_roi_overlays as "ROI overlay rebuild" -
+        # excluded from this function's stage breakdown below so it isn't
+        # counted twice; re-baseline stage_started_at past it.)
         window._update_roi_overlays()
+        stage_started_at = time.perf_counter()
         window._update_geometry_control_ranges(processed.shape)
         window._update_mask_file_button_state()
         window._refresh_mask_previews()
+        _mark_stage("geom_mask")
         is_reference_view = window._is_current_reference_image()
         window.detect_rois_button.setEnabled(is_reference_view)
         window.roi_detection_full_auto_button.setEnabled(is_reference_view)
@@ -256,18 +308,38 @@ class ImageRenderManager:
             window.flip_vertical_action.blockSignals(True)
             window.flip_vertical_action.setChecked(window._state.preprocessing.flip_vertical)
             window.flip_vertical_action.blockSignals(False)
+        _mark_stage("roi_edit_ui")
+        # Split into 4 sub-stages rather than one "chromatic" bucket - this
+        # bucket measured ~170ms even with chromatic correction OFF, which
+        # was unexpected enough (none of these four look individually
+        # expensive by inspection) that guessing which one was responsible
+        # wasn't good enough; this settles it directly instead of needing
+        # another round-trip.
         window._seed_chromatic_landmarks_for_current_image()
+        _mark_stage("chrom_seed")
         window._sync_current_chromatic_feature_selection()
+        _mark_stage("chrom_feature_sel")
         window._update_chromatic_control_state()
+        _mark_stage("chrom_state")
         window._sync_analysis_plots()
         if window._activate_chromatic_tool_after_refresh and window._is_chromatic_sample_image_key(window._current_image_key):
             window._activate_chromatic_tool_after_refresh = False
             window.chromatic_landmark_mark_button.setChecked(True)
-        window._apply_main_image_content()
+        _mark_stage("analysis_plots")
+        # skip_roi_overlay_refresh=True: the explicit _update_roi_overlays()
+        # call above already rebuilt every ROI overlay for this image_key -
+        # nothing between there and here repositions an ROI or changes the
+        # chromatic/crop signature display_rois() caches on, so
+        # _apply_main_image_content -> _sync_main_view_mode's own overlay
+        # rebuild would just redo the identical 160-ROI work a second time
+        # (measured ~90-115ms wasted per wavelength switch).
+        window._apply_main_image_content(skip_roi_overlay_refresh=True)
         window._update_reference_star_overlay()
+        _mark_stage("content")
         window._update_image_exclusion_indicator(spectral_cube_index, wavelength)
         window._dataset_controller._sync_ome_zarr_chunk_controls()
         window._update_ome_zarr_chunk_guide_overlay()
+        _mark_stage("exclusion")
         restored_view = window._restore_chromatic_view_after_load()
         if not restored_view:
             restored_view = self.restore_pending_image_view_after_load()
@@ -279,18 +351,28 @@ class ImageRenderManager:
             restored_view = True
         if not restored_view:
             window.image_plot.autoRange()
+        _mark_stage("view")
         window._update_image_name_overlay(None)
         if not window._chromatic_setup_active and not bool(getattr(window, "_image_tools_preview_only", False)):
             window._update_histogram(processed)
+        _mark_stage("histogram")
         window._sync_rotation_tool()
         window._sync_crop_tool(processed.shape)
         window._sync_chromatic_grid_tool(processed.shape)
         window._update_landmark_overlays()
+        _mark_stage("tools")
         window._set_status_text(f"Img spectral cube {spectral_cube_index} {wavelength:g}nm")
         if not window._chromatic_setup_active and not bool(getattr(window, "_image_tools_preview_only", False)):
             window._schedule_processing_state_save()
             window._refresh_visible_spectrum_from_cache()
             window._analysis_controller.preview_sensorgram_from_cache()
+        _mark_stage("status_and_preview")
+        total_ms = sum(elapsed for _label, elapsed in stage_timings)
+        window._workflow_logger.debug(
+            "Image apply stages | "
+            + " ".join(f"{label}={elapsed:.0f}ms" for label, elapsed in stage_timings)
+            + f" total={total_ms:.0f}ms"
+        )
         # Used to also call _request_roi_metrics_refresh() here to recompute
         # AreaRoi.score against the newly-shown reference image - removed
         # since nothing reads a placed ROI's score outside of Detect ROIs

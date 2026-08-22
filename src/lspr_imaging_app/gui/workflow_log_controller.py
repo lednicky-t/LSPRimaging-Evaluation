@@ -36,6 +36,17 @@ class WorkflowLogController:
             color = "#38bdf8" if enabled else "#94a3b8"
             window.workflow_log_autoscroll_button.setIcon(window._mask_panel_icon("arrow-down", color=color, size=20))
 
+    def set_workflow_log_debug_enabled(self, enabled: bool) -> None:
+        window = self.window
+        enabled = bool(enabled)
+        if enabled == bool(getattr(window, "_workflow_log_debug_enabled", False)):
+            return
+        window._workflow_log_debug_enabled = enabled
+        refresh = getattr(window, "_refresh_workflow_log_debug_button", None)
+        if callable(refresh):
+            refresh()
+        self.append_workflow_log(f"Console mode | {'Debug' if enabled else 'Normal'}", level="info")
+
     def copy_workflow_log(self) -> None:
         window = self.window
         if not hasattr(window, "workflow_log_view"):
@@ -54,12 +65,20 @@ class WorkflowLogController:
         handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] [%(name)s] %(message)s", "%H:%M:%S"))
         handler._lspr_gui_handler = True  # type: ignore[attr-defined]
         package_logger = logging.getLogger("lspr_imaging_app")
-        package_logger.setLevel(logging.DEBUG)
         if not any(getattr(existing, "_lspr_gui_handler", False) for existing in package_logger.handlers):
             package_logger.addHandler(handler)
+        package_logger.setLevel(logging.DEBUG)
         window._workflow_logger = logging.getLogger("lspr_imaging_app.workflow")
         window._workflow_logger.setLevel(logging.DEBUG)
         window._workflow_log_handler = handler
+        # Deliberately NOT wired to the Normal/Debug console toggle: these
+        # loggers (and the file/stream handlers app.py's _configure_logging
+        # attaches to the root logger) must always emit DEBUG records, or
+        # Normal mode would silently thin out the persisted session log file
+        # too - not just the on-screen console - which defeats exactly the
+        # crash/close-time diagnostics _configure_logging's own comment warns
+        # about. The Normal/Debug toggle instead filters only what reaches
+        # the console widget - see append_workflow_log_entry's DEBUG gate.
         window._workflow_log_buffer: list[tuple[int, str]] = []
         window._workflow_log_buffer_timer = QTimer(window)
         window._workflow_log_buffer_timer.setSingleShot(True)
@@ -97,6 +116,13 @@ class WorkflowLogController:
         if not line or not hasattr(window, "workflow_log_view"):
             return
         if int(levelno) < logging.INFO:
+            # Normal mode: DEBUG-level chatter (image apply/load timing, cache
+            # hit/build batches, ROI table refresh counts, ...) is dropped here,
+            # before it ever reaches the buffer - not just hidden after the
+            # fact, so toggling stays cheap while the console is quiet most of
+            # the time. See workflow_log_debug_button in layout_builder.py.
+            if not getattr(window, "_workflow_log_debug_enabled", False):
+                return
             buffer = getattr(window, "_workflow_log_buffer", None)
             buffer_timer = getattr(window, "_workflow_log_buffer_timer", None)
             if buffer is not None and buffer_timer is not None:
@@ -125,6 +151,8 @@ class WorkflowLogController:
         image_builds = 0
         roi_hits = 0
         roi_builds = 0
+        processed_hits = {"primary": 0, "secondary": 0}
+        processed_builds = {"primary": 0, "secondary": 0}
         for levelno, line in batch:
             if "Image cache hit |" in line:
                 image_hits += 1
@@ -138,11 +166,32 @@ class WorkflowLogController:
             if "ROI cache built |" in line:
                 roi_builds += 1
                 continue
+            if "Processed image cache hit | tier=" in line:
+                # Just the tier word, not rsplit(...)[-1] - a Debug-mode
+                # "built" line has trailing "count=.../... ~X.XMB" stats after
+                # tier=<word>, and this must still isolate <word> alone to
+                # match the processed_hits/processed_builds dict keys below.
+                tier = line.split("tier=", 1)[-1].split()[0].strip()
+                if tier in processed_hits:
+                    processed_hits[tier] += 1
+                    continue
+            if "Processed image cache built | tier=" in line:
+                tier = line.split("tier=", 1)[-1].split()[0].strip()
+                if tier in processed_builds:
+                    processed_builds[tier] += 1
+                    continue
             collapsed.append((levelno, line))
         if image_hits or image_builds:
             collapsed.append((logging.DEBUG, f"Image cache batch | hit={image_hits} build={image_builds}"))
         if roi_hits or roi_builds:
             collapsed.append((logging.DEBUG, f"ROI cache batch | hit={roi_hits} build={roi_builds}"))
+        if any(processed_hits.values()) or any(processed_builds.values()):
+            collapsed.append((
+                logging.DEBUG,
+                "Processed image cache batch | "
+                f"primary hit={processed_hits['primary']} build={processed_builds['primary']} | "
+                f"secondary hit={processed_hits['secondary']} build={processed_builds['secondary']}",
+            ))
         return collapsed
 
     def append_workflow_log_entry_now(self, levelno: int, text: str) -> None:
