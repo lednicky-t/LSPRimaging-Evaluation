@@ -248,6 +248,16 @@ class SessionStateManager:
         window._save_processing_state_for_dataset(force=True, reason="new session")
         window._set_status_text(f'Started new session "{name}".')
         window._append_workflow_log(f"New session started | name={name}", level="success")
+        if QMessageBox.question(
+            window,
+            "Clear loaded dataset",
+            "Also unload the currently loaded dataset (and its acquisition metadata) from "
+            "memory?\n\nThis only affects what's in RAM - nothing on disk is touched, and you "
+            "can reload the dataset folder afterwards.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        ) == QMessageBox.StandardButton.Yes:
+            window._dataset_controller.clear_dataset()
 
     def load_session(self) -> None:
         window = self._window

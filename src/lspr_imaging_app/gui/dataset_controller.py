@@ -468,6 +468,43 @@ class DatasetController:
             window.dataset_type_icon.setPixmap(window._dataset_stack_icon_pixmap(16, ome_zarr=ome_zarr))
             window.dataset_type_label.setText("OME-Zarr" if ome_zarr else "ImageStack")
 
+    def clear_dataset(self) -> None:
+        # Inverse of _on_dataset_loaded/_finish_load_dataset_from_folder -
+        # drops the dataset (and its acquisition metadata) back to the
+        # pre-load state so it can be garbage collected without restarting
+        # the app. Nothing on disk is touched.
+        window = self.window
+        window._state.dataset = None
+        window._record_map = {}
+        window._record_key_by_path = {}
+        window._spectral_cube_values = []
+        window._wavelength_values = []
+        window._reference_contrast_cache.clear()
+        window._current_record_path = None
+        window._current_file_mask = None
+        window._current_file_mask_path = None
+        window._current_file_mask_session_source_path = None
+        window._processed_image_cache.clear()
+        window._processed_shape_cache.clear()
+        window._invalidate_image_analysis_caches()
+        window._invalidate_background_profile_cache()
+        window._current_image_key = None
+        window._sensorgram_cache.clear()
+        window._sensorgram_running_signature = None
+        window._pending_sensorgram_payload = None
+        window.image_item.clear()
+        self._update_dataset_stack_indicator(None)
+        self._sync_ome_zarr_chunk_controls()
+        window._configure_slider(window.spectral_cube_slider, 0)
+        window._configure_slider(window.wavelength_slider, 0)
+        window._configure_navigation_inputs()
+        window._sync_image_processing_controls()
+        window._update_analysis_control_state()
+        window._update_dataset_summary_labels(None)
+        window._update_metadata_status_labels(None)
+        window._set_status_text("Dataset cleared from memory.")
+        window._append_workflow_log("Dataset cleared from memory", level="success")
+
     def _current_ome_zarr_chunk_size(self) -> int:
         return max(int(self.window.ome_zarr_chunk_spin.value()), 4)
 
