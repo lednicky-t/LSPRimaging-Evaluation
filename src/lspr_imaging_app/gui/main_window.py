@@ -33,14 +33,11 @@ from PyQt6.QtGui import (
     QColor,
     QDoubleValidator,
     QFont,
-    QIcon,
     QKeyEvent,
     QKeySequence,
-    QPainter,
     QPainterPath,
     QPalette,
     QPen,
-    QPixmap,
     QWheelEvent,
 )
 from PyQt6.QtWidgets import (
@@ -190,7 +187,6 @@ from .analysis_tasks import (
     _detect_rois_task,
     _estimate_chromatic_models_task,  # noqa: F401 - re-exported, see comment above
     _process_image_task,  # noqa: F401 - re-exported, see comment above
-    _score_reference_candidates_task,
 )
 # Plain `pyflakes` (unlike ruff) does not honor `# noqa`, so it still flags the three
 # re-exported names above as unused. This no-op reference marks them "used" for that
@@ -404,7 +400,6 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, HistogramMaskMixin, Measurem
         self._mask_candidate_pending: dict[tuple[object, ...], list] = {}
         self._processed_shape_cache: dict[tuple[object, ...], tuple[int, int]] = {}
         self._reference_contrast_cache: dict[str, float] = {}
-        self._reference_prefetch_in_flight: set[int] = set()
         self._ignored_mask_cache_signature: tuple[object, ...] | None = None
         self._ignored_mask_cache_value: np.ndarray | None = None
         self._roi_mask_cache_signature: tuple[object, ...] | None = None
@@ -534,10 +529,6 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, HistogramMaskMixin, Measurem
         self._image_refresh_timer.setSingleShot(True)
         self._image_refresh_timer.setInterval(45)
         self._image_refresh_timer.timeout.connect(self._refresh_image)
-        self._reference_sync_timer = QTimer(self)
-        self._reference_sync_timer.setSingleShot(True)
-        self._reference_sync_timer.setInterval(45)
-        self._reference_sync_timer.timeout.connect(self._run_debounced_auto_reference_sync)
         self._histogram_refresh_timer = QTimer(self)
         self._histogram_refresh_timer.setSingleShot(True)
         self._histogram_refresh_timer.setInterval(35)
@@ -825,7 +816,7 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, HistogramMaskMixin, Measurem
         self.reference_auto_button.setFixedSize(APP_THEME.compact_icon_outer, APP_THEME.compact_icon_outer)
         self.reference_auto_button.setIconSize(QSize(APP_THEME.compact_icon_inner, APP_THEME.compact_icon_inner))
         self.reference_auto_button.setStyleSheet(transparent_icon_button_stylesheet())
-        self.reference_auto_button.setToolTip("Auto: Use the best wavelength in the current spectral cube as the reference.")
+        self.reference_auto_button.setToolTip("Auto: pick the best-contrast wavelength in the current spectral cube as the fixed reference. Click again to re-pick from wherever you're currently viewing.")
         self.reference_auto_button.setIcon(self._reference_mode_icon("auto", False))
         self.reference_manual_button = QToolButton(self)
         self.reference_manual_button.setCheckable(True)
@@ -1104,7 +1095,7 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, HistogramMaskMixin, Measurem
             "QLineEdit { border: none; background: transparent; "
             f"color: {get_active_theme().text_primary}; font-size: 11px; font-weight: 700; padding: 0; }}"
         )
-        self.histogram_highlight_prefix_label = QLabel("Highlight [", self)
+        self.histogram_highlight_prefix_label = QLabel("Highlight: [", self)
         self.histogram_highlight_prefix_label.setStyleSheet(highlight_label_style)
         self.histogram_highlight_min_edit = QLineEdit(self)
         self.histogram_highlight_min_edit.setValidator(
@@ -2218,7 +2209,6 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, HistogramMaskMixin, Measurem
         self.reference_jump_button.clicked.connect(self._go_to_reference_image)
         self.spectral_cube_slider.valueChanged.connect(lambda _value: self._sync_analysis_plot_cursors())
         self.spectral_cube_slider.valueChanged.connect(lambda _value: self._schedule_image_refresh())
-        self.spectral_cube_slider.valueChanged.connect(lambda _value: self._schedule_auto_reference_sync())
         self.wavelength_slider.valueChanged.connect(lambda _value: self._sync_analysis_plot_cursors())
         self.wavelength_slider.valueChanged.connect(lambda _value: self._schedule_image_refresh())
         self.spectral_cube_spin.valueChanged.connect(self._on_spectral_cube_spin_changed)
@@ -3478,26 +3468,25 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, HistogramMaskMixin, Measurem
     def _initial_reference_indices(self) -> tuple[int, int]:
         if not self._spectral_cube_values or not self._wavelength_values:
             return 0, 0
-        if str(self._state.preprocessing.reference_mode or "auto") == "manual":
-            ref_spectral_cube = int(self._state.preprocessing.reference_spectral_cube_index)
-            ref_wavelength = self._state.preprocessing.reference_wavelength_nm
-            spectral_cube_index = self._spectral_cube_values.index(ref_spectral_cube) if ref_spectral_cube in self._spectral_cube_values else 0
-            wavelength_index = 0
-            if ref_wavelength is not None:
-                wavelength_index = min(
-                    range(len(self._wavelength_values)),
-                    key=lambda idx: abs(self._wavelength_values[idx] - float(ref_wavelength)),
-                )
-            return spectral_cube_index, wavelength_index
-        auto_key = self._auto_reference_image_key_for_spectral_cube(self._spectral_cube_values[0])
-        if auto_key is None:
-            return 0, 0
-        auto_spectral_cube, auto_wavelength = auto_key
-        spectral_cube_index = self._spectral_cube_values.index(int(auto_spectral_cube)) if int(auto_spectral_cube) in self._spectral_cube_values else 0
-        wavelength_index = min(
-            range(len(self._wavelength_values)),
-            key=lambda idx: abs(self._wavelength_values[idx] - float(auto_wavelength)),
-        )
+        settings = self._state.preprocessing
+        if str(settings.reference_mode or "auto") == "auto" and settings.reference_wavelength_nm is None:
+            # First time this dataset has an auto reference: pick the best-contrast
+            # wavelength in the first spectral cube and lock it in. From then on this
+            # is a fixed pair, not recomputed just because the user is looking at a
+            # different cube (see _reference_image_key).
+            auto_key = self._auto_reference_image_key_for_spectral_cube(self._spectral_cube_values[0])
+            if auto_key is not None:
+                settings.reference_spectral_cube_index = int(auto_key[0])
+                settings.reference_wavelength_nm = float(auto_key[1])
+        ref_spectral_cube = int(settings.reference_spectral_cube_index)
+        ref_wavelength = settings.reference_wavelength_nm
+        spectral_cube_index = self._spectral_cube_values.index(ref_spectral_cube) if ref_spectral_cube in self._spectral_cube_values else 0
+        wavelength_index = 0
+        if ref_wavelength is not None:
+            wavelength_index = min(
+                range(len(self._wavelength_values)),
+                key=lambda idx: abs(self._wavelength_values[idx] - float(ref_wavelength)),
+            )
         return spectral_cube_index, wavelength_index
 
     def _roi_signature(self, rois: list[AreaRoi] | None = None) -> tuple[object, ...]:
@@ -4570,8 +4559,10 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, HistogramMaskMixin, Measurem
         self.background_removal_link.setIcon(self._make_link_toggle_icon(background_applied))
 
     def _reference_image_key(self) -> tuple[int, float] | None:
-        if str(self._state.preprocessing.reference_mode or "auto") != "manual":
-            return self._auto_reference_image_key_for_spectral_cube(self._current_spectral_cube())
+        # The reference is a fixed (spectral cube, wavelength) pair, set once
+        # (see _sync_auto_reference_to_current_spectral_cube / _set_current_reference_from_view)
+        # and read back here as-is - it must NOT drift to whatever cube is
+        # currently being viewed, in either Auto or Manual mode.
         wavelength = self._state.preprocessing.reference_wavelength_nm
         if wavelength is None:
             return None
@@ -4876,7 +4867,7 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, HistogramMaskMixin, Measurem
             self.reference_method_status_label.setText(f"Method: {method_text}")
             self.reference_method_status_label.setStyleSheet("color: #84cc16; font-weight: 600;")
             self._update_reference_navigation_styles()
-            self._update_reference_star_overlay()
+            self._update_reference_jump_indicator()
             return
         ref_spectral_cube, ref_wavelength = ref_key
         current_spectral_cube = self._current_spectral_cube()
@@ -4894,7 +4885,7 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, HistogramMaskMixin, Measurem
         )
         self.reference_method_status_label.setStyleSheet("color: #84cc16; font-weight: 600;")
         self._update_reference_navigation_styles()
-        self._update_reference_star_overlay()
+        self._update_reference_jump_indicator()
 
     def _on_reference_mode_changed(self) -> None:
         mode = str(self.reference_mode_combo.currentData() or "auto")
@@ -4950,67 +4941,12 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, HistogramMaskMixin, Measurem
             self._schedule_processing_state_save()
         self._set_status_text(f"Manual reference set to {wavelength:g} nm | spectral cube {spectral_cube_index}.")
 
-    def _schedule_auto_reference_sync(self) -> None:
-        self._reference_sync_timer.start()
-
-    def _run_debounced_auto_reference_sync(self) -> None:
-        if str(self._state.preprocessing.reference_mode or "auto") != "auto":
-            return
-        spectral_cube_index = self._current_spectral_cube()
-        if spectral_cube_index is None:
-            return
-        if self._reference_contrast_scores_cached_for_cube(spectral_cube_index):
-            self._sync_auto_reference_to_current_spectral_cube(follow_view=False)
-        else:
-            self._prefetch_reference_contrast_scores(spectral_cube_index)
-
-    def _reference_contrast_scores_cached_for_cube(self, spectral_cube_index: int) -> bool:
-        return all(
-            str(record.path) in self._reference_contrast_cache
-            for _key, record in self._reference_candidate_records_for_cube(spectral_cube_index)
-        )
-
-    def _prefetch_reference_contrast_scores(self, spectral_cube_index: int) -> None:
-        # `_auto_reference_image_key_for_spectral_cube` scores every wavelength image in a
-        # spectral cube on first visit (disk load + contrast analysis per image), which can
-        # take a couple of seconds and would otherwise run inline on the GUI thread the moment
-        # the spectral-cube slider lands on an uncached cube. This scores the cube's images in
-        # the background instead; `_run_debounced_auto_reference_sync` above only calls the
-        # synchronous lookup once the cache is already warm.
-        if spectral_cube_index in self._reference_prefetch_in_flight:
-            return
-        paths_to_score = [
-            str(record.path)
-            for _key, record in self._reference_candidate_records_for_cube(spectral_cube_index)
-            if str(record.path) not in self._reference_contrast_cache
-        ]
-        if not paths_to_score:
-            return
-        self._reference_prefetch_in_flight.add(spectral_cube_index)
-        worker = FunctionWorker(_score_reference_candidates_task, paths_to_score)
-        worker.signals.result.connect(
-            lambda scores, spectral_cube_index=spectral_cube_index: self._on_reference_prefetch_ready(
-                spectral_cube_index, scores
-            )
-        )
-        worker.signals.error.connect(
-            lambda message, spectral_cube_index=spectral_cube_index: self._on_reference_prefetch_failed(
-                spectral_cube_index, message
-            )
-        )
-        self._thread_pool.start(worker)
-
-    def _on_reference_prefetch_ready(self, spectral_cube_index: int, scores: dict[str, float]) -> None:
-        self._reference_prefetch_in_flight.discard(spectral_cube_index)
-        self._reference_contrast_cache.update(scores)
-        if self._current_spectral_cube() == spectral_cube_index:
-            self._sync_auto_reference_to_current_spectral_cube(follow_view=False)
-
-    def _on_reference_prefetch_failed(self, spectral_cube_index: int, message: str) -> None:
-        self._reference_prefetch_in_flight.discard(spectral_cube_index)
-        self._append_workflow_log(f"Reference-image scoring failed | {message}", level="error")
-
-    def _sync_auto_reference_to_current_spectral_cube(self, follow_view: bool = True) -> None:
+    def _sync_auto_reference_to_current_spectral_cube(self) -> None:
+        # Explicit "use Auto" action (switching to Auto mode, or re-clicking the Auto
+        # button while already in it): scores every wavelength image in the *currently
+        # viewed* spectral cube and locks that in as the fixed reference pair. This is
+        # deliberately NOT re-run just because the user scrolls to a different cube -
+        # see _reference_image_key for why the reference must stay fixed once set.
         if str(self._state.preprocessing.reference_mode or "auto") != "auto":
             return
         spectral_cube_index = self._current_spectral_cube()
@@ -5023,7 +4959,7 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, HistogramMaskMixin, Measurem
         self._state.preprocessing.reference_mode = "auto"
         self._state.preprocessing.reference_spectral_cube_index = int(auto_spectral_cube)
         self._state.preprocessing.reference_wavelength_nm = float(auto_wavelength)
-        if follow_view and self._current_image_key != auto_key and self._wavelength_values:
+        if self._current_image_key != auto_key and self._wavelength_values:
             wavelength_index = min(
                 range(len(self._wavelength_values)),
                 key=lambda idx: abs(self._wavelength_values[idx] - float(auto_wavelength)),
@@ -5040,57 +4976,8 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, HistogramMaskMixin, Measurem
         self._update_reference_summary()
         self._schedule_processing_state_save()
 
-    def _ensure_reference_star_label(self) -> QLabel:
-        star = getattr(self, "_reference_star_label", None)
-        if star is not None:
-            return star
-        star = QLabel(self.image_view.viewport())
-        star.setObjectName("referenceStarLabel")
-        star.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
-        star.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground, True)
-        star.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        star.setFixedSize(26, 26)
-        icon = self._tabler_icon("star", "#84cc16", 26, stroke_width=2.0, fill="#84cc16")
-        if icon.isNull():
-            icon = self._lucide_icon("star", "#84cc16", 26, stroke_width=2.0)
-        if icon.isNull():
-            pixmap = QPixmap(26, 26)
-            pixmap.fill(Qt.GlobalColor.transparent)
-            painter = QPainter(pixmap)
-            painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-            painter.setPen(QPen(QColor("#84cc16"), 2.0))
-            painter.setBrush(QColor("#84cc16"))
-            path = QPainterPath()
-            path.moveTo(13.0, 2.8)
-            path.lineTo(16.6, 9.1)
-            path.lineTo(23.6, 9.6)
-            path.lineTo(18.2, 14.0)
-            path.lineTo(20.0, 21.0)
-            path.lineTo(13.0, 17.2)
-            path.lineTo(6.0, 21.0)
-            path.lineTo(7.8, 14.0)
-            path.lineTo(2.4, 9.6)
-            path.lineTo(9.4, 9.1)
-            path.closeSubpath()
-            painter.drawPath(path)
-            painter.end()
-            icon = QIcon(pixmap)
-        star.setPixmap(icon.pixmap(26, 26))
-        star.setStyleSheet("background: transparent;")
-        star.hide()
-        self._reference_star_label = star
-        self._position_reference_star_label()
-        return star
-
-    def _position_reference_star_label(self) -> None:
-        star = getattr(self, "_reference_star_label", None)
-        if star is None:
-            return
-        margin = 8
-        star.move(margin, margin)
-
-    def _update_reference_star_overlay(self) -> None:
-        self._overlay_manager._update_reference_star_overlay()
+    def _update_reference_jump_indicator(self) -> None:
+        self._overlay_manager._update_reference_jump_indicator()
 
     def _update_reference_navigation_styles(self) -> None:
         if self._state.dataset is None:

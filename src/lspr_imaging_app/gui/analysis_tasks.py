@@ -44,7 +44,6 @@ from lspr_imaging_app.processing.preprocess import (
     create_figure_mask,
     estimate_background_profile,
 )
-from lspr_imaging_app.processing.reference_selection import bimodal_dip_contrast
 from lspr_imaging_app.processing.roi_array_geometry import ArrayGeometryEstimate, estimate_array_geometry, estimate_reference_ring_radii
 from lspr_imaging_app.processing.roi_detection import detect_rois, ignored_pixel_mask
 from lspr_imaging_app.processing.roi_histogram import estimate_roi_intensity_range
@@ -143,18 +142,6 @@ def _process_image_task(
 def _mask_candidate_task(path_str: str, mask_settings, tool_key: str) -> np.ndarray:
     raw_image = load_image_array(path_str).astype(np.float32, copy=False)
     return create_figure_mask(raw_image, mask_settings, tool_key)
-
-
-def _score_reference_candidates_task(path_strs: list[str]) -> dict[str, float]:
-    scores: dict[str, float] = {}
-    for path_str in path_strs:
-        try:
-            image = load_image_array(path_str).astype(np.float32, copy=False)
-        except Exception:
-            scores[path_str] = float("-inf")
-            continue
-        scores[path_str] = bimodal_dip_contrast(image)
-    return scores
 
 
 def _detect_rois_task(

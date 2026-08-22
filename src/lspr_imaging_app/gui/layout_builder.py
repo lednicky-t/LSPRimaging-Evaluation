@@ -3,6 +3,7 @@ from __future__ import annotations
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QFont
 from PyQt6.QtWidgets import (
+    QAbstractSpinBox,
     QFormLayout,
     QGridLayout,
     QHBoxLayout,
@@ -1205,6 +1206,25 @@ def build_layout(window) -> None:
     histogram_layout = QVBoxLayout(histogram_content)
     histogram_layout.setContentsMargins(8, 8, 8, 8)
     histogram_layout.addWidget(window.histogram_plot)
+
+    # Bottom control row reads as one line of plain "Label: value" text
+    # (Axis / Bin / Highlight) separated by "|" - no boxed controls, so it
+    # sits under the histogram like a title-row readout rather than a form.
+    histogram_row_label_style = f"color: {get_active_theme().text_muted}; font-size: 11px; font-weight: 600;"
+
+    def _histogram_row_label(text: str) -> QLabel:
+        label = QLabel(text, histogram_content)
+        label.setStyleSheet(histogram_row_label_style)
+        return label
+
+    window.histogram_bins_spin.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
+    window.histogram_bins_spin.setAlignment(Qt.AlignmentFlag.AlignLeft)
+    window.histogram_bins_spin.setFixedWidth(68)
+    window.histogram_bins_spin.setStyleSheet(
+        "QSpinBox { border: none; background: transparent; "
+        f"color: {get_active_theme().text_primary}; font-size: 11px; font-weight: 700; padding: 0; }}"
+    )
+
     histogram_highlight_readout = QHBoxLayout()
     histogram_highlight_readout.setContentsMargins(0, 0, 0, 0)
     histogram_highlight_readout.setSpacing(1)
@@ -1216,15 +1236,15 @@ def build_layout(window) -> None:
 
     histogram_controls = QHBoxLayout()
     histogram_controls.setContentsMargins(0, 1, 0, 0)
-    histogram_controls.setSpacing(8)
+    histogram_controls.setSpacing(6)
+    histogram_controls.addWidget(_histogram_row_label("Axis:"))
+    histogram_controls.addWidget(window.histogram_y_scale_button)
+    histogram_controls.addWidget(_histogram_row_label("|"))
+    histogram_controls.addWidget(_histogram_row_label("Bin:"))
+    histogram_controls.addWidget(window.histogram_bins_spin)
+    histogram_controls.addWidget(_histogram_row_label("|"))
     histogram_controls.addLayout(histogram_highlight_readout)
     histogram_controls.addStretch(1)
-    histogram_mini_label = QLabel("Bin", histogram_content)
-    histogram_mini_label.setObjectName("toolbarMiniLabel")
-    histogram_controls.addWidget(histogram_mini_label)
-    window.histogram_bins_spin.setFixedWidth(76)
-    histogram_controls.addWidget(window.histogram_bins_spin)
-    histogram_controls.addWidget(window.histogram_y_scale_button)
     histogram_layout.addLayout(histogram_controls)
 
     spectra_content = QWidget(window)

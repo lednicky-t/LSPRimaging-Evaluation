@@ -531,20 +531,20 @@ class OverlayManager:
         w.intensity_highlight_item.show()
 
     # ------------------------------------------------------------------
-    # Reference star overlay
+    # Reference jump-button indicator
     # ------------------------------------------------------------------
 
-    def _update_reference_star_overlay(self) -> None:
+    def _update_reference_jump_indicator(self) -> None:
         w = self.window
-        star = w._ensure_reference_star_label()
-        visible = (
+        is_reference = (
             w._current_processed_image is not None
             and w._is_current_reference_image()
             and not w._showing_background_profile_main
         )
-        star.setVisible(bool(visible))
-        if visible:
-            w._position_reference_star_label()
+        w.reference_jump_button.setIcon(w._reference_jump_icon(is_reference))
+        w.reference_jump_button.setToolTip(
+            "Currently viewing the reference image." if is_reference else "Jump to the reference image."
+        )
 
     # ------------------------------------------------------------------
     # Crop overlay

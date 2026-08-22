@@ -148,10 +148,6 @@ class ImageInteractionController:
         if image_view is None:
             return False
 
-        if watched is image_view.viewport() and event.type() == QEvent.Type.Resize:
-            w._position_reference_star_label()
-            return False
-
         if watched is image_view.viewport() and w._active_tool == "crop":
             if event.type() == QEvent.Type.MouseButtonPress and event.button() == Qt.MouseButton.MiddleButton:
                 point = self._image_point_from_mouse_event(event)

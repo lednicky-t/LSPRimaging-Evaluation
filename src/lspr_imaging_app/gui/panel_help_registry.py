@@ -44,8 +44,11 @@ PANEL_HELP: dict[str, PanelHelpEntry] = {
     "reference": PanelHelpEntry(
         title="Reference",
         description=(
-            "Choose how the reference image is selected and stored in the processing profile: Auto picks the best "
-            "wavelength in the current spectral cube; Manual stores the current spectral cube and wavelength."
+            "Choose how the reference image is picked and stored in the processing profile: Auto scores every "
+            "wavelength in the spectral cube you're currently viewing and locks in the best-contrast one; Manual "
+            "locks in whichever spectral cube and wavelength you're currently viewing. Either way the choice is "
+            "a fixed pair afterwards - it will not change just from browsing to a different cube or wavelength. "
+            "Re-press Auto (or Manual) while already on that mode to re-pick using the current view."
         ),
     ),
     "export": PanelHelpEntry(

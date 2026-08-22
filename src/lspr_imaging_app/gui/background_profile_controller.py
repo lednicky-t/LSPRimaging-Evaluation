@@ -195,7 +195,7 @@ class BackgroundProfileController:
         elif self.window._current_processed_image is not None:
             self.window.image_item.setImage(self.window._current_processed_image.T, autoLevels=True)
         self._sync_main_view_mode(skip_roi_overlay_refresh=skip_roi_overlay_refresh)
-        self.window._update_reference_star_overlay()
+        self.window._update_reference_jump_indicator()
 
 
     def _background_profile_display_levels(self) -> tuple[float, float] | None:
@@ -258,7 +258,7 @@ class BackgroundProfileController:
         self.window._update_landmark_overlays()
         self.window._update_guide_overlays()
         self.window._sync_measurement_visibility()
-        self.window._update_reference_star_overlay()
+        self.window._update_reference_jump_indicator()
 
 
     def _sync_background_profile_buttons(self, checked: bool) -> None:

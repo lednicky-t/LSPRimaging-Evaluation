@@ -446,13 +446,9 @@ class MainWindowIcons:
             "}"
             "QLabel#histogramScaleToggle:hover {"
             "  color: #38bdf8;"
-            "  background: rgba(56, 189, 248, 0.12);"
-            "  border-radius: 9px;"
             "}"
             "QLabel#histogramScaleToggle[checked=\"true\"] {"
             "  color: #22c55e;"
-            "  background: rgba(34, 197, 94, 0.10);"
-            "  border-radius: 9px;"
             "}"
         )
         return label
@@ -905,6 +901,19 @@ class MainWindowIcons:
                 return icon
             return self._tabler_icon("manual-gearbox", color=color, size=24, stroke_width=2.1)
         return self._robot_icon(active)
+
+    def _reference_jump_icon(self, active: bool) -> QIcon:
+        color = "#84cc16"
+        icon = self._tabler_icon(
+            "star",
+            color=color,
+            size=APP_THEME.icon_button_inner,
+            stroke_width=2.1,
+            fill=color if active else "none",
+        )
+        if not icon.isNull():
+            return icon
+        return self._mask_panel_icon("star", color=color, size=APP_THEME.icon_button_inner)
 
     def _robot_icon(self, active: bool) -> QIcon:
         color = "#84cc16" if active else "#f8fafc"

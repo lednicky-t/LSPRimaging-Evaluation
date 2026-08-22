@@ -426,7 +426,7 @@ class ImageRenderManager:
         # rebuild would just redo the identical 160-ROI work a second time
         # (measured ~90-115ms wasted per wavelength switch).
         window._apply_main_image_content(skip_roi_overlay_refresh=True)
-        window._update_reference_star_overlay()
+        window._update_reference_jump_indicator()
         _mark_stage("content")
         window._update_image_exclusion_indicator(spectral_cube_index, wavelength)
         window._dataset_controller._sync_ome_zarr_chunk_controls()
