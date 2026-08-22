@@ -238,6 +238,7 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, HistogramMaskMixin, Measurem
 
     def __init__(self, default_folder: Path, *, fast_startup: bool = False) -> None:
         super().__init__()
+        self.setWindowTitle("LSPRi Evaluation")
         self._fast_startup = bool(fast_startup)
         self._state = AnalysisState()
         self._record_map: dict[tuple[int, float], object] = {}

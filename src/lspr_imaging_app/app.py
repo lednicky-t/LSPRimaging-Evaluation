@@ -25,15 +25,17 @@ from PyQt6.QtWidgets import (
 )
 
 from lspr_ui import (
+    APP_ID_LSPRI_EVALUATION,
     BLUE_DARK_THEME,
     GRAY_DARK_THEME,
     app_icon,
     apply_base_app_theme,
     get_active_theme,
     set_active_theme,
+    set_windows_app_user_model_id,
     startup_app_stylesheet,
 )
-from lspr_imaging_app.version import APP_NAME, APP_VERSION, version_string
+from lspr_imaging_app.version import APP_NAME, APP_VERSION
 
 
 def _configure_logging() -> Path:
@@ -472,11 +474,12 @@ def _apply_ui_scale_factor() -> None:
 
 
 def main() -> None:
+    set_windows_app_user_model_id(APP_ID_LSPRI_EVALUATION)
     _apply_ui_scale_factor()
     log_path = _configure_logging()
     app = QApplication(sys.argv)
     app.setApplicationName(APP_NAME)
-    app.setApplicationDisplayName(version_string())
+    app.setApplicationDisplayName("LSPRi Evaluation")
     app.setApplicationVersion(APP_VERSION)
     app.setQuitOnLastWindowClosed(False)
     app.setWindowIcon(app_icon())

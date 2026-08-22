@@ -3,7 +3,7 @@ from __future__ import annotations
 from lspr_imaging_app.format_versions import WORKSPACE_SCHEMA_VERSION
 
 APP_NAME = "LSPR Imaging"
-APP_VERSION = "0.2.0"
+APP_VERSION = "0.2.1"
 SCHEMA_VERSION = WORKSPACE_SCHEMA_VERSION
 
 
