@@ -10,7 +10,7 @@ from collections import OrderedDict
 from copy import deepcopy
 from dataclasses import asdict
 from datetime import datetime
-from math import hypot
+from math import ceil, floor, hypot
 from pathlib import Path
 from typing import Callable
 
@@ -22,6 +22,7 @@ from PyQt6.QtCore import (
     QRectF,
     QSize,
     QSettings,
+    QStringListModel,
     Qt,
     QThreadPool,
     QTimer,
@@ -43,9 +44,11 @@ from PyQt6.QtGui import (
     QWheelEvent,
 )
 from PyQt6.QtWidgets import (
+    QAbstractSpinBox,
     QApplication,
     QCheckBox,
     QColorDialog,
+    QCompleter,
     QComboBox,
     QAbstractItemView,
     QDoubleSpinBox,
@@ -156,6 +159,8 @@ from .widgets import (
     CollapsibleSection,  # also re-exported: layout_builder.py imports it from here, not from widgets directly
     CompactWedgeSlider,
     CubeTimeSpinBox,
+    DataAxisSlider,
+    GuidedValueSpinBox,
     PanelContainer,
     ResponsiveDoubleSpinBox,
     ShineProgressBar,
@@ -1802,17 +1807,38 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, HistogramMaskMixin, Measurem
         self.clear_rois_button = self._make_icon_tool_button("trash-x", "#ef4444", "Remove all detected ROIs and groups from the current dataset.")
         self.clear_roi_selection_button = QPushButton("Clear selection", self)
 
-        self.spectral_cube_slider = QSlider(Qt.Orientation.Horizontal, self)
+        self.spectral_cube_slider = DataAxisSlider(Qt.Orientation.Horizontal, self)
         self.spectral_cube_slider.setEnabled(False)
+        self.spectral_cube_slider.set_accent_color(get_active_theme().accent_gold)
         self.spectral_cube_spin = CubeTimeSpinBox(self)
         self.spectral_cube_spin.setEnabled(False)
         self.spectral_cube_spin.set_text_override_provider(self._cube_time_display_text_for)
-        self.wavelength_slider = QSlider(Qt.Orientation.Horizontal, self)
+        # NoButtons, not just QSS-hiding the up/down arrows: the app-wide
+        # stylesheet already zeroes their width, but Qt still reserves the
+        # edit-field geometry around invisible-but-present spin buttons on
+        # some styles, which is what the visible gap in front of the digits
+        # was - telling the widget there are no buttons at all reclaims
+        # that space outright instead of fighting it with more QSS.
+        self.spectral_cube_spin.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
+        self.spectral_cube_spin.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.spectral_cube_spin.setFixedWidth(52)
+        self.wavelength_slider = DataAxisSlider(Qt.Orientation.Horizontal, self)
         self.wavelength_slider.setEnabled(False)
-        self.wavelength_spin = QDoubleSpinBox(self)
+        self.wavelength_slider.set_accent_color(get_active_theme().accent_blue)
+        self.wavelength_spin = GuidedValueSpinBox(self)
         self.wavelength_spin.setEnabled(False)
         self.wavelength_spin.setDecimals(2)
-        self.wavelength_spin.setSuffix(" nm")
+        self.wavelength_spin.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
+        self.wavelength_spin.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.wavelength_spin.setFixedWidth(44)  # unit now lives in the "λ (nm)" title, not the box
+        self._wavelength_completer = QCompleter(self)
+        self._wavelength_completer.setCompletionMode(QCompleter.CompletionMode.PopupCompletion)
+        self._wavelength_completer.setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
+        self._wavelength_completer.setFilterMode(Qt.MatchFlag.MatchStartsWith)
+        self._wavelength_completer.setModel(QStringListModel([], self))
+        self.wavelength_spin.lineEdit().setCompleter(self._wavelength_completer)
+        self._wavelength_completer.activated[str].connect(self._on_wavelength_completion_activated)
+        self.wavelength_spin.lineEdit().textEdited.connect(self._on_wavelength_text_edited)
         self.reference_jump_button = self._make_icon_tool_button(
             "star", "#84cc16", "Jump to the reference image."
         )
@@ -2928,6 +2954,7 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, HistogramMaskMixin, Measurem
         self.spectral_cube_spin.setEnabled(spectral_cube_enabled)
         if spectral_cube_enabled:
             self.spectral_cube_spin.setRange(min(self._spectral_cube_values), max(self._spectral_cube_values))
+        self.spectral_cube_slider.set_ticks(self._spectral_cube_values, self._cube_slider_major_ticks())
 
         wavelength_enabled = bool(self._wavelength_values)
         self.wavelength_spin.setEnabled(wavelength_enabled)
@@ -2935,9 +2962,102 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, HistogramMaskMixin, Measurem
             self.wavelength_spin.setRange(min(self._wavelength_values), max(self._wavelength_values))
             decimals = max((self._decimal_places(value) for value in self._wavelength_values), default=0)
             self.wavelength_spin.setDecimals(min(max(decimals, 0), 4))
+        self.wavelength_slider.set_ticks(self._wavelength_values, self._wavelength_slider_major_ticks())
+        self._refresh_wavelength_completer_model()
         self._sync_analysis_spectral_cube_range_controls()
         self._sync_analysis_wavelength_range_controls()
         self._sync_analysis_plots()
+
+    def _wavelength_slider_major_ticks(self) -> dict[int, str]:
+        """Indices to label on the wavelength axis slider: the dataset point
+        nearest each ~100 nm boundary within the data's own range - not
+        every dataset point (there can be hundreds), and not arbitrary round
+        numbers that might not be near any real point."""
+        values = self._wavelength_values
+        if len(values) < 2:
+            return {}
+        step = 100.0
+        lo = ceil(min(values) / step) * step
+        hi = floor(max(values) / step) * step
+        majors: dict[int, str] = {}
+        boundary = lo
+        while boundary <= hi + 1e-6:
+            index = min(range(len(values)), key=lambda i: abs(values[i] - boundary))
+            majors[index] = f"{boundary:.0f}"
+            boundary += step
+        return majors
+
+    def _cube_slider_major_ticks(self) -> dict[int, str]:
+        """Indices to label on the cube axis slider. In Time mode (real
+        acquisition timing loaded and the Cube/Time toggle switched to
+        "Time"), labels are elapsed time at a "nice" interval - reusing the
+        same elapsed-seconds mapping the sensorgram time axis already uses
+        (AnalysisController._sensorgram_x_values) and the same M:SS/H:MM:SS
+        formatter the spin box's Time-mode display already uses
+        (_format_elapsed_seconds), so the slider, the spin box and the
+        sensorgram plot never disagree about what a given cube's elapsed
+        time is. Otherwise (Cube mode, or no timing loaded) labels are the
+        raw cube index at a nice interval."""
+        values = self._spectral_cube_values
+        count = len(values)
+        if count < 2:
+            return {}
+        if self._cube_time_display_mode == "time" and self._cube_time_toggle_available():
+            elapsed = self._analysis_controller._sensorgram_x_values(values)
+            finite = [float(e) for e in elapsed if np.isfinite(e)]
+            if len(finite) >= 2:
+                interval = self._nice_time_interval_seconds(max(finite) - min(finite))
+                majors: dict[int, str] = {}
+                last_bucket = None
+                for index, seconds in enumerate(elapsed):
+                    if not np.isfinite(seconds):
+                        continue
+                    bucket = int(seconds // interval)
+                    if bucket != last_bucket:
+                        majors[index] = self._format_elapsed_seconds(float(seconds)) or "0:00"
+                        last_bucket = bucket
+                return majors
+        interval = self._nice_count_interval(count)
+        return {index: str(values[index]) for index in range(0, count, interval)}
+
+    @staticmethod
+    def _nice_time_interval_seconds(total_seconds: float, target_ticks: int = 6) -> float:
+        candidates = (1, 2, 5, 10, 15, 30, 60, 120, 300, 600, 900, 1800, 3600, 7200, 10800, 21600)
+        for candidate in candidates:
+            if total_seconds <= 0 or total_seconds / candidate <= target_ticks:
+                return float(candidate)
+        return float(candidates[-1])
+
+    @staticmethod
+    def _nice_count_interval(count: int, target_ticks: int = 8) -> int:
+        candidates = (1, 2, 5, 10, 20, 25, 50, 100, 200, 500, 1000)
+        for candidate in candidates:
+            if count / candidate <= target_ticks:
+                return candidate
+        return candidates[-1]
+
+    def _refresh_wavelength_completer_model(self) -> None:
+        decimals = self.wavelength_spin.decimals()
+        texts = [f"{value:.{decimals}f}" for value in self._wavelength_values]
+        self._wavelength_completer.setModel(QStringListModel(texts, self))
+
+    def _on_wavelength_completion_activated(self, text: str) -> None:
+        line_edit = self.wavelength_spin.lineEdit()
+        line_edit.setStyleSheet("")
+        line_edit.setText(text)
+        self.wavelength_spin.interpretText()
+
+    def _on_wavelength_text_edited(self, text: str) -> None:
+        line_edit = self.wavelength_spin.lineEdit()
+        stripped = text.strip()
+        if not stripped or not self._wavelength_values:
+            line_edit.setStyleSheet("")
+            return
+        self._wavelength_completer.setCompletionPrefix(stripped)
+        if self._wavelength_completer.completionCount() == 0:
+            line_edit.setStyleSheet(f"border: 1px solid {get_active_theme().accent_red};")
+        else:
+            line_edit.setStyleSheet("")
 
     def _spectral_cube_axis_label(self) -> str:
         """Display name for the spectral-cube (time-point) axis. Centralized
@@ -3251,8 +3371,12 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, HistogramMaskMixin, Measurem
         spectral_cube_mini_label). Call after anything that could change
         what any of them should show: the mode was toggled, the displayed
         cube changed, or availability changed (dataset/metadata loaded,
-        cleared, or imported)."""
+        cleared, or imported). Also recomputes the spectral-cube slider's
+        major tick labels, since Cube mode (raw index) and Time mode
+        (elapsed time) pick different indices to label - see
+        _cube_slider_major_ticks."""
         self.spectral_cube_spin.refresh_display()
+        self.spectral_cube_slider.set_ticks(self._spectral_cube_values, self._cube_slider_major_ticks())
         for refresh in (
             getattr(self, "_refresh_metadata_cube_time_toggle", None),
             getattr(self, "_refresh_cube_slider_title_toggle", None),
@@ -4972,8 +5096,8 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, HistogramMaskMixin, Measurem
         if self._state.dataset is None:
             self.spectral_cube_spin.setStyleSheet("")
             self.wavelength_spin.setStyleSheet("")
-            self.spectral_cube_slider.setStyleSheet("")
-            self.wavelength_slider.setStyleSheet("")
+            self.spectral_cube_slider.set_reference_highlight(None)
+            self.wavelength_slider.set_reference_highlight(None)
             return
         ref_key = self._reference_image_key()
         current_spectral_cube = self._current_spectral_cube()
@@ -4988,26 +5112,18 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, HistogramMaskMixin, Measurem
             self.spectral_cube_spin.setStyleSheet(
                 "QSpinBox { background: rgba(250, 204, 21, 0.14); border: 1px solid #facc15; color: #fef08a; }"
             )
-            self.spectral_cube_slider.setStyleSheet(
-                "QSlider::handle:horizontal { background: #facc15; border: 1px solid #fef08a; width: 12px; margin: -5px 0; border-radius: 6px; }"
-                "QSlider::handle:horizontal:hover { background: #fde047; }"
-                "QSlider::handle:horizontal:pressed { background: #eab308; }"
-            )
+            self.spectral_cube_slider.set_reference_highlight("#facc15")
         else:
             self.spectral_cube_spin.setStyleSheet("")
-            self.spectral_cube_slider.setStyleSheet("")
+            self.spectral_cube_slider.set_reference_highlight(None)
         if wavelength_active:
             self.wavelength_spin.setStyleSheet(
                 "QSpinBox { background: rgba(132, 204, 22, 0.14); border: 1px solid #84cc16; color: #d9f99d; }"
             )
-            self.wavelength_slider.setStyleSheet(
-                "QSlider::handle:horizontal { background: #84cc16; border: 1px solid #d9f99d; width: 12px; margin: -5px 0; border-radius: 6px; }"
-                "QSlider::handle:horizontal:hover { background: #a3e635; }"
-                "QSlider::handle:horizontal:pressed { background: #65a30d; }"
-            )
+            self.wavelength_slider.set_reference_highlight("#84cc16")
         else:
             self.wavelength_spin.setStyleSheet("")
-            self.wavelength_slider.setStyleSheet("")
+            self.wavelength_slider.set_reference_highlight(None)
 
     def _set_help(self, target: QWidget | QAction, summary: str, detail: str | None = None) -> None:
         text = detail if detail is not None else summary

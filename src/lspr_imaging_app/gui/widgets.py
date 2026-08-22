@@ -21,6 +21,7 @@ from PyQt6.QtWidgets import (
     QLabel,
     QMessageBox,
     QProgressBar,
+    QSlider,
     QSpinBox,
     QStyleOptionProgressBar,
     QToolButton,
@@ -46,6 +47,35 @@ class ResponsiveDoubleSpinBox(QDoubleSpinBox):
         minimum = float(self.minimum())
         maximum = float(self.maximum())
         self.setValue(float(np.clip(target, minimum, maximum)))
+
+
+class GuidedValueSpinBox(QDoubleSpinBox):
+    """QDoubleSpinBox for jumping to one of a fixed, non-contiguous set of
+    real values (e.g. dataset wavelengths) via a QCompleter attached to its
+    line edit. The suffix (" nm") is hidden while the field has focus and
+    restored once it doesn't: QCompleter matches its popup against the raw
+    line-edit text, and a persistent suffix would make "5" as typed compare
+    as "5 nm" against a completion entry like "550.00 nm" - never a real
+    prefix match - so the popup would never filter correctly with the
+    suffix left in place. Purely a display trick: stored value/decimals/
+    stepping are unaffected either way."""
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._display_suffix = ""
+
+    def setSuffix(self, suffix: str) -> None:  # type: ignore[override]
+        self._display_suffix = suffix
+        if not self.hasFocus():
+            super().setSuffix(suffix)
+
+    def focusInEvent(self, event) -> None:  # type: ignore[override]
+        super().setSuffix("")
+        super().focusInEvent(event)
+
+    def focusOutEvent(self, event) -> None:  # type: ignore[override]
+        super().focusOutEvent(event)
+        super().setSuffix(self._display_suffix)
 
 
 class CubeTimeSpinBox(QSpinBox):
@@ -595,6 +625,162 @@ class CompactWedgeSlider(QWidget):
         fraction = float(np.clip(fraction, 0.0, 1.0))
         value = int(round(self._minimum + fraction * (self._maximum - self._minimum)))
         self.setValue(value)
+
+
+class DataAxisSlider(QSlider):
+    """Horizontal QSlider whose handle can only ever land on one of the real
+    values it represents - index-only min/max/step, set up exactly the same
+    way as a stock QSlider (see MainWindow._configure_slider) - painting is
+    the only thing this changes. Draws every entry passed to `set_ticks` as
+    a light tick below a thin rail, with the caller-chosen "major" subset
+    drawn taller and labeled. Which indices count as major and what text
+    they get is entirely up to the caller (wavelength: every ~100 nm; cube:
+    index or elapsed-time depending on the Cube/Time toggle - see
+    MainWindow._wavelength_slider_major_ticks / _cube_slider_major_ticks) -
+    this widget only ever renders whatever it's told, it has no notion of
+    wavelengths or cubes itself.
+
+    Clicking anywhere on the track jumps the handle straight there (like
+    clicking a plot axis) rather than paging one step at a time - the
+    default QSlider page-step click behavior doesn't fit a thin, tick-
+    labeled track the way it fits a fat native handle. Keyboard arrow
+    stepping and the app's own wheel-event handling (installed via
+    eventFilter elsewhere) are untouched since neither is overridden here.
+    """
+
+    _TRACK_TOP = 6.0
+    _TRACK_HEIGHT = 3.0
+    _TICK_TOP = 11.0
+    _MINOR_TICK_HEIGHT = 4.0
+    _MAJOR_TICK_HEIGHT = 7.0
+    _LABEL_TOP = 19.0
+    _SIDE_INSET = 6.0
+
+    def __init__(self, orientation: Qt.Orientation = Qt.Orientation.Horizontal, parent: QWidget | None = None) -> None:
+        super().__init__(orientation, parent)
+        self._tick_values: list[float] = []
+        self._major_labels: dict[int, str] = {}
+        self._accent_color = "#38bdf8"
+        self._reference_highlight_color: str | None = None
+        self.setFixedHeight(32)
+
+    def set_accent_color(self, color: str) -> None:
+        self._accent_color = color
+        self.update()
+
+    def set_reference_highlight(self, color: str | None) -> None:
+        self._reference_highlight_color = color
+        self.update()
+
+    def set_ticks(self, values, major_labels: dict[int, str]) -> None:
+        """`values` is the full real-value array this slider indexes into -
+        one entry per valid index, the same array current-value lookups
+        (e.g. MainWindow._current_wavelength) read from - every entry gets
+        a minor tick. `major_labels` maps a subset of those indices to the
+        label text drawn under a taller tick; indices absent from it stay
+        minor and unlabeled."""
+        self._tick_values = list(values)
+        self._major_labels = dict(major_labels)
+        self.update()
+
+    def sizeHint(self) -> QSize:
+        base = super().sizeHint()
+        return QSize(base.width(), 32)
+
+    def minimumSizeHint(self) -> QSize:
+        base = super().minimumSizeHint()
+        return QSize(base.width(), 32)
+
+    def _track_rect(self) -> QRectF:
+        width = max(self.width() - 2.0 * self._SIDE_INSET, 1.0)
+        return QRectF(self._SIDE_INSET, 0.0, width, self._LABEL_TOP)
+
+    def _value_fraction(self) -> float:
+        span = self.maximum() - self.minimum()
+        if span <= 0:
+            return 0.0
+        return (self.value() - self.minimum()) / float(span)
+
+    def paintEvent(self, _event) -> None:
+        theme = get_active_theme()
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        track = self._track_rect()
+        left, width = track.left(), track.width()
+        enabled = self.isEnabled()
+
+        rail_border = theme.control_border if enabled else theme.control_disabled_border
+        rail = QRectF(left, self._TRACK_TOP, width, self._TRACK_HEIGHT)
+        painter.setPen(QPen(QColor(rail_border), 1.0))
+        painter.setBrush(QColor(theme.control_bg if enabled else theme.control_disabled_bg))
+        painter.drawRoundedRect(rail, 1.5, 1.5)
+
+        count = len(self._tick_values)
+        if count > 1 and enabled:
+            minor_color = QColor(theme.control_border)
+            major_color = QColor(theme.text_dim)
+            font = painter.font()
+            font.setPixelSize(9)
+            painter.setFont(font)
+            metrics = painter.fontMetrics()
+            last_label_right: float | None = None
+            for index in range(count):
+                x = left + width * (index / float(count - 1))
+                label = self._major_labels.get(index)
+                if label:
+                    # Two majors can land close together in pixel space even
+                    # when they're far apart in value - ticks are spaced by
+                    # index, not by value, so a sparse stretch of the
+                    # dataset compresses whatever majors fall in it. Drop
+                    # (not truncate) any label whose text would overlap the
+                    # previous one rather than let them draw on top of each
+                    # other; the tick itself still gets the plain "minor"
+                    # treatment so the point isn't hidden entirely.
+                    half_width = metrics.horizontalAdvance(label) / 2.0
+                    if last_label_right is not None and x - half_width < last_label_right + 4.0:
+                        label = None
+                    else:
+                        last_label_right = x + half_width
+                is_major = label is not None
+                painter.setPen(QPen(major_color if is_major else minor_color, 1.0))
+                tick_height = self._MAJOR_TICK_HEIGHT if is_major else self._MINOR_TICK_HEIGHT
+                painter.drawLine(QPointF(x, self._TICK_TOP), QPointF(x, self._TICK_TOP + tick_height))
+                if label:
+                    painter.drawText(QPointF(x - metrics.horizontalAdvance(label) / 2.0, self._LABEL_TOP + metrics.ascent()), label)
+
+        if enabled and count > 0:
+            handle_x = left + width * self._value_fraction()
+            handle_color = QColor(self._reference_highlight_color or self._accent_color)
+            painter.setPen(QPen(handle_color, 2.0))
+            painter.setBrush(QColor(theme.window_bg))
+            painter.drawEllipse(QPointF(handle_x, self._TRACK_TOP + self._TRACK_HEIGHT / 2.0), 5.0, 5.0)
+
+        painter.end()
+
+    def _index_from_x(self, x: float) -> int:
+        span = self.maximum() - self.minimum()
+        if span <= 0:
+            return self.minimum()
+        track = self._track_rect()
+        if track.width() <= 0:
+            return self.minimum()
+        fraction = (x - track.left()) / track.width()
+        fraction = min(max(fraction, 0.0), 1.0)
+        return self.minimum() + round(fraction * span)
+
+    def mousePressEvent(self, event) -> None:  # type: ignore[override]
+        if event.button() == Qt.MouseButton.LeftButton and self.isEnabled():
+            self.setValue(self._index_from_x(event.position().x()))
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event) -> None:  # type: ignore[override]
+        if event.buttons() & Qt.MouseButton.LeftButton and self.isEnabled():
+            self.setValue(self._index_from_x(event.position().x()))
+            event.accept()
+            return
+        super().mouseMoveEvent(event)
 
 
 class BusySpinner(QWidget):

@@ -518,7 +518,19 @@ def _make_metadata_cube_time_toggle(window: QWidget) -> QToolButton:
     return button
 
 
-def _make_cube_slider_title_toggle(window: QWidget, width: int) -> QToolButton:
+def _slider_axis_title_style(color: str) -> str:
+    """Shared 11px/600 style for the Cube/λ slider-title labels - bigger and
+    tighter than QLabel#toolbarMiniLabel (8px, used by unrelated toolbar
+    mini-labels elsewhere) so these two read clearly sitting directly
+    against their own slider. Returns a bare declaration block (no
+    selector) so both the QLabel (λ) and QToolButton (Cube/Time) titles use
+    identical numbers instead of two hand-copied versions that can drift -
+    see _make_cube_slider_title_toggle's history for why that happened
+    once already."""
+    return f"color: {color}; font-size: 11px; font-weight: 600;"
+
+
+def _make_cube_slider_title_toggle(window: QWidget) -> QToolButton:
     """Second entry point for the same Cube/Time toggle
     _make_metadata_cube_time_toggle controls, replacing the plain-QLabel
     "Cube" title that used to sit above the spectral-cube slider. Deliberately
@@ -526,15 +538,13 @@ def _make_cube_slider_title_toggle(window: QWidget, width: int) -> QToolButton:
     toggle's bracketed style: this one replaces a label already anchored
     directly to its own slider, not a section title row, so the bracket
     convention (used for labels sitting *next to* something else's title)
-    doesn't apply here. Explicitly reproduces QLabel#toolbarMiniLabel's font
-    (8px/600) rather than relying on that QSS rule, which is scoped to the
-    QLabel type and so has no effect on a QToolButton."""
+    doesn't apply here. Sized to its text (no fixed width) so it can sit
+    tight against its slider - see _slider_axis_title_style."""
     theme = get_active_theme()
     button = QToolButton(window)
     button.setAutoRaise(True)
     button.setCheckable(False)
     button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
-    button.setFixedWidth(width)
     button.setCursor(Qt.CursorShape.PointingHandCursor)
 
     def refresh() -> None:
@@ -549,11 +559,9 @@ def _make_cube_slider_title_toggle(window: QWidget, width: int) -> QToolButton:
         color = theme.accent_gold if available else theme.text_muted
         button.setStyleSheet(
             "QToolButton {"
-            f"  color: {color};"
+            f"  {_slider_axis_title_style(color)}"
             "  background: transparent;"
             "  border: none;"
-            "  font-size: 8px;"
-            "  font-weight: 600;"
             "  padding: 0px;"
             "}"
             "QToolButton:hover { text-decoration: underline; }"
@@ -1237,24 +1245,38 @@ def build_layout(window) -> None:
     window.bottom_view_toolbar.setObjectName("bottomViewToolbar")
 
     image_slicer_row = QWidget(window)
-    image_slicer_layout = QHBoxLayout(image_slicer_row)
+    image_slicer_layout = QVBoxLayout(image_slicer_row)
     image_slicer_layout.setContentsMargins(0, 0, 0, 0)
-    image_slicer_layout.setSpacing(6)
-    slicer_mini_label_width = 36
-    window.cube_slider_title_toggle = _make_cube_slider_title_toggle(window, slicer_mini_label_width)
+    image_slicer_layout.setSpacing(4)
+
+    # Cube and wavelength each get their own full-width row (title -> slider
+    # -> control -> one of the two trailing icon buttons, tight 5px gaps)
+    # instead of splitting one row in half - each slider gets the full
+    # available width this way, and the two axes read as parallel strips
+    # rather than a single cramped row.
+    cube_row_layout = QHBoxLayout()
+    cube_row_layout.setContentsMargins(0, 0, 0, 0)
+    cube_row_layout.setSpacing(5)
+    window.cube_slider_title_toggle = _make_cube_slider_title_toggle(window)
     window._refresh_cube_slider_title_toggle = window.cube_slider_title_toggle.sync_appearance
-    image_slicer_layout.addWidget(window.cube_slider_title_toggle)
-    image_slicer_layout.addWidget(window.spectral_cube_slider, 1)
-    image_slicer_layout.addWidget(window.spectral_cube_spin)
-    wavelength_mini_label = QLabel("λ", image_slicer_row)
-    wavelength_mini_label.setObjectName("toolbarMiniLabel")
-    wavelength_mini_label.setFixedWidth(slicer_mini_label_width)
-    wavelength_mini_label.setToolTip("Wavelength")
-    image_slicer_layout.addWidget(wavelength_mini_label)
-    image_slicer_layout.addWidget(window.wavelength_slider, 1)
-    image_slicer_layout.addWidget(window.wavelength_spin)
-    image_slicer_layout.addWidget(window.reference_jump_button)
-    image_slicer_layout.addWidget(window.image_exclusion_button)
+    cube_row_layout.addWidget(window.cube_slider_title_toggle)
+    cube_row_layout.addWidget(window.spectral_cube_slider, 1)
+    cube_row_layout.addWidget(window.spectral_cube_spin)
+    cube_row_layout.addWidget(window.reference_jump_button)
+
+    wavelength_row_layout = QHBoxLayout()
+    wavelength_row_layout.setContentsMargins(0, 0, 0, 0)
+    wavelength_row_layout.setSpacing(5)
+    wavelength_mini_label = QLabel("λ (nm)", image_slicer_row)
+    wavelength_mini_label.setStyleSheet(_slider_axis_title_style(get_active_theme().text_muted))
+    wavelength_mini_label.setToolTip("Wavelength (nm)")
+    wavelength_row_layout.addWidget(wavelength_mini_label)
+    wavelength_row_layout.addWidget(window.wavelength_slider, 1)
+    wavelength_row_layout.addWidget(window.wavelength_spin)
+    wavelength_row_layout.addWidget(window.image_exclusion_button)
+
+    image_slicer_layout.addLayout(cube_row_layout)
+    image_slicer_layout.addLayout(wavelength_row_layout)
 
     image_tools_panel = QWidget(window)
     image_tools_layout = QVBoxLayout(image_tools_panel)
