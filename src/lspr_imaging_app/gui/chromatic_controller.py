@@ -664,11 +664,14 @@ class ChromaticController:
         window._set_status_text("Cleared chromatic transforms.")
 
     def on_transform_button_clicked(self) -> None:
+        # Purely (re)calculates - never clears. Clearing is
+        # chromatic_reset_transforms_button's own job (see main_window.py's
+        # _connect_chromatic) - one icon toggling between "estimate" and
+        # "clear" depending on whether models already existed was confusing
+        # to predict at a glance, so the two actions now have separate,
+        # always-the-same-meaning buttons.
         window = self.window
         if not window._state.dataset or window._chromatic_auto_running:
-            return
-        if window._state.chromatic_models:
-            self.clear_models()
             return
         self.estimate_models()
 
@@ -1309,19 +1312,21 @@ class ChromaticController:
             bundle.label.setVisible(True)
 
     def _update_chromatic_summary(self) -> None:
-        if not self.window._state.dataset:
-            self.window.chromatic_summary.setText("No dataset loaded.")
-            self.window.chromatic_progress_label.setText("No dataset loaded.")
-            self.window.chromatic_transform_button.setEnabled(False)
-            self.window.chromatic_apply_check.setEnabled(False)
-            self.window.chromatic_section.set_apply_enabled(False)
-            self.window._set_section_applied(self.window.chromatic_section, bool(self.window._state.preprocessing.chromatic_correction_enabled))
-            self.window.chromatic_transform_button.setPixmap(self.window._chromatic_transform_icon(False).pixmap(24, 24))
-            self.window.chromatic_transform_button.setToolTip(
-                "Estimate chromatic transforms."
-            )
+        """Single always-on-screen status line (chromatic_summary) - there is
+        no separate progress row anymore. Before transforms exist it shows
+        marking-workflow progress; once they exist it shows the applied state
+        and the largest-shift diagnostic instead (see max_shift_px)."""
+        window = self.window
+        if not window._state.dataset:
+            window.chromatic_summary.setText("No dataset loaded")
+            window.chromatic_summary.setToolTip("")
+            window.chromatic_transform_button.setEnabled(False)
+            window.chromatic_reset_transforms_button.setEnabled(False)
+            window.chromatic_apply_check.setEnabled(False)
+            window.chromatic_section.set_apply_enabled(False)
+            window._set_section_applied(window.chromatic_section, bool(window._state.preprocessing.chromatic_correction_enabled))
             return
-        model_count = len(self.window._state.chromatic_models)
+        model_count = len(window._state.chromatic_models)
         sample_keys = self.sample_image_keys()
         feature_ids = self.expected_feature_ids()
         filled_samples = 0
@@ -1329,79 +1334,72 @@ class ChromaticController:
         for sample_key in sample_keys:
             sample_marks = {
                 int(mark.landmark_id)
-                for mark in self.window._state.chromatic_landmarks
+                for mark in window._state.chromatic_landmarks
                 if int(mark.spectral_cube_index) == int(sample_key[0]) and abs(float(mark.wavelength_nm) - float(sample_key[1])) < 1e-6
             }
             if all(feature_id in sample_marks for feature_id in feature_ids):
                 filled_samples += 1
         can_estimate = bool(sample_keys) and filled_samples == len(sample_keys) and len(feature_ids) >= 2
-        controls_locked = self.window._chromatic_auto_running
+        controls_locked = window._chromatic_auto_running
         can_apply_models = model_count > 0 and not controls_locked
-        can_toggle_transform = (can_estimate or model_count > 0) and not controls_locked
-        self.window.chromatic_transform_button.setEnabled(can_toggle_transform)
-        self.window.chromatic_transform_button.setPixmap(self.window._chromatic_transform_icon(model_count > 0).pixmap(24, 24))
+        window.chromatic_transform_button.setEnabled(can_estimate and not controls_locked)
+        window.chromatic_reset_transforms_button.setEnabled(model_count > 0 and not controls_locked)
+        window.chromatic_apply_check.setEnabled(can_apply_models)
+        window.chromatic_section.set_apply_enabled(can_apply_models)
+        window._set_section_applied(window.chromatic_section, bool(window._state.preprocessing.chromatic_correction_enabled))
+
         if model_count > 0:
-            self.window.chromatic_transform_button.setToolTip("Clear saved chromatic transforms.")
-        elif can_estimate:
-            self.window.chromatic_transform_button.setToolTip("Estimate chromatic transforms.")
-        else:
-            self.window.chromatic_transform_button.setToolTip("Estimate chromatic transforms.")
-        self.window.chromatic_apply_check.setEnabled(can_apply_models)
-        self.window.chromatic_section.set_apply_enabled(can_apply_models)
-        self.window._set_section_applied(self.window.chromatic_section, bool(self.window._state.preprocessing.chromatic_correction_enabled))
-        self.window.chromatic_summary.setText("Radial setup ready." if self.window._chromatic_setup_active else "Radial workflow ready.")
+            applied = bool(window._state.preprocessing.chromatic_correction_enabled)
+            lines = ["Transforms estimated", "Applied" if applied else "Not applied"]
+            shift_info = self.max_shift_px()
+            if shift_info is not None:
+                shift_px, shift_wavelength, is_direct = shift_info
+                shift_text = f"{shift_px:.1f} px" if is_direct else f"({shift_px:.1f} px)"
+                segment = f"Largest shift {shift_text} at {shift_wavelength:g} nm"
+                if window._can_display_micrometers():
+                    shift_um = shift_px * window._microns_per_pixel_scalar()
+                    um_text = f"{shift_um:.2f} um" if is_direct else f"({shift_um:.2f} um)"
+                    segment += f" ({um_text})"
+                lines.append(segment)
+            window.chromatic_summary.setText(" | ".join(lines))
+            # model_count itself (one entry per dataset image, not per unique
+            # wavelength - see _estimate_chromatic_models_task's final loop,
+            # which reuses each wavelength's matrix across every spectral
+            # cube) isn't shown in the line above: never a meaningful
+            # diagnostic, just an artifact of how models are keyed for O(1)
+            # lookup. Mean RMSE moved to the tooltip too - the shift figure
+            # is the headline number now, not an abstract fit residual.
+            rmses = [float(model.rmse_px) for model in window._state.chromatic_models if model.rmse_px > 0.0]
+            rmse_text = f"{float(np.mean(rmses)):.2f} px" if rmses else "0.00 px"
+            bracket_note = (
+                "" if shift_info is None or shift_info[2]
+                else " Bracketed values are between the sampled wavelengths (interpolated, not directly landmark-fit)."
+            )
+            window.chromatic_summary.setToolTip(f"{model_count} image(s) covered | mean landmark-fit RMSE: {rmse_text}.{bracket_note}")
+            return
+
+        readiness = "Radial setup ready" if window._chromatic_setup_active else "Radial workflow ready"
         if sample_keys and current_index is not None:
             current_key = sample_keys[current_index]
             marked_current = len(
                 {
                     int(mark.landmark_id)
-                    for mark in self.window._state.chromatic_landmarks
+                    for mark in window._state.chromatic_landmarks
                     if int(mark.spectral_cube_index) == int(current_key[0]) and abs(float(mark.wavelength_nm) - float(current_key[1])) < 1e-6
                 }
             )
-            self.window.chromatic_progress_label.setText(
+            progress = (
                 f"Sample image {current_index + 1}/{len(sample_keys)} at {current_key[1]:g} nm | "
-                f"reference points marked: {marked_current}/{len(feature_ids)} | "
-                f"completed sample images: {filled_samples}/{len(sample_keys)}"
+                f"reference points marked {marked_current}/{len(feature_ids)} | "
+                f"completed sample images {filled_samples}/{len(sample_keys)}"
             )
         elif sample_keys:
             middle_index = len(sample_keys) // 2
-            self.window.chromatic_progress_label.setText(
-                f"Procedure ready: {len(sample_keys)} sampled wavelengths, middle reference at {sample_keys[middle_index][1]:g} nm."
-            )
+            progress = f"Procedure ready: {len(sample_keys)} sampled wavelengths, middle reference at {sample_keys[middle_index][1]:g} nm"
         else:
-            self.window.chromatic_progress_label.setText("Edit the radial workflow to choose sampled wavelengths.")
-        if model_count == 0:
-            return
-        # Once transforms exist, the Progress row's own job (sample-by-sample
-        # marking progress) is done - collapse everything meaningful into one
-        # line on the Status row instead of splitting "estimated" (Status)
-        # from a redundant image count/RMSE/applied-state sentence (Progress).
-        # model_count itself (one entry per dataset image, not per unique
-        # wavelength - see _estimate_chromatic_models_task's final loop,
-        # which reuses each wavelength's matrix across every spectral cube)
-        # isn't shown here: it was never a meaningful diagnostic, just an
-        # artifact of how models are keyed for O(1) lookup.
-        self.window.chromatic_progress_label.setText("")
-        applied = bool(self.window._state.preprocessing.chromatic_correction_enabled)
-        lines = ["Transforms estimated.", "Applied." if applied else "Not applied."]
-        shift_info = self.max_shift_px()
-        if shift_info is not None:
-            shift_px, shift_wavelength, is_direct = shift_info
-            shift_text = f"{shift_px:.1f} px" if is_direct else f"({shift_px:.1f} px)"
-            segment = f"Largest shift {shift_text} at {shift_wavelength:g} nm"
-            if self.window._can_display_micrometers():
-                shift_um = shift_px * self.window._microns_per_pixel_scalar()
-                um_text = f"{shift_um:.2f} um" if is_direct else f"({shift_um:.2f} um)"
-                segment += f" ({um_text})"
-            lines.append(segment)
-        self.window.chromatic_summary.setText(" | ".join(lines))
-        rmses = [float(model.rmse_px) for model in self.window._state.chromatic_models if model.rmse_px > 0.0]
-        rmse_text = f"{float(np.mean(rmses)):.2f} px" if rmses else "0.00 px"
-        bracket_note = "" if shift_info is None or shift_info[2] else " Bracketed values fall between sampled wavelengths (interpolated, not directly fit)."
-        self.window.chromatic_summary.setToolTip(
-            f"{model_count} image(s) covered | mean landmark-fit RMSE: {rmse_text}.{bracket_note}"
-        )
+            progress = "Edit the radial workflow to choose sampled wavelengths"
+        window.chromatic_summary.setText(f"{readiness} | {progress}")
+        window.chromatic_summary.setToolTip("")
 
     def _directly_fit_sample_wavelengths(self) -> set[float]:
         """Wavelengths among the current sampled/landmark set that have every
@@ -1427,22 +1425,41 @@ class ChromaticController:
                 directly_fit.add(float(sample_key[1]))
         return directly_fit
 
+    def _first_and_last_nonzero_wavelengths(self) -> tuple[float, float] | None:
+        """The dataset's minimum and maximum wavelength, excluding 0 nm (the
+        dark/broadband reference frame some acquisitions capture - never used
+        in chromatic correction, masking, or ROI placement; see
+        candidate_chromatic_wavelengths). Returns `None` if there are no
+        wavelengths at all once 0 nm is excluded.
+        """
+        wavelengths = sorted({float(w) for w in getattr(self.window, "_wavelength_values", []) if float(w) != 0.0})
+        if not wavelengths:
+            return None
+        return wavelengths[0], wavelengths[-1]
+
     def max_shift_px(self) -> tuple[float, float, bool] | None:
-        """The single largest displacement (px) any current chromatic model
-        implies anywhere in the frame, and the wavelength it occurs at.
+        """The larger of the two displacements (px) the current chromatic
+        models imply anywhere in the frame at the dataset's first and last
+        (non-0 nm) wavelengths, and which of the two it occurs at.
 
         For an affine map, `predicted(p) - p` is itself an affine function of
         `p`, so its magnitude over a rectangle is maximized at one of the 4
-        corners (a convex function's max over a convex region is at a vertex) -
-        no need to sample the interior. Returns
-        `(max_shift_px, wavelength_nm, is_directly_fit)`, or `None` if there's
-        no image/models to measure against.
+        corners (a convex function's max over a convex region is at a
+        vertex) - no need to sample the interior. Checking only the two
+        wavelength extremes, rather than every sampled/interpolated
+        wavelength in between, matches how chromatic displacement actually
+        behaves: it grows with distance from the reference wavelength, so
+        the worst case sits at whichever end of the sweep is farther from
+        it. Returns `(max_shift_px, wavelength_nm, is_directly_fit)`, or
+        `None` if there's no image/models/wavelength range to measure
+        against.
         """
         window = self.window
-        models = window._state.chromatic_models
+        wavelength_range = self._first_and_last_nonzero_wavelengths()
         image = window._current_processed_image
-        if not models or image is None:
+        if not window._state.chromatic_models or image is None or wavelength_range is None:
             return None
+        models_by_wavelength = {float(model.wavelength_nm): model for model in window._state.chromatic_models}
         height, width = image.shape[:2]
         corners = np.array(
             [[0.0, 0.0], [width - 1.0, 0.0], [0.0, height - 1.0], [width - 1.0, height - 1.0]],
@@ -1450,15 +1467,10 @@ class ChromaticController:
         )
         directly_fit = self._directly_fit_sample_wavelengths()
         best: tuple[float, float, bool] | None = None
-        seen_wavelengths: set[float] = set()
-        for model in models:
-            wavelength = float(model.wavelength_nm)
-            if wavelength in seen_wavelengths:
-                # Every spectral cube shares the same matrix for a given
-                # wavelength (chromatic aberration is a property of the
-                # optics, not the sample) - no need to re-measure it per cube.
+        for wavelength in dict.fromkeys(wavelength_range):  # dedupe a single-wavelength dataset
+            model = models_by_wavelength.get(wavelength)
+            if model is None:
                 continue
-            seen_wavelengths.add(wavelength)
             matrix = np.asarray(model.affine_matrix, dtype=np.float64)
             predicted = apply_affine_to_points(corners, matrix)
             local_max = float(np.max(np.hypot(predicted[:, 0] - corners[:, 0], predicted[:, 1] - corners[:, 1])))

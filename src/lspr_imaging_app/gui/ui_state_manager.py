@@ -310,11 +310,11 @@ class UIStateManager:
         window.chromatic_landmark_clear_button.setEnabled(has_dataset and bool(window._state.chromatic_landmarks) and controls_enabled)
         window.chromatic_landmark_id_spin.setEnabled(can_edit and controls_enabled)
         window.chromatic_transform_button.setEnabled(has_dataset and controls_enabled)
+        window.chromatic_reset_transforms_button.setEnabled(has_dataset and controls_enabled and bool(window._state.chromatic_models))
         window.chromatic_apply_check.setEnabled(has_dataset and controls_enabled)
         window.chromatic_apply_check.setChecked(bool(window._state.preprocessing.chromatic_correction_enabled))
         window.chromatic_apply_check.setIcon(window._make_link_toggle_icon(bool(window.chromatic_apply_check.isChecked())))
         window.chromatic_start_button.setChecked(bool(window._active_tool == "chromatic_landmark"))
-        window.chromatic_progress_label.setVisible(has_dataset)
         window._update_chromatic_summary()
 
     def sync_roi_detection_controls(self) -> None:

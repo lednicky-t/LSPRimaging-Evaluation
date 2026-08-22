@@ -950,7 +950,7 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, HistogramMaskMixin, Measurem
             lambda checked: self.chromatic_grid_button.setIcon(self._ome_zarr_grid_icon(bool(checked)))
         )
         self.chromatic_grid_reset_button = self._free_standing_icon_label(
-            self._make_remove_icon(),
+            self._make_chromatic_reset_icon(),
             "Reset the chromatic search area back to the automatic full-image area.",
             size=24,
             parent=self,
@@ -984,8 +984,6 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, HistogramMaskMixin, Measurem
             size=24,
             parent=self,
         )
-        self.chromatic_progress_label = QLabel("No radial procedure started.", self)
-        self.chromatic_progress_label.setWordWrap(True)
         self.chromatic_landmark_mark_button = self.chromatic_start_button
         self.chromatic_landmark_clear_button = self._free_standing_icon_label(
             self._make_remove_icon(),
@@ -998,13 +996,19 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, HistogramMaskMixin, Measurem
         self.chromatic_landmark_id_spin.setValue(1)
         self.chromatic_landmark_id_spin.setPrefix("")
         self.chromatic_transform_button = self._free_standing_icon_label(
-            self._chromatic_transform_icon(False),
-            "Estimate chromatic transforms.",
+            self._chromatic_transform_icon(True),
+            "Estimate (recalculate) chromatic transforms.",
             size=24,
             parent=self,
         )
         self.chromatic_estimate_button = self.chromatic_transform_button
-        self.chromatic_clear_button = self.chromatic_transform_button
+        self.chromatic_reset_transforms_button = self._free_standing_icon_label(
+            self._make_chromatic_reset_icon(),
+            "Reset (clear) the saved chromatic transforms.",
+            size=24,
+            parent=self,
+        )
+        self.chromatic_clear_button = self.chromatic_reset_transforms_button
         self.chromatic_landmark_export_button = self._free_standing_icon_label(
             self._mask_panel_icon("file-export", color="#22c55e", size=24),
             "Export marked reference points: raw tracked position, reference position, and (once transforms are "
@@ -2223,6 +2227,7 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, HistogramMaskMixin, Measurem
         self.chromatic_landmark_kind_combo.currentIndexChanged.connect(self._on_chromatic_landmark_kind_changed)
         self.chromatic_landmark_model_combo.currentIndexChanged.connect(self._on_chromatic_landmark_model_changed)
         self.chromatic_transform_button.clicked.connect(self._on_chromatic_transform_button_clicked)
+        self.chromatic_reset_transforms_button.clicked.connect(self._clear_chromatic_models)
         self.chromatic_landmark_export_button.clicked.connect(self._chromatic_controller.export_landmarks_csv)
 
     def _connect_analysis_and_histogram(self) -> None:
@@ -3926,6 +3931,7 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, HistogramMaskMixin, Measurem
             self.chromatic_landmark_mark_button,
             self.chromatic_landmark_clear_button,
             self.chromatic_transform_button,
+            self.chromatic_reset_transforms_button,
             self.ignore_marked_check,
             self.background_removal_link,
             self.clear_roi_selection_button,
@@ -4317,6 +4323,34 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, HistogramMaskMixin, Measurem
 
     def _remember_dataset_format_choice(self) -> bool:
         return self._settings_bool("startup/remember_dataset_format_choice", True)
+
+    def _exclude_zero_wavelength_enabled(self) -> bool:
+        return self._settings_bool("wavelength/exclude_zero_nm", False)
+
+    def _set_exclude_zero_wavelength_enabled(self, enabled: bool) -> None:
+        self._settings.setValue("wavelength/exclude_zero_nm", bool(enabled))
+
+    def _filtered_wavelength_values(self, wavelengths_nm) -> list[float]:
+        """The per-cube wavelength list used everywhere wavelengths are
+        navigated/iterated (wavelength_slider's range, chromatic candidate
+        wavelengths, etc. - see dataset_controller.py/undo_manager.py's own
+        `window._wavelength_values = ...` assignments, the only two places
+        that call this). 0 nm (a dark/broadband reference frame some
+        acquisitions capture) is never usable for chromatic correction,
+        masking, or ROI placement regardless of this setting - see
+        candidate_chromatic_wavelengths - but by default it still counts as
+        a normal, navigable wavelength (index 0 on the slider). Enabling
+        `_exclude_zero_wavelength_enabled` (Preferences > Wavelength
+        handling) drops it from this list entirely, so navigation always
+        starts from the next lowest real wavelength instead; the underlying
+        image is untouched and still reachable by other means (e.g. file
+        exclusion lists), just not through normal wavelength navigation.
+        Takes effect the next time a dataset is loaded, not retroactively.
+        """
+        values = [float(w) for w in wavelengths_nm]
+        if not self._exclude_zero_wavelength_enabled():
+            return values
+        return [w for w in values if w != 0.0]
 
     def _set_remember_dataset_format_choice(self, enabled: bool) -> None:
         self._settings.setValue("startup/remember_dataset_format_choice", bool(enabled))
@@ -5059,7 +5093,8 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, HistogramMaskMixin, Measurem
             "(recommended). Affine = also allows shear/unequal x-y scale, which a handful of noisy points can pick "
             "up spuriously and worsen the correction near the image center.",
         )
-        self._set_help(self.chromatic_transform_button, "Estimate chromatic transforms or clear saved chromatic transforms.")
+        self._set_help(self.chromatic_transform_button, "Estimate (recalculate) chromatic transforms.")
+        self._set_help(self.chromatic_reset_transforms_button, "Reset (clear) the saved chromatic transforms.")
         self._set_help(
             self.chromatic_landmark_export_button,
             "Export: save every marked reference point (raw position, reference position, and -- once transforms "

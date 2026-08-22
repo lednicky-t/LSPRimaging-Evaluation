@@ -1891,6 +1891,13 @@ class MainWindowIcons:
         self.spectral_cube_slider.setMinimumWidth(navigation_slider_minimum_width)
         self.wavelength_slider.setMinimumWidth(navigation_slider_minimum_width)
 
+    def _make_chromatic_reset_icon(self, *, size: int = 24) -> QIcon:
+        # Shared "reset" glyph for both the chromatic search-area reset
+        # (grid_reset_button) and the chromatic transforms reset button -
+        # a circular-arrow reads as "put this back to a starting state"
+        # rather than "delete", which the old red remove/X icon implied.
+        return self._tabler_icon("refresh", "#f59e0b", size, stroke_width=2.2)
+
     def _chromatic_transform_icon(self, has_models: bool) -> QIcon:
         if has_models:
             icon = self._tabler_icon("wand", "#a855f7", 24, stroke_width=2.1)

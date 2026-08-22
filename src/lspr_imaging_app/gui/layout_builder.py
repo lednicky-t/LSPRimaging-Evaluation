@@ -789,12 +789,12 @@ def build_layout(window) -> None:
     transform_row.addWidget(window.chromatic_auto_button)
     transform_row.addWidget(window.chromatic_reference_points_all_button)
     transform_row.addWidget(window.chromatic_transform_button)
+    transform_row.addWidget(window.chromatic_reset_transforms_button)
     transform_row.addWidget(window.chromatic_landmark_export_button)
     transform_row.addStretch(1)
     chromatic_layout.addRow("", transform_row)
     chromatic_layout.addRow("", window.chromatic_apply_check)
     chromatic_layout.addRow("Status", window.chromatic_summary)
-    chromatic_layout.addRow("Progress", window.chromatic_progress_label)
 
     circle_editor_group = QWidget(window)
     circle_editor_layout = QFormLayout(circle_editor_group)

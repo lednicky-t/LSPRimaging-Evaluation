@@ -64,6 +64,18 @@ class PreferencesDialog(QDialog):
             "be asked."
         )
 
+        # Wavelength handling
+        self.exclude_zero_wavelength_check = QCheckBox("Treat 0 nm as a dark reference frame")
+        self.exclude_zero_wavelength_check.setToolTip(
+            "0 nm (a dark/broadband frame some acquisitions capture alongside the narrowband "
+            "wavelengths) is never used in chromatic correction, masking, or ROI placement "
+            "regardless of this setting. When enabled, it's also dropped from ordinary "
+            "wavelength navigation (the wavelength slider/spinbox, sample-wavelength lists) - "
+            "cube navigation always starts from the next lowest real wavelength instead of 0 nm. "
+            "The image itself is unaffected either way. Takes effect the next time a dataset is "
+            "loaded, not for one already open."
+        )
+
         # OME-Zarr export
         self.zarr_adaptive_enabled_check = QCheckBox("Adaptive worker tuning enabled")
         self.zarr_adaptive_enabled_check.setToolTip(
@@ -115,6 +127,12 @@ class PreferencesDialog(QDialog):
         startup_layout.addRow(self.log_panel_open_check)
         startup_layout.addRow(self.remember_dataset_format_check)
 
+        wavelength_box = QGroupBox("Wavelength handling")
+        wavelength_layout = QFormLayout(wavelength_box)
+        wavelength_layout.setHorizontalSpacing(16)
+        wavelength_layout.setVerticalSpacing(8)
+        wavelength_layout.addRow(self.exclude_zero_wavelength_check)
+
         zarr_box = QGroupBox("OME-Zarr export: adaptive worker tuning")
         zarr_layout = QFormLayout(zarr_box)
         zarr_layout.setHorizontalSpacing(16)
@@ -128,6 +146,7 @@ class PreferencesDialog(QDialog):
 
         layout.addWidget(appearance_box)
         layout.addWidget(startup_box)
+        layout.addWidget(wavelength_box)
         layout.addWidget(zarr_box)
 
         scroll_area.setWidget(content)
@@ -185,6 +204,9 @@ class PreferencesDialog(QDialog):
         if hasattr(window, "_remember_dataset_format_choice"):
             self.remember_dataset_format_check.setChecked(bool(window._remember_dataset_format_choice()))
 
+        if hasattr(window, "_exclude_zero_wavelength_enabled"):
+            self.exclude_zero_wavelength_check.setChecked(bool(window._exclude_zero_wavelength_enabled()))
+
         if hasattr(window, "_ome_zarr_adaptive_enabled"):
             self.zarr_adaptive_enabled_check.setChecked(bool(window._ome_zarr_adaptive_enabled()))
 
@@ -210,6 +232,9 @@ class PreferencesDialog(QDialog):
 
         if hasattr(window, "_set_remember_dataset_format_choice"):
             window._set_remember_dataset_format_choice(self.remember_dataset_format_check.isChecked())
+
+        if hasattr(window, "_set_exclude_zero_wavelength_enabled"):
+            window._set_exclude_zero_wavelength_enabled(self.exclude_zero_wavelength_check.isChecked())
 
         if hasattr(window, "_set_ome_zarr_adaptive_enabled"):
             window._set_ome_zarr_adaptive_enabled(self.zarr_adaptive_enabled_check.isChecked())

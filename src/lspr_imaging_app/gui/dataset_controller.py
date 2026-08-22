@@ -207,7 +207,7 @@ class DatasetController:
         window._record_map = dataset_record_map(dataset)
         window._record_key_by_path = {record.path: (int(record.key.spectral_cube_index), float(record.key.wavelength_nm)) for record in dataset.records}
         window._spectral_cube_values = dataset.spectral_cube_indices
-        window._wavelength_values = dataset.wavelengths_nm
+        window._wavelength_values = window._filtered_wavelength_values(dataset.wavelengths_nm)
         window._reference_contrast_cache.clear()
         window._current_record_path = None
         window._current_file_mask = None

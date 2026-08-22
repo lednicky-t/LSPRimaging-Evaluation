@@ -171,7 +171,7 @@ class UndoManager:
                 else {}
             )
             window._spectral_cube_values = dataset.spectral_cube_indices if dataset is not None else []
-            window._wavelength_values = dataset.wavelengths_nm if dataset is not None else []
+            window._wavelength_values = window._filtered_wavelength_values(dataset.wavelengths_nm) if dataset is not None else []
             window._current_record_path = None
             window._current_image_key = None
             window._processed_shape_cache.clear()
