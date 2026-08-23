@@ -1391,6 +1391,10 @@ def build_layout(window) -> None:
     window.workflow_log_copy_button.clicked.connect(window._copy_workflow_log)
     window.workflow_log_clear_button = window._make_icon_tool_button("trash-2", "#ef4444", "Clear the workflow log.")
     window.workflow_log_clear_button.clicked.connect(lambda *_: window.workflow_log_view.clear())
+    window.workflow_log_open_folder_button = window._make_icon_tool_button(
+        "folder-open", "#38bdf8", "Open the logs folder in File Explorer (one file per session - worth cleaning out periodically)."
+    )
+    window.workflow_log_open_folder_button.clicked.connect(window._open_logs_folder)
     window.workflow_log_debug_button = _make_workflow_log_debug_toggle(window)
     window._refresh_workflow_log_debug_button = window.workflow_log_debug_button.sync_appearance
     workflow_log_row.addWidget(workflow_log_label, 0)
@@ -1398,6 +1402,7 @@ def build_layout(window) -> None:
     workflow_log_row.addStretch(1)
     workflow_log_row.addWidget(window.workflow_log_autoscroll_button, 0)
     workflow_log_row.addWidget(window.workflow_log_copy_button, 0)
+    workflow_log_row.addWidget(window.workflow_log_open_folder_button, 0)
     workflow_log_row.addWidget(window.workflow_log_clear_button, 0)
     workflow_log_content_layout.addLayout(workflow_log_row)
     window.workflow_log_view = QTextEdit(workflow_log_content)

@@ -94,6 +94,18 @@ class LayoutStateController:
             pass
         window._startup_restore_window_maximized = window._settings_bool("window_is_maximized", False)
         window._startup_restore_window_fullscreen = window._settings_bool("window_is_fullscreen", False)
+        logging.getLogger("lspr_imaging_app.layout").debug(
+            "restore window state | raw_maximized=%r raw_fullscreen=%r -> maximized=%s fullscreen=%s",
+            window._settings.value("window_is_maximized"),
+            window._settings.value("window_is_fullscreen"),
+            window._startup_restore_window_maximized,
+            window._startup_restore_window_fullscreen,
+        )
+        window._append_workflow_log(
+            f"Layout | read window_is_maximized={window._startup_restore_window_maximized} "
+            f"window_is_fullscreen={window._startup_restore_window_fullscreen}",
+            level="debug",
+        )
         window._window_geometry_restored = True
 
     def _saved_window_geometry_rect(self) -> QRectF | None:
@@ -161,11 +173,59 @@ class LayoutStateController:
             available = window.screen().availableGeometry() if window.screen() is not None else None
         if available is None:
             return
+        self._move_widget_inside_available_screen(window, available)
 
-        frame_geometry = window.frameGeometry()
+    @staticmethod
+    def _move_widget_inside_available_screen(widget: QWidget, available) -> None:
+        frame_geometry = widget.frameGeometry()
         x = min(max(frame_geometry.x(), available.left()), max(available.right() - frame_geometry.width() + 1, available.left()))
         y = min(max(frame_geometry.y(), available.top()), max(available.bottom() - frame_geometry.height() + 1, available.top()))
-        window.move(x, y)
+        widget.move(x, y)
+
+    def ensure_floating_panels_on_screen(self) -> None:
+        """Re-home any floating panel that restoreState() just placed off
+        every currently-connected screen.
+
+        restore_window_geometry() already solves this for the main window
+        itself (a saved monitor unplugged/renamed/reordered since last
+        close falls back to the closest-overlapping connected screen, see
+        best_restore_screen_geometry) - but window.restoreState() restores
+        each floating QDockWidget's geometry from its own opaque blob with
+        no equivalent fallback, so a panel left floating on a monitor that's
+        since gone would otherwise reopen off-screen and be unreachable.
+        Must run after restore_saved_panel_layout_state() (which is what
+        applies that blob) and after the main window's own geometry has
+        settled, since panels with no on-screen match fall back to
+        window.screen()."""
+        window = self.window
+        screens = QGuiApplication.screens()
+        if not screens:
+            return
+        for _name, panel in self.panel_layout_panels():
+            if not panel.isFloating():
+                continue
+            panel_rect = panel.frameGeometry()
+            best_screen = None
+            best_area = -1
+            for screen in screens:
+                available = screen.availableGeometry()
+                intersection = available.intersected(panel_rect)
+                area = intersection.width() * intersection.height()
+                if area > best_area:
+                    best_area = area
+                    best_screen = screen
+            if best_screen is None:
+                continue
+            available = best_screen.availableGeometry()
+            if best_area <= 0:
+                # No overlap with any connected screen - its saved monitor is
+                # gone, so the overlap tiebreak above is meaningless. Re-home
+                # onto the main window's own (already-resolved) screen
+                # instead of wherever that tiebreak happened to land.
+                current_screen = window.screen()
+                if current_screen is not None:
+                    available = current_screen.availableGeometry()
+            self._move_widget_inside_available_screen(panel, available)
 
     def restore_layout_preferences(self) -> None:
         window = self.window
@@ -326,16 +386,89 @@ class LayoutStateController:
             f"Layout | dock_state restored={restored} size={blob.size()}",
             level="debug" if restored else "warning",
         )
+        if restored:
+            # Must run on every restoreState() call, not just the first: app.py's
+            # startup flow calls this twice (once early via
+            # restore_panel_layout_preferences(), again later via
+            # window._restore_saved_panel_layout_state() in after_restore_flow(),
+            # right before the window is actually shown). Attaching the fix only
+            # to the first call left the second, later call free to silently
+            # re-apply the raw saved blob - including a floating panel's stale,
+            # possibly now off-screen geometry - undoing it again before the
+            # window ever became visible.
+            self.ensure_floating_panels_on_screen()
+            # include_floating=False: every call to restore_saved_panel_layout_state()
+            # happens before the main window itself is shown (see
+            # ensure_panel_visibility_restored's own docstring) - showing a
+            # floating panel here would pop it up on screen well before the
+            # main window appears. app.py's after_restore_flow() makes the
+            # real, floating-inclusive call once the window is actually shown.
+            self.ensure_panel_visibility_restored(include_floating=False)
         return restored
+
+    def ensure_panel_visibility_restored(self, *, include_floating: bool = True) -> None:
+        """Re-assert each panel's own saved visibility after restoreState().
+
+        See save_panel_layout_preferences() for why: a floating panel that
+        was visible when the app last closed can come back from
+        window.restoreState() silently hidden (geometry and floating state
+        both restore fine - only the "show it" step doesn't reliably
+        happen for a floating QDockWidget). This treats our own
+        independently-tracked layout/panel_visible/<name> as the source of
+        truth instead, correcting the case restoreState() gets wrong
+        without touching the case it already gets right.
+
+        include_floating=False skips floating panels entirely (docked ones
+        are still corrected). Every call to this from restore_saved_panel_layout_state()
+        happens while the main window itself is still window.hide()-hidden
+        (see app.py's finish_startup) - a *docked* panel's setVisible() is a
+        no-op paint-wise until its hidden ancestor is shown, but a
+        *floating* QDockWidget is a genuine independent top-level window,
+        so calling setVisible(True) on one there makes it pop up on screen
+        immediately, well before the main window itself ever appears (the
+        dataset load and image prep in between can take a visible moment).
+        app.py's after_restore_flow() calls this a second time, with
+        floating panels included, right after the main window is actually
+        shown - that is the only point floating panels should become
+        visible."""
+        window = self.window
+        for name, panel in self.panel_layout_panels():
+            if not include_floating and panel.isFloating():
+                continue
+            should_be_visible = window._settings_bool(f"layout/panel_visible/{name}", True)
+            currently_visible = not panel.isHidden()
+            if currently_visible != should_be_visible:
+                window._append_workflow_log(
+                    f"Layout | correcting {name} visibility after restore: "
+                    f"was {currently_visible}, saved {should_be_visible}",
+                    level="debug",
+                )
+                panel.setVisible(should_be_visible)
+                if should_be_visible and panel.isFloating():
+                    panel.raise_()
 
     def restore_saved_window_state_after_show(self) -> None:
         window = self.window
         if window._startup_restore_window_fullscreen:
+            chosen = "fullscreen"
             window.showFullScreen()
         elif window._startup_restore_window_maximized:
+            chosen = "maximized"
             window.showMaximized()
         else:
+            chosen = "normal"
             window.showNormal()
+        logging.getLogger("lspr_imaging_app.layout").debug(
+            "apply window state | chosen=%s | isMaximized_after=%s isFullScreen_after=%s",
+            chosen,
+            window.isMaximized(),
+            window.isFullScreen(),
+        )
+        window._append_workflow_log(
+            f"Layout | apply window state | chosen={chosen} "
+            f"isMaximized_after={window.isMaximized()} isFullScreen_after={window.isFullScreen()}",
+            level="debug",
+        )
 
     def restore_panel_layout_preferences(self) -> None:
         window = self.window
@@ -406,6 +539,20 @@ class LayoutStateController:
         if not window._dock_layout_built:
             return
         window._settings.setValue("layout/dock_state", window.saveState())
+        # Belt-and-suspenders alongside the dock_state blob above: Qt's
+        # QMainWindow.restoreState() reliably restores a *floating* dock
+        # widget's saved geometry and floating flag, but does not reliably
+        # re-show it - a floating panel that was visible at save time can
+        # come back from restoreState() hidden, with no error and nothing
+        # in the blob to say it went wrong. Track each panel's own
+        # visibility independently here so ensure_panel_visibility_restored()
+        # can re-assert it explicitly after every restoreState() call
+        # rather than trusting that bit of the blob alone. Uses isHidden(),
+        # not isVisible(): a call reachable while the top-level window
+        # itself is still hidden (e.g. during startup) would otherwise see
+        # every panel as invisible regardless of its own real state.
+        for name, panel in self.panel_layout_panels():
+            window._settings.setValue(f"layout/panel_visible/{name}", bool(not panel.isHidden()))
 
     def on_panel_visibility_changed(self, _dock: QWidget) -> None:
         window = self.window

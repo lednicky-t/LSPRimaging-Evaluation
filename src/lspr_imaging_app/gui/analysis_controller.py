@@ -1608,7 +1608,6 @@ class AnalysisController:
 
         x_values_all: list[np.ndarray] = []
         y_values_all: list[np.ndarray] = []
-        fit_y_values_all: list[np.ndarray] = []
         primary_result = series_payloads[0][2]
         for label, roi_id, roi_result in series_payloads:
             rendered = self.window._add_spectrum_series(
@@ -1620,24 +1619,25 @@ class AnalysisController:
             )
             if rendered is None:
                 continue
-            x_values, y_values, fit_x_values, fit_y_values = rendered
+            x_values, y_values, _fit_x_values, _fit_y_values = rendered
             x_values_all.append(np.asarray(x_values, dtype=np.float64))
             y_values_all.append(np.asarray(y_values, dtype=np.float64))
-            if fit_x_values is not None and fit_y_values is not None and fit_x_values.size and fit_y_values.size:
-                fit_y_values_all.append(np.asarray(fit_y_values, dtype=np.float64))
 
         if not x_values_all:
             self.window._set_spectrum_summary_text(f"{self.window._spectrum_selection_label()} | No valid absorbance values")
             return
 
+        # Axis range is driven by the real absorbance points only - never by
+        # the fitted curve. A fit (esp. a higher-order polynomial through
+        # sparse/noisy points) can swing far from the data between sample
+        # points (Runge's phenomenon); letting it into the axis range let a
+        # single bad fit collapse the real data to an invisible sliver. The
+        # fit line is still drawn and may simply run off-screen if it does
+        # this, which is itself a fair cue that the fit is poorly conditioned.
         x_min = min(float(np.min(values)) for values in x_values_all)
         x_max = max(float(np.max(values)) for values in x_values_all)
         y_min = min(float(np.min(values)) for values in y_values_all)
         y_max = max(float(np.max(values)) for values in y_values_all)
-        for fit_values in fit_y_values_all:
-            if fit_values.size:
-                y_min = min(y_min, float(np.nanmin(fit_values)))
-                y_max = max(y_max, float(np.nanmax(fit_values)))
         y_span = max(y_max - y_min, 0.05)
         self.window.spectrum_plot.setXRange(x_min, x_max, padding=0.02)
         self.window.spectrum_plot.setYRange(y_min - y_span * 0.08, y_max + y_span * 0.12, padding=0.0)
@@ -1700,12 +1700,18 @@ class AnalysisController:
         self.window._last_absorbance_fit_seconds = fit_seconds
 
         spectral_cube_index = self.window._current_spectral_cube()
+        cube_display = spectral_cube_index if spectral_cube_index is not None else "-"
         sample_pixels = int(np.nanmax(primary_result.sample_pixel_count)) if primary_result.sample_pixel_count.size else 0
         reference_pixels = int(np.nanmax(primary_result.reference_pixel_count)) if primary_result.reference_pixel_count.size else 0
-        self.window._set_spectrum_summary_text(
-            f"{self.window._spectrum_selection_label()} | Spectral cube {spectral_cube_index if spectral_cube_index is not None else '-'}"
+        roi_count = len(self.window._state.area_rois)
+        group_count = len(self.window._state.area_roi_groups)
+        cube_axis_label = self.window._spectral_cube_axis_label()
+        basic_text = f"ROI: {roi_count}, Groups: {group_count}, {cube_axis_label}: {cube_display}"
+        detail_tooltip = (
+            f"{self.window._spectrum_selection_label()} | Spectral cube {cube_display}"
             f" | ROI px: sample {sample_pixels}, reference {reference_pixels}{current_text}{fit_text}"
         )
+        self.window._set_spectrum_summary_text(basic_text, detail_tooltip)
         self.window._update_single_spectral_cube_sensorgram(metric_value, metric_signal)
         return fit_seconds
 

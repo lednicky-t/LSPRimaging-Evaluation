@@ -317,6 +317,9 @@ class PanelContainer(QDockWidget):
         self._title = title
         self._content = content
         self._help_text = help_text
+        self._subtitle_text = ""
+        self._subtitle_tooltip = ""
+        self._subtitle_label: QLabel | None = None
         self.setObjectName(f"{title.replace(' ', '')}Panel")
         self.setWidget(content)
         self.setFeatures(
@@ -370,6 +373,14 @@ class PanelContainer(QDockWidget):
         label = QLabel(title, row)
         label.setStyleSheet(f"color: {theme.text_primary}; font-weight: 600; background: transparent;")
         layout.addWidget(label)
+
+        subtitle_label = QLabel(self._subtitle_text, row)
+        subtitle_label.setStyleSheet(f"color: {theme.text_muted}; font-weight: 400; background: transparent;")
+        subtitle_label.setToolTip(self._subtitle_tooltip)
+        subtitle_label.setVisible(bool(self._subtitle_text))
+        layout.addSpacing(6)
+        layout.addWidget(subtitle_label)
+        self._subtitle_label = subtitle_label
         layout.addStretch(1)
 
         if self._help_text:
@@ -423,6 +434,18 @@ class PanelContainer(QDockWidget):
         outer.addWidget(separator)
 
         return bar
+
+    def set_subtitle(self, text: str, tooltip: str = "") -> None:
+        """Short status text shown after the panel title, e.g. live counts a
+        panel wants visible without stealing space from its own content
+        (used by the Spectra panel for ROI/group/cube counts that used to
+        sit as the pyqtgraph plot's own title, eating into the plot area)."""
+        self._subtitle_text = text
+        self._subtitle_tooltip = tooltip
+        if self._subtitle_label is not None:
+            self._subtitle_label.setText(text)
+            self._subtitle_label.setToolTip(tooltip)
+            self._subtitle_label.setVisible(bool(text))
 
     def _on_float_button_clicked(self) -> None:
         if not self.isFloating():

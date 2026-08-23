@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 
+from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QColor
 
 from lspr_ui import APP_THEME
@@ -184,6 +185,46 @@ class UIStateManager:
         window._sync_background_profile_buttons(window._showing_background_profile_main)
         window._restore_saved_image_view_after_load()
 
+        window._spectrum_fit_line_width_px = window._read_float_setting(
+            "plot_style/spectrum_fit_line_width_px", window._spectrum_fit_line_width_px
+        )
+        window._spectrum_fit_line_style = Qt.PenStyle(
+            window._settings_int("plot_style/spectrum_fit_line_style", int(window._spectrum_fit_line_style.value))
+        )
+        window._spectrum_symbol_size_px = window._read_float_setting(
+            "plot_style/spectrum_symbol_size_px", window._spectrum_symbol_size_px
+        )
+        window._sensorgram_line_width_px = window._read_float_setting(
+            "plot_style/sensorgram_line_width_px", window._sensorgram_line_width_px
+        )
+        window._sensorgram_line_style = Qt.PenStyle(
+            window._settings_int("plot_style/sensorgram_line_style", int(window._sensorgram_line_style.value))
+        )
+        window._sensorgram_processed_line_width_px = window._read_float_setting(
+            "plot_style/sensorgram_processed_line_width_px", window._sensorgram_processed_line_width_px
+        )
+        window._sensorgram_processed_line_style = Qt.PenStyle(
+            window._settings_int(
+                "plot_style/sensorgram_processed_line_style", int(window._sensorgram_processed_line_style.value)
+            )
+        )
+        processed_color = QColor(
+            str(window._settings.value("plot_style/sensorgram_processed_color", window._sensorgram_processed_color.name()))
+        )
+        if processed_color.isValid():
+            window._sensorgram_processed_color = processed_color
+        window._sensorgram_group_line_width_px = window._read_float_setting(
+            "plot_style/sensorgram_group_line_width_px", window._sensorgram_group_line_width_px
+        )
+        window._sensorgram_group_line_style = Qt.PenStyle(
+            window._settings_int("plot_style/sensorgram_group_line_style", int(window._sensorgram_group_line_style.value))
+        )
+        group_color = QColor(
+            str(window._settings.value("plot_style/sensorgram_group_color", window._sensorgram_group_color.name()))
+        )
+        if group_color.isValid():
+            window._sensorgram_group_color = group_color
+
     def save_visual_preferences(self) -> None:
         window = self._window
         window._settings.setValue("visual/mask_color", window._mask_visual_color.name())
@@ -209,6 +250,23 @@ class UIStateManager:
             window._settings.setValue("visual/image_view_x_max", float(x_range[1]))
             window._settings.setValue("visual/image_view_y_min", float(y_range[0]))
             window._settings.setValue("visual/image_view_y_max", float(y_range[1]))
+        window._settings.setValue("plot_style/spectrum_fit_line_width_px", float(window._spectrum_fit_line_width_px))
+        window._settings.setValue("plot_style/spectrum_fit_line_style", int(window._spectrum_fit_line_style.value))
+        window._settings.setValue("plot_style/spectrum_symbol_size_px", float(window._spectrum_symbol_size_px))
+        window._settings.setValue("plot_style/sensorgram_line_width_px", float(window._sensorgram_line_width_px))
+        window._settings.setValue("plot_style/sensorgram_line_style", int(window._sensorgram_line_style.value))
+        window._settings.setValue(
+            "plot_style/sensorgram_processed_line_width_px", float(window._sensorgram_processed_line_width_px)
+        )
+        window._settings.setValue(
+            "plot_style/sensorgram_processed_line_style", int(window._sensorgram_processed_line_style.value)
+        )
+        window._settings.setValue("plot_style/sensorgram_processed_color", window._sensorgram_processed_color.name())
+        window._settings.setValue(
+            "plot_style/sensorgram_group_line_width_px", float(window._sensorgram_group_line_width_px)
+        )
+        window._settings.setValue("plot_style/sensorgram_group_line_style", int(window._sensorgram_group_line_style.value))
+        window._settings.setValue("plot_style/sensorgram_group_color", window._sensorgram_group_color.name())
 
     def save_control_preferences(self) -> None:
         window = self._window

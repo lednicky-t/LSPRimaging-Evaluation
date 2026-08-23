@@ -480,6 +480,16 @@ def main() -> None:
     default_folder = _resolve_default_dataset_folder()
     splash.update_progress(40, "Building workspace...")
     window = MainWindow(default_folder=default_folder, fast_startup=fast_startup)
+    # Applied again later (harmless - DwmSetWindowAttribute is idempotent),
+    # but doing it here too, before the window's native handle is ever shown,
+    # is what actually matters: DWM decides the window's initial backdrop
+    # colour (a solid white placeholder by default) at the moment the native
+    # window is first realized, before Qt gets a chance to paint anything of
+    # its own - if the dark-mode attribute is only set after
+    # _restore_saved_window_state_after_show()'s first show() (as it used to
+    # be, in the finally block below), that first DWM-drawn frame is already
+    # the wrong (white) one, which is exactly the startup flash this avoids.
+    _apply_windows_titlebar_theme(window)
     splash.update_progress(55, "Preparing window layout...")
     window.prepare_initial_show()
     window.setWindowState(Qt.WindowState.WindowNoState)
@@ -535,6 +545,15 @@ def main() -> None:
                 splash.update_progress(96, "Launching workspace...")
                 window.setEnabled(True)
                 window._restore_saved_window_state_after_show()  # the one show() call: normal/maximized/fullscreen
+                # A floating dock widget's own shown/hidden state does not reliably
+                # survive its ancestor (this window) going from hidden to shown - the
+                # earlier correction inside _restore_saved_panel_layout_state() ran
+                # while window was still window.hide()-hidden, so it could be lost the
+                # moment the window above actually appears. Re-assert it now that the
+                # window is genuinely on screen, and re-sync the View menu checkboxes
+                # to match whatever that correction just changed.
+                window._ensure_panel_visibility_restored()
+                window._sync_panel_visibility_after_show()
                 window.raise_()
                 window.activateWindow()
                 app.processEvents()

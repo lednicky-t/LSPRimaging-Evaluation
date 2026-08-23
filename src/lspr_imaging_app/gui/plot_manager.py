@@ -118,18 +118,28 @@ class PlotManager:
             return
         self.clamp_histogram_log_range()
 
-    def set_spectrum_summary_text(self, text: str) -> None:
-        self._window.spectrum_plot.setTitle(text, color=get_active_theme().text_muted, size="9pt")
+    def set_spectrum_summary_text(self, text: str, tooltip: str = "") -> None:
+        # Shown in the Spectra panel's title bar (PanelContainer.set_subtitle)
+        # rather than as the pyqtgraph plot's own title - a pyqtgraph title
+        # reserves a row of vertical space inside the plot itself, which ate
+        # into the actual plotting area for no benefit. The fuller detail
+        # (fit metric, per-point readout, pixel counts) is still reachable
+        # by hovering the subtitle text.
+        panel = getattr(self._window, "spectra_panel", None)
+        if panel is not None:
+            panel.set_subtitle(text, tooltip or text)
 
     def clear_spectrum_summary_text(self) -> None:
-        self._window.spectrum_plot.setTitle(None)
+        panel = getattr(self._window, "spectra_panel", None)
+        if panel is not None:
+            panel.set_subtitle("")
 
     def clear_absorbance_spectrum(self) -> None:
         self.clear_spectrum_series_items()
         self._window.spectrum_current_point.setData([], [])
         self._window.spectrum_metric_point.setData([], [])
         self._window._absorbance_spectrum_dirty = True
-        self._window.spectrum_plot.setTitle(None)
+        self.clear_spectrum_summary_text()
 
     def clear_spectrum_series_items(self) -> None:
         window = self._window

@@ -536,6 +536,26 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, HistogramMaskMixin, Measurem
         self._reference_points_visible = True
         self._chromatic_reference_points_all_visible = False
         self._cached_rois_only_visible = self._settings_bool("layout/cached_rois_only_visible", False)
+
+        # Plot line-style settings, adjustable via the small settings icon
+        # in each plot's corner overlay (plot_style_settings_dialog.py).
+        # These defaults are overwritten by _restore_visual_preferences()
+        # below if a saved value exists - set first so that call always has
+        # a real value to fall back to. Series colors are not included here
+        # - see that dialog's note on why ROI/selection-driven colors stay
+        # out of user control.
+        self._spectrum_fit_line_width_px = 2.0
+        self._spectrum_fit_line_style = Qt.PenStyle.SolidLine
+        self._spectrum_symbol_size_px = 6.0
+        self._sensorgram_line_width_px = 2.2
+        self._sensorgram_line_style = Qt.PenStyle.SolidLine
+        self._sensorgram_processed_line_width_px = 2.0
+        self._sensorgram_processed_line_style = Qt.PenStyle.DashLine
+        self._sensorgram_processed_color = QColor("#f59e0b")
+        self._sensorgram_group_line_width_px = 2.2
+        self._sensorgram_group_line_style = Qt.PenStyle.SolidLine
+        self._sensorgram_group_color = QColor("#a855f7")
+
         self._restore_visual_preferences()
         self._image_refresh_timer = QTimer(self)
         self._image_refresh_timer.setSingleShot(True)
@@ -594,23 +614,6 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, HistogramMaskMixin, Measurem
         self._spectrum_stats_enabled = False
         self._sensorgram_cursor_enabled = False
         self._sensorgram_stats_enabled = False
-
-        # Plot line-style settings, adjustable via the small settings icon
-        # in each plot's corner overlay (plot_style_settings_dialog.py).
-        # Defaults match the pens the curves are constructed with below.
-        # Series colors are not included here - see that dialog's note on
-        # why ROI/selection-driven colors stay out of user control.
-        self._spectrum_fit_line_width_px = 2.0
-        self._spectrum_fit_line_style = Qt.PenStyle.SolidLine
-        self._spectrum_symbol_size_px = 6.0
-        self._sensorgram_line_width_px = 2.2
-        self._sensorgram_line_style = Qt.PenStyle.SolidLine
-        self._sensorgram_processed_line_width_px = 2.0
-        self._sensorgram_processed_line_style = Qt.PenStyle.DashLine
-        self._sensorgram_processed_color = QColor("#f59e0b")
-        self._sensorgram_group_line_width_px = 2.2
-        self._sensorgram_group_line_style = Qt.PenStyle.SolidLine
-        self._sensorgram_group_color = QColor("#a855f7")
 
     def _init_widgets(self, default_folder: Path) -> None:
         self._init_dataset_widgets(default_folder)
@@ -2972,6 +2975,9 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, HistogramMaskMixin, Measurem
     def _normalize_panel_layout(self) -> None:
         self._layout_state_controller.normalize_panel_layout()
 
+    def _ensure_panel_visibility_restored(self) -> None:
+        self._layout_state_controller.ensure_panel_visibility_restored()
+
     def _configure_slider(self, slider: QSlider, value_count: int) -> None:
         slider.setEnabled(value_count > 0)
         slider.setMinimum(0)
@@ -3739,6 +3745,9 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, HistogramMaskMixin, Measurem
     def _copy_workflow_log(self) -> None:
         self._workflow_log_controller.copy_workflow_log()
 
+    def _open_logs_folder(self) -> None:
+        self._workflow_log_controller.open_logs_folder()
+
     def _setup_workflow_logging(self) -> None:
         self._workflow_log_controller.setup_workflow_logging()
 
@@ -4204,9 +4213,27 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, HistogramMaskMixin, Measurem
         self._settings.setValue("geometry", self.saveGeometry())
         self._settings.setValue("window_is_maximized", bool(self.isMaximized()))
         self._settings.setValue("window_is_fullscreen", bool(self.isFullScreen()))
+        self._append_workflow_log(
+            f"Layout | close | saving window_is_maximized={self.isMaximized()} window_is_fullscreen={self.isFullScreen()}",
+            level="debug",
+        )
         self._settings.setValue("last_folder", self.folder_edit.text())
         self._settings.setValue("histogram_bin_size", int(self.histogram_bins_spin.value()))
         self._save_layout_preferences()
+        # Qt hides every dock widget of its own accord as part of actually
+        # tearing the window down below (super().closeEvent()) - each of
+        # those hides fires the same visibilityChanged signal a real user
+        # toggle would, which is wired straight to on_panel_visibility_changed
+        # -> save_layout_preferences(). Left unguarded, that teardown cascade
+        # re-saves right after the correct snapshot just above, persisting
+        # "every panel hidden" (an artifact of closing, not a real layout
+        # choice) as if it were the real one - the actual reason a floating
+        # panel that was genuinely visible at close never came back visible
+        # on the next launch. set_all_panel_visibility() already guards its
+        # own multi-panel visibility changes the same way, for the same
+        # reason; this just extends that guard to cover the window's own
+        # close-time cascade too.
+        self._suspend_layout_save = True
         self._remove_workflow_logging()
         self._wait_for_background_tasks_before_close()
         super().closeEvent(event)
@@ -5851,8 +5878,8 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, HistogramMaskMixin, Measurem
     def _on_histogram_view_range_changed(self, *_args) -> None:
         self._overlay_manager._on_histogram_view_range_changed(*_args)
 
-    def _set_spectrum_summary_text(self, text: str) -> None:
-        self._plot_manager.set_spectrum_summary_text(text)
+    def _set_spectrum_summary_text(self, text: str, tooltip: str = "") -> None:
+        self._plot_manager.set_spectrum_summary_text(text, tooltip)
 
     def _clear_spectrum_summary_text(self) -> None:
         self._plot_manager.clear_spectrum_summary_text()

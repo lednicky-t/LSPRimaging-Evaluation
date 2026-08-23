@@ -157,6 +157,7 @@ class SpectrumPlotSettingsDialog(_PlotStyleDialogBase):
         window._spectrum_symbol_size_px = float(self.symbol_size_spin.value())
         if hasattr(window, "_refresh_absorbance_spectrum"):
             window._refresh_absorbance_spectrum()
+        window._save_visual_preferences()
 
 
 class SensorgramPlotSettingsDialog(_PlotStyleDialogBase):
@@ -214,6 +215,7 @@ class SensorgramPlotSettingsDialog(_PlotStyleDialogBase):
         window._sensorgram_group_color = self.group_color_button.color()
         if hasattr(window, "_analysis_controller"):
             window._analysis_controller.apply_sensorgram_style_settings()
+        window._save_visual_preferences()
 
 
 def show_spectrum_plot_settings_dialog_for(window) -> None:

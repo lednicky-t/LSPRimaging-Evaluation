@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import logging
+import os
 import time
 from html import escape
+from pathlib import Path
 
 import numpy as np
 from PyQt6.QtCore import QTimer
@@ -55,6 +57,32 @@ class WorkflowLogController:
             return
         QApplication.clipboard().setText(window.workflow_log_view.toPlainText())
         self.append_workflow_log("Workflow log copied to clipboard.", level="debug")
+
+    def open_logs_folder(self) -> None:
+        """Opens the folder holding this and past sessions' log files (one
+        DEBUG-level .log per launch, see app.py::_configure_logging) in File
+        Explorer, so the maintainer can browse/clean them up without hunting
+        for the path by hand. Reads the current session's own log path off
+        the root logger (set once, at startup, by _configure_logging) rather
+        than recomputing it independently here, so there's a single source
+        of truth for where that file actually lives."""
+        window = self.window
+        session_log_path = getattr(logging.getLogger(), "_lspr_session_log_path", None)
+        if isinstance(session_log_path, Path):
+            folder = session_log_path.parent
+        else:
+            # Fallback for a context where _configure_logging() never ran
+            # (e.g. this module imported directly, outside the normal app.py
+            # entry point) - same computation app.py's own uses, just from
+            # this file's one-directory-deeper location under gui/.
+            folder = Path(__file__).resolve().parents[3] / "logs"
+        if not folder.is_dir():
+            window._set_status_text(f"Cannot open logs folder - path does not exist: {folder}")
+            return
+        try:
+            os.startfile(str(folder))
+        except OSError as exc:
+            window._set_status_text(f"Could not open logs folder in File Explorer: {exc}")
 
     def setup_workflow_logging(self) -> None:
         window = self.window
