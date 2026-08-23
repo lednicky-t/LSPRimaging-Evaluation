@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from lspr_ui import (
     APP_THEME,
-    BLUE_DARK_THEME,
+    BRIGHT_THEME,
     GRAY_DARK_THEME,
     GuiTheme,
     apply_base_app_theme,
@@ -21,7 +21,7 @@ from lspr_ui import (
 
 __all__ = [
     "APP_THEME",
-    "BLUE_DARK_THEME",
+    "BRIGHT_THEME",
     "GRAY_DARK_THEME",
     "GuiTheme",
     "apply_base_app_theme",

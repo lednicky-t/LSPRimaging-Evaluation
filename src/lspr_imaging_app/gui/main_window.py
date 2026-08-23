@@ -73,7 +73,7 @@ from PyQt6.QtWidgets import (
 
 from lspr_ui import (
     APP_THEME,
-    BLUE_DARK_THEME,
+    BRIGHT_THEME,
     DualHandleRangeSlider,
     GRAY_DARK_THEME,
     collapsible_pin_stylesheet,
@@ -94,7 +94,9 @@ from lspr_imaging_app.gui.background_profile_controller import BackgroundProfile
 from lspr_imaging_app.gui.chromatic_controller import ChromaticController
 from lspr_imaging_app.gui.shortcut_manager import ShortcutManager
 from lspr_imaging_app.gui.session_state_manager import SessionStateManager
+from lspr_imaging_app.gui.app_theme import apply_app_theme
 from lspr_imaging_app.gui.plot_manager import PlotManager
+from lspr_imaging_app.gui.plot_overlay_controller import PlotOverlayController
 from lspr_imaging_app.gui.ui_state_manager import UIStateManager
 from lspr_imaging_app.gui.shortcut_registry import shortcuts_text
 from lspr_imaging_app.gui.ui_helpers import (
@@ -251,6 +253,15 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, HistogramMaskMixin, Measurem
         self._init_controllers()
         self._init_state()
         self._init_widgets(default_folder)
+        # Corner overlay: stats/cursor readout + settings icon for the
+        # Spectra/Sensogram plots - see PlotOverlayController. Built after
+        # _init_widgets (not inside it) so every widget installEventFilter's
+        # own handler might reference - e.g. ImageInteractionController.
+        # handle_event's checks against self.wavelength_spin - already
+        # exists; installing our own event filters any earlier let a Show/
+        # Resize event reach them before that attribute was set.
+        self._plot_overlay.build_spectrum_overlays()
+        self._plot_overlay.build_sensorgram_overlays()
         self._build_layout()
         self._create_toolbar()
         self._connect_signals()
@@ -272,6 +283,7 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, HistogramMaskMixin, Measurem
         self._chromatic_controller = ChromaticController(self)
         self._analysis_controller = AnalysisController(self)
         self._plot_manager = PlotManager(self)
+        self._plot_overlay = PlotOverlayController(self)
         self._ui_state_manager = UIStateManager(self)
         self._session_state_manager = SessionStateManager(self)
         self._shortcut_manager = ShortcutManager(self)
@@ -574,6 +586,31 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, HistogramMaskMixin, Measurem
         self._roi_refresh_timer.setInterval(25)
         self._roi_refresh_timer.timeout.connect(self._roi_table_controller.update_table)
 
+        # Spectra/Sensogram corner overlay: cursor/crosshair + stats toggle
+        # state (off by default, not persisted across restarts - matches
+        # ImageInteractionController's image-view cursor readout toggle).
+        # See PlotOverlayController.
+        self._spectrum_cursor_enabled = False
+        self._spectrum_stats_enabled = False
+        self._sensorgram_cursor_enabled = False
+        self._sensorgram_stats_enabled = False
+
+        # Plot line-style settings, adjustable via the small settings icon
+        # in each plot's corner overlay (plot_style_settings_dialog.py).
+        # Defaults match the pens the curves are constructed with below.
+        # Series colors are not included here - see that dialog's note on
+        # why ROI/selection-driven colors stay out of user control.
+        self._spectrum_fit_line_width_px = 2.0
+        self._spectrum_fit_line_style = Qt.PenStyle.SolidLine
+        self._spectrum_symbol_size_px = 6.0
+        self._sensorgram_line_width_px = 2.2
+        self._sensorgram_line_style = Qt.PenStyle.SolidLine
+        self._sensorgram_processed_line_width_px = 2.0
+        self._sensorgram_processed_line_style = Qt.PenStyle.DashLine
+        self._sensorgram_processed_color = QColor("#f59e0b")
+        self._sensorgram_group_line_width_px = 2.2
+        self._sensorgram_group_line_style = Qt.PenStyle.SolidLine
+        self._sensorgram_group_color = QColor("#a855f7")
 
     def _init_widgets(self, default_folder: Path) -> None:
         self._init_dataset_widgets(default_folder)
@@ -623,7 +660,7 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, HistogramMaskMixin, Measurem
         self.ome_zarr_chunk_label.setToolTip("Square spatial chunk size used when exporting Zarr.")
         self.ome_zarr_chunk_guide_button = self._make_icon_tool_button(
             "grid-4x4",
-            "#94a3b8",
+            get_active_theme().text_dim,
             "Guide: show how the current Zarr chunk size would tile the visible image.",
             checkable=True,
             icon=self._ome_zarr_grid_icon(False),
@@ -662,7 +699,7 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, HistogramMaskMixin, Measurem
         self.ome_zarr_skip_excluded_label.setToolTip("Omit pixel data for excluded images/wavelengths/spectral cubes from the export.")
         self.ome_zarr_skip_excluded_button = self._make_icon_tool_button(
             "alert-triangle",
-            "#94a3b8",
+            get_active_theme().text_dim,
             "Skip excluded images: leave excluded planes empty in the exported file instead of writing their pixel data.",
             checkable=True,
         )
@@ -1026,7 +1063,7 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, HistogramMaskMixin, Measurem
         self._status_bar_busy_detail.setMinimumWidth(140)
         self._status_bar_busy_detail.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
         self._status_bar_busy_detail.setFont(QFont("Consolas", 9))
-        self._status_bar_busy_detail.setStyleSheet("color: #94a3b8;")
+        self._status_bar_busy_detail.setStyleSheet(f"color: {get_active_theme().text_dim};")
         self._status_bar_last_action = QLabel("Last action: -", self)
         self._status_bar_last_action.setWordWrap(False)
         self._status_bar_hint = QLabel("Hint: Hover a control for guidance.", self)
@@ -1055,8 +1092,8 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, HistogramMaskMixin, Measurem
             button = getattr(histogram_plot_item, button_name, None)
             if button is not None:
                 button.hide()
-        self.histogram_legend = self.histogram_plot.addLegend(offset=(8, 8), labelTextColor="#e5edf7")
-        self.histogram_curve = self.histogram_plot.plot(name="All pixels", pen=pg.mkPen("#ffffff", width=2.2))
+        self.histogram_legend = self.histogram_plot.addLegend(offset=(8, 8), labelTextColor=get_active_theme().text_primary)
+        self.histogram_curve = self.histogram_plot.plot(name="All pixels", pen=pg.mkPen(get_active_theme().text_primary, width=2.2))
         self.roi_histogram_curve = self.histogram_plot.plot(name="ROIs")
         self.reference_histogram_curve = self.histogram_plot.plot(name="Reference ROIs")
         self.mask_histogram_curve = self.histogram_plot.plot(name="Mask")
@@ -1161,14 +1198,14 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, HistogramMaskMixin, Measurem
         self.flatten_background_check.setIconSize(QSize(APP_THEME.compact_icon_inner, APP_THEME.compact_icon_inner))
         self.flatten_ignore_roi_area_check = self._make_icon_tool_button(
             "current-location-off",
-            "#94a3b8",
+            get_active_theme().text_dim,
             "Ignore the detected ROI area while estimating the illumination background.",
             checkable=True,
             icon=self._background_exclusion_icon("current-location-off", False, size=APP_THEME.compact_icon_inner),
         )
         self.flatten_ignore_mask_check = self._make_icon_tool_button(
             "mask-off",
-            "#94a3b8",
+            get_active_theme().text_dim,
             "Ignore masked pixels while estimating the illumination background.",
             checkable=True,
             icon=self._background_exclusion_icon("mask-off", False, size=APP_THEME.compact_icon_inner),
@@ -1187,7 +1224,7 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, HistogramMaskMixin, Measurem
         )
         self.background_local_reference_check = self._make_icon_tool_button(
             "focus-2",
-            "#94a3b8",
+            get_active_theme().text_dim,
             "Local reference-ROI normalization (sample+reference ROI geometry only): use the reference "
             "ROI area as per-ROI background. Enables fast spatial reads for OME-Zarr datasets — "
             "global background flattening is skipped during ROI analysis.",
@@ -1409,7 +1446,7 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, HistogramMaskMixin, Measurem
 
         self.roi_detection_full_auto_button = self._make_icon_tool_button(
             "robot",
-            "#f8fafc",
+            get_active_theme().text_primary,
             "Fully automatic: detect the periodic circle array directly from the image - diameter, rows, "
             "columns, spacing, and reference ring are all inferred, no manual values needed. Falls back to "
             "a status message (not a guess) if no clear periodic array is found.",
@@ -1425,9 +1462,9 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, HistogramMaskMixin, Measurem
         )
         self.roi_corner_select_button = self._make_icon_tool_button(
             "layout-grid",
-            "#94a3b8",
+            get_active_theme().text_dim,
             "Corner-seeded detection (coming later): select the four array corners first, then fill the grid.",
-            icon=self._make_corner_seed_icon("#94a3b8"),
+            icon=self._make_corner_seed_icon(get_active_theme().text_dim),
         )
         self.roi_corner_select_button.setEnabled(False)
 
@@ -1666,7 +1703,7 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, HistogramMaskMixin, Measurem
         self.spectrum_plot.setMinimumHeight(120)
         self.spectrum_plot.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.spectrum_plot.setMenuEnabled(False)
-        self.spectrum_legend = self.spectrum_plot.addLegend(offset=(8, 8), labelTextColor="#e5edf7")
+        self.spectrum_legend = self.spectrum_plot.addLegend(offset=(8, 8), labelTextColor=get_active_theme().text_primary)
         self._spectrum_series_items: list[pg.PlotDataItem] = []
         self.spectrum_curve: pg.PlotDataItem | None = None
         self.spectrum_fit_curve: pg.PlotDataItem | None = None
@@ -1676,7 +1713,7 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, HistogramMaskMixin, Measurem
             pen=None,
             symbol="o",
             symbolSize=9,
-            symbolBrush=pg.mkBrush("#f8fafc"),
+            symbolBrush=pg.mkBrush(get_active_theme().text_primary),
             symbolPen=pg.mkPen("#f59e0b", width=2),
         )
         self.spectrum_metric_point = self.spectrum_plot.plot(
@@ -1692,7 +1729,7 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, HistogramMaskMixin, Measurem
             pos=0.0,
             angle=90,
             movable=True,
-            pen=pg.mkPen("#f8fafc", width=1.4, style=Qt.PenStyle.DashLine),
+            pen=pg.mkPen(get_active_theme().text_primary, width=1.4, style=Qt.PenStyle.DashLine),
         )
         self.spectrum_cursor_line.setZValue(20)
         self.spectrum_cursor_line.hide()
@@ -1718,14 +1755,14 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, HistogramMaskMixin, Measurem
             pen=None,
             symbol="o",
             symbolSize=9,
-            symbolBrush=pg.mkBrush("#f8fafc"),
+            symbolBrush=pg.mkBrush(get_active_theme().text_primary),
             symbolPen=pg.mkPen("#22c55e", width=2),
         )
         self.sensorgram_cursor_line = pg.InfiniteLine(
             pos=0.0,
             angle=90,
             movable=True,
-            pen=pg.mkPen("#f8fafc", width=1.4, style=Qt.PenStyle.DashLine),
+            pen=pg.mkPen(get_active_theme().text_primary, width=1.4, style=Qt.PenStyle.DashLine),
         )
         self.sensorgram_cursor_line.setZValue(20)
         self.sensorgram_cursor_line.hide()
@@ -1788,11 +1825,11 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, HistogramMaskMixin, Measurem
         self.detect_rois_button = self.roi_detection_auto_button
         self.reorder_rois_button = self._make_icon_tool_button(
             "sort-ascending-numbers",
-            "#f8fafc",
+            get_active_theme().text_primary,
             "Reorder ROIs by row: number left-to-right within each row, top row to bottom row, so the top-left ROI becomes ID 1.",
-            icon=self._make_rotated_tabler_icon("sort-ascending-numbers", "#f8fafc", degrees=270.0),
+            icon=self._make_rotated_tabler_icon("sort-ascending-numbers", get_active_theme().text_primary, degrees=270.0),
         )
-        self.reorder_rois_column_button = self._make_icon_tool_button("sort-ascending-numbers", "#f8fafc", "Reorder ROIs by column: number top-to-bottom within each column, left column to right column, so the top-left ROI becomes ID 1.")
+        self.reorder_rois_column_button = self._make_icon_tool_button("sort-ascending-numbers", get_active_theme().text_primary, "Reorder ROIs by column: number top-to-bottom within each column, left column to right column, so the top-left ROI becomes ID 1.")
         self.clear_rois_button = self._make_icon_tool_button("trash-x", "#ef4444", "Remove all detected ROIs and groups from the current dataset.")
         self.clear_roi_selection_button = QPushButton("Clear selection", self)
 
@@ -1832,7 +1869,7 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, HistogramMaskMixin, Measurem
             "star", "#84cc16", "Jump to the reference image."
         )
         self.image_exclusion_button = self._make_icon_tool_button(
-            "ban", "#94a3b8", "Exclude this image/wavelength/spectral cube from processing, or manage exclusions."
+            "ban", get_active_theme().text_dim, "Exclude this image/wavelength/spectral cube from processing, or manage exclusions."
         )
         self.image_exclusion_button.clicked.connect(self._show_image_exclusion_menu)
         self.spectral_cube_slider.installEventFilter(self)
@@ -2129,8 +2166,8 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, HistogramMaskMixin, Measurem
         self._image_tools_controller.refresh_image_tool_action_icons()
         self._update_display_unit_controls()
         self._create_menu_bar()
-        theme_name = str(self._settings.value("ui/theme", "blue"))
-        self._set_ui_theme("gray" if theme_name == "gray" else "blue")
+        theme_name = str(self._settings.value("ui/theme", "dark"))
+        self._set_ui_theme("bright" if theme_name == "bright" else "dark")
         self._update_color_button_styles()
 
     def _make_scrollable_icon_row(self, content: QWidget) -> QWidget:
@@ -2148,8 +2185,8 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, HistogramMaskMixin, Measurem
         scroll.setStyleSheet("QScrollArea { border: none; background: transparent; }")
         scroll.setFixedHeight(content.sizeHint().height())
 
-        left_button = self._make_icon_tool_button("chevron-left", "#f8fafc", "Scroll the row left.")
-        right_button = self._make_icon_tool_button("chevron-right", "#f8fafc", "Scroll the row right.")
+        left_button = self._make_icon_tool_button("chevron-left", get_active_theme().text_primary, "Scroll the row left.")
+        right_button = self._make_icon_tool_button("chevron-right", get_active_theme().text_primary, "Scroll the row right.")
 
         bar = scroll.horizontalScrollBar()
 
@@ -3944,11 +3981,23 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, HistogramMaskMixin, Measurem
         )
         palette = self.palette()
         palette.setColor(QPalette.ColorRole.Window, QColor(theme.window_bg))
+        # WindowText is what plain QLabels (no explicit stylesheet) actually
+        # use for their text color - missing here meant every such label
+        # kept whichever theme's text_primary was active when the app first
+        # launched (set once by apply_base_app_theme in app.py's main())
+        # and never updated on a live theme switch via Preferences, since
+        # nothing else in this sweep touches WindowText. That's what made
+        # plain field-caption labels go near-invisible after switching to
+        # Bright mid-session (light text left over from Dark, now on a
+        # white background) until the app was restarted.
+        palette.setColor(QPalette.ColorRole.WindowText, QColor(theme.text_primary))
         palette.setColor(QPalette.ColorRole.Base, QColor(theme.window_bg))
         palette.setColor(QPalette.ColorRole.AlternateBase, QColor(theme.toolbar_section_bg))
         palette.setColor(QPalette.ColorRole.Button, QColor(theme.control_bg))
         palette.setColor(QPalette.ColorRole.Text, QColor(theme.text_primary))
         palette.setColor(QPalette.ColorRole.ButtonText, QColor(theme.text_primary))
+        palette.setColor(QPalette.ColorRole.Highlight, QColor(theme.primary_action_bg))
+        palette.setColor(QPalette.ColorRole.HighlightedText, QColor(theme.text_primary))
         self.setPalette(palette)
         if QApplication.instance() is not None:
             QApplication.instance().setPalette(palette)
@@ -3964,12 +4013,24 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, HistogramMaskMixin, Measurem
         self._apply_high_contrast_button_styles()
 
     def _set_ui_theme(self, theme_name: str) -> None:
-        theme = GRAY_DARK_THEME if theme_name == "gray" else BLUE_DARK_THEME
+        theme = BRIGHT_THEME if theme_name == "bright" else GRAY_DARK_THEME
         set_active_theme(theme)
         self._settings.setValue("ui/theme", theme_name)
         self._apply_theme_styles()
 
     def _apply_theme_styles(self) -> None:
+        # QApplication-level QSS/palette (packages/lspr_ui's startup stylesheet
+        # plus this app's own palette/combo-box patches) is otherwise only
+        # ever applied once, at app.py's main() startup - a QSS rule always
+        # wins over QPalette for anything it sets, so without this,
+        # QPushButton/QComboBox/QLineEdit/QMenu/QScrollBar/QTableWidget/
+        # QHeaderView (and any plain QLabel/QCheckBox relying on the
+        # application's default palette) stayed frozen at whichever theme
+        # was active at launch, no matter how many times set_active_theme()
+        # ran afterward. See gui/app_theme.py.
+        app_instance = QApplication.instance()
+        if app_instance is not None:
+            apply_app_theme(app_instance, get_active_theme())
         self._apply_dark_plot_theme()
         self._refresh_pin_and_apply_icons()
         self._refresh_collapsible_styles()
@@ -3977,6 +4038,29 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, HistogramMaskMixin, Measurem
         self._apply_roi_table_style()
         self._update_roi_label_button_icon(self._roi_labels_visible)
         self._apply_histogram_log_mode(refresh=not self._startup_restore_in_progress)
+        # Re-baked pixmaps: the mask/sample/reference/highlight/scale-bar
+        # color swatch buttons and the ROI table's per-row color icons are
+        # painted once (a QColor border baked into a QIcon/stylesheet), not
+        # QSS-styled, so they need to be explicitly rebuilt here rather than
+        # just repainting - same reasoning as _refresh_pin_and_apply_icons.
+        self._update_color_button_styles()
+        if hasattr(self, "workflow_log_view"):
+            log_theme = get_active_theme()
+            self.workflow_log_view.setStyleSheet(
+                "QTextEdit { "
+                f"background: {log_theme.control_bg}; "
+                f"color: {log_theme.text_muted}; "
+                f"border: 1px solid {log_theme.control_border}; "
+                "border-radius: 6px; }"
+            )
+        # Panel title bars (Workflow/Image area/Spectra/Histogram/Sensorgram
+        # etc.) build their own custom title bar widget with baked-in
+        # per-widget stylesheets (see PanelContainer._build_title_bar) since
+        # QDockWidget's built-in close/float buttons can't be resized via
+        # QSS - same "baked once, needs an explicit rebuild" situation as
+        # the color swatches and log panel above.
+        for panel in self.findChildren(PanelContainer):
+            panel.refresh_theme()
 
     def _all_collapsible_sections(self) -> tuple:
         return (
@@ -4880,10 +4964,10 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, HistogramMaskMixin, Measurem
         self.reference_spectral_cube_status_label.setText(f"Cube: {ref_spectral_cube}")
         self.reference_method_status_label.setText(f"Method: {method_text}")
         self.reference_wavelength_status_label.setStyleSheet(
-            f"color: {'#84cc16' if wavelength_active else '#f8fafc'}; font-weight: 600;"
+            f"color: {'#84cc16' if wavelength_active else get_active_theme().text_primary}; font-weight: 600;"
         )
         self.reference_spectral_cube_status_label.setStyleSheet(
-            f"color: {'#facc15' if spectral_cube_active else '#f8fafc'}; font-weight: 600;"
+            f"color: {'#facc15' if spectral_cube_active else get_active_theme().text_primary}; font-weight: 600;"
         )
         self.reference_method_status_label.setStyleSheet("color: #84cc16; font-weight: 600;")
         self._update_reference_navigation_styles()
@@ -5573,6 +5657,8 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, HistogramMaskMixin, Measurem
     def eventFilter(self, watched, event) -> bool:  # type: ignore[override]
         if self._image_interaction.handle_event(watched, event):
             return True
+        if self._plot_overlay.handle_event(watched, event):
+            return True
         return super().eventFilter(watched, event)
 
     def _image_point_from_mouse_event(self, event) -> tuple[float, float] | None:
@@ -6007,19 +6093,19 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, HistogramMaskMixin, Measurem
 
     def _update_color_button_styles(self) -> None:
         self.mask_color_button.setStyleSheet(
-            f"QToolButton {{ background-color: {self._mask_visual_color.name()}; min-width: 14px; max-width: 14px; min-height: 14px; max-height: 14px; border: 1px solid #e2e8f0; border-radius: 4px; padding: 0; }}"
+            f"QToolButton {{ background-color: {self._mask_visual_color.name()}; min-width: 14px; max-width: 14px; min-height: 14px; max-height: 14px; border: 1px solid {get_active_theme().control_border}; border-radius: 4px; padding: 0; }}"
         )
         self.sample_color_button.setStyleSheet(
-            f"QToolButton {{ background-color: {self._sample_visual_color.name()}; min-width: 14px; max-width: 14px; min-height: 14px; max-height: 14px; border: 1px solid #e2e8f0; border-radius: 4px; padding: 0; }}"
+            f"QToolButton {{ background-color: {self._sample_visual_color.name()}; min-width: 14px; max-width: 14px; min-height: 14px; max-height: 14px; border: 1px solid {get_active_theme().control_border}; border-radius: 4px; padding: 0; }}"
         )
         self.reference_color_button.setStyleSheet(
-            f"QToolButton {{ background-color: {self._reference_visual_color.name()}; min-width: 14px; max-width: 14px; min-height: 14px; max-height: 14px; border: 1px solid #e2e8f0; border-radius: 4px; padding: 0; }}"
+            f"QToolButton {{ background-color: {self._reference_visual_color.name()}; min-width: 14px; max-width: 14px; min-height: 14px; max-height: 14px; border: 1px solid {get_active_theme().control_border}; border-radius: 4px; padding: 0; }}"
         )
         self.highlight_color_button.setStyleSheet(
-            f"QToolButton {{ background-color: {self._highlight_visual_color.name()}; min-width: 14px; max-width: 14px; min-height: 14px; max-height: 14px; border: 1px solid #e2e8f0; border-radius: 4px; padding: 0; }}"
+            f"QToolButton {{ background-color: {self._highlight_visual_color.name()}; min-width: 14px; max-width: 14px; min-height: 14px; max-height: 14px; border: 1px solid {get_active_theme().control_border}; border-radius: 4px; padding: 0; }}"
         )
         self.scale_bar_color_button.setStyleSheet(
-            f"QToolButton {{ background-color: {self._scale_bar_visual_color.name()}; min-width: 14px; max-width: 14px; min-height: 14px; max-height: 14px; border: 1px solid #e2e8f0; border-radius: 4px; padding: 0; }}"
+            f"QToolButton {{ background-color: {self._scale_bar_visual_color.name()}; min-width: 14px; max-width: 14px; min-height: 14px; max-height: 14px; border: 1px solid {get_active_theme().control_border}; border-radius: 4px; padding: 0; }}"
         )
         self._update_histogram_region_styles()
         if hasattr(self, "roi_table") and self.roi_table.columnCount() >= 5:
@@ -6801,7 +6887,7 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, HistogramMaskMixin, Measurem
         marker = pg.TargetItem(
             pos=initial_pos,
             movable=True,
-            pen=pg.mkPen("#f8fafc", width=1.8),
+            pen=pg.mkPen(get_active_theme().text_primary, width=1.8),
             brush=pg.mkBrush(0, 0, 0, 0),
             hoverPen=pg.mkPen("#38bdf8", width=2.0),
             hoverBrush=pg.mkBrush(0, 0, 0, 0),
@@ -6960,7 +7046,7 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, HistogramMaskMixin, Measurem
         self.hist_region_label.setHtml(
             "<span style="
             f"'color:{self._highlight_visual_color.name()}; "
-            "font-size:9pt; font-weight:700; background:#0f172a; "
+            f"font-size:9pt; font-weight:700; background:{get_active_theme().toolbar_bg}; "
             f"border:1px solid {self._highlight_visual_color.name()}; border-radius:4px; padding:2px 4px;'"
             ">Highlight</span>"
         )

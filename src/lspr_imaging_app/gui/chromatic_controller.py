@@ -10,6 +10,8 @@ import pyqtgraph as pg
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QColor
 
+from lspr_ui import get_active_theme
+
 from lspr_imaging_app.domain.exclusions import is_excluded
 from lspr_imaging_app.domain.models import ChromaticLandmarkObservation, ChromaticTransformModel, GridBoundsDefinition
 from lspr_imaging_app.gui.analysis_tasks import _sampled_wavelengths
@@ -1281,7 +1283,7 @@ class ChromaticController:
                     dtype=np.float64,
                 )
                 bundle.active_cross.setData(cross_xs, cross_ys)
-                bundle.active_cross.setPen(pg.mkPen("#f8fafc", width=3.4))
+                bundle.active_cross.setPen(pg.mkPen(get_active_theme().text_primary, width=3.4))
                 bundle.active_cross.setVisible(True)
             elif bundle.active_cross is not None:
                 bundle.active_cross.setVisible(False)
@@ -1296,6 +1298,14 @@ class ChromaticController:
             rep_display_x = xs[representative_index]
             rep_display_y = ys[representative_index]
             label_color = self.wavelength_color(rep_wavelength)
+            # Background stays a fixed dark chip on purpose, not
+            # theme.control_bg - label_color spans the whole visible
+            # spectrum (violet through red, including yellow/cyan), and only
+            # a fixed dark backdrop keeps every one of those hues legible.
+            # Following the app theme would make this chip near-white in
+            # Bright mode and wash out yellow/cyan wavelength labels - same
+            # "fixed backdrop for an uncontrolled foreground color" reasoning
+            # as the selected-ROI badge exception in overlay_manager.py.
             bundle.label.setHtml(
                 "<span style="
                 f"'color:{label_color.name()}; "

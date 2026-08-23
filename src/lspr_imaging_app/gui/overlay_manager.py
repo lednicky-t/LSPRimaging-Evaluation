@@ -7,6 +7,8 @@ import pyqtgraph as pg
 from PyQt6.QtCore import Qt, QRectF
 from PyQt6.QtGui import QBrush, QColor, QPen, QPainterPath
 
+from lspr_ui import get_active_theme, hex_to_rgba
+
 from lspr_imaging_app.gui.worker import (
     LandmarkOverlayBundle,
     MeasurementOverlayBundle,
@@ -168,15 +170,23 @@ class OverlayManager:
                     bundle.outer_curve.setVisible(False)
             label = w._array_label_for_roi(roi.area_roi_id)
             if label is not None and w._roi_labels_visible:
+                theme = get_active_theme()
                 is_selected = roi.area_roi_id in w._selected_roi_ids
                 if is_selected:
+                    # Selected badge background (#0f766e teal) is a fixed
+                    # accent, not theme-tracked (same reasoning as
+                    # accent_green/blue/etc. - legible against both a
+                    # near-black and a near-white app chrome), so its paired
+                    # white text stays a literal too rather than following
+                    # theme.text_primary (which would go dark in Bright mode
+                    # and vanish against the still-dark teal chip).
                     label_color = "#f8fafc"
                 elif w._cached_rois_only_visible and roi_cached:
                     label_color = CACHED_ROI_INDICATOR_COLOR
                 else:
-                    label_color = "#ffffff"
-                label_background = "#0f766e" if is_selected else "#0f172a"
-                label_border = "#5eead4" if is_selected else "#94a3b8"
+                    label_color = theme.text_primary
+                label_background = "#0f766e" if is_selected else theme.control_bg
+                label_border = "#5eead4" if is_selected else theme.text_dim
                 label_text = label
                 if is_selected:
                     label_text = f"{label}<br><span style='font-size:8.5pt; font-weight:600;'>x={roi.center_x:.1f}, y={roi.center_y:.1f}</span>"
@@ -291,7 +301,8 @@ class OverlayManager:
                 dtype=np.float64,
             )
             is_selected = landmark_id == int(w._selected_landmark_id or w._chromatic_landmark_marker_id)
-            pen_color = QColor("#f8fafc" if not is_selected else "#38bdf8")
+            theme = get_active_theme()
+            pen_color = QColor(theme.text_primary if not is_selected else "#38bdf8")
             bundle.curve.setData(xs, ys)
             bundle.curve.setPen(pg.mkPen(pen_color, width=3.0 if is_selected else 2.2))
             bundle.curve.setVisible(True)
@@ -301,8 +312,8 @@ class OverlayManager:
                 "font-size:10pt; "
                 "font-style:italic; "
                 "font-weight:700; "
-                f"background:{'#0f766e' if is_selected else '#0f172a'}; "
-                f"border:1px solid {('#5eead4' if is_selected else '#94a3b8')}; "
+                f"background:{'#0f766e' if is_selected else theme.control_bg}; "
+                f"border:1px solid {('#5eead4' if is_selected else theme.text_dim)}; "
                 "border-radius:4px; "
                 "padding:2px 5px;'"
                 f">{landmark_id}</span>"
@@ -374,13 +385,14 @@ class OverlayManager:
         # Solid chip instead of a text halo: two same-size overlapping TextItems
         # can't form a real outline (the top one fully covers the one beneath),
         # which is why the old rendering looked inconsistent across backgrounds.
+        theme = get_active_theme()
         overlay.label.setHtml(
             "<span style="
-            "'color:#f8fafc; "
+            f"'color:{theme.text_primary}; "
             "font-size:9.5pt; "
             "font-weight:700; "
-            "background:rgba(15,23,42,0.78); "
-            "border:1px solid rgba(226,232,240,0.85); "
+            f"background:{hex_to_rgba(theme.control_bg, 0.78)}; "
+            f"border:1px solid {hex_to_rgba(theme.control_border, 0.85)}; "
             "border-radius:4px; "
             "padding:1px 5px;'"
             f">{label_text}</span>"
@@ -599,10 +611,11 @@ class OverlayManager:
         if w._measurement_overlay is not None:
             return w._measurement_overlay
         settings = w._state.preprocessing
+        theme = get_active_theme()
         marker_a = pg.TargetItem(
             pos=(float(settings.measurement_anchor1_x_px), float(settings.measurement_anchor1_y_px)),
             movable=True,
-            pen=pg.mkPen("#f8fafc", width=1.8),
+            pen=pg.mkPen(theme.text_primary, width=1.8),
             brush=pg.mkBrush(0, 0, 0, 0),
             hoverPen=pg.mkPen("#22c55e", width=2.0),
             hoverBrush=pg.mkBrush(0, 0, 0, 0),
@@ -611,7 +624,7 @@ class OverlayManager:
         marker_b = pg.TargetItem(
             pos=(float(settings.measurement_anchor2_x_px), float(settings.measurement_anchor2_y_px)),
             movable=True,
-            pen=pg.mkPen("#f8fafc", width=1.8),
+            pen=pg.mkPen(theme.text_primary, width=1.8),
             brush=pg.mkBrush(0, 0, 0, 0),
             hoverPen=pg.mkPen("#22c55e", width=2.0),
             hoverBrush=pg.mkBrush(0, 0, 0, 0),
@@ -676,7 +689,7 @@ class OverlayManager:
             bar_label = f"{distance:.1f} px"
         overlay.label.setHtml(
             "<span style="
-            "'color:#22c55e; font-size:10pt; font-weight:700; background:#0f172a; "
+            f"'color:#22c55e; font-size:10pt; font-weight:700; background:{get_active_theme().control_bg}; "
             "border:1px solid #22c55e; border-radius:4px; padding:2px 5px;'"
             f">{bar_label}</span>"
         )

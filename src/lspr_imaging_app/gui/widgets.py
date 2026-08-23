@@ -341,6 +341,19 @@ class PanelContainer(QDockWidget):
         self.setTitleBarWidget(self._build_title_bar(title, theme))
         self.topLevelChanged.connect(self._on_top_level_changed)
 
+    def refresh_theme(self) -> None:
+        """Rebuild the custom title bar with the currently active theme.
+
+        The title bar's colors are plain per-widget setStyleSheet() calls
+        baked in _build_title_bar at construction time, not QSS resolved
+        through the QApplication-level stylesheet/palette - so unlike most
+        of the app, they don't just pick up a live theme switch on their
+        own and need to be rebuilt explicitly. Called from
+        MainWindow._apply_theme_styles for every PanelContainer."""
+        theme = get_active_theme()
+        self.setStyleSheet(f"QDockWidget {{ color: {theme.text_primary}; }}")
+        self.setTitleBarWidget(self._build_title_bar(self._title, theme))
+
     def _build_title_bar(self, title: str, theme) -> QWidget:
         bar = QWidget(self)
         bar.setStyleSheet(f"background: {theme.window_bg};")
@@ -456,7 +469,8 @@ class PanelContainer(QDockWidget):
             )
 
     @staticmethod
-    def _make_close_icon(color: str = "#cbd5e1") -> QIcon:
+    def _make_close_icon(color: str | None = None) -> QIcon:
+        color = color if color is not None else get_active_theme().text_muted
         svg = tabler_icon_svg("x", color=color, stroke_width=2.2)
         if svg:
             renderer = QSvgRenderer(QByteArray(svg.encode("utf-8")))
@@ -470,7 +484,8 @@ class PanelContainer(QDockWidget):
         return QIcon()
 
     @staticmethod
-    def _make_float_icon(color: str = "#cbd5e1") -> QIcon:
+    def _make_float_icon(color: str | None = None) -> QIcon:
+        color = color if color is not None else get_active_theme().text_muted
         svg = tabler_icon_svg("external-link", color=color, stroke_width=2.2)
         if svg:
             renderer = QSvgRenderer(QByteArray(svg.encode("utf-8")))
@@ -488,7 +503,7 @@ class PanelContainer(QDockWidget):
         pixmap.fill(Qt.GlobalColor.transparent)
         painter = QPainter(pixmap)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        pen = QPen(QColor("#cbd5e1"), 2.0)
+        pen = QPen(QColor(get_active_theme().text_muted), 2.0)
         pen.setCapStyle(Qt.PenCapStyle.RoundCap)
         pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
         painter.setPen(pen)
@@ -506,7 +521,7 @@ class PanelContainer(QDockWidget):
         return QIcon(pixmap)
 
     def _make_pin_icon(self, pinned: bool) -> QIcon:
-        color = "#22c55e" if pinned else "#f8fafc"
+        color = "#22c55e" if pinned else get_active_theme().text_primary
         icon = MainWindowIcons._tabler_icon("pin-filled" if pinned else "pin", color, 24, stroke_width=2.2)
         if not icon.isNull():
             return icon
@@ -609,6 +624,7 @@ class CompactWedgeSlider(QWidget):
         super().mouseMoveEvent(event)
 
     def paintEvent(self, _event) -> None:
+        theme = get_active_theme()
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         rect = QRectF(self.rect()).adjusted(1.0, 1.0, -1.0, -1.0)
@@ -618,8 +634,8 @@ class CompactWedgeSlider(QWidget):
         base_path.lineTo(rect.right(), rect.top())
         base_path.lineTo(rect.right(), rect.bottom())
         base_path.closeSubpath()
-        painter.setPen(QPen(QColor("#475569"), 1.0))
-        painter.setBrush(QColor("#0f172a"))
+        painter.setPen(QPen(QColor(theme.control_border), 1.0))
+        painter.setBrush(QColor(theme.control_bg))
         painter.drawPath(base_path)
 
         fraction = 0.0 if self._maximum <= self._minimum else (self._value - self._minimum) / float(self._maximum - self._minimum)
@@ -636,7 +652,7 @@ class CompactWedgeSlider(QWidget):
             painter.drawPath(fill_path)
 
         handle_x = rect.left() + rect.width() * fraction
-        painter.setPen(QPen(QColor("#f8fafc"), 1.4))
+        painter.setPen(QPen(QColor(theme.text_primary), 1.4))
         painter.drawLine(QPointF(handle_x, rect.bottom()), QPointF(handle_x, rect.bottom() - rect.height() * max(fraction, 0.18)))
         painter.end()
 
@@ -876,7 +892,7 @@ class BusySpinner(QWidget):
         else:
             span = max(self._maximum - self._minimum, 1)
             fraction = float(np.clip((self._value - self._minimum) / span, 0.0, 1.0))
-            painter.setPen(QPen(QColor("#334155"), 2.0))
+            painter.setPen(QPen(QColor(get_active_theme().control_border), 2.0))
             painter.setBrush(Qt.BrushStyle.NoBrush)
             painter.drawEllipse(rect)
             painter.setPen(QPen(QColor("#38bdf8"), 2.4))
@@ -928,12 +944,13 @@ class ShineProgressBar(QProgressBar):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
 
+        theme = get_active_theme()
         rect = QRectF(self.rect()).adjusted(1.0, 1.0, -1.0, -1.0)
         radius = min(rect.height(), 9.0) / 2.0
-        track_color = QColor("#1f2937")
-        track_border = QColor("#475569")
+        track_color = QColor(theme.control_bg)
+        track_border = QColor(theme.control_border)
         fill_color = QColor("#38bdf8")
-        text_color = QColor("#f8fafc")
+        text_color = QColor(theme.text_primary)
         shine_color = QColor(255, 255, 255, 120)
 
         painter.setPen(QPen(track_border, 1.0))

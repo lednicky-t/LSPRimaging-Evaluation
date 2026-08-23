@@ -6,8 +6,11 @@ import numpy as np
 from copy import deepcopy
 from datetime import datetime
 from math import ceil, floor
+from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QColor
 import pyqtgraph as pg
+
+from lspr_ui import get_active_theme
 
 from lspr_imaging_app.domain.exclusions import is_cube_fully_excluded, is_excluded
 from lspr_imaging_app.domain.models import AreaRoi, AbsorbanceSpectrumResult
@@ -54,18 +57,46 @@ class AnalysisController:
         selected = bool(selected_signature) and has_data
         color = self._sensorgram_selection_color()
         curve_color = color if selected else QColor("#22c55e")
-        curve_width = 3.2 if selected else 2.2
+        base_width = float(getattr(self.window, "_sensorgram_line_width_px", 2.2))
+        curve_width = base_width + 1.0 if selected else base_width
+        curve_style = getattr(self.window, "_sensorgram_line_style", Qt.PenStyle.SolidLine)
         curve_symbol_size = 7.5 if selected else 6
         point_size = 11 if selected else 9
-        point_brush = pg.mkBrush(color.lighter(138) if selected else "#f8fafc")
+        point_brush = pg.mkBrush(color.lighter(138) if selected else get_active_theme().text_primary)
         point_pen = pg.mkPen(color.darker(125) if selected else "#22c55e", width=2.0)
-        self.window.sensorgram_curve.setPen(pg.mkPen(curve_color, width=curve_width))
+        self.window.sensorgram_curve.setPen(pg.mkPen(curve_color, width=curve_width, style=curve_style))
         self.window.sensorgram_curve.setSymbolSize(curve_symbol_size)
         self.window.sensorgram_curve.setSymbolBrush(pg.mkBrush(color.lighter(130) if selected else "#22c55e"))
         self.window.sensorgram_curve.setSymbolPen(pg.mkPen(curve_color.darker(120) if selected else "#bbf7d0", width=1.4))
         self.window.sensorgram_current_point.setSymbolSize(point_size)
         self.window.sensorgram_current_point.setSymbolBrush(point_brush)
         self.window.sensorgram_current_point.setSymbolPen(point_pen)
+
+    def apply_sensorgram_style_settings(self) -> None:
+        """Re-pen the sensogram's statistics overlays (processed/group
+        traces) from window._sensorgram_processed_*/_sensorgram_group_*, and
+        refresh the raw trace via update_selection_highlight so its width/
+        style pick up the new _sensorgram_line_width_px/_line_style. Called
+        after the plot settings dialog's Apply/OK - see
+        plot_style_settings_dialog.SensorgramPlotSettingsDialog."""
+        window = self.window
+        window.sensorgram_processed_curve.setPen(
+            pg.mkPen(
+                window._sensorgram_processed_color,
+                width=window._sensorgram_processed_line_width_px,
+                style=window._sensorgram_processed_line_style,
+            )
+        )
+        group_color = QColor(window._sensorgram_group_color)
+        window.sensorgram_group_curve.setPen(
+            pg.mkPen(group_color, width=window._sensorgram_group_line_width_px, style=window._sensorgram_group_line_style)
+        )
+        window.sensorgram_group_curve.setSymbolBrush(pg.mkBrush(group_color))
+        window.sensorgram_group_curve.setSymbolPen(pg.mkPen(group_color.lighter(150), width=1.0))
+        band_color = QColor(group_color)
+        band_color.setAlpha(50)
+        window.sensorgram_group_band_fill_item.setBrush(pg.mkBrush(band_color))
+        self.update_selection_highlight(force=True)
 
     def _store_roi_absorbance_cache(self, result) -> None:
         area_roi_results = getattr(result, "area_roi_results", None)

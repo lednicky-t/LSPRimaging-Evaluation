@@ -192,8 +192,11 @@ class PlotManager:
         y_values = y_values[order]
         color = self.roi_spectrum_color(roi_id)
         fit_color = QColor(color).darker(125)
-        symbol_size = 7.5 if highlighted else 6
-        fit_width = 3.0 if highlighted else 2.0
+        base_symbol_size = float(getattr(window, "_spectrum_symbol_size_px", 6.0))
+        base_fit_width = float(getattr(window, "_spectrum_fit_line_width_px", 2.0))
+        fit_style = getattr(window, "_spectrum_fit_line_style", Qt.PenStyle.SolidLine)
+        symbol_size = base_symbol_size + 1.5 if highlighted else base_symbol_size
+        fit_width = base_fit_width + 1.0 if highlighted else base_fit_width
         symbol_pen_width = 1.8 if highlighted else 1.4
         symbol_color = QColor(color)
         if dimmed and not highlighted:
@@ -223,7 +226,7 @@ class PlotManager:
                 pen=pg.mkPen(
                     fit_color if not highlighted else fit_symbol_color,
                     width=fit_width,
-                    style=Qt.PenStyle.SolidLine,
+                    style=fit_style,
                 ),
             )
         window._spectrum_series_items.extend([data_item, fit_item] if fit_item is not None else [data_item])
@@ -239,7 +242,7 @@ class PlotManager:
                     pen=pg.mkPen(
                         fit_color if not highlighted else fit_symbol_color,
                         width=fit_width,
-                        style=Qt.PenStyle.SolidLine,
+                        style=fit_style,
                     ) if fit_item is not None else None,
                     symbol="o",
                     symbolSize=symbol_size,
@@ -489,9 +492,9 @@ class PlotManager:
         if window._histogram_log_y_enabled:
             residual_counts_percent = np.clip(residual_counts_percent, y_floor, None)
         top_baseline = float(np.max(total_counts_display)) if total_counts_display.size else 0.0
-        residual_pen = QColor("#9ca3af")
+        residual_pen = QColor(get_active_theme().text_dim)
         residual_pen.setAlphaF(0.95)
-        residual_fill = QColor("#9ca3af")
+        residual_fill = QColor(get_active_theme().text_dim)
         residual_fill.setAlphaF(0.24)
         if window._histogram_log_y_enabled or residual_counts_percent.size == 0:
             window.residual_histogram_curve.setData([], [])

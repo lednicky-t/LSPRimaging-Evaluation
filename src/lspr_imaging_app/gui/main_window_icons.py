@@ -26,6 +26,7 @@ from PyQt6.QtWidgets import (
 
 from lspr_ui import (
     APP_THEME,
+    get_active_theme,
     icon_accent_colors,
     load_tabler_icon,
     make_compact_spinbox,
@@ -160,7 +161,8 @@ class MainWindowIcons:
         painter.end()
         return QIcon(pixmap)
 
-    def _make_array_marker_icon(self, kind: str, *, color: str = "#f8fafc", size: int = 24) -> QIcon:
+    def _make_array_marker_icon(self, kind: str, *, color: str | None = None, size: int = 24) -> QIcon:
+        color = color if color is not None else get_active_theme().text_primary
         if kind == "columns":
             svg = f"""<svg xmlns="http://www.w3.org/2000/svg" width="{size}" height="{size}" viewBox="0 0 24 24" fill="none">
   <circle cx="9" cy="12" r="1.2" fill="{color}" />
@@ -199,7 +201,8 @@ class MainWindowIcons:
         return label
 
     @staticmethod
-    def _make_corner_seed_icon(color: str = "#f8fafc", size: int = 24) -> QIcon:
+    def _make_corner_seed_icon(color: str | None = None, size: int = 24) -> QIcon:
+        color = color if color is not None else get_active_theme().text_primary
         svg = f"""<svg xmlns="http://www.w3.org/2000/svg" width="{size}" height="{size}" viewBox="0 0 24 24" fill="none" stroke="{color}" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
   <path d="M5 9V5h4" />
   <path d="M15 5h4v4" />
@@ -209,11 +212,12 @@ class MainWindowIcons:
         return MainWindowIcons._svg_icon_from_markup(svg, size=size)
 
     @staticmethod
-    def _make_rotated_tabler_icon(name: str, color: str = "#f8fafc", size: int = 24, *, degrees: float = 90.0) -> QIcon:
+    def _make_rotated_tabler_icon(name: str, color: str | None = None, size: int = 24, *, degrees: float = 90.0) -> QIcon:
         """A vendored Tabler icon rotated by `degrees` - used for the
         reorder-by-row button (270 degrees), so it reads as "the same sort
         operation as reorder-by-column, applied to the other axis" rather
         than needing a whole new glyph vendored just for that distinction."""
+        color = color if color is not None else get_active_theme().text_primary
         base = load_tabler_icon(name, color=color, size=size)
         pixmap = base.pixmap(size, size)
         if pixmap.isNull():
@@ -224,16 +228,18 @@ class MainWindowIcons:
     @staticmethod
     def _tabler_icon(
         name: str,
-        color: str = "#f8fafc",
+        color: str | None = None,
         size: int = 24,
         *,
         stroke_width: float = 2.2,
         fill: str = "none",
     ) -> QIcon:
+        color = color if color is not None else get_active_theme().text_primary
         return load_tabler_icon(name, color=color, size=size, stroke_width=stroke_width, fill=fill)
 
     @staticmethod
-    def _lucide_icon(name: str, color: str = "#f8fafc", size: int = 24, *, stroke_width: float = 2.2) -> QIcon:
+    def _lucide_icon(name: str, color: str | None = None, size: int = 24, *, stroke_width: float = 2.2) -> QIcon:
+        color = color if color is not None else get_active_theme().text_primary
         if lucide is None:
             return QIcon()
         try:
@@ -252,14 +258,14 @@ class MainWindowIcons:
 
     @staticmethod
     def _make_help_icon() -> QIcon:
-        icon = MainWindowIcons._lucide_icon("circle-help", "#f8fafc", 24, stroke_width=2.2)
+        icon = MainWindowIcons._lucide_icon("circle-help", get_active_theme().text_primary, 24, stroke_width=2.2)
         if not icon.isNull():
             return icon
         pixmap = QPixmap(24, 24)
         pixmap.fill(Qt.GlobalColor.transparent)
         painter = QPainter(pixmap)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        painter.setPen(QPen(QColor("#f8fafc"), 2.2))
+        painter.setPen(QPen(QColor(get_active_theme().text_primary), 2.2))
         painter.setBrush(Qt.BrushStyle.NoBrush)
         painter.drawEllipse(QRectF(3.5, 3.5, 17.0, 17.0))
         painter.setFont(QFont("Sans Serif", 10, QFont.Weight.Bold))
@@ -270,14 +276,14 @@ class MainWindowIcons:
     @staticmethod
     def _dataset_stack_icon_pixmap(size: int = 36, *, ome_zarr: bool = False) -> QPixmap:
         icon_name = "box" if ome_zarr else "stack-3"
-        icon = MainWindowIcons._tabler_icon(icon_name, "#f8fafc", size=size, stroke_width=2.1)
+        icon = MainWindowIcons._tabler_icon(icon_name, get_active_theme().text_primary, size=size, stroke_width=2.1)
         if not icon.isNull():
             return icon.pixmap(size, size)
         pixmap = QPixmap(size, size)
         pixmap.fill(Qt.GlobalColor.transparent)
         painter = QPainter(pixmap)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        pen = QPen(QColor("#f8fafc"), max(2.0, size / 18.0))
+        pen = QPen(QColor(get_active_theme().text_primary), max(2.0, size / 18.0))
         pen.setCapStyle(Qt.PenCapStyle.RoundCap)
         pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
         painter.setPen(pen)
@@ -293,7 +299,8 @@ class MainWindowIcons:
         return pixmap
 
     @staticmethod
-    def _not_available_icon(color: str = "#67707d", size: int = 16) -> QIcon:
+    def _not_available_icon(color: str | None = None, size: int = 16) -> QIcon:
+        color = color if color is not None else get_active_theme().control_disabled_text
         icon = MainWindowIcons._tabler_icon("ban", color, size, stroke_width=2.1)
         if not icon.isNull():
             return icon
@@ -312,7 +319,7 @@ class MainWindowIcons:
         return QIcon(pixmap)
 
     def _ome_zarr_grid_icon(self, active: bool) -> QIcon:
-        color = "#22c55e" if active else "#94a3b8"
+        color = "#22c55e" if active else get_active_theme().text_dim
         icon = self._tabler_icon("grid-4x4", color, 24, stroke_width=2.1)
         if not icon.isNull():
             return icon
@@ -333,7 +340,7 @@ class MainWindowIcons:
         return QIcon(pixmap)
 
     def _ome_zarr_compression_icon(self, active: bool) -> QIcon:
-        color = "#22c55e" if active else "#94a3b8"
+        color = "#22c55e" if active else get_active_theme().text_dim
         icon = self._tabler_icon("archive", color, 24, stroke_width=2.1)
         if not icon.isNull():
             return icon
@@ -369,7 +376,8 @@ class MainWindowIcons:
         return QIcon(pixmap)
 
     @staticmethod
-    def _dataset_transfer_icon(action: str, color: str = "#f8fafc", size: int = 24) -> QIcon:
+    def _dataset_transfer_icon(action: str, color: str | None = None, size: int = 24) -> QIcon:
+        color = color if color is not None else get_active_theme().text_primary
         icon_name = "database-import" if str(action).lower() == "import" else "database-export"
         icon = MainWindowIcons._tabler_icon(icon_name, color, size, stroke_width=2.1)
         if not icon.isNull():
@@ -442,7 +450,7 @@ class MainWindowIcons:
             "  margin: 0;"
             "  font-size: 12px;"
             "  font-weight: 700;"
-            "  color: #94a3b8;"
+            f"  color: {get_active_theme().text_dim};"
             "}"
             "QLabel#histogramScaleToggle:hover {"
             "  color: #38bdf8;"
@@ -486,7 +494,8 @@ class MainWindowIcons:
         return label
 
     @staticmethod
-    def _navigation_chevron_icon(direction: str, color: str = "#f8fafc", size: int = 24) -> QIcon:
+    def _navigation_chevron_icon(direction: str, color: str | None = None, size: int = 24) -> QIcon:
+        color = color if color is not None else get_active_theme().text_primary
         icon_name = "chevron-left" if str(direction).lower() == "left" else "chevron-right"
         icon = MainWindowIcons._tabler_icon(icon_name, color, size, stroke_width=2.2)
         if not icon.isNull():
@@ -544,7 +553,7 @@ class MainWindowIcons:
 
     @staticmethod
     def _make_rotate_icon(active: bool = False) -> QIcon:
-        color = "#fbbf24" if active else "#f8fafc"
+        color = "#fbbf24" if active else get_active_theme().text_primary
         icon = MainWindowIcons._tabler_icon("rotate-clockwise-2", color, 24, stroke_width=2.1)
         if not icon.isNull():
             return icon
@@ -565,7 +574,7 @@ class MainWindowIcons:
         # Filled square = new corner pixels are forced to 0 (dark/no-data).
         # Outline square = new corner pixels are stretched from the nearest
         # edge pixel (the previous, always-on behavior).
-        color = "#fbbf24" if dark else "#94a3b8"
+        color = "#fbbf24" if dark else get_active_theme().text_dim
         icon = MainWindowIcons._tabler_icon(
             "square-rounded",
             color,
@@ -589,7 +598,7 @@ class MainWindowIcons:
 
     @staticmethod
     def _make_crop_icon(active: bool = False) -> QIcon:
-        color = "#38bdf8" if active else "#f8fafc"
+        color = "#38bdf8" if active else get_active_theme().text_primary
         icon = MainWindowIcons._tabler_icon("crop", color, 24, stroke_width=2.1)
         if not icon.isNull():
             return icon
@@ -608,7 +617,7 @@ class MainWindowIcons:
 
     @staticmethod
     def _make_flip_horizontal_icon(active: bool = False) -> QIcon:
-        color = "#22c55e" if active else "#f8fafc"
+        color = "#22c55e" if active else get_active_theme().text_primary
         icon = MainWindowIcons._tabler_icon("flip-horizontal", color, 24, stroke_width=2.1)
         if not icon.isNull():
             return icon
@@ -627,7 +636,7 @@ class MainWindowIcons:
 
     @staticmethod
     def _make_flip_vertical_icon(active: bool = False) -> QIcon:
-        color = "#2dd4bf" if active else "#f8fafc"
+        color = "#2dd4bf" if active else get_active_theme().text_primary
         icon = MainWindowIcons._tabler_icon("flip-vertical", color, 24, stroke_width=2.1)
         if not icon.isNull():
             return icon
@@ -646,7 +655,7 @@ class MainWindowIcons:
 
     @staticmethod
     def _make_measure_icon(active: bool = False) -> QIcon:
-        color = "#22c55e" if active else "#f8fafc"
+        color = "#22c55e" if active else get_active_theme().text_primary
         icon = MainWindowIcons._tabler_icon("ruler-measure", color, 24, stroke_width=2.1)
         if not icon.isNull():
             return icon
@@ -669,14 +678,14 @@ class MainWindowIcons:
 
     @staticmethod
     def _make_undo_icon() -> QIcon:
-        icon = MainWindowIcons._lucide_icon("undo", "#f8fafc", 24, stroke_width=2.25)
+        icon = MainWindowIcons._lucide_icon("undo", get_active_theme().text_primary, 24, stroke_width=2.25)
         if not icon.isNull():
             return icon
         pixmap = QPixmap(24, 24)
         pixmap.fill(Qt.GlobalColor.transparent)
         painter = QPainter(pixmap)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        pen = QPen(QColor("#f8fafc"), 2.1)
+        pen = QPen(QColor(get_active_theme().text_primary), 2.1)
         pen.setCapStyle(Qt.PenCapStyle.RoundCap)
         pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
         painter.setPen(pen)
@@ -688,14 +697,14 @@ class MainWindowIcons:
 
     @staticmethod
     def _make_redo_icon() -> QIcon:
-        icon = MainWindowIcons._lucide_icon("redo", "#f8fafc", 24, stroke_width=2.25)
+        icon = MainWindowIcons._lucide_icon("redo", get_active_theme().text_primary, 24, stroke_width=2.25)
         if not icon.isNull():
             return icon
         pixmap = QPixmap(24, 24)
         pixmap.fill(Qt.GlobalColor.transparent)
         painter = QPainter(pixmap)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        pen = QPen(QColor("#f8fafc"), 2.1)
+        pen = QPen(QColor(get_active_theme().text_primary), 2.1)
         pen.setCapStyle(Qt.PenCapStyle.RoundCap)
         pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
         painter.setPen(pen)
@@ -707,7 +716,7 @@ class MainWindowIcons:
 
     @staticmethod
     def _make_roi_edit_icon(active: bool = False) -> QIcon:
-        color = "#22c55e" if active else "#94a3b8"
+        color = "#22c55e" if active else get_active_theme().text_dim
         icon = MainWindowIcons._lucide_icon("square-pen", color, 24, stroke_width=2.3)
         if not icon.isNull():
             return icon
@@ -731,7 +740,7 @@ class MainWindowIcons:
 
     @staticmethod
     def _make_roi_list_icon(active: bool = False) -> QIcon:
-        color = "#f59e0b" if active else "#f8fafc"
+        color = "#f59e0b" if active else get_active_theme().text_primary
         icon = MainWindowIcons._lucide_icon("table", color, 24, stroke_width=2.3)
         if not icon.isNull():
             return icon
@@ -753,7 +762,7 @@ class MainWindowIcons:
         swatch.fill(Qt.GlobalColor.transparent)
         painter = QPainter(swatch)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        painter.setPen(QPen(QColor("#e2e8f0"), 1.1))
+        painter.setPen(QPen(QColor(get_active_theme().control_border), 1.1))
         painter.setBrush(QBrush(QColor(color)))
         painter.drawRoundedRect(QRectF(1.5, 1.5, size - 3.0, size - 3.0), 3.0, 3.0)
         painter.end()
@@ -774,7 +783,7 @@ class MainWindowIcons:
         return button
 
     def _make_relation_scope_icon(self, active: bool = False) -> QIcon:
-        color = "#22c55e" if active else "#f8fafc"
+        color = "#22c55e" if active else get_active_theme().text_primary
         icon = MainWindowIcons._tabler_icon("relation-one-to-many", color, 24, stroke_width=2.1)
         if not icon.isNull():
             return icon
@@ -888,7 +897,7 @@ class MainWindowIcons:
         return QIcon(pixmap)
 
     def _reference_mode_icon(self, mode: str, active: bool) -> QIcon:
-        color = "#84cc16" if active else "#f8fafc"
+        color = "#84cc16" if active else get_active_theme().text_primary
         if mode == "manual":
             icon = self._tabler_icon(
                 "manual-gearbox",
@@ -916,7 +925,7 @@ class MainWindowIcons:
         return self._mask_panel_icon("star", color=color, size=APP_THEME.icon_button_inner)
 
     def _robot_icon(self, active: bool) -> QIcon:
-        color = "#84cc16" if active else "#f8fafc"
+        color = "#84cc16" if active else get_active_theme().text_primary
         icon = self._tabler_icon("robot", color=color, size=24, stroke_width=2.1)
         if not icon.isNull():
             return icon
@@ -982,7 +991,7 @@ class MainWindowIcons:
     def _make_mask_morphology_button(self, operation: str, tooltip: str) -> QToolButton:
         button = self._make_icon_tool_button(
             "square-rounded-plus",
-            "#f8fafc",
+            get_active_theme().text_primary,
             tooltip,
             checkable=True,
             icon=self._make_mask_morphology_icon(operation),
@@ -997,7 +1006,8 @@ class MainWindowIcons:
         )
         return button
 
-    def _make_mask_morphology_icon(self, operation: str, *, color: str = "#f8fafc", size: int = 24) -> QIcon:
+    def _make_mask_morphology_icon(self, operation: str, *, color: str | None = None, size: int = 24) -> QIcon:
+        color = color if color is not None else get_active_theme().text_primary
         if operation == "erode":
             svg = f"""<svg xmlns="http://www.w3.org/2000/svg" width="{size}" height="{size}" viewBox="0 0 24 24" fill="none" stroke="{color}" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
   <path stroke="none" d="M0 0h24v24H0z" fill="none" />
@@ -1039,7 +1049,7 @@ class MainWindowIcons:
         return self._draw_mask_panel_fallback_icon(icon_name, QColor(color), size=size)
 
     def _make_background_profile_icon(self, active: bool, *, size: int = 22) -> QIcon:
-        color = "#38bdf8" if active else "#94a3b8"
+        color = "#38bdf8" if active else get_active_theme().text_dim
         icon = self._tabler_icon("background", color, size, stroke_width=2.0)
         if not icon.isNull():
             return icon
@@ -1086,7 +1096,7 @@ class MainWindowIcons:
         return QIcon(pixmap)
 
     def _make_analysis_spectrum_icon(self, active: bool, *, size: int = 24) -> QIcon:
-        stroke_color = "#22c55e" if active else "#f8fafc"
+        stroke_color = "#22c55e" if active else get_active_theme().text_primary
         top_layer_color = "#22c55e" if active else stroke_color
         svg = f"""
         <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="{stroke_color}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -1102,7 +1112,7 @@ class MainWindowIcons:
         return self._tabler_icon("stack-middle", stroke_color, size, stroke_width=2.0, fill="none")
 
     def _make_analysis_preview_icon(self, active: bool, *, size: int = 24) -> QIcon:
-        color = "#22c55e" if active else "#94a3b8"
+        color = "#22c55e" if active else get_active_theme().text_dim
         icon = self._tabler_icon("eye", color, size, stroke_width=2.0)
         if not icon.isNull():
             return icon
@@ -1118,7 +1128,7 @@ class MainWindowIcons:
         return QIcon(pixmap)
 
     def _make_analysis_all_spectral_cubes_icon(self, active: bool, *, size: int = 24) -> QIcon:
-        color = "#22c55e" if active else "#f8fafc"
+        color = "#22c55e" if active else get_active_theme().text_primary
         fill_color = "#22c55e" if active else "none"
         svg = f"""
         <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="{color}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -1166,7 +1176,7 @@ class MainWindowIcons:
 
     def _make_roi_label_icon(self, visible: bool) -> QIcon:
         icon_name = "label-important" if visible else "label-off"
-        color = "#22c55e" if visible else "#94a3b8"
+        color = "#22c55e" if visible else get_active_theme().text_dim
         icon = self._tabler_icon(icon_name, color, 22, stroke_width=2.0)
         if not icon.isNull():
             return icon
@@ -1192,7 +1202,7 @@ class MainWindowIcons:
         return QIcon(pixmap)
 
     def _make_cached_rois_icon(self, visible: bool, *, size: int = 24) -> QIcon:
-        color = "#22c55e" if visible else "#94a3b8"
+        color = "#22c55e" if visible else get_active_theme().text_dim
         icon = self._tabler_icon("database", color, size, stroke_width=2.0)
         if not icon.isNull():
             return icon
@@ -1225,7 +1235,7 @@ class MainWindowIcons:
 
     def _make_view_toggle_icon(self, kind: str, visible: bool) -> QIcon:
         active_color = "#22c55e"
-        inactive_color = "#94a3b8"
+        inactive_color = get_active_theme().text_dim
         color = active_color if visible else inactive_color
         if kind == "roi":
             icon = self._tabler_icon("current-location", color, 24, stroke_width=2.1)
@@ -1295,7 +1305,7 @@ class MainWindowIcons:
         return QIcon(pixmap)
 
     def _background_exclusion_icon(self, icon_name: str, enabled: bool, *, size: int = 18) -> QIcon:
-        color = "#22c55e" if enabled else "#94a3b8"
+        color = "#22c55e" if enabled else get_active_theme().text_dim
         icon = self._tabler_icon(icon_name, color, size, stroke_width=2.1)
         if not icon.isNull():
             return icon
@@ -1349,7 +1359,7 @@ class MainWindowIcons:
             self.histogram_y_scale_button.blockSignals(False)
 
     def _make_mask_toggle_icon(self, visible: bool, *, size: int = 24) -> QIcon:
-        color = QColor("#22c55e" if visible else "#94a3b8")
+        color = QColor("#22c55e" if visible else get_active_theme().text_dim)
         pixmap = QPixmap(size, size)
         pixmap.fill(Qt.GlobalColor.transparent)
         painter = QPainter(pixmap)
@@ -1381,7 +1391,7 @@ class MainWindowIcons:
         return QIcon(pixmap)
 
     def _make_scale_bar_icon(self, visible: bool, *, size: int = 24) -> QIcon:
-        color = "#22c55e" if visible else "#f8fafc"
+        color = "#22c55e" if visible else get_active_theme().text_primary
         svg = f"""
         <svg xmlns="http://www.w3.org/2000/svg" width="120" height="30" viewBox="0 0 120 30" fill="none">
             <line x1="6" y1="20" x2="50" y2="20" stroke="{color}" stroke-width="3.5" />
@@ -1417,7 +1427,7 @@ class MainWindowIcons:
         # sensorgram cursor readout toggle (see apps/sLSPR/acq's
         # icon_helpers.crosshair_cursor_icon) - green when active to match
         # this row's other toggle icons (_make_scale_bar_icon etc.).
-        color = "#22c55e" if active else "#f8fafc"
+        color = "#22c55e" if active else get_active_theme().text_primary
         return self._tabler_icon("crosshair", color, size)
 
     def _create_cursor_readout_toggle_button(self, active: bool) -> QToolButton:
@@ -1448,18 +1458,18 @@ class MainWindowIcons:
         button.setCursor(Qt.CursorShape.PointingHandCursor)
         button.setMinimumWidth(34)
         button.setStyleSheet(
-            """
-            QToolButton {
+            f"""
+            QToolButton {{
                 background: transparent;
                 border: none;
                 padding: 0 2px;
                 font-weight: 700;
                 font-size: 12px;
-                color: #f8fafc;
-            }
-            QToolButton:hover {
+                color: {get_active_theme().text_primary};
+            }}
+            QToolButton:hover {{
                 color: #22c55e;
-            }
+            }}
             """
         )
         self._refresh_unit_toggle_button(button)
@@ -1480,7 +1490,7 @@ class MainWindowIcons:
                 padding: 0 2px;
                 font-weight: 700;
                 font-size: 12px;
-                color: {'#22c55e' if is_um else '#f8fafc'};
+                color: {'#22c55e' if is_um else get_active_theme().text_primary};
             }}
             QToolButton:hover {{
                 color: #22c55e;
@@ -1537,12 +1547,12 @@ class MainWindowIcons:
             }}
             QToolButton:hover {{
                 background: {hover};
-                border: 1px solid #e2e8f0;
+                border: 1px solid {get_active_theme().control_border_hover};
                 border-radius: 8px;
             }}
             QToolButton:pressed {{
                 background: {pressed};
-                border: 1px solid #94a3b8;
+                border: 1px solid {get_active_theme().text_dim};
                 border-radius: 8px;
             }}
             QToolButton:checked {{
@@ -1571,12 +1581,12 @@ class MainWindowIcons:
             }}
             QToolButton:hover {{
                 background: {hover};
-                border: 1px solid #e2e8f0;
+                border: 1px solid {get_active_theme().control_border_hover};
                 border-radius: 8px;
             }}
             QToolButton:pressed {{
                 background: {pressed};
-                border: 1px solid #94a3b8;
+                border: 1px solid {get_active_theme().text_dim};
                 border-radius: 8px;
             }}
             QToolButton:checked {{
@@ -1926,14 +1936,14 @@ class MainWindowIcons:
             painter.drawEllipse(QRectF(17.0, 11.8, 4.0, 4.0))
             painter.end()
             return QIcon(pixmap)
-        icon = self._tabler_icon("wand-off", "#94a3b8", 24, stroke_width=2.1)
+        icon = self._tabler_icon("wand-off", get_active_theme().text_dim, 24, stroke_width=2.1)
         if not icon.isNull():
             return icon
         pixmap = QPixmap(24, 24)
         pixmap.fill(Qt.GlobalColor.transparent)
         painter = QPainter(pixmap)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        pen = QPen(QColor("#94a3b8"), 2.2)
+        pen = QPen(QColor(get_active_theme().text_dim), 2.2)
         pen.setCapStyle(Qt.PenCapStyle.RoundCap)
         pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
         painter.setPen(pen)

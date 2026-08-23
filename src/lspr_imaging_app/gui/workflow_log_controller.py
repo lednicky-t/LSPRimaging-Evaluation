@@ -9,6 +9,8 @@ from PyQt6.QtCore import QTimer
 from PyQt6.QtGui import QTextCursor
 from PyQt6.QtWidgets import QApplication, QDialog, QDialogButtonBox, QPlainTextEdit, QVBoxLayout
 
+from lspr_ui import get_active_theme
+
 from .worker import WorkflowLogBridge, WorkflowLogHandler
 
 SUCCESS_LOG_LEVEL = 25
@@ -33,7 +35,7 @@ class WorkflowLogController:
         window = self.window
         window._workflow_log_autoscroll_enabled = bool(enabled)
         if hasattr(window, "workflow_log_autoscroll_button"):
-            color = "#38bdf8" if enabled else "#94a3b8"
+            color = "#38bdf8" if enabled else get_active_theme().text_dim
             window.workflow_log_autoscroll_button.setIcon(window._mask_panel_icon("arrow-down", color=color, size=20))
 
     def set_workflow_log_debug_enabled(self, enabled: bool) -> None:
@@ -196,14 +198,24 @@ class WorkflowLogController:
 
     def append_workflow_log_entry_now(self, levelno: int, text: str) -> None:
         window = self.window
+        # DEBUG/SUCCESS/WARNING/ERROR/CRITICAL stay literal: they're distinct
+        # accent-ish hues (matching the theme's accent_blue/green/gold/red
+        # family plus a pink for CRITICAL) with reasonable contrast against
+        # both a dark and a light console background - same reasoning as the
+        # accent-color exception used throughout this pass. INFO and the
+        # fallback default were a pale near-white tone tuned only for the
+        # console's old fixed-dark background (workflow_log_view, styled in
+        # layout_builder.py) - now that background reads from the active
+        # theme too, INFO needs to track it or it goes invisible in Bright
+        # mode (pale-on-pale).
         color = {
             logging.DEBUG: "#60a5fa",
-            logging.INFO: "#cbd5e1",
+            logging.INFO: get_active_theme().text_primary,
             SUCCESS_LOG_LEVEL: "#22c55e",
             logging.WARNING: "#f59e0b",
             logging.ERROR: "#ef4444",
             logging.CRITICAL: "#f43f5e",
-        }.get(int(levelno), "#cbd5e1")
+        }.get(int(levelno), get_active_theme().text_primary)
         escaped = escape(text).replace("\n", "<br>")
         html = f'<div style="color:{color}; white-space:pre-wrap; margin:0;">{escaped}</div>'
         window.workflow_log_view.moveCursor(QTextCursor.MoveOperation.End)

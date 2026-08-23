@@ -39,8 +39,8 @@ class PreferencesDialog(QDialog):
 
         # Appearance
         self.theme_combo = QComboBox()
-        self.theme_combo.addItem("Blue Dark Theme", "blue")
-        self.theme_combo.addItem("Gray Dark Theme", "gray")
+        self.theme_combo.addItem("Dark", "dark")
+        self.theme_combo.addItem("Bright", "bright")
 
         # Startup
         self.startup_restore_combo = QComboBox()
@@ -188,8 +188,8 @@ class PreferencesDialog(QDialog):
     def _load_from_window(self) -> None:
         window = self._window
 
-        theme = str(window._settings.value("ui/theme", "blue")) if hasattr(window, "_settings") else "blue"
-        theme_index = self.theme_combo.findData("gray" if theme == "gray" else "blue")
+        theme = str(window._settings.value("ui/theme", "dark")) if hasattr(window, "_settings") else "dark"
+        theme_index = self.theme_combo.findData("bright" if theme == "bright" else "dark")
         if theme_index >= 0:
             self.theme_combo.setCurrentIndex(theme_index)
 
@@ -218,7 +218,7 @@ class PreferencesDialog(QDialog):
     def apply_changes(self) -> None:
         window = self._window
 
-        theme = str(self.theme_combo.currentData() or "blue")
+        theme = str(self.theme_combo.currentData() or "dark")
         if hasattr(window, "_set_ui_theme"):
             window._set_ui_theme(theme)
 

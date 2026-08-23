@@ -6,6 +6,8 @@ from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QColor, QIcon, QPainter, QPixmap
 from PyQt6.QtWidgets import QTableWidget, QTableWidgetItem
 
+from lspr_ui import get_active_theme
+
 
 @dataclass(slots=True)
 class RoiTableRowColors:
@@ -45,7 +47,7 @@ def make_color_swatch_icon(color: QColor, size: int = 16) -> QIcon:
     try:
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
         painter.setBrush(color)
-        painter.setPen(QColor("#111827"))
+        painter.setPen(QColor(get_active_theme().control_border))
         painter.drawRoundedRect(1, 1, size - 2, size - 2, 3, 3)
     finally:
         painter.end()

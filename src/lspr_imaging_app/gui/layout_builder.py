@@ -27,7 +27,7 @@ from lspr_imaging_app.gui.panel_help_registry import panel_help_text
 def _placeholder_label(text: str) -> QLabel:
     label = QLabel(text)
     label.setWordWrap(True)
-    label.setStyleSheet("color: #64748b; font-style: italic;")
+    label.setStyleSheet(f"color: {get_active_theme().control_disabled_text}; font-style: italic;")
     return label
 
 
@@ -1409,7 +1409,14 @@ def build_layout(window) -> None:
     window.workflow_log_view.setTabChangesFocus(True)
     window.workflow_log_view.setLineWrapMode(QTextEdit.LineWrapMode.NoWrap)
     window.workflow_log_view.setFont(QFont("Consolas", 9))
-    window.workflow_log_view.setStyleSheet("QTextEdit { background: #0b1220; color: #cbd5e1; border: 1px solid #243041; border-radius: 6px; }")
+    log_theme = get_active_theme()
+    window.workflow_log_view.setStyleSheet(
+        "QTextEdit { "
+        f"background: {log_theme.control_bg}; "
+        f"color: {log_theme.text_muted}; "
+        f"border: 1px solid {log_theme.control_border}; "
+        "border-radius: 6px; }"
+    )
     window.workflow_log_view.installEventFilter(window)
     workflow_log_content_layout.addWidget(window.workflow_log_view, 0)
     window.workflow_log_section = CollapsibleSection(

@@ -8,7 +8,7 @@ from datetime import datetime
 from pathlib import Path
 
 from PyQt6.QtCore import QEasingCurve, QEvent, QObject, Qt, QPropertyAnimation, QSettings, QTimer
-from PyQt6.QtGui import QColor, QGuiApplication, QLinearGradient, QPainter, QPalette, QPen
+from PyQt6.QtGui import QColor, QGuiApplication, QLinearGradient, QPainter, QPen
 from PyQt6.QtWidgets import (
     QApplication,
     QComboBox,
@@ -26,15 +26,14 @@ from PyQt6.QtWidgets import (
 
 from lspr_ui import (
     APP_ID_LSPRI_EVALUATION,
-    BLUE_DARK_THEME,
+    BRIGHT_THEME,
     GRAY_DARK_THEME,
     app_icon,
-    apply_base_app_theme,
     get_active_theme,
     set_active_theme,
     set_windows_app_user_model_id,
-    startup_app_stylesheet,
 )
+from lspr_imaging_app.gui.app_theme import apply_app_theme
 from lspr_imaging_app.version import APP_NAME, APP_VERSION
 
 
@@ -120,8 +119,13 @@ class StartupProgressBar(QProgressBar):
 
             rect = self.rect().adjusted(0, 0, -1, -1)
             radius = 8.0
-            bg = QColor("#1f242b")
-            border = QColor("#2f353d")
+            theme = get_active_theme()
+            bg = QColor(theme.control_bg)
+            border = QColor(theme.control_border)
+            # The five fill_* stops below are the app's fixed "spectrum"
+            # brand gradient (shared with sLSPR Acquisition's identical
+            # startup progress bar) - decorative, not theme chrome, so they
+            # deliberately stay literal across both themes.
             fill_left = QColor("#7a5cff")
             fill_mid1 = QColor("#4f88ff")
             fill_mid2 = QColor("#39c7ba")
@@ -262,14 +266,19 @@ class StartupSplash(QWidget):
         layout.addWidget(body)
         self.setLayout(layout)
         self.setFixedSize(560, 190)
+        theme = get_active_theme()
+        # The qlineargradient stops below are the app's fixed "spectrum"
+        # brand gradient (shared with sLSPR Acquisition's identical startup
+        # accent bar) - decorative, not theme chrome, so they deliberately
+        # stay literal across both themes.
         self.setStyleSheet(
-            """
-            QWidget#startupSplash {
-                background: #15191f;
-                border: 1px solid #2d333b;
+            f"""
+            QWidget#startupSplash {{
+                background: {theme.window_bg};
+                border: 1px solid {theme.toolbar_border};
                 border-radius: 18px;
-            }
-            QFrame#startupAccent {
+            }}
+            QFrame#startupAccent {{
                 background: qlineargradient(
                     x1: 0, y1: 0, x2: 1, y2: 0,
                     stop: 0 #7a5cff,
@@ -280,37 +289,37 @@ class StartupSplash(QWidget):
                 );
                 border-top-left-radius: 18px;
                 border-top-right-radius: 18px;
-            }
-            QLabel#startupIcon {
+            }}
+            QLabel#startupIcon {{
                 background: transparent;
-            }
-            QLabel#startupTitle {
+            }}
+            QLabel#startupTitle {{
                 font-size: 18px;
                 font-weight: 700;
-                color: #eef2f6;
+                color: {theme.text_primary};
                 min-height: 24px;
                 padding-bottom: 0px;
-            }
-            QLabel#startupVersion {
-                color: #8a98a8;
+            }}
+            QLabel#startupVersion {{
+                color: {theme.text_dim};
                 font-size: 10px;
                 padding-top: 2px;
-            }
-            QLabel#startupSubtitle {
-                color: #95a0ac;
+            }}
+            QLabel#startupSubtitle {{
+                color: {theme.text_dim};
                 font-size: 12px;
-            }
-            QLabel#startupStatus {
-                color: #d7dce2;
+            }}
+            QLabel#startupStatus {{
+                color: {theme.text_secondary};
                 font-size: 12px;
-            }
-            QProgressBar {
+            }}
+            QProgressBar {{
                 border: none;
                 background: transparent;
                 min-height: 18px;
                 max-height: 18px;
                 padding: 0px;
-            }
+            }}
             """
         )
 
@@ -345,27 +354,9 @@ class StartupSplash(QWidget):
         self._icon_opacity_anim.start()
 
 
-def _combo_box_no_arrow_stylesheet() -> str:
-    # Collapsing the drop-down subcontrol to zero width - rather than just
-    # hiding the arrow image - is what actually frees up its reserved space,
-    # so QComboBox's own "padding: 2px 5px" (see startup_app_stylesheet())
-    # applies symmetrically instead of the text looking pushed left.
-    return """
-    QComboBox::drop-down {
-        width: 0px;
-        border: none;
-    }
-    QComboBox::down-arrow {
-        image: none;
-        width: 0px;
-        height: 0px;
-    }
-    """
-
-
 class _ComboBoxClickToOpenFilter(QObject):
     """Restores click-to-open anywhere on a QComboBox once its arrow
-    subcontrol is styled to zero width (see _combo_box_no_arrow_stylesheet).
+    subcontrol is styled to zero width (see app_theme.combo_box_no_arrow_stylesheet).
 
     Every QComboBox in this app is made editable-but-read-only elsewhere
     (see _apply_right_aligned_control_text: combo.setEditable(True) plus a
@@ -388,25 +379,6 @@ class _ComboBoxClickToOpenFilter(QObject):
             combo.showPopup()
             return True
         return False
-
-
-def _apply_dark_theme(app: QApplication) -> None:
-    app.setStyleSheet(startup_app_stylesheet() + _combo_box_no_arrow_stylesheet())
-
-
-def _apply_active_palette(app: QApplication) -> None:
-    theme = get_active_theme()
-    palette = app.palette()
-    palette.setColor(QPalette.ColorRole.Window, QColor(theme.window_bg))
-    palette.setColor(QPalette.ColorRole.Base, QColor(theme.window_bg))
-    palette.setColor(QPalette.ColorRole.AlternateBase, QColor(theme.toolbar_section_bg))
-    palette.setColor(QPalette.ColorRole.Button, QColor(theme.control_bg))
-    palette.setColor(QPalette.ColorRole.ButtonText, QColor(theme.text_primary))
-    palette.setColor(QPalette.ColorRole.Text, QColor(theme.text_primary))
-    palette.setColor(QPalette.ColorRole.WindowText, QColor(theme.text_primary))
-    palette.setColor(QPalette.ColorRole.Highlight, QColor(theme.primary_action_bg))
-    palette.setColor(QPalette.ColorRole.HighlightedText, QColor(theme.text_primary))
-    app.setPalette(palette)
 
 
 def _apply_windows_titlebar_theme(window: QMainWindow) -> None:
@@ -486,12 +458,10 @@ def main() -> None:
     combo_box_click_filter = _ComboBoxClickToOpenFilter(app)
     app.installEventFilter(combo_box_click_filter)
     settings = QSettings("LSPR", "LSPRImaging")
-    set_active_theme(GRAY_DARK_THEME if str(settings.value("ui/theme", "blue")) == "gray" else BLUE_DARK_THEME)
+    set_active_theme(BRIGHT_THEME if str(settings.value("ui/theme", "dark")) == "bright" else GRAY_DARK_THEME)
     fast_startup = _fast_startup_enabled(settings)
     logging.getLogger("lspr_imaging_app.startup").info("Session log file: %s", log_path)
-    apply_base_app_theme(app, get_active_theme())
-    _apply_active_palette(app)
-    _apply_dark_theme(app)
+    apply_app_theme(app)
     splash = StartupSplash()
     splash.show_centered()
     splash.update_progress(10, "Opening workspace...")
