@@ -4018,6 +4018,10 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, HistogramMaskMixin, Measurem
         self._apply_high_contrast_button_styles()
 
     def _set_ui_theme(self, theme_name: str) -> None:
+        theme_name = "bright" if theme_name == "bright" else "dark"
+        current_theme_name = "bright" if str(self._settings.value("ui/theme", "dark")) == "bright" else "dark"
+        if theme_name == current_theme_name:
+            return
         theme = BRIGHT_THEME if theme_name == "bright" else GRAY_DARK_THEME
         set_active_theme(theme)
         self._settings.setValue("ui/theme", theme_name)
