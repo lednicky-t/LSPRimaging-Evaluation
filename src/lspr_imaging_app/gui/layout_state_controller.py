@@ -229,9 +229,6 @@ class LayoutStateController:
         window._layout_preferences_ready = True
         window._update_analysis_control_state()
 
-    def apply_saved_splitter_sizes(self, main_sizes) -> None:
-        return
-
     def save_layout_preferences(self) -> None:
         window = self.window
         if not window._layout_preferences_ready or window._suspend_layout_save:

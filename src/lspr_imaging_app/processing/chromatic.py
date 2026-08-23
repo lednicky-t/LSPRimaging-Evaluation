@@ -253,7 +253,6 @@ def track_landmarks(
         peak_x, peak_y, score = _match_patch(
             reference_patch,
             search_area,
-            half,
             score_threshold=1.2,
             subpixel_precision=subpixel_precision,
         )
@@ -801,7 +800,6 @@ def estimate_affine_chromatic_transform(
             peak_x, peak_y, score = _match_patch(
                 reference_patch,
                 search_area,
-                half,
                 score_threshold=score_threshold,
                 subpixel_precision=subpixel_precision,
             )
@@ -1556,7 +1554,6 @@ def _select_evenly_spread_points(
 def _match_patch(
     reference_patch: np.ndarray,
     search_area: np.ndarray,
-    patch_half: int,
     *,
     score_threshold: float,
     subpixel_precision: int = 1,
