@@ -1756,10 +1756,9 @@ class MainWindowIcons:
         edit_menu.addAction(self.clear_roi_selection_button.text(), self._clear_roi_selection)
 
         view_menu = menu_bar.addMenu("&View")
-        view_menu.addAction(self.reset_layout_action)
-        view_menu.addAction(self.reset_dock_layout_action)
-        view_menu.addAction(self.expand_left_panels_action)
-        view_menu.addAction(self.collapse_left_panels_action)
+        reset_menu = view_menu.addMenu("Reset")
+        reset_menu.addAction(self.reset_sizes_action)
+        reset_menu.addAction(self.reset_panels_visibility_action)
         view_menu.addSeparator()
         dock_menu = view_menu.addMenu("Panels")
         dock_menu.addAction(self.show_all_panels_action)

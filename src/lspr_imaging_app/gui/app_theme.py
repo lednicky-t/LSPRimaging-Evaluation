@@ -18,6 +18,24 @@ from lspr_ui import GuiTheme, apply_base_app_theme, get_active_theme
 # widget types stuck on stale colors after a switch until the app restarted.
 
 
+def dock_separator_stylesheet(theme: GuiTheme | None = None) -> str:
+    # Qt draws QMainWindow::separator (the draggable strip between docked
+    # panels, both the vertical ones between side-by-side panels and the
+    # horizontal ones between stacked panels) in the plain window background
+    # color unless styled - on this app's dark theme that made every panel
+    # border invisible. theme.toolbar_border is the same subtle divider color
+    # already used for QGroupBox/QMenu/QTableWidget borders elsewhere.
+    theme = theme or get_active_theme()
+    return f"""
+    QMainWindow::separator {{
+        background: {theme.toolbar_border};
+    }}
+    QMainWindow::separator:hover {{
+        background: {theme.control_border_hover};
+    }}
+    """
+
+
 def combo_box_no_arrow_stylesheet() -> str:
     # Collapsing the drop-down subcontrol to zero width - rather than just
     # hiding the arrow image - is what actually frees up its reserved space,
@@ -63,4 +81,4 @@ def apply_app_theme(app: QApplication, theme: GuiTheme | None = None) -> None:
     theme = theme or get_active_theme()
     apply_base_app_theme(app, theme)
     apply_active_palette(app, theme)
-    app.setStyleSheet(app.styleSheet() + combo_box_no_arrow_stylesheet())
+    app.setStyleSheet(app.styleSheet() + combo_box_no_arrow_stylesheet() + dock_separator_stylesheet(theme))

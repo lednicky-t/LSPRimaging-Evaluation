@@ -1529,10 +1529,19 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, HistogramMaskMixin, Measurem
         self.analysis_trimmed_mean_spin.setToolTip("Fraction trimmed from each tail before averaging. Only used by Trimmed mean.")
 
         self.analysis_formula_combo = QComboBox(self)
-        self.analysis_formula_combo.addItem("Absorbance (-log10)", "absorbance")
-        self.analysis_formula_combo.addItem("Ratio (Is/Ir)", "ratio")
+        self.analysis_formula_combo.addItem("Absorbance", "absorbance")
+        self.analysis_formula_combo.addItem("Ratio", "ratio")
         self.analysis_formula_combo.addItem("Relative change", "relative_change")
         self.analysis_formula_combo.addItem("mOD absorbance", "mod_absorbance")
+        for _formula_index, _formula_tip in enumerate(
+            (
+                "Absorbance = -log10(sample / reference).",
+                "Ratio = sample / reference.",
+                "Relative change = (reference - sample) / reference.",
+                "mOD absorbance = -1000 x log10(sample / reference).",
+            )
+        ):
+            self.analysis_formula_combo.setItemData(_formula_index, _formula_tip, Qt.ItemDataRole.ToolTipRole)
         formula_index = max(
             self.analysis_formula_combo.findData(str(self._state.area_roi_settings.formula_key or "absorbance")), 0
         )
@@ -2067,16 +2076,14 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, HistogramMaskMixin, Measurem
         self.shortcuts_action = QAction("Keyboard shortcuts", self)
         self.shortcuts_action.setShortcut(QKeySequence.StandardKey.HelpContents)
         self.shortcuts_action.setToolTip("Show the main keyboard shortcuts used in the app.")
-        self.reset_layout_action = QAction("Reset layout", self)
-        self.reset_layout_action.setToolTip("Restore default splitter sizes and panel expanded states.")
-        self.reset_dock_layout_action = QAction("Reset panel layout", self)
-        self.reset_dock_layout_action.setToolTip("Restore default splitter sizes without changing panel visibility.")
+        self.reset_panels_visibility_action = QAction("Panels visibility", self)
+        self.reset_panels_visibility_action.setToolTip("Restore default panel/section visibility (and splitter sizes).")
+        self.reset_sizes_action = QAction("Sizes", self)
+        self.reset_sizes_action.setToolTip("Restore default splitter sizes without changing panel visibility.")
         self.show_all_panels_action = QAction("Show all panels", self)
         self.show_all_panels_action.setToolTip("Show every workspace panel.")
         self.hide_all_panels_action = QAction("Hide all panels", self)
         self.hide_all_panels_action.setToolTip("Hide every workspace panel.")
-        self.expand_left_panels_action = QAction("Expand left panels", self)
-        self.collapse_left_panels_action = QAction("Collapse left panels", self)
         self.about_action = QAction("About", self)
         self.calculate_spectrum_action = QAction("Calculate spectrum", self)
         self.calculate_spectrum_action.setToolTip("Calculate the absorbance spectrum for the current spectral cube and selected ROIs.")
@@ -2469,12 +2476,10 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, HistogramMaskMixin, Measurem
 
     def _connect_toolbar_and_ui(self) -> None:
         self.shortcuts_action.triggered.connect(self._show_shortcuts_dialog)
-        self.reset_layout_action.triggered.connect(self._reset_layout_to_defaults)
-        self.reset_dock_layout_action.triggered.connect(self._reset_panel_layout)
+        self.reset_panels_visibility_action.triggered.connect(self._reset_layout_to_defaults)
+        self.reset_sizes_action.triggered.connect(self._reset_panel_layout)
         self.show_all_panels_action.triggered.connect(lambda *_: self._set_all_panel_visibility(True))
         self.hide_all_panels_action.triggered.connect(lambda *_: self._set_all_panel_visibility(False))
-        self.expand_left_panels_action.triggered.connect(self._expand_left_panels)
-        self.collapse_left_panels_action.triggered.connect(self._collapse_left_panels)
         self.about_action.triggered.connect(self._show_about_dialog)
         self.rotate_action.toggled.connect(self._on_rotate_tool_toggled)
         self.crop_action.toggled.connect(self._on_crop_tool_toggled)
@@ -5125,12 +5130,6 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, HistogramMaskMixin, Measurem
     def _reset_panel_layout(self) -> None:
         self._layout_state_controller.reset_panel_layout()
 
-    def _expand_left_panels(self) -> None:
-        self._layout_state_controller.expand_left_panels()
-
-    def _collapse_left_panels(self) -> None:
-        self._layout_state_controller.collapse_left_panels()
-
     def _configure_control_help(self) -> None:
         self._set_help(self.folder_edit, "Dataset folder to load.", "Enter or paste the folder containing the image dataset.")
         self._set_help(self.browse_button, "Browse for a dataset folder.")
@@ -5375,10 +5374,8 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, HistogramMaskMixin, Measurem
         )
         self._set_help(self.analysis_preview_button, "Live preview: update the spectrum and sensorgram automatically when ROI selection changes.")
         self._set_help(self.shortcuts_action, "Show the main keyboard shortcuts.", shortcuts_text())
-        self._set_help(self.reset_layout_action, "Restore default splitter sizes and panel states.")
-        self._set_help(self.reset_dock_layout_action, "Restore default splitter sizes without changing panel visibility.")
-        self._set_help(self.expand_left_panels_action, "Expand all left workflow panels.")
-        self._set_help(self.collapse_left_panels_action, "Collapse all left workflow panels.")
+        self._set_help(self.reset_panels_visibility_action, "Restore default panel/section visibility (and splitter sizes).")
+        self._set_help(self.reset_sizes_action, "Restore default splitter sizes without changing panel visibility.")
         self._set_help(self.calculate_spectrum_action, "Calculate the absorbance spectrum for the current spectral cube and selected ROIs.")
         self._set_help(self.about_action, "Show basic app information.")
 

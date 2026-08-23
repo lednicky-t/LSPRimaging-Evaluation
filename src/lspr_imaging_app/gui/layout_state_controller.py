@@ -457,58 +457,6 @@ class LayoutStateController:
         self.save_panel_layout_preferences()
         window._set_status_text("Panel layout reset to defaults.")
 
-    def expand_left_panels(self) -> None:
-        window = self.window
-        window._suspend_collapsible_accordion = True
-        try:
-            for section in [
-                window.dataset_section,
-                window.summary_section,
-                window.reference_section,
-                window.export_section,
-                window.mask_section,
-                window.chromatic_section,
-                window.image_tools_section,
-                window.transforms_section,
-                window.roi_editor_section,
-                window.background_section,
-                window.analysis_section,
-                window.roi_math_section,
-                window.metric_trace_section,
-                window.statistics_section,
-                window.results_export_section,
-            ]:
-                section.set_expanded(True)
-        finally:
-            window._suspend_collapsible_accordion = False
-        self.save_layout_preferences()
-
-    def collapse_left_panels(self) -> None:
-        window = self.window
-        window._suspend_collapsible_accordion = True
-        try:
-            for section in [
-                window.dataset_section,
-                window.summary_section,
-                window.reference_section,
-                window.export_section,
-                window.mask_section,
-                window.chromatic_section,
-                window.image_tools_section,
-                window.transforms_section,
-                window.roi_editor_section,
-                window.background_section,
-                window.analysis_section,
-                window.roi_math_section,
-                window.metric_trace_section,
-                window.statistics_section,
-                window.results_export_section,
-            ]:
-                section.set_expanded(False)
-        finally:
-            window._suspend_collapsible_accordion = False
-        self.save_layout_preferences()
-
     def restore_default_panel_layout(self) -> None:
         window = self.window
         if not window._dock_layout_built:
