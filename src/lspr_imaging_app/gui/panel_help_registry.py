@@ -201,6 +201,63 @@ PANEL_HELP: dict[str, PanelHelpEntry] = {
         ),
         shortcut_keys=("main",),
     ),
+    "workflow_panel": PanelHelpEntry(
+        title="Workflow",
+        description=(
+            "Left-hand column walking through the evaluation workflow top to bottom: Dataset, Mask, Chromatic "
+            "correction, Image tools, Transforms, ROI editor, Background removal, Analysis (ROI's math, Metric "
+            "trace, Statistics, Results/Export), and Logs. Each of those sections has its own help icon with "
+            "detailed usage notes - this one is just the map of how they fit together."
+        ),
+    ),
+    "roi_table_panel": PanelHelpEntry(
+        title="ROI table",
+        description=(
+            "Lists every detected/added ROI pair (sample + reference) with its id, group, center, and diameters. "
+            "Selecting rows here decides which ROI(s) the Spectra and Sensorgram panels compute and plot; "
+            "double-click a cell to edit that ROI's geometry directly."
+        ),
+    ),
+    "image_area_panel": PanelHelpEntry(
+        title="Image area",
+        description=(
+            "Shows the currently selected spectral cube/wavelength image with the active mask, ROI, and "
+            "chromatic-landmark overlays. The wavelength/spectral-cube sliders below it navigate the loaded "
+            "dataset - the wavelength slider only lists wavelengths actually present in the data, with a tick "
+            "for each one and a labeled tick roughly every 100 nm."
+        ),
+    ),
+    "histogram_panel": PanelHelpEntry(
+        title="Histogram",
+        description=(
+            "Pixel-intensity histogram for the image currently shown in Image area, restricted to the active "
+            "mask/ROI highlight when one is set. Axis toggles a linear/log pixel-count y-axis; Bin sets the "
+            "number of histogram bins."
+        ),
+    ),
+    "spectra_panel": PanelHelpEntry(
+        title="Spectra",
+        description=(
+            "Plots the ROI's math result (Absorbance by default, or Ratio/Relative change/mOD absorbance, "
+            "depending on the Formula chosen there) against wavelength for the currently selected ROI(s). Ticks "
+            "and faint gridlines mark every wavelength actually present in the dataset - 0 nm, the dark/broadband "
+            "correction frame, is never plotted here since it's a correction input, not a target wavelength "
+            "result (see ROI's math).\n"
+            "The small title line above the plot reports which ROI(s)/spectral cube are shown, plus the fitted "
+            "metric if a curve fit is active; it stays blank when there's nothing to plot yet - most often "
+            "because no dataset is loaded, no ROI is selected, analysis is disabled for this profile, or "
+            "chromatic setup is currently active (spectra are hidden during that step)."
+        ),
+    ),
+    "sensorgram_panel": PanelHelpEntry(
+        title="Sensorgram",
+        description=(
+            "Plots the extracted metric (see Metric trace) for the selected ROI(s)/group over spectral cube "
+            "index, or elapsed time once acquisition metadata is loaded - the kinetics trace. Statistics "
+            "post-processing (spikes/smoothing/baseline/group averaging) is applied here, never to the raw "
+            "spectrum itself."
+        ),
+    ),
 }
 
 

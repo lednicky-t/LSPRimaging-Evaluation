@@ -949,8 +949,8 @@ def build_layout(window) -> None:
     # "Metric trace" nested section: just the metric/order controls - the
     # formula and usage tips live in this section's help popout instead (see
     # panel_help_registry.py's "metric_trace" entry), and the result is
-    # shown once, above the spectrum plot (spectrum_summary_label), not
-    # duplicated here.
+    # shown once, as the spectrum plot's own title (see
+    # PlotManager.set_spectrum_summary_text), not duplicated here.
     analysis_fitting_content = QWidget(window)
     analysis_fitting_layout = QVBoxLayout(analysis_fitting_content)
     analysis_fitting_layout.setContentsMargins(8, 8, 8, 8)
@@ -1251,7 +1251,6 @@ def build_layout(window) -> None:
     spectrum_layout = QVBoxLayout(spectra_content)
     spectrum_layout.setContentsMargins(8, 8, 8, 8)
     spectrum_layout.setSpacing(6)
-    spectrum_layout.addWidget(window.spectrum_summary_label)
     spectrum_layout.addWidget(window.spectrum_plot)
 
     sensorgram_content = QWidget(window)
@@ -1421,17 +1420,29 @@ def build_layout(window) -> None:
         parent=workflow_content,
     )
     workflow_content_layout.addWidget(window.workflow_log_section, 0)
-    window.workflow_panel = window._create_panel_container("Workflow", workflow_content, panel_name="workflowPanel")
+    window.workflow_panel = window._create_panel_container(
+        "Workflow", workflow_content, panel_name="workflowPanel", help_text=panel_help_text("workflow_panel")
+    )
     window.workflow_panel.setMinimumWidth(340)
-    window.roi_list_panel = window._create_panel_container("ROI table", roi_list_panel, panel_name="roiListPanel")
+    window.roi_list_panel = window._create_panel_container(
+        "ROI table", roi_list_panel, panel_name="roiListPanel", help_text=panel_help_text("roi_table_panel")
+    )
     window.roi_list_panel.setMinimumWidth(240)
-    window.image_panel = window._create_panel_container("Image area", image_tools_panel, panel_name="imageAreaPanel")
+    window.image_panel = window._create_panel_container(
+        "Image area", image_tools_panel, panel_name="imageAreaPanel", help_text=panel_help_text("image_area_panel")
+    )
     window.image_panel.setMinimumWidth(360)
-    window.histogram_panel = window._create_panel_container("Histogram", histogram_content, panel_name="histogramPanel")
+    window.histogram_panel = window._create_panel_container(
+        "Histogram", histogram_content, panel_name="histogramPanel", help_text=panel_help_text("histogram_panel")
+    )
     window.histogram_panel.setMinimumWidth(240)
-    window.spectra_panel = window._create_panel_container("Spectra", spectra_content, panel_name="spectraPanel")
+    window.spectra_panel = window._create_panel_container(
+        "Spectra", spectra_content, panel_name="spectraPanel", help_text=panel_help_text("spectra_panel")
+    )
     window.spectra_panel.setMinimumWidth(320)
-    window.sensorgram_panel = window._create_panel_container("Sensorgram", sensorgram_content, panel_name="sensorgramPanel")
+    window.sensorgram_panel = window._create_panel_container(
+        "Sensorgram", sensorgram_content, panel_name="sensorgramPanel", help_text=panel_help_text("sensorgram_panel")
+    )
     window.sensorgram_panel.setMinimumWidth(320)
     for panel in (window.workflow_panel, window.roi_list_panel, window.image_panel, window.histogram_panel, window.spectra_panel, window.sensorgram_panel):
         panel.visibilityChanged.connect(lambda _visible, target=panel: window._on_panel_visibility_changed(target))

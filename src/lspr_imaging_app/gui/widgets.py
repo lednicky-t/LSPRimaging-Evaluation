@@ -305,10 +305,18 @@ class CollapsibleSection(QWidget):
 
 
 class PanelContainer(QDockWidget):
-    def __init__(self, title: str, content: QWidget, parent: QWidget | None = None) -> None:
+    def __init__(
+        self,
+        title: str,
+        content: QWidget,
+        parent: QWidget | None = None,
+        *,
+        help_text: str | None = None,
+    ) -> None:
         super().__init__(title, parent)
         self._title = title
         self._content = content
+        self._help_text = help_text
         self.setObjectName(f"{title.replace(' ', '')}Panel")
         self.setWidget(content)
         self.setFeatures(
@@ -350,6 +358,21 @@ class PanelContainer(QDockWidget):
         label.setStyleSheet(f"color: {theme.text_primary}; font-weight: 600; background: transparent;")
         layout.addWidget(label)
         layout.addStretch(1)
+
+        if self._help_text:
+            help_text = self._help_text
+            help_button = QToolButton(row)
+            help_button.setIcon(MainWindowIcons._make_help_icon())
+            help_button.setIconSize(QSize(18, 18))
+            help_button.setFixedSize(24, 24)
+            help_button.setAutoRaise(True)
+            help_button.setToolTip("Show panel help.")
+            help_button.setStyleSheet(
+                transparent_icon_button_stylesheet(hover=hex_to_rgba(theme.accent_blue, 0.22))
+                + "QToolButton:hover { border-radius: 4px; }"
+            )
+            help_button.clicked.connect(lambda *_: QMessageBox.information(self, title, help_text))
+            layout.addWidget(help_button)
 
         float_button = QToolButton(row)
         float_button.setIcon(self._make_float_icon())

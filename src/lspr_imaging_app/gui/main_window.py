@@ -1662,8 +1662,6 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, HistogramMaskMixin, Measurem
         # experiment plan's real timestamps - see _spectral_cube_axis_label().
         self.analysis_spectral_cube_axis_label = QLabel(self._spectral_cube_axis_label(), self)
 
-        self.spectrum_summary_label = QLabel("Select ROIs to show absorbance spectrum.", self)
-        self.spectrum_summary_label.setWordWrap(True)
         self.spectrum_plot = pg.PlotWidget(parent=self)
         self.spectrum_plot.setMinimumHeight(120)
         self.spectrum_plot.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
@@ -3956,7 +3954,11 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, HistogramMaskMixin, Measurem
             QApplication.instance().setPalette(palette)
         self.image_toolbar.setStyleSheet(dark_image_toolbar_stylesheet())
         self._configure_data_plot(self.histogram_plot, bottom_label="Intensity", left_label="Pixels (%)", y_min=0.0)
-        self._configure_data_plot(self.spectrum_plot, bottom_label="Wavelength (nm)", left_label="Absorbance")
+        self._configure_data_plot(
+            self.spectrum_plot,
+            bottom_label="Wavelength (nm)",
+            left_label=self._analysis_controller._analysis_formula_axis_label(),
+        )
         self._configure_data_plot(self.sensorgram_plot, bottom_label="Spectral cube", left_label="Metric")
         self._update_sensorgram_plot_labels()
         self._apply_high_contrast_button_styles()
@@ -5765,6 +5767,9 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, HistogramMaskMixin, Measurem
     def _set_spectrum_summary_text(self, text: str) -> None:
         self._plot_manager.set_spectrum_summary_text(text)
 
+    def _clear_spectrum_summary_text(self) -> None:
+        self._plot_manager.clear_spectrum_summary_text()
+
     def _sensorgram_signature_for_selection(
         self,
         spectral_cubes: list[int],
@@ -5807,8 +5812,8 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, HistogramMaskMixin, Measurem
     def _spectrum_selection_label(self) -> str:
         return self._analysis_controller._spectrum_selection_label()
 
-    def _clear_absorbance_spectrum(self, summary_text: str) -> None:
-        self._plot_manager.clear_absorbance_spectrum(summary_text)
+    def _clear_absorbance_spectrum(self) -> None:
+        self._plot_manager.clear_absorbance_spectrum()
 
     def _clear_spectrum_series_items(self) -> None:
         self._plot_manager.clear_spectrum_series_items()
@@ -6217,8 +6222,9 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, HistogramMaskMixin, Measurem
         *,
         panel_name: str,
         allowed_areas: Qt.DockWidgetArea = Qt.DockWidgetArea.AllDockWidgetAreas,
+        help_text: str | None = None,
     ) -> PanelContainer:
-        panel = PanelContainer(title, content, self)
+        panel = PanelContainer(title, content, self, help_text=help_text)
         panel.setObjectName(panel_name)
         panel.setAllowedAreas(allowed_areas)
         return panel
@@ -6682,7 +6688,7 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, HistogramMaskMixin, Measurem
         if count == 0:
             self.roi_summary.setText("No ROIs")
             self.roi_summary.setToolTip("No ROIs detected.")
-            self._clear_absorbance_spectrum("Detect ROIs to show absorbance spectrum.")
+            self._clear_absorbance_spectrum()
             return
         selected_details = ""
         if len(self._selected_roi_ids) == 1:

@@ -5,6 +5,7 @@ import time
 import numpy as np
 from copy import deepcopy
 from datetime import datetime
+from math import ceil, floor
 from PyQt6.QtGui import QColor
 import pyqtgraph as pg
 
@@ -22,6 +23,14 @@ from lspr_imaging_app.processing.trace_statistics import (
     smooth_moving_average,
     smooth_savgol,
 )
+
+
+_FORMULA_AXIS_LABELS: dict[str, str] = {
+    "absorbance": "Absorbance (A = -log10(Is/Ir))",
+    "ratio": "Ratio (Is/Ir)",
+    "relative_change": "Relative change ((Ir-Is)/Ir)",
+    "mod_absorbance": "mOD Absorbance (-1000 x log10(Is/Ir))",
+}
 
 
 class AnalysisController:
@@ -1156,16 +1165,16 @@ class AnalysisController:
     def _refresh_absorbance_spectrum(self) -> None:
         start_time = time.perf_counter()
         if not self.window._analysis_enabled:
-            self.window._clear_absorbance_spectrum("Analysis calculations are disabled for this panel.")
+            self.window._clear_absorbance_spectrum()
             return
         selected_source_rois = self.window._selected_source_rois_snapshot()
         if not selected_source_rois:
-            self.window._clear_absorbance_spectrum("Select ROIs to show absorbance spectrum.")
+            self.window._clear_absorbance_spectrum()
             return
         selected_roi_ids = tuple(roi.area_roi_id for roi in selected_source_rois)
         roi_signatures = [self.window._roi_absorbance_signature(roi) for roi in selected_source_rois]
         if any(signature is None for signature in roi_signatures):
-            self.window._clear_absorbance_spectrum("Select ROIs to show absorbance spectrum.")
+            self.window._clear_absorbance_spectrum()
             return
         if len(selected_source_rois) == 1:
             roi_signature = roi_signatures[0]
@@ -1199,7 +1208,7 @@ class AnalysisController:
         target_source_rois = missing_source_rois if missing_source_rois else selected_source_rois
         signature = self._absorbance_spectrum_signature_for_source_rois(target_source_rois)
         if signature is None:
-            self.window._clear_absorbance_spectrum("Select ROIs to show absorbance spectrum.")
+            self.window._clear_absorbance_spectrum()
             return
         if self.window._absorbance_spectrum_running and self.window._absorbance_spectrum_running_signature == signature:
             return
@@ -1687,7 +1696,7 @@ class AnalysisController:
             return
         self.window._stop_sensorgram_calculation()
         self.window._pending_sensorgram_payload = None
-        self.window._clear_absorbance_spectrum("Analysis calculations are disabled for this panel.")
+        self.window._clear_absorbance_spectrum()
         self.window._clear_sensorgram("Analysis calculations are disabled for this panel.")
         self.window._set_status_text("Analysis calculations disabled.")
 
@@ -1705,6 +1714,18 @@ class AnalysisController:
         if metric_key in {"maximum", "centroid"}:
             return "Wavelength (nm)"
         return "Metric"
+
+    def _analysis_formula_axis_label(self) -> str:
+        """Spectra plot's y-axis label - shows the actual formula (see
+        processing/analysis.py:formula_value) matching whatever the ROI's
+        math Formula combo (analysis_formula_combo) is currently set to, so
+        the axis never silently mislabels a Ratio/Relative change/mOD trace
+        as "Absorbance"."""
+        formula_key = str(self.window.analysis_formula_combo.currentData() or "absorbance")
+        return _FORMULA_AXIS_LABELS.get(formula_key, _FORMULA_AXIS_LABELS["absorbance"])
+
+    def _update_spectrum_plot_label(self) -> None:
+        self.window.spectrum_plot.setLabel("left", self._analysis_formula_axis_label())
 
     def _analysis_poly_order(self) -> int:
         return int(self.window.analysis_poly_order_spin.value())
@@ -1833,6 +1854,7 @@ class AnalysisController:
         settings.trimmed_mean_fraction = float(self.window.analysis_trimmed_mean_spin.value()) / 100.0
         settings.formula_key = str(self.window.analysis_formula_combo.currentData() or "absorbance")
         self.sync_analysis_roi_math_controls()
+        self._update_spectrum_plot_label()
         self.window._schedule_processing_state_save()
         self._on_analysis_fit_settings_changed(*_args)
 
@@ -1858,6 +1880,7 @@ class AnalysisController:
             window.analysis_trimmed_mean_spin.blockSignals(False)
             window.analysis_formula_combo.blockSignals(False)
         self.sync_analysis_roi_math_controls()
+        self._update_spectrum_plot_label()
 
     # ------------------------------------------------------------------
     # Statistics: post-processing applied to the already-computed
@@ -2187,10 +2210,44 @@ class AnalysisController:
             return None
         return int(min(self.window._spectral_cube_values)), int(max(self.window._spectral_cube_values))
 
+    def _spectrum_plot_wavelength_values(self) -> list[float]:
+        """0 nm is the broadband/dark reference frame, not a target
+        wavelength (see ChromaticController.candidate_chromatic_wavelengths
+        for the same exclusion elsewhere) - it can feed analysis as a
+        correction factor but is never itself a result, so the spectra
+        plot's x-axis always drops it regardless of the separate "treat 0 nm
+        as a dark reference frame" display preference that only governs the
+        wavelength slider/spin/dropdown (_filtered_wavelength_values)."""
+        return sorted(float(w) for w in self.window._wavelength_values if float(w) != 0.0)
+
     def _analysis_plot_wavelength_range(self) -> tuple[float, float] | None:
-        if not self.window._wavelength_values:
+        values = self._spectrum_plot_wavelength_values()
+        if not values:
             return None
-        return float(min(self.window._wavelength_values)), float(max(self.window._wavelength_values))
+        return values[0], values[-1]
+
+    def _analysis_plot_wavelength_ticks(self) -> list[list[tuple[float, str]]] | None:
+        """Major ticks every ~100 nm (snapped to the nearest available
+        wavelength, mirroring MainWindow._wavelength_slider_major_ticks) plus
+        a minor tick at every remaining available wavelength, so the axis
+        grid (showGrid draws lines at each AxisItem tick) shows a labeled
+        line every ~100 nm and a faint line at every acquired wavelength."""
+        values = self._spectrum_plot_wavelength_values()
+        if not values:
+            return None
+        step = 100.0
+        lo = ceil(values[0] / step) * step
+        hi = floor(values[-1] / step) * step
+        major_values: set[float] = set()
+        boundary = lo
+        while boundary <= hi + 1e-6:
+            major_values.add(min(values, key=lambda v: abs(v - boundary)))
+            boundary += step
+        if not major_values:
+            major_values = {values[0], values[-1]}
+        majors = [(v, f"{v:.0f}") for v in sorted(major_values)]
+        minors = [(v, "") for v in values if v not in major_values]
+        return [majors, minors]
 
     def _sensorgram_axis_range(self) -> tuple[float, float] | None:
         """The sensorgram plot's x-axis limits: elapsed-time range when
@@ -2229,6 +2286,7 @@ class AnalysisController:
         if wavelength_range is not None:
             self.window.spectrum_plot.setLimits(xMin=wavelength_range[0], xMax=wavelength_range[1])
             self.window.spectrum_plot.setXRange(wavelength_range[0], wavelength_range[1], padding=0.03)
+        self.window.spectrum_plot.getAxis("bottom").setTicks(self._analysis_plot_wavelength_ticks())
         sensorgram_range = self._sensorgram_axis_range()
         if sensorgram_range is not None:
             self.window.sensorgram_plot.setLimits(xMin=sensorgram_range[0], xMax=sensorgram_range[1])
@@ -2347,19 +2405,19 @@ class AnalysisController:
     def _mark_absorbance_spectrum_dirty(self) -> None:
         self.window._absorbance_spectrum_dirty = True
         if not self.window._analysis_enabled:
-            self.window._set_spectrum_summary_text("Analysis calculations are disabled for this panel.")
+            self.window._clear_spectrum_summary_text()
             self.window._clear_sensorgram("Analysis calculations are disabled for this panel.")
             return
         if self.window._state.dataset is None:
-            self.window._set_spectrum_summary_text("Load a dataset to show absorbance spectrum.")
+            self.window._clear_spectrum_summary_text()
             self.window._clear_sensorgram("Load a dataset to build the fitted sensorgram.")
             return
         if self.window._chromatic_setup_active:
-            self.window._set_spectrum_summary_text("Spectral absorbance is hidden during chromatic setup.")
+            self.window._clear_spectrum_summary_text()
             self.window._clear_sensorgram("Sensorgram is hidden during chromatic setup.")
             return
         if not self._selected_spectrum_roi_ids():
-            self.window._set_spectrum_summary_text("Select ROIs to show absorbance spectrum.")
+            self.window._clear_spectrum_summary_text()
             self.window._clear_sensorgram("Select ROIs before calculating the sensorgram.")
             return
         self.window._set_spectrum_summary_text(

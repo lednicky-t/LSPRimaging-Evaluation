@@ -5,6 +5,8 @@ import pyqtgraph as pg
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QColor
 
+from lspr_ui import get_active_theme
+
 from lspr_imaging_app.domain.models import AbsorbanceSpectrumResult, FitResult
 from lspr_imaging_app.processing.analysis import fit_curve_for_method
 from lspr_imaging_app.processing.chromatic import transformed_annulus_mask, transformed_disk_mask
@@ -117,14 +119,17 @@ class PlotManager:
         self.clamp_histogram_log_range()
 
     def set_spectrum_summary_text(self, text: str) -> None:
-        self._window.spectrum_summary_label.setText(text)
+        self._window.spectrum_plot.setTitle(text, color=get_active_theme().text_muted, size="9pt")
 
-    def clear_absorbance_spectrum(self, summary_text: str) -> None:
+    def clear_spectrum_summary_text(self) -> None:
+        self._window.spectrum_plot.setTitle(None)
+
+    def clear_absorbance_spectrum(self) -> None:
         self.clear_spectrum_series_items()
         self._window.spectrum_current_point.setData([], [])
         self._window.spectrum_metric_point.setData([], [])
         self._window._absorbance_spectrum_dirty = True
-        self.set_spectrum_summary_text(summary_text)
+        self._window.spectrum_plot.setTitle(None)
 
     def clear_spectrum_series_items(self) -> None:
         window = self._window
