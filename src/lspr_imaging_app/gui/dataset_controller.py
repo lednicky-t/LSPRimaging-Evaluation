@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import os
 import shutil
 import threading
@@ -15,6 +16,7 @@ from lspr_imaging_app.domain.models import AreaRoiDetectionSettings, ImageDatase
 from lspr_imaging_app.gui.analysis_tasks import _ome_zarr_export_task
 from lspr_imaging_app.gui.ui_helpers import current_ome_zarr_compression_enabled
 from lspr_imaging_app.gui.worker import FunctionWorker
+from lspr_imaging_app.storage.measurement_export import ImagingMeasurementExportWriter
 from lspr_imaging_app.io.dataset import (
     DatasetLoadChoice,
     build_ome_zarr_export_folder_name,
@@ -229,10 +231,52 @@ class DatasetController:
             on_done=lambda: self._finish_load_dataset_from_folder(folder, on_done)
         )
 
+    def _close_measurement_export_writer(self) -> None:
+        """Close any measurement-export/backup writer left open from a
+        previous dataset, so its file isn't held open (or mixed with data
+        from the newly loaded dataset)."""
+        window = self.window
+        writer = getattr(window, "_measurement_export_writer", None)
+        if writer is not None:
+            try:
+                writer.close()
+            except Exception:
+                logging.getLogger("lspr_imaging_app.workflow").warning(
+                    "Failed to close measurement export writer", exc_info=True
+                )
+        window._measurement_export_writer = None
+        window._measurement_export_backed_up_absorbance = set()
+        window._measurement_export_backed_up_sensorgram = set()
+
+    def _open_measurement_export_writer_for_dataset(self) -> None:
+        """Always-on incremental spectra/sensorgram backup for the newly
+        loaded dataset - `analysis/measurement_backup.h5`, the shared
+        `lspr_measurement` HDF5 format (see
+        docs/imaging_measurement_export_format.md). Best-effort: a failure
+        here (e.g. read-only dataset folder) disables backup for this
+        session rather than blocking the dataset load."""
+        window = self.window
+        root = window._analysis_root()
+        if root is None:
+            return
+        try:
+            writer = ImagingMeasurementExportWriter(root / "measurement_backup.h5")
+            writer.write_roi_definitions(
+                window._state.area_rois, window._state.area_roi_groups, window._state.area_roi_arrays
+            )
+        except Exception:
+            logging.getLogger("lspr_imaging_app.workflow").warning(
+                "Failed to open measurement export writer - backup disabled for this session", exc_info=True
+            )
+            return
+        window._measurement_export_writer = writer
+
     def _finish_load_dataset_from_folder(self, folder: Path, on_done) -> None:
         window = self.window
         progress = getattr(window, "_report_startup_progress", None)
         dataset = window._state.dataset
+        self._close_measurement_export_writer()
+        self._open_measurement_export_writer_for_dataset()
         if callable(progress):
             progress(72, "Restoring analysis cache...")
         self._update_dataset_stack_indicator(dataset)
@@ -474,6 +518,7 @@ class DatasetController:
         # pre-load state so it can be garbage collected without restarting
         # the app. Nothing on disk is touched.
         window = self.window
+        self._close_measurement_export_writer()
         window._state.dataset = None
         window._record_map = {}
         window._record_key_by_path = {}

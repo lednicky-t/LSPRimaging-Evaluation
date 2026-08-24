@@ -437,6 +437,7 @@ class AnalysisController:
         request_id = self.window._sensorgram_request_id
         self.window._sensorgram_running = True
         self.window._sensorgram_running_signature = signature
+        self.window._sensorgram_running_roi_ids = selected_roi_ids
         import threading
 
         from lspr_imaging_app.gui.worker import FunctionWorker
@@ -542,6 +543,60 @@ class AnalysisController:
             self.window._sensorgram_metric_values,
             summary_text=f"{self.window._analysis_metric_label()} | Calculating {self.window._sensorgram_spectral_cube_indices.size}/{total_count} spectral cubes",
         )
+        self._backup_sensorgram_point(point)
+
+    def _backup_sensorgram_point(self, point) -> None:
+        """Append this sensorgram point to the measurement-export/backup
+        file, if one is open for the current dataset. Only backs up a
+        single-ROI selection - a combined/grouped multi-ROI trace isn't one
+        of the ROI-indexed sensorgram streams this format defines (see
+        docs/imaging_measurement_export_format.md), so those are skipped
+        rather than invented a new schema shape for. Deduplicates by
+        (roi_id, spectral_cube_index) so redisplaying an already-backed-up
+        cube (e.g. a cache hit) doesn't append a second row.
+        """
+        writer = getattr(self.window, "_measurement_export_writer", None)
+        if writer is None:
+            return
+        selected_roi_ids = getattr(self.window, "_sensorgram_running_roi_ids", None) or ()
+        if len(selected_roi_ids) != 1:
+            return
+        roi_id = int(selected_roi_ids[0])
+        cube_index = int(point.spectral_cube_index)
+        backed_up = self.window._measurement_export_backed_up_sensorgram
+        key = (roi_id, cube_index)
+        if key in backed_up:
+            return
+        if point.metric_value is None:
+            return
+        try:
+            writer.set_sensorgram_metric(
+                roi_id, metric_name=self.window._analysis_metric_key(), formula_key=self._roi_math_signature_elements()[2]
+            )
+            writer.append_sensorgram_point(
+                roi_id,
+                timestamp_utc_ms=self._acquisition_timestamp_ms_for_cube(cube_index),
+                metric_value=float(point.metric_value),
+            )
+        except Exception:
+            logging.getLogger("lspr_imaging_app.workflow").warning(
+                "Failed to append sensorgram point to measurement export backup", exc_info=True
+            )
+            return
+        backed_up.add(key)
+
+    def _acquisition_timestamp_ms_for_cube(self, spectral_cube_index: int) -> int:
+        """Real acquisition time for `spectral_cube_index` if the dataset
+        has per-image timing metadata loaded, otherwise the current wall
+        clock time as a best-effort fallback (still monotonically
+        increasing across a single analysis run, just not tied to the
+        original acquisition)."""
+        metadata = self._sensorgram_time_mode_metadata()
+        if metadata is not None:
+            timing = self._earliest_timing_by_cube_index(metadata).get(int(spectral_cube_index))
+            if timing is not None:
+                return int(timing.acquired_at_unix_ms)
+        return int(datetime.now().timestamp() * 1000)
 
     def on_sensorgram_ready(self, request_id: int, result) -> None:
         if request_id != self.window._sensorgram_request_id:
@@ -1559,6 +1614,47 @@ class AnalysisController:
         if self.window._pending_absorbance_spectrum_payload is not None:
             self.window._start_pending_absorbance_spectrum_refresh()
 
+    def _backup_absorbance_series(self, series_payloads: list[tuple[str, int, AbsorbanceSpectrumResult]]) -> None:
+        """Append each per-ROI absorbance spectrum to the measurement-export/
+        backup file, if one is open for the current dataset. Skips the
+        "Selection" fallback entry (a combined/whole-selection result, not a
+        real per-ROI trace) and deduplicates by (roi_id, spectral_cube_index)
+        so redisplaying an already-backed-up cube (e.g. a cache hit) doesn't
+        append a second row - see docs/imaging_measurement_export_format.md.
+        """
+        writer = getattr(self.window, "_measurement_export_writer", None)
+        if writer is None:
+            return
+        cube_index = self.window._current_spectral_cube()
+        if cube_index is None:
+            return
+        cube_index = int(cube_index)
+        backed_up = self.window._measurement_export_backed_up_absorbance
+        for label, roi_id, roi_result in series_payloads:
+            if label == "Selection":
+                continue
+            key = (int(roi_id), cube_index)
+            if key in backed_up:
+                continue
+            try:
+                writer.append_absorbance_spectrum(
+                    roi_id,
+                    wavelengths_nm=roi_result.wavelengths_nm,
+                    formula_values=roi_result.formula_values,
+                    sample_mean=roi_result.sample_mean,
+                    reference_mean=roi_result.reference_mean,
+                    cube_index=cube_index,
+                    timestamp_utc_ms=self._acquisition_timestamp_ms_for_cube(cube_index),
+                    formula_key=roi_result.formula_key,
+                    reduction_method=roi_result.reduction_method,
+                )
+            except Exception:
+                logging.getLogger("lspr_imaging_app.workflow").warning(
+                    "Failed to append absorbance spectrum to measurement export backup", exc_info=True
+                )
+                continue
+            backed_up.add(key)
+
     def _apply_absorbance_spectrum_result(self, result: AbsorbanceSpectrumResult) -> float | None:
         fit_started = time.perf_counter()
         selected_roi_ids = self.window._selected_spectrum_roi_ids()
@@ -1601,6 +1697,7 @@ class AnalysisController:
             fallback_id = int(selected_roi_ids[0]) if selected_roi_ids else 0
             series_payloads = [("Selection", fallback_id, result)]
         highlighted_ids = set(selected_roi_ids)
+        self._backup_absorbance_series(series_payloads)
 
         self.window._clear_spectrum_series_items()
         self.window.spectrum_current_point.setData([], [])

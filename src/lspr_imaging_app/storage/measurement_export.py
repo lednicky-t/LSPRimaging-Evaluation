@@ -1,0 +1,374 @@
+"""HDF5 spectra/sensorgram export and incremental backup for LSPRi eva.
+
+Writes into the shared `lspr_measurement` schema (`packages/lspr_io`),
+reusing the ROI-indexed groups introduced for LSPRimaging Acquisition in
+schema 6.4 and extended in 6.5 - see
+`apps/LSPRi/eva/docs/imaging_measurement_export_format.md` and
+`packages/lspr_io/src/lspr_io/schema.py`'s 6.4/6.5 changelog entries.
+
+No image pixel data is written here (images stay TIFF/OME-Zarr); this only
+covers per-ROI derived spectra and sensorgram (metric-over-time) traces,
+plus a descriptive mirror of the ROI definitions. The full ROI geometry -
+including any freeform mask - stays canonical in `analysis/roi_table.json`
+(see `storage/workspace.py`); the `roi_definitions` table written here is a
+thin, self-describing mirror, not a second source of truth.
+
+Datasets are created resizable and grown one row at a time, so a file this
+writer is actively appending to stays valid and readable if the app closes
+or crashes mid-run - the same property that makes sLSPR acq's HDF5 format
+usable as a live backup, not just a final export.
+
+Deliberately Qt-free (no imports from `gui/`): this module must be usable
+without a running Qt application, per this repo's GUI/science separation
+rule. Callers pass plain arrays/scalars, not `AbsorbanceSpectrumResult`/
+`SensorgramComputationResult` (those live in `domain/models.py` and
+`gui/worker.py` respectively, and the latter pulls in PyQt6 at import time)
+- the GUI layer converts to/from those at the call site.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from datetime import datetime
+from pathlib import Path
+from typing import Any
+
+import h5py
+import numpy as np
+
+from lspr_io import (
+    LSPR_MEASUREMENT_ROI_DEFINITIONS_COLUMNS,
+    LSPR_MEASUREMENT_ROI_DEFINITIONS_DATASET_NAME,
+    LSPR_PROCESSED_ABSORBANCE_SPECTRA_GROUP_NAME,
+    LSPR_PROCESSED_SENSORGRAM_GROUP_NAME,
+    create_roi_index_entry,
+    read_absorbance_spectra,
+    read_roi_definitions,
+    read_sensorgram,
+    standard_measurement_metadata,
+    upsert_table,
+    write_measurement_manifest_metadata,
+    write_measurement_root_metadata,
+)
+
+from lspr_imaging_app.domain.models import AreaRoi, AreaRoiGroup, RoiArrayGroup
+from lspr_imaging_app.version import APP_NAME, APP_VERSION
+
+
+def _opt(value: object) -> str:
+    """Empty string for None, str() otherwise - matches the `_opt` idiom
+    already used by LSPRi acq's writer for the same string-table encoding."""
+    return "" if value is None else str(value)
+
+
+def _array_position(roi_id: int, arrays: list[RoiArrayGroup]) -> tuple[str, str, str]:
+    """(array_group_id, row, col) for `roi_id`, derived from whichever
+    RoiArrayGroup lists it as a member - empty strings if it isn't part of
+    any array. Row/col come from the member's position in
+    `member_area_roi_ids` (row-major, per `cols`); AreaRoi itself has no
+    stored row/col field, so this is computed at export time only, not
+    written back onto the domain model."""
+    for array in arrays:
+        if roi_id in array.member_area_roi_ids:
+            index = array.member_area_roi_ids.index(roi_id)
+            cols = max(int(array.cols), 1)
+            return array.array_id, str(index // cols), str(index % cols)
+    return "", "", ""
+
+
+def _append_scalar(dataset: h5py.Dataset, value: object) -> None:
+    index = dataset.shape[0]
+    dataset.resize((index + 1,) + dataset.shape[1:])
+    dataset[index] = value
+
+
+def _append_row(dataset: h5py.Dataset, row: np.ndarray) -> None:
+    index = dataset.shape[0]
+    dataset.resize((index + 1,) + dataset.shape[1:])
+    dataset[index, :] = row
+
+
+class ImagingMeasurementExportWriter:
+    """Owns one open `lspr_measurement` HDF5 file used as LSPRi eva's
+    spectra/sensorgram export - and, since its datasets are resizable and
+    appended incrementally, also as a crash-safe backup during a long
+    analysis run.
+
+    Call `write_roi_definitions` whenever the ROI set is known or changes,
+    and `append_absorbance_spectrum`/`append_sensorgram_point` as each new
+    result becomes available.
+    """
+
+    def __init__(self, path: Path, *, experiment_name: str = "", started_at_utc: datetime | None = None) -> None:
+        self.path = Path(path)
+        self._handle = h5py.File(self.path, "w")
+        identity_kwargs = dict(
+            created_by=APP_NAME,
+            started_at_utc=started_at_utc or datetime.now(),
+            app_name=APP_NAME,
+            app_version=APP_VERSION,
+            experiment_name=experiment_name,
+        )
+        write_measurement_root_metadata(self._handle, **standard_measurement_metadata(**identity_kwargs))
+        manifest = self._handle.create_group("manifest")
+        write_measurement_manifest_metadata(
+            manifest,
+            **standard_measurement_metadata(**identity_kwargs),
+            extra_attrs={"manifest_kind": "measurement"},
+        )
+        self._processed = self._handle.create_group("processed")
+        self._sensorgram_groups: dict[str, h5py.Group] = {}
+        self._absorbance_groups: dict[str, h5py.Group] = {}
+
+    # -- ROI definitions: a thin, self-describing mirror ---------------------
+    # (full geometry, including any freeform mask, stays canonical in
+    # analysis/roi_table.json - see this module's docstring)
+
+    def write_roi_definitions(
+        self,
+        rois: list[AreaRoi],
+        groups: list[AreaRoiGroup] | None = None,
+        arrays: list[RoiArrayGroup] | None = None,
+    ) -> None:
+        group_id_by_roi_id: dict[int, str] = {}
+        for group in groups or []:
+            for roi_id in group.area_roi_ids:
+                group_id_by_roi_id[roi_id] = group.group_id
+        arrays = arrays or []
+
+        rows: list[list[str]] = []
+        for roi in rois:
+            array_group_id, array_row, array_col = _array_position(roi.area_roi_id, arrays)
+            rows.append(
+                [
+                    _opt(roi.area_roi_id),
+                    group_id_by_roi_id.get(roi.area_roi_id, ""),
+                    _opt(roi.center_x),
+                    _opt(roi.center_y),
+                    _opt(roi.sample_radius_px),
+                    _opt(roi.sample_diameter_px),
+                    _opt(roi.reference_inner_diameter_px),
+                    _opt(roi.reference_outer_diameter_px),
+                    roi.sample_color_hex or "",
+                    roi.reference_color_hex or "",
+                    roi.sample_geometry_type,
+                    roi.reference_geometry_type,
+                    roi.label or "",
+                    roi.notes or "",
+                    roi.created_by,
+                    array_group_id,
+                    array_row,
+                    array_col,
+                ]
+            )
+        upsert_table(
+            self._processed,
+            LSPR_MEASUREMENT_ROI_DEFINITIONS_DATASET_NAME,
+            rows,
+            LSPR_MEASUREMENT_ROI_DEFINITIONS_COLUMNS,
+        )
+
+        for roi in rois:
+            array_group_id, array_row, array_col = _array_position(roi.area_roi_id, arrays)
+            create_roi_index_entry(
+                self._handle,
+                str(roi.area_roi_id),
+                definition_attrs={
+                    "name": roi.label or "",
+                    "sample_geometry_type": roi.sample_geometry_type,
+                    "reference_geometry_type": roi.reference_geometry_type,
+                    "array_group_id": array_group_id,
+                    "array_row": array_row,
+                    "array_col": array_col,
+                    "notes": roi.notes or "",
+                    "created_by": roi.created_by,
+                },
+            )
+
+    # -- sensorgram: one tracked metric over time, per ROI --------------------
+
+    def _sensorgram_group(self, roi_id: str) -> h5py.Group:
+        group = self._sensorgram_groups.get(roi_id)
+        if group is not None:
+            return group
+        parent = self._processed.require_group(LSPR_PROCESSED_SENSORGRAM_GROUP_NAME)
+        group = parent.require_group(roi_id)
+        if "timestamp_utc_ms" not in group:
+            group.create_dataset("timestamp_utc_ms", shape=(0,), maxshape=(None,), dtype=np.int64, chunks=True)
+        if "metric_value" not in group:
+            group.create_dataset("metric_value", shape=(0,), maxshape=(None,), dtype=np.float64, chunks=True)
+        self._sensorgram_groups[roi_id] = group
+        create_roi_index_entry(
+            self._handle,
+            roi_id,
+            links={"sensorgram": f"/processed/{LSPR_PROCESSED_SENSORGRAM_GROUP_NAME}/{roi_id}"},
+        )
+        return group
+
+    def set_sensorgram_metric(self, roi_id: str | int, *, metric_name: str, formula_key: str) -> None:
+        """Record which metric/formula this ROI's sensorgram trace tracks.
+        Written once as group-level attrs (not a per-row column) - this
+        assumes the tracked metric/formula doesn't change mid-run for a
+        given ROI's backup stream. Switching metrics mid-analysis should
+        start a new roi_id/run rather than mixing metrics in one trace.
+        """
+        group = self._sensorgram_group(str(roi_id))
+        group.attrs["metric_name"] = metric_name
+        group.attrs["formula_key"] = formula_key
+
+    def append_sensorgram_point(self, roi_id: str | int, *, timestamp_utc_ms: int, metric_value: float) -> None:
+        group = self._sensorgram_group(str(roi_id))
+        _append_scalar(group["timestamp_utc_ms"], int(timestamp_utc_ms))
+        _append_scalar(group["metric_value"], float(metric_value))
+
+    # -- absorbance spectra: the full per-wavelength trace over time, per ROI -
+
+    def _absorbance_group(self, roi_id: str, *, n_wavelengths: int) -> h5py.Group:
+        group = self._absorbance_groups.get(roi_id)
+        if group is not None:
+            return group
+        parent = self._processed.require_group(LSPR_PROCESSED_ABSORBANCE_SPECTRA_GROUP_NAME)
+        group = parent.require_group(roi_id)
+        for name in ("cube_index", "timestamp_utc_ms"):
+            if name not in group:
+                group.create_dataset(name, shape=(0,), maxshape=(None,), dtype=np.int64, chunks=True)
+        for name in ("absorbance", "sample_mean", "reference_mean"):
+            if name not in group:
+                group.create_dataset(
+                    name, shape=(0, n_wavelengths), maxshape=(None, n_wavelengths), dtype=np.float32, chunks=True
+                )
+        self._absorbance_groups[roi_id] = group
+        create_roi_index_entry(
+            self._handle,
+            roi_id,
+            links={"absorbance_spectra": f"/processed/{LSPR_PROCESSED_ABSORBANCE_SPECTRA_GROUP_NAME}/{roi_id}"},
+        )
+        return group
+
+    def append_absorbance_spectrum(
+        self,
+        roi_id: str | int,
+        *,
+        wavelengths_nm: np.ndarray,
+        formula_values: np.ndarray,
+        sample_mean: np.ndarray,
+        reference_mean: np.ndarray,
+        cube_index: int,
+        timestamp_utc_ms: int,
+        formula_key: str = "absorbance",
+        reduction_method: str = "mean",
+    ) -> None:
+        """Append one ROI's full per-wavelength spectrum at one point in
+        time. `formula_values` is whatever `formula_key` actually computed
+        (absorbance by default - see processing/analysis.py:formula_value);
+        `sample_mean`/`reference_mean` are the pre-combination reduced pixel
+        values, kept alongside it (not discarded) so the combination can be
+        audited or recomputed later - mirroring this repo's "raw data is
+        sacred" rule applied to this app's own reduced-per-wavelength data.
+        """
+        wavelengths_nm = np.asarray(wavelengths_nm, dtype=np.float64)
+        group = self._absorbance_group(str(roi_id), n_wavelengths=len(wavelengths_nm))
+        if "wavelengths_nm" not in group:
+            group.create_dataset("wavelengths_nm", data=wavelengths_nm)
+        group.attrs["formula_key"] = formula_key
+        group.attrs["reduction_method"] = reduction_method
+        _append_scalar(group["cube_index"], int(cube_index))
+        _append_scalar(group["timestamp_utc_ms"], int(timestamp_utc_ms))
+        _append_row(group["absorbance"], np.asarray(formula_values, dtype=np.float32))
+        _append_row(group["sample_mean"], np.asarray(sample_mean, dtype=np.float32))
+        _append_row(group["reference_mean"], np.asarray(reference_mean, dtype=np.float32))
+
+    # -- lifecycle -------------------------------------------------------------
+
+    def flush(self) -> None:
+        self._handle.flush()
+
+    def close(self) -> None:
+        self._handle.close()
+
+    def __enter__(self) -> "ImagingMeasurementExportWriter":
+        return self
+
+    def __exit__(self, *exc_info: object) -> None:
+        self.close()
+
+
+@dataclass(slots=True)
+class RoiDefinitionRecord:
+    """Plain read-side mirror of one `processed/roi_definitions` row - the
+    descriptive subset written by `write_roi_definitions`, not the full
+    `AreaRoi` geometry (which stays canonical in `analysis/roi_table.json`).
+    """
+
+    area_roi_id: int
+    group_id: str
+    center_x: float
+    center_y: float
+    sample_geometry_type: str
+    reference_geometry_type: str
+    label: str
+    notes: str
+    created_by: str
+    array_group_id: str
+    array_row: int | None
+    array_col: int | None
+
+
+def read_roi_definition_records(path: Path) -> list[RoiDefinitionRecord]:
+    with h5py.File(path, "r") as handle:
+        rows = read_roi_definitions(handle)
+    records: list[RoiDefinitionRecord] = []
+    for row in rows:
+        records.append(
+            RoiDefinitionRecord(
+                area_roi_id=int(row.get("area_roi_id") or 0),
+                group_id=row.get("group_id", ""),
+                center_x=float(row.get("center_x") or 0.0),
+                center_y=float(row.get("center_y") or 0.0),
+                sample_geometry_type=row.get("sample_geometry_type") or "circle",
+                reference_geometry_type=row.get("reference_geometry_type") or "annulus",
+                label=row.get("label", ""),
+                notes=row.get("notes", ""),
+                created_by=row.get("created_by") or "user",
+                array_group_id=row.get("array_group_id", ""),
+                array_row=int(row["array_row"]) if row.get("array_row") else None,
+                array_col=int(row["array_col"]) if row.get("array_col") else None,
+            )
+        )
+    return records
+
+
+def read_sensorgram_trace(path: Path, roi_id: str | int) -> dict[str, Any]:
+    """Plain dict of arrays/attrs for one ROI's sensorgram trace
+    (`timestamp_utc_ms`, `metric_value`, `metric_name`, `formula_key`) - the
+    GUI layer wraps this into a `SensorgramComputationResult` if needed."""
+    with h5py.File(path, "r") as handle:
+        return read_sensorgram(handle, str(roi_id))
+
+
+def read_absorbance_spectra_trace(path: Path, roi_id: str | int) -> dict[str, Any]:
+    """Plain dict of arrays for one ROI's absorbance-spectrum-over-time
+    (`wavelengths_nm`, `cube_index`, `timestamp_utc_ms`, `absorbance`,
+    `sample_mean`, `reference_mean`, `formula_key`, `reduction_method`) - the
+    GUI layer wraps this into `AbsorbanceSpectrumResult` entries if needed.
+
+    `sample_mean`/`reference_mean` are LSPRi-eva-specific additions on top
+    of the generic `read_absorbance_spectra` shape shared with LSPRi acq
+    (which only has `cube_index`/`absorbance`/`wavelengths_nm`), so they're
+    read directly here rather than through the shared `lspr_io` helper.
+    """
+    with h5py.File(path, "r") as handle:
+        result = read_absorbance_spectra(handle, str(roi_id))
+        processed_group = handle.get("processed")
+        absorbance_root = processed_group.get(LSPR_PROCESSED_ABSORBANCE_SPECTRA_GROUP_NAME) if processed_group is not None else None
+        group = absorbance_root.get(str(roi_id)) if absorbance_root is not None else None
+        if group is not None:
+            if "sample_mean" in group:
+                result["sample_mean"] = group["sample_mean"][...]
+            if "reference_mean" in group:
+                result["reference_mean"] = group["reference_mean"][...]
+            for attr_name in ("formula_key", "reduction_method"):
+                if attr_name in group.attrs:
+                    value = group.attrs[attr_name]
+                    result[attr_name] = value.decode("utf-8") if isinstance(value, bytes) else value
+        return result

@@ -226,6 +226,24 @@ class RoiTableController:
     def _on_roi_table_write_done(self, path: Path, signature: str) -> None:
         self.window._last_saved_roi_table_signature = signature
         self.window._last_saved_roi_table_path = path
+        writer = getattr(self.window, "_measurement_export_writer", None)
+        if writer is not None:
+            # Refresh the backup file's thin roi_definitions mirror at the
+            # same already-debounced cadence as the roi_table.json write
+            # this just finished - not on every ROI edit directly, to avoid
+            # adding a synchronous HDF5 write to that hot path (see
+            # _save_roi_table_snapshot's docstring on why that write is
+            # itself debounced/backgrounded).
+            try:
+                writer.write_roi_definitions(
+                    self.window._state.area_rois,
+                    self.window._state.area_roi_groups,
+                    self.window._state.area_roi_arrays,
+                )
+            except Exception:
+                logging.getLogger("lspr_imaging_app.workflow").warning(
+                    "Failed to refresh measurement export roi_definitions", exc_info=True
+                )
         self._finish_roi_table_write()
 
     def _on_roi_table_write_failed(self, path: Path, message: str) -> None:
