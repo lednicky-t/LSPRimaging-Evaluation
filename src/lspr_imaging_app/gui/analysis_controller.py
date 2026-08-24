@@ -1088,7 +1088,7 @@ class AnalysisController:
         # regardless of this flag would silently diverge from the slow path.
         exclude_marked_pixels = bool(getattr(self.window._state.area_roi_settings, "ignore_marked_pixels", False))
 
-        measurement_payload: list[tuple[float, np.ndarray | None, np.ndarray | None]] = []
+        measurement_payload: list[tuple[float, np.ndarray | None, np.ndarray | None, object]] = []
         affine_matrices: list[np.ndarray | None] = []
         first_record = None
         for wavelength in self.window._wavelength_values:
@@ -1120,6 +1120,7 @@ class AnalysisController:
                     float(wavelength),
                     affine_matrix,
                     external_mask,
+                    record,
                 )
             )
             affine_matrices.append(affine_matrix)
@@ -1157,7 +1158,6 @@ class AnalysisController:
             self.window._state.dataset,
             int(spectral_cube_index),
             measurement_payload,
-            dict(self.window._record_map),
             deepcopy(selected_source_rois),
             selected_roi_ids,
             float(self.window._state.area_roi_settings.reference_inner_radius_px),
@@ -1165,6 +1165,14 @@ class AnalysisController:
             box,
             deepcopy(preprocessing),
             raw_shape,
+            # Shared with the slow-path ROI mask cache below - the cache key
+            # folds in patch shape/origin (see _absorbance_roi_mask_cache_key)
+            # so scoped fast-path masks can never collide with full-image
+            # slow-path ones; sharing the dict just means both paths draw
+            # from the same size-capped budget instead of needing a second one.
+            self.window._absorbance_roi_mask_cache,
+            self.window._analysis_cache_lock,
+            int(self.window.ABSORBANCE_ROI_MASK_CACHE_SIZE),
             mask_state,
             background_mask_settings,
         )

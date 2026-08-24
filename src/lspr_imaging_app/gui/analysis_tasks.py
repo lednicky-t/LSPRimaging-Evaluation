@@ -552,12 +552,20 @@ def _absorbance_roi_mask_cache_key(
     affine_matrix: np.ndarray | None,
     reference_inner_radius_px: float,
     reference_outer_radius_px: float,
+    patch_origin_xy: tuple[int, int] = (0, 0),
 ) -> tuple[object, ...]:
+    """`patch_origin_xy` only matters for the fast/zarr path, where masks are
+    local to a scoped patch rather than the full image (see
+    _selected_roi_masks_for_spectrum) - two same-shaped patches at different
+    offsets are not the same mask. The slow/full-image path never passes it
+    (always (0, 0), i.e. no offset), so its keys are unaffected.
+    """
     affine_signature = None
     if affine_matrix is not None:
         affine_signature = tuple(round(float(value), 6) for value in np.asarray(affine_matrix, dtype=np.float64).ravel())
     return (
         tuple(int(value) for value in image_shape[:2]),
+        (int(patch_origin_xy[0]), int(patch_origin_xy[1])),
         tuple(int(roi_id) for roi_id in selected_roi_ids),
         tuple(
             (
@@ -904,8 +912,7 @@ def _absorbance_spectrum_task(
 def _absorbance_spectrum_fast_task(
     dataset,
     spectral_cube_index: int,
-    measurement_payload: list[tuple[float, np.ndarray | None, np.ndarray | None]],
-    record_map: dict,
+    measurement_payload: list[tuple[float, np.ndarray | None, np.ndarray | None, object | None]],
     selected_rois: list[AreaRoi],
     selected_roi_ids: tuple[int, ...],
     reference_inner_radius_px: float,
@@ -913,6 +920,9 @@ def _absorbance_spectrum_fast_task(
     box: tuple[int, int, int, int],
     preprocessing,
     raw_shape: tuple[int, int],
+    roi_mask_cache,
+    roi_mask_cache_lock,
+    roi_mask_cache_max_size: int,
     mask_state=None,
     background_mask_settings=None,
     cancel_event: threading.Event | None = None,
@@ -946,6 +956,18 @@ def _absorbance_spectrum_fast_task(
 
     Supports multiple ROIs, chromatic correction, and external/ignored-pixel
     masks either way.
+
+    `roi_mask_cache`/`roi_mask_cache_lock`/`roi_mask_cache_max_size` mirror
+    _absorbance_spectrum_task's own ROI mask cache: with many selected ROIs
+    (e.g. a 170-spot array), rebuilding every sample/reference circle mask
+    from scratch for every wavelength of every spectral cube is real,
+    avoidable work when the ROI geometry, patch box, and per-wavelength
+    chromatic transform are unchanged run to run (the common case when
+    chromatic correction is off, since then affine_matrix is None for every
+    wavelength and the box is the same for every spectral cube too) - the
+    cache key folds in the patch's own shape and origin (see
+    _absorbance_roi_mask_cache_key) so a scoped/local mask is never confused
+    with a full-image one.
     """
     from lspr_imaging_app.processing.preprocess import (
         apply_preprocessing,
@@ -970,14 +992,54 @@ def _absorbance_spectrum_fast_task(
     }
     total = max(len(measurement_payload), 1)
 
+    def _fast_roi_mask_cache_entry(affine_matrix_local: np.ndarray | None) -> dict[str, object]:
+        """Same idea as _absorbance_spectrum_task's _build_roi_mask_cache: one
+        cache entry per (patch shape/origin, ROI set, affine matrix) holds
+        both the combined-selection mask and every individual ROI's own
+        sample/reference masks, so a run with many selected ROIs (e.g. a
+        170-spot array) rasterizes each ROI's circle/annulus once per unique
+        affine transform instead of once per wavelength per spectral cube.
+        """
+        cache_key = _absorbance_roi_mask_cache_key(
+            (patch_h, patch_w), selected_rois, selected_roi_ids, affine_matrix_local,
+            reference_inner_radius_px, reference_outer_radius_px, patch_origin_xy=(x0, y0),
+        )
+        with roi_mask_cache_lock:
+            cached_value = roi_mask_cache.get(cache_key) if hasattr(roi_mask_cache, "get") else None
+            if cached_value is not None:
+                try:
+                    roi_mask_cache.move_to_end(cache_key)
+                except Exception:
+                    pass
+                return cached_value
+        combined_roi_mask, combined_reference_mask = _selected_roi_masks_for_spectrum(
+            (patch_h, patch_w), selected_rois, selected_roi_ids, reference_inner_radius_px, reference_outer_radius_px,
+            affine_matrix_local, patch_origin_xy=(x0, y0),
+        )
+        per_roi_masks: dict[int, tuple[np.ndarray, np.ndarray]] = {}
+        for roi in selected_rois:
+            per_roi_masks[int(roi.area_roi_id)] = _selected_roi_masks_for_spectrum(
+                (patch_h, patch_w), [roi], (int(roi.area_roi_id),), reference_inner_radius_px, reference_outer_radius_px,
+                affine_matrix_local, patch_origin_xy=(x0, y0),
+            )
+        cached_value = {"combined": (combined_roi_mask, combined_reference_mask), "per_roi": per_roi_masks}
+        with roi_mask_cache_lock:
+            roi_mask_cache[cache_key] = cached_value
+            try:
+                roi_mask_cache.move_to_end(cache_key)
+            except Exception:
+                pass
+            while len(roi_mask_cache) > max(int(roi_mask_cache_max_size), 1):
+                roi_mask_cache.popitem(last=False)
+        return cached_value
+
     def _load_wl(item: tuple) -> tuple:
-        index, (wavelength_nm, affine_matrix, external_mask) = item
+        index, (wavelength_nm, affine_matrix, external_mask, record) = item
         empty_per_roi = {
             int(roi.area_roi_id): (float("nan"), float("nan"), float("nan"), 0, 0) for roi in selected_rois
         }
         if cancel_event is not None and cancel_event.is_set():
             return (index, float(wavelength_nm), (float("nan"), float("nan"), float("nan"), 0, 0), empty_per_roi)
-        record = record_map.get((int(spectral_cube_index), float(wavelength_nm)))
         if record is None:
             return (index, float(wavelength_nm), (float("nan"), float("nan"), float("nan"), 0, 0), empty_per_roi)
 
@@ -1012,11 +1074,15 @@ def _absorbance_spectrum_fast_task(
             sample_x: float | None = None,
             sample_y: float | None = None,
             extra_exclude_mask: np.ndarray | None = None,
+            precomputed_masks: tuple[np.ndarray, np.ndarray] | None = None,
         ) -> tuple[float, float, float, int, int]:
-            roi_mask, reference_mask = _selected_roi_masks_for_spectrum(
-                (patch_h, patch_w), rois_subset, ids_subset, reference_inner_radius_px, reference_outer_radius_px,
-                affine_matrix, patch_origin_xy=(x0, y0),
-            )
+            if precomputed_masks is not None:
+                roi_mask, reference_mask = precomputed_masks
+            else:
+                roi_mask, reference_mask = _selected_roi_masks_for_spectrum(
+                    (patch_h, patch_w), rois_subset, ids_subset, reference_inner_radius_px, reference_outer_radius_px,
+                    affine_matrix, patch_origin_xy=(x0, y0),
+                )
             if extra_exclude_mask is not None:
                 # Keeps a neighboring selected ROI's sample pixels out of THIS
                 # roi's reference ring - see _absorbance_spectrum_task for the
@@ -1050,25 +1116,27 @@ def _absorbance_spectrum_fast_task(
                 )
             return formula_value(sm, rm, formula_key), sm, rm, int(sample_pixels.size), int(reference_pixels.size)
 
+        mask_cache_entry = _fast_roi_mask_cache_entry(affine_matrix)
+
         # Union of every selected ROI's own sample area, used only for the
         # reference-ring exclusion above - not for pooling pixels. With one
         # selected ROI this is unnecessary (its own mask already excludes
         # itself), so it's skipped.
         all_selected_sample_mask = None
         if len(selected_rois) > 1:
-            all_selected_sample_mask, _unused_reference_mask = _selected_roi_masks_for_spectrum(
-                (patch_h, patch_w), selected_rois, selected_roi_ids, reference_inner_radius_px, reference_outer_radius_px,
-                affine_matrix, patch_origin_xy=(x0, y0),
-            )
+            all_selected_sample_mask, _unused_reference_mask = mask_cache_entry["combined"]  # type: ignore[index]
 
         # Sample and reference ROIs are always reduced to one absorbance value
         # per ROI, independently - never by pooling pixels from multiple ROIs
         # first (see _absorbance_spectrum_task for the full reasoning). The
         # "combined" value below, used when several ROIs are selected
         # together, is the average of these per-ROI absorbance values.
+        per_roi_masks = mask_cache_entry["per_roi"]  # type: ignore[index]
         per_roi = {
             int(roi.area_roi_id): _means_for(
-                [roi], (int(roi.area_roi_id),), roi.center_x, roi.center_y, extra_exclude_mask=all_selected_sample_mask
+                [roi], (int(roi.area_roi_id),), roi.center_x, roi.center_y,
+                extra_exclude_mask=all_selected_sample_mask,
+                precomputed_masks=per_roi_masks[int(roi.area_roi_id)],
             )
             for roi in selected_rois
         }

@@ -62,7 +62,17 @@ def fit_absorbance_curve(
     x = x[order]
     y = y[order]
 
-    effective_order = min(max(int(poly_order), 1), max(int(x.size) - 1, 1))
+    # Capped at half the point count, not (point count - 1): letting order
+    # approach the point count turns the fit into an (near-)exact
+    # interpolation through every point, noise included, which for a
+    # polynomial means wild oscillation - worst right at the ends of the
+    # range. Since the peak/centroid search below always considers x_min/
+    # x_max as fallback candidates, a large oscillation spike at one edge can
+    # outscore the real peak and get reported as the metric, landing the
+    # "peak" or "centroid" at the edge of the fitted window instead of near
+    # the actual feature. Halving the cap keeps enough residual points for
+    # the fit to average out noise instead of chasing it.
+    effective_order = min(max(int(poly_order), 1), max(int(x.size) // 2, 1))
     polynomial = np.polynomial.Polynomial.fit(x, y, effective_order).convert()
     x_min = float(np.min(x))
     x_max = float(np.max(x))
