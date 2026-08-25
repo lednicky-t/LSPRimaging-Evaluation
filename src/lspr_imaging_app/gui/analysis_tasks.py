@@ -1259,6 +1259,7 @@ def _sensorgram_metric_task(
     total_input_count = len(spectral_cube_payloads_or_spectral_cubes) if hasattr(spectral_cube_payloads_or_spectral_cubes, "__len__") else 0
     prep_seconds = 0.0
     fit_seconds = 0.0
+    prep_cancelled = False
     if spectral_cube_payload_builder is not None:
         spectral_cubes = [int(spectral_cube_index) for spectral_cube_index in spectral_cube_payloads_or_spectral_cubes]
         total_input_count = len(spectral_cubes)
@@ -1282,15 +1283,13 @@ def _sensorgram_metric_task(
             future_map = {executor.submit(spectral_cube_payload_builder, int(spectral_cube_index)): int(spectral_cube_index) for spectral_cube_index in spectral_cubes}
             for future in as_completed(future_map):
                 spectral_cube_index = int(future_map[future])
-                if cancel_event is not None and cancel_event.is_set():
-                    return SensorgramComputationResult(
-                        spectral_cube_indices=np.asarray([], dtype=np.int32),
-                        metric_values=np.asarray([], dtype=np.float64),
-                        metric_signal=np.asarray([], dtype=np.float64),
-                        completed_count=len(built_payloads),
-                        total_count=total_input_count,
-                        cancelled=True,
-                    )
+                # Always collect this future first - as_completed only
+                # yields it once it's already finished, so this is free (no
+                # extra wait), and skipping it would throw away completed
+                # work purely because of scheduling luck (many builder
+                # threads can finish before the main thread even reaches its
+                # first loop iteration). The cancel check below only decides
+                # whether to keep waiting for *further*, not-yet-done cubes.
                 payload = future.result()
                 if payload is not None:
                     built_payloads.append((spectral_cube_index, payload))
@@ -1300,6 +1299,22 @@ def _sensorgram_metric_task(
                         int(round((completed / max(total_input_count, 1)) * 20.0)),
                         f"Preparing sensorgram {completed}/{total_input_count} spectral cubes",
                     )
+                if cancel_event is not None and cancel_event.is_set():
+                    # Stop waiting for/loading more cubes, but keep what's
+                    # already in `built_payloads` - each already paid its
+                    # (usually dominant) image I/O cost, so fitting them
+                    # afterward is cheap and would otherwise be wasted.
+                    # Previously this returned empty arrays unconditionally
+                    # as soon as a cancel was seen, which threw away every
+                    # already-loaded cube whenever Stop landed during this
+                    # prep phase - the display had nothing to show and
+                    # analysis_controller.py's per-point backup (which
+                    # drives HDF5 export) never got a single point to
+                    # persist, so Stop could make export produce an
+                    # essentially empty file even after real work was done.
+                    prep_cancelled = True
+                    executor.shutdown(wait=False, cancel_futures=True)
+                    break
         prep_seconds = time.perf_counter() - prep_started
         spectral_cube_payloads = sorted(built_payloads, key=lambda item: item[0])
     else:
@@ -1313,7 +1328,11 @@ def _sensorgram_metric_task(
     compute_started = time.perf_counter()
 
     for index, (spectral_cube_index, payload) in enumerate(spectral_cube_payloads, start=1):
-        if cancel_event is not None and cancel_event.is_set():
+        # `prep_cancelled` means `spectral_cube_payloads` is already the
+        # smaller, already-fully-loaded batch prep stopped early with - run
+        # that fixed batch to completion rather than re-triggering on the
+        # same (still-set) cancel_event again here.
+        if not prep_cancelled and cancel_event is not None and cancel_event.is_set():
             return SensorgramComputationResult(
                 spectral_cube_indices=np.asarray(spectral_cube_indices, dtype=np.int32),
                 metric_values=np.asarray(metric_values, dtype=np.float64),
@@ -1341,7 +1360,13 @@ def _sensorgram_metric_task(
             _active_task = task_fn if task_fn is not None else _absorbance_spectrum_task
             spectrum = _active_task(
                 *payload,
-                cancel_event=cancel_event,
+                # None (not `cancel_event`) once prep already decided to
+                # finish this batch - `cancel_event` is already set, and
+                # this task (and the per-wavelength loaders inside it) bail
+                # out to empty/NaN results as soon as they see a set event,
+                # which would silently turn every cube in the "finish it"
+                # batch back into nothing to show or back up.
+                cancel_event=None if prep_cancelled else cancel_event,
                 progress_callback=spectral_cube_progress_callback,
                 reduction_method=reduction_method,
                 trimmed_mean_fraction=trimmed_mean_fraction,
@@ -1349,7 +1374,7 @@ def _sensorgram_metric_task(
             )
             if spectral_cube_result_cache_store is not None:
                 spectral_cube_result_cache_store(spectral_cube_index, spectrum)
-        if cancel_event is not None and cancel_event.is_set():
+        if not prep_cancelled and cancel_event is not None and cancel_event.is_set():
             return SensorgramComputationResult(
                 spectral_cube_indices=np.asarray(spectral_cube_indices, dtype=np.int32),
                 metric_values=np.asarray(metric_values, dtype=np.float64),
@@ -1404,7 +1429,10 @@ def _sensorgram_metric_task(
         prep_seconds=prep_seconds,
         fit_seconds=fit_seconds,
         total_seconds=time.perf_counter() - task_started,
-        cancelled=False,
+        # `prep_cancelled` means the loop above ran to completion, but only
+        # over the smaller batch prep managed to load before Stop was
+        # pressed - still a stopped run, not a normal full completion.
+        cancelled=prep_cancelled,
     )
 
 
