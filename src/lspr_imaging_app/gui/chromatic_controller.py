@@ -547,6 +547,35 @@ class ChromaticController:
         if status_text:
             window._set_status_text(status_text)
 
+    def _finalize_seeded_landmarks(self) -> None:
+        """Lighter counterpart to finalize_landmark_edit(), used only by the
+        automatic default-landmark seeding in
+        _seed_chromatic_landmarks_for_current_image.
+
+        Filling in placeholder markers for a newly-viewed image the user
+        hasn't touched yet is passive bookkeeping, not a deliberate edit -
+        it must not disable an already-fitted correction model (built from
+        *other* images' real landmarks, unaffected by a new image's
+        placeholder points) or wipe the absorbance-spectrum/sensorgram
+        cache. That cache is already correctly scoped per (spectral cube,
+        wavelength, ROI, chromatic transform) via _roi_absorbance_signature
+        - a real chromatic change already invalidates just the entries it
+        affects by giving them a new signature, so a full clear here was
+        never needed for correctness, only for the deliberate-edit case
+        finalize_landmark_edit handles.
+
+        Previously this path called finalize_landmark_edit() too, which
+        meant simply navigating to a new spectral cube silently cleared
+        every other cube's already-computed spectrum from the cache (so it
+        never showed instantly on revisiting) and could silently disable
+        chromatic correction entirely, purely from viewing a new image.
+        """
+        window = self.window
+        window._update_roi_overlays()
+        window._update_ignore_mask_overlay()
+        window._update_landmark_overlays()
+        window._schedule_processing_state_save()
+
     def sync_current_feature_selection(self) -> None:
         window = self.window
         if not self.is_sample_image_key(window._current_image_key):
@@ -1676,7 +1705,7 @@ class ChromaticController:
             self.upsert_current_landmark(feature_id, point, clear_models=False)
             changed = True
         if changed:
-            self.finalize_landmark_edit()
+            self._finalize_seeded_landmarks()
             self.window._set_status_text(
                 f"Seeded missing reference points for {image_key[1]:g} nm from the nearest marked sample image."
             )
