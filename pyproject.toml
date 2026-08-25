@@ -8,11 +8,17 @@ description = "LSPR imaging offline evaluation application."
 readme = "README.md"
 requires-python = ">=3.12"
 dynamic = ["version"]
+# Version bounds follow the pinning policy in CLAUDE.md ("Dependency Pinning"):
+# floor = currently tested version, ceiling = next breaking-change boundary.
+# imagecodecs and tifffile use calendar versioning (YYYY.M.D), so their
+# ceiling is "next year" rather than "next major". ome-zarr, numcodecs,
+# scikit-image, and pyqtgraph are pre-1.0 (API can break on any minor
+# release), hence their tight "<0.N+1"/"<0.15" ceilings instead of "<1".
 dependencies = [
-    "h5py",
-    "numpy",
-    "pydantic>=2",
-    "Pillow",
+    "h5py>=3.16,<4",
+    "numpy>=2.4,<3",
+    "pydantic>=2,<3",
+    "Pillow>=12.2,<13",
     "PyQt6>=6.11,<7",
     # PyQt6-sip is normally just a transitive dependency of PyQt6, but 13.11.1
     # on Python 3.14 has a reproducible access-violation crash (0xC0000005,
@@ -20,15 +26,15 @@ dependencies = [
     # loaded - fixed in 13.12.0. Pinned explicitly so a fresh install doesn't
     # silently resolve back to a known-bad version.
     "PyQt6-sip>=13.12.0",
-    "imagecodecs",
-    "ome-zarr",
-    "numcodecs",
-    "pyqtgraph",
-    "scikit-image",
-    "scipy",
-    "opencv-python-headless",
-    "tifffile",
-    "lucide",
+    "imagecodecs>=2026.6.6,<2027",
+    "ome-zarr>=0.17,<0.18",
+    "numcodecs>=0.16,<0.17",
+    "pyqtgraph>=0.14,<0.15",
+    "scikit-image>=0.26,<0.27",
+    "scipy>=1.17,<2",
+    "opencv-python-headless>=5.0,<6",
+    "tifffile>=2026.5.15,<2027",
+    "lucide>=1.1,<2",
     "lspr-ui>=0.1.0",
     "lspr-core>=0.1.0",
     "lspr-io>=0.1.0",
