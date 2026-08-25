@@ -1,7 +1,26 @@
 from __future__ import annotations
 
-import logging
 import os
+
+# Must run before numpy/scipy are imported anywhere in this process (their
+# BLAS/LAPACK backend, OpenBLAS here - see numpy.show_config() - reads these
+# once at load time). Without this, OpenBLAS spins up its own internal
+# worker threads (up to MAX_THREADS=24) for every matmul; when several of
+# our own analysis worker threads (see analysis_tasks.py's per-wavelength
+# ThreadPoolExecutor) call into a tiny numpy `@` matmul at the same moment
+# (chromatic.py's apply_affine_to_points, used while building per-ROI masks),
+# those concurrent entries into OpenBLAS's own thread pool can deadlock on
+# Windows - reproduced via py-spy dump: multiple threads stuck forever inside
+# `design @ affine_matrix.T`, all "idle" (not spinning, genuinely blocked).
+# Pinning BLAS to 1 thread removes that inner layer of parallelism - the
+# right fix since we already parallelize at the Python thread level, and
+# each individual matmul here is on a handful of points anyway (no benefit
+# from BLAS's own threading regardless).
+os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
+os.environ.setdefault("OMP_NUM_THREADS", "1")
+os.environ.setdefault("MKL_NUM_THREADS", "1")
+
+import logging
 import sys
 import threading
 from datetime import datetime
@@ -446,6 +465,9 @@ def _apply_ui_scale_factor() -> None:
 
 
 def main() -> None:
+    from lspr_imaging_app.win_job_object import enable_kill_children_on_exit
+
+    enable_kill_children_on_exit()
     set_windows_app_user_model_id(APP_ID_LSPRI_EVALUATION)
     _apply_ui_scale_factor()
     log_path = _configure_logging()
