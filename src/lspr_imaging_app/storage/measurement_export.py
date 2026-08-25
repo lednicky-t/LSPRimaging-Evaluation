@@ -205,16 +205,27 @@ class ImagingMeasurementExportWriter:
         )
         return group
 
-    def set_sensorgram_metric(self, roi_id: str | int, *, metric_name: str, formula_key: str) -> None:
+    def set_sensorgram_metric(
+        self, roi_id: str | int, *, metric_name: str, formula_key: str, combined_roi_ids: str = ""
+    ) -> None:
         """Record which metric/formula this ROI's sensorgram trace tracks.
         Written once as group-level attrs (not a per-row column) - this
         assumes the tracked metric/formula doesn't change mid-run for a
         given ROI's backup stream. Switching metrics mid-analysis should
         start a new roi_id/run rather than mixing metrics in one trace.
+
+        `combined_roi_ids`, if given, is a comma-separated list of the real
+        ROI ids a multi-ROI-selection trace is a combination of - written
+        when `roi_id` is a synthetic "combined_..." key rather than a real
+        ROI, so the trace stays self-describing without inventing a new
+        top-level schema shape for it (see `_backup_sensorgram_point` in
+        `gui/analysis_controller.py`).
         """
         group = self._sensorgram_group(str(roi_id))
         group.attrs["metric_name"] = metric_name
         group.attrs["formula_key"] = formula_key
+        if combined_roi_ids:
+            group.attrs["combined_roi_ids"] = combined_roi_ids
 
     def append_sensorgram_point(self, roi_id: str | int, *, timestamp_utc_ms: int, metric_value: float) -> None:
         group = self._sensorgram_group(str(roi_id))
@@ -277,6 +288,29 @@ class ImagingMeasurementExportWriter:
         _append_row(group["absorbance"], np.asarray(formula_values, dtype=np.float32))
         _append_row(group["sample_mean"], np.asarray(sample_mean, dtype=np.float32))
         _append_row(group["reference_mean"], np.asarray(reference_mean, dtype=np.float32))
+
+    # -- export ------------------------------------------------------------
+
+    def export_snapshot(self, destination: Path) -> None:
+        """Write a standalone copy of everything recorded so far (ROI
+        definitions, absorbance spectra, sensorgram traces) to a new file at
+        `destination`, without closing or otherwise disturbing this writer's
+        own open handle - this is what the "Export Results..." button uses,
+        so analysis can keep appending to the live backup afterward.
+
+        Copies via h5py's in-process `Group.copy` from the already-open
+        `self._handle`, not a filesystem copy of `self.path` - the backup
+        file is open for writing (this writer holds it), and a plain
+        OS-level byte copy of a currently-open HDF5 file isn't guaranteed
+        consistent or even readable while another handle holds it.
+        """
+        self._handle.flush()
+        destination = Path(destination)
+        with h5py.File(destination, "w") as dest:
+            for key in self._handle.keys():
+                self._handle.copy(key, dest)
+            for attr_key, attr_value in self._handle.attrs.items():
+                dest.attrs[attr_key] = attr_value
 
     # -- lifecycle -------------------------------------------------------------
 

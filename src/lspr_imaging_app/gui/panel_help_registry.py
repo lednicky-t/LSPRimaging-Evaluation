@@ -189,7 +189,16 @@ PANEL_HELP: dict[str, PanelHelpEntry] = {
     ),
     "results_export": PanelHelpEntry(
         title="Results / Export",
-        description="Sensorgram region and kinetics tools, and export of ROI values, spectra, and sensorgram metrics. Not implemented yet.",
+        description=(
+            "Export Results...: saves the analyzed absorbance spectra and sensorgram traces backed up so far "
+            "this session (per ROI, in the shared lspr_measurement HDF5 format) to a file you choose - a "
+            "point-in-time snapshot of analysis/measurement_backup.h5, not a fresh recomputation, so it only "
+            "covers spectral cubes actually viewed and sensorgram metrics actually calculated this session.\n"
+            "A multi-ROI combined selection's sensorgram trace (several ROI rows selected together) is exported "
+            "under a synthetic \"combined_<id>_<id>...\" key rather than a real ROI id.\n"
+            "Sensorgram region and kinetics measurement tools (regions, averages, slopes, step comparison) are "
+            "separate, still-unbuilt future work."
+        ),
     ),
     "logs": PanelHelpEntry(
         title="Logs",

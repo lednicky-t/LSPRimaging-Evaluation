@@ -6,8 +6,10 @@ import numpy as np
 from copy import deepcopy
 from datetime import datetime
 from math import ceil, floor
+from pathlib import Path
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QColor
+from PyQt6.QtWidgets import QFileDialog, QMessageBox
 import pyqtgraph as pg
 
 from lspr_ui import get_active_theme
@@ -547,21 +549,30 @@ class AnalysisController:
 
     def _backup_sensorgram_point(self, point) -> None:
         """Append this sensorgram point to the measurement-export/backup
-        file, if one is open for the current dataset. Only backs up a
-        single-ROI selection - a combined/grouped multi-ROI trace isn't one
-        of the ROI-indexed sensorgram streams this format defines (see
-        docs/imaging_measurement_export_format.md), so those are skipped
-        rather than invented a new schema shape for. Deduplicates by
-        (roi_id, spectral_cube_index) so redisplaying an already-backed-up
-        cube (e.g. a cache hit) doesn't append a second row.
+        file, if one is open for the current dataset. A single-ROI
+        selection backs up under its real `roi_id`; a combined/grouped
+        multi-ROI selection (several ROI rows selected together, averaged
+        into one trace) has no single ROI to attribute the value to, so it
+        backs up under a synthetic `"combined_<id>_<id>..."` key instead of
+        being dropped - `combined_roi_ids` on the trace records which real
+        ROIs it's a combination of (see `ImagingMeasurementExportWriter.
+        set_sensorgram_metric`). Deduplicates by (roi_id, spectral_cube_index)
+        so redisplaying an already-backed-up cube (e.g. a cache hit) doesn't
+        append a second row.
         """
         writer = getattr(self.window, "_measurement_export_writer", None)
         if writer is None:
             return
         selected_roi_ids = getattr(self.window, "_sensorgram_running_roi_ids", None) or ()
-        if len(selected_roi_ids) != 1:
+        if not selected_roi_ids:
             return
-        roi_id = int(selected_roi_ids[0])
+        sorted_ids = sorted(int(roi_id) for roi_id in selected_roi_ids)
+        if len(sorted_ids) == 1:
+            roi_id = str(sorted_ids[0])
+            combined_roi_ids = ""
+        else:
+            roi_id = "combined_" + "_".join(str(i) for i in sorted_ids)
+            combined_roi_ids = ",".join(str(i) for i in sorted_ids)
         cube_index = int(point.spectral_cube_index)
         backed_up = self.window._measurement_export_backed_up_sensorgram
         key = (roi_id, cube_index)
@@ -571,7 +582,10 @@ class AnalysisController:
             return
         try:
             writer.set_sensorgram_metric(
-                roi_id, metric_name=self.window._analysis_metric_key(), formula_key=self._roi_math_signature_elements()[2]
+                roi_id,
+                metric_name=self.window._analysis_metric_key(),
+                formula_key=self._roi_math_signature_elements()[2],
+                combined_roi_ids=combined_roi_ids,
             )
             writer.append_sensorgram_point(
                 roi_id,
@@ -1662,6 +1676,46 @@ class AnalysisController:
                 )
                 continue
             backed_up.add(key)
+
+    def export_results(self) -> None:
+        """"Export Results..." button (Results / Export panel): saves a
+        point-in-time snapshot of everything backed up so far this session -
+        ROI definitions, per-ROI absorbance spectra, and sensorgram traces -
+        to a file the user chooses. This exports what `_backup_absorbance_
+        series`/`_backup_sensorgram_point` have already recorded into the
+        live `analysis/measurement_backup.h5`, not a fresh recomputation
+        across every ROI/cube - so spectra only cover cubes actually viewed,
+        and sensorgram only covers metrics actually calculated, this
+        session.
+        """
+        writer = getattr(self.window, "_measurement_export_writer", None)
+        if writer is None:
+            self.window._set_status_text("No dataset loaded - nothing to export yet.")
+            return
+        dataset = self.window._state.dataset
+        dataset_name = dataset.home.name if dataset is not None else "results"
+        stamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+        default_path = writer.path.parent / f"{dataset_name}_results_{stamp}.h5"
+        path_str, _ = QFileDialog.getSaveFileName(
+            self.window,
+            "Export analyzed results (spectra + sensorgram)",
+            str(default_path),
+            "HDF5 Files (*.h5 *.hdf5)",
+        )
+        if not path_str:
+            return
+        path = Path(path_str)
+        if path.suffix.lower() not in (".h5", ".hdf5"):
+            path = path.with_suffix(".h5")
+        try:
+            writer.export_snapshot(path)
+        except Exception as exc:
+            logging.getLogger("lspr_imaging_app.workflow").warning(
+                "Failed to export analyzed results", exc_info=True
+            )
+            QMessageBox.warning(self.window, "Export failed", f"Could not write export file:\n{exc}")
+            return
+        self.window._set_status_text(f"Exported analyzed results to {path.name}.")
 
     def _apply_absorbance_spectrum_result(self, result: AbsorbanceSpectrumResult) -> float | None:
         fit_started = time.perf_counter()

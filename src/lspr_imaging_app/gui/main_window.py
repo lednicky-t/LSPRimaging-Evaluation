@@ -1673,6 +1673,12 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, HistogramMaskMixin, Measurem
 
         self.analysis_calculate_group_button = QPushButton("Calculate group", self)
 
+        self.export_results_button = QPushButton("Export Results...", self)
+        self.export_results_button.setToolTip(
+            "Save a snapshot of the analyzed spectra and sensorgram traces backed up so far this "
+            "session to a chosen HDF5 file."
+        )
+
         # "Spectra" range: wavelength window (nm) the absorbance spectrum is
         # cropped to before fitting - mirrors sLSPR acq's own Range/Min/Max.
         self.analysis_wavelength_min_spin = QDoubleSpinBox(self)
@@ -2342,6 +2348,7 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, HistogramMaskMixin, Measurem
         self.analysis_group_stats_center_combo.currentIndexChanged.connect(self._analysis_controller.on_statistics_settings_changed)
         self.analysis_group_stats_band_combo.currentIndexChanged.connect(self._analysis_controller.on_statistics_settings_changed)
         self.analysis_calculate_group_button.clicked.connect(self._analysis_controller.calculate_group_sensorgram)
+        self.export_results_button.clicked.connect(self._analysis_controller.export_results)
         self._analysis_controller.sync_statistics_controls()
 
     def _connect_background_and_mask(self) -> None:

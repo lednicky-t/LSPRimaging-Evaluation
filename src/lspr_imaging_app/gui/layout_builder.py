@@ -1138,17 +1138,24 @@ def build_layout(window) -> None:
         parent=window,
     )
 
-    # "Results / Export": sensorgram region/measurement tools and export of
-    # ROI values, spectra, and sensorgram metrics - not designed yet.
+    # "Results / Export": export of the analyzed spectra/sensorgram data
+    # backed up so far this session. Sensorgram region/measurement tools
+    # (regions, averages, kinetics/slopes, step comparison) are separate,
+    # still-unbuilt future work - not part of this section yet.
     results_export_content = QWidget(window)
     results_export_layout = QVBoxLayout(results_export_content)
     results_export_layout.setContentsMargins(12, 12, 12, 12)
-    results_export_layout.addWidget(
-        _placeholder_label(
-            "Sensorgram measurement (regions, averages, kinetics/slopes, step comparison) "
-            "and export of ROI values, spectra, and sensorgram metrics — coming soon."
-        )
+    results_export_layout.setSpacing(8)
+    results_export_layout.addWidget(window.export_results_button)
+    results_export_description = QLabel(
+        "Saves the analyzed absorbance spectra and sensorgram traces recorded so far this "
+        "session (per ROI) to an HDF5 file you choose. Sensorgram region/kinetics measurement "
+        "tools are separate, future work.",
+        results_export_content,
     )
+    results_export_description.setWordWrap(True)
+    results_export_description.setStyleSheet(f"color: {get_active_theme().text_muted};")
+    results_export_layout.addWidget(results_export_description)
     results_export_layout.addStretch(1)
     window.results_export_section = CollapsibleSection(
         "Results / Export",
