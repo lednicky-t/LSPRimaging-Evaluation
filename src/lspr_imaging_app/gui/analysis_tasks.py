@@ -1249,6 +1249,7 @@ def _sensorgram_metric_task(
     task_fn=None,
     spectral_cube_result_cache_get=None,
     spectral_cube_result_cache_store=None,
+    metric_value_cache_get=None,
     wl_min: float | None = None,
     wl_max: float | None = None,
     fit_method_key: str = "poly",
@@ -1357,51 +1358,67 @@ def _sensorgram_metric_task(
                 text or f"Sensorgram {position}/{total}: spectral cube {spectral_cube_number}",
             )
 
-        spectrum = spectral_cube_result_cache_get(spectral_cube_index) if spectral_cube_result_cache_get is not None else None
-        if spectrum is None:
-            _active_task = task_fn if task_fn is not None else _absorbance_spectrum_task
-            spectrum = _active_task(
-                *payload,
-                # None (not `cancel_event`) once prep already decided to
-                # finish this batch - `cancel_event` is already set, and
-                # this task (and the per-wavelength loaders inside it) bail
-                # out to empty/NaN results as soon as they see a set event,
-                # which would silently turn every cube in the "finish it"
-                # batch back into nothing to show or back up.
-                cancel_event=None if prep_cancelled else cancel_event,
-                progress_callback=spectral_cube_progress_callback,
-                reduction_method=reduction_method,
-                trimmed_mean_fraction=trimmed_mean_fraction,
-                formula_key=formula_key,
-            )
-            if spectral_cube_result_cache_store is not None:
-                spectral_cube_result_cache_store(spectral_cube_index, spectrum)
-        if not prep_cancelled and cancel_event is not None and cancel_event.is_set():
-            return SensorgramComputationResult(
-                spectral_cube_indices=np.asarray(spectral_cube_indices, dtype=np.int32),
-                metric_values=np.asarray(metric_values, dtype=np.float64),
-                metric_signal=np.asarray(metric_signals, dtype=np.float64),
-                completed_count=len(spectral_cube_indices),
-                total_count=len(spectral_cube_payloads),
-                cancelled=True,
-            )
-
-        if fit_method_key == "none":
-            metric_value, metric_signal = metric_value_from_spectrum(
-                spectrum.wavelengths_nm, spectrum.formula_values, metric_key, wl_min=wl_min, wl_max=wl_max
-            )
+        # Disk-backed shortcut: a backed-up HDF5 row can supply the already-
+        # reduced final metric_value for this exact (preprocessing/ROI/fit)
+        # signature, skipping both the pixel read/spectrum build below AND
+        # the fit - unlike spectral_cube_result_cache_get, which only ever
+        # skips the read (see the callback's own docstring in
+        # analysis_controller.py). `metric_signal` isn't persisted on disk
+        # (only metric_value is), so a disk hit always reports it as NaN -
+        # the same "no signal available" state a legacy/never-fitted point
+        # already produces; nothing currently plots a full-sweep
+        # metric_signal series (only the live single-cube preview does, which
+        # this shortcut never touches), so this loses no working UI.
+        disk_metric_value = metric_value_cache_get(spectral_cube_index) if metric_value_cache_get is not None else None
+        if disk_metric_value is not None:
+            metric_float = float(disk_metric_value) if np.isfinite(disk_metric_value) else float("nan")
+            signal_float = float("nan")
         else:
-            fit = fit_curve_for_method(
-                spectrum.wavelengths_nm,
-                spectrum.formula_values,
-                fit_method_key,
-                poly_order=poly_order,
-                wl_min=wl_min,
-                wl_max=wl_max,
-            )
-            metric_value, metric_signal = metric_value_from_fit(fit, metric_key)
-        metric_float = float(metric_value) if metric_value is not None and np.isfinite(metric_value) else float("nan")
-        signal_float = float(metric_signal) if metric_signal is not None and np.isfinite(metric_signal) else float("nan")
+            spectrum = spectral_cube_result_cache_get(spectral_cube_index) if spectral_cube_result_cache_get is not None else None
+            if spectrum is None:
+                _active_task = task_fn if task_fn is not None else _absorbance_spectrum_task
+                spectrum = _active_task(
+                    *payload,
+                    # None (not `cancel_event`) once prep already decided to
+                    # finish this batch - `cancel_event` is already set, and
+                    # this task (and the per-wavelength loaders inside it) bail
+                    # out to empty/NaN results as soon as they see a set event,
+                    # which would silently turn every cube in the "finish it"
+                    # batch back into nothing to show or back up.
+                    cancel_event=None if prep_cancelled else cancel_event,
+                    progress_callback=spectral_cube_progress_callback,
+                    reduction_method=reduction_method,
+                    trimmed_mean_fraction=trimmed_mean_fraction,
+                    formula_key=formula_key,
+                )
+                if spectral_cube_result_cache_store is not None:
+                    spectral_cube_result_cache_store(spectral_cube_index, spectrum)
+            if not prep_cancelled and cancel_event is not None and cancel_event.is_set():
+                return SensorgramComputationResult(
+                    spectral_cube_indices=np.asarray(spectral_cube_indices, dtype=np.int32),
+                    metric_values=np.asarray(metric_values, dtype=np.float64),
+                    metric_signal=np.asarray(metric_signals, dtype=np.float64),
+                    completed_count=len(spectral_cube_indices),
+                    total_count=len(spectral_cube_payloads),
+                    cancelled=True,
+                )
+
+            if fit_method_key == "none":
+                metric_value, metric_signal = metric_value_from_spectrum(
+                    spectrum.wavelengths_nm, spectrum.formula_values, metric_key, wl_min=wl_min, wl_max=wl_max
+                )
+            else:
+                fit = fit_curve_for_method(
+                    spectrum.wavelengths_nm,
+                    spectrum.formula_values,
+                    fit_method_key,
+                    poly_order=poly_order,
+                    wl_min=wl_min,
+                    wl_max=wl_max,
+                )
+                metric_value, metric_signal = metric_value_from_fit(fit, metric_key)
+            metric_float = float(metric_value) if metric_value is not None and np.isfinite(metric_value) else float("nan")
+            signal_float = float(metric_signal) if metric_signal is not None and np.isfinite(metric_signal) else float("nan")
 
         spectral_cube_indices.append(int(spectral_cube_index))
         metric_values.append(metric_float)

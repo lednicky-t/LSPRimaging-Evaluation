@@ -202,6 +202,37 @@ class ImagingMeasurementExportWriter:
                 keys.add((roi_id_text, int(cube_index), hash_text))
         return keys
 
+    def sensorgram_metric_index(self, roi_id: str | int) -> dict[int, tuple[str, float]]:
+        """`cube_index -> (signature_hash, metric_value)` for the most-
+        recently-appended row per cube_index in this ROI's backed-up
+        sensorgram trace. A parameter change makes an old row stale without
+        removing it (§4d of `analysis_pipeline_redesign.md` - rows are
+        appended, never rewritten in place), so a later row for the same
+        cube_index supersedes an earlier one; iterating in on-disk (append)
+        order and overwriting the dict per cube_index naturally keeps the
+        latest. Reads from the already-open handle, so it's safe to call
+        while this writer is still appending elsewhere. Rows backfilled with
+        `signature_hash=""` (see `_ensure_column`) are included as-is - never
+        a match for a real live signature, same convention as
+        `existing_sensorgram_keys`. This is the read-side counterpart of
+        `existing_sensorgram_keys`, giving a caller the actual `metric_value`
+        instead of just a dedup key, so a disk hit can supply the final
+        answer instead of only skipping a duplicate append."""
+        index: dict[int, tuple[str, float]] = {}
+        parent = self._processed.get(LSPR_PROCESSED_SENSORGRAM_GROUP_NAME)
+        if parent is None:
+            return index
+        group = parent.get(str(roi_id))
+        if group is None or "cube_index" not in group or "metric_value" not in group:
+            return index
+        cube_indices = group["cube_index"][...]
+        values = group["metric_value"][...]
+        hashes = group["signature_hash"][...] if "signature_hash" in group else [""] * len(cube_indices)
+        for cube_index, value, signature_hash in zip(cube_indices, values, hashes, strict=False):
+            hash_text = signature_hash.decode("utf-8") if isinstance(signature_hash, bytes) else str(signature_hash)
+            index[int(cube_index)] = (hash_text, float(value))
+        return index
+
     # -- ROI definitions: a thin, self-describing mirror ---------------------
     # (full geometry, including any freeform mask, stays canonical in
     # analysis/roi_table.json - see this module's docstring)

@@ -4,8 +4,11 @@
 pipeline (dataset load -> image tools -> ROIs -> preprocessing -> analysis -> caching). Goal:
 reduce recomputation of unchanged data and make the app responsive on large datasets (reference
 scale used throughout: 170 ROIs x up to 20,000 spectral cubes x ~50 wavelengths). \S2a, \S2b, and
-\S3 are implemented and tested; \S2c and \S4 (the larger unified-cache redesign) are still
-proposals pending the sign-off in \S6 - see \S7 for the current order/status of each piece.
+\S3 are implemented and tested; \S2c's exclusion-signature fix and \S4c (schema + read-before-
+recompute wiring for the sensorgram sweep) are also implemented and tested. \S2c's general bulk-
+clear removal (item 4b) is deliberately deferred, and \S4b/\S4e (RAM cache as a Preferences
+setting, removing `analysis_cache` from the JSON profile) are still proposals pending real-scale
+proof and the sign-offs in \S6 - see \S7 for the current order/status of each piece.
 
 This doc records what's already true in the code (so we don't re-debate settled ground), what's
 actually broken, and what's proposed as new work - each item tagged so it's clear which parts
@@ -199,21 +202,40 @@ multi-gigabyte JSON rewrite on every save - this is what actually breaks, not th
      written now for forward compatibility, but seen the same 4b gap the RAM cache has (missing
      full preprocessing state and ROI geometry). Recorded so no further schema bump is needed once
      4b is eventually done; not yet trustworthy enough to read back as a cache hit.
-3. **Read-before-recompute wiring - NOT started, blocked on a real design question.** Digging into
-   the sensorgram sweep worker (`_start_sensorgram_worker`/`_sensorgram_metric_task`,
-   `analysis_controller.py`/`analysis_tasks.py`) surfaced a granularity mismatch: the RAM result
-   cache this would need to feed (`_cached_sensorgram_spectral_cube_result`) is contracted to
-   return a full pre-fit `AbsorbanceSpectrumResult` (sample/reference means across all
-   wavelengths), which the worker then extracts a metric from - that's *how* changing only the fit
-   method avoids re-reading pixels. The HDF5 backup only ever stores the final, already-reduced
-   scalar `metric_value`. A disk hit can supply the final answer for one exact
-   (fit method, metric, poly order) combination, but can't reconstruct the reusable full-spectrum
-   object the worker's cache-hit contract expects - wiring this in means either (a) giving the
-   worker a second, "final answer, skip fitting entirely" hit path alongside its existing "full
-   spectrum, still needs fitting" one, or (b) some other restructuring not yet designed. This
-   touches the core sweep-computation worker, not just a cache lookup, so it needs its own
-   deliberate design pass rather than being bolted on - flagged for the maintainer rather than
-   guessed at.
+3. **Read-before-recompute wiring - implemented (option (a): a second, narrower cache-hit path).**
+   Resolves the granularity mismatch described in the original version of this section: the RAM
+   result cache the sweep worker normally consults (`_cached_sensorgram_spectral_cube_result`)
+   returns a full pre-fit `AbsorbanceSpectrumResult`, which the worker then fits a metric from -
+   that's *how* changing only the fit method avoids re-reading pixels. The HDF5 backup only ever
+   stores the final, already-reduced scalar `metric_value`, which can't reconstruct that object.
+   Rather than trying to make a disk hit repopulate the RAM spectrum cache, the sweep worker
+   (`_sensorgram_metric_task`, `analysis_tasks.py`) got a second, independent cache-hit path,
+   `metric_value_cache_get`, checked *before* `spectral_cube_result_cache_get`: on a hit it skips
+   the pixel read AND the fit entirely for that cube, returning the disk-stored `metric_value`
+   directly. It's deliberately scoped narrower than the RAM cache - it never populates
+   `_cached_sensorgram_spectral_cube_result`, so the single-cube live-preview display (which reuses
+   that RAM cache to show a full spectrum when browsing to an already-swept cube, see
+   `analysis_controller.py:2839`) is untouched and still recomputes on browse exactly as before for
+   any cube a disk hit covers - no regression, just no new benefit there (a live-preview disk
+   fallback would need the RAM cache's contract to change, which is out of scope here).
+
+   Concretely: `ImagingMeasurementExportWriter.sensorgram_metric_index(roi_id)`
+   (`storage/measurement_export.py`) is the read-side counterpart of `existing_sensorgram_keys()` -
+   it returns `cube_index -> (signature_hash, metric_value)` for the *latest* row per cube_index
+   (later rows supersede earlier ones per §4d's append-only rule), read from the writer's
+   already-open handle so it's safe to call mid-run. `_start_sensorgram_worker`
+   (`analysis_controller.py`) builds this index once per sweep (keyed by the same backup roi_id/
+   combined-id the write path uses - factored into a shared `_sensorgram_backup_roi_key` helper so
+   both sides can never drift apart) and passes a `metric_value_cache_get` closure into the worker
+   that only returns a value when the live `_sensorgram_point_signature_hash` for that cube exactly
+   matches the stored hash. `metric_signal` (a secondary, only-used-for-a-single-cube-preview-plot
+   value) isn't persisted on disk, so a disk hit reports it as unavailable (`None`) rather than a
+   stale guess - confirmed nothing currently plots a full-sweep `metric_signal` series, so this
+   loses no working UI. Covered by
+   `tests/unit/test_lspri_sensorgram_disk_metric_shortcut.py` (worker-level: a disk hit must skip
+   both the RAM-cache lookup and the fit task, a miss must compute normally) and
+   `tests/unit/test_lspri_measurement_export.py::test_sensorgram_metric_index_keeps_latest_row_per_cube`
+   (writer-level: index reflects the latest row per cube, not the first).
 
 ### 4d. Handling a stale row without rewriting the file - implemented (write-side)
 
@@ -299,12 +321,15 @@ Verified directly in `apps/sLSPR/acq`:
     for now, keep its bulk clear as a deliberate, documented correctness net, and prioritize item 5
     instead, which targets the actual stated scale problem. Revisit 4b only if the single-cube
     preview's recompute cost is ever actually observed to matter.
-5. ~~Add `signature_hash` to the HDF5 writer (\S4c-2, \S4d)~~ - **done, write-side only** (schema
-   bump to 6.6, sign-off obtained: hash not full-JSON signature). **Read-before-recompute wiring
-   (\S4c-3) is NOT done** - blocked on the sweep-worker cache-hit-contract question described in
-   \S4c, which needs its own decision before any more code changes here.
+5. ~~Add `signature_hash` to the HDF5 writer (§4c-2, §4d)~~ - **done** (schema bump to 6.6,
+   sign-off obtained: hash not full-JSON signature). ~~Read-before-recompute wiring (§4c-3)~~ -
+   **done** (option (a): a second, fit-skipping cache-hit path scoped to the sweep worker only, see
+   §4c item 3 above). This is now proven at the unit-test level (disk hit skips read+fit, miss
+   computes normally, index reflects latest row per cube); it hasn't yet been exercised against a
+   real large dataset at the 170×20,000-cube reference scale - that's the natural next check before
+   fully trusting item 6 below.
 6. Remove `analysis_cache` from the JSON profile once (5) is fully proven (including the read
-   side), and make the RAM cache size a Preferences setting (\S4b) - last, since it depends on (5)
+   side), and make the RAM cache size a Preferences setting (§4b) - last, since it depends on (5)
    actually working end-to-end.
 
 ## Where this document lives

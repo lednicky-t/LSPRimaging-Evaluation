@@ -532,6 +532,45 @@ class AnalysisController:
                 result,
             )
 
+        # Disk-backed shortcut that skips the fit step entirely, not just the
+        # spectrum read/build above - see analysis_pipeline_redesign.md \S4c
+        # item 3. Distinct from spectral_cube_result_cache_get: that RAM
+        # cache returns a full pre-fit AbsorbanceSpectrumResult, reusable
+        # across fit-method/metric/poly-order changes; a backed-up HDF5 row
+        # only ever stores the already-reduced metric_value for one exact
+        # (fit method, metric, poly order) combination
+        # (_sensorgram_point_signature_hash folds those into the hash), so a
+        # disk hit can supply the finished answer for a fully matching
+        # signature but can never repopulate that RAM spectrum cache.
+        disk_metric_index: dict[int, tuple[str, float]] = {}
+        writer = getattr(self.window, "_measurement_export_writer", None)
+        if writer is not None:
+            backup_roi_id, _ = self._sensorgram_backup_roi_key(selected_roi_ids)
+            if backup_roi_id:
+                try:
+                    disk_metric_index = writer.sensorgram_metric_index(backup_roi_id)
+                except Exception:
+                    logging.getLogger("lspr_imaging_app.workflow").warning(
+                        "Failed to read sensorgram metric index from measurement export backup", exc_info=True
+                    )
+                    disk_metric_index = {}
+
+        def metric_value_cache_get(spectral_cube_index, selected_roi_ids=selected_roi_ids, selected_source_rois=selected_source_rois):
+            if not disk_metric_index:
+                return None
+            entry = disk_metric_index.get(int(spectral_cube_index))
+            if entry is None:
+                return None
+            stored_hash, metric_value = entry
+            if not stored_hash:
+                return None
+            live_hash = self._sensorgram_point_signature_hash(
+                int(spectral_cube_index), tuple(selected_roi_ids), selected_source_rois
+            )
+            if live_hash and live_hash == stored_hash:
+                return metric_value
+            return None
+
         wavelength_range = self.window._analysis_wavelength_range()
         reduction_method, trimmed_mean_fraction, formula_key = self._roi_math_signature_elements()
         worker = FunctionWorker(
@@ -546,6 +585,7 @@ class AnalysisController:
             task_fn=task_fn,
             spectral_cube_result_cache_get=spectral_cube_result_cache_get,
             spectral_cube_result_cache_store=spectral_cube_result_cache_store,
+            metric_value_cache_get=metric_value_cache_get,
             wl_min=None if wavelength_range is None else wavelength_range[0],
             wl_max=None if wavelength_range is None else wavelength_range[1],
             fit_method_key=self._analysis_fit_method_key(),
@@ -584,21 +624,33 @@ class AnalysisController:
         )
         self._backup_sensorgram_point(point)
 
-    def _backup_sensorgram_point(self, point) -> None:
-        """Append this sensorgram point to the measurement-export/backup
-        file, if one is open for the current dataset. A single-ROI
+    @staticmethod
+    def _sensorgram_backup_roi_key(selected_roi_ids: tuple[int, ...]) -> tuple[str, str]:
+        """(roi_id, combined_roi_ids) backup key for a selection. A single-ROI
         selection backs up under its real `roi_id`; a combined/grouped
         multi-ROI selection (several ROI rows selected together, averaged
         into one trace) has no single ROI to attribute the value to, so it
         backs up under a synthetic `"combined_<id>_<id>..."` key instead of
-        being dropped - `combined_roi_ids` on the trace records which real
-        ROIs it's a combination of (see `ImagingMeasurementExportWriter.
-        set_sensorgram_metric`). Deduplicates by (roi_id, spectral_cube_index,
-        signature_hash) so redisplaying an already-backed-up, still-current
-        cube (e.g. a cache hit) doesn't append a second row - while a value
-        recomputed under different settings (an ROI moved, a transform
-        changed) still gets a fresh row, since its hash differs from
-        whatever's already on disk for that cube.
+        being dropped - `combined_roi_ids` records which real ROIs it's a
+        combination of (see `ImagingMeasurementExportWriter.
+        set_sensorgram_metric`). Shared by the write path
+        (`_backup_sensorgram_point`) and the disk-hit lookup
+        (`_start_sensorgram_worker`) so both land on the identical key."""
+        sorted_ids = sorted(int(roi_id) for roi_id in selected_roi_ids)
+        if not sorted_ids:
+            return "", ""
+        if len(sorted_ids) == 1:
+            return str(sorted_ids[0]), ""
+        return "combined_" + "_".join(str(i) for i in sorted_ids), ",".join(str(i) for i in sorted_ids)
+
+    def _backup_sensorgram_point(self, point) -> None:
+        """Append this sensorgram point to the measurement-export/backup
+        file, if one is open for the current dataset. Deduplicates by (roi_id,
+        spectral_cube_index, signature_hash) so redisplaying an already-
+        backed-up, still-current cube (e.g. a cache hit) doesn't append a
+        second row - while a value recomputed under different settings (an
+        ROI moved, a transform changed) still gets a fresh row, since its
+        hash differs from whatever's already on disk for that cube.
         """
         writer = getattr(self.window, "_measurement_export_writer", None)
         if writer is None:
@@ -607,12 +659,7 @@ class AnalysisController:
         if not selected_roi_ids:
             return
         sorted_ids = sorted(int(roi_id) for roi_id in selected_roi_ids)
-        if len(sorted_ids) == 1:
-            roi_id = str(sorted_ids[0])
-            combined_roi_ids = ""
-        else:
-            roi_id = "combined_" + "_".join(str(i) for i in sorted_ids)
-            combined_roi_ids = ",".join(str(i) for i in sorted_ids)
+        roi_id, combined_roi_ids = self._sensorgram_backup_roi_key(selected_roi_ids)
         cube_index = int(point.spectral_cube_index)
         selected_ids_set = set(sorted_ids)
         selected_source_rois = [roi for roi in self.window._state.area_rois if int(roi.area_roi_id) in selected_ids_set]
