@@ -519,8 +519,26 @@ class ImageRenderManager:
         affine_matrix = window._chromatic_affine_for_image_key(image_key)
         if affine_matrix is None:
             return window._state.area_rois
+        # Signature-keyed, same scheme as display_rois() above - this is the
+        # one ROI-position call background/absorbance preprocessing feeds
+        # through (_cached_processed_image, background_profile_controller,
+        # analysis_controller's spectrum prep), previously recomputed via
+        # transform_rois_affine on every single call even when nothing about
+        # the ROIs or the chromatic transform for this (cube, wavelength)
+        # had changed since the last call.
+        signature = (
+            image_key,
+            window._roi_signature(window._state.area_rois),
+            window._roi_override_signature(window._state.area_rois, image_key),
+            window._chromatic_signature_for_image_key(image_key),
+        )
+        if window._preprocessing_roi_cache_signature == signature and window._preprocessing_roi_cache_value is not None:
+            return window._preprocessing_roi_cache_value
         transformed = transform_rois_affine(window._state.area_rois, affine_matrix)
-        return _apply_dense_overrides(transformed, window._state.area_rois, image_key)
+        transformed = _apply_dense_overrides(transformed, window._state.area_rois, image_key)
+        window._preprocessing_roi_cache_signature = signature
+        window._preprocessing_roi_cache_value = transformed
+        return transformed
 
     def roi_curve_points(
         self,

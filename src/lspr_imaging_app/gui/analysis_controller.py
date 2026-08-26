@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 import time
 import numpy as np
@@ -199,22 +201,26 @@ class AnalysisController:
                 pass
         return min(timing.acquired_at_unix_ms for timing in metadata.image_timings)
 
-    def _acquisition_timing_index(self, metadata) -> tuple[dict[int, object], dict[tuple[int, float], object]]:
-        """(per_cube_earliest, per_frame) built together in one pass over
-        `metadata.image_timings`, cached on the window keyed by id(metadata) -
-        a freshly loaded/reloaded dataset always gets a new metadata object,
-        so this self-invalidates without needing an explicit clear call.
+    def _acquisition_timing_index(
+        self, metadata
+    ) -> tuple[dict[int, object], dict[int, object], dict[tuple[int, float], object]]:
+        """(per_cube_earliest, per_cube_latest, per_frame) built together in
+        one pass over `metadata.image_timings`, cached on the window keyed by
+        id(metadata) - a freshly loaded/reloaded dataset always gets a new
+        metadata object, so this self-invalidates without needing an
+        explicit clear call.
 
-        `per_cube_earliest`: {spectral_cube_index: earliest ImagingCubeTiming
-        for that cube} - one representative timestamp per cube (when its
-        sweep began), for anything plotting/navigating by cube (sensorgram
-        x-axis, the Cube/Time toggle).
+        `per_cube_earliest`/`per_cube_latest`: {spectral_cube_index: first/
+        last ImagingCubeTiming for that cube} - one representative timestamp
+        per cube (when its sweep began/ended), the raw material for
+        resolving the Cube/Time toggle's timestamp rule (see
+        `_cube_timestamp_ms_by_cube_index`).
 
         `per_frame`: {(spectral_cube_index, wavelength_nm): ImagingCubeTiming}
         - the full per-image timing, for anything asking "when was this
         exact frame taken" (the "This image acquired" status label).
 
-        Both replace linear scans that used to run on every wavelength
+        These replace linear scans that used to run on every wavelength
         switch: `ImagingCubeTiming.earliest_timing_for_cube()` and
         `.timing_for()` (packages/lspr_core) each re-scan the *entire*
         `image_timings` list - O(wavelengths x cubes) - per call, since
@@ -225,36 +231,67 @@ class AnalysisController:
         measured at ~190ms on a 200-cube x 65-wavelength dataset (13,000
         timing entries), matching almost exactly a "chromatic"-labeled stage
         cost seen on a real slow-switch log (mislabeled - the actual cost was
-        here, not chromatic sync). This builds both dicts with one O(cubes x
-        wavelengths) pass instead, without touching lspr_core (a separate,
-        shared package the acquisition app also depends on - changing its
-        model wasn't necessary here)."""
+        here, not chromatic sync). This builds all three dicts with one
+        O(cubes x wavelengths) pass instead, without touching lspr_core (a
+        separate, shared package the acquisition app also depends on -
+        changing its model wasn't necessary here)."""
         window = self.window
         cache = getattr(window, "_acquisition_timing_index_cache", None)
         if cache is not None and cache[0] == id(metadata):
-            return cache[1], cache[2]
+            return cache[1], cache[2], cache[3]
         per_cube_earliest: dict[int, object] = {}
+        per_cube_latest: dict[int, object] = {}
         per_frame: dict[tuple[int, float], object] = {}
         for timing in metadata.image_timings:
             cube_index = int(timing.spectral_cube_index)
             wavelength_nm = float(timing.wavelength_nm)
             per_frame[(cube_index, wavelength_nm)] = timing
-            existing = per_cube_earliest.get(cube_index)
-            if existing is None or timing.acquired_at_unix_ms < existing.acquired_at_unix_ms:
+            earliest = per_cube_earliest.get(cube_index)
+            if earliest is None or timing.acquired_at_unix_ms < earliest.acquired_at_unix_ms:
                 per_cube_earliest[cube_index] = timing
-        window._acquisition_timing_index_cache = (id(metadata), per_cube_earliest, per_frame)
-        return per_cube_earliest, per_frame
+            latest = per_cube_latest.get(cube_index)
+            if latest is None or timing.acquired_at_unix_ms > latest.acquired_at_unix_ms:
+                per_cube_latest[cube_index] = timing
+        window._acquisition_timing_index_cache = (id(metadata), per_cube_earliest, per_cube_latest, per_frame)
+        return per_cube_earliest, per_cube_latest, per_frame
 
     def _earliest_timing_by_cube_index(self, metadata) -> dict[int, object]:
-        per_cube_earliest, _per_frame = self._acquisition_timing_index(metadata)
+        per_cube_earliest, _per_cube_latest, _per_frame = self._acquisition_timing_index(metadata)
         return per_cube_earliest
+
+    def _latest_timing_by_cube_index(self, metadata) -> dict[int, object]:
+        _per_cube_earliest, per_cube_latest, _per_frame = self._acquisition_timing_index(metadata)
+        return per_cube_latest
+
+    def _cube_timestamp_ms_by_cube_index(self, metadata) -> dict[int, int]:
+        """Resolves each cube's single representative timestamp (ms) per the
+        active Cube/Time rule (`window._cube_time_timestamp_rule`): the
+        first frame acquired in the cube's sweep, the last, or the midpoint
+        between them. Used by both the Cube/Time spinbox display and the
+        sensorgram x-axis so they stay consistent with whichever rule is
+        selected. This is a display/plotting concern only - the timestamp
+        actually written to the measurement-export backup
+        (`_acquisition_timestamp_ms_for_cube`) intentionally always uses the
+        earliest frame regardless of this rule, so switching a display
+        preference never changes what gets persisted."""
+        rule = getattr(self.window, "_cube_time_timestamp_rule", "first")
+        per_cube_earliest, per_cube_latest, _per_frame = self._acquisition_timing_index(metadata)
+        if rule == "last":
+            return {cube_index: timing.acquired_at_unix_ms for cube_index, timing in per_cube_latest.items()}
+        if rule == "midpoint":
+            result: dict[int, int] = {}
+            for cube_index, earliest in per_cube_earliest.items():
+                latest = per_cube_latest.get(cube_index, earliest)
+                result[cube_index] = int((earliest.acquired_at_unix_ms + latest.acquired_at_unix_ms) / 2)
+            return result
+        return {cube_index: timing.acquired_at_unix_ms for cube_index, timing in per_cube_earliest.items()}
 
     def _timing_for_frame(self, metadata, spectral_cube_index: int, wavelength_nm: float):
         """The exact per-image timing for one (cube, wavelength) frame, or
         None if this metadata has no entry for it - the indexed equivalent of
         `ImagingAcquisitionMetadata.timing_for()`, see
         `_acquisition_timing_index`'s docstring for why."""
-        _per_cube_earliest, per_frame = self._acquisition_timing_index(metadata)
+        _per_cube_earliest, _per_cube_latest, per_frame = self._acquisition_timing_index(metadata)
         return per_frame.get((int(spectral_cube_index), float(wavelength_nm)))
 
     def _sensorgram_x_values(self, spectral_cube_indices) -> np.ndarray:
@@ -269,12 +306,12 @@ class AnalysisController:
         if metadata is None:
             return indices.astype(np.float64)
         anchor_ms = self._sensorgram_time_anchor_ms(metadata)
-        timing_by_cube = self._earliest_timing_by_cube_index(metadata)
+        timestamp_by_cube = self._cube_timestamp_ms_by_cube_index(metadata)
         values = np.full(indices.shape, np.nan, dtype=np.float64)
         for position, cube_index in enumerate(indices):
-            timing = timing_by_cube.get(int(cube_index))
-            if timing is not None:
-                values[position] = (timing.acquired_at_unix_ms - anchor_ms) / 1000.0
+            timestamp_ms = timestamp_by_cube.get(int(cube_index))
+            if timestamp_ms is not None:
+                values[position] = (timestamp_ms - anchor_ms) / 1000.0
         return values
 
     def clear_sensorgram(self, summary_text: str) -> None:
@@ -556,9 +593,12 @@ class AnalysisController:
         backs up under a synthetic `"combined_<id>_<id>..."` key instead of
         being dropped - `combined_roi_ids` on the trace records which real
         ROIs it's a combination of (see `ImagingMeasurementExportWriter.
-        set_sensorgram_metric`). Deduplicates by (roi_id, spectral_cube_index)
-        so redisplaying an already-backed-up cube (e.g. a cache hit) doesn't
-        append a second row.
+        set_sensorgram_metric`). Deduplicates by (roi_id, spectral_cube_index,
+        signature_hash) so redisplaying an already-backed-up, still-current
+        cube (e.g. a cache hit) doesn't append a second row - while a value
+        recomputed under different settings (an ROI moved, a transform
+        changed) still gets a fresh row, since its hash differs from
+        whatever's already on disk for that cube.
         """
         writer = getattr(self.window, "_measurement_export_writer", None)
         if writer is None:
@@ -574,8 +614,11 @@ class AnalysisController:
             roi_id = "combined_" + "_".join(str(i) for i in sorted_ids)
             combined_roi_ids = ",".join(str(i) for i in sorted_ids)
         cube_index = int(point.spectral_cube_index)
+        selected_ids_set = set(sorted_ids)
+        selected_source_rois = [roi for roi in self.window._state.area_rois if int(roi.area_roi_id) in selected_ids_set]
+        signature_hash = self._sensorgram_point_signature_hash(cube_index, tuple(sorted_ids), selected_source_rois)
         backed_up = self.window._measurement_export_backed_up_sensorgram
-        key = (roi_id, cube_index)
+        key = (roi_id, cube_index, signature_hash)
         if key in backed_up:
             return
         if point.metric_value is None:
@@ -589,6 +632,8 @@ class AnalysisController:
             )
             writer.append_sensorgram_point(
                 roi_id,
+                cube_index=cube_index,
+                signature_hash=signature_hash,
                 timestamp_utc_ms=self._acquisition_timestamp_ms_for_cube(cube_index),
                 metric_value=float(point.metric_value),
             )
@@ -744,6 +789,7 @@ class AnalysisController:
                         self.window._preprocessing_signature((int(spectral_cube_index), float(wavelength)))
                         for wavelength in self.window._wavelength_values
                     ),
+                    self._exclusion_signature_for_cube(spectral_cube_index),
                 )
             )
         dataset_key = str(self.window._state.dataset.folder)
@@ -784,7 +830,37 @@ class AnalysisController:
             round(float(self.window._state.area_roi_settings.reference_inner_radius_px), 3),
             round(float(self.window._state.area_roi_settings.reference_outer_radius_px), 3),
             *self._roi_math_signature_elements(),
+            self._exclusion_signature_for_cube(spectral_cube_index),
         )
+
+    def _sensorgram_point_signature_hash(
+        self,
+        spectral_cube_index: int,
+        selected_roi_ids: tuple[int, ...],
+        selected_source_rois: list[AreaRoi],
+    ) -> str:
+        """Signature hash for one backed-up sensorgram point (see
+        `storage/measurement_export.py`'s `signature_hash` column). Unlike
+        `_sensorgram_spectral_cube_payload_signature` - deliberately
+        fit-method/metric-independent, since it keys a cache of the full
+        pre-fit `AbsorbanceSpectrumResult` that stays reusable across fit
+        changes - the HDF5 backup only stores the already-reduced final
+        `metric_value` for one row, so a fit-method/metric/poly-order
+        change must count as a different value here. Falls back to an
+        empty string (never a hit) when the payload signature itself can't
+        be built (no dataset/selection yet)."""
+        payload_signature = self._sensorgram_spectral_cube_payload_signature(
+            spectral_cube_index, selected_roi_ids, selected_source_rois
+        )
+        if payload_signature is None:
+            return ""
+        full_signature = (
+            payload_signature,
+            self._analysis_fit_method_key(),
+            self.window._analysis_metric_key(),
+            int(self.window._analysis_poly_order()),
+        )
+        return self._signature_hash(full_signature)
 
     def _cached_sensorgram_spectral_cube_payload(
         self,
@@ -873,6 +949,7 @@ class AnalysisController:
                 for wavelength in self.window._wavelength_values
             ),
             *self._roi_math_signature_elements(),
+            self._exclusion_signature_for_cube(spectral_cube_index),
         )
 
     def _absorbance_spectrum_signature(self) -> tuple[object, ...] | None:
@@ -1640,9 +1717,11 @@ class AnalysisController:
         """Append each per-ROI absorbance spectrum to the measurement-export/
         backup file, if one is open for the current dataset. Skips the
         "Selection" fallback entry (a combined/whole-selection result, not a
-        real per-ROI trace) and deduplicates by (roi_id, spectral_cube_index)
-        so redisplaying an already-backed-up cube (e.g. a cache hit) doesn't
-        append a second row - see docs/imaging_measurement_export_format.md.
+        real per-ROI trace) and deduplicates by (roi_id, spectral_cube_index,
+        signature_hash) so redisplaying an already-backed-up, still-current
+        cube (e.g. a cache hit) doesn't append a second row, while a value
+        recomputed under different settings still gets a fresh one - see
+        docs/imaging_measurement_export_format.md.
         """
         writer = getattr(self.window, "_measurement_export_writer", None)
         if writer is None:
@@ -1655,7 +1734,9 @@ class AnalysisController:
         for label, roi_id, roi_result in series_payloads:
             if label == "Selection":
                 continue
-            key = (int(roi_id), cube_index)
+            roi = next((roi for roi in self.window._state.area_rois if int(roi.area_roi_id) == int(roi_id)), None)
+            signature_hash = self._signature_hash(self._roi_absorbance_signature(roi)) if roi is not None else ""
+            key = (int(roi_id), cube_index, signature_hash)
             if key in backed_up:
                 continue
             try:
@@ -1666,6 +1747,7 @@ class AnalysisController:
                     sample_mean=roi_result.sample_mean,
                     reference_mean=roi_result.reference_mean,
                     cube_index=cube_index,
+                    signature_hash=signature_hash,
                     timestamp_utc_ms=self._acquisition_timestamp_ms_for_cube(cube_index),
                     formula_key=roi_result.formula_key,
                     reduction_method=roi_result.reduction_method,
@@ -2573,17 +2655,21 @@ class AnalysisController:
         self.window._cached_roi_ids.clear()
 
     def _invalidate_caches_for_exclusion_change(self) -> None:
-        """Clear every cached absorbance/sensorgram result.
-
-        None of those caches' signatures include the exclusion rule set, so a
-        result computed before a rule was added/removed would otherwise be
-        served stale from cache -- silently ignoring the exclusion. Cheap
-        enough to just clear everything: rule changes are rare, deliberate
-        user actions, not a hot path.
+        """No longer bulk-clears every cache: `_absorbance_spectrum_signature_
+        for_source_rois`, `_roi_absorbance_signature`, `_sensorgram_signature_
+        for_selection`, and `_sensorgram_spectral_cube_payload_signature` all
+        now fold in `_exclusion_signature_for_cube()` per (cube, wavelength),
+        so a rule being added/removed already produces a signature miss for
+        exactly the affected cube/ROI entries - everything else the app
+        already computed stays a valid, reusable cache hit instead of being
+        thrown away wholesale (see docs/analysis_pipeline_redesign.md §2c).
+        Still refreshes the "already calculated" ROI-table indicator (its
+        cached snapshot, unlike the caches themselves, doesn't self-correct
+        on the next read) and marks the sensorgram stale, matching the same
+        "press Calculate again" UX every other analysis-affecting setting
+        change already uses.
         """
-        self._invalidate_absorbance_spectrum_cache()
-        self.window._sensorgram_cache.clear()
-        self.window._sensorgram_spectral_cube_payload_cache.clear()
+        self._refresh_cached_roi_ids_snapshot()
         self.mark_stale("Exclusion rules changed")
 
     def _schedule_sensorgram_refresh(self) -> None:
@@ -2739,7 +2825,40 @@ class AnalysisController:
             cached_from_rois = self._cached_absorbance_result_from_roi_cache(selected_source_rois)
             if cached_from_rois is not None:
                 return cached_from_rois
+        # "Calculate all spectral cubes" already computed and cached a full
+        # per-wavelength spectrum for every cube it visited (see
+        # _store_sensorgram_spectral_cube_result) - that cache was never
+        # consulted here, so browsing to a cube the batch run already covered
+        # silently recomputed it from scratch (or showed nothing at all, with
+        # Live Preview off) instead of reusing work already paid for. Reuses
+        # the sensorgram cache's own signature function, so this only ever
+        # hits when the cube/ROI/wavelength/preprocessing settings are
+        # unchanged since that computation - anything different (moved ROI,
+        # changed reference radius, etc.) naturally misses and falls through
+        # to a fresh computation below, same as before this fallback existed.
+        if selected_source_rois:
+            spectral_cube_index = self.window._current_spectral_cube()
+            if spectral_cube_index is not None:
+                sensorgram_result = self._cached_sensorgram_spectral_cube_result(
+                    int(spectral_cube_index), selected_roi_ids, selected_source_rois,
+                )
+                if sensorgram_result is not None and self._absorbance_result_covers_roi_ids(sensorgram_result, selected_roi_ids):
+                    return sensorgram_result
         return None
+
+    def _exclusion_signature_for_cube(self, spectral_cube_index: int) -> tuple[object, ...]:
+        """Per-wavelength "is this frame currently excluded" booleans for one
+        cube, folded into every cache signature that reduces across a cube's
+        wavelengths - `is_excluded` already resolves whole-cube and
+        whole-wavelength wildcard rules down to a plain per-frame bool, so
+        this is enough to make a signature miss whenever an exclusion rule
+        is added, removed, or changed, without needing to hash the rule list
+        itself. See `_invalidate_caches_for_exclusion_change`'s removal for
+        why this matters (docs/analysis_pipeline_redesign.md §2c)."""
+        return tuple(
+            is_excluded(self.window._state.image_exclusions, int(spectral_cube_index), float(wavelength))
+            for wavelength in self.window._wavelength_values
+        )
 
     def _roi_absorbance_signature(self, roi: AreaRoi) -> tuple[object, ...] | None:
         spectral_cube_index = self.window._current_spectral_cube()
@@ -2757,6 +2876,7 @@ class AnalysisController:
             reduction_method,
             trimmed_mean_fraction,
             formula_key,
+            exclusion_signatures=self._exclusion_signature_for_cube(spectral_cube_index),
         )
 
     def _roi_has_cached_absorbance(self, roi: AreaRoi) -> bool:
@@ -2789,6 +2909,22 @@ class AnalysisController:
         if isinstance(value, list):
             return tuple(AnalysisController._analysis_cache_signature_from_json(item) for item in value)
         return value
+
+    @staticmethod
+    def _signature_hash(signature: tuple[object, ...]) -> str:
+        """Stable, compact hash of a cache-signature tuple, for persisting
+        into the HDF5 measurement-export backup (see
+        `storage/measurement_export.py`'s `signature_hash` column) so a
+        reopened session can tell whether an on-disk row is still valid
+        under the current settings, without storing or comparing the
+        larger, code-coupled signature tuple itself. Reuses the same
+        tuple/list-to-JSON canonicalization already used to persist
+        signatures into the session's `analysis_cache` JSON, so the same
+        signature always hashes the same way regardless of where it's
+        used."""
+        canonical = AnalysisController._analysis_cache_signature_to_json(signature)
+        encoded = json.dumps(canonical, separators=(",", ":")).encode("utf-8")
+        return hashlib.sha256(encoded).hexdigest()
 
     @staticmethod
     def _absorbance_spectral_cube_signature(signature: tuple[object, ...] | None) -> tuple[object, ...] | None:

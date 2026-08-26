@@ -524,6 +524,7 @@ def _roi_absorbance_signature(
     reduction_method: str = "mean",
     trimmed_mean_fraction: float = 0.10,
     formula_key: str = "absorbance",
+    exclusion_signatures: tuple[object, ...] = (),
 ) -> tuple[object, ...]:
     return (
         int(spectral_cube_index),
@@ -542,6 +543,7 @@ def _roi_absorbance_signature(
         str(reduction_method),
         round(float(trimmed_mean_fraction), 4),
         str(formula_key),
+        exclusion_signatures,
     )
 
 

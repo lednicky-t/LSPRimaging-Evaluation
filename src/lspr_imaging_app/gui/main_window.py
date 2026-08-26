@@ -233,6 +233,11 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, HistogramMaskMixin, Measurem
     ABSORBANCE_ROI_MASK_CACHE_SIZE = 48
     ROI_ABSORBANCE_CACHE_SIZE = 512
     SENSORGRAM_CACHE_SIZE = 48
+    # Cube/Time toggle: which per-cube frame's acquisition timestamp
+    # represents the whole cube, when Time mode is active - see
+    # _cycle_cube_time_timestamp_rule / AnalysisController._cube_timestamp_ms_by_cube_index.
+    CUBE_TIME_TIMESTAMP_RULES = ("first", "last", "midpoint")
+    CUBE_TIME_TIMESTAMP_RULE_LABELS = {"first": "First", "last": "Last", "midpoint": "Mid"}
     SENSORGRAM_SPECTRAL_CUBE_PAYLOAD_CACHE_SIZE = 96
     SENSORGRAM_SPECTRAL_CUBE_RESULT_CACHE_SIZE = 96
     # Quick navigation:
@@ -310,6 +315,7 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, HistogramMaskMixin, Measurem
         self._wavelength_values: list[float] = []
         self._workflow_log_debug_enabled = False
         self._cube_time_display_mode = "cube"  # "cube" or "time" - see _toggle_cube_time_display_mode
+        self._cube_time_timestamp_rule = "first"  # "first"/"last"/"midpoint" - see _cycle_cube_time_timestamp_rule
         self._thread_pool = QThreadPool(self)
         self._thread_pool.setMaxThreadCount(max(4, min(6, os.cpu_count() or 4)))
         self._current_record_path: Path | None = None
@@ -500,6 +506,8 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, HistogramMaskMixin, Measurem
         self._sensorgram_metric_signal = np.asarray([], dtype=np.float64)
         self._display_roi_cache_signature: tuple[object, ...] | None = None
         self._display_roi_cache_value: list[AreaRoi] | None = None
+        self._preprocessing_roi_cache_signature: tuple[object, ...] | None = None
+        self._preprocessing_roi_cache_value: list[AreaRoi] | None = None
         self._selected_source_rois_cache_signature: tuple[object, ...] | None = None
         self._selected_source_rois_cache_value: tuple[AreaRoi, ...] = tuple()
         self._processed_mask_view_cache_signature: tuple[object, ...] | None = None
@@ -3384,6 +3392,27 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, HistogramMaskMixin, Measurem
         self._cube_time_display_mode = "time" if self._cube_time_display_mode == "cube" else "cube"
         self._refresh_cube_time_display()
 
+    def _cycle_cube_time_timestamp_rule(self) -> None:
+        """Advances which frame in a cube's sweep stands in for the whole
+        cube's timestamp (first -> last -> midpoint -> first...), when Time
+        mode is active. Only meaningful in Time mode - Cube mode shows the
+        raw index regardless, so this is a no-op (and its control hidden)
+        outside Time mode."""
+        if not self._cube_time_toggle_available() or self._cube_time_display_mode != "time":
+            return
+        rules = self.CUBE_TIME_TIMESTAMP_RULES
+        current_index = rules.index(self._cube_time_timestamp_rule)
+        self._cube_time_timestamp_rule = rules[(current_index + 1) % len(rules)]
+        self._refresh_cube_time_display()
+        if self._sensorgram_metric_values.size:
+            # Re-derives the sensorgram's x-axis under the new rule
+            # immediately, rather than waiting for the next recompute -
+            # the underlying metric values are unchanged, only which
+            # timestamp represents each cube.
+            self._analysis_controller.set_sensorgram_series(
+                self._sensorgram_spectral_cube_indices, self._sensorgram_metric_values
+            )
+
     def _cube_time_display_text_for(self, spectral_cube_index: int) -> str | None:
         """Elapsed-time text (H:MM:SS, or M:SS under an hour) for
         `spectral_cube_index` - CubeTimeSpinBox's override provider, called
@@ -3398,12 +3427,12 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, HistogramMaskMixin, Measurem
         metadata = getattr(dataset, "acquisition_metadata", None) if dataset is not None else None
         if metadata is None or not metadata.image_timings:
             return None
-        per_cube_earliest = self._analysis_controller._earliest_timing_by_cube_index(metadata)
-        timing = per_cube_earliest.get(int(spectral_cube_index))
-        if timing is None:
+        timestamp_by_cube = self._analysis_controller._cube_timestamp_ms_by_cube_index(metadata)
+        timestamp_ms = timestamp_by_cube.get(int(spectral_cube_index))
+        if timestamp_ms is None:
             return None
         anchor_ms = self._analysis_controller._sensorgram_time_anchor_ms(metadata)
-        elapsed_seconds = (timing.acquired_at_unix_ms - anchor_ms) / 1000.0
+        elapsed_seconds = (timestamp_ms - anchor_ms) / 1000.0
         return self._format_elapsed_seconds(elapsed_seconds) or "0:00"
 
     def _refresh_cube_time_display(self) -> None:
@@ -3423,6 +3452,7 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, HistogramMaskMixin, Measurem
         for refresh in (
             getattr(self, "_refresh_metadata_cube_time_toggle", None),
             getattr(self, "_refresh_cube_slider_title_toggle", None),
+            getattr(self, "_refresh_cube_time_timestamp_rule_toggle", None),
         ):
             if callable(refresh):
                 refresh()
@@ -3731,6 +3761,8 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, HistogramMaskMixin, Measurem
         self._processed_external_mask_cache_value = None
         self._display_roi_cache_signature = None
         self._display_roi_cache_value = None
+        self._preprocessing_roi_cache_signature = None
+        self._preprocessing_roi_cache_value = None
         self._processed_mask_view_cache_signature = None
         self._processed_mask_view_cache_value = None
 

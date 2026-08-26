@@ -264,6 +264,12 @@ class DatasetController:
             writer.write_roi_definitions(
                 window._state.area_rois, window._state.area_roi_groups, window._state.area_roi_arrays
             )
+            # Reopening an existing backup (e.g. re-loading a dataset analyzed
+            # in a previous session) must recognize what's already on disk,
+            # not just avoid destroying it - otherwise every cube already
+            # backed up last time would get a duplicate row appended today.
+            window._measurement_export_backed_up_absorbance = writer.existing_absorbance_keys()
+            window._measurement_export_backed_up_sensorgram = writer.existing_sensorgram_keys()
         except Exception:
             logging.getLogger("lspr_imaging_app.workflow").warning(
                 "Failed to open measurement export writer - backup disabled for this session", exc_info=True

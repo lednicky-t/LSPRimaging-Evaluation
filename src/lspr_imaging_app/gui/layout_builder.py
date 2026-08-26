@@ -519,6 +519,52 @@ def _make_metadata_cube_time_toggle(window: QWidget) -> QToolButton:
     return button
 
 
+def _make_cube_time_timestamp_rule_toggle(window: QWidget) -> QToolButton:
+    """(First)/(Last)/(Mid) label, click-cycled, sitting next to the
+    [Cube]/[Time] toggle in the Metadata section title row. Only meaningful
+    (and only shown) in Time mode: it picks which frame in a cube's
+    wavelength sweep stands in for that cube's single timestamp - the first
+    frame acquired, the last, or the midpoint between them. Hidden entirely
+    in Cube mode or when the Cube/Time toggle itself isn't available, so it
+    never clutters the header when there's nothing for it to control."""
+    theme = get_active_theme()
+    button = QToolButton(window)
+    button.setAutoRaise(True)
+    button.setCheckable(False)
+    button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
+    button.setCursor(Qt.CursorShape.PointingHandCursor)
+    button.setToolTip(
+        "Which frame in a cube's wavelength sweep represents that cube's timestamp - "
+        "click to cycle First / Last / Midpoint."
+    )
+
+    def refresh() -> None:
+        available = window._cube_time_toggle_available()
+        mode = getattr(window, "_cube_time_display_mode", "cube")
+        visible = available and mode == "time"
+        button.setVisible(visible)
+        if not visible:
+            return
+        rule = getattr(window, "_cube_time_timestamp_rule", "first")
+        label = window.CUBE_TIME_TIMESTAMP_RULE_LABELS.get(rule, rule.title())
+        button.setText(f"({label})")
+        button.setStyleSheet(
+            "QToolButton {"
+            f"  color: {theme.accent_gold};"
+            "  background: transparent;"
+            "  border: none;"
+            "  font-weight: 600;"
+            "  padding: 4px 2px;"
+            "}"
+            "QToolButton:hover { text-decoration: underline; }"
+        )
+
+    button.clicked.connect(lambda *_: window._cycle_cube_time_timestamp_rule())
+    button.sync_appearance = refresh
+    refresh()
+    return button
+
+
 def _slider_axis_title_style(color: str) -> str:
     """Shared 11px/600 style for the Cube/λ slider-title labels - bigger and
     tighter than QLabel#toolbarMiniLabel (8px, used by unrelated toolbar
@@ -685,13 +731,21 @@ def build_layout(window) -> None:
     metadata_content_layout.addWidget(window.metadata_preview_button)
     window.metadata_cube_time_toggle = _make_metadata_cube_time_toggle(window)
     window._refresh_metadata_cube_time_toggle = window.metadata_cube_time_toggle.sync_appearance
+    window.metadata_cube_time_timestamp_rule_toggle = _make_cube_time_timestamp_rule_toggle(window)
+    window._refresh_cube_time_timestamp_rule_toggle = window.metadata_cube_time_timestamp_rule_toggle.sync_appearance
+    metadata_header_extra = QWidget(window)
+    metadata_header_extra_layout = QHBoxLayout(metadata_header_extra)
+    metadata_header_extra_layout.setContentsMargins(0, 0, 0, 0)
+    metadata_header_extra_layout.setSpacing(2)
+    metadata_header_extra_layout.addWidget(window.metadata_cube_time_toggle)
+    metadata_header_extra_layout.addWidget(window.metadata_cube_time_timestamp_rule_toggle)
     window.metadata_section = CollapsibleSection(
         "Metadata",
         metadata_content,
         expanded=False,
         help_text=panel_help_text("metadata"),
         title_color=_nested_title_color(),
-        header_extra=window.metadata_cube_time_toggle,
+        header_extra=metadata_header_extra,
         parent=window,
     )
 

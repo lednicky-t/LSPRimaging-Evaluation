@@ -88,6 +88,27 @@ def _append_row(dataset: h5py.Dataset, row: np.ndarray) -> None:
     dataset[index, :] = row
 
 
+_STRING_DTYPE = h5py.string_dtype(encoding="utf-8")
+
+
+def _ensure_column(group: h5py.Group, name: str, *, dtype, fill_value, row_count: int) -> h5py.Dataset:
+    """Creates a resizable 1-D `name` dataset if missing, backfilling it with
+    `fill_value` up to `row_count` rows first. Needed whenever a schema
+    change adds a new per-row column (see schema.py's 6.6 changelog entry):
+    without backfilling, reopening a file written by an older version of
+    this writer would create the new column at length 0 while its
+    already-populated sibling columns (cube_index, timestamp_utc_ms, ...)
+    stay at their existing length - a silent row-count mismatch across one
+    "row" of a group, since every column in these groups is meant to stay
+    the same length by construction."""
+    if name in group:
+        return group[name]
+    dataset = group.create_dataset(name, shape=(row_count,), maxshape=(None,), dtype=dtype, chunks=True)
+    if row_count:
+        dataset[...] = fill_value
+    return dataset
+
+
 class ImagingMeasurementExportWriter:
     """Owns one open `lspr_measurement` HDF5 file used as LSPRi eva's
     spectra/sensorgram export - and, since its datasets are resizable and
@@ -100,25 +121,86 @@ class ImagingMeasurementExportWriter:
     """
 
     def __init__(self, path: Path, *, experiment_name: str = "", started_at_utc: datetime | None = None) -> None:
+        """Opens `path` for append if it already exists (a previous run's
+        backup), or creates it fresh otherwise. Reopening an existing backup
+        never truncates it - identity metadata (created_at_utc/started_at_utc/
+        etc.) is preserved from the original creation rather than re-stamped,
+        since those describe when the backup/run first started, not when it
+        was last reopened."""
         self.path = Path(path)
-        self._handle = h5py.File(self.path, "w")
-        identity_kwargs = dict(
-            created_by=APP_NAME,
-            started_at_utc=started_at_utc or datetime.now(),
-            app_name=APP_NAME,
-            app_version=APP_VERSION,
-            experiment_name=experiment_name,
-        )
-        write_measurement_root_metadata(self._handle, **standard_measurement_metadata(**identity_kwargs))
-        manifest = self._handle.create_group("manifest")
-        write_measurement_manifest_metadata(
-            manifest,
-            **standard_measurement_metadata(**identity_kwargs),
-            extra_attrs={"manifest_kind": "measurement"},
-        )
-        self._processed = self._handle.create_group("processed")
+        file_exists = self.path.exists()
+        self._handle = h5py.File(self.path, "a" if file_exists else "w")
+        if file_exists:
+            self._processed = self._handle.require_group("processed")
+        else:
+            identity_kwargs = dict(
+                created_by=APP_NAME,
+                started_at_utc=started_at_utc or datetime.now(),
+                app_name=APP_NAME,
+                app_version=APP_VERSION,
+                experiment_name=experiment_name,
+            )
+            write_measurement_root_metadata(self._handle, **standard_measurement_metadata(**identity_kwargs))
+            manifest = self._handle.create_group("manifest")
+            write_measurement_manifest_metadata(
+                manifest,
+                **standard_measurement_metadata(**identity_kwargs),
+                extra_attrs={"manifest_kind": "measurement"},
+            )
+            self._processed = self._handle.create_group("processed")
         self._sensorgram_groups: dict[str, h5py.Group] = {}
         self._absorbance_groups: dict[str, h5py.Group] = {}
+
+    # -- reopening an existing backup: recover what's already on disk --------
+
+    def existing_absorbance_keys(self) -> set[tuple[int, int, str]]:
+        """(roi_id, cube_index, signature_hash) triples already backed up on
+        disk, so a reopened writer's caller can skip re-appending a row for
+        a (cube, signature) a previous run already wrote - and, conversely,
+        still append a fresh row when the signature has since changed
+        (e.g. an ROI moved), rather than mistaking a now-stale row for a
+        duplicate. Reads only the small `cube_index`/`signature_hash`
+        columns per ROI, never the bulk spectral arrays. Legacy rows
+        backfilled with `signature_hash=""` (see `_ensure_column`) never
+        match a real hash, so they're always treated as needing a fresh
+        append rather than as an accidental duplicate."""
+        keys: set[tuple[int, int, str]] = set()
+        parent = self._processed.get(LSPR_PROCESSED_ABSORBANCE_SPECTRA_GROUP_NAME)
+        if parent is None:
+            return keys
+        for roi_id_text, group in parent.items():
+            if "cube_index" not in group:
+                continue
+            try:
+                roi_id = int(roi_id_text)
+            except ValueError:
+                continue
+            cube_indices = group["cube_index"][...]
+            hashes = group["signature_hash"][...] if "signature_hash" in group else [""] * len(cube_indices)
+            for cube_index, signature_hash in zip(cube_indices, hashes, strict=False):
+                hash_text = signature_hash.decode("utf-8") if isinstance(signature_hash, bytes) else str(signature_hash)
+                keys.add((roi_id, int(cube_index), hash_text))
+        return keys
+
+    def existing_sensorgram_keys(self) -> set[tuple[str, int, str]]:
+        """(roi_id, cube_index, signature_hash) triples already backed up on
+        disk. `roi_id` stays a string - a combined-ROI-selection trace uses
+        a synthetic `"combined_..."` key rather than a real ROI id. See
+        `existing_absorbance_keys` for why `signature_hash` is part of the
+        key rather than a separate freshness check."""
+        keys: set[tuple[str, int, str]] = set()
+        parent = self._processed.get(LSPR_PROCESSED_SENSORGRAM_GROUP_NAME)
+        if parent is None:
+            return keys
+        for roi_id_text, group in parent.items():
+            if "cube_index" not in group:
+                continue
+            cube_indices = group["cube_index"][...]
+            hashes = group["signature_hash"][...] if "signature_hash" in group else [""] * len(cube_indices)
+            for cube_index, signature_hash in zip(cube_indices, hashes, strict=False):
+                hash_text = signature_hash.decode("utf-8") if isinstance(signature_hash, bytes) else str(signature_hash)
+                keys.add((roi_id_text, int(cube_index), hash_text))
+        return keys
 
     # -- ROI definitions: a thin, self-describing mirror ---------------------
     # (full geometry, including any freeform mask, stays canonical in
@@ -193,10 +275,16 @@ class ImagingMeasurementExportWriter:
             return group
         parent = self._processed.require_group(LSPR_PROCESSED_SENSORGRAM_GROUP_NAME)
         group = parent.require_group(roi_id)
+        existing_row_count = int(group["timestamp_utc_ms"].shape[0]) if "timestamp_utc_ms" in group else 0
         if "timestamp_utc_ms" not in group:
             group.create_dataset("timestamp_utc_ms", shape=(0,), maxshape=(None,), dtype=np.int64, chunks=True)
         if "metric_value" not in group:
             group.create_dataset("metric_value", shape=(0,), maxshape=(None,), dtype=np.float64, chunks=True)
+        # Both added in schema 6.6, after the sensorgram group's original
+        # columns above - backfilled via _ensure_column so a file written by
+        # an earlier writer version reopens with all columns row-aligned.
+        _ensure_column(group, "cube_index", dtype=np.int64, fill_value=-1, row_count=existing_row_count)
+        _ensure_column(group, "signature_hash", dtype=_STRING_DTYPE, fill_value="", row_count=existing_row_count)
         self._sensorgram_groups[roi_id] = group
         create_roi_index_entry(
             self._handle,
@@ -227,10 +315,27 @@ class ImagingMeasurementExportWriter:
         if combined_roi_ids:
             group.attrs["combined_roi_ids"] = combined_roi_ids
 
-    def append_sensorgram_point(self, roi_id: str | int, *, timestamp_utc_ms: int, metric_value: float) -> None:
+    def append_sensorgram_point(
+        self,
+        roi_id: str | int,
+        *,
+        cube_index: int,
+        timestamp_utc_ms: int,
+        metric_value: float,
+        signature_hash: str = "",
+    ) -> None:
+        """`signature_hash` identifies the exact preprocessing/chromatic/ROI-
+        geometry/exclusion/fit-parameter state this value was computed
+        under (see `AnalysisController._sensorgram_point_signature_hash`) -
+        empty string means "unknown" (a caller that hasn't wired hashing
+        yet, or a legacy row backfilled by `_ensure_column`), which never
+        matches a real hash, so it's always treated as unverifiable rather
+        than accidentally trusted."""
         group = self._sensorgram_group(str(roi_id))
+        _append_scalar(group["cube_index"], int(cube_index))
         _append_scalar(group["timestamp_utc_ms"], int(timestamp_utc_ms))
         _append_scalar(group["metric_value"], float(metric_value))
+        _append_scalar(group["signature_hash"], str(signature_hash))
 
     # -- absorbance spectra: the full per-wavelength trace over time, per ROI -
 
@@ -240,6 +345,7 @@ class ImagingMeasurementExportWriter:
             return group
         parent = self._processed.require_group(LSPR_PROCESSED_ABSORBANCE_SPECTRA_GROUP_NAME)
         group = parent.require_group(roi_id)
+        existing_row_count = int(group["cube_index"].shape[0]) if "cube_index" in group else 0
         for name in ("cube_index", "timestamp_utc_ms"):
             if name not in group:
                 group.create_dataset(name, shape=(0,), maxshape=(None,), dtype=np.int64, chunks=True)
@@ -248,6 +354,9 @@ class ImagingMeasurementExportWriter:
                 group.create_dataset(
                     name, shape=(0, n_wavelengths), maxshape=(None, n_wavelengths), dtype=np.float32, chunks=True
                 )
+        # Added in schema 6.6, after this group's original columns above -
+        # see _sensorgram_group for why _ensure_column's backfill matters.
+        _ensure_column(group, "signature_hash", dtype=_STRING_DTYPE, fill_value="", row_count=existing_row_count)
         self._absorbance_groups[roi_id] = group
         create_roi_index_entry(
             self._handle,
@@ -268,6 +377,7 @@ class ImagingMeasurementExportWriter:
         timestamp_utc_ms: int,
         formula_key: str = "absorbance",
         reduction_method: str = "mean",
+        signature_hash: str = "",
     ) -> None:
         """Append one ROI's full per-wavelength spectrum at one point in
         time. `formula_values` is whatever `formula_key` actually computed
@@ -276,6 +386,11 @@ class ImagingMeasurementExportWriter:
         values, kept alongside it (not discarded) so the combination can be
         audited or recomputed later - mirroring this repo's "raw data is
         sacred" rule applied to this app's own reduced-per-wavelength data.
+        `signature_hash`: see `append_sensorgram_point`'s docstring - written
+        here for forward compatibility (this cache's own RAM signature
+        doesn't yet cover full preprocessing state or ROI geometry, so
+        nothing reads this column back as a cache hit yet; recorded now so
+        no further schema change is needed once that's fixed).
         """
         wavelengths_nm = np.asarray(wavelengths_nm, dtype=np.float64)
         group = self._absorbance_group(str(roi_id), n_wavelengths=len(wavelengths_nm))
@@ -288,6 +403,7 @@ class ImagingMeasurementExportWriter:
         _append_row(group["absorbance"], np.asarray(formula_values, dtype=np.float32))
         _append_row(group["sample_mean"], np.asarray(sample_mean, dtype=np.float32))
         _append_row(group["reference_mean"], np.asarray(reference_mean, dtype=np.float32))
+        _append_scalar(group["signature_hash"], str(signature_hash))
 
     # -- export ------------------------------------------------------------
 

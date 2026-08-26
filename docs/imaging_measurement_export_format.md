@@ -1,8 +1,17 @@
-# Imaging Measurement Export/Backup Format (proposal)
+# Imaging Measurement Export/Backup Format
 
-**Status: proposed, not implemented.** This is a design note to align on before any code is
-written. It extends the shared `lspr_measurement` HDF5 format (`docs/schemas/hdf_measurement_format.md`,
-`docs/schemas/hdf_standard.md` in the umbrella repo) rather than inventing a parallel one.
+**Status: implemented, on schema major 6.5 - not the major-7 layout proposed below.**
+`storage/measurement_export.py`'s `ImagingMeasurementExportWriter` is real, tested code wired into
+the GUI (`gui/dataset_controller.py`, `gui/analysis_controller.py`). It writes bulk data under
+`/processed/absorbance_spectra/<roi_id>/` and `/processed/sensorgram/<roi_id>/`, appended
+incrementally and safe to reopen across sessions (see
+`apps/LSPRi/eva/docs/analysis_pipeline_redesign.md` \S1/\S2a for the append-mode and
+dedup-key-recovery fix), with `/rois/<roi_id>/` as a secondary soft-link index for roi-centric
+browsing - not, as this doc originally proposed, `/rois/<roi_id>/spectra/...` as the primary
+storage location. That reshuffle (and the sLSPR-acq unification/migration in Phase B below)
+remains an unimplemented proposal. It extends the shared `lspr_measurement` HDF5 format
+(`docs/schemas/hdf_measurement_format.md`, `docs/schemas/hdf_standard.md` in the umbrella repo)
+rather than inventing a parallel one.
 
 ## Goal
 
