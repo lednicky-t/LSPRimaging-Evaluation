@@ -66,3 +66,7 @@ python -m pytest tests/unit/test_lspri_*.py
 the ROI model that actually shipped is `AreaRoi`/`AreaRoiGroup` in
 `domain/models.py`, not the naming those docs propose — treat them as
 historical context, not a current plan.
+
+## Citing this software
+
+This app is part of [LSPR Suite](https://github.com/lednicky-t/LSPR-Suite) — see that repo's `CITATION.cff` for how to cite it.
