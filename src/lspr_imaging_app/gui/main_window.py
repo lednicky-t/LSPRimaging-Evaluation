@@ -3941,9 +3941,8 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, HistogramMaskMixin, Measurem
         if elapsed is not None:
             elapsed_text = self._format_elapsed_seconds(elapsed)
             eta_text = "--:--"
-            eta_percent = max(current_percent, 1)
-            if current_percent > 0 or elapsed >= 1.0:
-                eta_seconds = max((elapsed * (100.0 - eta_percent)) / max(eta_percent, 1), 0.0)
+            if current_percent > 0:
+                eta_seconds = max((elapsed * (100.0 - current_percent)) / current_percent, 0.0)
                 eta_text = self._format_elapsed_seconds(eta_seconds) or "0:00"
             self._status_bar_busy_detail.setText(f"{elapsed_text} | ETA {eta_text} | {current_percent:d}%")
         if text:
