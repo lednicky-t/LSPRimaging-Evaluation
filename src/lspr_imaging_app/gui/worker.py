@@ -8,7 +8,7 @@ import pyqtgraph as pg
 from PyQt6.QtCore import QObject, QRunnable, pyqtSignal
 from PyQt6.QtWidgets import QGraphicsPathItem
 
-from lspr_imaging_app.domain.models import AnalysisState
+from lspr_imaging_app.domain.models import AbsorbanceSpectrumResult, AnalysisState
 
 
 class WorkflowLogBridge(QObject):
@@ -118,6 +118,15 @@ class SensorgramPointResult:
     spectral_cube_index: int
     metric_value: float | None
     metric_signal: float | None
+    # Populated only when this point's full spectrum was actually computed
+    # this call (a full cache/disk miss) - None when a faster metric-only
+    # shortcut supplied the point instead (see _sensorgram_metric_task),
+    # since those never have a full spectrum to hand back. This is how the
+    # per-cube spectrum crosses from the sensorgram worker thread to the
+    # main thread (on_sensorgram_partial_result) for backup + optional live
+    # display, over the same thread-safe partial-result Qt signal the metric
+    # value already used.
+    roi_absorbance_results: dict[int, AbsorbanceSpectrumResult] | None = None
 
 
 @dataclass(slots=True)

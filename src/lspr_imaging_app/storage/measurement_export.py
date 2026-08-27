@@ -233,6 +233,48 @@ class ImagingMeasurementExportWriter:
             index[int(cube_index)] = (hash_text, float(value))
         return index
 
+    def absorbance_spectrum_index(self, roi_id: str | int) -> "AbsorbanceSpectrumTraceIndex | None":
+        """Read-side counterpart of `append_absorbance_spectrum`, mirroring
+        `sensorgram_metric_index`'s contract exactly: reads from the
+        already-open `self._processed` handle (safe to call while this writer
+        is still appending elsewhere), and where a cube_index repeats (a
+        cube recomputed under changed settings appends a new row rather than
+        rewriting), the later row supersedes an earlier one for that cube.
+
+        Returns None if this ROI has no backed-up spectrum trace at all, so a
+        caller can distinguish "nothing on disk yet" from "on disk but every
+        row's signature is stale" (the latter is a per-cube decision the
+        caller makes by comparing `by_cube[cube_index][0]` against a live
+        signature hash - see AnalysisController._roi_absorbance_signature,
+        not `_sensorgram_point_signature_hash`, which is fit-method-dependent
+        and wrong for a raw pre-fit spectrum)."""
+        parent = self._processed.get(LSPR_PROCESSED_ABSORBANCE_SPECTRA_GROUP_NAME)
+        if parent is None:
+            return None
+        group = parent.get(str(roi_id))
+        if group is None or "cube_index" not in group or "wavelengths_nm" not in group:
+            return None
+        cube_indices = group["cube_index"][...]
+        hashes = group["signature_hash"][...] if "signature_hash" in group else [""] * len(cube_indices)
+        formula_rows = group["absorbance"][...]
+        sample_rows = group["sample_mean"][...]
+        reference_rows = group["reference_mean"][...]
+        by_cube: dict[int, tuple[str, np.ndarray, np.ndarray, np.ndarray]] = {}
+        for row_index, (cube_index, signature_hash) in enumerate(zip(cube_indices, hashes, strict=False)):
+            hash_text = signature_hash.decode("utf-8") if isinstance(signature_hash, bytes) else str(signature_hash)
+            by_cube[int(cube_index)] = (
+                hash_text,
+                np.asarray(formula_rows[row_index], dtype=np.float64),
+                np.asarray(sample_rows[row_index], dtype=np.float64),
+                np.asarray(reference_rows[row_index], dtype=np.float64),
+            )
+        return AbsorbanceSpectrumTraceIndex(
+            wavelengths_nm=np.asarray(group["wavelengths_nm"][...], dtype=np.float64),
+            formula_key=str(group.attrs.get("formula_key", "absorbance")),
+            reduction_method=str(group.attrs.get("reduction_method", "mean")),
+            by_cube=by_cube,
+        )
+
     # -- ROI definitions: a thin, self-describing mirror ---------------------
     # (full geometry, including any freeform mask, stays canonical in
     # analysis/roi_table.json - see this module's docstring)
@@ -472,6 +514,19 @@ class ImagingMeasurementExportWriter:
 
     def __exit__(self, *exc_info: object) -> None:
         self.close()
+
+
+@dataclass(slots=True)
+class AbsorbanceSpectrumTraceIndex:
+    """Read-side result of `ImagingMeasurementExportWriter.absorbance_spectrum_index`
+    - one ROI's whole backed-up spectrum trace, indexed by cube_index for a
+    caller to validate/reconstruct one cube's `AbsorbanceSpectrumResult` at a
+    time without re-reading the file per cube."""
+
+    wavelengths_nm: np.ndarray
+    formula_key: str
+    reduction_method: str
+    by_cube: dict[int, tuple[str, np.ndarray, np.ndarray, np.ndarray]]
 
 
 @dataclass(slots=True)

@@ -68,12 +68,17 @@ def _build_analysis_range_row(
     slider: QWidget,
     max_widget: QWidget,
     select_all_button: QToolButton,
+    extra_button: QToolButton | None = None,
 ) -> QWidget:
-    """One [axis label][min][slider][max][All] row - used twice under the
-    "Range" row (wavelength "Spectra" crop, then the spectral-cube/time
-    selection), so both share this one layout instead of two near-copies."""
+    """One [axis label][min][slider][max][All](extra) row - used twice under
+    the "Range" row (wavelength "Spectra" crop, then the spectral-cube/time
+    selection), so both share this one layout instead of two near-copies.
+    `extra_button` (only used by the spectral-cube row, for its "1st"
+    shortcut) sits after "All", styled the same way."""
     axis_label.setFixedWidth(_ANALYSIS_RANGE_AXIS_LABEL_WIDTH)
     _style_range_select_all_button(select_all_button)
+    if extra_button is not None:
+        _style_range_select_all_button(extra_button)
     row = QWidget()
     row_layout = QHBoxLayout(row)
     row_layout.setContentsMargins(0, 0, 0, 0)
@@ -83,6 +88,8 @@ def _build_analysis_range_row(
     row_layout.addWidget(slider, 1)
     row_layout.addWidget(max_widget)
     row_layout.addWidget(select_all_button)
+    if extra_button is not None:
+        row_layout.addWidget(extra_button)
     return row
 
 
@@ -516,6 +523,54 @@ def _make_metadata_cube_time_toggle(window: QWidget) -> QToolButton:
     button.clicked.connect(lambda *_: window._toggle_cube_time_display_mode())
     button.sync_appearance = refresh
     refresh()
+    return button
+
+
+def _make_time_independent_toggle(window: QWidget) -> QToolButton:
+    """Bracketed [λ,t]/[λ] label in the Analysis section title row -
+    switches "Start analysis" between recomputing every per-cube quantity
+    that's allowed to vary over time (ROI read geometry, marked-pixel masks
+    - the default, always-correct [λ,t] mode) and treating them as
+    wavelength-only/time-invariant, computed once from a reference cube and
+    reused for every cube in the run ([λ] mode - faster, valid when the
+    underlying quantities genuinely don't vary cube to cube, which is true
+    by default in this app; see AnalysisController.SharedWavelengthGeometry
+    and _build_shared_wavelength_mask). Not ROI-specific despite the name's
+    history - it now also covers marked-pixel masks, and may cover more
+    per-cube quantities later, hence the plain [λ,t]/[λ] notation rather
+    than naming one specific thing it affects. Same style as
+    _make_workflow_log_debug_toggle/_make_metadata_cube_time_toggle."""
+    theme = get_active_theme()
+    button = QToolButton(window)
+    button.setAutoRaise(True)
+    button.setCheckable(False)
+    button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
+    button.setCursor(Qt.CursorShape.PointingHandCursor)
+    button.setToolTip(
+        "Switch how Start analysis computes per-cube quantities (ROI read geometry, marked-pixel masks)."
+        " [λ,t]: recomputed per spectral cube (default, always correct). [λ]: computed once per run, from"
+        " one reference cube, and reused - faster, valid when these don't actually vary cube to cube"
+        " (true by default in this app)."
+    )
+
+    def refresh_time_independent_toggle() -> None:
+        time_independent = bool(getattr(window, "_analysis_time_independent", False))
+        button.setText("[λ]" if time_independent else "[λ,t]")
+        color = theme.accent_gold if time_independent else theme.text_dim
+        button.setStyleSheet(
+            "QToolButton {"
+            f"  color: {color};"
+            "  background: transparent;"
+            "  border: none;"
+            "  font-weight: 600;"
+            "  padding: 4px 2px;"
+            "}"
+            "QToolButton:hover { text-decoration: underline; }"
+        )
+
+    button.clicked.connect(lambda *_: window._toggle_analysis_time_independent())
+    button.sync_appearance = refresh_time_independent_toggle
+    refresh_time_independent_toggle()
     return button
 
 
@@ -960,7 +1015,6 @@ def build_layout(window) -> None:
     analysis_top_layout.setVerticalSpacing(4)
     analysis_top_layout.setLabelAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
     analysis_scope_row = QHBoxLayout()
-    analysis_scope_row.addWidget(window.analysis_refresh_button)
     analysis_scope_row.addWidget(window.analysis_calculate_all_button)
     analysis_scope_row.addWidget(window.analysis_stop_button)
     analysis_scope_row.addWidget(window.analysis_preview_button)
@@ -986,6 +1040,7 @@ def build_layout(window) -> None:
             slider=window.analysis_spectral_cube_range_slider,
             max_widget=window.analysis_end_spectral_cube_spin,
             select_all_button=window.analysis_spectral_cube_select_all_button,
+            extra_button=window.analysis_spectral_cube_select_first_button,
         )
     )
     analysis_top_layout.addRow("Range", analysis_range_group)
@@ -1182,6 +1237,8 @@ def build_layout(window) -> None:
     analysis_inner_layout.addWidget(
         _nested_section_group(window, window.roi_math_section, window.metric_trace_section, window.statistics_section)
     )
+    window.analysis_time_independent_toggle = _make_time_independent_toggle(window)
+    window._refresh_analysis_time_independent_toggle = window.analysis_time_independent_toggle.sync_appearance
     window.analysis_section = CollapsibleSection(
         "Analysis",
         analysis_inner,
@@ -1189,6 +1246,7 @@ def build_layout(window) -> None:
         applied=bool(window._analysis_enabled),
         apply_tooltip="Enable or disable analysis calculations.",
         help_text=panel_help_text("analysis"),
+        header_extra=window.analysis_time_independent_toggle,
         parent=window,
     )
 

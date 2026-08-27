@@ -1250,6 +1250,8 @@ def _sensorgram_metric_task(
     spectral_cube_result_cache_get=None,
     spectral_cube_result_cache_store=None,
     metric_value_cache_get=None,
+    spectral_cube_absorbance_cache_get=None,
+    spectral_cube_absorbance_cache_store=None,
     wl_min: float | None = None,
     wl_max: float | None = None,
     fit_method_key: str = "poly",
@@ -1300,7 +1302,7 @@ def _sensorgram_metric_task(
                 if progress_callback is not None:
                     progress_callback(
                         int(round((completed / max(total_input_count, 1)) * 20.0)),
-                        f"Preparing sensorgram {completed}/{total_input_count} spectral cubes",
+                        f"Preparing spectral cube reads {completed}/{total_input_count}",
                     )
                 if cancel_event is not None and cancel_event.is_set():
                     # Stop waiting for/loading more cubes, but keep what's
@@ -1332,10 +1334,21 @@ def _sensorgram_metric_task(
 
     for index, (spectral_cube_index, payload) in enumerate(spectral_cube_payloads, start=1):
         # `prep_cancelled` means `spectral_cube_payloads` is already the
-        # smaller, already-fully-loaded batch prep stopped early with - run
-        # that fixed batch to completion rather than re-triggering on the
-        # same (still-set) cancel_event again here.
-        if not prep_cancelled and cancel_event is not None and cancel_event.is_set():
+        # smaller, already-fully-loaded batch prep stopped early with - each
+        # of those cubes already paid its I/O cost, so discarding all of them
+        # outright (the pre-fix behavior) wasted real completed work and
+        # could leave HDF5 export with nothing to persist even though cubes
+        # were fully read. But exempting `prep_cancelled` from every
+        # remaining cancellation check for the rest of this batch (the
+        # original fix) went too far the other way: Stop pressed during prep
+        # became unable to stop anything else afterward, no matter how many
+        # cubes were still queued up. Exempt only until the FIRST cube of
+        # this batch has actually been recorded - that alone guarantees a
+        # prep-time Stop never returns a completely empty result - then go
+        # back to honoring cancel_event normally for cube #2 onward, so
+        # holding Stop through this phase still interrupts it.
+        exempt_from_cancel_check = prep_cancelled and not spectral_cube_indices
+        if not exempt_from_cancel_check and cancel_event is not None and cancel_event.is_set():
             return SensorgramComputationResult(
                 spectral_cube_indices=np.asarray(spectral_cube_indices, dtype=np.int32),
                 metric_values=np.asarray(metric_values, dtype=np.float64),
@@ -1353,9 +1366,15 @@ def _sensorgram_metric_task(
                 return
             inner_percent = float(np.clip(float(percent), 0.0, 100.0))
             overall = compute_base + (((position - 1) + (inner_percent / 100.0)) / total) * compute_span
+            # Cube position is prefixed onto whatever the inner task reports
+            # (e.g. "Fast spectrum 5/20: 650 nm") rather than only shown as a
+            # fallback for when `text` is empty - the inner task always
+            # supplies text, so without this prefix the status bar shows
+            # per-wavelength progress with no indication of which cube (of
+            # how many) is currently running.
             progress_callback(
                 int(round(overall)),
-                text or f"Sensorgram {position}/{total}: spectral cube {spectral_cube_number}",
+                f"Cube {position}/{total} | {text}" if text else f"Sensorgram {position}/{total}: spectral cube {spectral_cube_number}",
             )
 
         # Disk-backed shortcut: a backed-up HDF5 row can supply the already-
@@ -1370,30 +1389,39 @@ def _sensorgram_metric_task(
         # metric_signal series (only the live single-cube preview does, which
         # this shortcut never touches), so this loses no working UI.
         disk_metric_value = metric_value_cache_get(spectral_cube_index) if metric_value_cache_get is not None else None
+        roi_absorbance_results = None
         if disk_metric_value is not None:
             metric_float = float(disk_metric_value) if np.isfinite(disk_metric_value) else float("nan")
             signal_float = float("nan")
         else:
             spectrum = spectral_cube_result_cache_get(spectral_cube_index) if spectral_cube_result_cache_get is not None else None
+            # Next-cheapest: a combined result already sitting in the
+            # interactive per-ROI cache, or resumed from the HDF5 backup
+            # (see AnalysisController._combined_absorbance_results_from_ram_or_disk) -
+            # skips the pixel read just like spectral_cube_result_cache_get,
+            # just via a different cache this loop didn't populate itself.
+            if spectrum is None and spectral_cube_absorbance_cache_get is not None:
+                spectrum = spectral_cube_absorbance_cache_get(spectral_cube_index)
+            freshly_computed = False
             if spectrum is None:
                 _active_task = task_fn if task_fn is not None else _absorbance_spectrum_task
                 spectrum = _active_task(
                     *payload,
-                    # None (not `cancel_event`) once prep already decided to
-                    # finish this batch - `cancel_event` is already set, and
-                    # this task (and the per-wavelength loaders inside it) bail
-                    # out to empty/NaN results as soon as they see a set event,
-                    # which would silently turn every cube in the "finish it"
-                    # batch back into nothing to show or back up.
-                    cancel_event=None if prep_cancelled else cancel_event,
+                    # None (not `cancel_event`) only for the one cube exempted
+                    # above - letting its own per-wavelength loaders run to
+                    # completion rather than bailing to empty/NaN results, so
+                    # that first post-prep-cancel cube is a real, usable
+                    # point rather than a discarded one.
+                    cancel_event=None if exempt_from_cancel_check else cancel_event,
                     progress_callback=spectral_cube_progress_callback,
                     reduction_method=reduction_method,
                     trimmed_mean_fraction=trimmed_mean_fraction,
                     formula_key=formula_key,
                 )
+                freshly_computed = True
                 if spectral_cube_result_cache_store is not None:
                     spectral_cube_result_cache_store(spectral_cube_index, spectrum)
-            if not prep_cancelled and cancel_event is not None and cancel_event.is_set():
+            if not exempt_from_cancel_check and cancel_event is not None and cancel_event.is_set():
                 return SensorgramComputationResult(
                     spectral_cube_indices=np.asarray(spectral_cube_indices, dtype=np.int32),
                     metric_values=np.asarray(metric_values, dtype=np.float64),
@@ -1402,6 +1430,15 @@ def _sensorgram_metric_task(
                     total_count=len(spectral_cube_payloads),
                     cancelled=True,
                 )
+
+            roi_absorbance_results = getattr(spectrum, "area_roi_results", None) or None
+            # Only a *fresh* compute needs to populate the interactive per-ROI
+            # cache - RAM/disk hits above are already there (a disk hit was
+            # just written into it by spectral_cube_absorbance_cache_get
+            # itself; a spectral_cube_result_cache_get hit was already fresh-
+            # computed and stored on some earlier call this run).
+            if freshly_computed and roi_absorbance_results and spectral_cube_absorbance_cache_store is not None:
+                spectral_cube_absorbance_cache_store(spectral_cube_index, roi_absorbance_results)
 
             if fit_method_key == "none":
                 metric_value, metric_signal = metric_value_from_spectrum(
@@ -1430,6 +1467,7 @@ def _sensorgram_metric_task(
                     spectral_cube_index=int(spectral_cube_index),
                     metric_value=None if not np.isfinite(metric_float) else metric_float,
                     metric_signal=None if not np.isfinite(signal_float) else signal_float,
+                    roi_absorbance_results=roi_absorbance_results,
                 )
             )
         if progress_callback is not None:

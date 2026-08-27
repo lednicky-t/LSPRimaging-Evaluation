@@ -473,6 +473,10 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, HistogramMaskMixin, Measurem
         # machinery.
         self._cached_roi_ids: set[int] = set()
         self._analysis_live_preview_enabled = self._settings_bool("analysis/live_preview", False)
+        # [λ] mode - off by default, preserving the existing per-cube ([λ,t])
+        # behavior. See AnalysisController._build_shared_wavelength_geometry
+        # and _build_shared_wavelength_mask.
+        self._analysis_time_independent = self._settings_bool("analysis/time_independent", False)
         self._histogram_log_y_enabled = self._settings_bool("histogram/log_y", False)
         self._histogram_startup_autoscale_pending = False
         self._histogram_startup_autoscale_attempts = 0
@@ -517,6 +521,12 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, HistogramMaskMixin, Measurem
         self._showing_background_profile_main = False
         self._busy_operation_count = 0
         self._wait_cursor_active = False
+        # Separate from _busy_operation_count: lets a specific busy operation
+        # (e.g. analysis - see _start_sensorgram_worker) opt out of the
+        # app-wide wait cursor via _begin_busy(..., show_wait_cursor=False)
+        # while still showing normally in the status bar and still letting
+        # other, non-opted-out busy operations request the cursor as usual.
+        self._busy_cursor_request_count = 0
         self._undo_stack: list[UndoSnapshot] = []
         self._redo_stack: list[UndoSnapshot] = []
         self._prepared_undo_snapshot: UndoSnapshot | None = None
@@ -577,6 +587,16 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, HistogramMaskMixin, Measurem
         self._absorbance_spectrum_timer.setSingleShot(True)
         self._absorbance_spectrum_timer.setInterval(80)
         self._absorbance_spectrum_timer.timeout.connect(self._refresh_absorbance_spectrum)
+        # Coalesces "Start analysis" live-preview updates while a multi-cube
+        # run is in progress: each finished cube stashes itself as the
+        # pending point (see AnalysisController.on_sensorgram_partial_result)
+        # and this timer, on fire, draws only the latest one - "latest
+        # finished cube wins" rather than queuing a draw per cube.
+        self._sensorgram_live_preview_timer = QTimer(self)
+        self._sensorgram_live_preview_timer.setSingleShot(True)
+        self._sensorgram_live_preview_timer.setInterval(80)
+        self._sensorgram_live_preview_timer.timeout.connect(self._apply_pending_sensorgram_live_preview)
+        self._pending_sensorgram_live_point = None
         self._sensorgram_refresh_timer = QTimer(self)
         self._sensorgram_refresh_timer.setSingleShot(True)
         self._sensorgram_refresh_timer.setInterval(100)
@@ -1486,23 +1506,17 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, HistogramMaskMixin, Measurem
         self.histogram_bins_spin.setValue(self._settings_histogram_bin_size())
         self.histogram_bins_spin.setSuffix(" DN")
         self.histogram_bins_spin.setKeyboardTracking(False)
-        self.analysis_refresh_button = self._free_standing_icon_label(
-            self._make_analysis_spectrum_icon(False),
-            "Calculate spectrum.",
-            size=APP_THEME.compact_icon_inner,
-            parent=self,
-        )
-        self.analysis_refresh_button.setCursor(Qt.CursorShape.PointingHandCursor)
         self.analysis_preview_button = self._free_standing_icon_label(
             self._make_analysis_preview_icon(self._analysis_live_preview_enabled),
-            "Live preview: update the spectrum and sensorgram when ROI selection changes.",
+            "Live preview: update the spectrum/sensorgram when ROI selection changes, and show each cube's"
+            " spectrum live while Start analysis is running.",
             size=APP_THEME.compact_icon_inner,
             parent=self,
         )
         self.analysis_preview_button.setCursor(Qt.CursorShape.PointingHandCursor)
         self.analysis_calculate_all_button = self._free_standing_icon_label(
             self._make_analysis_all_spectral_cubes_icon(False),
-            "Calculate all spectral cubes.",
+            "Start analysis: compute spectra and sensorgram for the selected spectral cube range.",
             size=APP_THEME.compact_icon_inner,
             parent=self,
         )
@@ -1720,6 +1734,13 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, HistogramMaskMixin, Measurem
         self.analysis_spectral_cube_select_all_button = QToolButton(self)
         self.analysis_spectral_cube_select_all_button.setText("All")
         self.analysis_spectral_cube_select_all_button.setToolTip("Use the full available spectral cube range.")
+        # Shortcut for a one-cube run (replaces the old standalone "Calculate
+        # spectrum" button/action - Start analysis restricted to just the
+        # first cube gives the same result, through the same unified
+        # spectrum+sensorgram pipeline as any other range).
+        self.analysis_spectral_cube_select_first_button = QToolButton(self)
+        self.analysis_spectral_cube_select_first_button.setText("1st")
+        self.analysis_spectral_cube_select_first_button.setToolTip("Restrict the range to just the first available spectral cube.")
         # Row label kept as a QLabel (not a plain string) so its text can be
         # swapped for "Time" later, once spectral cubes are linked to an
         # experiment plan's real timestamps - see _spectral_cube_axis_label().
@@ -1760,7 +1781,7 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, HistogramMaskMixin, Measurem
         self.spectrum_cursor_line.setZValue(20)
         self.spectrum_cursor_line.hide()
         self.spectrum_plot.addItem(self.spectrum_cursor_line)
-        self.sensorgram_summary_label = QLabel("Calculate all spectral cubes to build the fitted sensorgram.", self)
+        self.sensorgram_summary_label = QLabel("Press Start analysis to build the fitted sensorgram.", self)
         self.sensorgram_summary_label.setWordWrap(True)
         self.sensorgram_plot = pg.PlotWidget(parent=self)
         self.sensorgram_plot.setMinimumHeight(110)
@@ -2102,8 +2123,6 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, HistogramMaskMixin, Measurem
         self.hide_all_panels_action = QAction("Hide all panels", self)
         self.hide_all_panels_action.setToolTip("Hide every workspace panel.")
         self.about_action = QAction("About", self)
-        self.calculate_spectrum_action = QAction("Calculate spectrum", self)
-        self.calculate_spectrum_action.setToolTip("Calculate the absorbance spectrum for the current spectral cube and selected ROIs.")
 
         self.show_rois_check = self._create_view_toggle_button("roi", self._rois_visible, "Show or hide the ROI overlays.")
         self.bottom_roi_labels_button = self._create_label_visibility_button(self._roi_labels_visible)
@@ -2276,6 +2295,7 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, HistogramMaskMixin, Measurem
         self.analysis_end_spectral_cube_spin.valueChanged.connect(self._analysis_controller.on_spectral_cube_range_changed)
         self.analysis_spectral_cube_range_slider.valuesChanged.connect(self._analysis_controller.on_spectral_cube_range_slider_changed)
         self.analysis_spectral_cube_select_all_button.clicked.connect(self._analysis_controller.select_all_spectral_cube_range)
+        self.analysis_spectral_cube_select_first_button.clicked.connect(self._analysis_controller.select_first_spectral_cube_range)
         self.analysis_wavelength_min_spin.valueChanged.connect(self._analysis_controller.on_wavelength_range_changed)
         self.analysis_wavelength_max_spin.valueChanged.connect(self._analysis_controller.on_wavelength_range_changed)
         self.analysis_wavelength_range_slider.valuesChanged.connect(self._analysis_controller.on_wavelength_range_slider_changed)
@@ -2319,7 +2339,6 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, HistogramMaskMixin, Measurem
         self.histogram_bins_spin.valueChanged.connect(self._on_histogram_bins_changed)
         self.histogram_plot.getViewBox().sigRangeChanged.connect(self._on_histogram_view_range_changed)
         self.histogram_bins_spin.editingFinished.connect(self._save_control_preferences)
-        self.analysis_refresh_button.clicked.connect(self._analysis_controller.refresh_absorbance_spectrum)
         self.analysis_preview_button.clicked.connect(self._toggle_analysis_live_preview)
         self.analysis_calculate_all_button.clicked.connect(self._analysis_controller.calculate_sensorgram)
         self.analysis_stop_button.clicked.connect(self._analysis_controller.stop_sensorgram)
@@ -2334,7 +2353,6 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, HistogramMaskMixin, Measurem
         self.analysis_trimmed_mean_spin.valueChanged.connect(self._analysis_controller.on_roi_math_settings_changed)
         self.analysis_formula_combo.currentIndexChanged.connect(self._analysis_controller.on_roi_math_settings_changed)
         self._analysis_controller.sync_analysis_roi_math_controls()
-        self.calculate_spectrum_action.triggered.connect(self._refresh_absorbance_spectrum)
 
     def _connect_analysis_statistics(self) -> None:
         self.analysis_smoothing_method_combo.currentIndexChanged.connect(self._analysis_controller.on_statistics_settings_changed)
@@ -3867,7 +3885,17 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, HistogramMaskMixin, Measurem
     def _redo(self) -> None:
         self._undo_manager.redo()
 
-    def _begin_busy(self, text: str, *, determinate: bool = False) -> None:
+    def _begin_busy(self, text: str, *, determinate: bool = False, show_wait_cursor: bool = True) -> None:
+        """`show_wait_cursor=False` (used by analysis - see
+        _start_sensorgram_worker) keeps this operation out of the app-wide
+        wait-cursor override entirely: the status bar busy indicator still
+        shows normally, but the mouse cursor stays interactive so the rest
+        of the app doesn't look/feel frozen while analysis genuinely runs in
+        the background. Tracked via a separate counter
+        (_busy_cursor_request_count) from the general busy counter so an
+        opted-out operation never affects - and is never affected by -
+        whether some other, concurrent busy operation wants the cursor.
+        """
         self._busy_operation_count += 1
         self._busy_started_at = time.perf_counter()
         self._busy_is_determinate = bool(determinate)
@@ -3884,25 +3912,31 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, HistogramMaskMixin, Measurem
             self._status_bar_busy_detail.setText("0:00")
         self._status_bar_busy.show()
         self._status_bar_busy_detail.show()
-        if not self._wait_cursor_active:
-            QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
-            self._wait_cursor_active = True
+        if show_wait_cursor:
+            self._busy_cursor_request_count += 1
+            if not self._wait_cursor_active:
+                QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+                self._wait_cursor_active = True
         self._undo_manager.update_action_state()
 
-    def _end_busy(self, text: str | None = None) -> None:
+    def _end_busy(self, text: str | None = None, *, show_wait_cursor: bool = True) -> None:
+        """`show_wait_cursor` must match whatever the paired `_begin_busy`
+        call used, so the cursor-request counter stays balanced."""
         self._busy_operation_count = max(0, self._busy_operation_count - 1)
+        if show_wait_cursor:
+            self._busy_cursor_request_count = max(0, self._busy_cursor_request_count - 1)
         if self._busy_operation_count == 0:
             self._status_bar_busy.hide()
             self._status_bar_busy.setRange(0, 0)
             self._status_bar_busy.setTextVisible(False)
             self._status_bar_busy_detail.setText("")
             self._status_bar_busy_detail.hide()
-            if self._wait_cursor_active:
-                QApplication.restoreOverrideCursor()
-                self._wait_cursor_active = False
             self._busy_started_at = None
             self._busy_is_determinate = False
             self._busy_last_percent = 0
+        if self._busy_cursor_request_count == 0 and self._wait_cursor_active:
+            QApplication.restoreOverrideCursor()
+            self._wait_cursor_active = False
         if text is not None:
             self._set_status_text(text)
         self._undo_manager.update_action_state()
@@ -3913,6 +3947,7 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, HistogramMaskMixin, Measurem
         if self._image_refresh_running or self._sensorgram_running or self._absorbance_spectrum_running or self._ome_zarr_export_running:
             return
         self._busy_operation_count = 0
+        self._busy_cursor_request_count = 0
         self._status_bar_busy.hide()
         self._status_bar_busy.setRange(0, 0)
         self._status_bar_busy.setTextVisible(False)
@@ -5441,11 +5476,14 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, HistogramMaskMixin, Measurem
             "when a calculation finishes, or when you toggle this button - not live while you "
             "edit ROIs, so the ROI editor stays fast regardless of dataset size.",
         )
-        self._set_help(self.analysis_preview_button, "Live preview: update the spectrum and sensorgram automatically when ROI selection changes.")
+        self._set_help(
+            self.analysis_preview_button,
+            "Live preview: update the spectrum/sensorgram when ROI selection changes, and show each cube's"
+            " spectrum live while Start analysis is running.",
+        )
         self._set_help(self.shortcuts_action, "Show the main keyboard shortcuts.", shortcuts_text())
         self._set_help(self.reset_panels_visibility_action, "Restore default panel/section visibility (and splitter sizes).")
         self._set_help(self.reset_sizes_action, "Restore default splitter sizes without changing panel visibility.")
-        self._set_help(self.calculate_spectrum_action, "Calculate the absorbance spectrum for the current spectral cube and selected ROIs.")
         self._set_help(self.about_action, "Show basic app information.")
 
 
@@ -6108,8 +6146,14 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, HistogramMaskMixin, Measurem
     def _toggle_analysis_live_preview(self) -> None:
         self._analysis_controller._toggle_analysis_live_preview()
 
+    def _toggle_analysis_time_independent(self) -> None:
+        self._analysis_controller._toggle_analysis_time_independent()
+
     def _refresh_absorbance_spectrum(self) -> None:
         self._analysis_controller._refresh_absorbance_spectrum()
+
+    def _apply_pending_sensorgram_live_preview(self) -> None:
+        self._analysis_controller._apply_pending_sensorgram_live_preview()
 
     def _available_analysis_spectral_cubes(self) -> list[int]:
         return self._analysis_controller._available_analysis_spectral_cubes()
@@ -7245,11 +7289,11 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, HistogramMaskMixin, Measurem
         else:
             if not spectrum_hit:
                 self._set_spectrum_summary_text(
-                    f"{self._spectrum_selection_label()} | Spectrum preview is cached-stale | Press Calculate spectrum"
+                    f"{self._spectrum_selection_label()} | Spectrum preview is cached-stale | Enable live preview, or run Start analysis"
                 )
             if not sensorgram_hit:
                 self._analysis_controller.mark_stale(
-                    f"{self._analysis_metric_label()} sensorgram is out of date | Press Calculate all spectral cubes"
+                    f"{self._analysis_metric_label()} sensorgram is out of date | Press Start analysis"
                 )
 
     def _update_selection_dependent_plots(self, *, force: bool = False, prompt_live_preview: bool = False) -> None:

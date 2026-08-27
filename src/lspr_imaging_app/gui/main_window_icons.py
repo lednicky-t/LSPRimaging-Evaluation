@@ -1095,22 +1095,6 @@ class MainWindowIcons:
         painter.end()
         return QIcon(pixmap)
 
-    def _make_analysis_spectrum_icon(self, active: bool, *, size: int = 24) -> QIcon:
-        stroke_color = "#22c55e" if active else get_active_theme().text_primary
-        top_layer_color = "#22c55e" if active else stroke_color
-        svg = f"""
-        <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="{stroke_color}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <path stroke="none" d="M0 0h24v24H0z" fill="none" />
-            <path d="M12 4l-8 4l8 4l8 -4l-8 -4" stroke="{top_layer_color}" />
-            <path d="M4 12l8 4l8 -4" />
-            <path d="M4 16l8 4l8 -4" />
-        </svg>
-        """
-        icon = self._svg_icon_from_markup(svg, size=size)
-        if not icon.isNull():
-            return icon
-        return self._tabler_icon("stack-middle", stroke_color, size, stroke_width=2.0, fill="none")
-
     def _make_analysis_preview_icon(self, active: bool, *, size: int = 24) -> QIcon:
         color = "#22c55e" if active else get_active_theme().text_dim
         icon = self._tabler_icon("eye", color, size, stroke_width=2.0)
@@ -1799,9 +1783,6 @@ class MainWindowIcons:
             _a.triggered.connect(lambda checked, v=_sv: checked and self._set_ui_scale_factor(v))
             ui_scale_group.addAction(_a)
             self._ui_scale_actions[_sv] = _a
-
-        analysis_menu = menu_bar.addMenu("&Analysis")
-        analysis_menu.addAction(self.calculate_spectrum_action)
 
         help_menu = menu_bar.addMenu("&Help")
         help_menu.addAction(self.shortcuts_action)

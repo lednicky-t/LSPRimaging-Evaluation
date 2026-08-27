@@ -321,10 +321,6 @@ class UIStateManager:
         enabled = bool(window._analysis_enabled)
         has_dataset = window._state.dataset is not None and bool(window._spectral_cube_values) and bool(window._wavelength_values)
         interactive = enabled and has_dataset and not window._sensorgram_running
-        window.analysis_refresh_button.setEnabled(interactive)
-        window.analysis_refresh_button.setPixmap(
-            window._make_analysis_spectrum_icon(enabled and has_dataset).pixmap(APP_THEME.compact_icon_inner, APP_THEME.compact_icon_inner)
-        )
         preview_enabled = enabled and has_dataset
         window.analysis_preview_button.setEnabled(preview_enabled)
         window.analysis_preview_button.setPixmap(
@@ -341,6 +337,9 @@ class UIStateManager:
         window.analysis_stop_button.setPixmap(
             window._make_analysis_stop_icon(enabled and window._sensorgram_running).pixmap(APP_THEME.compact_icon_inner, APP_THEME.compact_icon_inner)
         )
+        refresh_time_independent_toggle = getattr(window, "_refresh_analysis_time_independent_toggle", None)
+        if callable(refresh_time_independent_toggle):
+            refresh_time_independent_toggle()
 
     def update_chromatic_control_state(self) -> None:
         window = self._window

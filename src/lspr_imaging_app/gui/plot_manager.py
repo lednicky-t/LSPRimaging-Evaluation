@@ -288,7 +288,7 @@ class PlotManager:
             return
         spectral_cube_index = window._current_spectral_cube()
         if spectral_cube_index is None or metric_value is None or not np.isfinite(metric_value):
-            self.clear_sensorgram("Calculate all spectral cubes to build the fitted sensorgram.")
+            self.clear_sensorgram("Press Start analysis to build the fitted sensorgram.")
             return
         signal_value = float(metric_signal) if metric_signal is not None and np.isfinite(metric_signal) else float("nan")
         window._sensorgram_metric_signal = np.asarray([signal_value], dtype=np.float64)
