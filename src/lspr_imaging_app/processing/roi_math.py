@@ -5,6 +5,16 @@ from scipy.stats import trim_mean
 
 REDUCTION_METHODS: tuple[str, ...] = ("mean", "median", "trimmed_mean", "plane_fit")
 
+# Not user-adjustable (no GUI control) - a continuously-variable Trim %
+# would mean a cached "trimmed_mean" reduction is only valid for whatever
+# fraction happened to be set when it was computed, breaking the "every
+# Reduction method is instantly available once a cube's pixels are read"
+# guarantee the other three methods get for free (see gui/analysis_worker_
+# mixin.py's write-through reduction cache and processing/analysis.py's
+# project_reduction_result). Fixing it keeps "trimmed_mean" a plain,
+# always-available predefined option, same as mean/median/plane_fit.
+DEFAULT_TRIMMED_MEAN_FRACTION: float = 0.10
+
 
 def reduce_mean(pixels: np.ndarray) -> float:
     """Plain pixel average - the original, still-default behavior."""
@@ -102,3 +112,53 @@ def reduce_sample_and_reference(
             reduce_trimmed_mean(reference_pixels, trimmed_mean_fraction),
         )
     return reduce_mean(sample_pixels), reduce_mean(reference_pixels)  # "mean" (default)
+
+
+def reduce_sample_and_reference_all_methods(
+    sample_pixels: np.ndarray,
+    reference_pixels: np.ndarray,
+    *,
+    trimmed_mean_fraction: float = 0.10,
+    reference_xx: np.ndarray | None = None,
+    reference_yy: np.ndarray | None = None,
+    sample_x: float | None = None,
+    sample_y: float | None = None,
+) -> dict[str, tuple[float, float]]:
+    """Computes every REDUCTION_METHODS entry's (sample, reference) pair from
+    the SAME already-extracted pixel arrays in one call, keyed by method
+    name. The expensive part - reading the image, applying preprocessing,
+    and extracting these pixel arrays via the ROI mask - already happened
+    before this is called; getting every reduction method "for free" here
+    (each computed via the exact same underlying reduce_mean/reduce_median/
+    reduce_trimmed_mean/reduce_plane_fit_reference call that
+    reduce_sample_and_reference itself dispatches to, so results are
+    bit-identical to calling that function individually per method) is what
+    lets switching Reduction be instant afterward instead of re-reading
+    pixels - see processing/analysis.py's project_reduction_result.
+
+    "trimmed_mean" reflects whatever `trimmed_mean_fraction` was passed here
+    - a later Trim % change still needs a fresh call (with the pixel arrays,
+    which callers generally don't retain - see project_reduction_result's
+    docstring on why that's an accepted limitation, not a bug).
+
+    plane_fit needs reference_xx/reference_yy/sample_x/sample_y; when any are
+    None (caller didn't extract pixel coordinates), plane_fit falls back to
+    reduce_mean(reference_pixels) - the same fallback reduce_plane_fit_
+    reference itself uses for a degenerate/insufficient fit, just decided
+    here instead since there are no coordinates to attempt a fit with at all.
+    """
+    sample_mean_value = reduce_mean(sample_pixels)
+    results: dict[str, tuple[float, float]] = {
+        "mean": (sample_mean_value, reduce_mean(reference_pixels)),
+        "median": (reduce_median(sample_pixels), reduce_median(reference_pixels)),
+        "trimmed_mean": (
+            reduce_trimmed_mean(sample_pixels, trimmed_mean_fraction),
+            reduce_trimmed_mean(reference_pixels, trimmed_mean_fraction),
+        ),
+    }
+    if reference_xx is not None and reference_yy is not None and sample_x is not None and sample_y is not None:
+        plane_fit_reference_value = reduce_plane_fit_reference(reference_pixels, reference_xx, reference_yy, sample_x, sample_y)
+    else:
+        plane_fit_reference_value = reduce_mean(reference_pixels)
+    results["plane_fit"] = (sample_mean_value, plane_fit_reference_value)
+    return results

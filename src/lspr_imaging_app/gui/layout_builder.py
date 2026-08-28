@@ -139,25 +139,27 @@ def _build_analysis_fitting_row(window) -> QWidget:
 
 
 def _build_roi_math_row(window) -> QWidget:
-    """Reduction/Trim/Formula row: same stacked grid layout as
-    _build_analysis_fitting_row above. This is the panel that turns each ROI
-    pair's raw masked pixels into the per-wavelength sample/reference value
-    (Reduction, with Trim % only meaningful for Trimmed mean) and then into
-    the final value (Formula) - the step "Metric trace" below now assumes is
-    already done. Trim % visibility is gated the same way Order is in the
-    Metric trace row, see AnalysisController.sync_analysis_roi_math_controls()."""
+    """Reduction row: same stacked grid layout as _build_analysis_fitting_row
+    above. This is the panel that turns each ROI pair's raw masked pixels
+    into the per-wavelength sample/reference value - the genuinely expensive
+    step (re-reads pixels for a cube never visited under any Reduction
+    method before; otherwise an instant cache hit, see gui/analysis_worker_
+    mixin.py's _write_through_reduced_values_by_method). Trimmed mean uses a
+    fixed, non-adjustable trim fraction (processing/roi_math.py's
+    DEFAULT_TRIMMED_MEAN_FRACTION) precisely so every Reduction option stays
+    a plain predefined choice with no per-value staleness to track. How
+    those two values combine into the final value (Formula) lives in the
+    Metric trace section instead - see _build_roi_formula_row - since unlike
+    Reduction, switching formulas never re-reads pixels."""
     widget = QWidget(window)
     grid = QGridLayout()
     grid.setContentsMargins(0, 0, 0, 0)
     grid.setHorizontalSpacing(6)
     grid.setVerticalSpacing(4)
-    grid.setColumnStretch(4, 1)
+    grid.setColumnStretch(2, 1)
 
     section_label = QLabel("ROI's math")
-    section_label.setToolTip(
-        "How each ROI pair's masked pixels become the per-wavelength sample/reference value, "
-        "and how those two values combine into the final value."
-    )
+    section_label.setToolTip("How each ROI pair's masked pixels become the per-wavelength sample/reference value.")
     grid.addWidget(section_label, 1, 0, alignment=Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
 
     reduction_title = QLabel("Reduction")
@@ -166,19 +168,37 @@ def _build_roi_math_row(window) -> QWidget:
     grid.addWidget(reduction_title, 0, 1, alignment=Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignBottom)
     grid.addWidget(window.analysis_reduction_method_combo, 1, 1, alignment=Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
 
-    trim_title = QLabel("Trim %")
-    trim_title.setToolTip("Fraction trimmed from each tail before averaging. Only used by Trimmed mean.")
-    window.analysis_trimmed_mean_spin.setToolTip(trim_title.toolTip())
-    grid.addWidget(trim_title, 0, 2, alignment=Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignBottom)
-    grid.addWidget(window.analysis_trimmed_mean_spin, 1, 2, alignment=Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+    widget.setLayout(grid)
+    widget.setSizePolicy(QSizePolicy.Policy.MinimumExpanding, QSizePolicy.Policy.Fixed)
+    return widget
+
+
+def _build_roi_formula_row(window) -> QWidget:
+    """ROI's-formula row, in the Metric trace section: how each ROI pair's
+    already-reduced sample/reference values (see _build_roi_math_row above)
+    combine into the final per-wavelength value the rest of Metric trace
+    reads from. Deliberately its own row, not folded into
+    _build_analysis_fitting_row below: switching formulas is always instant
+    (no pixel re-read - see processing/analysis.py's
+    project_formula_spectrum), so it reads top-to-bottom as "pick the
+    spectrum, then how to fit/extract it"."""
+    widget = QWidget(window)
+    grid = QGridLayout()
+    grid.setContentsMargins(0, 0, 0, 0)
+    grid.setHorizontalSpacing(6)
+    grid.setVerticalSpacing(4)
+    grid.setColumnStretch(2, 1)
+
+    section_label = QLabel("ROI's formula")
+    section_label.setToolTip("How the sample and reference values combine into the final per-wavelength value.")
+    grid.addWidget(section_label, 1, 0, alignment=Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
 
     formula_title = QLabel("Formula")
     formula_title.setToolTip("How the sample and reference values combine into the final per-wavelength value.")
     window.analysis_formula_combo.setToolTip(formula_title.toolTip())
-    grid.addWidget(formula_title, 0, 3, alignment=Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignBottom)
-    grid.addWidget(window.analysis_formula_combo, 1, 3, alignment=Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+    grid.addWidget(formula_title, 0, 1, alignment=Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignBottom)
+    grid.addWidget(window.analysis_formula_combo, 1, 1, alignment=Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
 
-    window._analysis_trim_fraction_title_widget = trim_title
     widget.setLayout(grid)
     widget.setSizePolicy(QSizePolicy.Policy.MinimumExpanding, QSizePolicy.Policy.Fixed)
     return widget
@@ -1045,8 +1065,8 @@ def build_layout(window) -> None:
     )
     analysis_top_layout.addRow("Range", analysis_range_group)
 
-    # "ROI's math" nested section: reduction method + formula controls that
-    # turn each ROI pair's masked pixels into the per-wavelength value -
+    # "ROI's math" nested section: reduction method controls that turn each
+    # ROI pair's masked pixels into the per-wavelength sample/reference value -
     # usage tips live in this section's help popout (see
     # panel_help_registry.py's "roi_math" entry).
     analysis_roi_math_content = QWidget(window)
@@ -1055,15 +1075,16 @@ def build_layout(window) -> None:
     analysis_roi_math_layout.setSpacing(4)
     analysis_roi_math_layout.addWidget(_build_roi_math_row(window))
 
-    # "Metric trace" nested section: just the metric/order controls - the
-    # formula and usage tips live in this section's help popout instead (see
-    # panel_help_registry.py's "metric_trace" entry), and the result is
-    # shown once, as the spectrum plot's own title (see
-    # PlotManager.set_spectrum_summary_text), not duplicated here.
+    # "Metric trace" nested section: formula (which spectrum) + metric/order
+    # controls (how to fit/extract it) - usage tips live in this section's
+    # help popout instead (see panel_help_registry.py's "metric_trace"
+    # entry), and the result is shown once, as the spectrum plot's own title
+    # (see PlotManager.set_spectrum_summary_text), not duplicated here.
     analysis_fitting_content = QWidget(window)
     analysis_fitting_layout = QVBoxLayout(analysis_fitting_content)
     analysis_fitting_layout.setContentsMargins(8, 8, 8, 8)
     analysis_fitting_layout.setSpacing(4)
+    analysis_fitting_layout.addWidget(_build_roi_formula_row(window))
     analysis_fitting_layout.addWidget(_build_analysis_fitting_row(window))
 
     # "Statistics" nested section: post-processing applied to the already-

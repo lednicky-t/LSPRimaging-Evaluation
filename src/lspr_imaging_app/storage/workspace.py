@@ -893,7 +893,6 @@ def load_processing_profile(
         array_cols=int(raw_detection.get("array_cols", 0)),
         array_spacing_px=int(raw_detection.get("array_spacing_px", raw_detection.get("min_distance_px", 0))),
         reduction_method=str(raw_detection.get("reduction_method", "mean")),
-        trimmed_mean_fraction=float(raw_detection.get("trimmed_mean_fraction", 0.10)),
         formula_key=str(raw_detection.get("formula_key", "absorbance")),
     )
     if detection.ignored_intensity_min_value is None and detection.ignored_intensity_max_value is None:

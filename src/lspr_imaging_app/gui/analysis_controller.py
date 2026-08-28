@@ -540,56 +540,65 @@ class AnalysisController(AnalysisWorkerMixin, AnalysisChromaticGeometryMixin):
         if order_title is not None:
             order_title.setVisible(order_visible)
 
-    def sync_analysis_roi_math_controls(self) -> None:
-        """Show/hide Trim % to match the chosen Reduction method - only
-        Trimmed mean uses it, same visibility-gating pattern as
-        sync_analysis_fitting_controls's Order widget above."""
-        is_trimmed_mean = str(self.window.analysis_reduction_method_combo.currentData() or "mean") == "trimmed_mean"
-        self.window.analysis_trimmed_mean_spin.setVisible(is_trimmed_mean)
-        trim_title = getattr(self.window, "_analysis_trim_fraction_title_widget", None)
-        if trim_title is not None:
-            trim_title.setVisible(is_trimmed_mean)
-
     def on_roi_math_settings_changed(self, *_args) -> None:
-        """Reduction method / Trim % / Formula changed - these are session-
-        scoped (area_roi_settings, not QSettings, see storage/workspace.py)
-        since they change what a cached absorbance value means, unlike
-        fit_method/metric/poly_order. Written back into state here, then the
-        same cache-check-or-refresh logic as a fit-settings change applies
-        (the changed reduction/formula are now part of the cache signature -
-        see AnalysisController._roi_math_signature_elements - so a stale
-        result will already miss and trigger a real recompute)."""
+        """Reduction method changed - session-scoped (area_roi_settings, not
+        QSettings, see storage/workspace.py) since it changes what a cached
+        absorbance value means, unlike fit_method/metric/poly_order. Written
+        back into state here, then the same cache-check-or-refresh logic as
+        a fit-settings change applies. Switching among mean/median/
+        trimmed_mean/plane_fit is normally an instant cache hit rather than
+        a real recompute - see AnalysisController._roi_reduction_signature_
+        elements and `_write_through_reduced_values_by_method` (a genuine
+        miss - a cube never visited by any reduction method yet - still
+        falls through to a real recompute exactly as before this existed).
+
+        Formula is handled separately by `on_active_formula_changed`: unlike
+        Reduction, switching the active ROI's-formula never needs a pixel
+        re-read (see processing/analysis.py's `project_formula_spectrum`),
+        so it doesn't belong in the same "this touched pixels" bucket."""
         settings = self.window._state.area_roi_settings
         settings.reduction_method = str(self.window.analysis_reduction_method_combo.currentData() or "mean")
-        settings.trimmed_mean_fraction = float(self.window.analysis_trimmed_mean_spin.value()) / 100.0
+        self.window._schedule_processing_state_save()
+        self._on_analysis_fit_settings_changed(*_args)
+
+    def on_active_formula_changed(self, *_args) -> None:
+        """ROI's-formula (Metric trace section) changed. Still session-scoped
+        in area_roi_settings, same reasoning as reduction/trim above - a
+        cached sensorgram/metric value bakes in whichever formula produced
+        it (see _sensorgram_point_signature_hash). Unlike a reduction change,
+        this never re-reads pixels: `_on_analysis_fit_settings_changed`
+        re-checks the (now formula-independent) spectrum caches, finds the
+        same entry as before, and `_apply_formula_spectrum_result` projects
+        it onto the newly-active formula - see
+        processing/analysis.py's project_formula_spectrum."""
+        settings = self.window._state.area_roi_settings
         settings.formula_key = str(self.window.analysis_formula_combo.currentData() or "absorbance")
-        self.sync_analysis_roi_math_controls()
         self._update_spectrum_plot_label()
         self.window._schedule_processing_state_save()
         self._on_analysis_fit_settings_changed(*_args)
 
     def refresh_roi_math_controls_from_state(self) -> None:
-        """Push area_roi_settings' reduction/trim/formula into the ROI's-math
-        widgets without re-triggering on_roi_math_settings_changed - called
-        whenever a session/profile load replaces area_roi_settings wholesale,
-        so the panel doesn't keep showing stale (default) values after
-        loading a session that used a non-default Reduction or Formula."""
+        """Push area_roi_settings' reduction/formula into their widgets
+        without re-triggering on_roi_math_settings_changed/
+        on_active_formula_changed - called whenever a session/profile load
+        replaces area_roi_settings wholesale, so the panel doesn't keep
+        showing stale (default) values after loading a session that used a
+        non-default Reduction or Formula. Restores both together (even
+        though Formula's widget now lives in the Metric trace section, not
+        ROI's math) since callers always reload the whole area_roi_settings
+        object as one unit."""
         window = self.window
         settings = window._state.area_roi_settings
         window.analysis_reduction_method_combo.blockSignals(True)
-        window.analysis_trimmed_mean_spin.blockSignals(True)
         window.analysis_formula_combo.blockSignals(True)
         try:
             reduction_index = max(window.analysis_reduction_method_combo.findData(str(settings.reduction_method or "mean")), 0)
             window.analysis_reduction_method_combo.setCurrentIndex(reduction_index)
-            window.analysis_trimmed_mean_spin.setValue(int(round(float(settings.trimmed_mean_fraction) * 100.0)))
             formula_index = max(window.analysis_formula_combo.findData(str(settings.formula_key or "absorbance")), 0)
             window.analysis_formula_combo.setCurrentIndex(formula_index)
         finally:
             window.analysis_reduction_method_combo.blockSignals(False)
-            window.analysis_trimmed_mean_spin.blockSignals(False)
             window.analysis_formula_combo.blockSignals(False)
-        self.sync_analysis_roi_math_controls()
         self._update_spectrum_plot_label()
 
     # ------------------------------------------------------------------
@@ -604,7 +613,7 @@ class AnalysisController(AnalysisWorkerMixin, AnalysisChromaticGeometryMixin):
         settings - Order only for Savitzky-Golay smoothing, Threshold only
         for Hampel spike rejection, and the method/param controls for each
         block only while its own toggle is on. Same visibility-gating idea
-        as sync_analysis_fitting_controls/sync_analysis_roi_math_controls."""
+        as sync_analysis_fitting_controls."""
         window = self.window
         is_savgol = str(window.analysis_smoothing_method_combo.currentData() or "none") == "savgol"
         window.analysis_smoothing_polyorder_spin.setVisible(is_savgol)
@@ -1083,6 +1092,7 @@ class AnalysisController(AnalysisWorkerMixin, AnalysisChromaticGeometryMixin):
         self.window._formula_spectrum_cache.clear()
         self.window._formula_spectral_cube_cache.clear()
         self.window._roi_formula_spectrum_cache.clear()
+        self.window._formula_spectrum_disk_trace_cache.clear()
         self.window._formula_spectrum_dirty = True
         self.window._cached_roi_ids.clear()
 
@@ -1224,14 +1234,29 @@ class AnalysisController(AnalysisWorkerMixin, AnalysisChromaticGeometryMixin):
 
     def _refresh_cube_slider_cache_indicators(self) -> None:
         """Recomputes, on a background thread, which cubes on the Cube/Time
-        slider already have every currently-selected ROI's formula
-        spectrum cached in RAM (`window._roi_formula_spectrum_cache`), then colors
-        those ticks via `DataAxisSlider.set_tick_cache_state`. A cube only
-        counts as "cached" if ALL selected ROIs have it - selecting one
+        slider already have every currently-selected ROI's formula spectrum
+        available - either warm in RAM (`window._roi_formula_spectrum_cache`)
+        or permanently saved to the HDF5 export backup on disk (via
+        `_ensure_disk_formula_spectrum_trace_cached` /
+        `_formula_spectrum_signature_saved_on_disk`) - then colors those
+        ticks via `DataAxisSlider.set_tick_cache_state`. The tick therefore
+        means "was this ever calculated and saved", not just "still warm in
+        this session's RAM cache": RAM is LRU-capped and reset every app
+        restart, but a disk hit is permanent. A cube only counts as "cached"
+        if ALL selected ROIs have it (in RAM or on disk) - selecting one
         ROI that was never computed pulls ticks back to gray even if every
         other selected ROI already has that cube, matching the maintainer's
         expected semantics (adding an uncalculated spot should only ever
         lower the cached count, never hide that it's missing).
+
+        Deliberately formula-independent (the underlying signature is - see
+        `_roi_reduction_signature_elements`): a tick means "the reduction is
+        available", not "the currently-active formula's value is available",
+        since the two are the same thing anyway - any formula is instantly
+        derivable from an available reduction, see
+        processing/analysis.py's project_formula_spectrum. Making the tick
+        track the active formula specifically would make it flicker off on
+        every formula switch despite scrubbing there still being instant.
 
         Runs off the main thread because the cost is real: for N selected
         ROIs and M cubes this is N*M signature computations, each folding in
@@ -1262,12 +1287,14 @@ class AnalysisController(AnalysisWorkerMixin, AnalysisChromaticGeometryMixin):
 
         from lspr_imaging_app.gui.worker import FunctionWorker
 
+        disk_trace_cache = self._ensure_disk_formula_spectrum_trace_cached(selected_source_rois)
+
         window._cube_slider_cache_request_id += 1
         request_id = window._cube_slider_cache_request_id
         cache_lock = window._analysis_cache_lock
         roi_formula_spectrum_cache = window._roi_formula_spectrum_cache
 
-        def _compute(rois=selected_source_rois, cubes=spectral_cube_values) -> set[int]:
+        def _compute(rois=selected_source_rois, cubes=spectral_cube_values, disk_trace_cache=disk_trace_cache) -> set[int]:
             cached_tick_positions: set[int] = set()
             for position, spectral_cube_index in enumerate(cubes):
                 all_cached = True
@@ -1277,9 +1304,14 @@ class AnalysisController(AnalysisWorkerMixin, AnalysisChromaticGeometryMixin):
                         all_cached = False
                         break
                     with cache_lock:
-                        if roi_formula_spectrum_cache.get(signature) is None:
-                            all_cached = False
-                            break
+                        in_ram = roi_formula_spectrum_cache.get(signature) is not None
+                    if in_ram:
+                        continue
+                    if not self._formula_spectrum_signature_saved_on_disk(
+                        int(roi.area_roi_id), int(spectral_cube_index), signature, disk_trace_cache
+                    ):
+                        all_cached = False
+                        break
                 if all_cached:
                     cached_tick_positions.add(position)
             return cached_tick_positions

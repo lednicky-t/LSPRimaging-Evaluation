@@ -21,8 +21,8 @@ def serialize_formula_spectrum_result(result: FormulaSpectrumResult) -> dict:
     return {
         "wavelengths_nm": [float(value) for value in np.asarray(result.wavelengths_nm, dtype=np.float64)],
         "formula_values": [float(value) for value in np.asarray(result.formula_values, dtype=np.float64)],
-        "sample_mean": [float(value) for value in np.asarray(result.sample_mean, dtype=np.float64)],
-        "reference_mean": [float(value) for value in np.asarray(result.reference_mean, dtype=np.float64)],
+        "sample_reduced_value": [float(value) for value in np.asarray(result.sample_reduced_value, dtype=np.float64)],
+        "reference_reduced_value": [float(value) for value in np.asarray(result.reference_reduced_value, dtype=np.float64)],
         "sample_pixel_count": [int(value) for value in np.asarray(result.sample_pixel_count, dtype=np.int32)],
         "reference_pixel_count": [int(value) for value in np.asarray(result.reference_pixel_count, dtype=np.int32)],
         "load_seconds": float(result.load_seconds),
@@ -43,8 +43,8 @@ def deserialize_formula_spectrum_result(payload) -> FormulaSpectrumResult:
         return FormulaSpectrumResult(
             wavelengths_nm=np.asarray([], dtype=np.float64),
             formula_values=np.asarray([], dtype=np.float64),
-            sample_mean=np.asarray([], dtype=np.float64),
-            reference_mean=np.asarray([], dtype=np.float64),
+            sample_reduced_value=np.asarray([], dtype=np.float64),
+            reference_reduced_value=np.asarray([], dtype=np.float64),
             sample_pixel_count=np.asarray([], dtype=np.int32),
             reference_pixel_count=np.asarray([], dtype=np.int32),
         )
@@ -64,8 +64,17 @@ def deserialize_formula_spectrum_result(payload) -> FormulaSpectrumResult:
         # renamed (it always held whatever formula was selected, not
         # necessarily actual absorbance - only the label was misleading).
         formula_values=np.asarray(payload.get("formula_values", payload.get("absorbance", [])), dtype=np.float64),
-        sample_mean=np.asarray(payload.get("sample_mean") or payload.get("spot_mean", []), dtype=np.float64),
-        reference_mean=np.asarray(payload.get("reference_mean") or payload.get("ring_mean", []), dtype=np.float64),
+        # "sample_reduced_value"/"reference_reduced_value" are the current
+        # keys; "sample_mean"/"reference_mean" and "spot_mean"/"ring_mean"
+        # are earlier pre-rename keys, same fallback-chain pattern as
+        # formula_values/absorbance above (these were never necessarily
+        # arithmetic means - only the "_mean" naming was misleading).
+        sample_reduced_value=np.asarray(
+            payload.get("sample_reduced_value") or payload.get("sample_mean") or payload.get("spot_mean", []), dtype=np.float64
+        ),
+        reference_reduced_value=np.asarray(
+            payload.get("reference_reduced_value") or payload.get("reference_mean") or payload.get("ring_mean", []), dtype=np.float64
+        ),
         sample_pixel_count=np.asarray(payload.get("sample_pixel_count") or payload.get("spot_pixel_count", []), dtype=np.int32),
         reference_pixel_count=np.asarray(payload.get("reference_pixel_count") or payload.get("ring_pixel_count", []), dtype=np.int32),
         load_seconds=float(payload.get("load_seconds", 0.0)),

@@ -177,9 +177,10 @@ class AreaRoiDetectionSettings:
     # ROI's math: how each ROI pair's masked pixels become the per-wavelength
     # sample/reference value ("mean"/"median"/"trimmed_mean"/"plane_fit"), and
     # how those two values combine into the final value. Shared across every
-    # ROI pair - no per-ROI override yet, see processing/roi_math.py.
+    # ROI pair - no per-ROI override yet, see processing/roi_math.py. No
+    # trimmed_mean_fraction field: that's a fixed constant (processing/
+    # roi_math.py's DEFAULT_TRIMMED_MEAN_FRACTION), not a per-session setting.
     reduction_method: str = "mean"
-    trimmed_mean_fraction: float = 0.10
     formula_key: str = "absorbance"
 
 
@@ -199,8 +200,12 @@ class FormulaSpectrumResult:
     # Whatever formula (formula_key below) actually computed - "absorbance"
     # (-log10) is only the default. See processing/analysis.py:formula_value.
     formula_values: np.ndarray
-    sample_mean: np.ndarray
-    reference_mean: np.ndarray
+    # Per-wavelength sample/reference value from Reduction (reduction_method
+    # below) - NOT necessarily an arithmetic mean despite the historical
+    # "_mean" suffix on the on-disk HDF5 dataset name (processing/roi_math.py's
+    # reduce_sample_and_reference also offers median/trimmed_mean/plane_fit).
+    sample_reduced_value: np.ndarray
+    reference_reduced_value: np.ndarray
     sample_pixel_count: np.ndarray
     reference_pixel_count: np.ndarray
     load_seconds: float = 0.0
@@ -214,6 +219,16 @@ class FormulaSpectrumResult:
     # hardcoded behavior (plain mean, A = log10(reference/sample)).
     reduction_method: str = "mean"
     formula_key: str = "absorbance"
+    # Per-wavelength (sample, reference) reduced-value pair for every
+    # reduction method computed alongside reduction_method above, keyed by
+    # method name - populated at pixel-extraction time (see
+    # processing/roi_math.py's reduce_sample_and_reference_all_methods) so
+    # switching Reduction among these methods is a cheap re-projection
+    # instead of a pixel re-read (see processing/analysis.py's
+    # project_reduction_result). "trimmed_mean" here reflects whatever Trim %
+    # was set when this result was computed - a later Trim % change still
+    # needs a fresh compute, since the raw pixel array isn't retained.
+    reduced_values_by_method: dict[str, tuple[np.ndarray, np.ndarray]] = field(default_factory=dict)
 
 
 @dataclass(slots=True)

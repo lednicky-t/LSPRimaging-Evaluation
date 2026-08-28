@@ -47,7 +47,7 @@ from lspr_imaging_app.processing.preprocess import (
 from lspr_imaging_app.processing.roi_array_geometry import ArrayGeometryEstimate, estimate_array_geometry, estimate_reference_ring_radii
 from lspr_imaging_app.processing.roi_detection import detect_rois, ignored_pixel_mask
 from lspr_imaging_app.processing.roi_histogram import estimate_roi_intensity_range
-from lspr_imaging_app.processing.roi_math import reduce_sample_and_reference
+from lspr_imaging_app.processing.roi_math import REDUCTION_METHODS, reduce_sample_and_reference_all_methods
 from lspr_imaging_app.processing.roi_rasterize import expand_mask, expand_mask_to_patch
 
 
@@ -523,9 +523,13 @@ def _roi_formula_spectrum_signature(
     chromatic_signatures: tuple[object, ...],
     reduction_method: str = "mean",
     trimmed_mean_fraction: float = 0.10,
-    formula_key: str = "absorbance",
     exclusion_signatures: tuple[object, ...] = (),
 ) -> tuple[object, ...]:
+    """Deliberately formula-independent: this signature validates
+    sample_mean/reference_mean (the reduction), not the formula-combined
+    value, so it stays valid across a formula switch - see
+    AnalysisController._roi_reduction_signature_elements and
+    processing.analysis.project_formula_spectrum."""
     return (
         int(spectral_cube_index),
         tuple(round(float(value), 6) for value in wavelength_values),
@@ -542,7 +546,6 @@ def _roi_formula_spectrum_signature(
         chromatic_signatures,
         str(reduction_method),
         round(float(trimmed_mean_fraction), 4),
-        str(formula_key),
         exclusion_signatures,
     )
 
@@ -632,7 +635,7 @@ def _formula_spectrum_task(
     }
     selected_roi_id_set = set(selected_roi_ids)
     selected_rois = [roi for roi in source_rois if roi.area_roi_id in selected_roi_id_set]
-    roi_accumulators: dict[int, dict[str, list[float] | list[int]]] = {
+    roi_accumulators: dict[int, dict[str, list]] = {
         int(roi.area_roi_id): {
             "wavelengths": [],
             "formula_values": [],
@@ -640,6 +643,12 @@ def _formula_spectrum_task(
             "reference_mean": [],
             "sample_pixel_count": [],
             "reference_pixel_count": [],
+            # One (sample, reference) pair per wavelength for every reduction
+            # method, computed alongside the active one from the same
+            # already-extracted pixel arrays - see reduce_sample_and_
+            # reference_all_methods. Lets switching Reduction reuse this
+            # cube's already-computed values instead of re-reading pixels.
+            "reduced_by_method": {method: [] for method in REDUCTION_METHODS},
         }
         for roi in selected_rois
     }
@@ -649,6 +658,7 @@ def _formula_spectrum_task(
     reference_mean_values: list[float] = []
     sample_pixel_counts: list[int] = []
     reference_pixel_counts: list[int] = []
+    combined_reduced_by_method: dict[str, list[tuple[float, float]]] = {method: [] for method in REDUCTION_METHODS}
     total = max(len(measurement_payload), 1)
 
     def _build_roi_mask_cache(
@@ -760,15 +770,17 @@ def _formula_spectrum_task(
                 prepared_measurements.append(future.result())
         prepared_measurements.sort(key=lambda item: item[0])
 
-    is_plane_fit = str(reduction_method).strip().lower() == "plane_fit"
+    active_reduction_method_key = str(reduction_method).strip().lower()
+    if active_reduction_method_key not in REDUCTION_METHODS:
+        active_reduction_method_key = "mean"
 
     for index, wavelength_nm, processed, affine_matrix, external_mask, load_duration in prepared_measurements:
         if cancel_event is not None and cancel_event.is_set():
             return FormulaSpectrumResult(
                 wavelengths_nm=np.asarray([], dtype=np.float64),
                 formula_values=np.asarray([], dtype=np.float64),
-                sample_mean=np.asarray([], dtype=np.float64),
-                reference_mean=np.asarray([], dtype=np.float64),
+                sample_reduced_value=np.asarray([], dtype=np.float64),
+                reference_reduced_value=np.asarray([], dtype=np.float64),
                 sample_pixel_count=np.asarray([], dtype=np.int32),
                 reference_pixel_count=np.asarray([], dtype=np.int32),
                 load_seconds=load_seconds,
@@ -799,6 +811,9 @@ def _formula_spectrum_task(
         per_roi_formula_values_this_wavelength: list[float] = []
         per_roi_sample_mean_this_wavelength: list[float] = []
         per_roi_reference_mean_this_wavelength: list[float] = []
+        per_roi_reduced_by_method_this_wavelength: dict[str, list[tuple[float, float]]] = {
+            method: [] for method in REDUCTION_METHODS
+        }
         sample_pixel_count_total = 0
         reference_pixel_count_total = 0
         for roi in selected_rois:
@@ -820,20 +835,23 @@ def _formula_spectrum_task(
                 sample_mean_single = float("nan")
                 reference_mean_single = float("nan")
                 formula_value_single = float("nan")
+                reduced_by_method_single = {method: (float("nan"), float("nan")) for method in REDUCTION_METHODS}
             else:
-                reference_yy_single, reference_xx_single = (
-                    np.where(reference_mask_single) if is_plane_fit else (None, None)
-                )
-                sample_mean_single, reference_mean_single = reduce_sample_and_reference(
+                # Always extracted (not just for plane_fit): reduce_sample_and_
+                # reference_all_methods computes every reduction method from
+                # these same pixel arrays, so switching Reduction afterward
+                # doesn't re-read pixels - see that function's docstring.
+                reference_yy_single, reference_xx_single = np.where(reference_mask_single)
+                reduced_by_method_single = reduce_sample_and_reference_all_methods(
                     sample_pixels_single,
                     reference_pixels_single,
-                    reduction_method,
                     trimmed_mean_fraction=trimmed_mean_fraction,
                     reference_xx=reference_xx_single,
                     reference_yy=reference_yy_single,
                     sample_x=roi.center_x,
                     sample_y=roi.center_y,
                 )
+                sample_mean_single, reference_mean_single = reduced_by_method_single[active_reduction_method_key]
                 formula_value_single = formula_value(sample_mean_single, reference_mean_single, formula_key)
 
             accumulator = roi_accumulators[int(roi.area_roi_id)]
@@ -843,21 +861,32 @@ def _formula_spectrum_task(
             accumulator["reference_mean"].append(reference_mean_single)
             accumulator["sample_pixel_count"].append(int(sample_pixels_single.size))
             accumulator["reference_pixel_count"].append(int(reference_pixels_single.size))
+            for method in REDUCTION_METHODS:
+                accumulator["reduced_by_method"][method].append(reduced_by_method_single[method])
             sample_pixel_count_total += int(sample_pixels_single.size)
             reference_pixel_count_total += int(reference_pixels_single.size)
             if np.isfinite(formula_value_single):
                 per_roi_formula_values_this_wavelength.append(formula_value_single)
                 per_roi_sample_mean_this_wavelength.append(sample_mean_single)
                 per_roi_reference_mean_this_wavelength.append(reference_mean_single)
+                for method in REDUCTION_METHODS:
+                    per_roi_reduced_by_method_this_wavelength[method].append(reduced_by_method_single[method])
 
         if per_roi_formula_values_this_wavelength:
             sample_mean = float(np.mean(per_roi_sample_mean_this_wavelength))
             reference_mean = float(np.mean(per_roi_reference_mean_this_wavelength))
             formula_value_combined = float(np.mean(per_roi_formula_values_this_wavelength))
+            for method in REDUCTION_METHODS:
+                pairs = per_roi_reduced_by_method_this_wavelength[method]
+                combined_reduced_by_method[method].append(
+                    (float(np.mean([s for s, _r in pairs])), float(np.mean([r for _s, r in pairs])))
+                )
         else:
             sample_mean = float("nan")
             reference_mean = float("nan")
             formula_value_combined = float("nan")
+            for method in REDUCTION_METHODS:
+                combined_reduced_by_method[method].append((float("nan"), float("nan")))
 
         wavelengths.append(float(wavelength_nm))
         formula_values.append(formula_value_combined)
@@ -873,25 +902,35 @@ def _formula_spectrum_task(
                 f"Spectral absorbance {index}/{total}: {float(wavelength_nm):g} nm",
             )
 
+    def _reduced_arrays_by_method(pairs_by_method: dict[str, list[tuple[float, float]]]) -> dict[str, tuple[np.ndarray, np.ndarray]]:
+        return {
+            method: (
+                np.asarray([s for s, _r in pairs], dtype=np.float64),
+                np.asarray([r for _s, r in pairs], dtype=np.float64),
+            )
+            for method, pairs in pairs_by_method.items()
+        }
+
     roi_results: dict[int, FormulaSpectrumResult] = {}
     for roi in selected_rois:
         data = roi_accumulators[int(roi.area_roi_id)]
         roi_results[int(roi.area_roi_id)] = FormulaSpectrumResult(
             wavelengths_nm=np.asarray(data["wavelengths"], dtype=np.float64),
             formula_values=np.asarray(data["formula_values"], dtype=np.float64),
-            sample_mean=np.asarray(data["sample_mean"], dtype=np.float64),
-            reference_mean=np.asarray(data["reference_mean"], dtype=np.float64),
+            sample_reduced_value=np.asarray(data["sample_mean"], dtype=np.float64),
+            reference_reduced_value=np.asarray(data["reference_mean"], dtype=np.float64),
             sample_pixel_count=np.asarray(data["sample_pixel_count"], dtype=np.int32),
             reference_pixel_count=np.asarray(data["reference_pixel_count"], dtype=np.int32),
             reduction_method=str(reduction_method),
             formula_key=str(formula_key),
+            reduced_values_by_method=_reduced_arrays_by_method(data["reduced_by_method"]),
         )
 
     result = FormulaSpectrumResult(
         wavelengths_nm=np.asarray(wavelengths, dtype=np.float64),
         formula_values=np.asarray(formula_values, dtype=np.float64),
-        sample_mean=np.asarray(sample_mean_values, dtype=np.float64),
-        reference_mean=np.asarray(reference_mean_values, dtype=np.float64),
+        sample_reduced_value=np.asarray(sample_mean_values, dtype=np.float64),
+        reference_reduced_value=np.asarray(reference_mean_values, dtype=np.float64),
         sample_pixel_count=np.asarray(sample_pixel_counts, dtype=np.int32),
         reference_pixel_count=np.asarray(reference_pixel_counts, dtype=np.int32),
         reduction_method=str(reduction_method),
@@ -900,6 +939,7 @@ def _formula_spectrum_task(
         roi_seconds=roi_seconds,
         total_seconds=time.perf_counter() - task_started,
         area_roi_results=roi_results,
+        reduced_values_by_method=_reduced_arrays_by_method(combined_reduced_by_method),
     )
     logging.getLogger("lspr_imaging_app.workflow").debug(
         "Spec cache summary | img hit=%s build=%s | roi hit=%s build=%s",
@@ -980,7 +1020,9 @@ def _formula_spectrum_fast_task(
     task_started = time.perf_counter()
     x0, y0, x1, y1 = box
     patch_h, patch_w = y1 - y0, x1 - x0
-    is_plane_fit = str(reduction_method).strip().lower() == "plane_fit"
+    active_reduction_method_key = str(reduction_method).strip().lower()
+    if active_reduction_method_key not in REDUCTION_METHODS:
+        active_reduction_method_key = "mean"
     flatten_background_enabled = bool(getattr(preprocessing, "flatten_background_enabled", False))
     if not flatten_background_enabled:
         raw_x0, raw_y0, raw_x1, raw_y1 = raw_bounding_box_for_processed_box(raw_shape, preprocessing, box)
@@ -989,9 +1031,11 @@ def _formula_spectrum_fast_task(
         int(roi.area_roi_id): {
             "wavelengths": [], "formula_values": [], "sample_mean": [], "reference_mean": [],
             "sample_pixel_count": [], "reference_pixel_count": [],
+            "reduced_by_method": {method: [] for method in REDUCTION_METHODS},
         }
         for roi in selected_rois
     }
+    combined_reduced_by_method: dict[str, list[tuple[float, float]]] = {method: [] for method in REDUCTION_METHODS}
     total = max(len(measurement_payload), 1)
 
     def _fast_roi_mask_cache_entry(affine_matrix_local: np.ndarray | None) -> dict[str, object]:
@@ -1037,13 +1081,13 @@ def _formula_spectrum_fast_task(
 
     def _load_wl(item: tuple) -> tuple:
         index, (wavelength_nm, affine_matrix, external_mask, record) = item
-        empty_per_roi = {
-            int(roi.area_roi_id): (float("nan"), float("nan"), float("nan"), 0, 0) for roi in selected_rois
-        }
+        empty_reduced_by_method = {method: (float("nan"), float("nan")) for method in REDUCTION_METHODS}
+        empty_entry = (float("nan"), float("nan"), float("nan"), 0, 0, empty_reduced_by_method)
+        empty_per_roi = {int(roi.area_roi_id): empty_entry for roi in selected_rois}
         if cancel_event is not None and cancel_event.is_set():
-            return (index, float(wavelength_nm), (float("nan"), float("nan"), float("nan"), 0, 0), empty_per_roi)
+            return (index, float(wavelength_nm), empty_entry, empty_per_roi)
         if record is None:
-            return (index, float(wavelength_nm), (float("nan"), float("nan"), float("nan"), 0, 0), empty_per_roi)
+            return (index, float(wavelength_nm), empty_entry, empty_per_roi)
 
         if flatten_background_enabled:
             raw_image = load_image_array(str(record.path))
@@ -1059,7 +1103,7 @@ def _formula_spectrum_fast_task(
         else:
             raw_patch = dataset_load_plane_roi(dataset, int(spectral_cube_index), float(wavelength_nm), raw_y0, raw_y1, raw_x0, raw_x1, record=record)
             if raw_patch is None or raw_patch.size == 0:
-                return (index, float(wavelength_nm), (float("nan"), float("nan"), float("nan"), 0, 0), empty_per_roi)
+                return (index, float(wavelength_nm), empty_entry, empty_per_roi)
             patch = resample_raw_patch_to_processed_box(
                 np.asarray(raw_patch, dtype=np.float32), (raw_x0, raw_y0), raw_shape, preprocessing, box,
             )
@@ -1077,7 +1121,7 @@ def _formula_spectrum_fast_task(
             sample_y: float | None = None,
             extra_exclude_mask: np.ndarray | None = None,
             precomputed_masks: tuple[np.ndarray, np.ndarray] | None = None,
-        ) -> tuple[float, float, float, int, int]:
+        ) -> tuple[float, float, float, int, int, dict[str, tuple[float, float]]]:
             if precomputed_masks is not None:
                 roi_mask, reference_mask = precomputed_masks
             else:
@@ -1096,27 +1140,27 @@ def _formula_spectrum_fast_task(
             sample_pixels = patch[roi_mask]
             reference_pixels = patch[reference_mask]
             if sample_pixels.size == 0 or reference_pixels.size == 0:
-                return float("nan"), float("nan"), float("nan"), int(sample_pixels.size), int(reference_pixels.size)
-            if is_plane_fit:
-                # Patch-local indices from np.where must be shifted back by the
-                # patch's (x0, y0) origin so the plane is evaluated in the same
-                # absolute coordinate frame as roi.center_x/roi.center_y - a
-                # mismatch here would silently produce plausible-looking wrong
-                # numbers rather than crashing.
-                reference_row_idx, reference_col_idx = np.where(reference_mask)
-                reference_yy = reference_row_idx.astype(np.float64) + float(y0)
-                reference_xx = reference_col_idx.astype(np.float64) + float(x0)
-                sm, rm = reduce_sample_and_reference(
-                    sample_pixels, reference_pixels, reduction_method,
-                    trimmed_mean_fraction=trimmed_mean_fraction,
-                    reference_xx=reference_xx, reference_yy=reference_yy,
-                    sample_x=sample_x, sample_y=sample_y,
-                )
-            else:
-                sm, rm = reduce_sample_and_reference(
-                    sample_pixels, reference_pixels, reduction_method, trimmed_mean_fraction=trimmed_mean_fraction,
-                )
-            return formula_value(sm, rm, formula_key), sm, rm, int(sample_pixels.size), int(reference_pixels.size)
+                empty_reduced = {method: (float("nan"), float("nan")) for method in REDUCTION_METHODS}
+                return float("nan"), float("nan"), float("nan"), int(sample_pixels.size), int(reference_pixels.size), empty_reduced
+            # Patch-local indices from np.where must be shifted back by the
+            # patch's (x0, y0) origin so a plane fit is evaluated in the same
+            # absolute coordinate frame as roi.center_x/roi.center_y - a
+            # mismatch here would silently produce plausible-looking wrong
+            # numbers rather than crashing. Computed unconditionally (not just
+            # for plane_fit): reduce_sample_and_reference_all_methods computes
+            # every reduction method from these same pixel arrays, so
+            # switching Reduction afterward doesn't re-read pixels.
+            reference_row_idx, reference_col_idx = np.where(reference_mask)
+            reference_yy = reference_row_idx.astype(np.float64) + float(y0)
+            reference_xx = reference_col_idx.astype(np.float64) + float(x0)
+            reduced_by_method = reduce_sample_and_reference_all_methods(
+                sample_pixels, reference_pixels,
+                trimmed_mean_fraction=trimmed_mean_fraction,
+                reference_xx=reference_xx, reference_yy=reference_yy,
+                sample_x=sample_x, sample_y=sample_y,
+            )
+            sm, rm = reduced_by_method[active_reduction_method_key]
+            return formula_value(sm, rm, formula_key), sm, rm, int(sample_pixels.size), int(reference_pixels.size), reduced_by_method
 
         mask_cache_entry = _fast_roi_mask_cache_entry(affine_matrix)
 
@@ -1146,15 +1190,24 @@ def _formula_spectrum_fast_task(
         total_sample_px = sum(int(entry[3]) for entry in per_roi.values())
         total_reference_px = sum(int(entry[4]) for entry in per_roi.values())
         if finite_entries:
+            combined_reduced_by_method_this_wavelength = {
+                method: (
+                    float(np.mean([entry[5][method][0] for entry in finite_entries])),
+                    float(np.mean([entry[5][method][1] for entry in finite_entries])),
+                )
+                for method in REDUCTION_METHODS
+            }
             combined = (
                 float(np.mean([entry[0] for entry in finite_entries])),
                 float(np.mean([entry[1] for entry in finite_entries])),
                 float(np.mean([entry[2] for entry in finite_entries])),
                 total_sample_px,
                 total_reference_px,
+                combined_reduced_by_method_this_wavelength,
             )
         else:
-            combined = (float("nan"), float("nan"), float("nan"), total_sample_px, total_reference_px)
+            empty_reduced = {method: (float("nan"), float("nan")) for method in REDUCTION_METHODS}
+            combined = (float("nan"), float("nan"), float("nan"), total_sample_px, total_reference_px, empty_reduced)
         return (index, float(wavelength_nm), combined, per_roi)
 
     worker_count = max(1, min(max(int(os.cpu_count() or 2) // 2, 2), 8, len(measurement_payload)))
@@ -1193,15 +1246,18 @@ def _formula_spectrum_fast_task(
     for r in results:
         if r is None:
             continue
-        _, wl, (formula_val, sm, rm, spc, rpc), per_roi = r
+        _, wl, (formula_val, sm, rm, spc, rpc, reduced_by_method_combined), per_roi = r
         wavelengths_out.append(float(wl))
         formula_values.append(float(formula_val))
         sample_mean_values.append(float(sm))
         reference_mean_values.append(float(rm))
         sample_pixel_counts.append(int(spc))
         reference_pixel_counts.append(int(rpc))
+        for method in REDUCTION_METHODS:
+            s, rr = reduced_by_method_combined[method]
+            combined_reduced_by_method[method].append((float(s), float(rr)))
         for roi in selected_rois:
-            roi_formula_val, roi_sm, roi_rm, roi_spc, roi_rpc = per_roi[int(roi.area_roi_id)]
+            roi_formula_val, roi_sm, roi_rm, roi_spc, roi_rpc, roi_reduced_by_method = per_roi[int(roi.area_roi_id)]
             accumulator = roi_accumulators[int(roi.area_roi_id)]
             accumulator["wavelengths"].append(float(wl))
             accumulator["formula_values"].append(float(roi_formula_val))
@@ -1209,6 +1265,18 @@ def _formula_spectrum_fast_task(
             accumulator["reference_mean"].append(float(roi_rm))
             accumulator["sample_pixel_count"].append(int(roi_spc))
             accumulator["reference_pixel_count"].append(int(roi_rpc))
+            for method in REDUCTION_METHODS:
+                s, rr = roi_reduced_by_method[method]
+                accumulator["reduced_by_method"][method].append((float(s), float(rr)))
+
+    def _reduced_arrays_by_method(pairs_by_method: dict[str, list[tuple[float, float]]]) -> dict[str, tuple[np.ndarray, np.ndarray]]:
+        return {
+            method: (
+                np.asarray([s for s, _r in pairs], dtype=np.float64),
+                np.asarray([r for _s, r in pairs], dtype=np.float64),
+            )
+            for method, pairs in pairs_by_method.items()
+        }
 
     roi_results: dict[int, FormulaSpectrumResult] = {}
     for roi in selected_rois:
@@ -1216,25 +1284,27 @@ def _formula_spectrum_fast_task(
         roi_results[int(roi.area_roi_id)] = FormulaSpectrumResult(
             wavelengths_nm=np.asarray(data["wavelengths"], dtype=np.float64),
             formula_values=np.asarray(data["formula_values"], dtype=np.float64),
-            sample_mean=np.asarray(data["sample_mean"], dtype=np.float64),
-            reference_mean=np.asarray(data["reference_mean"], dtype=np.float64),
+            sample_reduced_value=np.asarray(data["sample_mean"], dtype=np.float64),
+            reference_reduced_value=np.asarray(data["reference_mean"], dtype=np.float64),
             sample_pixel_count=np.asarray(data["sample_pixel_count"], dtype=np.int32),
             reference_pixel_count=np.asarray(data["reference_pixel_count"], dtype=np.int32),
             reduction_method=str(reduction_method),
             formula_key=str(formula_key),
+            reduced_values_by_method=_reduced_arrays_by_method(data["reduced_by_method"]),
         )
 
     return FormulaSpectrumResult(
         wavelengths_nm=np.asarray(wavelengths_out, dtype=np.float64),
         formula_values=np.asarray(formula_values, dtype=np.float64),
-        sample_mean=np.asarray(sample_mean_values, dtype=np.float64),
-        reference_mean=np.asarray(reference_mean_values, dtype=np.float64),
+        sample_reduced_value=np.asarray(sample_mean_values, dtype=np.float64),
+        reference_reduced_value=np.asarray(reference_mean_values, dtype=np.float64),
         sample_pixel_count=np.asarray(sample_pixel_counts, dtype=np.int32),
         reference_pixel_count=np.asarray(reference_pixel_counts, dtype=np.int32),
         reduction_method=str(reduction_method),
         formula_key=str(formula_key),
         total_seconds=time.perf_counter() - task_started,
         area_roi_results=roi_results,
+        reduced_values_by_method=_reduced_arrays_by_method(combined_reduced_by_method),
     )
 
 

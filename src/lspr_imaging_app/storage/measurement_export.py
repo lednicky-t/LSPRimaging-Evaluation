@@ -456,9 +456,13 @@ class ImagingMeasurementExportWriter:
         time. `formula_values` is whatever `formula_key` actually computed
         (absorbance by default - see processing/analysis.py:formula_value);
         `sample_mean`/`reference_mean` are the pre-combination reduced pixel
-        values, kept alongside it (not discarded) so the combination can be
-        audited or recomputed later - mirroring this repo's "raw data is
-        sacred" rule applied to this app's own reduced-per-wavelength data.
+        values (from whichever `reduction_method` was active - despite the
+        param/dataset names, not necessarily an arithmetic mean; kept as-is
+        for on-disk schema stability, see domain/models.py's
+        FormulaSpectrumResult.sample_reduced_value), kept alongside it (not
+        discarded) so the combination can be audited or recomputed later -
+        mirroring this repo's "raw data is sacred" rule applied to this
+        app's own reduced-per-wavelength data.
         `signature_hash`: see `append_sensorgram_point`'s docstring - written
         here for forward compatibility (this cache's own RAM signature
         doesn't yet cover full preprocessing state or ROI geometry, so

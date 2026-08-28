@@ -419,6 +419,15 @@ class ImageInteractionController:
             ):
                 if w._roi_selection_rubber_band is not None:
                     w._roi_selection_rubber_band.hide()
+                    # Force the erase to paint now, synchronously - below, this
+                    # release handler can go on to open a modal live-preview
+                    # QMessageBox (_prompt_live_preview_calculation_choice's
+                    # box.exec()), which nests a second Qt event loop before
+                    # the queued hide()/repaint would otherwise run. Without
+                    # this, the rubber band's last-drawn outline stays painted
+                    # over the image view until something else forces a
+                    # repaint (e.g. resizing the window).
+                    w.image_view.viewport().repaint()
                 end_point = self._image_point_from_mouse_event(event)
                 start_x, start_y = w._roi_selection_drag_start
                 drag_modifiers = w._roi_selection_drag_modifiers

@@ -129,6 +129,7 @@ from lspr_imaging_app.processing.chromatic import warp_boolean_mask_affine
 from lspr_imaging_app.processing.reference_selection import bimodal_dip_contrast
 from lspr_imaging_app.processing.roi_histogram import estimate_roi_intensity_range
 from lspr_imaging_app.storage.workspace import _roi_signature_entry
+from lspr_imaging_app.storage.measurement_export import FormulaSpectrumTraceIndex
 from lspr_imaging_app.version import version_string
 from lspr_imaging_app.domain.models import (
     AnalysisState,
@@ -462,6 +463,13 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, HistogramMaskMixin, Measurem
         self._formula_spectrum_dirty = True
         self._formula_spectrum_started_at: float | None = None
         self._roi_formula_spectrum_cache: OrderedDict[tuple[object, ...], FormulaSpectrumResult] = OrderedDict()
+        # Per-ROI-id cache of each ROI's full on-disk formula-spectrum trace
+        # index (HDF5 export backup), used by _refresh_cube_slider_cache_indicators
+        # so the Cube/Time slider's cached-tick indicator can answer "was this
+        # cube ever calculated and saved" (permanent), not just "is it still
+        # warm in the RAM cache above" (LRU-capped, reset every app restart).
+        # See AnalysisWorkerMixin._ensure_disk_formula_spectrum_trace_cached.
+        self._formula_spectrum_disk_trace_cache: dict[int, FormulaSpectrumTraceIndex] = {}
         # Snapshot of which ROI ids currently have cached absorbance data, used by the
         # ROI table/overlay "calculated" indicator. Deliberately NOT recomputed on every
         # selection/edit (see _refresh_cached_roi_ids_snapshot): checking cache membership
@@ -519,6 +527,13 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, HistogramMaskMixin, Measurem
         self._background_profile_cache_image: np.ndarray | None = None
         self._showing_background_profile_main = False
         self._busy_operation_count = 0
+        # Set via _begin_busy(..., total_items=N) for a busy operation whose
+        # progress counts a known number of discrete units (e.g. spectral
+        # cubes in an analysis run) - lets _update_busy_progress show a
+        # speed readout (e.g. "1.23 s/cube") alongside elapsed/ETA. None for
+        # any other busy operation (dataset load, chromatic registration,
+        # ...), which just don't get that extra readout.
+        self._busy_total_items: int | None = None
         self._wait_cursor_active = False
         # Separate from _busy_operation_count: lets a specific busy operation
         # (e.g. analysis - see _start_sensorgram_worker) opt out of the
@@ -1540,13 +1555,13 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, HistogramMaskMixin, Measurem
         )
         self.analysis_stop_button.setCursor(Qt.CursorShape.PointingHandCursor)
         # ROI's math: how each ROI pair's masked sample/reference pixels become
-        # one value each (Reduction) and how those two values combine into the
-        # final per-wavelength value (Formula) - see processing/roi_math.py and
-        # processing/analysis.py::formula_value. Session-scoped via
-        # area_roi_settings (not QSettings): unlike fit_method/metric/poly_order
-        # below, these change what a cached absorbance value actually means, so
-        # they persist with the dataset's saved profile - see
-        # storage/workspace.py and AnalysisController.refresh_roi_math_controls_from_state.
+        # one value each (Reduction) - see processing/roi_math.py. Session-scoped
+        # via area_roi_settings (not QSettings): unlike fit_method/metric/poly_order
+        # below, this changes what a cached sample/reference value actually means,
+        # so it persists with the dataset's saved profile - see storage/workspace.py
+        # and AnalysisController.refresh_roi_math_controls_from_state. A Reduction
+        # change is the genuinely expensive one (re-reads pixels) - see
+        # ROI's formula below for the cheap, pixel-independent counterpart.
         self.analysis_reduction_method_combo = QComboBox(self)
         self.analysis_reduction_method_combo.addItem("Mean", "mean")
         self.analysis_reduction_method_combo.addItem("Median", "median")
@@ -1557,13 +1572,26 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, HistogramMaskMixin, Measurem
         )
         self.analysis_reduction_method_combo.setCurrentIndex(reduction_method_index)
 
-        self.analysis_trimmed_mean_spin = QSpinBox(self)
-        self.analysis_trimmed_mean_spin.setRange(0, 45)
-        self.analysis_trimmed_mean_spin.setSuffix("%")
-        self.analysis_trimmed_mean_spin.setValue(int(round(float(self._state.area_roi_settings.trimmed_mean_fraction) * 100.0)))
-        self.analysis_trimmed_mean_spin.setKeyboardTracking(False)
-        self.analysis_trimmed_mean_spin.setToolTip("Fraction trimmed from each tail before averaging. Only used by Trimmed mean.")
+        # Trim % is deliberately not a GUI control: Trimmed mean uses a fixed
+        # trim fraction (processing/roi_math.py's DEFAULT_TRIMMED_MEAN_FRACTION),
+        # not a user-adjustable one - see that constant's docstring for why
+        # (a continuously-variable Trim % would break the "every Reduction
+        # option is instantly available once a cube's pixels are read" property
+        # the other three methods get for free).
 
+        # ROI's formula: how the sample/reference values above combine into the
+        # final per-wavelength value - see processing/analysis.py::formula_value.
+        # Lives in the Metric trace section (below), not ROI's math: switching
+        # formulas is always instant - sample_reduced_value/reference_reduced_
+        # value don't depend on formula_key, so any formula is exactly
+        # re-derivable from an already-reduced result with no pixel access, see
+        # processing/analysis.py::project_formula_spectrum. (Switching Reduction
+        # itself is now also instant among mean/median/trimmed_mean/plane_fit,
+        # once a cube's pixels have been read once - see gui/analysis_worker_
+        # mixin.py's _write_through_reduced_values_by_method.) Still session-scoped
+        # via area_roi_settings (not QSettings), same reasoning as Reduction
+        # above: a cached *sensorgram/metric* value does bake in whichever
+        # formula produced it, even though the raw spectrum doesn't.
         self.analysis_formula_combo = QComboBox(self)
         self.analysis_formula_combo.addItem("Absorbance", "absorbance")
         self.analysis_formula_combo.addItem("Ratio", "ratio")
@@ -2360,10 +2388,7 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, HistogramMaskMixin, Measurem
         self.analysis_metric_combo.currentIndexChanged.connect(self._analysis_controller.on_fit_settings_changed)
         self._analysis_controller.sync_analysis_fitting_controls()
         self.analysis_reduction_method_combo.currentIndexChanged.connect(self._analysis_controller.on_roi_math_settings_changed)
-        self.analysis_reduction_method_combo.currentIndexChanged.connect(self._analysis_controller.sync_analysis_roi_math_controls)
-        self.analysis_trimmed_mean_spin.valueChanged.connect(self._analysis_controller.on_roi_math_settings_changed)
-        self.analysis_formula_combo.currentIndexChanged.connect(self._analysis_controller.on_roi_math_settings_changed)
-        self._analysis_controller.sync_analysis_roi_math_controls()
+        self.analysis_formula_combo.currentIndexChanged.connect(self._analysis_controller.on_active_formula_changed)
 
     def _connect_analysis_statistics(self) -> None:
         self.analysis_smoothing_method_combo.currentIndexChanged.connect(self._analysis_controller.on_statistics_settings_changed)
@@ -3897,7 +3922,9 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, HistogramMaskMixin, Measurem
     def _redo(self) -> None:
         self._undo_manager.redo()
 
-    def _begin_busy(self, text: str, *, determinate: bool = False, show_wait_cursor: bool = True) -> None:
+    def _begin_busy(
+        self, text: str, *, determinate: bool = False, show_wait_cursor: bool = True, total_items: int | None = None
+    ) -> None:
         """`show_wait_cursor=False` (used by analysis - see
         _start_sensorgram_worker) keeps this operation out of the app-wide
         wait-cursor override entirely: the status bar busy indicator still
@@ -3907,11 +3934,16 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, HistogramMaskMixin, Measurem
         (_busy_cursor_request_count) from the general busy counter so an
         opted-out operation never affects - and is never affected by -
         whether some other, concurrent busy operation wants the cursor.
+
+        `total_items`: how many discrete units 100% represents (e.g. spectral
+        cubes for an analysis run) - see `_busy_total_items`. Omit for a busy
+        operation with no such natural unit.
         """
         self._busy_operation_count += 1
         self._busy_started_at = time.perf_counter()
         self._busy_is_determinate = bool(determinate)
         self._busy_last_percent = 0
+        self._busy_total_items = int(total_items) if total_items else None
         self._set_status_text(text)
         if determinate:
             self._status_bar_busy.setRange(0, 100)
@@ -3946,6 +3978,7 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, HistogramMaskMixin, Measurem
             self._busy_started_at = None
             self._busy_is_determinate = False
             self._busy_last_percent = 0
+            self._busy_total_items = None
         if self._busy_cursor_request_count == 0 and self._wait_cursor_active:
             QApplication.restoreOverrideCursor()
             self._wait_cursor_active = False
@@ -3971,7 +4004,26 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, HistogramMaskMixin, Measurem
         self._busy_started_at = None
         self._busy_is_determinate = False
         self._busy_last_percent = 0
+        self._busy_total_items = None
         self._undo_manager.update_action_state()
+
+    @staticmethod
+    def _format_busy_detail_text(elapsed: float, current_percent: int, total_items: int | None) -> str:
+        """Pure text-formatting half of _update_busy_progress, split out so
+        the elapsed/ETA/speed math is testable without a real Qt MainWindow.
+        `total_items`, when given, turns `current_percent` back into a real
+        per-item rate (see `_busy_total_items`'s docstring for why that
+        conversion is needed here rather than being tracked directly)."""
+        elapsed_text = MainWindow._format_elapsed_seconds(elapsed)
+        eta_text = "--:--"
+        if current_percent > 0:
+            eta_seconds = max((elapsed * (100.0 - current_percent)) / current_percent, 0.0)
+            eta_text = MainWindow._format_elapsed_seconds(eta_seconds) or "0:00"
+        speed_text = ""
+        if total_items and current_percent > 0 and elapsed > 0:
+            items_done = max(1, round(total_items * current_percent / 100.0))
+            speed_text = f" | {elapsed / items_done:.2f} s/cube"
+        return f"{elapsed_text} | ETA {eta_text} | {current_percent:d}%{speed_text}"
 
     def _update_busy_progress(self, percent: int, text: str | None = None) -> None:
         if self._busy_operation_count <= 0:
@@ -3986,12 +4038,9 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, HistogramMaskMixin, Measurem
         started_at = self._busy_started_at
         elapsed = time.perf_counter() - started_at if started_at is not None else None
         if elapsed is not None:
-            elapsed_text = self._format_elapsed_seconds(elapsed)
-            eta_text = "--:--"
-            if current_percent > 0:
-                eta_seconds = max((elapsed * (100.0 - current_percent)) / current_percent, 0.0)
-                eta_text = self._format_elapsed_seconds(eta_seconds) or "0:00"
-            self._status_bar_busy_detail.setText(f"{elapsed_text} | ETA {eta_text} | {current_percent:d}%")
+            self._status_bar_busy_detail.setText(
+                self._format_busy_detail_text(elapsed, current_percent, self._busy_total_items)
+            )
         if text:
             self._set_status_text(text)
 
