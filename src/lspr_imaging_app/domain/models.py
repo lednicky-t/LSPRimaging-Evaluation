@@ -194,7 +194,7 @@ class FitResult:
 
 
 @dataclass(slots=True)
-class AbsorbanceSpectrumResult:
+class FormulaSpectrumResult:
     wavelengths_nm: np.ndarray
     # Whatever formula (formula_key below) actually computed - "absorbance"
     # (-log10) is only the default. See processing/analysis.py:formula_value.
@@ -207,7 +207,7 @@ class AbsorbanceSpectrumResult:
     roi_seconds: float = 0.0
     fit_seconds: float = 0.0
     total_seconds: float = 0.0
-    area_roi_results: dict[int, "AbsorbanceSpectrumResult"] = field(default_factory=dict)
+    area_roi_results: dict[int, "FormulaSpectrumResult"] = field(default_factory=dict)
     # Self-describing: the ROI's-math settings actually in effect when this
     # result was computed, so a cached result stays meaningful even if the
     # live settings have since changed. Defaults match the pre-existing

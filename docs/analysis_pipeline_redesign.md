@@ -42,8 +42,8 @@ need sign-off before any code changes.
   for the new per-cube-timestamp-rule control proposed in \S3.
 - **A persistent, signature-keyed result cache already exists and survives restarts** -
   `analysis_cache` in the session's processing-profile JSON (`storage/workspace.py:663-664`,
-  `gui/analysis_controller.py:2827-2919`), covering `absorbance_spectrum_cache`,
-  `absorbance_spectral_cube_cache`, `roi_absorbance_cache`, `sensorgram_cache`. Each entry is
+  `gui/analysis_controller.py:2827-2919`), covering `formula_spectrum_cache`,
+  `formula_spectral_cube_cache`, `roi_absorbance_cache`, `sensorgram_cache`. Each entry is
   keyed by a composite signature (dataset, ROI geometry, per-`(cube, wavelength)`
   preprocessing/chromatic state, wavelength range, formula/reduction settings) - this is already
   most of the "container that fills in incrementally, as long as parameters match" mechanism
@@ -68,7 +68,7 @@ previous session - silently wiping the prior backup before the first new row was
 **Fixed**: `ImagingMeasurementExportWriter.__init__` (`storage/measurement_export.py`) now opens
 with `"a"` when the file already exists, preserving the original identity metadata
 (`created_at_utc`/`started_at_utc`) instead of re-stamping it. Two new methods,
-`existing_absorbance_keys()` and `existing_sensorgram_keys()`, scan just the small `cube_index`
+`existing_formula_spectrum_keys()` and `existing_sensorgram_keys()`, scan just the small `cube_index`
 columns (never the bulk float arrays) to rebuild the in-memory backed-up-already sets on reopen -
 wired into `dataset_controller.py`'s `_open_measurement_export_writer_for_dataset()`. This
 required adding a `cube_index` column to the sensorgram group (it previously stored only
@@ -95,12 +95,12 @@ call sites needed.
 
 Every mutation site (ROI edit, mask change, chromatic change, image-tools change) calls
 `_invalidate_image_analysis_caches()` (`main_window.py`), which clears the **entire**
-`absorbance_spectrum_cache`/`absorbance_spectral_cube_cache`/`roi_absorbance_cache` outright -
+`formula_spectrum_cache`/`formula_spectral_cube_cache`/`roi_absorbance_cache` outright -
 even for ROIs/cubes whose own signature didn't change. One specific, previously-documented
 instance of this - the exclusion-rule set not being part of any signature - is now fixed (see
 below). **The general bulk clear on ROI/mask/chromatic/image-tools changes is a separate, larger
 question and was deliberately NOT touched by this fix** - investigating it surfaced that
-`_absorbance_spectrum_cache`/`_roi_absorbance_cache` only fold in chromatic state today, not the
+`_formula_spectrum_cache`/`_roi_formula_spectrum_cache` only fold in chromatic state today, not the
 full rotation/crop/background/mask preprocessing signature the sensorgram caches use. Those two
 caches still genuinely depend on `_invalidate_image_analysis_caches()`'s bulk clear for
 correctness against everything except chromatic and (now) exclusion changes - removing that bulk
@@ -111,8 +111,8 @@ separate, its-own-sign-off piece of work, not a trivial follow-on to the exclusi
 resolves each wavelength in a cube to a plain "is this frame currently excluded" bool via the
 existing `is_excluded()` helper (which already collapses whole-cube/whole-wavelength wildcard
 rules down to a per-frame answer, so no rule-list hashing is needed). This is now folded into all
-four places that previously omitted it entirely: `_roi_absorbance_signature`,
-`_absorbance_spectrum_signature_for_source_rois`, `_sensorgram_signature_for_selection`, and
+four places that previously omitted it entirely: `_roi_formula_spectrum_signature`,
+`_formula_spectrum_signature_for_source_rois`, `_sensorgram_signature_for_selection`, and
 `_sensorgram_spectral_cube_payload_signature`. With that in place, `_invalidate_caches_for_
 exclusion_change()` (triggered from `image_exclusion_controller.py` when a rule is added/removed)
 no longer needs to clear any cache at all - a rule change now produces a natural signature miss
@@ -189,7 +189,7 @@ multi-gigabyte JSON rewrite on every save - this is what actually breaks, not th
    rows from an older writer version are backfilled row-aligned (`_ensure_column`), not left at
    length 0 next to longer siblings - a real bug caught while implementing this, covered by
    `test_reopening_legacy_group_backfills_new_columns_row_aligned`. Dedup-on-append is now
-   signature-aware: `existing_absorbance_keys()`/`existing_sensorgram_keys()` return
+   signature-aware: `existing_formula_spectrum_keys()`/`existing_sensorgram_keys()` return
    `(roi_id, cube_index, signature_hash)` triples, so a value recomputed under changed settings
    appends a fresh row instead of being mistaken for a duplicate of the (now-stale) old one.
    - **Sensorgram** uses `_sensorgram_point_signature_hash()`, which is the payload signature
@@ -198,14 +198,14 @@ multi-gigabyte JSON rewrite on every save - this is what actually breaks, not th
      result cache (which stores the full fit-independent spectrum and deliberately excludes these
      from its signature), the HDF5 row only stores the already-reduced final scalar, so a
      fit/metric change must count as a different value here.
-   - **Absorbance spectra** uses the existing (narrower, \S2c/4b) `_roi_absorbance_signature` -
+   - **Absorbance spectra** uses the existing (narrower, \S2c/4b) `_roi_formula_spectrum_signature` -
      written now for forward compatibility, but seen the same 4b gap the RAM cache has (missing
      full preprocessing state and ROI geometry). Recorded so no further schema bump is needed once
      4b is eventually done; not yet trustworthy enough to read back as a cache hit.
 3. **Read-before-recompute wiring - implemented (option (a): a second, narrower cache-hit path).**
    Resolves the granularity mismatch described in the original version of this section: the RAM
    result cache the sweep worker normally consults (`_cached_sensorgram_spectral_cube_result`)
-   returns a full pre-fit `AbsorbanceSpectrumResult`, which the worker then fits a metric from -
+   returns a full pre-fit `FormulaSpectrumResult`, which the worker then fits a metric from -
    that's *how* changing only the fit method avoids re-reading pixels. The HDF5 backup only ever
    stores the final, already-reduced scalar `metric_value`, which can't reconstruct that object.
    Rather than trying to make a disk hit repopulate the RAM spectrum cache, the sweep worker
@@ -308,11 +308,11 @@ Verified directly in `apps/sLSPR/acq`:
    **done**. Does NOT yet deliver "moving one ROI only recomputes that ROI" in general - that
    needs item 4b below first.
 4b. **Deliberately deferred, not started.** Extending `_absorbance_spectrum_signature_for_source_
-    rois`/`_roi_absorbance_signature` to make their bulk clear removable turned out bigger than
+    rois`/`_roi_formula_spectrum_signature` to make their bulk clear removable turned out bigger than
     scoped: those two caches are missing not just full preprocessing state but the selected ROIs'
     own geometry (only the ROI *id* is in the signature today - the actual computation reads
     `_rois_for_preprocessing()`, which reflects center/radius/mask). Getting this right needs a
-    real audit against everything `_prepare_absorbance_spectrum_payload_for_spectral_cube`/
+    real audit against everything `_prepare_formula_spectrum_payload_for_spectral_cube`/
     `_prepare_fast_spectrum_payload_for_spectral_cube` actually read, not a small follow-on to the
     exclusion fix. It's also lower-payoff than it looked: this pair serves the single-cube live
     preview (recomputed on nearly every settings tweak, for one displayed cube), not the sensorgram

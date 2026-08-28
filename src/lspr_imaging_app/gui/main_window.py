@@ -132,7 +132,7 @@ from lspr_imaging_app.storage.workspace import _roi_signature_entry
 from lspr_imaging_app.version import version_string
 from lspr_imaging_app.domain.models import (
     AnalysisState,
-    AbsorbanceSpectrumResult,
+    FormulaSpectrumResult,
     ChromaticLandmarkObservation,
     ChromaticTransformModel,
     AreaRoi,
@@ -172,7 +172,6 @@ from .worker import (
     MeasurementOverlayBundle,
     ScaleBarOverlayBundle,
     SensorgramComputationResult,
-    SensorgramPointResult,
     RoiOverlayBundle,
     UndoSnapshot,
 )
@@ -228,10 +227,10 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, HistogramMaskMixin, Measurem
     PRIMARY_CUBE_IMAGE_CACHE_MIN_SIZE = 40
     SECONDARY_CUBE_IMAGE_CACHE_SIZE = 5
     MASK_CANDIDATE_CACHE_SIZE = 6
-    ABSORBANCE_SPECTRUM_CACHE_SIZE = 48
-    ABSORBANCE_SPECTRAL_CUBE_CACHE_SIZE = 48
-    ABSORBANCE_ROI_MASK_CACHE_SIZE = 48
-    ROI_ABSORBANCE_CACHE_SIZE = 512
+    FORMULA_SPECTRUM_CACHE_SIZE = 48
+    FORMULA_SPECTRAL_CUBE_CACHE_SIZE = 48
+    FORMULA_SPECTRUM_ROI_MASK_CACHE_SIZE = 48
+    ROI_FORMULA_SPECTRUM_CACHE_SIZE = 512
     SENSORGRAM_CACHE_SIZE = 48
     # Cube/Time toggle: which per-cube frame's acquisition timestamp
     # represents the whole cube, when Time mode is active - see
@@ -425,16 +424,16 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, HistogramMaskMixin, Measurem
         self._histogram_source_cache_signature: tuple[object, ...] | None = None
         self._histogram_source_cache_values: tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray] | None = None
         self._histogram_log_range_guard = False
-        self._absorbance_spectrum_cache: OrderedDict[tuple[object, ...], AbsorbanceSpectrumResult] = OrderedDict()
-        self._absorbance_spectral_cube_cache: OrderedDict[tuple[object, ...], AbsorbanceSpectrumResult] = OrderedDict()
-        self._absorbance_roi_mask_cache: OrderedDict[tuple[object, ...], dict[str, object]] = OrderedDict()
+        self._formula_spectrum_cache: OrderedDict[tuple[object, ...], FormulaSpectrumResult] = OrderedDict()
+        self._formula_spectral_cube_cache: OrderedDict[tuple[object, ...], FormulaSpectrumResult] = OrderedDict()
+        self._formula_spectrum_roi_mask_cache: OrderedDict[tuple[object, ...], dict[str, object]] = OrderedDict()
         self._sensorgram_cache: OrderedDict[tuple[object, ...], SensorgramComputationResult] = OrderedDict()
         self._sensorgram_spectral_cube_payload_cache: OrderedDict[tuple[object, ...], tuple[object, ...]] = OrderedDict()
-        self._sensorgram_spectral_cube_result_cache: OrderedDict[tuple[object, ...], AbsorbanceSpectrumResult] = OrderedDict()
+        self._sensorgram_spectral_cube_result_cache: OrderedDict[tuple[object, ...], FormulaSpectrumResult] = OrderedDict()
         self._acquisition_timing_index_cache: tuple[int, dict[int, object], dict[tuple[int, float], object]] | None = None
         self._sensorgram_axis_range_cache: tuple[object, tuple[float, float]] | None = None
         self._analysis_cache_lock = threading.Lock()
-        self._last_absorbance_fit_seconds: float | None = None
+        self._last_formula_spectrum_fit_seconds: float | None = None
         self._last_saved_processing_signature: str | None = None
         self._last_saved_preprocessing_path: Path | None = None
         self._last_saved_profile_path: Path | None = None
@@ -453,16 +452,16 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, HistogramMaskMixin, Measurem
         self._roi_detection_request_id = 0
         self._background_profile_in_flight: set[tuple[object, ...]] = set()
         self._background_profile_pending: dict[tuple[object, ...], list] = {}
-        self._absorbance_spectrum_request_id = 0
+        self._formula_spectrum_request_id = 0
         self._sensorgram_request_id = 0
         self._chromatic_registration_request_id = 0
         self._ome_zarr_export_request_id = 0
-        self._absorbance_spectrum_running = False
-        self._absorbance_spectrum_running_signature: tuple[object, ...] | None = None
-        self._pending_absorbance_spectrum_payload: tuple[object, ...] | None = None
-        self._absorbance_spectrum_dirty = True
-        self._absorbance_spectrum_started_at: float | None = None
-        self._roi_absorbance_cache: OrderedDict[tuple[object, ...], AbsorbanceSpectrumResult] = OrderedDict()
+        self._formula_spectrum_running = False
+        self._formula_spectrum_running_signature: tuple[object, ...] | None = None
+        self._pending_formula_spectrum_payload: tuple[object, ...] | None = None
+        self._formula_spectrum_dirty = True
+        self._formula_spectrum_started_at: float | None = None
+        self._roi_formula_spectrum_cache: OrderedDict[tuple[object, ...], FormulaSpectrumResult] = OrderedDict()
         # Snapshot of which ROI ids currently have cached absorbance data, used by the
         # ROI table/overlay "calculated" indicator. Deliberately NOT recomputed on every
         # selection/edit (see _refresh_cached_roi_ids_snapshot): checking cache membership
@@ -501,10 +500,10 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, HistogramMaskMixin, Measurem
         self._busy_started_at: float | None = None
         self._busy_is_determinate = False
         self._busy_last_percent: int = 0
-        self._absorbance_prep_request_id = 0
-        self._absorbance_prep_running = False
-        self._absorbance_prep_started_at: float | None = None
-        self._absorbance_prep_request_signature: tuple[object, ...] | None = None
+        self._formula_spectrum_prep_request_id = 0
+        self._formula_spectrum_prep_running = False
+        self._formula_spectrum_prep_started_at: float | None = None
+        self._formula_spectrum_prep_request_signature: tuple[object, ...] | None = None
         self._sensorgram_spectral_cube_indices = np.asarray([], dtype=np.int32)
         self._sensorgram_metric_values = np.asarray([], dtype=np.float64)
         self._sensorgram_metric_signal = np.asarray([], dtype=np.float64)
@@ -583,10 +582,10 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, HistogramMaskMixin, Measurem
         self._histogram_refresh_timer.setSingleShot(True)
         self._histogram_refresh_timer.setInterval(35)
         self._histogram_refresh_timer.timeout.connect(self._refresh_histogram_if_available)
-        self._absorbance_spectrum_timer = QTimer(self)
-        self._absorbance_spectrum_timer.setSingleShot(True)
-        self._absorbance_spectrum_timer.setInterval(80)
-        self._absorbance_spectrum_timer.timeout.connect(self._refresh_absorbance_spectrum)
+        self._formula_spectrum_timer = QTimer(self)
+        self._formula_spectrum_timer.setSingleShot(True)
+        self._formula_spectrum_timer.setInterval(80)
+        self._formula_spectrum_timer.timeout.connect(self._refresh_formula_spectrum)
         # Coalesces "Start analysis" live-preview updates while a multi-cube
         # run is in progress: each finished cube stashes itself as the
         # pending point (see AnalysisController.on_sensorgram_partial_result)
@@ -601,6 +600,18 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, HistogramMaskMixin, Measurem
         self._sensorgram_refresh_timer.setSingleShot(True)
         self._sensorgram_refresh_timer.setInterval(100)
         self._sensorgram_refresh_timer.timeout.connect(self._refresh_sensorgram)
+        # Debounced recompute of the Cube/Time slider's per-tick cache
+        # indicator (DataAxisSlider.set_tick_cache_state) - see
+        # AnalysisController.schedule_cube_slider_cache_refresh. Coalesces
+        # bursts (multi-select drag, rapid range edits) into one background
+        # scan instead of one per intermediate selection state.
+        self._cube_slider_cache_refresh_timer = QTimer(self)
+        self._cube_slider_cache_refresh_timer.setSingleShot(True)
+        self._cube_slider_cache_refresh_timer.setInterval(150)
+        self._cube_slider_cache_refresh_timer.timeout.connect(
+            lambda: self._analysis_controller._refresh_cube_slider_cache_indicators()
+        )
+        self._cube_slider_cache_request_id = 0
         self._processing_state_save_timer = QTimer(self)
         self._processing_state_save_timer.setSingleShot(True)
         # A few seconds, not milliseconds: this fires the real disk write.
@@ -3036,6 +3047,7 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, HistogramMaskMixin, Measurem
         self._sync_analysis_spectral_cube_range_controls()
         self._sync_analysis_wavelength_range_controls()
         self._sync_analysis_plots()
+        self._analysis_controller.schedule_cube_slider_cache_refresh()
 
     def _wavelength_slider_major_ticks(self) -> dict[int, str]:
         """Indices to label on the wavelength axis slider: the dataset point
@@ -3756,8 +3768,8 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, HistogramMaskMixin, Measurem
         self._roi_mask_cache_signature = None
         self._roi_mask_cache_values = None
 
-    def _invalidate_absorbance_spectrum_cache(self) -> None:
-        self._analysis_controller._invalidate_absorbance_spectrum_cache()
+    def _invalidate_formula_spectrum_cache(self) -> None:
+        self._analysis_controller._invalidate_formula_spectrum_cache()
 
     def _invalidate_caches_for_exclusion_change(self) -> None:
         self._analysis_controller._invalidate_caches_for_exclusion_change()
@@ -3786,7 +3798,7 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, HistogramMaskMixin, Measurem
 
     def _invalidate_image_analysis_caches(self) -> None:
         self._invalidate_per_frame_display_caches()
-        self._invalidate_absorbance_spectrum_cache()
+        self._invalidate_formula_spectrum_cache()
         if hasattr(self, "analysis_metric_combo"):
             self._mark_sensorgram_stale()
 
@@ -3944,7 +3956,7 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, HistogramMaskMixin, Measurem
     def _sync_busy_cursor_state(self) -> None:
         if self._busy_operation_count <= 0:
             return
-        if self._image_refresh_running or self._sensorgram_running or self._absorbance_spectrum_running or self._ome_zarr_export_running:
+        if self._image_refresh_running or self._sensorgram_running or self._formula_spectrum_running or self._ome_zarr_export_running:
             return
         self._busy_operation_count = 0
         self._busy_cursor_request_count = 0
@@ -3992,7 +4004,7 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, HistogramMaskMixin, Measurem
             return
         self._histogram_refresh_timer.start()
         if not self._dragging_rois and not self._roi_edit_refresh_pending:
-            self._schedule_absorbance_spectrum_refresh()
+            self._schedule_formula_spectrum_refresh()
 
     def _schedule_processing_state_save(self) -> None:
         self._processing_state_save_timer.start()
@@ -5990,8 +6002,8 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, HistogramMaskMixin, Measurem
     def _refresh_sensorgram(self) -> None:
         self._analysis_controller._refresh_sensorgram()
 
-    def _mark_absorbance_spectrum_dirty(self) -> None:
-        self._analysis_controller._mark_absorbance_spectrum_dirty()
+    def _mark_formula_spectrum_dirty(self) -> None:
+        self._analysis_controller._mark_formula_spectrum_dirty()
 
     def _selected_spectrum_roi_ids(self) -> tuple[int, ...]:
         return self._analysis_controller._selected_spectrum_roi_ids()
@@ -6002,8 +6014,8 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, HistogramMaskMixin, Measurem
     def _spectrum_selection_label(self) -> str:
         return self._analysis_controller._spectrum_selection_label()
 
-    def _clear_absorbance_spectrum(self) -> None:
-        self._plot_manager.clear_absorbance_spectrum()
+    def _clear_formula_spectrum(self) -> None:
+        self._plot_manager.clear_formula_spectrum()
 
     def _clear_spectrum_series_items(self) -> None:
         self._plot_manager.clear_spectrum_series_items()
@@ -6011,66 +6023,69 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, HistogramMaskMixin, Measurem
     def _roi_spectrum_color(self, roi_id: int) -> QColor:
         return self._plot_manager.roi_spectrum_color(roi_id)
 
-    def _add_spectrum_series(
+    def _compute_spectrum_series_data(self, result: FormulaSpectrumResult):
+        return self._plot_manager.compute_spectrum_series_data(result)
+
+    def _render_spectrum_series(
         self,
+        computed,
         *,
         roi_id: int,
-        result: AbsorbanceSpectrumResult,
         label: str | None = None,
         highlighted: bool = False,
         dimmed: bool = False,
-    ) -> tuple[np.ndarray, np.ndarray, np.ndarray | None, np.ndarray | None] | None:
-        return self._plot_manager.add_spectrum_series(
+    ) -> None:
+        self._plot_manager.render_spectrum_series(
+            computed,
             roi_id=roi_id,
-            result=result,
             label=label,
             highlighted=highlighted,
             dimmed=dimmed,
         )
 
-    def _analysis_fit_result_from_spectrum(self, result: AbsorbanceSpectrumResult) -> FitResult | None:
+    def _analysis_fit_result_from_spectrum(self, result: FormulaSpectrumResult) -> FitResult | None:
         return self._plot_manager.analysis_fit_result_from_spectrum(result)
 
     def _update_single_spectral_cube_sensorgram(self, metric_value: float | None, metric_signal: float | None) -> None:
         self._plot_manager.update_single_spectral_cube_sensorgram(metric_value, metric_signal)
 
-    def _schedule_absorbance_spectrum_refresh(self) -> None:
-        self._analysis_controller._schedule_absorbance_spectrum_refresh()
+    def _schedule_formula_spectrum_refresh(self) -> None:
+        self._analysis_controller._schedule_formula_spectrum_refresh()
 
-    def _start_absorbance_spectrum_preparation(
+    def _start_formula_spectrum_preparation(
         self,
         signature: tuple[object, ...],
         selected_source_rois: list[AreaRoi] | None = None,
     ) -> None:
-        self._analysis_controller._start_absorbance_spectrum_preparation(signature, selected_source_rois)
+        self._analysis_controller._start_formula_spectrum_preparation(signature, selected_source_rois)
 
-    def _on_absorbance_spectrum_payload_ready(
+    def _on_formula_spectrum_payload_ready(
         self,
         request_id: int,
         expected_signature: tuple[object, ...],
         prepared: tuple[tuple[object, ...], tuple[object, ...]] | None,
     ) -> None:
-        self._analysis_controller._on_absorbance_spectrum_payload_ready(request_id, expected_signature, prepared)
+        self._analysis_controller._on_formula_spectrum_payload_ready(request_id, expected_signature, prepared)
 
-    def _on_absorbance_spectrum_payload_failed(self, request_id: int, message: str) -> None:
-        self._analysis_controller._on_absorbance_spectrum_payload_failed(request_id, message)
+    def _on_formula_spectrum_payload_failed(self, request_id: int, message: str) -> None:
+        self._analysis_controller._on_formula_spectrum_payload_failed(request_id, message)
 
-    def _cached_absorbance_result_for_selection(
+    def _cached_formula_spectrum_result_for_selection(
         self,
         signature: tuple[object, ...],
         selected_roi_ids: tuple[int, ...],
         selected_source_rois: list[AreaRoi] | None = None,
-    ) -> AbsorbanceSpectrumResult | None:
-        return self._analysis_controller._cached_absorbance_result_for_selection(signature, selected_roi_ids, selected_source_rois)
+    ) -> FormulaSpectrumResult | None:
+        return self._analysis_controller._cached_formula_spectrum_result_for_selection(signature, selected_roi_ids, selected_source_rois)
 
-    def _absorbance_spectrum_signature(self) -> tuple[object, ...] | None:
-        return self._analysis_controller._absorbance_spectrum_signature()
+    def _formula_spectrum_signature(self) -> tuple[object, ...] | None:
+        return self._analysis_controller._formula_spectrum_signature()
 
-    def _roi_absorbance_signature(self, roi: AreaRoi) -> tuple[object, ...] | None:
-        return self._analysis_controller._roi_absorbance_signature(roi)
+    def _roi_formula_spectrum_signature(self, roi: AreaRoi) -> tuple[object, ...] | None:
+        return self._analysis_controller._roi_formula_spectrum_signature(roi)
 
-    def _roi_has_cached_absorbance(self, roi: AreaRoi) -> bool:
-        return self._analysis_controller._roi_has_cached_absorbance(roi)
+    def _roi_has_cached_formula_spectrum(self, roi: AreaRoi) -> bool:
+        return self._analysis_controller._roi_has_cached_formula_spectrum(roi)
 
     def _refresh_cached_roi_ids_snapshot(self) -> None:
         self._analysis_controller._refresh_cached_roi_ids_snapshot()
@@ -6084,24 +6099,24 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, HistogramMaskMixin, Measurem
         return AnalysisController._analysis_cache_signature_from_json(value)
 
     @staticmethod
-    def _absorbance_spectral_cube_signature(signature: tuple[object, ...] | None) -> tuple[object, ...] | None:
-        return AnalysisController._absorbance_spectral_cube_signature(signature)
+    def _formula_spectral_cube_signature(signature: tuple[object, ...] | None) -> tuple[object, ...] | None:
+        return AnalysisController._formula_spectral_cube_signature(signature)
 
     @staticmethod
-    def _absorbance_result_covers_roi_ids(result: AbsorbanceSpectrumResult, selected_roi_ids: tuple[int, ...]) -> bool:
-        return AnalysisController._absorbance_result_covers_roi_ids(result, selected_roi_ids)
+    def _formula_spectrum_result_covers_roi_ids(result: FormulaSpectrumResult, selected_roi_ids: tuple[int, ...]) -> bool:
+        return AnalysisController._formula_spectrum_result_covers_roi_ids(result, selected_roi_ids)
 
-    def _cached_absorbance_result_from_roi_cache(
+    def _cached_formula_spectrum_result_from_roi_cache(
         self,
         selected_source_rois: list[AreaRoi],
-    ) -> AbsorbanceSpectrumResult | None:
-        return self._analysis_controller._cached_absorbance_result_from_roi_cache(selected_source_rois)
+    ) -> FormulaSpectrumResult | None:
+        return self._analysis_controller._cached_formula_spectrum_result_from_roi_cache(selected_source_rois)
 
     @staticmethod
 
-    def _deserialize_absorbance_result(payload) -> AbsorbanceSpectrumResult:
+    def _deserialize_formula_spectrum_result(payload) -> FormulaSpectrumResult:
         from lspr_imaging_app.gui.analysis_controller import AnalysisController
-        return AnalysisController._deserialize_absorbance_result(payload)
+        return AnalysisController._deserialize_formula_spectrum_result(payload)
 
     @staticmethod
 
@@ -6121,13 +6136,13 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, HistogramMaskMixin, Measurem
     def _restore_analysis_caches(self, payload: dict | None) -> None:
         self._analysis_controller._restore_analysis_caches(payload)
 
-    def _prepare_absorbance_spectrum_payload_for_spectral_cube(
+    def _prepare_formula_spectrum_payload_for_spectral_cube(
         self,
         spectral_cube_index: int,
         selected_roi_ids: tuple[int, ...],
         selected_source_rois: list[AreaRoi],
     ) -> tuple[object, ...] | None:
-        return self._analysis_controller._prepare_absorbance_spectrum_payload_for_spectral_cube(spectral_cube_index, selected_roi_ids, selected_source_rois)
+        return self._analysis_controller._prepare_formula_spectrum_payload_for_spectral_cube(spectral_cube_index, selected_roi_ids, selected_source_rois)
 
     def _prepare_fast_spectrum_payload_for_spectral_cube(
         self,
@@ -6137,11 +6152,11 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, HistogramMaskMixin, Measurem
     ) -> tuple | None:
         return self._analysis_controller._prepare_fast_spectrum_payload_for_spectral_cube(spectral_cube_index, selected_roi_ids, selected_source_rois)
 
-    def _prepare_absorbance_spectrum_payload(
+    def _prepare_formula_spectrum_payload(
         self,
         selected_source_rois: list[AreaRoi] | None = None,
     ) -> tuple[tuple[object, ...], tuple[object, ...]] | None:
-        return self._analysis_controller._prepare_absorbance_spectrum_payload(selected_source_rois)
+        return self._analysis_controller._prepare_formula_spectrum_payload(selected_source_rois)
 
     def _toggle_analysis_live_preview(self) -> None:
         self._analysis_controller._toggle_analysis_live_preview()
@@ -6149,8 +6164,8 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, HistogramMaskMixin, Measurem
     def _toggle_analysis_time_independent(self) -> None:
         self._analysis_controller._toggle_analysis_time_independent()
 
-    def _refresh_absorbance_spectrum(self) -> None:
-        self._analysis_controller._refresh_absorbance_spectrum()
+    def _refresh_formula_spectrum(self) -> None:
+        self._analysis_controller._refresh_formula_spectrum()
 
     def _apply_pending_sensorgram_live_preview(self) -> None:
         self._analysis_controller._apply_pending_sensorgram_live_preview()
@@ -6164,42 +6179,25 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, HistogramMaskMixin, Measurem
     def _on_analysis_spectral_cube_range_changed(self, *_args) -> None:
         self._analysis_controller._on_analysis_spectral_cube_range_changed(*_args)
 
-    def _calculate_sensorgram_for_range(self) -> None:
-        self._analysis_controller._calculate_sensorgram_for_range()
-
     def _stop_sensorgram_calculation(self) -> None:
         self._analysis_controller._stop_sensorgram_calculation()
 
-    def _on_sensorgram_partial_result(
-        self,
-        request_id: int,
-        total_count: int,
-        point: SensorgramPointResult,
-    ) -> None:
-        self._analysis_controller._on_sensorgram_partial_result(request_id, total_count, point)
+    def _start_pending_formula_spectrum_refresh(self, *, reuse_busy: bool = False) -> None:
+        self._analysis_controller._start_pending_formula_spectrum_refresh(reuse_busy=reuse_busy)
 
-    def _on_sensorgram_ready(self, request_id: int, result: SensorgramComputationResult) -> None:
-        self._analysis_controller._on_sensorgram_ready(request_id, result)
-
-    def _on_sensorgram_failed(self, request_id: int, message: str) -> None:
-        self._analysis_controller._on_sensorgram_failed(request_id, message)
-
-    def _start_pending_absorbance_spectrum_refresh(self, *, reuse_busy: bool = False) -> None:
-        self._analysis_controller._start_pending_absorbance_spectrum_refresh(reuse_busy=reuse_busy)
-
-    def _on_absorbance_spectrum_ready(
+    def _on_formula_spectrum_ready(
         self,
         request_id: int,
         signature: tuple[object, ...],
-        result: AbsorbanceSpectrumResult,
+        result: FormulaSpectrumResult,
     ) -> None:
-        self._analysis_controller._on_absorbance_spectrum_ready(request_id, signature, result)
+        self._analysis_controller._on_formula_spectrum_ready(request_id, signature, result)
 
-    def _on_absorbance_spectrum_failed(self, request_id: int, message: str) -> None:
-        self._analysis_controller._on_absorbance_spectrum_failed(request_id, message)
+    def _on_formula_spectrum_failed(self, request_id: int, message: str) -> None:
+        self._analysis_controller._on_formula_spectrum_failed(request_id, message)
 
-    def _apply_absorbance_spectrum_result(self, result: AbsorbanceSpectrumResult) -> None:
-        return self._analysis_controller._apply_absorbance_spectrum_result(result)
+    def _apply_formula_spectrum_result(self, result: FormulaSpectrumResult) -> None:
+        return self._analysis_controller._apply_formula_spectrum_result(result)
 
     def _update_color_button_styles(self) -> None:
         self.mask_color_button.setStyleSheet(
@@ -6884,7 +6882,7 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, HistogramMaskMixin, Measurem
         if count == 0:
             self.roi_summary.setText("No ROIs")
             self.roi_summary.setToolTip("No ROIs detected.")
-            self._clear_absorbance_spectrum()
+            self._clear_formula_spectrum()
             return
         selected_details = ""
         if len(self._selected_roi_ids) == 1:
@@ -6908,7 +6906,7 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, HistogramMaskMixin, Measurem
             f"Detected ROIs: {count}\nGroups: {group_count}{selected_details}"
         )
         if not self._dragging_rois and not self._roi_edit_refresh_pending and not self._analysis_live_preview_enabled:
-            self._schedule_absorbance_spectrum_refresh()
+            self._schedule_formula_spectrum_refresh()
 
     def _clear_roi_selection(self) -> None:
         self._selected_roi_ids.clear()
@@ -7283,7 +7281,7 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, HistogramMaskMixin, Measurem
         )
         self._live_preview_prompt_selection_signature = selection_signature
         if choice == "spectrum":
-            self._schedule_absorbance_spectrum_refresh()
+            self._schedule_formula_spectrum_refresh()
         elif choice == "sensorgram":
             self._analysis_controller.calculate_sensorgram_for_range()
         else:
@@ -7303,6 +7301,7 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, HistogramMaskMixin, Measurem
         self._selection_plot_highlight_signature = selected_signature
         self._refresh_visible_spectrum_from_cache()
         self._analysis_controller.update_selection_highlight(force=force)
+        self._analysis_controller.schedule_cube_slider_cache_refresh()
         if prompt_live_preview and not force and self._analysis_live_preview_enabled:
             self._handle_live_preview_selection_change()
 

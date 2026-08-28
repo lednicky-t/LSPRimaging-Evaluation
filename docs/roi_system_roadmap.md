@@ -27,12 +27,12 @@ The production analysis path uses `AreaRoi` ([`domain/models.py`](../src/lspr_im
 a single dataclass that bakes one sample region and one reference region together:
 
 - **Circle sample + annulus reference** — fully implemented: detection, the ROI table, array
-  stamping, editing dialogs. This is the only geometry that actually drives absorbance
+  stamping, editing dialogs. This is the only geometry that actually drives formula-spectrum
   calculation today.
 - **Mask geometry escape hatch** — `sample_geometry_type`/`reference_geometry_type` can already
   be `"mask"` instead of `"circle"`/`"annulus"`, backed by `RoiMask` (cropped boolean array) and
   `crop_mask()`/`expand_mask()` in [`processing/roi_rasterize.py`](../src/lspr_imaging_app/processing/roi_rasterize.py).
-  Storage (`workspace.py`) and the absorbance pipeline (`analysis_tasks.py`) both know how to
+  Storage (`workspace.py`) and the formula-spectrum pipeline (`analysis_tasks.py`) both know how to
   *consume* one. Nothing in the GUI *creates* one yet — it only round-trips from a file.
 - **Per-frame registration already exists**, just under a different name: `ChromaticTransformModel`
   (one affine matrix per wavelength/spectral-cube index) plus `transformed_disk_mask`/
@@ -107,8 +107,8 @@ performance → polish).
 - Replace the inline `if roi.sample_geometry_type == "mask": ... else: ...` blocks in
   `analysis_tasks.py` with calls to this dispatcher.
 - No behavior change — this is a pure refactor. Verify with existing tests
-  (`test_lspri_roi_rasterize.py`) plus a regression check that absorbance numbers are bit-identical
-  before/after on a saved dataset.
+  (`test_lspri_roi_rasterize.py`) plus a regression check that formula-spectrum numbers are
+  bit-identical before/after on a saved dataset.
 - **Why first:** every later phase adds a geometry type. Doing this now means each new geometry
   is "add one case to the dispatcher," not "hunt down every inline branch again."
 
@@ -130,7 +130,7 @@ unwired `RoiDefinition` editor.
   — see "Current state" above — so this is new UI work, not a wiring job).
 - **Tests:** extend `test_lspri_roi_rasterize.py` with rectangle cases; extend
   `test_lspri_roi_table_storage.py` round-trip for rectangle geometry.
-- **Sign-off needed:** this touches the shared `AreaRoi` model and the absorbance pipeline —
+- **Sign-off needed:** this touches the shared `AreaRoi` model and the formula-spectrum pipeline —
   per `CLAUDE.md`, confirm the plan with the maintainer before starting, since it's a
   scientific-calculation-adjacent change to a shared model.
 
@@ -213,8 +213,8 @@ must include:
 - A storage round-trip test (`AreaRoi` → JSON → `AreaRoi`) for every geometry type, extending
   `test_lspri_roi_table_storage.py`.
 - A numerical regression check: build a synthetic image with a known sample/reference intensity
-  split (per the general spec's §38 example), confirm absorbance is identical whether the same
-  pixel region is expressed as a circle, a rectangle, or a mask — this is the concrete proof that
+  split (per the general spec's §38 example), confirm the formula-spectrum result is identical
+  whether the same pixel region is expressed as a circle, a rectangle, or a mask — this is the concrete proof that
   Phase 1's dispatcher actually made analysis geometry-blind.
 
 ## Where this document lives

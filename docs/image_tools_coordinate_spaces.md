@@ -21,9 +21,9 @@ rendering and never touched a calculated number. **That is not how this app
 works, and it is intentional, not a bug.** When image tools are linked, the
 rotated/cropped pixel grid is what feeds:
 
-- **Spectrum / absorbance / sensorgram calculation** — ROI pixel sampling in
+- **Spectrum / formula-result / sensorgram calculation** — ROI pixel sampling in
   `gui/analysis_tasks.py` (`_load_and_preprocess_measurement`,
-  `_absorbance_spectrum_task`) runs on `apply_preprocessing()`'s output, i.e. the
+  `_formula_spectrum_task`) runs on `apply_preprocessing()`'s output, i.e. the
   processed (rotated/cropped) array, not the raw one.
 - **Background flattening** — `flatten_background`/`estimate_background_profile`
   run on the already-rotated array (`apply_preprocessing` applies spatial

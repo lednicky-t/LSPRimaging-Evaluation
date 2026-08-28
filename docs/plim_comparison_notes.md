@@ -158,7 +158,7 @@ Why it is interesting:
 Current local analogue:
 
 - `apps/LSPRi/eva/src/lspr_imaging_app/processing/analysis.py`
-- especially `fit_absorbance_curve()` and `metric_value_from_fit()`
+- especially `fit_polynomial_curve()` and `metric_value_from_fit()`
 
 Recommendation:
 

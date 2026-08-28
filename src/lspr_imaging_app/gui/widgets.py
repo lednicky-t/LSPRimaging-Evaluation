@@ -717,11 +717,18 @@ class DataAxisSlider(QSlider):
     _MAJOR_TICK_HEIGHT = 7.0
     _LABEL_TOP = 19.0
     _SIDE_INSET = 6.0
+    # Fixed, not derived from _accent_color: the handle's accent can be
+    # repurposed per selection (see AnalysisController._sensorgram_selection_color),
+    # but "this tick is cached" should mean the same color regardless of
+    # whatever the handle currently shows. Matches the existing multi-ROI
+    # accent used elsewhere (AnalysisController._sensorgram_selection_color).
+    _CACHED_TICK_COLOR = "#38bdf8"
 
     def __init__(self, orientation: Qt.Orientation = Qt.Orientation.Horizontal, parent: QWidget | None = None) -> None:
         super().__init__(orientation, parent)
         self._tick_values: list[float] = []
         self._major_labels: dict[int, str] = {}
+        self._cached_tick_indices: frozenset[int] | None = None
         self._accent_color = "#38bdf8"
         self._reference_highlight_color: str | None = None
         self.setFixedHeight(32)
@@ -741,8 +748,35 @@ class DataAxisSlider(QSlider):
         a minor tick. `major_labels` maps a subset of those indices to the
         label text drawn under a taller tick; indices absent from it stay
         minor and unlabeled."""
-        self._tick_values = list(values)
+        new_tick_values = list(values)
+        if new_tick_values != self._tick_values:
+            # Any previously computed cache-state is positions into the OLD
+            # values array - a genuinely different array (different
+            # dataset, changed range) can reorder/resize it, so a stale
+            # index here would color the wrong tick. Callers that care
+            # re-request it via set_tick_cache_state once they've
+            # recomputed against the new values. A call with the *same*
+            # values (e.g. _refresh_cube_time_display() relabeling Cube vs.
+            # Time mode without the underlying cube list changing) leaves
+            # the cache-state alone, so toggling that doesn't blank out an
+            # indicator that's still accurate.
+            self._cached_tick_indices = None
+        self._tick_values = new_tick_values
         self._major_labels = dict(major_labels)
+        self.update()
+
+    def set_tick_cache_state(self, cached_indices: frozenset[int] | None) -> None:
+        """Marks a subset of tick indices (by position in the `values` array
+        last passed to `set_ticks`) as already available for whatever the
+        caller currently cares about - e.g. the Cube/Time slider uses this
+        to show which spectral cubes already have every selected ROI's
+        spectrum cached in RAM (see
+        AnalysisController._refresh_cube_slider_cache_indicators). `None`
+        means "no cache information to show" - ticks paint exactly as
+        before set_tick_cache_state was ever called."""
+        if cached_indices == self._cached_tick_indices:
+            return
+        self._cached_tick_indices = cached_indices
         self.update()
 
     def sizeHint(self) -> QSize:
@@ -781,6 +815,8 @@ class DataAxisSlider(QSlider):
         if count > 1 and enabled:
             minor_color = QColor(theme.control_border)
             major_color = QColor(theme.text_dim)
+            cached_color = QColor(self._CACHED_TICK_COLOR)
+            cached_tick_indices = self._cached_tick_indices
             font = painter.font()
             font.setPixelSize(9)
             painter.setFont(font)
@@ -804,7 +840,11 @@ class DataAxisSlider(QSlider):
                     else:
                         last_label_right = x + half_width
                 is_major = label is not None
-                painter.setPen(QPen(major_color if is_major else minor_color, 1.0))
+                if cached_tick_indices is not None and index in cached_tick_indices:
+                    tick_color = cached_color
+                else:
+                    tick_color = major_color if is_major else minor_color
+                painter.setPen(QPen(tick_color, 1.0))
                 tick_height = self._MAJOR_TICK_HEIGHT if is_major else self._MINOR_TICK_HEIGHT
                 painter.drawLine(QPointF(x, self._TICK_TOP), QPointF(x, self._TICK_TOP + tick_height))
                 if label:

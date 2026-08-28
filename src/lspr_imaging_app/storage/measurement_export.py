@@ -116,7 +116,7 @@ class ImagingMeasurementExportWriter:
     analysis run.
 
     Call `write_roi_definitions` whenever the ROI set is known or changes,
-    and `append_absorbance_spectrum`/`append_sensorgram_point` as each new
+    and `append_formula_spectrum`/`append_sensorgram_point` as each new
     result becomes available.
     """
 
@@ -153,7 +153,7 @@ class ImagingMeasurementExportWriter:
 
     # -- reopening an existing backup: recover what's already on disk --------
 
-    def existing_absorbance_keys(self) -> set[tuple[int, int, str]]:
+    def existing_formula_spectrum_keys(self) -> set[tuple[int, int, str]]:
         """(roi_id, cube_index, signature_hash) triples already backed up on
         disk, so a reopened writer's caller can skip re-appending a row for
         a (cube, signature) a previous run already wrote - and, conversely,
@@ -233,8 +233,8 @@ class ImagingMeasurementExportWriter:
             index[int(cube_index)] = (hash_text, float(value))
         return index
 
-    def absorbance_spectrum_index(self, roi_id: str | int) -> "AbsorbanceSpectrumTraceIndex | None":
-        """Read-side counterpart of `append_absorbance_spectrum`, mirroring
+    def formula_spectrum_index(self, roi_id: str | int) -> "FormulaSpectrumTraceIndex | None":
+        """Read-side counterpart of `append_formula_spectrum`, mirroring
         `sensorgram_metric_index`'s contract exactly: reads from the
         already-open `self._processed` handle (safe to call while this writer
         is still appending elsewhere), and where a cube_index repeats (a
@@ -268,7 +268,7 @@ class ImagingMeasurementExportWriter:
                 np.asarray(sample_rows[row_index], dtype=np.float64),
                 np.asarray(reference_rows[row_index], dtype=np.float64),
             )
-        return AbsorbanceSpectrumTraceIndex(
+        return FormulaSpectrumTraceIndex(
             wavelengths_nm=np.asarray(group["wavelengths_nm"][...], dtype=np.float64),
             formula_key=str(group.attrs.get("formula_key", "absorbance")),
             reduction_method=str(group.attrs.get("reduction_method", "mean")),
@@ -438,7 +438,7 @@ class ImagingMeasurementExportWriter:
         )
         return group
 
-    def append_absorbance_spectrum(
+    def append_formula_spectrum(
         self,
         roi_id: str | int,
         *,
@@ -517,8 +517,8 @@ class ImagingMeasurementExportWriter:
 
 
 @dataclass(slots=True)
-class AbsorbanceSpectrumTraceIndex:
-    """Read-side result of `ImagingMeasurementExportWriter.absorbance_spectrum_index`
+class FormulaSpectrumTraceIndex:
+    """Read-side result of `ImagingMeasurementExportWriter.formula_spectrum_index`
     - one ROI's whole backed-up spectrum trace, indexed by cube_index for a
     caller to validate/reconstruct one cube's `AbsorbanceSpectrumResult` at a
     time without re-reading the file per cube."""
@@ -582,7 +582,7 @@ def read_sensorgram_trace(path: Path, roi_id: str | int) -> dict[str, Any]:
         return read_sensorgram(handle, str(roi_id))
 
 
-def read_absorbance_spectra_trace(path: Path, roi_id: str | int) -> dict[str, Any]:
+def read_formula_spectra_trace(path: Path, roi_id: str | int) -> dict[str, Any]:
     """Plain dict of arrays for one ROI's absorbance-spectrum-over-time
     (`wavelengths_nm`, `cube_index`, `timestamp_utc_ms`, `absorbance`,
     `sample_mean`, `reference_mean`, `formula_key`, `reduction_method`) - the

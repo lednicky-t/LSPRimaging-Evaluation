@@ -245,7 +245,7 @@ class DatasetController:
                     "Failed to close measurement export writer", exc_info=True
                 )
         window._measurement_export_writer = None
-        window._measurement_export_backed_up_absorbance = set()
+        window._measurement_export_backed_up_formula_spectrum = set()
         window._measurement_export_backed_up_sensorgram = set()
 
     def _open_measurement_export_writer_for_dataset(self) -> None:
@@ -268,7 +268,7 @@ class DatasetController:
             # in a previous session) must recognize what's already on disk,
             # not just avoid destroying it - otherwise every cube already
             # backed up last time would get a duplicate row appended today.
-            window._measurement_export_backed_up_absorbance = writer.existing_absorbance_keys()
+            window._measurement_export_backed_up_formula_spectrum = writer.existing_formula_spectrum_keys()
             window._measurement_export_backed_up_sensorgram = writer.existing_sensorgram_keys()
         except Exception:
             logging.getLogger("lspr_imaging_app.workflow").warning(

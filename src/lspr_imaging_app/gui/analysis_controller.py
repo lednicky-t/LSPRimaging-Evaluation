@@ -1,29 +1,32 @@
 from __future__ import annotations
 
-import hashlib
-import json
-import logging
 import time
 import numpy as np
 from copy import deepcopy
 from datetime import datetime
 from math import ceil, floor
-from pathlib import Path
-from typing import NamedTuple
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QColor
-from PyQt6.QtWidgets import QFileDialog, QMessageBox
 import pyqtgraph as pg
 
 from lspr_ui import get_active_theme
 
-from lspr_imaging_app.domain.exclusions import is_cube_fully_excluded, is_excluded
-from lspr_imaging_app.domain.models import AreaRoi, AbsorbanceSpectrumResult
+from lspr_imaging_app.domain.exclusions import is_cube_fully_excluded
+from lspr_imaging_app.domain.models import AreaRoi
 from lspr_imaging_app.gui.worker import SensorgramComputationResult
-from lspr_imaging_app.gui.analysis_tasks import _roi_absorbance_signature
-from lspr_imaging_app.storage.measurement_export import AbsorbanceSpectrumTraceIndex
-from lspr_imaging_app.processing.analysis import metric_value_from_fit, metric_value_from_spectrum
-from lspr_imaging_app.processing.chromatic import warp_boolean_mask_affine
+from lspr_imaging_app.gui.analysis_result_serialization import (
+    serialize_formula_spectrum_result,
+    deserialize_formula_spectrum_result,
+    serialize_sensorgram_result,
+    deserialize_sensorgram_result,
+)
+from lspr_imaging_app.gui.analysis_cache_signature import (
+    analysis_cache_signature_to_json,
+    analysis_cache_signature_from_json,
+    signature_hash,
+    formula_spectral_cube_signature,
+    formula_spectrum_result_covers_roi_ids,
+)
 from lspr_imaging_app.processing.trace_statistics import (
     aggregate_group_traces,
     normalize_to_baseline_window,
@@ -32,57 +35,8 @@ from lspr_imaging_app.processing.trace_statistics import (
     smooth_moving_average,
     smooth_savgol,
 )
-
-
-class SpectrumSettingsSnapshot(NamedTuple):
-    """One deep-copied, read-only snapshot of the settings a spectrum/sensorgram
-    computation needs (preprocessing, ROI-detection settings, mask panel state),
-    taken once up front and shared by reference across every spectral-cube and
-    per-wavelength worker thread in a run.
-
-    Deep-copying these fresh per spectral cube (the old behavior) was both
-    wasteful (repeated array copies for state that never changes during a run)
-    and a latent correctness gap: cube payloads are built concurrently on a
-    thread pool, so an in-flight settings edit could let different cubes of the
-    *same* run silently use different settings. Nothing reachable from the
-    spectrum/sensorgram task functions mutates these objects in place (verified
-    for apply_preprocessing, flatten_background, estimate_background_profile,
-    and the ROI mask builders) - only the live GUI state itself is ever mutated
-    in place, which is exactly what taking this snapshot once protects against.
-    """
-
-    preprocessing: object
-    area_roi_settings: object
-    mask_state: object | None
-
-
-class SharedWavelengthGeometry(NamedTuple):
-    """[λ] mode's cube-invariant geometry: one chromatic affine matrix per
-    wavelength, and the scoped-read box those matrices (plus the fixed ROI
-    positions) produce - computed once from a single reference cube and
-    reused for every cube in the run, instead of recomputing the identical
-    numbers per cube (the default [λ,t] mode's behavior).
-
-    Valid only because this app's chromatic correction is estimated once,
-    from one reference cube's landmarks, and the resulting per-wavelength
-    matrix is broadcast identically to every cube - never re-estimated per
-    cube (verified against `_estimate_chromatic_models_task`,
-    analysis_tasks.py: the affine matrix is looked up purely by wavelength,
-    `matrices_by_wavelength[float(wavelength)]`, then copied onto every
-    cube's model). `_diagnose_shared_wavelength_geometry` cross-checks a
-    second cube against the reference and logs the result, but - at the
-    maintainer's request - no longer gates on it: this mode trusts the
-    user's toggle rather than silently falling back to per-cube computation
-    on a mismatch (which was rejecting runs for reasons unrelated to the
-    transform itself differing, e.g. the two cubes not sharing the exact
-    same set of excluded wavelengths).
-    """
-
-    affine_matrix_by_wavelength: dict[float, object]
-    raw_shape: tuple[int, int]
-    image_height: int
-    image_width: int
-    box: tuple[int, int, int, int]
+from lspr_imaging_app.gui.analysis_chromatic_geometry_mixin import AnalysisChromaticGeometryMixin
+from lspr_imaging_app.gui.analysis_worker_mixin import AnalysisWorkerMixin
 
 
 _FORMULA_AXIS_LABELS: dict[str, str] = {
@@ -93,7 +47,7 @@ _FORMULA_AXIS_LABELS: dict[str, str] = {
 }
 
 
-class AnalysisController:
+class AnalysisController(AnalysisWorkerMixin, AnalysisChromaticGeometryMixin):
     def __init__(self, window) -> None:
         self.window = window
 
@@ -155,67 +109,6 @@ class AnalysisController:
         window.sensorgram_group_band_fill_item.setBrush(pg.mkBrush(band_color))
         self.update_selection_highlight(force=True)
 
-    def _store_roi_absorbance_cache(self, result) -> None:
-        area_roi_results = getattr(result, "area_roi_results", None)
-        if not area_roi_results:
-            return
-        area_roi_by_id = {int(area_roi.area_roi_id): area_roi for area_roi in self.window._state.area_rois}
-        for area_roi_id, roi_result in area_roi_results.items():
-            area_roi = area_roi_by_id.get(int(area_roi_id))
-            if area_roi is None:
-                continue
-            signature = self.window._roi_absorbance_signature(area_roi)
-            if signature is None:
-                continue
-            self.window._roi_absorbance_cache[signature] = roi_result
-            self.window._roi_absorbance_cache.move_to_end(signature)
-            while len(self.window._roi_absorbance_cache) > self.window.ROI_ABSORBANCE_CACHE_SIZE:
-                self.window._roi_absorbance_cache.popitem(last=False)
-        self._refresh_cached_roi_ids_snapshot()
-
-    def _apply_cached_sensorgram_result(self, signature, result, *, preview: bool = False) -> None:
-        self.window._sensorgram_running = False
-        self.window._sensorgram_running_signature = None
-        self.window._sensorgram_cancel_event = None
-        self.window._end_busy()
-        self.window._sync_busy_cursor_state()
-        self.window._sensorgram_spectral_cube_indices = np.asarray(result.spectral_cube_indices, dtype=np.int32)
-        self.window._sensorgram_metric_values = np.asarray(result.metric_values, dtype=np.float64)
-        self.window._sensorgram_metric_signal = np.asarray(result.metric_signal, dtype=np.float64)
-        if signature:
-            self.window._sensorgram_cache[signature] = result
-            self.window._sensorgram_cache.move_to_end(signature)
-            while len(self.window._sensorgram_cache) > self.window.SENSORGRAM_CACHE_SIZE:
-                self.window._sensorgram_cache.popitem(last=False)
-        self.set_sensorgram_series(self.window._sensorgram_spectral_cube_indices, self.window._sensorgram_metric_values)
-        summary = (
-            f"{self.window._analysis_metric_label()} | Calculated {result.completed_count}/{result.total_count} spectral cubes"
-            f"{self._poly_order_summary_suffix()}"
-        )
-        if result.cancelled:
-            summary = (
-                f"{self.window._analysis_metric_label()} | Stopped after {result.completed_count}/{result.total_count} spectral cubes"
-                f"{self._poly_order_summary_suffix()}"
-            )
-        self.window._set_sensorgram_summary_text(summary)
-        if result.cancelled:
-            self.window._set_status_text("SG | stopped")
-        elif preview:
-            self.window._set_status_text("SG | cache 00:00")
-        else:
-            timing = self.window._compact_timing_text(("prep", result.prep_seconds), ("fit", result.fit_seconds))
-            self.window._set_status_text(f"SG | {timing}" if timing else "SG | done")
-        self.window._update_analysis_control_state()
-
-    def refresh_absorbance_spectrum(self) -> None:
-        self.window._refresh_absorbance_spectrum()
-
-    def calculate_sensorgram(self) -> None:
-        self.window._calculate_sensorgram_for_range()
-
-    def stop_sensorgram(self) -> None:
-        self.window._stop_sensorgram_calculation()
-
     def on_fit_settings_changed(self, *_args) -> None:
         self.window._on_analysis_fit_settings_changed(*_args)
 
@@ -224,9 +117,6 @@ class AnalysisController:
 
     def on_wavelength_range_changed(self, *_args) -> None:
         self._on_analysis_wavelength_range_changed(*_args)
-
-    def update_control_state(self) -> None:
-        self.window._update_analysis_control_state()
 
     def update_plot_labels(self) -> None:
         self.window._update_sensorgram_plot_labels()
@@ -367,1754 +257,26 @@ class AnalysisController:
                 values[position] = (timestamp_ms - anchor_ms) / 1000.0
         return values
 
-    def clear_sensorgram(self, summary_text: str) -> None:
-        self.window._sensorgram_spectral_cube_indices = np.asarray([], dtype=np.int32)
-        self.window._sensorgram_metric_values = np.asarray([], dtype=np.float64)
-        self.window._sensorgram_metric_signal = np.asarray([], dtype=np.float64)
-        self.window._pending_sensorgram_payload = None
-        self.window.sensorgram_curve.setData([], [])
-        self.window.sensorgram_current_point.setData([], [])
-        self.window.sensorgram_processed_curve.hide()
-        self.window.sensorgram_group_curve.hide()
-        self.window.sensorgram_group_band_fill_item.hide()
-        self.update_plot_labels()
-        self.update_selection_highlight(force=True)
-        self.window.sensorgram_summary_label.setText(summary_text)
-
-    def set_sensorgram_series(self, spectral_cube_indices, metric_values, *, summary_text: str | None = None) -> None:
-        spectral_cubes = np.asarray(spectral_cube_indices, dtype=np.int32)
-        metrics = np.asarray(metric_values, dtype=np.float64)
-        x_values = self._sensorgram_x_values(spectral_cubes)
-        valid_mask = np.isfinite(x_values) & np.isfinite(metrics)
-        self.window._sensorgram_spectral_cube_indices = spectral_cubes.copy()
-        self.window._sensorgram_metric_values = metrics.copy()
-        self.window.sensorgram_curve.setData(x_values[valid_mask], metrics[valid_mask])
-        self.update_plot_labels()
-        self.update_selection_highlight(force=True)
-        if np.any(valid_mask):
-            x_plotted = x_values[valid_mask]
-            y_values = metrics[valid_mask].astype(np.float64, copy=False)
-            self.window.sensorgram_plot.setXRange(float(np.min(x_plotted)), float(np.max(x_plotted)), padding=0.03)
-            y_min = float(np.min(y_values))
-            y_max = float(np.max(y_values))
-            y_span = max(y_max - y_min, 0.05)
-            self.window.sensorgram_plot.setYRange(y_min - y_span * 0.08, y_max + y_span * 0.12, padding=0.0)
-        self.update_current_point()
-        if summary_text is not None:
-            self.window.sensorgram_summary_label.setText(summary_text)
-        self._update_statistics_overlays()
-
-    def prepare_absorbance_spectrum_payload(self):
-        return self._prepare_absorbance_spectrum_payload()
-
     def available_analysis_spectral_cubes(self) -> list[int]:
         return self.window._available_analysis_spectral_cubes()
-
-    def calculate_sensorgram_for_range(self) -> None:
-        if not self.window._analysis_enabled:
-            self.clear_sensorgram("Analysis calculations are disabled for this panel.")
-            return
-        if self.window._state.dataset is None:
-            self.clear_sensorgram("Load a dataset before calculating the sensorgram.")
-            return
-        if self.window._chromatic_setup_active:
-            self.clear_sensorgram("Sensorgram is hidden during chromatic setup.")
-            return
-        selected_roi_ids = self.window._selected_spectrum_roi_ids()
-        if not selected_roi_ids:
-            self.clear_sensorgram("Detect or select ROIs before calculating the sensorgram.")
-            return
-        selected_roi_id_set = set(selected_roi_ids)
-        selected_source_rois = [deepcopy(roi) for roi in self.window._state.area_rois if roi.area_roi_id in selected_roi_id_set]
-        if not selected_source_rois:
-            self.clear_sensorgram("Detect or select ROIs before calculating the sensorgram.")
-            return
-        spectral_cubes = self.available_analysis_spectral_cubes()
-        if not spectral_cubes:
-            self.clear_sensorgram("No spectral cubes are available in the selected range.")
-            return
-        signature = self.window._sensorgram_signature_for_selection(spectral_cubes, selected_roi_ids, selected_source_rois)
-        if signature is None:
-            self.clear_sensorgram("No spectra are available in the selected spectral cube range.")
-            return
-        if self.window._sensorgram_running and self.window._sensorgram_running_signature == signature:
-            return
-        cached_result = self.window._sensorgram_cache.get(signature)
-        if cached_result is not None and not self.window._sensorgram_running:
-            self._apply_cached_sensorgram_result(signature, cached_result, preview=True)
-            return
-        if self.window._sensorgram_running:
-            self.window._pending_sensorgram_payload = (signature, spectral_cubes, selected_roi_ids, selected_source_rois)
-            self.window._set_sensorgram_summary_text(
-                f"{self.window._analysis_metric_label()} | Updating {len(spectral_cubes)} spectral cubes"
-            )
-            return
-        self._start_sensorgram_worker(signature, spectral_cubes, selected_roi_ids, selected_source_rois)
-
-    def preview_sensorgram_from_cache(self) -> bool:
-        if not self.window._analysis_enabled or self.window._state.dataset is None or self.window._chromatic_setup_active:
-            return False
-        selected_roi_ids = self.window._selected_spectrum_roi_ids()
-        if not selected_roi_ids:
-            return False
-        selected_roi_id_set = set(selected_roi_ids)
-        selected_source_rois = [deepcopy(roi) for roi in self.window._state.area_rois if roi.area_roi_id in selected_roi_id_set]
-        if not selected_source_rois:
-            return False
-        spectral_cubes = self.available_analysis_spectral_cubes()
-        if not spectral_cubes:
-            return False
-        signature = self.window._sensorgram_signature_for_selection(spectral_cubes, selected_roi_ids, selected_source_rois)
-        if signature is None:
-            return False
-        cached_result = self.window._sensorgram_cache.get(signature)
-        if cached_result is None:
-            return False
-        self._apply_cached_sensorgram_result(signature, cached_result, preview=True)
-        return True
-
-    def _fast_spectrum_path_eligible(self, selected_source_rois: list[AreaRoi]) -> bool:
-        """Whether the ROI-scoped, zarr-chunk-aware fast path can be used for
-        the whole sensorgram/spectrum run. Decided once, upfront — NOT
-        re-checked per spectral_cube_index — because a per-spectral_cube_index "not worth it" bail-out
-        would silently drop that spectral_cube_index's data point instead of falling back
-        to the full-plane path (spectral_cube_payload_builder results that come back
-        None are just skipped, not retried another way).
-
-        The "is the ROI selection compact enough" part uses a chromatic-shift
-        agnostic box (chromatic shifts are small perturbations that wouldn't
-        change whether ROIs are scattered enough to make scoping pointless),
-        so this stays a cheap, synchronous, no-pixel-data-loaded check.
-        """
-        from lspr_imaging_app.gui.analysis_tasks import compute_roi_union_bounding_box, roi_union_box_is_worth_scoping
-        from lspr_imaging_app.io.dataset import load_image_shape
-        from lspr_imaging_app.processing.preprocess import spatial_output_shape
-
-        preprocessing = self.window._state.preprocessing
-        dataset = self.window._state.dataset
-        basic_eligible = (
-            bool(selected_source_rois)
-            and dataset is not None
-            and dataset.is_ome_zarr
-        )
-        if not basic_eligible:
-            return False
-        first_record = next(iter(self.window._record_map.values()), None)
-        if first_record is None:
-            return False
-        try:
-            raw_shape = load_image_shape(str(first_record.path))
-        except Exception:
-            return False
-        image_height, image_width = spatial_output_shape(raw_shape, preprocessing)
-        box = compute_roi_union_bounding_box(
-            selected_source_rois,
-            float(self.window._state.area_roi_settings.reference_outer_radius_px),
-            [None],
-            image_height,
-            image_width,
-        )
-        return box is not None and roi_union_box_is_worth_scoping(box, image_height, image_width)
-
-    def _spectrum_settings_snapshot(self) -> SpectrumSettingsSnapshot:
-        """Build a SpectrumSettingsSnapshot once, up front - see its docstring.
-        Callers pass the result into `_prepare_fast_spectrum_payload_for_spectral_cube`/
-        `_prepare_absorbance_spectrum_payload_for_spectral_cube` instead of letting
-        those methods deep-copy the live state fresh on every call.
-        """
-        return SpectrumSettingsSnapshot(
-            preprocessing=deepcopy(self.window._state.preprocessing),
-            area_roi_settings=deepcopy(self.window._state.area_roi_settings),
-            mask_state=deepcopy(self.window._state.mask) if self.window._mask_section_applied() else None,
-        )
-
-    @staticmethod
-    def _affine_maps_match(a: dict[float, object], b: dict[float, object]) -> bool:
-        if set(a.keys()) != set(b.keys()):
-            return False
-        for wavelength, matrix_a in a.items():
-            matrix_b = b[wavelength]
-            if (matrix_a is None) != (matrix_b is None):
-                return False
-            if matrix_a is not None and not np.allclose(matrix_a, matrix_b, atol=1e-9):
-                return False
-        return True
-
-    def _affine_matrix_by_wavelength_for_cube(self, spectral_cube_index: int) -> dict[float, object] | None:
-        result: dict[float, object] = {}
-        for wavelength in self.window._wavelength_values:
-            record = self.window._record_map.get((spectral_cube_index, wavelength))
-            if record is None or is_excluded(self.window._state.image_exclusions, spectral_cube_index, wavelength):
-                continue
-            affine_matrix = self.window._chromatic_affine_for_image_key((spectral_cube_index, float(wavelength)))
-            result[float(wavelength)] = None if affine_matrix is None else np.asarray(affine_matrix, dtype=np.float64)
-        return result or None
-
-    def _diagnose_shared_wavelength_geometry(
-        self,
-        spectral_cubes: list[int],
-        affine_by_wavelength: dict[float, object],
-    ) -> bool | None:
-        """Reports - never gates - whether the reference cube's (`spectral_cubes[0]`)
-        per-wavelength chromatic geometry actually matches the last cube in
-        the run. This used to also decide whether [λ] mode's shared-geometry
-        shortcut was used at all, falling back to per-cube computation on a
-        mismatch - removed at the maintainer's request: in
-        practice this app's chromatic correction is wavelength-only by
-        construction (see SharedWavelengthGeometry's docstring), and the
-        gate could reject a run for reasons unrelated to the transform
-        itself actually differing - e.g. the reference cube and the check
-        cube simply not sharing the exact same set of excluded/missing
-        wavelengths, which trips the "same wavelengths present" half of the
-        comparison even when every wavelength they *do* share agrees
-        perfectly. Kept as a diagnostic (logged) so a real mismatch is still
-        visible if it ever happens, without silently blocking the mode.
-        Returns True/False for the comparison result, or None if there was
-        only one cube (nothing to compare) or the check cube had no usable
-        geometry of its own to compare against.
-        """
-        if len(spectral_cubes) <= 1:
-            return None
-        reference_cube = int(spectral_cubes[0])
-        check_cube = int(spectral_cubes[-1])
-        check_affine = self._affine_matrix_by_wavelength_for_cube(check_cube)
-        if check_affine is None:
-            return None
-        matches = self._affine_maps_match(affine_by_wavelength, check_affine)
-        logger = logging.getLogger("lspr_imaging_app.workflow")
-        if matches:
-            logger.info("[λ] mode: cube %s and cube %s agree on chromatic geometry.", reference_cube, check_cube)
-        else:
-            logger.warning(
-                "[λ] mode: cube %s and cube %s disagree on chromatic geometry "
-                "(diagnostic only - not blocking; see _diagnose_shared_wavelength_geometry).",
-                reference_cube, check_cube,
-            )
-        return matches
-
-    def _build_shared_wavelength_geometry(
-        self,
-        spectral_cubes: list[int],
-        selected_source_rois: list[AreaRoi],
-        settings_snapshot: SpectrumSettingsSnapshot,
-    ) -> SharedWavelengthGeometry | None:
-        """[λ] mode: compute the per-wavelength chromatic affine and the
-        resulting scoped-read box once, from `spectral_cubes[0]`, instead of
-        recomputing the same numbers for every cube (see
-        SharedWavelengthGeometry's docstring for why this is valid). Trusts
-        the user's toggle - see _diagnose_shared_wavelength_geometry, called
-        below purely for logging, not as a gate. Only returns None when
-        there's genuinely nothing to build from (no data for the reference
-        cube at all), never because of a cross-cube mismatch.
-
-        Known trade-off from not gating on the diagnostic any more: if the
-        reference cube (spectral_cubes[0]) is missing a wavelength that
-        other cubes in the run actually have (e.g. that one wavelength was
-        excluded only on this cube), every cube in the run will use no
-        chromatic correction (identity/None) for that wavelength, rather
-        than each cube's own - since there is no longer a per-cube fallback
-        for a wavelength missing from the shared map. Picking the reference
-        cube more carefully (e.g. the one with the most complete wavelength
-        set) would close this gap but was left out to keep this change
-        focused on removing the gate, not changing reference-cube selection.
-        """
-        from lspr_imaging_app.gui.analysis_tasks import compute_roi_union_bounding_box
-        from lspr_imaging_app.io.dataset import load_image_shape
-        from lspr_imaging_app.processing.preprocess import spatial_output_shape
-
-        if not spectral_cubes or self.window._state.dataset is None:
-            return None
-        reference_cube = int(spectral_cubes[0])
-        affine_by_wavelength = self._affine_matrix_by_wavelength_for_cube(reference_cube)
-        if affine_by_wavelength is None:
-            return None
-        self._diagnose_shared_wavelength_geometry(spectral_cubes, affine_by_wavelength)
-
-        first_record = None
-        for wavelength in self.window._wavelength_values:
-            record = self.window._record_map.get((reference_cube, wavelength))
-            if record is not None and not is_excluded(self.window._state.image_exclusions, reference_cube, wavelength):
-                first_record = record
-                break
-        if first_record is None:
-            return None
-        try:
-            raw_shape = load_image_shape(str(first_record.path))
-        except Exception:
-            return None
-        image_height, image_width = spatial_output_shape(raw_shape, settings_snapshot.preprocessing)
-
-        affine_matrices = [affine_by_wavelength.get(float(wavelength)) for wavelength in self.window._wavelength_values]
-        box = compute_roi_union_bounding_box(
-            selected_source_rois,
-            float(settings_snapshot.area_roi_settings.reference_outer_radius_px),
-            affine_matrices,
-            image_height,
-            image_width,
-        )
-        if box is None:
-            return None
-        return SharedWavelengthGeometry(
-            affine_matrix_by_wavelength=affine_by_wavelength,
-            raw_shape=raw_shape,
-            image_height=image_height,
-            image_width=image_width,
-            box=box,
-        )
-
-    def _external_mask_by_wavelength_for_cube(
-        self,
-        spectral_cube_index: int,
-        affine_by_wavelength: dict[float, object],
-    ) -> dict[float, object]:
-        """The fully-resolved (fetched, chromatic-warped, wavelength-diffed)
-        marked-pixels mask for every wavelength of one cube - the exact same
-        per-wavelength result `_prepare_fast_spectrum_payload_for_spectral_cube`
-        computes fresh per cube today. Used both directly (as today's
-        per-cube behavior) and as the one-time reference-cube computation
-        [λ] mode reuses across every other cube (see
-        _build_shared_wavelength_mask) - reuses `affine_by_wavelength` rather
-        than re-deriving it, so both modes warp the mask with the exact same
-        transform their spectrum payload will use.
-        """
-        result: dict[float, object] = {}
-        for wavelength in self.window._wavelength_values:
-            record = self.window._record_map.get((spectral_cube_index, wavelength))
-            if record is None or is_excluded(self.window._state.image_exclusions, spectral_cube_index, wavelength):
-                continue
-            external_mask, _ = self.window._effective_external_mask_for_record(record.path, processed_space=True)
-            if external_mask is not None:
-                external_mask = np.asarray(external_mask, dtype=bool)
-                affine_matrix = affine_by_wavelength.get(float(wavelength))
-                if affine_matrix is not None:
-                    external_mask = warp_boolean_mask_affine(external_mask, affine_matrix)
-                external_mask = self.window._apply_mask_wavelength_diff(
-                    external_mask, (spectral_cube_index, float(wavelength))
-                )
-            result[float(wavelength)] = external_mask
-        return result
-
-    def _build_shared_wavelength_mask(
-        self,
-        shared_geometry: SharedWavelengthGeometry,
-        reference_cube: int,
-    ) -> dict[float, object]:
-        """[λ] mode's counterpart to _build_shared_wavelength_geometry: the
-        marked-pixels mask, resolved once from the reference cube and reused
-        for every cube in the run, instead of being fetched from disk fresh
-        per cube (a real, avoidable per-cube disk read whenever the mask
-        panel's "ignore marked pixels" is on - see the maintainer's report
-        that this, not chromatic geometry, was the actual bottleneck behind
-        a slow "Preparing spectral cube reads" phase). Trusts the toggle the
-        same way the geometry side does - no cross-cube verification here
-        (unlike the geometry side, there's no cheap way to check two cubes'
-        masks agree without doing the same disk reads this is meant to
-        avoid); this is exactly the "assume it's the same everywhere" case
-        the maintainer described for their current single-mask-per-
-        wavelength workflow, not (yet) the more general per-cube-recompute-
-        with-translation mode planned for later.
-        """
-        return self._external_mask_by_wavelength_for_cube(reference_cube, shared_geometry.affine_matrix_by_wavelength)
-
-    def _build_disk_absorbance_trace_index(self, rois: list[AreaRoi]) -> dict[int, AbsorbanceSpectrumTraceIndex]:
-        """One HDF5 read per selected ROI, off the writer's already-open
-        handle (safe to call while it's still appending elsewhere - see
-        ImagingMeasurementExportWriter.absorbance_spectrum_index). Must only
-        ever be called from the main thread; callers hand the resulting plain
-        dict into background workers rather than letting them touch the
-        writer directly.
-        """
-        writer = getattr(self.window, "_measurement_export_writer", None)
-        if writer is None:
-            return {}
-        index: dict[int, AbsorbanceSpectrumTraceIndex] = {}
-        for roi in rois:
-            roi_id = int(roi.area_roi_id)
-            try:
-                trace = writer.absorbance_spectrum_index(roi_id)
-            except Exception:
-                logging.getLogger("lspr_imaging_app.workflow").warning(
-                    "Failed to read absorbance spectrum index from measurement export backup", exc_info=True
-                )
-                continue
-            if trace is not None:
-                index[roi_id] = trace
-        return index
-
-    def _absorbance_result_from_disk_row(
-        self,
-        roi_id: int,
-        spectral_cube_index: int,
-        signature: tuple[object, ...],
-        disk_trace_index: dict[int, AbsorbanceSpectrumTraceIndex] | None,
-    ) -> AbsorbanceSpectrumResult | None:
-        if not disk_trace_index:
-            return None
-        trace = disk_trace_index.get(int(roi_id))
-        if trace is None:
-            return None
-        entry = trace.by_cube.get(int(spectral_cube_index))
-        if entry is None:
-            return None
-        stored_hash, formula_values, sample_mean, reference_mean = entry
-        if not stored_hash or stored_hash != self._signature_hash(signature):
-            return None
-        # sample_pixel_count/reference_pixel_count aren't persisted to the
-        # HDF5 backup today (only the spectrum curve itself is) - a
-        # disk-resumed result shows 0px in the spectrum tooltip until this
-        # cube is recomputed fresh. Accepted gap, not a bug: these counts
-        # reflect exclusion masks that can change over time, so they aren't
-        # derivable from ROI geometry alone, and nothing besides that tooltip
-        # reads them.
-        return AbsorbanceSpectrumResult(
-            wavelengths_nm=trace.wavelengths_nm,
-            formula_values=formula_values,
-            sample_mean=sample_mean,
-            reference_mean=reference_mean,
-            sample_pixel_count=np.asarray([], dtype=np.int32),
-            reference_pixel_count=np.asarray([], dtype=np.int32),
-            reduction_method=trace.reduction_method,
-            formula_key=trace.formula_key,
-        )
-
-    def _combined_absorbance_results_from_ram_or_disk(
-        self,
-        spectral_cube_index: int,
-        selected_source_rois: list[AreaRoi],
-        disk_trace_index: dict[int, AbsorbanceSpectrumTraceIndex] | None = None,
-    ) -> dict[int, AbsorbanceSpectrumResult] | None:
-        """All-or-nothing: returns the full per-ROI results dict only if
-        EVERY selected ROI already has a valid result for this cube in RAM or
-        on disk (populating the RAM cache from any disk hits along the way);
-        None if even one ROI is still missing, meaning the caller must fall
-        back to a full compute for this cube. Deliberately all-or-nothing
-        rather than computing just the missing subset: the underlying task
-        functions already compute every selected ROI together in one call, so
-        a partial hit still needs that same one full call for the ROIs that
-        are missing - special-casing a smaller batch would add real
-        complexity for a rare case (selection changed between runs) without
-        meaningfully cutting cost.
-
-        Thread-safe: safe to call from a background worker thread (used by
-        the multi-cube "Start analysis" loop) as well as the main thread
-        (used by the interactive single-cube refresh) - RAM cache access is
-        lock-protected, and `disk_trace_index` is a plain, pre-loaded dict
-        (see _build_disk_absorbance_trace_index), never live HDF5 I/O here.
-        """
-        if not selected_source_rois:
-            return None
-        results: dict[int, AbsorbanceSpectrumResult] = {}
-        for roi in selected_source_rois:
-            roi_id = int(roi.area_roi_id)
-            signature = self._roi_absorbance_signature_for_cube(roi, spectral_cube_index)
-            if signature is None:
-                return None
-            with self.window._analysis_cache_lock:
-                cached = self.window._roi_absorbance_cache.get(signature)
-                if cached is not None:
-                    self.window._roi_absorbance_cache.move_to_end(signature)
-            if cached is None:
-                cached = self._absorbance_result_from_disk_row(roi_id, spectral_cube_index, signature, disk_trace_index)
-                if cached is not None:
-                    with self.window._analysis_cache_lock:
-                        self.window._roi_absorbance_cache[signature] = cached
-                        self.window._roi_absorbance_cache.move_to_end(signature)
-                        while len(self.window._roi_absorbance_cache) > self.window.ROI_ABSORBANCE_CACHE_SIZE:
-                            self.window._roi_absorbance_cache.popitem(last=False)
-            if cached is None:
-                return None
-            results[roi_id] = cached
-        return results
-
-    def _store_roi_absorbance_cache_for_cube(
-        self,
-        roi_results: dict[int, AbsorbanceSpectrumResult],
-        spectral_cube_index: int,
-        rois: list[AreaRoi],
-    ) -> None:
-        """Same as `_store_roi_absorbance_cache`, but for an arbitrary cube -
-        see `_roi_absorbance_signature_for_cube`. Lock-protected: called from
-        the sensorgram worker thread as well as the main thread.
-        """
-        roi_by_id = {int(roi.area_roi_id): roi for roi in rois}
-        for roi_id, roi_result in roi_results.items():
-            roi = roi_by_id.get(int(roi_id))
-            if roi is None:
-                continue
-            signature = self._roi_absorbance_signature_for_cube(roi, spectral_cube_index)
-            if signature is None:
-                continue
-            with self.window._analysis_cache_lock:
-                self.window._roi_absorbance_cache[signature] = roi_result
-                self.window._roi_absorbance_cache.move_to_end(signature)
-                while len(self.window._roi_absorbance_cache) > self.window.ROI_ABSORBANCE_CACHE_SIZE:
-                    self.window._roi_absorbance_cache.popitem(last=False)
-
-    def _compute_roi_absorbance_results(
-        self,
-        spectral_cube_index: int,
-        rois: list[AreaRoi],
-        *,
-        settings_snapshot: SpectrumSettingsSnapshot | None = None,
-    ) -> dict[int, AbsorbanceSpectrumResult] | None:
-        """Full compute (payload build + task_fn) for every given ROI on one
-        cube, populating the RAM cache with the result. This does real pixel
-        I/O and must only be called from a background thread - the multi-cube
-        loop is already on one (inside _sensorgram_metric_task's worker); the
-        interactive single-cube path dispatches this onto its own existing
-        FunctionWorker rather than calling it inline on the GUI thread.
-        """
-        if not rois:
-            return {}
-        from lspr_imaging_app.gui.analysis_tasks import _absorbance_spectrum_fast_task, _absorbance_spectrum_task
-
-        selected_roi_ids = tuple(int(roi.area_roi_id) for roi in rois)
-        if settings_snapshot is None:
-            settings_snapshot = self._spectrum_settings_snapshot()
-        task_fn = _absorbance_spectrum_task
-        payload = None
-        if self._fast_spectrum_path_eligible(rois):
-            payload = self._prepare_fast_spectrum_payload_for_spectral_cube(spectral_cube_index, selected_roi_ids, rois, settings_snapshot)
-            if payload is not None:
-                task_fn = _absorbance_spectrum_fast_task
-        if payload is None:
-            payload = self._prepare_absorbance_spectrum_payload_for_spectral_cube(spectral_cube_index, selected_roi_ids, rois, settings_snapshot)
-            task_fn = _absorbance_spectrum_task
-        if payload is None:
-            return None
-        result = task_fn(*payload)
-        area_roi_results = getattr(result, "area_roi_results", None) or {}
-        computed: dict[int, AbsorbanceSpectrumResult] = {
-            int(roi_id): roi_result for roi_id, roi_result in area_roi_results.items()
-        }
-        if computed:
-            self._store_roi_absorbance_cache_for_cube(computed, spectral_cube_index, rois)
-        return computed
-
-    def _start_sensorgram_worker(
-        self,
-        signature: tuple[object, ...],
-        spectral_cubes: list[int],
-        selected_roi_ids: tuple[int, ...],
-        selected_source_rois: list[AreaRoi],
-    ) -> None:
-        import time
-
-        self.window._sensorgram_request_id += 1
-        request_id = self.window._sensorgram_request_id
-        self.window._sensorgram_running = True
-        self.window._sensorgram_running_signature = signature
-        self.window._sensorgram_running_roi_ids = selected_roi_ids
-        import threading
-
-        from lspr_imaging_app.gui.worker import FunctionWorker
-        from lspr_imaging_app.gui.analysis_tasks import (
-            _sensorgram_metric_task,
-            _absorbance_spectrum_fast_task,
-        )
-
-        use_fast_path = self._fast_spectrum_path_eligible(selected_source_rois)
-        settings_snapshot = self._spectrum_settings_snapshot()
-        # Read once, up front, on the main thread - the worker thread below
-        # only ever sees the plain resulting dict, never touches HDF5 itself
-        # (see _combined_absorbance_results_from_ram_or_disk's docstring).
-        disk_absorbance_trace_index = self._build_disk_absorbance_trace_index(selected_source_rois)
-        # [λ] mode: only meaningful for the fast/scoped-read path (the slow
-        # path never computes a shared box at all - it reads the full plane
-        # every time regardless). None when the toggle is off, or when there
-        # was genuinely nothing to build from (no data for the reference
-        # cube), in which case the closure below transparently falls back to
-        # per-cube computation.
-        shared_wavelength_geometry = (
-            self._build_shared_wavelength_geometry(spectral_cubes, selected_source_rois, settings_snapshot)
-            if use_fast_path and self.window._analysis_time_independent
-            else None
-        )
-        # [λ] mode's mask counterpart - only worth building when there's a
-        # geometry to warp it with AND marked-pixel exclusion is even on
-        # (otherwise the fast-path payload builder never looks at a mask at
-        # all, per its own exclude_marked_pixels gate).
-        shared_mask_by_wavelength = (
-            self._build_shared_wavelength_mask(shared_wavelength_geometry, int(spectral_cubes[0]))
-            if shared_wavelength_geometry is not None
-            and bool(getattr(settings_snapshot.area_roi_settings, "ignore_marked_pixels", False))
-            else None
-        )
-
-        self.window._sensorgram_cancel_event = threading.Event()
-        self.window._sensorgram_started_at = time.perf_counter()
-        self.window._pending_sensorgram_payload = None
-        self.clear_sensorgram("")
-        self.window._update_analysis_control_state()
-        fast_label = " [fast]" if use_fast_path else ""
-        self.window._set_sensorgram_summary_text(
-            f"{self.window._analysis_metric_label()}{fast_label} | Preparing {len(spectral_cubes)} spectral cubes"
-            f" | Range {spectral_cubes[0]}-{spectral_cubes[-1]}"
-        )
-        self.window._set_status_text("Preparing spectral cube reads...")
-        # show_wait_cursor=False: analysis runs entirely in the background
-        # (a QThreadPool worker) - the app itself stays fully interactive
-        # while it runs, so it shouldn't look/feel frozen behind an app-wide
-        # wait cursor. Progress is still visible in the status bar as usual.
-        self.window._begin_busy("Preparing spectral cube reads...", determinate=True, show_wait_cursor=False)
-
-        if use_fast_path:
-            def spectral_cube_payload_builder(spectral_cube_index, selected_roi_ids=selected_roi_ids, selected_source_rois=selected_source_rois, settings_snapshot=settings_snapshot, shared_wavelength_geometry=shared_wavelength_geometry, shared_mask_by_wavelength=shared_mask_by_wavelength):
-                return self._prepare_fast_spectrum_payload_for_spectral_cube(
-                    spectral_cube_index,
-                    selected_roi_ids,
-                    selected_source_rois,
-                    settings_snapshot,
-                    shared_wavelength_geometry,
-                    shared_mask_by_wavelength,
-                )
-            task_fn = _absorbance_spectrum_fast_task
-        else:
-            def spectral_cube_payload_builder(spectral_cube_index, selected_roi_ids=selected_roi_ids, selected_source_rois=selected_source_rois, settings_snapshot=settings_snapshot):
-                return self._cached_sensorgram_spectral_cube_payload(
-                    spectral_cube_index,
-                    selected_roi_ids,
-                    selected_source_rois,
-                    settings_snapshot,
-                )
-            task_fn = None
-
-        def spectral_cube_result_cache_get(spectral_cube_index, selected_roi_ids=selected_roi_ids, selected_source_rois=selected_source_rois):
-            return self._cached_sensorgram_spectral_cube_result(
-                spectral_cube_index,
-                selected_roi_ids,
-                selected_source_rois,
-            )
-
-        def spectral_cube_result_cache_store(spectral_cube_index, result, selected_roi_ids=selected_roi_ids, selected_source_rois=selected_source_rois):
-            self._store_sensorgram_spectral_cube_result(
-                spectral_cube_index,
-                selected_roi_ids,
-                selected_source_rois,
-                result,
-            )
-
-        # Disk-backed shortcut that skips the fit step entirely, not just the
-        # spectrum read/build above - see analysis_pipeline_redesign.md \S4c
-        # item 3. Distinct from spectral_cube_result_cache_get: that RAM
-        # cache returns a full pre-fit AbsorbanceSpectrumResult, reusable
-        # across fit-method/metric/poly-order changes; a backed-up HDF5 row
-        # only ever stores the already-reduced metric_value for one exact
-        # (fit method, metric, poly order) combination
-        # (_sensorgram_point_signature_hash folds those into the hash), so a
-        # disk hit can supply the finished answer for a fully matching
-        # signature but can never repopulate that RAM spectrum cache.
-        disk_metric_index: dict[int, tuple[str, float]] = {}
-        writer = getattr(self.window, "_measurement_export_writer", None)
-        if writer is not None:
-            backup_roi_id, _ = self._sensorgram_backup_roi_key(selected_roi_ids)
-            if backup_roi_id:
-                try:
-                    disk_metric_index = writer.sensorgram_metric_index(backup_roi_id)
-                except Exception:
-                    logging.getLogger("lspr_imaging_app.workflow").warning(
-                        "Failed to read sensorgram metric index from measurement export backup", exc_info=True
-                    )
-                    disk_metric_index = {}
-
-        def metric_value_cache_get(spectral_cube_index, selected_roi_ids=selected_roi_ids, selected_source_rois=selected_source_rois):
-            if not disk_metric_index:
-                return None
-            entry = disk_metric_index.get(int(spectral_cube_index))
-            if entry is None:
-                return None
-            stored_hash, metric_value = entry
-            if not stored_hash:
-                return None
-            live_hash = self._sensorgram_point_signature_hash(
-                int(spectral_cube_index), tuple(selected_roi_ids), selected_source_rois
-            )
-            if live_hash and live_hash == stored_hash:
-                return metric_value
-            return None
-
-        def spectral_cube_absorbance_cache_get(spectral_cube_index, selected_source_rois=selected_source_rois, disk_absorbance_trace_index=disk_absorbance_trace_index):
-            roi_results = self._combined_absorbance_results_from_ram_or_disk(
-                spectral_cube_index, selected_source_rois, disk_absorbance_trace_index
-            )
-            if roi_results is None:
-                return None
-            return self._combine_roi_absorbance_results(roi_results)
-
-        def spectral_cube_absorbance_cache_store(spectral_cube_index, roi_absorbance_results, selected_source_rois=selected_source_rois):
-            self._store_roi_absorbance_cache_for_cube(roi_absorbance_results, spectral_cube_index, selected_source_rois)
-
-        wavelength_range = self.window._analysis_wavelength_range()
-        reduction_method, trimmed_mean_fraction, formula_key = self._roi_math_signature_elements()
-        worker = FunctionWorker(
-            _sensorgram_metric_task,
-            spectral_cubes,
-            self.window._analysis_poly_order(),
-            self.window._analysis_metric_key(),
-            cancel_event=self.window._sensorgram_cancel_event,
-            supports_progress=True,
-            supports_partial=True,
-            spectral_cube_payload_builder=spectral_cube_payload_builder,
-            task_fn=task_fn,
-            spectral_cube_result_cache_get=spectral_cube_result_cache_get,
-            spectral_cube_result_cache_store=spectral_cube_result_cache_store,
-            metric_value_cache_get=metric_value_cache_get,
-            spectral_cube_absorbance_cache_get=spectral_cube_absorbance_cache_get,
-            spectral_cube_absorbance_cache_store=spectral_cube_absorbance_cache_store,
-            wl_min=None if wavelength_range is None else wavelength_range[0],
-            wl_max=None if wavelength_range is None else wavelength_range[1],
-            fit_method_key=self._analysis_fit_method_key(),
-            reduction_method=reduction_method,
-            trimmed_mean_fraction=trimmed_mean_fraction,
-            formula_key=formula_key,
-        )
-        worker.signals.progress.connect(self.window._update_busy_progress)
-        worker.signals.partial.connect(
-            lambda point, request_id=request_id, total=len(spectral_cubes): self.on_sensorgram_partial_result(request_id, total, point)
-        )
-        worker.signals.result.connect(lambda result, request_id=request_id: self.on_sensorgram_ready(request_id, result))
-        worker.signals.error.connect(lambda message, request_id=request_id: self.on_sensorgram_failed(request_id, message))
-        self.window._thread_pool.start(worker)
-
-    def stop_sensorgram_calculation(self) -> None:
-        if not self.window._sensorgram_running or self.window._sensorgram_cancel_event is None:
-            return
-        self.window._sensorgram_cancel_event.set()
-        self.window._pending_sensorgram_payload = None
-        self.window._set_sensorgram_summary_text("Stopping sensorgram calculation...")
-        self.window._set_status_text("Stopping sensorgram calculation...")
-
-    def on_sensorgram_partial_result(self, request_id: int, total_count: int, point) -> None:
-        if request_id != self.window._sensorgram_request_id or not self.window._analysis_enabled:
-            return
-        metric_value = float("nan") if point.metric_value is None else float(point.metric_value)
-        metric_signal = float("nan") if point.metric_signal is None else float(point.metric_signal)
-        self.window._sensorgram_spectral_cube_indices = np.append(self.window._sensorgram_spectral_cube_indices, int(point.spectral_cube_index)).astype(np.int32, copy=False)
-        self.window._sensorgram_metric_values = np.append(self.window._sensorgram_metric_values, metric_value).astype(np.float64, copy=False)
-        self.window._sensorgram_metric_signal = np.append(self.window._sensorgram_metric_signal, metric_signal).astype(np.float64, copy=False)
-        self.set_sensorgram_series(
-            self.window._sensorgram_spectral_cube_indices,
-            self.window._sensorgram_metric_values,
-            summary_text=f"{self.window._analysis_metric_label()} | Calculating {self.window._sensorgram_spectral_cube_indices.size}/{total_count} spectral cubes",
-        )
-        self._backup_sensorgram_point(point)
-        roi_absorbance_results = getattr(point, "roi_absorbance_results", None)
-        if roi_absorbance_results:
-            # Unconditional - not gated by live preview: "save them in HDF5"
-            # is a completeness guarantee for every cube a run touches, not
-            # just the ones the user happens to watch live. The writer's own
-            # dedup-by-signature-hash means an already-backed-up cube (a RAM/
-            # disk cache hit here) is a cheap no-op, not a duplicate row.
-            series_payloads = [
-                (str(roi_id), int(roi_id), roi_result) for roi_id, roi_result in roi_absorbance_results.items()
-            ]
-            self._backup_absorbance_series(series_payloads, cube_index=int(point.spectral_cube_index))
-            if self.window._analysis_live_preview_enabled:
-                self.window._pending_sensorgram_live_point = point
-                self.window._sensorgram_live_preview_timer.start()
-
-    def _apply_pending_sensorgram_live_preview(self) -> None:
-        """Fires on the coalescing 80ms timer started by
-        on_sensorgram_partial_result - draws only the most recently finished
-        cube's spectrum, skipping any cubes that finished and were
-        overwritten as "pending" before this timer got a chance to fire.
-        Distinct from `_apply_absorbance_spectrum_result`: this is a trimmed
-        redraw-only path (no re-backup - the calling code already backed this
-        cube up unconditionally; no fit/metric recompute - the sensorgram
-        loop already has the metric) for a cube that isn't necessarily the
-        one the user was looking at, labeled "Live: cube N" so it reads as a
-        running preview, not the user's own selection.
-        """
-        point = self.window._pending_sensorgram_live_point
-        self.window._pending_sensorgram_live_point = None
-        if point is None or not self.window._sensorgram_running:
-            return
-        roi_absorbance_results = getattr(point, "roi_absorbance_results", None)
-        if not roi_absorbance_results:
-            return
-        spectral_cube_index = int(point.spectral_cube_index)
-        window = self.window
-        if spectral_cube_index in window._spectral_cube_values:
-            slider_position = window._spectral_cube_values.index(spectral_cube_index)
-            # blockSignals, and deliberately no _schedule_image_refresh() -
-            # this only needs to move the slider's own visual position so a
-            # run's progress is visible; reloading the raw image display on
-            # top of that is real, avoidable I/O + processing work competing
-            # with the background computation for the same CPU/GIL, on top
-            # of the spectrum-panel redraw below. The image view catches up
-            # to wherever the slider ended up once the run finishes and the
-            # user actually interacts with it again.
-            window.spectral_cube_slider.blockSignals(True)
-            window.spectral_cube_slider.setValue(slider_position)
-            window.spectral_cube_slider.blockSignals(False)
-
-        series_payloads = [
-            (f"ROI {int(roi_id)}", int(roi_id), roi_result) for roi_id, roi_result in sorted(roi_absorbance_results.items())
-        ]
-        window._clear_spectrum_series_items()
-        window.spectrum_current_point.setData([], [])
-        window.spectrum_metric_point.setData([], [])
-        x_values_all: list[np.ndarray] = []
-        y_values_all: list[np.ndarray] = []
-        for label, roi_id, roi_result in series_payloads:
-            rendered = window._add_spectrum_series(roi_id=roi_id, result=roi_result, label=label, highlighted=False, dimmed=False)
-            if rendered is None:
-                continue
-            x_values, y_values, _fit_x_values, _fit_y_values = rendered
-            x_values_all.append(np.asarray(x_values, dtype=np.float64))
-            y_values_all.append(np.asarray(y_values, dtype=np.float64))
-        if not x_values_all:
-            return
-        x_min = min(float(np.min(values)) for values in x_values_all)
-        x_max = max(float(np.max(values)) for values in x_values_all)
-        y_min = min(float(np.min(values)) for values in y_values_all)
-        y_max = max(float(np.max(values)) for values in y_values_all)
-        y_span = max(y_max - y_min, 0.05)
-        window.spectrum_plot.setXRange(x_min, x_max, padding=0.02)
-        window.spectrum_plot.setYRange(y_min - y_span * 0.08, y_max + y_span * 0.12, padding=0.0)
-        window._set_spectrum_summary_text(f"Live: cube {spectral_cube_index}")
-
-    @staticmethod
-    def _sensorgram_backup_roi_key(selected_roi_ids: tuple[int, ...]) -> tuple[str, str]:
-        """(roi_id, combined_roi_ids) backup key for a selection. A single-ROI
-        selection backs up under its real `roi_id`; a combined/grouped
-        multi-ROI selection (several ROI rows selected together, averaged
-        into one trace) has no single ROI to attribute the value to, so it
-        backs up under a synthetic `"combined_<id>_<id>..."` key instead of
-        being dropped - `combined_roi_ids` records which real ROIs it's a
-        combination of (see `ImagingMeasurementExportWriter.
-        set_sensorgram_metric`). Shared by the write path
-        (`_backup_sensorgram_point`) and the disk-hit lookup
-        (`_start_sensorgram_worker`) so both land on the identical key."""
-        sorted_ids = sorted(int(roi_id) for roi_id in selected_roi_ids)
-        if not sorted_ids:
-            return "", ""
-        if len(sorted_ids) == 1:
-            return str(sorted_ids[0]), ""
-        return "combined_" + "_".join(str(i) for i in sorted_ids), ",".join(str(i) for i in sorted_ids)
-
-    def _backup_sensorgram_point(self, point) -> None:
-        """Append this sensorgram point to the measurement-export/backup
-        file, if one is open for the current dataset. Deduplicates by (roi_id,
-        spectral_cube_index, signature_hash) so redisplaying an already-
-        backed-up, still-current cube (e.g. a cache hit) doesn't append a
-        second row - while a value recomputed under different settings (an
-        ROI moved, a transform changed) still gets a fresh row, since its
-        hash differs from whatever's already on disk for that cube.
-        """
-        writer = getattr(self.window, "_measurement_export_writer", None)
-        if writer is None:
-            return
-        selected_roi_ids = getattr(self.window, "_sensorgram_running_roi_ids", None) or ()
-        if not selected_roi_ids:
-            return
-        sorted_ids = sorted(int(roi_id) for roi_id in selected_roi_ids)
-        roi_id, combined_roi_ids = self._sensorgram_backup_roi_key(selected_roi_ids)
-        cube_index = int(point.spectral_cube_index)
-        selected_ids_set = set(sorted_ids)
-        selected_source_rois = [roi for roi in self.window._state.area_rois if int(roi.area_roi_id) in selected_ids_set]
-        signature_hash = self._sensorgram_point_signature_hash(cube_index, tuple(sorted_ids), selected_source_rois)
-        backed_up = self.window._measurement_export_backed_up_sensorgram
-        key = (roi_id, cube_index, signature_hash)
-        if key in backed_up:
-            return
-        if point.metric_value is None:
-            return
-        try:
-            writer.set_sensorgram_metric(
-                roi_id,
-                metric_name=self.window._analysis_metric_key(),
-                formula_key=self._roi_math_signature_elements()[2],
-                combined_roi_ids=combined_roi_ids,
-            )
-            writer.append_sensorgram_point(
-                roi_id,
-                cube_index=cube_index,
-                signature_hash=signature_hash,
-                timestamp_utc_ms=self._acquisition_timestamp_ms_for_cube(cube_index),
-                metric_value=float(point.metric_value),
-            )
-        except Exception:
-            logging.getLogger("lspr_imaging_app.workflow").warning(
-                "Failed to append sensorgram point to measurement export backup", exc_info=True
-            )
-            return
-        backed_up.add(key)
-
-    def _acquisition_timestamp_ms_for_cube(self, spectral_cube_index: int) -> int:
-        """Real acquisition time for `spectral_cube_index` if the dataset
-        has per-image timing metadata loaded, otherwise the current wall
-        clock time as a best-effort fallback (still monotonically
-        increasing across a single analysis run, just not tied to the
-        original acquisition)."""
-        metadata = self._sensorgram_time_mode_metadata()
-        if metadata is not None:
-            timing = self._earliest_timing_by_cube_index(metadata).get(int(spectral_cube_index))
-            if timing is not None:
-                return int(timing.acquired_at_unix_ms)
-        return int(datetime.now().timestamp() * 1000)
-
-    def on_sensorgram_ready(self, request_id: int, result) -> None:
-        if request_id != self.window._sensorgram_request_id:
-            if self.window._pending_sensorgram_payload is not None:
-                self.start_pending_sensorgram_refresh()
-            return
-        signature = self.window._sensorgram_running_signature
-        self.window._sensorgram_running = False
-        self.window._sensorgram_cancel_event = None
-        self.window._sensorgram_running_signature = None
-        self.window._sensorgram_started_at = None
-        self.window._end_busy(show_wait_cursor=False)
-        self.window._sync_busy_cursor_state()
-        if not self.window._analysis_enabled:
-            self.window._update_analysis_control_state()
-            return
-        # Live preview leaves the spectrum panel showing a stripped-down
-        # "Live: cube N" redraw (see _apply_pending_sensorgram_live_preview -
-        # no fit overlay/metric marker/proper status text). Now that the run
-        # has actually finished (_sensorgram_running is already False above,
-        # so _refresh_absorbance_spectrum's own guard against racing a live
-        # run no longer applies), replace it with a full, normal redraw for
-        # whichever cube the slider ended up on - a cheap RAM-cache hit
-        # thanks to _store_roi_absorbance_cache_for_cube having already
-        # populated it during the run, not a recompute.
-        self.window._absorbance_spectrum_dirty = True
-        self._refresh_absorbance_spectrum()
-        if signature:
-            self._apply_cached_sensorgram_result(signature, result, preview=False)
-        else:
-            self._apply_cached_sensorgram_result((), result, preview=False)
-        if result.cancelled:
-            self.window._set_status_text("SG | stopped")
-        else:
-            timing = self.window._compact_timing_text(("prep", result.prep_seconds), ("fit", result.fit_seconds))
-            self.window._set_status_text(f"SG | {timing}" if timing else "SG | done")
-        if getattr(self, "_group_calculation_active", False):
-            # A "Calculate group" run is mid-flight: this result was one
-            # member's own trace, now cached under its own signature above.
-            # Advance to the next member (or finish and restore the actual
-            # current-selection display) instead of the normal pending-
-            # refresh check below, which is for a real user-driven change.
-            self._on_group_member_sensorgram_ready()
-            return
-        if self.window._pending_sensorgram_payload is not None:
-            self.start_pending_sensorgram_refresh()
-
-    def on_sensorgram_failed(self, request_id: int, message: str) -> None:
-        if request_id != self.window._sensorgram_request_id:
-            return
-        self.window._sensorgram_running = False
-        self.window._sensorgram_cancel_event = None
-        self.window._sensorgram_running_signature = None
-        self.window._sensorgram_started_at = None
-        self.window._end_busy(show_wait_cursor=False)
-        self.window._sync_busy_cursor_state()
-        self.window._update_analysis_control_state()
-        self.window._set_sensorgram_summary_text(f"Sensorgram failed: {message}")
-        self.window._background_error("Sensorgram", message)
-        if getattr(self, "_group_calculation_active", False):
-            # Skip the failed member rather than stalling the queue forever;
-            # it just won't be part of the aggregated band.
-            self._on_group_member_sensorgram_ready()
-            return
-        if self.window._pending_sensorgram_payload is not None:
-            self.start_pending_sensorgram_refresh()
-
-    def start_pending_sensorgram_refresh(self) -> None:
-        if self.window._pending_sensorgram_payload is None:
-            return
-        signature, spectral_cubes, selected_roi_ids, selected_source_rois = self.window._pending_sensorgram_payload
-        self.window._pending_sensorgram_payload = None
-        cached_result = self.window._sensorgram_cache.get(signature)
-        if cached_result is not None:
-            self._apply_cached_sensorgram_result(signature, cached_result, preview=True)
-            return
-        self._start_sensorgram_worker(signature, list(spectral_cubes), tuple(selected_roi_ids), list(selected_source_rois))
-
-    def update_current_point(self) -> None:
-        current_spectral_cube = self.window._current_spectral_cube()
-        if current_spectral_cube is None or self.window._sensorgram_spectral_cube_indices.size == 0:
-            self.window.sensorgram_current_point.setData([], [])
-            return
-        matches = np.where(self.window._sensorgram_spectral_cube_indices == int(current_spectral_cube))[0]
-        if matches.size == 0:
-            self.window.sensorgram_current_point.setData([], [])
-            return
-        index = int(matches[-1])
-        value = float(self.window._sensorgram_metric_values[index])
-        if not np.isfinite(value):
-            self.window.sensorgram_current_point.setData([], [])
-            return
-        x_value = float(self._sensorgram_x_values([int(self.window._sensorgram_spectral_cube_indices[index])])[0])
-        if not np.isfinite(x_value):
-            self.window.sensorgram_current_point.setData([], [])
-            return
-        self.window.sensorgram_current_point.setData([x_value], [value])
-
-    def mark_stale(self, reason: str | None = None) -> None:
-        if self.window._sensorgram_running:
-            return
-        metric_label = self.window._analysis_metric_label()
-        range_text = ""
-        spectral_cube_range = self.window._current_analysis_spectral_cube_range()
-        if spectral_cube_range is not None:
-            range_text = f" | Spectral cubes {spectral_cube_range[0]}-{spectral_cube_range[1]}"
-        message = reason or f"{metric_label} sensorgram is out of date | Press Start analysis{range_text}"
-        self.clear_sensorgram(message)
 
     # ------------------------------------------------------------------
     # Cache / signature / serialization / payload-builder methods
     # (moved from MainWindow)
     # ------------------------------------------------------------------
 
-    def _roi_math_signature_elements(self) -> tuple[str, float, str]:
-        """(reduction_method, trimmed_mean_fraction, formula_key) - the three
-        ROI's-math settings that change what a ROI pair's masked pixels
-        reduce to. Appended to every cache signature whose cached value would
-        otherwise go stale when the user changes Reduction/Formula without
-        anything else changing."""
-        settings = self.window._state.area_roi_settings
-        return (
-            str(settings.reduction_method),
-            round(float(settings.trimmed_mean_fraction), 4),
-            str(settings.formula_key),
-        )
-
-    def _sensorgram_signature_for_selection(
-        self,
-        spectral_cubes: list[int],
-        selected_roi_ids: tuple[int, ...],
-        selected_source_rois: list[AreaRoi],
-    ) -> tuple[object, ...] | None:
-        if self.window._state.dataset is None or not selected_roi_ids or not selected_source_rois or not spectral_cubes:
-            return None
-        spectral_cube_signatures: list[tuple[object, ...]] = []
-        for spectral_cube_index in spectral_cubes:
-            spectral_cube_signatures.append(
-                (
-                    int(spectral_cube_index),
-                    tuple(
-                        self.window._preprocessing_signature((int(spectral_cube_index), float(wavelength)))
-                        for wavelength in self.window._wavelength_values
-                    ),
-                    self._exclusion_signature_for_cube(spectral_cube_index),
-                )
-            )
-        dataset_key = str(self.window._state.dataset.folder)
-        wavelength_range = self.window._analysis_wavelength_range()
-        return (
-            dataset_key,
-            tuple(selected_roi_ids),
-            self.window._roi_signature(selected_source_rois),
-            self.window._analysis_fit_method_key(),
-            self.window._analysis_metric_key(),
-            int(self.window._analysis_poly_order()),
-            None if wavelength_range is None else (round(wavelength_range[0], 6), round(wavelength_range[1], 6)),
-            tuple(round(float(value), 6) for value in self.window._wavelength_values),
-            tuple(spectral_cube_signatures),
-            round(float(self.window._state.area_roi_settings.reference_inner_radius_px), 3),
-            round(float(self.window._state.area_roi_settings.reference_outer_radius_px), 3),
-            *self._roi_math_signature_elements(),
-        )
-
-    def _sensorgram_spectral_cube_payload_signature(
-        self,
-        spectral_cube_index: int,
-        selected_roi_ids: tuple[int, ...],
-        selected_source_rois: list[AreaRoi],
-    ) -> tuple[object, ...] | None:
-        if self.window._state.dataset is None or not selected_roi_ids or not selected_source_rois:
-            return None
-        return (
-            str(self.window._state.dataset.folder),
-            int(spectral_cube_index),
-            tuple(selected_roi_ids),
-            self.window._roi_signature(selected_source_rois),
-            tuple(round(float(value), 6) for value in self.window._wavelength_values),
-            tuple(
-                self.window._preprocessing_signature((int(spectral_cube_index), float(wavelength)))
-                for wavelength in self.window._wavelength_values
-            ),
-            round(float(self.window._state.area_roi_settings.reference_inner_radius_px), 3),
-            round(float(self.window._state.area_roi_settings.reference_outer_radius_px), 3),
-            *self._roi_math_signature_elements(),
-            self._exclusion_signature_for_cube(spectral_cube_index),
-        )
-
-    def _sensorgram_point_signature_hash(
-        self,
-        spectral_cube_index: int,
-        selected_roi_ids: tuple[int, ...],
-        selected_source_rois: list[AreaRoi],
-    ) -> str:
-        """Signature hash for one backed-up sensorgram point (see
-        `storage/measurement_export.py`'s `signature_hash` column). Unlike
-        `_sensorgram_spectral_cube_payload_signature` - deliberately
-        fit-method/metric-independent, since it keys a cache of the full
-        pre-fit `AbsorbanceSpectrumResult` that stays reusable across fit
-        changes - the HDF5 backup only stores the already-reduced final
-        `metric_value` for one row, so a fit-method/metric/poly-order
-        change must count as a different value here. Falls back to an
-        empty string (never a hit) when the payload signature itself can't
-        be built (no dataset/selection yet)."""
-        payload_signature = self._sensorgram_spectral_cube_payload_signature(
-            spectral_cube_index, selected_roi_ids, selected_source_rois
-        )
-        if payload_signature is None:
-            return ""
-        full_signature = (
-            payload_signature,
-            self._analysis_fit_method_key(),
-            self.window._analysis_metric_key(),
-            int(self.window._analysis_poly_order()),
-        )
-        return self._signature_hash(full_signature)
-
-    def _cached_sensorgram_spectral_cube_payload(
-        self,
-        spectral_cube_index: int,
-        selected_roi_ids: tuple[int, ...],
-        selected_source_rois: list[AreaRoi],
-        settings_snapshot: SpectrumSettingsSnapshot | None = None,
-    ) -> tuple[object, ...] | None:
-        logger = logging.getLogger("lspr_imaging_app.workflow")
-        signature = self._sensorgram_spectral_cube_payload_signature(spectral_cube_index, selected_roi_ids, selected_source_rois)
-        if signature is None:
-            return None
-        with self.window._analysis_cache_lock:
-            cached = self.window._sensorgram_spectral_cube_payload_cache.get(signature)
-            if cached is not None:
-                self.window._sensorgram_spectral_cube_payload_cache.move_to_end(signature)
-                logger.debug(
-                    "SG payload cache hit | spectral_cube_index=%s rois=%s",
-                    int(spectral_cube_index),
-                    len(selected_roi_ids),
-                )
-                return cached
-        payload = self._prepare_absorbance_spectrum_payload_for_spectral_cube(spectral_cube_index, selected_roi_ids, selected_source_rois, settings_snapshot)
-        if payload is None:
-            return None
-        with self.window._analysis_cache_lock:
-            self.window._sensorgram_spectral_cube_payload_cache[signature] = payload
-            self.window._sensorgram_spectral_cube_payload_cache.move_to_end(signature)
-            while len(self.window._sensorgram_spectral_cube_payload_cache) > self.window.SENSORGRAM_SPECTRAL_CUBE_PAYLOAD_CACHE_SIZE:
-                self.window._sensorgram_spectral_cube_payload_cache.popitem(last=False)
-        logger.debug(
-            "SG payload cache built | spectral_cube_index=%s rois=%s",
-            int(spectral_cube_index),
-            len(selected_roi_ids),
-        )
-        return payload
-
-    def _cached_sensorgram_spectral_cube_result(
-        self,
-        spectral_cube_index: int,
-        selected_roi_ids: tuple[int, ...],
-        selected_source_rois: list[AreaRoi],
-    ) -> AbsorbanceSpectrumResult | None:
-        """Per-frame math-layer cache (sample/reference means -> AbsorbanceSpectrumResult),
-        keyed by the same fit-parameter-independent signature as the payload cache above, so
-        changing only poly_order/metric_key never forces re-reading pixels for a frame whose
-        sample/reference means are already known."""
-        signature = self._sensorgram_spectral_cube_payload_signature(spectral_cube_index, selected_roi_ids, selected_source_rois)
-        if signature is None:
-            return None
-        with self.window._analysis_cache_lock:
-            cached = self.window._sensorgram_spectral_cube_result_cache.get(signature)
-            if cached is not None:
-                self.window._sensorgram_spectral_cube_result_cache.move_to_end(signature)
-            return cached
-
-    def _store_sensorgram_spectral_cube_result(
-        self,
-        spectral_cube_index: int,
-        selected_roi_ids: tuple[int, ...],
-        selected_source_rois: list[AreaRoi],
-        result: AbsorbanceSpectrumResult,
-    ) -> None:
-        signature = self._sensorgram_spectral_cube_payload_signature(spectral_cube_index, selected_roi_ids, selected_source_rois)
-        if signature is None:
-            return
-        with self.window._analysis_cache_lock:
-            self.window._sensorgram_spectral_cube_result_cache[signature] = result
-            self.window._sensorgram_spectral_cube_result_cache.move_to_end(signature)
-            while len(self.window._sensorgram_spectral_cube_result_cache) > self.window.SENSORGRAM_SPECTRAL_CUBE_RESULT_CACHE_SIZE:
-                self.window._sensorgram_spectral_cube_result_cache.popitem(last=False)
-
-    def _absorbance_spectrum_signature_for_source_rois(
-        self,
-        selected_source_rois: list[AreaRoi],
-    ) -> tuple[object, ...] | None:
-        spectral_cube_index = self.window._current_spectral_cube()
-        if spectral_cube_index is None or not selected_source_rois:
-            return None
-        selected_roi_ids = tuple(int(roi.area_roi_id) for roi in selected_source_rois)
-        return (
-            int(spectral_cube_index),
-            tuple(round(float(value), 6) for value in self.window._wavelength_values),
-            selected_roi_ids,
-            tuple(
-                self.window._chromatic_signature_for_image_key((int(spectral_cube_index), float(wavelength)))
-                for wavelength in self.window._wavelength_values
-            ),
-            *self._roi_math_signature_elements(),
-            self._exclusion_signature_for_cube(spectral_cube_index),
-        )
-
-    def _absorbance_spectrum_signature(self) -> tuple[object, ...] | None:
-        return self._absorbance_spectrum_signature_for_source_rois(self.window._selected_source_rois_snapshot())
-
-    def _cached_absorbance_result_from_roi_cache(
-        self,
-        selected_source_rois: list[AreaRoi],
-    ) -> AbsorbanceSpectrumResult | None:
-        if not selected_source_rois:
-            return None
-        roi_results: dict[int, AbsorbanceSpectrumResult] = {}
-        for roi in selected_source_rois:
-            roi_signature = self.window._roi_absorbance_signature(roi)
-            if roi_signature is None:
-                return None
-            cached_result = self.window._roi_absorbance_cache.get(roi_signature)
-            if cached_result is None:
-                return None
-            roi_results[int(roi.area_roi_id)] = cached_result
-        return self._combine_roi_absorbance_results(roi_results)
-
-    @staticmethod
-    def _combine_roi_absorbance_results(
-        roi_results: dict[int, AbsorbanceSpectrumResult],
-    ) -> AbsorbanceSpectrumResult | None:
-        """Combine already-resolved per-ROI results (RAM cache, disk resume,
-        or a fresh compute - the caller decides where each came from) into one
-        displayable/fittable `AbsorbanceSpectrumResult`. All selected ROIs
-        share the same wavelengths/reduction/formula, so the "combined"
-        result's own curve is just the first ROI's - only `area_roi_results`
-        (read separately by anything that needs a specific ROI's own curve)
-        actually varies per ROI.
-        """
-        first_result = next(iter(roi_results.values()), None)
-        if first_result is None:
-            return None
-        return AbsorbanceSpectrumResult(
-            wavelengths_nm=np.asarray(first_result.wavelengths_nm, dtype=np.float64),
-            formula_values=np.asarray(first_result.formula_values, dtype=np.float64),
-            sample_mean=np.asarray(first_result.sample_mean, dtype=np.float64),
-            reference_mean=np.asarray(first_result.reference_mean, dtype=np.float64),
-            sample_pixel_count=np.asarray(first_result.sample_pixel_count, dtype=np.int32),
-            reference_pixel_count=np.asarray(first_result.reference_pixel_count, dtype=np.int32),
-            load_seconds=float(first_result.load_seconds),
-            roi_seconds=float(first_result.roi_seconds),
-            fit_seconds=float(first_result.fit_seconds),
-            total_seconds=float(first_result.total_seconds),
-            reduction_method=str(first_result.reduction_method),
-            formula_key=str(first_result.formula_key),
-            area_roi_results=roi_results,
-        )
-
-    @staticmethod
-    def _serialize_absorbance_result(result: AbsorbanceSpectrumResult) -> dict:
-        return {
-            "wavelengths_nm": [float(value) for value in np.asarray(result.wavelengths_nm, dtype=np.float64)],
-            "formula_values": [float(value) for value in np.asarray(result.formula_values, dtype=np.float64)],
-            "sample_mean": [float(value) for value in np.asarray(result.sample_mean, dtype=np.float64)],
-            "reference_mean": [float(value) for value in np.asarray(result.reference_mean, dtype=np.float64)],
-            "sample_pixel_count": [int(value) for value in np.asarray(result.sample_pixel_count, dtype=np.int32)],
-            "reference_pixel_count": [int(value) for value in np.asarray(result.reference_pixel_count, dtype=np.int32)],
-            "load_seconds": float(result.load_seconds),
-            "roi_seconds": float(result.roi_seconds),
-            "fit_seconds": float(result.fit_seconds),
-            "total_seconds": float(result.total_seconds),
-            "reduction_method": str(result.reduction_method),
-            "formula_key": str(result.formula_key),
-            "area_roi_results": {
-                str(int(roi_id)): AnalysisController._serialize_absorbance_result(roi_result)
-                for roi_id, roi_result in (result.area_roi_results or {}).items()
-            },
-        }
-
-    @staticmethod
-    def _deserialize_absorbance_result(payload) -> AbsorbanceSpectrumResult:
-        if not isinstance(payload, dict):
-            return AbsorbanceSpectrumResult(
-                wavelengths_nm=np.asarray([], dtype=np.float64),
-                formula_values=np.asarray([], dtype=np.float64),
-                sample_mean=np.asarray([], dtype=np.float64),
-                reference_mean=np.asarray([], dtype=np.float64),
-                sample_pixel_count=np.asarray([], dtype=np.int32),
-                reference_pixel_count=np.asarray([], dtype=np.int32),
-            )
-        raw_roi_results = payload.get("area_roi_results") or payload.get("roi_results", {})
-        roi_results: dict[int, AbsorbanceSpectrumResult] = {}
-        if isinstance(raw_roi_results, dict):
-            for key, value in raw_roi_results.items():
-                try:
-                    roi_id = int(key)
-                except Exception:
-                    continue
-                roi_results[roi_id] = AnalysisController._deserialize_absorbance_result(value)
-        return AbsorbanceSpectrumResult(
-            wavelengths_nm=np.asarray(payload.get("wavelengths_nm", []), dtype=np.float64),
-            # "formula_values" is the current key; "absorbance" is the pre-rename
-            # key still present in session files saved before this field was
-            # renamed (it always held whatever formula was selected, not
-            # necessarily actual absorbance - only the label was misleading).
-            formula_values=np.asarray(payload.get("formula_values", payload.get("absorbance", [])), dtype=np.float64),
-            sample_mean=np.asarray(payload.get("sample_mean") or payload.get("spot_mean", []), dtype=np.float64),
-            reference_mean=np.asarray(payload.get("reference_mean") or payload.get("ring_mean", []), dtype=np.float64),
-            sample_pixel_count=np.asarray(payload.get("sample_pixel_count") or payload.get("spot_pixel_count", []), dtype=np.int32),
-            reference_pixel_count=np.asarray(payload.get("reference_pixel_count") or payload.get("ring_pixel_count", []), dtype=np.int32),
-            load_seconds=float(payload.get("load_seconds", 0.0)),
-            roi_seconds=float(payload.get("roi_seconds", 0.0)),
-            fit_seconds=float(payload.get("fit_seconds", 0.0)),
-            total_seconds=float(payload.get("total_seconds", 0.0)),
-            reduction_method=str(payload.get("reduction_method", "mean")),
-            formula_key=str(payload.get("formula_key", "absorbance")),
-            area_roi_results=roi_results,
-        )
-
-    @staticmethod
-    def _serialize_sensorgram_result(result: SensorgramComputationResult) -> dict:
-        return {
-            "spectral_cube_indices": [int(value) for value in np.asarray(result.spectral_cube_indices, dtype=np.int32)],
-            "metric_values": [float(value) for value in np.asarray(result.metric_values, dtype=np.float64)],
-            "metric_signal": [float(value) for value in np.asarray(result.metric_signal, dtype=np.float64)],
-            "completed_count": int(result.completed_count),
-            "total_count": int(result.total_count),
-            "prep_seconds": float(result.prep_seconds),
-            "fit_seconds": float(result.fit_seconds),
-            "total_seconds": float(result.total_seconds),
-            "cancelled": bool(result.cancelled),
-        }
-
-    @staticmethod
-    def _deserialize_sensorgram_result(payload) -> SensorgramComputationResult:
-        if not isinstance(payload, dict):
-            return SensorgramComputationResult(
-                spectral_cube_indices=np.asarray([], dtype=np.int32),
-                metric_values=np.asarray([], dtype=np.float64),
-                metric_signal=np.asarray([], dtype=np.float64),
-                completed_count=0,
-                total_count=0,
-                cancelled=False,
-            )
-        return SensorgramComputationResult(
-            spectral_cube_indices=np.asarray(payload.get("spectral_cube_indices", []), dtype=np.int32),
-            metric_values=np.asarray(payload.get("metric_values", []), dtype=np.float64),
-            metric_signal=np.asarray(payload.get("metric_signal", []), dtype=np.float64),
-            completed_count=int(payload.get("completed_count", 0)),
-            total_count=int(payload.get("total_count", 0)),
-            prep_seconds=float(payload.get("prep_seconds", 0.0)),
-            fit_seconds=float(payload.get("fit_seconds", 0.0)),
-            total_seconds=float(payload.get("total_seconds", 0.0)),
-            cancelled=bool(payload.get("cancelled", False)),
-        )
-
-    def _prepare_absorbance_spectrum_payload_for_spectral_cube(
-        self,
-        spectral_cube_index: int,
-        selected_roi_ids: tuple[int, ...],
-        selected_source_rois: list[AreaRoi],
-        settings_snapshot: SpectrumSettingsSnapshot | None = None,
-    ) -> tuple[object, ...] | None:
-        if self.window._state.dataset is None or not selected_source_rois:
-            return None
-        if settings_snapshot is None:
-            settings_snapshot = self._spectrum_settings_snapshot()
-        preprocessing = settings_snapshot.preprocessing
-        flatten_mask_settings = settings_snapshot.area_roi_settings if preprocessing.flatten_background_exclude_mask else None
-        measurement_settings = settings_snapshot.area_roi_settings
-        measurement_payload: list[tuple[float, str, list[AreaRoi], np.ndarray | None, bool, np.ndarray | None]] = []
-        for wavelength in self.window._wavelength_values:
-            record = self.window._record_map.get((spectral_cube_index, wavelength))
-            if record is None or is_excluded(self.window._state.image_exclusions, spectral_cube_index, wavelength):
-                continue
-            image_key = (spectral_cube_index, float(wavelength))
-            preprocessing_rois = deepcopy(self.window._rois_for_preprocessing(image_key))
-            affine_matrix = self.window._chromatic_affine_for_image_key(image_key)
-            if affine_matrix is not None:
-                affine_matrix = np.asarray(affine_matrix, dtype=np.float64)
-            external_mask, external_mask_processed = self.window._effective_external_mask_for_record(record.path, processed_space=True)
-            if external_mask is not None:
-                external_mask = np.asarray(external_mask, dtype=bool)
-                # Ignore-mask geometry is authored/stored independent of wavelength; when
-                # chromatic correction is on, carry it into this wavelength's corrected
-                # geometry the same way circle/annulus ROIs already are (affine_matrix
-                # above), so the excluded pixels stay aligned with the real feature they
-                # were drawn over instead of a fixed pixel location.
-                if affine_matrix is not None:
-                    external_mask = warp_boolean_mask_affine(external_mask, affine_matrix)
-                external_mask = self.window._apply_mask_wavelength_diff(external_mask, image_key)
-            measurement_payload.append(
-                (
-                    float(wavelength),
-                    str(record.path),
-                    preprocessing_rois,
-                    affine_matrix,
-                    bool(external_mask_processed),
-                    external_mask,
-                )
-            )
-        if not measurement_payload:
-            return None
-        return (
-            measurement_payload,
-            preprocessing,
-            flatten_mask_settings,
-            measurement_settings,
-            self.window._absorbance_roi_mask_cache,
-            self.window._analysis_cache_lock,
-            int(self.window.ABSORBANCE_ROI_MASK_CACHE_SIZE),
-            # Already a deepcopy by the time it reaches this function (every
-            # caller builds selected_source_rois via deepcopy(roi) up front),
-            # so copying it again here was a deepcopy-of-a-deepcopy.
-            selected_source_rois,
-            selected_roi_ids,
-            float(settings_snapshot.area_roi_settings.reference_inner_radius_px),
-            float(settings_snapshot.area_roi_settings.reference_outer_radius_px),
-            settings_snapshot.mask_state,
-        )
-
-    def _prepare_fast_spectrum_payload_for_spectral_cube(
-        self,
-        spectral_cube_index: int,
-        selected_roi_ids: tuple,
-        selected_source_rois: list,
-        settings_snapshot: SpectrumSettingsSnapshot | None = None,
-        shared_geometry: SharedWavelengthGeometry | None = None,
-        shared_mask_by_wavelength: dict[float, object] | None = None,
-    ) -> tuple | None:
-        """Build a lightweight payload for _absorbance_spectrum_fast_task.
-
-        Used when the dataset is OME-Zarr, background flattening is off, and
-        no rotation/flip transform is active (see the eligibility check in
-        _start_sensorgram_worker, which also confirms the ROI selection is
-        compact enough for a scoped read to be worthwhile — that decision is
-        made once for the whole run, not per spectral_cube_index, so this always proceeds
-        with a scoped read once called; it must never bail out for a "not
-        worth it" reason here, or a spectral_cube_index would silently vanish from the
-        sensorgram instead of falling back to the full-plane path). Returns
-        None only when there's genuinely nothing to compute (no data for this
-        spectral_cube_index, or no ROI geometry to build a box from at all).
-
-        `shared_geometry`: [λ] mode - when given, the per-wavelength
-        chromatic affine and the scoped-read box are taken from it instead of
-        being recomputed for this cube (see SharedWavelengthGeometry's
-        docstring for why that's valid). `shared_mask_by_wavelength`: [λ]
-        mode's equivalent for the marked-pixels mask (see
-        _build_shared_wavelength_mask) - when given, the already-warped,
-        already-diffed mask for each wavelength is taken from it instead of
-        being fetched/warped fresh for this cube. Which record/file to read
-        per wavelength, and exclusions, are still resolved per cube either
-        way - those are genuinely cube-specific (different files).
-        """
-        from lspr_imaging_app.gui.analysis_tasks import compute_roi_union_bounding_box
-        from lspr_imaging_app.io.dataset import load_image_shape
-        from lspr_imaging_app.processing.preprocess import spatial_output_shape
-
-        if self.window._state.dataset is None or not selected_source_rois:
-            return None
-        if settings_snapshot is None:
-            settings_snapshot = self._spectrum_settings_snapshot()
-        preprocessing = settings_snapshot.preprocessing
-
-        # Mirror ignored_pixel_mask's own gating: an external mask only excludes
-        # pixels from the absorbance calculation when ignore_marked_pixels is
-        # on. Fetching it unconditionally and applying it in the fast task
-        # regardless of this flag would silently diverge from the slow path.
-        exclude_marked_pixels = bool(getattr(settings_snapshot.area_roi_settings, "ignore_marked_pixels", False))
-
-        measurement_payload: list[tuple[float, np.ndarray | None, np.ndarray | None, object]] = []
-        affine_matrices: list[np.ndarray | None] = []
-        first_record = None
-        for wavelength in self.window._wavelength_values:
-            record = self.window._record_map.get((spectral_cube_index, wavelength))
-            if record is None or is_excluded(self.window._state.image_exclusions, spectral_cube_index, wavelength):
-                continue
-            if first_record is None:
-                first_record = record
-            image_key = (spectral_cube_index, float(wavelength))
-            if shared_geometry is not None:
-                affine_matrix = shared_geometry.affine_matrix_by_wavelength.get(float(wavelength))
-            else:
-                affine_matrix = self.window._chromatic_affine_for_image_key(image_key)
-                if affine_matrix is not None:
-                    affine_matrix = np.asarray(affine_matrix, dtype=np.float64)
-            external_mask = None
-            if exclude_marked_pixels:
-                if shared_mask_by_wavelength is not None:
-                    external_mask = shared_mask_by_wavelength.get(float(wavelength))
-                else:
-                    external_mask, _ = self.window._effective_external_mask_for_record(record.path, processed_space=True)
-                    if external_mask is not None:
-                        external_mask = np.asarray(external_mask, dtype=bool)
-                        # Same per-wavelength chromatic warp as the slow/absorbance
-                        # payload builder above - must happen here, before the mask is
-                        # sliced into a wavelength-specific patch box downstream (the
-                        # box itself is computed in per-wavelength-transformed space
-                        # since the ROIs move; warping after slicing would read the
-                        # wrong region of the unwarped mask).
-                        if affine_matrix is not None:
-                            external_mask = warp_boolean_mask_affine(external_mask, affine_matrix)
-                        external_mask = self.window._apply_mask_wavelength_diff(external_mask, image_key)
-            measurement_payload.append(
-                (
-                    float(wavelength),
-                    affine_matrix,
-                    external_mask,
-                    record,
-                )
-            )
-            affine_matrices.append(affine_matrix)
-        if not measurement_payload or first_record is None:
-            return None
-
-        if shared_geometry is not None:
-            raw_shape = shared_geometry.raw_shape
-            image_height, image_width = shared_geometry.image_height, shared_geometry.image_width
-            box = shared_geometry.box
-        else:
-            try:
-                raw_shape = load_image_shape(str(first_record.path))
-            except Exception:
-                return None
-            image_height, image_width = spatial_output_shape(raw_shape, preprocessing)
-
-            box = compute_roi_union_bounding_box(
-                selected_source_rois,
-                float(settings_snapshot.area_roi_settings.reference_outer_radius_px),
-                affine_matrices,
-                image_height,
-                image_width,
-            )
-            if box is None:
-                return None
-
-        # Matches _prepare_absorbance_spectrum_payload_for_spectral_cube's own convention
-        # for these two: mask_state only when the mask panel is applied/linked,
-        # and background's own exclusion mask_settings only when background
-        # flattening is configured to exclude the mask.
-        mask_state = settings_snapshot.mask_state
-        background_mask_settings = (
-            settings_snapshot.area_roi_settings
-            if bool(getattr(preprocessing, "flatten_background_exclude_mask", False))
-            else None
-        )
-
-        return (
-            self.window._state.dataset,
-            int(spectral_cube_index),
-            measurement_payload,
-            # Already a deepcopy by the time it reaches this function - see the
-            # matching comment in _prepare_absorbance_spectrum_payload_for_spectral_cube.
-            selected_source_rois,
-            selected_roi_ids,
-            float(settings_snapshot.area_roi_settings.reference_inner_radius_px),
-            float(settings_snapshot.area_roi_settings.reference_outer_radius_px),
-            box,
-            preprocessing,
-            raw_shape,
-            # Shared with the slow-path ROI mask cache below - the cache key
-            # folds in patch shape/origin (see _absorbance_roi_mask_cache_key)
-            # so scoped fast-path masks can never collide with full-image
-            # slow-path ones; sharing the dict just means both paths draw
-            # from the same size-capped budget instead of needing a second one.
-            self.window._absorbance_roi_mask_cache,
-            self.window._analysis_cache_lock,
-            int(self.window.ABSORBANCE_ROI_MASK_CACHE_SIZE),
-            mask_state,
-            background_mask_settings,
-        )
-
-    def _prepare_absorbance_spectrum_payload(
-        self,
-        selected_source_rois: list[AreaRoi] | None = None,
-    ) -> tuple[tuple[object, ...], tuple[object, ...], object] | None:
-        """Build the (signature, payload, task_fn) for a single-spectral-cube spectrum
-        calculation. Uses the exact same eligibility decision and payload
-        builders as the sensorgram loop (_fast_spectrum_path_eligible,
-        _prepare_fast_spectrum_payload_for_spectral_cube /
-        _prepare_absorbance_spectrum_payload_for_spectral_cube) — a single-spectral-cube
-        spectrum is just a one-spectral-cube sensorgram, so there is one decision
-        point and one pair of task functions, not a separate parallel
-        implementation for this case.
-        """
-        if self.window._state.dataset is None:
-            return None
-        # Both branches must hand the payload builders an already-isolated copy -
-        # _selected_source_rois_snapshot() deep-copies internally, but an explicit
-        # caller-supplied list might be live references into window._state.area_rois,
-        # so it gets the same treatment here rather than relying on each builder to
-        # deepcopy it again (removed as a redundant deepcopy-of-a-deepcopy, see
-        # _prepare_fast_spectrum_payload_for_spectral_cube).
-        selected_source_rois = (
-            self.window._selected_source_rois_snapshot()
-            if selected_source_rois is None
-            else [deepcopy(roi) for roi in selected_source_rois]
-        )
-        if not selected_source_rois:
-            return None
-        signature = self._absorbance_spectrum_signature_for_source_rois(selected_source_rois)
-        if signature is None:
-            return None
-        spectral_cube_index = int(signature[0])
-        selected_roi_ids = tuple(roi.area_roi_id for roi in selected_source_rois)
-        settings_snapshot = self._spectrum_settings_snapshot()
-
-        from lspr_imaging_app.gui.analysis_tasks import _absorbance_spectrum_fast_task, _absorbance_spectrum_task
-
-        if self._fast_spectrum_path_eligible(selected_source_rois):
-            payload = self._prepare_fast_spectrum_payload_for_spectral_cube(spectral_cube_index, selected_roi_ids, selected_source_rois, settings_snapshot)
-            if payload is not None:
-                return signature, payload, _absorbance_spectrum_fast_task
-            # Fast payload builder found genuinely nothing to compute for this
-            # spectral cube (e.g. no records) — fall through to the full-plane path
-            # rather than reporting "no spectrum" when the slow path might
-            # still have an answer.
-        payload = self._prepare_absorbance_spectrum_payload_for_spectral_cube(spectral_cube_index, selected_roi_ids, selected_source_rois, settings_snapshot)
-        if payload is None:
-            return None
-        return signature, payload, _absorbance_spectrum_task
+    # Pure dict/dataclass<->JSON transforms - moved to analysis_result_serialization.py
+    # (no self.window/Qt dependency). Kept as staticmethod attributes under
+    # their original names since main_window.py already references them as
+    # AnalysisController._method(...).
+    _serialize_formula_spectrum_result = staticmethod(serialize_formula_spectrum_result)
+    _deserialize_formula_spectrum_result = staticmethod(deserialize_formula_spectrum_result)
+    _serialize_sensorgram_result = staticmethod(serialize_sensorgram_result)
+    _deserialize_sensorgram_result = staticmethod(deserialize_sensorgram_result)
 
     # ------------------------------------------------------------------
     # Result / event handler methods (moved from MainWindow)
     # ------------------------------------------------------------------
-
-    def _on_absorbance_spectrum_payload_ready(
-        self,
-        request_id: int,
-        expected_signature: tuple[object, ...],
-        prepared: tuple[tuple[object, ...], tuple[object, ...], object] | None,
-    ) -> None:
-        if request_id != self.window._absorbance_prep_request_id:
-            return
-        self.window._absorbance_prep_running = False
-        if self.window._absorbance_prep_started_at is not None:
-            self.window._append_workflow_log(
-                f"Spec prep done | {self.window._format_elapsed_seconds(time.perf_counter() - self.window._absorbance_prep_started_at)}",
-                level="success",
-            )
-        self.window._absorbance_prep_started_at = None
-        self.window._absorbance_prep_request_signature = None
-        if prepared is None:
-            self.window._end_busy("Select ROIs to show absorbance spectrum.")
-            return
-        signature, payload, task_fn = prepared
-        if signature != expected_signature:
-            self.window._absorbance_spectrum_dirty = True
-            self.window._end_busy("Select ROIs to show absorbance spectrum.")
-            return
-        self.window._pending_absorbance_spectrum_payload = (signature, payload, task_fn)
-        self.window._start_pending_absorbance_spectrum_refresh(reuse_busy=True)
-
-    def _on_absorbance_spectrum_payload_failed(self, request_id: int, message: str) -> None:
-        if request_id != self.window._absorbance_prep_request_id:
-            return
-        self.window._absorbance_prep_running = False
-        self.window._absorbance_prep_started_at = None
-        self.window._absorbance_prep_request_signature = None
-        self.window._end_busy()
-        self.window._background_error("Spectral absorbance prep", message)
-
-    def _refresh_absorbance_spectrum(self) -> None:
-        start_time = time.perf_counter()
-        if not self.window._analysis_enabled:
-            self.window._clear_absorbance_spectrum()
-            return
-        if self.window._sensorgram_running:
-            # A "Start analysis" run already owns the spectrum panel while
-            # it's in progress (see on_sensorgram_partial_result/
-            # _apply_pending_sensorgram_live_preview) - moving its live cube
-            # slider position would otherwise re-trigger this same method via
-            # the normal cube-changed path and race the run that's driving
-            # it. window._absorbance_spectrum_dirty is left as-is, so a
-            # refresh is picked up normally once the run finishes.
-            return
-        selected_source_rois = self.window._selected_source_rois_snapshot()
-        if not selected_source_rois:
-            self.window._clear_absorbance_spectrum()
-            return
-        selected_roi_ids = tuple(roi.area_roi_id for roi in selected_source_rois)
-        roi_signatures = [self.window._roi_absorbance_signature(roi) for roi in selected_source_rois]
-        if any(signature is None for signature in roi_signatures):
-            self.window._clear_absorbance_spectrum()
-            return
-        if len(selected_source_rois) == 1:
-            roi_signature = roi_signatures[0]
-            assert roi_signature is not None
-            cached_roi_result = self.window._roi_absorbance_cache.get(roi_signature)
-            if cached_roi_result is not None:
-                self.window._absorbance_spectrum_dirty = False
-                self._apply_absorbance_spectrum_result(cached_roi_result)
-                self.window._roi_absorbance_cache.move_to_end(roi_signature)
-                elapsed = self.window._format_elapsed_seconds(time.perf_counter() - start_time)
-                self.window._append_workflow_log(f"Spec cache hit | {elapsed}", level="debug")
-                self.window._set_status_text(f"Spec | cache {elapsed}")
-                return
-        signature = self._absorbance_spectrum_signature_for_source_rois(selected_source_rois)
-        if signature is not None:
-            cached_result = self.window._cached_absorbance_result_for_selection(signature, selected_roi_ids, selected_source_rois)
-            if cached_result is not None:
-                self.window._absorbance_spectrum_dirty = False
-                self._apply_absorbance_spectrum_result(cached_result)
-                spectral_cube_signature = self.window._absorbance_spectral_cube_signature(signature)
-                if spectral_cube_signature is not None and spectral_cube_signature in self.window._absorbance_spectral_cube_cache:
-                    self.window._absorbance_spectral_cube_cache.move_to_end(spectral_cube_signature)
-                elapsed = self.window._format_elapsed_seconds(time.perf_counter() - start_time)
-                self.window._set_status_text(f"Spec | cache {elapsed}")
-                return
-        missing_source_rois = [
-            roi
-            for roi, signature_value in zip(selected_source_rois, roi_signatures, strict=False)
-            if signature_value is None or self.window._roi_absorbance_cache.get(signature_value) is None
-        ]
-        if missing_source_rois:
-            spectral_cube_index = self.window._current_spectral_cube()
-            if spectral_cube_index is not None:
-                # Cross-restart resume: a cube already backed up to HDF5 in a
-                # previous session can skip recomputation here too, not just
-                # in the "Start analysis" loop - same all-or-nothing check
-                # (see _combined_absorbance_results_from_ram_or_disk), so a
-                # partial hit still falls through to the background worker
-                # below for the whole missing set rather than being
-                # special-cased. A full hit resolves every previously-missing
-                # ROI straight into the RAM cache, so re-running the combined
-                # cache lookup just below picks it up as a normal cache hit -
-                # no separate "apply immediately" branch needed here.
-                disk_trace_index = self._build_disk_absorbance_trace_index(missing_source_rois)
-                if disk_trace_index and self._combined_absorbance_results_from_ram_or_disk(
-                    int(spectral_cube_index), missing_source_rois, disk_trace_index
-                ) is not None:
-                    missing_source_rois = []
-                    cached_result = self._cached_absorbance_result_from_roi_cache(selected_source_rois)
-                    if cached_result is not None:
-                        self.window._absorbance_spectrum_dirty = False
-                        self._apply_absorbance_spectrum_result(cached_result)
-                        elapsed = self.window._format_elapsed_seconds(time.perf_counter() - start_time)
-                        self.window._set_status_text(f"Spec | cache {elapsed}")
-                        return
-        target_source_rois = missing_source_rois if missing_source_rois else selected_source_rois
-        signature = self._absorbance_spectrum_signature_for_source_rois(target_source_rois)
-        if signature is None:
-            self.window._clear_absorbance_spectrum()
-            return
-        if self.window._absorbance_spectrum_running and self.window._absorbance_spectrum_running_signature == signature:
-            return
-        if (
-            self.window._pending_absorbance_spectrum_payload is not None
-            and self.window._pending_absorbance_spectrum_payload[0] == signature
-        ):
-            return
-        if (
-            signature in self.window._absorbance_spectrum_cache
-        ):
-            self.window._absorbance_spectrum_dirty = False
-            self._apply_absorbance_spectrum_result(self.window._absorbance_spectrum_cache[signature])
-            self.window._absorbance_spectrum_cache.move_to_end(signature)
-            elapsed = self.window._format_elapsed_seconds(time.perf_counter() - start_time)
-            self.window._set_status_text(f"Spec | cache {elapsed}")
-            return
-        self.window._start_absorbance_spectrum_preparation(signature, target_source_rois)
 
     def _on_analysis_fit_settings_changed(self, *_args) -> None:
         start_time = time.perf_counter()
@@ -2127,23 +289,23 @@ class AnalysisController:
             )
         selected_source_rois = self.window._selected_source_rois_snapshot()
         if len(selected_source_rois) == 1:
-            roi_signature = self.window._roi_absorbance_signature(selected_source_rois[0])
-            if roi_signature is not None and roi_signature in self.window._roi_absorbance_cache and not self.window._absorbance_spectrum_dirty:
-                self.window._absorbance_spectrum_dirty = False
-                self._apply_absorbance_spectrum_result(self.window._roi_absorbance_cache[roi_signature])
-                self.window._roi_absorbance_cache.move_to_end(roi_signature)
+            roi_signature = self.window._roi_formula_spectrum_signature(selected_source_rois[0])
+            if roi_signature is not None and roi_signature in self.window._roi_formula_spectrum_cache and not self.window._formula_spectrum_dirty:
+                self.window._formula_spectrum_dirty = False
+                self._apply_formula_spectrum_result(self.window._roi_formula_spectrum_cache[roi_signature])
+                self.window._roi_formula_spectrum_cache.move_to_end(roi_signature)
                 elapsed = self.window._format_elapsed_seconds(time.perf_counter() - start_time)
                 self.window._set_status_text(f"Spec | cache {elapsed}")
                 return
-        signature = self._absorbance_spectrum_signature()
-        if signature is not None and signature in self.window._absorbance_spectrum_cache and not self.window._absorbance_spectrum_dirty:
-            self._apply_absorbance_spectrum_result(self.window._absorbance_spectrum_cache[signature])
-            self.window._absorbance_spectrum_cache.move_to_end(signature)
+        signature = self._formula_spectrum_signature()
+        if signature is not None and signature in self.window._formula_spectrum_cache and not self.window._formula_spectrum_dirty:
+            self._apply_formula_spectrum_result(self.window._formula_spectrum_cache[signature])
+            self.window._formula_spectrum_cache.move_to_end(signature)
             elapsed = self.window._format_elapsed_seconds(time.perf_counter() - start_time)
             self.window._append_workflow_log(f"Spec cache hit | {elapsed}", level="debug")
             self.window._set_status_text(f"Spec | cache {elapsed}")
         elif self.window._analysis_live_preview_enabled:
-            self.window._schedule_absorbance_spectrum_refresh()
+            self.window._schedule_formula_spectrum_refresh()
 
     def _on_analysis_spectral_cube_range_changed(self, *_args) -> None:
         self.window._save_control_preferences()
@@ -2225,458 +387,6 @@ class AnalysisController:
         self.window.analysis_wavelength_min_spin.setValue(float(min(self.window._wavelength_values)))
         self.window.analysis_wavelength_max_spin.setValue(float(max(self.window._wavelength_values)))
 
-    def _calculate_sensorgram_for_range(self) -> None:
-        if not self.window._analysis_enabled:
-            self.window._clear_sensorgram("Analysis calculations are disabled for this panel.")
-            return
-        if self.window._state.dataset is None:
-            self.window._clear_sensorgram("Load a dataset before calculating the sensorgram.")
-            return
-        if self.window._chromatic_setup_active:
-            self.window._clear_sensorgram("Sensorgram is hidden during chromatic setup.")
-            return
-        selected_roi_ids = self.window._selected_spectrum_roi_ids()
-        if not selected_roi_ids:
-            self.window._clear_sensorgram("Select ROIs before calculating the sensorgram.")
-            return
-        selected_source_rois = self.window._selected_source_rois_snapshot()
-        if not selected_source_rois:
-            self.window._clear_sensorgram("Select ROIs before calculating the sensorgram.")
-            return
-
-        spectral_cubes = self.window._available_analysis_spectral_cubes()
-        if not spectral_cubes:
-            self.window._clear_sensorgram("No spectral cubes are available in the selected range.")
-            return
-
-        cached_signature = self.window._sensorgram_signature_for_selection(spectral_cubes, selected_roi_ids, selected_source_rois)
-        if cached_signature is not None:
-            with self.window._analysis_cache_lock:
-                cached_sensorgram = self.window._sensorgram_cache.get(cached_signature)
-                if cached_sensorgram is not None:
-                    self.window._sensorgram_cache.move_to_end(cached_signature)
-                    self.window._append_workflow_log(
-                        f"SG cache hit | spectral_cubes {len(spectral_cubes)} | metric {self.window._analysis_metric_label()}",
-                        level="debug",
-                    )
-                    self.window._append_workflow_log(
-                        f"SG cache summary | payload hit {len(spectral_cubes)} build 0 | result hit 1 build 0",
-                        level="debug",
-                    )
-                    self.window._sensorgram_spectral_cube_indices = np.asarray(cached_sensorgram.spectral_cube_indices, dtype=np.int32)
-                    self.window._sensorgram_metric_values = np.asarray(cached_sensorgram.metric_values, dtype=np.float64)
-                    self.window._sensorgram_metric_signal = np.asarray(cached_sensorgram.metric_signal, dtype=np.float64)
-                    self.window._set_sensorgram_series(self.window._sensorgram_spectral_cube_indices, self.window._sensorgram_metric_values)
-                    summary = (
-                        f"{self.window._analysis_metric_label()} | Cached {cached_sensorgram.completed_count}/"
-                        f"{cached_sensorgram.total_count} spectral cubes{self._poly_order_summary_suffix()}"
-                    )
-                    self.window._set_sensorgram_summary_text(summary)
-                    self.window._set_status_text("Sensorgram cache used.")
-                    return
-        self.window._sensorgram_running_signature = cached_signature
-
-        self.window._append_workflow_log(
-            f"SG calc start | rois {len(selected_roi_ids)} | spectral_cubes {len(spectral_cubes)} | metric {self.window._analysis_metric_label()}",
-            level="info",
-        )
-        self._start_sensorgram_worker(cached_signature, spectral_cubes, selected_roi_ids, selected_source_rois)
-
-    def _on_sensorgram_partial_result(
-        self,
-        request_id: int,
-        total_count: int,
-        point,
-    ) -> None:
-        if request_id != self.window._sensorgram_request_id or not self.window._analysis_enabled:
-            return
-        metric_value = float("nan") if point.metric_value is None else float(point.metric_value)
-        metric_signal = float("nan") if point.metric_signal is None else float(point.metric_signal)
-        self.window._sensorgram_spectral_cube_indices = np.append(self.window._sensorgram_spectral_cube_indices, int(point.spectral_cube_index)).astype(np.int32, copy=False)
-        self.window._sensorgram_metric_values = np.append(self.window._sensorgram_metric_values, metric_value).astype(np.float64, copy=False)
-        self.window._sensorgram_metric_signal = np.append(self.window._sensorgram_metric_signal, metric_signal).astype(np.float64, copy=False)
-        self.window._set_sensorgram_series(
-            self.window._sensorgram_spectral_cube_indices,
-            self.window._sensorgram_metric_values,
-            summary_text=(
-                f"{self.window._analysis_metric_label()} | Calculating {self.window._sensorgram_spectral_cube_indices.size}/{total_count} spectral cubes"
-            ),
-        )
-
-    def _on_sensorgram_ready(self, request_id: int, result: SensorgramComputationResult) -> None:
-        if request_id != self.window._sensorgram_request_id:
-            return
-        self.window._sensorgram_running = False
-        self.window._sensorgram_cancel_event = None
-        self.window._end_busy()
-        if not self.window._analysis_enabled:
-            self.window._sensorgram_running_signature = None
-            self.window._update_analysis_control_state()
-            return
-        self.window._sensorgram_spectral_cube_indices = np.asarray(result.spectral_cube_indices, dtype=np.int32)
-        self.window._sensorgram_metric_values = np.asarray(result.metric_values, dtype=np.float64)
-        self.window._sensorgram_metric_signal = np.asarray(result.metric_signal, dtype=np.float64)
-        sensorgram_signature = self.window._sensorgram_running_signature
-        self.window._sensorgram_running_signature = None
-        if sensorgram_signature is not None:
-            with self.window._analysis_cache_lock:
-                self.window._sensorgram_cache[sensorgram_signature] = result
-                self.window._sensorgram_cache.move_to_end(sensorgram_signature)
-                while len(self.window._sensorgram_cache) > self.window.SENSORGRAM_CACHE_SIZE:
-                    self.window._sensorgram_cache.popitem(last=False)
-            self.window._append_workflow_log(
-                f"SG cache store | spectral_cubes {int(result.completed_count)}/{int(result.total_count)}",
-                level="debug",
-            )
-            self.window._append_workflow_log(
-                f"SG cache summary | payload result cached | prep {self.window._format_elapsed_seconds(result.prep_seconds)}",
-                level="debug",
-            )
-        self.window._set_sensorgram_series(self.window._sensorgram_spectral_cube_indices, self.window._sensorgram_metric_values)
-        self.window._append_workflow_log(
-            f"SG done | prep {self.window._format_elapsed_seconds(result.prep_seconds)} | fit {self.window._format_elapsed_seconds(result.fit_seconds)}",
-            level="success",
-        )
-        summary = (
-            f"{self.window._analysis_metric_label()} | Calculated {result.completed_count}/{result.total_count} spectral cubes"
-            f"{self._poly_order_summary_suffix()}"
-        )
-        if result.cancelled:
-            summary = (
-                f"{self.window._analysis_metric_label()} | Stopped after {result.completed_count}/{result.total_count} spectral cubes"
-                f"{self._poly_order_summary_suffix()}"
-            )
-        self.window._set_sensorgram_summary_text(summary)
-        self.window._set_status_text("Sensorgram calculation stopped." if result.cancelled else "Sensorgram calculation finished.")
-        self.window._update_analysis_control_state()
-
-    def _on_sensorgram_failed(self, request_id: int, message: str) -> None:
-        if request_id != self.window._sensorgram_request_id:
-            return
-        self.window._sensorgram_running = False
-        self.window._sensorgram_cancel_event = None
-        self.window._end_busy()
-        self.window._update_analysis_control_state()
-        self.window._set_sensorgram_summary_text(f"Sensorgram failed: {message}")
-        self.window._background_error("Sensorgram", message)
-
-    def _on_absorbance_spectrum_ready(
-        self,
-        request_id: int,
-        signature: tuple[object, ...],
-        result: AbsorbanceSpectrumResult,
-    ) -> None:
-        started_at = self.window._absorbance_spectrum_started_at
-        self.window._absorbance_spectrum_started_at = None
-        self.window._absorbance_spectrum_running = False
-        self.window._absorbance_spectrum_running_signature = None
-        self.window._end_busy()
-        if request_id != self.window._absorbance_spectrum_request_id:
-            if self.window._pending_absorbance_spectrum_payload is not None:
-                self.window._start_pending_absorbance_spectrum_refresh()
-            return
-        self.window._absorbance_spectrum_cache[signature] = result
-        self.window._absorbance_spectrum_cache.move_to_end(signature)
-        while len(self.window._absorbance_spectrum_cache) > self.window.ABSORBANCE_SPECTRUM_CACHE_SIZE:
-            self.window._absorbance_spectrum_cache.popitem(last=False)
-        self.window._append_workflow_log(
-            f"Spec cache store | rois {len(signature[2]) if len(signature) > 2 and isinstance(signature[2], tuple) else 0}",
-            level="debug",
-        )
-        spectral_cube_signature = self.window._absorbance_spectral_cube_signature(signature)
-        if spectral_cube_signature is not None:
-            self.window._absorbance_spectral_cube_cache[spectral_cube_signature] = result
-            self.window._absorbance_spectral_cube_cache.move_to_end(spectral_cube_signature)
-            while len(self.window._absorbance_spectral_cube_cache) > self.window.ABSORBANCE_SPECTRAL_CUBE_CACHE_SIZE:
-                self.window._absorbance_spectral_cube_cache.popitem(last=False)
-            self.window._append_workflow_log("Spec spectral_cube_index cache store", level="debug")
-        self._store_roi_absorbance_cache(result)
-        self.window._absorbance_spectrum_dirty = False
-        fit_seconds = self._apply_absorbance_spectrum_result(result) or 0.0
-        result.fit_seconds = float(fit_seconds)
-        self.window._append_workflow_log(
-            f"Spec done | load {self.window._format_elapsed_seconds(result.load_seconds)} | roi {self.window._format_elapsed_seconds(result.roi_seconds)} | fit {self.window._format_elapsed_seconds(fit_seconds)}",
-            level="success",
-        )
-        load_timing = self.window._compact_timing_text(("load", result.load_seconds), ("roi", result.roi_seconds))
-        fit_timing = self.window._format_elapsed_seconds(fit_seconds)
-        status_parts = ["Spec"]
-        if load_timing:
-            status_parts.append(load_timing)
-        if fit_timing:
-            status_parts.append(f"fit {fit_timing}")
-        if not load_timing and not fit_timing:
-            elapsed = self.window._format_elapsed_seconds(time.perf_counter() - started_at) if started_at is not None else ""
-            if elapsed:
-                status_parts.append(f"t {elapsed}")
-        self.window._set_status_text(" | ".join(status_parts))
-        if self.window._pending_absorbance_spectrum_payload is not None:
-            self.window._start_pending_absorbance_spectrum_refresh()
-
-    def _on_absorbance_spectrum_failed(self, request_id: int, message: str) -> None:
-        self.window._absorbance_spectrum_started_at = None
-        self.window._absorbance_spectrum_running = False
-        self.window._absorbance_spectrum_running_signature = None
-        self.window._end_busy()
-        if request_id == self.window._absorbance_spectrum_request_id:
-            self.window._background_error("Spectral absorbance", message)
-        if self.window._pending_absorbance_spectrum_payload is not None:
-            self.window._start_pending_absorbance_spectrum_refresh()
-
-    def _backup_absorbance_series(
-        self,
-        series_payloads: list[tuple[str, int, AbsorbanceSpectrumResult]],
-        *,
-        cube_index: int | None = None,
-    ) -> None:
-        """Append each per-ROI absorbance spectrum to the measurement-export/
-        backup file, if one is open for the current dataset. Skips the
-        "Selection" fallback entry (a combined/whole-selection result, not a
-        real per-ROI trace) and deduplicates by (roi_id, spectral_cube_index,
-        signature_hash) so redisplaying an already-backed-up, still-current
-        cube (e.g. a cache hit) doesn't append a second row, while a value
-        recomputed under different settings still gets a fresh one - see
-        docs/imaging_measurement_export_format.md.
-
-        `cube_index`: explicit for the multi-cube "Start analysis" loop, which
-        backs up a cube that isn't necessarily the one on screen. Defaults to
-        the currently-displayed cube (window._current_spectral_cube()) for the
-        interactive single-cube refresh path, preserving its existing behavior.
-        """
-        writer = getattr(self.window, "_measurement_export_writer", None)
-        if writer is None:
-            return
-        if cube_index is None:
-            cube_index = self.window._current_spectral_cube()
-        if cube_index is None:
-            return
-        cube_index = int(cube_index)
-        backed_up = self.window._measurement_export_backed_up_absorbance
-        for label, roi_id, roi_result in series_payloads:
-            if label == "Selection":
-                continue
-            roi = next((roi for roi in self.window._state.area_rois if int(roi.area_roi_id) == int(roi_id)), None)
-            signature_hash = self._signature_hash(self._roi_absorbance_signature_for_cube(roi, cube_index)) if roi is not None else ""
-            key = (int(roi_id), cube_index, signature_hash)
-            if key in backed_up:
-                continue
-            try:
-                writer.append_absorbance_spectrum(
-                    roi_id,
-                    wavelengths_nm=roi_result.wavelengths_nm,
-                    formula_values=roi_result.formula_values,
-                    sample_mean=roi_result.sample_mean,
-                    reference_mean=roi_result.reference_mean,
-                    cube_index=cube_index,
-                    signature_hash=signature_hash,
-                    timestamp_utc_ms=self._acquisition_timestamp_ms_for_cube(cube_index),
-                    formula_key=roi_result.formula_key,
-                    reduction_method=roi_result.reduction_method,
-                )
-            except Exception:
-                logging.getLogger("lspr_imaging_app.workflow").warning(
-                    "Failed to append absorbance spectrum to measurement export backup", exc_info=True
-                )
-                continue
-            backed_up.add(key)
-
-    def export_results(self) -> None:
-        """"Export Results..." button (Results / Export panel): saves a
-        point-in-time snapshot of everything backed up so far this session -
-        ROI definitions, per-ROI absorbance spectra, and sensorgram traces -
-        to a file the user chooses. This exports what `_backup_absorbance_
-        series`/`_backup_sensorgram_point` have already recorded into the
-        live `analysis/measurement_backup.h5`, not a fresh recomputation
-        across every ROI/cube - so spectra only cover cubes actually viewed,
-        and sensorgram only covers metrics actually calculated, this
-        session.
-        """
-        writer = getattr(self.window, "_measurement_export_writer", None)
-        if writer is None:
-            self.window._set_status_text("No dataset loaded - nothing to export yet.")
-            return
-        dataset = self.window._state.dataset
-        dataset_name = dataset.home.name if dataset is not None else "results"
-        stamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-        default_path = writer.path.parent / f"{dataset_name}_results_{stamp}.h5"
-        path_str, _ = QFileDialog.getSaveFileName(
-            self.window,
-            "Export analyzed results (spectra + sensorgram)",
-            str(default_path),
-            "HDF5 Files (*.h5 *.hdf5)",
-        )
-        if not path_str:
-            return
-        path = Path(path_str)
-        if path.suffix.lower() not in (".h5", ".hdf5"):
-            path = path.with_suffix(".h5")
-        try:
-            writer.export_snapshot(path)
-        except Exception as exc:
-            logging.getLogger("lspr_imaging_app.workflow").warning(
-                "Failed to export analyzed results", exc_info=True
-            )
-            QMessageBox.warning(self.window, "Export failed", f"Could not write export file:\n{exc}")
-            return
-        self.window._set_status_text(f"Exported analyzed results to {path.name}.")
-
-    def _apply_absorbance_spectrum_result(self, result: AbsorbanceSpectrumResult) -> float | None:
-        fit_started = time.perf_counter()
-        selected_roi_ids = self.window._selected_spectrum_roi_ids()
-        series_payloads: list[tuple[str, int, AbsorbanceSpectrumResult]] = []
-        if result.area_roi_results:
-            if selected_roi_ids:
-                for roi_id in selected_roi_ids:
-                    roi_result = result.area_roi_results.get(int(roi_id))
-                    if roi_result is not None:
-                        series_payloads.append((f"ROI {int(roi_id)}", int(roi_id), roi_result))
-            else:
-                for roi_id in sorted(result.area_roi_results):
-                    series_payloads.append((f"ROI {int(roi_id)}", int(roi_id), result.area_roi_results[int(roi_id)]))
-        if selected_roi_ids and len(series_payloads) < len(selected_roi_ids):
-            existing_ids = {int(roi_id) for _, roi_id, _ in series_payloads}
-            for roi_id in selected_roi_ids:
-                if int(roi_id) in existing_ids:
-                    continue
-                roi = next((roi for roi in self.window._state.area_rois if int(roi.area_roi_id) == int(roi_id)), None)
-                if roi is None:
-                    continue
-                roi_signature = self.window._roi_absorbance_signature(roi)
-                if roi_signature is None:
-                    continue
-                cached_result = self.window._roi_absorbance_cache.get(roi_signature)
-                if cached_result is not None:
-                    series_payloads.append((f"ROI {int(roi_id)}", int(roi_id), cached_result))
-        if not series_payloads and len(selected_roi_ids) > 1:
-            for roi_id in selected_roi_ids:
-                roi = next((roi for roi in self.window._state.area_rois if int(roi.area_roi_id) == int(roi_id)), None)
-                if roi is None:
-                    continue
-                roi_signature = self.window._roi_absorbance_signature(roi)
-                if roi_signature is None:
-                    continue
-                cached_result = self.window._roi_absorbance_cache.get(roi_signature)
-                if cached_result is not None:
-                    series_payloads.append((f"ROI {int(roi_id)}", int(roi_id), cached_result))
-        if not series_payloads:
-            fallback_id = int(selected_roi_ids[0]) if selected_roi_ids else 0
-            series_payloads = [("Selection", fallback_id, result)]
-        highlighted_ids = set(selected_roi_ids)
-        self._backup_absorbance_series(series_payloads)
-
-        self.window._clear_spectrum_series_items()
-        self.window.spectrum_current_point.setData([], [])
-        self.window.spectrum_metric_point.setData([], [])
-
-        x_values_all: list[np.ndarray] = []
-        y_values_all: list[np.ndarray] = []
-        primary_result = series_payloads[0][2]
-        for label, roi_id, roi_result in series_payloads:
-            rendered = self.window._add_spectrum_series(
-                roi_id=roi_id,
-                result=roi_result,
-                label=label,
-                highlighted=bool(highlighted_ids) and int(roi_id) in highlighted_ids,
-                dimmed=len(series_payloads) > 1 and bool(highlighted_ids),
-            )
-            if rendered is None:
-                continue
-            x_values, y_values, _fit_x_values, _fit_y_values = rendered
-            x_values_all.append(np.asarray(x_values, dtype=np.float64))
-            y_values_all.append(np.asarray(y_values, dtype=np.float64))
-
-        if not x_values_all:
-            self.window._set_spectrum_summary_text(f"{self.window._spectrum_selection_label()} | No valid absorbance values")
-            return
-
-        # Axis range is driven by the real absorbance points only - never by
-        # the fitted curve. A fit (esp. a higher-order polynomial through
-        # sparse/noisy points) can swing far from the data between sample
-        # points (Runge's phenomenon); letting it into the axis range let a
-        # single bad fit collapse the real data to an invisible sliver. The
-        # fit line is still drawn and may simply run off-screen if it does
-        # this, which is itself a fair cue that the fit is poorly conditioned.
-        x_min = min(float(np.min(values)) for values in x_values_all)
-        x_max = max(float(np.max(values)) for values in x_values_all)
-        y_min = min(float(np.min(values)) for values in y_values_all)
-        y_max = max(float(np.max(values)) for values in y_values_all)
-        y_span = max(y_max - y_min, 0.05)
-        self.window.spectrum_plot.setXRange(x_min, x_max, padding=0.02)
-        self.window.spectrum_plot.setYRange(y_min - y_span * 0.08, y_max + y_span * 0.12, padding=0.0)
-
-        metric_value = None
-        metric_signal = None
-        current_text = ""
-        fit_text = ""
-        fit_seconds = 0.0
-        if len(series_payloads) == 1:
-            fit = self.window._analysis_fit_result_from_spectrum(primary_result)
-            if fit is not None:
-                metric_value, metric_signal = metric_value_from_fit(fit, self.window._analysis_metric_key())
-            elif self._analysis_fit_method_key() == "none":
-                wavelength_range = self._analysis_wavelength_range()
-                metric_value, metric_signal = metric_value_from_spectrum(
-                    primary_result.wavelengths_nm,
-                    primary_result.formula_values,
-                    self.window._analysis_metric_key(),
-                    wl_min=None if wavelength_range is None else wavelength_range[0],
-                    wl_max=None if wavelength_range is None else wavelength_range[1],
-                )
-            if metric_value is not None and metric_signal is not None and np.isfinite(metric_value) and np.isfinite(metric_signal):
-                self.window.spectrum_metric_point.setData([float(metric_value)], [float(metric_signal)])
-            else:
-                self.window.spectrum_metric_point.setData([], [])
-            current_wavelength = self.window._current_wavelength()
-            current_point_index = None
-            if current_wavelength is not None:
-                current_point_index = next(
-                    (
-                        index
-                        for index, wavelength_nm in enumerate(primary_result.wavelengths_nm)
-                        if abs(float(wavelength_nm) - float(current_wavelength)) < 1e-6
-                        and np.isfinite(primary_result.formula_values[index])
-                    ),
-                    None,
-                )
-            if current_point_index is None:
-                self.window.spectrum_current_point.setData([], [])
-            else:
-                current_x = float(primary_result.wavelengths_nm[current_point_index])
-                current_y = float(primary_result.formula_values[current_point_index])
-                self.window.spectrum_current_point.setData([current_x], [current_y])
-                current_sample_mean = float(primary_result.sample_mean[current_point_index])
-                current_reference_mean = float(primary_result.reference_mean[current_point_index])
-                current_text = (
-                    f" | A({current_x:g} nm) = {current_y:.4f}"
-                    f" | sample {current_sample_mean:.1f}, reference {current_reference_mean:.1f}"
-                )
-            if metric_value is not None and np.isfinite(metric_value):
-                fit_text = f" | {self.window._analysis_metric_label()} {float(metric_value):.3f} nm"
-                if fit is not None:
-                    fit_text += f" | Poly {self.window._analysis_poly_order()}"
-        else:
-            self.window.spectrum_current_point.setData([], [])
-            self.window.spectrum_metric_point.setData([], [])
-            fit_text = f" | {len(series_payloads)} ROI series"
-        fit_seconds = time.perf_counter() - fit_started
-        self.window._last_absorbance_fit_seconds = fit_seconds
-
-        spectral_cube_index = self.window._current_spectral_cube()
-        cube_display = spectral_cube_index if spectral_cube_index is not None else "-"
-        sample_pixels = int(np.nanmax(primary_result.sample_pixel_count)) if primary_result.sample_pixel_count.size else 0
-        reference_pixels = int(np.nanmax(primary_result.reference_pixel_count)) if primary_result.reference_pixel_count.size else 0
-        roi_count = len(self.window._state.area_rois)
-        group_count = len(self.window._state.area_roi_groups)
-        cube_axis_label = self.window._spectral_cube_axis_label()
-        basic_text = f"ROI: {roi_count}, Groups: {group_count}, {cube_axis_label}: {cube_display}"
-        detail_tooltip = (
-            f"{self.window._spectrum_selection_label()} | Spectral cube {cube_display}"
-            f" | ROI px: sample {sample_pixels}, reference {reference_pixels}{current_text}{fit_text}"
-        )
-        self.window._set_spectrum_summary_text(basic_text, detail_tooltip)
-        self.window._update_single_spectral_cube_sensorgram(metric_value, metric_signal)
-        return fit_seconds
-
     def _on_analysis_section_applied_changed(self, applied: bool) -> None:
         applied = bool(applied)
         self.window._append_workflow_log(f"Analysis linked state changed: {applied}", level="debug")
@@ -2690,12 +400,12 @@ class AnalysisController:
             self.window._settings.setValue("analysis/live_preview", False)
         self.window._update_analysis_control_state()
         if self.window._analysis_enabled:
-            self.window._mark_absorbance_spectrum_dirty()
+            self.window._mark_formula_spectrum_dirty()
             self.window._set_status_text("Analysis calculations enabled.")
             return
         self.window._stop_sensorgram_calculation()
         self.window._pending_sensorgram_payload = None
-        self.window._clear_absorbance_spectrum()
+        self.window._clear_formula_spectrum()
         self.window._clear_sensorgram("Analysis calculations are disabled for this panel.")
         self.window._set_status_text("Analysis calculations disabled.")
 
@@ -3369,11 +1079,11 @@ class AnalysisController:
             return
         self.mark_stale(reason)
 
-    def _invalidate_absorbance_spectrum_cache(self) -> None:
-        self.window._absorbance_spectrum_cache.clear()
-        self.window._absorbance_spectral_cube_cache.clear()
-        self.window._roi_absorbance_cache.clear()
-        self.window._absorbance_spectrum_dirty = True
+    def _invalidate_formula_spectrum_cache(self) -> None:
+        self.window._formula_spectrum_cache.clear()
+        self.window._formula_spectral_cube_cache.clear()
+        self.window._roi_formula_spectrum_cache.clear()
+        self.window._formula_spectrum_dirty = True
         self.window._cached_roi_ids.clear()
 
     def _invalidate_caches_for_exclusion_change(self) -> None:
@@ -3406,17 +1116,18 @@ class AnalysisController:
             return
         self.calculate_sensorgram()
 
-    def _mark_absorbance_spectrum_dirty(self) -> None:
-        self.window._absorbance_spectrum_dirty = True
-        if not self.window._analysis_enabled:
+    def _mark_formula_spectrum_dirty(self) -> None:
+        self.window._formula_spectrum_dirty = True
+        blocked = self._sensorgram_prerequisite_blocked()
+        if blocked == "disabled":
             self.window._clear_spectrum_summary_text()
             self.window._clear_sensorgram("Analysis calculations are disabled for this panel.")
             return
-        if self.window._state.dataset is None:
+        if blocked == "no_dataset":
             self.window._clear_spectrum_summary_text()
             self.window._clear_sensorgram("Load a dataset to build the fitted sensorgram.")
             return
-        if self.window._chromatic_setup_active:
+        if blocked == "chromatic_active":
             self.window._clear_spectrum_summary_text()
             self.window._clear_sensorgram("Sensorgram is hidden during chromatic setup.")
             return
@@ -3479,227 +1190,149 @@ class AnalysisController:
         noun = "ROI" if len(selected_ids) == 1 else "ROIs"
         return f"All {len(selected_ids)} {noun}"
 
-    def _schedule_absorbance_spectrum_refresh(self) -> None:
+    def _schedule_formula_spectrum_refresh(self) -> None:
         if not self.window._startup_ready or self.window._startup_restore_in_progress:
             return
-        self._mark_absorbance_spectrum_dirty()
+        self._mark_formula_spectrum_dirty()
         if self.window._analysis_live_preview_enabled:
-            if self.window._absorbance_spectrum_timer.isActive():
-                self.window._absorbance_spectrum_timer.stop()
-            self.window._absorbance_spectrum_timer.start()
-
-    def _start_absorbance_spectrum_preparation(
-        self,
-        signature: tuple[object, ...],
-        selected_source_rois: list[AreaRoi] | None = None,
-    ) -> None:
-        from PyQt6.QtWidgets import QApplication
-        from lspr_imaging_app.gui.worker import FunctionWorker
-
-        if self.window._absorbance_prep_running:
-            return
-        self.window._absorbance_prep_request_id += 1
-        request_id = self.window._absorbance_prep_request_id
-        self.window._absorbance_prep_running = True
-        self.window._absorbance_prep_request_signature = signature
-        self.window._absorbance_prep_started_at = time.perf_counter()
-        self.window._append_workflow_log("Spec prep start", level="info")
-        self.window._begin_busy("Preparing absorbance spectrum...", determinate=False)
-        QApplication.processEvents()
-        worker = FunctionWorker(self._prepare_absorbance_spectrum_payload, selected_source_rois)
-        worker.signals.result.connect(
-            lambda prepared, request_id=request_id, signature=signature: self._on_absorbance_spectrum_payload_ready(
-                request_id,
-                signature,
-                prepared,
-            )
-        )
-        worker.signals.error.connect(
-            lambda message, request_id=request_id: self._on_absorbance_spectrum_payload_failed(request_id, message)
-        )
-        self.window._thread_pool.start(worker)
-
-    def _cached_absorbance_result_for_selection(
-        self,
-        signature: tuple[object, ...],
-        selected_roi_ids: tuple[int, ...],
-        selected_source_rois: list[AreaRoi] | None = None,
-    ) -> AbsorbanceSpectrumResult | None:
-        if not selected_roi_ids:
-            return None
-        if len(selected_roi_ids) == 1:
-            for cache_signature, cached_result in reversed(list(self.window._roi_absorbance_cache.items())):
-                if self._absorbance_spectral_cube_signature(cache_signature) != self._absorbance_spectral_cube_signature(signature):
-                    continue
-                if self._absorbance_result_covers_roi_ids(cached_result, selected_roi_ids):
-                    return cached_result
-        spectral_cube_signature = self._absorbance_spectral_cube_signature(signature)
-        if spectral_cube_signature is not None:
-            cached_result = self.window._absorbance_spectral_cube_cache.get(spectral_cube_signature)
-            if cached_result is not None and self._absorbance_result_covers_roi_ids(cached_result, selected_roi_ids):
-                return cached_result
-        for cache_signature, cached_result in reversed(list(self.window._absorbance_spectrum_cache.items())):
-            if self._absorbance_spectral_cube_signature(cache_signature) != spectral_cube_signature:
-                continue
-            if self._absorbance_result_covers_roi_ids(cached_result, selected_roi_ids):
-                return cached_result
-        if selected_source_rois:
-            cached_from_rois = self._cached_absorbance_result_from_roi_cache(selected_source_rois)
-            if cached_from_rois is not None:
-                return cached_from_rois
-        # "Start analysis" already computed and cached a full
-        # per-wavelength spectrum for every cube it visited (see
-        # _store_sensorgram_spectral_cube_result) - that cache was never
-        # consulted here, so browsing to a cube the batch run already covered
-        # silently recomputed it from scratch (or showed nothing at all, with
-        # Live Preview off) instead of reusing work already paid for. Reuses
-        # the sensorgram cache's own signature function, so this only ever
-        # hits when the cube/ROI/wavelength/preprocessing settings are
-        # unchanged since that computation - anything different (moved ROI,
-        # changed reference radius, etc.) naturally misses and falls through
-        # to a fresh computation below, same as before this fallback existed.
-        if selected_source_rois:
-            spectral_cube_index = self.window._current_spectral_cube()
-            if spectral_cube_index is not None:
-                sensorgram_result = self._cached_sensorgram_spectral_cube_result(
-                    int(spectral_cube_index), selected_roi_ids, selected_source_rois,
-                )
-                if sensorgram_result is not None and self._absorbance_result_covers_roi_ids(sensorgram_result, selected_roi_ids):
-                    return sensorgram_result
-        return None
-
-    def _exclusion_signature_for_cube(self, spectral_cube_index: int) -> tuple[object, ...]:
-        """Per-wavelength "is this frame currently excluded" booleans for one
-        cube, folded into every cache signature that reduces across a cube's
-        wavelengths - `is_excluded` already resolves whole-cube and
-        whole-wavelength wildcard rules down to a plain per-frame bool, so
-        this is enough to make a signature miss whenever an exclusion rule
-        is added, removed, or changed, without needing to hash the rule list
-        itself. See `_invalidate_caches_for_exclusion_change`'s removal for
-        why this matters (docs/analysis_pipeline_redesign.md §2c)."""
-        return tuple(
-            is_excluded(self.window._state.image_exclusions, int(spectral_cube_index), float(wavelength))
-            for wavelength in self.window._wavelength_values
-        )
-
-    def _roi_absorbance_signature(self, roi: AreaRoi) -> tuple[object, ...] | None:
-        spectral_cube_index = self.window._current_spectral_cube()
-        if spectral_cube_index is None:
-            return None
-        return self._roi_absorbance_signature_for_cube(roi, int(spectral_cube_index))
-
-    def _roi_absorbance_signature_for_cube(self, roi: AreaRoi, spectral_cube_index: int) -> tuple[object, ...] | None:
-        """Same as `_roi_absorbance_signature`, but for an arbitrary cube
-        rather than hard-coding `window._current_spectral_cube()` - needed by
-        the unified per-cube absorbance getter (§2 of the sensorgram/spectrum
-        unification), which computes/caches results for whichever cube a
-        multi-cube run is currently processing, not necessarily the one on
-        screen."""
-        if not self.window._wavelength_values:
-            return None
-        reduction_method, trimmed_mean_fraction, formula_key = self._roi_math_signature_elements()
-        return _roi_absorbance_signature(
-            int(spectral_cube_index),
-            tuple(float(value) for value in self.window._wavelength_values),
-            roi,
-            tuple(
-                self.window._chromatic_signature_for_image_key((int(spectral_cube_index), float(wavelength)))
-                for wavelength in self.window._wavelength_values
-            ),
-            reduction_method,
-            trimmed_mean_fraction,
-            formula_key,
-            exclusion_signatures=self._exclusion_signature_for_cube(spectral_cube_index),
-        )
-
-    def _roi_has_cached_absorbance(self, roi: AreaRoi) -> bool:
-        signature = self._roi_absorbance_signature(roi)
-        return signature is not None and self.window._roi_absorbance_cache.get(signature) is not None
+            if self.window._formula_spectrum_timer.isActive():
+                self.window._formula_spectrum_timer.stop()
+            self.window._formula_spectrum_timer.start()
 
     def _refresh_cached_roi_ids_snapshot(self) -> None:
         """Recompute the "which ROIs are already calculated" snapshot the ROI
         table/overlay read for their blue/white indicator.
 
-        This is the only place that calls `_roi_has_cached_absorbance` for the
-        whole ROI list. Call it after `_roi_absorbance_cache` actually changes
+        This is the only place that calls `_roi_has_cached_formula_spectrum` for the
+        whole ROI list. Call it after `_roi_formula_spectrum_cache` actually changes
         (populated or cleared) - never from ROI selection/editing code, which
         should only ever read `self.window._cached_roi_ids`.
         """
         self.window._cached_roi_ids = {
-            int(roi.area_roi_id) for roi in self.window._state.area_rois if self._roi_has_cached_absorbance(roi)
+            int(roi.area_roi_id) for roi in self.window._state.area_rois if self._roi_has_cached_formula_spectrum(roi)
         }
+        self.schedule_cube_slider_cache_refresh()
 
-    @staticmethod
-    def _analysis_cache_signature_to_json(value):
-        if isinstance(value, tuple):
-            return [AnalysisController._analysis_cache_signature_to_json(item) for item in value]
-        if isinstance(value, list):
-            return [AnalysisController._analysis_cache_signature_to_json(item) for item in value]
-        return value
+    def schedule_cube_slider_cache_refresh(self) -> None:
+        """Debounced (150ms, see the timer set up in MainWindow.__init__)
+        recompute of which Cube/Time slider ticks are already cached for the
+        current ROI selection - call after anything that can change either
+        side of that: the ROI selection itself, or `_roi_formula_spectrum_cache`
+        (already covered by `_refresh_cached_roi_ids_snapshot` above, the
+        established single choke point for cache-changed)."""
+        self.window._cube_slider_cache_refresh_timer.start()
 
-    @staticmethod
-    def _analysis_cache_signature_from_json(value):
-        if isinstance(value, list):
-            return tuple(AnalysisController._analysis_cache_signature_from_json(item) for item in value)
-        return value
+    def _refresh_cube_slider_cache_indicators(self) -> None:
+        """Recomputes, on a background thread, which cubes on the Cube/Time
+        slider already have every currently-selected ROI's formula
+        spectrum cached in RAM (`window._roi_formula_spectrum_cache`), then colors
+        those ticks via `DataAxisSlider.set_tick_cache_state`. A cube only
+        counts as "cached" if ALL selected ROIs have it - selecting one
+        ROI that was never computed pulls ticks back to gray even if every
+        other selected ROI already has that cube, matching the maintainer's
+        expected semantics (adding an uncalculated spot should only ever
+        lower the cached count, never hide that it's missing).
 
-    @staticmethod
-    def _signature_hash(signature: tuple[object, ...]) -> str:
-        """Stable, compact hash of a cache-signature tuple, for persisting
-        into the HDF5 measurement-export backup (see
-        `storage/measurement_export.py`'s `signature_hash` column) so a
-        reopened session can tell whether an on-disk row is still valid
-        under the current settings, without storing or comparing the
-        larger, code-coupled signature tuple itself. Reuses the same
-        tuple/list-to-JSON canonicalization already used to persist
-        signatures into the session's `analysis_cache` JSON, so the same
-        signature always hashes the same way regardless of where it's
-        used."""
-        canonical = AnalysisController._analysis_cache_signature_to_json(signature)
-        encoded = json.dumps(canonical, separators=(",", ":")).encode("utf-8")
-        return hashlib.sha256(encoded).hexdigest()
+        Runs off the main thread because the cost is real: for N selected
+        ROIs and M cubes this is N*M signature computations, each folding in
+        a per-wavelength chromatic signature - see
+        `_roi_absorbance_signature_for_cube`. Cheap per call, but with the
+        several dozen ROIs and few hundred cubes this app routinely handles
+        (see docs/analysis_pipeline_redesign.md), the total can run into
+        hundreds of milliseconds, which is a real, visible stall if paid on
+        the GUI thread (the same "must not block the GUI thread" rule the
+        sensorgram/spectrum workers already follow).
+        """
+        window = self.window
+        if not window._analysis_enabled or window._state.dataset is None:
+            window.spectral_cube_slider.set_tick_cache_state(None)
+            return
+        selected_roi_ids = window._selected_spectrum_roi_ids()
+        spectral_cube_values = list(window._spectral_cube_values)
+        if not selected_roi_ids or not spectral_cube_values:
+            window.spectral_cube_slider.set_tick_cache_state(None)
+            return
+        selected_roi_id_set = set(int(roi_id) for roi_id in selected_roi_ids)
+        selected_source_rois = [
+            deepcopy(roi) for roi in window._state.area_rois if int(roi.area_roi_id) in selected_roi_id_set
+        ]
+        if not selected_source_rois:
+            window.spectral_cube_slider.set_tick_cache_state(None)
+            return
 
-    @staticmethod
-    def _absorbance_spectral_cube_signature(signature: tuple[object, ...] | None) -> tuple[object, ...] | None:
-        if signature is None or len(signature) < 4:
-            return None
-        return (signature[0], signature[1], signature[3])
+        from lspr_imaging_app.gui.worker import FunctionWorker
 
-    @staticmethod
-    def _absorbance_result_covers_roi_ids(result: AbsorbanceSpectrumResult, selected_roi_ids: tuple[int, ...]) -> bool:
-        if not selected_roi_ids:
-            return False
-        if not result.area_roi_results:
-            return len(selected_roi_ids) == 1
-        available_ids = {int(roi_id) for roi_id in result.area_roi_results.keys()}
-        return all(int(roi_id) in available_ids for roi_id in selected_roi_ids)
+        window._cube_slider_cache_request_id += 1
+        request_id = window._cube_slider_cache_request_id
+        cache_lock = window._analysis_cache_lock
+        roi_formula_spectrum_cache = window._roi_formula_spectrum_cache
+
+        def _compute(rois=selected_source_rois, cubes=spectral_cube_values) -> set[int]:
+            cached_tick_positions: set[int] = set()
+            for position, spectral_cube_index in enumerate(cubes):
+                all_cached = True
+                for roi in rois:
+                    signature = self._roi_formula_spectrum_signature_for_cube(roi, int(spectral_cube_index))
+                    if signature is None:
+                        all_cached = False
+                        break
+                    with cache_lock:
+                        if roi_formula_spectrum_cache.get(signature) is None:
+                            all_cached = False
+                            break
+                if all_cached:
+                    cached_tick_positions.add(position)
+            return cached_tick_positions
+
+        worker = FunctionWorker(_compute)
+        worker.signals.result.connect(
+            lambda cached_tick_positions, request_id=request_id: self._apply_cube_slider_cache_indicators(
+                request_id, cached_tick_positions
+            )
+        )
+        window._thread_pool.start(worker)
+
+    def _apply_cube_slider_cache_indicators(self, request_id: int, cached_tick_positions: set[int]) -> None:
+        if request_id != self.window._cube_slider_cache_request_id:
+            return
+        self.window.spectral_cube_slider.set_tick_cache_state(frozenset(cached_tick_positions))
+
+    # Pure JSON-canonicalization/hash helpers - moved to analysis_cache_signature.py
+    # (no self.window/Qt dependency). Kept as staticmethod attributes under
+    # their original names since main_window.py already references them as
+    # AnalysisController._method(...).
+    _analysis_cache_signature_to_json = staticmethod(analysis_cache_signature_to_json)
+    _analysis_cache_signature_from_json = staticmethod(analysis_cache_signature_from_json)
+    _signature_hash = staticmethod(signature_hash)
+    _formula_spectral_cube_signature = staticmethod(formula_spectral_cube_signature)
+    _formula_spectrum_result_covers_roi_ids = staticmethod(formula_spectrum_result_covers_roi_ids)
 
     def _analysis_cache_payload(self) -> dict:
         payload: dict[str, list[dict[str, object]]] = {
-            "absorbance_spectrum_cache": [],
-            "absorbance_spectral_cube_cache": [],
+            "formula_spectrum_cache": [],
+            "formula_spectral_cube_cache": [],
             "roi_absorbance_cache": [],
             "sensorgram_cache": [],
         }
-        for signature, result in self.window._absorbance_spectrum_cache.items():
-            payload["absorbance_spectrum_cache"].append(
+        for signature, result in self.window._formula_spectrum_cache.items():
+            payload["formula_spectrum_cache"].append(
                 {
                     "signature": self._analysis_cache_signature_to_json(signature),
-                    "result": self._serialize_absorbance_result(result),
+                    "result": self._serialize_formula_spectrum_result(result),
                 }
             )
-        for signature, result in self.window._absorbance_spectral_cube_cache.items():
-            payload["absorbance_spectral_cube_cache"].append(
+        for signature, result in self.window._formula_spectral_cube_cache.items():
+            payload["formula_spectral_cube_cache"].append(
                 {
                     "signature": self._analysis_cache_signature_to_json(signature),
-                    "result": self._serialize_absorbance_result(result),
+                    "result": self._serialize_formula_spectrum_result(result),
                 }
             )
-        for signature, result in self.window._roi_absorbance_cache.items():
+        for signature, result in self.window._roi_formula_spectrum_cache.items():
             payload["roi_absorbance_cache"].append(
                 {
                     "signature": self._analysis_cache_signature_to_json(signature),
-                    "result": self._serialize_absorbance_result(result),
+                    "result": self._serialize_formula_spectrum_result(result),
                 }
             )
         for signature, result in self.window._sensorgram_cache.items():
@@ -3712,51 +1345,53 @@ class AnalysisController:
         return payload
 
     def _restore_analysis_caches(self, payload: dict | None) -> None:
-        self.window._absorbance_spectrum_cache.clear()
-        self.window._absorbance_spectral_cube_cache.clear()
-        self.window._roi_absorbance_cache.clear()
+        self.window._formula_spectrum_cache.clear()
+        self.window._formula_spectral_cube_cache.clear()
+        self.window._roi_formula_spectrum_cache.clear()
         self.window._sensorgram_cache.clear()
         if not isinstance(payload, dict):
             return
-        raw_absorbance = payload.get("absorbance_spectrum_cache", [])
-        if isinstance(raw_absorbance, list):
-            for entry in raw_absorbance:
+        raw_formula_spectrum = payload.get("formula_spectrum_cache", payload.get("absorbance_spectrum_cache", []))
+        if isinstance(raw_formula_spectrum, list):
+            for entry in raw_formula_spectrum:
                 if not isinstance(entry, dict):
                     continue
                 signature = self._analysis_cache_signature_from_json(entry.get("signature"))
-                result = self._deserialize_absorbance_result(entry.get("result"))
+                result = self._deserialize_formula_spectrum_result(entry.get("result"))
                 if signature is None:
                     continue
-                self.window._absorbance_spectrum_cache[signature] = result
-                spectral_cube_signature = self._absorbance_spectral_cube_signature(signature)
+                self.window._formula_spectrum_cache[signature] = result
+                spectral_cube_signature = self._formula_spectral_cube_signature(signature)
                 if spectral_cube_signature is not None:
-                    self.window._absorbance_spectral_cube_cache[spectral_cube_signature] = result
-                    self.window._absorbance_spectral_cube_cache.move_to_end(spectral_cube_signature)
-                    while len(self.window._absorbance_spectral_cube_cache) > self.window.ABSORBANCE_SPECTRAL_CUBE_CACHE_SIZE:
-                        self.window._absorbance_spectral_cube_cache.popitem(last=False)
-        raw_absorbance_spectral_cubes = payload.get("absorbance_spectral_cube_cache", [])
-        if isinstance(raw_absorbance_spectral_cubes, list):
-            for entry in raw_absorbance_spectral_cubes:
+                    self._store_in_lru_cache(
+                        self.window._formula_spectral_cube_cache, spectral_cube_signature, result,
+                        self.window.FORMULA_SPECTRAL_CUBE_CACHE_SIZE,
+                    )
+        raw_formula_spectral_cubes = payload.get(
+            "formula_spectral_cube_cache", payload.get("absorbance_spectral_cube_cache", [])
+        )
+        if isinstance(raw_formula_spectral_cubes, list):
+            for entry in raw_formula_spectral_cubes:
                 if not isinstance(entry, dict):
                     continue
                 signature = self._analysis_cache_signature_from_json(entry.get("signature"))
-                result = self._deserialize_absorbance_result(entry.get("result"))
+                result = self._deserialize_formula_spectrum_result(entry.get("result"))
                 if signature is None:
                     continue
-                self.window._absorbance_spectral_cube_cache[signature] = result
-                self.window._absorbance_spectral_cube_cache.move_to_end(signature)
-                while len(self.window._absorbance_spectral_cube_cache) > self.window.ABSORBANCE_SPECTRAL_CUBE_CACHE_SIZE:
-                    self.window._absorbance_spectral_cube_cache.popitem(last=False)
-        raw_roi_absorbance = payload.get("roi_absorbance_cache", payload.get("spot_absorbance_cache", []))
-        if isinstance(raw_roi_absorbance, list):
-            for entry in raw_roi_absorbance:
+                self._store_in_lru_cache(
+                    self.window._formula_spectral_cube_cache, signature, result,
+                    self.window.FORMULA_SPECTRAL_CUBE_CACHE_SIZE,
+                )
+        raw_roi_formula_spectrum = payload.get("roi_absorbance_cache", payload.get("spot_absorbance_cache", []))
+        if isinstance(raw_roi_formula_spectrum, list):
+            for entry in raw_roi_formula_spectrum:
                 if not isinstance(entry, dict):
                     continue
                 signature = self._analysis_cache_signature_from_json(entry.get("signature"))
-                result = self._deserialize_absorbance_result(entry.get("result"))
+                result = self._deserialize_formula_spectrum_result(entry.get("result"))
                 if signature is None:
                     continue
-                self.window._roi_absorbance_cache[signature] = result
+                self.window._roi_formula_spectrum_cache[signature] = result
         raw_sensorgram = payload.get("sensorgram_cache", [])
         if isinstance(raw_sensorgram, list):
             for entry in raw_sensorgram:
@@ -3821,92 +1456,3 @@ class AnalysisController:
             if start <= int(spectral_cube_index) <= end
             and not is_cube_fully_excluded(self.window._state.image_exclusions, spectral_cube_index)
         ]
-
-    def _stop_sensorgram_calculation(self) -> None:
-        if not self.window._sensorgram_running or self.window._sensorgram_cancel_event is None:
-            return
-        self.window._sensorgram_cancel_event.set()
-        self.window._pending_sensorgram_payload = None
-        self._set_sensorgram_summary_text("Stopping sensorgram calculation...")
-        self.window._set_status_text("Stopping sensorgram calculation...")
-
-    def _start_pending_absorbance_spectrum_refresh(self, *, reuse_busy: bool = False) -> None:
-        from lspr_imaging_app.gui.worker import FunctionWorker
-
-        if self.window._pending_absorbance_spectrum_payload is None:
-            return
-        signature, payload, task_fn = self.window._pending_absorbance_spectrum_payload
-        self.window._pending_absorbance_spectrum_payload = None
-        request_id = self.window._absorbance_spectrum_request_id + 1
-        self.window._absorbance_spectrum_request_id = request_id
-        self.window._absorbance_spectrum_running = True
-        self.window._absorbance_spectrum_running_signature = signature
-        self.window._absorbance_spectrum_started_at = time.perf_counter()
-        if reuse_busy:
-            self.window._busy_started_at = time.perf_counter()
-            self.window._busy_is_determinate = True
-            self.window._busy_last_percent = 0
-            self.window._status_bar_busy.setRange(0, 100)
-            self.window._status_bar_busy.setValue(0)
-            self.window._status_bar_busy.setTextVisible(True)
-            self.window._status_bar_busy.show()
-            self.window._status_bar_busy_detail.setText("0:00 | ETA --:-- | 0%")
-            self.window._status_bar_busy_detail.show()
-            self.window._set_status_text("Updating absorbance spectrum...")
-        else:
-            self.window._begin_busy("Updating absorbance spectrum...", determinate=True)
-        reduction_method, trimmed_mean_fraction, formula_key = self._roi_math_signature_elements()
-        worker = FunctionWorker(
-            task_fn,
-            *payload,
-            supports_progress=True,
-            reduction_method=reduction_method,
-            trimmed_mean_fraction=trimmed_mean_fraction,
-            formula_key=formula_key,
-        )
-        worker.signals.progress.connect(self.window._update_busy_progress)
-        worker.signals.result.connect(
-            lambda result,
-            request_id=request_id,
-            signature=signature: self._on_absorbance_spectrum_ready(request_id, signature, result)
-        )
-        worker.signals.error.connect(lambda message, request_id=request_id: self._on_absorbance_spectrum_failed(request_id, message))
-        self.window._thread_pool.start(worker)
-
-    def _refresh_visible_spectrum_from_cache(self) -> bool:
-        if not self.window._analysis_enabled:
-            return False
-        selected_source_rois = self._selected_source_rois_snapshot()
-        selected_roi_ids = tuple(roi.area_roi_id for roi in selected_source_rois)
-        roi_signature_single = None
-        if len(selected_source_rois) == 1:
-            roi_signature_single = self._roi_absorbance_signature(selected_source_rois[0])
-            if roi_signature_single is not None:
-                cached_roi_result = self.window._roi_absorbance_cache.get(roi_signature_single)
-                if cached_roi_result is not None:
-                    self._apply_absorbance_spectrum_result(cached_roi_result)
-                    self.window._roi_absorbance_cache.move_to_end(roi_signature_single)
-                    self.window._append_workflow_log("Spec repaint | roi cache", level="debug")
-                    return True
-        signature = self._absorbance_spectrum_signature()
-        if signature is None:
-            return False
-        if not selected_source_rois:
-            cached_result = self.window._absorbance_spectrum_cache.get(signature)
-            if cached_result is not None:
-                self._apply_absorbance_spectrum_result(cached_result)
-                spectral_cube_signature = self._absorbance_spectral_cube_signature(signature)
-                if spectral_cube_signature is not None and spectral_cube_signature in self.window._absorbance_spectral_cube_cache:
-                    self.window._absorbance_spectral_cube_cache.move_to_end(spectral_cube_signature)
-                self.window._append_workflow_log("Spec repaint | spectrum cache", level="debug")
-                return True
-            return False
-        cached_result = self._cached_absorbance_result_for_selection(signature, selected_roi_ids)
-        if cached_result is not None:
-            self._apply_absorbance_spectrum_result(cached_result)
-            spectral_cube_signature = self._absorbance_spectral_cube_signature(signature)
-            if spectral_cube_signature is not None and spectral_cube_signature in self.window._absorbance_spectral_cube_cache:
-                self.window._absorbance_spectral_cube_cache.move_to_end(spectral_cube_signature)
-            self.window._append_workflow_log("Spec repaint | spectrum cache", level="debug")
-            return True
-        return False

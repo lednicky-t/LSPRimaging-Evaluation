@@ -32,16 +32,16 @@ def absorbance_from_means(sample_mean: float, reference_mean: float) -> float:
     return formula_value(sample_mean, reference_mean, "absorbance")
 
 
-def fit_absorbance_curve(
+def fit_polynomial_curve(
     wavelengths_nm,
-    absorbance,
+    formula_values,
     poly_order: int = 3,
     wl_min: float | None = None,
     wl_max: float | None = None,
     sample_count: int = 400,
 ) -> FitResult:
     x = np.asarray(wavelengths_nm, dtype=np.float64)
-    y = np.asarray(absorbance, dtype=np.float64)
+    y = np.asarray(formula_values, dtype=np.float64)
     valid_mask = np.isfinite(x) & np.isfinite(y)
     x = x[valid_mask]
     y = y[valid_mask]
@@ -130,7 +130,7 @@ def _gaussian_model(x: np.ndarray, amplitude: float, center: float, sigma: float
 
 def fit_gaussian_curve(
     wavelengths_nm,
-    absorbance,
+    formula_values,
     wl_min: float | None = None,
     wl_max: float | None = None,
     sample_count: int = 400,
@@ -139,22 +139,22 @@ def fit_gaussian_curve(
     the "Gauss" Fitting option in Metric trace. coefficients holds
     [amplitude, center, sigma, offset] (not polynomial coefficients, despite
     the shared field name - nothing else in the codebase interprets
-    FitResult.coefficients, see fit_absorbance_curve above for the
+    FitResult.coefficients, see fit_polynomial_curve above for the
     polynomial case). peak_wavelength_nm is the fitted center, clamped to
     the fitted window; centroid_nm is computed the same way as
-    fit_absorbance_curve's (intensity-weighted mean over the sampled fitted
+    fit_polynomial_curve's (intensity-weighted mean over the sampled fitted
     curve), which for a symmetric Gaussian lands at the same place as the
     center - computing it identically keeps Metric trace's Centroid option
     meaningful regardless of which fit produced the curve.
 
-    Falls back to an empty FitResult (same shape as fit_absorbance_curve's
+    Falls back to an empty FitResult (same shape as fit_polynomial_curve's
     "too few points" case) if there aren't enough points to fit 4
     parameters, or if curve_fit fails to converge - a stuck/flat/noisy
     spectrum shouldn't crash the sensorgram loop, it should just skip that
-    frame's metric (same as fit_absorbance_curve already does elsewhere).
+    frame's metric (same as fit_polynomial_curve already does elsewhere).
     """
     x = np.asarray(wavelengths_nm, dtype=np.float64)
-    y = np.asarray(absorbance, dtype=np.float64)
+    y = np.asarray(formula_values, dtype=np.float64)
     valid_mask = np.isfinite(x) & np.isfinite(y)
     x = x[valid_mask]
     y = y[valid_mask]
@@ -224,7 +224,7 @@ def fit_gaussian_curve(
 
 def fit_curve_for_method(
     wavelengths_nm,
-    absorbance,
+    formula_values,
     fit_method_key: str,
     poly_order: int = 3,
     wl_min: float | None = None,
@@ -236,8 +236,8 @@ def fit_curve_for_method(
     the poly/gaussian choice."""
     key = str(fit_method_key).strip().lower()
     if key == "gaussian":
-        return fit_gaussian_curve(wavelengths_nm, absorbance, wl_min=wl_min, wl_max=wl_max)
-    return fit_absorbance_curve(wavelengths_nm, absorbance, poly_order=poly_order, wl_min=wl_min, wl_max=wl_max)
+        return fit_gaussian_curve(wavelengths_nm, formula_values, wl_min=wl_min, wl_max=wl_max)
+    return fit_polynomial_curve(wavelengths_nm, formula_values, poly_order=poly_order, wl_min=wl_min, wl_max=wl_max)
 
 
 def metric_value_from_fit(fit: FitResult, metric_key: str) -> tuple[float | None, float | None]:
@@ -256,15 +256,15 @@ def metric_value_from_fit(fit: FitResult, metric_key: str) -> tuple[float | None
 
 
 def metric_value_from_spectrum(
-    wavelengths_nm, absorbance, metric_key: str, wl_min: float | None = None, wl_max: float | None = None
+    wavelengths_nm, formula_values, metric_key: str, wl_min: float | None = None, wl_max: float | None = None
 ) -> tuple[float | None, float | None]:
-    """Maximum/Centroid read straight off the raw absorbance points - no curve
-    fit involved. Mirrors metric_value_from_fit's two metrics but is used when
-    Fitting is "None": Maximum is a plain argmax and Centroid is the
-    intensity-weighted mean wavelength (trapezoidal), both of which are
+    """Maximum/Centroid read straight off the raw formula-spectrum points - no
+    curve fit involved. Mirrors metric_value_from_fit's two metrics but is
+    used when Fitting is "None": Maximum is a plain argmax and Centroid is
+    the intensity-weighted mean wavelength (trapezoidal), both of which are
     well-defined without a fitted curve."""
     x = np.asarray(wavelengths_nm, dtype=np.float64)
-    y = np.asarray(absorbance, dtype=np.float64)
+    y = np.asarray(formula_values, dtype=np.float64)
     valid_mask = np.isfinite(x) & np.isfinite(y)
     x = x[valid_mask]
     y = y[valid_mask]

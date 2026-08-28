@@ -7,11 +7,12 @@ from PyQt6.QtGui import QColor
 
 from lspr_ui import get_active_theme
 
-from lspr_imaging_app.domain.models import AbsorbanceSpectrumResult, FitResult
+from lspr_imaging_app.domain.models import FormulaSpectrumResult, FitResult
 from lspr_imaging_app.processing.analysis import fit_curve_for_method
 from lspr_imaging_app.processing.chromatic import transformed_annulus_mask, transformed_disk_mask
 from lspr_imaging_app.processing.roi_detection import ignored_pixel_mask
 from lspr_imaging_app.gui.roi_overlay_helpers import resolved_roi_color
+from lspr_imaging_app.gui.analysis_types import SpectrumSeriesComputedData
 
 
 class PlotManager:
@@ -134,11 +135,11 @@ class PlotManager:
         if panel is not None:
             panel.set_subtitle("")
 
-    def clear_absorbance_spectrum(self) -> None:
+    def clear_formula_spectrum(self) -> None:
         self.clear_spectrum_series_items()
         self._window.spectrum_current_point.setData([], [])
         self._window.spectrum_metric_point.setData([], [])
-        self._window._absorbance_spectrum_dirty = True
+        self._window._formula_spectrum_dirty = True
         self.clear_spectrum_summary_text()
 
     def clear_spectrum_series_items(self) -> None:
@@ -164,7 +165,7 @@ class PlotManager:
         group = window._group_for_roi(int(roi_id)) if roi is not None else None
         return QColor(resolved_roi_color(roi, group, window._sample_visual_color) if roi is not None else window._sample_visual_color)
 
-    def analysis_fit_result_from_spectrum(self, result: AbsorbanceSpectrumResult) -> FitResult | None:
+    def analysis_fit_result_from_spectrum(self, result: FormulaSpectrumResult) -> FitResult | None:
         if self._window._analysis_fit_method_key() == "none":
             return None
         wavelength_range = self._window._analysis_wavelength_range()
@@ -180,16 +181,15 @@ class PlotManager:
             return None
         return fit
 
-    def add_spectrum_series(
-        self,
-        *,
-        roi_id: int,
-        result: AbsorbanceSpectrumResult,
-        label: str | None = None,
-        highlighted: bool = False,
-        dimmed: bool = False,
-    ) -> tuple[np.ndarray, np.ndarray, np.ndarray | None, np.ndarray | None] | None:
-        window = self._window
+    def compute_spectrum_series_data(self, result: FormulaSpectrumResult) -> SpectrumSeriesComputedData | None:
+        """NaN-filter/sort + curve fit for one ROI's spectrum - no Qt/pyqtgraph
+        calls. Split out from `render_spectrum_series` so a caller that also
+        needs the fit for a metric/current-point calculation (see
+        AnalysisWorkerMixin._compute_formula_spectrum_result) can reuse the
+        same `SpectrumSeriesComputedData.fit` instead of triggering a second,
+        independent fit evaluation for the same spectrum - `add_spectrum_series`
+        used to do exactly that (fit computed once here to draw the curve,
+        then again by its caller for the metric)."""
         wavelengths = np.asarray(result.wavelengths_nm, dtype=np.float64)
         formula_values = np.asarray(result.formula_values, dtype=np.float64)
         valid_mask = np.isfinite(wavelengths) & np.isfinite(formula_values)
@@ -200,6 +200,24 @@ class PlotManager:
         order = np.argsort(x_values)
         x_values = x_values[order]
         y_values = y_values[order]
+        fit = self.analysis_fit_result_from_spectrum(result)
+        return SpectrumSeriesComputedData(x_values=x_values, y_values=y_values, fit=fit)
+
+    def render_spectrum_series(
+        self,
+        computed: SpectrumSeriesComputedData,
+        *,
+        roi_id: int,
+        label: str | None = None,
+        highlighted: bool = False,
+        dimmed: bool = False,
+    ) -> None:
+        """Draws one ROI's already-computed spectrum points and fit curve.
+        Takes `SpectrumSeriesComputedData` (see `compute_spectrum_series_data`)
+        rather than a raw `FormulaSpectrumResult`, so this never re-derives
+        x/y arrays or re-runs the fit itself."""
+        window = self._window
+        x_values, y_values, fit = computed.x_values, computed.y_values, computed.fit
         color = self.roi_spectrum_color(roi_id)
         fit_color = QColor(color).darker(125)
         base_symbol_size = float(getattr(window, "_spectrum_symbol_size_px", 6.0))
@@ -228,7 +246,6 @@ class PlotManager:
             symbolPen=pg.mkPen(color, width=symbol_pen_width),
         )
         fit_item = None
-        fit = self.analysis_fit_result_from_spectrum(result)
         if fit is not None and fit.fitted_wavelengths_nm.size and fit.fitted_values.size:
             fit_item = window.spectrum_plot.plot(
                 fit.fitted_wavelengths_nm,
@@ -262,12 +279,6 @@ class PlotManager:
                 window.spectrum_legend.addItem(legend_sample, f"{label or f'ROI {int(roi_id)}'}")
             except Exception:
                 pass
-        return (
-            x_values,
-            y_values,
-            fit.fitted_wavelengths_nm if fit is not None else None,
-            fit.fitted_values if fit is not None else None,
-        )
 
     def set_sensorgram_series(
         self,

@@ -9,7 +9,7 @@ The app currently models the analysis world around detected circular spots:
 - `DetectedSpot` stores center, radius, and display colors.
 - `SpotGroup` stores named collections of spot IDs.
 - The spot table is effectively a flat summary of circles plus a reference-ring style background.
-- The absorbance pipeline builds spot and ring masks from circles.
+- The formula-spectrum pipeline builds spot and ring masks from circles.
 
 The codebase already has an ROI-shaped abstraction in `RoiDefinition`, but it is not yet the main user workflow.
 
@@ -158,5 +158,5 @@ Phase 5. Compatibility and cleanup
 2. Add the `RoiPair` domain sketch in code.
 3. Define the versioned ROI JSON schema.
 4. Add a custom-shape editor tab.
-5. Migrate absorbance mask construction to use ROI shapes.
+5. Migrate formula-spectrum mask construction to use ROI shapes.
 6. Add import/export compatibility tests.

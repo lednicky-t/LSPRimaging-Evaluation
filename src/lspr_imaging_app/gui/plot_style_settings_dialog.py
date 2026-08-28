@@ -155,8 +155,8 @@ class SpectrumPlotSettingsDialog(_PlotStyleDialogBase):
         window._spectrum_fit_line_width_px = float(self.fit_width_spin.value())
         window._spectrum_fit_line_style = self.fit_style_combo.currentData()
         window._spectrum_symbol_size_px = float(self.symbol_size_spin.value())
-        if hasattr(window, "_refresh_absorbance_spectrum"):
-            window._refresh_absorbance_spectrum()
+        if hasattr(window, "_refresh_formula_spectrum"):
+            window._refresh_formula_spectrum()
         window._save_visual_preferences()
 
 

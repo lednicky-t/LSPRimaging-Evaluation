@@ -8,7 +8,7 @@ import pyqtgraph as pg
 from PyQt6.QtCore import QObject, QRunnable, pyqtSignal
 from PyQt6.QtWidgets import QGraphicsPathItem
 
-from lspr_imaging_app.domain.models import AbsorbanceSpectrumResult, AnalysisState
+from lspr_imaging_app.domain.models import FormulaSpectrumResult, AnalysisState
 
 
 class WorkflowLogBridge(QObject):
@@ -126,7 +126,7 @@ class SensorgramPointResult:
     # main thread (on_sensorgram_partial_result) for backup + optional live
     # display, over the same thread-safe partial-result Qt signal the metric
     # value already used.
-    roi_absorbance_results: dict[int, AbsorbanceSpectrumResult] | None = None
+    roi_formula_spectrum_results: dict[int, FormulaSpectrumResult] | None = None
 
 
 @dataclass(slots=True)

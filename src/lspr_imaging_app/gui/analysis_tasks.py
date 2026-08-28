@@ -10,7 +10,7 @@ from pathlib import Path
 
 import numpy as np
 
-from lspr_imaging_app.domain.models import AbsorbanceSpectrumResult, AreaRoi, AreaRoiDetectionSettings, ChromaticTransformModel
+from lspr_imaging_app.domain.models import FormulaSpectrumResult, AreaRoi, AreaRoiDetectionSettings, ChromaticTransformModel
 from lspr_imaging_app.gui.worker import SensorgramComputationResult, SensorgramPointResult
 from lspr_imaging_app.io.dataset import dataset_load_plane_roi, export_ome_zarr_dataset, load_image_array
 from lspr_imaging_app.storage.workspace import load_preprocessing, load_processing_profile
@@ -516,7 +516,7 @@ def roi_union_box_is_worth_scoping(
     return box_area <= max_area_fraction * full_area
 
 
-def _roi_absorbance_signature(
+def _roi_formula_spectrum_signature(
     spectral_cube_index: int,
     wavelength_values: tuple[float, ...],
     roi: AreaRoi,
@@ -547,7 +547,7 @@ def _roi_absorbance_signature(
     )
 
 
-def _absorbance_roi_mask_cache_key(
+def _formula_spectrum_roi_mask_cache_key(
     image_shape: tuple[int, int],
     selected_rois: list[AreaRoi],
     selected_roi_ids: tuple[int, ...],
@@ -602,7 +602,7 @@ def _roi_mask_signature(roi_mask) -> tuple[object, ...] | None:
     return (roi_mask.x0, roi_mask.y0, roi_mask.mask.shape, hash(roi_mask.mask.tobytes()))
 
 
-def _absorbance_spectrum_task(
+def _formula_spectrum_task(
     measurement_payload: list[tuple[float, str, list[AreaRoi], np.ndarray | None, bool, np.ndarray | None]],
     preprocessing,
     flatten_mask_settings,
@@ -620,7 +620,7 @@ def _absorbance_spectrum_task(
     reduction_method: str = "mean",
     trimmed_mean_fraction: float = 0.10,
     formula_key: str = "absorbance",
-) -> AbsorbanceSpectrumResult:
+) -> FormulaSpectrumResult:
     task_started = time.perf_counter()
     load_seconds = 0.0
     roi_seconds = 0.0
@@ -658,7 +658,7 @@ def _absorbance_spectrum_task(
         affine_matrix_local: np.ndarray | None,
     ) -> dict[str, object]:
         logger = logging.getLogger("lspr_imaging_app.workflow")
-        cache_key = _absorbance_roi_mask_cache_key(
+        cache_key = _formula_spectrum_roi_mask_cache_key(
             image_shape,
             selected_rois_local,
             selected_ids_local,
@@ -764,7 +764,7 @@ def _absorbance_spectrum_task(
 
     for index, wavelength_nm, processed, affine_matrix, external_mask, load_duration in prepared_measurements:
         if cancel_event is not None and cancel_event.is_set():
-            return AbsorbanceSpectrumResult(
+            return FormulaSpectrumResult(
                 wavelengths_nm=np.asarray([], dtype=np.float64),
                 formula_values=np.asarray([], dtype=np.float64),
                 sample_mean=np.asarray([], dtype=np.float64),
@@ -873,10 +873,10 @@ def _absorbance_spectrum_task(
                 f"Spectral absorbance {index}/{total}: {float(wavelength_nm):g} nm",
             )
 
-    roi_results: dict[int, AbsorbanceSpectrumResult] = {}
+    roi_results: dict[int, FormulaSpectrumResult] = {}
     for roi in selected_rois:
         data = roi_accumulators[int(roi.area_roi_id)]
-        roi_results[int(roi.area_roi_id)] = AbsorbanceSpectrumResult(
+        roi_results[int(roi.area_roi_id)] = FormulaSpectrumResult(
             wavelengths_nm=np.asarray(data["wavelengths"], dtype=np.float64),
             formula_values=np.asarray(data["formula_values"], dtype=np.float64),
             sample_mean=np.asarray(data["sample_mean"], dtype=np.float64),
@@ -887,7 +887,7 @@ def _absorbance_spectrum_task(
             formula_key=str(formula_key),
         )
 
-    result = AbsorbanceSpectrumResult(
+    result = FormulaSpectrumResult(
         wavelengths_nm=np.asarray(wavelengths, dtype=np.float64),
         formula_values=np.asarray(formula_values, dtype=np.float64),
         sample_mean=np.asarray(sample_mean_values, dtype=np.float64),
@@ -911,7 +911,7 @@ def _absorbance_spectrum_task(
     return result
 
 
-def _absorbance_spectrum_fast_task(
+def _formula_spectrum_fast_task(
     dataset,
     spectral_cube_index: int,
     measurement_payload: list[tuple[float, np.ndarray | None, np.ndarray | None, object | None]],
@@ -932,7 +932,7 @@ def _absorbance_spectrum_fast_task(
     reduction_method: str = "mean",
     trimmed_mean_fraction: float = 0.10,
     formula_key: str = "absorbance",
-) -> AbsorbanceSpectrumResult:
+) -> FormulaSpectrumResult:
     """Fast multi-ROI absorbance spectrum using OME-Zarr chunk-aware spatial reads.
 
     `box` is a single bounding region, in full PROCESSED-image coordinates
@@ -1002,7 +1002,7 @@ def _absorbance_spectrum_fast_task(
         170-spot array) rasterizes each ROI's circle/annulus once per unique
         affine transform instead of once per wavelength per spectral cube.
         """
-        cache_key = _absorbance_roi_mask_cache_key(
+        cache_key = _formula_spectrum_roi_mask_cache_key(
             (patch_h, patch_w), selected_rois, selected_roi_ids, affine_matrix_local,
             reference_inner_radius_px, reference_outer_radius_px, patch_origin_xy=(x0, y0),
         )
@@ -1210,10 +1210,10 @@ def _absorbance_spectrum_fast_task(
             accumulator["sample_pixel_count"].append(int(roi_spc))
             accumulator["reference_pixel_count"].append(int(roi_rpc))
 
-    roi_results: dict[int, AbsorbanceSpectrumResult] = {}
+    roi_results: dict[int, FormulaSpectrumResult] = {}
     for roi in selected_rois:
         data = roi_accumulators[int(roi.area_roi_id)]
-        roi_results[int(roi.area_roi_id)] = AbsorbanceSpectrumResult(
+        roi_results[int(roi.area_roi_id)] = FormulaSpectrumResult(
             wavelengths_nm=np.asarray(data["wavelengths"], dtype=np.float64),
             formula_values=np.asarray(data["formula_values"], dtype=np.float64),
             sample_mean=np.asarray(data["sample_mean"], dtype=np.float64),
@@ -1224,7 +1224,7 @@ def _absorbance_spectrum_fast_task(
             formula_key=str(formula_key),
         )
 
-    return AbsorbanceSpectrumResult(
+    return FormulaSpectrumResult(
         wavelengths_nm=np.asarray(wavelengths_out, dtype=np.float64),
         formula_values=np.asarray(formula_values, dtype=np.float64),
         sample_mean=np.asarray(sample_mean_values, dtype=np.float64),
@@ -1250,8 +1250,8 @@ def _sensorgram_metric_task(
     spectral_cube_result_cache_get=None,
     spectral_cube_result_cache_store=None,
     metric_value_cache_get=None,
-    spectral_cube_absorbance_cache_get=None,
-    spectral_cube_absorbance_cache_store=None,
+    spectral_cube_formula_spectrum_cache_get=None,
+    spectral_cube_formula_spectrum_cache_store=None,
     wl_min: float | None = None,
     wl_max: float | None = None,
     fit_method_key: str = "poly",
@@ -1389,7 +1389,7 @@ def _sensorgram_metric_task(
         # metric_signal series (only the live single-cube preview does, which
         # this shortcut never touches), so this loses no working UI.
         disk_metric_value = metric_value_cache_get(spectral_cube_index) if metric_value_cache_get is not None else None
-        roi_absorbance_results = None
+        roi_formula_spectrum_results = None
         if disk_metric_value is not None:
             metric_float = float(disk_metric_value) if np.isfinite(disk_metric_value) else float("nan")
             signal_float = float("nan")
@@ -1400,11 +1400,11 @@ def _sensorgram_metric_task(
             # (see AnalysisController._combined_absorbance_results_from_ram_or_disk) -
             # skips the pixel read just like spectral_cube_result_cache_get,
             # just via a different cache this loop didn't populate itself.
-            if spectrum is None and spectral_cube_absorbance_cache_get is not None:
-                spectrum = spectral_cube_absorbance_cache_get(spectral_cube_index)
+            if spectrum is None and spectral_cube_formula_spectrum_cache_get is not None:
+                spectrum = spectral_cube_formula_spectrum_cache_get(spectral_cube_index)
             freshly_computed = False
             if spectrum is None:
-                _active_task = task_fn if task_fn is not None else _absorbance_spectrum_task
+                _active_task = task_fn if task_fn is not None else _formula_spectrum_task
                 spectrum = _active_task(
                     *payload,
                     # None (not `cancel_event`) only for the one cube exempted
@@ -1431,14 +1431,14 @@ def _sensorgram_metric_task(
                     cancelled=True,
                 )
 
-            roi_absorbance_results = getattr(spectrum, "area_roi_results", None) or None
+            roi_formula_spectrum_results = getattr(spectrum, "area_roi_results", None) or None
             # Only a *fresh* compute needs to populate the interactive per-ROI
             # cache - RAM/disk hits above are already there (a disk hit was
             # just written into it by spectral_cube_absorbance_cache_get
             # itself; a spectral_cube_result_cache_get hit was already fresh-
             # computed and stored on some earlier call this run).
-            if freshly_computed and roi_absorbance_results and spectral_cube_absorbance_cache_store is not None:
-                spectral_cube_absorbance_cache_store(spectral_cube_index, roi_absorbance_results)
+            if freshly_computed and roi_formula_spectrum_results and spectral_cube_formula_spectrum_cache_store is not None:
+                spectral_cube_formula_spectrum_cache_store(spectral_cube_index, roi_formula_spectrum_results)
 
             if fit_method_key == "none":
                 metric_value, metric_signal = metric_value_from_spectrum(
@@ -1467,7 +1467,7 @@ def _sensorgram_metric_task(
                     spectral_cube_index=int(spectral_cube_index),
                     metric_value=None if not np.isfinite(metric_float) else metric_float,
                     metric_signal=None if not np.isfinite(signal_float) else signal_float,
-                    roi_absorbance_results=roi_absorbance_results,
+                    roi_formula_spectrum_results=roi_formula_spectrum_results,
                 )
             )
         if progress_callback is not None:
