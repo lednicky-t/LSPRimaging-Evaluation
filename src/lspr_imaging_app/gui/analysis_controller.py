@@ -1307,8 +1307,9 @@ class AnalysisController(AnalysisWorkerMixin, AnalysisChromaticGeometryMixin):
                         in_ram = roi_formula_spectrum_cache.get(signature) is not None
                     if in_ram:
                         continue
-                    if not self._formula_spectrum_signature_saved_on_disk(
-                        int(roi.area_roi_id), int(spectral_cube_index), signature, disk_trace_cache
+                    disk_signature = self._roi_disk_signature_for_cube(roi, int(spectral_cube_index))
+                    if disk_signature is None or not self._formula_spectrum_signature_saved_on_disk(
+                        int(roi.area_roi_id), int(spectral_cube_index), disk_signature, disk_trace_cache
                     ):
                         all_cached = False
                         break

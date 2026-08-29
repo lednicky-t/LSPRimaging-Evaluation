@@ -30,7 +30,13 @@ from PyQt6.QtWidgets import QFileDialog, QMessageBox
 from lspr_imaging_app.domain.exclusions import is_excluded
 from lspr_imaging_app.domain.models import AreaRoi, FormulaSpectrumResult
 from lspr_imaging_app.gui.analysis_tasks import _roi_formula_spectrum_signature
-from lspr_imaging_app.processing.analysis import metric_value_from_fit, metric_value_from_spectrum, project_formula_spectrum, project_reduction_result
+from lspr_imaging_app.processing.analysis import (
+    formula_values_from_reduced_values,
+    metric_value_from_fit,
+    metric_value_from_spectrum,
+    project_formula_spectrum,
+    project_reduction_result,
+)
 from lspr_imaging_app.processing.chromatic import warp_boolean_mask_affine
 from lspr_imaging_app.processing.roi_math import DEFAULT_TRIMMED_MEAN_FRACTION, REDUCTION_METHODS
 from lspr_imaging_app.storage.measurement_export import FormulaSpectrumTraceIndex
@@ -466,10 +472,11 @@ class AnalysisWorkerMixin:
         # (see _combined_absorbance_results_from_ram_or_disk's docstring).
         disk_formula_spectrum_trace_index = self._build_disk_formula_spectrum_trace_index(selected_source_rois)
         # Also captured once, up front: every cube in this run projects onto
-        # the SAME active formula, even if the user flips the combo while the
-        # run is still in flight - see _combined_formula_spectrum_results_
-        # from_ram_or_disk's docstring.
+        # the SAME active formula/reduction, even if the user changes either
+        # control while the run is still in flight - see
+        # _combined_formula_spectrum_results_from_ram_or_disk's docstring.
         active_formula_key = self._active_formula_key()
+        active_reduction_method = self._active_reduction_method()
         # [λ] mode: only meaningful for the fast/scoped-read path (the slow
         # path never computes a shared box at all - it reads the full plane
         # every time regardless). None when the toggle is off, or when there
@@ -587,9 +594,19 @@ class AnalysisWorkerMixin:
                 return metric_value
             return None
 
-        def spectral_cube_formula_spectrum_cache_get(spectral_cube_index, selected_source_rois=selected_source_rois, disk_formula_spectrum_trace_index=disk_formula_spectrum_trace_index, active_formula_key=active_formula_key):
+        def spectral_cube_formula_spectrum_cache_get(
+            spectral_cube_index,
+            selected_source_rois=selected_source_rois,
+            disk_formula_spectrum_trace_index=disk_formula_spectrum_trace_index,
+            active_formula_key=active_formula_key,
+            active_reduction_method=active_reduction_method,
+        ):
             roi_results = self._combined_formula_spectrum_results_from_ram_or_disk(
-                spectral_cube_index, selected_source_rois, disk_formula_spectrum_trace_index, formula_key=active_formula_key
+                spectral_cube_index,
+                selected_source_rois,
+                disk_formula_spectrum_trace_index,
+                formula_key=active_formula_key,
+                reduction_method=active_reduction_method,
             )
             if roi_results is None:
                 return None
@@ -599,7 +616,7 @@ class AnalysisWorkerMixin:
             self._store_roi_formula_spectrum_cache_for_cube(roi_formula_spectrum_results, spectral_cube_index, selected_source_rois)
 
         wavelength_range = self.window._analysis_wavelength_range()
-        (reduction_method,) = self._roi_reduction_signature_elements()
+        reduction_method = active_reduction_method
         formula_key = active_formula_key
         worker = FunctionWorker(
             _sensorgram_metric_task,
@@ -1286,8 +1303,18 @@ class AnalysisWorkerMixin:
         real per-ROI trace) and deduplicates by (roi_id, spectral_cube_index,
         signature_hash) so redisplaying an already-backed-up, still-current
         cube (e.g. a cache hit) doesn't append a second row, while a value
-        recomputed under different settings still gets a fresh one - see
-        docs/imaging_measurement_export_format.md.
+        recomputed under different pixel-extraction settings still gets a
+        fresh one - see docs/imaging_measurement_export_format.md.
+
+        `signature_hash` (and the dedup key) use the reduction-independent
+        disk signature (`_roi_disk_signature_for_cube`), not the reduction-
+        inclusive one RAM keys on: a row saved once already carries every
+        reduction method's values via `reduced_values_by_method` (schema
+        6.7+, see `ImagingMeasurementExportWriter.append_formula_spectrum`),
+        so a later run under a *different* Reduction for the same cube has
+        nothing new to add - the existing row already covers it - and
+        correctly dedupes as a no-op rather than appending a near-duplicate
+        row that only differs in which method happened to be active.
 
         `cube_index`: explicit for the multi-cube "Start analysis" loop, which
         backs up a cube that isn't necessarily the one on screen. Defaults to
@@ -1307,7 +1334,7 @@ class AnalysisWorkerMixin:
             if label == "Selection":
                 continue
             roi = next((roi for roi in self.window._state.area_rois if int(roi.area_roi_id) == int(roi_id)), None)
-            signature_hash = self._signature_hash(self._roi_formula_spectrum_signature_for_cube(roi, cube_index)) if roi is not None else ""
+            signature_hash = self._signature_hash(self._roi_disk_signature_for_cube(roi, cube_index)) if roi is not None else ""
             key = (int(roi_id), cube_index, signature_hash)
             if key in backed_up:
                 continue
@@ -1323,6 +1350,7 @@ class AnalysisWorkerMixin:
                     timestamp_utc_ms=self._acquisition_timestamp_ms_for_cube(cube_index),
                     formula_key=roi_result.formula_key,
                     reduction_method=roi_result.reduction_method,
+                    reduced_values_by_method=roi_result.reduced_values_by_method or None,
                 )
             except Exception:
                 logging.getLogger("lspr_imaging_app.workflow").warning(
@@ -1886,6 +1914,19 @@ class AnalysisWorkerMixin:
         signature: tuple[object, ...],
         disk_trace_index: dict[int, FormulaSpectrumTraceIndex] | None,
     ) -> FormulaSpectrumResult | None:
+        """`signature` must be the reduction-independent disk signature (see
+        `_roi_disk_signature_for_cube`) - the row's validity no longer
+        depends on which reduction method happened to be active when it was
+        written, since (schema 6.7+) it can carry more than one.
+
+        Builds the result under a baseline reduction method (whichever the
+        trace says was last active, or any available one as a fallback) and
+        carries the row's *entire* `reduced_values_by_method` dict onto the
+        returned result - the caller projects onto whichever reduction/
+        formula is actually wanted afterward (see `project_reduction_result`
+        in `_combined_formula_spectrum_results_from_ram_or_disk`), exactly
+        the same "build a baseline, project after" pattern already used for
+        formula."""
         if not disk_trace_index:
             return None
         trace = disk_trace_index.get(int(roi_id))
@@ -1894,25 +1935,30 @@ class AnalysisWorkerMixin:
         entry = trace.by_cube.get(int(spectral_cube_index))
         if entry is None:
             return None
-        stored_hash, formula_values, sample_reduced_value, reference_reduced_value = entry
-        if not stored_hash or stored_hash != self._signature_hash(signature):
+        stored_hash, reduced_values_by_method = entry
+        if not stored_hash or stored_hash != self._signature_hash(signature) or not reduced_values_by_method:
             return None
+        baseline_method = trace.reduction_method if trace.reduction_method in reduced_values_by_method else next(
+            iter(reduced_values_by_method)
+        )
+        sample_reduced_value, reference_reduced_value = reduced_values_by_method[baseline_method]
         # sample_pixel_count/reference_pixel_count aren't persisted to the
-        # HDF5 backup today (only the spectrum curve itself is) - a
-        # disk-resumed result shows 0px in the spectrum tooltip until this
-        # cube is recomputed fresh. Accepted gap, not a bug: these counts
-        # reflect exclusion masks that can change over time, so they aren't
-        # derivable from ROI geometry alone, and nothing besides that tooltip
-        # reads them.
+        # HDF5 backup today (only the reduced values are) - a disk-resumed
+        # result shows 0px in the spectrum tooltip until this cube is
+        # recomputed fresh. Accepted gap, not a bug: these counts reflect
+        # exclusion masks that can change over time, so they aren't
+        # derivable from ROI geometry alone, and nothing besides that
+        # tooltip reads them.
         return FormulaSpectrumResult(
             wavelengths_nm=trace.wavelengths_nm,
-            formula_values=formula_values,
+            formula_values=formula_values_from_reduced_values(sample_reduced_value, reference_reduced_value, trace.formula_key),
             sample_reduced_value=sample_reduced_value,
             reference_reduced_value=reference_reduced_value,
             sample_pixel_count=np.asarray([], dtype=np.int32),
             reference_pixel_count=np.asarray([], dtype=np.int32),
-            reduction_method=trace.reduction_method,
+            reduction_method=baseline_method,
             formula_key=trace.formula_key,
+            reduced_values_by_method=reduced_values_by_method,
         )
 
     def _combined_formula_spectrum_results_from_ram_or_disk(
@@ -1921,6 +1967,7 @@ class AnalysisWorkerMixin:
         selected_source_rois: list[AreaRoi],
         disk_trace_index: dict[int, FormulaSpectrumTraceIndex] | None = None,
         formula_key: str | None = None,
+        reduction_method: str | None = None,
     ) -> dict[int, FormulaSpectrumResult] | None:
         """All-or-nothing: returns the full per-ROI results dict only if
         EVERY selected ROI already has a valid result for this cube in RAM or
@@ -1934,16 +1981,21 @@ class AnalysisWorkerMixin:
         complexity for a rare case (selection changed between runs) without
         meaningfully cutting cost.
 
-        Each returned per-ROI result is projected onto `formula_key`
-        (defaults to the live `_active_formula_key()` if not given
-        explicitly) via `project_formula_spectrum` - a RAM/disk hit is valid
-        for ANY formula (the signature is formula-independent, see
-        `_roi_formula_spectrum_signature_for_cube`), so this is what lets a
-        formula switch reuse an already-reduced cube instantly. Callers
-        driving a multi-cube background run should pass the formula
-        captured once at run start explicitly, rather than relying on the
-        live default, so every cube in that run is consistent even if the
-        active formula changes while the run is still in flight.
+        Each returned per-ROI result is projected onto `reduction_method`
+        and `formula_key` (each defaults to the live active setting if not
+        given explicitly) via `project_reduction_result` - a RAM/disk hit is
+        valid for ANY reduction method and formula (the RAM signature drops
+        formula entirely, see `_roi_formula_spectrum_signature_for_cube`,
+        and a schema-6.7+ disk row can carry every reduction method's values
+        via `reduced_values_by_method`), so this is what lets a Reduction or
+        Formula switch reuse an already-computed cube instantly instead of
+        re-reading pixels. Callers driving a multi-cube background run
+        should pass both captured once at run start explicitly, rather than
+        relying on the live defaults, so every cube in that run is
+        consistent even if either setting changes while the run is still in
+        flight - see `_roi_formula_spectrum_signature_for_cube`'s
+        `reduction_method_override`, used here for the same reason on the
+        RAM side.
 
         Thread-safe: safe to call from a background worker thread (used by
         the multi-cube "Start analysis" loop) as well as the main thread
@@ -1954,10 +2006,13 @@ class AnalysisWorkerMixin:
         if not selected_source_rois:
             return None
         active_formula_key = formula_key if formula_key is not None else self._active_formula_key()
+        active_reduction_method = reduction_method if reduction_method is not None else self._active_reduction_method()
         results: dict[int, FormulaSpectrumResult] = {}
         for roi in selected_source_rois:
             roi_id = int(roi.area_roi_id)
-            signature = self._roi_formula_spectrum_signature_for_cube(roi, spectral_cube_index)
+            signature = self._roi_formula_spectrum_signature_for_cube(
+                roi, spectral_cube_index, reduction_method_override=active_reduction_method
+            )
             if signature is None:
                 return None
             with self.window._analysis_cache_lock:
@@ -1965,15 +2020,28 @@ class AnalysisWorkerMixin:
                 if cached is not None:
                     self.window._roi_formula_spectrum_cache.move_to_end(signature)
             if cached is None:
-                cached = self._formula_spectrum_result_from_disk_row(roi_id, spectral_cube_index, signature, disk_trace_index)
+                disk_signature = self._roi_disk_signature_for_cube(roi, spectral_cube_index)
+                cached = self._formula_spectrum_result_from_disk_row(roi_id, spectral_cube_index, disk_signature, disk_trace_index)
                 if cached is not None:
                     self._store_in_lru_cache(
                         self.window._roi_formula_spectrum_cache, signature, cached, self.window.ROI_FORMULA_SPECTRUM_CACHE_SIZE,
                         lock=self.window._analysis_cache_lock,
                     )
+                    # A disk-resumed result can carry every reduction method
+                    # at once (see _formula_spectrum_result_from_disk_row) -
+                    # write-through the other three RAM slots too, same as a
+                    # fresh compute, so a later switch to a different method
+                    # for this same cube hits RAM directly instead of
+                    # re-reading the (already-loaded) disk trace index again.
+                    self._write_through_reduced_values_by_method(
+                        roi, spectral_cube_index, cached, lock=self.window._analysis_cache_lock
+                    )
             if cached is None:
                 return None
-            results[roi_id] = project_formula_spectrum(cached, active_formula_key)
+            projected = project_reduction_result(cached, active_reduction_method, active_formula_key)
+            if projected is None:
+                return None
+            results[roi_id] = projected
         return results
 
     def _store_roi_formula_spectrum_cache_for_cube(
@@ -2038,6 +2106,34 @@ class AnalysisWorkerMixin:
         trace extraction - see AreaRoiDetectionSettings.formula_key and the
         "ROI's formula" control in the Metric trace section."""
         return str(self.window._state.area_roi_settings.formula_key or "absorbance")
+
+    def _active_reduction_method(self) -> str:
+        """The live Reduction setting - `_roi_reduction_signature_elements()`
+        unpacked to a plain string, for callers that just want the value
+        (not a signature-shaped tuple)."""
+        (reduction_method,) = self._roi_reduction_signature_elements()
+        return reduction_method
+
+    # Sentinel `reduction_method_override` value used ONLY to build a
+    # reduction-independent signature for on-disk validity checks (see
+    # `_roi_disk_signature_for_cube`, `_backup_formula_spectrum_series`'s
+    # `signature_hash`, and `_formula_spectrum_result_from_disk_row`).
+    # Reusing the existing reduction-INCLUSIVE signature builder with a
+    # fixed, never-varying value in that slot is equivalent to omitting
+    # reduction_method from the signature entirely, without a second
+    # near-duplicate signature function to keep in sync. Never used for a
+    # RAM cache key - RAM keeps one slot per reduction method by design (see
+    # `_write_through_reduced_values_by_method`); this is disk-only, because
+    # a saved row's `reduced_values/<method>/` subgroup (see
+    # storage/measurement_export.py) makes ALL four methods available from
+    # one row, so the row's own validity must not depend on which one
+    # happened to be active when it was written.
+    _DISK_SIGNATURE_REDUCTION_PLACEHOLDER = "__disk_pixel_signature__"
+
+    def _roi_disk_signature_for_cube(self, roi: AreaRoi, spectral_cube_index: int) -> tuple[object, ...] | None:
+        return self._roi_formula_spectrum_signature_for_cube(
+            roi, spectral_cube_index, reduction_method_override=self._DISK_SIGNATURE_REDUCTION_PLACEHOLDER
+        )
 
     def _sensorgram_signature_for_selection(
         self,

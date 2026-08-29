@@ -1,6 +1,6 @@
 # Imaging Measurement Export/Backup Format
 
-**Status: implemented, on schema major 6.5 - not the major-7 layout proposed below.**
+**Status: implemented, on schema minor 6.7 - not the major-7 layout proposed below.**
 `storage/measurement_export.py`'s `ImagingMeasurementExportWriter` is real, tested code wired into
 the GUI (`gui/dataset_controller.py`, `gui/analysis_controller.py`). It writes bulk data under
 `/processed/absorbance_spectra/<roi_id>/` and `/processed/sensorgram/<roi_id>/`, appended
@@ -12,6 +12,20 @@ storage location. That reshuffle (and the sLSPR-acq unification/migration in Pha
 remains an unimplemented proposal. It extends the shared `lspr_measurement` HDF5 format
 (`docs/schemas/hdf_measurement_format.md`, `docs/schemas/hdf_standard.md` in the umbrella repo)
 rather than inventing a parallel one.
+
+As of schema 6.7, `/processed/absorbance_spectra/<roi_id>/` also has an optional
+`reduced_values/<reduction_method>/{sample_mean, reference_mean}` subgroup per Reduction method
+actually computed for that ROI (mean/median/trimmed_mean/plane_fit - see `processing/roi_math.py`'s
+`reduce_sample_and_reference_all_methods`), alongside the original flat `sample_mean`/
+`reference_mean`/`absorbance` columns (unchanged). This lets any reduction method - and, since
+Formula is always cheaply derivable from a (sample, reference) pair (see `processing/analysis.py`'s
+`formula_value`), any formula too - be recovered for an already-saved cube without re-reading
+pixels, the disk-side counterpart of the in-memory write-through cache added the same round (see
+`gui/analysis_worker_mixin.py`'s `_write_through_reduced_values_by_method`). Full detail, including
+the `reduced_values_start_row` backfill-boundary attr and the reproducibility catalog
+(`reduction_method_definitions`/`formula_key_definitions` JSON attrs), lives in the 6.7 changelog
+entry in `packages/lspr_io/src/lspr_io/schema.py` (umbrella repo) - not duplicated here since this
+doc otherwise stays at the "why/decision" level, not a column-by-column reference.
 
 ## Goal
 

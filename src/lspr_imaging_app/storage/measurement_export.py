@@ -28,6 +28,7 @@ rule. Callers pass plain arrays/scalars, not `AbsorbanceSpectrumResult`/
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -52,6 +53,7 @@ from lspr_io import (
 )
 
 from lspr_imaging_app.domain.models import AreaRoi, AreaRoiGroup, RoiArrayGroup
+from lspr_imaging_app.processing.roi_math import DEFAULT_TRIMMED_MEAN_FRACTION
 from lspr_imaging_app.version import APP_NAME, APP_VERSION
 
 
@@ -90,6 +92,48 @@ def _append_row(dataset: h5py.Dataset, row: np.ndarray) -> None:
 
 _STRING_DTYPE = h5py.string_dtype(encoding="utf-8")
 
+# Human-readable definitions for every Reduction/Formula key this writer can
+# emit under processed/absorbance_spectra/<roi_id>/reduced_values/<method>/
+# and the formula_key attr - stamped once per file (see
+# _stamp_method_definitions) so the file is self-documenting: a scientist
+# opening it years later without this app's source can see exactly how each
+# column was computed and reproduce it, without having to reverse-engineer
+# reduce_sample_and_reference_all_methods/formula_value from code. New keys
+# only need an entry added here - the JSON-attr shape itself never needs a
+# schema change to grow.
+_REDUCTION_METHOD_DEFINITIONS: dict[str, str] = {
+    "mean": "Arithmetic mean of every masked pixel in the ROI.",
+    "median": "Median of every masked pixel in the ROI - robust to a single hot/dead pixel or cosmic-ray hit.",
+    "trimmed_mean": (
+        f"Mean after dropping the top/bottom {DEFAULT_TRIMMED_MEAN_FRACTION * 100:.0f}% of pixel values from "
+        "each tail (a fixed fraction, not user-adjustable) - a middle ground between mean and median."
+    ),
+    "plane_fit": (
+        "Reference side: least-squares plane fit (z = a*x + b*y + c) to the reference ROI's pixels, evaluated "
+        "at the sample ROI's center - corrects a spatial illumination gradient between the sample and reference "
+        "apertures. Sample side: plain mean (same as the 'mean' method). Falls back to plain mean when there "
+        "are too few reference points to fit a plane."
+    ),
+}
+_FORMULA_KEY_DEFINITIONS: dict[str, str] = {
+    "absorbance": "A = -log10(sample / reference).",
+    "ratio": "sample / reference.",
+    "relative_change": "(reference - sample) / reference.",
+    "mod_absorbance": "-1000 x log10(sample / reference), in milli-absorbance units.",
+}
+
+
+def _stamp_method_definitions(parent: h5py.Group) -> None:
+    """Writes the Reduction/Formula definition catalogs above as JSON-string
+    attrs on `parent` (processed/absorbance_spectra), once - subsequent
+    calls are a no-op so re-opening an existing backup never overwrites an
+    already-stamped catalog (e.g. with a version of this dict from a newer
+    app release than actually computed the file's own data)."""
+    if "reduction_method_definitions" not in parent.attrs:
+        parent.attrs["reduction_method_definitions"] = json.dumps(_REDUCTION_METHOD_DEFINITIONS)
+    if "formula_key_definitions" not in parent.attrs:
+        parent.attrs["formula_key_definitions"] = json.dumps(_FORMULA_KEY_DEFINITIONS)
+
 
 def _ensure_column(group: h5py.Group, name: str, *, dtype, fill_value, row_count: int) -> h5py.Dataset:
     """Creates a resizable 1-D `name` dataset if missing, backfilling it with
@@ -104,6 +148,26 @@ def _ensure_column(group: h5py.Group, name: str, *, dtype, fill_value, row_count
     if name in group:
         return group[name]
     dataset = group.create_dataset(name, shape=(row_count,), maxshape=(None,), dtype=dtype, chunks=True)
+    if row_count:
+        dataset[...] = fill_value
+    return dataset
+
+
+def _ensure_matrix_column(group: h5py.Group, name: str, *, n_wavelengths: int, fill_value: float, row_count: int) -> h5py.Dataset:
+    """2-D analog of `_ensure_column`, for a per-row per-wavelength dataset
+    (shape (rows, n_wavelengths)) - same backfill reasoning: without it, a
+    subgroup created after a ROI group already has rows would start at
+    length 0 while `cube_index` stays at its existing length. The backfilled
+    rows are NaN placeholders standing in for "not actually computed for
+    this row", not real data - see `reduced_values_start_row` (stamped in
+    `_ensure_reduced_values_subgroup`), which is what a reader actually uses
+    to tell backfilled rows apart from genuine ones, since NaN alone can't
+    (a genuinely empty ROI mask also produces NaN)."""
+    if name in group:
+        return group[name]
+    dataset = group.create_dataset(
+        name, shape=(row_count, n_wavelengths), maxshape=(None, n_wavelengths), dtype=np.float32, chunks=True
+    )
     if row_count:
         dataset[...] = fill_value
     return dataset
@@ -245,9 +309,22 @@ class ImagingMeasurementExportWriter:
         caller can distinguish "nothing on disk yet" from "on disk but every
         row's signature is stale" (the latter is a per-cube decision the
         caller makes by comparing `by_cube[cube_index][0]` against a live
-        signature hash - see AnalysisController._roi_absorbance_signature,
-        not `_sensorgram_point_signature_hash`, which is fit-method-dependent
-        and wrong for a raw pre-fit spectrum)."""
+        signature hash - as of schema 6.7, the reduction-independent disk
+        signature, see AnalysisController._roi_disk_signature_for_cube; not
+        `_sensorgram_point_signature_hash`, which is fit-method-dependent
+        and wrong for a raw pre-fit spectrum).
+
+        Each `by_cube[cube_index]` entry's `reduced_values_by_method` dict
+        holds whichever reduction methods are actually available for that
+        row: every method in `reduced_values/<method>/` (schema 6.7+, once
+        `row_index >= reduced_values_start_row` - see
+        `_ensure_reduced_values_subgroup`) plus, as a fallback baseline,
+        the group's flat legacy `sample_mean`/`reference_mean` columns under
+        whichever `reduction_method` the group attrs say was active for
+        that write. A pre-6.7 file (or a row written before this group ever
+        got a `reduced_values/` subgroup) therefore still yields exactly one
+        method - the one it was actually saved under - never a fabricated
+        multi-method entry."""
         parent = self._processed.get(LSPR_PROCESSED_ABSORBANCE_SPECTRA_GROUP_NAME)
         if parent is None:
             return None
@@ -256,22 +333,44 @@ class ImagingMeasurementExportWriter:
             return None
         cube_indices = group["cube_index"][...]
         hashes = group["signature_hash"][...] if "signature_hash" in group else [""] * len(cube_indices)
-        formula_rows = group["absorbance"][...]
         sample_rows = group["sample_mean"][...]
         reference_rows = group["reference_mean"][...]
-        by_cube: dict[int, tuple[str, np.ndarray, np.ndarray, np.ndarray]] = {}
+        baseline_reduction_method = str(group.attrs.get("reduction_method", "mean"))
+
+        # Per-method (rows, n_wavelengths) arrays, only for methods that
+        # actually have a reduced_values/ subgroup in this file.
+        reduced_arrays_by_method: dict[str, tuple[np.ndarray, np.ndarray]] = {}
+        reduced_values_group = group.get("reduced_values")
+        if reduced_values_group is not None:
+            for method_name in reduced_values_group:
+                method_group = reduced_values_group[method_name]
+                if "sample_mean" in method_group and "reference_mean" in method_group:
+                    reduced_arrays_by_method[method_name] = (
+                        method_group["sample_mean"][...],
+                        method_group["reference_mean"][...],
+                    )
+        reduced_values_start_row = int(group.attrs.get("reduced_values_start_row", 0))
+
+        by_cube: dict[int, tuple[str, dict[str, tuple[np.ndarray, np.ndarray]]]] = {}
         for row_index, (cube_index, signature_hash) in enumerate(zip(cube_indices, hashes, strict=False)):
             hash_text = signature_hash.decode("utf-8") if isinstance(signature_hash, bytes) else str(signature_hash)
-            by_cube[int(cube_index)] = (
-                hash_text,
-                np.asarray(formula_rows[row_index], dtype=np.float64),
-                np.asarray(sample_rows[row_index], dtype=np.float64),
-                np.asarray(reference_rows[row_index], dtype=np.float64),
-            )
+            reduced_values_by_method: dict[str, tuple[np.ndarray, np.ndarray]] = {}
+            if row_index >= reduced_values_start_row:
+                for method_name, (sample_arr, reference_arr) in reduced_arrays_by_method.items():
+                    reduced_values_by_method[method_name] = (
+                        np.asarray(sample_arr[row_index], dtype=np.float64),
+                        np.asarray(reference_arr[row_index], dtype=np.float64),
+                    )
+            if baseline_reduction_method not in reduced_values_by_method:
+                reduced_values_by_method[baseline_reduction_method] = (
+                    np.asarray(sample_rows[row_index], dtype=np.float64),
+                    np.asarray(reference_rows[row_index], dtype=np.float64),
+                )
+            by_cube[int(cube_index)] = (hash_text, reduced_values_by_method)
         return FormulaSpectrumTraceIndex(
             wavelengths_nm=np.asarray(group["wavelengths_nm"][...], dtype=np.float64),
             formula_key=str(group.attrs.get("formula_key", "absorbance")),
-            reduction_method=str(group.attrs.get("reduction_method", "mean")),
+            reduction_method=baseline_reduction_method,
             by_cube=by_cube,
         )
 
@@ -417,6 +516,7 @@ class ImagingMeasurementExportWriter:
         if group is not None:
             return group
         parent = self._processed.require_group(LSPR_PROCESSED_ABSORBANCE_SPECTRA_GROUP_NAME)
+        _stamp_method_definitions(parent)
         group = parent.require_group(roi_id)
         existing_row_count = int(group["cube_index"].shape[0]) if "cube_index" in group else 0
         for name in ("cube_index", "timestamp_utc_ms"):
@@ -438,6 +538,33 @@ class ImagingMeasurementExportWriter:
         )
         return group
 
+    def _ensure_reduced_values_subgroup(self, group: h5py.Group, reduction_method: str, *, n_wavelengths: int) -> h5py.Group:
+        """`reduced_values/<reduction_method>/{sample_mean, reference_mean}`
+        under a ROI's absorbance-spectrum group - schema 6.7+. Every
+        reduction method actually computed alongside the row being appended
+        (see `reduce_sample_and_reference_all_methods`) gets its own
+        subgroup here, so any of them can be recovered later without
+        re-reading pixels - see processing/analysis.py's project_reduction_
+        result. `reduction_method`'s own pair also duplicates the flat
+        `sample_mean`/`reference_mean` columns (small extra storage,
+        simpler code than sharing via a link).
+
+        `reduced_values_start_row`, stamped once on the FIRST call for this
+        group (any method), is the row index before which no `reduced_values/`
+        entry should be trusted for ANY method - rows before it predate this
+        feature and get NaN-backfilled (`_ensure_matrix_column`) purely to
+        keep every column in the group the same length, not because they
+        were computed. See `formula_spectrum_index`'s read-side use of this.
+        """
+        existing_row_count = int(group["cube_index"].shape[0]) if "cube_index" in group else 0
+        if "reduced_values_start_row" not in group.attrs:
+            group.attrs["reduced_values_start_row"] = existing_row_count
+        reduced_values_root = group.require_group("reduced_values")
+        method_group = reduced_values_root.require_group(reduction_method)
+        _ensure_matrix_column(method_group, "sample_mean", n_wavelengths=n_wavelengths, fill_value=np.nan, row_count=existing_row_count)
+        _ensure_matrix_column(method_group, "reference_mean", n_wavelengths=n_wavelengths, fill_value=np.nan, row_count=existing_row_count)
+        return method_group
+
     def append_formula_spectrum(
         self,
         roi_id: str | int,
@@ -451,6 +578,7 @@ class ImagingMeasurementExportWriter:
         formula_key: str = "absorbance",
         reduction_method: str = "mean",
         signature_hash: str = "",
+        reduced_values_by_method: dict[str, tuple[np.ndarray, np.ndarray]] | None = None,
     ) -> None:
         """Append one ROI's full per-wavelength spectrum at one point in
         time. `formula_values` is whatever `formula_key` actually computed
@@ -463,18 +591,33 @@ class ImagingMeasurementExportWriter:
         discarded) so the combination can be audited or recomputed later -
         mirroring this repo's "raw data is sacred" rule applied to this
         app's own reduced-per-wavelength data.
-        `signature_hash`: see `append_sensorgram_point`'s docstring - written
-        here for forward compatibility (this cache's own RAM signature
-        doesn't yet cover full preprocessing state or ROI geometry, so
-        nothing reads this column back as a cache hit yet; recorded now so
-        no further schema change is needed once that's fixed).
+        `signature_hash`: see `append_sensorgram_point`'s docstring, with one
+        difference as of schema 6.7 - callers now compute this from a
+        reduction-INDEPENDENT signature (see AnalysisController._roi_disk_
+        signature_for_cube), since one row can carry every reduction
+        method's values (see `reduced_values_by_method` below) and its
+        validity must not depend on which one happened to be active when it
+        was written.
+        `reduced_values_by_method`: schema 6.7+ - every reduction method's
+        own (sample, reference) pair computed alongside `reduction_method`
+        this call (see processing/roi_math.py's reduce_sample_and_reference_
+        all_methods), written into per-method `reduced_values/<method>/`
+        subgroups so any of them can be recovered later without re-reading
+        pixels. Optional/None keeps this a purely additive parameter for any
+        future caller that only ever computes one method.
         """
         wavelengths_nm = np.asarray(wavelengths_nm, dtype=np.float64)
-        group = self._absorbance_group(str(roi_id), n_wavelengths=len(wavelengths_nm))
+        n_wavelengths = len(wavelengths_nm)
+        group = self._absorbance_group(str(roi_id), n_wavelengths=n_wavelengths)
         if "wavelengths_nm" not in group:
             group.create_dataset("wavelengths_nm", data=wavelengths_nm)
         group.attrs["formula_key"] = formula_key
         group.attrs["reduction_method"] = reduction_method
+        if reduced_values_by_method:
+            for method, (method_sample, method_reference) in reduced_values_by_method.items():
+                method_group = self._ensure_reduced_values_subgroup(group, method, n_wavelengths=n_wavelengths)
+                _append_row(method_group["sample_mean"], np.asarray(method_sample, dtype=np.float32))
+                _append_row(method_group["reference_mean"], np.asarray(method_reference, dtype=np.float32))
         _append_scalar(group["cube_index"], int(cube_index))
         _append_scalar(group["timestamp_utc_ms"], int(timestamp_utc_ms))
         _append_row(group["absorbance"], np.asarray(formula_values, dtype=np.float32))
@@ -525,12 +668,27 @@ class FormulaSpectrumTraceIndex:
     """Read-side result of `ImagingMeasurementExportWriter.formula_spectrum_index`
     - one ROI's whole backed-up spectrum trace, indexed by cube_index for a
     caller to validate/reconstruct one cube's `AbsorbanceSpectrumResult` at a
-    time without re-reading the file per cube."""
+    time without re-reading the file per cube.
+
+    `formula_key`/`reduction_method` are the group-level attrs (whichever was
+    active at the last append - see `append_formula_spectrum`), kept as a
+    baseline/default, not the full story: since schema 6.7, each cube's own
+    `by_cube` entry can carry more than one reduction method's (sample,
+    reference) pair (see `reduced_values_by_method` below), and formula is
+    never stored at all beyond that pair - both a specific formula's curve
+    and any other reduction method's pair are cheap to derive from whichever
+    pair IS present, see processing/analysis.py's project_formula_spectrum
+    and project_reduction_result."""
 
     wavelengths_nm: np.ndarray
     formula_key: str
     reduction_method: str
-    by_cube: dict[int, tuple[str, np.ndarray, np.ndarray, np.ndarray]]
+    # (signature_hash, {reduction_method: (sample_reduced_value, reference_reduced_value)})
+    # per cube_index. The reduction-independent signature_hash (see
+    # AnalysisController._roi_disk_signature_for_cube) validates the WHOLE
+    # entry - every method in the dict was computed from the same pixel
+    # extraction, so they all share one hash rather than needing their own.
+    by_cube: dict[int, tuple[str, dict[str, tuple[np.ndarray, np.ndarray]]]]
 
 
 @dataclass(slots=True)
