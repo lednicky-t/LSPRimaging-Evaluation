@@ -19,6 +19,7 @@ from `_start_sensorgram_worker`), which is one-directional and fine.
 from __future__ import annotations
 
 import logging
+import os
 import time
 import numpy as np
 from copy import deepcopy
@@ -103,6 +104,15 @@ class AnalysisWorkerMixin:
 
     def stop_sensorgram(self) -> None:
         self.window._stop_sensorgram_calculation()
+
+    def run_or_stop_sensorgram(self) -> None:
+        """Merged Start analysis / Stop button (Analysis section title row):
+        dispatches to whichever action the icon is currently showing -
+        Start analysis while idle, Stop while a run is already in progress."""
+        if self.window._sensorgram_running:
+            self.stop_sensorgram()
+        else:
+            self.calculate_sensorgram()
 
     def clear_sensorgram(self, summary_text: str) -> None:
         self.window._sensorgram_spectral_cube_indices = np.asarray([], dtype=np.int32)
@@ -1398,6 +1408,27 @@ class AnalysisWorkerMixin:
             QMessageBox.warning(self.window, "Export failed", f"Could not write export file:\n{exc}")
             return
         self.window._set_status_text(f"Exported analyzed results to {path.name}.")
+
+    def open_results_export_folder(self) -> None:
+        """Icon button next to "Export Results...": opens the folder that
+        button's save dialog defaults to (the dataset's `analysis` sidecar
+        folder, see MainWindow._analysis_root) in File Explorer, mirroring
+        DatasetController.open_dataset_folder_in_explorer /
+        WorkflowLogController.open_logs_folder. Exports can be redirected
+        elsewhere via that dialog, so this is only the default location,
+        not necessarily every export ever made.
+        """
+        folder = self.window._analysis_root()
+        if folder is None:
+            self.window._set_status_text("Cannot open exports folder - no dataset loaded yet.")
+            return
+        if not folder.is_dir():
+            self.window._set_status_text(f"Cannot open exports folder - path does not exist: {folder}")
+            return
+        try:
+            os.startfile(str(folder))
+        except OSError as exc:
+            self.window._set_status_text(f"Could not open exports folder in File Explorer: {exc}")
 
     def _compute_formula_spectrum_result(self, result: FormulaSpectrumResult) -> FormulaSpectrumRenderBundle | None:
         """Everything about applying one formula-spectrum result except the

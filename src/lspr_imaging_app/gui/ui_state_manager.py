@@ -329,14 +329,18 @@ class UIStateManager:
                 APP_THEME.compact_icon_inner,
             )
         )
-        window.analysis_calculate_all_button.setEnabled(interactive)
-        window.analysis_calculate_all_button.setPixmap(
-            window._make_analysis_all_spectral_cubes_icon(enabled and has_dataset).pixmap(APP_THEME.compact_icon_inner, APP_THEME.compact_icon_inner)
-        )
-        window.analysis_stop_button.setEnabled(enabled and window._sensorgram_running)
-        window.analysis_stop_button.setPixmap(
-            window._make_analysis_stop_icon(enabled and window._sensorgram_running).pixmap(APP_THEME.compact_icon_inner, APP_THEME.compact_icon_inner)
-        )
+        running = window._sensorgram_running
+        if running:
+            window.analysis_run_button.setEnabled(enabled)
+            window.analysis_run_button.setToolTip("Stop the running analysis.")
+            run_icon = window._make_analysis_stop_icon(enabled)
+        else:
+            window.analysis_run_button.setEnabled(interactive)
+            window.analysis_run_button.setToolTip(
+                "Start analysis: compute spectra and sensorgram for the selected spectral cube range."
+            )
+            run_icon = window._make_analysis_run_icon(enabled and has_dataset)
+        window.analysis_run_button.setPixmap(run_icon.pixmap(APP_THEME.compact_icon_inner, APP_THEME.compact_icon_inner))
         refresh_time_independent_toggle = getattr(window, "_refresh_analysis_time_independent_toggle", None)
         if callable(refresh_time_independent_toggle):
             refresh_time_independent_toggle()

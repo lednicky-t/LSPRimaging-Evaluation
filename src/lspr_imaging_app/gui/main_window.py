@@ -1540,20 +1540,17 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, HistogramMaskMixin, Measurem
             parent=self,
         )
         self.analysis_preview_button.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.analysis_calculate_all_button = self._free_standing_icon_label(
-            self._make_analysis_all_spectral_cubes_icon(False),
+        # Merged Start analysis / Stop button (Analysis section title row):
+        # a play icon while idle, swapped for a stop icon while a run is in
+        # progress - see AnalysisController.run_or_stop_sensorgram and
+        # ui_state_manager.update_analysis_control_state.
+        self.analysis_run_button = self._free_standing_icon_label(
+            self._make_analysis_run_icon(False),
             "Start analysis: compute spectra and sensorgram for the selected spectral cube range.",
             size=APP_THEME.compact_icon_inner,
             parent=self,
         )
-        self.analysis_calculate_all_button.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.analysis_stop_button = self._free_standing_icon_label(
-            self._make_analysis_stop_icon(False),
-            "Stop.",
-            size=APP_THEME.compact_icon_inner,
-            parent=self,
-        )
-        self.analysis_stop_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.analysis_run_button.setCursor(Qt.CursorShape.PointingHandCursor)
         # ROI's math: how each ROI pair's masked sample/reference pixels become
         # one value each (Reduction) - see processing/roi_math.py. Session-scoped
         # via area_roi_settings (not QSettings): unlike fit_method/metric/poly_order
@@ -1738,6 +1735,9 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, HistogramMaskMixin, Measurem
         self.export_results_button.setToolTip(
             "Save a snapshot of the analyzed spectra and sensorgram traces backed up so far this "
             "session to a chosen HDF5 file."
+        )
+        self.export_results_open_folder_button = self._make_icon_tool_button(
+            "folder-open", "#38bdf8", "Open the exports folder (dataset's analysis folder) in File Explorer."
         )
 
         # "Spectra" range: wavelength window (nm) the absorbance spectrum is
@@ -2379,8 +2379,7 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, HistogramMaskMixin, Measurem
         self.histogram_plot.getViewBox().sigRangeChanged.connect(self._on_histogram_view_range_changed)
         self.histogram_bins_spin.editingFinished.connect(self._save_control_preferences)
         self.analysis_preview_button.clicked.connect(self._toggle_analysis_live_preview)
-        self.analysis_calculate_all_button.clicked.connect(self._analysis_controller.calculate_sensorgram)
-        self.analysis_stop_button.clicked.connect(self._analysis_controller.stop_sensorgram)
+        self.analysis_run_button.clicked.connect(self._analysis_controller.run_or_stop_sensorgram)
         self.roi_list_cached_button.toggled.connect(self._on_cached_rois_only_toggled)
         self.analysis_fit_method_combo.currentIndexChanged.connect(self._analysis_controller.on_fit_settings_changed)
         self.analysis_fit_method_combo.currentIndexChanged.connect(self._analysis_controller.sync_analysis_fitting_controls)
@@ -2411,6 +2410,7 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, HistogramMaskMixin, Measurem
         self.analysis_group_stats_band_combo.currentIndexChanged.connect(self._analysis_controller.on_statistics_settings_changed)
         self.analysis_calculate_group_button.clicked.connect(self._analysis_controller.calculate_group_sensorgram)
         self.export_results_button.clicked.connect(self._analysis_controller.export_results)
+        self.export_results_open_folder_button.clicked.connect(self._analysis_controller.open_results_export_folder)
         self._analysis_controller.sync_statistics_controls()
 
     def _connect_background_and_mask(self) -> None:

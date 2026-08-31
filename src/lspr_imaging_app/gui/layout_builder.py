@@ -1034,12 +1034,6 @@ def build_layout(window) -> None:
     analysis_top_layout.setHorizontalSpacing(6)
     analysis_top_layout.setVerticalSpacing(4)
     analysis_top_layout.setLabelAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
-    analysis_scope_row = QHBoxLayout()
-    analysis_scope_row.addWidget(window.analysis_calculate_all_button)
-    analysis_scope_row.addWidget(window.analysis_stop_button)
-    analysis_scope_row.addWidget(window.analysis_preview_button)
-    analysis_scope_row.addStretch(1)
-    analysis_top_layout.addRow("Selection", analysis_scope_row)
     analysis_range_group = QWidget(window)
     analysis_range_group_layout = QVBoxLayout(analysis_range_group)
     analysis_range_group_layout.setContentsMargins(0, 0, 0, 0)
@@ -1260,6 +1254,17 @@ def build_layout(window) -> None:
     )
     window.analysis_time_independent_toggle = _make_time_independent_toggle(window)
     window._refresh_analysis_time_independent_toggle = window.analysis_time_independent_toggle.sync_appearance
+    # Title row: merged Start analysis/Stop icon and the Live preview toggle
+    # sit here instead of their own "Selection" row further down, right next
+    # to the existing [λ,t]/[λ] toggle - same header_extra pattern as
+    # roi_editor_header_extra/metadata_header_extra above.
+    analysis_header_extra = QWidget(window)
+    analysis_header_extra_layout = QHBoxLayout(analysis_header_extra)
+    analysis_header_extra_layout.setContentsMargins(0, 0, 0, 0)
+    analysis_header_extra_layout.setSpacing(4)
+    analysis_header_extra_layout.addWidget(window.analysis_run_button)
+    analysis_header_extra_layout.addWidget(window.analysis_preview_button)
+    analysis_header_extra_layout.addWidget(window.analysis_time_independent_toggle)
     window.analysis_section = CollapsibleSection(
         "Analysis",
         analysis_inner,
@@ -1267,7 +1272,7 @@ def build_layout(window) -> None:
         applied=bool(window._analysis_enabled),
         apply_tooltip="Enable or disable analysis calculations.",
         help_text=panel_help_text("analysis"),
-        header_extra=window.analysis_time_independent_toggle,
+        header_extra=analysis_header_extra,
         parent=window,
     )
 
@@ -1279,7 +1284,13 @@ def build_layout(window) -> None:
     results_export_layout = QVBoxLayout(results_export_content)
     results_export_layout.setContentsMargins(12, 12, 12, 12)
     results_export_layout.setSpacing(8)
-    results_export_layout.addWidget(window.export_results_button)
+    results_export_button_row = QHBoxLayout()
+    results_export_button_row.setContentsMargins(0, 0, 0, 0)
+    results_export_button_row.setSpacing(4)
+    results_export_button_row.addWidget(window.export_results_button)
+    results_export_button_row.addWidget(window.export_results_open_folder_button)
+    results_export_button_row.addStretch(1)
+    results_export_layout.addLayout(results_export_button_row)
     results_export_description = QLabel(
         "Saves the analyzed absorbance spectra and sensorgram traces recorded so far this "
         "session (per ROI) to an HDF5 file you choose. Sensorgram region/kinetics measurement "

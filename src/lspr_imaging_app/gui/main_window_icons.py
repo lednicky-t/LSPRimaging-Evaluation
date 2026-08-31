@@ -1111,34 +1111,28 @@ class MainWindowIcons:
         painter.end()
         return QIcon(pixmap)
 
-    def _make_analysis_all_spectral_cubes_icon(self, active: bool, *, size: int = 24) -> QIcon:
+    def _make_analysis_run_icon(self, active: bool, *, size: int = 24) -> QIcon:
+        """Play icon for the merged Start analysis / Stop button (Analysis
+        section title row) while idle - swapped for _make_analysis_stop_icon
+        while a run is in progress, see
+        ui_state_manager.update_analysis_control_state."""
         color = "#22c55e" if active else get_active_theme().text_primary
-        fill_color = "#22c55e" if active else "none"
-        svg = f"""
-        <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="{color}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <path stroke="none" d="M0 0h24v24H0z" fill="none" />
-            <path d="M12 2l-8 4l8 4l8 -4l-8 -4" />
-            <path d="M4 10l8 4l8 -4" />
-            <path d="M4 18l8 4l8 -4" />
-            <path d="M4 14l8 4l8 -4" fill="{fill_color}" />
-        </svg>
-        """
-        icon = self._svg_icon_from_markup(svg, size=size)
+        icon = self._tabler_icon("player-play-filled", color, size, stroke_width=2.0, fill=color)
         if not icon.isNull():
             return icon
-        fallback = self._tabler_icon("stack-3", color, size, stroke_width=2.0, fill=color if active else "none")
-        if not fallback.isNull():
-            return fallback
         pixmap = QPixmap(size, size)
         pixmap.fill(Qt.GlobalColor.transparent)
         painter = QPainter(pixmap)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        painter.setPen(QColor(color))
-        painter.setBrush(QColor(color) if active else Qt.BrushStyle.NoBrush)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor(color))
         scale = size / 24.0
-        painter.drawRoundedRect(QRectF(4.0 * scale, 3.0 * scale, 16.0 * scale, 4.0 * scale), 1.5 * scale, 1.5 * scale)
-        painter.drawRoundedRect(QRectF(4.0 * scale, 9.0 * scale, 16.0 * scale, 4.0 * scale), 1.5 * scale, 1.5 * scale)
-        painter.drawRoundedRect(QRectF(4.0 * scale, 15.0 * scale, 16.0 * scale, 4.0 * scale), 1.5 * scale, 1.5 * scale)
+        path = QPainterPath()
+        path.moveTo(QPointF(7.0 * scale, 5.0 * scale))
+        path.lineTo(QPointF(7.0 * scale, 19.0 * scale))
+        path.lineTo(QPointF(18.0 * scale, 12.0 * scale))
+        path.closeSubpath()
+        painter.drawPath(path)
         painter.end()
         return QIcon(pixmap)
 
