@@ -666,11 +666,21 @@ class AnalysisWorkerMixin:
         self.window._sensorgram_spectral_cube_indices = np.append(self.window._sensorgram_spectral_cube_indices, int(point.spectral_cube_index)).astype(np.int32, copy=False)
         self.window._sensorgram_metric_values = np.append(self.window._sensorgram_metric_values, metric_value).astype(np.float64, copy=False)
         self.window._sensorgram_metric_signal = np.append(self.window._sensorgram_metric_signal, metric_signal).astype(np.float64, copy=False)
-        self.set_sensorgram_series(
-            self.window._sensorgram_spectral_cube_indices,
-            self.window._sensorgram_metric_values,
-            summary_text=f"{self.window._analysis_metric_label()} | Calculating {self.window._sensorgram_spectral_cube_indices.size}/{total_count} spectral cubes",
+        # Coalesced, not called directly here: set_sensorgram_series redoes
+        # its O(n log n) statistics-overlay recompute over the WHOLE trace
+        # (see AnalysisController._update_processed_trace_overlay) on every
+        # call, so calling it once per finished cube would make total
+        # GUI-thread cost across a run grow roughly quadratically with cube
+        # count - see _sensorgram_curve_update_timer's setup in
+        # MainWindow.__init__ and _apply_pending_sensorgram_curve_update
+        # below. The final, fully up-to-date redraw always still happens
+        # unconditionally in _apply_cached_sensorgram_result once the run
+        # completes, so nothing about the end result depends on this timer
+        # actually firing for every intermediate point.
+        self.window._pending_sensorgram_curve_summary_text = (
+            f"{self.window._analysis_metric_label()} | Calculating {self.window._sensorgram_spectral_cube_indices.size}/{total_count} spectral cubes"
         )
+        self.window._sensorgram_curve_update_timer.start()
         self._backup_sensorgram_point(point)
         roi_formula_spectrum_results = getattr(point, "roi_formula_spectrum_results", None)
         if roi_formula_spectrum_results:
@@ -694,6 +704,28 @@ class AnalysisWorkerMixin:
             if self.window._analysis_live_preview_enabled:
                 self.window._pending_sensorgram_live_point = point
                 self.window._sensorgram_live_preview_timer.start()
+
+    def _apply_pending_sensorgram_curve_update(self) -> None:
+        """Fires on the coalescing 100ms timer started by
+        `on_sensorgram_partial_result` (see its setup in
+        `MainWindow.__init__`). Applies the sensorgram trace curve redraw +
+        statistics-overlay recompute (`set_sensorgram_series`) at most 10x/s
+        during a run instead of once per finished cube - cheap for a
+        handful of cubes, but `set_sensorgram_series` redoes O(n log n) of
+        work over the WHOLE trace so far on every call (see
+        `_update_processed_trace_overlay`'s argsort/spike-rejection/
+        smoothing), so paying it per-cube made total GUI-thread cost across
+        a long run grow roughly quadratically with cube count. Safe to skip
+        entirely if the run already finished by the time this fires -
+        `_apply_cached_sensorgram_result` always does one more
+        unconditional, fully up-to-date redraw on completion regardless."""
+        if not self.window._sensorgram_running:
+            return
+        self.set_sensorgram_series(
+            self.window._sensorgram_spectral_cube_indices,
+            self.window._sensorgram_metric_values,
+            summary_text=self.window._pending_sensorgram_curve_summary_text,
+        )
 
     def _apply_pending_sensorgram_live_preview(self) -> None:
         """Fires on the coalescing 80ms timer started by
@@ -1895,23 +1927,50 @@ class AnalysisWorkerMixin:
 
     def _formula_spectrum_signature_saved_on_disk(
         self,
-        roi_id: int,
+        roi: AreaRoi,
         spectral_cube_index: int,
         signature: tuple[object, ...],
         disk_trace_cache: dict[int, FormulaSpectrumTraceIndex],
     ) -> bool:
         """Boolean-only counterpart of `_formula_spectrum_result_from_disk_row`
-        for the slider's cached-tick check: same hash-validity rule, but skips
-        materializing the full `FormulaSpectrumResult` (wavelength/formula/
-        mean arrays) since the tick indicator only needs a yes/no per cube."""
-        trace = disk_trace_cache.get(int(roi_id))
+        for the slider's cached-tick check: same hash-validity rule (including
+        the pre-6.7 fallback below), but skips materializing the full
+        `FormulaSpectrumResult` (wavelength/formula/mean arrays) since the
+        tick indicator only needs a yes/no per cube."""
+        trace = disk_trace_cache.get(int(roi.area_roi_id))
         if trace is None:
             return False
         entry = trace.by_cube.get(int(spectral_cube_index))
         if entry is None:
             return False
         stored_hash = entry[0]
-        return bool(stored_hash) and stored_hash == self._signature_hash(signature)
+        if not stored_hash:
+            return False
+        if stored_hash == self._signature_hash(signature):
+            return True
+        return self._formula_spectrum_signature_matches_legacy_hash(roi, spectral_cube_index, stored_hash, trace)
+
+    def _formula_spectrum_signature_matches_legacy_hash(
+        self, roi: AreaRoi, spectral_cube_index: int, stored_hash: str, trace: FormulaSpectrumTraceIndex
+    ) -> bool:
+        """Pre-schema-6.7 rows had their `signature_hash` computed with the
+        ACTUAL reduction method baked in (e.g. "mean"), not today's
+        reduction-independent placeholder (see `_roi_disk_signature_for_cube`)
+        - a row written before that migration will never match a hash built
+        the new way, and would otherwise be permanently misread as "never
+        calculated" even though it's sitting right there on disk. Reconstruct
+        the older-style signature using the reduction method this row was
+        actually recorded under (`trace.reduction_method`, the group-level
+        attr `append_formula_spectrum` stamps on every write) - this is
+        exactly the same signature `_persist_formula_spectrum`'s dedup check
+        computed before the migration, just evaluated against today's live
+        settings (ROI geometry, wavelengths, chromatic state, exclusions),
+        so it still correctly rejects a row that's genuinely stale under any
+        of those, not only ones from a reduction-method change."""
+        legacy_signature = self._roi_formula_spectrum_signature_for_cube(
+            roi, spectral_cube_index, reduction_method_override=trace.reduction_method
+        )
+        return legacy_signature is not None and stored_hash == self._signature_hash(legacy_signature)
 
     def _build_disk_formula_spectrum_trace_index(self, rois: list[AreaRoi]) -> dict[int, FormulaSpectrumTraceIndex]:
         """One HDF5 read per selected ROI, off the writer's already-open
@@ -1940,7 +1999,7 @@ class AnalysisWorkerMixin:
 
     def _formula_spectrum_result_from_disk_row(
         self,
-        roi_id: int,
+        roi: AreaRoi,
         spectral_cube_index: int,
         signature: tuple[object, ...],
         disk_trace_index: dict[int, FormulaSpectrumTraceIndex] | None,
@@ -1948,7 +2007,10 @@ class AnalysisWorkerMixin:
         """`signature` must be the reduction-independent disk signature (see
         `_roi_disk_signature_for_cube`) - the row's validity no longer
         depends on which reduction method happened to be active when it was
-        written, since (schema 6.7+) it can carry more than one.
+        written, since (schema 6.7+) it can carry more than one. Rows
+        written BEFORE that migration are also accepted via a fallback to
+        the older, reduction-inclusive hash - see
+        `_formula_spectrum_signature_matches_legacy_hash`.
 
         Builds the result under a baseline reduction method (whichever the
         trace says was last active, or any available one as a fallback) and
@@ -1960,14 +2022,18 @@ class AnalysisWorkerMixin:
         formula."""
         if not disk_trace_index:
             return None
-        trace = disk_trace_index.get(int(roi_id))
+        trace = disk_trace_index.get(int(roi.area_roi_id))
         if trace is None:
             return None
         entry = trace.by_cube.get(int(spectral_cube_index))
         if entry is None:
             return None
         stored_hash, reduced_values_by_method = entry
-        if not stored_hash or stored_hash != self._signature_hash(signature) or not reduced_values_by_method:
+        if not stored_hash or not reduced_values_by_method:
+            return None
+        if stored_hash != self._signature_hash(signature) and not self._formula_spectrum_signature_matches_legacy_hash(
+            roi, spectral_cube_index, stored_hash, trace
+        ):
             return None
         baseline_method = trace.reduction_method if trace.reduction_method in reduced_values_by_method else next(
             iter(reduced_values_by_method)
@@ -2052,7 +2118,7 @@ class AnalysisWorkerMixin:
                     self.window._roi_formula_spectrum_cache.move_to_end(signature)
             if cached is None:
                 disk_signature = self._roi_disk_signature_for_cube(roi, spectral_cube_index)
-                cached = self._formula_spectrum_result_from_disk_row(roi_id, spectral_cube_index, disk_signature, disk_trace_index)
+                cached = self._formula_spectrum_result_from_disk_row(roi, spectral_cube_index, disk_signature, disk_trace_index)
                 if cached is not None:
                     self._store_in_lru_cache(
                         self.window._roi_formula_spectrum_cache, signature, cached, self.window.ROI_FORMULA_SPECTRUM_CACHE_SIZE,

@@ -1309,7 +1309,7 @@ class AnalysisController(AnalysisWorkerMixin, AnalysisChromaticGeometryMixin):
                         continue
                     disk_signature = self._roi_disk_signature_for_cube(roi, int(spectral_cube_index))
                     if disk_signature is None or not self._formula_spectrum_signature_saved_on_disk(
-                        int(roi.area_roi_id), int(spectral_cube_index), disk_signature, disk_trace_cache
+                        roi, int(spectral_cube_index), disk_signature, disk_trace_cache
                     ):
                         all_cached = False
                         break

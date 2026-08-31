@@ -611,6 +611,21 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, HistogramMaskMixin, Measurem
         self._sensorgram_live_preview_timer.setInterval(80)
         self._sensorgram_live_preview_timer.timeout.connect(self._apply_pending_sensorgram_live_preview)
         self._pending_sensorgram_live_point = None
+        # Coalesces the sensorgram TRACE curve's own redraw (as opposed to
+        # the single-cube spectrum preview above) during a multi-cube run:
+        # set_sensorgram_series redoes an O(n log n) statistics-overlay
+        # recompute over the WHOLE trace so far on every call, so calling it
+        # once per finished cube makes total GUI-thread cost across a run
+        # grow roughly quadratically with cube count - see
+        # AnalysisController.on_sensorgram_partial_result/_apply_pending_
+        # sensorgram_curve_update.
+        self._sensorgram_curve_update_timer = QTimer(self)
+        self._sensorgram_curve_update_timer.setSingleShot(True)
+        self._sensorgram_curve_update_timer.setInterval(100)
+        self._sensorgram_curve_update_timer.timeout.connect(
+            lambda: self._analysis_controller._apply_pending_sensorgram_curve_update()
+        )
+        self._pending_sensorgram_curve_summary_text = None
         self._sensorgram_refresh_timer = QTimer(self)
         self._sensorgram_refresh_timer.setSingleShot(True)
         self._sensorgram_refresh_timer.setInterval(100)

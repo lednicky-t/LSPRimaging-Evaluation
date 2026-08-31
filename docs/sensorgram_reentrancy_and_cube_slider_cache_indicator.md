@@ -266,3 +266,71 @@ whole duration anyway, and the completion hook already catches the final
 state once the run settles, matching the existing (pre-existing, not
 introduced here) cadence of the ROI table's own "already calculated"
 blue/white dot indicator (`_refresh_cached_roi_ids_snapshot`).
+
+## Follow-up done 2026-08-31: schema-6.7 migration broke the disk-cache hash check, plus a per-cube O(n²) redraw
+
+Two bugs reported together ("the tick indicator shows almost nothing cached"
+and "cube calculations start at 0.5s/cube but drift to 1.5s/cube"), diagnosed
+by reading the actual code paths rather than guessing - both had concrete,
+provable root causes.
+
+**Bug A - disk-cache hash check broken by the schema-6.7 commit
+(`988dd96`, the day before).** That commit changed `signature_hash`'s
+meaning: from a hash that bakes in the actual reduction method (`"mean"`,
+`"median"`, ...) to a reduction-independent placeholder
+(`_roi_disk_signature_for_cube`'s `_DISK_SIGNATURE_REDUCTION_PLACEHOLDER`),
+so one row could validate for any reduction method. It updated the *write*
+side (new rows get the new-style hash) and the *read* side (comparisons use
+the new-style hash) consistently with each other - but every row written
+*before* that commit still has its old-style hash sitting on disk, and nothing
+reconstructed it. Reading those rows back after the migration always failed
+the hash comparison, so a pre-migration cube permanently read as "never
+calculated" - not just for the tick indicator, but for two other things that
+share the same check:
+- The disk-resume shortcut (`_formula_spectrum_result_from_disk_row`, used by
+  `_combined_formula_spectrum_results_from_ram_or_disk`) fell through to a
+  full pixel recompute for every pre-migration cube instead of reading the
+  already-saved value.
+- `_persist_formula_spectrum`'s dedup check (`key in backed_up`) missed too,
+  so recomputing a pre-migration cube in a post-migration session appended a
+  **duplicate row** to `measurement_backup.h5` instead of recognizing it was
+  already there.
+
+**Fix**: `_formula_spectrum_signature_matches_legacy_hash` (used by both
+`_formula_spectrum_signature_saved_on_disk` and
+`_formula_spectrum_result_from_disk_row`) - if the new-style hash doesn't
+match, reconstruct the *old*-style signature using the reduction method that
+row's own group attrs say was active (`trace.reduction_method`, stamped by
+`append_formula_spectrum` on every write) and check that instead. This is
+provably the exact same signature the pre-6.7 dedup check computed, evaluated
+against today's live settings, so it still correctly rejects a row that's
+genuinely stale for any other reason (ROI moved, wavelength range changed,
+etc.) - it only widens what counts as "not stale" for the one thing that
+changed out from under old rows (the hash formula itself), not for anything
+about the data. Both call sites changed to pass the full `roi` object
+(previously just `roi_id`), since the legacy reconstruction needs ROI
+geometry, not just the id. Regression coverage:
+`tests/unit/test_lspri_reduction_write_through_cache.py::TestFormulaSpectrumResultFromDiskRow::test_pre_6_7_legacy_hash_is_still_a_hit`.
+
+**Bug B - per-cube O(n log n) redraw made a run's total GUI-thread cost grow
+roughly quadratically with cube count.** `on_sensorgram_partial_result` (fired
+once per finished cube) called `set_sensorgram_series` unconditionally every
+time. That function re-sorts and re-runs spike-rejection/smoothing/baseline
+(`_update_processed_trace_overlay`) over the *entire* trace accumulated so
+far, plus a curve redraw and axis autorange - all on the GUI thread. Nothing
+in the actual per-cube compute (pixel read + fit, on a background thread)
+scales with how many cubes are already done, so this GUI-thread bookkeeping
+was the only thing that did - cheap at cube 10, real cost by cube 300+,
+exactly matching "starts fast, visibly slows down over the course of one
+run" (as opposed to a flat per-cube cost, which is what a broken cache/disk
+shortcut alone would look like).
+
+**Fix**: throttled to a new 100ms coalescing timer
+(`_sensorgram_curve_update_timer`, set up in `MainWindow.__init__` next to
+the existing `_sensorgram_live_preview_timer` it mirrors) -
+`_apply_pending_sensorgram_curve_update` in `analysis_worker_mixin.py`. The
+full-precision arrays (`_sensorgram_spectral_cube_indices` etc.) still
+accumulate every cube; only how often the expensive redraw+overlay recompute
+actually *runs* is capped at ~10/s. The always-correct final redraw on
+completion (`_apply_cached_sensorgram_result`) is unchanged, so nothing about
+the end result depends on this timer firing for every intermediate point.
