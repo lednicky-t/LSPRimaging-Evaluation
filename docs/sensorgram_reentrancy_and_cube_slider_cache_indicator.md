@@ -334,3 +334,38 @@ accumulate every cube; only how often the expensive redraw+overlay recompute
 actually *runs* is capped at ~10/s. The always-correct final redraw on
 completion (`_apply_cached_sensorgram_result`) is unchanged, so nothing about
 the end result depends on this timer firing for every intermediate point.
+
+## Follow-up done 2026-09-02: the same symptom, again, from two more causes
+
+"Starts fast, drifts slower over a run" was reported a third time. Bug B's
+fix (above) throttled the *curve redraw* - it didn't touch the *Cube/Time
+slider tick* refresh this same doc introduced, which turned out to have an
+unrelated, unfixed scaling problem of its own, plus a completely separate
+storage-layer issue was found alongside it. Full writeup, including a
+Windows crash chain uncovered along the way and the fixes applied (a
+buffered/batched HDF5 write mode and a manual "Compact backup file" repair
+action) is in
+`apps/LSPRi/eva/docs/measurement_backup_performance_and_crash_recovery.md` -
+short version:
+
+- **Bug C - `schedule_cube_slider_cache_refresh`'s cost scales with how much
+  of the dataset is already cached, and compounds across separate runs, not
+  just within one.** Its 150ms debounce (shorter than one cube's own compute
+  time) meant it fired on essentially every cube, same class of bug as Bug B
+  - but throttling how *often* it ran wasn't enough here, because unlike Bug
+  B's redraw, this scan's *per-firing* cost also grows as a session goes on:
+  once most of the current ROI selection has hits somewhere in RAM/disk, the
+  "is this cube fully cached" check can't break out early anymore and has to
+  walk every selected ROI for every already-covered cube. Fixed by
+  suppressing it entirely while `_sensorgram_running` (not just throttling),
+  at the single choke point (`schedule_cube_slider_cache_refresh` in
+  `analysis_controller.py`) rather than each caller.
+- **Bug D - unrelated to any GUI redraw: HDF5's per-write cost for
+  `measurement_backup.h5` grows with how many times its resizable datasets
+  have *ever* been resized over the file's lifetime, not with the file's
+  current byte size.** Confirmed by watching write-only time climb while
+  file size stayed flat in a live session. See the new doc for the fix
+  (buffered batch writes, a `measurement_backup_batch_size` preference, and
+  a manual repack/"Compact backup file" action) and the recommended real
+  fix that wasn't implemented yet (pre-sized, cube-index-addressed datasets
+  instead of append-and-grow).

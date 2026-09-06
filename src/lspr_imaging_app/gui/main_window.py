@@ -1754,6 +1754,15 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, HistogramMaskMixin, Measurem
         self.export_results_open_folder_button = self._make_icon_tool_button(
             "folder-open", "#38bdf8", "Open the exports folder (dataset's analysis folder) in File Explorer."
         )
+        self.compact_measurement_backup_button = self._make_icon_tool_button(
+            "database",
+            "#38bdf8",
+            "Compact measurement_backup.h5. Rewrites the live backup file to reset the internal "
+            "write-cost growth a long analysis session accumulates (results still all appended one "
+            "at a time in the background) - most useful if analysis has visibly slowed down over a "
+            "long session. Takes a few moments and briefly pauses any in-progress analysis; nothing "
+            "is lost either way.",
+        )
 
         # "Spectra" range: wavelength window (nm) the absorbance spectrum is
         # cropped to before fitting - mirrors sLSPR acq's own Range/Min/Max.
@@ -2426,6 +2435,7 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, HistogramMaskMixin, Measurem
         self.analysis_calculate_group_button.clicked.connect(self._analysis_controller.calculate_group_sensorgram)
         self.export_results_button.clicked.connect(self._analysis_controller.export_results)
         self.export_results_open_folder_button.clicked.connect(self._analysis_controller.open_results_export_folder)
+        self.compact_measurement_backup_button.clicked.connect(self._analysis_controller.compact_measurement_backup)
         self._analysis_controller.sync_statistics_controls()
 
     def _connect_background_and_mask(self) -> None:
@@ -4330,6 +4340,14 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, HistogramMaskMixin, Measurem
     def closeEvent(self, event) -> None:  # type: ignore[override]
         if self._ome_zarr_export_running and self._ome_zarr_export_cancel_event is not None:
             self._ome_zarr_export_cancel_event.set()
+        # A bulk sensorgram run buffers several cubes' worth of measurement-
+        # backup rows before writing them in one batch (measurement_backup_
+        # batch_size preference) - closing must flush whatever's still
+        # buffered now, for the same reason the processing-state save below
+        # forces immediately: nothing pending should be silently dropped by
+        # a graceful close (only an actual crash mid-batch is the accepted
+        # trade-off that preference makes).
+        self._analysis_controller._flush_measurement_backup_buffers()
         # Closing ends the debounce window for good, so this must flush
         # immediately (force=True) rather than merely schedule - anything
         # still pending would otherwise never get written.
@@ -4750,6 +4768,23 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, HistogramMaskMixin, Measurem
 
     def _set_ome_zarr_adaptive_batch_mb(self, value: int) -> None:
         self._settings.setValue("export/ome_zarr_adaptive_batch_mb", int(value))
+
+    def _measurement_backup_batch_size(self) -> int:
+        """How many spectral cubes' worth of rows a bulk "Start analysis"
+        run buffers in RAM before writing them to `measurement_backup.h5`
+        in one batch (see ImagingMeasurementExportWriter.
+        append_formula_spectrum_batch) - 1 writes every cube immediately
+        (the old, fully crash-safe behavior: at most the current cube's
+        results are ever at risk on a crash), N buffers up to N cubes'
+        results in memory, cutting per-cube backup-write overhead roughly
+        N-fold at the cost of up to N cubes' worth of results being lost
+        if the app crashes mid-batch (a real, deliberately user-facing
+        trade-off - see the Preferences dialog control for this setting).
+        Clamped to >= 1: 0 or negative would mean "never flush"."""
+        return max(1, int(self._settings.value("analysis/measurement_backup_batch_size", 5)))
+
+    def _set_measurement_backup_batch_size(self, value: int) -> None:
+        self._settings.setValue("analysis/measurement_backup_batch_size", max(1, int(value)))
 
     def _set_ui_scale_factor(self, value: str) -> None:
         self._settings.setValue("ui/scale_factor", value)

@@ -28,6 +28,14 @@ _STARTUP_RESTORE_TIMEOUT_OPTIONS = [
     (0, "Auto restore (0s)"),
 ]
 
+_MEASUREMENT_BACKUP_BATCH_SIZE_OPTIONS = [
+    (1, "1 cube - write immediately (most crash-safe)"),
+    (5, "5 cubes (default)"),
+    (10, "10 cubes"),
+    (20, "20 cubes"),
+    (50, "50 cubes (fastest, least crash-safe)"),
+]
+
 
 class PreferencesDialog(QDialog):
     def __init__(self, window, parent: QWidget | None = None) -> None:
@@ -93,6 +101,19 @@ class PreferencesDialog(QDialog):
         self.zarr_adaptive_info_button = QPushButton("What is this?")
         self.zarr_adaptive_info_button.clicked.connect(self._show_zarr_adaptive_info)
 
+        # Analysis
+        self.measurement_backup_batch_combo = QComboBox()
+        for cubes, label in _MEASUREMENT_BACKUP_BATCH_SIZE_OPTIONS:
+            self.measurement_backup_batch_combo.addItem(label, cubes)
+        self.measurement_backup_batch_combo.setToolTip(
+            "During \"Start analysis\", results are backed up to measurement_backup.h5 as they're "
+            "computed. Buffering several cubes' worth before each write cuts backup overhead "
+            "roughly by that factor - but if the app crashes mid-batch, only the results already "
+            "written to disk survive; anything still buffered is lost (a normal Stop or app close "
+            "always flushes what's buffered first, so this only matters for an actual crash). "
+            "\"1 cube\" writes every result immediately, matching the original behavior."
+        )
+
         self._build_ui()
         self._load_from_window()
         self._fit_to_available_screen()
@@ -144,10 +165,17 @@ class PreferencesDialog(QDialog):
         info_row.addWidget(self.zarr_adaptive_info_button)
         zarr_layout.addRow(info_row)
 
+        analysis_box = QGroupBox("Analysis: measurement backup")
+        analysis_layout = QFormLayout(analysis_box)
+        analysis_layout.setHorizontalSpacing(16)
+        analysis_layout.setVerticalSpacing(8)
+        analysis_layout.addRow("Write batch size", self.measurement_backup_batch_combo)
+
         layout.addWidget(appearance_box)
         layout.addWidget(startup_box)
         layout.addWidget(wavelength_box)
         layout.addWidget(zarr_box)
+        layout.addWidget(analysis_box)
 
         scroll_area.setWidget(content)
         outer_layout.addWidget(scroll_area, 1)
@@ -215,6 +243,11 @@ class PreferencesDialog(QDialog):
             index = self.zarr_adaptive_batch_combo.findData(batch_mb)
             self.zarr_adaptive_batch_combo.setCurrentIndex(index if index >= 0 else 2)
 
+        if hasattr(window, "_measurement_backup_batch_size"):
+            batch_size = window._measurement_backup_batch_size()
+            index = self.measurement_backup_batch_combo.findData(batch_size)
+            self.measurement_backup_batch_combo.setCurrentIndex(index if index >= 0 else 1)
+
     def apply_changes(self) -> None:
         window = self._window
 
@@ -243,6 +276,11 @@ class PreferencesDialog(QDialog):
             batch_mb = self.zarr_adaptive_batch_combo.currentData()
             if batch_mb is not None:
                 window._set_ome_zarr_adaptive_batch_mb(int(batch_mb))
+
+        if hasattr(window, "_set_measurement_backup_batch_size"):
+            batch_size = self.measurement_backup_batch_combo.currentData()
+            if batch_size is not None:
+                window._set_measurement_backup_batch_size(int(batch_size))
 
 
 def show_preferences_dialog_for(window) -> None:

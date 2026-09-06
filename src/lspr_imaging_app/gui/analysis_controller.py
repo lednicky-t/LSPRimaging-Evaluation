@@ -1229,7 +1229,33 @@ class AnalysisController(AnalysisWorkerMixin, AnalysisChromaticGeometryMixin):
         current ROI selection - call after anything that can change either
         side of that: the ROI selection itself, or `_roi_formula_spectrum_cache`
         (already covered by `_refresh_cached_roi_ids_snapshot` above, the
-        established single choke point for cache-changed)."""
+        established single choke point for cache-changed).
+
+        Suppressed entirely while a sensorgram run is in flight (2026-09-02
+        - see docs/measurement_backup_performance_and_crash_recovery.md for
+        the full investigation). `_refresh_cube_slider_cache_indicators`'s
+        own docstring already flags its cost as O(selected ROIs * total
+        cubes) - what that didn't account for is that this cost keeps
+        growing as a session goes on and more of the dataset ends up
+        cached (in RAM or, permanently, on disk): the "is this cube fully
+        cached" check can no longer break out early on the first
+        not-yet-cached ROI once most ROIs in the current selection already
+        have hits, so it has to walk every selected ROI for every
+        already-covered cube instead - and that cost persists and
+        compounds across separate runs in the same session, not just
+        within one. A per-cube *throttle* alone isn't enough here (unlike
+        the similar-looking curve-redraw fix elsewhere in this file),
+        because throttling only reduces how OFTEN this runs, not this
+        per-firing scaling problem - hence suppressing it outright instead.
+        The slider ticks show stale (or no) cache-state coloring while a
+        run is active; on_sensorgram_ready/on_sensorgram_failed already
+        call this unconditionally once _sensorgram_running is back to
+        False, so the final state is still always correct the moment a
+        run ends or is stopped - only the live mid-run feedback is
+        affected.
+        """
+        if getattr(self.window, "_sensorgram_running", False):
+            return
         self.window._cube_slider_cache_refresh_timer.start()
 
     def _refresh_cube_slider_cache_indicators(self) -> None:

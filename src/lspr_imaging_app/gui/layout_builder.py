@@ -1289,6 +1289,7 @@ def build_layout(window) -> None:
     results_export_button_row.setSpacing(4)
     results_export_button_row.addWidget(window.export_results_button)
     results_export_button_row.addWidget(window.export_results_open_folder_button)
+    results_export_button_row.addWidget(window.compact_measurement_backup_button)
     results_export_button_row.addStretch(1)
     results_export_layout.addLayout(results_export_button_row)
     results_export_description = QLabel(

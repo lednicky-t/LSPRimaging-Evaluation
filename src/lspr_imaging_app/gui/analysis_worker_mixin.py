@@ -40,7 +40,11 @@ from lspr_imaging_app.processing.analysis import (
 )
 from lspr_imaging_app.processing.chromatic import warp_boolean_mask_affine
 from lspr_imaging_app.processing.roi_math import DEFAULT_TRIMMED_MEAN_FRACTION, REDUCTION_METHODS
-from lspr_imaging_app.storage.measurement_export import FormulaSpectrumTraceIndex
+from lspr_imaging_app.storage.measurement_export import (
+    FormulaSpectrumBackupRow,
+    FormulaSpectrumTraceIndex,
+    SensorgramPointBackupRow,
+)
 from lspr_imaging_app.gui.analysis_types import SpectrumSettingsSnapshot, SharedWavelengthGeometry
 
 
@@ -681,8 +685,19 @@ class AnalysisWorkerMixin:
             f"{self.window._analysis_metric_label()} | Calculating {self.window._sensorgram_spectral_cube_indices.size}/{total_count} spectral cubes"
         )
         self.window._sensorgram_curve_update_timer.start()
+        # Stage-timed unconditionally, same reasoning as _process_image_
+        # task's "Image raw load" log: this backup path runs synchronously
+        # on the GUI thread once per finished cube, so its cost is worth
+        # being able to see directly rather than re-instrumenting each time
+        # a slowdown gets reported - see docs/measurement_backup_
+        # performance_and_crash_recovery.md for the investigation that
+        # established what actually drives this cost (resize-operation
+        # count over the backup file's lifetime, not its current size).
+        backup_point_started = time.perf_counter()
         self._backup_sensorgram_point(point)
+        backup_point_ms = (time.perf_counter() - backup_point_started) * 1000.0
         roi_formula_spectrum_results = getattr(point, "roi_formula_spectrum_results", None)
+        backup_series_ms = 0.0
         if roi_formula_spectrum_results:
             # Unconditional - not gated by live preview: "save them in HDF5"
             # is a completeness guarantee for every cube a run touches, not
@@ -692,14 +707,34 @@ class AnalysisWorkerMixin:
             series_payloads = [
                 (str(roi_id), int(roi_id), roi_result) for roi_id, roi_result in roi_formula_spectrum_results.items()
             ]
+            backup_series_started = time.perf_counter()
             self._backup_formula_spectrum_series(series_payloads, cube_index=int(point.spectral_cube_index))
+            backup_series_ms = (time.perf_counter() - backup_series_started) * 1000.0
+        logging.getLogger("lspr_imaging_app.workflow").debug(
+            "SG backup timing | cube %s | sensorgram_point=%.1fms formula_series=%.1fms (rois=%s)",
+            int(point.spectral_cube_index),
+            backup_point_ms,
+            backup_series_ms,
+            len(roi_formula_spectrum_results) if roi_formula_spectrum_results else 0,
+        )
+        # Flush the buffered-backup-rows batch (see _backup_formula_spectrum_
+        # series/_backup_sensorgram_point) every measurement_backup_batch_size
+        # cubes, so buffered data doesn't grow without bound over a long run.
+        # The final partial batch at the end of a run is flushed
+        # unconditionally by on_sensorgram_ready/on_sensorgram_failed instead
+        # of here, since a run can end between multiples of the batch size.
+        self.window._measurement_backup_buffered_cube_count += 1
+        if self.window._measurement_backup_buffered_cube_count >= self.window._measurement_backup_batch_size():
+            self._flush_measurement_backup_buffers()
+        if roi_formula_spectrum_results:
             # This cube's formula-spectrum results just landed in
             # _roi_formula_spectrum_cache (via spectral_cube_formula_spectrum_cache_store,
             # a background-thread write that - unlike _store_roi_formula_spectrum_cache -
-            # doesn't itself trigger a slider refresh). Schedule one here so the
-            # Cube/Time slider's cached-tick coloring updates incrementally
-            # during a live run instead of only once at on_sensorgram_ready/
-            # on_sensorgram_failed.
+            # doesn't itself trigger a slider refresh). Schedule one here so
+            # the tick coloring updates as soon as a run finishes - it's a
+            # no-op while one is still active (schedule_cube_slider_cache_
+            # refresh suppresses itself then; see that method's docstring
+            # for why a per-cube live refresh isn't worth its cost).
             self.schedule_cube_slider_cache_refresh()
             if self.window._analysis_live_preview_enabled:
                 self.window._pending_sensorgram_live_point = point
@@ -815,6 +850,14 @@ class AnalysisWorkerMixin:
         second row - while a value recomputed under different settings (an
         ROI moved, a transform changed) still gets a fresh row, since its
         hash differs from whatever's already on disk for that cube.
+
+        While a bulk "Start analysis" run is in flight (`_sensorgram_
+        running`), this buffers the row in RAM instead of writing it
+        immediately - see `_flush_measurement_backup_buffers` and the
+        `measurement_backup_batch_size` preference. The interactive
+        single-cube path (this method also runs then, with `_sensorgram_
+        running` False) still writes immediately, same as always - there's
+        no stream of rows to batch there.
         """
         writer = getattr(self.window, "_measurement_export_writer", None)
         if writer is None:
@@ -841,6 +884,18 @@ class AnalysisWorkerMixin:
                 formula_key=self._active_formula_key(),
                 combined_roi_ids=combined_roi_ids,
             )
+        except Exception:
+            logging.getLogger("lspr_imaging_app.workflow").warning(
+                "Failed to set sensorgram metric on measurement export backup", exc_info=True
+            )
+            return
+        if bool(getattr(self.window, "_sensorgram_running", False)):
+            self.window._sensorgram_backup_buffer.setdefault(str(roi_id), []).append(
+                (cube_index, signature_hash, float(point.metric_value))
+            )
+            backed_up.add(key)
+            return
+        try:
             writer.append_sensorgram_point(
                 roi_id,
                 cube_index=cube_index,
@@ -869,6 +924,23 @@ class AnalysisWorkerMixin:
         return int(datetime.now().timestamp() * 1000)
 
     def on_sensorgram_ready(self, request_id: int, result) -> None:
+        # Pairs with the gc.disable() at the top of _sensorgram_metric_task
+        # (analysis_tasks.py). Unconditional, before the stale-request early
+        # return below: the worker task itself already finished by the time
+        # this slot fires either way, so GC must come back on regardless of
+        # which run's result this is. gc.enable() is a no-op if it was never
+        # disabled, so this is safe even for a result that didn't come from
+        # that task (e.g. a cache-hit path).
+        import gc as _gc
+
+        _gc.enable()
+        _gc.collect()  # reclaim anything that piled up while GC was off, rather than leaving it for the next automatic trigger
+        # Unconditional, same reasoning as gc.enable() above and before the
+        # stale-request early return below: whatever's buffered (see
+        # _backup_formula_spectrum_series/_backup_sensorgram_point) is real,
+        # already-computed data that should never be left sitting unwritten
+        # just because this particular result turned out to be superseded.
+        self._flush_measurement_backup_buffers()
         if request_id != self.window._sensorgram_request_id:
             if self.window._pending_sensorgram_payload is not None:
                 self.start_pending_sensorgram_refresh()
@@ -927,6 +999,13 @@ class AnalysisWorkerMixin:
             self.start_pending_sensorgram_refresh()
 
     def on_sensorgram_failed(self, request_id: int, message: str) -> None:
+        # See on_sensorgram_ready's matching comment; same reasoning
+        # applies to the failure path.
+        import gc as _gc
+
+        _gc.enable()
+        _gc.collect()  # reclaim anything that piled up while GC was off, rather than leaving it for the next automatic trigger
+        self._flush_measurement_backup_buffers()  # see on_sensorgram_ready's matching comment
         if request_id != self.window._sensorgram_request_id:
             return
         self.window._sensorgram_running = False
@@ -1362,6 +1441,16 @@ class AnalysisWorkerMixin:
         backs up a cube that isn't necessarily the one on screen. Defaults to
         the currently-displayed cube (window._current_spectral_cube()) for the
         interactive single-cube refresh path, preserving its existing behavior.
+
+        While a bulk "Start analysis" run is in flight (`_sensorgram_
+        running`), rows are buffered in RAM instead of written immediately -
+        see `_flush_measurement_backup_buffers` and the `measurement_backup_
+        batch_size` preference (root-caused 2026-09-02: per-write HDF5 cost
+        climbs with how many times this file's ~14-datasets-per-ROI have
+        EVER been resized over its lifetime, not with current file size -
+        confirmed by watching write-only time climb while file size stayed
+        flat, most calls being dedup no-ops). The interactive single-cube
+        path (`_sensorgram_running` False here) still writes immediately.
         """
         writer = getattr(self.window, "_measurement_export_writer", None)
         if writer is None:
@@ -1372,6 +1461,7 @@ class AnalysisWorkerMixin:
             return
         cube_index = int(cube_index)
         backed_up = self.window._measurement_export_backed_up_formula_spectrum
+        buffering = bool(getattr(self.window, "_sensorgram_running", False))
         for label, roi_id, roi_result in series_payloads:
             if label == "Selection":
                 continue
@@ -1379,6 +1469,12 @@ class AnalysisWorkerMixin:
             signature_hash = self._signature_hash(self._roi_disk_signature_for_cube(roi, cube_index)) if roi is not None else ""
             key = (int(roi_id), cube_index, signature_hash)
             if key in backed_up:
+                continue
+            if buffering:
+                self.window._formula_spectrum_backup_buffer.setdefault(str(roi_id), []).append(
+                    (cube_index, signature_hash, roi_result)
+                )
+                backed_up.add(key)
                 continue
             try:
                 writer.append_formula_spectrum(
@@ -1400,6 +1496,78 @@ class AnalysisWorkerMixin:
                 )
                 continue
             backed_up.add(key)
+
+    def _flush_measurement_backup_buffers(self) -> None:
+        """Writes out every spectra/sensorgram-point row currently buffered
+        in RAM by `_backup_formula_spectrum_series`/`_backup_sensorgram_
+        point` while a bulk run is in flight - via `append_formula_spectrum_
+        batch`/`append_sensorgram_point_batch`, one bulk HDF5 write per ROI
+        per dataset instead of one per row. Call this:
+          - every `measurement_backup_batch_size` cubes during a run (see
+            on_sensorgram_partial_result), so buffered data doesn't grow
+            without bound over a long run;
+          - unconditionally when a run ends (on_sensorgram_ready/failed),
+            so the tail of a run (fewer than a full batch) isn't left
+            sitting unwritten;
+          - before the writer itself is closed (dataset switch/close) and
+            on app close, so a graceful shutdown never loses buffered rows -
+            only an actual crash mid-batch can (the deliberate, user-
+            configurable trade-off this batching makes; see the
+            Preferences dialog control).
+        Safe and cheap to call when nothing is buffered.
+        """
+        writer = getattr(self.window, "_measurement_export_writer", None)
+        formula_buffer = getattr(self.window, "_formula_spectrum_backup_buffer", None)
+        if writer is not None and formula_buffer:
+            for roi_id_str, entries in formula_buffer.items():
+                if not entries:
+                    continue
+                rows = [
+                    FormulaSpectrumBackupRow(
+                        wavelengths_nm=roi_result.wavelengths_nm,
+                        formula_values=roi_result.formula_values,
+                        sample_mean=roi_result.sample_reduced_value,
+                        reference_mean=roi_result.reference_reduced_value,
+                        cube_index=cube_index,
+                        timestamp_utc_ms=self._acquisition_timestamp_ms_for_cube(cube_index),
+                        formula_key=roi_result.formula_key,
+                        reduction_method=roi_result.reduction_method,
+                        signature_hash=signature_hash,
+                        reduced_values_by_method=roi_result.reduced_values_by_method or None,
+                    )
+                    for cube_index, signature_hash, roi_result in entries
+                ]
+                try:
+                    writer.append_formula_spectrum_batch(roi_id_str, rows)
+                except Exception:
+                    logging.getLogger("lspr_imaging_app.workflow").warning(
+                        "Failed to append absorbance spectrum batch to measurement export backup", exc_info=True
+                    )
+        if formula_buffer:
+            formula_buffer.clear()
+        sensorgram_buffer = getattr(self.window, "_sensorgram_backup_buffer", None)
+        if writer is not None and sensorgram_buffer:
+            for roi_id_str, entries in sensorgram_buffer.items():
+                if not entries:
+                    continue
+                rows = [
+                    SensorgramPointBackupRow(
+                        cube_index=cube_index,
+                        timestamp_utc_ms=self._acquisition_timestamp_ms_for_cube(cube_index),
+                        metric_value=metric_value,
+                        signature_hash=signature_hash,
+                    )
+                    for cube_index, signature_hash, metric_value in entries
+                ]
+                try:
+                    writer.append_sensorgram_point_batch(roi_id_str, rows)
+                except Exception:
+                    logging.getLogger("lspr_imaging_app.workflow").warning(
+                        "Failed to append sensorgram point batch to measurement export backup", exc_info=True
+                    )
+        if sensorgram_buffer:
+            sensorgram_buffer.clear()
+        self.window._measurement_backup_buffered_cube_count = 0
 
     def export_results(self) -> None:
         """"Export Results..." button (Results / Export panel): saves a
@@ -1461,6 +1629,47 @@ class AnalysisWorkerMixin:
             os.startfile(str(folder))
         except OSError as exc:
             self.window._set_status_text(f"Could not open exports folder in File Explorer: {exc}")
+
+    def compact_measurement_backup(self) -> None:
+        """"Compact backup file" button (Results/Export panel): rewrites
+        measurement_backup.h5 in place to reset the HDF5 per-write cost a
+        long analysis session accumulates - see ImagingMeasurementExport
+        Writer.compact's docstring for the mechanism (root-caused
+        2026-09-02: write time climbs with how many times a dataset has
+        EVER been resized over the file's lifetime, not with current file
+        size). A maintenance action triggered deliberately by the user,
+        not run automatically - runs on the GUI thread and blocks briefly
+        (the file is fully rewritten), same as any other synchronous
+        Qt-slot action in this app; safe to run mid-analysis (any live
+        partial-result updates just queue up for the moment it takes).
+
+        Flushes any RAM-buffered-but-not-yet-written rows first (see
+        _flush_measurement_backup_buffers) so nothing pending is left out
+        of the copy.
+        """
+        writer = getattr(self.window, "_measurement_export_writer", None)
+        if writer is None:
+            self.window._set_status_text("Cannot compact backup file - no dataset loaded yet.")
+            return
+        self._flush_measurement_backup_buffers()
+        self.window._set_status_text("Compacting measurement backup file...")
+        started = time.perf_counter()
+        try:
+            size_before, size_after = writer.compact()
+        except Exception as exc:
+            logging.getLogger("lspr_imaging_app.workflow").warning(
+                "Failed to compact measurement export backup", exc_info=True
+            )
+            self.window._set_status_text(f"Failed to compact backup file: {exc}")
+            return
+        elapsed = time.perf_counter() - started
+        before_mb = size_before / (1024.0 * 1024.0)
+        after_mb = size_after / (1024.0 * 1024.0)
+        self.window._append_workflow_log(
+            f"Measurement backup compacted | {before_mb:.1f}MB -> {after_mb:.1f}MB | {elapsed:.1f}s",
+            level="info",
+        )
+        self.window._set_status_text(f"Compacted backup file: {before_mb:.1f}MB -> {after_mb:.1f}MB ({elapsed:.1f}s)")
 
     def _compute_formula_spectrum_result(self, result: FormulaSpectrumResult) -> FormulaSpectrumRenderBundle | None:
         """Everything about applying one formula-spectrum result except the

@@ -78,19 +78,64 @@ def _array_position(roi_id: int, arrays: list[RoiArrayGroup]) -> tuple[str, str,
     return "", "", ""
 
 
-def _append_scalar(dataset: h5py.Dataset, value: object) -> None:
+def _append_scalars(dataset: h5py.Dataset, values: list) -> None:
+    """Append every value in `values` to a 1-D resizable dataset via one
+    resize + one bulk write, instead of one resize + write per value (see
+    `append_formula_spectrum_batch`'s docstring for why the call count,
+    not the byte count, is what this is optimizing). A single value is
+    just a length-1 list - this is the only append primitive now; there's
+    no separate single-value helper to keep in sync with it."""
+    if not values:
+        return
     index = dataset.shape[0]
-    dataset.resize((index + 1,) + dataset.shape[1:])
-    dataset[index] = value
+    count = len(values)
+    dataset.resize((index + count,) + dataset.shape[1:])
+    dataset[index : index + count] = values
 
 
-def _append_row(dataset: h5py.Dataset, row: np.ndarray) -> None:
+def _append_rows(dataset: h5py.Dataset, rows: np.ndarray) -> None:
+    """2-D analog of `_append_scalars`: appends every row in `rows`
+    (shape (n, columns)) via one resize + one bulk slice-write."""
+    if rows.shape[0] == 0:
+        return
     index = dataset.shape[0]
-    dataset.resize((index + 1,) + dataset.shape[1:])
-    dataset[index, :] = row
+    count = rows.shape[0]
+    dataset.resize((index + count,) + dataset.shape[1:])
+    dataset[index : index + count, :] = rows
 
 
 _STRING_DTYPE = h5py.string_dtype(encoding="utf-8")
+
+
+@dataclass(slots=True)
+class FormulaSpectrumBackupRow:
+    """One (ROI, spectral cube) row for `ImagingMeasurementExportWriter.
+    append_formula_spectrum_batch` - see that method's docstring for why
+    batching exists. Groups exactly the per-row fields `append_formula_
+    spectrum` takes directly, so the batched and single-row paths share
+    one row shape instead of two parameter lists that could drift apart."""
+
+    wavelengths_nm: np.ndarray
+    formula_values: np.ndarray
+    sample_mean: np.ndarray
+    reference_mean: np.ndarray
+    cube_index: int
+    timestamp_utc_ms: int
+    formula_key: str = "absorbance"
+    reduction_method: str = "mean"
+    signature_hash: str = ""
+    reduced_values_by_method: dict[str, tuple[np.ndarray, np.ndarray]] | None = None
+
+
+@dataclass(slots=True)
+class SensorgramPointBackupRow:
+    """One (ROI, spectral cube) row for `append_sensorgram_point_batch` -
+    see `FormulaSpectrumBackupRow`'s docstring for the reasoning."""
+
+    cube_index: int
+    timestamp_utc_ms: int
+    metric_value: float
+    signature_hash: str = ""
 
 # Human-readable definitions for every Reduction/Formula key this writer can
 # emit under processed/absorbance_spectra/<roi_id>/reduced_values/<method>/
@@ -502,12 +547,38 @@ class ImagingMeasurementExportWriter:
         empty string means "unknown" (a caller that hasn't wired hashing
         yet, or a legacy row backfilled by `_ensure_column`), which never
         matches a real hash, so it's always treated as unverifiable rather
-        than accidentally trusted."""
+        than accidentally trusted.
+
+        Thin single-row wrapper around `append_sensorgram_point_batch` -
+        see that method for why a caller doing many of these in a row
+        (e.g. a bulk "Start analysis" run) should batch them instead."""
+        self.append_sensorgram_point_batch(
+            roi_id,
+            [
+                SensorgramPointBackupRow(
+                    cube_index=cube_index,
+                    timestamp_utc_ms=timestamp_utc_ms,
+                    metric_value=metric_value,
+                    signature_hash=signature_hash,
+                )
+            ],
+        )
+
+    def append_sensorgram_point_batch(self, roi_id: str | int, rows: list[SensorgramPointBackupRow]) -> None:
+        """Batched form of `append_sensorgram_point`: writes every row in
+        `rows` (each a different spectral_cube_index for the same ROI) via
+        one resize + one bulk write per column, instead of one resize +
+        write per row per column. See `append_formula_spectrum_batch`'s
+        docstring for why this matters - the same reasoning applies here,
+        just with a much smaller per-row payload (4 scalar columns instead
+        of full per-wavelength arrays)."""
+        if not rows:
+            return
         group = self._sensorgram_group(str(roi_id))
-        _append_scalar(group["cube_index"], int(cube_index))
-        _append_scalar(group["timestamp_utc_ms"], int(timestamp_utc_ms))
-        _append_scalar(group["metric_value"], float(metric_value))
-        _append_scalar(group["signature_hash"], str(signature_hash))
+        _append_scalars(group["cube_index"], [int(row.cube_index) for row in rows])
+        _append_scalars(group["timestamp_utc_ms"], [int(row.timestamp_utc_ms) for row in rows])
+        _append_scalars(group["metric_value"], [float(row.metric_value) for row in rows])
+        _append_scalars(group["signature_hash"], [str(row.signature_hash) for row in rows])
 
     # -- absorbance spectra: the full per-wavelength trace over time, per ROI -
 
@@ -605,25 +676,96 @@ class ImagingMeasurementExportWriter:
         subgroups so any of them can be recovered later without re-reading
         pixels. Optional/None keeps this a purely additive parameter for any
         future caller that only ever computes one method.
+
+        Thin single-row wrapper around `append_formula_spectrum_batch` -
+        see that method for why a caller doing many of these in a row
+        (e.g. a bulk "Start analysis" run) should batch them instead.
         """
-        wavelengths_nm = np.asarray(wavelengths_nm, dtype=np.float64)
-        n_wavelengths = len(wavelengths_nm)
+        self.append_formula_spectrum_batch(
+            roi_id,
+            [
+                FormulaSpectrumBackupRow(
+                    wavelengths_nm=np.asarray(wavelengths_nm, dtype=np.float64),
+                    formula_values=formula_values,
+                    sample_mean=sample_mean,
+                    reference_mean=reference_mean,
+                    cube_index=cube_index,
+                    timestamp_utc_ms=timestamp_utc_ms,
+                    formula_key=formula_key,
+                    reduction_method=reduction_method,
+                    signature_hash=signature_hash,
+                    reduced_values_by_method=reduced_values_by_method,
+                )
+            ],
+        )
+
+    def append_formula_spectrum_batch(self, roi_id: str | int, rows: list[FormulaSpectrumBackupRow]) -> None:
+        """Batched form of `append_formula_spectrum`: writes every row in
+        `rows` (each a different spectral_cube_index for the same ROI,
+        oldest first) via one resize + one bulk write per dataset, instead
+        of one resize + write per row per dataset.
+
+        Why this exists: each `dataset.resize()` call extends that
+        dataset's HDF5 chunk index / the file's internal free-space
+        bookkeeping, and the cost of doing that grows with how many times
+        a dataset has EVER been resized over the file's lifetime - not
+        with the file's current byte size (confirmed empirically: write
+        time climbed from a live LSPRi eva session while the backup file's
+        own size barely changed, since most calls were cache-hit no-ops;
+        only the genuinely-new rows' write cost was climbing). A ~30-ROI
+        selection touches ~14 datasets per ROI, so one cube's worth of
+        backup writes at batch size 1 is ~400+ separate resize calls;
+        batching N cubes together cuts that by a factor of N.
+
+        All rows must share the same wavelength count (guaranteed within
+        one analysis run - the wavelength grid doesn't change mid-run).
+        Rows missing a given reduction method (from `reduced_values_by_
+        method`) that OTHER rows in the same batch do have get a NaN row
+        for that method, same as `_ensure_matrix_column`'s backfill for
+        rows that predate a method being tracked at all - every column in
+        a ROI's group must stay the same length.
+        """
+        if not rows:
+            return
+        n_wavelengths = len(rows[0].wavelengths_nm)
         group = self._absorbance_group(str(roi_id), n_wavelengths=n_wavelengths)
         if "wavelengths_nm" not in group:
-            group.create_dataset("wavelengths_nm", data=wavelengths_nm)
-        group.attrs["formula_key"] = formula_key
-        group.attrs["reduction_method"] = reduction_method
-        if reduced_values_by_method:
-            for method, (method_sample, method_reference) in reduced_values_by_method.items():
-                method_group = self._ensure_reduced_values_subgroup(group, method, n_wavelengths=n_wavelengths)
-                _append_row(method_group["sample_mean"], np.asarray(method_sample, dtype=np.float32))
-                _append_row(method_group["reference_mean"], np.asarray(method_reference, dtype=np.float32))
-        _append_scalar(group["cube_index"], int(cube_index))
-        _append_scalar(group["timestamp_utc_ms"], int(timestamp_utc_ms))
-        _append_row(group["absorbance"], np.asarray(formula_values, dtype=np.float32))
-        _append_row(group["sample_mean"], np.asarray(sample_mean, dtype=np.float32))
-        _append_row(group["reference_mean"], np.asarray(reference_mean, dtype=np.float32))
-        _append_scalar(group["signature_hash"], str(signature_hash))
+            group.create_dataset("wavelengths_nm", data=np.asarray(rows[0].wavelengths_nm, dtype=np.float64))
+        group.attrs["formula_key"] = rows[-1].formula_key
+        group.attrs["reduction_method"] = rows[-1].reduction_method
+
+        methods_present: set[str] = set()
+        for row in rows:
+            if row.reduced_values_by_method:
+                methods_present.update(row.reduced_values_by_method.keys())
+        for method in methods_present:
+            method_group = self._ensure_reduced_values_subgroup(group, method, n_wavelengths=n_wavelengths)
+            nan_row = np.full(n_wavelengths, np.nan, dtype=np.float32)
+            sample_stack = np.stack(
+                [
+                    np.asarray(row.reduced_values_by_method[method][0], dtype=np.float32)
+                    if row.reduced_values_by_method and method in row.reduced_values_by_method
+                    else nan_row
+                    for row in rows
+                ]
+            )
+            reference_stack = np.stack(
+                [
+                    np.asarray(row.reduced_values_by_method[method][1], dtype=np.float32)
+                    if row.reduced_values_by_method and method in row.reduced_values_by_method
+                    else nan_row
+                    for row in rows
+                ]
+            )
+            _append_rows(method_group["sample_mean"], sample_stack)
+            _append_rows(method_group["reference_mean"], reference_stack)
+
+        _append_scalars(group["cube_index"], [int(row.cube_index) for row in rows])
+        _append_scalars(group["timestamp_utc_ms"], [int(row.timestamp_utc_ms) for row in rows])
+        _append_rows(group["absorbance"], np.stack([np.asarray(row.formula_values, dtype=np.float32) for row in rows]))
+        _append_rows(group["sample_mean"], np.stack([np.asarray(row.sample_mean, dtype=np.float32) for row in rows]))
+        _append_rows(group["reference_mean"], np.stack([np.asarray(row.reference_mean, dtype=np.float32) for row in rows]))
+        _append_scalars(group["signature_hash"], [str(row.signature_hash) for row in rows])
 
     # -- export ------------------------------------------------------------
 
@@ -647,6 +789,61 @@ class ImagingMeasurementExportWriter:
                 self._handle.copy(key, dest)
             for attr_key, attr_value in self._handle.attrs.items():
                 dest.attrs[attr_key] = attr_value
+
+    def compact(self) -> tuple[int, int]:
+        """Rewrites this backup file in place into a fresh copy with clean
+        internal HDF5 bookkeeping - equivalent to what the `h5repack`
+        command-line tool does, but via the same in-process `Group.copy`
+        technique `export_snapshot` already uses, so no external tool
+        dependency is needed.
+
+        Why this exists: every dataset here is resizable and gets grown
+        one row (or one small batch - see append_formula_spectrum_batch)
+        at a time as analysis results arrive. HDF5's cost for extending a
+        resizable dataset grows with how many times it's EVER been
+        resized over the file's lifetime (chunk-index/free-space
+        bookkeeping), not with the file's current byte size - confirmed
+        empirically in a live session (write time climbed while file size
+        stayed flat). Copying every dataset into a brand-new file writes
+        each one fresh, in one pass, with no resize history at all -
+        resetting that accumulated cost back to zero. This is a
+        maintenance action the user (or, later, an automatic policy)
+        triggers deliberately, not something done on every write.
+
+        Any RAM-buffered-but-not-yet-written rows (see AnalysisWorkerMixin.
+        _flush_measurement_backup_buffers) are NOT included unless the
+        caller flushes them first - this only copies what's already on
+        disk in `self._handle`.
+
+        Returns (size_before_bytes, size_after_bytes) for the caller to
+        report what compacting actually achieved. Raises on failure
+        (e.g. disk full mid-copy) - the original file is left untouched
+        until the copy has fully succeeded, so a failed compaction never
+        destroys the working backup.
+        """
+        self._handle.flush()
+        size_before = self.path.stat().st_size
+        temp_path = self.path.with_name(self.path.name + ".compacting.tmp")
+        if temp_path.exists():
+            temp_path.unlink()
+        with h5py.File(temp_path, "w") as dest:
+            for key in self._handle.keys():
+                self._handle.copy(key, dest)
+            for attr_key, attr_value in self._handle.attrs.items():
+                dest.attrs[attr_key] = attr_value
+        # Everything below only runs once the copy above has fully
+        # succeeded (an exception during it propagates before this point,
+        # leaving the original file and handle completely untouched).
+        self._handle.close()
+        self.path.unlink()  # Windows can't rename onto an existing path
+        temp_path.rename(self.path)
+        self._handle = h5py.File(self.path, "a")
+        self._processed = self._handle.require_group("processed")
+        # Cached Group objects from the closed handle are now stale.
+        self._sensorgram_groups = {}
+        self._absorbance_groups = {}
+        size_after = self.path.stat().st_size
+        return size_before, size_after
 
     # -- lifecycle -------------------------------------------------------------
 

@@ -1329,6 +1329,17 @@ def _sensorgram_metric_task(
     trimmed_mean_fraction: float = 0.10,
     formula_key: str = "absorbance",
 ) -> SensorgramComputationResult:
+    # Cyclic GC is disabled for the run's duration (re-enabled + a one-off
+    # collect() in the GUI-thread completion handlers, on_sensorgram_ready/
+    # on_sensorgram_failed) - a standard, safe technique for a batch job
+    # like this: reference counting still frees the vast majority of
+    # objects immediately regardless, cyclic GC only exists to catch
+    # reference cycles, and skipping periodic cycle-hunting for a few
+    # minutes doesn't leak anything that isn't already cleaned up the
+    # moment it's turned back on.
+    import gc as _gc
+
+    _gc.disable()
     task_started = time.perf_counter()
     spectral_cube_payloads: list[tuple[int, tuple[object, ...]]] = []
     total_input_count = len(spectral_cube_payloads_or_spectral_cubes) if hasattr(spectral_cube_payloads_or_spectral_cubes, "__len__") else 0
@@ -1426,7 +1437,7 @@ def _sensorgram_metric_task(
                 completed_count=len(spectral_cube_indices),
                 total_count=len(spectral_cube_payloads),
                 prep_seconds=prep_seconds,
-                fit_seconds=fit_seconds,
+                fit_seconds=time.perf_counter() - compute_started,
                 total_seconds=time.perf_counter() - task_started,
                 cancelled=True,
             )
@@ -1473,6 +1484,12 @@ def _sensorgram_metric_task(
             if spectrum is None and spectral_cube_formula_spectrum_cache_get is not None:
                 spectrum = spectral_cube_formula_spectrum_cache_get(spectral_cube_index)
             freshly_computed = False
+            # Logged unconditionally (not just on a slow cube): cheap, and
+            # matches the existing stage-timing convention used elsewhere
+            # (e.g. _process_image_task's "Image raw load" log) for
+            # answering "which stage is actually slow" without re-adding
+            # instrumentation each time a slowdown gets reported.
+            _cube_compute_started = time.perf_counter()
             if spectrum is None:
                 _active_task = task_fn if task_fn is not None else _formula_spectrum_task
                 spectrum = _active_task(
@@ -1491,6 +1508,12 @@ def _sensorgram_metric_task(
                 freshly_computed = True
                 if spectral_cube_result_cache_store is not None:
                     spectral_cube_result_cache_store(spectral_cube_index, spectrum)
+            logging.getLogger("lspr_imaging_app.workflow").debug(
+                "SG cube compute timing | cube %s | %.1fms | cache_hit=%s",
+                int(spectral_cube_index),
+                (time.perf_counter() - _cube_compute_started) * 1000.0,
+                not freshly_computed,
+            )
             if not exempt_from_cancel_check and cancel_event is not None and cancel_event.is_set():
                 return SensorgramComputationResult(
                     spectral_cube_indices=np.asarray(spectral_cube_indices, dtype=np.int32),
@@ -1498,6 +1521,9 @@ def _sensorgram_metric_task(
                     metric_signal=np.asarray(metric_signals, dtype=np.float64),
                     completed_count=len(spectral_cube_indices),
                     total_count=len(spectral_cube_payloads),
+                    prep_seconds=prep_seconds,
+                    fit_seconds=time.perf_counter() - compute_started,
+                    total_seconds=time.perf_counter() - task_started,
                     cancelled=True,
                 )
 

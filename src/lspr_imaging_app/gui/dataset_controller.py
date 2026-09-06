@@ -234,8 +234,20 @@ class DatasetController:
     def _close_measurement_export_writer(self) -> None:
         """Close any measurement-export/backup writer left open from a
         previous dataset, so its file isn't held open (or mixed with data
-        from the newly loaded dataset)."""
+        from the newly loaded dataset).
+
+        Flushes any rows still buffered in RAM (see AnalysisWorkerMixin.
+        _flush_measurement_backup_buffers) first - a bulk analysis run
+        buffers several cubes' worth of backup rows before writing them in
+        one batch (measurement_backup_batch_size preference); without this
+        flush, switching/closing the dataset while a batch is still short
+        of its threshold would silently drop that buffered data, which a
+        graceful close/switch has no reason to do (only an actual crash
+        mid-batch is the accepted trade-off for that preference)."""
         window = self.window
+        analysis_controller = getattr(window, "_analysis_controller", None)
+        if analysis_controller is not None:
+            analysis_controller._flush_measurement_backup_buffers()
         writer = getattr(window, "_measurement_export_writer", None)
         if writer is not None:
             try:
@@ -247,6 +259,9 @@ class DatasetController:
         window._measurement_export_writer = None
         window._measurement_export_backed_up_formula_spectrum = set()
         window._measurement_export_backed_up_sensorgram = set()
+        window._formula_spectrum_backup_buffer = {}
+        window._sensorgram_backup_buffer = {}
+        window._measurement_backup_buffered_cube_count = 0
 
     def _open_measurement_export_writer_for_dataset(self) -> None:
         """Always-on incremental spectra/sensorgram backup for the newly
