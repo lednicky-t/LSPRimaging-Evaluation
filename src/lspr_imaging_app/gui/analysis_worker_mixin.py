@@ -632,6 +632,17 @@ class AnalysisWorkerMixin:
         wavelength_range = self.window._analysis_wavelength_range()
         reduction_method = active_reduction_method
         formula_key = active_formula_key
+        # A single-cube call (live preview, or a just-edited group member) is
+        # worth computing every Reduction method for, so switching the
+        # dropdown afterward stays instant - see reduce_sample_and_reference_
+        # all_methods's docstring. A multi-cube "Start analysis" sweep is not:
+        # paying that 4x cost (np.where's mask scan plus plane_fit's lstsq,
+        # both otherwise skippable) on every ROI of every wavelength of
+        # hundreds of cubes is real, measured multi-second-per-cube overhead
+        # for a switch most bulk runs never make - switching Reduction after
+        # the fact for an already-computed cube still works, it just re-reads
+        # that one cube's pixels instead of hitting a cache.
+        compute_all_reduction_methods = len(spectral_cubes) <= 1
         worker = FunctionWorker(
             _sensorgram_metric_task,
             spectral_cubes,
@@ -653,6 +664,7 @@ class AnalysisWorkerMixin:
             reduction_method=reduction_method,
             trimmed_mean_fraction=DEFAULT_TRIMMED_MEAN_FRACTION,
             formula_key=formula_key,
+            compute_all_reduction_methods=compute_all_reduction_methods,
         )
         worker.signals.progress.connect(self.window._update_busy_progress)
         worker.signals.partial.connect(

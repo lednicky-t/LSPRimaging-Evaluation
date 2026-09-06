@@ -375,10 +375,19 @@ def resample_raw_patch_to_processed_box(
     """Resample a raw-space patch (already read via a chunk-aware partial
     read, at `raw_patch_origin_xy` within the full raw image) directly into
     the final PROCESSED-space `box`, applying rotation/flip. Mirrors
-    apply_spatial_preprocessing_export's interpolation (scipy affine_transform
-    with the same fill-mode handling) but scoped to a small box instead of
-    the whole plane, and reading from an already-cropped-to-the-needed-region
-    raw patch instead of the full raw array.
+    apply_spatial_preprocessing_export's interpolation (same fill-mode
+    handling, including its cv2 fast path for the nearest/edge-stretch case)
+    but scoped to a small box instead of the whole plane, and reading from an
+    already-cropped-to-the-needed-region raw patch instead of the full raw
+    array.
+
+    The cv2 path introduces a tiny, deterministic difference from scipy's
+    continuous bilinear interpolation (OpenCV rounds the sub-pixel offset to
+    one of 32 discrete steps internally) - measured at up to ~0.4 counts on
+    real 16-bit sensor data, ~30,000x below that same data's own Poisson
+    shot-noise floor (~200 counts). See
+    docs/roi_scoped_resample_cv2_fast_path.md for the full measurement
+    writeup and why this is treated as scientifically negligible.
     """
     matrix, offset, out_shape = combined_transform_for_box(in_shape, settings, box)
     if out_shape[0] <= 0 or out_shape[1] <= 0:
@@ -389,6 +398,10 @@ def resample_raw_patch_to_processed_box(
     # subtraction from the offset term, not a matrix-multiplied one.
     local_offset = offset - np.array([float(raw_y0), float(raw_x0)])
     fill_mode = "constant" if bool(settings.rotation_fill_dark) else "nearest"
+    if fill_mode == "nearest":
+        cv2_result = _cv2_affine(raw_patch, matrix, local_offset, out_shape)
+        if cv2_result is not None:
+            return cv2_result
     return ndimage.affine_transform(
         raw_patch,
         matrix,

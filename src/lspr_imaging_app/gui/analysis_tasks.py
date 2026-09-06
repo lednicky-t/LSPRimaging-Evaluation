@@ -47,7 +47,7 @@ from lspr_imaging_app.processing.preprocess import (
 from lspr_imaging_app.processing.roi_array_geometry import ArrayGeometryEstimate, estimate_array_geometry, estimate_reference_ring_radii
 from lspr_imaging_app.processing.roi_detection import detect_rois, ignored_pixel_mask
 from lspr_imaging_app.processing.roi_histogram import estimate_roi_intensity_range
-from lspr_imaging_app.processing.roi_math import REDUCTION_METHODS, reduce_sample_and_reference_all_methods
+from lspr_imaging_app.processing.roi_math import REDUCTION_METHODS, reduce_sample_and_reference, reduce_sample_and_reference_all_methods
 from lspr_imaging_app.processing.roi_rasterize import expand_mask, expand_mask_to_patch
 
 
@@ -623,6 +623,7 @@ def _formula_spectrum_task(
     reduction_method: str = "mean",
     trimmed_mean_fraction: float = 0.10,
     formula_key: str = "absorbance",
+    compute_all_reduction_methods: bool = True,
 ) -> FormulaSpectrumResult:
     task_started = time.perf_counter()
     load_seconds = 0.0
@@ -837,21 +838,49 @@ def _formula_spectrum_task(
                 formula_value_single = float("nan")
                 reduced_by_method_single = {method: (float("nan"), float("nan")) for method in REDUCTION_METHODS}
             else:
-                # Always extracted (not just for plane_fit): reduce_sample_and_
-                # reference_all_methods computes every reduction method from
-                # these same pixel arrays, so switching Reduction afterward
-                # doesn't re-read pixels - see that function's docstring.
-                reference_yy_single, reference_xx_single = np.where(reference_mask_single)
-                reduced_by_method_single = reduce_sample_and_reference_all_methods(
-                    sample_pixels_single,
-                    reference_pixels_single,
-                    trimmed_mean_fraction=trimmed_mean_fraction,
-                    reference_xx=reference_xx_single,
-                    reference_yy=reference_yy_single,
-                    sample_x=roi.center_x,
-                    sample_y=roi.center_y,
-                )
-                sample_mean_single, reference_mean_single = reduced_by_method_single[active_reduction_method_key]
+                # np.where + reduce_sample_and_reference_all_methods (every
+                # method, so switching Reduction afterward doesn't re-read
+                # pixels - see that function's docstring) is only worth its
+                # cost when compute_all_reduction_methods says a caller
+                # actually wants that guarantee for this cube - e.g. the
+                # single cube currently being previewed. A bulk multi-cube
+                # "Start analysis" sweep passes False: it needs one number
+                # per ROI per wavelength, not four, and paying 4x here for
+                # hundreds of cubes whose Reduction is unlikely to ever be
+                # switched was the direct cause of a multi-second-per-cube
+                # regression (np.where's mask scan plus plane_fit's lstsq,
+                # both otherwise skippable, running unconditionally).
+                needs_plane_fit_coords = compute_all_reduction_methods or active_reduction_method_key == "plane_fit"
+                if needs_plane_fit_coords:
+                    reference_yy_single, reference_xx_single = np.where(reference_mask_single)
+                else:
+                    reference_yy_single = reference_xx_single = None
+                if compute_all_reduction_methods:
+                    reduced_by_method_single = reduce_sample_and_reference_all_methods(
+                        sample_pixels_single,
+                        reference_pixels_single,
+                        trimmed_mean_fraction=trimmed_mean_fraction,
+                        reference_xx=reference_xx_single,
+                        reference_yy=reference_yy_single,
+                        sample_x=roi.center_x,
+                        sample_y=roi.center_y,
+                    )
+                    sample_mean_single, reference_mean_single = reduced_by_method_single[active_reduction_method_key]
+                else:
+                    sample_mean_single, reference_mean_single = reduce_sample_and_reference(
+                        sample_pixels_single,
+                        reference_pixels_single,
+                        active_reduction_method_key,
+                        trimmed_mean_fraction=trimmed_mean_fraction,
+                        reference_xx=reference_xx_single,
+                        reference_yy=reference_yy_single,
+                        sample_x=roi.center_x,
+                        sample_y=roi.center_y,
+                    )
+                    reduced_by_method_single = {
+                        method: (sample_mean_single, reference_mean_single) if method == active_reduction_method_key else (float("nan"), float("nan"))
+                        for method in REDUCTION_METHODS
+                    }
                 formula_value_single = formula_value(sample_mean_single, reference_mean_single, formula_key)
 
             accumulator = roi_accumulators[int(roi.area_roi_id)]
@@ -972,6 +1001,7 @@ def _formula_spectrum_fast_task(
     reduction_method: str = "mean",
     trimmed_mean_fraction: float = 0.10,
     formula_key: str = "absorbance",
+    compute_all_reduction_methods: bool = True,
 ) -> FormulaSpectrumResult:
     """Fast multi-ROI absorbance spectrum using OME-Zarr chunk-aware spatial reads.
 
@@ -1038,6 +1068,15 @@ def _formula_spectrum_fast_task(
     combined_reduced_by_method: dict[str, list[tuple[float, float]]] = {method: [] for method in REDUCTION_METHODS}
     total = max(len(measurement_payload), 1)
 
+    # Debug-only, always-cheap-to-compute stage timing (perf_counter, one
+    # lock acquisition per wavelength, not per ROI - see the per-wavelength
+    # accumulation in _load_wl below) - same convention as _process_image_
+    # task's "Image raw load" and _formula_spectrum_task's own timing, added
+    # to answer "which stage is actually slow" for a "SG cube compute
+    # timing" outlier without re-instrumenting from scratch each time.
+    _stage_timing_lock = threading.Lock()
+    _stage_timing_totals = {"io": 0.0, "resample": 0.0, "mask": 0.0, "where": 0.0, "reduce": 0.0}
+
     def _fast_roi_mask_cache_entry(affine_matrix_local: np.ndarray | None) -> dict[str, object]:
         """Same idea as _absorbance_spectrum_task's _build_roi_mask_cache: one
         cache entry per (patch shape/origin, ROI set, affine matrix) holds
@@ -1089,7 +1128,10 @@ def _formula_spectrum_fast_task(
         if record is None:
             return (index, float(wavelength_nm), empty_entry, empty_per_roi)
 
+        _io_seconds = 0.0
+        _resample_seconds = 0.0
         if flatten_background_enabled:
+            _io_started = time.perf_counter()
             raw_image = load_image_array(str(record.path))
             background_rois = selected_rois if bool(getattr(preprocessing, "flatten_background_exclude_area_rois", True)) else None
             background_mask = background_mask_settings if bool(getattr(preprocessing, "flatten_background_exclude_mask", False)) else None
@@ -1100,19 +1142,28 @@ def _formula_spectrum_fast_task(
                 mask_state=mask_state, region=box,
             )
             patch = np.asarray(patch, dtype=np.float32)
+            _io_seconds = time.perf_counter() - _io_started
         else:
+            _io_started = time.perf_counter()
             raw_patch = dataset_load_plane_roi(dataset, int(spectral_cube_index), float(wavelength_nm), raw_y0, raw_y1, raw_x0, raw_x1, record=record)
+            _io_seconds = time.perf_counter() - _io_started
             if raw_patch is None or raw_patch.size == 0:
                 return (index, float(wavelength_nm), empty_entry, empty_per_roi)
+            _resample_started = time.perf_counter()
             patch = resample_raw_patch_to_processed_box(
                 np.asarray(raw_patch, dtype=np.float32), (raw_x0, raw_y0), raw_shape, preprocessing, box,
             )
+            _resample_seconds = time.perf_counter() - _resample_started
 
         ignored_patch = None
         if external_mask is not None:
             mask_full = np.asarray(external_mask, dtype=bool)
             if mask_full.shape[0] >= y1 and mask_full.shape[1] >= x1:
                 ignored_patch = mask_full[y0:y1, x0:x1]
+
+        nonlocal_mask_seconds = 0.0
+        nonlocal_where_seconds = 0.0
+        nonlocal_reduce_seconds = 0.0
 
         def _means_for(
             rois_subset: list[AreaRoi],
@@ -1122,13 +1173,16 @@ def _formula_spectrum_fast_task(
             extra_exclude_mask: np.ndarray | None = None,
             precomputed_masks: tuple[np.ndarray, np.ndarray] | None = None,
         ) -> tuple[float, float, float, int, int, dict[str, tuple[float, float]]]:
+            nonlocal nonlocal_mask_seconds, nonlocal_where_seconds, nonlocal_reduce_seconds
             if precomputed_masks is not None:
                 roi_mask, reference_mask = precomputed_masks
             else:
+                _mask_started = time.perf_counter()
                 roi_mask, reference_mask = _selected_roi_masks_for_spectrum(
                     (patch_h, patch_w), rois_subset, ids_subset, reference_inner_radius_px, reference_outer_radius_px,
                     affine_matrix, patch_origin_xy=(x0, y0),
                 )
+                nonlocal_mask_seconds += time.perf_counter() - _mask_started
             if extra_exclude_mask is not None:
                 # Keeps a neighboring selected ROI's sample pixels out of THIS
                 # roi's reference ring - see _absorbance_spectrum_task for the
@@ -1146,23 +1200,52 @@ def _formula_spectrum_fast_task(
             # patch's (x0, y0) origin so a plane fit is evaluated in the same
             # absolute coordinate frame as roi.center_x/roi.center_y - a
             # mismatch here would silently produce plausible-looking wrong
-            # numbers rather than crashing. Computed unconditionally (not just
-            # for plane_fit): reduce_sample_and_reference_all_methods computes
-            # every reduction method from these same pixel arrays, so
-            # switching Reduction afterward doesn't re-read pixels.
-            reference_row_idx, reference_col_idx = np.where(reference_mask)
-            reference_yy = reference_row_idx.astype(np.float64) + float(y0)
-            reference_xx = reference_col_idx.astype(np.float64) + float(x0)
-            reduced_by_method = reduce_sample_and_reference_all_methods(
-                sample_pixels, reference_pixels,
-                trimmed_mean_fraction=trimmed_mean_fraction,
-                reference_xx=reference_xx, reference_yy=reference_yy,
-                sample_x=sample_x, sample_y=sample_y,
-            )
-            sm, rm = reduced_by_method[active_reduction_method_key]
+            # numbers rather than crashing. Only computed when actually
+            # needed (see compute_all_reduction_methods below) -
+            # reduce_sample_and_reference_all_methods computes every
+            # reduction method from these same pixel arrays so switching
+            # Reduction afterward doesn't re-read pixels, but that guarantee
+            # is only worth paying for on a cube someone might actually
+            # switch Reduction on (a live single-cube preview); unconditionally
+            # doing this np.where mask scan plus plane_fit's lstsq for every
+            # ROI of every wavelength of a hundreds-of-cubes bulk sweep is
+            # exactly what made "Start analysis" multiple seconds slower per
+            # cube after reduce_sample_and_reference_all_methods was introduced.
+            needs_plane_fit_coords = compute_all_reduction_methods or active_reduction_method_key == "plane_fit"
+            if needs_plane_fit_coords:
+                _where_started = time.perf_counter()
+                reference_row_idx, reference_col_idx = np.where(reference_mask)
+                nonlocal_where_seconds += time.perf_counter() - _where_started
+                reference_yy = reference_row_idx.astype(np.float64) + float(y0)
+                reference_xx = reference_col_idx.astype(np.float64) + float(x0)
+            else:
+                reference_yy = reference_xx = None
+            _reduce_started = time.perf_counter()
+            if compute_all_reduction_methods:
+                reduced_by_method = reduce_sample_and_reference_all_methods(
+                    sample_pixels, reference_pixels,
+                    trimmed_mean_fraction=trimmed_mean_fraction,
+                    reference_xx=reference_xx, reference_yy=reference_yy,
+                    sample_x=sample_x, sample_y=sample_y,
+                )
+                sm, rm = reduced_by_method[active_reduction_method_key]
+            else:
+                sm, rm = reduce_sample_and_reference(
+                    sample_pixels, reference_pixels, active_reduction_method_key,
+                    trimmed_mean_fraction=trimmed_mean_fraction,
+                    reference_xx=reference_xx, reference_yy=reference_yy,
+                    sample_x=sample_x, sample_y=sample_y,
+                )
+                reduced_by_method = {
+                    method: (sm, rm) if method == active_reduction_method_key else (float("nan"), float("nan"))
+                    for method in REDUCTION_METHODS
+                }
+            nonlocal_reduce_seconds += time.perf_counter() - _reduce_started
             return formula_value(sm, rm, formula_key), sm, rm, int(sample_pixels.size), int(reference_pixels.size), reduced_by_method
 
+        _mask_cache_entry_started = time.perf_counter()
         mask_cache_entry = _fast_roi_mask_cache_entry(affine_matrix)
+        nonlocal_mask_seconds += time.perf_counter() - _mask_cache_entry_started
 
         # Union of every selected ROI's own sample area, used only for the
         # reference-ring exclusion above - not for pooling pixels. With one
@@ -1208,6 +1291,16 @@ def _formula_spectrum_fast_task(
         else:
             empty_reduced = {method: (float("nan"), float("nan")) for method in REDUCTION_METHODS}
             combined = (float("nan"), float("nan"), float("nan"), total_sample_px, total_reference_px, empty_reduced)
+        # One lock acquisition per wavelength (not per ROI) - _means_for above
+        # accumulates into the nonlocal_* floats across all ROIs of this
+        # wavelength first, so concurrent _load_wl calls (one per wavelength,
+        # via the thread pool below) only ever contend on this single add.
+        with _stage_timing_lock:
+            _stage_timing_totals["io"] += _io_seconds
+            _stage_timing_totals["resample"] += _resample_seconds
+            _stage_timing_totals["mask"] += nonlocal_mask_seconds
+            _stage_timing_totals["where"] += nonlocal_where_seconds
+            _stage_timing_totals["reduce"] += nonlocal_reduce_seconds
         return (index, float(wavelength_nm), combined, per_roi)
 
     worker_count = max(1, min(max(int(os.cpu_count() or 2) // 2, 2), 8, len(measurement_payload)))
@@ -1269,6 +1362,18 @@ def _formula_spectrum_fast_task(
                 s, rr = roi_reduced_by_method[method]
                 accumulator["reduced_by_method"][method].append((float(s), float(rr)))
 
+    logging.getLogger("lspr_imaging_app.workflow").debug(
+        "SG fast task stage timing | cube %s | io=%.1fms resample=%.1fms mask=%.1fms where=%.1fms reduce=%.1fms wavelengths=%s rois=%s",
+        int(spectral_cube_index),
+        _stage_timing_totals["io"] * 1000.0,
+        _stage_timing_totals["resample"] * 1000.0,
+        _stage_timing_totals["mask"] * 1000.0,
+        _stage_timing_totals["where"] * 1000.0,
+        _stage_timing_totals["reduce"] * 1000.0,
+        total,
+        len(selected_rois),
+    )
+
     def _reduced_arrays_by_method(pairs_by_method: dict[str, list[tuple[float, float]]]) -> dict[str, tuple[np.ndarray, np.ndarray]]:
         return {
             method: (
@@ -1328,6 +1433,7 @@ def _sensorgram_metric_task(
     reduction_method: str = "mean",
     trimmed_mean_fraction: float = 0.10,
     formula_key: str = "absorbance",
+    compute_all_reduction_methods: bool = True,
 ) -> SensorgramComputationResult:
     # Cyclic GC is disabled for the run's duration (re-enabled + a one-off
     # collect() in the GUI-thread completion handlers, on_sensorgram_ready/
@@ -1504,6 +1610,7 @@ def _sensorgram_metric_task(
                     reduction_method=reduction_method,
                     trimmed_mean_fraction=trimmed_mean_fraction,
                     formula_key=formula_key,
+                    compute_all_reduction_methods=compute_all_reduction_methods,
                 )
                 freshly_computed = True
                 if spectral_cube_result_cache_store is not None:

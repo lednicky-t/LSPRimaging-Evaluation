@@ -38,7 +38,14 @@ dependencies = [
     "lspr-ui>=0.1.0",
     "lspr-core>=0.1.0",
     "lspr-io>=0.1.0",
-    "zarr>=3.2,<4",
+    # zarr>=3.3 specifically (not just >=3.2): 3.2.x's local-store sharding
+    # partial-read path issues one file-open + thread-pool round-trip per
+    # logical chunk touched even within an already-open shard, adding ~1.5ms
+    # of pure dispatch overhead per chunk (measured via cProfile) regardless
+    # of chunk size - a scoped ROI read spanning ~100 chunks cost ~150ms on
+    # 3.2.1 vs ~37ms on 3.3.0 for the exact same file. Fixed upstream by
+    # zarr-python PR #3004 ("Optimize partial shard reads"), released in 3.3.0.
+    "zarr>=3.3,<4",
 ]
 
 [project.scripts]

@@ -38,6 +38,7 @@ from PyQt6.QtGui import (
     QPainterPath,
     QPalette,
     QPen,
+    QShortcut,
     QWheelEvent,
 )
 from PyQt6.QtWidgets import (
@@ -2404,6 +2405,14 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, HistogramMaskMixin, Measurem
         self.histogram_bins_spin.editingFinished.connect(self._save_control_preferences)
         self.analysis_preview_button.clicked.connect(self._toggle_analysis_live_preview)
         self.analysis_run_button.clicked.connect(self._analysis_controller.run_or_stop_sensorgram)
+        # analysis_run_button is a bare ClickableIconLabel (QLabel), which UI
+        # Automation tooling (pywinauto, screen readers) generally cannot
+        # invoke - unlike a real QAbstractButton, it has no accessible
+        # Invoke/Toggle pattern for synthetic clicks to land on. This
+        # keyboard equivalent gives automated/scripted control over Start/
+        # Stop analysis without relying on a synthetic mouse click hitting
+        # the right pixel.
+        QShortcut(QKeySequence("Ctrl+Shift+F9"), self, activated=self._run_or_stop_sensorgram_via_shortcut)
         self.roi_list_cached_button.toggled.connect(self._on_cached_rois_only_toggled)
         self.analysis_fit_method_combo.currentIndexChanged.connect(self._analysis_controller.on_fit_settings_changed)
         self.analysis_fit_method_combo.currentIndexChanged.connect(self._analysis_controller.sync_analysis_fitting_controls)
@@ -6615,6 +6624,21 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, HistogramMaskMixin, Measurem
 
     def _on_analysis_section_applied_changed(self, applied: bool) -> None:
         self._analysis_controller._on_analysis_section_applied_changed(applied)
+
+    def _run_or_stop_sensorgram_via_shortcut(self) -> None:
+        """Ctrl+Shift+F9 handler: unlike the analysis_run_button click path,
+        this must work as a single reliable trigger regardless of the
+        Analysis section's applied state - in particular, startup always
+        forces it off (see _on_startup_dataset_restore_done), so a script
+        driving only this shortcut would otherwise silently no-op on a
+        freshly launched session. ROI selection is likewise not restored
+        across a restart, so select every ROI row when nothing is already
+        selected - matches clicking "select all" in the ROI table by hand."""
+        if not self.analysis_section.is_applied():
+            self.analysis_section.set_applied(True)
+        if not self._selected_roi_ids:
+            self._select_roi_table_rows(list(range(self.roi_table.rowCount())))
+        self._analysis_controller.run_or_stop_sensorgram()
 
     def _update_geometry_control_ranges(self, image_shape: tuple[int, int] | None) -> None:
         if image_shape is None:
