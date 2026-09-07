@@ -4458,6 +4458,19 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, HistogramMaskMixin, Measurem
         super().keyPressEvent(event)
 
     def closeEvent(self, event) -> None:  # type: ignore[override]
+        # Undo the process-wide app.installEventFilter(self) from __init__ -
+        # without this, this window stays registered as a global event
+        # filter for the rest of the process's life even after it's closed.
+        # Harmless for normal single-window app usage (the filter just lives
+        # as long as the process does), but a real leak anywhere multiple
+        # MainWindow instances share one QApplication in the same process -
+        # notably the test suite, where every test file's `QApplication.
+        # instance() or QApplication([])` reuses one process-wide QApplication
+        # across dozens of MainWindow instances, each left as a permanent
+        # zombie filter still receiving every Qt event in the whole session.
+        app = QApplication.instance()
+        if app is not None:
+            app.removeEventFilter(self)
         if self._ome_zarr_export_running and self._ome_zarr_export_cancel_event is not None:
             self._ome_zarr_export_cancel_event.set()
         # A bulk sensorgram run buffers several cubes' worth of measurement-

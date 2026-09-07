@@ -714,17 +714,23 @@ def _scoped_formula_spectrum_task(
                 except Exception:
                     pass
                 return cached_value
-        combined_roi_mask, combined_reference_mask = _selected_roi_masks_for_spectrum(
-            (patch_h, patch_w), selected_rois, selected_roi_ids, reference_inner_radius_px, reference_outer_radius_px,
-            affine_matrix_local, patch_origin_xy=(x0, y0),
-        )
+        # Only the sample-mask union is ever read back out of "combined"
+        # (see all_selected_sample_mask below - the reference-mask half was
+        # computed and immediately discarded). Building it from the per-ROI
+        # masks below (a cheap boolean OR) instead of a second, separate
+        # _selected_roi_masks_for_spectrum call over every ROI at once avoids
+        # rasterizing every ROI's sample circle twice - measured ~20-30%
+        # avoidable overhead in this cache-build step on a 160-ROI selection.
         per_roi_masks: dict[int, tuple[np.ndarray, np.ndarray]] = {}
         for roi in selected_rois:
             per_roi_masks[int(roi.area_roi_id)] = _selected_roi_masks_for_spectrum(
                 (patch_h, patch_w), [roi], (int(roi.area_roi_id),), reference_inner_radius_px, reference_outer_radius_px,
                 affine_matrix_local, patch_origin_xy=(x0, y0),
             )
-        cached_value = {"combined": (combined_roi_mask, combined_reference_mask), "per_roi": per_roi_masks}
+        combined_roi_mask = np.zeros((patch_h, patch_w), dtype=bool)
+        for roi_sample_mask, _roi_reference_mask in per_roi_masks.values():
+            combined_roi_mask |= roi_sample_mask
+        cached_value = {"combined": (combined_roi_mask, None), "per_roi": per_roi_masks}
         with roi_mask_cache_lock:
             roi_mask_cache[cache_key] = cached_value
             try:
@@ -960,7 +966,16 @@ def _scoped_formula_spectrum_task(
             _stage_timing_totals["reduce"] += nonlocal_reduce_seconds
         return (index, float(wavelength_nm), combined, per_roi)
 
-    worker_count = max(1, min(max(int(os.cpu_count() or 2) // 2, 2), 8, len(measurement_payload)))
+    # Capped at 4, not 8 - Follow-up #4 of bulk_analysis_performance_
+    # investigation.md directly measured (on the maintainer's real dataset)
+    # that per-wavelength read wall-clock is flat from 1-4 workers and
+    # actively *worse* at 8 (the zarr dispatch layer, not disk bandwidth, is
+    # the bottleneck - more threads just contend for it). That measurement
+    # is still the current reality since the `zarrs` codec pipeline (which
+    # might change this calculus) is disabled per Follow-up #7 - re-measure
+    # if it's ever re-enabled. Matches the cap _sensorgram_metric_task's own
+    # prep-phase pool already uses a few hundred lines below.
+    worker_count = max(1, min(max(int(os.cpu_count() or 2) // 2, 2), 4, len(measurement_payload)))
     indexed = list(enumerate(measurement_payload))
     results: list = [None] * len(measurement_payload)
 

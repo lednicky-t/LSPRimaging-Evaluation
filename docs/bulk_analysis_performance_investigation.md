@@ -27,6 +27,14 @@ The chunk-size re-export is, for now, the only remaining path to the
 fixes, the mask reach-limiting fix, the always-scoped-path unification, the
 busy-progress speed window) is unaffected and still active.
 
+**Update, 2026-09-07 - Follow-up #10**: a fresh, report-independent audit of
+the whole pipeline found and fixed three more small issues (worker-count cap
+too high, redundant mask rasterization, an unrelated global event-filter
+leak found in passing) and quantified a real remaining gap
+(`flatten_background_enabled` bypasses every scoped-read win in this doc,
+14x measured) that was deliberately left unfixed - see "Follow-up #10" near
+the end for why.
+
 ## The three fixes already landed (summary - see submodule commit `176bde9` for full detail)
 
 1. **Reduction-method over-computation.** `reduce_sample_and_reference_all_methods`
@@ -1086,6 +1094,105 @@ regressions, and the maintainer re-running the same real 12-cube TIFF
 analysis for a genuine before/after from real data (not just the synthetic
 reproduction above) - the actual point of this exercise per this doc's own
 "Verify a fix with a real before/after measurement" rule.
+
+## Follow-up #10 (2026-09-07): fresh audit after Follow-up #9 - three more fixes, one gap quantified and deliberately left unfixed
+
+A broader "recheck the whole pipeline for bottlenecks/architecture issues"
+pass, independent of any specific slowness report, done after Follow-up #9
+landed. Three small, low-risk fixes shipped; one real gap was measured and
+explicitly *not* turned into a code change, because fixing it would mean
+trading off scientific correctness for speed - a decision for the maintainer,
+not something to bury in a "performance fix."
+
+### Fix: worker_count cap lowered from 8 to 4
+
+`_scoped_formula_spectrum_task`'s per-wavelength `ThreadPoolExecutor` used
+`min(cpu_count // 2, 8)`, reachable on any 16+ logical-core machine. This
+directly contradicts Follow-up #4's own measurement earlier in this doc: wall
+time for 26 real reads was flat from 1-4 workers (~1950-2050ms) and *worse*
+at 8 (2855ms) - the zarr dispatch layer is the bottleneck, not disk
+bandwidth, and more threads just contend for it harder. That finding is still
+current (the `zarrs` pipeline that might change it is disabled per
+Follow-up #7). `_sensorgram_metric_task`'s own prep-phase pool a few hundred
+lines below already used `min(4, cpu_count)` - this brings the main
+per-wavelength loop in line with it. Re-measure if `zarrs` is ever
+re-enabled; its different I/O characteristics might change the optimum.
+
+### Fix: redundant mask rasterization in `_fast_roi_mask_cache_entry`
+
+The mask-cache build computed the "combined" selection mask via a *second*,
+separate `_selected_roi_masks_for_spectrum` call over every selected ROI at
+once, in addition to the per-ROI loop that was already computing each ROI's
+own mask individually - rasterizing every ROI's sample circle twice per
+cache build. Worse: the combined call's *reference*-mask half was never read
+by any caller (the one call site unpacks it as `_unused_reference_mask`) -
+pure wasted work.
+
+Fixed: `combined_roi_mask` is now built by OR-ing the already-computed
+per-ROI sample masks together; the combined reference mask isn't computed at
+all (the cache entry's `"combined"` value is now `(combined_roi_mask, None)`).
+Correctness verified directly: a 25-ROI synthetic case comparing the old
+"recompute over all ROIs" mask against the new "OR of independently-computed
+per-ROI masks" - `np.array_equal` true (bit-identical, as expected: both are
+the same union of the same per-ROI `transformed_disk_mask` calls, just
+computed once instead of twice). Measured ~20-30% avoidable overhead in the
+mask-cache-build step on a 160-ROI/806x1288 synthetic case. Since this build
+is cached per unique (patch, ROI-set, affine) combination - once per run when
+chromatic correction is off, once per wavelength when it's on - the real
+saving is a one-time few-hundred-ms-to-low-seconds amount per run, not a
+per-cube recurring cost.
+
+### Fix: MainWindow's global event-filter leak (not part of "Start analysis" specifically, found in passing)
+
+`main_window.py`'s `__init__` calls `app.installEventFilter(self)`
+(registering the window as a filter for *every* Qt event in the whole
+process), with no matching `app.removeEventFilter(self)` anywhere, including
+`closeEvent`. Harmless for real single-window usage (the filter just lives as
+long as the process does). Real impact: every test file in this repo's suite
+does `QApplication.instance() or QApplication([])`, meaning all 19+ test
+files that construct a `MainWindow` share one process-wide `QApplication` -
+so across a full test session, every `MainWindow` instance ever constructed
+stays registered as a permanent filter, still receiving every subsequent Qt
+event anywhere in the whole session. This was actually observed: running
+`pytest tests/unit tests/integration -k lspri` threw repeated
+`AttributeError: 'MainWindow' object has no attribute '_image_interaction'`
+from inside `eventFilter`, silently - PyQt6 swallows exceptions raised inside
+an event filter rather than crashing, so pytest still reported the run as
+516 passed even while this fired dozens of times. Root cause: a torn-down
+MainWindow instance from an earlier test still receiving events via its
+zombie filter registration. Fixed with one line in `closeEvent`:
+`app.removeEventFilter(self)`. Full `-k lspri` suite re-run afterward to
+confirm no regressions and that the AttributeError spam is gone.
+
+### Measured, not fixed: `flatten_background_enabled` bypasses every OME-Zarr scoped-read optimization in this entire doc
+
+`_scoped_formula_spectrum_task`'s `_load_wl` reads the *full plane*
+unconditionally whenever `preprocessing.flatten_background_enabled` is on,
+regardless of how small the ROI selection's own scoped box would otherwise
+be - already known qualitatively ("same cost as the slow path", Follow-up #6
+above), now quantified: for a compact ROI selection (~180x180px union box,
+e.g. 8 clustered ROIs), a synthetic-zarr benchmark measured the scoped box
+read at **14x faster** than the full-plane read. Every `io=` win from every
+earlier follow-up in this doc is unavailable the moment this setting is on.
+
+**Investigated as a possible fix, deliberately not implemented.** The
+"thread the region through" half is already done (Follow-up #6's
+`region=box` plumbing into `apply_preprocessing`/`flatten_background`). What
+remains is a genuine algorithmic requirement, not an oversight:
+`flatten_background`'s `baseline` value
+(`float(np.median(background_full[valid_mask]))`) is a whole-image median
+statistic, added back into every returned pixel - not a quantity that decays
+with distance the way the Gaussian-blurred background estimate itself does.
+Scoping the raw read to a padded box around the ROI selection would change
+that baseline for any image whose ROI-cluster region and the rest of the
+frame differ in average brightness - a real, image-dependent shift in
+computed absorbance values, not something boundable with a fixed safety
+margin the way Follow-up #6's binned-median resolution shortcut was. This is
+a correctness/scientific-validity trade-off (this repo's priority #1),
+deliberately left as a flagged gap rather than a silent performance fix - if
+this is worth pursuing, it needs the same "measure the actual worst-case
+discrepancy on real data" treatment Follow-up #6 gave its own approximation,
+which is a dedicated task, not a quick patch.
 
 ## One fix attempted and reverted during this investigation (for context)
 
