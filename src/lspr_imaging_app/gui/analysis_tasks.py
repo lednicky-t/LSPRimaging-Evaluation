@@ -10,7 +10,7 @@ from pathlib import Path
 
 import numpy as np
 
-from lspr_imaging_app.domain.models import FormulaSpectrumResult, AreaRoi, AreaRoiDetectionSettings, ChromaticTransformModel
+from lspr_imaging_app.domain.models import FormulaSpectrumResult, AreaRoi, AreaRoiDetectionSettings, ChromaticTransformModel, ImageDataset
 from lspr_imaging_app.gui.worker import SensorgramComputationResult, SensorgramPointResult
 from lspr_imaging_app.io.dataset import dataset_load_plane_roi, export_ome_zarr_dataset, load_image_array
 from lspr_imaging_app.storage.workspace import load_preprocessing, load_processing_profile
@@ -355,37 +355,20 @@ def _selected_roi_masks_for_spectrum(
 
     default_inner_radius = float(max(reference_inner_radius_px, 0.0))
     default_outer_radius = float(max(reference_outer_radius_px, default_inner_radius))
-    use_affine = affine_matrix is not None and not np.allclose(
-        np.asarray(affine_matrix, dtype=np.float64),
-        identity_affine_matrix(),
-        atol=1e-9,
-    )
+    # A concrete matrix (identity when no chromatic correction is active),
+    # always routed through the reach-limited transformed_*_mask functions
+    # below. A previous "no affine" fast path here instead computed a full
+    # image_height x image_width distance grid per ROI - O(patch area x ROI
+    # count) instead of O(ROI count x ROI area) - profiled directly against a
+    # 160-ROI/806x1288 case at ~30ms/ROI (~4.8s for one mask-cache build in
+    # isolation, single-threaded), the dominant cost behind a real "78.6s
+    # stall building masks for the first cube" report (see Follow-up #9 in
+    # bulk_analysis_performance_investigation.md). transformed_annulus_mask's
+    # reach-box math already handles an identity (or near-identity) matrix
+    # correctly and cheaply - a 2x2 SVD per ROI, negligible next to the
+    # full-grid cost it replaces.
+    effective_affine_matrix = affine_matrix if affine_matrix is not None else identity_affine_matrix()
     px0, py0 = patch_origin_xy
-    if not use_affine:
-        yy, xx = np.indices((image_height, image_width), dtype=np.float32)
-        xx = xx + px0
-        yy = yy + py0
-        for roi in effective_rois:
-            # "mask"-geometry ROIs carry their own cropped bitmap and skip the
-            # circle/annulus formula below; sample and reference are dispatched
-            # independently so one can be a mask while the other stays a circle.
-            needs_distance = roi.sample_geometry_type != "mask" or roi.reference_geometry_type not in ("mask", "none")
-            distance_sq = (xx - float(roi.center_x)) ** 2 + (yy - float(roi.center_y)) ** 2 if needs_distance else None
-
-            if roi.sample_geometry_type == "mask" and roi.sample_mask is not None:
-                roi_mask |= expand_mask_to_patch(roi.sample_mask, (px0, py0), (image_height, image_width))
-            else:
-                roi_mask |= distance_sq <= float(roi.sample_radius_px) ** 2
-
-            inner_radius, outer_radius = _effective_reference_radii(roi, default_inner_radius, default_outer_radius)
-            if roi.reference_geometry_type == "mask" and roi.reference_mask is not None:
-                reference_mask |= expand_mask_to_patch(roi.reference_mask, (px0, py0), (image_height, image_width))
-            elif roi.reference_geometry_type != "none" and outer_radius > 0.0:
-                outer_mask = distance_sq <= outer_radius**2
-                inner_mask = distance_sq < inner_radius**2 if inner_radius > 0.0 else np.zeros_like(outer_mask)
-                reference_mask |= outer_mask & ~inner_mask
-        reference_mask &= ~roi_mask
-        return roi_mask, reference_mask
 
     # (0, 0) covers both the original full-image call convention (all existing
     # callers) and a patch that happens to start at the image origin — either
@@ -407,7 +390,7 @@ def _selected_roi_masks_for_spectrum(
                     (image_height, image_width),
                     (float(roi.center_x), float(roi.center_y)),
                     float(roi.sample_radius_px),
-                    affine_matrix,
+                    effective_affine_matrix,
                 )
             inner_radius, outer_radius = _effective_reference_radii(roi, default_inner_radius, default_outer_radius)
             if roi.reference_geometry_type == "mask" and roi.reference_mask is not None:
@@ -418,7 +401,7 @@ def _selected_roi_masks_for_spectrum(
                     (float(roi.center_x), float(roi.center_y)),
                     float(inner_radius),
                     float(outer_radius),
-                    affine_matrix,
+                    effective_affine_matrix,
                 )
     else:
         for roi in effective_rois:
@@ -430,7 +413,7 @@ def _selected_roi_masks_for_spectrum(
                     (image_height, image_width),
                     (float(roi.center_x), float(roi.center_y)),
                     float(roi.sample_radius_px),
-                    affine_matrix,
+                    effective_affine_matrix,
                 )
             inner_radius, outer_radius = _effective_reference_radii(roi, default_inner_radius, default_outer_radius)
             if roi.reference_geometry_type == "mask" and roi.reference_mask is not None:
@@ -442,7 +425,7 @@ def _selected_roi_masks_for_spectrum(
                     (float(roi.center_x), float(roi.center_y)),
                     float(inner_radius),
                     float(outer_radius),
-                    affine_matrix,
+                    effective_affine_matrix,
                 )
     reference_mask &= ~roi_mask
     return roi_mask, reference_mask
@@ -497,23 +480,34 @@ def compute_roi_union_bounding_box(
     return x0, y0, x1, y1
 
 
-def roi_union_box_is_worth_scoping(
-    box: tuple[int, int, int, int],
+def spectrum_read_region(
+    dataset: ImageDataset,
     image_height: int,
     image_width: int,
-    max_area_fraction: float = 0.6,
-) -> bool:
-    """Whether a scoped read of `box` is meaningfully cheaper than loading the
-    whole plane. If selected ROIs are scattered enough that their union
-    covers most of the image anyway, a full-plane load is simpler and just as
-    fast, so callers should fall back rather than bother with a partial read.
+    selected_rois: list[AreaRoi],
+    reference_outer_radius_px: float,
+    affine_matrices: list[np.ndarray | None],
+) -> tuple[int, int, int, int] | None:
+    """The region ("chunk") one spectrum-compute pass reads/processes at
+    once - the single place format enters `_scoped_formula_spectrum_task`'s
+    otherwise format-agnostic pipeline (everything downstream of this just
+    reads/processes whatever box comes back, TIFF or OME-Zarr alike).
+
+    TIFF's only real read unit is the whole plane: `dataset_load_plane_roi`'s
+    TIFF fallback always loads the full file regardless of the requested
+    region, so a smaller box wouldn't reduce I/O - it would only shrink
+    which pixels the mask/reduction math touches, for no reason. OME-Zarr's
+    chunked reads stay cheap at any size (see the `zarrs` codec pipeline
+    fix), so the region is the ROI union bounding box - as tight as the
+    actual selection allows, via `compute_roi_union_bounding_box`.
     """
-    x0, y0, x1, y1 = box
-    full_area = image_height * image_width
-    if full_area <= 0:
-        return False
-    box_area = (x1 - x0) * (y1 - y0)
-    return box_area <= max_area_fraction * full_area
+    if not dataset.is_ome_zarr:
+        if image_height <= 0 or image_width <= 0:
+            return None
+        return (0, 0, image_width, image_height)
+    return compute_roi_union_bounding_box(
+        selected_rois, reference_outer_radius_px, affine_matrices, image_height, image_width,
+    )
 
 
 def _roi_formula_spectrum_signature(
@@ -605,382 +599,7 @@ def _roi_mask_signature(roi_mask) -> tuple[object, ...] | None:
     return (roi_mask.x0, roi_mask.y0, roi_mask.mask.shape, hash(roi_mask.mask.tobytes()))
 
 
-def _formula_spectrum_task(
-    measurement_payload: list[tuple[float, str, list[AreaRoi], np.ndarray | None, bool, np.ndarray | None]],
-    preprocessing,
-    flatten_mask_settings,
-    measurement_settings,
-    roi_mask_cache,
-    roi_mask_cache_lock,
-    roi_mask_cache_max_size: int,
-    source_rois: list[AreaRoi],
-    selected_roi_ids: tuple[int, ...],
-    reference_inner_radius_px: float,
-    reference_outer_radius_px: float,
-    mask_state,
-    cancel_event: threading.Event | None = None,
-    progress_callback=None,
-    reduction_method: str = "mean",
-    trimmed_mean_fraction: float = 0.10,
-    formula_key: str = "absorbance",
-    compute_all_reduction_methods: bool = True,
-) -> FormulaSpectrumResult:
-    task_started = time.perf_counter()
-    load_seconds = 0.0
-    roi_seconds = 0.0
-    cache_stats = {
-        "image_hits": 0,
-        "image_builds": 0,
-        "roi_hits": 0,
-        "roi_builds": 0,
-    }
-    selected_roi_id_set = set(selected_roi_ids)
-    selected_rois = [roi for roi in source_rois if roi.area_roi_id in selected_roi_id_set]
-    roi_accumulators: dict[int, dict[str, list]] = {
-        int(roi.area_roi_id): {
-            "wavelengths": [],
-            "formula_values": [],
-            "sample_mean": [],
-            "reference_mean": [],
-            "sample_pixel_count": [],
-            "reference_pixel_count": [],
-            # One (sample, reference) pair per wavelength for every reduction
-            # method, computed alongside the active one from the same
-            # already-extracted pixel arrays - see reduce_sample_and_
-            # reference_all_methods. Lets switching Reduction reuse this
-            # cube's already-computed values instead of re-reading pixels.
-            "reduced_by_method": {method: [] for method in REDUCTION_METHODS},
-        }
-        for roi in selected_rois
-    }
-    wavelengths: list[float] = []
-    formula_values: list[float] = []
-    sample_mean_values: list[float] = []
-    reference_mean_values: list[float] = []
-    sample_pixel_counts: list[int] = []
-    reference_pixel_counts: list[int] = []
-    combined_reduced_by_method: dict[str, list[tuple[float, float]]] = {method: [] for method in REDUCTION_METHODS}
-    total = max(len(measurement_payload), 1)
-
-    def _build_roi_mask_cache(
-        image_shape: tuple[int, int],
-        selected_rois_local: list[AreaRoi],
-        selected_ids_local: tuple[int, ...],
-        affine_matrix_local: np.ndarray | None,
-    ) -> dict[str, object]:
-        logger = logging.getLogger("lspr_imaging_app.workflow")
-        cache_key = _formula_spectrum_roi_mask_cache_key(
-            image_shape,
-            selected_rois_local,
-            selected_ids_local,
-            affine_matrix_local,
-            reference_inner_radius_px,
-            reference_outer_radius_px,
-        )
-        with roi_mask_cache_lock:
-            cached_value = roi_mask_cache.get(cache_key) if hasattr(roi_mask_cache, "get") else None
-            if cached_value is not None:
-                try:
-                    roi_mask_cache.move_to_end(cache_key)
-                except Exception:
-                    pass
-                cache_stats["roi_hits"] += 1
-                logger.debug(
-                    "ROI cache hit | shape=%sx%s rois=%s",
-                    int(image_shape[0]),
-                    int(image_shape[1]),
-                    len(selected_rois_local),
-                )
-                return cached_value
-        combined_roi_mask, combined_reference_mask = _selected_roi_masks_for_spectrum(
-            image_shape,
-            source_rois,
-            selected_ids_local,
-            reference_inner_radius_px,
-            reference_outer_radius_px,
-            affine_matrix_local,
-        )
-        per_roi_masks: dict[int, tuple[np.ndarray, np.ndarray]] = {}
-        for roi in selected_rois_local:
-            per_roi_masks[int(roi.area_roi_id)] = _selected_roi_masks_for_spectrum(
-                image_shape,
-                [roi],
-                (int(roi.area_roi_id),),
-                reference_inner_radius_px,
-                reference_outer_radius_px,
-                affine_matrix_local,
-            )
-        cached_value = {
-            "shape": tuple(int(value) for value in image_shape[:2]),
-            "combined": (combined_roi_mask, combined_reference_mask),
-            "per_roi": per_roi_masks,
-        }
-        with roi_mask_cache_lock:
-            roi_mask_cache[cache_key] = cached_value
-            try:
-                roi_mask_cache.move_to_end(cache_key)
-            except Exception:
-                pass
-            while len(roi_mask_cache) > max(int(roi_mask_cache_max_size), 1):
-                roi_mask_cache.popitem(last=False)
-        cache_stats["roi_builds"] += 1
-        logger.debug(
-            "ROI cache built | shape=%sx%s rois=%s",
-            int(image_shape[0]),
-            int(image_shape[1]),
-            len(selected_rois_local),
-        )
-        return cached_value
-
-    def _load_and_preprocess_measurement(
-        item: tuple[int, tuple[float, str, list[AreaRoi], np.ndarray | None, bool, np.ndarray | None]]
-    ) -> tuple[int, float, np.ndarray, np.ndarray | None, np.ndarray | None, float]:
-        index, (wavelength_nm, path_str, preprocessing_rois, affine_matrix, external_mask_processed, external_mask) = item
-        load_started = time.perf_counter()
-        cache_info_before = getattr(load_image_array, "cache_info", None)
-        before_hits = cache_info_before().hits if callable(cache_info_before) else None
-        before_misses = cache_info_before().misses if callable(cache_info_before) else None
-        raw_image = load_image_array(path_str)
-        if callable(cache_info_before):
-            cache_info_after = cache_info_before()
-            if before_hits is not None and cache_info_after.hits > before_hits:
-                cache_stats["image_hits"] += int(cache_info_after.hits - before_hits)
-            if before_misses is not None and cache_info_after.misses > before_misses:
-                cache_stats["image_builds"] += int(cache_info_after.misses - before_misses)
-        processed = apply_preprocessing(
-            raw_image,
-            preprocessing,
-            rois=preprocessing_rois,
-            mask_settings=flatten_mask_settings,
-            external_mask=external_mask,
-            external_mask_processed=external_mask_processed,
-            mask_state=mask_state,
-        ).astype(np.float32, copy=False)
-        load_duration = time.perf_counter() - load_started
-        return int(index), float(wavelength_nm), processed, affine_matrix, external_mask, load_duration
-
-    worker_count = max(1, min(int(os.cpu_count() or 1), 4, len(measurement_payload)))
-    prepared_measurements: list[tuple[int, float, np.ndarray, np.ndarray | None, np.ndarray | None, float]] = []
-    if worker_count <= 1:
-        for index, item in enumerate(measurement_payload, start=1):
-            prepared_measurements.append(_load_and_preprocess_measurement((index, item)))
-    else:
-        with ThreadPoolExecutor(max_workers=worker_count) as executor:
-            futures = [executor.submit(_load_and_preprocess_measurement, (index, item)) for index, item in enumerate(measurement_payload, start=1)]
-            for future in as_completed(futures):
-                prepared_measurements.append(future.result())
-        prepared_measurements.sort(key=lambda item: item[0])
-
-    active_reduction_method_key = str(reduction_method).strip().lower()
-    if active_reduction_method_key not in REDUCTION_METHODS:
-        active_reduction_method_key = "mean"
-
-    for index, wavelength_nm, processed, affine_matrix, external_mask, load_duration in prepared_measurements:
-        if cancel_event is not None and cancel_event.is_set():
-            return FormulaSpectrumResult(
-                wavelengths_nm=np.asarray([], dtype=np.float64),
-                formula_values=np.asarray([], dtype=np.float64),
-                sample_reduced_value=np.asarray([], dtype=np.float64),
-                reference_reduced_value=np.asarray([], dtype=np.float64),
-                sample_pixel_count=np.asarray([], dtype=np.int32),
-                reference_pixel_count=np.asarray([], dtype=np.int32),
-                load_seconds=load_seconds,
-                roi_seconds=roi_seconds,
-                total_seconds=time.perf_counter() - task_started,
-                reduction_method=str(reduction_method),
-                formula_key=str(formula_key),
-            )
-        load_seconds += float(load_duration)
-
-        roi_started = time.perf_counter()
-        current_shape = tuple(int(value) for value in processed.shape[:2])
-        roi_mask_cache_entry = _build_roi_mask_cache(current_shape, selected_rois, selected_roi_ids, affine_matrix)
-        ignored_mask = ignored_pixel_mask(processed, measurement_settings, external_mask=external_mask)
-        # Union of every selected ROI's own sample area, used only to keep a
-        # neighbor's sample pixels out of THIS roi's reference ring below -
-        # not for pooling pixels across ROIs (see the comment further down).
-        all_selected_sample_mask, _unused_combined_reference_mask = roi_mask_cache_entry["combined"]  # type: ignore[index]
-
-        # Sample and reference ROIs are always reduced to one absorbance value
-        # per ROI, independently - never by pooling pixels from multiple ROIs
-        # into one sample/reference mean first. When multiple ROIs are
-        # selected, the "combined" value below is the average of these
-        # per-ROI absorbance values, not a value computed from pooled pixels
-        # (pooling pixels before the sample/reference ratio is not the same
-        # calculation as averaging each ROI's own ratio afterward, and isn't
-        # physically meaningful across different sample/reference apertures).
-        per_roi_formula_values_this_wavelength: list[float] = []
-        per_roi_sample_mean_this_wavelength: list[float] = []
-        per_roi_reference_mean_this_wavelength: list[float] = []
-        per_roi_reduced_by_method_this_wavelength: dict[str, list[tuple[float, float]]] = {
-            method: [] for method in REDUCTION_METHODS
-        }
-        sample_pixel_count_total = 0
-        reference_pixel_count_total = 0
-        for roi in selected_rois:
-            per_roi_masks = roi_mask_cache_entry["per_roi"]  # type: ignore[index]
-            roi_mask_template, reference_mask_template = per_roi_masks[int(roi.area_roi_id)]
-            roi_mask_single = np.array(roi_mask_template, dtype=bool, copy=True)
-            reference_mask_single = np.array(reference_mask_template, dtype=bool, copy=True)
-            roi_mask_single &= ~ignored_mask
-            reference_mask_single &= ~ignored_mask
-            # Exclude every selected ROI's sample area, not just this one's -
-            # otherwise a nearby selected ROI's (often much brighter) sample
-            # spot can fall inside this ROI's reference ring and bias its
-            # reference mean.
-            reference_mask_single &= ~all_selected_sample_mask
-
-            sample_pixels_single = processed[roi_mask_single]
-            reference_pixels_single = processed[reference_mask_single]
-            if sample_pixels_single.size == 0 or reference_pixels_single.size == 0:
-                sample_mean_single = float("nan")
-                reference_mean_single = float("nan")
-                formula_value_single = float("nan")
-                reduced_by_method_single = {method: (float("nan"), float("nan")) for method in REDUCTION_METHODS}
-            else:
-                # np.where + reduce_sample_and_reference_all_methods (every
-                # method, so switching Reduction afterward doesn't re-read
-                # pixels - see that function's docstring) is only worth its
-                # cost when compute_all_reduction_methods says a caller
-                # actually wants that guarantee for this cube - e.g. the
-                # single cube currently being previewed. A bulk multi-cube
-                # "Start analysis" sweep passes False: it needs one number
-                # per ROI per wavelength, not four, and paying 4x here for
-                # hundreds of cubes whose Reduction is unlikely to ever be
-                # switched was the direct cause of a multi-second-per-cube
-                # regression (np.where's mask scan plus plane_fit's lstsq,
-                # both otherwise skippable, running unconditionally).
-                needs_plane_fit_coords = compute_all_reduction_methods or active_reduction_method_key == "plane_fit"
-                if needs_plane_fit_coords:
-                    reference_yy_single, reference_xx_single = np.where(reference_mask_single)
-                else:
-                    reference_yy_single = reference_xx_single = None
-                if compute_all_reduction_methods:
-                    reduced_by_method_single = reduce_sample_and_reference_all_methods(
-                        sample_pixels_single,
-                        reference_pixels_single,
-                        trimmed_mean_fraction=trimmed_mean_fraction,
-                        reference_xx=reference_xx_single,
-                        reference_yy=reference_yy_single,
-                        sample_x=roi.center_x,
-                        sample_y=roi.center_y,
-                    )
-                    sample_mean_single, reference_mean_single = reduced_by_method_single[active_reduction_method_key]
-                else:
-                    sample_mean_single, reference_mean_single = reduce_sample_and_reference(
-                        sample_pixels_single,
-                        reference_pixels_single,
-                        active_reduction_method_key,
-                        trimmed_mean_fraction=trimmed_mean_fraction,
-                        reference_xx=reference_xx_single,
-                        reference_yy=reference_yy_single,
-                        sample_x=roi.center_x,
-                        sample_y=roi.center_y,
-                    )
-                    reduced_by_method_single = {
-                        method: (sample_mean_single, reference_mean_single) if method == active_reduction_method_key else (float("nan"), float("nan"))
-                        for method in REDUCTION_METHODS
-                    }
-                formula_value_single = formula_value(sample_mean_single, reference_mean_single, formula_key)
-
-            accumulator = roi_accumulators[int(roi.area_roi_id)]
-            accumulator["wavelengths"].append(float(wavelength_nm))
-            accumulator["formula_values"].append(formula_value_single)
-            accumulator["sample_mean"].append(sample_mean_single)
-            accumulator["reference_mean"].append(reference_mean_single)
-            accumulator["sample_pixel_count"].append(int(sample_pixels_single.size))
-            accumulator["reference_pixel_count"].append(int(reference_pixels_single.size))
-            for method in REDUCTION_METHODS:
-                accumulator["reduced_by_method"][method].append(reduced_by_method_single[method])
-            sample_pixel_count_total += int(sample_pixels_single.size)
-            reference_pixel_count_total += int(reference_pixels_single.size)
-            if np.isfinite(formula_value_single):
-                per_roi_formula_values_this_wavelength.append(formula_value_single)
-                per_roi_sample_mean_this_wavelength.append(sample_mean_single)
-                per_roi_reference_mean_this_wavelength.append(reference_mean_single)
-                for method in REDUCTION_METHODS:
-                    per_roi_reduced_by_method_this_wavelength[method].append(reduced_by_method_single[method])
-
-        if per_roi_formula_values_this_wavelength:
-            sample_mean = float(np.mean(per_roi_sample_mean_this_wavelength))
-            reference_mean = float(np.mean(per_roi_reference_mean_this_wavelength))
-            formula_value_combined = float(np.mean(per_roi_formula_values_this_wavelength))
-            for method in REDUCTION_METHODS:
-                pairs = per_roi_reduced_by_method_this_wavelength[method]
-                combined_reduced_by_method[method].append(
-                    (float(np.mean([s for s, _r in pairs])), float(np.mean([r for _s, r in pairs])))
-                )
-        else:
-            sample_mean = float("nan")
-            reference_mean = float("nan")
-            formula_value_combined = float("nan")
-            for method in REDUCTION_METHODS:
-                combined_reduced_by_method[method].append((float("nan"), float("nan")))
-
-        wavelengths.append(float(wavelength_nm))
-        formula_values.append(formula_value_combined)
-        sample_mean_values.append(sample_mean)
-        reference_mean_values.append(reference_mean)
-        sample_pixel_counts.append(sample_pixel_count_total)
-        reference_pixel_counts.append(reference_pixel_count_total)
-        roi_seconds += time.perf_counter() - roi_started
-
-        if progress_callback is not None:
-            progress_callback(
-                int(round(index / total * 100.0)),
-                f"Spectral absorbance {index}/{total}: {float(wavelength_nm):g} nm",
-            )
-
-    def _reduced_arrays_by_method(pairs_by_method: dict[str, list[tuple[float, float]]]) -> dict[str, tuple[np.ndarray, np.ndarray]]:
-        return {
-            method: (
-                np.asarray([s for s, _r in pairs], dtype=np.float64),
-                np.asarray([r for _s, r in pairs], dtype=np.float64),
-            )
-            for method, pairs in pairs_by_method.items()
-        }
-
-    roi_results: dict[int, FormulaSpectrumResult] = {}
-    for roi in selected_rois:
-        data = roi_accumulators[int(roi.area_roi_id)]
-        roi_results[int(roi.area_roi_id)] = FormulaSpectrumResult(
-            wavelengths_nm=np.asarray(data["wavelengths"], dtype=np.float64),
-            formula_values=np.asarray(data["formula_values"], dtype=np.float64),
-            sample_reduced_value=np.asarray(data["sample_mean"], dtype=np.float64),
-            reference_reduced_value=np.asarray(data["reference_mean"], dtype=np.float64),
-            sample_pixel_count=np.asarray(data["sample_pixel_count"], dtype=np.int32),
-            reference_pixel_count=np.asarray(data["reference_pixel_count"], dtype=np.int32),
-            reduction_method=str(reduction_method),
-            formula_key=str(formula_key),
-            reduced_values_by_method=_reduced_arrays_by_method(data["reduced_by_method"]),
-        )
-
-    result = FormulaSpectrumResult(
-        wavelengths_nm=np.asarray(wavelengths, dtype=np.float64),
-        formula_values=np.asarray(formula_values, dtype=np.float64),
-        sample_reduced_value=np.asarray(sample_mean_values, dtype=np.float64),
-        reference_reduced_value=np.asarray(reference_mean_values, dtype=np.float64),
-        sample_pixel_count=np.asarray(sample_pixel_counts, dtype=np.int32),
-        reference_pixel_count=np.asarray(reference_pixel_counts, dtype=np.int32),
-        reduction_method=str(reduction_method),
-        formula_key=str(formula_key),
-        load_seconds=load_seconds,
-        roi_seconds=roi_seconds,
-        total_seconds=time.perf_counter() - task_started,
-        area_roi_results=roi_results,
-        reduced_values_by_method=_reduced_arrays_by_method(combined_reduced_by_method),
-    )
-    logging.getLogger("lspr_imaging_app.workflow").debug(
-        "Spec cache summary | img hit=%s build=%s | roi hit=%s build=%s",
-        int(cache_stats["image_hits"]),
-        int(cache_stats["image_builds"]),
-        int(cache_stats["roi_hits"]),
-        int(cache_stats["roi_builds"]),
-    )
-    return result
-
-
-def _formula_spectrum_fast_task(
+def _scoped_formula_spectrum_task(
     dataset,
     spectral_cube_index: int,
     measurement_payload: list[tuple[float, np.ndarray | None, np.ndarray | None, object | None]],
@@ -1029,17 +648,16 @@ def _formula_spectrum_fast_task(
     Supports multiple ROIs, chromatic correction, and external/ignored-pixel
     masks either way.
 
-    `roi_mask_cache`/`roi_mask_cache_lock`/`roi_mask_cache_max_size` mirror
-    _absorbance_spectrum_task's own ROI mask cache: with many selected ROIs
-    (e.g. a 170-spot array), rebuilding every sample/reference circle mask
-    from scratch for every wavelength of every spectral cube is real,
-    avoidable work when the ROI geometry, patch box, and per-wavelength
-    chromatic transform are unchanged run to run (the common case when
-    chromatic correction is off, since then affine_matrix is None for every
-    wavelength and the box is the same for every spectral cube too) - the
-    cache key folds in the patch's own shape and origin (see
-    _absorbance_roi_mask_cache_key) so a scoped/local mask is never confused
-    with a full-image one.
+    `roi_mask_cache`/`roi_mask_cache_lock`/`roi_mask_cache_max_size`: with
+    many selected ROIs (e.g. a 170-spot array), rebuilding every
+    sample/reference circle mask from scratch for every wavelength of every
+    spectral cube is real, avoidable work when the ROI geometry, patch box,
+    and per-wavelength chromatic transform are unchanged run to run (the
+    common case when chromatic correction is off, since then affine_matrix
+    is None for every wavelength and the box is the same for every spectral
+    cube too) - the cache key folds in the patch's own shape and origin (see
+    _formula_spectrum_roi_mask_cache_key) so a scoped/local mask is never
+    confused with a full-image one.
     """
     from lspr_imaging_app.processing.preprocess import (
         apply_preprocessing,
@@ -1071,15 +689,14 @@ def _formula_spectrum_fast_task(
     # Debug-only, always-cheap-to-compute stage timing (perf_counter, one
     # lock acquisition per wavelength, not per ROI - see the per-wavelength
     # accumulation in _load_wl below) - same convention as _process_image_
-    # task's "Image raw load" and _formula_spectrum_task's own timing, added
-    # to answer "which stage is actually slow" for a "SG cube compute
-    # timing" outlier without re-instrumenting from scratch each time.
+    # task's "Image raw load" timing, added to answer "which stage is
+    # actually slow" for a "SG cube compute timing" outlier without
+    # re-instrumenting from scratch each time.
     _stage_timing_lock = threading.Lock()
     _stage_timing_totals = {"io": 0.0, "resample": 0.0, "mask": 0.0, "where": 0.0, "reduce": 0.0}
 
     def _fast_roi_mask_cache_entry(affine_matrix_local: np.ndarray | None) -> dict[str, object]:
-        """Same idea as _absorbance_spectrum_task's _build_roi_mask_cache: one
-        cache entry per (patch shape/origin, ROI set, affine matrix) holds
+        """One cache entry per (patch shape/origin, ROI set, affine matrix) holds
         both the combined-selection mask and every individual ROI's own
         sample/reference masks, so a run with many selected ROIs (e.g. a
         170-spot array) rasterizes each ROI's circle/annulus once per unique
@@ -1183,25 +800,63 @@ def _formula_spectrum_fast_task(
                     affine_matrix, patch_origin_xy=(x0, y0),
                 )
                 nonlocal_mask_seconds += time.perf_counter() - _mask_started
+
+            # Reach-limit patch/mask indexing to a small local box around this
+            # ROI instead of scanning the full (patch_h, patch_w) patch for
+            # every one of potentially hundreds of ROIs - confirmed via
+            # cProfile to be the single largest cost in a bulk run once the
+            # mask itself is cheap to build (see docs/tiff_vs_ome_zarr_read_
+            # benchmark.md's "Finding 2": 55% of total cube time, 11.3x
+            # measured speedup). Only safe for a single circle/annulus ROI,
+            # whose extent is bounded by its own radius - "mask" geometry (an
+            # arbitrary bitmap unrelated to any radius) already gets
+            # full-patch treatment inside _selected_roi_masks_for_spectrum
+            # itself, so this mirrors that existing split rather than
+            # inventing a new rule.
+            single_roi = rois_subset[0] if len(rois_subset) == 1 else None
+            can_reach_limit = (
+                single_roi is not None
+                and sample_x is not None
+                and sample_y is not None
+                and single_roi.sample_geometry_type != "mask"
+                and single_roi.reference_geometry_type != "mask"
+            )
+            if can_reach_limit:
+                _, outer_r = _effective_reference_radii(
+                    single_roi, max(reference_inner_radius_px, 0.0), max(reference_outer_radius_px, 0.0)
+                )
+                reach = max(float(single_roi.sample_radius_px), outer_r) + 2.0
+                rx0 = max(int(np.floor(sample_x - reach)), 0)
+                rx1 = min(int(np.ceil(sample_x + reach)) + 1, patch_w)
+                ry0 = max(int(np.floor(sample_y - reach)), 0)
+                ry1 = min(int(np.ceil(sample_y + reach)) + 1, patch_h)
+            else:
+                rx0, ry0, rx1, ry1 = 0, 0, patch_w, patch_h
+
+            local_patch = patch[ry0:ry1, rx0:rx1]
+            local_roi_mask = roi_mask[ry0:ry1, rx0:rx1]
+            local_reference_mask = reference_mask[ry0:ry1, rx0:rx1]
             if extra_exclude_mask is not None:
                 # Keeps a neighboring selected ROI's sample pixels out of THIS
-                # roi's reference ring - see _absorbance_spectrum_task for the
-                # full reasoning (same fix, fast-zarr-path version).
-                reference_mask = reference_mask & ~extra_exclude_mask
+                # roi's reference ring - otherwise a nearby selected ROI's
+                # (often much brighter) sample spot can fall inside this
+                # ROI's reference ring and bias its reference mean.
+                local_reference_mask = local_reference_mask & ~extra_exclude_mask[ry0:ry1, rx0:rx1]
             if ignored_patch is not None:
-                roi_mask = roi_mask & ~ignored_patch
-                reference_mask = reference_mask & ~ignored_patch
-            sample_pixels = patch[roi_mask]
-            reference_pixels = patch[reference_mask]
+                local_roi_mask = local_roi_mask & ~ignored_patch[ry0:ry1, rx0:rx1]
+                local_reference_mask = local_reference_mask & ~ignored_patch[ry0:ry1, rx0:rx1]
+            sample_pixels = local_patch[local_roi_mask]
+            reference_pixels = local_patch[local_reference_mask]
             if sample_pixels.size == 0 or reference_pixels.size == 0:
                 empty_reduced = {method: (float("nan"), float("nan")) for method in REDUCTION_METHODS}
                 return float("nan"), float("nan"), float("nan"), int(sample_pixels.size), int(reference_pixels.size), empty_reduced
             # Patch-local indices from np.where must be shifted back by the
-            # patch's (x0, y0) origin so a plane fit is evaluated in the same
-            # absolute coordinate frame as roi.center_x/roi.center_y - a
-            # mismatch here would silently produce plausible-looking wrong
-            # numbers rather than crashing. Only computed when actually
-            # needed (see compute_all_reduction_methods below) -
+            # local reach box's own origin AND the patch's (x0, y0) origin so
+            # a plane fit is evaluated in the same absolute coordinate frame
+            # as roi.center_x/roi.center_y - a mismatch here would silently
+            # produce plausible-looking wrong numbers rather than crashing.
+            # Only computed when actually needed (see
+            # compute_all_reduction_methods below) -
             # reduce_sample_and_reference_all_methods computes every
             # reduction method from these same pixel arrays so switching
             # Reduction afterward doesn't re-read pixels, but that guarantee
@@ -1214,10 +869,10 @@ def _formula_spectrum_fast_task(
             needs_plane_fit_coords = compute_all_reduction_methods or active_reduction_method_key == "plane_fit"
             if needs_plane_fit_coords:
                 _where_started = time.perf_counter()
-                reference_row_idx, reference_col_idx = np.where(reference_mask)
+                reference_row_idx, reference_col_idx = np.where(local_reference_mask)
                 nonlocal_where_seconds += time.perf_counter() - _where_started
-                reference_yy = reference_row_idx.astype(np.float64) + float(y0)
-                reference_xx = reference_col_idx.astype(np.float64) + float(x0)
+                reference_yy = reference_row_idx.astype(np.float64) + float(y0 + ry0)
+                reference_xx = reference_col_idx.astype(np.float64) + float(x0 + rx0)
             else:
                 reference_yy = reference_xx = None
             _reduce_started = time.perf_counter()
@@ -1257,8 +912,10 @@ def _formula_spectrum_fast_task(
 
         # Sample and reference ROIs are always reduced to one absorbance value
         # per ROI, independently - never by pooling pixels from multiple ROIs
-        # first (see _absorbance_spectrum_task for the full reasoning). The
-        # "combined" value below, used when several ROIs are selected
+        # into one sample/reference mean first (pooling before the ratio is
+        # not the same calculation as averaging each ROI's own ratio
+        # afterward, and mixes pixels from different physical apertures).
+        # The "combined" value below, used when several ROIs are selected
         # together, is the average of these per-ROI absorbance values.
         per_roi_masks = mask_cache_entry["per_roi"]  # type: ignore[index]
         per_roi = {
@@ -1363,7 +1020,7 @@ def _formula_spectrum_fast_task(
                 accumulator["reduced_by_method"][method].append((float(s), float(rr)))
 
     logging.getLogger("lspr_imaging_app.workflow").debug(
-        "SG fast task stage timing | cube %s | io=%.1fms resample=%.1fms mask=%.1fms where=%.1fms reduce=%.1fms wavelengths=%s rois=%s",
+        "SG scoped task stage timing | cube %s | io=%.1fms resample=%.1fms mask=%.1fms where=%.1fms reduce=%.1fms wavelengths=%s rois=%s",
         int(spectral_cube_index),
         _stage_timing_totals["io"] * 1000.0,
         _stage_timing_totals["resample"] * 1000.0,
@@ -1597,7 +1254,7 @@ def _sensorgram_metric_task(
             # instrumentation each time a slowdown gets reported.
             _cube_compute_started = time.perf_counter()
             if spectrum is None:
-                _active_task = task_fn if task_fn is not None else _formula_spectrum_task
+                _active_task = task_fn if task_fn is not None else _scoped_formula_spectrum_task
                 spectrum = _active_task(
                     *payload,
                     # None (not `cancel_event`) only for the one cube exempted

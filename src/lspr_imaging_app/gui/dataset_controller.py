@@ -607,6 +607,30 @@ class DatasetController:
     def _sync_ome_zarr_chunk_controls(self) -> None:
         self.window._ui_state_manager.sync_ome_zarr_chunk_controls()
 
+    def _ensure_zarr_read_overhead_calibration(self) -> None:
+        """Kick off the background calibration (see io/dataset.py's
+        calibrate_zarr_read_overhead_ms) once per app session, the first
+        time the Export section's chunk-size estimate could use it. A
+        no-op if already done or already in flight - safe to call from
+        every sync_ome_zarr_chunk_controls pass."""
+        window = self.window
+        if window._zarr_read_overhead_calibration_attempted or window._zarr_read_overhead_calibration_pending:
+            return
+        window._zarr_read_overhead_calibration_pending = True
+        from lspr_imaging_app.io.dataset import calibrate_zarr_read_overhead_ms
+
+        worker = FunctionWorker(calibrate_zarr_read_overhead_ms)
+        worker.signals.result.connect(self._on_zarr_read_overhead_calibration_done)
+        worker.signals.error.connect(lambda _message: self._on_zarr_read_overhead_calibration_done(None))
+        window._thread_pool.start(worker)
+
+    def _on_zarr_read_overhead_calibration_done(self, calibration: tuple[float, float] | None) -> None:
+        window = self.window
+        window._zarr_read_overhead_calibration_pending = False
+        window._zarr_read_overhead_calibration_attempted = True
+        window._zarr_read_overhead_calibration = calibration
+        self._sync_ome_zarr_chunk_controls()
+
     def _current_ome_zarr_shard_mode(self) -> str:
         return str(self.window.ome_zarr_shard_mode_combo.currentData() or "per_image")
 
@@ -685,6 +709,7 @@ class DatasetController:
         window.ome_zarr_compression_button.setEnabled(not running)
         window.dataset_ome_zarr_controls_row.setEnabled(not running)
         window.dataset_ome_zarr_options_row.setEnabled(not running)
+        window.dataset_ome_zarr_chunk_total_row.setEnabled(not running)
         if running:
             window.dataset_ome_zarr_export_status_label.setText("Progress")
         self._sync_ome_zarr_chunk_controls()
@@ -831,6 +856,7 @@ class DatasetController:
         window.ome_zarr_compression_button.setEnabled(True)
         window.dataset_ome_zarr_controls_row.setEnabled(True)
         window.dataset_ome_zarr_options_row.setEnabled(True)
+        window.dataset_ome_zarr_chunk_total_row.setEnabled(True)
         self._sync_ome_zarr_chunk_controls()
         window._append_workflow_log(
             f"OME-Zarr export {'failed' if failed else 'done'}{elapsed_text}",

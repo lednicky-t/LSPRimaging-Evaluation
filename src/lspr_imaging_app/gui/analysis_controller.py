@@ -1504,6 +1504,26 @@ class AnalysisController(AnalysisWorkerMixin, AnalysisChromaticGeometryMixin):
         else:
             self.window._set_status_text("[λ,t]: per-cube read geometry/masks recomputed for every cube.")
 
+    def _toggle_analysis_ram_only_backup(self) -> None:
+        """Switches "Start analysis" between the default incremental backup
+        (results written to measurement_backup.h5 every `measurement_backup_
+        batch_size` cubes) and holding every result in RAM for the whole
+        run, writing the backup file only once - when the run finishes or is
+        stopped (on_sensorgram_ready/on_sensorgram_failed already do that
+        unconditional flush regardless of this toggle; see this toggle's
+        button docstring in layout_builder.py for the full trade-off and why
+        it exists). Deliberately not persisted via QSettings - see
+        MainWindow._analysis_ram_only_backup's docstring."""
+        self.window._analysis_ram_only_backup = not self.window._analysis_ram_only_backup
+        self.window._update_analysis_control_state()
+        if self.window._analysis_ram_only_backup:
+            self.window._set_status_text(
+                "[RAM]: analysis results held in memory during the run, written to the backup file"
+                " once the run finishes or is stopped."
+            )
+        else:
+            self.window._set_status_text("[disk]: analysis results backed up incrementally during the run.")
+
     def _available_analysis_spectral_cubes(self) -> list[int]:
         spectral_cube_range = self._current_analysis_spectral_cube_range()
         if spectral_cube_range is None:

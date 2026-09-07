@@ -344,6 +344,9 @@ class UIStateManager:
         refresh_time_independent_toggle = getattr(window, "_refresh_analysis_time_independent_toggle", None)
         if callable(refresh_time_independent_toggle):
             refresh_time_independent_toggle()
+        refresh_ram_only_backup_toggle = getattr(window, "_refresh_analysis_ram_only_backup_toggle", None)
+        if callable(refresh_ram_only_backup_toggle):
+            refresh_ram_only_backup_toggle()
 
     def update_chromatic_control_state(self) -> None:
         window = self._window
@@ -450,5 +453,40 @@ class UIStateManager:
             window.ome_zarr_compression_label.setText(f"Compression: {'on' if compression_enabled else 'off'}")
             window.ome_zarr_compression_button.setIcon(window._ome_zarr_compression_icon(compression_enabled))
             window._update_ome_zarr_chunk_guide_overlay()
+            self._sync_ome_zarr_chunk_estimate_label(size)
         finally:
             window._ome_zarr_chunk_controls_syncing = False
+
+    def _sync_ome_zarr_chunk_estimate_label(self, chunk_size_px: int) -> None:
+        """Live "-> N chunks/plane, ~Xms/plane read" readout next to the
+        Export section's chunk-size spinner, plus a second, dataset-wide
+        "-> N chunks total (M images), ~Xs read" readout underneath it - see
+        io/dataset.py's estimate_ome_zarr_export_chunk_plane_read and
+        estimate_ome_zarr_export_dataset_total_read for the math/estimate.
+        Uses whatever image is already displayed (no extra I/O) for the
+        plane dimensions - close enough for a live "what if" estimate; the
+        real export path computes the authoritative shape itself via
+        probe_ome_zarr_export_shape."""
+        window = self._window
+        image = window._current_processed_image
+        if image is None:
+            window.ome_zarr_chunk_estimate_label.setText("")
+            window.ome_zarr_chunk_total_label.setText("")
+            return
+        from lspr_imaging_app.io.dataset import (
+            estimate_ome_zarr_export_chunk_plane_read,
+            estimate_ome_zarr_export_dataset_total_read,
+        )
+
+        height, width = image.shape[:2]
+        text = estimate_ome_zarr_export_chunk_plane_read(
+            int(width), int(height), int(chunk_size_px), window._zarr_read_overhead_calibration
+        )
+        window.ome_zarr_chunk_estimate_label.setText(text)
+        dataset = window._state.dataset
+        image_count = len(dataset.records) if dataset is not None else 0
+        total_text = estimate_ome_zarr_export_dataset_total_read(
+            int(width), int(height), int(chunk_size_px), image_count, window._zarr_read_overhead_calibration
+        )
+        window.ome_zarr_chunk_total_label.setText(total_text)
+        window._dataset_controller._ensure_zarr_read_overhead_calibration()

@@ -71,6 +71,68 @@ class FormulaSpectrumRenderBundle:
     fit_seconds: float
 
 
+def _write_measurement_backup_buffers(writer, formula_buffer, sensorgram_buffer) -> None:
+    """The actual HDF5 write behind a measurement-backup flush - writes
+    every row in `formula_buffer`/`sensorgram_buffer` (the same
+    {roi_id_str: [(cube_index, signature_hash, value, timestamp_utc_ms), ...]}
+    shape `_backup_formula_spectrum_series`/`_backup_sensorgram_point` build)
+    via one batch call per ROI.
+
+    Deliberately a plain module-level function, not a method on
+    AnalysisWorkerMixin: `_flush_measurement_backup_buffers_async` runs this
+    on a background thread (see its docstring), and a bound method would
+    tempt a future edit into reaching back into `self.window` from that
+    thread - every value this function touches must already be plain data
+    handed in by the caller, nothing resolved by calling back into GUI-owned
+    state. Shared by both the synchronous flush (main thread) and the
+    background one, so there is exactly one place this logic can drift from.
+    """
+    if writer is not None and formula_buffer:
+        for roi_id_str, entries in formula_buffer.items():
+            if not entries:
+                continue
+            rows = [
+                FormulaSpectrumBackupRow(
+                    wavelengths_nm=roi_result.wavelengths_nm,
+                    formula_values=roi_result.formula_values,
+                    sample_mean=roi_result.sample_reduced_value,
+                    reference_mean=roi_result.reference_reduced_value,
+                    cube_index=cube_index,
+                    timestamp_utc_ms=timestamp_utc_ms,
+                    formula_key=roi_result.formula_key,
+                    reduction_method=roi_result.reduction_method,
+                    signature_hash=signature_hash,
+                    reduced_values_by_method=roi_result.reduced_values_by_method or None,
+                )
+                for cube_index, signature_hash, roi_result, timestamp_utc_ms in entries
+            ]
+            try:
+                writer.append_formula_spectrum_batch(roi_id_str, rows)
+            except Exception:
+                logging.getLogger("lspr_imaging_app.workflow").warning(
+                    "Failed to append absorbance spectrum batch to measurement export backup", exc_info=True
+                )
+    if writer is not None and sensorgram_buffer:
+        for roi_id_str, entries in sensorgram_buffer.items():
+            if not entries:
+                continue
+            rows = [
+                SensorgramPointBackupRow(
+                    cube_index=cube_index,
+                    timestamp_utc_ms=timestamp_utc_ms,
+                    metric_value=metric_value,
+                    signature_hash=signature_hash,
+                )
+                for cube_index, signature_hash, metric_value, timestamp_utc_ms in entries
+            ]
+            try:
+                writer.append_sensorgram_point_batch(roi_id_str, rows)
+            except Exception:
+                logging.getLogger("lspr_imaging_app.workflow").warning(
+                    "Failed to append sensorgram point batch to measurement export backup", exc_info=True
+                )
+
+
 class AnalysisWorkerMixin:
     def _apply_cached_sensorgram_result(self, signature, result, *, preview: bool = False) -> None:
         self.window._sensorgram_running = False
@@ -186,54 +248,10 @@ class AnalysisWorkerMixin:
         self._apply_cached_sensorgram_result(signature, cached_result, preview=True)
         return True
 
-    def _fast_spectrum_path_eligible(self, selected_source_rois: list[AreaRoi]) -> bool:
-        """Whether the ROI-scoped, zarr-chunk-aware fast path can be used for
-        the whole sensorgram/spectrum run. Decided once, upfront — NOT
-        re-checked per spectral_cube_index — because a per-spectral_cube_index "not worth it" bail-out
-        would silently drop that spectral_cube_index's data point instead of falling back
-        to the full-plane path (spectral_cube_payload_builder results that come back
-        None are just skipped, not retried another way).
-
-        The "is the ROI selection compact enough" part uses a chromatic-shift
-        agnostic box (chromatic shifts are small perturbations that wouldn't
-        change whether ROIs are scattered enough to make scoping pointless),
-        so this stays a cheap, synchronous, no-pixel-data-loaded check.
-        """
-        from lspr_imaging_app.gui.analysis_tasks import compute_roi_union_bounding_box, roi_union_box_is_worth_scoping
-        from lspr_imaging_app.io.dataset import load_image_shape
-        from lspr_imaging_app.processing.preprocess import spatial_output_shape
-
-        preprocessing = self.window._state.preprocessing
-        dataset = self.window._state.dataset
-        basic_eligible = (
-            bool(selected_source_rois)
-            and dataset is not None
-            and dataset.is_ome_zarr
-        )
-        if not basic_eligible:
-            return False
-        first_record = next(iter(self.window._record_map.values()), None)
-        if first_record is None:
-            return False
-        try:
-            raw_shape = load_image_shape(str(first_record.path))
-        except Exception:
-            return False
-        image_height, image_width = spatial_output_shape(raw_shape, preprocessing)
-        box = compute_roi_union_bounding_box(
-            selected_source_rois,
-            float(self.window._state.area_roi_settings.reference_outer_radius_px),
-            [None],
-            image_height,
-            image_width,
-        )
-        return box is not None and roi_union_box_is_worth_scoping(box, image_height, image_width)
-
     def _spectrum_settings_snapshot(self) -> SpectrumSettingsSnapshot:
         """Build a SpectrumSettingsSnapshot once, up front - see its docstring.
-        Callers pass the result into `_prepare_fast_spectrum_payload_for_spectral_cube`/
-        `_prepare_absorbance_spectrum_payload_for_spectral_cube` instead of letting
-        those methods deep-copy the live state fresh on every call.
+        Callers pass the result into `_prepare_scoped_spectrum_payload_for_spectral_cube`
+        instead of letting it deep-copy the live state fresh on every call.
         """
         return SpectrumSettingsSnapshot(
             preprocessing=deepcopy(self.window._state.preprocessing),
@@ -241,72 +259,7 @@ class AnalysisWorkerMixin:
             mask_state=deepcopy(self.window._state.mask) if self.window._mask_section_applied() else None,
         )
 
-    def _prepare_formula_spectrum_payload_for_spectral_cube(
-        self,
-        spectral_cube_index: int,
-        selected_roi_ids: tuple[int, ...],
-        selected_source_rois: list[AreaRoi],
-        settings_snapshot: SpectrumSettingsSnapshot | None = None,
-    ) -> tuple[object, ...] | None:
-        if self.window._state.dataset is None or not selected_source_rois:
-            return None
-        if settings_snapshot is None:
-            settings_snapshot = self._spectrum_settings_snapshot()
-        preprocessing = settings_snapshot.preprocessing
-        flatten_mask_settings = settings_snapshot.area_roi_settings if preprocessing.flatten_background_exclude_mask else None
-        measurement_settings = settings_snapshot.area_roi_settings
-        measurement_payload: list[tuple[float, str, list[AreaRoi], np.ndarray | None, bool, np.ndarray | None]] = []
-        for wavelength in self.window._wavelength_values:
-            record = self.window._record_map.get((spectral_cube_index, wavelength))
-            if record is None or is_excluded(self.window._state.image_exclusions, spectral_cube_index, wavelength):
-                continue
-            image_key = (spectral_cube_index, float(wavelength))
-            preprocessing_rois = deepcopy(self.window._rois_for_preprocessing(image_key))
-            affine_matrix = self.window._chromatic_affine_for_image_key(image_key)
-            if affine_matrix is not None:
-                affine_matrix = np.asarray(affine_matrix, dtype=np.float64)
-            external_mask, external_mask_processed = self.window._effective_external_mask_for_record(record.path, processed_space=True)
-            if external_mask is not None:
-                external_mask = np.asarray(external_mask, dtype=bool)
-                # Ignore-mask geometry is authored/stored independent of wavelength; when
-                # chromatic correction is on, carry it into this wavelength's corrected
-                # geometry the same way circle/annulus ROIs already are (affine_matrix
-                # above), so the excluded pixels stay aligned with the real feature they
-                # were drawn over instead of a fixed pixel location.
-                if affine_matrix is not None:
-                    external_mask = warp_boolean_mask_affine(external_mask, affine_matrix)
-                external_mask = self.window._apply_mask_wavelength_diff(external_mask, image_key)
-            measurement_payload.append(
-                (
-                    float(wavelength),
-                    str(record.path),
-                    preprocessing_rois,
-                    affine_matrix,
-                    bool(external_mask_processed),
-                    external_mask,
-                )
-            )
-        if not measurement_payload:
-            return None
-        return (
-            measurement_payload,
-            preprocessing,
-            flatten_mask_settings,
-            measurement_settings,
-            self.window._formula_spectrum_roi_mask_cache,
-            self.window._analysis_cache_lock,
-            int(self.window.FORMULA_SPECTRUM_ROI_MASK_CACHE_SIZE),
-            # Already a deepcopy by the time it reaches this function (every
-            # caller builds selected_source_rois via deepcopy(roi) up front),
-            # so copying it again here was a deepcopy-of-a-deepcopy.
-            selected_source_rois,
-            selected_roi_ids,
-            float(settings_snapshot.area_roi_settings.reference_inner_radius_px),
-            float(settings_snapshot.area_roi_settings.reference_outer_radius_px),
-            settings_snapshot.mask_state,
-        )
-
-    def _prepare_fast_spectrum_payload_for_spectral_cube(
+    def _prepare_scoped_spectrum_payload_for_spectral_cube(
         self,
         spectral_cube_index: int,
         selected_roi_ids: tuple,
@@ -315,21 +268,20 @@ class AnalysisWorkerMixin:
         shared_geometry: SharedWavelengthGeometry | None = None,
         shared_mask_by_wavelength: dict[float, object] | None = None,
     ) -> tuple | None:
-        """Build a lightweight payload for _absorbance_spectrum_fast_task.
+        """Build the payload for `_scoped_formula_spectrum_task` - the one
+        spectrum-compute path, used for every dataset regardless of format.
+        Returns None only when there's genuinely nothing to compute (no data
+        for this spectral_cube_index, or no ROI geometry to build a read
+        region from at all).
 
-        Used when the dataset is OME-Zarr, background flattening is off, and
-        no rotation/flip transform is active (see the eligibility check in
-        _start_sensorgram_worker, which also confirms the ROI selection is
-        compact enough for a scoped read to be worthwhile — that decision is
-        made once for the whole run, not per spectral_cube_index, so this always proceeds
-        with a scoped read once called; it must never bail out for a "not
-        worth it" reason here, or a spectral_cube_index would silently vanish from the
-        sensorgram instead of falling back to the full-plane path). Returns
-        None only when there's genuinely nothing to compute (no data for this
-        spectral_cube_index, or no ROI geometry to build a box from at all).
+        `spectrum_read_region` (analysis_tasks.py) is the only place format
+        matters: a TIFF dataset gets the whole plane as its region (its only
+        real read unit), an OME-Zarr dataset gets the ROI union bounding box
+        (cheap at any size - see the `zarrs` codec pipeline fix). Everything
+        below this point is format-agnostic.
 
         `shared_geometry`: [λ] mode - when given, the per-wavelength
-        chromatic affine and the scoped-read box are taken from it instead of
+        chromatic affine and the read region are taken from it instead of
         being recomputed for this cube (see SharedWavelengthGeometry's
         docstring for why that's valid). `shared_mask_by_wavelength`: [λ]
         mode's equivalent for the marked-pixels mask (see
@@ -339,7 +291,7 @@ class AnalysisWorkerMixin:
         per wavelength, and exclusions, are still resolved per cube either
         way - those are genuinely cube-specific (different files).
         """
-        from lspr_imaging_app.gui.analysis_tasks import compute_roi_union_bounding_box
+        from lspr_imaging_app.gui.analysis_tasks import spectrum_read_region
         from lspr_imaging_app.io.dataset import load_image_shape
         from lspr_imaging_app.processing.preprocess import spatial_output_shape
 
@@ -411,19 +363,19 @@ class AnalysisWorkerMixin:
                 return None
             image_height, image_width = spatial_output_shape(raw_shape, preprocessing)
 
-            box = compute_roi_union_bounding_box(
+            box = spectrum_read_region(
+                self.window._state.dataset,
+                image_height,
+                image_width,
                 selected_source_rois,
                 float(settings_snapshot.area_roi_settings.reference_outer_radius_px),
                 affine_matrices,
-                image_height,
-                image_width,
             )
             if box is None:
                 return None
 
-        # Matches _prepare_absorbance_spectrum_payload_for_spectral_cube's own convention
-        # for these two: mask_state only when the mask panel is applied/linked,
-        # and background's own exclusion mask_settings only when background
+        # mask_state only when the mask panel is applied/linked, and
+        # background's own exclusion mask_settings only when background
         # flattening is configured to exclude the mask.
         mask_state = settings_snapshot.mask_state
         background_mask_settings = (
@@ -436,8 +388,8 @@ class AnalysisWorkerMixin:
             self.window._state.dataset,
             int(spectral_cube_index),
             measurement_payload,
-            # Already a deepcopy by the time it reaches this function - see the
-            # matching comment in _prepare_absorbance_spectrum_payload_for_spectral_cube.
+            # Already a deepcopy by the time it reaches this function - see
+            # _prepare_formula_spectrum_payload's own comment on this.
             selected_source_rois,
             selected_roi_ids,
             float(settings_snapshot.area_roi_settings.reference_inner_radius_px),
@@ -445,11 +397,9 @@ class AnalysisWorkerMixin:
             box,
             preprocessing,
             raw_shape,
-            # Shared with the slow-path ROI mask cache below - the cache key
-            # folds in patch shape/origin (see _absorbance_roi_mask_cache_key)
-            # so scoped fast-path masks can never collide with full-image
-            # slow-path ones; sharing the dict just means both paths draw
-            # from the same size-capped budget instead of needing a second one.
+            # The cache key folds in patch shape/origin (see
+            # _formula_spectrum_roi_mask_cache_key) so masks for different
+            # regions can never collide in this shared, size-capped cache.
             self.window._formula_spectrum_roi_mask_cache,
             self.window._analysis_cache_lock,
             int(self.window.FORMULA_SPECTRUM_ROI_MASK_CACHE_SIZE),
@@ -476,10 +426,9 @@ class AnalysisWorkerMixin:
         from lspr_imaging_app.gui.worker import FunctionWorker
         from lspr_imaging_app.gui.analysis_tasks import (
             _sensorgram_metric_task,
-            _formula_spectrum_fast_task,
+            _scoped_formula_spectrum_task,
         )
 
-        use_fast_path = self._fast_spectrum_path_eligible(selected_source_rois)
         settings_snapshot = self._spectrum_settings_snapshot()
         # Read once, up front, on the main thread - the worker thread below
         # only ever sees the plain resulting dict, never touches HDF5 itself
@@ -491,15 +440,13 @@ class AnalysisWorkerMixin:
         # _combined_formula_spectrum_results_from_ram_or_disk's docstring.
         active_formula_key = self._active_formula_key()
         active_reduction_method = self._active_reduction_method()
-        # [λ] mode: only meaningful for the fast/scoped-read path (the slow
-        # path never computes a shared box at all - it reads the full plane
-        # every time regardless). None when the toggle is off, or when there
-        # was genuinely nothing to build from (no data for the reference
-        # cube), in which case the closure below transparently falls back to
-        # per-cube computation.
+        # [λ] mode: None when the toggle is off, or when there was genuinely
+        # nothing to build from (no data for the reference cube), in which
+        # case the closure below transparently falls back to per-cube
+        # computation.
         shared_wavelength_geometry = (
             self._build_shared_wavelength_geometry(spectral_cubes, selected_source_rois, settings_snapshot)
-            if use_fast_path and self.window._analysis_time_independent
+            if self.window._analysis_time_independent
             else None
         )
         # [λ] mode's mask counterpart - only worth building when there's a
@@ -518,10 +465,10 @@ class AnalysisWorkerMixin:
         self.window._pending_sensorgram_payload = None
         self.clear_sensorgram("")
         self.window._update_analysis_control_state()
-        fast_label = " [fast]" if use_fast_path else ""
+        ram_only_label = " | [RAM]" if bool(getattr(self.window, "_analysis_ram_only_backup", False)) else ""
         self.window._set_sensorgram_summary_text(
-            f"{self.window._analysis_metric_label()}{fast_label} | Preparing {len(spectral_cubes)} spectral cubes"
-            f" | Range {spectral_cubes[0]}-{spectral_cubes[-1]}"
+            f"{self.window._analysis_metric_label()} | Preparing {len(spectral_cubes)} spectral cubes"
+            f" | Range {spectral_cubes[0]}-{spectral_cubes[-1]}{ram_only_label}"
         )
         self.window._set_status_text("Preparing spectral cube reads...")
         # show_wait_cursor=False: analysis runs entirely in the background
@@ -532,26 +479,16 @@ class AnalysisWorkerMixin:
             "Preparing spectral cube reads...", determinate=True, show_wait_cursor=False, total_items=len(spectral_cubes)
         )
 
-        if use_fast_path:
-            def spectral_cube_payload_builder(spectral_cube_index, selected_roi_ids=selected_roi_ids, selected_source_rois=selected_source_rois, settings_snapshot=settings_snapshot, shared_wavelength_geometry=shared_wavelength_geometry, shared_mask_by_wavelength=shared_mask_by_wavelength):
-                return self._prepare_fast_spectrum_payload_for_spectral_cube(
-                    spectral_cube_index,
-                    selected_roi_ids,
-                    selected_source_rois,
-                    settings_snapshot,
-                    shared_wavelength_geometry,
-                    shared_mask_by_wavelength,
-                )
-            task_fn = _formula_spectrum_fast_task
-        else:
-            def spectral_cube_payload_builder(spectral_cube_index, selected_roi_ids=selected_roi_ids, selected_source_rois=selected_source_rois, settings_snapshot=settings_snapshot):
-                return self._cached_sensorgram_spectral_cube_payload(
-                    spectral_cube_index,
-                    selected_roi_ids,
-                    selected_source_rois,
-                    settings_snapshot,
-                )
-            task_fn = None
+        def spectral_cube_payload_builder(spectral_cube_index, selected_roi_ids=selected_roi_ids, selected_source_rois=selected_source_rois, settings_snapshot=settings_snapshot, shared_wavelength_geometry=shared_wavelength_geometry, shared_mask_by_wavelength=shared_mask_by_wavelength):
+            return self._prepare_scoped_spectrum_payload_for_spectral_cube(
+                spectral_cube_index,
+                selected_roi_ids,
+                selected_source_rois,
+                settings_snapshot,
+                shared_wavelength_geometry,
+                shared_mask_by_wavelength,
+            )
+        task_fn = _scoped_formula_spectrum_task
 
         def spectral_cube_result_cache_get(spectral_cube_index, selected_roi_ids=selected_roi_ids, selected_source_rois=selected_source_rois, active_formula_key=active_formula_key):
             return self._cached_sensorgram_spectral_cube_result(
@@ -674,6 +611,23 @@ class AnalysisWorkerMixin:
         worker.signals.error.connect(lambda message, request_id=request_id: self.on_sensorgram_failed(request_id, message))
         self.window._thread_pool.start(worker)
 
+    @staticmethod
+    def _measurement_backup_periodic_flush_due(buffered_cube_count: int, batch_size: int, ram_only: bool) -> bool:
+        """Whether on_sensorgram_partial_result's periodic backup-buffer
+        flush should fire now. Pure logic, split out so it's testable
+        without a real window/QTimer - same reasoning as MainWindow.
+        _format_busy_detail_text.
+
+        Always False in [RAM] mode (`ram_only` - the Analysis title row's
+        [disk]/[RAM] toggle, `_analysis_ram_only_backup`): buffered results
+        still all reach the backup file, just not from here - on_sensorgram_
+        ready/on_sensorgram_failed's own unconditional flush (which runs
+        regardless of this toggle) is what writes them, once, when the run
+        finishes or is stopped. This function only decides whether to flush
+        *early*, mid-run.
+        """
+        return not ram_only and buffered_cube_count >= max(int(batch_size), 1)
+
     def on_sensorgram_partial_result(self, request_id: int, total_count: int, point) -> None:
         if request_id != self.window._sensorgram_request_id or not self.window._analysis_enabled:
             return
@@ -732,12 +686,23 @@ class AnalysisWorkerMixin:
         # Flush the buffered-backup-rows batch (see _backup_formula_spectrum_
         # series/_backup_sensorgram_point) every measurement_backup_batch_size
         # cubes, so buffered data doesn't grow without bound over a long run.
-        # The final partial batch at the end of a run is flushed
-        # unconditionally by on_sensorgram_ready/on_sensorgram_failed instead
-        # of here, since a run can end between multiples of the batch size.
+        # Async (_flush_measurement_backup_buffers_async): the actual HDF5
+        # write runs on a background thread, not here on the GUI thread, so
+        # a periodic backup save never stalls the next cube's analysis (see
+        # that method's docstring - this used to cost ~1-1.75s inline, every
+        # 5th cube by default). The final partial batch at the end of a run
+        # is flushed unconditionally and *synchronously* by
+        # on_sensorgram_ready/on_sensorgram_failed instead of here, since a
+        # run can end between multiples of the batch size - see
+        # _measurement_backup_periodic_flush_due's docstring for [RAM]
+        # mode's effect on this decision.
         self.window._measurement_backup_buffered_cube_count += 1
-        if self.window._measurement_backup_buffered_cube_count >= self.window._measurement_backup_batch_size():
-            self._flush_measurement_backup_buffers()
+        if self._measurement_backup_periodic_flush_due(
+            self.window._measurement_backup_buffered_cube_count,
+            self.window._measurement_backup_batch_size(),
+            bool(getattr(self.window, "_analysis_ram_only_backup", False)),
+        ):
+            self._flush_measurement_backup_buffers_async()
         if roi_formula_spectrum_results:
             # This cube's formula-spectrum results just landed in
             # _roi_formula_spectrum_cache (via spectral_cube_formula_spectrum_cache_store,
@@ -902,8 +867,15 @@ class AnalysisWorkerMixin:
             )
             return
         if bool(getattr(self.window, "_sensorgram_running", False)):
+            # Timestamp resolved here (cheap - _acquisition_timing_index is
+            # memoized on the window, see its own docstring), not at flush
+            # time: the periodic flush hands buffered rows to a background
+            # thread (_flush_measurement_backup_buffers_async), which must
+            # not call back into any self.window method - baking the
+            # already-resolved value into the tuple keeps that background
+            # function pure (writer + plain data only).
             self.window._sensorgram_backup_buffer.setdefault(str(roi_id), []).append(
-                (cube_index, signature_hash, float(point.metric_value))
+                (cube_index, signature_hash, float(point.metric_value), self._acquisition_timestamp_ms_for_cube(cube_index))
             )
             backed_up.add(key)
             return
@@ -1182,14 +1154,12 @@ class AnalysisWorkerMixin:
         self,
         selected_source_rois: list[AreaRoi] | None = None,
     ) -> tuple[tuple[object, ...], tuple[object, ...], object] | None:
-        """Build the (signature, payload, task_fn) for a single-spectral-cube spectrum
-        calculation. Uses the exact same eligibility decision and payload
-        builders as the sensorgram loop (_fast_spectrum_path_eligible,
-        _prepare_fast_spectrum_payload_for_spectral_cube /
-        _prepare_absorbance_spectrum_payload_for_spectral_cube) — a single-spectral-cube
-        spectrum is just a one-spectral-cube sensorgram, so there is one decision
-        point and one pair of task functions, not a separate parallel
-        implementation for this case.
+        """Build the (signature, payload, task_fn) for a single-spectral-cube
+        spectrum calculation. Uses the exact same payload builder as the
+        sensorgram loop (_prepare_scoped_spectrum_payload_for_spectral_cube)
+        - a single-spectral-cube spectrum is just a one-spectral-cube
+        sensorgram, so there is one payload builder and one task function,
+        not a separate implementation for this case.
         """
         if self.window._state.dataset is None:
             return None
@@ -1198,7 +1168,7 @@ class AnalysisWorkerMixin:
         # caller-supplied list might be live references into window._state.area_rois,
         # so it gets the same treatment here rather than relying on each builder to
         # deepcopy it again (removed as a redundant deepcopy-of-a-deepcopy, see
-        # _prepare_fast_spectrum_payload_for_spectral_cube).
+        # _prepare_scoped_spectrum_payload_for_spectral_cube).
         selected_source_rois = (
             self.window._selected_source_rois_snapshot()
             if selected_source_rois is None
@@ -1213,20 +1183,12 @@ class AnalysisWorkerMixin:
         selected_roi_ids = tuple(roi.area_roi_id for roi in selected_source_rois)
         settings_snapshot = self._spectrum_settings_snapshot()
 
-        from lspr_imaging_app.gui.analysis_tasks import _formula_spectrum_fast_task, _formula_spectrum_task
+        from lspr_imaging_app.gui.analysis_tasks import _scoped_formula_spectrum_task
 
-        if self._fast_spectrum_path_eligible(selected_source_rois):
-            payload = self._prepare_fast_spectrum_payload_for_spectral_cube(spectral_cube_index, selected_roi_ids, selected_source_rois, settings_snapshot)
-            if payload is not None:
-                return signature, payload, _formula_spectrum_fast_task
-            # Fast payload builder found genuinely nothing to compute for this
-            # spectral cube (e.g. no records) — fall through to the full-plane path
-            # rather than reporting "no spectrum" when the slow path might
-            # still have an answer.
-        payload = self._prepare_formula_spectrum_payload_for_spectral_cube(spectral_cube_index, selected_roi_ids, selected_source_rois, settings_snapshot)
+        payload = self._prepare_scoped_spectrum_payload_for_spectral_cube(spectral_cube_index, selected_roi_ids, selected_source_rois, settings_snapshot)
         if payload is None:
             return None
-        return signature, payload, _formula_spectrum_task
+        return signature, payload, _scoped_formula_spectrum_task
 
     def _on_formula_spectrum_payload_ready(
         self,
@@ -1483,8 +1445,12 @@ class AnalysisWorkerMixin:
             if key in backed_up:
                 continue
             if buffering:
+                # Timestamp resolved here, not at flush time - see the
+                # matching comment in _backup_sensorgram_point; the periodic
+                # flush runs this data through a background thread that must
+                # not call back into self.window.
                 self.window._formula_spectrum_backup_buffer.setdefault(str(roi_id), []).append(
-                    (cube_index, signature_hash, roi_result)
+                    (cube_index, signature_hash, roi_result, self._acquisition_timestamp_ms_for_cube(cube_index))
                 )
                 backed_up.add(key)
                 continue
@@ -1514,10 +1480,8 @@ class AnalysisWorkerMixin:
         in RAM by `_backup_formula_spectrum_series`/`_backup_sensorgram_
         point` while a bulk run is in flight - via `append_formula_spectrum_
         batch`/`append_sensorgram_point_batch`, one bulk HDF5 write per ROI
-        per dataset instead of one per row. Call this:
-          - every `measurement_backup_batch_size` cubes during a run (see
-            on_sensorgram_partial_result), so buffered data doesn't grow
-            without bound over a long run;
+        per dataset instead of one per row. Blocking: use this whenever the
+        write must have actually finished before the caller proceeds -
           - unconditionally when a run ends (on_sensorgram_ready/failed),
             so the tail of a run (fewer than a full batch) isn't left
             sitting unwritten;
@@ -1525,61 +1489,74 @@ class AnalysisWorkerMixin:
             on app close, so a graceful shutdown never loses buffered rows -
             only an actual crash mid-batch can (the deliberate, user-
             configurable trade-off this batching makes; see the
-            Preferences dialog control).
+            Preferences dialog control);
+          - before compacting the backup file (nothing pending should be
+            left out of the copy).
+        The *periodic* mid-run trigger (every `measurement_backup_batch_
+        size` cubes, see on_sensorgram_partial_result) uses
+        `_flush_measurement_backup_buffers_async` instead - this method
+        would otherwise stall the very next cube's analysis on a
+        synchronous HDF5 write (~1-1.75s measured - see docs/tiff_vs_ome_
+        zarr_read_benchmark.md's Finding 3).
+
+        Waits for any already-in-flight background flush to finish first
+        (`_measurement_backup_flush_pool.waitForDone()`) - both so this
+        call's own write can't race a background one on the same writer,
+        and so cube ordering within each ROI's on-disk trace stays
+        chronological (this call's rows are always the *newest*, so it must
+        write after anything already queued, not concurrently with it).
         Safe and cheap to call when nothing is buffered.
         """
-        writer = getattr(self.window, "_measurement_export_writer", None)
-        formula_buffer = getattr(self.window, "_formula_spectrum_backup_buffer", None)
-        if writer is not None and formula_buffer:
-            for roi_id_str, entries in formula_buffer.items():
-                if not entries:
-                    continue
-                rows = [
-                    FormulaSpectrumBackupRow(
-                        wavelengths_nm=roi_result.wavelengths_nm,
-                        formula_values=roi_result.formula_values,
-                        sample_mean=roi_result.sample_reduced_value,
-                        reference_mean=roi_result.reference_reduced_value,
-                        cube_index=cube_index,
-                        timestamp_utc_ms=self._acquisition_timestamp_ms_for_cube(cube_index),
-                        formula_key=roi_result.formula_key,
-                        reduction_method=roi_result.reduction_method,
-                        signature_hash=signature_hash,
-                        reduced_values_by_method=roi_result.reduced_values_by_method or None,
-                    )
-                    for cube_index, signature_hash, roi_result in entries
-                ]
-                try:
-                    writer.append_formula_spectrum_batch(roi_id_str, rows)
-                except Exception:
-                    logging.getLogger("lspr_imaging_app.workflow").warning(
-                        "Failed to append absorbance spectrum batch to measurement export backup", exc_info=True
-                    )
-        if formula_buffer:
-            formula_buffer.clear()
-        sensorgram_buffer = getattr(self.window, "_sensorgram_backup_buffer", None)
-        if writer is not None and sensorgram_buffer:
-            for roi_id_str, entries in sensorgram_buffer.items():
-                if not entries:
-                    continue
-                rows = [
-                    SensorgramPointBackupRow(
-                        cube_index=cube_index,
-                        timestamp_utc_ms=self._acquisition_timestamp_ms_for_cube(cube_index),
-                        metric_value=metric_value,
-                        signature_hash=signature_hash,
-                    )
-                    for cube_index, signature_hash, metric_value in entries
-                ]
-                try:
-                    writer.append_sensorgram_point_batch(roi_id_str, rows)
-                except Exception:
-                    logging.getLogger("lspr_imaging_app.workflow").warning(
-                        "Failed to append sensorgram point batch to measurement export backup", exc_info=True
-                    )
-        if sensorgram_buffer:
-            sensorgram_buffer.clear()
-        self.window._measurement_backup_buffered_cube_count = 0
+        window = self.window
+        window._measurement_backup_flush_pool.waitForDone()
+        writer = getattr(window, "_measurement_export_writer", None)
+        formula_buffer = getattr(window, "_formula_spectrum_backup_buffer", None) or {}
+        sensorgram_buffer = getattr(window, "_sensorgram_backup_buffer", None) or {}
+        _write_measurement_backup_buffers(writer, formula_buffer, sensorgram_buffer)
+        formula_buffer.clear()
+        sensorgram_buffer.clear()
+        window._measurement_backup_buffered_cube_count = 0
+
+    def _flush_measurement_backup_buffers_async(self) -> None:
+        """Non-blocking counterpart to `_flush_measurement_backup_buffers`,
+        for the periodic mid-run trigger only (on_sensorgram_partial_result)
+        - every other caller needs the write to have actually finished
+        before it proceeds and must keep calling the synchronous version.
+
+        Swaps the current buffer dicts for fresh empty ones - a plain
+        attribute reassignment, not a lock; the GUI thread never blocks on
+        anything here, and `_backup_sensorgram_point`/`_backup_formula_
+        spectrum_series` (which only ever *append* to whatever dict is
+        currently installed) can keep buffering the next cube into the new
+        one immediately - then hands the swapped-out data to
+        `_write_measurement_backup_buffers` running on a dedicated
+        single-worker QThreadPool (`_measurement_backup_flush_pool`), so a
+        periodic backup save can never again stall the next cube's analysis
+        the way it did running inline on the GUI thread. `waitForDone()` on
+        that same pool (called by the synchronous flush before run end,
+        dataset switch, or app close) is what guarantees this background
+        write has actually landed before anything relies on it being there.
+        """
+        window = self.window
+        writer = getattr(window, "_measurement_export_writer", None)
+        formula_buffer = getattr(window, "_formula_spectrum_backup_buffer", None)
+        sensorgram_buffer = getattr(window, "_sensorgram_backup_buffer", None)
+        if writer is None or not (formula_buffer or sensorgram_buffer):
+            window._measurement_backup_buffered_cube_count = 0
+            return
+        window._formula_spectrum_backup_buffer = {}
+        window._sensorgram_backup_buffer = {}
+        window._measurement_backup_buffered_cube_count = 0
+
+        from lspr_imaging_app.gui.worker import FunctionWorker
+
+        worker = FunctionWorker(_write_measurement_backup_buffers, writer, formula_buffer, sensorgram_buffer)
+        worker.signals.error.connect(
+            lambda message: logging.getLogger("lspr_imaging_app.workflow").warning(
+                "Background measurement backup flush failed: %s", message
+            )
+        )
+        window._measurement_backup_flush_pool.start(worker)
 
     def export_results(self) -> None:
         """"Export Results..." button (Results / Export panel): saves a
@@ -2551,41 +2528,6 @@ class AnalysisWorkerMixin:
             int(self.window._analysis_poly_order()),
         )
         return self._signature_hash(full_signature)
-
-    def _cached_sensorgram_spectral_cube_payload(
-        self,
-        spectral_cube_index: int,
-        selected_roi_ids: tuple[int, ...],
-        selected_source_rois: list[AreaRoi],
-        settings_snapshot: SpectrumSettingsSnapshot | None = None,
-    ) -> tuple[object, ...] | None:
-        logger = logging.getLogger("lspr_imaging_app.workflow")
-        signature = self._sensorgram_spectral_cube_payload_signature(spectral_cube_index, selected_roi_ids, selected_source_rois)
-        if signature is None:
-            return None
-        with self.window._analysis_cache_lock:
-            cached = self.window._sensorgram_spectral_cube_payload_cache.get(signature)
-            if cached is not None:
-                self.window._sensorgram_spectral_cube_payload_cache.move_to_end(signature)
-                logger.debug(
-                    "SG payload cache hit | spectral_cube_index=%s rois=%s",
-                    int(spectral_cube_index),
-                    len(selected_roi_ids),
-                )
-                return cached
-        payload = self._prepare_formula_spectrum_payload_for_spectral_cube(spectral_cube_index, selected_roi_ids, selected_source_rois, settings_snapshot)
-        if payload is None:
-            return None
-        self._store_in_lru_cache(
-            self.window._sensorgram_spectral_cube_payload_cache, signature, payload,
-            self.window.SENSORGRAM_SPECTRAL_CUBE_PAYLOAD_CACHE_SIZE, lock=self.window._analysis_cache_lock,
-        )
-        logger.debug(
-            "SG payload cache built | spectral_cube_index=%s rois=%s",
-            int(spectral_cube_index),
-            len(selected_roi_ids),
-        )
-        return payload
 
     def _cached_sensorgram_spectral_cube_result(
         self,

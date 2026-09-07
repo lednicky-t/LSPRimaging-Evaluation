@@ -594,6 +594,68 @@ def _make_time_independent_toggle(window: QWidget) -> QToolButton:
     return button
 
 
+def _make_ram_only_backup_toggle(window: QWidget) -> QToolButton:
+    """[disk]/[RAM] label in the Analysis section title row - switches
+    "Start analysis" between the default behavior (results backed up to
+    measurement_backup.h5 incrementally, every `measurement_backup_batch_
+    size` cubes - see MainWindow._measurement_backup_batch_size) and holding
+    every result in RAM for the whole run, writing the backup file only once
+    the run finishes or is stopped (AnalysisWorkerMixin.on_sensorgram_ready/
+    on_sensorgram_failed already do that unconditional final flush either
+    way - this toggle only suppresses the *periodic* one in
+    on_sensorgram_partial_result).
+
+    Exists because a long, write-heavy testing session can make
+    measurement_backup.h5 fragile enough to crash the whole process on a
+    native HDF5 bug (STATUS_HEAP_CORRUPTION) - see
+    apps/LSPRi/eva/docs/measurement_backup_performance_and_crash_recovery.md,
+    two separate incidents. Skipping the incremental writes entirely avoids
+    that write churn for the run. Trade-off, stated plainly in the tooltip:
+    a crash *during* a run with this on loses the whole run's results so
+    far, not just the last batch - deliberately not persisted across
+    launches (see MainWindow._analysis_ram_only_backup's docstring), so a
+    fresh session always starts from the safe default.
+
+    Same style as _make_time_independent_toggle: non-checkable QToolButton,
+    click cycles a plain bool, sync_appearance lets other state-change
+    handlers re-render it.
+    """
+    theme = get_active_theme()
+    button = QToolButton(window)
+    button.setAutoRaise(True)
+    button.setCheckable(False)
+    button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
+    button.setCursor(Qt.CursorShape.PointingHandCursor)
+    button.setToolTip(
+        "Switch how Start analysis backs up results to measurement_backup.h5."
+        " [disk]: written incrementally as the run goes (default; batch size configurable in"
+        " Preferences), a crash loses at most one batch's worth. [RAM]: nothing written until the"
+        " run finishes or is stopped, then written all at once - avoids incremental-write disk"
+        " churn on a long session, but a crash mid-run loses everything computed so far, not just"
+        " the last batch."
+    )
+
+    def refresh_ram_only_backup_toggle() -> None:
+        ram_only = bool(getattr(window, "_analysis_ram_only_backup", False))
+        button.setText("[RAM]" if ram_only else "[disk]")
+        color = theme.accent_gold if ram_only else theme.text_dim
+        button.setStyleSheet(
+            "QToolButton {"
+            f"  color: {color};"
+            "  background: transparent;"
+            "  border: none;"
+            "  font-weight: 600;"
+            "  padding: 4px 2px;"
+            "}"
+            "QToolButton:hover { text-decoration: underline; }"
+        )
+
+    button.clicked.connect(lambda *_: window._toggle_analysis_ram_only_backup())
+    button.sync_appearance = refresh_ram_only_backup_toggle
+    refresh_ram_only_backup_toggle()
+    return button
+
+
 def _make_cube_time_timestamp_rule_toggle(window: QWidget) -> QToolButton:
     """(First)/(Last)/(Mid) label, click-cycled, sitting next to the
     [Cube]/[Time] toggle in the Metadata section title row. Only meaningful
@@ -768,6 +830,7 @@ def build_layout(window) -> None:
     for row in (
         window.dataset_ome_zarr_controls_row,
         window.dataset_ome_zarr_options_row,
+        window.dataset_ome_zarr_chunk_total_row,
         window.dataset_ome_zarr_compression_row,
         window.dataset_ome_zarr_skip_excluded_row,
         window.dataset_ome_zarr_export_progress_row,
@@ -1254,10 +1317,12 @@ def build_layout(window) -> None:
     )
     window.analysis_time_independent_toggle = _make_time_independent_toggle(window)
     window._refresh_analysis_time_independent_toggle = window.analysis_time_independent_toggle.sync_appearance
+    window.analysis_ram_only_backup_toggle = _make_ram_only_backup_toggle(window)
+    window._refresh_analysis_ram_only_backup_toggle = window.analysis_ram_only_backup_toggle.sync_appearance
     # Title row: merged Start analysis/Stop icon and the Live preview toggle
     # sit here instead of their own "Selection" row further down, right next
-    # to the existing [λ,t]/[λ] toggle - same header_extra pattern as
-    # roi_editor_header_extra/metadata_header_extra above.
+    # to the existing [λ,t]/[λ] and [disk]/[RAM] toggles - same header_extra
+    # pattern as roi_editor_header_extra/metadata_header_extra above.
     analysis_header_extra = QWidget(window)
     analysis_header_extra_layout = QHBoxLayout(analysis_header_extra)
     analysis_header_extra_layout.setContentsMargins(0, 0, 0, 0)
@@ -1265,6 +1330,7 @@ def build_layout(window) -> None:
     analysis_header_extra_layout.addWidget(window.analysis_run_button)
     analysis_header_extra_layout.addWidget(window.analysis_preview_button)
     analysis_header_extra_layout.addWidget(window.analysis_time_independent_toggle)
+    analysis_header_extra_layout.addWidget(window.analysis_ram_only_backup_toggle)
     window.analysis_section = CollapsibleSection(
         "Analysis",
         analysis_inner,

@@ -63,7 +63,7 @@ def project_formula_spectrum(result: FormulaSpectrumResult | None, formula_key: 
     Recurses into area_roi_results (each is itself a per-ROI result, so
     derivation is exact); the combined top-level curve for a multi-ROI
     result is the per-wavelength mean over whichever ROIs are finite at that
-    wavelength, matching _formula_spectrum_task's own combination rule (a
+    wavelength, matching _scoped_formula_spectrum_task's own combination rule (a
     NaN sample/reference yields NaN under every formula, so the finite/NaN
     pattern is identical regardless of which formula produced the original
     result - see that function's docstring)."""

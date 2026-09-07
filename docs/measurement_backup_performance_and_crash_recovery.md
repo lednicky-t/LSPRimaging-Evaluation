@@ -119,6 +119,72 @@ fresh if the file doesn't exist" path took over on next launch. Unblocked
 immediately; no code changes needed for the crash itself, only for what
 follows.
 
+## Second incident, 2026-09-07: same bug class, different trigger (ROI table, not sensorgram/absorbance)
+
+A separate investigation that day put this same file through dozens of
+"Start analysis" runs (some taking minutes per cube before being fixed/
+stopped) and hit `STATUS_HEAP_CORRUPTION` again on every subsequent launch -
+same exit code, same "reopen this file early in startup" mechanism as the
+first incident above, but a **different specific trigger**: not the
+sensorgram/absorbance append path (Bug D), but `write_roi_definitions`'s
+`upsert_table` call (`packages/lspr_io/src/lspr_io/hdf5.py`), which writes
+the ROI-definitions table - called unconditionally, every launch, before
+any analysis even runs.
+
+**A better diagnostic this time - worth reusing**: `faulthandler.enable()`
+at the top of a small standalone script that reproduces the exact startup
+call sequence (`load_roi_table` -> `ImagingMeasurementExportWriter(path)` ->
+`write_roi_definitions(...)`) turns this normally-uncatchable native crash
+into a real Python-level stack trace instead of a silent process death -
+pinpointed the exact line (`hdf5.py`'s `dataset[...] = table`) without
+needing a native debugger. Reproduced against a **copy** of the real backup
+file (never the original, in case the repro script itself made things
+worse) - confirmed the crash, then confirmed the fix by running the exact
+same real ROI data (`load_roi_table` on the dataset's own `roi_table.json`)
+against a **fresh** file, which completed cleanly - proving the ROI data
+itself was never the problem, only the old file's accumulated fragility.
+
+**Mechanism, precisely**: `upsert_table` recreates the dataset (`del
+group[name]` + `create_dataset`) whenever the row count changes from the
+last write (`needs_recreate` when `dataset.shape != table.shape`) - which
+it does on essentially every launch, since the ROI table's row count moves
+around across a long testing session. Repeated delete+recreate of a
+variable-length-string (VLEN) dataset is a different flavor of the same
+"resize/structural-churn fragility" Bug D already documented for
+appended/grown datasets, hitting a file that had accumulated a very long
+history of exactly that churn (many dozens of runs in one day).
+
+**Recovery**: identical to the first incident - `measurement_backup.h5`
+renamed aside (`.corrupted_<timestamp>`, never deleted), letting the
+writer's normal "create fresh if missing" path take over.
+
+**Takeaway for future incidents of this class**: this bug isn't confined to
+Bug D's specific append path - *any* HDF5 write against a file with a long
+enough resize/delete/recreate history is a candidate once it's fragile
+enough, including the ROI-table upsert this incident found. The "Compact
+backup file" button (below) resets *all* of a file's datasets in one pass,
+including this one - using it periodically during a long, write-heavy
+testing session (not only once sensorgram-write slowness is noticed) would
+likely have prevented this specific incident from accumulating enough
+history to crash at all.
+
+**A second, more direct mitigation added the same day**: the Analysis
+section's title row got a `[disk]`/`[RAM]` toggle
+(`_analysis_ram_only_backup`, `layout_builder.py`'s
+`_make_ram_only_backup_toggle`) that skips the *periodic* mid-run backup
+flush entirely - results are held in RAM for the whole run and written once,
+when it finishes or is stopped (`on_sensorgram_ready`/`on_sensorgram_failed`
+already did that unconditional final flush regardless; the toggle only
+suppresses the earlier, periodic one in `on_sensorgram_partial_result` - see
+`_measurement_backup_periodic_flush_due`). For a heavy iterative testing
+session specifically - exactly the kind that caused both incidents above -
+this avoids the write/resize churn at its source rather than relying on
+periodically remembering to compact. Deliberately not persisted across app
+launches (unlike the [λ,t]/[λ] toggle next to it): a crash *during* a run
+with this on loses the whole run's results so far, not just one batch, so
+it resets to the safe default every session rather than potentially
+carrying over unnoticed from a different testing session's needs.
+
 ## Bug C: slider-cache-refresh cost scales with the whole session, not one run
 
 Covered in `sensorgram_reentrancy_and_cube_slider_cache_indicator.md`'s

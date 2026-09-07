@@ -6,7 +6,7 @@ import sys
 import os
 import threading
 import time
-from collections import OrderedDict
+from collections import OrderedDict, deque
 from copy import deepcopy
 from dataclasses import asdict
 from datetime import datetime
@@ -234,12 +234,19 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, HistogramMaskMixin, Measurem
     FORMULA_SPECTRUM_ROI_MASK_CACHE_SIZE = 48
     ROI_FORMULA_SPECTRUM_CACHE_SIZE = 512
     SENSORGRAM_CACHE_SIZE = 48
+    # How far back _update_busy_progress looks when computing the "s/cube"
+    # speed readout. A whole-run average (elapsed / items_done since the
+    # very start) gets stuck reflecting a regime that no longer applies -
+    # e.g. a run that opens with dozens of near-instant disk-cache-hit
+    # cubes before reaching fresh, uncached ones reports a falsely fast
+    # average for a long time afterward. A short trailing window recovers
+    # within roughly one window's worth of wall time instead.
+    BUSY_PROGRESS_SPEED_WINDOW_SECONDS = 10.0
     # Cube/Time toggle: which per-cube frame's acquisition timestamp
     # represents the whole cube, when Time mode is active - see
     # _cycle_cube_time_timestamp_rule / AnalysisController._cube_timestamp_ms_by_cube_index.
     CUBE_TIME_TIMESTAMP_RULES = ("first", "last", "midpoint")
     CUBE_TIME_TIMESTAMP_RULE_LABELS = {"first": "First", "last": "Last", "midpoint": "Mid"}
-    SENSORGRAM_SPECTRAL_CUBE_PAYLOAD_CACHE_SIZE = 96
     SENSORGRAM_SPECTRAL_CUBE_RESULT_CACHE_SIZE = 96
     # Quick navigation:
     # - layout and signal wiring: _build_layout, _create_toolbar, _connect_signals
@@ -319,6 +326,19 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, HistogramMaskMixin, Measurem
         self._cube_time_timestamp_rule = "first"  # "first"/"last"/"midpoint" - see _cycle_cube_time_timestamp_rule
         self._thread_pool = QThreadPool(self)
         self._thread_pool.setMaxThreadCount(max(4, min(6, os.cpu_count() or 4)))
+        # Dedicated, single-worker pool for measurement-backup HDF5 flushes -
+        # max_thread_count=1 both serializes flushes against each other (so
+        # two concurrent writes to the same HDF5 dataset can never happen)
+        # and preserves submission order (cube ordering within each ROI's
+        # on-disk trace stays chronological). Kept separate from
+        # _thread_pool deliberately: a flush must never queue behind other,
+        # unrelated background work (or vice versa), since every caller that
+        # needs a flush to have actually finished (run end, dataset switch,
+        # app close) relies on waitForDone() here draining ONLY backup
+        # flushes, not the whole shared pool's unrelated work too. See
+        # AnalysisWorkerMixin._flush_measurement_backup_buffers_async.
+        self._measurement_backup_flush_pool = QThreadPool(self)
+        self._measurement_backup_flush_pool.setMaxThreadCount(1)
         self._current_record_path: Path | None = None
         self._crop_roi: pg.RectROI | None = None
         self._chromatic_grid_roi: pg.RectROI | None = None
@@ -430,7 +450,6 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, HistogramMaskMixin, Measurem
         self._formula_spectral_cube_cache: OrderedDict[tuple[object, ...], FormulaSpectrumResult] = OrderedDict()
         self._formula_spectrum_roi_mask_cache: OrderedDict[tuple[object, ...], dict[str, object]] = OrderedDict()
         self._sensorgram_cache: OrderedDict[tuple[object, ...], SensorgramComputationResult] = OrderedDict()
-        self._sensorgram_spectral_cube_payload_cache: OrderedDict[tuple[object, ...], tuple[object, ...]] = OrderedDict()
         self._sensorgram_spectral_cube_result_cache: OrderedDict[tuple[object, ...], FormulaSpectrumResult] = OrderedDict()
         self._acquisition_timing_index_cache: tuple[int, dict[int, object], dict[tuple[int, float], object]] | None = None
         self._sensorgram_axis_range_cache: tuple[object, tuple[float, float]] | None = None
@@ -485,6 +504,14 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, HistogramMaskMixin, Measurem
         # behavior. See AnalysisController._build_shared_wavelength_geometry
         # and _build_shared_wavelength_mask.
         self._analysis_time_independent = self._settings_bool("analysis/time_independent", False)
+        # RAM-only backup - deliberately NOT persisted via QSettings (unlike
+        # the toggle above): this controls whether a mid-run crash loses the
+        # whole run's results so far, not just a shortcut choice, so it
+        # resets to the safe default (off) every launch rather than
+        # potentially carrying over silently from a different session's
+        # testing needs. See _toggle_analysis_ram_only_backup and
+        # analysis_worker_mixin.py's on_sensorgram_partial_result.
+        self._analysis_ram_only_backup: bool = False
         self._histogram_log_y_enabled = self._settings_bool("histogram/log_y", False)
         self._histogram_startup_autoscale_pending = False
         self._histogram_startup_autoscale_attempts = 0
@@ -535,6 +562,10 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, HistogramMaskMixin, Measurem
         # any other busy operation (dataset load, chromatic registration,
         # ...), which just don't get that extra readout.
         self._busy_total_items: int | None = None
+        # Trailing (elapsed, items_done) samples for the "s/cube" speed
+        # readout - see BUSY_PROGRESS_SPEED_WINDOW_SECONDS. Reset alongside
+        # the other _busy_* fields in _begin_busy/_end_busy/_sync_busy_cursor_state.
+        self._busy_progress_window: deque[tuple[float, float]] = deque()
         self._wait_cursor_active = False
         # Separate from _busy_operation_count: lets a specific busy operation
         # (e.g. analysis - see _start_sensorgram_worker) opt out of the
@@ -549,6 +580,18 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, HistogramMaskMixin, Measurem
         self._roi_overlay_theta = np.linspace(0.0, 2.0 * np.pi, 48)
         self._image_tools_preview_only = False
         self._ome_zarr_chunk_controls_syncing = False
+        # (fixed_ms, per_chunk_ms) from a quick synthetic calibration of this
+        # machine's current zarr read overhead - None until the background
+        # calibration (kicked off on first dataset load, see
+        # DatasetController._ensure_zarr_read_overhead_calibration) finishes
+        # - which can itself mean "failed", not just "not tried yet"; the
+        # separate _attempted flag distinguishes those so a failure isn't
+        # retried forever on every chunk-control sync. Used only for the
+        # Export section's live chunk-size estimate; a pure UI nice-to-have,
+        # never load-bearing.
+        self._zarr_read_overhead_calibration: tuple[float, float] | None = None
+        self._zarr_read_overhead_calibration_pending = False
+        self._zarr_read_overhead_calibration_attempted = False
         theme = get_active_theme()
         self._sample_visual_color = QColor(theme.spot_color)
         self._mask_visual_color = QColor(theme.mask_color)
@@ -731,6 +774,21 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, HistogramMaskMixin, Measurem
         self.ome_zarr_chunk_label = QLabel("Chunk tile", self)
         self.ome_zarr_chunk_label.setObjectName("toolbarMiniLabel")
         self.ome_zarr_chunk_label.setToolTip("Square spatial chunk size used when exporting Zarr.")
+        self.ome_zarr_chunk_estimate_label = QLabel("", self)
+        self.ome_zarr_chunk_estimate_label.setObjectName("toolbarMiniLabel")
+        self.ome_zarr_chunk_estimate_label.setToolTip(
+            "How many chunks a full-plane read would touch at this chunk size, and a rough read-time"
+            " estimate from a quick local calibration (not a benchmark of this specific dataset - see"
+            " apps/LSPRi/eva/docs/bulk_analysis_performance_investigation.md). Read cost is dominated by"
+            " how many chunks a read touches, not raw bytes - fewer, larger chunks read faster."
+        )
+        self.ome_zarr_chunk_total_label = QLabel("", self)
+        self.ome_zarr_chunk_total_label.setObjectName("toolbarMiniLabel")
+        self.ome_zarr_chunk_total_label.setToolTip(
+            "Total chunks this chunk size would produce across every image in the currently loaded"
+            " dataset (spectral cubes x wavelengths), and a rough total read-time estimate - see"
+            " apps/LSPRi/eva/docs/bulk_analysis_performance_investigation.md."
+        )
         self.ome_zarr_chunk_guide_button = self._make_icon_tool_button(
             "grid-4x4",
             get_active_theme().text_dim,
@@ -808,10 +866,17 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, HistogramMaskMixin, Measurem
         dataset_ome_zarr_options_layout.setSpacing(4)
         dataset_ome_zarr_options_layout.addWidget(self.ome_zarr_chunk_label)
         dataset_ome_zarr_options_layout.addWidget(self.ome_zarr_chunk_spin)
+        dataset_ome_zarr_options_layout.addWidget(self.ome_zarr_chunk_estimate_label)
         dataset_ome_zarr_options_layout.addWidget(self.ome_zarr_chunk_guide_button)
         dataset_ome_zarr_options_layout.addWidget(self.ome_zarr_shard_label)
         dataset_ome_zarr_options_layout.addWidget(self.ome_zarr_shard_mode_combo)
         dataset_ome_zarr_options_layout.addStretch(1)
+        self.dataset_ome_zarr_chunk_total_row = QWidget(self)
+        dataset_ome_zarr_chunk_total_layout = QHBoxLayout(self.dataset_ome_zarr_chunk_total_row)
+        dataset_ome_zarr_chunk_total_layout.setContentsMargins(0, 0, 0, 0)
+        dataset_ome_zarr_chunk_total_layout.setSpacing(4)
+        dataset_ome_zarr_chunk_total_layout.addWidget(self.ome_zarr_chunk_total_label)
+        dataset_ome_zarr_chunk_total_layout.addStretch(1)
         self.dataset_ome_zarr_compression_row = QWidget(self)
         dataset_ome_zarr_compression_layout = QHBoxLayout(self.dataset_ome_zarr_compression_row)
         dataset_ome_zarr_compression_layout.setContentsMargins(0, 0, 0, 0)
@@ -3978,6 +4043,7 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, HistogramMaskMixin, Measurem
         self._busy_is_determinate = bool(determinate)
         self._busy_last_percent = 0
         self._busy_total_items = int(total_items) if total_items else None
+        self._busy_progress_window.clear()
         self._set_status_text(text)
         if determinate:
             self._status_bar_busy.setRange(0, 100)
@@ -4013,6 +4079,7 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, HistogramMaskMixin, Measurem
             self._busy_is_determinate = False
             self._busy_last_percent = 0
             self._busy_total_items = None
+            self._busy_progress_window.clear()
         if self._busy_cursor_request_count == 0 and self._wait_cursor_active:
             QApplication.restoreOverrideCursor()
             self._wait_cursor_active = False
@@ -4039,15 +4106,32 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, HistogramMaskMixin, Measurem
         self._busy_is_determinate = False
         self._busy_last_percent = 0
         self._busy_total_items = None
+        self._busy_progress_window.clear()
         self._undo_manager.update_action_state()
 
     @staticmethod
-    def _format_busy_detail_text(elapsed: float, current_percent: int, total_items: int | None) -> str:
+    def _format_busy_detail_text(
+        elapsed: float,
+        current_percent: int,
+        total_items: int | None,
+        recent_seconds_per_item: float | None = None,
+    ) -> str:
         """Pure text-formatting half of _update_busy_progress, split out so
         the elapsed/ETA/speed math is testable without a real Qt MainWindow.
         `total_items`, when given, turns `current_percent` back into a real
         per-item rate (see `_busy_total_items`'s docstring for why that
-        conversion is needed here rather than being tracked directly)."""
+        conversion is needed here rather than being tracked directly).
+
+        `recent_seconds_per_item`, when given (a trailing-window rate from
+        `_busy_progress_window` - see BUSY_PROGRESS_SPEED_WINDOW_SECONDS),
+        replaces the whole-run average for the speed readout specifically.
+        Elapsed/ETA still use the whole-run `elapsed` either way - that's
+        the number those actually mean; only the speed readout benefits
+        from a recent window, since a whole-run average gets stuck
+        reflecting a regime (e.g. a string of near-instant disk-cache hits)
+        that may no longer apply by the time slower, freshly-computed items
+        are the ones actually running.
+        """
         elapsed_text = MainWindow._format_elapsed_seconds(elapsed)
         eta_text = "--:--"
         if current_percent > 0:
@@ -4055,9 +4139,35 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, HistogramMaskMixin, Measurem
             eta_text = MainWindow._format_elapsed_seconds(eta_seconds) or "0:00"
         speed_text = ""
         if total_items and current_percent > 0 and elapsed > 0:
-            items_done = max(1, round(total_items * current_percent / 100.0))
-            speed_text = f" | {elapsed / items_done:.2f} s/cube"
+            if recent_seconds_per_item is not None and recent_seconds_per_item > 0:
+                rate = recent_seconds_per_item
+            else:
+                items_done = max(1, round(total_items * current_percent / 100.0))
+                rate = elapsed / items_done
+            speed_text = f" | {rate:.2f} s/cube"
         return f"{elapsed_text} | ETA {eta_text} | {current_percent:d}%{speed_text}"
+
+    def _recent_busy_progress_rate(self, elapsed: float, current_percent: int) -> float | None:
+        """Trailing-window seconds/item rate for the speed readout - see
+        BUSY_PROGRESS_SPEED_WINDOW_SECONDS and _format_busy_detail_text's
+        docstring for why this exists instead of a whole-run average.
+        Returns None until the window holds enough of a time span to give a
+        stable reading (falls back to the whole-run average until then)."""
+        if not self._busy_total_items:
+            return None
+        items_done = self._busy_total_items * current_percent / 100.0
+        window = self._busy_progress_window
+        window.append((elapsed, items_done))
+        cutoff = elapsed - self.BUSY_PROGRESS_SPEED_WINDOW_SECONDS
+        while len(window) > 1 and window[0][0] < cutoff:
+            window.popleft()
+        if len(window) < 2:
+            return None
+        window_elapsed = window[-1][0] - window[0][0]
+        window_items = window[-1][1] - window[0][1]
+        if window_elapsed < 1.0 or window_items <= 0:
+            return None
+        return window_elapsed / window_items
 
     def _update_busy_progress(self, percent: int, text: str | None = None) -> None:
         if self._busy_operation_count <= 0:
@@ -4072,8 +4182,9 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, HistogramMaskMixin, Measurem
         started_at = self._busy_started_at
         elapsed = time.perf_counter() - started_at if started_at is not None else None
         if elapsed is not None:
+            recent_rate = self._recent_busy_progress_rate(elapsed, current_percent)
             self._status_bar_busy_detail.setText(
-                self._format_busy_detail_text(elapsed, current_percent, self._busy_total_items)
+                self._format_busy_detail_text(elapsed, current_percent, self._busy_total_items, recent_rate)
             )
         if text:
             self._set_status_text(text)
@@ -6096,14 +6207,6 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, HistogramMaskMixin, Measurem
     ) -> tuple[object, ...] | None:
         return self._analysis_controller._sensorgram_spectral_cube_payload_signature(spectral_cube_index, selected_roi_ids, selected_source_rois)
 
-    def _cached_sensorgram_spectral_cube_payload(
-        self,
-        spectral_cube_index: int,
-        selected_roi_ids: tuple[int, ...],
-        selected_source_rois: list[AreaRoi],
-    ) -> tuple[object, ...] | None:
-        return self._analysis_controller._cached_sensorgram_spectral_cube_payload(spectral_cube_index, selected_roi_ids, selected_source_rois)
-
     def _schedule_sensorgram_refresh(self) -> None:
         self._analysis_controller._schedule_sensorgram_refresh()
 
@@ -6244,21 +6347,13 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, HistogramMaskMixin, Measurem
     def _restore_analysis_caches(self, payload: dict | None) -> None:
         self._analysis_controller._restore_analysis_caches(payload)
 
-    def _prepare_formula_spectrum_payload_for_spectral_cube(
-        self,
-        spectral_cube_index: int,
-        selected_roi_ids: tuple[int, ...],
-        selected_source_rois: list[AreaRoi],
-    ) -> tuple[object, ...] | None:
-        return self._analysis_controller._prepare_formula_spectrum_payload_for_spectral_cube(spectral_cube_index, selected_roi_ids, selected_source_rois)
-
-    def _prepare_fast_spectrum_payload_for_spectral_cube(
+    def _prepare_scoped_spectrum_payload_for_spectral_cube(
         self,
         spectral_cube_index: int,
         selected_roi_ids: tuple,
         selected_source_rois: list,
     ) -> tuple | None:
-        return self._analysis_controller._prepare_fast_spectrum_payload_for_spectral_cube(spectral_cube_index, selected_roi_ids, selected_source_rois)
+        return self._analysis_controller._prepare_scoped_spectrum_payload_for_spectral_cube(spectral_cube_index, selected_roi_ids, selected_source_rois)
 
     def _prepare_formula_spectrum_payload(
         self,
@@ -6271,6 +6366,9 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, HistogramMaskMixin, Measurem
 
     def _toggle_analysis_time_independent(self) -> None:
         self._analysis_controller._toggle_analysis_time_independent()
+
+    def _toggle_analysis_ram_only_backup(self) -> None:
+        self._analysis_controller._toggle_analysis_ram_only_backup()
 
     def _refresh_formula_spectrum(self) -> None:
         self._analysis_controller._refresh_formula_spectrum()

@@ -1169,17 +1169,41 @@ def transformed_annulus_mask_for_patch(
     already been read from a smaller region of the target space (e.g. a
     zarr-chunk-aware partial read around one or more ROIs) — returns a mask
     shaped `patch_shape`, local to `patch_origin_xy`, instead of embedding into
-    a full-image-sized array. Use when the caller has already decided the
-    patch is the right region (e.g. a per-ROI or union bounding box); this
-    does not do its own reach-based shrinking beyond the given patch.
+    a full-image-sized array.
+
+    Does its own reach-based shrinking (same `annulus_reach_box` bound
+    `transformed_annulus_mask` uses), clipped to the given patch's own
+    bounds, rather than computing over the entire patch regardless of the
+    ROI's actual size. This matters once the patch can be large relative to
+    one ROI - e.g. the OME-Zarr scoped path's per-ROI mask build, where
+    `patch_shape` is the union box for *every* selected ROI, not just this
+    one - a widely scattered multi-ROI selection can make that patch nearly
+    as big as the full image; recomputing every one of hundreds of ROIs'
+    individual masks over that whole patch measured at ~48s/wavelength on a
+    real 160-ROI dataset (see apps/LSPRi/eva/docs/
+    bulk_analysis_performance_investigation.md, "Follow-up #3"). Bounded work
+    per ROI regardless of patch size closes that gap.
     """
     patch_h, patch_w = patch_shape[:2]
     inner_radius = max(float(inner_radius_px), 0.0)
     outer_radius = max(float(outer_radius_px), inner_radius)
+    mask = np.zeros((patch_h, patch_w), dtype=bool)
     if outer_radius <= 0.0:
-        return np.zeros((patch_h, patch_w), dtype=bool)
+        return mask
     px0, py0 = int(patch_origin_xy[0]), int(patch_origin_xy[1])
-    return _annulus_mask_in_box(px0, py0, px0 + patch_w, py0 + patch_h, center_xy, inner_radius, outer_radius, affine_matrix)
+    transformed_center, reach = annulus_reach_box(center_xy, outer_radius, affine_matrix)
+    local_x0 = max(int(np.floor(transformed_center[0] - reach)) - px0, 0)
+    local_x1 = min(int(np.ceil(transformed_center[0] + reach)) + 1 - px0, patch_w)
+    local_y0 = max(int(np.floor(transformed_center[1] - reach)) - py0, 0)
+    local_y1 = min(int(np.ceil(transformed_center[1] + reach)) + 1 - py0, patch_h)
+    if local_x0 >= local_x1 or local_y0 >= local_y1:
+        return mask
+    mask_local = _annulus_mask_in_box(
+        px0 + local_x0, py0 + local_y0, px0 + local_x1, py0 + local_y1,
+        center_xy, inner_radius, outer_radius, affine_matrix,
+    )
+    mask[local_y0:local_y1, local_x0:local_x1] = mask_local
+    return mask
 
 
 def transformed_disk_mask_for_patch(

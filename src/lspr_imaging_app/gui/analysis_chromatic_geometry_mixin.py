@@ -114,7 +114,7 @@ class AnalysisChromaticGeometryMixin:
         set) would close this gap but was left out to keep this change
         focused on removing the gate, not changing reference-cube selection.
         """
-        from lspr_imaging_app.gui.analysis_tasks import compute_roi_union_bounding_box
+        from lspr_imaging_app.gui.analysis_tasks import spectrum_read_region
         from lspr_imaging_app.io.dataset import load_image_shape
         from lspr_imaging_app.processing.preprocess import spatial_output_shape
 
@@ -141,12 +141,13 @@ class AnalysisChromaticGeometryMixin:
         image_height, image_width = spatial_output_shape(raw_shape, settings_snapshot.preprocessing)
 
         affine_matrices = [affine_by_wavelength.get(float(wavelength)) for wavelength in self.window._wavelength_values]
-        box = compute_roi_union_bounding_box(
+        box = spectrum_read_region(
+            self.window._state.dataset,
+            image_height,
+            image_width,
             selected_source_rois,
             float(settings_snapshot.area_roi_settings.reference_outer_radius_px),
             affine_matrices,
-            image_height,
-            image_width,
         )
         if box is None:
             return None
@@ -165,7 +166,7 @@ class AnalysisChromaticGeometryMixin:
     ) -> dict[float, object]:
         """The fully-resolved (fetched, chromatic-warped, wavelength-diffed)
         marked-pixels mask for every wavelength of one cube - the exact same
-        per-wavelength result `_prepare_fast_spectrum_payload_for_spectral_cube`
+        per-wavelength result `_prepare_scoped_spectrum_payload_for_spectral_cube`
         computes fresh per cube today. Used both directly (as today's
         per-cube behavior) and as the one-time reference-cube computation
         [λ] mode reuses across every other cube (see

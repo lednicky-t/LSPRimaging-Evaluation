@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import re
 import threading
 import time
@@ -21,6 +22,11 @@ try:
 except Exception:  # pragma: no cover - optional acceleration path
     _tifffile_imread = None
     _tifffile_TiffFile = None
+
+try:
+    import zarrs as _zarrs  # noqa: F401  (only needed to register its codec pipeline)
+except Exception:  # pragma: no cover - optional acceleration path
+    _zarrs = None
 
 from lspr_core import ImagingAcquisitionMetadata
 from lspr_io import is_imaging_measurement_file, read_imaging_acquisition_metadata
@@ -74,6 +80,48 @@ def _crc32c(data: bytes) -> int:
     return crc ^ 0xFFFFFFFF
 
 
+_ZARR_CODEC_PIPELINE_CONFIGURED = False
+
+
+def _configure_zarr_codec_pipeline(zarr) -> None:
+    """Switch zarr's read/decode pipeline to the Rust-backed `zarrs` one, once.
+
+    zarr-python's default pipeline already coalesces a scoped read's chunk
+    *fetches* into one batched I/O call (see the zarr>=3.3 pin comment in
+    pyproject.toml) - but it still *decodes* the fetched chunks one at a
+    time (codec_pipeline.batch_size=1 by default), each paying its own
+    asyncio task / thread-pool dispatch (~1.5-2ms) regardless of chunk size.
+    `zarrs` does that same per-chunk loop in Rust instead, sidestepping that
+    dispatch cost. Measured directly on a real 66-ROI dataset: ~5x on a
+    27-wavelength/cube ROI-scoped read (~1000ms -> ~195ms), ~7.5x on a
+    full-plane read (~175ms -> ~23ms), byte-identical output.
+
+    DISABLED as of 2026-09-07: a real run crashed the whole process with
+    Windows STATUS_HEAP_CORRUPTION (exit code 0xC0000374) shortly after
+    startup's first image load - no Python traceback, just a hard native
+    crash, consistent with `zarrs`' Rust-side Rayon thread pool colliding
+    with this app's own threading (QThreadPool for interactive image loads,
+    a separate ThreadPoolExecutor during "Start analysis" - see
+    zarrs-python issue #171 for a related, already-documented concurrency
+    bug in this exact library, albeit a different symptom). Not yet root-
+    caused to a specific trigger, so left off rather than guessing at a
+    workaround - re-enable (uncomment the `zarr.config.set` call below)
+    only after that's understood, and re-verify under the app's actual
+    concurrent access patterns (interactive load + background analysis),
+    not just the single-threaded benchmarks that validated it originally.
+    Falls back to the standard pipeline either way - this was always a pure
+    performance path, never the only way to read a dataset.
+    """
+    global _ZARR_CODEC_PIPELINE_CONFIGURED
+    if _ZARR_CODEC_PIPELINE_CONFIGURED or _zarrs is None:
+        return
+    # try:
+    #     zarr.config.set({"codec_pipeline.path": "zarrs.ZarrsCodecPipeline"})
+    # except Exception:
+    #     _LOGGER.debug("Could not enable zarrs codec pipeline; using zarr's default.", exc_info=True)
+    _ZARR_CODEC_PIPELINE_CONFIGURED = True
+
+
 def _require_ome_zarr_support():
     global _OME_ZARR_IMPORT_ERROR
     try:
@@ -86,6 +134,7 @@ def _require_ome_zarr_support():
         raise ImportError(
             "OME-Zarr support requires zarr, numcodecs, and ome-zarr."
         ) from exc
+    _configure_zarr_codec_pipeline(zarr)
     return zarr, Blosc, _blosc, write_multiscales_metadata
 
 _LOGGER = logging.getLogger("lspr_imaging_app.workflow")
@@ -928,6 +977,143 @@ def read_existing_ome_zarr_summary(destination: Path) -> OmeZarrExportSummary | 
         return None
 
 
+def calibrate_zarr_read_overhead_ms() -> tuple[float, float] | None:
+    """Empirically characterize this machine's *current* local-zarr-store
+    read overhead as `(fixed_ms, per_chunk_ms)`, via a small, throwaway
+    synthetic array in a temp directory - not a benchmark of any real
+    dataset, just a quick calibration of whichever codec pipeline is
+    currently active (see io/dataset.py's `_configure_zarr_codec_pipeline` -
+    this picks it up automatically, whatever it is).
+
+    Why this is a reasonable basis for estimating a *different*, not-yet-
+    chosen chunk size (see `estimate_ome_zarr_export_chunk_plane_read`):
+    per apps/LSPRi/eva/docs/bulk_analysis_performance_investigation.md, read
+    cost for this local-store/sharded setup is dominated by per-chunk
+    dispatch overhead, not decompression (a whole plane's worth of pixels
+    decompresses in a few ms regardless of how many pieces it's split
+    into) - so a `fixed + per_chunk * chunks_touched` model fit against ONE
+    chunk size's own chunk-count-vs-time curve transfers reasonably well to
+    predicting a different chunk size's chunk-count, on the same machine and
+    pipeline. It will not be exact (this is deliberately a quick estimate,
+    not a benchmark of the real, not-yet-created export), most notably once
+    a candidate chunk size is large enough that decompression time stops
+    being negligible - but by then chunks-per-plane is already low (a few
+    at most), so the total estimate stays small regardless of the modeling
+    error.
+
+    Returns None if calibration fails for any reason (missing zarr support,
+    a read-only temp dir, etc.) - this is a pure UI nice-to-have, never
+    load-bearing, so callers should treat None as "no estimate available"
+    and fall back to showing just the chunk-count fact.
+    """
+    import tempfile
+    import time as _time
+
+    try:
+        zarr, _, _, _ = _require_ome_zarr_support()
+        from zarr.codecs import BloscCodec
+        from zarr.storage import LocalStore
+    except ImportError:
+        return None
+    try:
+        with tempfile.TemporaryDirectory(prefix="lspr_zarr_calibration_") as tmp:
+            store = LocalStore(tmp)
+            group = zarr.open_group(store=store, mode="w", zarr_format=3)
+            side = 400
+            chunk = 50
+            array = group.create_array(
+                "cal",
+                shape=(1, 1, side, side),
+                chunks=(1, 1, chunk, chunk),
+                # One shard covers the whole array, matching a real export's
+                # "many inner chunks in one already-open shard file" shape -
+                # what's actually being calibrated is the per-inner-chunk
+                # dispatch cost *within* a shard (see the investigation
+                # doc's root-cause section), not a many-small-files-on-disk
+                # cost, so this must not be left unsharded (one file per
+                # chunk would characterize a different, unrelated overhead).
+                shards=(1, 1, side, side),
+                dtype=np.uint16,
+                fill_value=0,
+                compressors=BloscCodec(cname="lz4", clevel=1, shuffle="bitshuffle"),
+            )
+            rng = np.random.default_rng(0)
+            array[0, 0, :, :] = rng.integers(0, 4000, size=(side, side), dtype=np.uint16)
+
+            chunks_per_side = side // chunk  # 8
+            probe_side_in_chunks = sorted({1, 2, 4, chunks_per_side})
+            chunk_counts: list[float] = []
+            elapsed_ms_values: list[float] = []
+            for k in probe_side_in_chunks:
+                region = k * chunk
+                # Warm read first (untimed) - measures the codec pipeline's
+                # own dispatch cost, not cold-disk I/O, matching this
+                # investigation's own methodology throughout.
+                _ = array[0, 0, 0:region, 0:region]
+                started = _time.perf_counter()
+                _ = array[0, 0, 0:region, 0:region]
+                elapsed_ms_values.append((_time.perf_counter() - started) * 1000.0)
+                chunk_counts.append(float(k * k))
+
+            slope, intercept = np.polyfit(chunk_counts, elapsed_ms_values, 1)
+            return (max(float(intercept), 0.0), max(float(slope), 0.0))
+    except Exception:
+        logging.getLogger("lspr_imaging_app.io").debug(
+            "OME-Zarr read-overhead calibration failed; read-time estimates will be unavailable.", exc_info=True
+        )
+        return None
+
+
+def estimate_ome_zarr_export_chunk_plane_read(
+    width: int,
+    height: int,
+    chunk_size_px: int,
+    calibration: tuple[float, float] | None,
+) -> str:
+    """Live "what would this chunk size mean for read speed" text for the
+    Export section's chunk-size spinner - the chunk count is exact (pure
+    geometry from the prospective export's own dimensions), the time is a
+    rough estimate from `calibrate_zarr_read_overhead_ms`'s linear model
+    (None if calibration wasn't available - falls back to chunk count only).
+    """
+    if width <= 0 or height <= 0 or chunk_size_px <= 0:
+        return ""
+    chunks_per_plane = math.ceil(height / chunk_size_px) * math.ceil(width / chunk_size_px)
+    if calibration is None:
+        return f"-> {chunks_per_plane} chunks/plane"
+    fixed_ms, per_chunk_ms = calibration
+    estimated_ms = fixed_ms + per_chunk_ms * chunks_per_plane
+    return f"-> {chunks_per_plane} chunks/plane, ~{estimated_ms:.0f}ms/plane read (estimated)"
+
+
+def estimate_ome_zarr_export_dataset_total_read(
+    width: int,
+    height: int,
+    chunk_size_px: int,
+    image_count: int,
+    calibration: tuple[float, float] | None,
+) -> str:
+    """Live "what would this chunk size mean for the whole dataset" text,
+    for the Export section - extends `estimate_ome_zarr_export_chunk_plane_
+    read`'s per-plane numbers across every image (one image = one
+    (spectral cube, wavelength) plane, matching `ImageDataset.records`/
+    `image_count` elsewhere in this module) in the currently loaded
+    dataset. Chunk count is exact; total time (once calibration is
+    available) is the per-plane estimate multiplied by image_count - each
+    plane read pays its own fixed dispatch cost, so this is a straight sum
+    across images, not a discount for reading many back to back.
+    """
+    if width <= 0 or height <= 0 or chunk_size_px <= 0 or image_count <= 0:
+        return ""
+    chunks_per_plane = math.ceil(height / chunk_size_px) * math.ceil(width / chunk_size_px)
+    total_chunks = chunks_per_plane * image_count
+    if calibration is None:
+        return f"-> {total_chunks:,} chunks total ({image_count:,} images)"
+    fixed_ms, per_chunk_ms = calibration
+    total_ms = image_count * (fixed_ms + per_chunk_ms * chunks_per_plane)
+    return f"-> {total_chunks:,} chunks total ({image_count:,} images), ~{total_ms / 1000:.1f}s read (estimated)"
+
+
 def compare_ome_zarr_summaries(
     existing: OmeZarrExportSummary,
     new: OmeZarrExportSummary,
@@ -1332,7 +1518,18 @@ def _load_image_array_uncached(path_str: str) -> np.ndarray:
         return np.asarray(_read_ome_zarr_plane_by_path(path, ome_root), dtype=np.float32)
     if path.suffix.lower() in {".tif", ".tiff"} and _tifffile_imread is not None:
         try:
-            return np.asarray(_tifffile_imread(path_str, maxworkers=max(2, os.cpu_count() or 1)), dtype=np.float32)
+            # maxworkers=2, not os.cpu_count(): this is the per-wavelength read
+            # called from inside analysis_tasks.py's own ThreadPoolExecutor
+            # (one call per concurrent worker, several workers at once) as much
+            # as from single-image interactive loads - giving each individual
+            # file its own full-core-count decode pool means N outer workers x
+            # cpu_count inner threads all fighting over the same cores.
+            # Measured on a real 806x1288 dataset: maxworkers=cpu_count (8) cost
+            # ~1.1s to decode one cube's 27 planes inside the app's own 4-worker
+            # pool, vs ~0.6s with a small, fixed inner worker count - matches
+            # the same reasoning already applied to _load_image_array_native's
+            # export path below.
+            return np.asarray(_tifffile_imread(path_str, maxworkers=2), dtype=np.float32)
         except TypeError:
             return np.asarray(_tifffile_imread(path_str), dtype=np.float32)
     try:

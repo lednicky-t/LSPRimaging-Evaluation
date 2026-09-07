@@ -46,6 +46,24 @@ dependencies = [
     # 3.2.1 vs ~37ms on 3.3.0 for the exact same file. Fixed upstream by
     # zarr-python PR #3004 ("Optimize partial shard reads"), released in 3.3.0.
     "zarr>=3.3,<4",
+    # Rust-backed codec pipeline (see io/dataset.py's _configure_zarr_codec_pipeline).
+    # Even with the 3.3.0 fix above, decoding the fetched chunks still happens
+    # one-at-a-time by default (codec_pipeline.batch_size=1) - each dispatched
+    # through its own asyncio task/thread-pool round trip regardless of chunk
+    # size. zarrs replaces that per-chunk Python dispatch with a Rust loop:
+    # measured on a real 66-ROI dataset, a 27-wavelength/cube ROI-scoped read
+    # dropped from ~1000ms to ~195ms (~5x), full-plane reads from ~175ms to
+    # ~23ms (~7.5x) - verified byte-identical output against the default
+    # pipeline. Pre-1.0, so ceiling is next minor per the pinning policy above.
+    #
+    # DISABLED as of 2026-09-07 - _configure_zarr_codec_pipeline no longer
+    # activates it (kept installed, and importable for that check, so
+    # re-enabling later is a one-line change once root-caused). A real run
+    # crashed the whole process with Windows STATUS_HEAP_CORRUPTION shortly
+    # after startup's first image load; see the docstring there and
+    # apps/LSPRi/eva/docs/bulk_analysis_performance_investigation.md's
+    # "Follow-up #7" for detail.
+    "zarrs>=0.2.3,<0.3",
 ]
 
 [project.scripts]
