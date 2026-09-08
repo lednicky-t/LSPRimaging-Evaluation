@@ -30,8 +30,9 @@ from PyQt6.QtWidgets import QFileDialog, QMessageBox
 
 from lspr_imaging_app.domain.exclusions import is_excluded
 from lspr_imaging_app.domain.models import AreaRoi, FormulaSpectrumResult
-from lspr_imaging_app.gui.analysis_tasks import _roi_formula_spectrum_signature
+from lspr_imaging_app.gui.analysis_tasks import _roi_formula_spectrum_signature, _scoped_formula_spectrum_task
 from lspr_imaging_app.processing.analysis import (
+    fit_curve_for_method,
     formula_values_from_reduced_values,
     metric_value_from_fit,
     metric_value_from_spectrum,
@@ -69,6 +70,94 @@ class FormulaSpectrumRenderBundle:
     basic_text: str
     detail_tooltip: str
     fit_seconds: float
+
+
+# 5% of the real (non-dark) spectral span is an arbitrary but reasonable
+# threshold for "this is worth acting on" - small enough to flag a genuine
+# LSPR-peak-scale distortion (the incident this test was built from shifted
+# the metric by >200% of the range), large enough not to nag over
+# sub-nanometer floating-point-scale noise between the two fits.
+DARK_FRAME_IMPACT_RECOMMEND_EXCLUDE_THRESHOLD = 0.05
+
+
+def dark_frame_with_without_metrics(
+    wavelengths_nm: np.ndarray,
+    formula_values: np.ndarray,
+    *,
+    fit_method_key: str,
+    metric_key: str,
+    poly_order: int,
+    wl_min: float | None,
+    wl_max: float | None,
+) -> tuple[float | None, float | None, float]:
+    """Pure core of run_dark_frame_impact_test: given one already-computed
+    spectrum (real wavelengths plus a 0 nm dark frame mixed in), returns
+    (metric_with_dark_frame, metric_without_it, real_wavelength_span_nm) -
+    split out so it's directly unit-testable with synthetic arrays, no Qt
+    app, dataset, or background dispatch needed (mirrors this module's
+    format_dark_frame_impact_result and this repo's other pure-computation-
+    split-from-orchestration functions, e.g. main_window.py's
+    _format_busy_detail_text). `wl_min`/`wl_max` are the Analysis section's
+    current wavelength-range filter (may be None) - applied identically to
+    both the with- and without-dark-frame fits so the comparison isolates
+    only the dark frame's own effect, not a range-setting difference."""
+    wavelengths = np.asarray(wavelengths_nm, dtype=np.float64)
+    values = np.asarray(formula_values, dtype=np.float64)
+    without_dark_mask = wavelengths != 0.0
+    real_wavelengths = wavelengths[without_dark_mask]
+    real_span = float(np.max(real_wavelengths) - np.min(real_wavelengths)) if real_wavelengths.size >= 2 else 0.0
+
+    def _metric_for(wl: np.ndarray, val: np.ndarray) -> float | None:
+        if fit_method_key == "none":
+            metric_value, _signal = metric_value_from_spectrum(wl, val, metric_key, wl_min=wl_min, wl_max=wl_max)
+        else:
+            fit = fit_curve_for_method(wl, val, fit_method_key, poly_order=poly_order, wl_min=wl_min, wl_max=wl_max)
+            metric_value, _signal = metric_value_from_fit(fit, metric_key)
+        return metric_value
+
+    with_value = _metric_for(wavelengths, values)
+    without_value = _metric_for(real_wavelengths, values[without_dark_mask])
+    return with_value, without_value, real_span
+
+
+def format_dark_frame_impact_result(
+    with_dark_frame: float | None,
+    without_dark_frame: float | None,
+    real_wavelength_span_nm: float,
+    spectral_cube_index: int,
+) -> str:
+    """Pure formatter for AnalysisWorkerMixin.run_dark_frame_impact_test's
+    result text - split out so it's directly unit-testable without a
+    running Qt app or a real dataset (mirrors main_window.py's
+    _format_busy_detail_text pattern). `real_wavelength_span_nm` is the
+    max-minus-min of the dataset's real (non-0nm) wavelengths - the
+    denominator for expressing the shift as a percentage of "how wide your
+    actual spectrum is," which is more meaningful here than a percentage of
+    the metric's own absolute value (a wavelength near 0 nm would produce
+    an enormous, misleading percentage under that definition instead)."""
+    if with_dark_frame is None or without_dark_frame is None:
+        missing = "with" if with_dark_frame is None else "without"
+        return (
+            f"Cube {spectral_cube_index}: could not compute a result {missing} the 0 nm frame - "
+            "try a different Fit/Metric combination, or pick a dataset with more real wavelengths."
+        )
+    shift = abs(with_dark_frame - without_dark_frame)
+    if real_wavelength_span_nm > 1.0e-9:
+        percent = shift / real_wavelength_span_nm * 100.0
+        percent_text = f"{percent:.1f}% of your {real_wavelength_span_nm:.0f} nm spectral range"
+        recommend_exclude = (shift / real_wavelength_span_nm) > DARK_FRAME_IMPACT_RECOMMEND_EXCLUDE_THRESHOLD
+    else:
+        percent_text = "spectral range too narrow to express as a percentage"
+        recommend_exclude = shift > 1.0e-9
+    verdict = (
+        "Recommend turning on \"Treat 0 nm as a dark reference frame.\""
+        if recommend_exclude
+        else "Negligible either way - the preference doesn't matter much for this dataset."
+    )
+    return (
+        f"Cube {spectral_cube_index}: including the 0 nm frame gives {with_dark_frame:.2f}, "
+        f"excluding it gives {without_dark_frame:.2f} - a shift of {shift:.2f} ({percent_text}). {verdict}"
+    )
 
 
 def _write_measurement_backup_buffers(writer, formula_buffer, sensorgram_buffer) -> None:
@@ -267,6 +356,7 @@ class AnalysisWorkerMixin:
         settings_snapshot: SpectrumSettingsSnapshot | None = None,
         shared_geometry: SharedWavelengthGeometry | None = None,
         shared_mask_by_wavelength: dict[float, object] | None = None,
+        wavelength_values: list[float] | None = None,
     ) -> tuple | None:
         """Build the payload for `_scoped_formula_spectrum_task` - the one
         spectrum-compute path, used for every dataset regardless of format.
@@ -290,6 +380,15 @@ class AnalysisWorkerMixin:
         being fetched/warped fresh for this cube. Which record/file to read
         per wavelength, and exclusions, are still resolved per cube either
         way - those are genuinely cube-specific (different files).
+
+        `wavelength_values`: which wavelengths to build the payload over -
+        defaults to `self.window._wavelength_values` (the normal, possibly
+        `_filtered_wavelength_values`-filtered list every other caller
+        implicitly uses). Only `run_dark_frame_impact_test` passes this
+        explicitly, with the dataset's raw, unfiltered wavelength list -
+        that test needs to see a 0 nm frame regardless of whether the
+        "Treat 0 nm as a dark reference frame" preference already filters
+        it out of the normal list.
         """
         from lspr_imaging_app.gui.analysis_tasks import spectrum_read_region
         from lspr_imaging_app.io.dataset import load_image_shape
@@ -300,6 +399,8 @@ class AnalysisWorkerMixin:
         if settings_snapshot is None:
             settings_snapshot = self._spectrum_settings_snapshot()
         preprocessing = settings_snapshot.preprocessing
+        if wavelength_values is None:
+            wavelength_values = self.window._wavelength_values
 
         # Mirror ignored_pixel_mask's own gating: an external mask only excludes
         # pixels from the absorbance calculation when ignore_marked_pixels is
@@ -310,7 +411,7 @@ class AnalysisWorkerMixin:
         measurement_payload: list[tuple[float, np.ndarray | None, np.ndarray | None, object]] = []
         affine_matrices: list[np.ndarray | None] = []
         first_record = None
-        for wavelength in self.window._wavelength_values:
+        for wavelength in wavelength_values:
             record = self.window._record_map.get((spectral_cube_index, wavelength))
             if record is None or is_excluded(self.window._state.image_exclusions, spectral_cube_index, wavelength):
                 continue
@@ -406,6 +507,108 @@ class AnalysisWorkerMixin:
             mask_state,
             background_mask_settings,
         )
+
+    def run_dark_frame_impact_test(self, on_result, on_error) -> None:
+        """"Test dark-frame impact" (Preferences > Wavelength handling,
+        next to "Treat 0 nm as a dark reference frame"): for the first
+        spectral cube only, computes the current Fit/Metric result twice -
+        once with the dataset's 0 nm frame included, once with it excluded
+        - and reports how much it shifts the result. Meant to let a user
+        decide whether to turn that preference on without already knowing
+        why a stray 0 nm (dark/broadband reference) frame can distort a
+        polynomial fit - see docs/qthreadpool_zarr_crash_investigation.md's
+        sibling sensorgram-wavelength-range bug writeup for the real
+        incident this was built from: an 11th-order polynomial fit
+        including one extreme low-signal outlier point pulled the fitted
+        peak position far outside the real spectral range.
+
+        Always builds against the dataset's raw, unfiltered wavelength list
+        (`dataset.wavelengths_nm`, not `window._wavelength_values`) so the
+        test is meaningful regardless of whether the preference is
+        currently on - `_wavelength_values` may already have 0 nm filtered
+        out by the time this runs.
+
+        Format-agnostic: reuses `_prepare_scoped_spectrum_payload_for_spectral_cube`
+        / `_scoped_formula_spectrum_task`, the same pipeline "Start
+        analysis" and the live preview already use for both TIFF and
+        OME-Zarr - `spectrum_read_region` (analysis_tasks.py) is the only
+        place either of those cares about format, and this test doesn't
+        touch that decision at all.
+
+        `on_result(text)`/`on_error(text)` are plain callbacks, called back
+        on the GUI thread by FunctionWorker's signals - not dispatched
+        through QThreadPool (see gui/worker.py's FunctionWorker docstring
+        for why that matters for anything touching the dataset).
+        """
+        from lspr_imaging_app.gui.worker import FunctionWorker
+
+        window = self.window
+        dataset = window._state.dataset
+        if dataset is None:
+            on_error("No dataset is loaded.")
+            return
+        raw_wavelengths = sorted({float(w) for w in dataset.wavelengths_nm})
+        if 0.0 not in raw_wavelengths:
+            on_error("This dataset has no 0 nm frame - there's nothing to test.")
+            return
+        if len(raw_wavelengths) < 3:
+            on_error("Not enough wavelengths in this dataset to fit a spectrum.")
+            return
+        selected_roi_ids = window._selected_spectrum_roi_ids()
+        selected_source_rois = window._selected_source_rois_snapshot()
+        if not selected_roi_ids or not selected_source_rois:
+            on_error("Select at least one ROI (in the ROI table) before running this test.")
+            return
+        spectral_cubes = self.available_analysis_spectral_cubes()
+        if not spectral_cubes:
+            on_error("No spectral cubes available to test.")
+            return
+        first_cube = int(min(spectral_cubes))
+
+        settings_snapshot = self._spectrum_settings_snapshot()
+        payload = self._prepare_scoped_spectrum_payload_for_spectral_cube(
+            first_cube,
+            selected_roi_ids,
+            selected_source_rois,
+            settings_snapshot,
+            wavelength_values=raw_wavelengths,
+        )
+        if payload is None:
+            on_error(f"Could not read spectral cube {first_cube} for the current ROI selection.")
+            return
+
+        (reduction_method,) = self._roi_reduction_signature_elements()
+        formula_key = self._active_formula_key()
+        fit_method_key = self._analysis_fit_method_key()
+        metric_key = window._analysis_metric_key()
+        poly_order = window._analysis_poly_order()
+        wavelength_range = window._analysis_wavelength_range()
+        wl_min = None if wavelength_range is None else wavelength_range[0]
+        wl_max = None if wavelength_range is None else wavelength_range[1]
+
+        def _on_spectrum_ready(spectrum) -> None:
+            with_value, without_value, real_span = dark_frame_with_without_metrics(
+                spectrum.wavelengths_nm,
+                spectrum.formula_values,
+                fit_method_key=fit_method_key,
+                metric_key=metric_key,
+                poly_order=poly_order,
+                wl_min=wl_min,
+                wl_max=wl_max,
+            )
+            on_result(format_dark_frame_impact_result(with_value, without_value, real_span, first_cube))
+
+        worker = FunctionWorker(
+            _scoped_formula_spectrum_task,
+            *payload,
+            reduction_method=reduction_method,
+            trimmed_mean_fraction=DEFAULT_TRIMMED_MEAN_FRACTION,
+            formula_key=formula_key,
+            compute_all_reduction_methods=True,
+        )
+        worker.signals.result.connect(_on_spectrum_ready)
+        worker.signals.error.connect(on_error)
+        worker.start()
 
     def _start_sensorgram_worker(
         self,
@@ -867,8 +1070,9 @@ class AnalysisWorkerMixin:
             )
             return
         if bool(getattr(self.window, "_sensorgram_running", False)):
-            # Timestamp resolved here (cheap - _acquisition_timing_index is
-            # memoized on the window, see its own docstring), not at flush
+            # Timestamp resolved here (cheap - a dict lookup against
+            # dataset.compact_image_timings, see AnalysisController.
+            # _compact_image_timings), not at flush
             # time: the periodic flush hands buffered rows to a background
             # thread (_flush_measurement_backup_buffers_async), which must
             # not call back into any self.window method - baking the
@@ -902,9 +1106,9 @@ class AnalysisWorkerMixin:
         original acquisition)."""
         metadata = self._sensorgram_time_mode_metadata()
         if metadata is not None:
-            timing = self._earliest_timing_by_cube_index(metadata).get(int(spectral_cube_index))
-            if timing is not None:
-                return int(timing.acquired_at_unix_ms)
+            timing_ms = self._earliest_timing_by_cube_index(metadata).get(int(spectral_cube_index))
+            if timing_ms is not None:
+                return int(timing_ms)
         return int(datetime.now().timestamp() * 1000)
 
     def on_sensorgram_ready(self, request_id: int, result) -> None:

@@ -5,6 +5,7 @@ from pathlib import Path
 
 from PyQt6.QtWidgets import QFileDialog, QMessageBox
 
+from lspr_imaging_app.domain.models import rehydrated_acquisition_metadata
 from lspr_imaging_app.io.dataset import acquisition_metadata_sidecar_path
 from lspr_imaging_app.io.metadata_import import import_metadata_files
 from lspr_imaging_app.storage.workspace import save_acquisition_metadata_sidecar
@@ -54,6 +55,11 @@ class MetadataController:
             save_acquisition_metadata_sidecar(acquisition_metadata_sidecar_path(folder), result.metadata)
         except OSError as exc:
             result.notes.append(f"Could not save metadata sidecar: {exc}")
+        # _update_metadata_status_labels itself lazily compacts the
+        # (potentially thousands-strong) live ImagingCubeTiming list down to
+        # a compact form via compact_dataset_image_timings - see that
+        # function's docstring for why, and why this doesn't need its own
+        # explicit call here.
         self.window._update_metadata_status_labels(dataset)
 
         QMessageBox.information(
@@ -66,7 +72,11 @@ class MetadataController:
         re-importing that same file (see `import_metadata`) restores it
         exactly, including any edits made in the preview/edit dialog."""
         dataset = self.window._state.dataset
-        metadata = getattr(dataset, "acquisition_metadata", None) if dataset is not None else None
+        # rehydrated_acquisition_metadata, not dataset.acquisition_metadata
+        # directly - image_timings may already be compacted away (see
+        # compact_dataset_image_timings), and this export needs the full,
+        # real per-image data.
+        metadata = rehydrated_acquisition_metadata(dataset) if dataset is not None else None
         if metadata is None:
             QMessageBox.information(self.window, "Nothing to export", "No acquisition metadata is currently loaded.")
             return
@@ -96,7 +106,13 @@ class MetadataController:
             return
         from lspr_imaging_app.gui.metadata_edit_dialog import MetadataEditDialog
 
-        dialog = MetadataEditDialog(metadata, parent=self.window)
+        # Rehydrated, not the possibly-already-compacted dataset.acquisition_
+        # metadata directly - the dialog's read-only timing summary
+        # (_format_timing_summary) needs the real per-image data to describe
+        # accurately, and result_metadata() below returns a copy built from
+        # whatever was passed in here, so an empty image_timings would
+        # silently propagate back into dataset.acquisition_metadata otherwise.
+        dialog = MetadataEditDialog(rehydrated_acquisition_metadata(dataset), parent=self.window)
         if not dialog.exec():
             return
         updated = dialog.result_metadata()
@@ -107,4 +123,6 @@ class MetadataController:
                 save_acquisition_metadata_sidecar(acquisition_metadata_sidecar_path(folder), updated)
             except OSError as exc:
                 QMessageBox.warning(self.window, "Could not save edits", str(exc))
+        # _update_metadata_status_labels lazily (re)compacts - see
+        # import_metadata's comment above.
         self.window._update_metadata_status_labels(dataset)

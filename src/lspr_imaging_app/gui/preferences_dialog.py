@@ -9,6 +9,7 @@ from PyQt6.QtWidgets import (
     QFormLayout,
     QGroupBox,
     QHBoxLayout,
+    QLabel,
     QPushButton,
     QScrollArea,
     QVBoxLayout,
@@ -44,6 +45,12 @@ class PreferencesDialog(QDialog):
         self.setWindowTitle("Preferences")
         self.setModal(True)
         self.setMinimumWidth(420)
+        # run_dark_frame_impact_test's result arrives on a background thread's
+        # timing (a real dataset read, not instant) - if the dialog is closed
+        # before it comes back, its callbacks must not touch widgets that no
+        # longer exist. done() (called for both accept/reject/close) is the
+        # single choke point for that, unlike overriding closeEvent alone.
+        self._closed = False
 
         # Appearance
         self.theme_combo = QComboBox()
@@ -78,11 +85,27 @@ class PreferencesDialog(QDialog):
             "0 nm (a dark/broadband frame some acquisitions capture alongside the narrowband "
             "wavelengths) is never used in chromatic correction, masking, or ROI placement "
             "regardless of this setting. When enabled, it's also dropped from ordinary "
-            "wavelength navigation (the wavelength slider/spinbox, sample-wavelength lists) - "
-            "cube navigation always starts from the next lowest real wavelength instead of 0 nm. "
-            "The image itself is unaffected either way. Takes effect the next time a dataset is "
+            "wavelength navigation (the wavelength slider/spinbox, sample-wavelength lists) AND "
+            "from the Analysis section's spectrum (Metric trace fitting, \"Start analysis\" "
+            "sensorgram sweeps) - both read the same filtered wavelength list, so leaving this "
+            "off lets a 0 nm frame's near-zero counts pull a polynomial fit's peak search far "
+            "outside your real spectral range. Use \"Test dark-frame impact\" below to check how "
+            "much it actually matters for your dataset before deciding. Cube navigation always "
+            "starts from the next lowest real wavelength instead of 0 nm when this is on. The "
+            "image itself is unaffected either way. Takes effect the next time a dataset is "
             "loaded, not for one already open."
         )
+        self.dark_frame_test_button = QPushButton("Test dark-frame impact...")
+        self.dark_frame_test_button.setToolTip(
+            "Computes your current Fit/Metric result for the first spectral cube twice - once "
+            "with the dataset's 0 nm frame included, once excluded - and reports how much it "
+            "shifts the result, so you can decide whether the setting above matters for this "
+            "dataset instead of guessing. Requires a dataset with a 0 nm frame to be loaded and "
+            "at least one ROI selected. Works for both TIFF and OME-Zarr datasets."
+        )
+        self.dark_frame_test_button.clicked.connect(self._run_dark_frame_impact_test)
+        self.dark_frame_test_result_label = QLabel("")
+        self.dark_frame_test_result_label.setWordWrap(True)
 
         # OME-Zarr export
         self.zarr_adaptive_enabled_check = QCheckBox("Adaptive worker tuning enabled")
@@ -153,6 +176,11 @@ class PreferencesDialog(QDialog):
         wavelength_layout.setHorizontalSpacing(16)
         wavelength_layout.setVerticalSpacing(8)
         wavelength_layout.addRow(self.exclude_zero_wavelength_check)
+        dark_frame_test_row = QHBoxLayout()
+        dark_frame_test_row.addWidget(self.dark_frame_test_button)
+        dark_frame_test_row.addStretch(1)
+        wavelength_layout.addRow(dark_frame_test_row)
+        wavelength_layout.addRow(self.dark_frame_test_result_label)
 
         zarr_box = QGroupBox("OME-Zarr export: adaptive worker tuning")
         zarr_layout = QFormLayout(zarr_box)
@@ -209,9 +237,34 @@ class PreferencesDialog(QDialog):
         self.apply_changes()
         self.accept()
 
+    def done(self, result: int) -> None:  # type: ignore[override]
+        self._closed = True
+        super().done(result)
+
     def _show_zarr_adaptive_info(self) -> None:
         if hasattr(self._window, "_dataset_controller"):
             self._window._dataset_controller._show_ome_zarr_adaptive_tuning_info()
+
+    def _run_dark_frame_impact_test(self) -> None:
+        analysis_controller = getattr(self._window, "_analysis_controller", None)
+        if analysis_controller is None or not hasattr(analysis_controller, "run_dark_frame_impact_test"):
+            return
+        self.dark_frame_test_button.setEnabled(False)
+        self.dark_frame_test_result_label.setText("Testing cube 0...")
+
+        def _on_result(text: str) -> None:
+            if self._closed:
+                return
+            self.dark_frame_test_button.setEnabled(True)
+            self.dark_frame_test_result_label.setText(text)
+
+        def _on_error(message: str) -> None:
+            if self._closed:
+                return
+            self.dark_frame_test_button.setEnabled(True)
+            self.dark_frame_test_result_label.setText(str(message))
+
+        analysis_controller.run_dark_frame_impact_test(_on_result, _on_error)
 
     def _load_from_window(self) -> None:
         window = self._window

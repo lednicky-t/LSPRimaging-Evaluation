@@ -128,83 +128,61 @@ class AnalysisController(AnalysisWorkerMixin, AnalysisChromaticGeometryMixin):
         the behavior for every dataset without acquisition metadata loaded."""
         dataset = self.window._state.dataset
         metadata = getattr(dataset, "acquisition_metadata", None) if dataset is not None else None
-        if metadata is None or not metadata.image_timings:
+        # _compact_image_timings() (build-if-needed), not metadata.
+        # image_timings directly - the latter is emptied once
+        # compact_dataset_image_timings runs (see its docstring), so it's
+        # never a reliable "has timing data" check once a dataset has real
+        # timing data at all.
+        has_timings = bool(self._compact_image_timings())
+        if metadata is None or not has_timings:
             return None
         return metadata
 
-    @staticmethod
-    def _sensorgram_time_anchor_ms(metadata) -> int:
+    def _sensorgram_time_anchor_ms(self, metadata) -> int:
         """t=0 for the elapsed-time axis: the dataset's recorded start time
         if parseable (consistent with how comment-event/image timestamps are
-        already anchored), otherwise the earliest recorded image timing."""
+        already anchored), otherwise the earliest recorded image timing.
+
+        No longer a @staticmethod - the fallback now needs
+        `_compact_image_timings()` (instance state), not
+        `metadata.image_timings` directly (see that method's docstring)."""
         if metadata.started_at_utc:
             try:
                 return int(datetime.fromisoformat(metadata.started_at_utc.replace("Z", "+00:00")).timestamp() * 1000)
             except ValueError:
                 pass
-        return min(timing.acquired_at_unix_ms for timing in metadata.image_timings)
+        compact = self._compact_image_timings()
+        return min(compact.per_frame_ms.values())
 
-    def _acquisition_timing_index(
-        self, metadata
-    ) -> tuple[dict[int, object], dict[int, object], dict[tuple[int, float], object]]:
-        """(per_cube_earliest, per_cube_latest, per_frame) built together in
-        one pass over `metadata.image_timings`, cached on the window keyed by
-        id(metadata) - a freshly loaded/reloaded dataset always gets a new
-        metadata object, so this self-invalidates without needing an
-        explicit clear call.
+    def _compact_image_timings(self):
+        """Lazily-built compact timing index for the current dataset, or an
+        empty one if there's no dataset/timing data - the actual backing
+        store for every method below. Ignores whatever `metadata` a caller
+        passes in (every caller already only ever has the current
+        dataset's metadata in hand - see `_sensorgram_time_mode_metadata`).
+        Always goes through `compact_dataset_image_timings` (build-if-
+        needed), never reads `dataset.compact_image_timings` directly - see
+        that function's own docstring for why that distinction matters.
+        See domain/models.py's `CompactImageTimings` for why this exists at
+        all: avoiding thousands of live `ImagingCubeTiming` pydantic
+        instances staying referenced for a whole session."""
+        from lspr_imaging_app.domain.models import CompactImageTimings, compact_dataset_image_timings
 
-        `per_cube_earliest`/`per_cube_latest`: {spectral_cube_index: first/
-        last ImagingCubeTiming for that cube} - one representative timestamp
-        per cube (when its sweep began/ended), the raw material for
-        resolving the Cube/Time toggle's timestamp rule (see
-        `_cube_timestamp_ms_by_cube_index`).
+        dataset = self.window._state.dataset
+        if dataset is None:
+            return CompactImageTimings({}, {}, {})
+        return compact_dataset_image_timings(dataset)
 
-        `per_frame`: {(spectral_cube_index, wavelength_nm): ImagingCubeTiming}
-        - the full per-image timing, for anything asking "when was this
-        exact frame taken" (the "This image acquired" status label).
+    def _earliest_timing_by_cube_index(self, metadata) -> dict[int, int]:
+        """{spectral_cube_index: earliest acquired_at_unix_ms for that cube}
+        - one representative timestamp per cube (when its sweep began), the
+        raw material for resolving the Cube/Time toggle's timestamp rule
+        (see `_cube_timestamp_ms_by_cube_index`). `metadata` is unused - see
+        `_compact_image_timings`."""
+        return self._compact_image_timings().earliest_ms_by_cube
 
-        These replace linear scans that used to run on every wavelength
-        switch: `ImagingCubeTiming.earliest_timing_for_cube()` and
-        `.timing_for()` (packages/lspr_core) each re-scan the *entire*
-        `image_timings` list - O(wavelengths x cubes) - per call, since
-        `image_timings` is flat per-(cube, wavelength), not indexed by
-        either key. `_sensorgram_axis_range` used to call
-        `earliest_timing_for_cube()` once per spectral cube in the whole
-        dataset every switch, making that one call O(cubes^2 x wavelengths) -
-        measured at ~190ms on a 200-cube x 65-wavelength dataset (13,000
-        timing entries), matching almost exactly a "chromatic"-labeled stage
-        cost seen on a real slow-switch log (mislabeled - the actual cost was
-        here, not chromatic sync). This builds all three dicts with one
-        O(cubes x wavelengths) pass instead, without touching lspr_core (a
-        separate, shared package the acquisition app also depends on -
-        changing its model wasn't necessary here)."""
-        window = self.window
-        cache = getattr(window, "_acquisition_timing_index_cache", None)
-        if cache is not None and cache[0] == id(metadata):
-            return cache[1], cache[2], cache[3]
-        per_cube_earliest: dict[int, object] = {}
-        per_cube_latest: dict[int, object] = {}
-        per_frame: dict[tuple[int, float], object] = {}
-        for timing in metadata.image_timings:
-            cube_index = int(timing.spectral_cube_index)
-            wavelength_nm = float(timing.wavelength_nm)
-            per_frame[(cube_index, wavelength_nm)] = timing
-            earliest = per_cube_earliest.get(cube_index)
-            if earliest is None or timing.acquired_at_unix_ms < earliest.acquired_at_unix_ms:
-                per_cube_earliest[cube_index] = timing
-            latest = per_cube_latest.get(cube_index)
-            if latest is None or timing.acquired_at_unix_ms > latest.acquired_at_unix_ms:
-                per_cube_latest[cube_index] = timing
-        window._acquisition_timing_index_cache = (id(metadata), per_cube_earliest, per_cube_latest, per_frame)
-        return per_cube_earliest, per_cube_latest, per_frame
-
-    def _earliest_timing_by_cube_index(self, metadata) -> dict[int, object]:
-        per_cube_earliest, _per_cube_latest, _per_frame = self._acquisition_timing_index(metadata)
-        return per_cube_earliest
-
-    def _latest_timing_by_cube_index(self, metadata) -> dict[int, object]:
-        _per_cube_earliest, per_cube_latest, _per_frame = self._acquisition_timing_index(metadata)
-        return per_cube_latest
+    def _latest_timing_by_cube_index(self, metadata) -> dict[int, int]:
+        return self._compact_image_timings().latest_ms_by_cube
 
     def _cube_timestamp_ms_by_cube_index(self, metadata) -> dict[int, int]:
         """Resolves each cube's single representative timestamp (ms) per the
@@ -218,24 +196,25 @@ class AnalysisController(AnalysisWorkerMixin, AnalysisChromaticGeometryMixin):
         earliest frame regardless of this rule, so switching a display
         preference never changes what gets persisted."""
         rule = getattr(self.window, "_cube_time_timestamp_rule", "first")
-        per_cube_earliest, per_cube_latest, _per_frame = self._acquisition_timing_index(metadata)
+        compact = self._compact_image_timings()
         if rule == "last":
-            return {cube_index: timing.acquired_at_unix_ms for cube_index, timing in per_cube_latest.items()}
+            return dict(compact.latest_ms_by_cube)
         if rule == "midpoint":
             result: dict[int, int] = {}
-            for cube_index, earliest in per_cube_earliest.items():
-                latest = per_cube_latest.get(cube_index, earliest)
-                result[cube_index] = int((earliest.acquired_at_unix_ms + latest.acquired_at_unix_ms) / 2)
+            for cube_index, earliest_ms in compact.earliest_ms_by_cube.items():
+                latest_ms = compact.latest_ms_by_cube.get(cube_index, earliest_ms)
+                result[cube_index] = int((earliest_ms + latest_ms) / 2)
             return result
-        return {cube_index: timing.acquired_at_unix_ms for cube_index, timing in per_cube_earliest.items()}
+        return dict(compact.earliest_ms_by_cube)
 
-    def _timing_for_frame(self, metadata, spectral_cube_index: int, wavelength_nm: float):
-        """The exact per-image timing for one (cube, wavelength) frame, or
-        None if this metadata has no entry for it - the indexed equivalent of
-        `ImagingAcquisitionMetadata.timing_for()`, see
-        `_acquisition_timing_index`'s docstring for why."""
-        _per_cube_earliest, _per_cube_latest, per_frame = self._acquisition_timing_index(metadata)
-        return per_frame.get((int(spectral_cube_index), float(wavelength_nm)))
+    def _timing_for_frame(self, metadata, spectral_cube_index: int, wavelength_nm: float) -> int | None:
+        """The exact per-image timing (acquired_at_unix_ms) for one (cube,
+        wavelength) frame, or None if there's no entry for it - the indexed
+        equivalent of `ImagingAcquisitionMetadata.timing_for()`, without
+        needing lspr_core's `ImagingCubeTiming` object (this returns the
+        plain int timestamp directly, not an object with an
+        `.acquired_at_unix_ms` attribute - see `_compact_image_timings`)."""
+        return self._compact_image_timings().per_frame_ms.get((int(spectral_cube_index), float(wavelength_nm)))
 
     def _sensorgram_x_values(self, spectral_cube_indices) -> np.ndarray:
         """Map spectral cube indices to sensorgram x-axis display values:

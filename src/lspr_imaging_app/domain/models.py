@@ -4,7 +4,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 import numpy as np
-from lspr_core import ImagingAcquisitionMetadata
+from lspr_core import ImagingAcquisitionMetadata, ImagingCubeTiming
 
 from lspr_imaging_app.domain.exclusions import ImageExclusionRule
 
@@ -22,11 +22,65 @@ class ImageRecord:
 
 
 @dataclass(slots=True)
+class CompactImageTimings:
+    """Memory-light substitute for holding thousands of live
+    `lspr_core.ImagingCubeTiming` pydantic `BaseModel` instances (one per
+    (spectral_cube_index, wavelength_nm) image) for a whole session - a
+    large legacy CSV metadata import can produce 8,500+ of them. Stores
+    exactly the same per-image timing information, but as plain dict
+    entries (int/tuple/int) instead of one validated pydantic instance per
+    row - see `compact_dataset_image_timings`'s docstring for why.
+
+    Built once, right after a dataset's `acquisition_metadata` is set (see
+    `compact_dataset_image_timings`); `AnalysisController`'s timing-lookup
+    methods read this directly instead of scanning
+    `acquisition_metadata.image_timings` (which is emptied once this
+    exists - see that function).
+    """
+
+    per_frame_ms: dict[tuple[int, float], int]
+    earliest_ms_by_cube: dict[int, int]
+    latest_ms_by_cube: dict[int, int]
+
+    @classmethod
+    def from_timings(cls, timings: list[ImagingCubeTiming]) -> "CompactImageTimings":
+        per_frame_ms: dict[tuple[int, float], int] = {}
+        earliest_ms_by_cube: dict[int, int] = {}
+        latest_ms_by_cube: dict[int, int] = {}
+        for timing in timings:
+            cube_index = int(timing.spectral_cube_index)
+            wavelength_nm = float(timing.wavelength_nm)
+            acquired_ms = int(timing.acquired_at_unix_ms)
+            per_frame_ms[(cube_index, wavelength_nm)] = acquired_ms
+            earliest = earliest_ms_by_cube.get(cube_index)
+            if earliest is None or acquired_ms < earliest:
+                earliest_ms_by_cube[cube_index] = acquired_ms
+            latest = latest_ms_by_cube.get(cube_index)
+            if latest is None or acquired_ms > latest:
+                latest_ms_by_cube[cube_index] = acquired_ms
+        return cls(per_frame_ms=per_frame_ms, earliest_ms_by_cube=earliest_ms_by_cube, latest_ms_by_cube=latest_ms_by_cube)
+
+    def to_timings(self) -> list[ImagingCubeTiming]:
+        """Rebuilds real `ImagingCubeTiming` objects - a lossless inverse
+        of `from_timings`, only ever called transiently right before a
+        `model_dump()`/export call (see `rehydrated_acquisition_metadata`).
+        The rebuilt list is never stored back onto a dataset."""
+        return [
+            ImagingCubeTiming(spectral_cube_index=cube_index, wavelength_nm=wavelength_nm, acquired_at_unix_ms=acquired_ms)
+            for (cube_index, wavelength_nm), acquired_ms in self.per_frame_ms.items()
+        ]
+
+    def __len__(self) -> int:
+        return len(self.per_frame_ms)
+
+
+@dataclass(slots=True)
 class ImageDataset:
     folder: Path
     records: list[ImageRecord]
     source_format: str = "image_stack"
     acquisition_metadata: ImagingAcquisitionMetadata | None = None
+    compact_image_timings: CompactImageTimings | None = None
     home_folder: Path | None = None
     """The folder this dataset was loaded *from*, when that differs from
     `folder` (the actual TIFF/OME-Zarr location) - e.g. `load_dataset`
@@ -62,6 +116,84 @@ class ImageDataset:
     @property
     def format_label(self) -> str:
         return "OME-Zarr" if self.is_ome_zarr else "ImageStack"
+
+
+def compact_dataset_image_timings(dataset: ImageDataset) -> CompactImageTimings:
+    """Returns `dataset.compact_image_timings`, building it from
+    `dataset.acquisition_metadata.image_timings` first if that hasn't
+    happened yet - lazy and idempotent, so **every** reader should call
+    this (never read `dataset.compact_image_timings` directly) rather than
+    relying on some earlier assignment site having remembered to call it.
+    Deliberately not "call once after assigning acquisition_metadata,
+    trust it from then on" - that shape was tried first and proven fragile
+    by real test failures: anything that constructs/reloads an
+    `ImageDataset` with `acquisition_metadata` already set (a test fixture,
+    `io/dataset.py`'s loaders, a future code path) bypassed any such eager
+    call site silently, with no error, just quietly empty timing data for
+    a direct `dataset.acquisition_metadata.image_timings` reader, or a
+    stale-looking-empty result for one that hadn't loaded yet. Nothing in
+    this app calls this eagerly at load/import time any more for exactly
+    that reason - only actual consumers do (`AnalysisController.
+    _compact_image_timings`, `MainWindow._update_metadata_status_labels`
+    and its sibling Cube/Time display method), which is also naturally
+    "as soon as possible in practice": both run essentially immediately
+    after any dataset load or metadata import/edit completes.
+
+    Detects "there's real, not-yet-compacted data" by checking
+    `metadata.image_timings` truthiness - once compacted, that list is
+    empty, so a *second* call is just a cache read (returns the existing
+    `dataset.compact_image_timings`, does no work). If
+    `dataset.acquisition_metadata` is later reassigned to a fresh object
+    with its own real `image_timings` (e.g. a re-import), that reassignment
+    naturally makes this function compact again on the next call, since the
+    truthiness check is against the *current* `acquisition_metadata`, not a
+    one-time flag.
+
+    Why this exists: a large legacy CSV import can leave 8,500+ live
+    `ImagingCubeTiming` pydantic instances referenced by
+    `dataset.acquisition_metadata.image_timings` for the rest of a
+    session. This correlates (not proven causally) with a PyQt6-sip
+    native crash-on-close - see the maintainer's own investigation notes.
+    Dropping the reference here lets CPython's refcounting free those
+    objects promptly instead of holding them until app close, on the
+    chance that's what the sip binding layer's teardown code trips over.
+    `CompactImageTimings` preserves every reader's actual need (per-frame/
+    per-cube lookups, counts) without holding onto the heavier form -
+    `rehydrated_acquisition_metadata` rebuilds a fully-populated,
+    export-ready metadata object on demand for the few call sites that
+    still need one. Uses `model_copy` rather than mutating `image_timings`
+    in place, so a background thread concurrently holding the same
+    `acquisition_metadata` reference (e.g. an in-flight OME-Zarr export)
+    never observes a half-updated object - export call sites use their own
+    local `metadata`/`result.metadata` variable for the actual `model_dump()`
+    call, never `dataset.acquisition_metadata` at that point, so they're
+    unaffected regardless of exactly when compaction happens relative to
+    them.
+    """
+    metadata = dataset.acquisition_metadata
+    if metadata is not None and metadata.image_timings:
+        dataset.compact_image_timings = CompactImageTimings.from_timings(metadata.image_timings)
+        dataset.acquisition_metadata = metadata.model_copy(update={"image_timings": []})
+    if dataset.compact_image_timings is not None:
+        return dataset.compact_image_timings
+    return CompactImageTimings({}, {}, {})
+
+
+def rehydrated_acquisition_metadata(dataset: ImageDataset) -> ImagingAcquisitionMetadata | None:
+    """`dataset.acquisition_metadata` with `image_timings` repopulated from
+    `dataset.compact_image_timings` (if `compact_dataset_image_timings` has
+    already emptied it) - for the handful of call sites that still need a
+    fully-populated `ImagingAcquisitionMetadata` to serialize (sidecar
+    JSON export, OME-Zarr `.zattrs` embed). Returns a new object via
+    `model_copy` rather than mutating the live one, so the rebuilt list is
+    never stored back onto the dataset - it exists only for the caller's
+    own `model_dump()` call and is garbage the moment that returns."""
+    metadata = dataset.acquisition_metadata
+    if metadata is None:
+        return None
+    if dataset.compact_image_timings is None or metadata.image_timings:
+        return metadata
+    return metadata.model_copy(update={"image_timings": dataset.compact_image_timings.to_timings()})
 
 
 @dataclass(slots=True)

@@ -140,6 +140,7 @@ from lspr_imaging_app.domain.models import (
     AreaRoiGroup,
     FitResult,
     MaskSettings,
+    compact_dataset_image_timings,
 )
 from lspr_imaging_app.io.dataset import (
     dataset_is_ome_zarr,
@@ -461,7 +462,6 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, HistogramMaskMixin, Measurem
         self._formula_spectrum_roi_mask_cache: OrderedDict[tuple[object, ...], dict[str, object]] = OrderedDict()
         self._sensorgram_cache: OrderedDict[tuple[object, ...], SensorgramComputationResult] = OrderedDict()
         self._sensorgram_spectral_cube_result_cache: OrderedDict[tuple[object, ...], FormulaSpectrumResult] = OrderedDict()
-        self._acquisition_timing_index_cache: tuple[int, dict[int, object], dict[tuple[int, float], object]] | None = None
         self._sensorgram_axis_range_cache: tuple[object, tuple[float, float]] | None = None
         self._analysis_cache_lock = threading.Lock()
         self._last_formula_spectrum_fit_seconds: float | None = None
@@ -3496,7 +3496,12 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, HistogramMaskMixin, Measurem
     def _update_metadata_status_labels(self, dataset=None) -> None:
         dataset = self._state.dataset if dataset is None else dataset
         metadata = getattr(dataset, "acquisition_metadata", None) if dataset is not None else None
-        if metadata is None or not metadata.image_timings:
+        # compact_dataset_image_timings(dataset) (build-if-needed), not
+        # metadata.image_timings or dataset.compact_image_timings directly -
+        # see that function's own docstring for why this is the only
+        # reliable way to check "does this dataset have timing data".
+        compact_timings = compact_dataset_image_timings(dataset) if dataset is not None else None
+        if metadata is None or not compact_timings:
             # Metadata just got cleared/reloaded without timing data - Time
             # mode has nothing left to show, so fall back to Cube rather than
             # leave the toggle stuck showing "[Time]" for a feature that's no
@@ -3515,8 +3520,8 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, HistogramMaskMixin, Measurem
         parts = [f"Loaded: {source_label}"]
         if metadata.wavelengths_nm:
             parts.append(f"{len(metadata.wavelengths_nm)} wavelengths")
-        if metadata.image_timings:
-            parts.append(f"{len(metadata.image_timings)} timed images")
+        if compact_timings:
+            parts.append(f"{len(compact_timings)} timed images")
         if metadata.comment_events:
             parts.append(f"{len(metadata.comment_events)} comment events")
         self.metadata_status_label.setText(" | ".join(parts))
@@ -3589,7 +3594,8 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, HistogramMaskMixin, Measurem
             return None
         dataset = self._state.dataset
         metadata = getattr(dataset, "acquisition_metadata", None) if dataset is not None else None
-        if metadata is None or not metadata.image_timings:
+        compact_timings = compact_dataset_image_timings(dataset) if dataset is not None else None
+        if metadata is None or not compact_timings:
             return None
         timestamp_by_cube = self._analysis_controller._cube_timestamp_ms_by_cube_index(metadata)
         timestamp_ms = timestamp_by_cube.get(int(spectral_cube_index))
@@ -3641,21 +3647,22 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, HistogramMaskMixin, Measurem
         if spectral_cube_index is None or wavelength is None:
             self.metadata_current_cube_label.setText("")
             return
-        # Indexed lookup (built once per metadata object, see
-        # AnalysisController._acquisition_timing_index), not
+        # Indexed lookup (built once per dataset, see
+        # AnalysisController._compact_image_timings), not
         # metadata.timing_for() directly - that rescans the entire
         # image_timings list on every call, and this label refreshes on
-        # every single wavelength switch.
-        timing = self._analysis_controller._timing_for_frame(metadata, int(spectral_cube_index), float(wavelength))
-        if timing is None:
+        # every single wavelength switch. Returns a plain acquired_at_unix_ms
+        # int, not an ImagingCubeTiming object - see _timing_for_frame.
+        timing_ms = self._analysis_controller._timing_for_frame(metadata, int(spectral_cube_index), float(wavelength))
+        if timing_ms is None:
             self.metadata_current_cube_label.setText("This image: no timing data loaded.")
             return
         if metadata.started_at_utc:
-            acquired_dt = datetime.fromtimestamp(timing.acquired_at_unix_ms / 1000.0)
+            acquired_dt = datetime.fromtimestamp(timing_ms / 1000.0)
             text = f"This image acquired: {acquired_dt.strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]}"
         else:
-            text = f"This image acquired: +{self._format_elapsed_ms_precise(timing.acquired_at_unix_ms)} since start"
-        comment = metadata.comment_at(timing.acquired_at_unix_ms)
+            text = f"This image acquired: +{self._format_elapsed_ms_precise(timing_ms)} since start"
+        comment = metadata.comment_at(timing_ms)
         if comment:
             text += f" | {comment}"
         self.metadata_current_cube_label.setText(text)
@@ -4880,17 +4887,28 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, HistogramMaskMixin, Measurem
         navigated/iterated (wavelength_slider's range, chromatic candidate
         wavelengths, etc. - see dataset_controller.py/undo_manager.py's own
         `window._wavelength_values = ...` assignments, the only two places
-        that call this). 0 nm (a dark/broadband reference frame some
-        acquisitions capture) is never usable for chromatic correction,
-        masking, or ROI placement regardless of this setting - see
-        candidate_chromatic_wavelengths - but by default it still counts as
-        a normal, navigable wavelength (index 0 on the slider). Enabling
-        `_exclude_zero_wavelength_enabled` (Preferences > Wavelength
-        handling) drops it from this list entirely, so navigation always
-        starts from the next lowest real wavelength instead; the underlying
-        image is untouched and still reachable by other means (e.g. file
-        exclusion lists), just not through normal wavelength navigation.
-        Takes effect the next time a dataset is loaded, not retroactively.
+        that call this) - AND, since `AnalysisWorkerMixin._prepare_scoped_
+        spectrum_payload_for_spectral_cube` iterates this exact same list to
+        build the payload for a spectrum/sensorgram fit, this is also what
+        Metric trace fitting and "Start analysis" see. 0 nm (a dark/
+        broadband reference frame some acquisitions capture) is never
+        usable for chromatic correction, masking, or ROI placement
+        regardless of this setting - see candidate_chromatic_wavelengths -
+        but by default it still counts as a normal, navigable AND
+        analyzable wavelength (index 0 on the slider, and a normal point in
+        the fitted spectrum). Enabling `_exclude_zero_wavelength_enabled`
+        (Preferences > Wavelength handling, "Treat 0 nm as a dark reference
+        frame") drops it from this list entirely, so navigation always
+        starts from the next lowest real wavelength AND every Analysis fit
+        skips it too - real-world impact confirmed directly: a 0 nm frame
+        with near-zero signal, left in a high-order polynomial fit, pulled
+        the fitted peak position far outside the real spectral range (see
+        docs/qthreadpool_zarr_crash_investigation.md's sibling writeup, and
+        the "Test dark-frame impact" button next to this preference, which
+        quantifies exactly this effect for a given dataset before you
+        decide). The underlying image is untouched and still reachable by
+        other means (e.g. file exclusion lists) either way. Takes effect
+        the next time a dataset is loaded, not retroactively.
         """
         values = [float(w) for w in wavelengths_nm]
         if not self._exclude_zero_wavelength_enabled():
