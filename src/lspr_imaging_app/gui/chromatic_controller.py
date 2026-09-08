@@ -891,7 +891,7 @@ class ChromaticController:
             lambda message, request_id=request_id: self._on_auto_error(request_id, message)
         )
         window._begin_busy("Auto-detecting chromatic reference points...", determinate=True)
-        window._thread_pool.start(worker)
+        worker.start()
 
     def estimate_models(self) -> None:
         window = self.window
@@ -989,7 +989,7 @@ class ChromaticController:
             lambda models, request_id=request_id: self._on_models_ready(request_id, models)
         )
         worker.signals.error.connect(lambda message: self._on_models_failed(message))
-        window._thread_pool.start(worker)
+        worker.start()
 
     def _on_auto_ready(self, request_id: int, observations: list[tuple[int, int, float, float, float]]) -> None:
         window = self.window

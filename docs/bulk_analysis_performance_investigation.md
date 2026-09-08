@@ -27,6 +27,14 @@ The chunk-size re-export is, for now, the only remaining path to the
 fixes, the mask reach-limiting fix, the always-scoped-path unification, the
 busy-progress speed window) is unaffected and still active.
 
+**Update, 2026-09-08 - root-caused and RE-ENABLED**: the crash was not
+`zarrs`-specific after all - see
+[qthreadpool_zarr_crash_investigation.md](qthreadpool_zarr_crash_investigation.md)
+for the full isolation. Short version: any `QThreadPool` worker thread
+entangled in a zarr read (either codec pipeline) reliably crashed; this
+app's background dispatch (`gui/worker.py`'s `FunctionWorker`) no longer
+uses `QThreadPool` for dataset-touching work, and `zarrs` is back on.
+
 **Update, 2026-09-07 - Follow-up #10**: a fresh, report-independent audit of
 the whole pipeline found and fixed three more small issues (worker-count cap
 too high, redundant mask rasterization, an unrelated global event-filter

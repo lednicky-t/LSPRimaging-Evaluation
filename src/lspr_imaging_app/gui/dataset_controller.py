@@ -125,7 +125,7 @@ class DatasetController:
         worker.signals.error.connect(
             lambda message, on_done=on_done: self._on_dataset_load_failed(on_done, message)
         )
-        window._thread_pool.start(worker)
+        worker.start()
 
     def _set_dataset_load_controls_enabled(self, enabled: bool) -> None:
         window = self.window
@@ -622,7 +622,7 @@ class DatasetController:
         worker = FunctionWorker(calibrate_zarr_read_overhead_ms)
         worker.signals.result.connect(self._on_zarr_read_overhead_calibration_done)
         worker.signals.error.connect(lambda _message: self._on_zarr_read_overhead_calibration_done(None))
-        window._thread_pool.start(worker)
+        worker.start()
 
     def _on_zarr_read_overhead_calibration_done(self, calibration: tuple[float, float] | None) -> None:
         window = self.window

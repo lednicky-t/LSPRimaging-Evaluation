@@ -232,7 +232,7 @@ class ImageRenderManager:
             )
         )
         worker.signals.error.connect(lambda message: self.on_image_refresh_failed(message))
-        window._thread_pool.start(worker)
+        worker.start()
 
     def on_image_refresh_ready(
         self,

@@ -96,29 +96,34 @@ def _configure_zarr_codec_pipeline(zarr) -> None:
     27-wavelength/cube ROI-scoped read (~1000ms -> ~195ms), ~7.5x on a
     full-plane read (~175ms -> ~23ms), byte-identical output.
 
-    DISABLED as of 2026-09-07: a real run crashed the whole process with
-    Windows STATUS_HEAP_CORRUPTION (exit code 0xC0000374) shortly after
-    startup's first image load - no Python traceback, just a hard native
-    crash, consistent with `zarrs`' Rust-side Rayon thread pool colliding
-    with this app's own threading (QThreadPool for interactive image loads,
-    a separate ThreadPoolExecutor during "Start analysis" - see
-    zarrs-python issue #171 for a related, already-documented concurrency
-    bug in this exact library, albeit a different symptom). Not yet root-
-    caused to a specific trigger, so left off rather than guessing at a
-    workaround - re-enable (uncomment the `zarr.config.set` call below)
-    only after that's understood, and re-verify under the app's actual
-    concurrent access patterns (interactive load + background analysis),
-    not just the single-threaded benchmarks that validated it originally.
-    Falls back to the standard pipeline either way - this was always a pure
-    performance path, never the only way to read a dataset.
+    RE-ENABLED as of 2026-09-08, after root-causing the crash first
+    DISABLED on 2026-09-07 (Windows STATUS_HEAP_CORRUPTION shortly after
+    startup's first image load). The original "zarrs' Rust-side Rayon
+    thread pool colliding with this app's own threading" suspicion was
+    partly right but too narrow: a standalone, headless stress harness
+    (see qthreadpool_zarr_crash_investigation.md) isolated the actual
+    trigger to `QThreadPool` specifically, not `zarrs` specifically - a
+    `QThreadPool` worker thread that ever becomes part of a wait/read chain
+    touching a zarr array (any codec pipeline, directly or via blocking on
+    a future for one) reliably crashed with native memory corruption
+    (STATUS_HEAP_CORRUPTION and, in the isolated repro, the related
+    STATUS_STACK_BUFFER_OVERRUN); a plain `threading.Thread` running the
+    identical zarr-reading workload, under the same stress, never crashed,
+    with any codec pipeline. This app's background dispatch
+    (`gui/worker.py`'s `FunctionWorker`) no longer uses `QThreadPool` for
+    anything that touches the dataset - re-verified with the isolated
+    repro's exact stress pattern against the real, patched `FunctionWorker`
+    class, `zarrs` enabled, clean across multiple runs. Falls back to the
+    standard pipeline either way if `zarrs` isn't importable - this was
+    always a pure performance path, never the only way to read a dataset.
     """
     global _ZARR_CODEC_PIPELINE_CONFIGURED
     if _ZARR_CODEC_PIPELINE_CONFIGURED or _zarrs is None:
         return
-    # try:
-    #     zarr.config.set({"codec_pipeline.path": "zarrs.ZarrsCodecPipeline"})
-    # except Exception:
-    #     _LOGGER.debug("Could not enable zarrs codec pipeline; using zarr's default.", exc_info=True)
+    try:
+        zarr.config.set({"codec_pipeline.path": "zarrs.ZarrsCodecPipeline"})
+    except Exception:
+        _LOGGER.debug("Could not enable zarrs codec pipeline; using zarr's default.", exc_info=True)
     _ZARR_CODEC_PIPELINE_CONFIGURED = True
 
 

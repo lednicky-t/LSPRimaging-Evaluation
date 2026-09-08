@@ -136,7 +136,7 @@ class BackgroundProfileController:
         worker.signals.error.connect(
             lambda message, signature=signature: self._on_background_profile_failed(signature, message)
         )
-        window._thread_pool.start(worker)
+        worker.start()
 
 
     def _update_background_profile_preview(self) -> None:

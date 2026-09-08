@@ -58,7 +58,7 @@ class SessionStateManager:
         worker.signals.result.connect(
             lambda result, on_done=on_done: self._on_processing_state_loaded(on_done, *result)
         )
-        window._thread_pool.start(worker)
+        worker.start()
 
     def _on_processing_state_loaded(
         self,
@@ -421,7 +421,7 @@ class SessionStateManager:
         worker.signals.error.connect(
             lambda message, profile_path=profile_path: self._on_processing_state_write_failed(profile_path, message)
         )
-        window._thread_pool.start(worker)
+        worker.start()
 
     def _on_processing_state_write_done(self, path: Path, profile_path: Path, signature: str) -> None:
         window = self._window

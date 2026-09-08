@@ -472,7 +472,7 @@ class AnalysisWorkerMixin:
         )
         self.window._set_status_text("Preparing spectral cube reads...")
         # show_wait_cursor=False: analysis runs entirely in the background
-        # (a QThreadPool worker) - the app itself stays fully interactive
+        # (a FunctionWorker thread) - the app itself stays fully interactive
         # while it runs, so it shouldn't look/feel frozen behind an app-wide
         # wait cursor. Progress is still visible in the status bar as usual.
         self.window._begin_busy(
@@ -609,7 +609,7 @@ class AnalysisWorkerMixin:
         )
         worker.signals.result.connect(lambda result, request_id=request_id: self.on_sensorgram_ready(request_id, result))
         worker.signals.error.connect(lambda message, request_id=request_id: self.on_sensorgram_failed(request_id, message))
-        self.window._thread_pool.start(worker)
+        worker.start()
 
     @staticmethod
     def _measurement_backup_periodic_flush_due(buffered_cube_count: int, batch_size: int, ram_only: bool) -> bool:
@@ -1910,7 +1910,7 @@ class AnalysisWorkerMixin:
         worker.signals.error.connect(
             lambda message, request_id=request_id: self._on_formula_spectrum_payload_failed(request_id, message)
         )
-        self.window._thread_pool.start(worker)
+        worker.start()
 
     def _start_pending_formula_spectrum_refresh(self, *, reuse_busy: bool = False) -> None:
         from lspr_imaging_app.gui.worker import FunctionWorker
@@ -1953,7 +1953,7 @@ class AnalysisWorkerMixin:
             signature=signature: self._on_formula_spectrum_ready(request_id, signature, result)
         )
         worker.signals.error.connect(lambda message, request_id=request_id: self._on_formula_spectrum_failed(request_id, message))
-        self.window._thread_pool.start(worker)
+        worker.start()
 
     def _refresh_visible_spectrum_from_cache(self) -> bool:
         if not self.window._analysis_enabled:

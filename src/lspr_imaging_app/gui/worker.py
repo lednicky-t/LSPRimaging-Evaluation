@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import logging
+import threading
+import time
 from dataclasses import dataclass
 
 import numpy as np
@@ -150,6 +152,45 @@ class WorkerSignals(QObject):
 
 
 class FunctionWorker(QRunnable):
+    """Runs `fn` off the GUI thread, reporting back via `.signals` (a
+    QObject; Qt safely queues a cross-thread `.emit()` onto the receiver's
+    thread via AutoConnection regardless of what kind of thread emitted it).
+
+    Call `.start()` (spawns a plain `threading.Thread`) for virtually every
+    use of this class - NOT `QThreadPool.start(worker)`, despite this still
+    being a QRunnable. See qthreadpool_zarr_crash_investigation.md:
+    stress-testing found that a QThreadPool worker thread that ever becomes
+    part of a wait/read chain touching a zarr array (this app's own dataset
+    reads, directly or via blocking on a future for one) reliably crashes
+    the whole process with a native memory-corruption error
+    (STATUS_HEAP_CORRUPTION / STATUS_STACK_BUFFER_OVERRUN, both reproduced) -
+    independent of the `zarrs` codec pipeline, and independent of any second
+    thread pool being involved. A plain `threading.Thread` running the
+    identical zarr-reading workload, under the same stress, never crashed.
+    Since nearly every use of this class in this app reads from the dataset
+    somewhere (directly or via a helper it calls), and QThreadPool worker
+    threads are reused across unrelated submissions, there was no safe
+    subset of call sites to leave on QThreadPool - see the investigation doc
+    for the full isolation matrix.
+
+    Still a QRunnable only so `window._measurement_backup_flush_pool` (HDF5
+    writes only, never zarr - not implicated by the crash above) can keep
+    dispatching it through `QThreadPool.start(worker)` instead, for that
+    pool's own real reason: max_thread_count=1 there serializes flushes
+    against each other, a guarantee `.start()`'s unordered raw threads don't
+    provide. That is the ONLY call site that should still use
+    `QThreadPool.start(worker)` - every other caller should use `.start()`.
+
+    Unlike QThreadPool, `.start()` has no built-in concurrency cap - each
+    call spawns a new OS thread immediately rather than queuing behind a
+    fixed pool size. Not a concern for this app's actual usage (nothing
+    dispatches more than a handful of these concurrently), but a real
+    behavior difference from the QThreadPool version if that ever changes.
+    """
+
+    _active_lock = threading.Lock()
+    _active_threads: set[threading.Thread] = set()
+
     def __init__(self, fn, *args, supports_progress: bool = False, supports_partial: bool = False, **kwargs) -> None:
         super().__init__()
         self._fn = fn
@@ -158,6 +199,19 @@ class FunctionWorker(QRunnable):
         self._supports_progress = supports_progress
         self._supports_partial = supports_partial
         self.signals = WorkerSignals()
+
+    def start(self) -> None:
+        thread = threading.Thread(target=self._run_tracked, daemon=True)
+        with FunctionWorker._active_lock:
+            FunctionWorker._active_threads.add(thread)
+        thread.start()
+
+    def _run_tracked(self) -> None:
+        try:
+            self.run()
+        finally:
+            with FunctionWorker._active_lock:
+                FunctionWorker._active_threads.discard(threading.current_thread())
 
     def run(self) -> None:
         try:
@@ -171,3 +225,24 @@ class FunctionWorker(QRunnable):
             self.signals.error.emit(str(exc))
             return
         self.signals.result.emit(result)
+
+    @classmethod
+    def active_count(cls) -> int:
+        with cls._active_lock:
+            return len(cls._active_threads)
+
+    @classmethod
+    def wait_for_all(cls, timeout_ms: int) -> bool:
+        """Join every currently-tracked worker thread, bounded so the total
+        wait across all of them never exceeds timeout_ms - mirrors
+        QThreadPool.waitForDone(timeout_ms)'s contract. Returns True if every
+        tracked thread finished within the budget."""
+        deadline = time.monotonic() + timeout_ms / 1000.0
+        with cls._active_lock:
+            threads = list(cls._active_threads)
+        for thread in threads:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            thread.join(timeout=remaining)
+        return cls.active_count() == 0

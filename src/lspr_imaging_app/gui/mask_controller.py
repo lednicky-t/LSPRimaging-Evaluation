@@ -434,7 +434,7 @@ class MaskController:
         worker.signals.error.connect(
             lambda message, cache_key=cache_key: self._on_mask_candidate_failed(cache_key, message)
         )
-        window._thread_pool.start(worker)
+        worker.start()
 
     def _on_mask_candidate_computed(self, cache_key: tuple[object, ...], candidate: np.ndarray) -> None:
         window = self.window

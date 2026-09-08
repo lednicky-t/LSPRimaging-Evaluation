@@ -221,7 +221,7 @@ class RoiTableController:
             lambda _result, path=path, signature=signature: self._on_roi_table_write_done(path, signature)
         )
         worker.signals.error.connect(lambda message, path=path: self._on_roi_table_write_failed(path, message))
-        self.window._thread_pool.start(worker)
+        worker.start()
 
     def _on_roi_table_write_done(self, path: Path, signature: str) -> None:
         self.window._last_saved_roi_table_signature = signature

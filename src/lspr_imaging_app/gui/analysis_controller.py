@@ -1349,7 +1349,7 @@ class AnalysisController(AnalysisWorkerMixin, AnalysisChromaticGeometryMixin):
                 request_id, cached_tick_positions
             )
         )
-        window._thread_pool.start(worker)
+        worker.start()
 
     def _apply_cube_slider_cache_indicators(self, request_id: int, cached_tick_positions: set[int]) -> None:
         if request_id != self.window._cube_slider_cache_request_id:

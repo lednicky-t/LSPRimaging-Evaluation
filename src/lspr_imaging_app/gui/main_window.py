@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
-import os
 import threading
 import time
 from collections import OrderedDict, deque
@@ -324,19 +323,30 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, HistogramMaskMixin, Measurem
         self._workflow_log_debug_enabled = False
         self._cube_time_display_mode = "cube"  # "cube" or "time" - see _toggle_cube_time_display_mode
         self._cube_time_timestamp_rule = "first"  # "first"/"last"/"midpoint" - see _cycle_cube_time_timestamp_rule
-        self._thread_pool = QThreadPool(self)
-        self._thread_pool.setMaxThreadCount(max(4, min(6, os.cpu_count() or 4)))
-        # Dedicated, single-worker pool for measurement-backup HDF5 flushes -
-        # max_thread_count=1 both serializes flushes against each other (so
-        # two concurrent writes to the same HDF5 dataset can never happen)
-        # and preserves submission order (cube ordering within each ROI's
-        # on-disk trace stays chronological). Kept separate from
-        # _thread_pool deliberately: a flush must never queue behind other,
-        # unrelated background work (or vice versa), since every caller that
-        # needs a flush to have actually finished (run end, dataset switch,
-        # app close) relies on waitForDone() here draining ONLY backup
-        # flushes, not the whole shared pool's unrelated work too. See
-        # AnalysisWorkerMixin._flush_measurement_backup_buffers_async.
+        # Background dispatch for nearly everything (image loads, dataset
+        # loading, ROI/chromatic/mask work, analysis, export, ...) is
+        # FunctionWorker.start() (a plain threading.Thread), not a QThreadPool
+        # - see worker.py's FunctionWorker docstring and
+        # qthreadpool_zarr_crash_investigation.md for why: a QThreadPool
+        # worker thread entangled in any zarr-array wait/read chain reliably
+        # crashed the whole process with native memory corruption, reproduced
+        # independent of the zarrs codec pipeline. FunctionWorker.active_count()
+        # / .wait_for_all() (used in _wait_for_background_tasks_before_close
+        # below) replace the QThreadPool.activeThreadCount()/waitForDone()
+        # this window used to call on a now-removed `self._thread_pool`.
+        #
+        # Dedicated, single-worker QThreadPool for measurement-backup HDF5
+        # flushes only - max_thread_count=1 both serializes flushes against
+        # each other (so two concurrent writes to the same HDF5 dataset can
+        # never happen) and preserves submission order (cube ordering within
+        # each ROI's on-disk trace stays chronological) - a guarantee
+        # FunctionWorker.start()'s unordered raw threads don't provide. Safe
+        # to keep on QThreadPool: this pool only ever runs HDF5 writes
+        # (h5py), never a zarr read, so it isn't implicated by the crash
+        # above. Every caller that needs a flush to have actually finished
+        # (run end, dataset switch, app close) relies on waitForDone() here
+        # draining ONLY backup flushes, not unrelated background work too.
+        # See AnalysisWorkerMixin._flush_measurement_backup_buffers_async.
         self._measurement_backup_flush_pool = QThreadPool(self)
         self._measurement_backup_flush_pool.setMaxThreadCount(1)
         self._current_record_path: Path | None = None
@@ -4539,7 +4549,7 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, HistogramMaskMixin, Measurem
         super().closeEvent(event)
 
     def _wait_for_background_tasks_before_close(self, timeout_ms: int = 5000) -> None:
-        """Give any still-running `_thread_pool` task (image-cache build,
+        """Give any still-running FunctionWorker task (image-cache build,
         ROI/mask refresh, chromatic registration, export, ...) a bounded
         chance to finish before the window actually closes and the
         interpreter starts tearing down modules.
@@ -4554,16 +4564,16 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, HistogramMaskMixin, Measurem
         does not eliminate that fragility (it lives in the zarr library),
         but it removes the one collision this app can control.
         """
-        active = self._thread_pool.activeThreadCount()
+        active = FunctionWorker.active_count()
         if active <= 0:
             return
         self._workflow_logger.info(
             "Close | waiting up to %.1fs for %d background task(s) to finish", timeout_ms / 1000.0, active
         )
-        if not self._thread_pool.waitForDone(timeout_ms):
+        if not FunctionWorker.wait_for_all(timeout_ms):
             self._workflow_logger.warning(
                 "Close | %d background task(s) still running after %.1fs wait",
-                self._thread_pool.activeThreadCount(),
+                FunctionWorker.active_count(),
                 timeout_ms / 1000.0,
             )
 
@@ -7004,7 +7014,7 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, HistogramMaskMixin, Measurem
             image_key=image_key: self._on_detect_rois_fully_automatic_ready(request_id, image_key, result)
         )
         worker.signals.error.connect(lambda message: self._on_detect_rois_failed(message))
-        self._thread_pool.start(worker)
+        worker.start()
 
     def _on_detect_rois_fully_automatic_ready(
         self,
@@ -7072,7 +7082,7 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, HistogramMaskMixin, Measurem
             image_key=image_key: self._on_detect_rois_ready(request_id, image_key, detected_rois)
         )
         worker.signals.error.connect(lambda message: self._on_detect_rois_failed(message))
-        self._thread_pool.start(worker)
+        worker.start()
 
     def _on_detect_rois_ready(
         self,
