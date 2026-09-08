@@ -321,6 +321,49 @@ def _effective_reference_radii(
     return inner_radius, outer_radius
 
 
+def _roi_reach_box(
+    roi: AreaRoi,
+    sample_x: float,
+    sample_y: float,
+    patch_h: int,
+    patch_w: int,
+    reference_inner_radius_px: float,
+    reference_outer_radius_px: float,
+) -> tuple[int, int, int, int] | None:
+    """Local (patch-relative) (rx0, ry0, rx1, ry1) window bounding one ROI's
+    own sample circle and reference ring, clipped to the patch. `None` for
+    "mask" geometry (an arbitrary bitmap unrelated to any radius, so it has
+    no reach to bound - same case `_selected_roi_masks_for_spectrum` already
+    always treats as needing the full patch) or a degenerate (empty) window.
+
+    Pulled out of what used to be `_means_for`'s own inline reach-limit
+    computation (still the same formula/margin, unchanged) so
+    `_fast_roi_mask_cache_entry` can build/cache each ROI's mask already
+    cropped to this exact window instead of the full (patch_h, patch_w)
+    patch - see that function's docstring for why a per-ROI full-patch mask
+    was the dominant RAM cost of a bulk run with many selected ROIs. Sharing
+    one function guarantees the cache builder and `_means_for`'s own
+    patch/exclude-mask slicing can never disagree about where a given ROI's
+    window is - if each instead computed it independently, any drift
+    between the two copies would silently misalign a cached mask against
+    the current patch (see `_means_for`'s own warning about that class of
+    bug at its np.where-index comment).
+    """
+    if roi.sample_geometry_type == "mask" or roi.reference_geometry_type == "mask":
+        return None
+    _, outer_r = _effective_reference_radii(
+        roi, max(reference_inner_radius_px, 0.0), max(reference_outer_radius_px, 0.0)
+    )
+    reach = max(float(roi.sample_radius_px), outer_r) + 2.0
+    rx0 = max(int(np.floor(sample_x - reach)), 0)
+    rx1 = min(int(np.ceil(sample_x + reach)) + 1, patch_w)
+    ry0 = max(int(np.floor(sample_y - reach)), 0)
+    ry1 = min(int(np.ceil(sample_y + reach)) + 1, patch_h)
+    if rx1 <= rx0 or ry1 <= ry0:
+        return None
+    return rx0, ry0, rx1, ry1
+
+
 def _selected_roi_masks_for_spectrum(
     image_shape: tuple[int, int],
     source_rois: list[AreaRoi],
@@ -721,15 +764,50 @@ def _scoped_formula_spectrum_task(
         # _selected_roi_masks_for_spectrum call over every ROI at once avoids
         # rasterizing every ROI's sample circle twice - measured ~20-30%
         # avoidable overhead in this cache-build step on a 160-ROI selection.
+        #
+        # Each ROI's own pair is built (and cached) at its own small reach
+        # window (_roi_reach_box), not the full (patch_h, patch_w) patch -
+        # with many selected ROIs (a 170-spot array, per this function's own
+        # docstring above), a full-patch-sized boolean array per ROI was the
+        # dominant RAM cost of a bulk "Start analysis" run: up to
+        # FORMULA_SPECTRUM_ROI_MASK_CACHE_SIZE cache entries, each holding
+        # two full-patch arrays per selected ROI. _means_for consumes these
+        # directly with no further slicing, because it computes the
+        # identical window via the same _roi_reach_box call - see that
+        # function's docstring. `combined_roi_mask` still has to stay
+        # full-patch-sized (it's sliced later at whatever *other* ROI's
+        # reach window happens to need it, via extra_exclude_mask), so each
+        # small per-ROI mask is OR'd into its own sub-region of it rather
+        # than OR'd directly (shapes wouldn't match once per-ROI masks are
+        # no longer all patch-sized).
         per_roi_masks: dict[int, tuple[np.ndarray, np.ndarray]] = {}
+        per_roi_reach_boxes: dict[int, tuple[int, int, int, int] | None] = {}
         for roi in selected_rois:
-            per_roi_masks[int(roi.area_roi_id)] = _selected_roi_masks_for_spectrum(
-                (patch_h, patch_w), [roi], (int(roi.area_roi_id),), reference_inner_radius_px, reference_outer_radius_px,
-                affine_matrix_local, patch_origin_xy=(x0, y0),
+            roi_id = int(roi.area_roi_id)
+            reach_box = _roi_reach_box(
+                roi, float(roi.center_x), float(roi.center_y), patch_h, patch_w,
+                reference_inner_radius_px, reference_outer_radius_px,
             )
+            per_roi_reach_boxes[roi_id] = reach_box
+            if reach_box is None:
+                per_roi_masks[roi_id] = _selected_roi_masks_for_spectrum(
+                    (patch_h, patch_w), [roi], (roi_id,), reference_inner_radius_px, reference_outer_radius_px,
+                    affine_matrix_local, patch_origin_xy=(x0, y0),
+                )
+            else:
+                rx0, ry0, rx1, ry1 = reach_box
+                per_roi_masks[roi_id] = _selected_roi_masks_for_spectrum(
+                    (ry1 - ry0, rx1 - rx0), [roi], (roi_id,), reference_inner_radius_px, reference_outer_radius_px,
+                    affine_matrix_local, patch_origin_xy=(x0 + rx0, y0 + ry0),
+                )
         combined_roi_mask = np.zeros((patch_h, patch_w), dtype=bool)
-        for roi_sample_mask, _roi_reference_mask in per_roi_masks.values():
-            combined_roi_mask |= roi_sample_mask
+        for roi_id, (roi_sample_mask, _roi_reference_mask) in per_roi_masks.items():
+            reach_box = per_roi_reach_boxes[roi_id]
+            if reach_box is None:
+                combined_roi_mask |= roi_sample_mask
+            else:
+                rx0, ry0, rx1, ry1 = reach_box
+                combined_roi_mask[ry0:ry1, rx0:rx1] |= roi_sample_mask
         cached_value = {"combined": (combined_roi_mask, None), "per_roi": per_roi_masks}
         with roi_mask_cache_lock:
             roi_mask_cache[cache_key] = cached_value
@@ -797,15 +875,6 @@ def _scoped_formula_spectrum_task(
             precomputed_masks: tuple[np.ndarray, np.ndarray] | None = None,
         ) -> tuple[float, float, float, int, int, dict[str, tuple[float, float]]]:
             nonlocal nonlocal_mask_seconds, nonlocal_where_seconds, nonlocal_reduce_seconds
-            if precomputed_masks is not None:
-                roi_mask, reference_mask = precomputed_masks
-            else:
-                _mask_started = time.perf_counter()
-                roi_mask, reference_mask = _selected_roi_masks_for_spectrum(
-                    (patch_h, patch_w), rois_subset, ids_subset, reference_inner_radius_px, reference_outer_radius_px,
-                    affine_matrix, patch_origin_xy=(x0, y0),
-                )
-                nonlocal_mask_seconds += time.perf_counter() - _mask_started
 
             # Reach-limit patch/mask indexing to a small local box around this
             # ROI instead of scanning the full (patch_h, patch_w) patch for
@@ -818,30 +887,40 @@ def _scoped_formula_spectrum_task(
             # arbitrary bitmap unrelated to any radius) already gets
             # full-patch treatment inside _selected_roi_masks_for_spectrum
             # itself, so this mirrors that existing split rather than
-            # inventing a new rule.
+            # inventing a new rule. Same _roi_reach_box call
+            # _fast_roi_mask_cache_entry uses to decide what size/origin to
+            # cache this ROI's mask at, in the precomputed_masks case below -
+            # see that function's docstring for why sharing it matters.
             single_roi = rois_subset[0] if len(rois_subset) == 1 else None
-            can_reach_limit = (
-                single_roi is not None
-                and sample_x is not None
-                and sample_y is not None
-                and single_roi.sample_geometry_type != "mask"
-                and single_roi.reference_geometry_type != "mask"
-            )
-            if can_reach_limit:
-                _, outer_r = _effective_reference_radii(
-                    single_roi, max(reference_inner_radius_px, 0.0), max(reference_outer_radius_px, 0.0)
+            reach_box = (
+                _roi_reach_box(
+                    single_roi, sample_x, sample_y, patch_h, patch_w,
+                    reference_inner_radius_px, reference_outer_radius_px,
                 )
-                reach = max(float(single_roi.sample_radius_px), outer_r) + 2.0
-                rx0 = max(int(np.floor(sample_x - reach)), 0)
-                rx1 = min(int(np.ceil(sample_x + reach)) + 1, patch_w)
-                ry0 = max(int(np.floor(sample_y - reach)), 0)
-                ry1 = min(int(np.ceil(sample_y + reach)) + 1, patch_h)
-            else:
-                rx0, ry0, rx1, ry1 = 0, 0, patch_w, patch_h
+                if single_roi is not None and sample_x is not None and sample_y is not None
+                else None
+            )
+            rx0, ry0, rx1, ry1 = reach_box if reach_box is not None else (0, 0, patch_w, patch_h)
 
             local_patch = patch[ry0:ry1, rx0:rx1]
-            local_roi_mask = roi_mask[ry0:ry1, rx0:rx1]
-            local_reference_mask = reference_mask[ry0:ry1, rx0:rx1]
+            if precomputed_masks is not None:
+                # Already built (and, for a non-"mask"-geometry ROI, cached)
+                # at exactly this (rx0, ry0, rx1, ry1) window by
+                # _fast_roi_mask_cache_entry, via the same _roi_reach_box
+                # call above - used as-is, no further slicing needed (and
+                # none possible: the cache no longer stores a full-patch-
+                # sized array to slice - see that function's docstring for
+                # why).
+                local_roi_mask, local_reference_mask = precomputed_masks
+            else:
+                _mask_started = time.perf_counter()
+                roi_mask, reference_mask = _selected_roi_masks_for_spectrum(
+                    (patch_h, patch_w), rois_subset, ids_subset, reference_inner_radius_px, reference_outer_radius_px,
+                    affine_matrix, patch_origin_xy=(x0, y0),
+                )
+                nonlocal_mask_seconds += time.perf_counter() - _mask_started
+                local_roi_mask = roi_mask[ry0:ry1, rx0:rx1]
+                local_reference_mask = reference_mask[ry0:ry1, rx0:rx1]
             if extra_exclude_mask is not None:
                 # Keeps a neighboring selected ROI's sample pixels out of THIS
                 # roi's reference ring - otherwise a nearby selected ROI's
