@@ -54,6 +54,7 @@ class UndoManager:
             file_mask=None if window._current_file_mask is None else window._current_file_mask.copy(),
             file_mask_path=None if window._current_file_mask_path is None else str(window._current_file_mask_path),
             file_mask_revision=int(window._external_mask_revision),
+            file_mask_wavelength_diffs=deepcopy(window._current_file_mask_wavelength_diffs),
         )
 
     def signature(self, snapshot) -> tuple[object, ...]:
@@ -159,6 +160,7 @@ class UndoManager:
             window._current_file_mask = None if snapshot.file_mask is None else snapshot.file_mask.copy()
             window._current_file_mask_path = None if snapshot.file_mask_path is None else Path(snapshot.file_mask_path)
             window._external_mask_revision = int(snapshot.file_mask_revision)
+            window._current_file_mask_wavelength_diffs = deepcopy(snapshot.file_mask_wavelength_diffs)
             window._clear_processed_image_cache()
             window._invalidate_image_analysis_caches()
             window._invalidate_background_profile_cache()

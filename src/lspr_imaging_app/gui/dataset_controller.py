@@ -550,6 +550,7 @@ class DatasetController:
         window._current_file_mask = None
         window._current_file_mask_path = None
         window._current_file_mask_session_source_path = None
+        window._current_file_mask_wavelength_diffs = {}
         window._clear_processed_image_cache()
         window._processed_shape_cache.clear()
         window._invalidate_image_analysis_caches()
@@ -738,6 +739,11 @@ class DatasetController:
         request_id = window._ome_zarr_export_request_id
         window._ome_zarr_export_cancel_event = threading.Event()
         window._ome_zarr_export_destination = destination
+        # Snapshot now, before the export starts writing anything - a
+        # "Replace" export leaves the pre-existing destination untouched
+        # until it fully succeeds (see export_ome_zarr_dataset), so a
+        # failure/cancel must not delete it below.
+        window._ome_zarr_export_replacing_existing = destination.exists()
         window._ome_zarr_export_started_at = time.perf_counter()
         self._set_ome_zarr_export_ui_running(True)
         window._set_status_text(f"Exporting Stack to Zarr to {destination.name}...")
@@ -873,13 +879,20 @@ class DatasetController:
         )
         if message:
             window._set_status_text(f"{message}{elapsed_text}")
-        if failed and window._ome_zarr_export_destination is not None:
+        if failed and window._ome_zarr_export_destination is not None and not window._ome_zarr_export_replacing_existing:
+            # Only a fresh export (nothing existed at this destination before
+            # it started) can leave a partial write worth cleaning up here.
+            # A "Replace" export never touches the pre-existing destination
+            # until it fully succeeds (see export_ome_zarr_dataset), so on
+            # failure the old export is still there, intact, and must not be
+            # deleted.
             try:
                 if window._ome_zarr_export_destination.exists():
                     shutil.rmtree(window._ome_zarr_export_destination, ignore_errors=True)
             except Exception:
                 pass
         window._ome_zarr_export_destination = None
+        window._ome_zarr_export_replacing_existing = False
 
     def _on_ome_zarr_export_finished(self, request_id: int, result: Path) -> None:
         window = self.window

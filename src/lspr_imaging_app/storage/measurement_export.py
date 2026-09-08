@@ -835,8 +835,11 @@ class ImagingMeasurementExportWriter:
         # succeeded (an exception during it propagates before this point,
         # leaving the original file and handle completely untouched).
         self._handle.close()
-        self.path.unlink()  # Windows can't rename onto an existing path
-        temp_path.rename(self.path)
+        # Path.replace() (os.replace() under the hood) atomically swaps
+        # temp_path onto self.path on both POSIX and Windows - unlike
+        # unlink()-then-rename(), there is no window where neither the old
+        # nor the new file exists, so a crash here can't destroy the backup.
+        temp_path.replace(self.path)
         self._handle = h5py.File(self.path, "a")
         self._processed = self._handle.require_group("processed")
         # Cached Group objects from the closed handle are now stale.

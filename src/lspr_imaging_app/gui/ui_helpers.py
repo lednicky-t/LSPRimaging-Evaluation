@@ -41,13 +41,11 @@ def settings_bool(settings, key: str, default: bool) -> bool:
     return str(value).strip().lower() in {"1", "true", "yes", "on"}
 
 
-def read_bool_setting(settings, key: str, default: bool) -> bool:
-    value = settings.value(key, default)
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, str):
-        return value.strip().lower() in {"1", "true", "yes", "on"}
-    return bool(value)
+# Alias kept for call-site clarity (window._read_bool_setting reads as "read a
+# persisted bool", window._settings_bool reads as "coerce this setting to a
+# bool") - both delegate to the single implementation above so there is only
+# one truthy-string convention to maintain.
+read_bool_setting = settings_bool
 
 
 def read_float_setting(settings, key: str, default: float) -> float:

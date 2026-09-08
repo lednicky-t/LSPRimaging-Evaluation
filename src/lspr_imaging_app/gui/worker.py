@@ -113,6 +113,7 @@ class UndoSnapshot:
     file_mask: np.ndarray | None
     file_mask_path: str | None
     file_mask_revision: int
+    file_mask_wavelength_diffs: dict[tuple[int, float], dict[tuple[int, int], bool]]
 
 
 @dataclass(slots=True)
@@ -222,6 +223,7 @@ class FunctionWorker(QRunnable):
                 kwargs["partial_callback"] = self.signals.partial.emit
             result = self._fn(*self._args, **kwargs)
         except Exception as exc:  # pragma: no cover - worker thread error path
+            logging.getLogger(__name__).exception("FunctionWorker task failed: %s", self._fn)
             self.signals.error.emit(str(exc))
             return
         self.signals.result.emit(result)

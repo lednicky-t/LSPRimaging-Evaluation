@@ -18,7 +18,6 @@ import pyqtgraph as pg
 from PyQt6.QtCore import (
     QByteArray,
     QItemSelectionModel,
-    QRectF,
     QSize,
     QSettings,
     QStringListModel,
@@ -122,7 +121,6 @@ from lspr_imaging_app.gui.undo_manager import UndoManager
 from lspr_imaging_app.gui.layout_state_controller import LayoutStateController
 from lspr_imaging_app.gui.image_tools_controller import ImageToolsController
 from lspr_imaging_app.gui.roi_geometry_mixin import RoiGeometryMixin
-from lspr_imaging_app.gui.histogram_mask_mixin import HistogramMaskMixin
 from lspr_imaging_app.gui.measurement_calibration_mixin import MeasurementCalibrationMixin
 from lspr_imaging_app.domain.exclusions import is_excluded
 from lspr_imaging_app.processing.chromatic import warp_boolean_mask_affine
@@ -202,6 +200,16 @@ except Exception:  # pragma: no cover - optional dependency
     lucide = None
 
 
+def _append_closed_polygon(path: QPainterPath, xs: np.ndarray, ys: np.ndarray) -> None:
+    """Append a closed polygon subpath through (xs, ys) to `path` in place."""
+    if len(xs) == 0:
+        return
+    path.moveTo(float(xs[0]), float(ys[0]))
+    for x, y in zip(xs[1:], ys[1:]):
+        path.lineTo(float(x), float(y))
+    path.closeSubpath()
+
+
 class _WheelHorizontalScrollArea(QScrollArea):
     """A QScrollArea whose (vertical) mouse wheel input scrolls it horizontally.
 
@@ -220,7 +228,7 @@ class _WheelHorizontalScrollArea(QScrollArea):
             super().wheelEvent(event)
 
 
-class MainWindow(MainWindowIcons, RoiGeometryMixin, HistogramMaskMixin, MeasurementCalibrationMixin, QMainWindow):
+class MainWindow(MainWindowIcons, RoiGeometryMixin, MeasurementCalibrationMixin, QMainWindow):
     SETTINGS_ORG = "LSPR"
     SETTINGS_APP = "LSPRImaging"
     HISTOGRAM_MIN_INTENSITY = 0.0
@@ -532,6 +540,11 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, HistogramMaskMixin, Measurem
         self._sensorgram_running_signature: tuple[object, ...] | None = None
         self._sensorgram_cancel_event: threading.Event | None = None
         self._sensorgram_started_at: float | None = None
+        # Set by AnalysisWorkerMixin.mark_stale when a setting changes while
+        # a run is already in flight and nothing already queued a fresh
+        # recompute for it - tells on_sensorgram_ready its result no longer
+        # matches current settings. See whole_app_bug_audit_2026-09.md 2.1.
+        self._sensorgram_settings_changed_during_run = False
         self._pending_sensorgram_payload: tuple[
             tuple[object, ...],
             list[int],
@@ -542,6 +555,14 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, HistogramMaskMixin, Measurem
         self._ome_zarr_export_cancel_event: threading.Event | None = None
         self._ome_zarr_export_started_at: float | None = None
         self._ome_zarr_export_destination: Path | None = None
+        # True when this export is replacing a destination that already had
+        # data in it (the "Replace" collision choice) - export_ome_zarr_dataset
+        # (io/dataset.py) writes that case to a temp dir and only swaps it
+        # onto the destination on success, so the pre-existing data is never
+        # touched by a failed/cancelled export; _finish_ome_zarr_export must
+        # not rmtree it on failure the way it does for a genuinely fresh
+        # destination's partial write. See whole_app_bug_audit_2026-09.md 1.1.
+        self._ome_zarr_export_replacing_existing = False
         self._busy_started_at: float | None = None
         self._busy_is_determinate = False
         self._busy_last_percent: int = 0
@@ -7263,19 +7284,22 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, HistogramMaskMixin, Measurem
 
     def _create_reference_fill_path(
         self,
-        center_x: float,
-        center_y: float,
-        inner_radius: float,
-        outer_radius: float,
+        outer_xs: np.ndarray,
+        outer_ys: np.ndarray,
+        inner_xs: np.ndarray | None,
+        inner_ys: np.ndarray | None,
     ) -> QPainterPath:
-        outer_radius = max(float(outer_radius), 0.0)
-        inner_radius = max(min(float(inner_radius), outer_radius), 0.0)
-
+        # Built from the same boundary polylines the inner/outer outline
+        # curves use (see _roi_curve_points/ImageRenderManager.roi_curve_points)
+        # rather than an unwarped QPainterPath.addEllipse circle, so the
+        # shaded ring matches the outline exactly - including under a
+        # non-similarity ("affine") chromatic-correction model, where the
+        # outline is an ellipse, not a circle.
         path = QPainterPath()
         path.setFillRule(Qt.FillRule.OddEvenFill)
-        path.addEllipse(QRectF(center_x - outer_radius, center_y - outer_radius, outer_radius * 2.0, outer_radius * 2.0))
-        if inner_radius > 0.0:
-            path.addEllipse(QRectF(center_x - inner_radius, center_y - inner_radius, inner_radius * 2.0, inner_radius * 2.0))
+        _append_closed_polygon(path, outer_xs, outer_ys)
+        if inner_xs is not None and inner_ys is not None and len(inner_xs) > 0:
+            _append_closed_polygon(path, inner_xs, inner_ys)
         return path
 
     def _update_guide_overlays(self) -> None:

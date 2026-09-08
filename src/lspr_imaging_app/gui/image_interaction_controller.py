@@ -300,9 +300,11 @@ class ImageInteractionController:
                 if point is None:
                     return False
                 roi_id = w._find_roi_id_at(point)
-                roi_move_allowed = w._is_current_reference_image() or bool(
-                    w._state.preprocessing.chromatic_correction_enabled
-                )
+                # Read the already-maintained enabled state (kept in sync by
+                # _sync_roi_edit_capabilities) instead of re-deriving the
+                # on_reference-or-chromatic condition here, so there is a
+                # single source of truth for ROI-move eligibility.
+                roi_move_allowed = w.roi_move_action.isEnabled()
                 if allow_roi_move and roi_move_allowed and roi_id is not None:
                     if w._selected_roi_ids:
                         drag_roi_ids = set(w._selected_roi_ids)

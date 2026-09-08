@@ -164,6 +164,7 @@ class SessionStateManager:
             window._current_file_mask = None
             window._current_file_mask_path = None
             window._current_file_mask_session_source_path = None
+            window._current_file_mask_wavelength_diffs = {}
             window._update_roi_table()
             window._normalize_mask_application_state()
             if on_done is not None:
@@ -212,6 +213,7 @@ class SessionStateManager:
         window._current_file_mask = None
         window._current_file_mask_path = None
         window._current_file_mask_session_source_path = None
+        window._current_file_mask_wavelength_diffs = {}
         window._update_roi_table()
 
     def new_session(self) -> None:

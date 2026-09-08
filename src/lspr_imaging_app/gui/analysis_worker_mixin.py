@@ -737,6 +737,10 @@ class AnalysisWorkerMixin:
         self.window._sensorgram_running = True
         self.window._sensorgram_running_signature = signature
         self.window._sensorgram_running_roi_ids = selected_roi_ids
+        # This run's settings are current as of right now - any staleness
+        # tracked from before this point no longer applies (see mark_stale
+        # and on_sensorgram_ready).
+        self.window._sensorgram_settings_changed_during_run = False
         import threading
 
         from lspr_imaging_app.gui.worker import FunctionWorker
@@ -1257,6 +1261,29 @@ class AnalysisWorkerMixin:
         if not self.window._analysis_enabled:
             self.window._update_analysis_control_state()
             return
+        settings_changed_during_run = self.window._sensorgram_settings_changed_during_run
+        self.window._sensorgram_settings_changed_during_run = False
+        if (
+            settings_changed_during_run
+            and not getattr(self, "_group_calculation_active", False)
+            and self.window._pending_sensorgram_payload is None
+        ):
+            # A setting changed (Fit method/Metric/Reduction/Formula/range/...)
+            # while this run was still in flight (see mark_stale) and nothing
+            # already queued a fresh recompute for it (that path is handled
+            # below via _pending_sensorgram_payload). This result was
+            # computed under settings that no longer match what's on screen -
+            # applying/backing it up as "done" would silently show a stale
+            # result as current, with no indication anything is wrong. Show
+            # the normal "out of date" state instead, same as any other
+            # settings change, so the user knows to press Start analysis
+            # again. See whole_app_bug_audit_2026-09.md finding 2.1.
+            self.window._append_workflow_log(
+                "SG done | settings changed mid-run - discarding stale result", level="debug"
+            )
+            self.schedule_cube_slider_cache_refresh()
+            self.mark_stale("Settings changed while calculating - press Start analysis again")
+            return
         # Live preview leaves the spectrum panel showing a stripped-down
         # "Live: cube N" redraw (see _apply_pending_sensorgram_live_preview -
         # no fit overlay/metric marker/proper status text). Now that the run
@@ -1361,6 +1388,14 @@ class AnalysisWorkerMixin:
 
     def mark_stale(self, reason: str | None = None) -> None:
         if self.window._sensorgram_running:
+            # clear_sensorgram (below) can't safely run while a computation
+            # is in flight - it would blank the live plot and drop
+            # _pending_sensorgram_payload out from under it. Remember
+            # instead that a setting changed after this run started, so
+            # on_sensorgram_ready knows its result no longer matches current
+            # settings and must not display/back it up as if it were still
+            # current. See whole_app_bug_audit_2026-09.md finding 2.1.
+            self.window._sensorgram_settings_changed_during_run = True
             return
         metric_label = self.window._analysis_metric_label()
         range_text = ""
@@ -1570,11 +1605,17 @@ class AnalysisWorkerMixin:
         if len(selected_source_rois) == 1:
             roi_signature = roi_signatures[0]
             assert roi_signature is not None
-            cached_roi_result = self.window._roi_formula_spectrum_cache.get(roi_signature)
+            # get() + move_to_end() must happen atomically under the same
+            # lock _store_in_lru_cache's writers use - otherwise a
+            # background-thread eviction landing between the two calls can
+            # move_to_end() a key that was just evicted and raise KeyError.
+            with self.window._analysis_cache_lock:
+                cached_roi_result = self.window._roi_formula_spectrum_cache.get(roi_signature)
+                if cached_roi_result is not None:
+                    self.window._roi_formula_spectrum_cache.move_to_end(roi_signature)
             if cached_roi_result is not None:
                 self.window._formula_spectrum_dirty = False
                 self._apply_formula_spectrum_result(cached_roi_result)
-                self.window._roi_formula_spectrum_cache.move_to_end(roi_signature)
                 elapsed = self.window._format_elapsed_seconds(time.perf_counter() - start_time)
                 self.window._append_workflow_log(f"Spec cache hit | {elapsed}", level="debug")
                 self.window._set_status_text(f"Spec | cache {elapsed}")
@@ -2282,10 +2323,15 @@ class AnalysisWorkerMixin:
         if len(selected_source_rois) == 1:
             roi_signature_single = self._roi_formula_spectrum_signature(selected_source_rois[0])
             if roi_signature_single is not None:
-                cached_roi_result = self.window._roi_formula_spectrum_cache.get(roi_signature_single)
+                # See the matching lock usage in _refresh_formula_spectrum -
+                # get() + move_to_end() must be atomic against a background
+                # eviction of the same key.
+                with self.window._analysis_cache_lock:
+                    cached_roi_result = self.window._roi_formula_spectrum_cache.get(roi_signature_single)
+                    if cached_roi_result is not None:
+                        self.window._roi_formula_spectrum_cache.move_to_end(roi_signature_single)
                 if cached_roi_result is not None:
                     self._apply_formula_spectrum_result(cached_roi_result)
-                    self.window._roi_formula_spectrum_cache.move_to_end(roi_signature_single)
                     self.window._append_workflow_log("Spec repaint | roi cache", level="debug")
                     return True
         signature = self._formula_spectrum_signature()

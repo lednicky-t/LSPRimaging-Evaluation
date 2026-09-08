@@ -180,8 +180,14 @@ def aggregate_group_traces(
         spread = np.nanstd(stacked, axis=0)
         if str(band).strip().lower() == "sem":
             n_valid = np.sum(np.isfinite(stacked), axis=0).astype(np.float64)
+            # SEM needs the unbiased *sample* std (ddof=1), not the
+            # population std used for the "sd" band above - ddof=0 would
+            # understate the band (e.g. ~29% too narrow at n=2). Only
+            # defined for n_valid >= 2; fewer valid members -> NaN.
+            with np.errstate(invalid="ignore"):
+                sample_spread = np.nanstd(stacked, axis=0, ddof=1)
             with np.errstate(divide="ignore", invalid="ignore"):
-                spread = np.where(n_valid > 0, spread / np.sqrt(np.maximum(n_valid, 1.0)), np.nan)
+                spread = np.where(n_valid > 1, sample_spread / np.sqrt(n_valid), np.nan)
     band_low = center_trace - spread
     band_high = center_trace + spread
     return center_trace, band_low, band_high

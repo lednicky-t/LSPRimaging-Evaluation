@@ -4,8 +4,10 @@ import json
 import logging
 import math
 import re
+import shutil
 import threading
 import time
+import uuid
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
@@ -59,27 +61,6 @@ _OME_ZARR_IMPORT_ERROR: ImportError | None = None
 ADAPTIVE_MAX_FACTOR = 2.0          # never exceed 2x cpu_count
 ADAPTIVE_IO_FLIP_UP = 0.5          # >=50% time in read+write -> add workers
 ADAPTIVE_IO_FLIP_DOWN = 0.2        # <=20% time in read+write -> remove workers
-
-
-def _crc32c(data: bytes) -> int:
-    """CRC32C (Castagnoli) checksum — required for zarr v3 shard index format."""
-    try:
-        import crc32c as _lib  # type: ignore[import-untyped]
-        return _lib.crc32c(data)
-    except ImportError:
-        pass
-    # Pure-Python fallback. The shard index is at most a few KB, so this is fast enough.
-    poly = 0x82F63B78
-    table: list[int] = []
-    for i in range(256):
-        crc = i
-        for _ in range(8):
-            crc = (crc >> 1) ^ poly if crc & 1 else crc >> 1
-        table.append(crc)
-    crc = 0xFFFFFFFF
-    for byte in data:
-        crc = (crc >> 8) ^ table[(crc ^ byte) & 0xFF]
-    return crc ^ 0xFFFFFFFF
 
 
 _ZARR_CODEC_PIPELINE_CONFIGURED = False
@@ -1232,6 +1213,93 @@ def compare_ome_zarr_summaries(
 
 
 def export_ome_zarr_dataset(
+    dataset: ImageDataset,
+    destination: Path,
+    *,
+    chunk_size_px: int = 64,
+    compression_enabled: bool = True,
+    shard_mode: str = "per_image",
+    preprocessing: PreprocessingSettings | None = None,
+    progress_callback: Callable[[int, str], None] | None = None,
+    cancel_event: threading.Event | None = None,
+    excluded_rules: list[ImageExclusionRule] | None = None,
+    skip_excluded: bool = False,
+    adaptive_workers_enabled: bool = True,
+    adaptive_batch_mb: int = 1024,
+) -> Path:
+    """Export `dataset` to `destination` as OME-Zarr - see
+    `_export_ome_zarr_dataset_to_path` for what actually writes it.
+
+    When `destination` already holds data (the GUI's "Replace" collision
+    choice), the new export is written to a temporary sibling directory
+    first and only swapped onto `destination` once it has fully succeeded -
+    the pre-existing export is never touched until the new one is confirmed
+    complete. Any failure (including cancellation) leaves the old export
+    exactly as it was and cleans up only the temp directory. Without this,
+    the old data was destroyed the instant the new export opened
+    `destination` in write mode, before a single shard of the replacement
+    was written - see whole_app_bug_audit_2026-09.md finding 1.1.
+    """
+    normalized_destination = (
+        destination
+        if destination.suffix == ".zarr" or destination.name.endswith(".ome.zarr")
+        else destination.with_suffix(".ome.zarr")
+    )
+    kwargs = dict(
+        chunk_size_px=chunk_size_px,
+        compression_enabled=compression_enabled,
+        shard_mode=shard_mode,
+        preprocessing=preprocessing,
+        progress_callback=progress_callback,
+        cancel_event=cancel_event,
+        excluded_rules=excluded_rules,
+        skip_excluded=skip_excluded,
+        adaptive_workers_enabled=adaptive_workers_enabled,
+        adaptive_batch_mb=adaptive_batch_mb,
+    )
+    if not normalized_destination.exists():
+        return _export_ome_zarr_dataset_to_path(dataset, destination, **kwargs)
+
+    # The suffix must land at the very end of the name (not after it) -
+    # _export_ome_zarr_dataset_to_path re-normalizes any destination whose
+    # name doesn't already end in ".ome.zarr"/".zarr" by replacing its
+    # trailing suffix, which would otherwise silently rename this temp
+    # path out from under us mid-export.
+    normalized_name = normalized_destination.name
+    if normalized_name.endswith(".ome.zarr"):
+        base_stem, ome_zarr_ext = normalized_name[: -len(".ome.zarr")], ".ome.zarr"
+    else:
+        base_stem, ome_zarr_ext = normalized_name[: -len(".zarr")], ".zarr"
+    write_target = normalized_destination.with_name(f"{base_stem}.exporting-{uuid.uuid4().hex[:8]}{ome_zarr_ext}")
+    try:
+        _export_ome_zarr_dataset_to_path(dataset, write_target, **kwargs)
+    except BaseException:
+        if write_target.exists():
+            shutil.rmtree(write_target, ignore_errors=True)
+        raise
+
+    # The new export fully succeeded - only now does the old one get
+    # replaced. Two plain renames (old -> a fresh backup name, new -> the
+    # final name) rather than one directory-replace call, since neither
+    # os.rename nor os.replace can atomically overwrite an existing
+    # *directory* on Windows the way they can a file. Each rename here
+    # targets a name that does not yet exist, which is an ordinary, fast
+    # rename on both platforms - and at every point in the sequence the old
+    # export's data still exists on disk somewhere (nothing is deleted until
+    # the very end), so a crash here loses nothing; at worst it leaves a
+    # "<name>.replaced-tmp-XXXXXXXX" folder next to the dataset to recover.
+    backup_path = normalized_destination.with_name(f"{normalized_destination.name}.replaced-tmp-{uuid.uuid4().hex[:8]}")
+    normalized_destination.rename(backup_path)
+    try:
+        write_target.rename(normalized_destination)
+    except BaseException:
+        backup_path.rename(normalized_destination)
+        raise
+    shutil.rmtree(backup_path, ignore_errors=True)
+    return normalized_destination
+
+
+def _export_ome_zarr_dataset_to_path(
     dataset: ImageDataset,
     destination: Path,
     *,

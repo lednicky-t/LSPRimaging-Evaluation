@@ -127,6 +127,12 @@ class OverlayManager:
                     reference_fill.setAlphaF(w._alpha01(max(w._reference_alpha, 0.08)))
                 inner_pen = pg.mkPen(reference_color, width=1.4, style=Qt.PenStyle.DashLine)
                 outer_pen = pg.mkPen(reference_color, width=1.4, style=Qt.PenStyle.DotLine)
+                # Computed once and reused for both outline curves and the
+                # fill path below, so the shaded ring always matches the
+                # outline exactly (including under a non-similarity affine
+                # chromatic-correction model, where these are ellipses).
+                outer_xs, outer_ys = w._roi_curve_points(source_roi, roi, reference_outer_radius)
+                inner_xs = inner_ys = None
                 if reference_inner_radius > 0.0:
                     if bundle.inner_curve is None:
                         bundle.inner_curve = pg.PlotCurveItem()
@@ -143,12 +149,7 @@ class OverlayManager:
                     bundle.reference_fill = QGraphicsPathItem()
                     w.image_plot.addItem(bundle.reference_fill, ignoreBounds=True)
                 bundle.reference_fill.setPath(
-                    w._create_reference_fill_path(
-                        roi.center_x,
-                        roi.center_y,
-                        reference_inner_radius,
-                        reference_outer_radius,
-                    )
+                    w._create_reference_fill_path(outer_xs, outer_ys, inner_xs, inner_ys)
                 )
                 bundle.reference_fill.setBrush(QBrush(reference_fill))
                 bundle.reference_fill.setPen(QPen(Qt.PenStyle.NoPen))
@@ -157,7 +158,6 @@ class OverlayManager:
                     bundle.outer_curve = pg.PlotCurveItem()
                     bundle.outer_curve.setSkipFiniteCheck(True)
                     w.image_plot.addItem(bundle.outer_curve, ignoreBounds=True)
-                outer_xs, outer_ys = w._roi_curve_points(source_roi, roi, reference_outer_radius)
                 bundle.outer_curve.setData(outer_xs, outer_ys)
                 bundle.outer_curve.setPen(outer_pen)
                 bundle.outer_curve.setVisible(True)

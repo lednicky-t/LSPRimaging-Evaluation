@@ -112,9 +112,15 @@ def import_metadata_files(paths: list[Path]) -> MetadataImportResult:
         if metadata is None:
             notes.append(f"Could not read {chosen.name} as imaging acquisition metadata.")
             continue
+        # Anything else that was selected alongside the winner is ignored,
+        # including a file of the *other* winner-eligible kind (e.g. both a
+        # sidecar JSON and a native HDF5 file picked together) - not just the
+        # legacy CSV/TXT candidates, so nothing is silently dropped without
+        # a note.
+        other_reader_candidates = [path for other_kind in readers if other_kind != kind for path in by_kind[other_kind]]
         notes.extend(
             f"Ignored (a {_KIND_LABELS[kind]} was also selected): {path.name}"
-            for path in by_kind[CLASSIFICATION_LEGACY_CSV] + by_kind[CLASSIFICATION_LEGACY_TXT]
+            for path in by_kind[CLASSIFICATION_LEGACY_CSV] + by_kind[CLASSIFICATION_LEGACY_TXT] + other_reader_candidates
         )
         notes.append(f"Loaded from {chosen.name}.")
         return MetadataImportResult(metadata=metadata, notes=notes)
