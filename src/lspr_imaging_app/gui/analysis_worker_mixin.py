@@ -32,7 +32,6 @@ from lspr_imaging_app.domain.exclusions import is_excluded
 from lspr_imaging_app.domain.models import AreaRoi, FormulaSpectrumResult
 from lspr_imaging_app.gui.analysis_tasks import _roi_formula_spectrum_signature, _scoped_formula_spectrum_task
 from lspr_imaging_app.processing.analysis import (
-    fit_curve_for_method,
     formula_values_from_reduced_values,
     metric_value_from_fit,
     metric_value_from_spectrum,
@@ -72,92 +71,174 @@ class FormulaSpectrumRenderBundle:
     fit_seconds: float
 
 
-# 5% of the real (non-dark) spectral span is an arbitrary but reasonable
-# threshold for "this is worth acting on" - small enough to flag a genuine
-# LSPR-peak-scale distortion (the incident this test was built from shifted
-# the metric by >200% of the range), large enough not to nag over
-# sub-nanometer floating-point-scale noise between the two fits.
+# A dark-correction shift worth more than 5% of the real spectrum's own
+# natural variation (max-min of its own formula values) is treated as
+# "worth acting on" - self-relative, not an absolute cutoff, since what
+# counts as a "big" absorbance shift depends entirely on how much the real
+# signal itself varies across the spectrum. Same reasoning/threshold as
+# this module's earlier wavelength-shift version of this test, just applied
+# to formula-value range instead of nm range now.
 DARK_FRAME_IMPACT_RECOMMEND_EXCLUDE_THRESHOLD = 0.05
 
+# If the dark frame's plain mean is more than this fraction above its own
+# trimmed mean (DEFAULT_TRIMMED_MEAN_FRACTION discards the extreme 10% from
+# each tail), a handful of unusually hot/noisy pixels are likely inflating
+# the mean rather than the whole ROI being uniformly offset - worth flagging
+# separately from the overall correction-impact number, since it points to
+# a sensor/ROI-placement issue rather than a "should I dark-correct" one.
+DARK_FRAME_HOT_PIXEL_RATIO_THRESHOLD = 0.15
 
-def dark_frame_with_without_metrics(
+
+@dataclass(slots=True)
+class DarkFramePixelImpact:
+    """Pure result of `dark_frame_pixel_impact`: what a dataset's 0 nm
+    (dark/background) frame's own pixel counts look like, and how much
+    subtracting them from every real wavelength's sample/reference values
+    would actually change the computed formula value - the real question a
+    user needs answered to decide whether dark-current subtraction matters
+    for their dataset, not (as an earlier version of this test asked) how
+    the dark frame distorts a spectral *fit* it was never meant to be part
+    of in the first place."""
+
+    dark_sample_mean: float
+    dark_reference_mean: float
+    dark_sample_hot_pixel_ratio: float | None
+    """(mean - trimmed_mean) / mean for the dark frame's own sample-ROI
+    pixels - None if the dark sample mean is ~0 (division would be
+    meaningless) or trimmed_mean data wasn't available."""
+    dark_as_percent_of_dimmest_signal: float | None
+    """dark_sample_mean as a percentage of the real spectrum's own dimmest
+    (minimum) sample value - None if that minimum is ~0."""
+    worst_wavelength_nm: float
+    worst_shift: float
+    """Signed: (formula value with dark subtracted) - (without), at
+    whichever real wavelength the subtraction changes the most."""
+    mean_abs_shift: float
+    formula_value_range: float
+    """max - min of the real (uncorrected) formula values across the
+    spectrum - the denominator for expressing a shift as "how much of your
+    own signal's variation" instead of an arbitrary absolute cutoff."""
+
+
+def dark_frame_pixel_impact(
     wavelengths_nm: np.ndarray,
-    formula_values: np.ndarray,
-    *,
-    fit_method_key: str,
-    metric_key: str,
-    poly_order: int,
-    wl_min: float | None,
-    wl_max: float | None,
-) -> tuple[float | None, float | None, float]:
+    sample_reduced_value: np.ndarray,
+    reference_reduced_value: np.ndarray,
+    reduced_values_by_method: dict[str, tuple[np.ndarray, np.ndarray]],
+    formula_key: str,
+) -> DarkFramePixelImpact | None:
     """Pure core of run_dark_frame_impact_test: given one already-computed
-    spectrum (real wavelengths plus a 0 nm dark frame mixed in), returns
-    (metric_with_dark_frame, metric_without_it, real_wavelength_span_nm) -
-    split out so it's directly unit-testable with synthetic arrays, no Qt
-    app, dataset, or background dispatch needed (mirrors this module's
-    format_dark_frame_impact_result and this repo's other pure-computation-
-    split-from-orchestration functions, e.g. main_window.py's
-    _format_busy_detail_text). `wl_min`/`wl_max` are the Analysis section's
-    current wavelength-range filter (may be None) - applied identically to
-    both the with- and without-dark-frame fits so the comparison isolates
-    only the dark frame's own effect, not a range-setting difference."""
+    spectrum (real wavelengths plus the dataset's 0 nm dark/background
+    frame mixed in, all reduced the same way real ROI pixels are), measures
+    the dark frame's own pixel-count level and simulates subtracting it
+    from every real wavelength's sample/reference values, comparing the
+    resulting formula value (e.g. absorbance) against the uncorrected one.
+    Returns None if there's no 0 nm entry or no real wavelength to compare
+    against. Split out from orchestration/dispatch so it's directly
+    unit-testable with synthetic arrays - no Qt app, dataset, or background
+    thread needed (mirrors this repo's other pure-compute-vs-orchestration
+    splits, e.g. main_window.py's _format_busy_detail_text).
+
+    `reduced_values_by_method` is the same dict `_scoped_formula_spectrum_task`
+    already returns when `compute_all_reduction_methods=True` (every
+    Reduction method computed from the same pixels, "for free") - used here
+    only for its `"trimmed_mean"` entry, as a robust-to-outliers comparison
+    against the plain mean to flag likely hot/noisy pixels in the dark
+    frame specifically, not to change which Reduction method drives the
+    actual correction (that's always the plain mean, matching the physical
+    question "what's the average dark offset every pixel in this ROI
+    carries").
+    """
     wavelengths = np.asarray(wavelengths_nm, dtype=np.float64)
-    values = np.asarray(formula_values, dtype=np.float64)
-    without_dark_mask = wavelengths != 0.0
-    real_wavelengths = wavelengths[without_dark_mask]
-    real_span = float(np.max(real_wavelengths) - np.min(real_wavelengths)) if real_wavelengths.size >= 2 else 0.0
+    dark_mask = wavelengths == 0.0
+    if not np.any(dark_mask):
+        return None
+    real_mask = ~dark_mask
+    if not np.any(real_mask):
+        return None
+    dark_index = int(np.flatnonzero(dark_mask)[0])
 
-    def _metric_for(wl: np.ndarray, val: np.ndarray) -> float | None:
-        if fit_method_key == "none":
-            metric_value, _signal = metric_value_from_spectrum(wl, val, metric_key, wl_min=wl_min, wl_max=wl_max)
-        else:
-            fit = fit_curve_for_method(wl, val, fit_method_key, poly_order=poly_order, wl_min=wl_min, wl_max=wl_max)
-            metric_value, _signal = metric_value_from_fit(fit, metric_key)
-        return metric_value
+    sample = np.asarray(sample_reduced_value, dtype=np.float64)
+    reference = np.asarray(reference_reduced_value, dtype=np.float64)
+    dark_sample_mean = float(sample[dark_index])
+    dark_reference_mean = float(reference[dark_index])
 
-    with_value = _metric_for(wavelengths, values)
-    without_value = _metric_for(real_wavelengths, values[without_dark_mask])
-    return with_value, without_value, real_span
+    hot_pixel_ratio: float | None = None
+    trimmed = reduced_values_by_method.get("trimmed_mean")
+    if trimmed is not None and abs(dark_sample_mean) > 1.0e-9:
+        trimmed_sample = np.asarray(trimmed[0], dtype=np.float64)
+        if dark_index < trimmed_sample.size:
+            dark_sample_trimmed = float(trimmed_sample[dark_index])
+            hot_pixel_ratio = (dark_sample_mean - dark_sample_trimmed) / dark_sample_mean
+
+    real_wavelengths = wavelengths[real_mask]
+    real_sample = sample[real_mask]
+    real_reference = reference[real_mask]
+
+    uncorrected = formula_values_from_reduced_values(real_sample, real_reference, formula_key)
+    corrected = formula_values_from_reduced_values(real_sample - dark_sample_mean, real_reference - dark_reference_mean, formula_key)
+    shift = corrected - uncorrected
+    worst_index = int(np.argmax(np.abs(shift)))
+
+    min_real_sample = float(np.min(real_sample)) if real_sample.size else 0.0
+    dark_percent_of_dimmest = (dark_sample_mean / min_real_sample * 100.0) if min_real_sample > 1.0e-9 else None
+    formula_value_range = float(np.max(uncorrected) - np.min(uncorrected)) if uncorrected.size >= 2 else 0.0
+
+    return DarkFramePixelImpact(
+        dark_sample_mean=dark_sample_mean,
+        dark_reference_mean=dark_reference_mean,
+        dark_sample_hot_pixel_ratio=hot_pixel_ratio,
+        dark_as_percent_of_dimmest_signal=dark_percent_of_dimmest,
+        worst_wavelength_nm=float(real_wavelengths[worst_index]),
+        worst_shift=float(shift[worst_index]),
+        mean_abs_shift=float(np.mean(np.abs(shift))),
+        formula_value_range=formula_value_range,
+    )
 
 
 def format_dark_frame_impact_result(
-    with_dark_frame: float | None,
-    without_dark_frame: float | None,
-    real_wavelength_span_nm: float,
+    impact: DarkFramePixelImpact | None,
     spectral_cube_index: int,
+    formula_label: str,
 ) -> str:
     """Pure formatter for AnalysisWorkerMixin.run_dark_frame_impact_test's
     result text - split out so it's directly unit-testable without a
     running Qt app or a real dataset (mirrors main_window.py's
-    _format_busy_detail_text pattern). `real_wavelength_span_nm` is the
-    max-minus-min of the dataset's real (non-0nm) wavelengths - the
-    denominator for expressing the shift as a percentage of "how wide your
-    actual spectrum is," which is more meaningful here than a percentage of
-    the metric's own absolute value (a wavelength near 0 nm would produce
-    an enormous, misleading percentage under that definition instead)."""
-    if with_dark_frame is None or without_dark_frame is None:
-        missing = "with" if with_dark_frame is None else "without"
+    _format_busy_detail_text pattern)."""
+    if impact is None:
         return (
-            f"Cube {spectral_cube_index}: could not compute a result {missing} the 0 nm frame - "
-            "try a different Fit/Metric combination, or pick a dataset with more real wavelengths."
+            f"Cube {spectral_cube_index}: could not evaluate dark-frame impact - "
+            "this dataset has no 0 nm frame, or no real wavelength to compare it against."
         )
-    shift = abs(with_dark_frame - without_dark_frame)
-    if real_wavelength_span_nm > 1.0e-9:
-        percent = shift / real_wavelength_span_nm * 100.0
-        percent_text = f"{percent:.1f}% of your {real_wavelength_span_nm:.0f} nm spectral range"
-        recommend_exclude = (shift / real_wavelength_span_nm) > DARK_FRAME_IMPACT_RECOMMEND_EXCLUDE_THRESHOLD
+    lines = [
+        f"Cube {spectral_cube_index}: dark frame counts - sample={impact.dark_sample_mean:.1f}, "
+        f"reference={impact.dark_reference_mean:.1f}."
+    ]
+    if impact.dark_as_percent_of_dimmest_signal is not None:
+        lines.append(f"That's {impact.dark_as_percent_of_dimmest_signal:.2f}% of your dimmest real wavelength's own signal.")
+    if impact.dark_sample_hot_pixel_ratio is not None and impact.dark_sample_hot_pixel_ratio > DARK_FRAME_HOT_PIXEL_RATIO_THRESHOLD:
+        lines.append(
+            f"Note: the dark mean is {impact.dark_sample_hot_pixel_ratio * 100.0:.0f}% above its trimmed mean - "
+            "a few unusually hot/noisy pixels may be inflating it, worth checking this ROI/mask rather than "
+            "just the overall dark level."
+        )
+    if impact.formula_value_range > 1.0e-9:
+        percent = abs(impact.worst_shift) / impact.formula_value_range * 100.0
+        percent_text = f"{percent:.1f}% of your spectrum's own {impact.formula_value_range:.4g}-unit range"
+        significant = percent > DARK_FRAME_IMPACT_RECOMMEND_EXCLUDE_THRESHOLD * 100.0
     else:
-        percent_text = "spectral range too narrow to express as a percentage"
-        recommend_exclude = shift > 1.0e-9
+        percent_text = "your spectrum is too flat here to express as a percentage"
+        significant = abs(impact.worst_shift) > 1.0e-9
     verdict = (
-        "Recommend turning on \"Treat 0 nm as a dark reference frame.\""
-        if recommend_exclude
-        else "Negligible either way - the preference doesn't matter much for this dataset."
+        "This could visibly affect your results - consider dark-correcting or excluding your lowest-signal wavelengths."
+        if significant
+        else "Negligible for this dataset - dark subtraction wouldn't meaningfully change your results."
     )
-    return (
-        f"Cube {spectral_cube_index}: including the 0 nm frame gives {with_dark_frame:.2f}, "
-        f"excluding it gives {without_dark_frame:.2f} - a shift of {shift:.2f} ({percent_text}). {verdict}"
+    lines.append(
+        f"Dark-correcting would shift {formula_label} by up to {impact.worst_shift:+.4g} "
+        f"(at {impact.worst_wavelength_nm:.0f}nm, worst case; {percent_text}). {verdict}"
     )
+    return " ".join(lines)
 
 
 def _write_measurement_backup_buffers(writer, formula_buffer, sensorgram_buffer) -> None:
@@ -511,16 +592,20 @@ class AnalysisWorkerMixin:
     def run_dark_frame_impact_test(self, on_result, on_error) -> None:
         """"Test dark-frame impact" (Preferences > Wavelength handling,
         next to "Treat 0 nm as a dark reference frame"): for the first
-        spectral cube only, computes the current Fit/Metric result twice -
-        once with the dataset's 0 nm frame included, once with it excluded
-        - and reports how much it shifts the result. Meant to let a user
-        decide whether to turn that preference on without already knowing
-        why a stray 0 nm (dark/broadband reference) frame can distort a
-        polynomial fit - see docs/qthreadpool_zarr_crash_investigation.md's
-        sibling sensorgram-wavelength-range bug writeup for the real
-        incident this was built from: an 11th-order polynomial fit
-        including one extreme low-signal outlier point pulled the fitted
-        peak position far outside the real spectral range.
+        spectral cube only, measures the dataset's 0 nm (dark/background)
+        frame's own pixel-count level in the current ROI selection, and
+        simulates subtracting it from every real wavelength's sample/
+        reference values to see how much that actually changes the
+        computed formula value (e.g. Absorbance) - the physically real
+        question ("does this dark count matter enough to correct for"),
+        not how a dark frame distorts a spectral fit it was never meant to
+        be part of (an earlier version of this test asked that instead;
+        see `dark_frame_pixel_impact`'s own docstring for why the pixel-
+        level question is the right one). Built from a real incident where
+        a dark frame's near-zero signal, left in an order-11 polynomial
+        fit, pulled a sensorgram trace to a nonsense wavelength - see
+        docs/qthreadpool_zarr_crash_investigation.md's sibling
+        sensorgram-wavelength-range bug writeup.
 
         Always builds against the dataset's raw, unfiltered wavelength list
         (`dataset.wavelengths_nm`, not `window._wavelength_values`) so the
@@ -551,8 +636,8 @@ class AnalysisWorkerMixin:
         if 0.0 not in raw_wavelengths:
             on_error("This dataset has no 0 nm frame - there's nothing to test.")
             return
-        if len(raw_wavelengths) < 3:
-            on_error("Not enough wavelengths in this dataset to fit a spectrum.")
+        if len(raw_wavelengths) < 2:
+            on_error("Not enough wavelengths in this dataset to compare against.")
             return
         selected_roi_ids = window._selected_spectrum_roi_ids()
         selected_source_rois = window._selected_source_rois_snapshot()
@@ -579,24 +664,17 @@ class AnalysisWorkerMixin:
 
         (reduction_method,) = self._roi_reduction_signature_elements()
         formula_key = self._active_formula_key()
-        fit_method_key = self._analysis_fit_method_key()
-        metric_key = window._analysis_metric_key()
-        poly_order = window._analysis_poly_order()
-        wavelength_range = window._analysis_wavelength_range()
-        wl_min = None if wavelength_range is None else wavelength_range[0]
-        wl_max = None if wavelength_range is None else wavelength_range[1]
+        formula_label = self._analysis_formula_axis_label()
 
         def _on_spectrum_ready(spectrum) -> None:
-            with_value, without_value, real_span = dark_frame_with_without_metrics(
+            impact = dark_frame_pixel_impact(
                 spectrum.wavelengths_nm,
-                spectrum.formula_values,
-                fit_method_key=fit_method_key,
-                metric_key=metric_key,
-                poly_order=poly_order,
-                wl_min=wl_min,
-                wl_max=wl_max,
+                spectrum.sample_reduced_value,
+                spectrum.reference_reduced_value,
+                spectrum.reduced_values_by_method,
+                formula_key,
             )
-            on_result(format_dark_frame_impact_result(with_value, without_value, real_span, first_cube))
+            on_result(format_dark_frame_impact_result(impact, first_cube, formula_label))
 
         worker = FunctionWorker(
             _scoped_formula_spectrum_task,

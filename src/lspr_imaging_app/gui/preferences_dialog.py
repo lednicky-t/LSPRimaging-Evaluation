@@ -97,11 +97,14 @@ class PreferencesDialog(QDialog):
         )
         self.dark_frame_test_button = QPushButton("Test dark-frame impact...")
         self.dark_frame_test_button.setToolTip(
-            "Computes your current Fit/Metric result for the first spectral cube twice - once "
-            "with the dataset's 0 nm frame included, once excluded - and reports how much it "
-            "shifts the result, so you can decide whether the setting above matters for this "
-            "dataset instead of guessing. Requires a dataset with a 0 nm frame to be loaded and "
-            "at least one ROI selected. Works for both TIFF and OME-Zarr datasets."
+            "Measures your 0 nm frame's own pixel counts (dark current - never zero on a real "
+            "sensor) for the first spectral cube, and simulates subtracting them from every real "
+            "wavelength's sample/reference values as a dark-offset correction, reporting how much "
+            "that would actually change your formula value (e.g. Absorbance) - a small dark count "
+            "against a bright signal is usually negligible, but the same count can matter against "
+            "a dim one. Also flags likely hot/noisy pixels in the dark frame itself. Requires a "
+            "dataset with a 0 nm frame to be loaded and at least one ROI selected. Works for both "
+            "TIFF and OME-Zarr datasets."
         )
         self.dark_frame_test_button.clicked.connect(self._run_dark_frame_impact_test)
         self.dark_frame_test_result_label = QLabel("")
