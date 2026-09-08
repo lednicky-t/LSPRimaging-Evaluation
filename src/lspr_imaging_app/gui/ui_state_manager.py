@@ -458,9 +458,10 @@ class UIStateManager:
             window._ome_zarr_chunk_controls_syncing = False
 
     def _sync_ome_zarr_chunk_estimate_label(self, chunk_size_px: int) -> None:
-        """Live "-> N chunks/plane, ~Xms/plane read" readout next to the
-        Export section's chunk-size spinner, plus a second, dataset-wide
-        "-> N chunks total (M images), ~Xs read" readout underneath it - see
+        """Live "-> N chunks/plane, ~Xms/plane read" readout, plus a second,
+        dataset-wide "-> N chunks total (M images), ~Xs read" readout on its
+        own row underneath, both below the Export section's chunk-size
+        spinner - see
         io/dataset.py's estimate_ome_zarr_export_chunk_plane_read and
         estimate_ome_zarr_export_dataset_total_read for the math/estimate.
         Uses whatever image is already displayed (no extra I/O) for the

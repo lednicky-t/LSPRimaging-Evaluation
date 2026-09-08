@@ -830,6 +830,7 @@ def build_layout(window) -> None:
     for row in (
         window.dataset_ome_zarr_controls_row,
         window.dataset_ome_zarr_options_row,
+        window.dataset_ome_zarr_chunk_estimate_row,
         window.dataset_ome_zarr_chunk_total_row,
         window.dataset_ome_zarr_compression_row,
         window.dataset_ome_zarr_skip_excluded_row,

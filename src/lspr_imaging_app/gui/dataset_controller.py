@@ -710,6 +710,7 @@ class DatasetController:
         window.ome_zarr_compression_button.setEnabled(not running)
         window.dataset_ome_zarr_controls_row.setEnabled(not running)
         window.dataset_ome_zarr_options_row.setEnabled(not running)
+        window.dataset_ome_zarr_chunk_estimate_row.setEnabled(not running)
         window.dataset_ome_zarr_chunk_total_row.setEnabled(not running)
         if running:
             window.dataset_ome_zarr_export_status_label.setText("Progress")
@@ -871,6 +872,7 @@ class DatasetController:
         window.ome_zarr_compression_button.setEnabled(True)
         window.dataset_ome_zarr_controls_row.setEnabled(True)
         window.dataset_ome_zarr_options_row.setEnabled(True)
+        window.dataset_ome_zarr_chunk_estimate_row.setEnabled(True)
         window.dataset_ome_zarr_chunk_total_row.setEnabled(True)
         self._sync_ome_zarr_chunk_controls()
         window._append_workflow_log(
