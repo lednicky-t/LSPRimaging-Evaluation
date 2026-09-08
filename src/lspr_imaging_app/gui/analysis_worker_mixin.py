@@ -688,6 +688,40 @@ class AnalysisWorkerMixin:
         worker.signals.error.connect(on_error)
         worker.start()
 
+    def _ensure_analysis_worker_count_calibration(self) -> None:
+        """Kick off the background per-machine analysis worker-count
+        calibration (see io/dataset.py's calibrate_analysis_worker_count)
+        the first time "Start analysis" runs this session. A no-op if
+        already done or already in flight - safe to call at the top of
+        every _start_sensorgram_worker call. Non-blocking and never
+        load-bearing for the run that triggers it: that run (and any other
+        started before this finishes) simply uses _scoped_formula_spectrum_
+        task's own os.cpu_count()-based fallback, exactly as before this
+        existed - only a run started *after* this completes benefits. See
+        bulk_analysis_performance_investigation.md Follow-up #11/#12.
+        """
+        window = self.window
+        if window._analysis_worker_count_calibration_attempted or window._analysis_worker_count_calibration_pending:
+            return
+        window._analysis_worker_count_calibration_pending = True
+        from lspr_imaging_app.gui.worker import FunctionWorker
+        from lspr_imaging_app.io.dataset import calibrate_analysis_worker_count
+
+        worker = FunctionWorker(calibrate_analysis_worker_count)
+        worker.signals.result.connect(self._on_analysis_worker_count_calibration_done)
+        worker.signals.error.connect(lambda _message: self._on_analysis_worker_count_calibration_done(None))
+        worker.start()
+
+    def _on_analysis_worker_count_calibration_done(self, worker_count: int | None) -> None:
+        window = self.window
+        window._analysis_worker_count_calibration_pending = False
+        window._analysis_worker_count_calibration_attempted = True
+        window._analysis_worker_count_calibration = worker_count
+        if worker_count is not None:
+            logging.getLogger("lspr_imaging_app.workflow").debug(
+                "Analysis worker-count calibration | worker_count=%s", worker_count
+            )
+
     def _start_sensorgram_worker(
         self,
         signature: tuple[object, ...],
@@ -697,6 +731,7 @@ class AnalysisWorkerMixin:
     ) -> None:
         import time
 
+        self._ensure_analysis_worker_count_calibration()
         self.window._sensorgram_request_id += 1
         request_id = self.window._sensorgram_request_id
         self.window._sensorgram_running = True
@@ -883,6 +918,7 @@ class AnalysisWorkerMixin:
             trimmed_mean_fraction=DEFAULT_TRIMMED_MEAN_FRACTION,
             formula_key=formula_key,
             compute_all_reduction_methods=compute_all_reduction_methods,
+            worker_count_override=self.window._analysis_worker_count_calibration,
         )
         worker.signals.progress.connect(self.window._update_busy_progress)
         worker.signals.partial.connect(

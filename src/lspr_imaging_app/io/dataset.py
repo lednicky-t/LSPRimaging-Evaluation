@@ -18,9 +18,11 @@ from PIL import Image
 
 try:
     from tifffile import imread as _tifffile_imread
+    from tifffile import imwrite as _tifffile_imwrite
     from tifffile import TiffFile as _tifffile_TiffFile
 except Exception:  # pragma: no cover - optional acceleration path
     _tifffile_imread = None
+    _tifffile_imwrite = None
     _tifffile_TiffFile = None
 
 try:
@@ -1069,6 +1071,93 @@ def calibrate_zarr_read_overhead_ms() -> tuple[float, float] | None:
         return None
 
 
+def calibrate_analysis_worker_count() -> int | None:
+    """Empirically find this machine's fastest concurrency for the analysis
+    pipeline's per-wavelength TIFF read (tifffile.imread(..., maxworkers=1)
+    under an outer ThreadPoolExecutor, see analysis_tasks.py's
+    _scoped_formula_spectrum_task), via small synthetic LZW TIFF files in a
+    temp directory - same calibration pattern as calibrate_zarr_read_
+    overhead_ms above, applied to a different bottleneck.
+
+    Why this needs its own calibration rather than a fixed formula: the
+    previous hardcoded cap (worker_count capped at 4, see
+    bulk_analysis_performance_investigation.md Follow-up #10) was tuned by
+    hand on one 4-physical-core machine, where it happened to equal
+    os.cpu_count()//2 - and was directly measured WORSE at higher counts on
+    that same machine (Follow-up #4). Neither "always 4" nor "always
+    cpu_count()//2" is known to hold on different hardware (more physical
+    cores, a different CPU generation, a different disk) - this measures the
+    real crossover on whichever machine it actually runs on instead of
+    assuming one.
+
+    The synthetic files are written with heavy strip fragmentation
+    (rowsperstrip=3) to match the real dataset's own worst-case layout (see
+    Follow-up #11's "Finding C" and the investigation doc's "Finding 1" -
+    real acquisition TIFFs were found LZW-compressed with ~300 strips/image,
+    a property of the source files, not something this app controls) -
+    calibrating against a *lighter* synthetic file would risk finding a
+    worker count tuned for less contention than real files actually cause.
+
+    Returns None if calibration fails for any reason (missing tifffile, a
+    read-only temp dir, etc.) - callers fall back to the previous
+    os.cpu_count()-based heuristic, exactly as before this function existed.
+    """
+    import tempfile
+    import time as _time
+    from concurrent.futures import ThreadPoolExecutor
+
+    if _tifffile_imread is None or _tifffile_imwrite is None:
+        return None
+    try:
+        cpu_count = int(os.cpu_count() or 4)
+        candidates = sorted({1, 2, max(2, cpu_count // 2), cpu_count})
+        with tempfile.TemporaryDirectory(prefix="lspr_analysis_worker_calibration_") as tmp:
+            tmp_path = Path(tmp)
+            rng = np.random.default_rng(0)
+            height, width = 800, 1280
+            n_files = 12
+            paths: list[str] = []
+            for i in range(n_files):
+                array = rng.integers(0, 4000, size=(height, width), dtype=np.uint16)
+                file_path = tmp_path / f"cal_{i}.tiff"
+                _tifffile_imwrite(str(file_path), array, compression="lzw", rowsperstrip=3)
+                paths.append(str(file_path))
+
+            def read_all(worker_count: int) -> None:
+                with ThreadPoolExecutor(max_workers=worker_count) as executor:
+                    list(executor.map(lambda p: _tifffile_imread(p, maxworkers=1), paths))
+
+            # One shared untimed warm pass before any candidate is timed
+            # (OS page cache, not cold disk - matches calibrate_zarr_read_
+            # overhead_ms's own methodology) - the files stay warm in the
+            # OS page cache for every candidate afterward regardless of
+            # worker count, so re-warming before each one (as a first
+            # version of this function did) only doubled the wall time for
+            # no accuracy benefit.
+            read_all(max(candidates))
+            timings_ms: dict[int, float] = {}
+            for worker_count in candidates:
+                started = _time.perf_counter()
+                read_all(worker_count)
+                timings_ms[worker_count] = (_time.perf_counter() - started) * 1000.0
+            best_ms = min(timings_ms.values())
+            # Prefer the SMALLEST worker count within 10% of the best time,
+            # not the strict minimum - several counts are often functionally
+            # tied, and this repo's own measurements (Follow-up #4/#10) found
+            # that extra concurrency with no real benefit still costs
+            # something (contention, thread creation, RAM) even when it
+            # doesn't show up as clearly slower in a single calibration run.
+            for worker_count in sorted(timings_ms):
+                if timings_ms[worker_count] <= best_ms * 1.10:
+                    return worker_count
+            return min(timings_ms, key=lambda k: timings_ms[k])
+    except Exception:
+        logging.getLogger("lspr_imaging_app.io").debug(
+            "Analysis worker-count calibration failed; falling back to the cpu_count heuristic.", exc_info=True
+        )
+        return None
+
+
 def estimate_ome_zarr_export_chunk_plane_read(
     width: int,
     height: int,
@@ -1523,18 +1612,25 @@ def _load_image_array_uncached(path_str: str) -> np.ndarray:
         return np.asarray(_read_ome_zarr_plane_by_path(path, ome_root), dtype=np.float32)
     if path.suffix.lower() in {".tif", ".tiff"} and _tifffile_imread is not None:
         try:
-            # maxworkers=2, not os.cpu_count(): this is the per-wavelength read
+            # maxworkers=1, not os.cpu_count(): this is the per-wavelength read
             # called from inside analysis_tasks.py's own ThreadPoolExecutor
             # (one call per concurrent worker, several workers at once) as much
             # as from single-image interactive loads - giving each individual
-            # file its own full-core-count decode pool means N outer workers x
-            # cpu_count inner threads all fighting over the same cores.
-            # Measured on a real 806x1288 dataset: maxworkers=cpu_count (8) cost
-            # ~1.1s to decode one cube's 27 planes inside the app's own 4-worker
-            # pool, vs ~0.6s with a small, fixed inner worker count - matches
-            # the same reasoning already applied to _load_image_array_native's
-            # export path below.
-            return np.asarray(_tifffile_imread(path_str, maxworkers=2), dtype=np.float32)
+            # file its own decode pool on top of the outer one means every
+            # inner pool pays tifffile's own per-strip dispatch/lock overhead
+            # (these files have 300 LZW strips each) for work the outer pool's
+            # 4-way file-level parallelism already covers. Measured directly,
+            # nested inside the app's real outer 4-worker pool (see
+            # bulk_analysis_performance_investigation.md Follow-up #11,
+            # Finding C): maxworkers=1 averaged 16.9ms/file vs 26.2ms/file at
+            # maxworkers=2 (~1.55x) - a plain per-strip decode inside one
+            # thread with no inner dispatch beats splitting one file's own
+            # strips across a second thread pool once the outer pool is
+            # already keeping every core busy. (An earlier version of this
+            # comment recommended maxworkers=2 over the default cpu_count - 2
+            # was correct relative to 8, just not relative to 1, which wasn't
+            # tested at the time.)
+            return np.asarray(_tifffile_imread(path_str, maxworkers=1), dtype=np.float32)
         except TypeError:
             return np.asarray(_tifffile_imread(path_str), dtype=np.float32)
     try:

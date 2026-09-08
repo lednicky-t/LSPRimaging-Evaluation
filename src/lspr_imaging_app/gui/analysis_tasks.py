@@ -664,6 +664,7 @@ def _scoped_formula_spectrum_task(
     trimmed_mean_fraction: float = 0.10,
     formula_key: str = "absorbance",
     compute_all_reduction_methods: bool = True,
+    worker_count_override: int | None = None,
 ) -> FormulaSpectrumResult:
     """Fast multi-ROI absorbance spectrum using OME-Zarr chunk-aware spatial reads.
 
@@ -701,6 +702,15 @@ def _scoped_formula_spectrum_task(
     cube too) - the cache key folds in the patch's own shape and origin (see
     _formula_spectrum_roi_mask_cache_key) so a scoped/local mask is never
     confused with a full-image one.
+
+    `worker_count_override`: this machine's calibrated per-wavelength read
+    concurrency (see io/dataset.py's `calibrate_analysis_worker_count` and
+    bulk_analysis_performance_investigation.md Follow-up #11/#12), when
+    available - replaces the `os.cpu_count()`-based heuristic below
+    entirely rather than just capping it, since that heuristic was tuned by
+    hand on one specific machine and measured wrong (too high) on it too.
+    `None` (calibration not yet finished, or failed) falls back to the
+    heuristic exactly as before this parameter existed.
     """
     from lspr_imaging_app.processing.preprocess import (
         apply_preprocessing,
@@ -1045,16 +1055,22 @@ def _scoped_formula_spectrum_task(
             _stage_timing_totals["reduce"] += nonlocal_reduce_seconds
         return (index, float(wavelength_nm), combined, per_roi)
 
-    # Capped at 4, not 8 - Follow-up #4 of bulk_analysis_performance_
-    # investigation.md directly measured (on the maintainer's real dataset)
-    # that per-wavelength read wall-clock is flat from 1-4 workers and
-    # actively *worse* at 8 (the zarr dispatch layer, not disk bandwidth, is
-    # the bottleneck - more threads just contend for it). That measurement
-    # is still the current reality since the `zarrs` codec pipeline (which
-    # might change this calculus) is disabled per Follow-up #7 - re-measure
-    # if it's ever re-enabled. Matches the cap _sensorgram_metric_task's own
-    # prep-phase pool already uses a few hundred lines below.
-    worker_count = max(1, min(max(int(os.cpu_count() or 2) // 2, 2), 4, len(measurement_payload)))
+    if worker_count_override is not None and worker_count_override > 0:
+        # This machine's own calibrated value - see this function's
+        # docstring and calibrate_analysis_worker_count. Takes priority
+        # over the heuristic below entirely.
+        worker_count = max(1, min(int(worker_count_override), len(measurement_payload)))
+    else:
+        # Fallback heuristic, used only until calibration finishes (or if
+        # it fails) - capped at 4, not 8, per Follow-up #4 of
+        # bulk_analysis_performance_investigation.md, which directly
+        # measured (on the maintainer's specific 4-physical-core machine)
+        # that per-wavelength read wall-clock is flat from 1-4 workers and
+        # actively *worse* at 8. That cap does NOT generalize to other
+        # hardware (Follow-up #11/#12's own finding) - it's a safe default
+        # for the brief window before this machine's real number is known,
+        # not a claim about what's optimal here.
+        worker_count = max(1, min(max(int(os.cpu_count() or 2) // 2, 2), 4, len(measurement_payload)))
     indexed = list(enumerate(measurement_payload))
     results: list = [None] * len(measurement_payload)
 
@@ -1164,6 +1180,20 @@ def _scoped_formula_spectrum_task(
     )
 
 
+# How often (in freshly-computed cubes) to force a cyclic-GC pass during a
+# sweep despite gc.disable() below - see bulk_analysis_performance_
+# investigation.md, Follow-up #11 "Finding D": tifffile's own TiffFile/
+# TiffPages/TiffTag/FileHandle objects form real reference cycles (one full
+# cluster per file read), which plain reference counting can never free -
+# leaving GC off for an entire multi-hundred-cube run measured at ~30MB/cube
+# of accumulating, unreachable garbage (~9-10GB projected over a full
+# ~314-cube run). Measured cost of a periodic collect(): ~50-65ms per call
+# (recovering ~20,000+ objects each time, at this interval) - under 1%
+# overhead against a ~1s/cube sweep, and it keeps RSS flat instead of
+# growing unbounded.
+SENSORGRAM_GC_COLLECT_INTERVAL_CUBES = 10
+
+
 def _sensorgram_metric_task(
     spectral_cube_payloads_or_spectral_cubes,
     poly_order: int,
@@ -1185,18 +1215,18 @@ def _sensorgram_metric_task(
     trimmed_mean_fraction: float = 0.10,
     formula_key: str = "absorbance",
     compute_all_reduction_methods: bool = True,
+    worker_count_override: int | None = None,
 ) -> SensorgramComputationResult:
     # Cyclic GC is disabled for the run's duration (re-enabled + a one-off
     # collect() in the GUI-thread completion handlers, on_sensorgram_ready/
-    # on_sensorgram_failed) - a standard, safe technique for a batch job
-    # like this: reference counting still frees the vast majority of
-    # objects immediately regardless, cyclic GC only exists to catch
-    # reference cycles, and skipping periodic cycle-hunting for a few
-    # minutes doesn't leak anything that isn't already cleaned up the
-    # moment it's turned back on.
+    # on_sensorgram_failed) - the periodic collect() below (every
+    # SENSORGRAM_GC_COLLECT_INTERVAL_CUBES freshly-computed cubes) is still
+    # needed despite this: reference counting alone does NOT free everything
+    # here, see that constant's own comment.
     import gc as _gc
 
     _gc.disable()
+    _gc_countdown = SENSORGRAM_GC_COLLECT_INTERVAL_CUBES
     task_started = time.perf_counter()
     spectral_cube_payloads: list[tuple[int, tuple[object, ...]]] = []
     total_input_count = len(spectral_cube_payloads_or_spectral_cubes) if hasattr(spectral_cube_payloads_or_spectral_cubes, "__len__") else 0
@@ -1349,6 +1379,14 @@ def _sensorgram_metric_task(
             _cube_compute_started = time.perf_counter()
             if spectrum is None:
                 _active_task = task_fn if task_fn is not None else _scoped_formula_spectrum_task
+                _extra_task_kwargs = {}
+                # Only passed when actually set - a custom task_fn (e.g. a
+                # test's fixed-signature stub) never needs to know about
+                # this, and omitting it when None keeps every such stub
+                # working unchanged rather than requiring them all to grow
+                # a **kwargs catch-all just for this.
+                if worker_count_override is not None:
+                    _extra_task_kwargs["worker_count_override"] = worker_count_override
                 spectrum = _active_task(
                     *payload,
                     # None (not `cancel_event`) only for the one cube exempted
@@ -1362,10 +1400,19 @@ def _sensorgram_metric_task(
                     trimmed_mean_fraction=trimmed_mean_fraction,
                     formula_key=formula_key,
                     compute_all_reduction_methods=compute_all_reduction_methods,
+                    **_extra_task_kwargs,
                 )
                 freshly_computed = True
                 if spectral_cube_result_cache_store is not None:
                     spectral_cube_result_cache_store(spectral_cube_index, spectrum)
+                # See SENSORGRAM_GC_COLLECT_INTERVAL_CUBES's own comment -
+                # only freshly-computed cubes create the tifffile reference
+                # cycles this exists to reclaim, so a disk/cache-hit cube
+                # doesn't count toward the interval.
+                _gc_countdown -= 1
+                if _gc_countdown <= 0:
+                    _gc.collect()
+                    _gc_countdown = SENSORGRAM_GC_COLLECT_INTERVAL_CUBES
             logging.getLogger("lspr_imaging_app.workflow").debug(
                 "SG cube compute timing | cube %s | %.1fms | cache_hit=%s",
                 int(spectral_cube_index),

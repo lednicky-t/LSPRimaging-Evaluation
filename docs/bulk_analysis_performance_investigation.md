@@ -1237,3 +1237,489 @@ box sized for the *whole selection* instead of one ROI. Reverted
 immediately; the lesson (measure before trusting a "this pattern worked
 before" plausibility argument) is in this doc's sibling discussion about
 CLAUDE.md process rules.
+
+## Follow-up #11 (2026-09-08): full-pipeline resource-utilization audit - why CPU/SSD/RAM sit well under saturation at today's ~1.4s/cube
+
+Prompted by a direct question after all the above landed: per-cube time is
+now much better (~1.4s/cube average, real production log below) than the
+original ~10-13s, but CPU/SSD/RAM all looked under-used during a run - is
+there more headroom, and where exactly does the remaining time go? This
+follow-up extends this doc's own "call the real function directly" method
+with live system-resource sampling (`psutil`, a background thread sampling
+per-core CPU%, process CPU%, process disk-read bytes, and RSS every ~100ms
+throughout) and, for the first time in this investigation, the maintainer's
+**real ROI table and real preprocessing settings** (`analysis/roi_table.json`,
+`analysis/preprocessing.json` next to the dataset - 160 real ROIs, real crop/
+rotation, chromatic correction on) instead of synthetic geometry, giving
+numbers that reproduce the real app's own stage-timing output closely enough
+to cross-check directly against a live log.
+
+### Today's real production log, for reference
+
+A real 43-cube run (`logs/lspr_imaging_20260908_150522.log`, TIFF stack,
+160 ROIs, chromatic on, `reduce=mean`) averaged **1417ms/cube** (`SG cube
+compute timing`, min 689ms, max 2555ms including the one-time cube-0
+mask-cache-build cost). Two things stand out that hadn't been looked at
+before:
+
+1. `io=` (and, in lockstep, `reduce=`) **climbs steadily over the run** -
+   roughly 2300ms -> 4700ms (io) and 150ms -> 290ms (reduce) from cube 1 to
+   cube 35, then partially recovers - not the flat steady-state this doc's
+   earlier sections generally assumed. See "Open question" below.
+2. Both stages moving together, proportionally, points at a shared external
+   cause (something slowing down *all* CPU-bound work a little) rather than
+   two independent per-stage bugs.
+
+### Finding A: CPU utilization is genuinely low, and it isn't a thread-count problem
+
+25-cube benchmark (real ROIs/preprocessing, TIFF stack, `gc.disable()`
+matching production), sampled throughout:
+
+| Metric | Value |
+|---|---:|
+| System-wide mean CPU across all 8 logical cores | **38.3%** |
+| System-wide peak sample | 83.6% |
+| This process's own CPU (of 800% = 8 cores) | mean 207.8% (26.0%), peak 325.6% (40.7%) |
+| Per-core mean utilization | 46-53% on 4 cores, 27-30% on the other 4 |
+
+The per-core split is a hyperthreading signature (this machine: 4 physical /
+8 logical cores, confirmed via `psutil.cpu_count(logical=False)`) - work
+concentrates on one logical thread per physical core, with the sibling
+thread picking up partial secondary work. All 8 logical cores *do* hit 100%
+momentarily (bursty), but never together and never sustained - consistent
+with Finding C below (per-file decode is itself thread-pool-dispatch-bound,
+not raw-compute-bound, so more concurrent threads mostly means more waiting,
+not more throughput). **This is not a "not enough worker threads" situation**
+- `worker_count` is already capped at 4 (Follow-up #10) specifically because
+more was measured worse; the low utilization comes from what those threads
+spend their time doing (see Findings C and E).
+
+### Finding B: disk/SSD bandwidth is nowhere near the bottleneck
+
+Same benchmark run: **~52MB/s average, ~70MB/s peak** process-level read
+throughput. A basic SATA SSD does 400-550MB/s sequential; NVMe does
+1500-7000+MB/s. Disk is at roughly **1-13%** of what the hardware can
+sustain. This directly confirms (with a live measurement, not just the
+strip-count arithmetic used earlier in this doc) that the `io=` stage's cost
+is dispatch/decode overhead, not bytes/sec - the same shape of problem this
+doc already diagnosed for OME-Zarr's chunk dispatch, now shown to apply to
+TIFF's strip dispatch too (Finding C).
+
+### Finding C (new, actionable): tifffile's own inner decode pool is now a net loss - `maxworkers=2` should be `maxworkers=1`
+
+`_load_image_array_uncached` (`io/dataset.py:1537`) calls
+`tifffile.imread(path, maxworkers=2)` - a deliberate choice from Follow-up #9,
+which measured `maxworkers=8` (the default, `os.cpu_count()`) as worse than
+a small fixed count and picked 2, but never tried 1. Measured directly on 27
+real files from this dataset, both standalone and nested inside the real
+outer 4-worker pool (the actual production condition):
+
+| Inner `maxworkers` | Standalone (1 caller thread) | Nested under outer 4-worker pool |
+|---|---:|---:|
+| 1 | 28.1ms/file | **16.9ms/file-equivalent** |
+| 2 (current) | 30.3ms/file | 26.2ms/file-equivalent |
+| 4 | 27.5ms/file | 26.0ms/file-equivalent |
+| default (`os.cpu_count()`) | 27.4ms/file | - |
+
+Standalone, worker count barely matters (one file, nothing else competing).
+**Nested - the condition that actually matters, since real reads always
+happen inside the outer pool - `maxworkers=1` is 1.55x faster than the
+current `maxworkers=2`.** Mechanism, confirmed via `cProfile` on 5 real
+cubes: each file's 300 LZW strips are dispatched through tifffile's own
+internal `ThreadPoolExecutor` even at `maxworkers=2` (`tifffile.py:7386
+decode_other`, 40,500 calls / 5 cubes / 27 files = exactly 300/file;
+`_thread.lock.acquire` alone shows 207,338 calls across 5 cubes - real
+dispatch/locking overhead, not decode work). With 4 outer threads already
+running concurrently, giving each one its own 2-thread inner pool means up
+to 8 threads paying that per-strip dispatch tax at once for work 4 physical
+cores can't actually run in parallel anyway - `maxworkers=1` removes the
+redundant inner dispatch entirely while keeping the outer pool's real
+file-level parallelism.
+
+**Applied (2026-09-08)**: `maxworkers=2` -> `maxworkers=1` at
+`io/dataset.py:1537`. No computed-value change (same decode, fewer threads).
+`_load_image_array_native` (the export path, `io/dataset.py:1564`) uses the
+same constant for a different reason (worker-count-squared with its own
+outer export pool) - left unchanged, since this fix was only measured for
+the analysis read path; worth the same nested-condition test separately
+before touching it.
+
+**Real before/after, same cube range, same benchmark harness**: 884.2ms/cube
+-> **683.8ms/cube, a measured 22.7% reduction** - slightly less than the
+isolated-read 1.55x projection (expected: total cube time also includes
+resample/mask/reduce, which this change doesn't touch). Full
+`pytest tests/ -k lspri` (554 tests) passes unchanged.
+
+### Finding D (new, real bug, independently worth fixing): the GC-disabled sweep accumulates real reference-cycle garbage from tifffile's own objects
+
+`_sensorgram_metric_task`'s `gc.disable()` comment claims "reference
+counting still frees the vast majority of objects immediately regardless...
+skipping periodic cycle-hunting... doesn't leak anything." Tested directly
+and found **false for this workload**: 15 real cube reads (same benchmark
+conditions, `gc.disable()` active, exactly as production runs) grew RSS by
+**32.6MB/cube**; forcing `gc.collect()` afterward found **30,783 unreachable
+objects** - `TiffFile`/`TiffPages`/`TiffTag`/`FileHandle`/`cell`/`function`/
+`dict`, i.e. real reference cycles inside `tifffile`'s own object graph
+(one `TiffFile` cluster per file read: 405 `TiffFile` objects for 405 file
+reads, exactly 1:1). These are genuine cycles - reference counting alone
+cannot free them, `gc.disable()` for the run's duration means they never get
+collected until the run ends.
+
+**Applied (2026-09-08)**: `SENSORGRAM_GC_COLLECT_INTERVAL_CUBES = 10` added
+just above `_sensorgram_metric_task`; a countdown, incremented only on
+freshly-computed cubes (a cache hit doesn't create new tifffile objects, so
+doesn't need to count toward the interval), calls `gc.collect()` every 10th
+one. Comment above `_gc.disable()` corrected to stop claiming nothing leaks.
+Verified end-to-end through the real `_sensorgram_metric_task` entry point
+(not just the lower-level function benchmarked above): a 25-cube run's RSS
+climbed to ~673-690MB by cube 20 (two periodic collects fired) and stayed
+flat for the remaining cubes rather than continuing to climb. Cost matches
+the isolated measurement: 50-65ms per call, ~20,000+ objects each time,
+under 1% overhead. Full `pytest tests/ -k lspri` (554 tests) passes
+unchanged.
+
+**Follow-up check (2026-09-08, same day): is `tifffile` the only leak source,
+or are there others in this codebase's own objects?** Catalogued every
+cyclic-garbage object after a real 60-cube run with GC left fully disabled
+(`gc.set_debug(gc.DEBUG_SAVEALL)`, then `gc.collect()`): **123,123 objects
+total, and every single one traces back to `tifffile`'s own object graph**
+(`TiffFile`/`TiffPages`/`TiffPage`/`TiffTags`/`TiffTag`/`FileHandle`/
+`NullContext` - 1,620 of each, exactly 60 cubes x 27 files - plus the
+generic `cell`/`dict`/`function`/`tuple`/`list`/`set` containers that are
+*part of* those same objects' internals, not separate leaks). Nothing from
+this app's own code (ROI mask cache, chromatic transforms, accumulator
+dicts, closures in `_scoped_formula_spectrum_task` itself) showed up as
+uncollectable - this is a single, fully-contained, now-fixed leak source,
+not a symptom of a broader pattern.
+
+**Why this matters even though a single collect() barely shows up in one
+cube's timing**: extrapolated to a full ~314-cube run, unfixed growth would
+reach roughly **9-10GB** of accumulated, unreleased memory by the time the
+run ends and the existing `gc.enable()`/`collect()` finally runs in the
+GUI-thread completion handler - real risk of memory pressure or swapping on
+a lower-RAM machine, independent of whether it's also contributing to the
+mid-run slowdown below (tested for that specifically - see "Open question").
+
+### Finding E (structural, largest theoretical lever, not yet built or verified): no I/O/compute overlap across cubes
+
+Traced the outer sweep loop (`_sensorgram_metric_task`, `analysis_tasks.py`
+~1273-1432): cubes are processed **strictly sequentially**. Each call to
+`_scoped_formula_spectrum_task` creates a fresh `ThreadPoolExecutor`, submits
+all of one cube's wavelength reads, blocks until every one completes, tears
+the pool down, unpacks results in a plain Python loop, logs, then - only
+after all of that - the next cube's payload is handed to a **new** call that
+starts its reads from scratch. Confirmed via the "prep" phase
+(`spectral_cube_payload_builder`, lines 1206-1262): it only resolves cheap
+metadata (file paths, chromatic affines, geometry) for every cube up front,
+**not pixel data** - actual I/O only ever happens inside the sequential
+per-cube call.
+
+The non-io stages (resample + mask + reduce) measured **~200-300ms/cube** in
+both production and this session's benchmark - roughly 20-25% of a
+steady-state cube's total time - during which every decode thread (up to 8,
+per Findings A-C) sits completely idle, and disk sits completely idle
+(Finding B already shows it's barely used even *during* the io stage, let
+alone during this gap). Since io is dispatch-bound rather than
+bandwidth-bound, there is real room to start the next cube's reads
+concurrently with the current cube's tail-end compute/unpacking - the two
+have no data dependency.
+
+**Update (2026-09-08, same day): prototyped and tested - the naive version
+of this makes things WORSE, not better.** The original projection above
+(hiding the ~200-300ms/cube non-io tail behind the next cube's I/O) assumed
+spare capacity existed to do the prefetching with, based on Finding A's
+*average* utilization figure (38%). That average blends the busy io burst
+(where per-core utilization already hits 100%, Finding A) with the quiet
+tail - it does not mean 62% of capacity is free *during the burst
+specifically*, which is when a naive prefetch thread would actually be
+running.
+
+Tested directly: a background prefetch (1-2 extra `ThreadPoolExecutor`
+workers, started when cube N begins, reading cube N+1's/N+2's files ahead of
+need into the same `load_image_array` LRU cache `dataset_load_plane_roi`
+already uses for TIFF) against real cube data, each variant on its own
+fresh, never-before-read cube range (avoiding both the process-level
+`lru_cache` and OS page-cache warmth from contaminating the comparison - the
+same lesson Follow-up #4 already learned once). Matched, same-cube-index
+comparison (cubes 200-209, with vs. without 2 prefetch threads active):
+
+| Condition | avg ms/cube (cubes 200-209) |
+|---|---:|
+| No prefetch | 891.6 |
+| 2 prefetch threads active | 1246.3 |
+| **Ratio** | **1.40x slower** |
+
+This machine has **4 physical cores** (8 logical, hyperthreaded - Finding
+A). The existing outer pool already runs 4 concurrent decode threads during
+the io burst (`worker_count`, capped there specifically because Follow-up
+#10 already measured more as worse - the same mechanism, now confirmed
+again from a different angle). Adding prefetch threads on top is simply
+*more concurrent CPU-bound decode threads than physical cores*, which this
+doc has now measured as a net loss twice. The "quiet 20-25% tail" is real,
+but a bolt-on prefetch thread that runs for a cube's *entire* duration
+contends during the busy 75-80% too, where there is no real spare capacity
+on this specific hardware - net negative.
+
+**This does not mean the underlying idea (overlap the next cube's I/O with
+the current cube's compute tail) is wrong, only that this implementation of
+it is.** A more promising, not-yet-built alternative: don't add *extra*
+threads at all - keep exactly 4 concurrent workers, but make the pool
+**persistent across the whole sweep** (created once, not per cube) so a
+worker that finishes cube N's last wavelength early can immediately start on
+cube N+1's first wavelength instead of idling until every one of cube N's 4
+workers finishes and the pool is torn down and rebuilt. This targets
+specifically the inter-cube synchronization barrier, not total thread count,
+so it wouldn't reintroduce the oversubscription this test just measured -
+but it's a real restructure (shared pool spanning `_scoped_formula_spectrum_
+task` calls, not a single function's own local pool) and has not been
+prototyped or measured. **Also worth checking on a machine with more
+physical cores** before writing this off everywhere - a naive prefetch
+thread could plausibly pay off differently on hardware with real spare
+core capacity during the io burst itself; this result is specific to the
+maintainer's 4-physical-core machine, not a general law.
+
+**Update (2026-09-08, later same day): the persistent-shared-pool variant
+was also prototyped and measured - also a net loss, not a win.**
+
+Implemented for real (not a benchmark-only reimplementation) as a
+behavior-preserving refactor of `_scoped_formula_spectrum_task`
+(`analysis_tasks.py`): the function's submit/collect tail is now split into
+`_finalize_scoped_formula_spectrum` (result assembly, shared by both paths)
+and a new opt-in `shared_executor` parameter - when given, the function
+submits its per-wavelength reads to the caller's own persistent pool and
+returns a `PendingScopedFormulaSpectrum` (futures, not yet collected)
+instead of a finished result; `_collect_scoped_formula_spectrum_pending`
+drains it. `shared_executor=None` (the default, every existing caller)
+preserves the exact previous behavior - confirmed by the full `pytest tests/
+-k lspri` suite (554 tests) passing unchanged after the refactor, before any
+new caller used the new parameter.
+
+A sweep driver built on top of this (one `ThreadPoolExecutor(max_workers=4)`
+- the same worker count as today, no extra threads - submitting cube i+1's
+reads into it immediately after cube i's, one cube ahead) was measured
+directly against the existing per-cube-pool baseline, same real cube range
+(130-149) for both, to rule out the range-variance confound this doc has
+hit twice already:
+
+| Condition | avg ms/cube (cubes 130-149) |
+|---|---:|
+| Baseline (today's per-cube pool) | 929.5 |
+| Persistent pool, 1-cube-ahead submit | 1021.0 |
+| **Ratio** | **1.10x slower** |
+
+(Baseline ran *second*, after persistent had already warmed the OS page
+cache for these exact files - a real advantage for baseline - and it still
+won. If anything this understates persistent's disadvantage.)
+
+**Why it didn't help, best current understanding**: the "worker finishes
+early, grabs next cube's work" scenario this was built to exploit assumes
+meaningful *within-cube* imbalance - some of a cube's 26-27 wavelength reads
+finishing well before others, leaving a worker idle with nothing local left
+to do. In practice these reads are fairly uniform in cost (same file size,
+same codec, same machine), so all 4 workers tend to finish a cube's own
+batch at close to the same time regardless - there's little real "early
+finisher" slack to fill with the next cube's work in the first place. What
+*is* real (the ~200-300ms Python-level tail: result-unpacking, mask/reduce,
+logging) runs on the *calling* thread, not a pool worker, and holds the GIL
+for meaningful stretches of it - plausibly reducing, not eliminating, how
+much actual progress background workers make on the next cube's reads
+during exactly the window this was aimed at, which would explain a result
+close to breakeven or slightly negative rather than a clean win.
+
+**Conclusion for this hardware/workload**: three independent attempts at
+more parallelism/overlap in this pipeline (Follow-up #10's worker-count
+cap, this section's prefetch-thread test, and this persistent-pool test)
+have now all measured flat-to-negative. The picture that's emerged across
+all of Follow-up #11 is consistent: this machine's 4 physical cores are
+already close to fully committed during the decode-bound part of a cube,
+and the remaining "quiet" time is dominated by genuinely single-threaded
+Python/GIL-bound work that more threads can't parallelize away. Further
+gains are more likely to come from **doing less work** (the still-standing
+OME-Zarr chunk-size re-export, which removes TIFF's LZW/300-strip decode
+cost at the root rather than trying to hide it behind more scheduling) than
+from scheduling the same work more cleverly.
+
+**Status of the new code: reverted (2026-09-08).** `PendingScopedFormulaSpectrum`,
+`_finalize_scoped_formula_spectrum`, `_collect_scoped_formula_spectrum_
+pending`, and `_scoped_formula_spectrum_task`'s `shared_executor` parameter
+were built and measured (both real, tested infrastructure - the default
+path was behavior-identical to before, confirmed by the full test suite
+passing both with and without them present), but per the negative result
+above, removed rather than kept as unused optionality. `_scoped_formula_
+spectrum_task` is back to its pre-Follow-up-#11 form (spliced from the
+pristine committed version, not hand-reverted, to avoid transcription risk
+in a ~500-line function); `Future`/`dataclass` imports added only for this
+scaffolding were removed too. `pytest tests/ -k lspri` (554 tests) passes
+identically before and after the revert. The two applied fixes from earlier
+in this Follow-up (`maxworkers=1`, periodic `gc.collect()`) are untouched by
+this - they live in different functions and were unaffected by either the
+prototype or its removal.
+
+**Other parallel-computation strategies considered, not pursued**:
+multiprocessing (separate processes, own GIL each) was considered as an
+alternative to threading, but doesn't address this specific bottleneck -
+Finding A already shows individual cores reaching 100% under the *current*
+thread-based model (`tifffile`'s C-level LZW decode releases the GIL, so
+real multi-core parallelism is already happening), meaning the ceiling here
+is physical CPU throughput, not GIL contention. Multiprocessing would add
+real cost (process startup, numpy-array serialization across the process
+boundary) to work around a limit that isn't actually GIL-shaped for this
+stage - not recommended without a specific measurement showing GIL
+contention is real here, which Finding A's per-core-100% observations argue
+against.
+
+### Open question, honestly unresolved: the mid-run ~2x slowdown (io and reduce climbing together)
+
+The production log's steady climb (see "today's real production log" above)
+was suspected to be Finding D (growing heap from uncollected cycles) given
+both `io=` and `reduce=` - two stages with no shared code path - slow down
+proportionally together, which a GC-driven allocator/cache-locality cost
+would plausibly produce across unrelated stages. **Tested directly and not
+confirmed**: a paired 70-cube benchmark, `gc.disable()` vs `gc.collect()`
+every 10 cubes, same real cube range, same conditions - both showed only a
+mild, noisy 1.06-1.22x drift from first-10 to last-10 cubes, nowhere near
+production's ~2x, and not meaningfully different between the two GC
+conditions. **Finding D is real and worth fixing on its own merits (measured
+directly, independent of this question) but is not confirmed as the cause
+of the production slowdown pattern.**
+
+Leading remaining hypothesis, not yet tested: **CPU frequency
+throttling**. `psutil.cpu_freq()` on the maintainer's machine reports
+`current=1803MHz` against `max=2304MHz` even at light/idle load (Intel
+Model 142/Stepping 12 - a low-power mobile-class chip), suggesting the
+machine may already be running under a power/thermal budget - Intel's
+short-term boost window (PL2) typically lasts on the order of 30-60 seconds
+before dropping to a lower sustained power limit (PL1), which would produce
+exactly this signature: fast at first, slower after roughly a minute of
+sustained mixed CPU load, affecting every CPU-bound stage proportionally
+regardless of what code it's running. **Not verified** - would need
+`psutil.cpu_freq()` (or Windows' own power/thermal counters) sampled
+throughout a real, several-minutes-long in-app run and correlated against
+the per-cube stage timing log, which wasn't done this session. Flagged as
+the most promising next step if the maintainer wants this pattern
+root-caused rather than left as a known-but-unexplained characteristic.
+
+### Summary: what actually moves the needle from here
+
+| # | Finding | Status | Est. impact | Risk |
+|---|---|---|---:|---|
+| C | `tifffile` inner pool `maxworkers=2` -> `1` | **applied** - measured 22.7% real cube-time reduction | ~35% of `io=` stage (~25-30% of total cube time) | very low - no computed-value change |
+| D | Periodic `gc.collect()` during the sweep | **applied** - verified flat RSS through real entry point | prevents ~9-10GB/run unbounded growth; <1% time cost | very low - matches existing GC-disable pattern, just periodic instead of once |
+| E | Prefetch/overlap next cube's I/O during current cube's compute tail | **tested two ways (extra prefetch threads, persistent shared pool) - both net negative** (1.40x and 1.10x slower respectively) | none realized - original ~20-25% projection withdrawn | both prototyped in code, neither shipped; persistent-pool scaffolding recommended for revert (see its own section) |
+| - | Mid-run ~2x slowdown (thermal throttling suspected) | open, unresolved | unknown - could be the largest single factor if confirmed | n/a - diagnosis only, no code fix implied yet |
+| - | TIFF LZW/300-strip source format (this doc's original finding) | still the underlying ceiling | re-export to OME-Zarr large-chunk removes it at the root | n/a - per-dataset workaround, not a code change |
+
+Findings C and D are both small, mechanical, low-risk changes with direct
+measurements behind them - reasonable to apply together and re-measure
+against a real run. Finding E is the biggest remaining number but is a real
+architecture change, not a quick fix. The open thermal-throttling question is
+worth a cheap instrumented check (a few `cpu_freq()` samples added to a
+future long run) before investing in anything to address it specifically.
+
+## Follow-up #12 (2026-09-08, later same day): making Finding C's fix portable to other machines
+
+Direct question after Follow-up #11 landed: every worker-count number in
+this doc (`worker_count` capped at 4, `maxworkers=1`) was tuned and measured
+on the maintainer's one 4-physical-core machine - what happens on different,
+possibly more capable hardware? Should there be a user-facing performance
+setting?
+
+### Decision: auto-calibrate, not a user toggle - and there's already a working precedent for this in the codebase
+
+A manual "worker threads" preference would ask a scientist (per this app's
+own maintainer profile, see CLAUDE.md) to make a systems-tuning judgment call
+they have no real way to evaluate - the wrong shape of control for who this
+app is for. `io/dataset.py` already solves an analogous problem a different
+way for the OME-Zarr export path: a live adaptive tuner (`ADAPTIVE_MAX_
+FACTOR`, `ADAPTIVE_IO_FLIP_UP`/`DOWN`) that measures its own io-vs-compute
+ratio during a real export and adjusts worker count up/down as it runs,
+never trusting a fixed number. The calibration built here follows the
+*other* existing pattern in this same file instead -
+`calibrate_zarr_read_overhead_ms` (Follow-up #8): a small, fast, throwaway
+synthetic benchmark run once per session in the background, rather than
+continuous live adjustment - simpler to reason about and sufficient here,
+since (unlike the export path) the quantity being tuned (best worker count
+for TIFF decode concurrency) doesn't drift *during* a single run the way
+io-vs-compute balance can.
+
+### `calibrate_analysis_worker_count()` (`io/dataset.py`)
+
+Writes a handful (12) of small synthetic LZW TIFF files to a temp directory
+with heavy strip fragmentation (`rowsperstrip=3`, matching the real
+dataset's own worst-case layout from the original investigation's "Finding
+1" - calibrating against a *lighter* synthetic file would risk finding a
+worker count tuned for less contention than real files actually cause), then
+times reading all of them through `tifffile.imread(path, maxworkers=1)`
+under an outer `ThreadPoolExecutor` at each of several candidate worker
+counts (`{1, 2, cpu_count//2, cpu_count}`), picking the *smallest* count
+within 10% of the best time (not the strict minimum - several counts are
+often functionally tied, and this doc's own Follow-up #4/#10 already
+established that extra concurrency with no real benefit still costs
+something even when it doesn't show up as clearly slower in one run).
+
+One shared untimed warm-up pass runs before any candidate is timed (OS page
+cache, not cold disk - the files stay warm for every candidate afterward
+regardless of worker count, so an early version that re-warmed before each
+candidate individually just doubled the wall time for no accuracy benefit -
+caught and fixed before shipping). Measured on the maintainer's own machine:
+**~1.0-1.2s**, consistently returning **4** across three repeated trials -
+exactly matching the hand-tuned value the rest of this doc arrived at
+manually, a good sanity check that the calibration methodology itself is
+sound before trusting it on hardware nobody has measured by hand.
+
+### Wiring: lazy, once per session, non-blocking, with a safe fallback
+
+- `MainWindow.__init__`: three new state fields next to the existing zarr
+  calibration ones - `_analysis_worker_count_calibration` (`int | None`),
+  `..._pending`, `..._attempted`.
+- `AnalysisWorkerMixin._ensure_analysis_worker_count_calibration`: same
+  shape as `DatasetController._ensure_zarr_read_overhead_calibration` -
+  guarded by the `_attempted`/`_pending` flags, dispatches the calibration
+  via a background `FunctionWorker` (never `QThreadPool`, per the earlier
+  crash investigation), stores the result via `_on_analysis_worker_count_
+  calibration_done`.
+- Triggered from the top of `_start_sensorgram_worker` - the first "Start
+  analysis" click of a session kicks it off; that *first* run (and any other
+  started before the ~1s calibration finishes) still uses `_scoped_formula_
+  spectrum_task`'s own `os.cpu_count()`-based fallback heuristic, exactly as
+  before this existed - only a run started *after* calibration completes
+  benefits. Real usage very often runs "Start analysis" more than once per
+  session (tuning ROIs/settings and re-running), so this costs at most one
+  run's worth of using the fallback, not every run.
+- `_scoped_formula_spectrum_task` gained an optional `worker_count_override`
+  parameter - when given (and > 0), it replaces the `os.cpu_count()`
+  heuristic entirely rather than just capping it (that heuristic was tuned
+  by hand on one machine and directly measured wrong - too conservative -
+  even on that same machine, so it shouldn't remain in the loop once a real
+  measurement is available). `_sensorgram_metric_task` gained the same
+  parameter, passed through to whichever `task_fn` is active - but **only
+  when not `None`**, so a caller with a fixed-signature stub (e.g. this
+  repo's own `fake_fit_task` test doubles in `test_lspri_sensorgram_stop_
+  preserves_prepared_cubes.py`/`test_lspri_sensorgram_disk_metric_shortcut.py`,
+  neither of which accepts this parameter) keeps working unchanged rather
+  than needing every test stub to grow a `**kwargs` catch-all just for this.
+
+Deliberately **not** touched: `_sensorgram_metric_task`'s own separate
+prep-phase pool (payload building - file-path/chromatic-affine lookups, not
+TIFF decode) and the export path's already-adaptive tuner - both are
+different workloads than what this calibration measures, and extending it
+to them without their own evidence would be exactly the kind of "this
+pattern worked elsewhere, must transfer" assumption this doc has already
+warned against twice this session (Follow-up #11's prefetch and
+persistent-pool attempts).
+
+### Verification
+
+`pytest tests/ -k lspri` (554 tests) passes unchanged after every step of
+this change. End-to-end functional check (not just unit-level): called
+`calibrate_analysis_worker_count()` for a real value (4, matching the
+standalone runs above), then ran a real 15-cube sweep through
+`_sensorgram_metric_task` twice - once with `worker_count_override=4`
+(889.6ms/cube) and once with `worker_count_override=None` (911.1ms/cube,
+the fallback path) - both completed correctly with comparable timing, as
+expected on this specific machine where the fallback heuristic and the
+calibrated value happen to agree. The real test of this change is
+necessarily deferred to different hardware - nothing about *this* machine's
+own numbers can confirm the calibration finds a *different*, correct value
+on a machine with more physical cores, only that it doesn't break anything
+on the one machine available to test on.

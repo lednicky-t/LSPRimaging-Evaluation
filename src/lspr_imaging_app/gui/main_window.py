@@ -601,6 +601,18 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, HistogramMaskMixin, Measurem
         self._zarr_read_overhead_calibration: tuple[float, float] | None = None
         self._zarr_read_overhead_calibration_pending = False
         self._zarr_read_overhead_calibration_attempted = False
+        # This machine's calibrated per-wavelength analysis-read worker
+        # count (see io/dataset.py's calibrate_analysis_worker_count,
+        # kicked off on the first "Start analysis" click - see
+        # AnalysisWorkerMixin._ensure_analysis_worker_count_calibration) -
+        # None until that finishes (or if it fails/hasn't been tried), in
+        # which case _scoped_formula_spectrum_task falls back to its own
+        # os.cpu_count()-based heuristic. See bulk_analysis_performance_
+        # investigation.md Follow-up #11/#12 for why a fixed worker count
+        # doesn't generalize across machines.
+        self._analysis_worker_count_calibration: int | None = None
+        self._analysis_worker_count_calibration_pending = False
+        self._analysis_worker_count_calibration_attempted = False
         theme = get_active_theme()
         self._sample_visual_color = QColor(theme.spot_color)
         self._mask_visual_color = QColor(theme.mask_color)
