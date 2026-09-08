@@ -35,6 +35,18 @@ entangled in a zarr read (either codec pipeline) reliably crashed; this
 app's background dispatch (`gui/worker.py`'s `FunctionWorker`) no longer
 uses `QThreadPool` for dataset-touching work, and `zarrs` is back on.
 
+**Update, 2026-09-08 - the chunk-size re-export is NOT being carried
+forward as a recommended fix.** It was never a code fix to begin with - it's
+a one-time, per-dataset workaround (re-export this specific file at a larger
+chunk size) rather than something that improves the app itself, and with
+`zarrs` back on (~5-7.5x cheaper per-chunk dispatch), the remaining gap it
+would close is a smaller win for the effort than it looked like when this
+doc was written. The "OME-Zarr chunk size" section below, and the re-export
+settings/verification steps in it, are kept as historical reference (the
+chunk-count-scales-cost model in there is still correct and may be useful
+context for a *different* future investigation) - but they are no longer
+this doc's standing recommendation or an open TODO item.
+
 **Update, 2026-09-07 - Follow-up #10**: a fresh, report-independent audit of
 the whole pipeline found and fixed three more small issues (worker-count cap
 too high, redundant mask rasterization, an unrelated global event-filter
@@ -59,7 +71,7 @@ the end for why.
 3. **cv2 resample fast path.** Full writeup:
    [roi_scoped_resample_cv2_fast_path.md](roi_scoped_resample_cv2_fast_path.md).
 
-## The pending fix: OME-Zarr chunk size (requires re-export, not yet done)
+## OME-Zarr chunk size (evaluated, NOT a recommended fix - see 2026-09-08 update above)
 
 ### Root cause, precisely
 
@@ -164,7 +176,7 @@ large (both zarr versions measured ~9.4-9.5ms on the one-chunk-per-plane
 test array) - the two fixes address the same symptom from different angles
 and mostly overlap once chunks are fixed, rather than compounding.
 
-### Recommended re-export settings
+### Re-export settings, if this is ever revisited (not a current recommendation)
 
 Via the app's existing **Export as OME-Zarr** dialog:
 
@@ -622,10 +634,13 @@ which the very first measurements in this doc project to bring `io=` down to
 roughly the 20-30ms/cube range the one-chunk-per-plane benchmarks already
 demonstrated on this same file.
 
-**Not yet done**: the re-export itself. Everything else identified in this
-investigation (three original fixes, the `zarrs` pipeline, the OME-Zarr-
-always-scoped-path gating fix, the patch-mask reach-limiting fix) is now
-landed; this is the only remaining item.
+**Not yet done at the time this section was written**: the re-export itself.
+Everything else identified in this investigation (three original fixes, the
+`zarrs` pipeline, the OME-Zarr-always-scoped-path gating fix, the
+patch-mask reach-limiting fix) is now landed. Per the 2026-09-08 update near
+the top of this doc, the re-export is no longer being carried forward as a
+recommendation - `zarrs` being back on (a code-side fix) covers most of
+this same gap without it.
 
 ## Follow-up #5 (2026-09-07): the "s/cube" speed readout was itself misleading
 
@@ -959,14 +974,18 @@ chunks total in the dataset. Order of magnitude:
   instead of it.
 - **A chunk size >= the image's longer dimension (>=1288px)** collapses
   every full-plane read to exactly 1 chunk - 331 chunks dataset-wide
-  instead of ~120,000, a ~360x reduction in dispatch count - and remains
-  this doc's standing top recommendation (see "The pending fix" section
-  near the top) for the next re-export.
-- Bottom line: 442/plane is worse than necessary, and re-exporting at a
-  larger chunk size is clearly still worth doing, but it is not a
-  catastrophic value on its own. The new label exists precisely so this
+  instead of ~120,000, a ~360x reduction in dispatch count. Was this doc's
+  standing top recommendation at the time this section was written; per the
+  2026-09-08 update near the top, re-exporting is no longer being carried
+  forward as a recommendation now that `zarrs` (a code-side fix, no data
+  change needed) is back on and covers most of the same win.
+- Bottom line: 442/plane is worse than necessary in principle, but per the
+  update above, not catastrophic enough on its own to justify re-exporting
+  as a dedicated action item. The new label exists precisely so this
   judgment call is visible *before* an export commits to a chunk size,
-  instead of only discoverable after the fact via a slow real run.
+  instead of only discoverable after the fact via a slow real run - useful
+  if a *future* re-export happens for unrelated reasons, not as a reason to
+  schedule one.
 
 ### Addendum (2026-09-07, same day): a second field for the dataset-wide total
 
