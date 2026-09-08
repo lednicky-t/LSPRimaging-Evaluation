@@ -540,7 +540,6 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, HistogramMaskMixin, Measurem
         ] | None = None
         self._ome_zarr_export_running = False
         self._ome_zarr_export_cancel_event: threading.Event | None = None
-        self._ome_zarr_export_thread: threading.Thread | None = None
         self._ome_zarr_export_started_at: float | None = None
         self._ome_zarr_export_destination: Path | None = None
         self._busy_started_at: float | None = None
@@ -4558,31 +4557,59 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, HistogramMaskMixin, Measurem
     def _wait_for_background_tasks_before_close(self, timeout_ms: int = 5000) -> None:
         """Give any still-running FunctionWorker task (image-cache build,
         ROI/mask refresh, chromatic registration, export, ...) a bounded
-        chance to finish before the window actually closes and the
-        interpreter starts tearing down modules.
+        chance to finish, then explicitly stop zarr's own background thread
+        too - both before the window actually closes and the interpreter
+        starts tearing down modules.
 
-        A task still reading OME-Zarr data at that point is a plausible
-        cause of the native access-violation crashes seen on close: zarr's
-        own background asyncio/IOCP event-loop thread (started the first
-        time this app reads a zarr store) is torn down by zarr's own
-        `atexit` hook with only a 200 ms grace period before it force-closes
-        the loop regardless of whether that thread is still using it - a
-        race with any of our own workers still mid-read. Waiting here first
-        does not eliminate that fragility (it lives in the zarr library),
-        but it removes the one collision this app can control.
+        This targets a confirmed cause of the native access-violation
+        crashes seen on close (0xC0000005, matching PyQt6-sip's own C++
+        teardown code): a standalone repro (no app code, no dataset) showed
+        this exact exit code reproduces reliably whenever a daemon thread is
+        still alive at the exact moment CPython's interpreter-shutdown
+        sequence begins, while Qt objects with Python-side reference cycles
+        (this window's own widget/controller graph, which cyclic GC can only
+        collect - and does, constantly, from whatever thread happens to be
+        running - see the isolated stress tests) are being torn down at the
+        same time. See `lspri_pyqt6_sip_crash_on_close` (project memory) for
+        the full investigation: it needed the interpreter-shutdown
+        transition specifically - 6+ minutes of steady-state background-
+        thread GC pressure alone never crashed it, but 2 of 18 repeated
+        "live daemon threads at process exit" attempts did, with a
+        bit-identical exit code to the real bug.
+
+        Waiting for FunctionWorker tasks (first, as before) handles this
+        app's own workers. zarr's own background asyncio/IOCP event-loop
+        thread (started the first time this app reads an OME-Zarr store) is
+        the one background thread this app doesn't otherwise control: left
+        alone, it's only stopped by zarr's own `atexit` hook, which races
+        against Python's interpreter-shutdown sequence instead of finishing
+        safely before it starts. `zarr.core.sync.cleanup_resources()` is the
+        exact function that atexit hook calls - calling it here ourselves,
+        from the GUI thread, while the interpreter is still fully alive,
+        stops that thread synchronously well before any such race can begin.
+        No-ops immediately if no zarr store was ever opened this session.
+        Reaches into zarr's `core` module (not part of its public API) since
+        that's where the real cleanup function lives; if a future zarr
+        upgrade moves or renames it, this just falls back to the pre-existing
+        atexit-hook behavior (logged, not fatal).
         """
         active = FunctionWorker.active_count()
-        if active <= 0:
-            return
-        self._workflow_logger.info(
-            "Close | waiting up to %.1fs for %d background task(s) to finish", timeout_ms / 1000.0, active
-        )
-        if not FunctionWorker.wait_for_all(timeout_ms):
-            self._workflow_logger.warning(
-                "Close | %d background task(s) still running after %.1fs wait",
-                FunctionWorker.active_count(),
-                timeout_ms / 1000.0,
+        if active > 0:
+            self._workflow_logger.info(
+                "Close | waiting up to %.1fs for %d background task(s) to finish", timeout_ms / 1000.0, active
             )
+            if not FunctionWorker.wait_for_all(timeout_ms):
+                self._workflow_logger.warning(
+                    "Close | %d background task(s) still running after %.1fs wait",
+                    FunctionWorker.active_count(),
+                    timeout_ms / 1000.0,
+                )
+        try:
+            from zarr.core.sync import cleanup_resources
+
+            cleanup_resources()
+        except Exception:
+            self._workflow_logger.warning("Close | zarr background thread cleanup failed", exc_info=True)
 
     def prepare_initial_show(self) -> None:
         self._layout_state_controller.prepare_initial_show()

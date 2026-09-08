@@ -774,11 +774,20 @@ class DatasetController:
         )
         worker.signals.result.connect(lambda result, request_id=request_id: self._on_ome_zarr_export_finished(request_id, result))
         worker.signals.error.connect(lambda message, request_id=request_id: self._on_ome_zarr_export_failed(request_id, message))
-        # Run in a dedicated daemon thread instead of QThreadPool so the export is
-        # fully independent of the GUI thread pool (Qt tasks like image loading keep
-        # their pool slots) and Qt signals are delivered via queued connections.
-        window._ome_zarr_export_thread = threading.Thread(target=worker.run, daemon=True, name="ome-zarr-export")
-        window._ome_zarr_export_thread.start()
+        # worker.start() (FunctionWorker's own dispatch) spawns the same kind
+        # of plain daemon thread this used to build by hand - FunctionWorker
+        # no longer touches QThreadPool at all (see
+        # qthreadpool_zarr_crash_investigation.md), so the original reason to
+        # bypass it here no longer applies. Using .start() instead of a
+        # bespoke threading.Thread also registers this thread in
+        # FunctionWorker's tracked set, so
+        # _wait_for_background_tasks_before_close actually waits for an
+        # in-flight export before the window closes - it silently didn't
+        # before, a real gap given this is exactly the kind of
+        # dataset-touching background thread the interpreter-shutdown crash
+        # (see lspri_pyqt6_sip_crash_on_close, project memory) needs stopped
+        # before process exit.
+        worker.start()
 
     def _stop_ome_zarr_export(self) -> None:
         window = self.window
