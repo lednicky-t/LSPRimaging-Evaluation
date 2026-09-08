@@ -2514,18 +2514,36 @@ class AnalysisWorkerMixin:
         metric_value bakes in whichever formula produced it, unlike the raw
         pre-fit spectrum, which is exactly re-derivable under any formula.
         Omitting it here would let a formula switch silently reuse a disk
-        metric value computed under the previous formula."""
+        metric value computed under the previous formula.
+
+        Also explicitly includes the wavelength-range filter (Analysis
+        section's min/max nm spinners, `_analysis_wavelength_range()`) - for
+        the same reason as the formula above, and previously missing here:
+        Maximum/Centroid are computed from whatever wavelength window the
+        fit/metric search is restricted to, so a `metric_value` backed up
+        under one range is a different, generally wrong answer once the
+        range changes (e.g. a peak search narrowed to some sub-window
+        earlier in a session, or in a previous session against this same
+        persistent measurement_backup.h5, produces a peak_wavelength_nm that
+        can land nowhere near the peak the *current*, wider range would
+        find) - without this, `metric_value_cache_get` would keep serving
+        that stale value forever after the range is widened back out,
+        because every other element of the signature (fit method, metric,
+        poly order, ROI/preprocessing signature) can still match exactly."""
         payload_signature = self._sensorgram_spectral_cube_payload_signature(
             spectral_cube_index, selected_roi_ids, selected_source_rois
         )
         if payload_signature is None:
             return ""
+        wavelength_range = self.window._analysis_wavelength_range()
         full_signature = (
             payload_signature,
             self._active_formula_key(),
             self._analysis_fit_method_key(),
             self.window._analysis_metric_key(),
             int(self.window._analysis_poly_order()),
+            None if wavelength_range is None else round(float(wavelength_range[0]), 6),
+            None if wavelength_range is None else round(float(wavelength_range[1]), 6),
         )
         return self._signature_hash(full_signature)
 
