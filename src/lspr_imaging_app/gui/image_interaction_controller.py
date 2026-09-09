@@ -154,17 +154,17 @@ class ImageInteractionController:
         # itself (_begin/_update/_end_image_pan) is already tool-agnostic;
         # this used to be wired up only for the crop tool.
         if watched is image_view.viewport() and event.type() == QEvent.Type.MouseButtonPress and event.button() == Qt.MouseButton.MiddleButton:
-            point = self._image_point_from_mouse_event(event)
-            if point is None:
+            scene_point = self._scene_point_from_mouse_event(event)
+            if scene_point is None:
                 return False
-            self._begin_image_pan(point)
+            self._begin_image_pan(scene_point)
             image_view.viewport().setCursor(Qt.CursorShape.ClosedHandCursor)
             return True
         if watched is image_view.viewport() and event.type() == QEvent.Type.MouseMove and w._panning_image:
-            point = self._image_point_from_mouse_event(event)
-            if point is None:
+            scene_point = self._scene_point_from_mouse_event(event)
+            if scene_point is None:
                 return True
-            self._update_image_pan(point)
+            self._update_image_pan(scene_point)
             return True
         if watched is image_view.viewport() and event.type() == QEvent.Type.MouseButtonRelease and event.button() == Qt.MouseButton.MiddleButton and w._panning_image:
             self._end_image_pan()
@@ -312,12 +312,16 @@ class ImageInteractionController:
                 w._finalize_mask_edit()
                 return True
 
-        selection_mode_active = (
-            (w._active_tool == "roi")
-            or (w._analysis_enabled and w._state.dataset is not None)
-        )
+        # Plain click-to-select only ever needs a dataset with ROIs to look
+        # at - it doesn't change anything, so unlike add/move/delete it was
+        # never a good fit for gating behind Manual Edit or an Applied
+        # Analysis section (previously required here: w._analysis_enabled
+        # and w._state.dataset is not None). Editing itself stays properly
+        # gated - see _roi_add_editable/_roi_move_editable, both still
+        # "roi" (Manual Edit) tool only.
+        selection_mode_active = (w._active_tool == "roi") or (w._state.dataset is not None)
 
-        # No tool active and nothing selectable (analysis off / no dataset):
+        # No tool active and nothing selectable (no dataset loaded yet):
         # consume left/right clicks instead of letting them fall through to
         # PyQtGraph's own default pan/zoom-drag - middle-drag above is the
         # only thing that should ever pan the view.
@@ -335,7 +339,7 @@ class ImageInteractionController:
         if watched is w.image_view.viewport() and selection_mode_active:
             if event.type() == QEvent.Type.MouseButtonDblClick and event.button() == Qt.MouseButton.LeftButton:
                 # Double-click adds a new ROI - only inside ROI edit mode
-                # (idle/analysis-only browsing stays selection-only).
+                # (idle browsing stays selection-only, per _roi_add_editable).
                 if w._active_tool != "roi" or not w._roi_add_editable:
                     return True
                 point = self._image_point_from_mouse_event(event)
@@ -608,36 +612,69 @@ class ImageInteractionController:
         mouse_point = w.image_plot.vb.mapSceneToView(scene_pos)
         return float(mouse_point.x()), float(mouse_point.y())
 
+    def _scene_point_from_mouse_event(self, event) -> QPointF | None:
+        """Scene-space (pixel) position of a mouse event on the image
+        viewport. Unlike _image_point_from_mouse_event's view/data-space
+        point (via ViewBox.mapSceneToView), scene coordinates are NOT
+        affected by the ViewBox's current range - only by the outer
+        QGraphicsView's own transform, which panning never touches. That
+        stability is exactly why panning needs this one instead - see
+        _update_image_pan."""
+        w = self.window
+        scene_pos = w.image_view.mapToScene(event.position().toPoint())
+        if not w.image_plot.sceneBoundingRect().contains(scene_pos):
+            return None
+        return scene_pos
+
     def _selection_drag_threshold(self) -> float:
         return 5.0
 
-    def _begin_image_pan(self, point: tuple[float, float]) -> None:
+    def _begin_image_pan(self, scene_point: QPointF) -> None:
         w = self.window
         if w._current_processed_image is None:
             return
-        x_range, y_range = w.image_plot.vb.viewRange()
         w._panning_image = True
-        w._pan_anchor_view = (float(point[0]), float(point[1]))
-        w._pan_anchor_ranges = ((float(x_range[0]), float(x_range[1])), (float(y_range[0]), float(y_range[1])))
+        w._pan_last_scene_pos = QPointF(scene_point)
 
-    def _update_image_pan(self, point: tuple[float, float]) -> None:
+    def _update_image_pan(self, scene_point: QPointF) -> None:
         w = self.window
-        if not w._panning_image or w._pan_anchor_view is None or w._pan_anchor_ranges is None:
+        if not w._panning_image or w._pan_last_scene_pos is None:
             return
-        x_range, y_range = w._pan_anchor_ranges
-        dx = float(point[0]) - float(w._pan_anchor_view[0])
-        dy = float(point[1]) - float(w._pan_anchor_view[1])
-        w.image_plot.vb.setRange(
-            xRange=(x_range[0] - dx, x_range[1] - dx),
-            yRange=(y_range[0] - dy, y_range[1] - dy),
-            padding=0.0,
-        )
+        # Delta computed purely in scene/pixel space since the LAST move,
+        # then mapped through the ViewBox's CURRENT inverted transform to
+        # get a view/data-space displacement - the same technique
+        # pyqtgraph's own native drag-to-pan uses internally (ViewBox.
+        # mouseDragEvent -> translateBy). This used to instead subtract two
+        # _image_point_from_mouse_event results (view/data-space points, via
+        # mapSceneToView) - a press-anchored point vs. the current one.
+        # mapSceneToView's result depends on the ViewBox's CURRENT range,
+        # which THIS method changes every call - so that anchor and that
+        # "current" point were silently expressed in two different (before-
+        # pan vs. mid-pan) coordinate frames, and subtracting them mixed the
+        # two. That produced a real, reproducible bug reported 2026-09-09:
+        # the view would advance on one move event, sit still on the next,
+        # or swing backward, i.e. "snapping to previous locations" - a
+        # feedback loop where each frame's computed delta depended on the
+        # error already baked into the range by the previous frame. Scene
+        # coordinates are immune to this: the ViewBox's range never affects
+        # them, so a delta taken there (dif, below) is always correct,
+        # regardless of how many pan steps happened before it.
+        # Inverted (last - current, not current - last): the view WINDOW
+        # must shift opposite to the mouse for content to visually follow
+        # the drag (grab a point, drag it right, that point should track
+        # right under the cursor) - pyqtgraph's own mouseDragEvent negates
+        # the same way for the same reason ("## invert").
+        delta_scene = w._pan_last_scene_pos - scene_point
+        w._pan_last_scene_pos = QPointF(scene_point)
+        view_box = w.image_plot.vb
+        transform = pg.functions.invertQTransform(view_box.childGroup.transform())
+        delta_view = transform.map(delta_scene) - transform.map(QPointF(0.0, 0.0))
+        view_box.translateBy(x=delta_view.x(), y=delta_view.y())
 
     def _end_image_pan(self) -> None:
         w = self.window
         w._panning_image = False
-        w._pan_anchor_view = None
-        w._pan_anchor_ranges = None
+        w._pan_last_scene_pos = None
 
     def _crop_rect_contains_point(self, point: tuple[float, float]) -> bool:
         w = self.window

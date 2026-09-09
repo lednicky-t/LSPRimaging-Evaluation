@@ -1332,6 +1332,7 @@ def build_layout(window) -> None:
     analysis_header_extra_layout.addWidget(window.analysis_preview_button)
     analysis_header_extra_layout.addWidget(window.analysis_time_independent_toggle)
     analysis_header_extra_layout.addWidget(window.analysis_ram_only_backup_toggle)
+    analysis_header_extra_layout.addWidget(window.delete_measurement_backup_button)
     window.analysis_section = CollapsibleSection(
         "Analysis",
         analysis_inner,

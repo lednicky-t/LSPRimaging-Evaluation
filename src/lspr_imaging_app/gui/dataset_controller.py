@@ -292,6 +292,48 @@ class DatasetController:
             return
         window._measurement_export_writer = writer
 
+    def delete_measurement_backup(self) -> None:
+        """"Delete backup file" icon (Analysis section title): removes
+        measurement_backup.h5 for the current dataset. The open writer's
+        HDF5 handle is exactly why the file can't be deleted from File
+        Explorer while a dataset is loaded (Windows won't let another
+        process delete a file this app still has open), so this closes it
+        first via the same _close_measurement_export_writer used when
+        switching datasets - which already flushes any RAM-buffered rows
+        and waits for the async flush pool first, so it's safe even while
+        an analysis run is in progress. A fresh, empty writer is reopened
+        right after so backup keeps working for the rest of the session."""
+        window = self.window
+        writer = getattr(window, "_measurement_export_writer", None)
+        if writer is None:
+            window._set_status_text("No backup file for this dataset - nothing to delete.")
+            return
+        backup_path = writer.path
+        answer = QMessageBox.question(
+            window,
+            "Delete backup file",
+            f"Delete {backup_path.name}? This discards every analyzed spectrum and sensorgram "
+            "point backed up so far this session for this dataset. Results already saved via "
+            '"Export Results..." are unaffected.',
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        self._close_measurement_export_writer()
+        try:
+            backup_path.unlink(missing_ok=True)
+        except OSError as exc:
+            logging.getLogger("lspr_imaging_app.workflow").warning(
+                "Failed to delete measurement backup file", exc_info=True
+            )
+            window._set_status_text(f"Failed to delete backup file: {exc}")
+            self._open_measurement_export_writer_for_dataset()
+            return
+        self._open_measurement_export_writer_for_dataset()
+        window._append_workflow_log(f"Deleted measurement backup file: {backup_path.name}", level="info")
+        window._set_status_text(f"Deleted backup file: {backup_path.name}")
+
     def _finish_load_dataset_from_folder(self, folder: Path, on_done) -> None:
         window = self.window
         progress = getattr(window, "_report_startup_progress", None)

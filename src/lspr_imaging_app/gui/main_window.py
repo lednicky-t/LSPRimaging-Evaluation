@@ -18,6 +18,7 @@ import pyqtgraph as pg
 from PyQt6.QtCore import (
     QByteArray,
     QItemSelectionModel,
+    QPointF,
     QSize,
     QSettings,
     QStringListModel,
@@ -364,8 +365,10 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, MeasurementCalibrationMixin,
         self._crop_drag_origin: tuple[float, float] | None = None
         self._roi_editor_mode = "circles"
         self._panning_image = False
-        self._pan_anchor_view: tuple[float, float] | None = None
-        self._pan_anchor_ranges: tuple[tuple[float, float], tuple[float, float]] | None = None
+        # Scene-space (pixel), not view/data-space - see _update_image_pan's
+        # docstring for why an anchor expressed in view/data coordinates
+        # doesn't work once the ViewBox's range starts changing mid-pan.
+        self._pan_last_scene_pos: QPointF | None = None
         self._current_processed_image: np.ndarray | None = None
         self._current_file_mask: np.ndarray | None = None
         self._current_file_mask_path: Path | None = None
@@ -1685,6 +1688,19 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, MeasurementCalibrationMixin,
             parent=self,
         )
         self.analysis_run_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        # Deletes measurement_backup.h5 for the current dataset (Analysis
+        # section title row) - see DatasetController.delete_measurement_backup.
+        # The only way to remove that file while a dataset is loaded: the app
+        # keeps it open for incremental backup writes the whole time, which
+        # is exactly why File Explorer refuses to delete it directly.
+        self.delete_measurement_backup_button = self._make_icon_tool_button(
+            "trash-2",
+            "#ef4444",
+            "Delete measurement_backup.h5 for this dataset and start a fresh one. This is the only "
+            "way to remove it while the app has it open (File Explorer can't delete a file this app "
+            "is still writing to). Discards every spectrum/sensorgram point backed up so far this "
+            "session; results already saved via \"Export Results...\" are unaffected.",
+        )
         # ROI's math: how each ROI pair's masked sample/reference pixels become
         # one value each (Reduction) - see processing/roi_math.py. Session-scoped
         # via area_roi_settings (not QSettings): unlike fit_method/metric/poly_order
@@ -2551,6 +2567,7 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, MeasurementCalibrationMixin,
         self.export_results_button.clicked.connect(self._analysis_controller.export_results)
         self.export_results_open_folder_button.clicked.connect(self._analysis_controller.open_results_export_folder)
         self.compact_measurement_backup_button.clicked.connect(self._analysis_controller.compact_measurement_backup)
+        self.delete_measurement_backup_button.clicked.connect(self._dataset_controller.delete_measurement_backup)
         self._analysis_controller.sync_statistics_controls()
 
     def _connect_background_and_mask(self) -> None:
@@ -7624,6 +7641,19 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, MeasurementCalibrationMixin,
             return
         self._selection_plot_highlight_signature = selected_signature
         self._refresh_visible_spectrum_from_cache()
+        # Sensorgram gets the same unconditional cache-hit treatment as the
+        # spectrum line above - a selection change should always show
+        # whatever's already computed and cached (e.g. re-selecting one ROI
+        # out of a multi-ROI "Start analysis" run backs up each individual
+        # ROI's own trace too, not just the combined one - see
+        # _backup_per_roi_sensorgram_points), regardless of the "Live
+        # preview" toggle. That toggle is about proactively computing NEW
+        # data for a selection with nothing cached yet (see
+        # _handle_live_preview_selection_change, still gated on it below) -
+        # gating a plain cache lookup+display behind it too meant switching
+        # to an already-analyzed ROI with Live preview off silently showed
+        # no sensorgram at all, reported 2026-09-09.
+        self._analysis_controller.preview_sensorgram_from_cache()
         self._analysis_controller.update_selection_highlight(force=force)
         self._analysis_controller.schedule_cube_slider_cache_refresh()
         if prompt_live_preview and not force and self._analysis_live_preview_enabled:
