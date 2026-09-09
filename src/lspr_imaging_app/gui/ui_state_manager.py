@@ -347,6 +347,42 @@ class UIStateManager:
         refresh_ram_only_backup_toggle = getattr(window, "_refresh_analysis_ram_only_backup_toggle", None)
         if callable(refresh_ram_only_backup_toggle):
             refresh_ram_only_backup_toggle()
+        self._apply_analysis_settings_lock(running)
+
+    _ANALYSIS_SETTINGS_LOCK_TOOLTIP = (
+        "Locked while analysis is running - Reduction/Formula/Metric/Fitting/Order must stay "
+        "fixed for the whole run so the saved per-cube results stay internally consistent."
+    )
+
+    def _apply_analysis_settings_lock(self, running: bool) -> None:
+        """Disable Reduction/Formula/Metric/Fitting/Order while a sensorgram
+        run is in flight - none of the five were ever gated before (changing
+        any of them mid-run would silently mix settings within one saved
+        "core data" trace, since Start analysis assumes they stay fixed for
+        its whole duration). Swaps each widget's tooltip to explain why it's
+        greyed out, restoring its normal tooltip (cached once, on first use,
+        from layout_builder.py's own text - not duplicated here) once the
+        run ends."""
+        window = self._window
+        cache = getattr(window, "_analysis_locked_tooltip_cache", None)
+        if cache is None:
+            cache = {}
+            window._analysis_locked_tooltip_cache = cache
+        locked_widgets = (
+            window.analysis_reduction_method_combo,
+            window.analysis_formula_combo,
+            window.analysis_metric_combo,
+            window.analysis_fit_method_combo,
+            window.analysis_poly_order_spin,
+        )
+        for widget in locked_widgets:
+            widget.setEnabled(not running)
+            if running:
+                if widget not in cache:
+                    cache[widget] = widget.toolTip()
+                widget.setToolTip(self._ANALYSIS_SETTINGS_LOCK_TOOLTIP)
+            elif widget in cache:
+                widget.setToolTip(cache[widget])
 
     def update_chromatic_control_state(self) -> None:
         window = self._window

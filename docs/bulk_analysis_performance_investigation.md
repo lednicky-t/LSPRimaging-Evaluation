@@ -1723,3 +1723,220 @@ necessarily deferred to different hardware - nothing about *this* machine's
 own numbers can confirm the calibration finds a *different*, correct value
 on a machine with more physical cores, only that it doesn't break anything
 on the one machine available to test on.
+
+## Follow-up #13 (2026-09-09): per-ROI sensorgram + reduction completeness -
+## a real added cost, and an unrelated ~24x speed bug found while measuring it
+
+New feature (see `imaging_measurement_export_format.md`'s matching update):
+every selected ROI now gets its own sensorgram metric fit and backed-up row
+under its real `roi_id`, in addition to the existing combined-selection
+trace; `mean`/`median`/`trimmed_mean` (not `plane_fit`) are now saved for
+every ROI during a bulk sweep regardless of which Reduction method is
+active. Measured per this doc's own "verify before calling it done" rule,
+using a standalone synthetic benchmark (160 ROIs, 26 wavelengths, not
+committed) rather than assuming from the code.
+
+### The "cheap methods" assumption was wrong - `scipy.stats.trim_mean` was
+### the real cost, not `plane_fit`
+
+First measurement of "compute mean/median/trimmed_mean unconditionally,
+skip plane_fit unless active" came back at **+3.48s/cube** at 160 ROIs -
+not the "near-free" cost this doc's own earlier framing implied (mean/
+median/trimmed_mean characterized as cheap relative to plane_fit's
+coordinate-scan-plus-lstsq cost, which is true, but "cheap relative to
+plane_fit" turned out not to mean "cheap in absolute terms" at 4,160
+ROI-wavelength pairs/cube). Isolated per-method: `reduce_mean` ~5us/call,
+`reduce_median` ~24-26us/call (both genuinely cheap), `reduce_trimmed_mean`
+**~360-410us/call** - the actual dominant cost, an order of magnitude above
+either of the other two.
+
+Root cause: `reduce_trimmed_mean` called `scipy.stats.trim_mean`, whose
+own per-call Python-level overhead dominates the (otherwise trivial) sort-
+and-slice arithmetic it's wrapping. A manual `np.sort()` + slice + `np.mean()`
+implementation, verified bit-identical to `trim_mean` across 200 randomized
+(size, fraction) cases (max abs diff ~1e-14, float64 rounding noise, not a
+real difference), measured **~15us/call - ~24x faster**. This is a genuine,
+separate bug (scipy overhead, not the calculation itself) that predates
+this change and affects *every* existing use of `reduce_trimmed_mean`, not
+just the new per-ROI completeness feature - e.g. any run with "Trimmed
+mean" already selected as the active Reduction method was paying this same
+24x tax already, unnoticed because nothing had measured this one function
+in isolation before.
+
+**Fixed** (`processing/roi_math.py`): `reduce_trimmed_mean` now does the
+sort-and-slice directly instead of calling `scipy.stats.trim_mean`. Same
+public signature, same output, `tests/unit/test_lspri_roi_math.py`'s
+existing correctness tests for this function pass unchanged.
+
+### Final measured cost, after the fix
+
+| Change | Added cost/cube (160 ROIs, 26 wavelengths) |
+|---|---:|
+| Reduction completeness (mean/median/trimmed_mean always) | **~349ms** (was ~3480ms before the `reduce_trimmed_mean` fix) |
+| Per-ROI sensorgram fit, `fit_method=none` | ~7ms |
+| Per-ROI sensorgram fit, `fit_method=poly` | ~118ms |
+| Per-ROI sensorgram fit, `fit_method=gaussian` | ~105ms |
+
+Against a real production cube baseline of ~700-1000ms (Follow-up #11), the
+combined addition is roughly a **35-65% increase in per-cube time**
+depending on fit method - a real, disclosed cost accepted in exchange for
+having every selected ROI's own reduced values/spectrum/sensorgram always
+available as "core data" for later cross-ROI statistical analysis, not a
+free change. Flagged explicitly per this repo's own rule on quantifying any
+change that measurably affects computed values or run time, even when the
+underlying numbers themselves are unaffected (this change adds new columns,
+it doesn't alter any existing computed value).
+
+`reduce_median`'s own ~24-26us/call is inherent (a real partition/sort cost
+numpy already does about as efficiently as this kind of operation can be
+done) - unlike `trim_mean`, there was no equivalent "wrapper overhead" bug
+to fix there.
+
+### Verification
+
+`pytest tests/ -k lspri` (587 tests, up from 554) passes after every step -
+24 new tests added across the reduction-completeness closure
+(`test_lspri_reduction_completeness.py`, run through the real
+`_scoped_formula_spectrum_task` against a synthetic TIFF image, not mocked),
+the per-ROI metric fit (`test_lspri_sensorgram_per_roi_metric.py`, including
+a correctness property test that a single-ROI selection's per-ROI value
+exactly matches the existing combined-trace value for that same selection -
+mathematically the same computation), the new backup write path
+(`test_lspri_per_roi_sensorgram_backup.py`), the `reduce_sample_and_
+reference_cheap_methods` helper (`test_lspri_roi_math.py`), and the new
+Reduction/Formula/Metric/Fitting/Order run-lock (`test_lspri_analysis_
+settings_lock.py` - these five controls were never disabled during a run
+before this change, confirmed via a full-repo grep before adding the lock).
+
+## Follow-up #14 (2026-09-09, same day): reduction completeness reverted
+## after real-world use - the disclosed cost was still too much
+
+Follow-up #13's "~349ms/cube added" figure (after the `reduce_trimmed_mean`
+fix) was disclosed as a real, accepted trade-off at the time - but on
+reflection against actual use, a **35-65% increase in per-cube time** for a
+bulk sweep was too much. Reverted: during a bulk sweep
+(`compute_all_reduction_methods=False`), only the *active* Reduction
+method's row is computed and saved per ROI again, exactly as it worked
+before Follow-up #13 - `mean`/`median`/`trimmed_mean` are no longer
+computed unconditionally. `reduce_sample_and_reference_cheap_methods`
+(`processing/roi_math.py`) and its call site in `analysis_tasks.py`'s
+per-ROI reduce closure were removed rather than left disabled/unused,
+per this repo's own "don't leave a monument to a reverted decision" style.
+
+**Kept, deliberately not reverted**: the `reduce_trimmed_mean` speed fix
+(sort-and-slice instead of `scipy.stats.trim_mean`, ~24x faster, verified
+bit-identical output) - that bug predates and is independent of the
+reduction-completeness feature; it still benefits every existing use of
+"Trimmed mean" as the active Reduction method, and the always-on-anyway
+single-cube live preview path (`compute_all_reduction_methods=True`).
+Also kept: the per-ROI sensorgram feature itself (Follow-up #13's other
+half - each selected ROI's own metric fit and backup under its real
+`roi_id`) and the Reduction/Formula/Metric/Fitting/Order run-lock -
+neither carries reduction completeness's per-cube cost, so neither was
+implicated by this revert.
+
+`test_lspri_reduction_completeness.py` was repurposed rather than
+deleted: it now asserts the reverted-to behavior directly (only the active
+method's entry is real during a bulk sweep, every other entry NaN) as a
+regression guard, since this exact class of "recompute everything for
+every ROI" cost has now bitten this codebase more than once (Follow-up #1's
+original `compute_all_reduction_methods` bug, and this one) - worth a
+standing test, not just a comment, so it can't silently reappear a third
+time. `TestReduceSampleAndReferenceCheapMethods` (`test_lspri_roi_math.py`)
+was removed along with the function it tested.
+
+### Verification
+
+`pytest tests/ -k lspri` (587 tests) passes unchanged after the revert -
+same count as before, since tests were repurposed in place rather than
+removed outright.
+
+## Follow-up #15 (2026-09-09, same day): the per-ROI sensorgram backup
+## itself was recomputing an expensive, cube-constant signature 160x/cube
+
+A real production run (160 ROIs) reported ~2.3s/cube after Follow-up #13's
+per-ROI sensorgram feature landed - much worse than the ~7-118ms/cube the
+per-ROI *fit* itself was measured to cost (Follow-up #13's synthetic
+benchmark). The real log's own `SG backup timing` line pointed straight at
+it: `per_roi_sensorgram=633.6-778.0ms` per cube - the single largest cost
+in the entire per-cube breakdown, bigger than `reduce=` itself.
+
+### Root cause: `_sensorgram_point_signature_hash` recomputed once per ROI,
+### not once per cube
+
+`_backup_per_roi_sensorgram_points` (Follow-up #13) called the existing
+`_sensorgram_point_signature_hash(cube_index, (roi_id,), [roi])` once per
+selected ROI - reusing already-tested code, reasonable on its face. But
+that function's own dominant cost - `_sensorgram_spectral_cube_payload_
+signature`'s `tuple(window._preprocessing_signature(...) for wavelength in
+window._wavelength_values)`, a per-*wavelength* scan (26x) that also touches
+mask/chromatic lookups internally - has **nothing to do with which ROI is
+being backed up**. Every one of its inputs (dataset, cube index, wavelength
+list, preprocessing/mask/chromatic state, reference radii, Reduction,
+per-cube exclusions, active Formula/Fitting/Metric/Order/wavelength-range)
+is identical for every ROI within one cube; only the ROI's own id and
+geometry differ. Calling the whole function per ROI meant 160 x 26 = 4,160
+redundant `_preprocessing_signature` calls per cube for the backup step
+alone - confirmed by direct call-counting (not guessed): the old call
+pattern hits it exactly 4,160 times/cube at 160 ROIs; instrumented directly
+in a standalone check, not inferred.
+
+This likely also explains part of why `SG cube compute timing` itself (not
+just the backup line) came in well above its own `SG scoped task stage
+timing` sub-total on the same cubes in that log - the GUI thread doing this
+much per-ROI signature work is real, CPU-bound Python work that holds the
+GIL, and can slow down the *worker* thread's own concurrent per-wavelength
+dispatch for the next cube even though nothing is explicitly waiting on it
+(cubes run one after another on the worker thread, per Finding E, but this
+app's `partial_callback`/backup does run on the GUI thread via a queued,
+non-blocking connection - genuinely concurrent with, not serialized behind,
+the next cube's compute; genuine concurrency doesn't mean free of GIL
+contention when one side is CPU-heavy).
+
+### Fix: compute the cube-constant part once per cube, reuse it per ROI
+
+`_sensorgram_point_signature_hash_cube_context(spectral_cube_index)`
+(`gui/analysis_worker_mixin.py`) builds everything from `_sensorgram_point_
+signature_hash`'s input *except* the ROI's own id/geometry, once.
+`_sensorgram_point_signature_hash_for_roi(cube_context, roi)` cheaply
+completes it per ROI (just the ROI's own id + `_roi_signature([roi])`) and
+hashes. `_backup_per_roi_sensorgram_points` now calls the cube-context
+builder once at the top of its loop instead of the full expensive function
+once per ROI. Direct call-count check confirms the fix: `_preprocessing_
+signature` now called exactly 26 times/cube (once, period) regardless of
+ROI count, not 26 x ROI-count.
+
+**Correctness, verified before relying on this**: the whole point of
+reusing the same underlying values is that the *hash itself* must not
+change, or already-backed-up rows would stop matching their dedup key
+(silently forcing a full re-write of "unchanged" data) - a real data-
+integrity concern, not just a speed one. `test_lspri_sensorgram_signature_
+hash_for_roi.py` builds a complete fake window/mixin and checks, using the
+real `signature_hash` (JSON+SHA256) function - not a stub - that `_for_roi`
+produces byte-identical output to calling the original `_sensorgram_point_
+signature_hash` directly, across several cubes and ROIs, plus that
+different ROIs/cubes still hash differently from each other (no accidental
+collisions from the refactor).
+
+### Not yet independently confirmed against a real run
+
+This fix removes the specific, measured cost (`per_roi_sensorgram=`) and is
+verified correct and call-count-reduced by 160x - but the *exact* new
+real-world per-cube number depends on this specific dataset's real
+`_preprocessing_signature`/mask/chromatic cost, which a synthetic
+benchmark's stand-in function can't honestly reproduce (unlike Follow-up
+#13's fit-cost benchmark, which measured the real `fit_curve_for_method`/
+`metric_value_from_spectrum` functions directly). Check the next real run's
+log for the new `per_roi_sensorgram=` value and overall `SG cube compute
+timing` before assuming this fully closes the gap - if a real, separate
+cost still remains, the same log-first method that found this one
+generalizes directly.
+
+### Verification
+
+`pytest tests/ -k lspri` (588 tests, up 1 from 587) passes - `test_lspri_
+sensorgram_signature_hash_for_roi.py` (4 new tests: the correctness proof
+above, hash-uniqueness across ROIs/cubes, and the no-dataset guard) plus 2
+new tests in `test_lspri_per_roi_sensorgram_backup.py` (the cube-context
+`None` guard, and that the cube-context builder is called exactly once per
+cube, not once per ROI).

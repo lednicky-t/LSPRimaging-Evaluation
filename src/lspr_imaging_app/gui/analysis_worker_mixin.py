@@ -952,6 +952,10 @@ class AnalysisWorkerMixin:
     def on_sensorgram_partial_result(self, request_id: int, total_count: int, point) -> None:
         if request_id != self.window._sensorgram_request_id or not self.window._analysis_enabled:
             return
+        # Exact per-cube completion event for the status bar's "Curr/Avg
+        # s/cube" readout - see _note_busy_item_completed's docstring for why
+        # this (not the rounded progress percent) is what drives it.
+        self.window._note_busy_item_completed()
         metric_value = float("nan") if point.metric_value is None else float(point.metric_value)
         metric_signal = float("nan") if point.metric_signal is None else float(point.metric_signal)
         self.window._sensorgram_spectral_cube_indices = np.append(self.window._sensorgram_spectral_cube_indices, int(point.spectral_cube_index)).astype(np.int32, copy=False)
@@ -997,11 +1001,23 @@ class AnalysisWorkerMixin:
             backup_series_started = time.perf_counter()
             self._backup_formula_spectrum_series(series_payloads, cube_index=int(point.spectral_cube_index))
             backup_series_ms = (time.perf_counter() - backup_series_started) * 1000.0
+        per_roi_metric_values = getattr(point, "per_roi_metric_values", None)
+        backup_per_roi_ms = 0.0
+        if per_roi_metric_values:
+            # Each selected ROI's own "core data" sensorgram row, under its
+            # real roi_id - in addition to (never instead of) the combined-
+            # selection row _backup_sensorgram_point just wrote above. Same
+            # unconditional/dedup-by-signature-hash reasoning as the formula
+            # spectrum series backup right above.
+            backup_per_roi_started = time.perf_counter()
+            self._backup_per_roi_sensorgram_points(per_roi_metric_values, cube_index=int(point.spectral_cube_index))
+            backup_per_roi_ms = (time.perf_counter() - backup_per_roi_started) * 1000.0
         logging.getLogger("lspr_imaging_app.workflow").debug(
-            "SG backup timing | cube %s | sensorgram_point=%.1fms formula_series=%.1fms (rois=%s)",
+            "SG backup timing | cube %s | sensorgram_point=%.1fms formula_series=%.1fms per_roi_sensorgram=%.1fms (rois=%s)",
             int(point.spectral_cube_index),
             backup_point_ms,
             backup_series_ms,
+            backup_per_roi_ms,
             len(roi_formula_spectrum_results) if roi_formula_spectrum_results else 0,
         )
         # Flush the buffered-backup-rows batch (see _backup_formula_spectrum_
@@ -1216,6 +1232,88 @@ class AnalysisWorkerMixin:
             return
         backed_up.add(key)
 
+    def _backup_per_roi_sensorgram_points(self, per_roi_metric_values: dict[int, tuple[float, float]], cube_index: int) -> None:
+        """Sibling of `_backup_sensorgram_point`: backs up each selected
+        ROI's OWN metric (from `_sensorgram_metric_task`'s per-ROI fit,
+        `SensorgramPointResult.per_roi_metric_values`) under that ROI's
+        real `roi_id`, in addition to - never instead of - the combined-
+        selection point `_backup_sensorgram_point` already writes under a
+        synthetic `combined_<ids>` key whenever more than one ROI is
+        selected. This is the "core data" a later cross-ROI statistical
+        pass reads, independent of whatever combination happened to be
+        selected for the interactive combined trace.
+
+        Reuses `_sensorgram_backup_roi_key` exactly as `_backup_sensorgram_
+        point` does - already generic over the roi-id tuple, so no new key
+        scheme is needed. The signature hash, unlike that method, is NOT
+        built via a plain per-ROI `_sensorgram_point_signature_hash` call -
+        see `_sensorgram_point_signature_hash_cube_context`'s docstring for
+        why looping that directly over many ROIs is expensive, and what
+        `_sensorgram_point_signature_hash_for_roi` (its cheap per-ROI
+        pairing, used here instead) does about it; both produce byte-
+        identical output to the plain per-ROI call. Same dedup-by-
+        `(roi_id, cube_index, signature_hash)`, same RAM-buffer-while-
+        `_sensorgram_running`/immediate-write-otherwise split, same writer
+        calls (`set_sensorgram_metric`/`append_sensorgram_point`) as
+        `_backup_sensorgram_point` - see its own docstring for the
+        batching/crash-safety details, unchanged here.
+        """
+        if not per_roi_metric_values:
+            return
+        writer = getattr(self.window, "_measurement_export_writer", None)
+        if writer is None:
+            return
+        cube_context = self._sensorgram_point_signature_hash_cube_context(cube_index)
+        if cube_context is None:
+            return
+        area_rois_by_id = {int(roi.area_roi_id): roi for roi in self.window._state.area_rois}
+        backed_up = self.window._measurement_export_backed_up_sensorgram
+        running = bool(getattr(self.window, "_sensorgram_running", False))
+        timestamp_ms = self._acquisition_timestamp_ms_for_cube(cube_index)
+        metric_name = self.window._analysis_metric_key()
+        formula_key = self._active_formula_key()
+        for roi_id, (metric_value, _metric_signal) in per_roi_metric_values.items():
+            roi = area_rois_by_id.get(int(roi_id))
+            if roi is None or not np.isfinite(metric_value):
+                continue
+            roi_key, combined_roi_ids = self._sensorgram_backup_roi_key((int(roi_id),))
+            signature_hash = self._sensorgram_point_signature_hash_for_roi(cube_context, roi)
+            key = (roi_key, cube_index, signature_hash)
+            if key in backed_up:
+                continue
+            try:
+                writer.set_sensorgram_metric(
+                    roi_key,
+                    metric_name=metric_name,
+                    formula_key=formula_key,
+                    combined_roi_ids=combined_roi_ids,
+                )
+            except Exception:
+                logging.getLogger("lspr_imaging_app.workflow").warning(
+                    "Failed to set per-ROI sensorgram metric on measurement export backup", exc_info=True
+                )
+                continue
+            if running:
+                self.window._sensorgram_backup_buffer.setdefault(roi_key, []).append(
+                    (cube_index, signature_hash, float(metric_value), timestamp_ms)
+                )
+                backed_up.add(key)
+                continue
+            try:
+                writer.append_sensorgram_point(
+                    roi_key,
+                    cube_index=cube_index,
+                    signature_hash=signature_hash,
+                    timestamp_utc_ms=timestamp_ms,
+                    metric_value=float(metric_value),
+                )
+            except Exception:
+                logging.getLogger("lspr_imaging_app.workflow").warning(
+                    "Failed to append per-ROI sensorgram point to measurement export backup", exc_info=True
+                )
+                continue
+            backed_up.add(key)
+
     def _acquisition_timestamp_ms_for_cube(self, spectral_cube_index: int) -> int:
         """Real acquisition time for `spectral_cube_index` if the dataset
         has per-image timing metadata loaded, otherwise the current wall
@@ -1305,11 +1403,18 @@ class AnalysisWorkerMixin:
             f" | fit {self.window._format_elapsed_seconds(result.fit_seconds)}",
             level="info",
         )
-        if result.cancelled:
-            self.window._set_status_text("SG | stopped")
-        else:
-            timing = self.window._compact_timing_text(("prep", result.prep_seconds), ("fit", result.fit_seconds))
-            self.window._set_status_text(f"SG | {timing}" if timing else "SG | done")
+        roi_count = len(getattr(self.window, "_sensorgram_running_roi_ids", None) or ())
+        dataset_size_label = getattr(self.window, "summary_dataset_size_label", None)
+        completion_summary = self.window._format_sensorgram_completion_summary(
+            cancelled=bool(result.cancelled),
+            completed_cubes=result.completed_count,
+            total_cubes=result.total_count,
+            roi_count=roi_count,
+            wavelength_count=len(getattr(self.window, "_wavelength_values", None) or ()),
+            dataset_size_text=dataset_size_label.text() if dataset_size_label is not None else "",
+            total_seconds=getattr(result, "total_seconds", None),
+        )
+        self.window._set_status_text(completion_summary)
         # A full or stopped run just populated _roi_absorbance_cache for
         # every cube it reached (see _store_roi_absorbance_cache_for_cube in
         # _sensorgram_metric_task's loop) - refresh the slider's cached-tick
@@ -2909,6 +3014,94 @@ class AnalysisWorkerMixin:
             None if wavelength_range is None else round(float(wavelength_range[0]), 6),
             None if wavelength_range is None else round(float(wavelength_range[1]), 6),
         )
+        return self._signature_hash(full_signature)
+
+    def _sensorgram_point_signature_hash_cube_context(self, spectral_cube_index: int) -> tuple[object, ...] | None:
+        """The ROI-INDEPENDENT portion of `_sensorgram_point_signature_hash`'s
+        input, computed once per cube - pair with `_sensorgram_point_
+        signature_hash_for_roi` (below) instead of calling `_sensorgram_
+        point_signature_hash` once per ROI when backing up many ROIs for the
+        same cube (`_backup_per_roi_sensorgram_points`).
+
+        Every field here (dataset folder, cube index, the per-wavelength
+        preprocessing signature scan, reference radii, Reduction, per-cube
+        exclusions, formula/fit/metric/poly/wavelength-range settings) is
+        identical for every ROI within one cube - only the ROI's own id and
+        geometry (`_sensorgram_point_signature_hash_for_roi`'s job) differ.
+        Recomputing this whole tuple from scratch per ROI - in particular
+        the per-wavelength `_preprocessing_signature` scan, itself O(26)
+        wavelengths - measured ~630-780ms/cube at 160 ROIs (4,160 redundant
+        preprocessing-signature calls/cube); computing it once here and
+        reusing it cheaply per ROI removes that multiplier entirely. See
+        bulk_analysis_performance_investigation.md's matching follow-up.
+
+        Produces the exact same values, in the exact same positions,
+        `_sensorgram_spectral_cube_payload_signature`/`_sensorgram_point_
+        signature_hash` would for a single-ROI selection - verified
+        byte-identical-hash by `test_lspri_per_roi_sensorgram_backup.py` -
+        so any already-backed-up row's dedup hash still matches. Returns
+        None under the same "no dataset" condition those use.
+        """
+        window = self.window
+        if window._state.dataset is None:
+            return None
+        wavelength_range = window._analysis_wavelength_range()
+        return (
+            str(window._state.dataset.folder),
+            int(spectral_cube_index),
+            tuple(round(float(value), 6) for value in window._wavelength_values),
+            tuple(
+                window._preprocessing_signature((int(spectral_cube_index), float(wavelength)))
+                for wavelength in window._wavelength_values
+            ),
+            round(float(window._state.area_roi_settings.reference_inner_radius_px), 3),
+            round(float(window._state.area_roi_settings.reference_outer_radius_px), 3),
+            self._roi_reduction_signature_elements(),
+            self._exclusion_signature_for_cube(spectral_cube_index),
+            self._active_formula_key(),
+            self._analysis_fit_method_key(),
+            window._analysis_metric_key(),
+            int(window._analysis_poly_order()),
+            None if wavelength_range is None else round(float(wavelength_range[0]), 6),
+            None if wavelength_range is None else round(float(wavelength_range[1]), 6),
+        )
+
+    def _sensorgram_point_signature_hash_for_roi(self, cube_context: tuple[object, ...], roi: AreaRoi) -> str:
+        """Cheap per-ROI completion of `_sensorgram_point_signature_hash_
+        cube_context` (above) into the same hash `_sensorgram_point_
+        signature_hash(cube_index, (roi.area_roi_id,), [roi])` would
+        produce - just without redoing that call's expensive, ROI-
+        independent inner work for every ROI. See that method's docstring
+        for why this pairing exists and the measured cost it removes."""
+        (
+            dataset_key,
+            spectral_cube_index,
+            wavelength_signature,
+            preprocessing_signature,
+            reference_inner_radius_px,
+            reference_outer_radius_px,
+            reduction_elements,
+            exclusion_signature,
+            formula_key,
+            fit_method_key,
+            metric_key,
+            poly_order,
+            wl_min,
+            wl_max,
+        ) = cube_context
+        payload_signature = (
+            dataset_key,
+            spectral_cube_index,
+            (int(roi.area_roi_id),),
+            self.window._roi_signature([roi]),
+            wavelength_signature,
+            preprocessing_signature,
+            reference_inner_radius_px,
+            reference_outer_radius_px,
+            *reduction_elements,
+            exclusion_signature,
+        )
+        full_signature = (payload_signature, formula_key, fit_method_key, metric_key, poly_order, wl_min, wl_max)
         return self._signature_hash(full_signature)
 
     def _cached_sensorgram_spectral_cube_result(

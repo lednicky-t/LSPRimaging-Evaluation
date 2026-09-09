@@ -27,6 +27,27 @@ the `reduced_values_start_row` backfill-boundary attr and the reproducibility ca
 entry in `packages/lspr_io/src/lspr_io/schema.py` (umbrella repo) - not duplicated here since this
 doc otherwise stays at the "why/decision" level, not a column-by-column reference.
 
+**Update (2026-09-09): every selected ROI now gets its own `/processed/sensorgram/<roi_id>/`
+row, not only the interactively-combined selection.** Previously, `/processed/sensorgram/<roi_id>/`
+was only ever populated under whichever key the *currently selected* group of ROIs backed up as -
+a real `roi_id` for a single-ROI selection, or a synthetic `combined_<id>_<id>...` key for a
+multi-ROI one (`_sensorgram_backup_roi_key`). Selecting a different combination afterward (e.g. one
+ROI out of a 160-ROI group that was analyzed together) had no row to read - the point of this
+change. `_sensorgram_metric_task` (`gui/analysis_tasks.py`) now also fits each selected ROI's own
+metric from its own spectrum (`per_roi_metric_values` on `SensorgramPointResult`), and
+`AnalysisWorkerMixin._backup_per_roi_sensorgram_points` (`gui/analysis_worker_mixin.py`) backs each
+one up under its real `roi_id`, in addition to - never instead of - the existing combined-selection
+row. No schema change: `/processed/sensorgram/<roi_id>/` already accepted any `roi_id` string; this
+only writes to more of them per cube.
+
+`/processed/absorbance_spectra/<roi_id>/reduced_values/<method>/` completeness during a bulk sweep
+was *also* tried the same way (every ROI gets `mean`/`median`/`trimmed_mean` regardless of which
+Reduction method is active) and then **reverted** after real-world use showed it added too much
+time to a bulk sweep - during a bulk sweep, only the active Reduction method's row is real, same as
+before this whole change; see `bulk_analysis_performance_investigation.md`'s Follow-up #13/#14 for
+the measured cost and why. A `reduce_trimmed_mean` speed fix found while measuring that (unrelated
+~24x `scipy.stats.trim_mean` overhead bug, not specific to this feature) was kept regardless.
+
 ## Goal
 
 LSPRi eva needs a way to export/backup its per-ROI spectra and sensorgram traces (no images -

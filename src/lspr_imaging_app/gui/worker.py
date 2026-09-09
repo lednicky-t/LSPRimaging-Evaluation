@@ -130,6 +130,14 @@ class SensorgramPointResult:
     # display, over the same thread-safe partial-result Qt signal the metric
     # value already used.
     roi_formula_spectrum_results: dict[int, FormulaSpectrumResult] | None = None
+    # Each selected ROI's own (metric_value, metric_signal) - fit from that
+    # ROI's own spectrum in roi_formula_spectrum_results above, under the
+    # same fit method/metric/poly order as the combined metric_value on this
+    # same point - not a per-ROI copy of the combined (pooled-selection)
+    # value. Same conditional-population rule as roi_formula_spectrum_
+    # results: None whenever that's None, since there's no per-ROI spectrum
+    # to fit from on a metric-only shortcut hit either.
+    per_roi_metric_values: dict[int, tuple[float, float]] | None = None
 
 
 @dataclass(slots=True)

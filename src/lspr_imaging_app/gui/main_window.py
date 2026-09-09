@@ -5,7 +5,7 @@ import subprocess
 import sys
 import threading
 import time
-from collections import OrderedDict, deque
+from collections import OrderedDict
 from copy import deepcopy
 from dataclasses import asdict
 from datetime import datetime
@@ -242,14 +242,6 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, MeasurementCalibrationMixin,
     FORMULA_SPECTRUM_ROI_MASK_CACHE_SIZE = 48
     ROI_FORMULA_SPECTRUM_CACHE_SIZE = 512
     SENSORGRAM_CACHE_SIZE = 48
-    # How far back _update_busy_progress looks when computing the "s/cube"
-    # speed readout. A whole-run average (elapsed / items_done since the
-    # very start) gets stuck reflecting a regime that no longer applies -
-    # e.g. a run that opens with dozens of near-instant disk-cache-hit
-    # cubes before reaching fresh, uncached ones reports a falsely fast
-    # average for a long time afterward. A short trailing window recovers
-    # within roughly one window's worth of wall time instead.
-    BUSY_PROGRESS_SPEED_WINDOW_SECONDS = 10.0
     # Cube/Time toggle: which per-cube frame's acquisition timestamp
     # represents the whole cube, when Time mode is active - see
     # _cycle_cube_time_timestamp_rule / AnalysisController._cube_timestamp_ms_by_cube_index.
@@ -588,14 +580,21 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, MeasurementCalibrationMixin,
         # Set via _begin_busy(..., total_items=N) for a busy operation whose
         # progress counts a known number of discrete units (e.g. spectral
         # cubes in an analysis run) - lets _update_busy_progress show a
-        # speed readout (e.g. "1.23 s/cube") alongside elapsed/ETA. None for
+        # "Curr/Avg s/cube" speed readout alongside elapsed/ETA. None for
         # any other busy operation (dataset load, chromatic registration,
         # ...), which just don't get that extra readout.
         self._busy_total_items: int | None = None
-        # Trailing (elapsed, items_done) samples for the "s/cube" speed
-        # readout - see BUSY_PROGRESS_SPEED_WINDOW_SECONDS. Reset alongside
-        # the other _busy_* fields in _begin_busy/_end_busy/_sync_busy_cursor_state.
-        self._busy_progress_window: deque[tuple[float, float]] = deque()
+        # Exact per-item completion tracking for the speed readout, fed by
+        # _note_busy_item_completed (called once per real completion, e.g.
+        # on_sensorgram_partial_result - once per spectral cube actually
+        # finished, never derived from the rounded progress percent the way
+        # an earlier version of this readout worked). _busy_items_completed
+        # and _busy_last_item_seconds drive "Avg" and "Curr" respectively in
+        # _format_busy_detail_text. Reset alongside the other _busy_* fields
+        # in _begin_busy/_end_busy/_sync_busy_cursor_state.
+        self._busy_items_completed: int = 0
+        self._busy_last_item_elapsed: float = 0.0
+        self._busy_last_item_seconds: float | None = None
         self._wait_cursor_active = False
         # Separate from _busy_operation_count: lets a specific busy operation
         # (e.g. analysis - see _start_sensorgram_worker) opt out of the
@@ -4030,6 +4029,40 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, MeasurementCalibrationMixin,
     def _compact_timing_text(self, *parts: tuple[str, float | None]) -> str:
         return self._workflow_log_controller.compact_timing_text(*parts)
 
+    @staticmethod
+    def _format_sensorgram_completion_summary(
+        *,
+        cancelled: bool,
+        completed_cubes: int,
+        total_cubes: int,
+        roi_count: int,
+        wavelength_count: int,
+        dataset_size_text: str,
+        total_seconds: float | None,
+    ) -> str:
+        """Pure text-formatting for the status-bar summary shown after
+        "Start analysis" finishes (or is stopped) - split out so this is
+        testable without a real Qt MainWindow, same reasoning as
+        `_format_busy_detail_text`. ROI/cube/wavelength counts describe
+        THIS run specifically (which ones were actually analyzed - a cube
+        range or ROI subset can be narrower than the whole loaded dataset),
+        while `dataset_size_text` describes the whole loaded dataset's
+        on-disk size, reusing the exact text already shown in the Dataset
+        panel's Summary section (`summary_dataset_size_label`) rather than
+        re-deriving it (a fresh disk scan there is real I/O, not free, and
+        the dataset can't have changed mid-run anyway).
+        """
+        elapsed_text = MainWindow._format_elapsed_seconds(total_seconds)
+        cubes_text = f"{int(completed_cubes)}/{int(total_cubes)} cubes" if cancelled else f"{int(completed_cubes)} cubes"
+        roi_text = f"{int(roi_count)} ROI" + ("" if roi_count == 1 else "s")
+        wavelength_text = f"{int(wavelength_count)} wavelength" + ("" if wavelength_count == 1 else "s")
+        parts = [elapsed_text] if elapsed_text else []
+        parts.append(f"{roi_text}, {cubes_text}, {wavelength_text}")
+        if dataset_size_text:
+            parts.append(dataset_size_text)
+        prefix = "SG stopped" if cancelled else "SG done"
+        return f"{prefix} | " + " | ".join(parts)
+
     def _workflow_notes_text(self) -> str:
         return self._workflow_log_controller.workflow_notes_text()
 
@@ -4097,7 +4130,9 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, MeasurementCalibrationMixin,
         self._busy_is_determinate = bool(determinate)
         self._busy_last_percent = 0
         self._busy_total_items = int(total_items) if total_items else None
-        self._busy_progress_window.clear()
+        self._busy_items_completed = 0
+        self._busy_last_item_elapsed = 0.0
+        self._busy_last_item_seconds = None
         self._set_status_text(text)
         if determinate:
             self._status_bar_busy.setRange(0, 100)
@@ -4133,7 +4168,9 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, MeasurementCalibrationMixin,
             self._busy_is_determinate = False
             self._busy_last_percent = 0
             self._busy_total_items = None
-            self._busy_progress_window.clear()
+            self._busy_items_completed = 0
+            self._busy_last_item_elapsed = 0.0
+            self._busy_last_item_seconds = None
         if self._busy_cursor_request_count == 0 and self._wait_cursor_active:
             QApplication.restoreOverrideCursor()
             self._wait_cursor_active = False
@@ -4160,7 +4197,9 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, MeasurementCalibrationMixin,
         self._busy_is_determinate = False
         self._busy_last_percent = 0
         self._busy_total_items = None
-        self._busy_progress_window.clear()
+        self._busy_items_completed = 0
+        self._busy_last_item_elapsed = 0.0
+        self._busy_last_item_seconds = None
         self._undo_manager.update_action_state()
 
     @staticmethod
@@ -4168,23 +4207,37 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, MeasurementCalibrationMixin,
         elapsed: float,
         current_percent: int,
         total_items: int | None,
-        recent_seconds_per_item: float | None = None,
+        items_completed: int | None = None,
+        last_item_seconds: float | None = None,
     ) -> str:
         """Pure text-formatting half of _update_busy_progress, split out so
         the elapsed/ETA/speed math is testable without a real Qt MainWindow.
-        `total_items`, when given, turns `current_percent` back into a real
-        per-item rate (see `_busy_total_items`'s docstring for why that
-        conversion is needed here rather than being tracked directly).
 
-        `recent_seconds_per_item`, when given (a trailing-window rate from
-        `_busy_progress_window` - see BUSY_PROGRESS_SPEED_WINDOW_SECONDS),
-        replaces the whole-run average for the speed readout specifically.
-        Elapsed/ETA still use the whole-run `elapsed` either way - that's
-        the number those actually mean; only the speed readout benefits
-        from a recent window, since a whole-run average gets stuck
-        reflecting a regime (e.g. a string of near-instant disk-cache hits)
-        that may no longer apply by the time slower, freshly-computed items
-        are the ones actually running.
+        `total_items`/`items_completed` gate the speed readout - both must
+        be given and `items_completed` must be positive (nothing computed
+        yet has nothing to report a rate for). `items_completed` and
+        `last_item_seconds` come from `_note_busy_item_completed`, called
+        once per *real* completion (e.g. once per spectral cube actually
+        finished) - not derived from the rounded `current_percent`, which
+        an earlier version of this readout did. That rounding was fine for
+        the progress bar itself but too coarse for a per-item rate: with
+        many items (e.g. a few hundred spectral cubes), each whole percent
+        point can represent several items, so a percent-derived item count
+        only advances in those same coarse jumps - the "s/cube" figure then
+        only ever lands on a handful of quantized values instead of
+        tracking the real rate, which is what made it look like it was
+        "flipping" between two similar numbers rather than converging on
+        one.
+
+        Shows two numbers instead of one: `Curr` (this single most-recently-
+        finished item's own duration - the same number the debug log's "SG
+        cube compute timing" line reports for that cube) and `Avg` (whole-
+        run average, elapsed / items_completed). Curr answers "is the cube
+        that just finished slow" directly, without any smoothing hiding a
+        real spike or amplifying rounding noise into a fake one; Avg answers
+        "how is the run doing overall". Elapsed/ETA always use the whole-run
+        `elapsed`, regardless of items_completed - that's the number those
+        actually mean.
         """
         elapsed_text = MainWindow._format_elapsed_seconds(elapsed)
         eta_text = "--:--"
@@ -4192,36 +4245,25 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, MeasurementCalibrationMixin,
             eta_seconds = max((elapsed * (100.0 - current_percent)) / current_percent, 0.0)
             eta_text = MainWindow._format_elapsed_seconds(eta_seconds) or "0:00"
         speed_text = ""
-        if total_items and current_percent > 0 and elapsed > 0:
-            if recent_seconds_per_item is not None and recent_seconds_per_item > 0:
-                rate = recent_seconds_per_item
-            else:
-                items_done = max(1, round(total_items * current_percent / 100.0))
-                rate = elapsed / items_done
-            speed_text = f" | {rate:.2f} s/cube"
+        if total_items and items_completed and elapsed > 0:
+            avg = elapsed / items_completed
+            curr = last_item_seconds if last_item_seconds is not None else avg
+            speed_text = f" | Curr/Avg {curr:.2f}/{avg:.2f} s/cube"
         return f"{elapsed_text} | ETA {eta_text} | {current_percent:d}%{speed_text}"
 
-    def _recent_busy_progress_rate(self, elapsed: float, current_percent: int) -> float | None:
-        """Trailing-window seconds/item rate for the speed readout - see
-        BUSY_PROGRESS_SPEED_WINDOW_SECONDS and _format_busy_detail_text's
-        docstring for why this exists instead of a whole-run average.
-        Returns None until the window holds enough of a time span to give a
-        stable reading (falls back to the whole-run average until then)."""
-        if not self._busy_total_items:
-            return None
-        items_done = self._busy_total_items * current_percent / 100.0
-        window = self._busy_progress_window
-        window.append((elapsed, items_done))
-        cutoff = elapsed - self.BUSY_PROGRESS_SPEED_WINDOW_SECONDS
-        while len(window) > 1 and window[0][0] < cutoff:
-            window.popleft()
-        if len(window) < 2:
-            return None
-        window_elapsed = window[-1][0] - window[0][0]
-        window_items = window[-1][1] - window[0][1]
-        if window_elapsed < 1.0 or window_items <= 0:
-            return None
-        return window_elapsed / window_items
+    def _note_busy_item_completed(self) -> None:
+        """Record that one _busy_total_items-tracked unit (e.g. one spectral
+        cube of a "Start analysis" sweep) has just actually finished - call
+        once per real completion (see on_sensorgram_partial_result), never
+        derived from the progress percent (see _format_busy_detail_text's
+        docstring for why that used to make the speed readout misleading).
+        No-op for a busy operation that never set total_items."""
+        if self._busy_total_items is None or self._busy_started_at is None:
+            return
+        elapsed = time.perf_counter() - self._busy_started_at
+        self._busy_last_item_seconds = elapsed - self._busy_last_item_elapsed
+        self._busy_last_item_elapsed = elapsed
+        self._busy_items_completed += 1
 
     def _update_busy_progress(self, percent: int, text: str | None = None) -> None:
         if self._busy_operation_count <= 0:
@@ -4236,9 +4278,10 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, MeasurementCalibrationMixin,
         started_at = self._busy_started_at
         elapsed = time.perf_counter() - started_at if started_at is not None else None
         if elapsed is not None:
-            recent_rate = self._recent_busy_progress_rate(elapsed, current_percent)
             self._status_bar_busy_detail.setText(
-                self._format_busy_detail_text(elapsed, current_percent, self._busy_total_items, recent_rate)
+                self._format_busy_detail_text(
+                    elapsed, current_percent, self._busy_total_items, self._busy_items_completed, self._busy_last_item_seconds
+                )
             )
         if text:
             self._set_status_text(text)
@@ -7633,7 +7676,24 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, MeasurementCalibrationMixin,
         self._analysis_controller.update_selection_highlight(force=force)
         self._analysis_controller.schedule_cube_slider_cache_refresh()
         if prompt_live_preview and not force and self._analysis_live_preview_enabled:
-            self._handle_live_preview_selection_change()
+            # Deferred one event-loop tick, not called directly: this can
+            # open a modal QMessageBox (_prompt_live_preview_calculation_
+            # choice), and every caller of _update_selection_dependent_plots
+            # with prompt_live_preview=True runs synchronously from inside a
+            # mouse press/release handler (image_interaction_controller.py's
+            # eventFilter - see its own MouseButtonRelease comment on the
+            # same issue for the rubber-band-repaint half of this). Calling
+            # box.exec() while Qt is still mid-delivery of that same mouse
+            # event nests a second event loop before Qt has finished closing
+            # out the button-release - a known Qt/PyQt trap where the
+            # framework can still see the button as held once the dialog
+            # closes, so the next click reads as a drag continuation instead
+            # of a clean new press. That's what left the ROI rubber-band
+            # selection stuck after this prompt appeared. Letting the
+            # triggering mouse event finish being processed first (a delay
+            # of 0ms - the next idle loop iteration, not a visible pause)
+            # avoids the whole class of bug.
+            QTimer.singleShot(0, self._handle_live_preview_selection_change)
 
     def _on_mask_alpha_changed(self, value: int) -> None:
         self._push_undo_point("Overlay appearance")

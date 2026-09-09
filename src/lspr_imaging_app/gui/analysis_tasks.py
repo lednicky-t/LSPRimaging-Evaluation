@@ -986,6 +986,14 @@ def _scoped_formula_spectrum_task(
                     reference_xx=reference_xx, reference_yy=reference_yy,
                     sample_x=sample_x, sample_y=sample_y,
                 )
+                # Only the active method is computed - a bulk sweep of
+                # hundreds of cubes pays this once per ROI per wavelength,
+                # so even "cheap" methods add up at real ROI counts (a
+                # tried-and-reverted "always compute mean/median/
+                # trimmed_mean" version measured +349ms/cube at 160 ROIs -
+                # see bulk_analysis_performance_investigation.md's Follow-up
+                # #13/#14). Every other method's entry stays NaN ("not
+                # computed" for this cube, not a real value).
                 reduced_by_method = {
                     method: (sm, rm) if method == active_reduction_method_key else (float("nan"), float("nan"))
                     for method in REDUCTION_METHODS
@@ -1358,6 +1366,7 @@ def _sensorgram_metric_task(
         # this shortcut never touches), so this loses no working UI.
         disk_metric_value = metric_value_cache_get(spectral_cube_index) if metric_value_cache_get is not None else None
         roi_formula_spectrum_results = None
+        per_roi_metric_values = None
         if disk_metric_value is not None:
             metric_float = float(disk_metric_value) if np.isfinite(disk_metric_value) else float("nan")
             signal_float = float("nan")
@@ -1458,6 +1467,43 @@ def _sensorgram_metric_task(
             metric_float = float(metric_value) if metric_value is not None and np.isfinite(metric_value) else float("nan")
             signal_float = float(metric_signal) if metric_signal is not None and np.isfinite(metric_signal) else float("nan")
 
+            # Each selected ROI's own metric, fit from its own spectrum
+            # (roi_formula_spectrum_results, populated above) under the same
+            # fit_method_key/metric_key/poly_order/wl_min/wl_max as the
+            # combined value just computed - "core data" for later per-ROI
+            # statistical analysis, independent of whatever combination is
+            # selected for the interactive combined trace above. Logged
+            # once per cube (aggregated), not per ROI - see this repo's
+            # stage-timing convention (CLAUDE.md's Performance Work rules).
+            if roi_formula_spectrum_results:
+                per_roi_metric_values = {}
+                _per_roi_fit_started = time.perf_counter()
+                for _roi_id, _roi_spectrum in roi_formula_spectrum_results.items():
+                    if fit_method_key == "none":
+                        _roi_metric_value, _roi_metric_signal = metric_value_from_spectrum(
+                            _roi_spectrum.wavelengths_nm, _roi_spectrum.formula_values, metric_key, wl_min=wl_min, wl_max=wl_max
+                        )
+                    else:
+                        _roi_fit = fit_curve_for_method(
+                            _roi_spectrum.wavelengths_nm,
+                            _roi_spectrum.formula_values,
+                            fit_method_key,
+                            poly_order=poly_order,
+                            wl_min=wl_min,
+                            wl_max=wl_max,
+                        )
+                        _roi_metric_value, _roi_metric_signal = metric_value_from_fit(_roi_fit, metric_key)
+                    per_roi_metric_values[int(_roi_id)] = (
+                        float(_roi_metric_value) if _roi_metric_value is not None and np.isfinite(_roi_metric_value) else float("nan"),
+                        float(_roi_metric_signal) if _roi_metric_signal is not None and np.isfinite(_roi_metric_signal) else float("nan"),
+                    )
+                logging.getLogger("lspr_imaging_app.workflow").debug(
+                    "SG per-roi metric fit timing | cube %s | rois=%s | %.1fms",
+                    int(spectral_cube_index),
+                    len(per_roi_metric_values),
+                    (time.perf_counter() - _per_roi_fit_started) * 1000.0,
+                )
+
         spectral_cube_indices.append(int(spectral_cube_index))
         metric_values.append(metric_float)
         metric_signals.append(signal_float)
@@ -1469,6 +1515,7 @@ def _sensorgram_metric_task(
                     metric_value=None if not np.isfinite(metric_float) else metric_float,
                     metric_signal=None if not np.isfinite(signal_float) else signal_float,
                     roi_formula_spectrum_results=roi_formula_spectrum_results,
+                    per_roi_metric_values=per_roi_metric_values,
                 )
             )
         if progress_callback is not None:
