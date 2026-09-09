@@ -261,7 +261,11 @@ next flush. Mitigated three ways:
   buffered data is real regardless of which logical run produced it),
   `_close_measurement_export_writer` (dataset switch/close), and
   `MainWindow.closeEvent` (app close). Only an actual crash mid-batch loses
-  anything.
+  anything. **This turned out to be wrong as originally implemented - see
+  the 2026-09-09 follow-up at the end of this doc:** none of these flushes
+  actually reached disk until the writer was closed, so a crash anywhere
+  during a run lost the whole session's backup, not just the current
+  batch. Fixed there.
 - Default batch size is 5 (not larger), keeping the worst case small.
 - User-configurable via **Preferences -> Analysis: measurement backup ->
   Write batch size** (`MainWindow._measurement_backup_batch_size`/`_set_
@@ -322,3 +326,71 @@ gradually (likely still just tens of MB at this dataset's scale, but a real
 change in behavior worth deciding on deliberately). Flagged for a future
 session once the current mitigations (batching + manual compact) have been
 tested in real use and there's a clear signal they're insufficient.
+
+## Follow-up (2026-09-09): "Only an actual crash mid-batch loses anything" was wrong - the file was never actually reaching disk during a run at all
+
+Reported symptom: `measurement_backup.h5` sits at ~0 bytes for the entire
+duration of "Start analysis", and only reaches its real size when the app is
+closed.
+
+### Root cause: `_flush_measurement_backup_buffers` was a RAM-to-h5py flush, not a disk flush
+
+The "crash-safety trade-off" section above (written when batching was
+added) treats `_flush_measurement_backup_buffers` running at every graceful
+exit point as sufficient - "only an actual crash mid-batch loses anything."
+That's true for the RAM buffer (dict of not-yet-appended rows), but it
+silently assumed `writer.append_formula_spectrum_batch`/`append_
+sensorgram_point_batch` landing data *inside the open h5py handle* was the
+same as that data being *on disk*. It isn't. h5py/HDF5 keeps writes to a
+resizable dataset in its own in-memory cache and does not push them to the
+real file until `File.flush()` (or `.close()`) is called - confirmed
+directly: a 500-row resizable dataset stayed at 96 bytes on disk through
+every single append, then jumped to its real size the instant `flush()` was
+called.
+
+`ImagingMeasurementExportWriter.flush()` (a thin wrapper over `self._handle.
+flush()`) already existed, but grepping every call site in the app found it
+was only ever reached from two manual, user-triggered actions -
+`export_snapshot` ("Export Results...") and `compact` ("Compact backup
+file") - never from the analysis run's own write path. So the real
+crash-safety picture was: **any crash from the moment a run starts until
+the app is next closed or the dataset is switched loses the entire
+session's backup**, not just "up to `measurement_backup_batch_size` cubes'
+worth" as this doc previously claimed - because nothing written by that run
+had reached disk yet regardless of how many batches had flushed the RAM
+buffer.
+
+(Bug D's own diagnosis above logged the file's on-disk size mid-run and saw
+it grow, 42.2 -> 42.5MB over 93 cubes - that measurement predates this fix
+and was evidently taken with some ad-hoc `flush()` call added for that one
+debug session, not code that shipped; the current source had no such call
+anywhere in the live path, confirmed by grep before this fix landed.)
+
+### Fix: `writer.flush()` added to the one shared write function, not scattered per caller
+
+`_write_measurement_backup_buffers` (`analysis_worker_mixin.py:244`) is the
+single module-level function both the synchronous flush
+(`_flush_measurement_backup_buffers`, main thread) and the periodic
+background one (`_flush_measurement_backup_buffers_async`, dedicated
+single-worker `QThreadPool`) already funnel through - exactly the "one
+place this logic can't drift" seam its own docstring calls out. Added one
+`writer.flush()` call at the end, gated on whether anything was actually
+appended this call (so an empty flush - nothing buffered - stays free, as
+`_flush_measurement_backup_buffers`'s own docstring already promises).
+
+**Performance impact, measured, not assumed** (per this repo's own
+performance-work rule: verify before calling a change done): built a
+realistic synthetic backup file (160 ROIs x 26 wavelengths, matching this
+app's real scale) and timed 60 batches of 5 rows each. Batch write itself:
+~130-150ms. Added `flush()` after each batch: **~1.3-1.5ms, ~1% overhead**,
+and flat across early vs. late batches (no growth with resize-history, unlike
+Bug D's write cost). Since the periodic path already runs entirely on the
+background thread pool, this added cost never touches the GUI thread or the
+next cube's own analysis time either - the flush now happens where the
+batch write already was, not somewhere new.
+
+Verified end-to-end: opened a writer, ran one 5-row batch through `_write_
+measurement_backup_buffers` with no explicit `close()` afterward - file
+size went from 96 bytes (freshly opened) to its real ~150KB immediately,
+where before this fix it would have stayed at 96 bytes until something
+closed the handle. `pytest tests/ -k lspri` (604 tests) passes unchanged.
