@@ -10,6 +10,11 @@ from pathlib import Path
 
 import numpy as np
 
+try:
+    import psutil as _psutil
+except ImportError:  # pragma: no cover - diagnostic only, see _cpu_freq_text below
+    _psutil = None
+
 from lspr_imaging_app.domain.models import FormulaSpectrumResult, AreaRoi, AreaRoiDetectionSettings, ChromaticTransformModel, ImageDataset
 from lspr_imaging_app.gui.worker import SensorgramComputationResult, SensorgramPointResult
 from lspr_imaging_app.io.dataset import dataset_load_plane_roi, export_ome_zarr_dataset, load_image_array
@@ -1202,6 +1207,32 @@ def _scoped_formula_spectrum_task(
 SENSORGRAM_GC_COLLECT_INTERVAL_CUBES = 10
 
 
+def _cpu_freq_text() -> str:
+    """"current=NNNNMHz max=NNNNMHz", or "" when unavailable (psutil not
+    installed, or this platform/CPU doesn't expose live frequency - both
+    common, e.g. inside a VM or container). Logged once per cube (see "SG
+    cube compute timing" below) to help confirm or rule out CPU frequency
+    throttling (a Turbo Boost/Precision Boost PL2->PL1 step-down after
+    sustained load) as the cause of a still-open, previously-observed
+    mid-run per-cube slowdown - see bulk_analysis_performance_
+    investigation.md's Follow-up #11 "leading hypothesis, not yet tested"
+    and its own note that this exact measurement was what was missing to
+    confirm or rule it out. Cheap enough to leave unconditionally on
+    (measured ~2-3us/call - negligible against a ~1s/cube sweep, same
+    reasoning as this file's existing time.perf_counter() stage timers).
+    """
+    if _psutil is None:
+        return ""
+    try:
+        freq = _psutil.cpu_freq()
+    except Exception:
+        return ""
+    if freq is None or not freq.current:
+        return ""
+    max_text = f" max={freq.max:.0f}MHz" if freq.max else ""
+    return f" cpu_freq: current={freq.current:.0f}MHz{max_text}"
+
+
 def _sensorgram_metric_task(
     spectral_cube_payloads_or_spectral_cubes,
     poly_order: int,
@@ -1423,10 +1454,11 @@ def _sensorgram_metric_task(
                     _gc.collect()
                     _gc_countdown = SENSORGRAM_GC_COLLECT_INTERVAL_CUBES
             logging.getLogger("lspr_imaging_app.workflow").debug(
-                "SG cube compute timing | cube %s | %.1fms | cache_hit=%s",
+                "SG cube compute timing | cube %s | %.1fms | cache_hit=%s |%s",
                 int(spectral_cube_index),
                 (time.perf_counter() - _cube_compute_started) * 1000.0,
                 not freshly_computed,
+                _cpu_freq_text(),
             )
             if not exempt_from_cancel_check and cancel_event is not None and cancel_event.is_set():
                 return SensorgramComputationResult(

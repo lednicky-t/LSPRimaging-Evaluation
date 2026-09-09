@@ -35,6 +35,16 @@ dependencies = [
     "opencv-python-headless>=5.0,<6",
     "tifffile>=2026.5.15,<2027",
     "lucide>=1.1,<2",
+    # Diagnostic only - see gui/analysis_tasks.py's _sensorgram_metric_task
+    # ("SG cpu freq" debug log line). Soft-imported (falls back to no-op if
+    # missing, mirroring the tifffile/zarrs optional-import pattern below),
+    # but still declared here per this repo's pinning policy: every
+    # dependency gets a floor+ceiling even when the code tolerates its
+    # absence. Added to help root-cause a still-open, previously-observed
+    # mid-run per-cube slowdown (see bulk_analysis_performance_
+    # investigation.md's Follow-up #11 "leading hypothesis: CPU frequency
+    # throttling", never confirmed for lack of exactly this instrumentation).
+    "psutil>=7.2,<8",
     "lspr-ui>=0.1.0",
     "lspr-core>=0.1.0",
     "lspr-io>=0.1.0",

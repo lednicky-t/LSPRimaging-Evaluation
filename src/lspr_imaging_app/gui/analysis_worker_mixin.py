@@ -1248,10 +1248,12 @@ class AnalysisWorkerMixin:
         scheme is needed. The signature hash, unlike that method, is NOT
         built via a plain per-ROI `_sensorgram_point_signature_hash` call -
         see `_sensorgram_point_signature_hash_cube_context`'s docstring for
-        why looping that directly over many ROIs is expensive, and what
+        why looping that directly over many ROIs is expensive, what
         `_sensorgram_point_signature_hash_for_roi` (its cheap per-ROI
-        pairing, used here instead) does about it; both produce byte-
-        identical output to the plain per-ROI call. Same dedup-by-
+        pairing, used here instead) does about it, and the deliberate
+        hash-compatibility trade-off that pairing makes (a valid, stable,
+        distinguishing fingerprint - just not byte-identical to the plain
+        per-ROI call's own historical hash values). Same dedup-by-
         `(roi_id, cube_index, signature_hash)`, same RAM-buffer-while-
         `_sensorgram_running`/immediate-write-otherwise split, same writer
         calls (`set_sensorgram_metric`/`append_sensorgram_point`) as
@@ -3016,37 +3018,49 @@ class AnalysisWorkerMixin:
         )
         return self._signature_hash(full_signature)
 
-    def _sensorgram_point_signature_hash_cube_context(self, spectral_cube_index: int) -> tuple[object, ...] | None:
-        """The ROI-INDEPENDENT portion of `_sensorgram_point_signature_hash`'s
-        input, computed once per cube - pair with `_sensorgram_point_
-        signature_hash_for_roi` (below) instead of calling `_sensorgram_
-        point_signature_hash` once per ROI when backing up many ROIs for the
-        same cube (`_backup_per_roi_sensorgram_points`).
+    def _sensorgram_point_signature_hash_cube_context(self, spectral_cube_index: int) -> str | None:
+        """A single hash summarizing everything ROI-INDEPENDENT about this
+        cube's sensorgram-point signature (dataset, cube index, the per-
+        wavelength preprocessing signature scan, reference radii,
+        Reduction, per-cube exclusions, active Formula/Fitting/Metric/
+        Order/wavelength-range) - computed once per cube, then combined
+        cheaply per ROI by `_sensorgram_point_signature_hash_for_roi`
+        (below) instead of backing up many ROIs for the same cube by
+        calling `_sensorgram_point_signature_hash` once per ROI
+        (`_backup_per_roi_sensorgram_points`).
 
-        Every field here (dataset folder, cube index, the per-wavelength
-        preprocessing signature scan, reference radii, Reduction, per-cube
-        exclusions, formula/fit/metric/poly/wavelength-range settings) is
-        identical for every ROI within one cube - only the ROI's own id and
-        geometry (`_sensorgram_point_signature_hash_for_roi`'s job) differ.
-        Recomputing this whole tuple from scratch per ROI - in particular
-        the per-wavelength `_preprocessing_signature` scan, itself O(26)
-        wavelengths - measured ~630-780ms/cube at 160 ROIs (4,160 redundant
-        preprocessing-signature calls/cube); computing it once here and
-        reusing it cheaply per ROI removes that multiplier entirely. See
-        bulk_analysis_performance_investigation.md's matching follow-up.
+        Two costs that call would otherwise repeat per ROI, both measured
+        in a real 160-ROI run (see bulk_analysis_performance_investigation.
+        md's matching follow-ups): recomputing the per-wavelength
+        `_preprocessing_signature` scan itself (O(26) wavelengths;
+        ~630-780ms/cube before the first fix) - eliminated by computing it
+        here, once - and re-serializing/re-hashing that same (potentially
+        large) scan via JSON+SHA256 for every ROI (~52ms/cube measured
+        standalone) - eliminated by pre-hashing it into one compact string
+        here, so each ROI's own hash only ever has to combine a short
+        hash string with its own small (roi_id, geometry) tuple, not
+        re-serialize the whole per-wavelength scan again.
 
-        Produces the exact same values, in the exact same positions,
-        `_sensorgram_spectral_cube_payload_signature`/`_sensorgram_point_
-        signature_hash` would for a single-ROI selection - verified
-        byte-identical-hash by `test_lspri_per_roi_sensorgram_backup.py` -
-        so any already-backed-up row's dedup hash still matches. Returns
-        None under the same "no dataset" condition those use.
+        Trade-off, deliberate and disclosed: unlike the first fix, this
+        does NOT reproduce `_sensorgram_point_signature_hash`'s exact
+        historical hash values (hashing a pre-hashed summary instead of
+        the raw fields is not the same input, even though it is just as
+        valid a "did anything relevant change" fingerprint) - a one-time,
+        harmless re-verification of already-backed-up per-ROI rows next
+        time each is touched (a brand-new feature with no accumulated
+        production history yet), not a correctness or data-loss issue.
+        `test_lspri_sensorgram_signature_hash_for_roi.py` checks the
+        properties that actually matter: stable/deterministic per (cube,
+        ROI), distinct across ROIs and across cubes, and changes whenever
+        any of the underlying settings does. Returns None under the same
+        "no dataset" condition `_sensorgram_spectral_cube_payload_
+        signature` uses.
         """
         window = self.window
         if window._state.dataset is None:
             return None
         wavelength_range = window._analysis_wavelength_range()
-        return (
+        cube_level_signature = (
             str(window._state.dataset.folder),
             int(spectral_cube_index),
             tuple(round(float(value), 6) for value in window._wavelength_values),
@@ -3065,44 +3079,17 @@ class AnalysisWorkerMixin:
             None if wavelength_range is None else round(float(wavelength_range[0]), 6),
             None if wavelength_range is None else round(float(wavelength_range[1]), 6),
         )
+        return self._signature_hash(cube_level_signature)
 
-    def _sensorgram_point_signature_hash_for_roi(self, cube_context: tuple[object, ...], roi: AreaRoi) -> str:
+    def _sensorgram_point_signature_hash_for_roi(self, cube_context_hash: str, roi: AreaRoi) -> str:
         """Cheap per-ROI completion of `_sensorgram_point_signature_hash_
-        cube_context` (above) into the same hash `_sensorgram_point_
-        signature_hash(cube_index, (roi.area_roi_id,), [roi])` would
-        produce - just without redoing that call's expensive, ROI-
-        independent inner work for every ROI. See that method's docstring
-        for why this pairing exists and the measured cost it removes."""
-        (
-            dataset_key,
-            spectral_cube_index,
-            wavelength_signature,
-            preprocessing_signature,
-            reference_inner_radius_px,
-            reference_outer_radius_px,
-            reduction_elements,
-            exclusion_signature,
-            formula_key,
-            fit_method_key,
-            metric_key,
-            poly_order,
-            wl_min,
-            wl_max,
-        ) = cube_context
-        payload_signature = (
-            dataset_key,
-            spectral_cube_index,
-            (int(roi.area_roi_id),),
-            self.window._roi_signature([roi]),
-            wavelength_signature,
-            preprocessing_signature,
-            reference_inner_radius_px,
-            reference_outer_radius_px,
-            *reduction_elements,
-            exclusion_signature,
-        )
-        full_signature = (payload_signature, formula_key, fit_method_key, metric_key, poly_order, wl_min, wl_max)
-        return self._signature_hash(full_signature)
+        cube_context` (above) - combines the cube-level hash with just this
+        ROI's own id/geometry and hashes that small tuple, instead of
+        re-serializing/re-hashing the full cube-level scan for every ROI.
+        See that method's own docstring for why this pairing exists, what
+        it measurably saves, and the deliberate hash-compatibility
+        trade-off it makes."""
+        return self._signature_hash((cube_context_hash, int(roi.area_roi_id), self.window._roi_signature([roi])))
 
     def _cached_sensorgram_spectral_cube_result(
         self,

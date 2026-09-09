@@ -1940,3 +1940,207 @@ above, hash-uniqueness across ROIs/cubes, and the no-dataset guard) plus 2
 new tests in `test_lspri_per_roi_sensorgram_backup.py` (the cube-context
 `None` guard, and that the cube-context builder is called exactly once per
 cube, not once per ROI).
+
+## Follow-up #16 (2026-09-09, same day): the real run confirmed Follow-up
+## #15 helped, but two more real costs remained - both found and fixed
+
+A real production run after Follow-up #15 landed measured `per_roi_
+sensorgram=` down to **~150ms/cube** (from ~630-780ms) - the fix worked,
+but the maintainer's own follow-up report ("still ~1.95s/cube overall")
+prompted digging further rather than assuming the job was done. Two more
+real, distinct costs were found in the same code path, both specific to
+this session's new per-ROI backup call pattern (calling something 160x/cube
+that used to run once/cube).
+
+### Bug: `set_sensorgram_metric` wrote 3 HDF5 attributes unconditionally,
+### every call, even when nothing changed
+
+`ImagingMeasurementExportWriter.set_sensorgram_metric` (`storage/
+measurement_export.py`) sets `metric_name`/`formula_key`/`combined_
+roi_ids` as h5py group attributes on every call, regardless of whether the
+values already match what's there. `_backup_sensorgram_point` (the
+pre-existing combined-selection path) only ever called this once per cube,
+so the redundancy was invisible; `_backup_per_roi_sensorgram_points` calls
+it once per selected ROI - 160x/cube for values that don't actually change
+mid-run (Reduction/Formula/Metric/Fitting/Order are locked for a run's
+duration - Follow-up #13). Fixed with a small per-writer cache
+(`_sensorgram_metric_attrs_cache: dict[roi_id, (metric_name, formula_key,
+combined_roi_ids)]`) - the actual `.attrs[...] =` writes are skipped when
+the cached values already match, and the cache is cleared (not trusted)
+after `compact()` swaps in a new file handle. Standalone benchmark: ~33.5ms
+saved per cube at 160 ROIs on a small fresh file - real production savings
+plausibly larger, since HDF5 attribute-write cost on a long-lived, larger
+file with more accumulated resize history has consistently measured worse
+than a fresh-file benchmark throughout this whole doc (see Bug D in
+`measurement_backup_performance_and_crash_recovery.md`).
+
+### Bug: the per-ROI signature hash still re-serialized/re-hashed the
+### whole cube-level scan for every ROI, even after Follow-up #15
+
+Follow-up #15 stopped *recomputing* the expensive per-wavelength
+preprocessing scan per ROI, but `_sensorgram_point_signature_hash_for_roi`
+still rebuilt the *entire* flat signature tuple (embedding that same,
+potentially large, already-computed scan) and ran it through `signature_
+hash` (JSON serialize + SHA256) again for every ROI. Measured standalone on
+a realistically-sized signature (26 wavelengths, chromatic/mask-shaped
+sub-fields): **~326us/call, ~52ms/cube at 160 ROIs** - real, and entirely
+avoidable, since the bytes being re-serialized were identical across every
+ROI in the same cube.
+
+**Fix**: `_sensorgram_point_signature_hash_cube_context` now returns a
+single pre-computed hash *string* (not a tuple of raw fields) summarizing
+everything ROI-independent; `_sensorgram_point_signature_hash_for_roi`
+combines that short string with just the ROI's own `(roi_id, geometry)`
+and hashes *that* small tuple - each ROI's own hash work drops from
+serializing the full cube-level scan to serializing three short values.
+Standalone measurement with the real `signature_hash` function: **~3.2ms
+for all 160 ROIs** (was ~52ms), i.e. the per-ROI hashing cost is now
+essentially eliminated.
+
+**Trade-off, deliberate and disclosed - unlike Follow-up #15's fix, this
+one is NOT byte-identical to the original per-ROI `_sensorgram_point_
+signature_hash` call.** Hashing a pre-hashed summary is a different input
+than hashing the raw fields directly, even though it's an equally valid
+fingerprint (stable, deterministic, and still distinguishes every case
+that should be distinguished - verified by `test_lspri_sensorgram_
+signature_hash_for_roi.py`: same cube+ROI is stable across repeated calls,
+different ROIs/cubes get different hashes, and changing any one of
+dataset/wavelengths/preprocessing/reduction/formula/fit/metric/poly-order/
+wavelength-range changes the cube-level hash). Practical consequence: any
+per-ROI sensorgram row already backed up under the old hash scheme will
+look "changed" once and get re-verified/re-written the next time that
+exact (cube, ROI) combination is touched - a one-time, harmless cost, not
+data loss - acceptable here specifically because this is a brand-new
+feature (added this same session) with no accumulated production history
+yet to disturb.
+
+### Combined result
+
+| Stage | Before #15 | After #15 | After #16 |
+|---|---:|---:|---:|
+| `per_roi_sensorgram=` (measured, production log) | ~630-780ms/cube | ~150ms/cube | not yet re-measured against a real run |
+| Signature hashing alone (standalone, 160 ROIs) | n/a (recomputed the whole scan) | ~52ms (re-hash only) | ~3.2ms |
+| `set_sensorgram_metric` attrs (standalone, 160 ROIs, fresh file) | ~33.5ms/cube | ~33.5ms/cube (not yet fixed) | ~0ms/cube (cache hit after cube 1) |
+
+### Also found, deliberately NOT touched: `sample_count=400` in the fit
+### functions is a further, real lever - but changes actual computed values
+
+`fit_polynomial_curve`/`fit_gaussian_curve` (`processing/analysis.py`) each
+build a dense 400-point sampled curve (`fitted_wavelengths_nm`/`fitted_
+values`) regardless of caller. For **polynomial** fits this array is
+already redundant for the *primary* metric - `peak_wavelength_nm`/`peak_
+value` come from the polynomial's exact derivative roots and `centroid_nm`
+from its exact closed-form integral, none of which touch the sampled
+array; only the *secondary* `centroid_y` (via `metric_value_from_fit`'s
+`np.interp` against the sampled curve) depends on it. For **Gaussian**
+fits, `centroid_nm` itself is computed by numerically integrating
+(`np.trapezoid`) over that same sampled array, so it's not just a display
+convenience there - a lower sample count would change the *primary*
+reported value for a Gaussian+Centroid combination, by however much a
+coarser numerical integration differs from a finer one (plausibly tiny for
+a smooth peak, not measured here). Standalone measurement on realistic
+noisy synthetic data: ~187ms/cube (poly) / ~158ms/cube (gaussian) for 160
+ROIs' worth of fit+metric extraction - noticeably more than the earlier
+clean-synthetic-data estimate in Follow-up #13, real noisy absorbance data
+is genuinely more expensive to fit than a clean synthetic peak. Not acted
+on: `fit_curve_for_method` doesn't currently expose `sample_count` to
+callers at all (would need new plumbing), and, more importantly, this
+touches actual computed values for one fit-method/metric combination - per
+this repo's own rule on scientific-compute-path changes, that needs its
+own correctness check and the maintainer's explicit sign-off, not a
+performance-driven change made unilaterally. Flagged here as a real,
+sized, available option if the remaining per-ROI-fit cost (not itself a
+bug - see Follow-ups #13-14) is still worth shaving down after re-measuring
+Follow-up #16's fixes against a real run.
+
+### Verification
+
+`pytest tests/ -k lspri` (598 tests, up 10 from 588) passes - 2 new tests
+in `test_lspri_measurement_export.py` (the `set_sensorgram_metric` dedup:
+skips a redundant write for unchanged values, still writes when values
+actually change), and `test_lspri_sensorgram_signature_hash_for_roi.py`
+rewritten (6 tests) to check the new hash-composition properties instead
+of byte-identical equivalence to the pre-#16 implementation.
+
+**Not yet independently confirmed against a real run** - same caveat as
+Follow-up #15: check the next real run's `SG backup timing` line for
+`per_roi_sensorgram=` (expect single-digit ms, not ~150ms) and the overall
+per-cube average before assuming this closes the whole gap. The mid-run
+climb documented in Follow-up #11 (io=/reduce= both drifting upward over a
+long run, thermal throttling suspected, still unconfirmed) is a separate,
+pre-existing, unrelated phenomenon that will still be present regardless -
+don't attribute all remaining per-cube variance to this feature.
+
+## Follow-up #17 (2026-09-09, same day): instrumented the one missing
+## measurement to actually confirm or rule out Follow-up #11's thermal-
+## throttling hypothesis
+
+Follow-up #11 left the mid-run slowdown (io=/reduce= climbing over a long
+run) as an open question with a specific, named next step: "would need
+`psutil.cpu_freq()` ... sampled throughout a real, several-minutes-long
+in-app run and correlated against the per-cube stage timing log, which
+wasn't done this session." That measurement is now permanent
+instrumentation instead of a one-off script, so the next real long run
+answers the question on its own without a dedicated diagnostic session.
+
+### What was added
+
+`_cpu_freq_text()` (`gui/analysis_tasks.py`) reads `psutil.cpu_freq()` and
+formats `" cpu_freq: current=NNNNMHz max=NNNNMHz"` (or `""` when
+unavailable - psutil missing, the call raising, or no live reading exposed
+on this platform/CPU, all handled without ever raising into the caller).
+Appended to the existing `SG cube compute timing` line, so every cube's own
+compute time and the CPU's clock speed at that moment land on the same,
+already-`cube`-indexed log line - no separate line to correlate by
+timestamp. Measured cost: ~2-3us/call (`psutil.cpu_freq()` itself), i.e.
+free against a ~1s+/cube sweep - left unconditionally on, same reasoning as
+this file's existing stage timers (CLAUDE.md's Performance Work rules).
+
+`psutil` is a new dependency (`apps/LSPRi/eva/pyproject.toml`,
+`psutil>=7.2,<8` - normal semver, ceiling is next major per this repo's
+pinning policy), soft-imported (`try/except ImportError`, mirroring the
+existing `tifffile`/`zarrs` optional-import pattern in `io/dataset.py`) so
+a system missing it just never gets the `cpu_freq` segment, not a crash.
+
+### How to actually read the answer once a new long run's log exists
+
+Grep `SG cube compute timing` from a real several-minutes-long run and
+compare the `cpu_freq: current=` value on early cubes against late ones,
+alongside each cube's own `%.1fms` duration (exactly the correlation
+Follow-up #11 asked for):
+
+- **Confirms throttling**: `current=` drops over the run (e.g. sustained
+  near `max=` early, sagging toward a lower sustained value after ~30-60s
+  of continuous load - the classic PL2->PL1 Turbo Boost/Precision Boost
+  step-down signature) *and* that drop's timing lines up with cube time
+  climbing. If so, this is a hardware/OS power-management ceiling, not
+  something fixable in this app's own code - see Follow-up #11's own
+  conclusion on that.
+- **Rules it out**: `current=` stays roughly flat (whether already at a
+  reduced value throughout, or holding near `max=`) while cube time still
+  climbs - points elsewhere (OS scheduler contention from another process,
+  a cache/memory-locality effect, disk-level throttling, or something not
+  yet considered) and this doc's own log-first method should be applied
+  fresh rather than assuming thermal throttling by default.
+- **Inconclusive**: some psutil/Windows combinations report a rounded or
+  static `current=` value that doesn't actually track live turbo state -
+  if every cube shows the identical number for a whole run, that's a sign
+  this particular signal isn't informative on this machine, not that
+  nothing is happening; Windows' own richer power/thermal counters (via
+  WMI or `CallNtPowerInformation`) would be the next, heavier-weight
+  instrument to reach for specifically in that case - not implemented here.
+
+### Verification
+
+`pytest tests/ -k lspri` (604 tests, up 6 from 598) passes -
+`test_lspri_cpu_freq_diagnostic.py` (6 tests: psutil missing, `cpu_freq()`
+raising, a `None`/zero-current reading, a valid reading formatted
+correctly, and a zero-`max` reading omitting the misleading `max=0MHz`
+segment) - all exercise `_cpu_freq_text()` directly with a fake `psutil`
+stand-in, never the real one, so this suite's own result doesn't depend on
+what hardware it happens to run on.
+
+**Not yet confirmed either way** - this follow-up only adds the
+measurement; a real several-minutes-long run's log is still needed to read
+an actual answer. Worth sharing that log (or just the `cpu_freq=` /
+duration trend across early vs. late cubes) once available.

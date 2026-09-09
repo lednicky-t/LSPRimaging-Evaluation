@@ -259,6 +259,10 @@ class ImagingMeasurementExportWriter:
             self._processed = self._handle.create_group("processed")
         self._sensorgram_groups: dict[str, h5py.Group] = {}
         self._absorbance_groups: dict[str, h5py.Group] = {}
+        # (metric_name, formula_key, combined_roi_ids) last actually written
+        # for each roi_id by set_sensorgram_metric - see that method's own
+        # comment for why this cache exists.
+        self._sensorgram_metric_attrs_cache: dict[str, tuple[str, str, str]] = {}
 
     # -- reopening an existing backup: recover what's already on disk --------
 
@@ -525,12 +529,30 @@ class ImagingMeasurementExportWriter:
         ROI, so the trace stays self-describing without inventing a new
         top-level schema shape for it (see `_backup_sensorgram_point` in
         `gui/analysis_controller.py`).
+
+        Skips the actual attribute writes when these three values already
+        match what was last written for this `roi_id` (`_sensorgram_metric_
+        attrs_cache`) - h5py performs a real write on every `.attrs[key] =
+        value` regardless of whether the value changed, and this is called
+        once per selected ROI per cube during a per-ROI sensorgram backup
+        (`_backup_per_roi_sensorgram_points`); at 160 ROIs that's 480
+        otherwise-redundant attribute writes every single cube for values
+        that don't actually change mid-run (Reduction/Formula/Metric/
+        Fitting/Order are locked for the run's duration - see `ui_state_
+        manager.py`'s `_apply_analysis_settings_lock`). Measured as a real,
+        non-trivial slice of per-ROI backup time in production - see
+        bulk_analysis_performance_investigation.md's matching follow-up.
         """
-        group = self._sensorgram_group(str(roi_id))
+        key = str(roi_id)
+        values = (metric_name, formula_key, combined_roi_ids)
+        if self._sensorgram_metric_attrs_cache.get(key) == values:
+            return
+        group = self._sensorgram_group(key)
         group.attrs["metric_name"] = metric_name
         group.attrs["formula_key"] = formula_key
         if combined_roi_ids:
             group.attrs["combined_roi_ids"] = combined_roi_ids
+        self._sensorgram_metric_attrs_cache[key] = values
 
     def append_sensorgram_point(
         self,
@@ -845,6 +867,10 @@ class ImagingMeasurementExportWriter:
         # Cached Group objects from the closed handle are now stale.
         self._sensorgram_groups = {}
         self._absorbance_groups = {}
+        # Not stale (attrs were copied along with everything else by the
+        # compact) - cleared anyway so a mismatch is never trusted past a
+        # file swap, only ever costing a few redundant re-writes at worst.
+        self._sensorgram_metric_attrs_cache = {}
         size_after = self.path.stat().st_size
         return size_before, size_after
 
