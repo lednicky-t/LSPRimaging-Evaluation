@@ -1082,7 +1082,34 @@ def calibrate_analysis_worker_count() -> int | None:
     Returns None if calibration fails for any reason (missing tifffile, a
     read-only temp dir, etc.) - callers fall back to the previous
     os.cpu_count()-based heuristic, exactly as before this function existed.
+
+    Candidates deliberately stop at `cpu_count // 2` (roughly the physical
+    core count on most consumer/workstation CPUs) and never test the full
+    `os.cpu_count()` (all logical/hyperthreaded threads) - see Follow-up #18
+    in bulk_analysis_performance_investigation.md. The original version of
+    this function (Follow-up #12) *did* include the full logical count as a
+    candidate and was verified to return 4 (matching the hand-tuned value)
+    across three repeated *manual* trials on the maintainer's
+    4-physical/8-logical-core machine - but one real session's single timed
+    comparison returned 8 instead, costing ~25-30% more wall-clock over a
+    full 314-cube sweep. Follow-up #4 had already directly measured, on this
+    same machine, that 8 threads of contended LZW decode is ~2x slower
+    per-call than 4 - the exact regression this run reproduced. A follow-up
+    fix that timed each candidate 3 times and compared medians (rather than
+    one sample) did *not* make the choice reliable either - re-tested
+    live on this machine, still swung between 2, 8, and 4 across three
+    back-to-back trials - so the noise isn't a single-sample fluke, it's
+    inherent to how cheap and short this synthetic benchmark is. Since a
+    hyperthreaded/logical core is not a real extra execution unit for
+    CPU-bound work like LZW decode, and this repo's own careful, larger-scale
+    measurement (Follow-up #4: 26 real scoped reads, not 12 small synthetic
+    ones) already showed it never wins on the one machine tested, the
+    reliable fix is to simply never offer it as a candidate, rather than
+    trusting a noisy race to avoid it. Candidates are still timed 3 times
+    and compared by median (see `trials_per_candidate` below) to keep the
+    remaining, safer choices (1 vs 2 vs cpu_count//2) less noisy too.
     """
+    import statistics
     import tempfile
     import time as _time
     from concurrent.futures import ThreadPoolExecutor
@@ -1091,7 +1118,7 @@ def calibrate_analysis_worker_count() -> int | None:
         return None
     try:
         cpu_count = int(os.cpu_count() or 4)
-        candidates = sorted({1, 2, max(2, cpu_count // 2), cpu_count})
+        candidates = sorted({1, 2, max(2, cpu_count // 2)})
         with tempfile.TemporaryDirectory(prefix="lspr_analysis_worker_calibration_") as tmp:
             tmp_path = Path(tmp)
             rng = np.random.default_rng(0)
@@ -1117,10 +1144,14 @@ def calibrate_analysis_worker_count() -> int | None:
             # no accuracy benefit.
             read_all(max(candidates))
             timings_ms: dict[int, float] = {}
+            trials_per_candidate = 3
             for worker_count in candidates:
-                started = _time.perf_counter()
-                read_all(worker_count)
-                timings_ms[worker_count] = (_time.perf_counter() - started) * 1000.0
+                samples_ms = []
+                for _ in range(trials_per_candidate):
+                    started = _time.perf_counter()
+                    read_all(worker_count)
+                    samples_ms.append((_time.perf_counter() - started) * 1000.0)
+                timings_ms[worker_count] = statistics.median(samples_ms)
             best_ms = min(timings_ms.values())
             # Prefer the SMALLEST worker count within 10% of the best time,
             # not the strict minimum - several counts are often functionally

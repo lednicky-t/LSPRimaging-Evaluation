@@ -2144,3 +2144,98 @@ what hardware it happens to run on.
 measurement; a real several-minutes-long run's log is still needed to read
 an actual answer. Worth sharing that log (or just the `cpu_freq=` /
 duration trend across early vs. late cubes) once available.
+
+## Follow-up #18 (2026-09-09, same day): the real run's log came in - `cpu_freq` is static on this Windows machine, and a *different* regression (1.0-1.2s/cube -> 1.8s/cube) turned up alongside it
+
+Two real full 314-cube runs' logs were shared: one from before Follow-up #13's
+per-ROI backup fix was picked up
+(`lspr_imaging_20260909_164822.log`, `worker_count=4`) and one from after
+(`lspr_imaging_20260909_173902.log`, `worker_count=8`, includes the
+Follow-up #17 `cpu_freq` field).
+
+### Follow-up #13's backup-cost fix is confirmed working
+
+`per_roi_sensorgram=` dropped from ~120-260ms/cube (before) to a **~5-10ms/cube
+steady state** (after), one cube-0 outlier aside (791.2ms - a one-time
+warm-up cost, not representative). A ~20-30x reduction, exactly as intended.
+
+### `cpu_freq` is flat - but Follow-up #17's own "Inconclusive" branch applies, not "Rules it out"
+
+All 314 cubes in the after-run logged the identical `cpu_freq: current=
+1803MHz max=2304MHz` - no drift at all, early cube to late. Read alongside
+per-cube compute time also being flat (first-half avg 1793ms vs second-half
+avg 1820ms, ~1.5%, noise) this looks at first like a clean "throttling isn't
+happening" result.
+
+It isn't that clean. Directly tested whether this machine's `psutil.cpu_freq()`
+is actually live: sampled it 10x at idle (all 10 identical, 1803.0) and again
+6x while 8 Python threads busy-looped across every logical core for 3+
+seconds (still all identical, 1803.0 - if this reading tracked real turbo
+state, deliberately saturating every core for several seconds should have
+moved it). It didn't move a single time under either condition. That's
+Follow-up #17's own pre-written **"Inconclusive"** case, not "Rules it
+out": "some psutil/Windows combinations report a rounded or static
+`current=` value that doesn't actually track live turbo state." Confirmed -
+on this machine, `psutil.cpu_freq()` is exactly that. **The thermal-
+throttling question from Follow-up #11 remains open** - this diagnostic
+cannot answer it here; per Follow-up #17's own note, Windows' own richer
+power/thermal counters (WMI `Win32_Processor.CurrentClockSpeed` is the
+likely source of this static value in the first place; `CallNtPowerInformation`
+would be a different, potentially-live API) would be the next instrument to
+reach for, not implemented.
+
+### The real regression: 1.0-1.2s/cube (Follow-up #12's baseline) -> 1.8s/cube - traced to worker-count calibration noise picking the one value already known to be bad
+
+Per-cube compute time (`SG cube compute timing`) averaged 1417.6ms across
+the before-run (`worker_count=4`) and 1806.6ms across the after-run
+(`worker_count=8`) - a ~27% per-cube regression, and total sweep wall-clock
+went from 595s to 721s (~21% slower end to end) despite the backup-cost fix
+making *part* of each cube strictly cheaper. The only other thing that
+changed between the two runs was `calibrate_analysis_worker_count()`
+(Follow-up #12) picking a different value: 4 in the before-run, 8 in the
+after-run.
+
+8 is exactly the worker count Follow-up #4 already directly measured as
+**~2x slower per-call** than 4 for this same per-wavelength scoped-read
+pattern, on this same machine (795x1275px reads: 302.5ms/call at 4 workers
+vs 805.9ms/call at 8). Follow-up #12's own calibration function was supposed
+to avoid ever picking 8 here - and had been manually verified to return 4
+across three repeated trials when it was built - but this real session's
+single timed comparison happened to return 8 instead, reproducing the exact
+regression Follow-up #4 had already ruled out as a good idea on this
+hardware.
+
+**First fix attempted (insufficient):** timed each candidate 3x and compared
+medians instead of one sample. Re-tested live on this machine, 3 back-to-back
+calls to the patched function still returned 2, 8, and 4 - no more stable
+than before. The synthetic benchmark (12 small, page-cache-warm files) is
+just too cheap and short for its ranking of candidates to be reliable
+run-to-run on this machine, regardless of how many times each one is sampled.
+
+**Actual fix:** stop offering the full logical/hyperthreaded core count
+(`os.cpu_count()`) as a candidate at all. Candidates are now `{1, 2,
+max(2, cpu_count // 2)}` only - `cpu_count // 2` still scales up for
+genuinely larger hardware (more physical cores), same as before, but a
+hyperthreaded logical core was never a real extra execution unit for
+CPU-bound LZW decode, and Follow-up #4's own careful, larger-scale
+measurement (26 real reads, not 12 small synthetic ones) already showed it
+never wins on the one machine this has been tested on. Removing it from the
+race is more reliable than hoping a noisy race avoids it. Kept the
+median-of-3 timing per remaining candidate too, since it still reduces noise
+among the safer choices. Re-verified live: 4 repeated calls to the fixed
+function all returned 4 (previously: 2, 8, 4 across 3 calls with only the
+median-of-3 change; 8, unpredictably, before that).
+
+`src/lspr_imaging_app/io/dataset.py`'s `calibrate_analysis_worker_count()` -
+docstring and candidate-set change only, no change to the read path itself
+or to `_scoped_formula_spectrum_task`'s use of `worker_count_override`.
+
+### Verification
+
+`pytest tests/ -k lspri` (604 tests) passes unchanged - no existing test
+exercises this function directly (it was previously only verified by hand,
+per Follow-up #12). Live-verified via 4 repeated direct calls to
+`calibrate_analysis_worker_count()` on the maintainer's machine, all
+returning 4 (see above) - the real test of whether this generalizes
+correctly to a machine with more physical cores is, as Follow-up #12 already
+noted about itself, necessarily deferred to different hardware.
