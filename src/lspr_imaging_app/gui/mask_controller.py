@@ -56,19 +56,7 @@ class MaskController:
                 window.mask_pencil_check.blockSignals(False)
                 window.status_label.setText("Mask drawing is available only on the reference image.")
                 return
-            window.rotate_action.blockSignals(True)
-            window.rotate_action.setChecked(False)
-            window.rotate_action.blockSignals(False)
-            window.crop_action.blockSignals(True)
-            window.crop_action.setChecked(False)
-            window.crop_action.blockSignals(False)
-            window.roi_edit_action.blockSignals(True)
-            window.roi_edit_action.setChecked(False)
-            window.roi_edit_action.blockSignals(False)
-            window.chromatic_grid_button.blockSignals(True)
-            window.chromatic_grid_button.setChecked(False)
-            window.chromatic_grid_button.blockSignals(False)
-            window._active_tool = "mask"
+            window._activate_tool("mask")
         elif window._active_tool == "mask":
             window._active_tool = None
         window._mask_drawing = False

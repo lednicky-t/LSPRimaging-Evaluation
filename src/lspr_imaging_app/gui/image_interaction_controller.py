@@ -148,22 +148,30 @@ class ImageInteractionController:
         if image_view is None:
             return False
 
+        # Middle-drag always pans, in every tool/mode - this is checked first,
+        # ahead of any tool-specific branch below, so it can never be shadowed
+        # by a tool that doesn't otherwise touch MiddleButton. The pan math
+        # itself (_begin/_update/_end_image_pan) is already tool-agnostic;
+        # this used to be wired up only for the crop tool.
+        if watched is image_view.viewport() and event.type() == QEvent.Type.MouseButtonPress and event.button() == Qt.MouseButton.MiddleButton:
+            point = self._image_point_from_mouse_event(event)
+            if point is None:
+                return False
+            self._begin_image_pan(point)
+            image_view.viewport().setCursor(Qt.CursorShape.ClosedHandCursor)
+            return True
+        if watched is image_view.viewport() and event.type() == QEvent.Type.MouseMove and w._panning_image:
+            point = self._image_point_from_mouse_event(event)
+            if point is None:
+                return True
+            self._update_image_pan(point)
+            return True
+        if watched is image_view.viewport() and event.type() == QEvent.Type.MouseButtonRelease and event.button() == Qt.MouseButton.MiddleButton and w._panning_image:
+            self._end_image_pan()
+            image_view.viewport().unsetCursor()
+            return True
+
         if watched is image_view.viewport() and w._active_tool == "crop":
-            if event.type() == QEvent.Type.MouseButtonPress and event.button() == Qt.MouseButton.MiddleButton:
-                point = self._image_point_from_mouse_event(event)
-                if point is None:
-                    return False
-                self._begin_image_pan(point)
-                return True
-            if event.type() == QEvent.Type.MouseMove and w._panning_image:
-                point = self._image_point_from_mouse_event(event)
-                if point is None:
-                    return True
-                self._update_image_pan(point)
-                return True
-            if event.type() == QEvent.Type.MouseButtonRelease and event.button() == Qt.MouseButton.MiddleButton and w._panning_image:
-                self._end_image_pan()
-                return True
             if event.type() == QEvent.Type.MouseButtonPress and event.button() == Qt.MouseButton.RightButton:
                 point = self._image_point_from_mouse_event(event)
                 if point is None:
@@ -193,24 +201,57 @@ class ImageInteractionController:
                 return True
 
         if watched is image_view.viewport() and w._active_tool == "chromatic_landmark":
+            # Double-click places/replaces the currently-selected landmark ID.
+            # Right-drag moves an existing landmark; a plain right-click (no
+            # drag) opens a small menu to clear it. Disambiguated with the
+            # same press-then-check-distance pattern the ROI edit mode below
+            # uses for its own right-click-vs-drag split.
+            if event.type() == QEvent.Type.MouseButtonDblClick and event.button() == Qt.MouseButton.LeftButton:
+                point = self._image_point_from_mouse_event(event)
+                if point is None:
+                    return True
+                w._selected_landmark_id = int(w._chromatic_landmark_marker_id)
+                w._set_current_landmark(point)
+                return True
+
             if event.type() == QEvent.Type.MouseButtonPress and event.button() == Qt.MouseButton.RightButton:
                 point = self._image_point_from_mouse_event(event)
                 if point is None:
                     return False
                 landmark_id = w._find_landmark_id_at(point)
-                if landmark_id is not None:
-                    w._selected_landmark_id = landmark_id
-                    w.chromatic_landmark_id_spin.blockSignals(True)
-                    w.chromatic_landmark_id_spin.setValue(landmark_id)
-                    w.chromatic_landmark_id_spin.blockSignals(False)
-                    w._prepare_undo_snapshot("Chromatic landmarks")
-                    w._dragging_landmark = True
-                    w._dragging_landmark_started = False
-                    w._update_landmark_overlays()
-                else:
-                    w._selected_landmark_id = int(w._chromatic_landmark_marker_id)
-                    w._set_current_landmark(point)
+                if landmark_id is None:
+                    return True
+                w._chromatic_landmark_press_point = point
+                w._chromatic_landmark_press_id = landmark_id
+                w._dragging_landmark = False
+                w._dragging_landmark_started = False
                 return True
+
+            if (
+                event.type() == QEvent.Type.MouseMove
+                and w._chromatic_landmark_press_id is not None
+                and not w._dragging_landmark
+            ):
+                point = self._image_point_from_mouse_event(event)
+                if point is None or w._chromatic_landmark_press_point is None:
+                    return True
+                distance = hypot(
+                    float(point[0] - w._chromatic_landmark_press_point[0]),
+                    float(point[1] - w._chromatic_landmark_press_point[1]),
+                )
+                if distance < self._selection_drag_threshold():
+                    return True
+                landmark_id = w._chromatic_landmark_press_id
+                w._selected_landmark_id = landmark_id
+                w.chromatic_landmark_id_spin.blockSignals(True)
+                w.chromatic_landmark_id_spin.setValue(landmark_id)
+                w.chromatic_landmark_id_spin.blockSignals(False)
+                w._prepare_undo_snapshot("Chromatic landmarks")
+                w._dragging_landmark = True
+                w._dragging_landmark_started = False
+                w._update_landmark_overlays()
+                return True
+
             if event.type() == QEvent.Type.MouseMove and w._dragging_landmark and w._selected_landmark_id is not None:
                 point = self._image_point_from_mouse_event(event)
                 if point is None:
@@ -224,13 +265,29 @@ class ImageInteractionController:
                     mark.y_px = float(np.clip(point[1], 0.0, max_y))
                     w._update_landmark_overlays()
                 return True
-            if event.type() == QEvent.Type.MouseButtonRelease and event.button() == Qt.MouseButton.LeftButton and w._dragging_landmark:
-                w._dragging_landmark = False
-                moved = w._dragging_landmark_started
-                w._dragging_landmark_started = False
-                if moved:
-                    w._finalize_chromatic_landmark_edit(status_text=f"Adjusted reference point {w._selected_landmark_id}.")
-                w._commit_prepared_undo_snapshot()
+
+            if event.type() == QEvent.Type.MouseButtonRelease and event.button() == Qt.MouseButton.RightButton:
+                if w._dragging_landmark:
+                    w._dragging_landmark = False
+                    moved = w._dragging_landmark_started
+                    w._dragging_landmark_started = False
+                    w._chromatic_landmark_press_point = None
+                    w._chromatic_landmark_press_id = None
+                    if moved:
+                        w._finalize_chromatic_landmark_edit(status_text=f"Adjusted reference point {w._selected_landmark_id}.")
+                    w._commit_prepared_undo_snapshot()
+                    return True
+                if w._chromatic_landmark_press_id is not None:
+                    landmark_id = w._chromatic_landmark_press_id
+                    w._chromatic_landmark_press_point = None
+                    w._chromatic_landmark_press_id = None
+                    w._selected_landmark_id = landmark_id
+                    w.chromatic_landmark_id_spin.blockSignals(True)
+                    w.chromatic_landmark_id_spin.setValue(landmark_id)
+                    w.chromatic_landmark_id_spin.blockSignals(False)
+                    w._update_landmark_overlays()
+                    self.show_chromatic_landmark_context_menu(landmark_id, event.globalPosition().toPoint())
+                    return True
                 return True
 
         if watched is w.image_view.viewport() and w._active_tool == "mask":
@@ -259,20 +316,44 @@ class ImageInteractionController:
             (w._active_tool == "roi")
             or (w._analysis_enabled and w._state.dataset is not None)
         )
+
+        # No tool active and nothing selectable (analysis off / no dataset):
+        # consume left/right clicks instead of letting them fall through to
+        # PyQtGraph's own default pan/zoom-drag - middle-drag above is the
+        # only thing that should ever pan the view.
+        if watched is w.image_view.viewport() and w._active_tool is None and not selection_mode_active:
+            if (
+                event.type() in (
+                    QEvent.Type.MouseButtonPress,
+                    QEvent.Type.MouseButtonRelease,
+                    QEvent.Type.MouseButtonDblClick,
+                )
+                and event.button() in (Qt.MouseButton.LeftButton, Qt.MouseButton.RightButton)
+            ):
+                return True
+
         if watched is w.image_view.viewport() and selection_mode_active:
-            allow_roi_add = w._active_tool == "roi" and w.roi_add_action.isChecked()
-            allow_roi_array = w._active_tool == "roi" and w.roi_array_action.isChecked()
-            allow_roi_move = w._active_tool == "roi" and w.roi_move_action.isChecked()
+            if event.type() == QEvent.Type.MouseButtonDblClick and event.button() == Qt.MouseButton.LeftButton:
+                # Double-click adds a new ROI - only inside ROI edit mode
+                # (idle/analysis-only browsing stays selection-only).
+                if w._active_tool != "roi" or not w._roi_add_editable:
+                    return True
+                point = self._image_point_from_mouse_event(event)
+                if point is None:
+                    return True
+                w._roi_selection_drag_start = None
+                w._roi_selection_drag_button = None
+                w._roi_selection_pressed_id = None
+                w._roi_selection_drag_modifiers = Qt.KeyboardModifier.NoModifier
+                if w._roi_selection_rubber_band is not None:
+                    w._roi_selection_rubber_band.hide()
+                w._add_roi_at(point)
+                return True
+
             if event.type() == QEvent.Type.MouseButtonPress and event.button() == Qt.MouseButton.LeftButton:
                 point = self._image_point_from_mouse_event(event)
                 if point is None:
                     return False
-                if allow_roi_array:
-                    w._add_roi_array_at(point)
-                    return True
-                if allow_roi_add:
-                    w._add_roi_at(point)
-                    return True
                 roi_id = w._find_roi_id_at(point)
                 modifiers = event.modifiers()
                 w._roi_selection_drag_start = point
@@ -300,59 +381,63 @@ class ImageInteractionController:
                 if point is None:
                     return False
                 roi_id = w._find_roi_id_at(point)
-                # Read the already-maintained enabled state (kept in sync by
-                # _sync_roi_edit_capabilities) instead of re-deriving the
-                # on_reference-or-chromatic condition here, so there is a
-                # single source of truth for ROI-move eligibility.
-                roi_move_allowed = w.roi_move_action.isEnabled()
-                if allow_roi_move and roi_move_allowed and roi_id is not None:
-                    if w._selected_roi_ids:
-                        drag_roi_ids = set(w._selected_roi_ids)
-                    else:
-                        w._selected_roi_ids = {roi_id}
-                        drag_roi_ids = {roi_id}
-                    w._update_roi_overlays()
-                    w._update_roi_summary()
-                    w._sync_roi_table_selection()
-                    w._update_selection_dependent_plots(prompt_live_preview=True)
-                    w._prepare_undo_snapshot("Move ROIs")
-                    w._dragging_rois = True
-                    w._drag_anchor = point
-                    w._drag_original_positions = {
-                        roi.area_roi_id: w._roi_display_position(roi, w._current_image_key)
-                        for roi in w._state.area_rois
-                        if roi.area_roi_id in drag_roi_ids
-                    }
+                if roi_id is not None:
+                    # Defer the click-vs-drag decision to the move/release
+                    # handlers below (same idea as the LMB rubber-band
+                    # press-then-check-distance split further down): a plain
+                    # click opens the context menu, a drag past the threshold
+                    # moves the ROI(s).
+                    w._roi_selection_drag_start = point
                     w._roi_selection_drag_button = Qt.MouseButton.RightButton
-                    w._roi_selection_drag_start = None
-                    w._roi_selection_pressed_id = None
-                    w._roi_selection_drag_modifiers = Qt.KeyboardModifier.NoModifier
+                    w._roi_selection_pressed_id = roi_id
+                    w._roi_selection_drag_modifiers = event.modifiers()
                     return True
-                if w._analysis_enabled and roi_id is not None:
-                    if roi_id not in w._selected_roi_ids:
-                        w._selected_roi_ids = {roi_id}
-                        w._update_roi_overlays()
-                        w._update_roi_summary()
-                        w._sync_roi_table_selection()
-                        w._update_selection_dependent_plots(prompt_live_preview=True)
-                    w._show_analysis_roi_context_menu(roi_id, event.globalPosition().toPoint())
-                    return True
-                if roi_id is None and getattr(w, "_image_cursor_readout_enabled", False):
+                if getattr(w, "_image_cursor_readout_enabled", False):
                     self.show_cursor_readout_context_menu(event.globalPosition().toPoint())
                     return True
                 return True
 
-            if event.type() == QEvent.Type.MouseButtonDblClick and event.button() == Qt.MouseButton.RightButton:
-                if not w._analysis_enabled:
+            if (
+                event.type() == QEvent.Type.MouseMove
+                and w._roi_selection_drag_start is not None
+                and w._roi_selection_drag_button == Qt.MouseButton.RightButton
+                and not w._dragging_rois
+            ):
+                current_point = self._image_point_from_mouse_event(event)
+                if current_point is None:
                     return True
-                point = self._image_point_from_mouse_event(event)
-                if point is None:
+                distance = hypot(
+                    float(current_point[0] - w._roi_selection_drag_start[0]),
+                    float(current_point[1] - w._roi_selection_drag_start[1]),
+                )
+                if distance < self._selection_drag_threshold():
                     return True
-                roi_id = w._find_roi_id_at(point)
-                if roi_id is None:
+                roi_id = w._roi_selection_pressed_id
+                # Read the already-maintained _roi_move_editable flag (kept in
+                # sync by _sync_roi_edit_capabilities) instead of re-deriving
+                # the on_reference-or-chromatic condition here, so there is a
+                # single source of truth for ROI-move eligibility.
+                if not w._roi_move_editable or roi_id is None:
+                    # Move isn't allowed here - stay pending, so release still
+                    # falls through to the click/context-menu path below.
                     return True
-                if w._select_group_members_for_roi(roi_id):
-                    w.status_label.setText(f"Selected group members for ROI {roi_id}.")
+                if roi_id in w._selected_roi_ids:
+                    drag_roi_ids = set(w._selected_roi_ids)
+                else:
+                    w._selected_roi_ids = {roi_id}
+                    drag_roi_ids = {roi_id}
+                w._update_roi_overlays()
+                w._update_roi_summary()
+                w._sync_roi_table_selection()
+                w._update_selection_dependent_plots(prompt_live_preview=True)
+                w._prepare_undo_snapshot("Move ROIs")
+                w._dragging_rois = True
+                w._drag_anchor = current_point
+                w._drag_original_positions = {
+                    roi.area_roi_id: w._roi_display_position(roi, w._current_image_key)
+                    for roi in w._state.area_rois
+                    if roi.area_roi_id in drag_roi_ids
+                }
                 return True
 
             if event.type() == QEvent.Type.MouseMove and w._dragging_rois and w._drag_anchor is not None:
@@ -398,19 +483,45 @@ class ImageInteractionController:
                 w._roi_selection_rubber_band.setGeometry(viewport_rect)
                 return True
 
-            if event.type() == QEvent.Type.MouseButtonRelease and event.button() == Qt.MouseButton.RightButton and w._dragging_rois:
-                w._dragging_rois = False
-                w._drag_anchor = None
-                w._drag_original_positions.clear()
+            if event.type() == QEvent.Type.MouseButtonRelease and event.button() == Qt.MouseButton.RightButton:
+                if w._dragging_rois and w._roi_selection_drag_button == Qt.MouseButton.RightButton:
+                    w._dragging_rois = False
+                    w._drag_anchor = None
+                    w._drag_original_positions.clear()
+                    w._roi_selection_drag_start = None
+                    w._roi_selection_drag_button = None
+                    w._roi_selection_pressed_id = None
+                    w._roi_selection_drag_modifiers = Qt.KeyboardModifier.NoModifier
+                    w._roi_overlay_refresh_timer.stop()
+                    w._update_roi_overlays()
+                    # _mark_roi_edit_refresh_pending() already saves+schedules
+                    # when the ROI tool is active, which this drag path requires
+                    # (see w._roi_move_editable above) - see roi_geometry_mixin.py's
+                    # _move_selected_rois for the matching keyboard-nudge fix.
+                    w._mark_roi_edit_refresh_pending()
+                    w.status_label.setText(f"Moved {len(w._selected_roi_ids)} selected ROIs.")
+                    return True
+                if w._roi_selection_drag_button == Qt.MouseButton.RightButton and w._roi_selection_pressed_id is not None:
+                    # A right-click without enough drag to commit to a move -
+                    # select the clicked ROI (if it wasn't already part of the
+                    # selection) and show the context menu for it/them.
+                    roi_id = w._roi_selection_pressed_id
+                    w._roi_selection_drag_start = None
+                    w._roi_selection_drag_button = None
+                    w._roi_selection_pressed_id = None
+                    w._roi_selection_drag_modifiers = Qt.KeyboardModifier.NoModifier
+                    if roi_id not in w._selected_roi_ids:
+                        w._selected_roi_ids = {roi_id}
+                        w._update_roi_overlays()
+                        w._update_roi_summary()
+                        w._sync_roi_table_selection()
+                        w._update_selection_dependent_plots(prompt_live_preview=True)
+                    w._show_analysis_roi_context_menu(roi_id, event.globalPosition().toPoint())
+                    return True
+                w._roi_selection_drag_start = None
                 w._roi_selection_drag_button = None
-                w._roi_overlay_refresh_timer.stop()
-                w._update_roi_overlays()
-                # _mark_roi_edit_refresh_pending() already saves+schedules
-                # when the ROI tool is active, which this drag path requires
-                # (see allow_roi_move above) - see roi_geometry_mixin.py's
-                # _move_selected_rois for the matching keyboard-nudge fix.
-                w._mark_roi_edit_refresh_pending()
-                w.status_label.setText(f"Moved {len(w._selected_roi_ids)} selected ROIs.")
+                w._roi_selection_pressed_id = None
+                w._roi_selection_drag_modifiers = Qt.KeyboardModifier.NoModifier
                 return True
 
             if (
@@ -622,3 +733,11 @@ class ImageInteractionController:
         text = f"x={x:.3f}\ty={y:.3f}\tI={intensity_text}"
         QApplication.clipboard().setText(text)
         w._set_status_text(f"Copied cursor readout: {text}")
+
+    def show_chromatic_landmark_context_menu(self, landmark_id: int, global_pos) -> None:
+        w = self.window
+        menu = QMenu(w)
+        clear_action = menu.addAction("Clear this point")
+        chosen = menu.exec(global_pos)
+        if chosen is clear_action:
+            w._clear_chromatic_landmark(landmark_id)

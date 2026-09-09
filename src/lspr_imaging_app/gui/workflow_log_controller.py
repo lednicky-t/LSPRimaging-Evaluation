@@ -383,22 +383,10 @@ class WorkflowLogController:
     def update_status_hint(self) -> None:
         window = self.window
         if window._active_tool == "roi":
-            if window._roi_editor_mode == "circles":
-                if window.roi_move_action.isChecked():
-                    self.set_status_hint("Left-click selects, right-drag moves. Arrow keys nudge. Delete removes.")
-                elif window.roi_add_action.isChecked():
-                    self.set_status_hint("Left-click places a circle ROI at the cursor position.")
-                elif window.roi_array_action.isChecked():
-                    self.set_status_hint("Left-click stamps a grid of circle ROIs centred on the cursor.")
-                else:
-                    self.set_status_hint("Left-click selects ROIs, Shift adds, box-drag multi-select, Delete removes.")
-                return
-            if window.roi_move_action.isChecked():
-                self.set_status_hint("Left-click selects, Shift adds, left-drag boxes, right-drag moves, middle-drag pans.")
-            elif window.roi_add_action.isChecked():
-                self.set_status_hint("Left-click adds an ROI. Shift-click still adds to selection.")
-            else:
-                self.set_status_hint("Left-click selects, Shift adds, left-drag boxes, double-click empty space clears selection.")
+            self.set_status_hint(
+                "Left-click selects (Shift adds, drag boxes), double-click adds an ROI, "
+                "right-drag moves, right-click opens the menu, middle-drag pans."
+            )
             return
         if window._active_tool == "mask":
             self.set_status_hint("Left-drag paints the mask. Use the toolbar icons to show, add, or subtract previews.")

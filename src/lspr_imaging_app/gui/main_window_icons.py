@@ -808,52 +808,6 @@ class MainWindowIcons:
         return QIcon(pixmap)
 
     @staticmethod
-    def _make_add_icon() -> QIcon:
-        icon = MainWindowIcons._lucide_icon("plus", "#22c55e", 24, stroke_width=2.8)
-        if not icon.isNull():
-            return icon
-        pixmap = QPixmap(24, 24)
-        pixmap.fill(Qt.GlobalColor.transparent)
-        painter = QPainter(pixmap)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        pen = QPen(QColor("#22c55e"), 2.8)
-        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
-        painter.setPen(pen)
-        painter.drawEllipse(QRectF(4.6, 4.6, 14.8, 14.8))
-        painter.drawLine(QLineF(12.0, 7.3, 12.0, 16.7))
-        painter.drawLine(QLineF(7.3, 12.0, 16.7, 12.0))
-        painter.end()
-        return QIcon(pixmap)
-
-    @staticmethod
-    def _make_move_icon() -> QIcon:
-        icon = MainWindowIcons._tabler_icon("arrows-move", "#38bdf8", 24, stroke_width=2.2)
-        if not icon.isNull():
-            return icon
-        pixmap = QPixmap(24, 24)
-        pixmap.fill(Qt.GlobalColor.transparent)
-        painter = QPainter(pixmap)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        pen = QPen(QColor("#38bdf8"), 2.6)
-        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
-        pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
-        painter.setPen(pen)
-        painter.drawLine(QLineF(12.0, 4.6, 12.0, 19.4))
-        painter.drawLine(QLineF(4.6, 12.0, 19.4, 12.0))
-        painter.drawLine(QLineF(12.0, 4.6, 9.0, 7.6))
-        painter.drawLine(QLineF(12.0, 4.6, 15.0, 7.6))
-        painter.drawLine(QLineF(12.0, 19.4, 9.0, 16.4))
-        painter.drawLine(QLineF(12.0, 19.4, 15.0, 16.4))
-        painter.drawLine(QLineF(4.6, 12.0, 7.6, 9.0))
-        painter.drawLine(QLineF(4.6, 12.0, 7.6, 15.0))
-        painter.drawLine(QLineF(19.4, 12.0, 16.4, 9.0))
-        painter.drawLine(QLineF(19.4, 12.0, 16.4, 15.0))
-        painter.setPen(QPen(QColor("#e0f2fe"), 2.0, cap=Qt.PenCapStyle.RoundCap, join=Qt.PenJoinStyle.RoundJoin))
-        painter.drawEllipse(QRectF(9.5, 9.5, 5.0, 5.0))
-        painter.end()
-        return QIcon(pixmap)
-
-    @staticmethod
     def _make_remove_icon() -> QIcon:
         icon = MainWindowIcons._lucide_icon("trash-2", "#ef4444", 24, stroke_width=2.2)
         if not icon.isNull():
@@ -1675,9 +1629,6 @@ class MainWindowIcons:
         buttons = [
             (self.roi_auto_histogram_action, {"accent": "blue"}),
             (self.roi_edit_action, {"primary": True}),
-            (self.roi_add_action, {"accent": "green"}),
-            (self.roi_array_action, {"accent": "green"}),
-            (self.roi_move_action, {"accent": "blue"}),
             (self.remove_rois_action, {"accent": "red"}),
         ]
         for action, kwargs in buttons:

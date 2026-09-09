@@ -116,42 +116,6 @@ class RoiGeometryMixin:
         self._mark_roi_edit_refresh_pending()
         self.status_label.setText(f"Added ROI {provisional.area_roi_id}.")
 
-    def _add_roi_array_at(self, point: tuple[float, float]) -> None:
-        if self._current_processed_image is None:
-            self.status_label.setText("No image available for adding ROI array.")
-            return
-        rows = int(self.array_rows_spin.value())
-        cols = int(self.array_cols_spin.value())
-        spacing = max(float(self._length_display_to_px(float(self.array_spacing_spin.value()))), 0.0)
-        if rows <= 0 or cols <= 0 or spacing <= 0.0:
-            self.status_label.setText("Set array rows, columns, and spacing before stamping an ROI array.")
-            return
-        radius = float(max(self._state.area_roi_settings.sample_radius_px, 1))
-        image_height, image_width = self._current_processed_image.shape[:2]
-        step = spacing
-        start_x = float(point[0]) - (cols - 1) * step / 2.0
-        start_y = float(point[1]) - (rows - 1) * step / 2.0
-        self._push_undo_point("Add ROI array")
-        next_id = len(self._state.area_rois) + 1
-        new_rois: list[AreaRoi] = []
-        for row in range(rows):
-            for col in range(cols):
-                cx = start_x + col * step
-                cy = start_y + row * step
-                cx = float(min(max(cx, radius), max(float(image_width - 1) - radius, radius)))
-                cy = float(min(max(cy, radius), max(float(image_height - 1) - radius, radius)))
-                roi = AreaRoi(area_roi_id=next_id, center_x=cx, center_y=cy, sample_radius_px=radius, score=0.0)
-                new_rois.append(roi)
-                next_id += 1
-        self._state.area_rois.extend(new_rois)
-        self._selected_roi_ids = {s.area_roi_id for s in new_rois}
-        self._update_roi_overlays()
-        self._update_roi_table()
-        self._update_roi_summary()
-        self._save_processing_state_for_dataset()
-        self._schedule_processing_state_save()
-        self.status_label.setText(f"Added ROI array: {len(new_rois)} ROIs.")
-
     def _clamp_roi_position(self, roi: AreaRoi, x: float, y: float) -> tuple[float, float]:
         if self._current_processed_image is None:
             return x, y
@@ -376,7 +340,12 @@ class RoiGeometryMixin:
             select_group_action = menu.addAction("Select group members")
             ungroup_action = menu.addAction("Ungroup")
             destroy_group_action = menu.addAction("Destroy group")
-            menu.addSeparator()
+        menu.addSeparator()
+        # Same enablement as the toolbar's Remove action (see
+        # _sync_roi_edit_capabilities) - reference-image-only, ROI edit mode
+        # only - so there's one source of truth for whether deleting is safe.
+        delete_action = menu.addAction("Delete selection")
+        delete_action.setEnabled(self.remove_rois_action.isEnabled())
         action = menu.exec(global_pos)
         if action is None:
             return
@@ -389,6 +358,8 @@ class RoiGeometryMixin:
             self._ungroup_selected_rois()
         elif destroy_group_action is not None and action is destroy_group_action:
             self._destroy_groups_for_roi(roi_id)
+        elif action is delete_action:
+            self._remove_selected_rois()
 
     def _reindex_detected_rois(self) -> None:
         roi_id_map: dict[int, int] = {}

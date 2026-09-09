@@ -423,6 +423,8 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, MeasurementCalibrationMixin,
         self._suspend_collapsible_accordion = False
         self._dragging_landmark = False
         self._dragging_landmark_started = False
+        self._chromatic_landmark_press_point: tuple[float, float] | None = None
+        self._chromatic_landmark_press_id: int | None = None
         self._dragging_rois = False
         self._drag_anchor: tuple[float, float] | None = None
         self._drag_original_positions: dict[int, tuple[float, float]] = {}
@@ -431,6 +433,11 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, MeasurementCalibrationMixin,
         self._roi_selection_drag_button: Qt.MouseButton | None = None
         self._roi_selection_pressed_id: int | None = None
         self._roi_selection_drag_modifiers: Qt.KeyboardModifier = Qt.KeyboardModifier.NoModifier
+        # Kept in sync by _sync_roi_edit_capabilities() - single source of
+        # truth for whether double-click-add / right-drag-move are currently
+        # allowed, read directly by ImageInteractionController.handle_event.
+        self._roi_add_editable = False
+        self._roi_move_editable = False
         self._roi_edit_refresh_pending = False
         self._roi_overlay_refresh_timer = QTimer(self)
         self._roi_overlay_refresh_timer.setSingleShot(True)
@@ -2231,22 +2238,10 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, MeasurementCalibrationMixin,
         )
         self.roi_edit_action = QAction(self._make_roi_edit_icon(), "Manual edit", self)
         self.roi_edit_action.setCheckable(True)
-        self.roi_edit_action.setToolTip("Left-click or right-click to select ROIs in the active ROI tab. Ctrl-click for group selection. Left-drag in Move mode to correct ROIs.")
+        self.roi_edit_action.setToolTip(
+            "Left-click to select ROIs, double-click to add one, right-drag to move, right-click for options."
+        )
         self.roi_edit_action.setShortcut(QKeySequence("Ctrl+E"))
-        self.roi_add_action = QAction(self._make_add_icon(), "Add", self)
-        self.roi_add_action.setCheckable(True)
-        self.roi_add_action.setEnabled(False)
-        self.roi_add_action.setToolTip("Left-click in the image to add a new ROI stamp using the active shape template.")
-        self.roi_add_action.setShortcut(QKeySequence("Ctrl+Shift+A"))
-        self.roi_move_action = QAction(self._make_move_icon(), "Move", self)
-        self.roi_move_action.setCheckable(True)
-        self.roi_move_action.setEnabled(False)
-        self.roi_move_action.setToolTip("Move selected ROIs by dragging or arrow keys while ROI edit mode is active.")
-        self.roi_move_action.setShortcut(QKeySequence("Ctrl+Shift+M"))
-        self.roi_array_action = QAction(self._tabler_icon("layout-grid"), "Array", self)
-        self.roi_array_action.setCheckable(True)
-        self.roi_array_action.setEnabled(False)
-        self.roi_array_action.setToolTip("Stamp a grid of ROIs using the active ROI tab template.")
         self.remove_rois_action = QAction(self._make_remove_icon(), "Remove", self)
         self.remove_rois_action.setEnabled(False)
         self.remove_rois_action.setToolTip("Remove the selected ROIs and renumber the remaining array.")
@@ -2652,7 +2647,6 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, MeasurementCalibrationMixin,
         self.reorder_rois_column_button.clicked.connect(lambda *_args: self._reorder_rois_by_position(column_major=True))
         self.clear_rois_button.clicked.connect(self._clear_detected_rois)
         self.clear_roi_selection_button.clicked.connect(self._clear_roi_selection)
-        self.roi_array_action.toggled.connect(self._on_roi_array_toggled)
         self.roi_list_action.toggled.connect(self._roi_table_controller.on_toggled)
         self.roi_list_panel.visibilityChanged.connect(self._on_roi_panel_visibility_changed)
         self.roi_table.itemSelectionChanged.connect(self._roi_table_controller.on_selection_changed)
@@ -2704,8 +2698,6 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, MeasurementCalibrationMixin,
         self.flip_horizontal_action.toggled.connect(self._on_flip_horizontal_toggled)
         self.flip_vertical_action.toggled.connect(self._on_flip_vertical_toggled)
         self.roi_edit_action.toggled.connect(self._on_roi_edit_tool_toggled)
-        self.roi_add_action.toggled.connect(self._on_roi_add_toggled)
-        self.roi_move_action.toggled.connect(self._on_roi_move_toggled)
         self.mask_color_button.clicked.connect(lambda: self._choose_overlay_color("mask"))
         self.sample_color_button.clicked.connect(lambda: self._choose_overlay_color("roi"))
         self.reference_color_button.clicked.connect(lambda: self._choose_overlay_color("reference"))
@@ -5330,6 +5322,9 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, MeasurementCalibrationMixin,
     def _clear_chromatic_landmarks(self, *, push_undo: bool = True) -> None:
         self._chromatic_controller.clear_landmarks(push_undo=push_undo)
 
+    def _clear_chromatic_landmark(self, landmark_id: int) -> bool:
+        return self._chromatic_controller.clear_landmark(landmark_id)
+
     def _set_current_spectral_cube_and_wavelength(self, spectral_cube_index: int, wavelength: float) -> None:
         self._capture_chromatic_view_ranges()
         if spectral_cube_index in self._spectral_cube_values:
@@ -5834,18 +5829,15 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, MeasurementCalibrationMixin,
             "ROI edit mode:\n"
             "Left-click: select an ROI\n"
             "Shift+Left-click: add an ROI to the selection\n"
-            "Double-left-click outside an ROI: clear the selection\n"
+            "Double-left-click: add a new ROI at the cursor\n"
             "Left-drag: draw a selection box\n"
-            "Right-drag: move selected ROIs when Move is active\n"
+            "Right-drag: move selected ROI(s)\n"
+            "Right-click (no drag): open the ROI menu (Group, Delete selection, ...)\n"
             "Middle-drag: pan the image view\n"
-            "Arrow keys: move selected ROIs while Move is active\n"
+            "Arrow keys: move selected ROIs\n"
             "Shift+Arrow: select neighboring ROI in the array\n"
-            "Ctrl+Arrow: move selected ROIs faster\n"
-            "Ctrl+Shift+A: Add mode for the active shape template\n"
-            "Ctrl+Shift+M: Move mode",
+            "Ctrl+Arrow: move selected ROIs faster",
         )
-        self._set_help(self.roi_add_action, "Add mode: click the image to place a new ROI from the active shape template.")
-        self._set_help(self.roi_move_action, "Move selected ROIs by dragging or arrow keys.")
         self._set_help(self.remove_rois_action, "Remove the selected ROIs.")
         self._set_help(self.group_rois_action, "Group selected ROIs.")
         self._set_help(self.ungroup_rois_action, "Ungroup selected ROIs.")
@@ -5876,30 +5868,43 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, MeasurementCalibrationMixin,
     def _on_measure_tool_toggled(self, checked: bool) -> None:
         self._image_tools_controller.on_measure_tool_toggled(checked)
 
+    def _activate_tool(self, name: str) -> None:
+        """Make `name` the sole active image-area tool: uncheck every other
+        tool's toggle (without re-entering their own toggled handlers), then
+        record the new active tool. Each toggle handler still does its own
+        gating (e.g. "reference image only") before calling this - this only
+        replaces the "uncheck my siblings" bookkeeping that used to be
+        hand-duplicated, slightly differently, in every handler."""
+        toggle_widgets = {
+            "rotate": self.rotate_action,
+            "crop": self.crop_action,
+            "measure": self.measure_action,
+            "roi": self.roi_edit_action,
+            "mask": self.mask_pencil_check,
+            "chromatic_grid_bounds": self.chromatic_grid_button,
+            "chromatic_landmark": self.chromatic_start_button,
+        }
+        for tool_name, widget in toggle_widgets.items():
+            if tool_name == name:
+                continue
+            widget.blockSignals(True)
+            widget.setChecked(False)
+            widget.blockSignals(False)
+        self._active_tool = name
+
     def _on_roi_edit_tool_toggled(self, checked: bool) -> None:
         if checked:
             # Deliberately does NOT force-navigate to the reference image.
-            # ROI *creation* (add/array-stamp) still requires the reference
-            # view - _sync_roi_edit_capabilities() below disables those
-            # controls on a non-reference wavelength - but *moving* an
+            # ROI *creation* (double-click add) still requires the reference
+            # view - _sync_roi_edit_capabilities() below disables that
+            # gesture on a non-reference wavelength - but *moving* an
             # existing ROI is intentionally supported while viewing any
             # wavelength once chromatic correction is enabled (see
             # _roi_display_position/_set_roi_position_for_current_view),
             # so jumping away here would fight that feature. Use the
             # explicit "Jump to reference image" button when reference-only
             # actions are needed.
-            self.mask_pencil_check.blockSignals(True)
-            self.mask_pencil_check.setChecked(False)
-            self.mask_pencil_check.blockSignals(False)
-            self.rotate_action.blockSignals(True)
-            self.rotate_action.setChecked(False)
-            self.rotate_action.blockSignals(False)
-            self.crop_action.blockSignals(True)
-            self.crop_action.setChecked(False)
-            self.crop_action.blockSignals(False)
-            self.roi_array_action.blockSignals(True)
-            self.roi_array_action.setChecked(False)
-            self.roi_array_action.blockSignals(False)
+            self._activate_tool("roi")
             if not self._rois_visible:
                 self.show_rois_check.blockSignals(True)
                 self.show_rois_check.setChecked(True)
@@ -5907,26 +5912,20 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, MeasurementCalibrationMixin,
                 self._rois_visible = True
                 self._refresh_view_toggle_icons()
                 self._save_visual_preferences()
-            self._active_tool = "roi"
             self._sync_roi_edit_capabilities()
+            if hasattr(self, "image_panel"):
+                self.image_panel.raise_()
+                if hasattr(self, "image_view") and self.image_view is not None:
+                    self.image_view.setFocus(Qt.FocusReason.ActiveWindowFocusReason)
+                    viewport = self.image_view.viewport()
+                    if viewport is not None:
+                        viewport.setFocus(Qt.FocusReason.ActiveWindowFocusReason)
             if self._is_current_reference_image():
                 self._set_status_text("ROI editor active.")
             else:
                 self._set_status_text("ROI inspect mode active.")
         elif self._active_tool == "roi":
             self._active_tool = None
-            self.roi_add_action.blockSignals(True)
-            self.roi_add_action.setChecked(False)
-            self.roi_add_action.blockSignals(False)
-            self.roi_add_action.setEnabled(False)
-            self.roi_move_action.blockSignals(True)
-            self.roi_move_action.setChecked(False)
-            self.roi_move_action.blockSignals(False)
-            self.roi_move_action.setEnabled(False)
-            self.roi_array_action.blockSignals(True)
-            self.roi_array_action.setChecked(False)
-            self.roi_array_action.blockSignals(False)
-            self.roi_array_action.setEnabled(False)
             self.remove_rois_action.setEnabled(False)
             self.group_rois_action.setEnabled(False)
             self.ungroup_rois_action.setEnabled(False)
@@ -5934,6 +5933,10 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, MeasurementCalibrationMixin,
         self._dragging_rois = False
         self._drag_anchor = None
         self._drag_original_positions.clear()
+        self._roi_selection_drag_start = None
+        self._roi_selection_drag_button = None
+        self._roi_selection_pressed_id = None
+        self._roi_selection_drag_modifiers = Qt.KeyboardModifier.NoModifier
         self._sync_rotation_visibility()
         self._sync_crop_visibility()
         self._sync_roi_edit_capabilities()
@@ -5950,8 +5953,8 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, MeasurementCalibrationMixin,
         self._mask_controller.set_draw_mode(mode)
 
     def _sync_roi_edit_capabilities(self) -> None:
-        # ROI creation (add/array-stamp) and removal/grouping stay anchored to
-        # the reference image - new ROIs are always authored in reference
+        # ROI creation (double-click add) and removal/grouping stay anchored
+        # to the reference image - new ROIs are always authored in reference
         # space (see AreaRoi.per_wavelength). Moving an *existing* ROI is also
         # allowed while viewing a non-reference wavelength once chromatic
         # correction is enabled, so the maintainer can independently nudge a
@@ -5962,65 +5965,13 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, MeasurementCalibrationMixin,
         move_editable = self._active_tool == "roi" and (
             on_reference or bool(self._state.preprocessing.chromatic_correction_enabled)
         )
-        self.roi_add_action.setEnabled(creation_editable)
-        self.roi_move_action.setEnabled(move_editable)
-        self.roi_array_action.setEnabled(creation_editable)
+        self._roi_add_editable = creation_editable
+        self._roi_move_editable = move_editable
         self.remove_rois_action.setEnabled(creation_editable)
         self.group_rois_action.setEnabled(creation_editable)
         self.ungroup_rois_action.setEnabled(creation_editable)
-        if not creation_editable:
-            self.roi_add_action.blockSignals(True)
-            self.roi_add_action.setChecked(False)
-            self.roi_add_action.blockSignals(False)
-            self.roi_array_action.blockSignals(True)
-            self.roi_array_action.setChecked(False)
-            self.roi_array_action.blockSignals(False)
-        if not move_editable:
-            self.roi_move_action.blockSignals(True)
-            self.roi_move_action.setChecked(False)
-            self.roi_move_action.blockSignals(False)
         self._sync_rotation_visibility()
         self._sync_crop_visibility()
-        self._update_status_hint()
-
-    def _on_roi_add_toggled(self, checked: bool) -> None:
-        if checked:
-            self.roi_move_action.blockSignals(True)
-            self.roi_move_action.setChecked(False)
-            self.roi_move_action.blockSignals(False)
-            self.roi_array_action.blockSignals(True)
-            self.roi_array_action.setChecked(False)
-            self.roi_array_action.blockSignals(False)
-        self._update_roi_overlays()
-        self._update_status_hint()
-
-    def _on_roi_move_toggled(self, checked: bool) -> None:
-        if checked:
-            self.roi_add_action.blockSignals(True)
-            self.roi_add_action.setChecked(False)
-            self.roi_add_action.blockSignals(False)
-            self.roi_array_action.blockSignals(True)
-            self.roi_array_action.setChecked(False)
-            self.roi_array_action.blockSignals(False)
-        if hasattr(self, "image_panel"):
-            self.image_panel.raise_()
-            if hasattr(self, "image_view") and self.image_view is not None:
-                self.image_view.setFocus(Qt.FocusReason.ActiveWindowFocusReason)
-                viewport = self.image_view.viewport()
-                if viewport is not None:
-                    viewport.setFocus(Qt.FocusReason.ActiveWindowFocusReason)
-        self._update_roi_overlays()
-        self._update_status_hint()
-
-    def _on_roi_array_toggled(self, checked: bool) -> None:
-        if checked:
-            self.roi_add_action.blockSignals(True)
-            self.roi_add_action.setChecked(False)
-            self.roi_add_action.blockSignals(False)
-            self.roi_move_action.blockSignals(True)
-            self.roi_move_action.setChecked(False)
-            self.roi_move_action.blockSignals(False)
-        self._update_roi_overlays()
         self._update_status_hint()
 
     def _on_flip_horizontal_toggled(self, checked: bool) -> None:

@@ -279,19 +279,7 @@ class ChromaticController:
     def on_grid_tool_toggled(self, checked: bool) -> None:
         window = self.window
         if checked:
-            for other in (
-                window.chromatic_start_button,
-                window.rotate_action,
-                window.crop_action,
-                window.measure_action,
-                window.mask_pencil_check,
-                window.roi_edit_action,
-                window.roi_array_action,
-            ):
-                other.blockSignals(True)
-                other.setChecked(False)
-                other.blockSignals(False)
-            window._active_tool = "chromatic_grid_bounds"
+            window._activate_tool("chromatic_grid_bounds")
             image = window._current_processed_image
             if image is not None:
                 self.sync_grid_tool(image.shape[:2])
@@ -488,6 +476,23 @@ class ChromaticController:
         window._set_status_text(
             f"Stored reference point {landmark_id} at {key[1]:g} nm spectral cube {key[0]}."
         )
+
+    def clear_landmark(self, landmark_id: int) -> bool:
+        """Reset a single reference point on the current image only, unlike
+        clear_landmarks() which wipes every point on every image. Used by the
+        landmark-editor's right-click "Clear this point" menu."""
+        window = self.window
+        existing = self.current_landmark(landmark_id)
+        if existing is None:
+            return False
+        window._push_undo_point("Chromatic landmarks")
+        window._state.chromatic_landmarks = [
+            mark for mark in window._state.chromatic_landmarks if mark is not existing
+        ]
+        if window._selected_landmark_id == landmark_id:
+            window._selected_landmark_id = None
+        self.finalize_landmark_edit(status_text=f"Cleared reference point {landmark_id} on this image.")
+        return True
 
     def clear_landmarks(self, *, push_undo: bool = True) -> None:
         window = self.window
@@ -1564,22 +1569,7 @@ class ChromaticController:
                     self.window.chromatic_start_button.blockSignals(False)
                     self.window.chromatic_start_button.setIcon(self.window._make_roi_edit_icon(False))
                     return
-            self.window.rotate_action.blockSignals(True)
-            self.window.rotate_action.setChecked(False)
-            self.window.rotate_action.blockSignals(False)
-            self.window.crop_action.blockSignals(True)
-            self.window.crop_action.setChecked(False)
-            self.window.crop_action.blockSignals(False)
-            self.window.roi_edit_action.blockSignals(True)
-            self.window.roi_edit_action.setChecked(False)
-            self.window.roi_edit_action.blockSignals(False)
-            self.window.mask_pencil_check.blockSignals(True)
-            self.window.mask_pencil_check.setChecked(False)
-            self.window.mask_pencil_check.blockSignals(False)
-            self.window.chromatic_grid_button.blockSignals(True)
-            self.window.chromatic_grid_button.setChecked(False)
-            self.window.chromatic_grid_button.blockSignals(False)
-            self.window._active_tool = "chromatic_landmark"
+            self.window._activate_tool("chromatic_landmark")
             self.window._selected_landmark_id = self.window._chromatic_landmark_marker_id
             if hasattr(self.window, "image_panel"):
                 self.window.image_panel.raise_()
@@ -1589,8 +1579,8 @@ class ChromaticController:
                 if viewport is not None:
                     viewport.setFocus(Qt.FocusReason.ActiveWindowFocusReason)
             self.window._set_status_text(
-                f"Chromatic reference point editor active. Click to place point {self.window._chromatic_landmark_marker_id}, "
-                "drag to adjust, PageUp/PageDown to switch reference points."
+                f"Chromatic reference point editor active. Double-click to place point {self.window._chromatic_landmark_marker_id}, "
+                "right-drag to adjust, PageUp/PageDown to switch reference points."
             )
             self.window._append_workflow_log("Chromatic edit activated", level="debug")
         elif self.window._active_tool == "chromatic_landmark":
