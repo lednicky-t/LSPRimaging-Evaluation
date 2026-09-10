@@ -1,8 +1,20 @@
 # Imaging Measurement Export/Backup Format
 
-**Status: implemented, on schema minor 6.7 - not the major-7 layout proposed below.**
+**Status (2026-09-10): Phase A implemented - schema major 7 is real, alongside 6.7, both
+supported by the same dual-mode writer.** A new backup file now always starts life as schema 7
+(fixed-size, pre-allocated `/rois/<roi_id>/...` layout - combined with the resize-cost fix from
+`measurement_backup_performance_and_crash_recovery.md`'s "Recommended real fix" section); an
+existing file, whatever its schema version, keeps using whatever it already is - no migration, no
+upgrade-in-place. See `storage/measurement_export_schema7.py` for the implementation and
+`ImagingMeasurementExportWriter._schema_major` for the dispatch. The layout below differs slightly
+from what actually shipped (no separate `absorbance`/`formula_values` array, no `cube_index`
+column, no flat "active method" columns alongside per-method subgroups - see that module's own
+docstring for the up-to-date shape and why each simplification was made); kept here for the
+original design reasoning, not as a byte-exact reference. Phase B (sLSPR acq migration) remains
+unstarted and out of scope, exactly as originally planned.
+
 `storage/measurement_export.py`'s `ImagingMeasurementExportWriter` is real, tested code wired into
-the GUI (`gui/dataset_controller.py`, `gui/analysis_controller.py`). It writes bulk data under
+the GUI (`gui/dataset_controller.py`, `gui/analysis_controller.py`). Its schema-6 half writes bulk data under
 `/processed/absorbance_spectra/<roi_id>/` and `/processed/sensorgram/<roi_id>/`, appended
 incrementally and safe to reopen across sessions (see
 `apps/LSPRi/eva/docs/analysis_pipeline_redesign.md` \S1/\S2a for the append-mode and

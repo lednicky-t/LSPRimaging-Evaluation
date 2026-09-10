@@ -12,6 +12,7 @@ from PyQt6.QtWidgets import (
     QLabel,
     QPushButton,
     QScrollArea,
+    QSpinBox,
     QVBoxLayout,
     QWidget,
 )
@@ -140,6 +141,20 @@ class PreferencesDialog(QDialog):
             "\"1 cube\" writes every result immediately, matching the original behavior."
         )
 
+        self.roi_formula_spectrum_cache_spin = QSpinBox()
+        self.roi_formula_spectrum_cache_spin.setRange(16, 20000)
+        self.roi_formula_spectrum_cache_spin.setSingleStep(16)
+        self.roi_formula_spectrum_cache_spin.setToolTip(
+            "How many ROIs' worth of already-computed absorbance spectra (one entry per ROI per "
+            "spectral cube) are kept in RAM at once. A larger cache means switching between "
+            "already-analyzed ROIs/cubes stays instant for longer before anything needs to be "
+            "re-read from the measurement backup file; it costs more memory, not accuracy - a "
+            "value that's too small only means more frequent (still correct, just slower) disk "
+            "reads, never wrong results."
+        )
+        self.roi_formula_spectrum_cache_spin.valueChanged.connect(self._update_roi_formula_spectrum_cache_estimate_label)
+        self.roi_formula_spectrum_cache_estimate_label = QLabel("")
+
         self._build_ui()
         self._load_from_window()
         self._fit_to_available_screen()
@@ -202,11 +217,22 @@ class PreferencesDialog(QDialog):
         analysis_layout.setVerticalSpacing(8)
         analysis_layout.addRow("Write batch size", self.measurement_backup_batch_combo)
 
+        cache_box = QGroupBox("Analysis: memory cache")
+        cache_layout = QFormLayout(cache_box)
+        cache_layout.setHorizontalSpacing(16)
+        cache_layout.setVerticalSpacing(8)
+        cache_size_row = QHBoxLayout()
+        cache_size_row.addWidget(self.roi_formula_spectrum_cache_spin)
+        cache_size_row.addWidget(self.roi_formula_spectrum_cache_estimate_label)
+        cache_size_row.addStretch(1)
+        cache_layout.addRow("Spectra kept in memory", cache_size_row)
+
         layout.addWidget(appearance_box)
         layout.addWidget(startup_box)
         layout.addWidget(wavelength_box)
         layout.addWidget(zarr_box)
         layout.addWidget(analysis_box)
+        layout.addWidget(cache_box)
 
         scroll_area.setWidget(content)
         outer_layout.addWidget(scroll_area, 1)
@@ -269,6 +295,16 @@ class PreferencesDialog(QDialog):
 
         analysis_controller.run_dark_frame_impact_test(_on_result, _on_error)
 
+    def _update_roi_formula_spectrum_cache_estimate_label(self) -> None:
+        window = self._window
+        if not hasattr(window, "_estimated_roi_formula_spectrum_entry_bytes"):
+            self.roi_formula_spectrum_cache_estimate_label.setText("")
+            return
+        entries = self.roi_formula_spectrum_cache_spin.value()
+        per_entry_bytes = window._estimated_roi_formula_spectrum_entry_bytes()
+        estimated_mb = entries * per_entry_bytes / (1024.0 * 1024.0)
+        self.roi_formula_spectrum_cache_estimate_label.setText(f"→ ~{estimated_mb:.0f} MB")
+
     def _load_from_window(self) -> None:
         window = self._window
 
@@ -304,6 +340,10 @@ class PreferencesDialog(QDialog):
             index = self.measurement_backup_batch_combo.findData(batch_size)
             self.measurement_backup_batch_combo.setCurrentIndex(index if index >= 0 else 1)
 
+        if hasattr(window, "_roi_formula_spectrum_cache_limit"):
+            self.roi_formula_spectrum_cache_spin.setValue(int(window._roi_formula_spectrum_cache_limit()))
+        self._update_roi_formula_spectrum_cache_estimate_label()
+
     def apply_changes(self) -> None:
         window = self._window
 
@@ -337,6 +377,9 @@ class PreferencesDialog(QDialog):
             batch_size = self.measurement_backup_batch_combo.currentData()
             if batch_size is not None:
                 window._set_measurement_backup_batch_size(int(batch_size))
+
+        if hasattr(window, "_set_roi_formula_spectrum_cache_limit"):
+            window._set_roi_formula_spectrum_cache_limit(self.roi_formula_spectrum_cache_spin.value())
 
 
 def show_preferences_dialog_for(window) -> None:

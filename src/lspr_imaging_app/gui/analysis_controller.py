@@ -14,15 +14,7 @@ from lspr_ui import get_active_theme
 from lspr_imaging_app.domain.exclusions import is_cube_fully_excluded
 from lspr_imaging_app.domain.models import AreaRoi
 from lspr_imaging_app.gui.worker import SensorgramComputationResult
-from lspr_imaging_app.gui.analysis_result_serialization import (
-    serialize_formula_spectrum_result,
-    deserialize_formula_spectrum_result,
-    serialize_sensorgram_result,
-    deserialize_sensorgram_result,
-)
 from lspr_imaging_app.gui.analysis_cache_signature import (
-    analysis_cache_signature_to_json,
-    analysis_cache_signature_from_json,
     signature_hash,
     formula_spectral_cube_signature,
     formula_spectrum_result_covers_roi_ids,
@@ -238,20 +230,6 @@ class AnalysisController(AnalysisWorkerMixin, AnalysisChromaticGeometryMixin):
 
     def available_analysis_spectral_cubes(self) -> list[int]:
         return self.window._available_analysis_spectral_cubes()
-
-    # ------------------------------------------------------------------
-    # Cache / signature / serialization / payload-builder methods
-    # (moved from MainWindow)
-    # ------------------------------------------------------------------
-
-    # Pure dict/dataclass<->JSON transforms - moved to analysis_result_serialization.py
-    # (no self.window/Qt dependency). Kept as staticmethod attributes under
-    # their original names since main_window.py already references them as
-    # AnalysisController._method(...).
-    _serialize_formula_spectrum_result = staticmethod(serialize_formula_spectrum_result)
-    _deserialize_formula_spectrum_result = staticmethod(deserialize_formula_spectrum_result)
-    _serialize_sensorgram_result = staticmethod(serialize_sensorgram_result)
-    _deserialize_sensorgram_result = staticmethod(deserialize_sensorgram_result)
 
     # ------------------------------------------------------------------
     # Result / event handler methods (moved from MainWindow)
@@ -1302,9 +1280,14 @@ class AnalysisController(AnalysisWorkerMixin, AnalysisChromaticGeometryMixin):
         def _compute(rois=selected_source_rois, cubes=spectral_cube_values, disk_trace_cache=disk_trace_cache) -> set[int]:
             cached_tick_positions: set[int] = set()
             for position, spectral_cube_index in enumerate(cubes):
+                # Built once per cube, not once per (ROI, cube) pair below -
+                # see _roi_formula_spectrum_signature_cube_context.
+                cube_context = self._roi_formula_spectrum_signature_cube_context(int(spectral_cube_index))
                 all_cached = True
                 for roi in rois:
-                    signature = self._roi_formula_spectrum_signature_for_cube(roi, int(spectral_cube_index))
+                    signature = self._roi_formula_spectrum_signature_for_cube(
+                        roi, int(spectral_cube_index), cube_context=cube_context
+                    )
                     if signature is None:
                         all_cached = False
                         break
@@ -1312,7 +1295,9 @@ class AnalysisController(AnalysisWorkerMixin, AnalysisChromaticGeometryMixin):
                         in_ram = roi_formula_spectrum_cache.get(signature) is not None
                     if in_ram:
                         continue
-                    disk_signature = self._roi_disk_signature_for_cube(roi, int(spectral_cube_index))
+                    disk_signature = self._roi_disk_signature_for_cube(
+                        roi, int(spectral_cube_index), cube_context=cube_context
+                    )
                     if disk_signature is None or not self._formula_spectrum_signature_saved_on_disk(
                         roi, int(spectral_cube_index), disk_signature, disk_trace_cache
                     ):
@@ -1339,108 +1324,9 @@ class AnalysisController(AnalysisWorkerMixin, AnalysisChromaticGeometryMixin):
     # (no self.window/Qt dependency). Kept as staticmethod attributes under
     # their original names since main_window.py already references them as
     # AnalysisController._method(...).
-    _analysis_cache_signature_to_json = staticmethod(analysis_cache_signature_to_json)
-    _analysis_cache_signature_from_json = staticmethod(analysis_cache_signature_from_json)
     _signature_hash = staticmethod(signature_hash)
     _formula_spectral_cube_signature = staticmethod(formula_spectral_cube_signature)
     _formula_spectrum_result_covers_roi_ids = staticmethod(formula_spectrum_result_covers_roi_ids)
-
-    def _analysis_cache_payload(self) -> dict:
-        payload: dict[str, list[dict[str, object]]] = {
-            "formula_spectrum_cache": [],
-            "formula_spectral_cube_cache": [],
-            "roi_absorbance_cache": [],
-            "sensorgram_cache": [],
-        }
-        for signature, result in self.window._formula_spectrum_cache.items():
-            payload["formula_spectrum_cache"].append(
-                {
-                    "signature": self._analysis_cache_signature_to_json(signature),
-                    "result": self._serialize_formula_spectrum_result(result),
-                }
-            )
-        for signature, result in self.window._formula_spectral_cube_cache.items():
-            payload["formula_spectral_cube_cache"].append(
-                {
-                    "signature": self._analysis_cache_signature_to_json(signature),
-                    "result": self._serialize_formula_spectrum_result(result),
-                }
-            )
-        for signature, result in self.window._roi_formula_spectrum_cache.items():
-            payload["roi_absorbance_cache"].append(
-                {
-                    "signature": self._analysis_cache_signature_to_json(signature),
-                    "result": self._serialize_formula_spectrum_result(result),
-                }
-            )
-        for signature, result in self.window._sensorgram_cache.items():
-            payload["sensorgram_cache"].append(
-                {
-                    "signature": self._analysis_cache_signature_to_json(signature),
-                    "result": self._serialize_sensorgram_result(result),
-                }
-            )
-        return payload
-
-    def _restore_analysis_caches(self, payload: dict | None) -> None:
-        self.window._formula_spectrum_cache.clear()
-        self.window._formula_spectral_cube_cache.clear()
-        self.window._roi_formula_spectrum_cache.clear()
-        self.window._sensorgram_cache.clear()
-        if not isinstance(payload, dict):
-            return
-        raw_formula_spectrum = payload.get("formula_spectrum_cache", payload.get("absorbance_spectrum_cache", []))
-        if isinstance(raw_formula_spectrum, list):
-            for entry in raw_formula_spectrum:
-                if not isinstance(entry, dict):
-                    continue
-                signature = self._analysis_cache_signature_from_json(entry.get("signature"))
-                result = self._deserialize_formula_spectrum_result(entry.get("result"))
-                if signature is None:
-                    continue
-                self.window._formula_spectrum_cache[signature] = result
-                spectral_cube_signature = self._formula_spectral_cube_signature(signature)
-                if spectral_cube_signature is not None:
-                    self._store_in_lru_cache(
-                        self.window._formula_spectral_cube_cache, spectral_cube_signature, result,
-                        self.window.FORMULA_SPECTRAL_CUBE_CACHE_SIZE,
-                    )
-        raw_formula_spectral_cubes = payload.get(
-            "formula_spectral_cube_cache", payload.get("absorbance_spectral_cube_cache", [])
-        )
-        if isinstance(raw_formula_spectral_cubes, list):
-            for entry in raw_formula_spectral_cubes:
-                if not isinstance(entry, dict):
-                    continue
-                signature = self._analysis_cache_signature_from_json(entry.get("signature"))
-                result = self._deserialize_formula_spectrum_result(entry.get("result"))
-                if signature is None:
-                    continue
-                self._store_in_lru_cache(
-                    self.window._formula_spectral_cube_cache, signature, result,
-                    self.window.FORMULA_SPECTRAL_CUBE_CACHE_SIZE,
-                )
-        raw_roi_formula_spectrum = payload.get("roi_absorbance_cache", payload.get("spot_absorbance_cache", []))
-        if isinstance(raw_roi_formula_spectrum, list):
-            for entry in raw_roi_formula_spectrum:
-                if not isinstance(entry, dict):
-                    continue
-                signature = self._analysis_cache_signature_from_json(entry.get("signature"))
-                result = self._deserialize_formula_spectrum_result(entry.get("result"))
-                if signature is None:
-                    continue
-                self.window._roi_formula_spectrum_cache[signature] = result
-        raw_sensorgram = payload.get("sensorgram_cache", [])
-        if isinstance(raw_sensorgram, list):
-            for entry in raw_sensorgram:
-                if not isinstance(entry, dict):
-                    continue
-                signature = self._analysis_cache_signature_from_json(entry.get("signature"))
-                result = self._deserialize_sensorgram_result(entry.get("result"))
-                if signature is None:
-                    continue
-                self.window._sensorgram_cache[signature] = result
-        self._refresh_cached_roi_ids_snapshot()
 
     def _toggle_analysis_live_preview(self) -> None:
         self.window._analysis_live_preview_enabled = not self.window._analysis_live_preview_enabled

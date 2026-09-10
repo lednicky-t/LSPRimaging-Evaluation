@@ -6,9 +6,17 @@ reduce recomputation of unchanged data and make the app responsive on large data
 scale used throughout: 170 ROIs x up to 20,000 spectral cubes x ~50 wavelengths). \S2a, \S2b, and
 \S3 are implemented and tested; \S2c's exclusion-signature fix and \S4c (schema + read-before-
 recompute wiring for the sensorgram sweep) are also implemented and tested. \S2c's general bulk-
-clear removal (item 4b) is deliberately deferred, and \S4b/\S4e (RAM cache as a Preferences
-setting, removing `analysis_cache` from the JSON profile) are still proposals pending real-scale
-proof and the sign-offs in \S6 - see \S7 for the current order/status of each piece.
+clear removal (item 4b) is deliberately deferred. **\S4b/\S4e implemented 2026-09-10**: `analysis_cache`
+is fully removed from the JSON processing profile (nothing reads or writes it anymore -
+`_analysis_cache_payload`/`_restore_analysis_caches` and their now-dead serialization helpers were
+deleted, not just stopped calling); the RAM cache size (`ROI_FORMULA_SPECTRUM_CACHE_SIZE`, the
+dominant cache - see \S4a/\S4b below) is now a Preferences setting
+(`MainWindow._roi_formula_spectrum_cache_limit`, Preferences -> Analysis: memory cache), with a
+live estimated-MB readout next to the spinbox. The other three, smaller analysis caches stay fixed
+constants (see \S7's note for why only this one was made configurable). Separately, the HDF5
+disk-of-record itself also got its "recommended real fix" from
+`measurement_backup_performance_and_crash_recovery.md` (pre-sized, cube-index-addressed datasets -
+schema major 7) - see \S7 for the summary.
 
 This doc records what's already true in the code (so we don't re-debate settled ground), what's
 actually broken, and what's proposed as new work - each item tagged so it's clear which parts
@@ -293,11 +301,16 @@ Verified directly in `apps/sLSPR/acq`:
   dark/reference correction - those are unrelated to this doc and should stay separately scoped).
   Confirm whether `signature_hash` should be added to that same major-7 proposal before it's
   implemented, rather than bolted on afterward as a major 8.
-- **Removing `analysis_cache` from the JSON processing profile** is a session-file-format change -
-  needs confirmation that nothing currently depends on reading that JSON field directly (e.g. an
-  external script, or a support workflow) before it's dropped.
-- **Correcting the stale "proposed, not implemented" status** in
-  `imaging_measurement_export_format.md` now that the writer is real code in the GUI path.
+- ~~**Removing `analysis_cache` from the JSON processing profile** is a session-file-format
+  change - needs confirmation that nothing currently depends on reading that JSON field directly
+  (e.g. an external script, or a support workflow) before it's dropped.~~ **Resolved, 2026-09-10**:
+  confirmed via repo-wide grep - the only code that ever read/wrote that key was the save/load chain
+  this doc already describes (`workspace.py`, `session_state_manager.py`,
+  `AnalysisController._analysis_cache_payload`/`_restore_analysis_caches`); no external script,
+  test fixture, or other reader existed. Removed.
+- ~~**Correcting the stale "proposed, not implemented" status**~~ - **done, 2026-09-10** (and
+  the doc's status line updated further still, since schema major 7 has since gone from "proposed"
+  to "implemented, Phase A" - see that doc directly).
 
 ## 7. Suggested implementation order
 
@@ -328,9 +341,21 @@ Verified directly in `apps/sLSPR/acq`:
    computes normally, index reflects latest row per cube); it hasn't yet been exercised against a
    real large dataset at the 170×20,000-cube reference scale - that's the natural next check before
    fully trusting item 6 below.
-6. Remove `analysis_cache` from the JSON profile once (5) is fully proven (including the read
-   side), and make the RAM cache size a Preferences setting (§4b) - last, since it depends on (5)
-   actually working end-to-end.
+6. ~~Remove `analysis_cache` from the JSON profile... and make the RAM cache size a Preferences
+   setting (§4b)~~ - **done, 2026-09-10**. `profile_version` bumped 2 -> 3 to mark the format
+   change (pure field removal, no reader-side gating needed - see `format_versions.py`). Only
+   `ROI_FORMULA_SPECTRUM_CACHE_SIZE` (the dominant cache by both entry count and per-entry size) was
+   made configurable; `FORMULA_SPECTRUM_CACHE_SIZE`/`FORMULA_SPECTRAL_CUBE_CACHE_SIZE`/
+   `SENSORGRAM_CACHE_SIZE` stay fixed small constants (48 each) - they're coarser "current combined
+   selection" caches that don't scale with dataset size the way the ROI-level one does, so making
+   them separately configurable wasn't judged worth the extra Preferences surface.
+7. **Bonus, not originally scoped in this doc**: the HDF5 disk-of-record itself (§5's "mirrors
+   sLSPR acq's pattern" observation) also got its own "recommended real fix" implemented the same
+   day - see `measurement_backup_performance_and_crash_recovery.md`'s "Recommended real fix"
+   section (now marked implemented) and `imaging_measurement_export_format.md` (schema major 7,
+   combining the layout reorg proposed there with the fixed-size/pre-allocated write path). This
+   makes the disk tier not just correct-and-read-before-recompute (item 5) but also fast to write
+   to for the file's entire lifetime, for any brand-new backup file going forward.
 
 ## Where this document lives
 

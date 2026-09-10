@@ -297,7 +297,48 @@ byte-for-byte, and the writer stays fully appendable afterward - a row
 written post-compact lands correctly, proving the reopened handle/group
 caches aren't stale references into the closed file).
 
-## Recommended real fix, not yet implemented: pre-sized, cube-index-addressed datasets
+## Recommended real fix - implemented 2026-09-10, schema major 7
+
+Done, combined with the `/rois/<roi_id>/...` layout reorg proposed in
+`imaging_measurement_export_format.md` into one schema bump - see that doc
+and `storage/measurement_export_schema7.py` for the implementation. Short
+version of what changed and what didn't, since the section below (kept as
+historical context for *why*) predates the actual implementation:
+
+- **LSPRi eva only**, as scoped in that doc's own Phase A/B split - sLSPR
+  acq is completely untouched, still schema major 6, no migration attempted
+  or needed.
+- **Old (schema 6.x) backup files keep working exactly as before** - this
+  writer is now dual-mode (`ImagingMeasurementExportWriter._schema_major`),
+  and every existing method for schema 6 is unchanged, byte-for-byte, not
+  just behaviorally compatible. A file only ever starts life as schema 7;
+  nothing "upgrades" an existing file in place.
+- **No shared-package touch needed after all.** The original plan assumed
+  bumping `packages/lspr_io`'s `LSPR_MEASUREMENT_SCHEMA_MAJOR` constant -
+  turned out unnecessary and actively worse: that constant also controls
+  what `standard_measurement_metadata` stamps onto every *other* caller's
+  new files (including sLSPR acq's), so bumping it would have mislabeled
+  every future sLSPR acq file as "schema 7" despite an unchanged schema-6
+  layout. Schema-7 identity is stamped directly (`write_schema7_identity`)
+  with its own locally-scoped constants instead - zero lines changed in
+  `packages/lspr_io`.
+- **Measured, not just argued**: a fixed-offset write has no `.resize()`
+  call anywhere in the schema-7 path (confirmed by code inspection, not
+  merely benchmark) - the exact mechanism Bug D blames is categorically
+  absent, not just made rarer. Synthetic multi-session benchmarks (closing
+  and reopening the writer repeatedly, to accumulate resize history the way
+  real repeated "Start analysis" runs do) measured schema 7 consistently
+  **1.5-2.2x faster per write** than schema 6 at every scale tried, up to
+  20 ROIs x 4 reduction methods x hundreds of cubes across dozens of
+  sessions. Honestly: none of these synthetic runs reproduced the *dramatic*
+  runaway-growth curve the original incident showed - most likely because
+  matching a real lab file's accumulated history (many dozens of runs over
+  weeks) isn't practical in a quick benchmark, and because Bugs B/C (fixed
+  earlier, see the other doc) already removed some of what made the original
+  symptom so visible. The architectural argument (no resize op exists at all)
+  holds regardless of that gap in reproducing the exact original curve.
+
+## Original proposal (superseded by the above - kept for context)
 
 Batching and repacking both work *around* Bug D's mechanism; this would
 remove it. For LSPRi eva specifically (unlike a live-acquisition writer),

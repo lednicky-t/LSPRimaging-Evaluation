@@ -16,16 +16,16 @@ from lspr_imaging_app.domain.models import FormulaSpectrumResult
 
 
 def analysis_cache_signature_to_json(value):
+    """Recursively turns a cache-signature tuple into plain lists, so it can
+    be JSON-canonicalized (see `signature_hash`, below) independent of
+    Python's own tuple-vs-list distinction. No longer feeds a persisted
+    session cache (the JSON `analysis_cache` field this was originally
+    named for was removed) - kept as `signature_hash`'s own canonicalization
+    step."""
     if isinstance(value, tuple):
         return [analysis_cache_signature_to_json(item) for item in value]
     if isinstance(value, list):
         return [analysis_cache_signature_to_json(item) for item in value]
-    return value
-
-
-def analysis_cache_signature_from_json(value):
-    if isinstance(value, list):
-        return tuple(analysis_cache_signature_from_json(item) for item in value)
     return value
 
 
@@ -34,10 +34,7 @@ def signature_hash(signature: tuple[object, ...]) -> str:
     the HDF5 measurement-export backup (see `storage/measurement_export.py`'s
     `signature_hash` column) so a reopened session can tell whether an
     on-disk row is still valid under the current settings, without storing
-    or comparing the larger, code-coupled signature tuple itself. Reuses the
-    same tuple/list-to-JSON canonicalization already used to persist
-    signatures into the session's `analysis_cache` JSON, so the same
-    signature always hashes the same way regardless of where it's used."""
+    or comparing the larger, code-coupled signature tuple itself."""
     canonical = analysis_cache_signature_to_json(signature)
     encoded = json.dumps(canonical, separators=(",", ":")).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()

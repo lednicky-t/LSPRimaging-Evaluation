@@ -275,7 +275,19 @@ class DatasetController:
         if root is None:
             return
         try:
-            writer = ImagingMeasurementExportWriter(root / "measurement_backup.h5")
+            # spectral_cube_indices/wavelengths_nm are only consulted when
+            # creating a BRAND NEW backup file (schema major 7, fixed-size
+            # pre-allocated arrays - see storage/measurement_export_
+            # schema7.py); reopening an existing file, whatever its schema
+            # version, ignores them and keeps using whatever it already is.
+            # Both are already populated by this point (_on_dataset_loaded
+            # runs before _finish_load_dataset_from_folder, which is what
+            # calls this).
+            writer = ImagingMeasurementExportWriter(
+                root / "measurement_backup.h5",
+                spectral_cube_indices=list(window._spectral_cube_values),
+                wavelengths_nm=np.asarray(window._wavelength_values, dtype=np.float64),
+            )
             writer.write_roi_definitions(
                 window._state.area_rois, window._state.area_roi_groups, window._state.area_roi_arrays
             )

@@ -737,6 +737,19 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, MeasurementCalibrationMixin,
             lambda: self._analysis_controller._refresh_cube_slider_cache_indicators()
         )
         self._cube_slider_cache_request_id = 0
+        # Status-bar RAM/disk cache-stats readout (_status_bar_cache_stats,
+        # see _init_status_and_histogram_widgets). A plain repeating timer,
+        # not an event-driven refresh hooked into every cache-mutation call
+        # site (there are dozens - _store_in_lru_cache alone has ~9) - this
+        # is a passive readout, not something that needs to be instant, and
+        # a 2s-stale number is a fine trade for not having to keep a
+        # dedicated refresh call in sync with every place a cache grows or
+        # shrinks. Cheap to compute (bounded LRU caches, one os.stat() call)
+        # so a short interval costs nothing measurable.
+        self._cache_stats_refresh_timer = QTimer(self)
+        self._cache_stats_refresh_timer.setInterval(2000)
+        self._cache_stats_refresh_timer.timeout.connect(self._refresh_cache_stats_display)
+        self._cache_stats_refresh_timer.start()
         self._processing_state_save_timer = QTimer(self)
         self._processing_state_save_timer.setSingleShot(True)
         # A few seconds, not milliseconds: this fires the real disk write.
@@ -1262,6 +1275,18 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, MeasurementCalibrationMixin,
         self._status_bar_last_action.setWordWrap(False)
         self._status_bar_hint = QLabel("Hint: Hover a control for guidance.", self)
         self._status_bar_hint.setWordWrap(False)
+        # RAM/disk analysis-cache stats, right-aligned (see
+        # _refresh_cache_stats_display, updated on a periodic timer -
+        # _cache_stats_refresh_timer, set up in __init__).
+        self._status_bar_cache_stats = QLabel("", self)
+        self._status_bar_cache_stats.setWordWrap(False)
+        self._status_bar_cache_stats.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        self._status_bar_cache_stats.setStyleSheet(f"color: {get_active_theme().text_dim};")
+        self._status_bar_cache_stats.setToolTip(
+            "Analysis cache: how much backed-up spectrum/sensorgram data is currently resident in RAM "
+            "(fast, but bounded and cleared on restart) versus saved to this dataset's measurement_backup.h5 "
+            "(unbounded, survives restarts)."
+        )
         self._status_bar_busy = BusySpinner(self)
         self._status_bar_busy.hide()
         status_bar = self.statusBar()
@@ -1276,6 +1301,7 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, MeasurementCalibrationMixin,
         status_row_layout.addWidget(self._status_bar_last_action, 1)
         status_row_layout.addWidget(self._status_bar_hint, 2)
         status_row_layout.addStretch(1)
+        status_row_layout.addWidget(self._status_bar_cache_stats, 0, Qt.AlignmentFlag.AlignVCenter)
         status_bar.addWidget(status_row, 1)
         self.histogram_plot = pg.PlotWidget(parent=self)
         self.histogram_plot.setMinimumHeight(100)
@@ -1920,12 +1946,18 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, MeasurementCalibrationMixin,
 
         # Spectral-cube (time-point) range: which cubes are included in the
         # calculation. Same min/slider/max/All layout as the row above it.
-        self.analysis_start_spectral_cube_spin = QSpinBox(self)
+        # CubeTimeSpinBox (not plain QSpinBox), same as the main navigation
+        # spectral_cube_spin below - without this, these two boxes always
+        # show a raw cube index even when analysis_spectral_cube_axis_label
+        # (right next to them) says "Elapsed time (s)" in Time mode.
+        self.analysis_start_spectral_cube_spin = CubeTimeSpinBox(self)
         self.analysis_start_spectral_cube_spin.setEnabled(False)
         self.analysis_start_spectral_cube_spin.setKeyboardTracking(False)
-        self.analysis_end_spectral_cube_spin = QSpinBox(self)
+        self.analysis_start_spectral_cube_spin.set_text_override_provider(self._cube_time_display_text_for)
+        self.analysis_end_spectral_cube_spin = CubeTimeSpinBox(self)
         self.analysis_end_spectral_cube_spin.setEnabled(False)
         self.analysis_end_spectral_cube_spin.setKeyboardTracking(False)
+        self.analysis_end_spectral_cube_spin.set_text_override_provider(self._cube_time_display_text_for)
         self.analysis_spectral_cube_range_slider = DualHandleRangeSlider(parent=self)
         self.analysis_spectral_cube_range_slider.setEnabled(False)
         self.analysis_spectral_cube_range_slider.setToolTip("Range of spectral cubes included in the calculation.")
@@ -3664,6 +3696,12 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, MeasurementCalibrationMixin,
         _cube_slider_major_ticks."""
         self.spectral_cube_spin.refresh_display()
         self.spectral_cube_slider.set_ticks(self._spectral_cube_values, self._cube_slider_major_ticks())
+        # The Analysis section's own cube-range row (start/end spin boxes +
+        # axis label) mirrors the same Cube/Time choice - previously only
+        # updated at the next dataset-load/range-sync, not live on toggle.
+        self.analysis_start_spectral_cube_spin.refresh_display()
+        self.analysis_end_spectral_cube_spin.refresh_display()
+        self.analysis_spectral_cube_axis_label.setText(self._spectral_cube_axis_label())
         for refresh in (
             getattr(self, "_refresh_metadata_cube_time_toggle", None),
             getattr(self, "_refresh_cube_slider_title_toggle", None),
@@ -4008,6 +4046,97 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, MeasurementCalibrationMixin,
 
     def _remove_workflow_logging(self) -> None:
         self._workflow_log_controller.remove_workflow_logging()
+
+    @staticmethod
+    def _formula_spectrum_result_nbytes(result: "FormulaSpectrumResult") -> int:
+        """Approximate RAM footprint of one cached spectrum result: its own
+        array fields plus reduced_values_by_method's arrays. Deliberately
+        does not recurse into area_roi_results (only ever populated on a
+        "combined multi-ROI selection" result, not the individual per-ROI
+        entries these caches mostly hold) - an approximation is enough for a
+        status-bar readout, not a value anything depends on for correctness.
+        """
+        total = 0
+        for array in (
+            result.wavelengths_nm,
+            result.formula_values,
+            result.sample_reduced_value,
+            result.reference_reduced_value,
+            result.sample_pixel_count,
+            result.reference_pixel_count,
+        ):
+            total += int(getattr(array, "nbytes", 0))
+        for sample_array, reference_array in result.reduced_values_by_method.values():
+            total += int(getattr(sample_array, "nbytes", 0)) + int(getattr(reference_array, "nbytes", 0))
+        return total
+
+    @staticmethod
+    def _sensorgram_computation_result_nbytes(result: "SensorgramComputationResult") -> int:
+        total = 0
+        for array in (result.spectral_cube_indices, result.metric_values, result.metric_signal):
+            total += int(getattr(array, "nbytes", 0))
+        return total
+
+    @staticmethod
+    def _formula_spectrum_trace_index_nbytes(trace: "FormulaSpectrumTraceIndex") -> int:
+        total = int(getattr(trace.wavelengths_nm, "nbytes", 0))
+        for _signature_hash, reduced_values_by_method in trace.by_cube.values():
+            for sample_array, reference_array in reduced_values_by_method.values():
+                total += int(getattr(sample_array, "nbytes", 0)) + int(getattr(reference_array, "nbytes", 0))
+        return total
+
+    def _analysis_ram_cache_stats(self) -> tuple[int, int]:
+        """(entry_count, approx_bytes) across every RAM analysis cache this
+        window owns - the four FormulaSpectrumResult-shaped LRUs, the
+        sensorgram trace LRU, and the per-ROI disk-trace cache (loaded FROM
+        disk, but occupying real RAM once resident)."""
+        entry_count = 0
+        total_bytes = 0
+        for cache in (
+            self._formula_spectrum_cache,
+            self._formula_spectral_cube_cache,
+            self._roi_formula_spectrum_cache,
+            self._sensorgram_spectral_cube_result_cache,
+        ):
+            entry_count += len(cache)
+            for result in cache.values():
+                total_bytes += self._formula_spectrum_result_nbytes(result)
+        for result in self._sensorgram_cache.values():
+            entry_count += 1
+            total_bytes += self._sensorgram_computation_result_nbytes(result)
+        for trace in self._formula_spectrum_disk_trace_cache.values():
+            entry_count += 1
+            total_bytes += self._formula_spectrum_trace_index_nbytes(trace)
+        return entry_count, total_bytes
+
+    def _measurement_backup_disk_bytes(self) -> int | None:
+        """Current on-disk size of this dataset's measurement_backup.h5, or
+        None if no writer is open (no dataset loaded, or it hasn't been
+        created yet)."""
+        writer = getattr(self, "_measurement_export_writer", None)
+        if writer is None:
+            return None
+        try:
+            return int(writer.path.stat().st_size)
+        except OSError:
+            return None
+
+    @staticmethod
+    def _format_bytes_mb(num_bytes: int) -> str:
+        return f"{num_bytes / (1024.0 * 1024.0):.1f} MB"
+
+    def _refresh_cache_stats_display(self) -> None:
+        """Updates the status bar's right-aligned RAM/disk cache-stats
+        readout. Called from a plain periodic timer (_cache_stats_refresh_
+        timer, __init__) rather than threaded through every cache-mutation
+        call site - see that timer's own comment for why."""
+        label = getattr(self, "_status_bar_cache_stats", None)
+        if label is None:
+            return
+        entry_count, ram_bytes = self._analysis_ram_cache_stats()
+        disk_bytes = self._measurement_backup_disk_bytes()
+        disk_text = self._format_bytes_mb(disk_bytes) if disk_bytes is not None else "-"
+        label.setText(f"Cache: {entry_count} entries, {self._format_bytes_mb(ram_bytes)} RAM | {disk_text} disk")
 
     def _append_workflow_log_entry(self, levelno: int, text: str) -> None:
         self._workflow_log_controller.append_workflow_log_entry(levelno, text)
@@ -5063,6 +5192,43 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, MeasurementCalibrationMixin,
 
     def _set_measurement_backup_batch_size(self, value: int) -> None:
         self._settings.setValue("analysis/measurement_backup_batch_size", max(1, int(value)))
+
+    def _roi_formula_spectrum_cache_limit(self) -> int:
+        """How many per-(ROI, spectral cube) absorbance-spectrum results
+        (`_roi_formula_spectrum_cache`) are kept resident in RAM at once -
+        the dominant analysis RAM cache (holds a full per-wavelength result,
+        every reduction method, per entry), unlike the other three analysis
+        caches which stay at their small fixed constants. Read live at every
+        store (`AnalysisWorkerMixin._store_in_lru_cache`), so a Preferences
+        change takes effect immediately, no restart needed. Clamped to >= 1
+        so the cache can never be configured away entirely (that would defeat
+        the whole point of the RAM tier - a cache size of 0 isn't a smaller
+        cache, it's a bug)."""
+        return max(1, int(self._settings.value("analysis/roi_formula_spectrum_cache_limit", self.ROI_FORMULA_SPECTRUM_CACHE_SIZE)))
+
+    def _set_roi_formula_spectrum_cache_limit(self, value: int) -> None:
+        self._settings.setValue("analysis/roi_formula_spectrum_cache_limit", max(1, int(value)))
+
+    def _estimated_roi_formula_spectrum_entry_bytes(self) -> int:
+        """Best-effort average per-entry byte size for `_roi_formula_spectrum_cache`,
+        used only for the Preferences dialog's live MB estimate next to the
+        cache-size spinbox - not a value anything else depends on. Sampled
+        from a real cache entry when one exists (most accurate); otherwise
+        estimated from the currently-loaded dataset's wavelength count;
+        otherwise a generic placeholder for when no dataset is loaded yet."""
+        if self._roi_formula_spectrum_cache:
+            sample = next(iter(self._roi_formula_spectrum_cache.values()))
+            return max(1, self._formula_spectrum_result_nbytes(sample))
+        n_wavelengths = len(self._wavelength_values) if self._wavelength_values else 40
+        # Matches _formula_spectrum_result_nbytes's own field list: 6
+        # per-wavelength arrays (wavelengths_nm, formula_values, sample/
+        # reference_reduced_value, sample/reference_pixel_count) plus up to
+        # 4 reduction methods' own (sample, reference) pairs - all
+        # approximated at 8 bytes/value (float64/int64-ish worst case).
+        per_wavelength_arrays = 6
+        reduction_methods = 4
+        bytes_per_value = 8
+        return n_wavelengths * (per_wavelength_arrays + reduction_methods * 2) * bytes_per_value
 
     def _set_ui_scale_factor(self, value: str) -> None:
         self._settings.setValue("ui/scale_factor", value)
@@ -6419,14 +6585,6 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, MeasurementCalibrationMixin,
         self._analysis_controller._refresh_cached_roi_ids_snapshot()
 
     @staticmethod
-    def _analysis_cache_signature_to_json(value):
-        return AnalysisController._analysis_cache_signature_to_json(value)
-
-    @staticmethod
-    def _analysis_cache_signature_from_json(value):
-        return AnalysisController._analysis_cache_signature_from_json(value)
-
-    @staticmethod
     def _formula_spectral_cube_signature(signature: tuple[object, ...] | None) -> tuple[object, ...] | None:
         return AnalysisController._formula_spectral_cube_signature(signature)
 
@@ -6439,30 +6597,6 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, MeasurementCalibrationMixin,
         selected_source_rois: list[AreaRoi],
     ) -> FormulaSpectrumResult | None:
         return self._analysis_controller._cached_formula_spectrum_result_from_roi_cache(selected_source_rois)
-
-    @staticmethod
-
-    def _deserialize_formula_spectrum_result(payload) -> FormulaSpectrumResult:
-        from lspr_imaging_app.gui.analysis_controller import AnalysisController
-        return AnalysisController._deserialize_formula_spectrum_result(payload)
-
-    @staticmethod
-
-    def _serialize_sensorgram_result(result: SensorgramComputationResult) -> dict:
-        from lspr_imaging_app.gui.analysis_controller import AnalysisController
-        return AnalysisController._serialize_sensorgram_result(result)
-
-    @staticmethod
-
-    def _deserialize_sensorgram_result(payload) -> SensorgramComputationResult:
-        from lspr_imaging_app.gui.analysis_controller import AnalysisController
-        return AnalysisController._deserialize_sensorgram_result(payload)
-
-    def _analysis_cache_payload(self) -> dict:
-        return self._analysis_controller._analysis_cache_payload()
-
-    def _restore_analysis_caches(self, payload: dict | None) -> None:
-        self._analysis_controller._restore_analysis_caches(payload)
 
     def _prepare_scoped_spectrum_payload_for_spectral_cube(
         self,

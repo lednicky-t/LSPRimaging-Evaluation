@@ -848,6 +848,7 @@ class AnalysisWorkerMixin:
         self.window._sensorgram_settings_changed_during_run = False
         import threading
 
+        from PyQt6.QtWidgets import QApplication
         from lspr_imaging_app.gui.worker import FunctionWorker
         from lspr_imaging_app.gui.analysis_tasks import (
             _sensorgram_metric_task,
@@ -855,6 +856,37 @@ class AnalysisWorkerMixin:
         )
 
         settings_snapshot = self._spectrum_settings_snapshot()
+
+        self.window._sensorgram_cancel_event = threading.Event()
+        self.window._sensorgram_started_at = time.perf_counter()
+        self.window._pending_sensorgram_payload = None
+        self.clear_sensorgram("")
+        self.window._update_analysis_control_state()
+        ram_only_label = " | [RAM]" if bool(getattr(self.window, "_analysis_ram_only_backup", False)) else ""
+        self.window._set_sensorgram_summary_text(
+            f"{self.window._analysis_metric_label()} | Preparing {len(spectral_cubes)} spectral cubes"
+            f" | Range {spectral_cubes[0]}-{spectral_cubes[-1]}{ram_only_label}"
+        )
+        # show_wait_cursor=False: analysis runs entirely in the background
+        # (a FunctionWorker thread) - the app itself stays fully interactive
+        # while it runs, so it shouldn't look/feel frozen behind an app-wide
+        # wait cursor. Progress is still visible in the status bar as usual.
+        # Started here, BEFORE the disk-history read below, not after: any
+        # ROI in this selection not already resident in the (unbounded)
+        # _formula_spectrum_disk_trace_cache means that read loads its
+        # entire history (every cube, every wavelength, every reduction
+        # method) synchronously on this thread - genuinely slow for a large
+        # dataset, and with nothing on screen yet to explain why, it looks
+        # like the app hung. Showing busy state first, then forcing a paint
+        # via processEvents() (same pattern already used just below in
+        # _start_pending_formula_spectrum_refresh), means that wait is at
+        # least visible as progress instead of a silent freeze.
+        self.window._begin_busy(
+            "Loading backed-up results...", determinate=True, show_wait_cursor=False, total_items=len(spectral_cubes)
+        )
+        self.window._set_status_text(f"Loading backed-up results for {len(selected_source_rois)} ROI(s)...")
+        QApplication.processEvents()
+
         # Read once, up front, on the main thread - the worker thread below
         # only ever sees the plain resulting dict, never touches HDF5 itself
         # (see _combined_absorbance_results_from_ram_or_disk's docstring).
@@ -884,25 +916,7 @@ class AnalysisWorkerMixin:
             and bool(getattr(settings_snapshot.area_roi_settings, "ignore_marked_pixels", False))
             else None
         )
-
-        self.window._sensorgram_cancel_event = threading.Event()
-        self.window._sensorgram_started_at = time.perf_counter()
-        self.window._pending_sensorgram_payload = None
-        self.clear_sensorgram("")
-        self.window._update_analysis_control_state()
-        ram_only_label = " | [RAM]" if bool(getattr(self.window, "_analysis_ram_only_backup", False)) else ""
-        self.window._set_sensorgram_summary_text(
-            f"{self.window._analysis_metric_label()} | Preparing {len(spectral_cubes)} spectral cubes"
-            f" | Range {spectral_cubes[0]}-{spectral_cubes[-1]}{ram_only_label}"
-        )
         self.window._set_status_text("Preparing spectral cube reads...")
-        # show_wait_cursor=False: analysis runs entirely in the background
-        # (a FunctionWorker thread) - the app itself stays fully interactive
-        # while it runs, so it shouldn't look/feel frozen behind an app-wide
-        # wait cursor. Progress is still visible in the status bar as usual.
-        self.window._begin_busy(
-            "Preparing spectral cube reads...", determinate=True, show_wait_cursor=False, total_items=len(spectral_cubes)
-        )
 
         def spectral_cube_payload_builder(spectral_cube_index, selected_roi_ids=selected_roi_ids, selected_source_rois=selected_source_rois, settings_snapshot=settings_snapshot, shared_wavelength_geometry=shared_wavelength_geometry, shared_mask_by_wavelength=shared_mask_by_wavelength):
             return self._prepare_scoped_spectrum_payload_for_spectral_cube(
@@ -1875,7 +1889,10 @@ class AnalysisWorkerMixin:
                 # ROI straight into the RAM cache, so re-running the combined
                 # cache lookup just below picks it up as a normal cache hit -
                 # no separate "apply immediately" branch needed here.
-                disk_trace_index = self._build_disk_formula_spectrum_trace_index(missing_source_rois)
+                # Scoped to this one cube (_build_disk_formula_spectrum_row_index),
+                # not the bulk per-ROI history read the multi-cube sweep uses -
+                # this interactive path only ever needs the cube on screen.
+                disk_trace_index = self._build_disk_formula_spectrum_row_index(missing_source_rois, int(spectral_cube_index))
                 if disk_trace_index and self._combined_formula_spectrum_results_from_ram_or_disk(
                     int(spectral_cube_index), missing_source_rois, disk_trace_index
                 ) is not None:
@@ -2020,11 +2037,16 @@ class AnalysisWorkerMixin:
         cube_index = int(cube_index)
         backed_up = self.window._measurement_export_backed_up_formula_spectrum
         buffering = bool(getattr(self.window, "_sensorgram_running", False))
+        cube_context = self._roi_formula_spectrum_signature_cube_context(cube_index)
         for label, roi_id, roi_result in series_payloads:
             if label == "Selection":
                 continue
             roi = next((roi for roi in self.window._state.area_rois if int(roi.area_roi_id) == int(roi_id)), None)
-            signature_hash = self._signature_hash(self._roi_disk_signature_for_cube(roi, cube_index)) if roi is not None else ""
+            signature_hash = (
+                self._signature_hash(self._roi_disk_signature_for_cube(roi, cube_index, cube_context=cube_context))
+                if roi is not None
+                else ""
+            )
             key = (int(roi_id), cube_index, signature_hash)
             if key in backed_up:
                 continue
@@ -2401,12 +2423,24 @@ class AnalysisWorkerMixin:
 
         spectral_cube_index = self.window._current_spectral_cube()
         cube_display = spectral_cube_index if spectral_cube_index is not None else "-"
+        # cube_axis_label switches to "Elapsed time (s)" in Time mode, but
+        # cube_display above is always the raw index - without this, the
+        # title would show a real label next to the wrong kind of number
+        # (e.g. "Elapsed time (s): 42" where 42 is a cube index, not
+        # seconds). _cube_time_display_text_for is the same conversion the
+        # spectral-cube spin box already uses (CubeTimeSpinBox), so this
+        # stays consistent with what the rest of the UI shows for the same
+        # cube. Falls back to cube_display in Cube mode, or when no real
+        # timing is available for this cube yet.
+        cube_time_display = (
+            self.window._cube_time_display_text_for(spectral_cube_index) if spectral_cube_index is not None else None
+        ) or cube_display
         sample_pixels = int(np.nanmax(primary_result.sample_pixel_count)) if primary_result.sample_pixel_count.size else 0
         reference_pixels = int(np.nanmax(primary_result.reference_pixel_count)) if primary_result.reference_pixel_count.size else 0
         roi_count = len(self.window._state.area_rois)
         group_count = len(self.window._state.area_roi_groups)
         cube_axis_label = self.window._spectral_cube_axis_label()
-        basic_text = f"ROI: {roi_count}, Groups: {group_count}, {cube_axis_label}: {cube_display}"
+        basic_text = f"ROI: {roi_count}, Groups: {group_count}, {cube_axis_label}: {cube_time_display}"
         detail_tooltip = (
             f"{self.window._spectrum_selection_label()} | Spectral cube {cube_display}"
             f" | ROI px: sample {sample_pixels}, reference {reference_pixels}{current_text}{fit_text}"
@@ -2620,7 +2654,7 @@ class AnalysisWorkerMixin:
             signature = self.window._roi_formula_spectrum_signature(area_roi)
             if signature is None:
                 continue
-            self._store_in_lru_cache(self.window._roi_formula_spectrum_cache, signature, roi_result, self.window.ROI_FORMULA_SPECTRUM_CACHE_SIZE)
+            self._store_in_lru_cache(self.window._roi_formula_spectrum_cache, signature, roi_result, self.window._roi_formula_spectrum_cache_limit())
             if spectral_cube_index is not None:
                 self._write_through_reduced_values_by_method(area_roi, int(spectral_cube_index), roi_result)
         self._refresh_cached_roi_ids_snapshot()
@@ -2632,6 +2666,7 @@ class AnalysisWorkerMixin:
         result: FormulaSpectrumResult,
         *,
         lock=None,
+        cube_context: tuple[object, ...] | None = None,
     ) -> None:
         """Right after a fresh per-ROI reduction result is cached under its
         own (pixel-extraction + active reduction_method) signature, also
@@ -2659,11 +2694,13 @@ class AnalysisWorkerMixin:
             projected = project_reduction_result(result, method, str(result.formula_key))
             if projected is None:
                 continue
-            signature = self._roi_formula_spectrum_signature_for_cube(roi, spectral_cube_index, reduction_method_override=method)
+            signature = self._roi_formula_spectrum_signature_for_cube(
+                roi, spectral_cube_index, reduction_method_override=method, cube_context=cube_context
+            )
             if signature is None:
                 continue
             self._store_in_lru_cache(
-                self.window._roi_formula_spectrum_cache, signature, projected, self.window.ROI_FORMULA_SPECTRUM_CACHE_SIZE,
+                self.window._roi_formula_spectrum_cache, signature, projected, self.window._roi_formula_spectrum_cache_limit(),
                 lock=lock,
             )
 
@@ -2784,6 +2821,42 @@ class AnalysisWorkerMixin:
                 index[roi_id] = trace
         return index
 
+    def _build_disk_formula_spectrum_row_index(
+        self, rois: list[AreaRoi], spectral_cube_index: int
+    ) -> dict[int, FormulaSpectrumTraceIndex]:
+        """Scoped counterpart of `_build_disk_formula_spectrum_trace_index`,
+        for the interactive single-cube preview: reads only ONE cube's row
+        per ROI (`writer.formula_spectrum_row`) instead of a ROI's entire
+        history. Use this here, not the bulk index builder - the interactive
+        preview only ever needs the currently-displayed cube, so loading
+        every cube/wavelength/reduction-method up front (and keeping it in
+        the unbounded `_formula_spectrum_disk_trace_cache` forever) is pure
+        waste for an ROI someone briefly clicked once. The multi-cube sweep
+        (`_start_sensorgram_worker`) still uses the bulk builder, where
+        loading everything up front is the right trade-off.
+
+        Same contract as `_build_disk_formula_spectrum_trace_index`
+        (main-thread only, plain dict handed to callers) - not itself
+        cached, since callers of this scoped path are the "not already in
+        the disk-trace cache" branch specifically.
+        """
+        writer = getattr(self.window, "_measurement_export_writer", None)
+        if writer is None:
+            return {}
+        index: dict[int, FormulaSpectrumTraceIndex] = {}
+        for roi in rois:
+            roi_id = int(roi.area_roi_id)
+            try:
+                trace = writer.formula_spectrum_row(roi_id, int(spectral_cube_index))
+            except Exception:
+                logging.getLogger("lspr_imaging_app.workflow").warning(
+                    "Failed to read absorbance spectrum row from measurement export backup", exc_info=True
+                )
+                continue
+            if trace is not None:
+                index[roi_id] = trace
+        return index
+
     def _formula_spectrum_result_from_disk_row(
         self,
         roi: AreaRoi,
@@ -2891,11 +2964,15 @@ class AnalysisWorkerMixin:
             return None
         active_formula_key = formula_key if formula_key is not None else self._active_formula_key()
         active_reduction_method = reduction_method if reduction_method is not None else self._active_reduction_method()
+        # Built once for this cube, not once per selected ROI - see
+        # _roi_formula_spectrum_signature_cube_context's own docstring for
+        # why this matters at real ROI/cube counts.
+        cube_context = self._roi_formula_spectrum_signature_cube_context(spectral_cube_index)
         results: dict[int, FormulaSpectrumResult] = {}
         for roi in selected_source_rois:
             roi_id = int(roi.area_roi_id)
             signature = self._roi_formula_spectrum_signature_for_cube(
-                roi, spectral_cube_index, reduction_method_override=active_reduction_method
+                roi, spectral_cube_index, reduction_method_override=active_reduction_method, cube_context=cube_context
             )
             if signature is None:
                 return None
@@ -2904,11 +2981,11 @@ class AnalysisWorkerMixin:
                 if cached is not None:
                     self.window._roi_formula_spectrum_cache.move_to_end(signature)
             if cached is None:
-                disk_signature = self._roi_disk_signature_for_cube(roi, spectral_cube_index)
+                disk_signature = self._roi_disk_signature_for_cube(roi, spectral_cube_index, cube_context=cube_context)
                 cached = self._formula_spectrum_result_from_disk_row(roi, spectral_cube_index, disk_signature, disk_trace_index)
                 if cached is not None:
                     self._store_in_lru_cache(
-                        self.window._roi_formula_spectrum_cache, signature, cached, self.window.ROI_FORMULA_SPECTRUM_CACHE_SIZE,
+                        self.window._roi_formula_spectrum_cache, signature, cached, self.window._roi_formula_spectrum_cache_limit(),
                         lock=self.window._analysis_cache_lock,
                     )
                     # A disk-resumed result can carry every reduction method
@@ -2918,7 +2995,7 @@ class AnalysisWorkerMixin:
                     # for this same cube hits RAM directly instead of
                     # re-reading the (already-loaded) disk trace index again.
                     self._write_through_reduced_values_by_method(
-                        roi, spectral_cube_index, cached, lock=self.window._analysis_cache_lock
+                        roi, spectral_cube_index, cached, lock=self.window._analysis_cache_lock, cube_context=cube_context
                     )
             if cached is None:
                 return None
@@ -2939,19 +3016,20 @@ class AnalysisWorkerMixin:
         the sensorgram worker thread as well as the main thread.
         """
         roi_by_id = {int(roi.area_roi_id): roi for roi in rois}
+        cube_context = self._roi_formula_spectrum_signature_cube_context(spectral_cube_index)
         for roi_id, roi_result in roi_results.items():
             roi = roi_by_id.get(int(roi_id))
             if roi is None:
                 continue
-            signature = self._roi_formula_spectrum_signature_for_cube(roi, spectral_cube_index)
+            signature = self._roi_formula_spectrum_signature_for_cube(roi, spectral_cube_index, cube_context=cube_context)
             if signature is None:
                 continue
             self._store_in_lru_cache(
-                self.window._roi_formula_spectrum_cache, signature, roi_result, self.window.ROI_FORMULA_SPECTRUM_CACHE_SIZE,
+                self.window._roi_formula_spectrum_cache, signature, roi_result, self.window._roi_formula_spectrum_cache_limit(),
                 lock=self.window._analysis_cache_lock,
             )
             self._write_through_reduced_values_by_method(
-                roi, spectral_cube_index, roi_result, lock=self.window._analysis_cache_lock
+                roi, spectral_cube_index, roi_result, lock=self.window._analysis_cache_lock, cube_context=cube_context
             )
 
     def _roi_reduction_signature_elements(self) -> tuple[str]:
@@ -3014,9 +3092,14 @@ class AnalysisWorkerMixin:
     # happened to be active when it was written.
     _DISK_SIGNATURE_REDUCTION_PLACEHOLDER = "__disk_pixel_signature__"
 
-    def _roi_disk_signature_for_cube(self, roi: AreaRoi, spectral_cube_index: int) -> tuple[object, ...] | None:
+    def _roi_disk_signature_for_cube(
+        self, roi: AreaRoi, spectral_cube_index: int, *, cube_context: tuple[object, ...] | None = None
+    ) -> tuple[object, ...] | None:
         return self._roi_formula_spectrum_signature_for_cube(
-            roi, spectral_cube_index, reduction_method_override=self._DISK_SIGNATURE_REDUCTION_PLACEHOLDER
+            roi,
+            spectral_cube_index,
+            reduction_method_override=self._DISK_SIGNATURE_REDUCTION_PLACEHOLDER,
+            cube_context=cube_context,
         )
 
     def _sensorgram_signature_for_selection(
@@ -3384,8 +3467,37 @@ class AnalysisWorkerMixin:
             return None
         return self._roi_formula_spectrum_signature_for_cube(roi, int(spectral_cube_index))
 
+    def _roi_formula_spectrum_signature_cube_context(self, spectral_cube_index: int) -> tuple[object, ...]:
+        """The part of `_roi_formula_spectrum_signature_for_cube` that is
+        identical for every ROI of a given cube (the per-wavelength chromatic
+        signature scan, plus the per-wavelength exclusion signature) -
+        computed once per cube here, instead of once per (ROI, cube) pair.
+
+        Mirrors `_sensorgram_point_signature_hash_cube_context`'s split for
+        the same reason: `_combined_formula_spectrum_results_from_ram_or_disk`
+        calls the per-ROI signature builder once per selected ROI for the
+        SAME cube, and at real scale (tens of ROIs, thousands of cubes) that
+        repeated per-wavelength chromatic lookup was pure, avoidable overhead
+        paid even when every underlying value is already cached (see
+        docs/buzzing-tinkering-church plan / analysis_pipeline_redesign.md).
+        Callers looping ROIs for one cube should build this once and pass it
+        into every `_roi_formula_spectrum_signature_for_cube` call via
+        `cube_context=`."""
+        return (
+            tuple(
+                self.window._chromatic_signature_for_image_key((int(spectral_cube_index), float(wavelength)))
+                for wavelength in self.window._wavelength_values
+            ),
+            self._exclusion_signature_for_cube(spectral_cube_index),
+        )
+
     def _roi_formula_spectrum_signature_for_cube(
-        self, roi: AreaRoi, spectral_cube_index: int, *, reduction_method_override: str | None = None
+        self,
+        roi: AreaRoi,
+        spectral_cube_index: int,
+        *,
+        reduction_method_override: str | None = None,
+        cube_context: tuple[object, ...] | None = None,
     ) -> tuple[object, ...] | None:
         """Same as `_roi_absorbance_signature`, but for an arbitrary cube
         rather than hard-coding `window._current_spectral_cube()` - needed by
@@ -3398,23 +3510,29 @@ class AnalysisWorkerMixin:
         reduction method instead of the live setting - used by
         `_write_through_reduced_values_by_method` to compute the OTHER
         reduction methods' own cache signatures for the same cube/ROI, so a
-        freshly-computed result can be stashed under all of them at once."""
+        freshly-computed result can be stashed under all of them at once.
+
+        `cube_context`: pass the result of `_roi_formula_spectrum_signature_
+        cube_context(spectral_cube_index)` when calling this for several ROIs
+        of the same cube back to back, to avoid rebuilding the ROI-independent
+        chromatic/exclusion scan every time. Computed here (unchanged
+        behavior) when omitted."""
         if not self.window._wavelength_values:
             return None
         (reduction_method,) = (
             self._roi_reduction_signature_elements() if reduction_method_override is None else (reduction_method_override,)
         )
+        chromatic_signatures, exclusion_signatures = (
+            cube_context if cube_context is not None else self._roi_formula_spectrum_signature_cube_context(spectral_cube_index)
+        )
         return _roi_formula_spectrum_signature(
             int(spectral_cube_index),
             tuple(float(value) for value in self.window._wavelength_values),
             roi,
-            tuple(
-                self.window._chromatic_signature_for_image_key((int(spectral_cube_index), float(wavelength)))
-                for wavelength in self.window._wavelength_values
-            ),
+            chromatic_signatures,
             reduction_method,
             DEFAULT_TRIMMED_MEAN_FRACTION,
-            exclusion_signatures=self._exclusion_signature_for_cube(spectral_cube_index),
+            exclusion_signatures=exclusion_signatures,
         )
 
     def _roi_has_cached_formula_spectrum(self, roi: AreaRoi) -> bool:

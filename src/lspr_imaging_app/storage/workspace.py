@@ -600,7 +600,6 @@ def build_processing_profile_payload(
     area_roi_groups: list[AreaRoiGroup] | None = None,
     chromatic_models: list[ChromaticTransformModel] | None = None,
     chromatic_landmarks: list[ChromaticLandmarkObservation] | None = None,
-    analysis_cache: dict | None = None,
     session_mask: dict | None = None,
     mask_settings: MaskSettings | None = None,
     image_exclusions: list[ImageExclusionRule] | None = None,
@@ -660,8 +659,6 @@ def build_processing_profile_payload(
     }
     if mask_settings is not None:
         payload["mask_settings"] = _encode_mask_settings(mask_settings)
-    if analysis_cache:
-        payload["analysis_cache"] = analysis_cache
     if isinstance(session_mask, dict):
         mask = session_mask.get("mask")
         record_path = session_mask.get("record_path")
@@ -682,7 +679,6 @@ def save_processing_profile(
     area_roi_groups: list[AreaRoiGroup] | None = None,
     chromatic_models: list[ChromaticTransformModel] | None = None,
     chromatic_landmarks: list[ChromaticLandmarkObservation] | None = None,
-    analysis_cache: dict | None = None,
     session_mask: dict | None = None,
     mask_settings: MaskSettings | None = None,
     image_exclusions: list[ImageExclusionRule] | None = None,
@@ -698,7 +694,6 @@ def save_processing_profile(
             area_roi_groups,
             chromatic_models,
             chromatic_landmarks,
-            analysis_cache,
             session_mask=session_mask,
             mask_settings=mask_settings,
             image_exclusions=image_exclusions,
@@ -738,7 +733,6 @@ def load_processing_profile(
     list[AreaRoiGroup],
     list[ChromaticTransformModel],
     list[ChromaticLandmarkObservation],
-    dict,
     dict | None,
     MaskSettings,
     list[ImageExclusionRule],
@@ -962,9 +956,6 @@ def load_processing_profile(
                 )
             )
 
-    analysis_cache = payload.get("analysis_cache", {})
-    if not isinstance(analysis_cache, dict):
-        analysis_cache = {}
     raw_mask_settings = payload.get("mask_settings", {})
     mask_settings = _decode_mask_settings(raw_mask_settings) if isinstance(raw_mask_settings, dict) else MaskSettings()
     session_mask_payload = payload.get("session_mask", None)
@@ -1030,7 +1021,6 @@ def load_processing_profile(
         area_roi_groups,
         chromatic_models,
         chromatic_landmarks,
-        analysis_cache,
         session_mask,
         mask_settings,
         image_exclusions,

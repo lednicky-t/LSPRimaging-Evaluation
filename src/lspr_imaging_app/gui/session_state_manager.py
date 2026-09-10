@@ -80,7 +80,6 @@ class SessionStateManager:
                 area_roi_groups,
                 chromatic_models,
                 chromatic_landmarks,
-                analysis_cache,
                 session_mask,
                 mask_settings,
                 image_exclusions,
@@ -120,7 +119,6 @@ class SessionStateManager:
             window._state.chromatic_models = chromatic_models
             window._state.chromatic_landmarks = chromatic_landmarks
             window._state.image_exclusions = image_exclusions
-            window._restore_analysis_caches(analysis_cache)
             window._append_workflow_log(
                 f"Mask settings restore | histogram={bool(mask_settings.histogram_enabled)} figure={bool(mask_settings.figure_enabled)}",
                 level="debug",
@@ -373,7 +371,6 @@ class SessionStateManager:
                 window._state.area_roi_groups,
                 window._state.chromatic_models,
                 window._state.chromatic_landmarks,
-                window._analysis_cache_payload(),
                 session_mask=session_mask_payload,
                 mask_settings=window._state.mask,
                 image_exclusions=window._state.image_exclusions,
@@ -477,7 +474,6 @@ class SessionStateManager:
                 window._state.area_roi_groups,
                 window._state.chromatic_models,
                 window._state.chromatic_landmarks,
-                window._analysis_cache_payload(),
                 session_mask=window._session_mask_payload(),
                 mask_settings=window._state.mask,
                 image_exclusions=window._state.image_exclusions,
@@ -522,7 +518,6 @@ class SessionStateManager:
                 area_roi_groups,
                 chromatic_models,
                 chromatic_landmarks,
-                analysis_cache,
                 session_mask,
                 mask_settings,
                 image_exclusions,
@@ -552,7 +547,6 @@ class SessionStateManager:
                         None if restored_record_path is None else Path(str(restored_record_path))
                     )
                     window._current_file_mask_wavelength_diffs = session_mask.get("wavelength_diffs") or {}
-            window._restore_analysis_caches(analysis_cache)
             window._update_roi_table()
             window._restore_control_preferences()
             window._update_chromatic_control_state()

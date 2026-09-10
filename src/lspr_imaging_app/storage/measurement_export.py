@@ -54,6 +54,7 @@ from lspr_io import (
 
 from lspr_imaging_app.domain.models import AreaRoi, AreaRoiGroup, RoiArrayGroup
 from lspr_imaging_app.processing.roi_math import DEFAULT_TRIMMED_MEAN_FRACTION
+from lspr_imaging_app.storage import measurement_export_schema7
 from lspr_imaging_app.version import APP_NAME, APP_VERSION
 
 
@@ -229,18 +230,48 @@ class ImagingMeasurementExportWriter:
     result becomes available.
     """
 
-    def __init__(self, path: Path, *, experiment_name: str = "", started_at_utc: datetime | None = None) -> None:
+    def __init__(
+        self,
+        path: Path,
+        *,
+        experiment_name: str = "",
+        started_at_utc: datetime | None = None,
+        spectral_cube_indices: list[int] | None = None,
+        wavelengths_nm: np.ndarray | None = None,
+    ) -> None:
         """Opens `path` for append if it already exists (a previous run's
         backup), or creates it fresh otherwise. Reopening an existing backup
         never truncates it - identity metadata (created_at_utc/started_at_utc/
         etc.) is preserved from the original creation rather than re-stamped,
         since those describe when the backup/run first started, not when it
-        was last reopened."""
+        was last reopened.
+
+        `spectral_cube_indices`/`wavelengths_nm`: only consulted when
+        creating a BRAND NEW file (an existing file - whatever its schema
+        version - always keeps using whatever it already is, never
+        "upgraded"). When both are given, the new file starts life as
+        schema major 7 (fixed-size, pre-allocated `/rois/<roi_id>/...`
+        layout - see `storage/measurement_export_schema7.py`); when either
+        is omitted, it starts as schema major 6 (today's resizable,
+        append-and-grow layout), matching this writer's behavior before
+        schema 7 existed. `dataset_controller.py` is the one call site that
+        passes them, from `window._spectral_cube_values`/`_wavelength_
+        values` - both already known before a dataset's writer is opened."""
         self.path = Path(path)
         file_exists = self.path.exists()
         self._handle = h5py.File(self.path, "a" if file_exists else "w")
+        self._sensorgram_groups: dict[str, h5py.Group] = {}
+        self._absorbance_groups: dict[str, h5py.Group] = {}
+        # schema-7-only state (see storage/measurement_export_schema7.py) -
+        # unused and left at these defaults for a schema-6 file/session.
+        self._schema7_position_map: dict[int, int] | None = None
+        self._schema7_spectra_groups: dict[str, h5py.Group] = {}
+        self._schema7_metrics_groups: dict[str, h5py.Group] = {}
         if file_exists:
+            self._schema_major = int(self._handle.attrs.get("schema_major", 6))
             self._processed = self._handle.require_group("processed")
+            if self._schema_major >= 7:
+                self._schema7_position_map = measurement_export_schema7.spectral_cube_position_map(self._handle)
         else:
             identity_kwargs = dict(
                 created_by=APP_NAME,
@@ -249,16 +280,28 @@ class ImagingMeasurementExportWriter:
                 app_version=APP_VERSION,
                 experiment_name=experiment_name,
             )
-            write_measurement_root_metadata(self._handle, **standard_measurement_metadata(**identity_kwargs))
-            manifest = self._handle.create_group("manifest")
-            write_measurement_manifest_metadata(
-                manifest,
-                **standard_measurement_metadata(**identity_kwargs),
-                extra_attrs={"manifest_kind": "measurement"},
-            )
-            self._processed = self._handle.create_group("processed")
-        self._sensorgram_groups: dict[str, h5py.Group] = {}
-        self._absorbance_groups: dict[str, h5py.Group] = {}
+            if spectral_cube_indices is not None and wavelengths_nm is not None:
+                self._schema_major = 7
+                measurement_export_schema7.write_schema7_identity(self._handle, **identity_kwargs)
+                measurement_export_schema7.write_spectral_cube_manifest(self._handle, spectral_cube_indices)
+                measurement_export_schema7.write_wavelength_axis(self._handle, wavelengths_nm)
+                self._schema7_position_map = measurement_export_schema7.spectral_cube_position_map(self._handle)
+                # A schema-7 file still gets a (mostly empty) "processed"
+                # group - write_roi_definitions' small descriptive table
+                # (unrelated to the bulk-data reorg schema 7 is actually
+                # about) lives there regardless of schema version, so that
+                # method needs zero branching.
+                self._processed = self._handle.create_group("processed")
+            else:
+                self._schema_major = 6
+                write_measurement_root_metadata(self._handle, **standard_measurement_metadata(**identity_kwargs))
+                manifest = self._handle.create_group("manifest")
+                write_measurement_manifest_metadata(
+                    manifest,
+                    **standard_measurement_metadata(**identity_kwargs),
+                    extra_attrs={"manifest_kind": "measurement"},
+                )
+                self._processed = self._handle.create_group("processed")
         # (metric_name, formula_key, combined_roi_ids) last actually written
         # for each roi_id by set_sensorgram_metric - see that method's own
         # comment for why this cache exists.
@@ -276,7 +319,15 @@ class ImagingMeasurementExportWriter:
         columns per ROI, never the bulk spectral arrays. Legacy rows
         backfilled with `signature_hash=""` (see `_ensure_column`) never
         match a real hash, so they're always treated as needing a fresh
-        append rather than as an accidental duplicate."""
+        append rather than as an accidental duplicate.
+
+        Schema 7 always returns an empty set: the dedup this exists to
+        support (skip a redundant, expensive resize+append) doesn't apply
+        there - a schema-7 write is a fixed-offset overwrite regardless of
+        whether the value actually changed, so there's no "expensive
+        duplicate write" to avoid in the first place."""
+        if self._schema_major >= 7:
+            return set()
         keys: set[tuple[int, int, str]] = set()
         parent = self._processed.get(LSPR_PROCESSED_ABSORBANCE_SPECTRA_GROUP_NAME)
         if parent is None:
@@ -300,7 +351,11 @@ class ImagingMeasurementExportWriter:
         disk. `roi_id` stays a string - a combined-ROI-selection trace uses
         a synthetic `"combined_..."` key rather than a real ROI id. See
         `existing_absorbance_keys` for why `signature_hash` is part of the
-        key rather than a separate freshness check."""
+        key rather than a separate freshness check. Schema 7: see
+        `existing_formula_spectrum_keys`'s own docstring - same reasoning,
+        always an empty set."""
+        if self._schema_major >= 7:
+            return set()
         keys: set[tuple[str, int, str]] = set()
         parent = self._processed.get(LSPR_PROCESSED_SENSORGRAM_GROUP_NAME)
         if parent is None:
@@ -330,7 +385,18 @@ class ImagingMeasurementExportWriter:
         `existing_sensorgram_keys`. This is the read-side counterpart of
         `existing_sensorgram_keys`, giving a caller the actual `metric_value`
         instead of just a dedup key, so a disk hit can supply the final
-        answer instead of only skipping a duplicate append."""
+        answer instead of only skipping a duplicate append.
+
+        Schema 7: dispatches to `measurement_export_schema7.read_sensorgram_
+        metric_index` - no "latest row wins" scan needed there, since a
+        cube's slot is overwritten in place rather than superseded by a
+        later append."""
+        if self._schema_major >= 7:
+            if self._schema7_position_map is None:
+                return {}
+            return measurement_export_schema7.read_sensorgram_metric_index(
+                self._handle, str(roi_id), self._schema7_position_map
+            )
         index: dict[int, tuple[str, float]] = {}
         parent = self._processed.get(LSPR_PROCESSED_SENSORGRAM_GROUP_NAME)
         if parent is None:
@@ -373,7 +439,14 @@ class ImagingMeasurementExportWriter:
         that write. A pre-6.7 file (or a row written before this group ever
         got a `reduced_values/` subgroup) therefore still yields exactly one
         method - the one it was actually saved under - never a fabricated
-        multi-method entry."""
+        multi-method entry.
+
+        Schema 7: dispatches to `measurement_export_schema7.read_formula_
+        spectrum_index` and wraps its result into this same
+        `FormulaSpectrumTraceIndex` shape, so every caller of this method
+        works unchanged regardless of which schema version is behind it."""
+        if self._schema_major >= 7:
+            return self._schema7_formula_spectrum_trace_index(str(roi_id))
         parent = self._processed.get(LSPR_PROCESSED_ABSORBANCE_SPECTRA_GROUP_NAME)
         if parent is None:
             return None
@@ -419,6 +492,136 @@ class ImagingMeasurementExportWriter:
         return FormulaSpectrumTraceIndex(
             wavelengths_nm=np.asarray(group["wavelengths_nm"][...], dtype=np.float64),
             formula_key=str(group.attrs.get("formula_key", "absorbance")),
+            reduction_method=baseline_reduction_method,
+            by_cube=by_cube,
+        )
+
+    def formula_spectrum_row(self, roi_id: str | int, cube_index: int) -> "FormulaSpectrumTraceIndex | None":
+        """Scoped counterpart of `formula_spectrum_index`: reads only the
+        small `cube_index`/`signature_hash` columns to find the matching row
+        for ONE cube, then slices just that row out of the (potentially
+        large, rows x wavelengths, up to 4 reduction methods)
+        `sample_mean`/`reference_mean`/`reduced_values/*` arrays - instead of
+        loading a ROI's *entire* history in one call.
+
+        For the interactive single-cube preview (only ever needs one cube at
+        a time for a not-yet-RAM-resident ROI), this avoids the multi-second
+        one-shot read `formula_spectrum_index` pays for a large dataset. The
+        multi-cube sweep still uses `formula_spectrum_index` /
+        `_build_disk_formula_spectrum_trace_index` - loading everything once
+        up front is the right trade-off there since a sweep visits most
+        cubes anyway, so repeated single-row reads would cost more overall,
+        not less.
+
+        Returns a `FormulaSpectrumTraceIndex` whose `by_cube` holds at most
+        one entry (this `cube_index`, if a valid row exists) - the same
+        shape `formula_spectrum_index` returns, so this is a drop-in
+        `disk_trace_index` value (wrapped in a one-entry dict keyed by
+        `roi_id`) for `_formula_spectrum_result_from_disk_row` and friends,
+        with no changes needed on the reading side.
+
+        Schema 7: dispatches to `measurement_export_schema7.read_formula_
+        spectrum_row` - a true single-slot read there (not a scoped slice of
+        a larger array), since a cube's data already lives at one fixed,
+        directly-addressable position."""
+        if self._schema_major >= 7:
+            return self._schema7_formula_spectrum_trace_index(str(roi_id), only_cube_index=int(cube_index))
+        parent = self._processed.get(LSPR_PROCESSED_ABSORBANCE_SPECTRA_GROUP_NAME)
+        if parent is None:
+            return None
+        group = parent.get(str(roi_id))
+        if group is None or "cube_index" not in group or "wavelengths_nm" not in group:
+            return None
+        cube_indices = group["cube_index"][...]
+        matches = np.flatnonzero(cube_indices == int(cube_index))
+        if matches.size == 0:
+            return None
+        # A cube recomputed under changed settings appends a new row rather
+        # than rewriting the old one in place (§4d of
+        # analysis_pipeline_redesign.md) - the LAST matching row is the
+        # current one, same "later row supersedes earlier" rule
+        # formula_spectrum_index's own by_cube dict construction relies on.
+        row_index = int(matches[-1])
+        hashes = group["signature_hash"][...] if "signature_hash" in group else None
+        hash_value = hashes[row_index] if hashes is not None else ""
+        hash_text = hash_value.decode("utf-8") if isinstance(hash_value, bytes) else str(hash_value)
+
+        baseline_reduction_method = str(group.attrs.get("reduction_method", "mean"))
+        reduced_values_start_row = int(group.attrs.get("reduced_values_start_row", 0))
+        reduced_values_by_method: dict[str, tuple[np.ndarray, np.ndarray]] = {}
+        reduced_values_group = group.get("reduced_values")
+        if reduced_values_group is not None and row_index >= reduced_values_start_row:
+            for method_name in reduced_values_group:
+                method_group = reduced_values_group[method_name]
+                if "sample_mean" in method_group and "reference_mean" in method_group:
+                    reduced_values_by_method[method_name] = (
+                        np.asarray(method_group["sample_mean"][row_index], dtype=np.float64),
+                        np.asarray(method_group["reference_mean"][row_index], dtype=np.float64),
+                    )
+        if baseline_reduction_method not in reduced_values_by_method:
+            reduced_values_by_method[baseline_reduction_method] = (
+                np.asarray(group["sample_mean"][row_index], dtype=np.float64),
+                np.asarray(group["reference_mean"][row_index], dtype=np.float64),
+            )
+        return FormulaSpectrumTraceIndex(
+            wavelengths_nm=np.asarray(group["wavelengths_nm"][...], dtype=np.float64),
+            formula_key=str(group.attrs.get("formula_key", "absorbance")),
+            reduction_method=baseline_reduction_method,
+            by_cube={int(cube_index): (hash_text, reduced_values_by_method)},
+        )
+
+    # -- schema-7 helpers (see storage/measurement_export_schema7.py) --------
+
+    def _schema7_n_cubes(self) -> int:
+        assert self._schema7_position_map is not None
+        return len(self._schema7_position_map)
+
+    def _schema7_spectra_group(self, roi_id: str) -> h5py.Group:
+        group = self._schema7_spectra_groups.get(roi_id)
+        if group is not None:
+            return group
+        group = measurement_export_schema7.roi_spectra_group(self._handle, roi_id, n_cubes=self._schema7_n_cubes())
+        self._schema7_spectra_groups[roi_id] = group
+        return group
+
+    def _schema7_metrics_group(self, roi_id: str) -> h5py.Group:
+        group = self._schema7_metrics_groups.get(roi_id)
+        if group is not None:
+            return group
+        group = measurement_export_schema7.roi_metrics_group(self._handle, roi_id, n_cubes=self._schema7_n_cubes())
+        self._schema7_metrics_groups[roi_id] = group
+        return group
+
+    def _schema7_formula_spectrum_trace_index(
+        self, roi_id: str, *, only_cube_index: int | None = None
+    ) -> "FormulaSpectrumTraceIndex | None":
+        """Shared by `formula_spectrum_index` (bulk, `only_cube_index=None`)
+        and `formula_spectrum_row` (scoped, one cube) - wraps `measurement_
+        export_schema7`'s plain-dataclass read results into this module's
+        own `FormulaSpectrumTraceIndex`, so callers never need to know which
+        schema version answered them."""
+        if self._schema7_position_map is None:
+            return None
+        wavelengths_nm = measurement_export_schema7.read_wavelength_axis(self._handle)
+        rois = self._handle.get("rois")
+        spectra = rois.get(roi_id, {}).get("spectra") if rois is not None else None
+        baseline_reduction_method = str(spectra.attrs.get("reduction_method", "mean")) if spectra is not None else "mean"
+        baseline_formula_key = str(spectra.attrs.get("formula_key", "absorbance")) if spectra is not None else "absorbance"
+        if only_cube_index is not None:
+            row = measurement_export_schema7.read_formula_spectrum_row(
+                self._handle, roi_id, only_cube_index, self._schema7_position_map
+            )
+            if row is None:
+                return None
+            by_cube = {int(only_cube_index): (row.signature_hash, row.reduced_values_by_method)}
+        else:
+            rows = measurement_export_schema7.read_formula_spectrum_index(self._handle, roi_id, self._schema7_position_map)
+            if not rows:
+                return None
+            by_cube = {cube_index: (row.signature_hash, row.reduced_values_by_method) for cube_index, row in rows.items()}
+        return FormulaSpectrumTraceIndex(
+            wavelengths_nm=wavelengths_nm,
+            formula_key=baseline_formula_key,
             reduction_method=baseline_reduction_method,
             by_cube=by_cube,
         )
@@ -547,11 +750,19 @@ class ImagingMeasurementExportWriter:
         values = (metric_name, formula_key, combined_roi_ids)
         if self._sensorgram_metric_attrs_cache.get(key) == values:
             return
-        group = self._sensorgram_group(key)
-        group.attrs["metric_name"] = metric_name
-        group.attrs["formula_key"] = formula_key
-        if combined_roi_ids:
-            group.attrs["combined_roi_ids"] = combined_roi_ids
+        if self._schema_major >= 7:
+            measurement_export_schema7.set_sensorgram_metric_attrs(
+                self._schema7_metrics_group(key),
+                metric_name=metric_name,
+                formula_key=formula_key,
+                combined_roi_ids=combined_roi_ids,
+            )
+        else:
+            group = self._sensorgram_group(key)
+            group.attrs["metric_name"] = metric_name
+            group.attrs["formula_key"] = formula_key
+            if combined_roi_ids:
+                group.attrs["combined_roi_ids"] = combined_roi_ids
         self._sensorgram_metric_attrs_cache[key] = values
 
     def append_sensorgram_point(
@@ -593,8 +804,26 @@ class ImagingMeasurementExportWriter:
         write per row per column. See `append_formula_spectrum_batch`'s
         docstring for why this matters - the same reasoning applies here,
         just with a much smaller per-row payload (4 scalar columns instead
-        of full per-wavelength arrays)."""
+        of full per-wavelength arrays).
+
+        Schema 7: each row is a direct, fixed-offset overwrite at its own
+        cube's row position (`measurement_export_schema7.write_sensorgram_
+        point`) - there's no resize to batch, so this just loops (still one
+        call per writer method, not per-cube call sites elsewhere in the
+        app - batching's benefit here is entirely at the schema-6 layer)."""
         if not rows:
+            return
+        if self._schema_major >= 7:
+            if self._schema7_position_map is None:
+                return
+            metrics = self._schema7_metrics_group(str(roi_id))
+            for row in rows:
+                position = self._schema7_position_map.get(int(row.cube_index))
+                if position is None:
+                    continue
+                measurement_export_schema7.write_sensorgram_point(
+                    metrics, position, metric_value=row.metric_value, signature_hash=row.signature_hash
+                )
             return
         group = self._sensorgram_group(str(roi_id))
         _append_scalars(group["cube_index"], [int(row.cube_index) for row in rows])
@@ -746,8 +975,43 @@ class ImagingMeasurementExportWriter:
         for that method, same as `_ensure_matrix_column`'s backfill for
         rows that predate a method being tracked at all - every column in
         a ROI's group must stay the same length.
-        """
+
+        Schema 7: each row is a direct, fixed-offset overwrite at its own
+        cube's row position - no resize, no batching benefit to chase (the
+        whole reason this method batches for schema 6 doesn't apply), so
+        this just loops over `rows` calling `measurement_export_schema7.
+        write_formula_spectrum_row` once per cube. `reduced_values_by_
+        method` there always includes at least the row's own `reduction_
+        method` (falling back to `sample_mean`/`reference_mean` when no
+        other methods were computed) - schema 7 has no separate flat
+        "active method" columns to fall back to instead (see this module's
+        own top-of-file docstring for why)."""
         if not rows:
+            return
+        if self._schema_major >= 7:
+            if self._schema7_position_map is None:
+                return
+            n_wavelengths = len(rows[0].wavelengths_nm)
+            spectra = self._schema7_spectra_group(str(roi_id))
+            spectra.attrs["formula_key"] = rows[-1].formula_key
+            spectra.attrs["reduction_method"] = rows[-1].reduction_method
+            n_cubes = self._schema7_n_cubes()
+            for row in rows:
+                position = self._schema7_position_map.get(int(row.cube_index))
+                if position is None:
+                    continue
+                reduced_values_by_method = dict(row.reduced_values_by_method or {})
+                if row.reduction_method not in reduced_values_by_method:
+                    reduced_values_by_method[row.reduction_method] = (row.sample_mean, row.reference_mean)
+                measurement_export_schema7.write_formula_spectrum_row(
+                    spectra,
+                    position,
+                    timestamp_utc_ms=row.timestamp_utc_ms,
+                    signature_hash=row.signature_hash,
+                    reduced_values_by_method=reduced_values_by_method,
+                    n_cubes=n_cubes,
+                    n_wavelengths=n_wavelengths,
+                )
             return
         n_wavelengths = len(rows[0].wavelengths_nm)
         group = self._absorbance_group(str(roi_id), n_wavelengths=n_wavelengths)
