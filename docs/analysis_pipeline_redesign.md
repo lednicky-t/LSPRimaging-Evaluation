@@ -9,11 +9,21 @@ recompute wiring for the sensorgram sweep) are also implemented and tested. \S2c
 clear removal (item 4b) is deliberately deferred. **\S4b/\S4e implemented 2026-09-10**: `analysis_cache`
 is fully removed from the JSON processing profile (nothing reads or writes it anymore -
 `_analysis_cache_payload`/`_restore_analysis_caches` and their now-dead serialization helpers were
-deleted, not just stopped calling); the RAM cache size (`ROI_FORMULA_SPECTRUM_CACHE_SIZE`, the
-dominant cache - see \S4a/\S4b below) is now a Preferences setting
-(`MainWindow._roi_formula_spectrum_cache_limit`, Preferences -> Analysis: memory cache), with a
-live estimated-MB readout next to the spinbox. The other three, smaller analysis caches stay fixed
-constants (see \S7's note for why only this one was made configurable). Separately, the HDF5
+deleted, not just stopped calling); the RAM cache size is now a Preferences setting expressed
+directly in MB (`MainWindow._analysis_cache_budget_mb`, default 500, Preferences -> Analysis:
+memory cache size), **shared between the two caches that actually scale with dataset size** -
+`ROI_FORMULA_SPECTRUM_CACHE_SIZE` (`_roi_formula_spectrum_cache`, one entry per (ROI, spectral
+cube) absorbance spectrum) and `SENSORGRAM_CACHE_SIZE` (`_sensorgram_cache`, one entry per whole
+computed sensorgram trace per ROI-selection/settings combination) - converted to an entry-count
+limit at store-time independently for each (`_roi_formula_spectrum_cache_limit`/`_sensorgram_
+cache_limit`, each dividing the same MB budget by its own current best-effort per-entry size
+estimate - self-corrects from a generic guess to an accurate figure once a dataset is loaded and
+each cache has at least one real entry to sample), with a live "-> ~N spectra, or ~M sensorgrams"
+readout next to the spinbox showing what that budget buys each cache independently (so the true
+combined worst case is bounded by roughly 2x the configured number, not exactly that number - in
+practice the sensorgram cache holds far fewer, far smaller entries and rarely approaches its own
+share). The other two, smaller "current combined selection" display caches stay fixed constants.
+Separately, the HDF5
 disk-of-record itself also got its "recommended real fix" from
 `measurement_backup_performance_and_crash_recovery.md` (pre-sized, cube-index-addressed datasets -
 schema major 7) - see \S7 for the summary.

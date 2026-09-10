@@ -141,19 +141,55 @@ class PreferencesDialog(QDialog):
             "\"1 cube\" writes every result immediately, matching the original behavior."
         )
 
-        self.roi_formula_spectrum_cache_spin = QSpinBox()
-        self.roi_formula_spectrum_cache_spin.setRange(16, 20000)
-        self.roi_formula_spectrum_cache_spin.setSingleStep(16)
-        self.roi_formula_spectrum_cache_spin.setToolTip(
-            "How many ROIs' worth of already-computed absorbance spectra (one entry per ROI per "
-            "spectral cube) are kept in RAM at once. A larger cache means switching between "
-            "already-analyzed ROIs/cubes stays instant for longer before anything needs to be "
-            "re-read from the measurement backup file; it costs more memory, not accuracy - a "
-            "value that's too small only means more frequent (still correct, just slower) disk "
-            "reads, never wrong results."
+        self.analysis_cache_budget_spin = QSpinBox()
+        self.analysis_cache_budget_spin.setRange(16, 8192)
+        self.analysis_cache_budget_spin.setSingleStep(50)
+        self.analysis_cache_budget_spin.setSuffix(" MB")
+        self.analysis_cache_budget_spin.setToolTip(
+            "How much RAM is used to hold already-computed absorbance spectra (one entry per ROI "
+            "per spectral cube) and computed sensorgram traces (one entry per ROI-selection/"
+            "settings combination). A larger budget means switching between already-analyzed "
+            "ROIs/cubes/selections stays instant for longer before anything needs to be re-read "
+            "from the measurement backup file or recomputed; it costs more memory, not accuracy - "
+            "a value that's too small only means more frequent (still correct, just slower) disk "
+            "reads or recomputation, never wrong results. Shared between both caches, each sized "
+            "independently against this same budget."
         )
-        self.roi_formula_spectrum_cache_spin.valueChanged.connect(self._update_roi_formula_spectrum_cache_estimate_label)
-        self.roi_formula_spectrum_cache_estimate_label = QLabel("")
+        self.analysis_cache_budget_spin.valueChanged.connect(self._update_analysis_cache_estimate_label)
+        self.analysis_cache_estimate_label = QLabel("")
+
+        # Small calculator: "how big would fully caching N ROIs x N
+        # wavelengths x N cubes' worth of spectra be" - answers the sizing
+        # question in the other direction from the estimate label above
+        # (that one goes budget -> entry count; this one goes ROI/wavelength/
+        # cube counts -> MB), so a maintainer can size the budget against
+        # their actual dataset instead of guessing. Deliberately spectra-only
+        # (matches the formula requested: #ROI x #wavelengths x #cubes) - the
+        # sensorgram cache doesn't scale with wavelength count the same way,
+        # so it isn't part of this specific calculation.
+        self.cache_calc_roi_spin = QSpinBox()
+        self.cache_calc_roi_spin.setRange(1, 100000)
+        self.cache_calc_roi_spin.setValue(1)
+        self.cache_calc_roi_spin.setToolTip("Number of ROIs to estimate for.")
+        self.cache_calc_wavelength_spin = QSpinBox()
+        self.cache_calc_wavelength_spin.setRange(1, 2000)
+        self.cache_calc_wavelength_spin.setValue(40)
+        self.cache_calc_wavelength_spin.setToolTip("Number of wavelengths per spectrum to estimate for.")
+        self.cache_calc_cube_spin = QSpinBox()
+        self.cache_calc_cube_spin.setRange(1, 500000)
+        self.cache_calc_cube_spin.setValue(100)
+        self.cache_calc_cube_spin.setToolTip("Number of spectral cubes (time points) to estimate for.")
+        for spin in (self.cache_calc_roi_spin, self.cache_calc_wavelength_spin, self.cache_calc_cube_spin):
+            spin.valueChanged.connect(self._update_cache_calculator_result_label)
+        self.cache_calc_result_label = QLabel("")
+        self.cache_calc_use_selection_button = QPushButton("Use current selection")
+        self.cache_calc_use_selection_button.setToolTip("Fill # ROIs from how many ROIs are currently selected.")
+        self.cache_calc_use_selection_button.clicked.connect(self._fill_cache_calculator_from_selection)
+        self.cache_calc_use_dataset_button = QPushButton("Use current dataset")
+        self.cache_calc_use_dataset_button.setToolTip(
+            "Fill # wavelengths and # cubes from the currently loaded dataset."
+        )
+        self.cache_calc_use_dataset_button.clicked.connect(self._fill_cache_calculator_from_dataset)
 
         self._build_ui()
         self._load_from_window()
@@ -222,10 +258,28 @@ class PreferencesDialog(QDialog):
         cache_layout.setHorizontalSpacing(16)
         cache_layout.setVerticalSpacing(8)
         cache_size_row = QHBoxLayout()
-        cache_size_row.addWidget(self.roi_formula_spectrum_cache_spin)
-        cache_size_row.addWidget(self.roi_formula_spectrum_cache_estimate_label)
+        cache_size_row.addWidget(self.analysis_cache_budget_spin)
+        cache_size_row.addWidget(self.analysis_cache_estimate_label)
         cache_size_row.addStretch(1)
-        cache_layout.addRow("Spectra kept in memory", cache_size_row)
+        cache_layout.addRow("Memory cache size", cache_size_row)
+
+        cache_calc_inputs_row = QHBoxLayout()
+        cache_calc_inputs_row.addWidget(self.cache_calc_roi_spin)
+        cache_calc_inputs_row.addWidget(QLabel("ROIs ×"))
+        cache_calc_inputs_row.addWidget(self.cache_calc_wavelength_spin)
+        cache_calc_inputs_row.addWidget(QLabel("wavelengths ×"))
+        cache_calc_inputs_row.addWidget(self.cache_calc_cube_spin)
+        cache_calc_inputs_row.addWidget(QLabel("cubes ="))
+        cache_calc_inputs_row.addWidget(self.cache_calc_result_label)
+        cache_calc_inputs_row.addStretch(1)
+        cache_calc_buttons_row = QHBoxLayout()
+        cache_calc_buttons_row.addWidget(self.cache_calc_use_selection_button)
+        cache_calc_buttons_row.addWidget(self.cache_calc_use_dataset_button)
+        cache_calc_buttons_row.addStretch(1)
+        cache_calc_column = QVBoxLayout()
+        cache_calc_column.addLayout(cache_calc_inputs_row)
+        cache_calc_column.addLayout(cache_calc_buttons_row)
+        cache_layout.addRow("Spectra cache size calculator", cache_calc_column)
 
         layout.addWidget(appearance_box)
         layout.addWidget(startup_box)
@@ -295,15 +349,50 @@ class PreferencesDialog(QDialog):
 
         analysis_controller.run_dark_frame_impact_test(_on_result, _on_error)
 
-    def _update_roi_formula_spectrum_cache_estimate_label(self) -> None:
+    def _update_analysis_cache_estimate_label(self) -> None:
         window = self._window
         if not hasattr(window, "_estimated_roi_formula_spectrum_entry_bytes"):
-            self.roi_formula_spectrum_cache_estimate_label.setText("")
+            self.analysis_cache_estimate_label.setText("")
             return
-        entries = self.roi_formula_spectrum_cache_spin.value()
-        per_entry_bytes = window._estimated_roi_formula_spectrum_entry_bytes()
-        estimated_mb = entries * per_entry_bytes / (1024.0 * 1024.0)
-        self.roi_formula_spectrum_cache_estimate_label.setText(f"→ ~{estimated_mb:.0f} MB")
+        budget_bytes = self.analysis_cache_budget_spin.value() * 1024 * 1024
+        spectra_per_entry_bytes = max(1, window._estimated_roi_formula_spectrum_entry_bytes())
+        sensorgrams_per_entry_bytes = max(1, window._estimated_sensorgram_result_entry_bytes())
+        estimated_spectra = int(budget_bytes / spectra_per_entry_bytes)
+        estimated_sensorgrams = int(budget_bytes / sensorgrams_per_entry_bytes)
+        self.analysis_cache_estimate_label.setText(
+            f"→ ~{estimated_spectra:,} spectra, or ~{estimated_sensorgrams:,} sensorgrams (each up to that budget)"
+        )
+
+    def _update_cache_calculator_result_label(self) -> None:
+        window = self._window
+        if not hasattr(window, "_estimated_roi_formula_spectrum_bytes_per_wavelength"):
+            self.cache_calc_result_label.setText("")
+            return
+        n_rois = self.cache_calc_roi_spin.value()
+        n_wavelengths = self.cache_calc_wavelength_spin.value()
+        n_cubes = self.cache_calc_cube_spin.value()
+        bytes_per_wavelength = window._estimated_roi_formula_spectrum_bytes_per_wavelength()
+        total_bytes = n_rois * n_wavelengths * n_cubes * bytes_per_wavelength
+        total_mb = total_bytes / (1024.0 * 1024.0)
+        if total_mb >= 1024.0:
+            self.cache_calc_result_label.setText(f"~{total_mb / 1024.0:,.2f} GB")
+        else:
+            self.cache_calc_result_label.setText(f"~{total_mb:,.1f} MB")
+
+    def _fill_cache_calculator_from_selection(self) -> None:
+        window = self._window
+        selected_roi_ids = getattr(window, "_selected_roi_ids", None)
+        if selected_roi_ids:
+            self.cache_calc_roi_spin.setValue(max(1, len(selected_roi_ids)))
+
+    def _fill_cache_calculator_from_dataset(self) -> None:
+        window = self._window
+        wavelength_values = getattr(window, "_wavelength_values", None)
+        if wavelength_values:
+            self.cache_calc_wavelength_spin.setValue(max(1, len(wavelength_values)))
+        spectral_cube_values = getattr(window, "_spectral_cube_values", None)
+        if spectral_cube_values:
+            self.cache_calc_cube_spin.setValue(max(1, len(spectral_cube_values)))
 
     def _load_from_window(self) -> None:
         window = self._window
@@ -340,9 +429,10 @@ class PreferencesDialog(QDialog):
             index = self.measurement_backup_batch_combo.findData(batch_size)
             self.measurement_backup_batch_combo.setCurrentIndex(index if index >= 0 else 1)
 
-        if hasattr(window, "_roi_formula_spectrum_cache_limit"):
-            self.roi_formula_spectrum_cache_spin.setValue(int(window._roi_formula_spectrum_cache_limit()))
-        self._update_roi_formula_spectrum_cache_estimate_label()
+        if hasattr(window, "_analysis_cache_budget_mb"):
+            self.analysis_cache_budget_spin.setValue(int(window._analysis_cache_budget_mb()))
+        self._update_analysis_cache_estimate_label()
+        self._update_cache_calculator_result_label()
 
     def apply_changes(self) -> None:
         window = self._window
@@ -378,8 +468,8 @@ class PreferencesDialog(QDialog):
             if batch_size is not None:
                 window._set_measurement_backup_batch_size(int(batch_size))
 
-        if hasattr(window, "_set_roi_formula_spectrum_cache_limit"):
-            window._set_roi_formula_spectrum_cache_limit(self.roi_formula_spectrum_cache_spin.value())
+        if hasattr(window, "_set_analysis_cache_budget_mb"):
+            window._set_analysis_cache_budget_mb(self.analysis_cache_budget_spin.value())
 
 
 def show_preferences_dialog_for(window) -> None:

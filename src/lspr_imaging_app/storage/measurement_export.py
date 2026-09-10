@@ -996,6 +996,7 @@ class ImagingMeasurementExportWriter:
             spectra.attrs["formula_key"] = rows[-1].formula_key
             spectra.attrs["reduction_method"] = rows[-1].reduction_method
             n_cubes = self._schema7_n_cubes()
+            resolved_rows: list[measurement_export_schema7.FormulaSpectrumRowWrite] = []
             for row in rows:
                 position = self._schema7_position_map.get(int(row.cube_index))
                 if position is None:
@@ -1003,15 +1004,21 @@ class ImagingMeasurementExportWriter:
                 reduced_values_by_method = dict(row.reduced_values_by_method or {})
                 if row.reduction_method not in reduced_values_by_method:
                     reduced_values_by_method[row.reduction_method] = (row.sample_mean, row.reference_mean)
-                measurement_export_schema7.write_formula_spectrum_row(
-                    spectra,
-                    position,
-                    timestamp_utc_ms=row.timestamp_utc_ms,
-                    signature_hash=row.signature_hash,
-                    reduced_values_by_method=reduced_values_by_method,
-                    n_cubes=n_cubes,
-                    n_wavelengths=n_wavelengths,
+                resolved_rows.append(
+                    measurement_export_schema7.FormulaSpectrumRowWrite(
+                        position=position,
+                        timestamp_utc_ms=row.timestamp_utc_ms,
+                        signature_hash=row.signature_hash,
+                        reduced_values_by_method=reduced_values_by_method,
+                    )
                 )
+            # One call for the whole batch - resolves each reduction
+            # method's dataset pair once, not once per row (see write_
+            # formula_spectrum_rows' own docstring for why this was a real,
+            # measured regression when it was done per row instead).
+            measurement_export_schema7.write_formula_spectrum_rows(
+                spectra, resolved_rows, n_cubes=n_cubes, n_wavelengths=n_wavelengths
+            )
             return
         n_wavelengths = len(rows[0].wavelengths_nm)
         group = self._absorbance_group(str(roi_id), n_wavelengths=n_wavelengths)

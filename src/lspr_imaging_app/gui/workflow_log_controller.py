@@ -290,11 +290,8 @@ class WorkflowLogController:
 
     def set_status_text(self, text: str) -> None:
         window = self.window
-        previous_text = window._status_bar_message.text()
         window.status_label.setText(text)
         window._status_bar_message.setText(text)
-        if previous_text and previous_text != text:
-            window._status_bar_last_action.setText(f"Last action: {previous_text}")
 
     def set_status_hint(self, text: str) -> None:
         self.window._status_bar_hint.setText(f"Hint: {text}")

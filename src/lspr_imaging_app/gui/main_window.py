@@ -1271,8 +1271,6 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, MeasurementCalibrationMixin,
         self._status_bar_busy_detail.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
         self._status_bar_busy_detail.setFont(QFont("Consolas", 9))
         self._status_bar_busy_detail.setStyleSheet(f"color: {get_active_theme().text_dim};")
-        self._status_bar_last_action = QLabel("Last action: -", self)
-        self._status_bar_last_action.setWordWrap(False)
         self._status_bar_hint = QLabel("Hint: Hover a control for guidance.", self)
         self._status_bar_hint.setWordWrap(False)
         # RAM/disk analysis-cache stats, right-aligned (see
@@ -1298,7 +1296,6 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, MeasurementCalibrationMixin,
         status_row_layout.addWidget(self._status_bar_busy, 0, Qt.AlignmentFlag.AlignVCenter)
         status_row_layout.addWidget(self._status_bar_busy_detail, 0, Qt.AlignmentFlag.AlignVCenter)
         status_row_layout.addWidget(self._status_bar_message, 2)
-        status_row_layout.addWidget(self._status_bar_last_action, 1)
         status_row_layout.addWidget(self._status_bar_hint, 2)
         status_row_layout.addStretch(1)
         status_row_layout.addWidget(self._status_bar_cache_stats, 0, Qt.AlignmentFlag.AlignVCenter)
@@ -4129,9 +4126,23 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, MeasurementCalibrationMixin,
         """Updates the status bar's right-aligned RAM/disk cache-stats
         readout. Called from a plain periodic timer (_cache_stats_refresh_
         timer, __init__) rather than threaded through every cache-mutation
-        call site - see that timer's own comment for why."""
+        call site - see that timer's own comment for why.
+
+        Skipped entirely while a sensorgram run is in flight
+        (`_sensorgram_running`) - same choke point and same reasoning as
+        `AnalysisController.schedule_cube_slider_cache_refresh`'s own
+        run-in-progress guard (see docs/sensorgram_reentrancy_and_cube_
+        slider_cache_indicator.md's "Follow-up done 2026-09-02"): with the
+        RAM cache size now a configurable MB budget rather than a small
+        fixed 512-entry cap, `_analysis_ram_cache_stats()`'s full scan over
+        every entry in `_roi_formula_spectrum_cache` can walk tens of
+        thousands of entries at a generous budget - real, avoidable
+        GUI-thread cost competing for the GIL with the background sweep's
+        own per-cube work if left unconditional. The displayed numbers just
+        go briefly stale during a run (acceptable for a passive readout) and
+        catch up within one tick after it finishes."""
         label = getattr(self, "_status_bar_cache_stats", None)
-        if label is None:
+        if label is None or getattr(self, "_sensorgram_running", False):
             return
         entry_count, ram_bytes = self._analysis_ram_cache_stats()
         disk_bytes = self._measurement_backup_disk_bytes()
@@ -4373,13 +4384,34 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, MeasurementCalibrationMixin,
         run average, elapsed / items_completed). Curr answers "is the cube
         that just finished slow" directly, without any smoothing hiding a
         real spike or amplifying rounding noise into a fake one; Avg answers
-        "how is the run doing overall". Elapsed/ETA always use the whole-run
-        `elapsed`, regardless of items_completed - that's the number those
-        actually mean.
+        "how is the run doing overall".
+
+        ETA prefers the same real items_completed/total_items counter used
+        for Avg (elapsed / items_completed * remaining items) over a naive
+        elapsed*(100-percent)/percent extrapolation from `current_percent`
+        alone, whenever items are actually being tracked. For a "Start
+        analysis" sweep, `current_percent` is NOT a uniform clock: analysis_
+        tasks.py's spectral_cube_progress_callback deliberately spends a
+        fixed 20 of the 100 percentage-points on a fast, parallel "prep"
+        phase (reading every cube's pixels) before the slow per-cube compute
+        loop gets the remaining 80 - so the bar can already read 35% after
+        prep alone finishes in a couple seconds, even though the genuinely
+        slow 80%-of-the-bar compute phase has barely started. Extrapolating
+        linearly from that percent averages the "free" prep chunk in with
+        the expensive compute chunk and badly underestimates time left -
+        the items-based rate sidesteps this because it only ever measures
+        real per-cube compute completions, never the prep phase's percentage
+        jump. Falls back to the percent-based estimate for busy operations
+        that don't track items this way (no total_items/items_completed).
         """
         elapsed_text = MainWindow._format_elapsed_seconds(elapsed)
         eta_text = "--:--"
-        if current_percent > 0:
+        if total_items and items_completed:
+            avg_seconds_per_item = elapsed / items_completed
+            remaining_items = max(total_items - items_completed, 0)
+            eta_seconds = max(avg_seconds_per_item * remaining_items, 0.0)
+            eta_text = MainWindow._format_elapsed_seconds(eta_seconds) or "0:00"
+        elif current_percent > 0:
             eta_seconds = max((elapsed * (100.0 - current_percent)) / current_percent, 0.0)
             eta_text = MainWindow._format_elapsed_seconds(eta_seconds) or "0:00"
         speed_text = ""
@@ -5193,42 +5225,106 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, MeasurementCalibrationMixin,
     def _set_measurement_backup_batch_size(self, value: int) -> None:
         self._settings.setValue("analysis/measurement_backup_batch_size", max(1, int(value)))
 
+    def _analysis_cache_budget_mb(self) -> int:
+        """User-facing RAM budget (in MB), shared by the two analysis caches
+        that actually scale with dataset size: `_roi_formula_spectrum_cache`
+        (one entry per (ROI, spectral cube) absorbance spectrum - the bigger
+        of the two per entry) and `_sensorgram_cache` (one entry per
+        distinct ROI-selection/settings combination's whole computed
+        sensorgram trace). The other two analysis caches
+        (`_formula_spectrum_cache`/`_formula_spectral_cube_cache`) stay at
+        their small fixed entry-count constants - they're "current combined
+        selection" display caches, not something that benefits from a
+        memory dial. A memory budget is what the Preferences UI shows and
+        stores; see `_roi_formula_spectrum_cache_limit`/`_sensorgram_cache_
+        limit` for the entry-count each cache actually turns this into at
+        store-time - independently, each against its own per-entry size
+        estimate, so the true combined worst case is bounded by roughly
+        2x this number, not exactly this number (in real use the sensorgram
+        cache holds far fewer, far smaller entries than the spectrum cache,
+        so it rarely approaches its own share of the budget). Clamped to
+        >= 1."""
+        return max(1, int(self._settings.value("analysis/cache_budget_mb", 500)))
+
+    def _set_analysis_cache_budget_mb(self, value: int) -> None:
+        self._settings.setValue("analysis/cache_budget_mb", max(1, int(value)))
+
     def _roi_formula_spectrum_cache_limit(self) -> int:
         """How many per-(ROI, spectral cube) absorbance-spectrum results
-        (`_roi_formula_spectrum_cache`) are kept resident in RAM at once -
-        the dominant analysis RAM cache (holds a full per-wavelength result,
-        every reduction method, per entry), unlike the other three analysis
-        caches which stay at their small fixed constants. Read live at every
-        store (`AnalysisWorkerMixin._store_in_lru_cache`), so a Preferences
-        change takes effect immediately, no restart needed. Clamped to >= 1
-        so the cache can never be configured away entirely (that would defeat
-        the whole point of the RAM tier - a cache size of 0 isn't a smaller
-        cache, it's a bug)."""
-        return max(1, int(self._settings.value("analysis/roi_formula_spectrum_cache_limit", self.ROI_FORMULA_SPECTRUM_CACHE_SIZE)))
+        `_roi_formula_spectrum_cache` keeps resident in RAM at once -
+        `_analysis_cache_budget_mb`'s byte budget divided by the current
+        best-effort per-entry size estimate (see
+        `_estimated_roi_formula_spectrum_entry_bytes` - uses a real sampled
+        entry once one exists, so this self-corrects from a generic guess to
+        an accurate figure once a dataset is actually loaded and analyzed).
+        Read live at every store (`AnalysisWorkerMixin._store_in_lru_cache`),
+        so a Preferences change - or simply loading a dataset with a
+        different wavelength count - takes effect immediately, no restart
+        needed. Clamped to >= 1 so the cache can never be configured away
+        entirely (that would defeat the whole point of the RAM tier - a
+        cache size of 0 isn't a smaller cache, it's a bug)."""
+        budget_bytes = self._analysis_cache_budget_mb() * 1024 * 1024
+        per_entry_bytes = max(1, self._estimated_roi_formula_spectrum_entry_bytes())
+        return max(1, budget_bytes // per_entry_bytes)
 
-    def _set_roi_formula_spectrum_cache_limit(self, value: int) -> None:
-        self._settings.setValue("analysis/roi_formula_spectrum_cache_limit", max(1, int(value)))
+    def _sensorgram_cache_limit(self) -> int:
+        """How many whole computed sensorgram traces `_sensorgram_cache`
+        keeps resident in RAM at once - same shared-budget approach as
+        `_roi_formula_spectrum_cache_limit`, just against `_sensorgram_
+        cache`'s own (much smaller per entry, in typical use) size
+        estimate."""
+        budget_bytes = self._analysis_cache_budget_mb() * 1024 * 1024
+        per_entry_bytes = max(1, self._estimated_sensorgram_result_entry_bytes())
+        return max(1, budget_bytes // per_entry_bytes)
 
     def _estimated_roi_formula_spectrum_entry_bytes(self) -> int:
         """Best-effort average per-entry byte size for `_roi_formula_spectrum_cache`,
-        used only for the Preferences dialog's live MB estimate next to the
-        cache-size spinbox - not a value anything else depends on. Sampled
-        from a real cache entry when one exists (most accurate); otherwise
-        estimated from the currently-loaded dataset's wavelength count;
-        otherwise a generic placeholder for when no dataset is loaded yet."""
+        used for the Preferences dialog's live estimate next to the cache-size
+        spinbox, and to convert the configured MB budget into an actual entry-
+        count limit (`_roi_formula_spectrum_cache_limit`). Sampled from a real
+        cache entry when one exists (most accurate); otherwise estimated from
+        the currently-loaded dataset's wavelength count; otherwise a generic
+        placeholder for when no dataset is loaded yet."""
         if self._roi_formula_spectrum_cache:
             sample = next(iter(self._roi_formula_spectrum_cache.values()))
             return max(1, self._formula_spectrum_result_nbytes(sample))
         n_wavelengths = len(self._wavelength_values) if self._wavelength_values else 40
-        # Matches _formula_spectrum_result_nbytes's own field list: 6
-        # per-wavelength arrays (wavelengths_nm, formula_values, sample/
-        # reference_reduced_value, sample/reference_pixel_count) plus up to
-        # 4 reduction methods' own (sample, reference) pairs - all
-        # approximated at 8 bytes/value (float64/int64-ish worst case).
+        return n_wavelengths * self._estimated_roi_formula_spectrum_bytes_per_wavelength()
+
+    @staticmethod
+    def _estimated_roi_formula_spectrum_bytes_per_wavelength() -> int:
+        """Approximate RAM cost of one wavelength's worth of one `_roi_
+        formula_spectrum_cache` entry - the per-wavelength part of `_estimated_
+        roi_formula_spectrum_entry_bytes`'s fallback estimate, factored out so
+        the Preferences dialog's cache-size calculator (ROI x wavelength x
+        cube counts -> MB, for a hypothetical dataset the maintainer types in)
+        uses the exact same constant rather than a second copy of it. Matches
+        `_formula_spectrum_result_nbytes`'s own field list: 6 per-wavelength
+        arrays (wavelengths_nm, formula_values, sample/reference_reduced_
+        value, sample/reference_pixel_count) plus up to 4 reduction methods'
+        own (sample, reference) pairs - all approximated at 8 bytes/value
+        (float64/int64-ish worst case)."""
         per_wavelength_arrays = 6
         reduction_methods = 4
         bytes_per_value = 8
-        return n_wavelengths * (per_wavelength_arrays + reduction_methods * 2) * bytes_per_value
+        return (per_wavelength_arrays + reduction_methods * 2) * bytes_per_value
+
+    def _estimated_sensorgram_result_entry_bytes(self) -> int:
+        """Best-effort average per-entry byte size for `_sensorgram_cache`,
+        same role as `_estimated_roi_formula_spectrum_entry_bytes` but for
+        whole sensorgram traces (one entry per distinct ROI-selection/
+        settings combination, sized by how many spectral cubes are in the
+        trace, not by wavelength count)."""
+        if self._sensorgram_cache:
+            sample = next(iter(self._sensorgram_cache.values()))
+            return max(1, self._sensorgram_computation_result_nbytes(sample))
+        n_cubes = len(self._spectral_cube_values) if self._spectral_cube_values else 100
+        # Matches _sensorgram_computation_result_nbytes's own field list: 3
+        # arrays (spectral_cube_indices, metric_values, metric_signal), each
+        # one value per cube in the trace, ~8 bytes/value.
+        arrays_per_entry = 3
+        bytes_per_value = 8
+        return n_cubes * arrays_per_entry * bytes_per_value
 
     def _set_ui_scale_factor(self, value: str) -> None:
         self._settings.setValue("ui/scale_factor", value)
@@ -7771,7 +7867,24 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, MeasurementCalibrationMixin,
 
     def _update_selection_dependent_plots(self, *, force: bool = False, prompt_live_preview: bool = False) -> None:
         selected_signature = tuple(sorted(int(roi_id) for roi_id in self._selected_roi_ids))
-        if not force and selected_signature == self._selection_plot_highlight_signature:
+        # Also re-run when the sensorgram is currently empty, even if the
+        # selection signature matches the last run - a single ROI click
+        # fires this twice (image_interaction_controller.py calls it once
+        # on MouseButtonPress and again on MouseButtonRelease for the same
+        # resulting selection), and _update_roi_summary() unconditionally
+        # clears the sensorgram via _mark_formula_spectrum_dirty whenever
+        # "Live preview" is off, once per call - both press and release. The
+        # unchanged-signature skip below is correct for avoiding redundant
+        # cache lookups, but it also skipped RESTORING the plot that the
+        # second call's own _update_roi_summary() had just blanked, since
+        # nothing else runs between them to repaint - so the release call
+        # ended up leaving the sensorgram permanently empty despite valid
+        # cached/backed-up data existing for it (reported 2026-09-10: "flash
+        # then no data" after a full "Start analysis" run). Checking for
+        # empty data too makes this self-healing without weakening the skip
+        # for the common case (same selection, already showing real data).
+        already_showing_data = self._sensorgram_spectral_cube_indices.size > 0
+        if not force and selected_signature == self._selection_plot_highlight_signature and already_showing_data:
             return
         self._selection_plot_highlight_signature = selected_signature
         self._refresh_visible_spectrum_from_cache()

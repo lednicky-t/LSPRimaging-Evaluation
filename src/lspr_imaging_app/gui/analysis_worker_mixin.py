@@ -344,7 +344,7 @@ class AnalysisWorkerMixin:
         self.window._sensorgram_metric_values = np.asarray(result.metric_values, dtype=np.float64)
         self.window._sensorgram_metric_signal = np.asarray(result.metric_signal, dtype=np.float64)
         if signature:
-            self._store_in_lru_cache(self.window._sensorgram_cache, signature, result, self.window.SENSORGRAM_CACHE_SIZE)
+            self._store_in_lru_cache(self.window._sensorgram_cache, signature, result, self.window._sensorgram_cache_limit())
         self.set_sensorgram_series(self.window._sensorgram_spectral_cube_indices, self.window._sensorgram_metric_values)
         summary = (
             f"{self.window._analysis_metric_label()} | Calculated {result.completed_count}/{result.total_count} spectral cubes"
@@ -1002,7 +1002,25 @@ class AnalysisWorkerMixin:
                 return None
             return self._combine_roi_formula_spectrum_results(roi_results)
 
+        # A multi-cube "Start analysis" sweep deliberately does NOT feed the
+        # freshly-computed per-cube spectra into _roi_formula_spectrum_cache
+        # (full per-wavelength arrays, write-through-fanned-out to up to 4
+        # Reduction methods each - see _store_roi_formula_spectrum_cache_for_
+        # cube). At real dataset scale (hundreds of ROIs x cubes) that cache
+        # never fills and evicts within a single run, so it just grows for
+        # the run's entire duration - measured as a real, monotonic per-cube
+        # slowdown (rising memory pressure competing with the OS file-cache
+        # backing the OME-Zarr reads). None of that RAM copy is needed for
+        # THIS run's own progress: the metric this loop actually needs comes
+        # straight from the freshly-computed result in hand, and any later
+        # interactive spectrum preview or resume-skip check already falls
+        # back to the HDF5 backup (schema 7: fixed-position, O(1) reads - see
+        # _build_disk_formula_spectrum_row_index) instead of expecting a RAM
+        # hit. A single-cube call (interactive refresh) is unaffected - it
+        # still fully populates this cache, same as before.
         def spectral_cube_formula_spectrum_cache_store(spectral_cube_index, roi_formula_spectrum_results, selected_source_rois=selected_source_rois):
+            if len(spectral_cubes) > 1:
+                return
             self._store_roi_formula_spectrum_cache_for_cube(roi_formula_spectrum_results, spectral_cube_index, selected_source_rois)
 
         wavelength_range = self.window._analysis_wavelength_range()

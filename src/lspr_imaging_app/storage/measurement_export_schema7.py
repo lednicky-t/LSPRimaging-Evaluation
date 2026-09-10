@@ -197,7 +197,22 @@ def ensure_reduced_method_arrays(
     ROI, mirroring schema 6.7's `reduced_values/<method>/` lazy-subgroup
     pattern, minus the flat "active method" duplicate columns 6.7 also kept
     (see this module's own docstring for why that duality isn't needed
-    here)."""
+    here).
+
+    Known, deliberately-unaddressed edge case: once a method's arrays exist
+    (any row of this ROI ever supplied it), every OTHER row reads back as
+    "having" that method too - via its NaN fill value, since there's no
+    per-(cube, method) "was this actually supplied" marker, unlike schema
+    6.7's `reduced_values_start_row` (which solves the analogous problem
+    for its own, chronologically-different scenario - a method introduced
+    partway through a file's history, not a row selectively omitting one).
+    Not a gap in practice: every real caller (`reduce_sample_and_reference_
+    all_methods`) already populates every `REDUCTION_METHODS` key on every
+    row, NaN for whichever wasn't actually active - a row genuinely missing
+    a key never happens via any call site in this app today. Flagged here,
+    not fixed, per this repo's "don't add handling for scenarios that can't
+    happen" rule - revisit if a future caller ever legitimately needs to
+    omit a method per-row rather than NaN-fill it."""
     reduced = spectra_group.require_group("reduced")
     method_group = reduced.require_group(method)
     if "sample" not in method_group:
@@ -207,28 +222,63 @@ def ensure_reduced_method_arrays(
     return method_group["sample"], method_group["reference"]
 
 
-def write_formula_spectrum_row(
+@dataclass(slots=True)
+class FormulaSpectrumRowWrite:
+    """One (cube) row to write for a single ROI, for `write_formula_
+    spectrum_rows` below - the schema-7 counterpart of `measurement_export.
+    py`'s `FormulaSpectrumBackupRow`, minus the fields schema 7 doesn't
+    store (cube_index is implicit in `position`; there's no separate flat
+    absorbance/sample_mean/reference_mean, only `reduced_values_by_method` -
+    see this module's own top docstring for why)."""
+
+    position: int
+    timestamp_utc_ms: int
+    signature_hash: str
+    reduced_values_by_method: dict[str, tuple[np.ndarray, np.ndarray]]
+
+
+def write_formula_spectrum_rows(
     spectra_group: h5py.Group,
-    position: int,
+    rows: list[FormulaSpectrumRowWrite],
     *,
-    timestamp_utc_ms: int,
-    signature_hash: str,
-    reduced_values_by_method: dict[str, tuple[np.ndarray, np.ndarray]],
     n_cubes: int,
     n_wavelengths: int,
 ) -> None:
-    """Writes one (ROI, cube) row in place at its fixed row `position` - a
-    direct slice assignment, never a resize. `reduced_values_by_method` must
-    carry at least one method (the row's own reduction_method at minimum,
-    matching schema 6.x's fallback when no other methods were computed)."""
-    spectra_group["timestamp_utc_ms"][position] = int(timestamp_utc_ms)
-    spectra_group["signature_hash"][position] = str(signature_hash)
-    for method, (sample_row, reference_row) in reduced_values_by_method.items():
-        sample_ds, reference_ds = ensure_reduced_method_arrays(
-            spectra_group, method, n_cubes=n_cubes, n_wavelengths=n_wavelengths
-        )
-        sample_ds[position] = np.asarray(sample_row, dtype=np.float32)
-        reference_ds[position] = np.asarray(reference_row, dtype=np.float32)
+    """Writes every row in `rows` (all for the same ROI - each a different
+    cube, each already resolved to `reduced_values_by_method` with at least
+    the row's own reduction_method) in place at each row's own fixed
+    position - direct slice assignments, never a resize.
+
+    Resolves every reduction method's `sample`/`reference` dataset pair
+    (`ensure_reduced_method_arrays`) ONCE per call, up front, for the union
+    of methods across the whole batch - not once per row. This matters: a
+    real "Start analysis" run buffers several cubes per ROI before flushing
+    (`measurement_backup_batch_size`), so `rows` is typically a small batch,
+    not a single row - resolving the group/dataset objects per row instead
+    of once per batch was a real, measured regression (2x slower than
+    schema 6's own batched write at a realistic 30-ROI/4-method/batch-of-5
+    scale - schema 6's batching amortizes its resize cost across the batch,
+    and this fix is what lets schema 7's batching amortize its own,
+    smaller-but-nonzero per-call HDF5 group/dataset-lookup cost the same
+    way, instead of paying it fresh for every row)."""
+    if not rows:
+        return
+    methods_present: set[str] = set()
+    for row in rows:
+        methods_present.update(row.reduced_values_by_method.keys())
+    method_datasets = {
+        method: ensure_reduced_method_arrays(spectra_group, method, n_cubes=n_cubes, n_wavelengths=n_wavelengths)
+        for method in methods_present
+    }
+    timestamp_ds = spectra_group["timestamp_utc_ms"]
+    hash_ds = spectra_group["signature_hash"]
+    for row in rows:
+        timestamp_ds[row.position] = int(row.timestamp_utc_ms)
+        hash_ds[row.position] = str(row.signature_hash)
+        for method, (sample_row, reference_row) in row.reduced_values_by_method.items():
+            sample_ds, reference_ds = method_datasets[method]
+            sample_ds[row.position] = np.asarray(sample_row, dtype=np.float32)
+            reference_ds[row.position] = np.asarray(reference_row, dtype=np.float32)
 
 
 @dataclass(slots=True)
