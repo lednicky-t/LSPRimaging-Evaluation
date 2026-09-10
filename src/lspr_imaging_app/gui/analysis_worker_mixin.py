@@ -1894,34 +1894,22 @@ class AnalysisWorkerMixin:
             for roi, signature_value in zip(selected_source_rois, roi_signatures, strict=False)
             if signature_value is None or self.window._roi_formula_spectrum_cache.get(signature_value) is None
         ]
-        if missing_source_rois:
-            spectral_cube_index = self.window._current_spectral_cube()
-            if spectral_cube_index is not None:
-                # Cross-restart resume: a cube already backed up to HDF5 in a
-                # previous session can skip recomputation here too, not just
-                # in the "Start analysis" loop - same all-or-nothing check
-                # (see _combined_absorbance_results_from_ram_or_disk), so a
-                # partial hit still falls through to the background worker
-                # below for the whole missing set rather than being
-                # special-cased. A full hit resolves every previously-missing
-                # ROI straight into the RAM cache, so re-running the combined
-                # cache lookup just below picks it up as a normal cache hit -
-                # no separate "apply immediately" branch needed here.
-                # Scoped to this one cube (_build_disk_formula_spectrum_row_index),
-                # not the bulk per-ROI history read the multi-cube sweep uses -
-                # this interactive path only ever needs the cube on screen.
-                disk_trace_index = self._build_disk_formula_spectrum_row_index(missing_source_rois, int(spectral_cube_index))
-                if disk_trace_index and self._combined_formula_spectrum_results_from_ram_or_disk(
-                    int(spectral_cube_index), missing_source_rois, disk_trace_index
-                ) is not None:
-                    missing_source_rois = []
-                    cached_result = self._cached_formula_spectrum_result_from_roi_cache(selected_source_rois)
-                    if cached_result is not None:
-                        self.window._formula_spectrum_dirty = False
-                        self._apply_formula_spectrum_result(cached_result)
-                        elapsed = self.window._format_elapsed_seconds(time.perf_counter() - start_time)
-                        self.window._set_status_text(f"Spec | cache {elapsed}")
-                        return
+        if missing_source_rois and self._fill_roi_formula_spectrum_cache_from_disk(missing_source_rois):
+            # Cross-restart resume: a cube already backed up to HDF5 in a
+            # previous session can skip recomputation here too, not just in
+            # the "Start analysis" loop. A full hit resolves every
+            # previously-missing ROI straight into the RAM cache (inside
+            # _fill_roi_formula_spectrum_cache_from_disk), so re-running the
+            # combined cache lookup just below picks it up as a normal cache
+            # hit - no separate "apply immediately" branch needed here.
+            missing_source_rois = []
+            cached_result = self._cached_formula_spectrum_result_from_roi_cache(selected_source_rois)
+            if cached_result is not None:
+                self.window._formula_spectrum_dirty = False
+                self._apply_formula_spectrum_result(cached_result)
+                elapsed = self.window._format_elapsed_seconds(time.perf_counter() - start_time)
+                self.window._set_status_text(f"Spec | cache {elapsed}")
+                return
         target_source_rois = missing_source_rois if missing_source_rois else selected_source_rois
         signature = self._formula_spectrum_signature_for_source_rois(target_source_rois)
         if signature is None:
@@ -2624,7 +2612,7 @@ class AnalysisWorkerMixin:
                 self.window._append_workflow_log("Spec repaint | spectrum cache", level="debug")
                 return True
             return False
-        cached_result = self._cached_formula_spectrum_result_for_selection(signature, selected_roi_ids)
+        cached_result = self._cached_formula_spectrum_result_for_selection(signature, selected_roi_ids, selected_source_rois)
         if cached_result is not None:
             self._apply_formula_spectrum_result(cached_result)
             spectral_cube_signature = self._formula_spectral_cube_signature(signature)
@@ -2632,6 +2620,21 @@ class AnalysisWorkerMixin:
                 self.window._formula_spectral_cube_cache.move_to_end(spectral_cube_signature)
             self.window._append_workflow_log("Spec repaint | spectrum cache", level="debug")
             return True
+        # RAM missed for every source (roi cache, combined-selection cache,
+        # and the in-flight sensorgram-sweep cache above) - try the HDF5
+        # backup before giving up. This is what makes browsing to a cube a
+        # finished "Start analysis" run already covered show its spectrum
+        # again once that cube's RAM entry has aged out (or, for a
+        # multi-cube run, was never cached in RAM to begin with - see
+        # _fill_roi_formula_spectrum_cache_from_disk's docstring). Cheap: a
+        # fixed-position HDF5 row read per selected ROI (schema 7), not a
+        # real recompute.
+        if self._fill_roi_formula_spectrum_cache_from_disk(selected_source_rois):
+            disk_result = self._cached_formula_spectrum_result_from_roi_cache(selected_source_rois)
+            if disk_result is not None:
+                self._apply_formula_spectrum_result(disk_result)
+                self.window._append_workflow_log("Spec repaint | disk backup", level="debug")
+                return True
         return False
 
     @staticmethod
@@ -3022,6 +3025,43 @@ class AnalysisWorkerMixin:
                 return None
             results[roi_id] = projected
         return results
+
+    def _fill_roi_formula_spectrum_cache_from_disk(self, missing_source_rois: list[AreaRoi]) -> bool:
+        """Best-effort O(1) HDF5-backup read for the current spectral cube,
+        for ROIs not already in `_roi_formula_spectrum_cache` - populates the
+        RAM cache on a hit (via `_combined_formula_spectrum_results_from_ram_
+        or_disk`, same all-or-nothing contract: every ROI in
+        `missing_source_rois` must resolve, RAM or disk, or this returns
+        False and nothing is left half-filled).
+
+        Factored out of `_refresh_formula_spectrum`'s own disk-fallback
+        branch so `_refresh_visible_spectrum_from_cache` (the plain,
+        no-recompute cache lookup that runs on every Cube/wavelength slider
+        move and sensorgram-cursor drag) can use the exact same shortcut.
+        Before this, that lightweight navigation path only ever checked RAM,
+        so browsing to a cube a multi-cube "Start analysis" sweep had
+        already computed showed nothing once that cube's result aged out of
+        the small, fixed-size `_sensorgram_spectral_cube_result_cache` (96
+        entries - see `SENSORGRAM_SPECTRAL_CUBE_RESULT_CACHE_SIZE`) or,
+        since 2026-09-10, was never written to `_roi_formula_spectrum_cache`
+        at all for a multi-cube run (see `spectral_cube_formula_spectrum_
+        cache_store`'s `len(spectral_cubes) > 1` guard, added that same day
+        to stop that RAM cache growing unbounded during a long sweep). The
+        recompute path (`_refresh_formula_spectrum`) already had this
+        fallback, but nothing called it on plain navigation - it only fires
+        from Live Preview's own triggers - so the disk-backed data a
+        finished sweep had already written was effectively invisible while
+        just scrubbing through cubes, even with the analysis fully done.
+        """
+        spectral_cube_index = self.window._current_spectral_cube()
+        if spectral_cube_index is None or not missing_source_rois:
+            return False
+        disk_trace_index = self._build_disk_formula_spectrum_row_index(missing_source_rois, int(spectral_cube_index))
+        if not disk_trace_index:
+            return False
+        return self._combined_formula_spectrum_results_from_ram_or_disk(
+            int(spectral_cube_index), missing_source_rois, disk_trace_index
+        ) is not None
 
     def _store_roi_formula_spectrum_cache_for_cube(
         self,
