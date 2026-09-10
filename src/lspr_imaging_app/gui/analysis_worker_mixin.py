@@ -1467,6 +1467,41 @@ class AnalysisWorkerMixin:
         return int(datetime.now().timestamp() * 1000)
 
     def on_sensorgram_ready(self, request_id: int, result) -> None:
+        # Stage timing for this whole GUI-thread completion handler - added
+        # after a maintainer report (2026-09-10) that the app goes
+        # unresponsive for a noticeable while right as a "Start analysis"
+        # run finishes. Every step below runs synchronously on the GUI
+        # thread (by necessity for some - see the gc/flush comments just
+        # below - by inherited cost for others, like set_sensorgram_series's
+        # full-trace redraw, WITH a circular symbol on every point, of
+        # potentially tens of thousands of cubes - see its own "Coalesced,
+        # not called directly here" comment in on_sensorgram_partial_result
+        # for why that redraw is deliberately throttled mid-run but always
+        # runs once, unconditionally and in full, right here). One
+        # aggregated debug line at the end (not per-stage logging) - see
+        # apply_loaded_image's stage-timing docstring for why this shape.
+        stage_started_at = time.perf_counter()
+        stage_timings: list[tuple[str, float]] = []
+
+        def _mark_stage(label: str) -> None:
+            nonlocal stage_started_at
+            now = time.perf_counter()
+            stage_timings.append((label, (now - stage_started_at) * 1000.0))
+            stage_started_at = now
+
+        def _log_stages(outcome: str) -> None:
+            total_ms = sum(elapsed for _label, elapsed in stage_timings)
+            # Same getattr fallback append_workflow_log uses (workflow_log_
+            # controller.py) - not every _FakeWindow test double sets up a
+            # real _workflow_logger, only the actual MainWindow does.
+            logger = getattr(self.window, "_workflow_logger", logging.getLogger("lspr_imaging_app.workflow"))
+            logger.debug(
+                "SG done stages (%s) | %s total=%.0fms",
+                outcome,
+                " ".join(f"{label}={elapsed:.0f}ms" for label, elapsed in stage_timings),
+                total_ms,
+            )
+
         # Pairs with the gc.disable() at the top of _sensorgram_metric_task
         # (analysis_tasks.py). Unconditional, before the stale-request early
         # return below: the worker task itself already finished by the time
@@ -1478,13 +1513,38 @@ class AnalysisWorkerMixin:
 
         _gc.enable()
         _gc.collect()  # reclaim anything that piled up while GC was off, rather than leaving it for the next automatic trigger
+        _mark_stage("gc")
         # Unconditional, same reasoning as gc.enable() above and before the
         # stale-request early return below: whatever's buffered (see
         # _backup_formula_spectrum_series/_backup_sensorgram_point) is real,
         # already-computed data that should never be left sitting unwritten
         # just because this particular result turned out to be superseded.
+        #
+        # This call genuinely blocks the GUI thread for real time (measured
+        # 3.4s on a 50-ROI/314-cube run - see the "SG done stages" debug
+        # line this function logs) - it waits for the last in-flight
+        # periodic background write to land, then does one more synchronous
+        # write for the tail batch, on purpose: a crash right after "done"
+        # is shown must not silently lose the last few cubes' backed-up
+        # results (2026-09-10 maintainer decision: keep this guarantee
+        # rather than making the tail write async like every other batch -
+        # show progress here instead). show_wait_cursor=True (unlike the
+        # analysis run's own busy state, show_wait_cursor=False): during the
+        # run a background thread does the work and the GUI stays genuinely
+        # interactive, but this call itself never yields back to the event
+        # loop, so the wait cursor is an honest signal, not just decoration.
+        # processEvents() forces the text/cursor to actually paint before
+        # the block starts - same pattern as _start_sensorgram_worker's own
+        # "Loading backed-up results..." busy state just above in this file.
+        from PyQt6.QtWidgets import QApplication
+
+        self.window._begin_busy("Finishing - saving results...", show_wait_cursor=True)
+        QApplication.processEvents()
         self._flush_measurement_backup_buffers()
+        self.window._end_busy(show_wait_cursor=True)
+        _mark_stage("backup_flush")
         if request_id != self.window._sensorgram_request_id:
+            _log_stages("stale request")
             if self.window._pending_sensorgram_payload is not None:
                 self.start_pending_sensorgram_refresh()
             return
@@ -1497,6 +1557,7 @@ class AnalysisWorkerMixin:
         self.window._sync_busy_cursor_state()
         if not self.window._analysis_enabled:
             self.window._update_analysis_control_state()
+            _log_stages("analysis disabled")
             return
         settings_changed_during_run = self.window._sensorgram_settings_changed_during_run
         self.window._sensorgram_settings_changed_during_run = False
@@ -1520,6 +1581,7 @@ class AnalysisWorkerMixin:
             )
             self.schedule_cube_slider_cache_refresh()
             self.mark_stale("Settings changed while calculating - press Start analysis again")
+            _log_stages("settings changed mid-run")
             return
         # Live preview leaves the spectrum panel showing a stripped-down
         # "Live: cube N" redraw (see _apply_pending_sensorgram_live_preview -
@@ -1532,10 +1594,20 @@ class AnalysisWorkerMixin:
         # populated it during the run, not a recompute.
         self.window._formula_spectrum_dirty = True
         self._refresh_formula_spectrum()
+        _mark_stage("formula_spectrum_refresh")
         if signature:
             self._apply_cached_sensorgram_result(signature, result, preview=False)
         else:
             self._apply_cached_sensorgram_result((), result, preview=False)
+        # The likeliest single dominant stage at real scale: this is the
+        # unconditional, full-trace sensorgram redraw (set_sensorgram_series
+        # via _apply_cached_sensorgram_result) - drawing a circular symbol
+        # on every one of up to tens of thousands of points, plus an O(n log
+        # n) statistics-overlay recompute over the whole trace. Mid-run
+        # updates deliberately throttle this exact call (see
+        # on_sensorgram_partial_result's "Coalesced, not called directly
+        # here" comment) - this is the one place it's never throttled.
+        _mark_stage("sensorgram_apply_and_redraw")
         self.window._append_workflow_log(
             f"SG {'stopped' if result.cancelled else 'done'} | {result.completed_count}/{result.total_count} spectral cubes"
             f" | prep {self.window._format_elapsed_seconds(result.prep_seconds)}"
@@ -1567,12 +1639,15 @@ class AnalysisWorkerMixin:
         self.window._append_workflow_log(
             completion_summary, level="info" if result.cancelled else "success"
         )
+        _mark_stage("summary_logging")
         # A full or stopped run just populated _roi_absorbance_cache for
         # every cube it reached (see _store_roi_absorbance_cache_for_cube in
         # _sensorgram_metric_task's loop) - refresh the slider's cached-tick
         # indicator so it reflects what's now actually in RAM, same as a
         # stop does below.
         self.schedule_cube_slider_cache_refresh()
+        _mark_stage("cube_slider_cache_schedule")
+        _log_stages("stopped" if result.cancelled else "done")
         if getattr(self, "_group_calculation_active", False):
             # A "Calculate group" run is mid-flight: this result was one
             # member's own trace, now cached under its own signature above.
