@@ -46,6 +46,7 @@ from lspr_imaging_app.storage.measurement_export import (
     SensorgramPointBackupRow,
 )
 from lspr_imaging_app.gui.analysis_types import SpectrumSettingsSnapshot, SharedWavelengthGeometry
+from lspr_imaging_app.gui.worker import SensorgramComputationResult
 
 
 @dataclass(slots=True)
@@ -443,9 +444,84 @@ class AnalysisWorkerMixin:
             return False
         cached_result = self.window._sensorgram_cache.get(signature)
         if cached_result is None:
-            return False
+            # RAM miss doesn't mean there's nothing to show: a selection
+            # that was part of an earlier multi-ROI "Start analysis" run
+            # (e.g. one ROI reselected out of an all-ROIs run) was already
+            # backed up to measurement_backup.h5 by _backup_per_roi_
+            # sensorgram_points, even though that run only ever populated
+            # _sensorgram_cache under the FULL combined selection's own
+            # signature - a per-ROI disk row never gets its own RAM cache
+            # entry just because it was backed up. Reconstruct straight
+            # from disk instead of reporting a miss.
+            cached_result = self._sensorgram_result_from_disk_backup(
+                selected_roi_ids, selected_source_rois, spectral_cubes
+            )
+            if cached_result is None:
+                return False
         self._apply_cached_sensorgram_result(signature, cached_result, preview=True)
         return True
+
+    def _sensorgram_result_from_disk_backup(
+        self,
+        selected_roi_ids: tuple[int, ...],
+        selected_source_rois: list[AreaRoi],
+        spectral_cubes: list[int],
+    ) -> SensorgramComputationResult | None:
+        """Reconstruct a plottable sensorgram trace straight from
+        measurement_backup.h5 for a selection with no RAM _sensorgram_cache
+        entry of its own - e.g. one ROI reselected out of an earlier multi-
+        ROI "Start analysis" run, whose per-ROI backup (_backup_per_roi_
+        sensorgram_points) wrote that ROI's own row without ever
+        populating a RAM cache entry keyed to just that ROI. Mirrors
+        _scoped_formula_spectrum_task's own disk shortcut (metric_value_
+        cache_get in _start_sensorgram_worker) - same per-cube hash
+        validation against the CURRENT live settings via
+        _sensorgram_point_signature_hash (single ROI or several - one
+        unified scheme, see its own docstring), so a stale row (fit
+        method/metric/poly order/ROI geometry changed since the run that
+        wrote it) is never silently reused. A multi-ROI selection only
+        ever finds a row here if this exact combination was run together
+        before (backed up under a `combined_<ids>` key) - an arbitrary new
+        combination simply has nothing to find, same as any other miss.
+
+        metric_signal isn't persisted on disk (only metric_value is), so
+        every point here reports NaN for it - the same "no signal
+        available" state a disk-hit cube already produces during a live
+        run.
+        """
+        writer = getattr(self.window, "_measurement_export_writer", None)
+        if writer is None:
+            return None
+        backup_roi_id, _combined_roi_ids = self._sensorgram_backup_roi_key(selected_roi_ids)
+        if not backup_roi_id:
+            return None
+        disk_index = writer.sensorgram_metric_index(backup_roi_id)
+        if not disk_index:
+            return None
+        sorted_roi_ids = tuple(sorted(int(roi_id) for roi_id in selected_roi_ids))
+        valid_cube_indices: list[int] = []
+        valid_metric_values: list[float] = []
+        for cube_index in sorted(int(cube) for cube in spectral_cubes):
+            entry = disk_index.get(cube_index)
+            if entry is None:
+                continue
+            stored_hash, metric_value = entry
+            if not stored_hash:
+                continue
+            live_hash = self._sensorgram_point_signature_hash(cube_index, sorted_roi_ids, selected_source_rois)
+            if not live_hash or live_hash != stored_hash:
+                continue
+            valid_cube_indices.append(cube_index)
+            valid_metric_values.append(metric_value)
+        if not valid_cube_indices:
+            return None
+        return SensorgramComputationResult(
+            spectral_cube_indices=np.asarray(valid_cube_indices, dtype=np.int32),
+            metric_values=np.asarray(valid_metric_values, dtype=np.float64),
+            metric_signal=np.full(len(valid_cube_indices), np.nan, dtype=np.float64),
+            completed_count=len(valid_cube_indices),
+            total_count=len(spectral_cubes),
+        )
 
     def _spectrum_settings_snapshot(self) -> SpectrumSettingsSnapshot:
         """Build a SpectrumSettingsSnapshot once, up front - see its docstring.
@@ -1446,6 +1522,19 @@ class AnalysisWorkerMixin:
             total_seconds=getattr(result, "total_seconds", None),
         )
         self.window._set_status_text(completion_summary)
+        # Also into the workflow log, not just the status bar - the status
+        # bar text gets overwritten by the next thing that happens (a hover
+        # readout, another action's own status message, ...), so a run
+        # finished a while ago has no trace left there. The log keeps every
+        # run's stats (elapsed time, ROI/cube/wavelength counts, dataset
+        # size) around and searchable/copyable afterward. "success" for a
+        # clean finish matches this app's convention for other completion
+        # events (e.g. background profile computation, session load) -
+        # "info" for a stopped run, since that's an intentional interruption
+        # rather than a finished result.
+        self.window._append_workflow_log(
+            completion_summary, level="info" if result.cancelled else "success"
+        )
         # A full or stopped run just populated _roi_absorbance_cache for
         # every cube it reached (see _store_roi_absorbance_cache_for_cube in
         # _sensorgram_metric_task's loop) - refresh the slider's cached-tick
@@ -2999,53 +3088,39 @@ class AnalysisWorkerMixin:
         selected_source_rois: list[AreaRoi],
     ) -> str:
         """Signature hash for one backed-up sensorgram point (see
-        `storage/measurement_export.py`'s `signature_hash` column). Unlike
-        `_sensorgram_spectral_cube_payload_signature` - deliberately
-        fit-method/metric-independent, since it keys a cache of the full
-        pre-fit `AbsorbanceSpectrumResult` that stays reusable across fit
-        changes - the HDF5 backup only stores the already-reduced final
-        `metric_value` for one row, so a fit-method/metric/poly-order
-        change must count as a different value here. Falls back to an
-        empty string (never a hit) when the payload signature itself can't
-        be built (no dataset/selection yet).
+        `storage/measurement_export.py`'s `signature_hash` column) - for
+        WHATEVER selection is currently active, one ROI or several. Falls
+        back to an empty string (never a hit) when there's no dataset or
+        selection yet.
 
-        Explicitly includes the active formula (the payload signature itself
-        does not - see `_roi_reduction_signature_elements`): a finished
-        metric_value bakes in whichever formula produced it, unlike the raw
-        pre-fit spectrum, which is exactly re-derivable under any formula.
-        Omitting it here would let a formula switch silently reuse a disk
-        metric value computed under the previous formula.
-
-        Also explicitly includes the wavelength-range filter (Analysis
-        section's min/max nm spinners, `_analysis_wavelength_range()`) - for
-        the same reason as the formula above, and previously missing here:
-        Maximum/Centroid are computed from whatever wavelength window the
-        fit/metric search is restricted to, so a `metric_value` backed up
-        under one range is a different, generally wrong answer once the
-        range changes (e.g. a peak search narrowed to some sub-window
-        earlier in a session, or in a previous session against this same
-        persistent measurement_backup.h5, produces a peak_wavelength_nm that
-        can land nowhere near the peak the *current*, wider range would
-        find) - without this, `metric_value_cache_get` would keep serving
-        that stale value forever after the range is widened back out,
-        because every other element of the signature (fit method, metric,
-        poly order, ROI/preprocessing signature) can still match exactly."""
-        payload_signature = self._sensorgram_spectral_cube_payload_signature(
-            spectral_cube_index, selected_roi_ids, selected_source_rois
-        )
-        if payload_signature is None:
+        Built from `_sensorgram_point_signature_hash_cube_context` (the
+        part that's identical across every ROI for this cube - dataset,
+        wavelengths, preprocessing, reference radii, Reduction, exclusions,
+        Formula/Fitting/Metric/Order/wavelength-range) combined with this
+        specific selection via `_sensorgram_point_signature_hash_for_
+        selection` - the same combine step `_sensorgram_point_signature_
+        hash_for_roi` uses for a single ROI, so a one-ROI selection here
+        and that ROI's own row from `_backup_per_roi_sensorgram_points`
+        (written while it was one member of a larger multi-ROI run) hash
+        identically - both represent the exact same per-ROI computation,
+        so there's no reason a disk lookup should treat them as different
+        signatures depending on which run happened to write them. Was two
+        separately-defined, differently-shaped hash schemes that happened
+        to cover the same fields (unified 2026-09-10 - see
+        _sensorgram_point_signature_hash_cube_context's docstring for why
+        the split exists at all); unifying it invalidates every
+        signature_hash already sitting in an existing measurement_backup.h5
+        (an old row simply reads as unrecognized/stale and gets
+        recomputed via the normal path - no crash, no wrong value, no
+        migration needed at this stage of the project)."""
+        if not selected_roi_ids or not selected_source_rois:
             return ""
-        wavelength_range = self.window._analysis_wavelength_range()
-        full_signature = (
-            payload_signature,
-            self._active_formula_key(),
-            self._analysis_fit_method_key(),
-            self.window._analysis_metric_key(),
-            int(self.window._analysis_poly_order()),
-            None if wavelength_range is None else round(float(wavelength_range[0]), 6),
-            None if wavelength_range is None else round(float(wavelength_range[1]), 6),
+        cube_context_hash = self._sensorgram_point_signature_hash_cube_context(spectral_cube_index)
+        if cube_context_hash is None:
+            return ""
+        return self._sensorgram_point_signature_hash_for_selection(
+            cube_context_hash, selected_roi_ids, selected_source_rois
         )
-        return self._signature_hash(full_signature)
 
     def _sensorgram_point_signature_hash_cube_context(self, spectral_cube_index: int) -> str | None:
         """A single hash summarizing everything ROI-INDEPENDENT about this
@@ -3053,37 +3128,24 @@ class AnalysisWorkerMixin:
         wavelength preprocessing signature scan, reference radii,
         Reduction, per-cube exclusions, active Formula/Fitting/Metric/
         Order/wavelength-range) - computed once per cube, then combined
-        cheaply per ROI by `_sensorgram_point_signature_hash_for_roi`
-        (below) instead of backing up many ROIs for the same cube by
-        calling `_sensorgram_point_signature_hash` once per ROI
-        (`_backup_per_roi_sensorgram_points`).
+        with a selection (one ROI or several) by `_sensorgram_point_
+        signature_hash_for_selection` (below), instead of rebuilding all of
+        this from scratch for every ROI when backing up many ROIs for the
+        same cube (`_backup_per_roi_sensorgram_points`).
 
-        Two costs that call would otherwise repeat per ROI, both measured
-        in a real 160-ROI run (see bulk_analysis_performance_investigation.
-        md's matching follow-ups): recomputing the per-wavelength
+        Two costs that would otherwise repeat per ROI, both measured in a
+        real 160-ROI run (see bulk_analysis_performance_investigation.md's
+        matching follow-ups): recomputing the per-wavelength
         `_preprocessing_signature` scan itself (O(26) wavelengths;
         ~630-780ms/cube before the first fix) - eliminated by computing it
         here, once - and re-serializing/re-hashing that same (potentially
         large) scan via JSON+SHA256 for every ROI (~52ms/cube measured
         standalone) - eliminated by pre-hashing it into one compact string
-        here, so each ROI's own hash only ever has to combine a short
-        hash string with its own small (roi_id, geometry) tuple, not
-        re-serialize the whole per-wavelength scan again.
-
-        Trade-off, deliberate and disclosed: unlike the first fix, this
-        does NOT reproduce `_sensorgram_point_signature_hash`'s exact
-        historical hash values (hashing a pre-hashed summary instead of
-        the raw fields is not the same input, even though it is just as
-        valid a "did anything relevant change" fingerprint) - a one-time,
-        harmless re-verification of already-backed-up per-ROI rows next
-        time each is touched (a brand-new feature with no accumulated
-        production history yet), not a correctness or data-loss issue.
-        `test_lspri_sensorgram_signature_hash_for_roi.py` checks the
-        properties that actually matter: stable/deterministic per (cube,
-        ROI), distinct across ROIs and across cubes, and changes whenever
-        any of the underlying settings does. Returns None under the same
-        "no dataset" condition `_sensorgram_spectral_cube_payload_
-        signature` uses.
+        here, so completing a selection's hash only ever has to combine a
+        short hash string with that selection's own (small) roi-id/geometry
+        tuple, not re-serialize the whole per-wavelength scan again.
+        Returns None under the same "no dataset" condition
+        `_sensorgram_spectral_cube_payload_signature` uses.
         """
         window = self.window
         if window._state.dataset is None:
@@ -3110,15 +3172,36 @@ class AnalysisWorkerMixin:
         )
         return self._signature_hash(cube_level_signature)
 
+    def _sensorgram_point_signature_hash_for_selection(
+        self,
+        cube_context_hash: str,
+        selected_roi_ids: tuple[int, ...],
+        selected_source_rois: list[AreaRoi],
+    ) -> str:
+        """Combines a cube-context hash (`_sensorgram_point_signature_hash_
+        cube_context`, above) with a specific ROI selection - one ROI or
+        several. The single place both `_sensorgram_point_signature_hash`
+        (whatever's currently selected) and `_sensorgram_point_signature_
+        hash_for_roi` (one ROI's row while backing up many at once) meet,
+        so the same underlying per-ROI computation always hashes the same
+        way regardless of which of those two call sites produced it."""
+        return self._signature_hash(
+            (
+                cube_context_hash,
+                tuple(sorted(int(roi_id) for roi_id in selected_roi_ids)),
+                self.window._roi_signature(selected_source_rois),
+            )
+        )
+
     def _sensorgram_point_signature_hash_for_roi(self, cube_context_hash: str, roi: AreaRoi) -> str:
-        """Cheap per-ROI completion of `_sensorgram_point_signature_hash_
-        cube_context` (above) - combines the cube-level hash with just this
-        ROI's own id/geometry and hashes that small tuple, instead of
-        re-serializing/re-hashing the full cube-level scan for every ROI.
-        See that method's own docstring for why this pairing exists, what
-        it measurably saves, and the deliberate hash-compatibility
-        trade-off it makes."""
-        return self._signature_hash((cube_context_hash, int(roi.area_roi_id), self.window._roi_signature([roi])))
+        """One ROI's completion of `_sensorgram_point_signature_hash_
+        cube_context` (above) - a thin single-ROI convenience wrapper
+        around `_sensorgram_point_signature_hash_for_selection`, kept
+        separate only so `_backup_per_roi_sensorgram_points`'s per-ROI loop
+        doesn't need to wrap each `roi` in a one-element list/tuple itself."""
+        return self._sensorgram_point_signature_hash_for_selection(
+            cube_context_hash, (int(roi.area_roi_id),), [roi]
+        )
 
     def _cached_sensorgram_spectral_cube_result(
         self,
