@@ -276,7 +276,22 @@ def _write_measurement_backup_buffers(writer, formula_buffer, sensorgram_buffer)
     handed in by the caller, nothing resolved by calling back into GUI-owned
     state. Shared by both the synchronous flush (main thread) and the
     background one, so there is exactly one place this logic can drift from.
+
+    Stage-timed at DEBUG level (2026-09-11, investigating a maintainer
+    report of per-cube "Start analysis" slowdown from ~1s/cube to 4-6s/cube
+    after the schema-7 rewrite): one aggregated line per call, same
+    "log once per outer unit of work" convention as `analysis_tasks.py`'s
+    "SG scoped task stage timing" line - this is the one place in that
+    rewrite with no timing at all, sync and async alike, so it's the
+    natural next place to look if the per-cube compute stages (which this
+    rewrite didn't touch) come back clean.
     """
+    formula_rows = sum(len(entries) for entries in formula_buffer.values()) if formula_buffer else 0
+    sensorgram_rows = sum(len(entries) for entries in sensorgram_buffer.values()) if sensorgram_buffer else 0
+    roi_count = len(set(formula_buffer) | set(sensorgram_buffer))
+    formula_write_seconds = 0.0
+    sensorgram_write_seconds = 0.0
+    flush_seconds = 0.0
     wrote_anything = False
     if writer is not None and formula_buffer:
         for roi_id_str, entries in formula_buffer.items():
@@ -297,6 +312,7 @@ def _write_measurement_backup_buffers(writer, formula_buffer, sensorgram_buffer)
                 )
                 for cube_index, signature_hash, roi_result, timestamp_utc_ms in entries
             ]
+            _write_started_at = time.perf_counter()
             try:
                 writer.append_formula_spectrum_batch(roi_id_str, rows)
                 wrote_anything = True
@@ -304,6 +320,8 @@ def _write_measurement_backup_buffers(writer, formula_buffer, sensorgram_buffer)
                 logging.getLogger("lspr_imaging_app.workflow").warning(
                     "Failed to append absorbance spectrum batch to measurement export backup", exc_info=True
                 )
+            finally:
+                formula_write_seconds += time.perf_counter() - _write_started_at
     if writer is not None and sensorgram_buffer:
         for roi_id_str, entries in sensorgram_buffer.items():
             if not entries:
@@ -317,6 +335,7 @@ def _write_measurement_backup_buffers(writer, formula_buffer, sensorgram_buffer)
                 )
                 for cube_index, signature_hash, metric_value, timestamp_utc_ms in entries
             ]
+            _write_started_at = time.perf_counter()
             try:
                 writer.append_sensorgram_point_batch(roi_id_str, rows)
                 wrote_anything = True
@@ -324,13 +343,31 @@ def _write_measurement_backup_buffers(writer, formula_buffer, sensorgram_buffer)
                 logging.getLogger("lspr_imaging_app.workflow").warning(
                     "Failed to append sensorgram point batch to measurement export backup", exc_info=True
                 )
+            finally:
+                sensorgram_write_seconds += time.perf_counter() - _write_started_at
     if writer is not None and wrote_anything:
+        _flush_started_at = time.perf_counter()
         try:
             writer.flush()
         except Exception:
             logging.getLogger("lspr_imaging_app.workflow").warning(
                 "Failed to flush measurement export backup to disk", exc_info=True
             )
+        finally:
+            flush_seconds = time.perf_counter() - _flush_started_at
+    if wrote_anything:
+        total_ms = (formula_write_seconds + sensorgram_write_seconds + flush_seconds) * 1000.0
+        logging.getLogger("lspr_imaging_app.workflow").debug(
+            "SG backup flush stage timing | rois=%s formula_rows=%s sensorgram_rows=%s"
+            " formula_write=%.1fms sensorgram_write=%.1fms disk_flush=%.1fms total=%.1fms",
+            roi_count,
+            formula_rows,
+            sensorgram_rows,
+            formula_write_seconds * 1000.0,
+            sensorgram_write_seconds * 1000.0,
+            flush_seconds * 1000.0,
+            total_ms,
+        )
 
 
 class AnalysisWorkerMixin:
