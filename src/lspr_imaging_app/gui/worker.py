@@ -138,6 +138,15 @@ class SensorgramPointResult:
     # results: None whenever that's None, since there's no per-ROI spectrum
     # to fit from on a metric-only shortcut hit either.
     per_roi_metric_values: dict[int, tuple[float, float]] | None = None
+    # True only when this point required a real pixel read + fit this call -
+    # False for a RAM/disk cache hit (including a resumed "Start analysis"
+    # run picking up cubes a previous, since-stopped run already finished -
+    # see the "Start analysis after Stop" fix this accompanies). Drives the
+    # busy-indicator's "Curr/Avg s/cube" readout (MainWindow._note_busy_
+    # item_completed): a cache hit is near-instant and isn't a sample of
+    # real per-cube compute performance, so it must not be averaged in
+    # alongside genuine computations - see that method's docstring.
+    freshly_computed: bool = True
 
 
 @dataclass(slots=True)

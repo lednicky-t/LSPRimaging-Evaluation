@@ -1398,6 +1398,12 @@ def _sensorgram_metric_task(
         disk_metric_value = metric_value_cache_get(spectral_cube_index) if metric_value_cache_get is not None else None
         roi_formula_spectrum_results = None
         per_roi_metric_values = None
+        # Always defined regardless of which branch below actually supplies
+        # this point - see SensorgramPointResult.freshly_computed's
+        # docstring for why the busy-indicator speed readout needs an
+        # accurate per-point flag rather than assuming every point took
+        # real compute time.
+        freshly_computed = False
         if disk_metric_value is not None:
             metric_float = float(disk_metric_value) if np.isfinite(disk_metric_value) else float("nan")
             signal_float = float("nan")
@@ -1410,7 +1416,6 @@ def _sensorgram_metric_task(
             # just via a different cache this loop didn't populate itself.
             if spectrum is None and spectral_cube_formula_spectrum_cache_get is not None:
                 spectrum = spectral_cube_formula_spectrum_cache_get(spectral_cube_index)
-            freshly_computed = False
             # Logged unconditionally (not just on a slow cube): cheap, and
             # matches the existing stage-timing convention used elsewhere
             # (e.g. _process_image_task's "Image raw load" log) for
@@ -1443,7 +1448,31 @@ def _sensorgram_metric_task(
                     **_extra_task_kwargs,
                 )
                 freshly_computed = True
-                if spectral_cube_result_cache_store is not None:
+                # Cancellation can land partway through THIS cube's own
+                # per-wavelength read pool (_load_wl above runs one task per
+                # wavelength via a ThreadPoolExecutor) - a wavelength whose
+                # task hadn't started yet by the time Stop was pressed comes
+                # back as an empty/NaN placeholder, while wavelengths already
+                # in flight finish normally. That makes `spectrum` here a
+                # PARTIAL, corrupted result (e.g. real data for the first 20
+                # of 26 wavelengths, NaN for the rest) even though the call
+                # already returned normally - the cancellation check right
+                # below correctly discards THIS run's own point for such a
+                # cube, but caching it here (before that check) would have
+                # silently poisoned spectral_cube_result_cache_get for a
+                # LATER resumed run: that run's cancel_event starts unset, so
+                # it would treat the corrupted spectrum as a legitimate cache
+                # hit, fit over the truncated wavelength range, and bake the
+                # resulting wrong metric value permanently into the backup -
+                # a real incident (2026-09-11): three Stop-then-resume cycles
+                # each left a visible dip in the sensorgram, always missing
+                # the same trailing wavelengths, confirmed in measurement_
+                # backup.h5. Only cache a spectrum whose read actually ran to
+                # completion.
+                cancelled_mid_compute = (
+                    not exempt_from_cancel_check and cancel_event is not None and cancel_event.is_set()
+                )
+                if spectral_cube_result_cache_store is not None and not cancelled_mid_compute:
                     spectral_cube_result_cache_store(spectral_cube_index, spectrum)
                 # See SENSORGRAM_GC_COLLECT_INTERVAL_CUBES's own comment -
                 # only freshly-computed cubes create the tifffile reference
@@ -1548,6 +1577,7 @@ def _sensorgram_metric_task(
                     metric_signal=None if not np.isfinite(signal_float) else signal_float,
                     roi_formula_spectrum_results=roi_formula_spectrum_results,
                     per_roi_metric_values=per_roi_metric_values,
+                    freshly_computed=freshly_computed,
                 )
             )
         if progress_callback is not None:

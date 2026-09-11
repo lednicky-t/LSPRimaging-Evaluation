@@ -599,12 +599,22 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, MeasurementCalibrationMixin,
         # on_sensorgram_partial_result - once per spectral cube actually
         # finished, never derived from the rounded progress percent the way
         # an earlier version of this readout worked). _busy_items_completed
-        # and _busy_last_item_seconds drive "Avg" and "Curr" respectively in
-        # _format_busy_detail_text. Reset alongside the other _busy_* fields
-        # in _begin_busy/_end_busy/_sync_busy_cursor_state.
+        # counts every completed item (cache hits included) and still drives
+        # the ETA's remaining-item count; _busy_fresh_items_completed/
+        # _busy_fresh_elapsed_seconds count only genuinely-computed items
+        # (freshly_computed=True) and drive "Avg"/"Curr"/ETA-rate in
+        # _format_busy_detail_text - a resumed "Start analysis" run's
+        # opening stretch of near-instant cache/disk hits (cubes a since-
+        # stopped earlier run already finished) must not be averaged in
+        # alongside real per-cube compute time, or the whole run's Avg
+        # reads as falsely fast for its entire remaining duration. Reset
+        # alongside the other _busy_* fields in _begin_busy/_end_busy/
+        # _sync_busy_cursor_state.
         self._busy_items_completed: int = 0
         self._busy_last_item_elapsed: float = 0.0
         self._busy_last_item_seconds: float | None = None
+        self._busy_fresh_items_completed: int = 0
+        self._busy_fresh_elapsed_seconds: float = 0.0
         self._wait_cursor_active = False
         # Separate from _busy_operation_count: lets a specific busy operation
         # (e.g. analysis - see _start_sensorgram_worker) opt out of the
@@ -4282,6 +4292,8 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, MeasurementCalibrationMixin,
         self._busy_items_completed = 0
         self._busy_last_item_elapsed = 0.0
         self._busy_last_item_seconds = None
+        self._busy_fresh_items_completed = 0
+        self._busy_fresh_elapsed_seconds = 0.0
         self._set_status_text(text)
         if determinate:
             self._status_bar_busy.setRange(0, 100)
@@ -4320,6 +4332,8 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, MeasurementCalibrationMixin,
             self._busy_items_completed = 0
             self._busy_last_item_elapsed = 0.0
             self._busy_last_item_seconds = None
+            self._busy_fresh_items_completed = 0
+            self._busy_fresh_elapsed_seconds = 0.0
         if self._busy_cursor_request_count == 0 and self._wait_cursor_active:
             QApplication.restoreOverrideCursor()
             self._wait_cursor_active = False
@@ -4349,6 +4363,8 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, MeasurementCalibrationMixin,
         self._busy_items_completed = 0
         self._busy_last_item_elapsed = 0.0
         self._busy_last_item_seconds = None
+        self._busy_fresh_items_completed = 0
+        self._busy_fresh_elapsed_seconds = 0.0
         self._undo_manager.update_action_state()
 
     @staticmethod
@@ -4358,6 +4374,8 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, MeasurementCalibrationMixin,
         total_items: int | None,
         items_completed: int | None = None,
         last_item_seconds: float | None = None,
+        fresh_items_completed: int | None = None,
+        fresh_elapsed_seconds: float | None = None,
     ) -> str:
         """Pure text-formatting half of _update_busy_progress, split out so
         the elapsed/ETA/speed math is testable without a real Qt MainWindow.
@@ -4380,14 +4398,34 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, MeasurementCalibrationMixin,
 
         Shows two numbers instead of one: `Curr` (this single most-recently-
         finished item's own duration - the same number the debug log's "SG
-        cube compute timing" line reports for that cube) and `Avg` (whole-
-        run average, elapsed / items_completed). Curr answers "is the cube
-        that just finished slow" directly, without any smoothing hiding a
-        real spike or amplifying rounding noise into a fake one; Avg answers
-        "how is the run doing overall".
+        cube compute timing" line reports for that cube) and `Avg`. Curr
+        answers "is the cube that just finished slow" directly, without any
+        smoothing hiding a real spike or amplifying rounding noise into a
+        fake one; Avg answers "how is the run doing overall".
 
-        ETA prefers the same real items_completed/total_items counter used
-        for Avg (elapsed / items_completed * remaining items) over a naive
+        `fresh_items_completed`/`fresh_elapsed_seconds` (from
+        `_note_busy_item_completed`) count only genuinely-computed items -
+        a RAM/disk cache hit is excluded from both. This matters for a
+        resumed "Start analysis" run continuing after Stop: the opening
+        stretch of the resumed sweep picks up every cube the earlier,
+        since-stopped run already finished as a near-instant cache/disk
+        hit before reaching genuinely new cubes. `items_completed` (every
+        completion, cache hits included) counts those too, so an average of
+        elapsed/items_completed over the *whole* busy operation would be
+        permanently diluted by that free opening stretch - reading as a
+        falsely fast rate for the rest of the run, well past the point the
+        cache hits stopped. `Avg`/`Curr`/the ETA rate use the fresh-only
+        counters instead (elapsed/items_completed still works fine for a
+        run with no resumed prefix, since every item is then fresh and the
+        two counters track together) - both are 0/None until the first
+        genuinely-computed item lands, so the speed readout is simply
+        absent during a pure cache-hit catch-up phase rather than showing a
+        misleadingly optimistic number.
+
+        ETA prefers the fresh-only rate (falling back to plain elapsed /
+        items_completed only when nothing has been freshly computed yet)
+        times the remaining item count (total_items - items_completed, all
+        types - however many points are still to be emitted) over a naive
         elapsed*(100-percent)/percent extrapolation from `current_percent`
         alone, whenever items are actually being tracked. For a "Start
         analysis" sweep, `current_percent` is NOT a uniform clock: analysis_
@@ -4406,34 +4444,67 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, MeasurementCalibrationMixin,
         """
         elapsed_text = MainWindow._format_elapsed_seconds(elapsed)
         eta_text = "--:--"
+        # `fresh_items_completed is None` means the caller isn't tracking
+        # the fresh-vs-cache-hit distinction at all (only exercised
+        # directly by callers/tests that predate it) - fall back to the
+        # plain items-based rate exactly as before that tracking existed.
+        # `fresh_items_completed == 0` is different: it means the caller
+        # DOES track it and nothing has been genuinely computed yet (e.g.
+        # a resumed run still working through its opening stretch of
+        # cache/disk hits) - there is no real rate to report yet, so this
+        # deliberately yields None rather than falling back to the
+        # (misleadingly fast) items-based rate.
+        if fresh_items_completed is None:
+            avg_seconds_per_item = (elapsed / items_completed) if items_completed else None
+        elif fresh_items_completed and fresh_elapsed_seconds is not None:
+            avg_seconds_per_item = fresh_elapsed_seconds / fresh_items_completed
+        else:
+            avg_seconds_per_item = None
         if total_items and items_completed:
-            avg_seconds_per_item = elapsed / items_completed
+            eta_rate = avg_seconds_per_item if avg_seconds_per_item is not None else elapsed / items_completed
             remaining_items = max(total_items - items_completed, 0)
-            eta_seconds = max(avg_seconds_per_item * remaining_items, 0.0)
+            eta_seconds = max(eta_rate * remaining_items, 0.0)
             eta_text = MainWindow._format_elapsed_seconds(eta_seconds) or "0:00"
         elif current_percent > 0:
             eta_seconds = max((elapsed * (100.0 - current_percent)) / current_percent, 0.0)
             eta_text = MainWindow._format_elapsed_seconds(eta_seconds) or "0:00"
         speed_text = ""
-        if total_items and items_completed and elapsed > 0:
-            avg = elapsed / items_completed
-            curr = last_item_seconds if last_item_seconds is not None else avg
-            speed_text = f" | Curr/Avg {curr:.2f}/{avg:.2f} s/cube"
+        if total_items and avg_seconds_per_item is not None and elapsed > 0:
+            curr = last_item_seconds if last_item_seconds is not None else avg_seconds_per_item
+            speed_text = f" | Curr/Avg {curr:.2f}/{avg_seconds_per_item:.2f} s/cube"
         return f"{elapsed_text} | ETA {eta_text} | {current_percent:d}%{speed_text}"
 
-    def _note_busy_item_completed(self) -> None:
+    def _note_busy_item_completed(self, *, freshly_computed: bool = True) -> None:
         """Record that one _busy_total_items-tracked unit (e.g. one spectral
         cube of a "Start analysis" sweep) has just actually finished - call
         once per real completion (see on_sensorgram_partial_result), never
         derived from the progress percent (see _format_busy_detail_text's
         docstring for why that used to make the speed readout misleading).
-        No-op for a busy operation that never set total_items."""
+        No-op for a busy operation that never set total_items.
+
+        `freshly_computed=False` marks a RAM/disk cache hit (a cube a
+        since-stopped earlier run already finished, picked up near-
+        instantly on a resumed "Start analysis" run) rather than a genuine
+        per-cube computation. `_busy_items_completed` (and the elapsed
+        "clock" consumed by this item, via `_busy_last_item_elapsed`) still
+        advance either way, so the next item's own duration is measured
+        correctly and the ETA's remaining-item count stays accurate - but
+        `_busy_last_item_seconds`/`_busy_fresh_items_completed`/
+        `_busy_fresh_elapsed_seconds` (Curr/Avg's inputs) only advance for
+        a genuine computation, so a cache hit's near-zero duration never
+        gets averaged in as if it were real compute time. See
+        _format_busy_detail_text's docstring for why that distinction
+        matters specifically for a resumed run."""
         if self._busy_total_items is None or self._busy_started_at is None:
             return
         elapsed = time.perf_counter() - self._busy_started_at
-        self._busy_last_item_seconds = elapsed - self._busy_last_item_elapsed
+        item_seconds = elapsed - self._busy_last_item_elapsed
         self._busy_last_item_elapsed = elapsed
         self._busy_items_completed += 1
+        if freshly_computed:
+            self._busy_last_item_seconds = item_seconds
+            self._busy_fresh_items_completed += 1
+            self._busy_fresh_elapsed_seconds += item_seconds
 
     def _update_busy_progress(self, percent: int, text: str | None = None) -> None:
         if self._busy_operation_count <= 0:
@@ -4450,7 +4521,13 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, MeasurementCalibrationMixin,
         if elapsed is not None:
             self._status_bar_busy_detail.setText(
                 self._format_busy_detail_text(
-                    elapsed, current_percent, self._busy_total_items, self._busy_items_completed, self._busy_last_item_seconds
+                    elapsed,
+                    current_percent,
+                    self._busy_total_items,
+                    self._busy_items_completed,
+                    self._busy_last_item_seconds,
+                    self._busy_fresh_items_completed,
+                    self._busy_fresh_elapsed_seconds,
                 )
             )
         if text:

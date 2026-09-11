@@ -1129,7 +1129,11 @@ class AnalysisWorkerMixin:
         # Exact per-cube completion event for the status bar's "Curr/Avg
         # s/cube" readout - see _note_busy_item_completed's docstring for why
         # this (not the rounded progress percent) is what drives it.
-        self.window._note_busy_item_completed()
+        # freshly_computed=False for a RAM/disk cache hit (e.g. a cube a
+        # since-stopped earlier run already finished, picked up near-
+        # instantly on resume) - must not be averaged in as if it were a
+        # real per-cube compute sample, see _note_busy_item_completed.
+        self.window._note_busy_item_completed(freshly_computed=point.freshly_computed)
         metric_value = float("nan") if point.metric_value is None else float(point.metric_value)
         metric_signal = float("nan") if point.metric_signal is None else float(point.metric_signal)
         self.window._sensorgram_spectral_cube_indices = np.append(self.window._sensorgram_spectral_cube_indices, int(point.spectral_cube_index)).astype(np.int32, copy=False)
@@ -1843,7 +1847,17 @@ class AnalysisWorkerMixin:
                 cached_sensorgram = self.window._sensorgram_cache.get(cached_signature)
                 if cached_sensorgram is not None:
                     self.window._sensorgram_cache.move_to_end(cached_signature)
-            if cached_sensorgram is not None:
+            # A cancelled (Stopped) run's own partial result is cached under
+            # this same signature (see _apply_cached_sensorgram_result), but
+            # it is not a valid answer to "Start analysis" for that
+            # signature - treating it as a cache hit here made pressing
+            # Start again after Stop silently redisplay the same stopped
+            # result and return, without ever resuming/continuing the
+            # computation. Only a completed run's result short-circuits a
+            # fresh Start analysis; a cancelled one falls through below to
+            # actually resume the worker (already-computed cubes are still
+            # picked up cheaply from the on-disk backup written on Stop).
+            if cached_sensorgram is not None and not getattr(cached_sensorgram, "cancelled", False):
                 self.window._append_workflow_log(
                     f"SG cache hit | spectral_cubes {len(spectral_cubes)} | metric {self.window._analysis_metric_label()}",
                     level="debug",
