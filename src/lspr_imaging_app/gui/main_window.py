@@ -310,7 +310,6 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, MeasurementCalibrationMixin,
         self._image_exclusion_controller = ImageExclusionController(self)
 
     def _init_state(self) -> None:
-        self._analysis_enabled = self._settings_bool("analysis_section_applied", True)
         self._window_geometry_restored = False
         self._layout_preferences_ready = False
         self._dock_layout_built = False
@@ -2620,7 +2619,6 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, MeasurementCalibrationMixin,
         self.transforms_section.apply_changed.connect(self._on_image_tools_section_applied_changed)
         self.roi_editor_section.apply_changed.connect(self._on_live_geometry_toggled)
         self.background_section.apply_changed.connect(self._on_background_section_applied_changed)
-        self.analysis_section.apply_changed.connect(self._on_analysis_section_applied_changed)
         self.background_removal_link.toggled.connect(self._update_image_processing_settings)
         self.background_smoothing_sigma_spin.valueChanged.connect(self._update_image_processing_settings)
         self.background_smoothing_binning_combo.currentIndexChanged.connect(self._update_image_processing_settings)
@@ -3197,10 +3195,14 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, MeasurementCalibrationMixin,
         self._sync_roi_detection_controls()
         self._restore_control_preferences()
         self._report_startup_progress(76, "Preparing the first image...")
-        self._analysis_enabled = False
+        # Live preview specifically stays off across a restart, regardless
+        # of its own persisted setting - ROI selection isn't restored
+        # either, so there is nothing useful for it to compute yet, and
+        # forcing it off here avoids an automatic recompute racing the
+        # first image load. Start analysis/preview themselves are NOT
+        # gated behind any panel-wide switch - they're always available,
+        # same as every other section's controls.
         self._analysis_live_preview_enabled = False
-        self._set_section_applied(self.analysis_section, False)
-        self._settings.setValue("analysis_section_applied", False)
         self._settings.setValue("analysis/live_preview", False)
         # The dataset-load chain that got us here already kicked off (and, on a cache
         # hit, already applied) the first image - this call is a no-op in that case,
@@ -7144,20 +7146,12 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, MeasurementCalibrationMixin,
     def _on_image_tools_section_applied_changed(self, applied: bool) -> None:
         self._image_tools_controller.on_image_tools_section_applied_changed(applied)
 
-    def _on_analysis_section_applied_changed(self, applied: bool) -> None:
-        self._analysis_controller._on_analysis_section_applied_changed(applied)
-
     def _run_or_stop_sensorgram_via_shortcut(self) -> None:
-        """Ctrl+Shift+F9 handler: unlike the analysis_run_button click path,
-        this must work as a single reliable trigger regardless of the
-        Analysis section's applied state - in particular, startup always
-        forces it off (see _on_startup_dataset_restore_done), so a script
-        driving only this shortcut would otherwise silently no-op on a
-        freshly launched session. ROI selection is likewise not restored
-        across a restart, so select every ROI row when nothing is already
-        selected - matches clicking "select all" in the ROI table by hand."""
-        if not self.analysis_section.is_applied():
-            self.analysis_section.set_applied(True)
+        """Ctrl+Shift+F9 handler. ROI selection is not restored across a
+        restart, so select every ROI row when nothing is already selected -
+        matches clicking "select all" in the ROI table by hand, and lets a
+        script driving only this shortcut work on a freshly launched
+        session with no prior manual selection."""
         if not self._selected_roi_ids:
             self._select_roi_table_rows(list(range(self.roi_table.rowCount())))
         self._analysis_controller.run_or_stop_sensorgram()
@@ -7875,8 +7869,7 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, MeasurementCalibrationMixin,
 
     def _prompt_live_preview_calculation_choice(self, *, spectrum_hit: bool, sensorgram_hit: bool) -> str | None:
         if (
-            not self._analysis_enabled
-            or self._state.dataset is None
+            self._state.dataset is None
             or not self._analysis_live_preview_enabled
             or not self._startup_ready
             or self._startup_restore_in_progress
@@ -7909,8 +7902,7 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, MeasurementCalibrationMixin,
 
     def _handle_live_preview_selection_change(self) -> None:
         if (
-            not self._analysis_enabled
-            or not self._analysis_live_preview_enabled
+            not self._analysis_live_preview_enabled
             or not self._startup_ready
             or self._startup_restore_in_progress
         ):

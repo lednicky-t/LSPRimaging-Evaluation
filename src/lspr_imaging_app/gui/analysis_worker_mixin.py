@@ -1124,7 +1124,7 @@ class AnalysisWorkerMixin:
         return not ram_only and buffered_cube_count >= max(int(batch_size), 1)
 
     def on_sensorgram_partial_result(self, request_id: int, total_count: int, point) -> None:
-        if request_id != self.window._sensorgram_request_id or not self.window._analysis_enabled:
+        if request_id != self.window._sensorgram_request_id:
             return
         # Exact per-cube completion event for the status bar's "Curr/Avg
         # s/cube" readout - see _note_busy_item_completed's docstring for why
@@ -1596,10 +1596,6 @@ class AnalysisWorkerMixin:
         self.window._sensorgram_started_at = None
         self.window._end_busy(show_wait_cursor=False)
         self.window._sync_busy_cursor_state()
-        if not self.window._analysis_enabled:
-            self.window._update_analysis_control_state()
-            _log_stages("analysis disabled")
-            return
         settings_changed_during_run = self.window._sensorgram_settings_changed_during_run
         self.window._sensorgram_settings_changed_during_run = False
         if (
@@ -1779,14 +1775,12 @@ class AnalysisWorkerMixin:
         self.clear_sensorgram(message)
 
     def _sensorgram_prerequisite_blocked(self) -> str | None:
-        """'disabled' | 'no_dataset' | 'chromatic_active' if a basic
-        sensorgram/spectrum prerequisite isn't met, else None. Callers own
-        their own exact message wording and failure action (clear_sensorgram
-        vs. a plain False return vs. also clearing the spectrum summary) -
-        this only unifies the repeated condition-checking itself, which was
+        """'no_dataset' | 'chromatic_active' if a basic sensorgram/spectrum
+        prerequisite isn't met, else None. Callers own their own exact
+        message wording and failure action (clear_sensorgram vs. a plain
+        False return vs. also clearing the spectrum summary) - this only
+        unifies the repeated condition-checking itself, which was
         duplicated near-verbatim across three methods."""
-        if not self.window._analysis_enabled:
-            return "disabled"
         if self.window._state.dataset is None:
             return "no_dataset"
         if self.window._chromatic_setup_active:
@@ -1795,9 +1789,6 @@ class AnalysisWorkerMixin:
 
     def _calculate_sensorgram_for_range(self) -> None:
         blocked = self._sensorgram_prerequisite_blocked()
-        if blocked == "disabled":
-            self.window._clear_sensorgram("Analysis calculations are disabled for this panel.")
-            return
         if blocked == "no_dataset":
             self.window._clear_sensorgram("Load a dataset before calculating the sensorgram.")
             return
@@ -1964,9 +1955,6 @@ class AnalysisWorkerMixin:
 
     def _refresh_formula_spectrum(self) -> None:
         start_time = time.perf_counter()
-        if not self.window._analysis_enabled:
-            self.window._clear_formula_spectrum()
-            return
         if self.window._sensorgram_running:
             # A "Start analysis" run already owns the spectrum panel while
             # it's in progress (see on_sensorgram_partial_result/
@@ -2706,8 +2694,6 @@ class AnalysisWorkerMixin:
         worker.start()
 
     def _refresh_visible_spectrum_from_cache(self) -> bool:
-        if not self.window._analysis_enabled:
-            return False
         selected_source_rois = self._selected_source_rois_snapshot()
         selected_roi_ids = tuple(roi.area_roi_id for roi in selected_source_rois)
         roi_signature_single = None

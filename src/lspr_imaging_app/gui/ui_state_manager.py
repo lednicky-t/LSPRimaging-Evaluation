@@ -318,10 +318,9 @@ class UIStateManager:
 
     def update_analysis_control_state(self) -> None:
         window = self._window
-        enabled = bool(window._analysis_enabled)
         has_dataset = window._state.dataset is not None and bool(window._spectral_cube_values) and bool(window._wavelength_values)
-        interactive = enabled and has_dataset and not window._sensorgram_running
-        preview_enabled = enabled and has_dataset
+        interactive = has_dataset and not window._sensorgram_running
+        preview_enabled = has_dataset
         window.analysis_preview_button.setEnabled(preview_enabled)
         window.analysis_preview_button.setPixmap(
             window._make_analysis_preview_icon(preview_enabled and window._analysis_live_preview_enabled).pixmap(
@@ -331,15 +330,15 @@ class UIStateManager:
         )
         running = window._sensorgram_running
         if running:
-            window.analysis_run_button.setEnabled(enabled)
+            window.analysis_run_button.setEnabled(True)
             window.analysis_run_button.setToolTip("Stop the running analysis.")
-            run_icon = window._make_analysis_stop_icon(enabled)
+            run_icon = window._make_analysis_stop_icon(True)
         else:
             window.analysis_run_button.setEnabled(interactive)
             window.analysis_run_button.setToolTip(
                 "Start analysis: compute spectra and sensorgram for the selected spectral cube range."
             )
-            run_icon = window._make_analysis_run_icon(enabled and has_dataset)
+            run_icon = window._make_analysis_run_icon(has_dataset)
         window.analysis_run_button.setPixmap(run_icon.pixmap(APP_THEME.compact_icon_inner, APP_THEME.compact_icon_inner))
         refresh_time_independent_toggle = getattr(window, "_refresh_analysis_time_independent_toggle", None)
         if callable(refresh_time_independent_toggle):

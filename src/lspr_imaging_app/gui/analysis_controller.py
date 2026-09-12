@@ -344,28 +344,6 @@ class AnalysisController(AnalysisWorkerMixin, AnalysisChromaticGeometryMixin):
         self.window.analysis_wavelength_min_spin.setValue(float(min(self.window._wavelength_values)))
         self.window.analysis_wavelength_max_spin.setValue(float(max(self.window._wavelength_values)))
 
-    def _on_analysis_section_applied_changed(self, applied: bool) -> None:
-        applied = bool(applied)
-        self.window._append_workflow_log(f"Analysis linked state changed: {applied}", level="debug")
-        if self.window._analysis_enabled == applied:
-            self.window._update_analysis_control_state()
-            return
-        self.window._analysis_enabled = applied
-        self.window._settings.setValue("analysis_section_applied", self.window._analysis_enabled)
-        if not self.window._analysis_enabled and self.window._analysis_live_preview_enabled:
-            self.window._analysis_live_preview_enabled = False
-            self.window._settings.setValue("analysis/live_preview", False)
-        self.window._update_analysis_control_state()
-        if self.window._analysis_enabled:
-            self.window._mark_formula_spectrum_dirty()
-            self.window._set_status_text("Analysis calculations enabled.")
-            return
-        self.window._stop_sensorgram_calculation()
-        self.window._pending_sensorgram_payload = None
-        self.window._clear_formula_spectrum()
-        self.window._clear_sensorgram("Analysis calculations are disabled for this panel.")
-        self.window._set_status_text("Analysis calculations disabled.")
-
     def _analysis_fit_method_key(self) -> str:
         return str(self.window.analysis_fit_method_combo.currentData() or "none")
 
@@ -1038,7 +1016,7 @@ class AnalysisController(AnalysisWorkerMixin, AnalysisChromaticGeometryMixin):
         self.window._set_current_spectral_cube_and_wavelength(target_spectral_cube, float(current_wavelength))
 
     def _mark_sensorgram_stale(self, reason: str | None = None) -> None:
-        if self.window._analysis_live_preview_enabled and self.window._analysis_enabled and self.window._state.dataset is not None:
+        if self.window._analysis_live_preview_enabled and self.window._state.dataset is not None:
             if reason is not None:
                 self._set_sensorgram_summary_text(reason)
             self._schedule_sensorgram_refresh()
@@ -1086,10 +1064,6 @@ class AnalysisController(AnalysisWorkerMixin, AnalysisChromaticGeometryMixin):
     def _mark_formula_spectrum_dirty(self) -> None:
         self.window._formula_spectrum_dirty = True
         blocked = self._sensorgram_prerequisite_blocked()
-        if blocked == "disabled":
-            self.window._clear_spectrum_summary_text()
-            self.window._clear_sensorgram("Analysis calculations are disabled for this panel.")
-            return
         if blocked == "no_dataset":
             self.window._clear_spectrum_summary_text()
             self.window._clear_sensorgram("Load a dataset to build the fitted sensorgram.")
@@ -1252,7 +1226,7 @@ class AnalysisController(AnalysisWorkerMixin, AnalysisChromaticGeometryMixin):
         sensorgram/spectrum workers already follow).
         """
         window = self.window
-        if not window._analysis_enabled or window._state.dataset is None:
+        if window._state.dataset is None:
             window.spectral_cube_slider.set_tick_cache_state(None)
             return
         selected_roi_ids = window._selected_spectrum_roi_ids()
@@ -1330,12 +1304,6 @@ class AnalysisController(AnalysisWorkerMixin, AnalysisChromaticGeometryMixin):
 
     def _toggle_analysis_live_preview(self) -> None:
         self.window._analysis_live_preview_enabled = not self.window._analysis_live_preview_enabled
-        if not self.window._analysis_enabled and self.window._analysis_live_preview_enabled:
-            self.window._analysis_live_preview_enabled = False
-            self.window._settings.setValue("analysis/live_preview", False)
-            self.window._update_analysis_control_state()
-            self.window._set_status_text("Enable Analysis to use live preview.")
-            return
         self.window._settings.setValue("analysis/live_preview", bool(self.window._analysis_live_preview_enabled))
         self.window._update_analysis_control_state()
         if self.window._analysis_live_preview_enabled:

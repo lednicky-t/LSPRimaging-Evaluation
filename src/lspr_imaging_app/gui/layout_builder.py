@@ -1337,8 +1337,6 @@ def build_layout(window) -> None:
         "Analysis",
         analysis_inner,
         expanded=True,
-        applied=bool(window._analysis_enabled),
-        apply_tooltip="Enable or disable analysis calculations.",
         help_text=panel_help_text("analysis"),
         header_extra=analysis_header_extra,
         parent=window,

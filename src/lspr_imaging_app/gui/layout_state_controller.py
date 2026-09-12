@@ -273,8 +273,6 @@ class LayoutStateController:
             window.results_export_section.set_expanded(window._settings_bool("results_export_section_expanded", False))
             if hasattr(window, "workflow_log_section"):
                 window.workflow_log_section.set_expanded(window._startup_log_panel_open())
-            window._analysis_enabled = window._settings_bool("analysis_section_applied", window._analysis_enabled)
-            window._set_section_applied(window.analysis_section, window._analysis_enabled)
         finally:
             window._suspend_collapsible_accordion = False
         self.restore_panel_layout_preferences()
@@ -317,7 +315,6 @@ class LayoutStateController:
         window._settings.setValue("background_section_pinned", window.background_section.is_pinned())
         window._settings.setValue("analysis_section_expanded", window.analysis_section.is_expanded())
         window._settings.setValue("analysis_section_pinned", window.analysis_section.is_pinned())
-        window._settings.setValue("analysis_section_applied", window._analysis_enabled)
         window._settings.setValue("roi_math_section_expanded", window.roi_math_section.is_expanded())
         window._settings.setValue("roi_math_section_pinned", window.roi_math_section.is_pinned())
         window._settings.setValue("metric_trace_section_expanded", window.metric_trace_section.is_expanded())
