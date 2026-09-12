@@ -3,6 +3,7 @@ from __future__ import annotations
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QColor
 from PyQt6.QtWidgets import (
+    QCheckBox,
     QColorDialog,
     QComboBox,
     QDialog,
@@ -167,6 +168,12 @@ class SensorgramPlotSettingsDialog(_PlotStyleDialogBase):
         self.raw_width_spin = _line_width_spin(window._sensorgram_line_width_px)
         self.raw_style_combo = _line_style_combo(window._sensorgram_line_style)
 
+        self.show_symbols_checkbox = QCheckBox("Show data point markers")
+        self.show_symbols_checkbox.setChecked(bool(window._sensorgram_show_symbols))
+        self.symbol_size_spin = _line_width_spin(window._sensorgram_symbol_size_px, minimum=2.0, maximum=20.0)
+        self.symbol_size_spin.setEnabled(self.show_symbols_checkbox.isChecked())
+        self.show_symbols_checkbox.toggled.connect(self.symbol_size_spin.setEnabled)
+
         self.processed_width_spin = _line_width_spin(window._sensorgram_processed_line_width_px)
         self.processed_style_combo = _line_style_combo(window._sensorgram_processed_line_style)
         self.processed_color_button = _ColorSwatchButton(window._sensorgram_processed_color)
@@ -182,6 +189,11 @@ class SensorgramPlotSettingsDialog(_PlotStyleDialogBase):
         raw_layout.addRow("Width", self.raw_width_spin)
         raw_layout.addRow("Style", self.raw_style_combo)
 
+        points_box = QGroupBox("Raw trace data points")
+        points_layout = QFormLayout(points_box)
+        points_layout.addRow(self.show_symbols_checkbox)
+        points_layout.addRow("Symbol size", self.symbol_size_spin)
+
         processed_box = QGroupBox("Statistics: processed trace")
         processed_layout = QFormLayout(processed_box)
         processed_layout.addRow("Width", self.processed_width_spin)
@@ -195,11 +207,12 @@ class SensorgramPlotSettingsDialog(_PlotStyleDialogBase):
         group_layout.addRow("Color", self.group_color_button)
 
         layout.addWidget(raw_box)
+        layout.addWidget(points_box)
         layout.addWidget(processed_box)
         layout.addWidget(group_box)
         layout.addWidget(_note_label(
             "The raw trace's color follows ROI selection (see the ROI list); only its "
-            "width and style are adjustable here."
+            "width, style, and data point markers are adjustable here."
         ))
         self._finish_ui(layout)
 
@@ -207,6 +220,8 @@ class SensorgramPlotSettingsDialog(_PlotStyleDialogBase):
         window = self._window
         window._sensorgram_line_width_px = float(self.raw_width_spin.value())
         window._sensorgram_line_style = self.raw_style_combo.currentData()
+        window._sensorgram_show_symbols = bool(self.show_symbols_checkbox.isChecked())
+        window._sensorgram_symbol_size_px = float(self.symbol_size_spin.value())
         window._sensorgram_processed_line_width_px = float(self.processed_width_spin.value())
         window._sensorgram_processed_line_style = self.processed_style_combo.currentData()
         window._sensorgram_processed_color = self.processed_color_button.color()

@@ -504,9 +504,16 @@ class StatisticsSettings:
     baseline_enabled: bool = False
     baseline_window_start: float | None = None
     baseline_window_end: float | None = None
-    group_stats_enabled: bool = False
-    group_stats_center: str = "mean"  # "mean" | "median"
-    group_stats_band: str = "sd"  # "sd" | "sem"
+    # How the Sensogram plot displays the current ROI selection - see
+    # apps/LSPRi/eva/docs/analysis_pipeline_layers.md for why this only ever
+    # averages already-fitted per-ROI sensogram values (never spectra or
+    # pixels). "individual": one trace per selected ROI. "average_all": one
+    # trace, averaging every selected ROI's own trace. "average_by_group":
+    # one trace per group present in the selection, plus one more for any
+    # selected ROIs that aren't in a group.
+    sensorgram_display_mode: str = "average_all"  # "individual" | "average_all" | "average_by_group"
+    sensorgram_aggregation: str = "mean"  # "mean" | "median"
+    sensorgram_band: str = "sd"  # "sd" | "sem"
 
 
 @dataclass(slots=True)

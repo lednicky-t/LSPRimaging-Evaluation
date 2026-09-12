@@ -320,41 +320,49 @@ def _build_statistics_baseline_row(window) -> QWidget:
     return widget
 
 
-def _build_statistics_group_row(window) -> QWidget:
-    """Group-statistics row - aggregates each selected ROI pair's own
-    already-computed trace across an AreaRoiGroup's members into a center
-    trace + SD/SEM band, shown alongside (not replacing) the individual
-    trace. "Calculate group" computes any member traces not already cached."""
+def _build_statistics_sensorgram_display_row(window) -> QWidget:
+    """Sensogram display-mode row - governs how the Sensogram plot shows a
+    multi-ROI selection: each ROI's own trace separately (Individual), one
+    trace averaging every selected ROI (Average all), or one trace per
+    group present in the selection plus one for any ungrouped ROIs
+    (Average by group). Always reads each ROI's own already-fitted
+    sensogram value, never spectra or pixels - see
+    apps/LSPRi/eva/docs/analysis_pipeline_layers.md. Missing ROI data is
+    computed automatically in the background, so there is no separate
+    "Calculate" button here (unlike the single-group overlay this
+    replaced)."""
     widget = QWidget(window)
     grid = QGridLayout()
     grid.setContentsMargins(0, 0, 0, 0)
     grid.setHorizontalSpacing(6)
     grid.setVerticalSpacing(4)
-    grid.setColumnStretch(4, 1)
+    grid.setColumnStretch(3, 1)
 
-    window.analysis_group_stats_check.setText("Group")
-    window.analysis_group_stats_check.setToolTip(
-        "When the current ROI selection belongs to a multi-member group, show the group's mean/median trace "
-        "alongside the individual one, with a spread band."
+    mode_title = QLabel("Sensogram display")
+    mode_title.setToolTip(
+        "How the Sensogram plot shows more than one selected ROI: Individual (each ROI's own trace), "
+        "Average all (one trace, averaging every selected ROI), or Average by group (one trace per group "
+        "present in the selection, plus one for any ungrouped selected ROIs)."
     )
-    grid.addWidget(window.analysis_group_stats_check, 1, 0, alignment=Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+    window.analysis_sensorgram_display_mode_combo.setToolTip(mode_title.toolTip())
+    grid.addWidget(mode_title, 0, 0, alignment=Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignBottom)
+    grid.addWidget(
+        window.analysis_sensorgram_display_mode_combo, 1, 0, alignment=Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
+    )
 
-    center_title = QLabel("Center")
-    center_title.setToolTip("Mean or median across the group's member traces at each time point.")
-    window.analysis_group_stats_center_combo.setToolTip(center_title.toolTip())
-    grid.addWidget(center_title, 0, 1, alignment=Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignBottom)
-    grid.addWidget(window.analysis_group_stats_center_combo, 1, 1, alignment=Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+    aggregation_title = QLabel("Aggregation")
+    aggregation_title.setToolTip("Mean or median across the averaged ROIs' own traces at each point. Individual mode ignores this.")
+    window.analysis_sensorgram_aggregation_combo.setToolTip(aggregation_title.toolTip())
+    grid.addWidget(aggregation_title, 0, 1, alignment=Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignBottom)
+    grid.addWidget(
+        window.analysis_sensorgram_aggregation_combo, 1, 1, alignment=Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
+    )
 
     band_title = QLabel("Band")
-    band_title.setToolTip("SD = spread of the members themselves. SEM = SD / sqrt(member count), how well the mean is known.")
-    window.analysis_group_stats_band_combo.setToolTip(band_title.toolTip())
+    band_title.setToolTip("SD = spread of the averaged ROIs themselves. SEM = SD / sqrt(count), how well the average is known.")
+    window.analysis_sensorgram_band_combo.setToolTip(band_title.toolTip())
     grid.addWidget(band_title, 0, 2, alignment=Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignBottom)
-    grid.addWidget(window.analysis_group_stats_band_combo, 1, 2, alignment=Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
-
-    window.analysis_calculate_group_button.setToolTip(
-        "Calculate the sensorgram for every member of the current selection's group (reusing any already-cached member traces)."
-    )
-    grid.addWidget(window.analysis_calculate_group_button, 1, 3, alignment=Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+    grid.addWidget(window.analysis_sensorgram_band_combo, 1, 2, alignment=Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
 
     widget.setLayout(grid)
     widget.setSizePolicy(QSizePolicy.Policy.MinimumExpanding, QSizePolicy.Policy.Fixed)
@@ -1157,7 +1165,7 @@ def build_layout(window) -> None:
     analysis_statistics_layout.addWidget(_build_statistics_smoothing_row(window))
     analysis_statistics_layout.addWidget(_build_statistics_spike_row(window))
     analysis_statistics_layout.addWidget(_build_statistics_baseline_row(window))
-    analysis_statistics_layout.addWidget(_build_statistics_group_row(window))
+    analysis_statistics_layout.addWidget(_build_statistics_sensorgram_display_row(window))
 
     window.image_toolbar = QWidget(window)
     window.image_toolbar.setObjectName("imageToolbar")

@@ -685,6 +685,8 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, MeasurementCalibrationMixin,
         self._spectrum_symbol_size_px = 6.0
         self._sensorgram_line_width_px = 2.2
         self._sensorgram_line_style = Qt.PenStyle.SolidLine
+        self._sensorgram_symbol_size_px = 6.0
+        self._sensorgram_show_symbols = True
         self._sensorgram_processed_line_width_px = 2.0
         self._sensorgram_processed_line_style = Qt.PenStyle.DashLine
         self._sensorgram_processed_color = QColor("#f59e0b")
@@ -1892,26 +1894,31 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, MeasurementCalibrationMixin,
         self.analysis_baseline_end_spin.setValue(float(statistics_settings.baseline_window_end or 0.0))
         self.analysis_baseline_end_spin.setKeyboardTracking(False)
 
-        self.analysis_group_stats_check = QCheckBox(self)
-        self.analysis_group_stats_check.setChecked(bool(statistics_settings.group_stats_enabled))
-
-        self.analysis_group_stats_center_combo = QComboBox(self)
-        self.analysis_group_stats_center_combo.addItem("Mean", "mean")
-        self.analysis_group_stats_center_combo.addItem("Median", "median")
-        group_center_index = max(
-            self.analysis_group_stats_center_combo.findData(str(statistics_settings.group_stats_center or "mean")), 0
+        self.analysis_sensorgram_display_mode_combo = QComboBox(self)
+        self.analysis_sensorgram_display_mode_combo.addItem("Individual", "individual")
+        self.analysis_sensorgram_display_mode_combo.addItem("Average all", "average_all")
+        self.analysis_sensorgram_display_mode_combo.addItem("Average by group", "average_by_group")
+        display_mode_index = max(
+            self.analysis_sensorgram_display_mode_combo.findData(
+                str(statistics_settings.sensorgram_display_mode or "average_all")
+            ),
+            0,
         )
-        self.analysis_group_stats_center_combo.setCurrentIndex(group_center_index)
+        self.analysis_sensorgram_display_mode_combo.setCurrentIndex(display_mode_index)
 
-        self.analysis_group_stats_band_combo = QComboBox(self)
-        self.analysis_group_stats_band_combo.addItem("SD", "sd")
-        self.analysis_group_stats_band_combo.addItem("SEM", "sem")
-        group_band_index = max(
-            self.analysis_group_stats_band_combo.findData(str(statistics_settings.group_stats_band or "sd")), 0
+        self.analysis_sensorgram_aggregation_combo = QComboBox(self)
+        self.analysis_sensorgram_aggregation_combo.addItem("Mean", "mean")
+        self.analysis_sensorgram_aggregation_combo.addItem("Median", "median")
+        aggregation_index = max(
+            self.analysis_sensorgram_aggregation_combo.findData(str(statistics_settings.sensorgram_aggregation or "mean")), 0
         )
-        self.analysis_group_stats_band_combo.setCurrentIndex(group_band_index)
+        self.analysis_sensorgram_aggregation_combo.setCurrentIndex(aggregation_index)
 
-        self.analysis_calculate_group_button = QPushButton("Calculate group", self)
+        self.analysis_sensorgram_band_combo = QComboBox(self)
+        self.analysis_sensorgram_band_combo.addItem("SD", "sd")
+        self.analysis_sensorgram_band_combo.addItem("SEM", "sem")
+        band_index = max(self.analysis_sensorgram_band_combo.findData(str(statistics_settings.sensorgram_band or "sd")), 0)
+        self.analysis_sensorgram_band_combo.setCurrentIndex(band_index)
 
         self.export_results_button = QPushButton("Export Results...", self)
         self.export_results_button.setToolTip(
@@ -2023,6 +2030,14 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, MeasurementCalibrationMixin,
         self.sensorgram_plot.setMinimumHeight(110)
         self.sensorgram_plot.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.sensorgram_plot.setMenuEnabled(False)
+        # Legend + dynamic item list for the Individual/Average-by-group
+        # multi-trace display modes (more than one curve shown at once) -
+        # mirrors spectrum_legend/_spectrum_series_items below exactly.
+        # Hidden by default (no items) so the single-trace case (the common
+        # one-ROI-selected path, still drawn on sensorgram_curve) shows no
+        # empty legend box.
+        self.sensorgram_legend = self.sensorgram_plot.addLegend(offset=(8, 8), labelTextColor=get_active_theme().text_primary)
+        self._sensorgram_series_items: list[pg.PlotDataItem] = []
         self.sensorgram_curve = self.sensorgram_plot.plot(
             [],
             [],
@@ -2597,11 +2612,10 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, MeasurementCalibrationMixin,
         self.analysis_baseline_check.toggled.connect(self._analysis_controller.sync_statistics_controls)
         self.analysis_baseline_start_spin.valueChanged.connect(self._analysis_controller.on_statistics_settings_changed)
         self.analysis_baseline_end_spin.valueChanged.connect(self._analysis_controller.on_statistics_settings_changed)
-        self.analysis_group_stats_check.toggled.connect(self._analysis_controller.on_statistics_settings_changed)
-        self.analysis_group_stats_check.toggled.connect(self._analysis_controller.sync_statistics_controls)
-        self.analysis_group_stats_center_combo.currentIndexChanged.connect(self._analysis_controller.on_statistics_settings_changed)
-        self.analysis_group_stats_band_combo.currentIndexChanged.connect(self._analysis_controller.on_statistics_settings_changed)
-        self.analysis_calculate_group_button.clicked.connect(self._analysis_controller.calculate_group_sensorgram)
+        self.analysis_sensorgram_display_mode_combo.currentIndexChanged.connect(self._analysis_controller.on_statistics_settings_changed)
+        self.analysis_sensorgram_display_mode_combo.currentIndexChanged.connect(self._analysis_controller.sync_statistics_controls)
+        self.analysis_sensorgram_aggregation_combo.currentIndexChanged.connect(self._analysis_controller.on_statistics_settings_changed)
+        self.analysis_sensorgram_band_combo.currentIndexChanged.connect(self._analysis_controller.on_statistics_settings_changed)
         self.export_results_button.clicked.connect(self._analysis_controller.export_results)
         self.export_results_open_folder_button.clicked.connect(self._analysis_controller.open_results_export_folder)
         self.compact_measurement_backup_button.clicked.connect(self._analysis_controller.compact_measurement_backup)
@@ -7970,6 +7984,17 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, MeasurementCalibrationMixin,
         # to an already-analyzed ROI with Live preview off silently showed
         # no sensorgram at all, reported 2026-09-09.
         self._analysis_controller.preview_sensorgram_from_cache()
+        # Unconditional, not gated on the above call's hit/miss: with more
+        # than one ROI selected, _render_sensorgram_display reads each
+        # ROI's own per-ROI cache/backup entry independently (see
+        # analysis_pipeline_layers.md) rather than requiring this exact
+        # combination to have its own "combined_<ids>" entry - so a newly
+        # selected subset that was never run together as its own combo
+        # still shows real data immediately whenever its individual
+        # members already have some, instead of the "no sensorgram at all"
+        # gap this file's own preview_sensorgram_from_cache comment already
+        # fixed once for the single-ROI case.
+        self._analysis_controller._render_sensorgram_display()
         self._analysis_controller.update_selection_highlight(force=force)
         self._analysis_controller.schedule_cube_slider_cache_refresh()
         if prompt_live_preview and not force and self._analysis_live_preview_enabled:

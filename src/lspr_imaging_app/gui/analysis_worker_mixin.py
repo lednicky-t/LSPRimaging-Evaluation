@@ -427,6 +427,7 @@ class AnalysisWorkerMixin:
         self.window.sensorgram_processed_curve.hide()
         self.window.sensorgram_group_curve.hide()
         self.window.sensorgram_group_band_fill_item.hide()
+        self._clear_sensorgram_series_items()
         self.update_plot_labels()
         self.update_selection_highlight(force=True)
         self.window.sensorgram_summary_label.setText(summary_text)

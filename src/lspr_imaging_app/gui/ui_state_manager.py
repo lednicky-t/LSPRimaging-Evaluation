@@ -200,6 +200,12 @@ class UIStateManager:
         window._sensorgram_line_style = Qt.PenStyle(
             window._settings_int("plot_style/sensorgram_line_style", int(window._sensorgram_line_style.value))
         )
+        window._sensorgram_symbol_size_px = window._read_float_setting(
+            "plot_style/sensorgram_symbol_size_px", window._sensorgram_symbol_size_px
+        )
+        window._sensorgram_show_symbols = window._read_bool_setting(
+            "plot_style/sensorgram_show_symbols", window._sensorgram_show_symbols
+        )
         window._sensorgram_processed_line_width_px = window._read_float_setting(
             "plot_style/sensorgram_processed_line_width_px", window._sensorgram_processed_line_width_px
         )
@@ -255,6 +261,8 @@ class UIStateManager:
         window._settings.setValue("plot_style/spectrum_symbol_size_px", float(window._spectrum_symbol_size_px))
         window._settings.setValue("plot_style/sensorgram_line_width_px", float(window._sensorgram_line_width_px))
         window._settings.setValue("plot_style/sensorgram_line_style", int(window._sensorgram_line_style.value))
+        window._settings.setValue("plot_style/sensorgram_symbol_size_px", float(window._sensorgram_symbol_size_px))
+        window._settings.setValue("plot_style/sensorgram_show_symbols", bool(window._sensorgram_show_symbols))
         window._settings.setValue(
             "plot_style/sensorgram_processed_line_width_px", float(window._sensorgram_processed_line_width_px)
         )

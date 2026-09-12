@@ -990,6 +990,19 @@ def load_processing_profile(
     raw_statistics_settings = payload.get("statistics_settings", {})
     if not isinstance(raw_statistics_settings, dict):
         raw_statistics_settings = {}
+    if "sensorgram_display_mode" in raw_statistics_settings:
+        sensorgram_display_mode = str(raw_statistics_settings.get("sensorgram_display_mode", "average_all"))
+        sensorgram_aggregation = str(raw_statistics_settings.get("sensorgram_aggregation", "mean"))
+        sensorgram_band = str(raw_statistics_settings.get("sensorgram_band", "sd"))
+    else:
+        # Profile saved before the multi-mode Sensogram display existed - map
+        # its single on/off "group stats" toggle onto the closest new mode,
+        # carrying its center/band choice over unchanged rather than losing
+        # it. See apps/LSPRi/eva/docs/analysis_pipeline_layers.md.
+        legacy_group_stats_enabled = bool(raw_statistics_settings.get("group_stats_enabled", False))
+        sensorgram_display_mode = "average_by_group" if legacy_group_stats_enabled else "average_all"
+        sensorgram_aggregation = str(raw_statistics_settings.get("group_stats_center", "mean"))
+        sensorgram_band = str(raw_statistics_settings.get("group_stats_band", "sd"))
     statistics_settings = StatisticsSettings(
         smoothing_method=str(raw_statistics_settings.get("smoothing_method", "none")),
         smoothing_window=int(raw_statistics_settings.get("smoothing_window", 15)),
@@ -1009,9 +1022,9 @@ def load_processing_profile(
             if raw_statistics_settings.get("baseline_window_end") is None
             else float(raw_statistics_settings.get("baseline_window_end"))
         ),
-        group_stats_enabled=bool(raw_statistics_settings.get("group_stats_enabled", False)),
-        group_stats_center=str(raw_statistics_settings.get("group_stats_center", "mean")),
-        group_stats_band=str(raw_statistics_settings.get("group_stats_band", "sd")),
+        sensorgram_display_mode=sensorgram_display_mode,
+        sensorgram_aggregation=sensorgram_aggregation,
+        sensorgram_band=sensorgram_band,
     )
 
     return (

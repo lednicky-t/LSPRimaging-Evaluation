@@ -11,7 +11,7 @@ from lspr_imaging_app.domain.models import FormulaSpectrumResult, FitResult
 from lspr_imaging_app.processing.analysis import fit_curve_for_method
 from lspr_imaging_app.processing.chromatic import transformed_annulus_mask, transformed_disk_mask
 from lspr_imaging_app.processing.roi_detection import ignored_pixel_mask
-from lspr_imaging_app.gui.roi_overlay_helpers import resolved_roi_color
+from lspr_imaging_app.gui.roi_overlay_helpers import resolved_roi_plot_color
 from lspr_imaging_app.gui.analysis_types import SpectrumSeriesComputedData
 
 
@@ -162,8 +162,10 @@ class PlotManager:
     def roi_spectrum_color(self, roi_id: int) -> QColor:
         window = self._window
         roi = next((roi for roi in window._state.area_rois if int(roi.area_roi_id) == int(roi_id)), None)
-        group = window._group_for_roi(int(roi_id)) if roi is not None else None
-        return QColor(resolved_roi_color(roi, group, window._sample_visual_color) if roi is not None else window._sample_visual_color)
+        if roi is None:
+            return QColor(window._sample_visual_color)
+        group = window._group_for_roi(int(roi_id))
+        return resolved_roi_plot_color(roi, group)
 
     def analysis_fit_result_from_spectrum(self, result: FormulaSpectrumResult) -> FitResult | None:
         if self._window._analysis_fit_method_key() == "none":

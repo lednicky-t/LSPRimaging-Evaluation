@@ -12,7 +12,8 @@ import pyqtgraph as pg
 from lspr_ui import get_active_theme
 
 from lspr_imaging_app.domain.exclusions import is_cube_fully_excluded
-from lspr_imaging_app.domain.models import AreaRoi
+from lspr_imaging_app.domain.models import AreaRoi, AreaRoiGroup
+from lspr_imaging_app.gui.roi_overlay_helpers import resolved_roi_plot_color
 from lspr_imaging_app.gui.worker import SensorgramComputationResult
 from lspr_imaging_app.gui.analysis_cache_signature import (
     signature_hash,
@@ -63,11 +64,14 @@ class AnalysisController(AnalysisWorkerMixin, AnalysisChromaticGeometryMixin):
         base_width = float(getattr(self.window, "_sensorgram_line_width_px", 2.2))
         curve_width = base_width + 1.0 if selected else base_width
         curve_style = getattr(self.window, "_sensorgram_line_style", Qt.PenStyle.SolidLine)
-        curve_symbol_size = 7.5 if selected else 6
+        base_symbol_size = float(getattr(self.window, "_sensorgram_symbol_size_px", 6.0))
+        curve_symbol_size = base_symbol_size + 1.5 if selected else base_symbol_size
         point_size = 11 if selected else 9
         point_brush = pg.mkBrush(color.lighter(138) if selected else get_active_theme().text_primary)
         point_pen = pg.mkPen(color.darker(125) if selected else "#22c55e", width=2.0)
         self.window.sensorgram_curve.setPen(pg.mkPen(curve_color, width=curve_width, style=curve_style))
+        show_symbols = bool(getattr(self.window, "_sensorgram_show_symbols", True))
+        self.window.sensorgram_curve.setSymbol("o" if show_symbols else None)
         self.window.sensorgram_curve.setSymbolSize(curve_symbol_size)
         self.window.sensorgram_curve.setSymbolBrush(pg.mkBrush(color.lighter(130) if selected else "#22c55e"))
         self.window.sensorgram_curve.setSymbolPen(pg.mkPen(curve_color.darker(120) if selected else "#bbf7d0", width=1.4))
@@ -573,10 +577,9 @@ class AnalysisController(AnalysisWorkerMixin, AnalysisChromaticGeometryMixin):
         window.analysis_baseline_start_spin.setEnabled(baseline_enabled)
         window.analysis_baseline_end_spin.setEnabled(baseline_enabled)
 
-        group_enabled = bool(window.analysis_group_stats_check.isChecked())
-        window.analysis_group_stats_center_combo.setEnabled(group_enabled)
-        window.analysis_group_stats_band_combo.setEnabled(group_enabled)
-        window.analysis_calculate_group_button.setEnabled(group_enabled)
+        aggregation_enabled = str(window.analysis_sensorgram_display_mode_combo.currentData() or "average_all") != "individual"
+        window.analysis_sensorgram_aggregation_combo.setEnabled(aggregation_enabled)
+        window.analysis_sensorgram_band_combo.setEnabled(aggregation_enabled)
 
     def on_statistics_settings_changed(self, *_args) -> None:
         """Any Statistics control changed - write back to state (session-
@@ -596,9 +599,9 @@ class AnalysisController(AnalysisWorkerMixin, AnalysisChromaticGeometryMixin):
         settings.baseline_enabled = bool(window.analysis_baseline_check.isChecked())
         settings.baseline_window_start = float(window.analysis_baseline_start_spin.value())
         settings.baseline_window_end = float(window.analysis_baseline_end_spin.value())
-        settings.group_stats_enabled = bool(window.analysis_group_stats_check.isChecked())
-        settings.group_stats_center = str(window.analysis_group_stats_center_combo.currentData() or "mean")
-        settings.group_stats_band = str(window.analysis_group_stats_band_combo.currentData() or "sd")
+        settings.sensorgram_display_mode = str(window.analysis_sensorgram_display_mode_combo.currentData() or "average_all")
+        settings.sensorgram_aggregation = str(window.analysis_sensorgram_aggregation_combo.currentData() or "mean")
+        settings.sensorgram_band = str(window.analysis_sensorgram_band_combo.currentData() or "sd")
         self.sync_statistics_controls()
         window._schedule_processing_state_save()
         self._update_statistics_overlays()
@@ -621,9 +624,9 @@ class AnalysisController(AnalysisWorkerMixin, AnalysisChromaticGeometryMixin):
             window.analysis_baseline_check,
             window.analysis_baseline_start_spin,
             window.analysis_baseline_end_spin,
-            window.analysis_group_stats_check,
-            window.analysis_group_stats_center_combo,
-            window.analysis_group_stats_band_combo,
+            window.analysis_sensorgram_display_mode_combo,
+            window.analysis_sensorgram_aggregation_combo,
+            window.analysis_sensorgram_band_combo,
         )
         for widget in widgets:
             widget.blockSignals(True)
@@ -642,13 +645,19 @@ class AnalysisController(AnalysisWorkerMixin, AnalysisChromaticGeometryMixin):
             window.analysis_baseline_check.setChecked(bool(settings.baseline_enabled))
             window.analysis_baseline_start_spin.setValue(float(settings.baseline_window_start or 0.0))
             window.analysis_baseline_end_spin.setValue(float(settings.baseline_window_end or 0.0))
-            window.analysis_group_stats_check.setChecked(bool(settings.group_stats_enabled))
-            group_center_index = max(
-                window.analysis_group_stats_center_combo.findData(str(settings.group_stats_center or "mean")), 0
+            display_mode_index = max(
+                window.analysis_sensorgram_display_mode_combo.findData(
+                    str(settings.sensorgram_display_mode or "average_all")
+                ),
+                0,
             )
-            window.analysis_group_stats_center_combo.setCurrentIndex(group_center_index)
-            group_band_index = max(window.analysis_group_stats_band_combo.findData(str(settings.group_stats_band or "sd")), 0)
-            window.analysis_group_stats_band_combo.setCurrentIndex(group_band_index)
+            window.analysis_sensorgram_display_mode_combo.setCurrentIndex(display_mode_index)
+            aggregation_index = max(
+                window.analysis_sensorgram_aggregation_combo.findData(str(settings.sensorgram_aggregation or "mean")), 0
+            )
+            window.analysis_sensorgram_aggregation_combo.setCurrentIndex(aggregation_index)
+            band_index = max(window.analysis_sensorgram_band_combo.findData(str(settings.sensorgram_band or "sd")), 0)
+            window.analysis_sensorgram_band_combo.setCurrentIndex(band_index)
         finally:
             for widget in widgets:
                 widget.blockSignals(False)
@@ -656,30 +665,34 @@ class AnalysisController(AnalysisWorkerMixin, AnalysisChromaticGeometryMixin):
         self._update_statistics_overlays()
 
     def _update_statistics_overlays(self) -> None:
-        self._update_processed_trace_overlay()
-        self._update_group_overlay()
+        self._render_sensorgram_display()
 
-    def _update_processed_trace_overlay(self) -> None:
+    def _update_processed_trace_overlay(self, x_values: np.ndarray | None, y_values: np.ndarray | None) -> None:
         """Spike-rejection -> smoothing -> baseline, in that order (clean
         transients before smoothing blends them into neighbors; baseline is
         a simple offset applied last), drawn on sensorgram_processed_curve.
         Hidden whenever nothing is actually active, so an unused overlay
-        doesn't sit on top of the raw trace."""
+        doesn't sit on top of the raw trace.
+
+        Takes the already-resolved (x, y) of whatever single trace
+        `_render_sensorgram_display` is currently showing - this overlay
+        only ever makes sense for exactly one on-screen trace ("smooth
+        *which* trace" is ambiguous otherwise), so the caller passes
+        (None, None) whenever more than one curve is being displayed at
+        once (Individual with several ROIs, or Average by group with
+        several buckets)."""
         window = self.window
         settings = window._state.statistics_settings
-        spectral_cubes = window._sensorgram_spectral_cube_indices
-        values = window._sensorgram_metric_values
-        if spectral_cubes.size == 0:
+        if x_values is None or y_values is None or x_values.size == 0:
             window.sensorgram_processed_curve.hide()
             return
-        x_values = self._sensorgram_x_values(spectral_cubes)
-        valid = np.isfinite(x_values) & np.isfinite(values)
+        valid = np.isfinite(x_values) & np.isfinite(y_values)
         if not np.any(valid):
             window.sensorgram_processed_curve.hide()
             return
         order = np.argsort(x_values[valid])
         x = x_values[valid][order]
-        y = values[valid][order].astype(np.float64, copy=True)
+        y = y_values[valid][order].astype(np.float64, copy=True)
 
         active = False
         if settings.spike_rejection_enabled:
@@ -709,111 +722,340 @@ class AnalysisController(AnalysisWorkerMixin, AnalysisChromaticGeometryMixin):
         window.sensorgram_processed_curve.show()
 
     # ------------------------------------------------------------------
-    # Group statistics: aggregates each member ROI pair's own already-
-    # computed sensorgram trace across an AreaRoiGroup, shown alongside
-    # (not replacing) the individually-selected trace above.
+    # Sensogram display modes: Individual / Average all / Average by group.
+    # See apps/LSPRi/eva/docs/analysis_pipeline_layers.md - these only ever
+    # read each ROI's own already-fitted sensogram value (never spectra or
+    # pixels) and combine them for display. Pure Pillar-I-independent data
+    # in, pure visual combination out.
     # ------------------------------------------------------------------
-
-    def _group_members_for_current_selection(self) -> tuple[str, list[AreaRoi]] | None:
-        """(group_name, member_area_rois) if the current selection is
-        exactly one ROI pair belonging to a group with >=2 members, else
-        None - group stats only make sense for a genuine multi-member group,
-        not a lone ROI or an already-multi-selected combined view."""
-        selected_roi_ids = self.window._selected_spectrum_roi_ids()
-        if len(selected_roi_ids) != 1:
-            return None
-        group = self.window._group_for_roi(int(selected_roi_ids[0]))
-        if group is None or len(group.area_roi_ids) < 2:
-            return None
-        member_ids = {int(roi_id) for roi_id in group.area_roi_ids}
-        members = [roi for roi in self.window._state.area_rois if int(roi.area_roi_id) in member_ids]
-        if len(members) < 2:
-            return None
-        return group.name, members
 
     @staticmethod
     def _member_trace_aligned(result: SensorgramComputationResult, spectral_cubes: list[int]) -> np.ndarray:
-        """Reindex a member's own (spectral_cube_indices, metric_signal)
-        onto the group's full requested spectral-cube list, NaN where that
-        member has no value for a given cube - keeps every member's array
-        the same length/order for aggregate_group_traces regardless of
-        whether one member happened to skip/fail a different frame."""
+        """Reindex one ROI's own (spectral_cube_indices, metric_value) onto
+        the requested full spectral-cube list, NaN where that ROI has no
+        value for a given cube - keeps every ROI's array the same length/
+        order for aggregate_group_traces regardless of whether one ROI
+        happened to skip/fail a different frame.
+
+        Uses `metric_value` (the fitted sensogram number itself), not
+        `metric_signal` (an auxiliary readout, NaN whenever a trace is
+        reconstructed from the disk backup - see
+        `_sensorgram_result_from_disk_backup`) - the earlier single-group
+        overlay this is shared with used metric_signal, but metric_value is
+        the correct field for "the sensogram trace" in every case."""
         value_by_cube = {
-            int(index): float(value) for index, value in zip(result.spectral_cube_indices, result.metric_signal)
+            int(index): float(value) for index, value in zip(result.spectral_cube_indices, result.metric_values)
         }
         return np.asarray([value_by_cube.get(int(cube), float("nan")) for cube in spectral_cubes], dtype=np.float64)
 
-    def _update_group_overlay(self) -> None:
-        """Draws whatever is already available from cache - never triggers a
-        computation itself (see calculate_group_sensorgram for that). Called
-        after every sensorgram update and after a group calculation
-        finishes, so the band reflects whatever member traces exist right
-        now, live."""
+    def _sensorgram_trace_for_roi(self, roi_id: int, spectral_cubes: list[int]) -> np.ndarray | None:
+        """One ROI's own sensogram trace, aligned to `spectral_cubes` - RAM
+        cache first (the same single-ROI signature the old group-stats
+        feature already used), then the HDF5 backup
+        (`_sensorgram_result_from_disk_backup`) as a fallback. Returns None
+        only when neither has anything for this ROI at all - never computes
+        (see `_ensure_sensorgram_traces` for that)."""
         window = self.window
-        settings = window._state.statistics_settings
-        if not settings.group_stats_enabled:
-            window.sensorgram_group_curve.hide()
-            window.sensorgram_group_band_fill_item.hide()
-            return
-        group_info = self._group_members_for_current_selection()
-        spectral_cubes = self.available_analysis_spectral_cubes()
-        if group_info is None or not spectral_cubes:
-            window.sensorgram_group_curve.hide()
-            window.sensorgram_group_band_fill_item.hide()
-            return
-        _group_name, members = group_info
-        member_traces: dict[int, np.ndarray] = {}
-        for member_roi in members:
-            member_id = int(member_roi.area_roi_id)
-            signature = self._sensorgram_signature_for_selection(spectral_cubes, (member_id,), [member_roi])
-            result = None if signature is None else window._sensorgram_cache.get(signature)
-            if result is None:
+        roi = next((r for r in window._state.area_rois if int(r.area_roi_id) == int(roi_id)), None)
+        if roi is None:
+            return None
+        signature = self._sensorgram_signature_for_selection(spectral_cubes, (roi_id,), [roi])
+        result = None if signature is None else window._sensorgram_cache.get(signature)
+        if result is None:
+            result = self._sensorgram_result_from_disk_backup((roi_id,), [roi], spectral_cubes)
+        if result is None:
+            return None
+        return self._member_trace_aligned(result, spectral_cubes)
+
+    def _sensorgram_group_buckets(self, selected_roi_ids: tuple[int, ...]) -> list[tuple[str, QColor, list[int]]]:
+        """Partitions a multi-ROI selection into (label, color, member_ids)
+        buckets for "Average by group": one bucket per group actually
+        represented in the selection, using only that group's *selected*
+        members (not its full membership), plus one more bucket for any
+        selected ROIs that aren't in any group at all."""
+        window = self.window
+        grouped: dict[str, list[int]] = {}
+        group_by_id: dict[str, AreaRoiGroup] = {}
+        ungrouped: list[int] = []
+        for roi_id in selected_roi_ids:
+            group = window._group_for_roi(int(roi_id))
+            if group is None:
+                ungrouped.append(int(roi_id))
+            else:
+                grouped.setdefault(group.group_id, []).append(int(roi_id))
+                group_by_id[group.group_id] = group
+        buckets: list[tuple[str, QColor, list[int]]] = []
+        for group in window._state.area_roi_groups:
+            member_ids = grouped.get(group.group_id)
+            if member_ids:
+                buckets.append((group.name, QColor(group.sample_color_hex), member_ids))
+        if ungrouped:
+            buckets.append(("Ungrouped", QColor("#38bdf8"), ungrouped))
+        return buckets
+
+    def _clear_sensorgram_series_items(self) -> None:
+        window = self.window
+        for item in getattr(window, "_sensorgram_series_items", None) or []:
+            try:
+                window.sensorgram_plot.removeItem(item)
+            except Exception:
                 continue
-            member_traces[member_id] = self._member_trace_aligned(result, spectral_cubes)
-        if len(member_traces) < 2:
-            window.sensorgram_group_curve.hide()
-            window.sensorgram_group_band_fill_item.hide()
+        window._sensorgram_series_items = []
+        if getattr(window, "sensorgram_legend", None) is not None:
+            try:
+                window.sensorgram_legend.clear()
+            except Exception:
+                pass
+
+    def _hide_sensorgram_aggregate_band(self) -> None:
+        window = self.window
+        window.sensorgram_group_curve.hide()
+        window.sensorgram_group_band_fill_item.hide()
+
+    def _render_sensorgram_series_items(
+        self,
+        x_values: np.ndarray,
+        bucket_traces: list[tuple[str, QColor | None, np.ndarray]],
+        bucket_bands: list[dict[str, np.ndarray] | None],
+    ) -> None:
+        """Multiple simultaneous curves (Individual with several ROIs, or
+        Average by group with several buckets) - the single sensorgram_
+        curve/band items can only ever show one trace, so this generalizes
+        to N, directly mirroring the Spectra panel's own
+        `_spectrum_series_items`/`render_spectrum_series` pattern
+        (plot_manager.py) rather than inventing a different shape."""
+        window = self.window
+        self._clear_sensorgram_series_items()
+        show_symbols = bool(getattr(window, "_sensorgram_show_symbols", True))
+        symbol_size = float(getattr(window, "_sensorgram_symbol_size_px", 6.0))
+        line_width = float(getattr(window, "_sensorgram_line_width_px", 2.2))
+        line_style = getattr(window, "_sensorgram_line_style", Qt.PenStyle.SolidLine)
+        extents: list[tuple[float, float, float, float]] = []
+        for (label, color, y_values), band in zip(bucket_traces, bucket_bands):
+            valid = np.isfinite(x_values) & np.isfinite(y_values)
+            if not np.any(valid):
+                continue
+            x_plot = x_values[valid]
+            y_plot = y_values[valid]
+            pen_color = QColor(color) if color is not None else QColor("#22c55e")
+            curve_item = window.sensorgram_plot.plot(
+                x_plot,
+                y_plot,
+                pen=pg.mkPen(pen_color, width=line_width, style=line_style),
+                symbol="o" if show_symbols else None,
+                symbolSize=symbol_size,
+                symbolBrush=pg.mkBrush(pen_color),
+                symbolPen=pg.mkPen(pen_color.darker(120), width=1.2),
+                name=label,
+            )
+            window._sensorgram_series_items.append(curve_item)
+            if band is not None:
+                band_valid = valid & np.isfinite(band["low"]) & np.isfinite(band["high"])
+                if np.any(band_valid):
+                    low_item = window.sensorgram_plot.plot(x_values[band_valid], band["low"][band_valid], pen=None)
+                    high_item = window.sensorgram_plot.plot(x_values[band_valid], band["high"][band_valid], pen=None)
+                    band_color = QColor(pen_color)
+                    band_color.setAlpha(50)
+                    fill_item = pg.FillBetweenItem(low_item, high_item, brush=pg.mkBrush(band_color))
+                    window.sensorgram_plot.addItem(fill_item)
+                    window._sensorgram_series_items.extend([low_item, high_item, fill_item])
+            extents.append((float(np.min(x_plot)), float(np.max(x_plot)), float(np.min(y_plot)), float(np.max(y_plot))))
+        if extents:
+            x_min = min(e[0] for e in extents)
+            x_max = max(e[1] for e in extents)
+            y_min = min(e[2] for e in extents)
+            y_max = max(e[3] for e in extents)
+            window.sensorgram_plot.setXRange(x_min, x_max, padding=0.03)
+            y_span = max(y_max - y_min, 0.05)
+            window.sensorgram_plot.setYRange(y_min - y_span * 0.08, y_max + y_span * 0.12, padding=0.0)
+
+    def _render_sensorgram_display(self) -> None:
+        """Draws the Sensogram plot's primary content for the current ROI
+        selection and settings.sensorgram_display_mode.
+
+        Exactly one selected ROI (or a run still in progress) always keeps
+        using the existing single raw-trace pipeline unchanged
+        (window._sensorgram_metric_values, fed by the normal Start-analysis/
+        live-preview run - see set_sensorgram_series): there's nothing to
+        combine with one ROI, and re-fetching per-ROI data on every one of
+        the ~10/s live-preview redraws during a bulk run would be real,
+        avoidable per-selected-ROI cost for no visible benefit mid-run (the
+        plot already updates live from the raw trace during the run either
+        way). The new display modes only take over once a selection has
+        more than one ROI AND nothing is actively running.
+
+        More than one selected ROI reads each ROI's own already-fitted
+        sensogram value (never spectra/pixels) and combines them per mode -
+        never itself triggers a fresh per-cube computation for "the
+        selection" as a whole, only for individual ROIs found missing their
+        own data (via _ensure_sensorgram_traces)."""
+        window = self.window
+        selected_roi_ids = self._selected_spectrum_roi_ids()
+
+        if len(selected_roi_ids) <= 1 or window._sensorgram_running:
+            self._clear_sensorgram_series_items()
+            self._hide_sensorgram_aggregate_band()
+            window.sensorgram_curve.show()
+            window.sensorgram_current_point.show()
+            spectral_cube_indices = window._sensorgram_spectral_cube_indices
+            values = window._sensorgram_metric_values
+            if spectral_cube_indices.size == 0:
+                self._update_processed_trace_overlay(None, None)
+                return
+            x_values = self._sensorgram_x_values(spectral_cube_indices)
+            valid = np.isfinite(x_values) & np.isfinite(values)
+            self._update_processed_trace_overlay(
+                x_values[valid] if np.any(valid) else None,
+                values[valid] if np.any(valid) else None,
+            )
+            return
+
+        window.sensorgram_current_point.hide()
+        settings = window._state.statistics_settings
+        mode = settings.sensorgram_display_mode
+        spectral_cubes = self.available_analysis_spectral_cubes()
+        if not spectral_cubes:
+            window.sensorgram_curve.hide()
+            self._clear_sensorgram_series_items()
+            self._hide_sensorgram_aggregate_band()
+            self._update_processed_trace_overlay(None, None)
             return
         x_values = self._sensorgram_x_values(spectral_cubes)
-        center, low, high = aggregate_group_traces(
-            member_traces, center=settings.group_stats_center, band=settings.group_stats_band
-        )
-        valid = np.isfinite(x_values) & np.isfinite(center) & np.isfinite(low) & np.isfinite(high)
-        if not np.any(valid):
-            window.sensorgram_group_curve.hide()
-            window.sensorgram_group_band_fill_item.hide()
-            return
-        window.sensorgram_group_curve.setData(x_values[valid], center[valid])
-        window.sensorgram_group_band_low_curve.setData(x_values[valid], low[valid])
-        window.sensorgram_group_band_high_curve.setData(x_values[valid], high[valid])
-        window.sensorgram_group_curve.show()
-        window.sensorgram_group_band_fill_item.show()
 
-    def calculate_group_sensorgram(self) -> None:
-        """"Calculate group" button: computes (or reuses already-cached)
-        every member's own single-ROI sensorgram, one at a time - reusing
-        the normal single-ROI worker path (_start_sensorgram_worker) rather
-        than a separate parallel implementation, so each member's result
-        lands in the same window._sensorgram_cache the individual view
-        already reads from. The visible primary trace flickers through each
-        member while this runs (the same worker that updates the display is
-        what's being reused per member) and is restored to the actual
-        current selection once the whole group is done, see
-        _finish_group_calculation."""
-        group_info = self._group_members_for_current_selection()
-        if group_info is None:
-            self.window._set_status_text("Select a ROI pair that belongs to a multi-member group first.")
+        if mode == "average_by_group":
+            buckets = self._sensorgram_group_buckets(selected_roi_ids) or [
+                ("Average", QColor("#38bdf8"), list(selected_roi_ids))
+            ]
+            aggregate = True
+        elif mode == "individual":
+            buckets = [(f"ROI {roi_id}", None, [int(roi_id)]) for roi_id in selected_roi_ids]
+            aggregate = False
+        else:  # "average_all"
+            buckets = [("Average", QColor("#38bdf8"), list(selected_roi_ids))]
+            aggregate = True
+
+        missing_ids: list[int] = []
+        bucket_traces: list[tuple[str, QColor | None, np.ndarray]] = []
+        bucket_bands: list[dict[str, np.ndarray] | None] = []
+        for label, color, member_ids in buckets:
+            member_traces: dict[int, np.ndarray] = {}
+            for roi_id in member_ids:
+                trace = self._sensorgram_trace_for_roi(int(roi_id), spectral_cubes)
+                if trace is None:
+                    missing_ids.append(int(roi_id))
+                    continue
+                member_traces[int(roi_id)] = trace
+            if not member_traces:
+                continue
+            if aggregate:
+                center, low, high = aggregate_group_traces(
+                    member_traces, center=settings.sensorgram_aggregation, band=settings.sensorgram_band
+                )
+                bucket_traces.append((label, color, center))
+                bucket_bands.append({"low": low, "high": high})
+            else:
+                roi_id = member_ids[0]
+                trace = member_traces.get(int(roi_id))
+                roi = next((r for r in window._state.area_rois if int(r.area_roi_id) == int(roi_id)), None)
+                group = window._group_for_roi(int(roi_id)) if roi is not None else None
+                resolved_color = (
+                    resolved_roi_plot_color(roi, group) if roi is not None else QColor(window._sample_visual_color)
+                )
+                bucket_traces.append((label, resolved_color, trace))
+                bucket_bands.append(None)
+
+        if missing_ids:
+            self._ensure_sensorgram_traces(missing_ids)
+
+        if not bucket_traces:
+            window.sensorgram_curve.hide()
+            self._clear_sensorgram_series_items()
+            self._hide_sensorgram_aggregate_band()
+            self._update_processed_trace_overlay(None, None)
+            return
+
+        if len(bucket_traces) == 1:
+            self._clear_sensorgram_series_items()
+            label, color, y_values = bucket_traces[0]
+            valid = np.isfinite(x_values) & np.isfinite(y_values)
+            window.sensorgram_curve.show()
+            pen_color = QColor(color) if color is not None else QColor("#22c55e")
+            if np.any(valid):
+                window.sensorgram_curve.setData(x_values[valid], y_values[valid])
+            else:
+                window.sensorgram_curve.setData([], [])
+            window.sensorgram_curve.setPen(
+                pg.mkPen(pen_color, width=window._sensorgram_line_width_px, style=window._sensorgram_line_style)
+            )
+            show_symbols = bool(getattr(window, "_sensorgram_show_symbols", True))
+            window.sensorgram_curve.setSymbol("o" if show_symbols else None)
+            window.sensorgram_curve.setSymbolSize(float(getattr(window, "_sensorgram_symbol_size_px", 6.0)))
+            window.sensorgram_curve.setSymbolBrush(pg.mkBrush(pen_color))
+            window.sensorgram_curve.setSymbolPen(pg.mkPen(pen_color.darker(120), width=1.2))
+            band = bucket_bands[0]
+            band_valid = (
+                valid & np.isfinite(band["low"]) & np.isfinite(band["high"]) if band is not None else None
+            )
+            if band is not None and np.any(band_valid):
+                window.sensorgram_group_band_low_curve.setData(x_values[band_valid], band["low"][band_valid])
+                window.sensorgram_group_band_high_curve.setData(x_values[band_valid], band["high"][band_valid])
+                band_color = QColor(pen_color)
+                band_color.setAlpha(50)
+                window.sensorgram_group_band_fill_item.setBrush(pg.mkBrush(band_color))
+                window.sensorgram_group_band_fill_item.show()
+            else:
+                self._hide_sensorgram_aggregate_band()
+            self._update_processed_trace_overlay(
+                x_values[valid] if np.any(valid) else None, y_values[valid] if np.any(valid) else None
+            )
+            return
+
+        window.sensorgram_curve.hide()
+        self._hide_sensorgram_aggregate_band()
+        self._update_processed_trace_overlay(None, None)
+        self._render_sensorgram_series_items(x_values, bucket_traces, bucket_bands)
+
+    def _ensure_sensorgram_traces(self, roi_ids: list[int]) -> None:
+        """Queues a background single-ROI sensorgram computation for each of
+        `roi_ids` that has no RAM/disk trace available yet - the "compute
+        whatever's missing" behavior backing the display modes above.
+        Reuses the exact same per-ROI queue machinery this previously ran
+        only for the old "Calculate group" button
+        (_group_calculation_active and friends), kept under its original
+        attribute/method names since analysis_worker_mixin.py's
+        on_sensorgram_ready/on_sensorgram_failed already call back into
+        _on_group_member_sensorgram_ready by that name - renaming those
+        would mean touching that carefully-tuned completion-handling code
+        for no functional benefit."""
+        window = self.window
+        if getattr(self, "_group_calculation_active", False):
+            # A batch is already in flight - extend its queue with any new
+            # ids instead of starting a second, overlapping one.
+            pending = self._group_calculation_pending_member_ids
+            members_by_id = self._group_calculation_members_by_id
+            for roi_id in roi_ids:
+                if int(roi_id) in members_by_id:
+                    continue
+                roi = next((r for r in window._state.area_rois if int(r.area_roi_id) == int(roi_id)), None)
+                if roi is None:
+                    continue
+                members_by_id[int(roi_id)] = roi
+                pending.append(int(roi_id))
             return
         spectral_cubes = self.available_analysis_spectral_cubes()
         if not spectral_cubes:
-            self.window._set_status_text("No spectral cubes are available in the selected range.")
             return
-        _group_name, members = group_info
+        members_by_id = {}
+        for roi_id in roi_ids:
+            roi = next((r for r in window._state.area_rois if int(r.area_roi_id) == int(roi_id)), None)
+            if roi is not None:
+                members_by_id[int(roi_id)] = roi
+        if not members_by_id:
+            return
         self._group_calculation_spectral_cubes = spectral_cubes
-        self._group_calculation_members_by_id = {int(m.area_roi_id): m for m in members}
-        self._group_calculation_pending_member_ids = list(self._group_calculation_members_by_id.keys())
+        self._group_calculation_members_by_id = members_by_id
+        self._group_calculation_pending_member_ids = list(members_by_id.keys())
         self._group_calculation_active = True
-        self.window._set_status_text(f"Calculating group ({len(members)} members)...")
         self._advance_group_calculation()
 
     def _advance_group_calculation(self) -> None:
@@ -845,12 +1087,7 @@ class AnalysisController(AnalysisWorkerMixin, AnalysisChromaticGeometryMixin):
 
     def _finish_group_calculation(self) -> None:
         self._group_calculation_active = False
-        member_count = len(getattr(self, "_group_calculation_members_by_id", {}) or {})
-        self.window._set_status_text(f"Group calculated ({member_count} members).")
-        # Restore the actual current selection's own trace/view - group
-        # member calculations reused the same worker/display path, so the
-        # plot currently shows whichever member finished last.
-        self.calculate_sensorgram_for_range()
+        self._render_sensorgram_display()
 
     def _set_sensorgram_summary_text(self, text: str) -> None:
         self.window.sensorgram_summary_label.setText(text)
