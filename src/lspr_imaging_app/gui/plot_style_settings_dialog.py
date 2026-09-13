@@ -12,6 +12,7 @@ from PyQt6.QtWidgets import (
     QFormLayout,
     QGroupBox,
     QLabel,
+    QPushButton,
     QToolButton,
     QVBoxLayout,
     QWidget,
@@ -27,12 +28,29 @@ from lspr_ui import get_active_theme
 # SensorgramPlotSettingsDialog for the kind of controls to expose (line
 # width/style), see apps/sLSPR/acq/src/lspr_app/gui/main_window_plot_settings.py.
 #
-# Series colors are deliberately NOT exposed for the spectrum's data curves
-# or the sensogram's raw curve: those colors already carry meaning (each
-# ROI's own color, or the "which ROI is selected" highlight in
-# AnalysisController.update_selection_highlight) and overriding them here
-# would fight that. Colors ARE exposed for the sensogram's processed/group
+# A literal per-series color override is deliberately NOT exposed for the
+# spectrum's data curves or the sensogram's raw curve: those colors already
+# carry meaning (each ROI's own color, or the "which ROI is selected"
+# highlight in AnalysisController.update_selection_highlight) and
+# overriding one directly here would fight that. What IS exposed, in the
+# shared "ROI colors" section both dialogs add (_build_roi_color_section),
+# is which PALETTE an unassigned ROI's/group's color is auto-picked from -
+# see roi_color_palettes.py and roi_overlay_helpers.resolved_roi_plot_color.
+# Colors ARE directly exposed for the sensogram's processed/group
 # statistics overlays, whose colors are fixed decorative literals today.
+
+_SEQUENTIAL_PALETTE_LABELS: list[tuple[str, str]] = [
+    ("Viridis", "viridis"),
+    ("Plasma", "plasma"),
+    ("Cividis (colorblind-safe)", "cividis"),
+    ("Turbo", "turbo"),
+]
+_CATEGORICAL_PALETTE_LABELS: list[tuple[str, str]] = [
+    ("Tab10 (10 colors)", "tab10"),
+    ("Tab20 (20 colors)", "tab20"),
+    ("Set2 (8, soft)", "set2"),
+    ("Dark2 (8, muted)", "dark2"),
+]
 
 _LINE_STYLE_OPTIONS = [
     ("Solid", Qt.PenStyle.SolidLine),
@@ -66,6 +84,77 @@ def _note_label(text: str) -> QLabel:
     label.setWordWrap(True)
     label.setStyleSheet(f"color: {get_active_theme().text_dim}; font-size: 9pt;")
     return label
+
+
+def _palette_combo(options: list[tuple[str, str]], current: str) -> QComboBox:
+    combo = QComboBox()
+    for label, value in options:
+        combo.addItem(label, value)
+    index = combo.findData(current)
+    combo.setCurrentIndex(index if index >= 0 else 0)
+    return combo
+
+
+def _build_roi_color_section(dialog: QDialog, window, *, gradient_attr: str) -> QGroupBox:
+    """Shared "ROI colors" section, added identically to both the Spectra
+    and Sensogram plot settings dialogs - see roi_color_palettes.py for the
+    palette values and resolved_roi_plot_color for how they get used.
+
+    - Ungrouped ROI gradient: which sequential palette an unassigned ROI's
+      color is drawn from, by its position among the dataset's ROIs. Reads/
+      writes `gradient_attr` on `window` - the two plots keep this setting
+      separate (not shared) since the Sensogram can show a different
+      number of simultaneous traces than the Spectra plot does (e.g. one
+      averaged trace per group, rather than one per ROI).
+    - Group palette: which categorical palette a newly-created group's own
+      color is assigned from. This one IS shared between both dialogs
+      (`window._roi_group_color_palette`) - a group's color means the same
+      thing everywhere it's shown. "Apply to existing groups" is an
+      explicit, opt-in re-color of every current group from this palette;
+      changing the dropdown alone never touches an existing group's color.
+
+    Widgets are stored on `dialog` as `roi_gradient_combo`/
+    `roi_group_palette_combo`/`roi_group_apply_button` for `apply_changes`
+    to read back.
+    """
+    box = QGroupBox("ROI colors")
+    layout = QFormLayout(box)
+
+    dialog.roi_gradient_combo = _palette_combo(_SEQUENTIAL_PALETTE_LABELS, getattr(window, gradient_attr))
+    gradient_title = QLabel("Ungrouped ROI gradient")
+    gradient_title.setToolTip(
+        "An unassigned ROI's Spectra/Sensogram color comes from this gradient, ordered by the ROI's "
+        "position among all of the dataset's ROIs - nearby indices read as nearby colors."
+    )
+    dialog.roi_gradient_combo.setToolTip(gradient_title.toolTip())
+    layout.addRow(gradient_title, dialog.roi_gradient_combo)
+
+    dialog.roi_group_palette_combo = _palette_combo(_CATEGORICAL_PALETTE_LABELS, window._roi_group_color_palette)
+    group_title = QLabel("Group palette")
+    group_title.setToolTip(
+        "A newly-created group's own color comes from this palette, in creation order. Shared between "
+        "the Spectra and Sensogram settings - a group's color is the same everywhere it's shown."
+    )
+    dialog.roi_group_palette_combo.setToolTip(group_title.toolTip())
+    layout.addRow(group_title, dialog.roi_group_palette_combo)
+
+    dialog.roi_group_apply_button = QPushButton("Apply to existing groups", box)
+    dialog.roi_group_apply_button.setToolTip(
+        "Re-color every existing group from the palette above, in their current order. Does not touch "
+        "ungrouped ROIs. Changing the dropdown alone never does this on its own."
+    )
+    dialog.roi_group_apply_button.clicked.connect(lambda: _apply_group_palette_now(dialog, window))
+    layout.addRow(dialog.roi_group_apply_button)
+
+    return box
+
+
+def _apply_group_palette_now(dialog: QDialog, window) -> None:
+    window._roi_group_color_palette = str(
+        dialog.roi_group_palette_combo.currentData() or window._roi_group_color_palette
+    )
+    window._save_visual_preferences()
+    window._apply_group_color_palette()
 
 
 class _ColorSwatchButton(QToolButton):
@@ -146,9 +235,15 @@ class SpectrumPlotSettingsDialog(_PlotStyleDialogBase):
         points_layout = QFormLayout(points_box)
         points_layout.addRow("Symbol size", self.symbol_size_spin)
 
+        roi_color_box = _build_roi_color_section(self, window, gradient_attr="_spectrum_roi_gradient_palette")
+
         layout.addWidget(fit_box)
         layout.addWidget(points_box)
-        layout.addWidget(_note_label("Series colors follow each ROI's own color, set from the ROI list."))
+        layout.addWidget(roi_color_box)
+        layout.addWidget(_note_label(
+            "Series colors follow each ROI's own color, set from the ROI list, or the palettes above when "
+            "a ROI has no color of its own."
+        ))
         self._finish_ui(layout)
 
     def apply_changes(self) -> None:
@@ -156,8 +251,12 @@ class SpectrumPlotSettingsDialog(_PlotStyleDialogBase):
         window._spectrum_fit_line_width_px = float(self.fit_width_spin.value())
         window._spectrum_fit_line_style = self.fit_style_combo.currentData()
         window._spectrum_symbol_size_px = float(self.symbol_size_spin.value())
+        window._spectrum_roi_gradient_palette = str(self.roi_gradient_combo.currentData() or "viridis")
+        window._roi_group_color_palette = str(self.roi_group_palette_combo.currentData() or "tab10")
         if hasattr(window, "_refresh_formula_spectrum"):
             window._refresh_formula_spectrum()
+        if hasattr(window, "_analysis_controller"):
+            window._analysis_controller._render_sensorgram_display()
         window._save_visual_preferences()
 
 
@@ -206,13 +305,16 @@ class SensorgramPlotSettingsDialog(_PlotStyleDialogBase):
         group_layout.addRow("Style", self.group_style_combo)
         group_layout.addRow("Color", self.group_color_button)
 
+        roi_color_box = _build_roi_color_section(self, window, gradient_attr="_sensorgram_roi_gradient_palette")
+
         layout.addWidget(raw_box)
         layout.addWidget(points_box)
+        layout.addWidget(roi_color_box)
         layout.addWidget(processed_box)
         layout.addWidget(group_box)
         layout.addWidget(_note_label(
-            "The raw trace's color follows ROI selection (see the ROI list); only its "
-            "width, style, and data point markers are adjustable here."
+            "The raw trace's color follows ROI selection (see the ROI list) or the palettes above; only "
+            "its width, style, and data point markers are adjustable here."
         ))
         self._finish_ui(layout)
 
@@ -222,6 +324,8 @@ class SensorgramPlotSettingsDialog(_PlotStyleDialogBase):
         window._sensorgram_line_style = self.raw_style_combo.currentData()
         window._sensorgram_show_symbols = bool(self.show_symbols_checkbox.isChecked())
         window._sensorgram_symbol_size_px = float(self.symbol_size_spin.value())
+        window._sensorgram_roi_gradient_palette = str(self.roi_gradient_combo.currentData() or "viridis")
+        window._roi_group_color_palette = str(self.roi_group_palette_combo.currentData() or "tab10")
         window._sensorgram_processed_line_width_px = float(self.processed_width_spin.value())
         window._sensorgram_processed_line_style = self.processed_style_combo.currentData()
         window._sensorgram_processed_color = self.processed_color_button.color()

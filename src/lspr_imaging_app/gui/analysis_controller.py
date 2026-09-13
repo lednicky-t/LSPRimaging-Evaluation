@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import time
 import numpy as np
+from collections.abc import Callable
 from copy import deepcopy
 from datetime import datetime
 from math import ceil, floor
@@ -14,6 +15,7 @@ from lspr_ui import get_active_theme
 from lspr_imaging_app.domain.exclusions import is_cube_fully_excluded
 from lspr_imaging_app.domain.models import AreaRoi, AreaRoiGroup
 from lspr_imaging_app.gui.roi_overlay_helpers import resolved_roi_plot_color
+from lspr_imaging_app.gui.roi_color_palettes import roi_index_fraction
 from lspr_imaging_app.gui.worker import SensorgramComputationResult
 from lspr_imaging_app.gui.analysis_cache_signature import (
     signature_hash,
@@ -104,6 +106,11 @@ class AnalysisController(AnalysisWorkerMixin, AnalysisChromaticGeometryMixin):
         band_color.setAlpha(50)
         window.sensorgram_group_band_fill_item.setBrush(pg.mkBrush(band_color))
         self.update_selection_highlight(force=True)
+        # Also redraws the Individual/Average-by-group multi-curve display
+        # (if active) so a changed ROI-color gradient/group palette is
+        # reflected immediately - update_selection_highlight above only
+        # covers the <=1-ROI-selected single-trace case.
+        self._render_sensorgram_display()
 
     def on_fit_settings_changed(self, *_args) -> None:
         self.window._on_analysis_fit_settings_changed(*_args)
@@ -748,21 +755,48 @@ class AnalysisController(AnalysisWorkerMixin, AnalysisChromaticGeometryMixin):
         }
         return np.asarray([value_by_cube.get(int(cube), float("nan")) for cube in spectral_cubes], dtype=np.float64)
 
-    def _sensorgram_trace_for_roi(self, roi_id: int, spectral_cubes: list[int]) -> np.ndarray | None:
+    def _sensorgram_trace_for_roi(
+        self,
+        roi_id: int,
+        spectral_cubes: list[int],
+        spectral_cube_signatures: tuple[object, ...] | None,
+        cube_context_hashes_provider: Callable[[], dict[int, str]],
+    ) -> np.ndarray | None:
         """One ROI's own sensogram trace, aligned to `spectral_cubes` - RAM
         cache first (the same single-ROI signature the old group-stats
         feature already used), then the HDF5 backup
         (`_sensorgram_result_from_disk_backup`) as a fallback. Returns None
         only when neither has anything for this ROI at all - never computes
-        (see `_ensure_sensorgram_traces` for that)."""
+        (see `_ensure_sensorgram_traces` for that).
+
+        `spectral_cube_signatures` must come from
+        `_sensorgram_spectral_cube_signatures`, computed once by the caller
+        and reused across every ROI being looked up against the same
+        `spectral_cubes` - the expensive, ROI-independent O(cubes x
+        wavelengths) half of the RAM-cache signature. Recomputing it per ROI
+        on every selection change (rather than once per selection) is what
+        froze the app on selecting several ROIs (2026-09-12).
+
+        `cube_context_hashes_provider` is the disk-backup check's
+        equivalent (`_sensorgram_cube_context_hashes`) - taken as a
+        zero-arg callable rather than an already-computed dict so it's only
+        ever built at most once per render pass, and not at all when every
+        selected ROI's RAM cache already hits: that build is itself
+        O(cubes x wavelengths), and right after launch (RAM cache empty)
+        every ROI would otherwise fall through to it, which was the other
+        half of the same freeze."""
         window = self.window
         roi = next((r for r in window._state.area_rois if int(r.area_roi_id) == int(roi_id)), None)
         if roi is None:
             return None
-        signature = self._sensorgram_signature_for_selection(spectral_cubes, (roi_id,), [roi])
+        signature = self._sensorgram_signature_for_selection_with_cube_signatures(
+            spectral_cube_signatures, (roi_id,), [roi]
+        )
         result = None if signature is None else window._sensorgram_cache.get(signature)
         if result is None:
-            result = self._sensorgram_result_from_disk_backup((roi_id,), [roi], spectral_cubes)
+            result = self._sensorgram_result_from_disk_backup(
+                (roi_id,), [roi], spectral_cubes, cube_context_hashes_provider()
+            )
         if result is None:
             return None
         return self._member_trace_aligned(result, spectral_cubes)
@@ -913,6 +947,7 @@ class AnalysisController(AnalysisWorkerMixin, AnalysisChromaticGeometryMixin):
         window.sensorgram_current_point.hide()
         settings = window._state.statistics_settings
         mode = settings.sensorgram_display_mode
+        all_roi_ids = [int(r.area_roi_id) for r in window._state.area_rois]
         spectral_cubes = self.available_analysis_spectral_cubes()
         if not spectral_cubes:
             window.sensorgram_curve.hide()
@@ -921,6 +956,24 @@ class AnalysisController(AnalysisWorkerMixin, AnalysisChromaticGeometryMixin):
             self._update_processed_trace_overlay(None, None)
             return
         x_values = self._sensorgram_x_values(spectral_cubes)
+        # Computed ONCE for this whole redraw and reused for every selected
+        # ROI below - this is the expensive O(cubes x wavelengths) half of
+        # each ROI's own cache signature (see
+        # _sensorgram_spectral_cube_signatures's docstring); rebuilding it
+        # per ROI instead of once per selection change is what froze the
+        # app when several ROIs were selected (2026-09-12).
+        spectral_cube_signatures = self._sensorgram_spectral_cube_signatures(spectral_cubes)
+        # Built at most once, and only if actually needed (see
+        # _sensorgram_trace_for_roi's docstring) - a plain memoizing
+        # closure rather than an eager call, since most ROIs hit the RAM
+        # cache once a session has been running a while and never need this
+        # at all.
+        cube_context_hashes_cache: list[dict[int, str]] = []
+
+        def get_cube_context_hashes() -> dict[int, str]:
+            if not cube_context_hashes_cache:
+                cube_context_hashes_cache.append(self._sensorgram_cube_context_hashes(spectral_cubes))
+            return cube_context_hashes_cache[0]
 
         if mode == "average_by_group":
             buckets = self._sensorgram_group_buckets(selected_roi_ids) or [
@@ -940,7 +993,9 @@ class AnalysisController(AnalysisWorkerMixin, AnalysisChromaticGeometryMixin):
         for label, color, member_ids in buckets:
             member_traces: dict[int, np.ndarray] = {}
             for roi_id in member_ids:
-                trace = self._sensorgram_trace_for_roi(int(roi_id), spectral_cubes)
+                trace = self._sensorgram_trace_for_roi(
+                    int(roi_id), spectral_cubes, spectral_cube_signatures, get_cube_context_hashes
+                )
                 if trace is None:
                     missing_ids.append(int(roi_id))
                     continue
@@ -959,7 +1014,14 @@ class AnalysisController(AnalysisWorkerMixin, AnalysisChromaticGeometryMixin):
                 roi = next((r for r in window._state.area_rois if int(r.area_roi_id) == int(roi_id)), None)
                 group = window._group_for_roi(int(roi_id)) if roi is not None else None
                 resolved_color = (
-                    resolved_roi_plot_color(roi, group) if roi is not None else QColor(window._sample_visual_color)
+                    resolved_roi_plot_color(
+                        roi,
+                        group,
+                        roi_fraction=roi_index_fraction(int(roi_id), all_roi_ids),
+                        gradient_palette=window._sensorgram_roi_gradient_palette,
+                    )
+                    if roi is not None
+                    else QColor(window._sample_visual_color)
                 )
                 bucket_traces.append((label, resolved_color, trace))
                 bucket_bands.append(None)
@@ -1053,6 +1115,10 @@ class AnalysisController(AnalysisWorkerMixin, AnalysisChromaticGeometryMixin):
         if not members_by_id:
             return
         self._group_calculation_spectral_cubes = spectral_cubes
+        # Computed once for the whole queue and reused per member below,
+        # same reasoning as _render_sensorgram_display - see
+        # _sensorgram_spectral_cube_signatures's docstring.
+        self._group_calculation_spectral_cube_signatures = self._sensorgram_spectral_cube_signatures(spectral_cubes)
         self._group_calculation_members_by_id = members_by_id
         self._group_calculation_pending_member_ids = list(members_by_id.keys())
         self._group_calculation_active = True
@@ -1060,6 +1126,7 @@ class AnalysisController(AnalysisWorkerMixin, AnalysisChromaticGeometryMixin):
 
     def _advance_group_calculation(self) -> None:
         spectral_cubes = getattr(self, "_group_calculation_spectral_cubes", None)
+        spectral_cube_signatures = getattr(self, "_group_calculation_spectral_cube_signatures", None)
         pending = getattr(self, "_group_calculation_pending_member_ids", None)
         members_by_id = getattr(self, "_group_calculation_members_by_id", None)
         if not spectral_cubes or pending is None or members_by_id is None:
@@ -1068,7 +1135,9 @@ class AnalysisController(AnalysisWorkerMixin, AnalysisChromaticGeometryMixin):
         while pending:
             member_id = pending[0]
             member_roi = members_by_id[member_id]
-            signature = self._sensorgram_signature_for_selection(spectral_cubes, (member_id,), [member_roi])
+            signature = self._sensorgram_signature_for_selection_with_cube_signatures(
+                spectral_cube_signatures, (member_id,), [member_roi]
+            )
             if signature is None:
                 pending.pop(0)
                 continue

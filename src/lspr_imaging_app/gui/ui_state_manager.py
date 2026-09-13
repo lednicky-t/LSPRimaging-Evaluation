@@ -194,6 +194,17 @@ class UIStateManager:
         window._spectrum_symbol_size_px = window._read_float_setting(
             "plot_style/spectrum_symbol_size_px", window._spectrum_symbol_size_px
         )
+        window._spectrum_roi_gradient_palette = str(
+            window._settings.value("plot_style/spectrum_roi_gradient_palette", window._spectrum_roi_gradient_palette)
+        )
+        window._sensorgram_roi_gradient_palette = str(
+            window._settings.value(
+                "plot_style/sensorgram_roi_gradient_palette", window._sensorgram_roi_gradient_palette
+            )
+        )
+        window._roi_group_color_palette = str(
+            window._settings.value("plot_style/roi_group_color_palette", window._roi_group_color_palette)
+        )
         window._sensorgram_line_width_px = window._read_float_setting(
             "plot_style/sensorgram_line_width_px", window._sensorgram_line_width_px
         )
@@ -259,6 +270,9 @@ class UIStateManager:
         window._settings.setValue("plot_style/spectrum_fit_line_width_px", float(window._spectrum_fit_line_width_px))
         window._settings.setValue("plot_style/spectrum_fit_line_style", int(window._spectrum_fit_line_style.value))
         window._settings.setValue("plot_style/spectrum_symbol_size_px", float(window._spectrum_symbol_size_px))
+        window._settings.setValue("plot_style/spectrum_roi_gradient_palette", window._spectrum_roi_gradient_palette)
+        window._settings.setValue("plot_style/sensorgram_roi_gradient_palette", window._sensorgram_roi_gradient_palette)
+        window._settings.setValue("plot_style/roi_group_color_palette", window._roi_group_color_palette)
         window._settings.setValue("plot_style/sensorgram_line_width_px", float(window._sensorgram_line_width_px))
         window._settings.setValue("plot_style/sensorgram_line_style", int(window._sensorgram_line_style.value))
         window._settings.setValue("plot_style/sensorgram_symbol_size_px", float(window._sensorgram_symbol_size_px))

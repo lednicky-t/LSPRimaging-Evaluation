@@ -3,6 +3,7 @@ from __future__ import annotations
 from PyQt6.QtGui import QColor
 
 from lspr_imaging_app.domain.models import AreaRoi, AreaRoiGroup
+from lspr_imaging_app.gui.roi_color_palettes import sequential_gradient_color
 
 # "This ROI's absorbance is already calculated" indicator color, shared by the
 # image-overlay ROI label text and the ROI table row text. Not-yet-calculated
@@ -33,27 +34,6 @@ def resolved_reference_color(roi: AreaRoi, group: AreaRoiGroup | None, fallback:
         if color.isValid():
             return color
     return QColor(fallback)
-
-
-# Golden-angle hue step (in degrees): the standard trick for turning an
-# arbitrary integer id into one of N well-separated hues without a fixed-
-# size palette - consecutive ids land far apart on the color wheel instead
-# of clustering, so however many ROIs end up plotted together, neighbours
-# are never near-duplicates.
-_GOLDEN_ANGLE_DEG = 137.508
-
-
-def auto_roi_color(roi_id: int, *, saturation: int = 200, value: int = 225) -> QColor:
-    """A distinct, deterministic color for a ROI that has no color of its
-    own and isn't in a group - so several such ROIs plotted together (e.g.
-    their Spectra/Sensogram traces) are visually distinguishable instead of
-    all sharing the one flat default color. Keyed on the ROI's own stable
-    `area_roi_id`, not its position in the current selection, so a given
-    ROI keeps the same color across different selections and sessions."""
-    hue = int((int(roi_id) * _GOLDEN_ANGLE_DEG) % 360)
-    color = QColor()
-    color.setHsv(hue, saturation, value)
-    return color
 
 
 def shade_group_member_color(
@@ -90,14 +70,25 @@ def shade_group_member_color(
     return shaded
 
 
-def resolved_roi_plot_color(roi: AreaRoi, group: AreaRoiGroup | None) -> QColor:
+def resolved_roi_plot_color(
+    roi: AreaRoi,
+    group: AreaRoiGroup | None,
+    *,
+    roi_fraction: float = 0.5,
+    gradient_palette: str = "viridis",
+) -> QColor:
     """Color for one ROI's series in the Spectra/Sensogram plots. Same
     precedence as `resolved_roi_color` (explicit ROI color, then group
-    color) but replaces the flat shared fallback with an auto-generated
-    color, since a plot - unlike the image overlay - relies on color alone
+    color) but replaces the flat shared fallback with a distinguishable
+    one, since a plot - unlike the image overlay - relies on color alone
     to tell multiple simultaneously-drawn ROIs apart:
-    - no color, no group: a distinct hue per ROI (`auto_roi_color`).
-    - no color, in a group: the group's color, shaded by this ROI's
+    - no color, no group: a position along the named sequential gradient
+      palette (`roi_fraction` - see roi_color_palettes.roi_index_fraction -
+      and `gradient_palette`), so ROIs read as an ordered progression by
+      index rather than a scatter of unrelated hues.
+    - no color, in a group: the group's own color (itself assigned from a
+      categorical palette when the group was created - see
+      roi_color_palettes.categorical_palette_color), shaded by this ROI's
       position among the group's members (`shade_group_member_color`).
     """
     if roi.sample_color_hex:
@@ -112,4 +103,4 @@ def resolved_roi_plot_color(roi: AreaRoi, group: AreaRoiGroup | None) -> QColor:
             except ValueError:
                 member_index = 0
             return shade_group_member_color(color, member_index, len(group.area_roi_ids))
-    return auto_roi_color(int(roi.area_roi_id))
+    return sequential_gradient_color(gradient_palette, roi_fraction)

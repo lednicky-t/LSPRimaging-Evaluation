@@ -7,6 +7,7 @@ from PyQt6.QtWidgets import QColorDialog, QInputDialog, QMenu
 
 from lspr_imaging_app.domain.models import AreaRoi, AreaRoiGroup
 from lspr_imaging_app.processing.chromatic import apply_affine_to_points
+from lspr_imaging_app.gui.roi_color_palettes import categorical_palette_color
 
 
 class RoiGeometryMixin:
@@ -276,6 +277,37 @@ class RoiGeometryMixin:
     def _groups_for_roi(self, roi_id: int) -> list[AreaRoiGroup]:
         return [group for group in self._state.area_roi_groups if roi_id in group.area_roi_ids]
 
+    def _next_group_palette_color(self) -> QColor:
+        """The color a newly-created group should get by default: the next
+        step of the current group-color palette (`self._roi_group_color_
+        palette`, see roi_color_palettes.py), indexed by how many groups
+        already exist. Used as a starting suggestion, not a lock-in - group
+        creation still goes through a color picker the user can override
+        (see `_group_selected_rois`)."""
+        return categorical_palette_color(self._roi_group_color_palette, len(self._state.area_roi_groups))
+
+    def _apply_group_color_palette(self) -> None:
+        """Re-assigns every existing group's own color from the current
+        palette, in their existing order - an explicit, opt-in action (the
+        "Apply to existing groups" button in the plot settings dialogs),
+        never triggered just by changing the palette setting itself, so a
+        manually-chosen group color is never silently overwritten."""
+        if not self._state.area_roi_groups:
+            return
+        self._push_undo_point("Recolor groups from palette")
+        for index, group in enumerate(self._state.area_roi_groups):
+            group.sample_color_hex = self._next_group_palette_color_at(index).name()
+        self._update_roi_overlays()
+        self._update_roi_summary()
+        self._refresh_visible_spectrum_from_cache()
+        if hasattr(self, "_analysis_controller"):
+            self._analysis_controller._render_sensorgram_display()
+        self._save_processing_state_for_dataset()
+        self._update_roi_table()
+
+    def _next_group_palette_color_at(self, index: int) -> QColor:
+        return categorical_palette_color(self._roi_group_color_palette, index)
+
     def _select_group_members_for_roi(self, roi_id: int) -> bool:
         groups = self._groups_for_roi(roi_id)
         if not groups:
@@ -420,7 +452,7 @@ class RoiGeometryMixin:
             self.status_label.setText("Group creation cancelled: name is required.")
             return
 
-        initial_color = QColor(current_group.sample_color_hex) if current_group is not None else QColor("#f59e0b")
+        initial_color = QColor(current_group.sample_color_hex) if current_group is not None else self._next_group_palette_color()
         color = QColorDialog.getColor(initial_color, self, "ROI group color")
         if not color.isValid():
             return

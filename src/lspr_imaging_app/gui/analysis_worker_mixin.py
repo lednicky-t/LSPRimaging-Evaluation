@@ -504,6 +504,7 @@ class AnalysisWorkerMixin:
         selected_roi_ids: tuple[int, ...],
         selected_source_rois: list[AreaRoi],
         spectral_cubes: list[int],
+        cube_context_hashes: dict[int, str] | None = None,
     ) -> SensorgramComputationResult | None:
         """Reconstruct a plottable sensorgram trace straight from
         measurement_backup.h5 for a selection with no RAM _sensorgram_cache
@@ -526,6 +527,20 @@ class AnalysisWorkerMixin:
         every point here reports NaN for it - the same "no signal
         available" state a disk-hit cube already produces during a live
         run.
+
+        `cube_context_hashes`: optional {cube_index: cube_context_hash}
+        (see `_sensorgram_point_signature_hash_cube_context`) precomputed
+        by a caller that's about to call this once PER ROI against the same
+        `spectral_cubes` (see AnalysisController._render_sensorgram_display)
+        - reuses each cube's expensive ROI-independent context hash instead
+        of recomputing it from scratch inside every one of those calls via
+        the plain `_sensorgram_point_signature_hash`, mirroring the same
+        once-per-cube reuse `_backup_per_roi_sensorgram_points` already does
+        on the write side. Recomputing it per ROI here is what froze the
+        app on selecting several ROIs right after launch, when the RAM
+        cache is empty and every ROI falls through to this disk path
+        (2026-09-12) - omit it (the default) for a call covering only one
+        fixed selection, same as before this parameter existed.
         """
         writer = getattr(self.window, "_measurement_export_writer", None)
         if writer is None:
@@ -546,7 +561,17 @@ class AnalysisWorkerMixin:
             stored_hash, metric_value = entry
             if not stored_hash:
                 continue
-            live_hash = self._sensorgram_point_signature_hash(cube_index, sorted_roi_ids, selected_source_rois)
+            if cube_context_hashes is not None:
+                cube_context_hash = cube_context_hashes.get(cube_index)
+                live_hash = (
+                    ""
+                    if cube_context_hash is None
+                    else self._sensorgram_point_signature_hash_for_selection(
+                        cube_context_hash, sorted_roi_ids, selected_source_rois
+                    )
+                )
+            else:
+                live_hash = self._sensorgram_point_signature_hash(cube_index, sorted_roi_ids, selected_source_rois)
             if not live_hash or live_hash != stored_hash:
                 continue
             valid_cube_indices.append(cube_index)
@@ -3273,26 +3298,65 @@ class AnalysisWorkerMixin:
             cube_context=cube_context,
         )
 
-    def _sensorgram_signature_for_selection(
+    def _sensorgram_cube_context_hashes(self, spectral_cubes: list[int]) -> dict[int, str]:
+        """{cube_index: _sensorgram_point_signature_hash_cube_context(cube_index)}
+        for every cube in `spectral_cubes`, computed once - the expensive,
+        ROI-independent half of the disk-backup signature-hash check (see
+        `_sensorgram_result_from_disk_backup`'s `cube_context_hashes`
+        parameter), meant to be built once per render pass and reused
+        across every ROI being looked up, not rebuilt per ROI."""
+        hashes: dict[int, str] = {}
+        for cube_index in spectral_cubes:
+            cube_context_hash = self._sensorgram_point_signature_hash_cube_context(int(cube_index))
+            if cube_context_hash is not None:
+                hashes[int(cube_index)] = cube_context_hash
+        return hashes
+
+    def _sensorgram_spectral_cube_signatures(self, spectral_cubes: list[int]) -> tuple[object, ...] | None:
+        """The expensive, ROI-independent half of
+        _sensorgram_signature_for_selection: one entry per requested
+        spectral cube, each folding in every wavelength's preprocessing
+        signature plus that cube's exclusion signature - O(cubes x
+        wavelengths). Split out so a caller building a signature for
+        several ROIs against the SAME cube list (see
+        AnalysisController._render_sensorgram_display) can compute this
+        once and reuse it via
+        _sensorgram_signature_for_selection_with_cube_signatures below,
+        instead of paying this cost once per ROI. Recomputing it per ROI on
+        every selection change (rather than once per selection) is what
+        froze the whole app when several ROIs were selected - reported
+        2026-09-12, see docs/analysis_pipeline_layers.md."""
+        if self.window._state.dataset is None or not spectral_cubes:
+            return None
+        return tuple(
+            (
+                int(spectral_cube_index),
+                tuple(
+                    self.window._preprocessing_signature((int(spectral_cube_index), float(wavelength)))
+                    for wavelength in self.window._wavelength_values
+                ),
+                self._exclusion_signature_for_cube(spectral_cube_index),
+            )
+            for spectral_cube_index in spectral_cubes
+        )
+
+    def _sensorgram_signature_for_selection_with_cube_signatures(
         self,
-        spectral_cubes: list[int],
+        spectral_cube_signatures: tuple[object, ...] | None,
         selected_roi_ids: tuple[int, ...],
         selected_source_rois: list[AreaRoi],
     ) -> tuple[object, ...] | None:
-        if self.window._state.dataset is None or not selected_roi_ids or not selected_source_rois or not spectral_cubes:
+        """Same signature `_sensorgram_signature_for_selection` builds, but
+        takes the expensive per-cube half as an already-computed argument
+        (see `_sensorgram_spectral_cube_signatures`) instead of rebuilding
+        it - everything else here is cheap attribute reads."""
+        if (
+            self.window._state.dataset is None
+            or not selected_roi_ids
+            or not selected_source_rois
+            or spectral_cube_signatures is None
+        ):
             return None
-        spectral_cube_signatures: list[tuple[object, ...]] = []
-        for spectral_cube_index in spectral_cubes:
-            spectral_cube_signatures.append(
-                (
-                    int(spectral_cube_index),
-                    tuple(
-                        self.window._preprocessing_signature((int(spectral_cube_index), float(wavelength)))
-                        for wavelength in self.window._wavelength_values
-                    ),
-                    self._exclusion_signature_for_cube(spectral_cube_index),
-                )
-            )
         dataset_key = str(self.window._state.dataset.folder)
         wavelength_range = self.window._analysis_wavelength_range()
         return (
@@ -3304,11 +3368,21 @@ class AnalysisWorkerMixin:
             int(self.window._analysis_poly_order()),
             None if wavelength_range is None else (round(wavelength_range[0], 6), round(wavelength_range[1], 6)),
             tuple(round(float(value), 6) for value in self.window._wavelength_values),
-            tuple(spectral_cube_signatures),
+            spectral_cube_signatures,
             round(float(self.window._state.area_roi_settings.reference_inner_radius_px), 3),
             round(float(self.window._state.area_roi_settings.reference_outer_radius_px), 3),
             *self._roi_reduction_signature_elements(),
             self._active_formula_key(),
+        )
+
+    def _sensorgram_signature_for_selection(
+        self,
+        spectral_cubes: list[int],
+        selected_roi_ids: tuple[int, ...],
+        selected_source_rois: list[AreaRoi],
+    ) -> tuple[object, ...] | None:
+        return self._sensorgram_signature_for_selection_with_cube_signatures(
+            self._sensorgram_spectral_cube_signatures(spectral_cubes), selected_roi_ids, selected_source_rois
         )
 
     def _sensorgram_spectral_cube_payload_signature(

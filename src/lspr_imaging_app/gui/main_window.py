@@ -677,12 +677,24 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, MeasurementCalibrationMixin,
         # in each plot's corner overlay (plot_style_settings_dialog.py).
         # These defaults are overwritten by _restore_visual_preferences()
         # below if a saved value exists - set first so that call always has
-        # a real value to fall back to. Series colors are not included here
-        # - see that dialog's note on why ROI/selection-driven colors stay
-        # out of user control.
+        # a real value to fall back to. A literal per-ROI/selection color
+        # override still isn't offered here - only the palette an
+        # unassigned ROI's color is auto-picked from (roi_color_palettes.py,
+        # resolved_roi_plot_color) - see that dialog's "ROI colors" section.
         self._spectrum_fit_line_width_px = 2.0
         self._spectrum_fit_line_style = Qt.PenStyle.SolidLine
         self._spectrum_symbol_size_px = 6.0
+        # Sequential (gradient) palette an ungrouped ROI's color is drawn
+        # from, keyed by that ROI's position among the dataset's ROIs - one
+        # setting per plot (not shared) since the Sensogram can show fewer
+        # simultaneous traces than the Spectra plot (e.g. one trace per
+        # group average) - see roi_color_palettes.SEQUENTIAL_PALETTES.
+        self._spectrum_roi_gradient_palette = "viridis"
+        self._sensorgram_roi_gradient_palette = "viridis"
+        # Categorical palette a newly-created group's own color is assigned
+        # from - shared between both plots (a group's color is the same
+        # wherever it's shown) - see roi_color_palettes.CATEGORICAL_PALETTES.
+        self._roi_group_color_palette = "tab10"
         self._sensorgram_line_width_px = 2.2
         self._sensorgram_line_style = Qt.PenStyle.SolidLine
         self._sensorgram_symbol_size_px = 6.0
@@ -2938,7 +2950,7 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, MeasurementCalibrationMixin,
                 AreaRoiGroup(
                     group_id=f"group_{len(self._state.area_roi_groups) + 1}",
                     name=new_name,
-                    sample_color_hex=self._sample_visual_color.name(),
+                    sample_color_hex=self._next_group_palette_color().name(),
                     reference_color_hex=self._reference_visual_color.name(),
                     area_roi_ids=sorted(selected_ids),
                 )
@@ -2991,7 +3003,7 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, MeasurementCalibrationMixin,
                 target_group = AreaRoiGroup(
                     group_id=f"group_{len(self._state.area_roi_groups) + 1}",
                     name=group_name,
-                    sample_color_hex=str(group_sample_color) if isinstance(group_sample_color, str) else self._sample_visual_color.name(),
+                    sample_color_hex=str(group_sample_color) if isinstance(group_sample_color, str) else self._next_group_palette_color().name(),
                     reference_color_hex=str(group_reference_color) if isinstance(group_reference_color, str) else self._reference_visual_color.name(),
                     area_roi_ids=[],
                 )
