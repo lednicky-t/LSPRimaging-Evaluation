@@ -7982,31 +7982,44 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, MeasurementCalibrationMixin,
         if not force and selected_signature == self._selection_plot_highlight_signature and already_showing_data:
             return
         self._selection_plot_highlight_signature = selected_signature
-        self._refresh_visible_spectrum_from_cache()
-        # Sensorgram gets the same unconditional cache-hit treatment as the
-        # spectrum line above - a selection change should always show
-        # whatever's already computed and cached (e.g. re-selecting one ROI
-        # out of a multi-ROI "Start analysis" run backs up each individual
-        # ROI's own trace too, not just the combined one - see
-        # _backup_per_roi_sensorgram_points), regardless of the "Live
-        # preview" toggle. That toggle is about proactively computing NEW
-        # data for a selection with nothing cached yet (see
-        # _handle_live_preview_selection_change, still gated on it below) -
-        # gating a plain cache lookup+display behind it too meant switching
-        # to an already-analyzed ROI with Live preview off silently showed
-        # no sensorgram at all, reported 2026-09-09.
-        self._analysis_controller.preview_sensorgram_from_cache()
-        # Unconditional, not gated on the above call's hit/miss: with more
-        # than one ROI selected, _render_sensorgram_display reads each
-        # ROI's own per-ROI cache/backup entry independently (see
-        # analysis_pipeline_layers.md) rather than requiring this exact
-        # combination to have its own "combined_<ids>" entry - so a newly
-        # selected subset that was never run together as its own combo
-        # still shows real data immediately whenever its individual
-        # members already have some, instead of the "no sensorgram at all"
-        # gap this file's own preview_sensorgram_from_cache comment already
-        # fixed once for the single-ROI case.
-        self._analysis_controller._render_sensorgram_display()
+        if self._analysis_live_preview_enabled:
+            self._refresh_visible_spectrum_from_cache()
+            # Sensorgram gets the same cache-hit treatment as the spectrum
+            # line above - with Live preview on, a selection change shows
+            # whatever's already computed and cached (e.g. re-selecting one
+            # ROI out of a multi-ROI "Start analysis" run backs up each
+            # individual ROI's own trace too, not just the combined one -
+            # see _backup_per_roi_sensorgram_points). That toggle is also
+            # about proactively computing NEW data for a selection with
+            # nothing cached yet (see _handle_live_preview_selection_change,
+            # still gated on it below).
+            self._analysis_controller.preview_sensorgram_from_cache()
+            # Unconditional, not gated on the above call's hit/miss: with more
+            # than one ROI selected, _render_sensorgram_display reads each
+            # ROI's own per-ROI cache/backup entry independently (see
+            # analysis_pipeline_layers.md) rather than requiring this exact
+            # combination to have its own "combined_<ids>" entry - so a newly
+            # selected subset that was never run together as its own combo
+            # still shows real data immediately whenever its individual
+            # members already have some, instead of the "no sensorgram at all"
+            # gap this file's own preview_sensorgram_from_cache comment already
+            # fixed once for the single-ROI case.
+            self._analysis_controller._render_sensorgram_display()
+        else:
+            # With Live preview off, a selection change must NOT auto-repaint
+            # from cache/disk - previously this ran unconditionally (to fix a
+            # 2026-09-09 report that reselecting an already-analyzed ROI with
+            # Live preview off silently showed no sensorgram), but that made
+            # every ROI click quietly redraw old results even though Live
+            # preview was off, which is confusing in the opposite direction
+            # (reported 2026-09-13). Reuses the same dirty-marking path
+            # _on_analysis_fit_settings_changed already uses for the
+            # identical "off" case: it sets the spectrum panel's subtitle to
+            # "... out of date ..." and clears+labels the sensorgram via
+            # mark_stale, so both plot areas get an explicit "Live preview is
+            # off" style message instead of either stale numbers with no
+            # explanation or an unexplained blank plot.
+            self._analysis_controller._mark_formula_spectrum_dirty()
         self._analysis_controller.update_selection_highlight(force=force)
         self._analysis_controller.schedule_cube_slider_cache_refresh()
         if prompt_live_preview and not force and self._analysis_live_preview_enabled:
