@@ -1949,6 +1949,15 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, MeasurementCalibrationMixin,
             "long session. Takes a few moments and briefly pauses any in-progress analysis; nothing "
             "is lost either way.",
         )
+        self.upgrade_measurement_backup_button = self._make_icon_tool_button(
+            "arrow-up",
+            "#22c55e",
+            "Upgrade measurement_backup.h5 to the faster fixed-layout format new datasets already "
+            "use automatically. One-time rewrite for a dataset analyzed before this feature shipped "
+            "- afterward, every future Start analysis run's background saving stays fast for the "
+            "rest of this dataset's life, instead of slowing down over a long session. Takes a "
+            "little longer than Compact since it restructures the file; nothing is lost either way.",
+        )
 
         # "Spectra" range: wavelength window (nm) the absorbance spectrum is
         # cropped to before fitting - mirrors sLSPR acq's own Range/Min/Max.
@@ -2631,6 +2640,7 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, MeasurementCalibrationMixin,
         self.export_results_button.clicked.connect(self._analysis_controller.export_results)
         self.export_results_open_folder_button.clicked.connect(self._analysis_controller.open_results_export_folder)
         self.compact_measurement_backup_button.clicked.connect(self._analysis_controller.compact_measurement_backup)
+        self.upgrade_measurement_backup_button.clicked.connect(self._analysis_controller.upgrade_measurement_backup_to_schema7)
         self.delete_measurement_backup_button.clicked.connect(self._dataset_controller.delete_measurement_backup)
         self._analysis_controller.sync_statistics_controls()
 

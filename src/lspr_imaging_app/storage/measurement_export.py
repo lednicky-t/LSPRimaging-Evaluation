@@ -29,6 +29,7 @@ rule. Callers pass plain arrays/scalars, not `AbsorbanceSpectrumResult`/
 from __future__ import annotations
 
 import json
+import logging
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -1141,6 +1142,197 @@ class ImagingMeasurementExportWriter:
         # Not stale (attrs were copied along with everything else by the
         # compact) - cleared anyway so a mismatch is never trusted past a
         # file swap, only ever costing a few redundant re-writes at worst.
+        self._sensorgram_metric_attrs_cache = {}
+        size_after = self.path.stat().st_size
+        return size_before, size_after
+
+    def migrate_to_schema7(
+        self, spectral_cube_indices: list[int], wavelengths_nm: np.ndarray
+    ) -> tuple[int, int] | None:
+        """One-time, user-triggered upgrade of an existing schema-6
+        `measurement_backup.h5` to schema major 7 (see `storage/
+        measurement_export_schema7.py`) - the fixed-size, pre-allocated
+        layout every BRAND NEW dataset's backup file already gets
+        automatically (see `__init__`'s docstring), but which an existing
+        file never gets "upgraded" into on its own. Schema 6's resizable-
+        dataset write cost grows with how many times a dataset has EVER
+        been resized over the file's lifetime (docs/measurement_backup_
+        performance_and_crash_recovery.md, "Bug D") - for a real multi-
+        hundred-ROI/cube dataset this can make the periodic background
+        backup flush fall behind production for a large stretch of a run,
+        and the final synchronous wait (`on_sensorgram_ready`'s
+        unconditional flush) then has to drain that whole backlog at once -
+        measured at 116943ms on a real 160-ROI/314-cube run, the thing this
+        method exists to fix.
+
+        Returns `None` (no-op, nothing written) if this file is already
+        schema >= 7. Otherwise builds a brand-new schema-7 writer at a temp
+        path and replays every existing ROI's history into it through this
+        same class's own already-schema-aware methods (`formula_spectrum_
+        index`/`sensorgram_metric_index` to read, `append_formula_spectrum_
+        batch`/`append_sensorgram_point_batch`/`set_sensorgram_metric` to
+        write) rather than duplicating any HDF5 mechanics, then atomically
+        swaps the temp file onto `self.path` - the same crash-safe
+        technique `compact()` uses above (original file untouched unless
+        the rewrite fully succeeds; a failed attempt's temp file is left on
+        disk for inspection, not silently deleted).
+
+        `spectral_cube_indices`/`wavelengths_nm`: the LIVE dataset's current
+        cube list/wavelength grid, passed by the caller the same way a
+        brand-new file's are (see `__init__` and `dataset_controller.py`'s
+        call site). Raises `ValueError` before writing anything if
+        `wavelengths_nm`'s length doesn't match what's already recorded for
+        an existing ROI: the new schema-7 arrays are sized
+        `(n_cubes, n_wavelengths)` from `wavelengths_nm`, so silently
+        writing old rows recorded under a different grid would misalign
+        every column - a real data-integrity risk, not defensive
+        boilerplate.
+        """
+        if self._schema_major >= 7:
+            return None
+        self._handle.flush()
+        size_before = self.path.stat().st_size
+
+        absorbance_parent = self._processed.get(LSPR_PROCESSED_ABSORBANCE_SPECTRA_GROUP_NAME)
+        sensorgram_parent = self._processed.get(LSPR_PROCESSED_SENSORGRAM_GROUP_NAME)
+        absorbance_roi_ids = list(absorbance_parent.keys()) if absorbance_parent is not None else []
+        sensorgram_roi_ids = list(sensorgram_parent.keys()) if sensorgram_parent is not None else []
+
+        new_wavelength_count = len(np.asarray(wavelengths_nm))
+        for roi_id in absorbance_roi_ids:
+            trace = self.formula_spectrum_index(roi_id)
+            if trace is None:
+                continue
+            if len(trace.wavelengths_nm) != new_wavelength_count:
+                raise ValueError(
+                    f"Cannot migrate {self.path.name} to schema 7: ROI {roi_id}'s backed-up "
+                    f"spectrum has {len(trace.wavelengths_nm)} wavelengths, but the live "
+                    f"dataset currently has {new_wavelength_count} - the wavelength grid must "
+                    "match before migrating."
+                )
+            break
+
+        root_attrs = self._handle.attrs
+        started_at_raw = root_attrs.get("started_at_utc")
+        try:
+            started_at_utc = datetime.fromisoformat(str(started_at_raw)) if started_at_raw else datetime.now()
+        except ValueError:
+            started_at_utc = datetime.now()
+        experiment_name = str(root_attrs.get("experiment_name", "") or "")
+
+        temp_path = self.path.with_name(self.path.name + ".schema7_migrate.tmp")
+        if temp_path.exists():
+            temp_path.unlink()
+
+        skipped_rows = 0
+        with ImagingMeasurementExportWriter(
+            temp_path,
+            experiment_name=experiment_name,
+            started_at_utc=started_at_utc,
+            spectral_cube_indices=list(spectral_cube_indices),
+            wavelengths_nm=np.asarray(wavelengths_nm, dtype=np.float64),
+        ) as new_writer:
+            for key in self._processed.keys():
+                if key in (LSPR_PROCESSED_ABSORBANCE_SPECTRA_GROUP_NAME, LSPR_PROCESSED_SENSORGRAM_GROUP_NAME):
+                    continue
+                self._processed.copy(key, new_writer._processed)
+
+            assert new_writer._schema7_position_map is not None
+            position_map = new_writer._schema7_position_map
+
+            for roi_id in absorbance_roi_ids:
+                group = absorbance_parent[roi_id]
+                if "cube_index" not in group or "timestamp_utc_ms" not in group:
+                    continue
+                timestamp_by_cube: dict[int, int] = {}
+                for cube_index, timestamp in zip(group["cube_index"][...], group["timestamp_utc_ms"][...], strict=False):
+                    timestamp_by_cube[int(cube_index)] = int(timestamp)
+                trace = self.formula_spectrum_index(roi_id)
+                if trace is None:
+                    continue
+                rows: list[FormulaSpectrumBackupRow] = []
+                for cube_index, (signature_hash, reduced_values_by_method) in trace.by_cube.items():
+                    if int(cube_index) not in position_map:
+                        skipped_rows += 1
+                        continue
+                    baseline = reduced_values_by_method.get(trace.reduction_method)
+                    if baseline is None:
+                        baseline = next(iter(reduced_values_by_method.values()))
+                    sample_mean, reference_mean = baseline
+                    rows.append(
+                        FormulaSpectrumBackupRow(
+                            wavelengths_nm=trace.wavelengths_nm,
+                            # Never read by the schema-7 write path (it derives
+                            # absorbance from sample/reference + formula_key on
+                            # demand instead - see measurement_export_schema7.py's
+                            # module docstring) - a placeholder is correct, not
+                            # just expedient.
+                            formula_values=np.full_like(np.asarray(sample_mean, dtype=np.float64), np.nan),
+                            sample_mean=sample_mean,
+                            reference_mean=reference_mean,
+                            cube_index=int(cube_index),
+                            timestamp_utc_ms=timestamp_by_cube.get(int(cube_index), -1),
+                            formula_key=trace.formula_key,
+                            reduction_method=trace.reduction_method,
+                            signature_hash=signature_hash,
+                            reduced_values_by_method=reduced_values_by_method,
+                        )
+                    )
+                if rows:
+                    new_writer.append_formula_spectrum_batch(roi_id, rows)
+
+            for roi_id in sensorgram_roi_ids:
+                group = sensorgram_parent[roi_id]
+                if "cube_index" not in group or "timestamp_utc_ms" not in group:
+                    continue
+                timestamp_by_cube = {}
+                for cube_index, timestamp in zip(group["cube_index"][...], group["timestamp_utc_ms"][...], strict=False):
+                    timestamp_by_cube[int(cube_index)] = int(timestamp)
+                metric_index = self.sensorgram_metric_index(roi_id)
+                rows_sg: list[SensorgramPointBackupRow] = []
+                for cube_index, (signature_hash, metric_value) in metric_index.items():
+                    if int(cube_index) not in position_map:
+                        skipped_rows += 1
+                        continue
+                    rows_sg.append(
+                        SensorgramPointBackupRow(
+                            cube_index=int(cube_index),
+                            timestamp_utc_ms=timestamp_by_cube.get(int(cube_index), -1),
+                            metric_value=metric_value,
+                            signature_hash=signature_hash,
+                        )
+                    )
+                if rows_sg:
+                    new_writer.set_sensorgram_metric(
+                        roi_id,
+                        metric_name=str(group.attrs.get("metric_name", "")),
+                        formula_key=str(group.attrs.get("formula_key", "")),
+                        combined_roi_ids=str(group.attrs.get("combined_roi_ids", "")),
+                    )
+                    new_writer.append_sensorgram_point_batch(roi_id, rows_sg)
+
+        if skipped_rows:
+            logging.getLogger("lspr_imaging_app.workflow").warning(
+                "Schema-7 migration of %s skipped %d row(s) whose cube_index is not in the "
+                "current dataset's cube list.",
+                self.path.name,
+                skipped_rows,
+            )
+
+        # Everything below only runs once the temp file above was built
+        # fully successfully (an exception during it propagates before this
+        # point, leaving self._handle/self.path completely untouched, same
+        # guarantee as compact()).
+        self._handle.close()
+        temp_path.replace(self.path)
+        self._handle = h5py.File(self.path, "a")
+        self._schema_major = 7
+        self._processed = self._handle.require_group("processed")
+        self._schema7_position_map = measurement_export_schema7.spectral_cube_position_map(self._handle)
+        self._sensorgram_groups = {}
+        self._absorbance_groups = {}
+        self._schema7_spectra_groups = {}
+        self._schema7_metrics_groups = {}
         self._sensorgram_metric_attrs_cache = {}
         size_after = self.path.stat().st_size
         return size_before, size_after

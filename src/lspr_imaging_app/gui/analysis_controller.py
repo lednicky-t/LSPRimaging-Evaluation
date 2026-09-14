@@ -766,8 +766,10 @@ class AnalysisController(AnalysisWorkerMixin, AnalysisChromaticGeometryMixin):
         cache first (the same single-ROI signature the old group-stats
         feature already used), then the HDF5 backup
         (`_sensorgram_result_from_disk_backup`) as a fallback. Returns None
-        only when neither has anything for this ROI at all - never computes
-        (see `_ensure_sensorgram_traces` for that).
+        only when neither has anything for this ROI at all - never computes;
+        the caller (`_render_sensorgram_display`) reports a None here via
+        its summary text ("Press Start analysis") rather than triggering
+        anything.
 
         `spectral_cube_signatures` must come from
         `_sensorgram_spectral_cube_signatures`, computed once by the caller
@@ -920,9 +922,12 @@ class AnalysisController(AnalysisWorkerMixin, AnalysisChromaticGeometryMixin):
 
         More than one selected ROI reads each ROI's own already-fitted
         sensogram value (never spectra/pixels) and combines them per mode -
-        never itself triggers a fresh per-cube computation for "the
-        selection" as a whole, only for individual ROIs found missing their
-        own data (via _ensure_sensorgram_traces)."""
+        never triggers any computation itself. A selected ROI with no
+        trace available yet (RAM cache or HDF5 backup) is simply reported
+        as missing via the summary text ("N of M selected ROI(s) not yet
+        analyzed | Press Start analysis") rather than computed here -
+        analysis only ever runs when the user explicitly presses Start
+        analysis, the same rule the single-ROI case above already follows."""
         window = self.window
         selected_roi_ids = self._selected_spectrum_roi_ids()
 
@@ -1027,7 +1032,9 @@ class AnalysisController(AnalysisWorkerMixin, AnalysisChromaticGeometryMixin):
                 bucket_bands.append(None)
 
         if missing_ids:
-            self._ensure_sensorgram_traces(missing_ids)
+            self._set_sensorgram_summary_text(
+                f"{len(missing_ids)} of {len(selected_roi_ids)} selected ROI(s) not yet analyzed | Press Start analysis"
+            )
 
         if not bucket_traces:
             window.sensorgram_curve.hide()
@@ -1076,87 +1083,6 @@ class AnalysisController(AnalysisWorkerMixin, AnalysisChromaticGeometryMixin):
         self._hide_sensorgram_aggregate_band()
         self._update_processed_trace_overlay(None, None)
         self._render_sensorgram_series_items(x_values, bucket_traces, bucket_bands)
-
-    def _ensure_sensorgram_traces(self, roi_ids: list[int]) -> None:
-        """Queues a background single-ROI sensorgram computation for each of
-        `roi_ids` that has no RAM/disk trace available yet - the "compute
-        whatever's missing" behavior backing the display modes above.
-        Reuses the exact same per-ROI queue machinery this previously ran
-        only for the old "Calculate group" button
-        (_group_calculation_active and friends), kept under its original
-        attribute/method names since analysis_worker_mixin.py's
-        on_sensorgram_ready/on_sensorgram_failed already call back into
-        _on_group_member_sensorgram_ready by that name - renaming those
-        would mean touching that carefully-tuned completion-handling code
-        for no functional benefit."""
-        window = self.window
-        if getattr(self, "_group_calculation_active", False):
-            # A batch is already in flight - extend its queue with any new
-            # ids instead of starting a second, overlapping one.
-            pending = self._group_calculation_pending_member_ids
-            members_by_id = self._group_calculation_members_by_id
-            for roi_id in roi_ids:
-                if int(roi_id) in members_by_id:
-                    continue
-                roi = next((r for r in window._state.area_rois if int(r.area_roi_id) == int(roi_id)), None)
-                if roi is None:
-                    continue
-                members_by_id[int(roi_id)] = roi
-                pending.append(int(roi_id))
-            return
-        spectral_cubes = self.available_analysis_spectral_cubes()
-        if not spectral_cubes:
-            return
-        members_by_id = {}
-        for roi_id in roi_ids:
-            roi = next((r for r in window._state.area_rois if int(r.area_roi_id) == int(roi_id)), None)
-            if roi is not None:
-                members_by_id[int(roi_id)] = roi
-        if not members_by_id:
-            return
-        self._group_calculation_spectral_cubes = spectral_cubes
-        # Computed once for the whole queue and reused per member below,
-        # same reasoning as _render_sensorgram_display - see
-        # _sensorgram_spectral_cube_signatures's docstring.
-        self._group_calculation_spectral_cube_signatures = self._sensorgram_spectral_cube_signatures(spectral_cubes)
-        self._group_calculation_members_by_id = members_by_id
-        self._group_calculation_pending_member_ids = list(members_by_id.keys())
-        self._group_calculation_active = True
-        self._advance_group_calculation()
-
-    def _advance_group_calculation(self) -> None:
-        spectral_cubes = getattr(self, "_group_calculation_spectral_cubes", None)
-        spectral_cube_signatures = getattr(self, "_group_calculation_spectral_cube_signatures", None)
-        pending = getattr(self, "_group_calculation_pending_member_ids", None)
-        members_by_id = getattr(self, "_group_calculation_members_by_id", None)
-        if not spectral_cubes or pending is None or members_by_id is None:
-            self._group_calculation_active = False
-            return
-        while pending:
-            member_id = pending[0]
-            member_roi = members_by_id[member_id]
-            signature = self._sensorgram_signature_for_selection_with_cube_signatures(
-                spectral_cube_signatures, (member_id,), [member_roi]
-            )
-            if signature is None:
-                pending.pop(0)
-                continue
-            if self.window._sensorgram_cache.get(signature) is not None:
-                pending.pop(0)
-                continue
-            self._start_sensorgram_worker(signature, spectral_cubes, (member_id,), [member_roi])
-            return
-        self._finish_group_calculation()
-
-    def _on_group_member_sensorgram_ready(self) -> None:
-        pending = getattr(self, "_group_calculation_pending_member_ids", None)
-        if pending:
-            pending.pop(0)
-        self._advance_group_calculation()
-
-    def _finish_group_calculation(self) -> None:
-        self._group_calculation_active = False
-        self._render_sensorgram_display()
 
     def _set_sensorgram_summary_text(self, text: str) -> None:
         self.window.sensorgram_summary_label.setText(text)

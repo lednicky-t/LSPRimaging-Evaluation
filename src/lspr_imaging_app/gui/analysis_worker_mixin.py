@@ -457,9 +457,9 @@ class AnalysisWorkerMixin:
 
     def calculate_sensorgram_for_range(self) -> None:
         """Public alias for `_calculate_sensorgram_for_range` - kept as a
-        separate name because `_finish_group_calculation` and the
-        live-preview selection-change prompt (main_window.py) already call
-        it under this name. There used to be two full, diverging
+        separate name because the live-preview selection-change prompt
+        (main_window.py) already calls it under this name. There used to be
+        two full, diverging
         implementations here (missing/misordered running-state guard, one
         locked, one not) - consolidated into the one canonical
         implementation, see `_calculate_sensorgram_for_range`."""
@@ -1626,7 +1626,6 @@ class AnalysisWorkerMixin:
         self.window._sensorgram_settings_changed_during_run = False
         if (
             settings_changed_during_run
-            and not getattr(self, "_group_calculation_active", False)
             and self.window._pending_sensorgram_payload is None
         ):
             # A setting changed (Fit method/Metric/Reduction/Formula/range/...)
@@ -1711,14 +1710,6 @@ class AnalysisWorkerMixin:
         self.schedule_cube_slider_cache_refresh()
         _mark_stage("cube_slider_cache_schedule")
         _log_stages("stopped" if result.cancelled else "done")
-        if getattr(self, "_group_calculation_active", False):
-            # A "Calculate group" run is mid-flight: this result was one
-            # member's own trace, now cached under its own signature above.
-            # Advance to the next member (or finish and restore the actual
-            # current-selection display) instead of the normal pending-
-            # refresh check below, which is for a real user-driven change.
-            self._on_group_member_sensorgram_ready()
-            return
         if self.window._pending_sensorgram_payload is not None:
             self.start_pending_sensorgram_refresh()
 
@@ -1742,11 +1733,6 @@ class AnalysisWorkerMixin:
         self.window._set_sensorgram_summary_text(f"Sensorgram failed: {message}")
         self.window._background_error("Sensorgram", message)
         self.schedule_cube_slider_cache_refresh()
-        if getattr(self, "_group_calculation_active", False):
-            # Skip the failed member rather than stalling the queue forever;
-            # it just won't be part of the aggregated band.
-            self._on_group_member_sensorgram_ready()
-            return
         if self.window._pending_sensorgram_payload is not None:
             self.start_pending_sensorgram_refresh()
 
@@ -2411,6 +2397,58 @@ class AnalysisWorkerMixin:
             level="info",
         )
         self.window._set_status_text(f"Compacted backup file: {before_mb:.1f}MB -> {after_mb:.1f}MB ({elapsed:.1f}s)")
+
+    def upgrade_measurement_backup_to_schema7(self) -> None:
+        """"Upgrade backup file" button (Results/Export panel): migrates
+        measurement_backup.h5 from schema 6 (resizable, append-and-grow
+        datasets) to schema 7 (fixed-size, pre-allocated - see
+        ImagingMeasurementExportWriter.migrate_to_schema7's docstring).
+        Every BRAND NEW dataset's backup file already starts on schema 7
+        automatically; this is the one-time catch-up action for a dataset
+        whose backup file predates that (every dataset analyzed before this
+        feature shipped) - root-caused from a real 160-ROI/314-cube run
+        where the final "Finishing - saving results..." wait hit 116943ms
+        because schema 6's resizable-dataset write cost let the background
+        backup writer fall behind production for most of the run (see
+        docs/measurement_backup_performance_and_crash_recovery.md's "Bug
+        D"). A maintenance action triggered deliberately by the user, not
+        run automatically - same trust level and blocking-GUI-thread
+        behavior as compact_measurement_backup above (the file is fully
+        rewritten; safe to run mid-analysis).
+
+        Flushes any RAM-buffered-but-not-yet-written rows first, same as
+        compact_measurement_backup, so nothing pending is left out of the
+        migration.
+        """
+        writer = getattr(self.window, "_measurement_export_writer", None)
+        if writer is None:
+            self.window._set_status_text("Cannot upgrade backup file - no dataset loaded yet.")
+            return
+        self._flush_measurement_backup_buffers()
+        self.window._set_status_text("Upgrading backup file to the fast format...")
+        started = time.perf_counter()
+        try:
+            result = writer.migrate_to_schema7(
+                list(self.window._spectral_cube_values), np.asarray(self.window._wavelength_values, dtype=np.float64)
+            )
+        except Exception as exc:
+            logging.getLogger("lspr_imaging_app.workflow").warning(
+                "Failed to migrate measurement export backup to schema 7", exc_info=True
+            )
+            self.window._set_status_text(f"Failed to upgrade backup file: {exc}")
+            return
+        if result is None:
+            self.window._set_status_text("Backup file is already on the fast format - nothing to upgrade.")
+            return
+        size_before, size_after = result
+        elapsed = time.perf_counter() - started
+        before_mb = size_before / (1024.0 * 1024.0)
+        after_mb = size_after / (1024.0 * 1024.0)
+        self.window._append_workflow_log(
+            f"Measurement backup upgraded to schema 7 | {before_mb:.1f}MB -> {after_mb:.1f}MB | {elapsed:.1f}s",
+            level="success",
+        )
+        self.window._set_status_text(f"Upgraded backup file to the fast format ({elapsed:.1f}s)")
 
     def _compute_formula_spectrum_result(self, result: FormulaSpectrumResult) -> FormulaSpectrumRenderBundle | None:
         """Everything about applying one formula-spectrum result except the
