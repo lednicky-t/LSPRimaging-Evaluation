@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import numpy as np
 from PyQt6.QtCore import QPoint
-from PyQt6.QtGui import QColor
+from PyQt6.QtGui import QAction, QColor
 from PyQt6.QtWidgets import QColorDialog, QInputDialog, QMenu
 
 from lspr_imaging_app.domain.models import AreaRoi, AreaRoiGroup
@@ -360,6 +360,17 @@ class RoiGeometryMixin:
         menu = QMenu(self)
         menu.setToolTipsVisible(True)
         group_action = menu.addAction("Group...")
+        # One action per already-existing group, so the current selection
+        # (not just the right-clicked ROI - see image_interaction_controller.py's
+        # MouseButtonRelease handler, which sets _selected_roi_ids before
+        # calling this) can be added directly without retyping a group name
+        # in the "Group..." dialog. Reuses GroupTableController's own
+        # add-to-group logic so this stays the one place that operation lives.
+        add_to_group_actions: dict[QAction, str] = {}
+        if self._state.area_roi_groups:
+            add_to_group_menu = menu.addMenu("Add to group")
+            for group in self._state.area_roi_groups:
+                add_to_group_actions[add_to_group_menu.addAction(group.name)] = group.group_id
         select_group_action = None
         ungroup_action = None
         destroy_group_action = None
@@ -379,6 +390,8 @@ class RoiGeometryMixin:
             return
         if action is group_action:
             self._group_selected_rois()
+        elif action in add_to_group_actions:
+            self._group_table_controller.add_selected_rois_to_group(add_to_group_actions[action])
         elif select_group_action is not None and action is select_group_action:
             if self._select_group_members_for_roi(roi_id):
                 self.status_label.setText(f"Selected group members for ROI {roi_id}.")

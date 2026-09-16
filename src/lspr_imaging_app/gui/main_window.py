@@ -4932,7 +4932,7 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, MeasurementCalibrationMixin,
 
     def _apply_roi_table_style(self) -> None:
         theme = get_active_theme()
-        self.roi_table.setStyleSheet(
+        stylesheet = (
             "QTableWidget {"
             f"  font-size: 8pt;"
             f"  color: {theme.text_primary};"
@@ -4946,6 +4946,8 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, MeasurementCalibrationMixin,
             "QTableWidget::item:selected { background: " + theme.primary_action_bg + "; color: " + theme.text_primary + "; }"
             f"QHeaderView::section {{ padding: 1px 3px; font-size: 8pt; color: {theme.text_muted}; background: {theme.toolbar_section_bg}; }}"
         )
+        self.roi_table.setStyleSheet(stylesheet)
+        self.group_table.setStyleSheet(stylesheet)
 
     def keyPressEvent(self, event: QKeyEvent) -> None:
         if self._shortcut_manager.handle_key_press(event):
