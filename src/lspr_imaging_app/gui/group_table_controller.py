@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from PyQt6.QtCore import QItemSelectionModel, Qt
 from PyQt6.QtGui import QColor
-from PyQt6.QtWidgets import QColorDialog, QInputDialog, QMenu, QTableWidgetItem
+from PyQt6.QtWidgets import QColorDialog, QHeaderView, QInputDialog, QMenu, QTableWidgetItem
 
 from lspr_imaging_app.domain.models import AreaRoiGroup
 from lspr_imaging_app.gui.roi_table_helpers import GroupTableRowData, append_group_table_row, group_table_headers
@@ -78,6 +78,25 @@ class GroupTableController:
                         roi_count=len(ungrouped_ids),
                     ),
                 )
+            # All columns need to switch out of the table's default
+            # ResizeToContents mode before an explicit width sticks - a
+            # ResizeToContents section keeps recomputing its own width (to
+            # fit its header text, which is what made the icon-only Sample/
+            # Reference columns end up far wider than their 16px swatch) and
+            # silently ignores setColumnWidth() otherwise.
+            header = table.horizontalHeader()
+            for column in range(table.columnCount()):
+                header.setSectionResizeMode(column, QHeaderView.ResizeMode.Fixed)
+            # Qt also clamps any explicit width to header.minimumSectionSize()
+            # regardless of resize mode (default here computes to 32px, from
+            # font metrics) - without lowering it, the 22px swatch columns
+            # below would silently end up wider than requested too.
+            header.setMinimumSectionSize(16)
+            table.setColumnWidth(0, 110)
+            table.setColumnWidth(1, 22)
+            table.setColumnWidth(2, 22)
+            table.setColumnWidth(3, 50)
+            header.setStretchLastSection(False)
         finally:
             table.blockSignals(False)
             table.setSortingEnabled(True)

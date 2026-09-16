@@ -4970,6 +4970,17 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, MeasurementCalibrationMixin,
             app.removeEventFilter(self)
         if self._ome_zarr_export_running and self._ome_zarr_export_cancel_event is not None:
             self._ome_zarr_export_cancel_event.set()
+        # A bulk "Start analysis" sensorgram run is the other long-running
+        # background task in this app (the only reason it has its own Stop
+        # button and cancel-event machinery at all) - closing while one is
+        # still in flight must request the same cancellation the Stop button
+        # does, or _wait_for_background_tasks_before_close() below has no
+        # way to get that thread to actually finish within its bounded wait.
+        # See lspri_pyqt6_sip_crash_on_close (project memory): a thread still
+        # alive when the interpreter starts shutting down is the confirmed
+        # trigger for the native PyQt6-sip crash on close.
+        if self._sensorgram_running:
+            self._analysis_controller._stop_sensorgram_calculation()
         # A bulk sensorgram run buffers several cubes' worth of measurement-
         # backup rows before writing them in one batch (measurement_backup_
         # batch_size preference) - closing must flush whatever's still
@@ -5035,7 +5046,7 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, MeasurementCalibrationMixin,
         self._wait_for_background_tasks_before_close()
         super().closeEvent(event)
 
-    def _wait_for_background_tasks_before_close(self, timeout_ms: int = 5000) -> None:
+    def _wait_for_background_tasks_before_close(self, timeout_ms: int = 10000) -> None:
         """Give any still-running FunctionWorker task (image-cache build,
         ROI/mask refresh, chromatic registration, export, ...) a bounded
         chance to finish, then explicitly stop zarr's own background thread
@@ -5073,6 +5084,18 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, MeasurementCalibrationMixin,
         that's where the real cleanup function lives; if a future zarr
         upgrade moves or renames it, this just falls back to the pre-existing
         atexit-hook behavior (logged, not fatal).
+
+        timeout_ms was 5000 until 2026-09-16, when closeEvent also started
+        cancelling an in-progress bulk sensorgram run (the one FunctionWorker
+        task that can legitimately run for minutes - previously only the
+        OME-Zarr export got cancelled here) before calling this. Raised to
+        10000 to give a cancelled-but-still-finishing-its-current-iteration
+        sensorgram run, or an OME-Zarr export's ProcessPoolExecutor.shutdown
+        (io/dataset.py), a real chance to land inside the wait instead of
+        hitting the warn-and-proceed-anyway path below with the thread still
+        alive - not a claim that 10s is guaranteed sufficient, just a better
+        empirical margin than the original 5s now that cancellation reaches
+        the task most likely to still be running.
         """
         active = FunctionWorker.active_count()
         if active > 0:

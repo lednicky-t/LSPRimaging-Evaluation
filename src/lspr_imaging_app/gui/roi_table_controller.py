@@ -6,7 +6,7 @@ from pathlib import Path
 
 from PyQt6.QtCore import QItemSelectionModel
 from PyQt6.QtGui import QBrush, QColor
-from PyQt6.QtWidgets import QFileDialog, QMenu, QMessageBox, QTableWidgetItem
+from PyQt6.QtWidgets import QFileDialog, QHeaderView, QMenu, QMessageBox, QTableWidgetItem
 
 from lspr_imaging_app.domain.models import AreaRoi, AreaRoiGroup, RoiArrayGroup
 from lspr_imaging_app.domain.roi_editor_tools import build_roi_array_group
@@ -391,6 +391,21 @@ class RoiTableController:
                         self._style_calculated_row(row, calculated=roi_cached)
                 except Exception:
                     logger.exception("ROI table row build failed | area_roi_id=%s", int(roi.area_roi_id))
+            # These setColumnWidth() calls used to be silent no-ops: the
+            # header was left in its construction-time ResizeToContents mode
+            # (layout_builder.py), which keeps recomputing each column's
+            # width from its content/header text and ignores any explicit
+            # width entirely - e.g. the C_s/C_r icon-only columns rendered at
+            # ~60px instead of the 22px requested here, leaving visible empty
+            # space around each 16px swatch. Switching to Fixed mode first,
+            # and lowering minimumSectionSize (Qt clamps explicit widths to
+            # it regardless of resize mode - default here is 32px, above the
+            # 22px swatch columns want), is what actually makes these stick.
+            # Same fix as GroupTableController.update_table().
+            roi_header = self.window.roi_table.horizontalHeader()
+            for column in range(self.window.roi_table.columnCount()):
+                roi_header.setSectionResizeMode(column, QHeaderView.ResizeMode.Fixed)
+            roi_header.setMinimumSectionSize(16)
             self.window.roi_table.setColumnWidth(0, 34)
             self.window.roi_table.setColumnWidth(1, 96)
             self.window.roi_table.setColumnWidth(2, 22)
@@ -400,7 +415,7 @@ class RoiTableController:
             self.window.roi_table.setColumnWidth(6, 58)
             self.window.roi_table.setColumnWidth(7, 64)
             self.window.roi_table.setColumnWidth(8, 64)
-            self.window.roi_table.horizontalHeader().setStretchLastSection(False)
+            roi_header.setStretchLastSection(False)
         finally:
             self.window.roi_table.blockSignals(False)
             self.window.roi_table.setSortingEnabled(sorting_enabled)

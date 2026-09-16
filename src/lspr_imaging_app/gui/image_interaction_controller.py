@@ -144,6 +144,20 @@ class ImageInteractionController:
                         return True
                     w._roi_list_range_anchor_row = row
 
+        # Qt's QAbstractItemView fires cellDoubleClicked/the DoubleClicked edit
+        # trigger for a double-click of *any* mouse button, not just Left -
+        # without this, a right-double-click on a color swatch cell opens the
+        # same color-picker dialog a left-double-click does, and on an
+        # editable cell it would start the same inline text edit. Swallowing
+        # the event here (before it reaches the view's own event handling)
+        # blocks that without touching left-double-click behavior. This is
+        # independent of the separate QContextMenuEvent Qt generates for a
+        # right-click, so it doesn't affect either table's right-click menu.
+        group_list_viewport = w.group_table.viewport() if hasattr(w, "group_table") else None
+        if event.type() == QEvent.Type.MouseButtonDblClick and event.button() != Qt.MouseButton.LeftButton:
+            if watched is roi_list_viewport or watched is group_list_viewport:
+                return True
+
         image_view = getattr(w, "image_view", None)
         if image_view is None:
             return False
