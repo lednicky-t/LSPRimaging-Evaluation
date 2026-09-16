@@ -16,10 +16,8 @@ from lspr_imaging_app.domain.exclusions import is_cube_fully_excluded
 from lspr_imaging_app.domain.models import AreaRoi, AreaRoiGroup
 from lspr_imaging_app.gui.roi_overlay_helpers import resolved_roi_plot_color
 from lspr_imaging_app.gui.roi_color_palettes import roi_index_fraction
-from lspr_imaging_app.gui.worker import SensorgramComputationResult
 from lspr_imaging_app.gui.analysis_cache_signature import (
     signature_hash,
-    formula_spectral_cube_signature,
     formula_spectrum_result_covers_roi_ids,
 )
 from lspr_imaging_app.processing.trace_statistics import (
@@ -255,24 +253,23 @@ class AnalysisController(AnalysisWorkerMixin, AnalysisChromaticGeometryMixin):
             self.window._mark_sensorgram_stale(
                 f"{self.window._analysis_metric_label()} sensorgram is out of date | Press Start analysis"
             )
+        # Instant-redraw shortcut (skip the scheduled/debounced refresh
+        # entirely) when the new fit settings happen to already match a
+        # cached result - e.g. toggling back to a previously-used fit
+        # method. One shared atomic-per-ROI check handles 1 ROI the same as
+        # many now (see docs/analysis_caching_architecture.md) - no separate
+        # single-ROI/combined-selection branches.
         selected_source_rois = self.window._selected_source_rois_snapshot()
-        if len(selected_source_rois) == 1:
-            roi_signature = self.window._roi_formula_spectrum_signature(selected_source_rois[0])
-            if roi_signature is not None and roi_signature in self.window._roi_formula_spectrum_cache and not self.window._formula_spectrum_dirty:
+        if not self.window._formula_spectrum_dirty:
+            cached_result = self._cached_formula_spectrum_result_from_roi_cache(selected_source_rois)
+            if cached_result is not None:
                 self.window._formula_spectrum_dirty = False
-                self._apply_formula_spectrum_result(self.window._roi_formula_spectrum_cache[roi_signature])
-                self.window._roi_formula_spectrum_cache.move_to_end(roi_signature)
+                self._apply_formula_spectrum_result(cached_result)
                 elapsed = self.window._format_elapsed_seconds(time.perf_counter() - start_time)
+                self.window._append_workflow_log(f"Spec cache hit | {elapsed}", level="debug")
                 self.window._set_status_text(f"Spec | cache {elapsed}")
                 return
-        signature = self._formula_spectrum_signature()
-        if signature is not None and signature in self.window._formula_spectrum_cache and not self.window._formula_spectrum_dirty:
-            self._apply_formula_spectrum_result(self.window._formula_spectrum_cache[signature])
-            self.window._formula_spectrum_cache.move_to_end(signature)
-            elapsed = self.window._format_elapsed_seconds(time.perf_counter() - start_time)
-            self.window._append_workflow_log(f"Spec cache hit | {elapsed}", level="debug")
-            self.window._set_status_text(f"Spec | cache {elapsed}")
-        elif self.window._analysis_live_preview_enabled:
+        if self.window._analysis_live_preview_enabled:
             self.window._schedule_formula_spectrum_refresh()
 
     def _on_analysis_spectral_cube_range_changed(self, *_args) -> None:
@@ -736,25 +733,6 @@ class AnalysisController(AnalysisWorkerMixin, AnalysisChromaticGeometryMixin):
     # in, pure visual combination out.
     # ------------------------------------------------------------------
 
-    @staticmethod
-    def _member_trace_aligned(result: SensorgramComputationResult, spectral_cubes: list[int]) -> np.ndarray:
-        """Reindex one ROI's own (spectral_cube_indices, metric_value) onto
-        the requested full spectral-cube list, NaN where that ROI has no
-        value for a given cube - keeps every ROI's array the same length/
-        order for aggregate_group_traces regardless of whether one ROI
-        happened to skip/fail a different frame.
-
-        Uses `metric_value` (the fitted sensogram number itself), not
-        `metric_signal` (an auxiliary readout, NaN whenever a trace is
-        reconstructed from the disk backup - see
-        `_sensorgram_result_from_disk_backup`) - the earlier single-group
-        overlay this is shared with used metric_signal, but metric_value is
-        the correct field for "the sensogram trace" in every case."""
-        value_by_cube = {
-            int(index): float(value) for index, value in zip(result.spectral_cube_indices, result.metric_values)
-        }
-        return np.asarray([value_by_cube.get(int(cube), float("nan")) for cube in spectral_cubes], dtype=np.float64)
-
     def _sensorgram_trace_for_roi(
         self,
         roi_id: int,
@@ -762,14 +740,24 @@ class AnalysisController(AnalysisWorkerMixin, AnalysisChromaticGeometryMixin):
         spectral_cube_signatures: tuple[object, ...] | None,
         cube_context_hashes_provider: Callable[[], dict[int, str]],
     ) -> np.ndarray | None:
-        """One ROI's own sensogram trace, aligned to `spectral_cubes` - RAM
-        cache first (the same single-ROI signature the old group-stats
-        feature already used), then the HDF5 backup
-        (`_sensorgram_result_from_disk_backup`) as a fallback. Returns None
-        only when neither has anything for this ROI at all - never computes;
-        the caller (`_render_sensorgram_display`) reports a None here via
-        its summary text ("Press Start analysis") rather than triggering
-        anything.
+        """One ROI's own sensogram trace, aligned to `spectral_cubes` -
+        checks `_sensorgram_metric_cache` one cube at a time (true per-(ROI,
+        cube) atomicity - see docs/analysis_caching_architecture.md), then
+        falls back to the HDF5 backup (`_sensorgram_result_from_disk_
+        backup`) for ONLY the cubes still missing after that. Returns None
+        only when nothing at all was found for this ROI, across every cube -
+        never computes; the caller (`_render_sensorgram_display`) reports a
+        None here via its summary text ("Press Start analysis") rather than
+        triggering anything.
+
+        A disk hit is written back into the RAM cache per-cube before
+        returning, same spirit as before this method was atomized: any
+        future selection containing this ROI reuses it, not just the one
+        active right now. Being atomic per cube (rather than per whole
+        ROI-selection trace, the pre-atomization shape) means a *partial*
+        disk hit no longer forces re-validating cubes RAM already had - and
+        a later, wider cube range for the same ROI reuses whatever overlap
+        it shares with an earlier, narrower one instead of missing outright.
 
         `spectral_cube_signatures` must come from
         `_sensorgram_spectral_cube_signatures`, computed once by the caller
@@ -777,7 +765,11 @@ class AnalysisController(AnalysisWorkerMixin, AnalysisChromaticGeometryMixin):
         `spectral_cubes` - the expensive, ROI-independent O(cubes x
         wavelengths) half of the RAM-cache signature. Recomputing it per ROI
         on every selection change (rather than once per selection) is what
-        froze the app on selecting several ROIs (2026-09-12).
+        froze the app on selecting several ROIs (2026-09-12). Deliberately
+        NOT `_sensorgram_point_signature_hash_cube_context` (a different,
+        disk-oriented scheme - see `_sensorgram_metric_signature`'s
+        docstring) - this method's whole per-cube RAM check would reintroduce
+        that exact freeze if it depended on the hash-string half instead.
 
         `cube_context_hashes_provider` is the disk-backup check's
         equivalent (`_sensorgram_cube_context_hashes`) - taken as a
@@ -789,19 +781,109 @@ class AnalysisController(AnalysisWorkerMixin, AnalysisChromaticGeometryMixin):
         half of the same freeze."""
         window = self.window
         roi = next((r for r in window._state.area_rois if int(r.area_roi_id) == int(roi_id)), None)
-        if roi is None:
+        if roi is None or spectral_cube_signatures is None:
             return None
-        signature = self._sensorgram_signature_for_selection_with_cube_signatures(
-            spectral_cube_signatures, (roi_id,), [roi]
-        )
-        result = None if signature is None else window._sensorgram_cache.get(signature)
-        if result is None:
-            result = self._sensorgram_result_from_disk_backup(
-                (roi_id,), [roi], spectral_cubes, cube_context_hashes_provider()
+        value_by_cube: dict[int, float] = {}
+        cube_signature_by_index: dict[int, object] = {}
+        missing_cubes: list[int] = []
+        for cube_index, cube_signature in zip(spectral_cubes, spectral_cube_signatures):
+            cube_index = int(cube_index)
+            cube_signature_by_index[cube_index] = cube_signature
+            cached = self._sensorgram_metric_from_cache(roi, cube_signature)
+            if cached is not None:
+                value_by_cube[cube_index] = cached[0]
+            else:
+                missing_cubes.append(cube_index)
+        if missing_cubes:
+            disk_result = self._sensorgram_result_from_disk_backup(
+                (roi_id,), [roi], missing_cubes, cube_context_hashes_provider()
             )
-        if result is None:
+            if disk_result is not None:
+                for cube_index, metric_value in zip(disk_result.spectral_cube_indices, disk_result.metric_values):
+                    cube_index = int(cube_index)
+                    if not np.isfinite(metric_value):
+                        continue
+                    value_by_cube[cube_index] = float(metric_value)
+                    cube_signature = cube_signature_by_index.get(cube_index)
+                    if cube_signature is not None:
+                        self._store_sensorgram_metric_in_cache(roi, cube_signature, float(metric_value), float("nan"))
+        if not value_by_cube:
             return None
-        return self._member_trace_aligned(result, spectral_cubes)
+        return np.asarray(
+            [value_by_cube.get(int(cube), float("nan")) for cube in spectral_cubes], dtype=np.float64
+        )
+
+    def _sensorgram_selection_fully_available(
+        self,
+        selected_roi_ids: tuple[int, ...],
+        spectral_cubes: list[int],
+    ) -> bool:
+        """True only if EVERY selected ROI already has a value for EVERY
+        cube in `spectral_cubes` (RAM or disk, via `_sensorgram_trace_for_
+        roi`) - meaning a real "Start analysis" sweep would find nothing new
+        to compute. Used to skip launching the worker entirely when nothing
+        actually changed since the last run, replacing the old single
+        combined-selection cache-hit check (see docs/analysis_caching_
+        architecture.md) with a check built from the same atomic per-ROI
+        data the render path already uses - one way to answer "is this
+        fresh", not two."""
+        spectral_cube_signatures = self._sensorgram_spectral_cube_signatures(spectral_cubes)
+        if spectral_cube_signatures is None:
+            return False
+        cube_context_hashes_cache: list[dict[int, str]] = []
+
+        def get_cube_context_hashes() -> dict[int, str]:
+            if not cube_context_hashes_cache:
+                cube_context_hashes_cache.append(self._sensorgram_cube_context_hashes(spectral_cubes))
+            return cube_context_hashes_cache[0]
+
+        for roi_id in selected_roi_ids:
+            trace = self._sensorgram_trace_for_roi(
+                int(roi_id), spectral_cubes, spectral_cube_signatures, get_cube_context_hashes
+            )
+            if trace is None or not np.all(np.isfinite(trace)):
+                return False
+        return True
+
+    def _apply_already_available_sensorgram_selection(
+        self,
+        selected_roi_ids: tuple[int, ...],
+        spectral_cubes: list[int],
+    ) -> None:
+        """Companion to `_sensorgram_selection_fully_available` - call only
+        after that returns True. For a single ROI, "the combined trace" IS
+        that ROI's own trace (see `_sensorgram_metric_task`'s own top-level
+        result, which - for more than one selected ROI - is really just the
+        FIRST selected ROI's own fit, not a pooled/averaged value; nothing
+        user-visible reads it for that case, so it's not reconstructed here
+        for >1 ROI). `set_sensorgram_series` both populates that single-ROI
+        buffer AND redraws (it ends with `_update_statistics_overlays()`).
+        For several ROIs, there's no single buffer value that means
+        anything - the display already reads each ROI's own cached value
+        directly (`_render_sensorgram_display`), so redrawing is enough."""
+        window = self.window
+        summary = f"{window._analysis_metric_label()} | Calculated {len(spectral_cubes)}/{len(spectral_cubes)} spectral cubes"
+        if len(selected_roi_ids) <= 1:
+            spectral_cube_signatures = self._sensorgram_spectral_cube_signatures(spectral_cubes)
+            cube_context_hashes_cache: list[dict[int, str]] = []
+
+            def get_cube_context_hashes() -> dict[int, str]:
+                if not cube_context_hashes_cache:
+                    cube_context_hashes_cache.append(self._sensorgram_cube_context_hashes(spectral_cubes))
+                return cube_context_hashes_cache[0]
+
+            trace = self._sensorgram_trace_for_roi(
+                int(selected_roi_ids[0]), spectral_cubes, spectral_cube_signatures, get_cube_context_hashes
+            )
+            if trace is not None:
+                self.set_sensorgram_series(
+                    np.asarray(spectral_cubes, dtype=np.int32), trace, summary_text=summary
+                )
+        else:
+            window._set_sensorgram_summary_text(summary)
+            self._update_statistics_overlays()
+        window._set_status_text("SG | cache 00:00")
+        window._update_analysis_control_state()
 
     def _sensorgram_group_buckets(self, selected_roi_ids: tuple[int, ...]) -> list[tuple[str, QColor, list[int]]]:
         """Partitions a multi-ROI selection into (label, color, member_ids)
@@ -904,6 +986,21 @@ class AnalysisController(AnalysisWorkerMixin, AnalysisChromaticGeometryMixin):
             window.sensorgram_plot.setXRange(x_min, x_max, padding=0.03)
             y_span = max(y_max - y_min, 0.05)
             window.sensorgram_plot.setYRange(y_min - y_span * 0.08, y_max + y_span * 0.12, padding=0.0)
+            window._append_workflow_log(
+                f"SG render | {len(window._sensorgram_series_items)} plot item(s) from {len(extents)}/{len(bucket_traces)} "
+                f"bucket(s) with data | x[{x_min:.3g},{x_max:.3g}] y[{y_min:.3g},{y_max:.3g}]",
+                level="debug",
+            )
+        else:
+            # Every bucket's (x, y) pair was entirely NaN/invalid - no curve
+            # items were created at all, and the axis range is left
+            # untouched (whatever it was showing before this call), which
+            # can look exactly like "the plot didn't update" if the
+            # previous range doesn't happen to overlap anything relevant.
+            window._append_workflow_log(
+                f"SG render | {len(bucket_traces)} bucket(s), 0 had any valid point - nothing drawn, axis range unchanged",
+                level="debug",
+            )
 
     def _render_sensorgram_display(self) -> None:
         """Draws the Sensogram plot's primary content for the current ROI
@@ -932,15 +1029,37 @@ class AnalysisController(AnalysisWorkerMixin, AnalysisChromaticGeometryMixin):
         selected_roi_ids = self._selected_spectrum_roi_ids()
 
         if len(selected_roi_ids) <= 1 or window._sensorgram_running:
+            spectral_cube_indices = window._sensorgram_spectral_cube_indices
+            values = window._sensorgram_metric_values
+            if spectral_cube_indices.size == 0:
+                # This branch never calls window.sensorgram_curve.setData
+                # itself - it only re-shows the curve and assumes its data
+                # was already set by preview_sensorgram_from_cache (RAM/disk
+                # hit -> _apply_cached_sensorgram_result -> set_sensorgram_
+                # series, called just before this in
+                # _update_selection_dependent_plots) or a live "Start
+                # analysis" run. A miss here means there is nothing new to
+                # draw for this call, so the display is left exactly as it
+                # was - including any multi-ROI series items still on
+                # screen from a moment ago. Root cause of the 2026-09-14/15
+                # "disappears on reselect" report: this used to clear those
+                # series items and re-show the (unpopulated) curve
+                # unconditionally, before this emptiness check - so a
+                # selection transiently dropping to <=1 mid-drag (e.g. the
+                # instant a new rubber-band drag starts, before it has swept
+                # over any ROI) wiped a perfectly good multi-ROI view and
+                # replaced it with nothing.
+                window._append_workflow_log(
+                    f"SG render | single-ROI path | {len(selected_roi_ids)} selected | buffer empty "
+                    "- nothing to draw, display left untouched",
+                    level="debug",
+                )
+                self._update_processed_trace_overlay(None, None)
+                return
             self._clear_sensorgram_series_items()
             self._hide_sensorgram_aggregate_band()
             window.sensorgram_curve.show()
             window.sensorgram_current_point.show()
-            spectral_cube_indices = window._sensorgram_spectral_cube_indices
-            values = window._sensorgram_metric_values
-            if spectral_cube_indices.size == 0:
-                self._update_processed_trace_overlay(None, None)
-                return
             x_values = self._sensorgram_x_values(spectral_cube_indices)
             valid = np.isfinite(x_values) & np.isfinite(values)
             self._update_processed_trace_overlay(
@@ -1035,8 +1154,22 @@ class AnalysisController(AnalysisWorkerMixin, AnalysisChromaticGeometryMixin):
             self._set_sensorgram_summary_text(
                 f"{len(missing_ids)} of {len(selected_roi_ids)} selected ROI(s) not yet analyzed | Press Start analysis"
             )
+            # Diagnostic for the 2026-09-14 "sensogram disappears on
+            # reselect" report - _sensorgram_trace_for_roi returned None for
+            # these specific ROIs (RAM miss AND disk-backup miss/stale, see
+            # that method's own logging), so this pins down whether the bug
+            # is upstream (data genuinely unavailable) vs. downstream (data
+            # WAS available but something after this point hid/cleared it).
+            window._append_workflow_log(
+                f"SG render | {len(missing_ids)}/{len(selected_roi_ids)} selected ROI(s) unresolved: {sorted(missing_ids)}",
+                level="debug",
+            )
 
         if not bucket_traces:
+            window._append_workflow_log(
+                f"SG render | no bucket had any resolvable member out of {len(selected_roi_ids)} selected ROI(s) - hiding plot",
+                level="debug",
+            )
             window.sensorgram_curve.hide()
             self._clear_sensorgram_series_items()
             self._hide_sensorgram_aggregate_band()
@@ -1077,8 +1210,29 @@ class AnalysisController(AnalysisWorkerMixin, AnalysisChromaticGeometryMixin):
             self._update_processed_trace_overlay(
                 x_values[valid] if np.any(valid) else None, y_values[valid] if np.any(valid) else None
             )
+            # Diagnostic for the 2026-09-14/15 "sensogram disappears/scaling
+            # off on reselect" report - confirms whether this single-bucket
+            # ("Average all"/one-group) path actually drew a visible curve,
+            # and with what point count/range, since no log line existed
+            # here before and the earlier "SG render"/"SG disk backup"
+            # diagnostics only cover outright data-retrieval failure, not a
+            # silently-empty-looking-but-technically-successful draw.
+            window._append_workflow_log(
+                f"SG render | single-bucket curve | {int(np.sum(valid))}/{valid.size} valid points"
+                + (
+                    f" | x[{float(np.min(x_values[valid])):.3g},{float(np.max(x_values[valid])):.3g}]"
+                    f" y[{float(np.min(y_values[valid])):.3g},{float(np.max(y_values[valid])):.3g}]"
+                    if np.any(valid)
+                    else " | no valid points - curve set empty"
+                ),
+                level="debug",
+            )
             return
 
+        window._append_workflow_log(
+            f"SG render | {len(bucket_traces)} buckets | switching to multi-curve series-items view",
+            level="debug",
+        )
         window.sensorgram_curve.hide()
         self._hide_sensorgram_aggregate_band()
         self._update_processed_trace_overlay(None, None)
@@ -1256,8 +1410,6 @@ class AnalysisController(AnalysisWorkerMixin, AnalysisChromaticGeometryMixin):
         self.mark_stale(reason)
 
     def _invalidate_formula_spectrum_cache(self) -> None:
-        self.window._formula_spectrum_cache.clear()
-        self.window._formula_spectral_cube_cache.clear()
         self.window._roi_formula_spectrum_cache.clear()
         self.window._formula_spectrum_disk_trace_cache.clear()
         self.window._formula_spectrum_dirty = True
@@ -1531,7 +1683,6 @@ class AnalysisController(AnalysisWorkerMixin, AnalysisChromaticGeometryMixin):
     # their original names since main_window.py already references them as
     # AnalysisController._method(...).
     _signature_hash = staticmethod(signature_hash)
-    _formula_spectral_cube_signature = staticmethod(formula_spectral_cube_signature)
     _formula_spectrum_result_covers_roi_ids = staticmethod(formula_spectrum_result_covers_roi_ids)
 
     def _toggle_analysis_live_preview(self) -> None:

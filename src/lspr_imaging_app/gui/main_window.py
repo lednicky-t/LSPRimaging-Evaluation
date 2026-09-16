@@ -172,7 +172,6 @@ from .worker import (
     LandmarkOverlayBundle,
     MeasurementOverlayBundle,
     ScaleBarOverlayBundle,
-    SensorgramComputationResult,
     RoiOverlayBundle,
     UndoSnapshot,
 )
@@ -238,8 +237,6 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, MeasurementCalibrationMixin,
     PRIMARY_CUBE_IMAGE_CACHE_MIN_SIZE = 40
     SECONDARY_CUBE_IMAGE_CACHE_SIZE = 5
     MASK_CANDIDATE_CACHE_SIZE = 6
-    FORMULA_SPECTRUM_CACHE_SIZE = 48
-    FORMULA_SPECTRAL_CUBE_CACHE_SIZE = 48
     FORMULA_SPECTRUM_ROI_MASK_CACHE_SIZE = 48
     ROI_FORMULA_SPECTRUM_CACHE_SIZE = 512
     SENSORGRAM_CACHE_SIZE = 48
@@ -466,11 +463,54 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, MeasurementCalibrationMixin,
         self._histogram_source_cache_signature: tuple[object, ...] | None = None
         self._histogram_source_cache_values: tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray] | None = None
         self._histogram_log_range_guard = False
-        self._formula_spectrum_cache: OrderedDict[tuple[object, ...], FormulaSpectrumResult] = OrderedDict()
-        self._formula_spectral_cube_cache: OrderedDict[tuple[object, ...], FormulaSpectrumResult] = OrderedDict()
+        # Three of this app's analysis-result caches live here (a fourth,
+        # _roi_formula_spectrum_cache, is declared below near the other
+        # formula-spectrum run-state fields it's grouped with historically).
+        # Together with the measurement_backup.h5 disk layer and its
+        # freshness-hash gate, that's 5 mechanisms - down from an original 8
+        # (see docs/analysis_caching_architecture.md for the full history:
+        # _formula_spectrum_cache/_formula_spectral_cube_cache and the old
+        # _sensorgram_cache were retired once every read path converged onto
+        # looping _roi_formula_spectrum_cache per ROI instead).
+        #
+        # Spectra panel, depth 1: pixel masks (which pixels belong to a
+        # ROI's sample/reference regions) - cheaper to recompute than a raw
+        # pixel read, but still real numpy geometry work. Never explicitly
+        # cleared; relies on the dataset path being part of the key plus
+        # LRU eviction under the shared memory budget.
         self._formula_spectrum_roi_mask_cache: OrderedDict[tuple[object, ...], dict[str, object]] = OrderedDict()
-        self._sensorgram_cache: OrderedDict[tuple[object, ...], SensorgramComputationResult] = OrderedDict()
+        # Sensorgram panel, depth 1: pre-formula sample/reference reduced
+        # pixel values per (cube, ROI selection) - same role as the Spectra
+        # mask cache above, one level up the pipeline. Never explicitly
+        # cleared, same as that cache, for the same reason.
+        #
+        # Mid-unification note (see docs/analysis_caching_architecture.md):
+        # this cache and _roi_formula_spectrum_cache store the identical
+        # FormulaSpectrumResult type, but are NOT the same tier despite that
+        # - this one is keyed to the WHOLE selected-ROI set (populated by a
+        # bulk "Start analysis" sweep) while _roi_formula_spectrum_cache is
+        # atomic per ROI (populated only by a single-cube interactive
+        # preview - deliberately never during a bulk sweep, see
+        # spectral_cube_formula_spectrum_cache_store's own `len(spectral_
+        # cubes) > 1` guard). Kept separate on purpose, not a leftover
+        # duplicate - see _cached_formula_spectrum_result_from_sensorgram_
+        # sweep for the explicit cross-panel bridge between the two.
         self._sensorgram_spectral_cube_result_cache: OrderedDict[tuple[object, ...], FormulaSpectrumResult] = OrderedDict()
+        # Sensorgram-only tier (Spectra has no equivalent - it doesn't fit
+        # anything): one fitted metric value+signal per (ROI, cube,
+        # settings). Keyed by `_sensorgram_metric_signature` - the SAME
+        # cheap raw-tuple scheme `_roi_formula_spectrum_cache` already uses
+        # as a dict key, deliberately NOT `_sensorgram_point_signature_
+        # hash_for_roi`'s SHA256 string (that scheme is for the disk column
+        # only; using it here would force an expensive per-wavelength scan
+        # on every RAM lookup and reintroduce the exact per-ROI-
+        # recomputation freeze fixed 2026-09-12 - see `_sensorgram_metric_
+        # signature`'s own docstring). Replaces the old `_sensorgram_cache`'s
+        # whole-trace-per-ROI-selection entries with true per-cube
+        # atomicity, so a partial/resumed run or a widened cube range never
+        # has to refit cubes already fitted. See `_sensorgram_metric_from_
+        # cache`/`_store_sensorgram_metric_in_cache`.
+        self._sensorgram_metric_cache: OrderedDict[tuple[object, ...], tuple[float, float]] = OrderedDict()
         self._sensorgram_axis_range_cache: tuple[object, tuple[float, float]] | None = None
         self._analysis_cache_lock = threading.Lock()
         self._last_formula_spectrum_fit_seconds: float | None = None
@@ -501,6 +541,17 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, MeasurementCalibrationMixin,
         self._pending_formula_spectrum_payload: tuple[object, ...] | None = None
         self._formula_spectrum_dirty = True
         self._formula_spectrum_started_at: float | None = None
+        # Spectra panel's per-ROI cache, atomic per (ROI, cube, settings) -
+        # the fourth of this app's analysis-result caches (the other three
+        # are declared together above; grouped here instead next to the
+        # other formula-spectrum run-state fields for historical reasons).
+        # Every Spectra display path now reads this one exclusively
+        # (combining several ROIs by looping it, never a separate combined-
+        # selection cache - see docs/analysis_caching_architecture.md),
+        # populated by a single-cube interactive preview or Sensogram's
+        # own per-ROI backup - never directly by a bulk sweep itself (see
+        # _sensorgram_spectral_cube_result_cache's own declaration comment
+        # above for that distinction).
         self._roi_formula_spectrum_cache: OrderedDict[tuple[object, ...], FormulaSpectrumResult] = OrderedDict()
         # Per-ROI-id cache of each ROI's full on-disk formula-spectrum trace
         # index (HDF5 export backup), used by _refresh_cube_slider_cache_indicators
@@ -4116,13 +4167,6 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, MeasurementCalibrationMixin,
         return total
 
     @staticmethod
-    def _sensorgram_computation_result_nbytes(result: "SensorgramComputationResult") -> int:
-        total = 0
-        for array in (result.spectral_cube_indices, result.metric_values, result.metric_signal):
-            total += int(getattr(array, "nbytes", 0))
-        return total
-
-    @staticmethod
     def _formula_spectrum_trace_index_nbytes(trace: "FormulaSpectrumTraceIndex") -> int:
         total = int(getattr(trace.wavelengths_nm, "nbytes", 0))
         for _signature_hash, reduced_values_by_method in trace.by_cube.values():
@@ -4132,23 +4176,22 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, MeasurementCalibrationMixin,
 
     def _analysis_ram_cache_stats(self) -> tuple[int, int]:
         """(entry_count, approx_bytes) across every RAM analysis cache this
-        window owns - the four FormulaSpectrumResult-shaped LRUs, the
-        sensorgram trace LRU, and the per-ROI disk-trace cache (loaded FROM
-        disk, but occupying real RAM once resident)."""
+        window owns - the two FormulaSpectrumResult-shaped LRUs (mask cache
+        excluded - it stores plain mask dicts, not FormulaSpectrumResult,
+        so _formula_spectrum_result_nbytes doesn't apply), the atomic
+        per-(ROI, cube) sensorgram-metric LRU, and the per-ROI disk-trace
+        cache (loaded FROM disk, but occupying real RAM once resident)."""
         entry_count = 0
         total_bytes = 0
         for cache in (
-            self._formula_spectrum_cache,
-            self._formula_spectral_cube_cache,
             self._roi_formula_spectrum_cache,
             self._sensorgram_spectral_cube_result_cache,
         ):
             entry_count += len(cache)
             for result in cache.values():
                 total_bytes += self._formula_spectrum_result_nbytes(result)
-        for result in self._sensorgram_cache.values():
-            entry_count += 1
-            total_bytes += self._sensorgram_computation_result_nbytes(result)
+        entry_count += len(self._sensorgram_metric_cache)
+        total_bytes += len(self._sensorgram_metric_cache) * self._estimated_sensorgram_metric_entry_bytes()
         for trace in self._formula_spectrum_disk_trace_cache.values():
             entry_count += 1
             total_bytes += self._formula_spectrum_trace_index_nbytes(trace)
@@ -5344,21 +5387,17 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, MeasurementCalibrationMixin,
         """User-facing RAM budget (in MB), shared by the two analysis caches
         that actually scale with dataset size: `_roi_formula_spectrum_cache`
         (one entry per (ROI, spectral cube) absorbance spectrum - the bigger
-        of the two per entry) and `_sensorgram_cache` (one entry per
-        distinct ROI-selection/settings combination's whole computed
-        sensorgram trace). The other two analysis caches
-        (`_formula_spectrum_cache`/`_formula_spectral_cube_cache`) stay at
-        their small fixed entry-count constants - they're "current combined
-        selection" display caches, not something that benefits from a
-        memory dial. A memory budget is what the Preferences UI shows and
-        stores; see `_roi_formula_spectrum_cache_limit`/`_sensorgram_cache_
-        limit` for the entry-count each cache actually turns this into at
-        store-time - independently, each against its own per-entry size
-        estimate, so the true combined worst case is bounded by roughly
-        2x this number, not exactly this number (in real use the sensorgram
-        cache holds far fewer, far smaller entries than the spectrum cache,
-        so it rarely approaches its own share of the budget). Clamped to
-        >= 1."""
+        of the two per entry) and `_sensorgram_metric_cache` (one entry per
+        (ROI, spectral cube) fitted metric value - much smaller per entry,
+        but with many more entries at real scale). A memory budget is what
+        the Preferences UI shows and stores; see `_roi_formula_spectrum_
+        cache_limit`/`_sensorgram_metric_cache_limit` for the entry-count
+        each cache actually turns this into at store-time - independently,
+        each against its own per-entry size estimate, so the true combined
+        worst case is bounded by roughly 2x this number, not exactly this
+        number (in real use the sensorgram cache holds far fewer, far
+        smaller entries than the spectrum cache, so it rarely approaches
+        its own share of the budget). Clamped to >= 1."""
         return max(1, int(self._settings.value("analysis/cache_budget_mb", 500)))
 
     def _set_analysis_cache_budget_mb(self, value: int) -> None:
@@ -5380,16 +5419,6 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, MeasurementCalibrationMixin,
         cache size of 0 isn't a smaller cache, it's a bug)."""
         budget_bytes = self._analysis_cache_budget_mb() * 1024 * 1024
         per_entry_bytes = max(1, self._estimated_roi_formula_spectrum_entry_bytes())
-        return max(1, budget_bytes // per_entry_bytes)
-
-    def _sensorgram_cache_limit(self) -> int:
-        """How many whole computed sensorgram traces `_sensorgram_cache`
-        keeps resident in RAM at once - same shared-budget approach as
-        `_roi_formula_spectrum_cache_limit`, just against `_sensorgram_
-        cache`'s own (much smaller per entry, in typical use) size
-        estimate."""
-        budget_bytes = self._analysis_cache_budget_mb() * 1024 * 1024
-        per_entry_bytes = max(1, self._estimated_sensorgram_result_entry_bytes())
         return max(1, budget_bytes // per_entry_bytes)
 
     def _estimated_roi_formula_spectrum_entry_bytes(self) -> int:
@@ -5424,22 +5453,30 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, MeasurementCalibrationMixin,
         bytes_per_value = 8
         return (per_wavelength_arrays + reduction_methods * 2) * bytes_per_value
 
-    def _estimated_sensorgram_result_entry_bytes(self) -> int:
-        """Best-effort average per-entry byte size for `_sensorgram_cache`,
-        same role as `_estimated_roi_formula_spectrum_entry_bytes` but for
-        whole sensorgram traces (one entry per distinct ROI-selection/
-        settings combination, sized by how many spectral cubes are in the
-        trace, not by wavelength count)."""
-        if self._sensorgram_cache:
-            sample = next(iter(self._sensorgram_cache.values()))
-            return max(1, self._sensorgram_computation_result_nbytes(sample))
-        n_cubes = len(self._spectral_cube_values) if self._spectral_cube_values else 100
-        # Matches _sensorgram_computation_result_nbytes's own field list: 3
-        # arrays (spectral_cube_indices, metric_values, metric_signal), each
-        # one value per cube in the trace, ~8 bytes/value.
-        arrays_per_entry = 3
-        bytes_per_value = 8
-        return n_cubes * arrays_per_entry * bytes_per_value
+    def _sensorgram_metric_cache_limit(self) -> int:
+        """How many (ROI, cube)-atomic fitted-metric entries `_sensorgram_
+        metric_cache` keeps resident in RAM - same shared-budget approach as
+        `_roi_formula_spectrum_cache_limit`, just against this cache's own
+        (much smaller per entry - a tuple key plus two floats, not a whole
+        array) size estimate. Entries scale with ROI count x cube count
+        rather than ROI count x cube count x wavelength count, so the same
+        MB budget buys far more of these than of `_roi_formula_spectrum_
+        cache`'s entries."""
+        budget_bytes = self._analysis_cache_budget_mb() * 1024 * 1024
+        per_entry_bytes = max(1, self._estimated_sensorgram_metric_entry_bytes())
+        return max(1, budget_bytes // per_entry_bytes)
+
+    @staticmethod
+    def _estimated_sensorgram_metric_entry_bytes() -> int:
+        """Fixed estimate, unlike the other `_estimated_*_entry_bytes`
+        helpers - this cache's entry shape (a small tuple key - see
+        `_sensorgram_metric_signature` - plus a 2-float value) doesn't vary
+        with dataset/wavelength count the way a whole spectrum or trace
+        does, so there's no per-dataset scaling to sample for. Rounded up
+        for headroom against the key tuple's own Python object overhead
+        (dataset key string, ROI id/geometry, cube signature, settings
+        fields) plus the OrderedDict entry/hash-table overhead."""
+        return 300
 
     def _set_ui_scale_factor(self, value: str) -> None:
         self._settings.setValue("ui/scale_factor", value)
@@ -6775,17 +6812,6 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, MeasurementCalibrationMixin,
     def _on_formula_spectrum_payload_failed(self, request_id: int, message: str) -> None:
         self._analysis_controller._on_formula_spectrum_payload_failed(request_id, message)
 
-    def _cached_formula_spectrum_result_for_selection(
-        self,
-        signature: tuple[object, ...],
-        selected_roi_ids: tuple[int, ...],
-        selected_source_rois: list[AreaRoi] | None = None,
-    ) -> FormulaSpectrumResult | None:
-        return self._analysis_controller._cached_formula_spectrum_result_for_selection(signature, selected_roi_ids, selected_source_rois)
-
-    def _formula_spectrum_signature(self) -> tuple[object, ...] | None:
-        return self._analysis_controller._formula_spectrum_signature()
-
     def _roi_formula_spectrum_signature(self, roi: AreaRoi) -> tuple[object, ...] | None:
         return self._analysis_controller._roi_formula_spectrum_signature(roi)
 
@@ -6794,10 +6820,6 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, MeasurementCalibrationMixin,
 
     def _refresh_cached_roi_ids_snapshot(self) -> None:
         self._analysis_controller._refresh_cached_roi_ids_snapshot()
-
-    @staticmethod
-    def _formula_spectral_cube_signature(signature: tuple[object, ...] | None) -> tuple[object, ...] | None:
-        return AnalysisController._formula_spectral_cube_signature(signature)
 
     @staticmethod
     def _formula_spectrum_result_covers_roi_ids(result: FormulaSpectrumResult, selected_roi_ids: tuple[int, ...]) -> bool:

@@ -356,11 +356,11 @@ class PreferencesDialog(QDialog):
             return
         budget_bytes = self.analysis_cache_budget_spin.value() * 1024 * 1024
         spectra_per_entry_bytes = max(1, window._estimated_roi_formula_spectrum_entry_bytes())
-        sensorgrams_per_entry_bytes = max(1, window._estimated_sensorgram_result_entry_bytes())
+        metric_points_per_entry_bytes = max(1, window._estimated_sensorgram_metric_entry_bytes())
         estimated_spectra = int(budget_bytes / spectra_per_entry_bytes)
-        estimated_sensorgrams = int(budget_bytes / sensorgrams_per_entry_bytes)
+        estimated_metric_points = int(budget_bytes / metric_points_per_entry_bytes)
         self.analysis_cache_estimate_label.setText(
-            f"→ ~{estimated_spectra:,} spectra, or ~{estimated_sensorgrams:,} sensorgrams (each up to that budget)"
+            f"→ ~{estimated_spectra:,} spectra, or ~{estimated_metric_points:,} sensorgram points (each up to that budget)"
         )
 
     def _update_cache_calculator_result_label(self) -> None:

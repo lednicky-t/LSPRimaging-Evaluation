@@ -40,12 +40,6 @@ def signature_hash(signature: tuple[object, ...]) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
-def formula_spectral_cube_signature(signature: tuple[object, ...] | None) -> tuple[object, ...] | None:
-    if signature is None or len(signature) < 4:
-        return None
-    return (signature[0], signature[1], signature[3])
-
-
 def formula_spectrum_result_covers_roi_ids(result: FormulaSpectrumResult, selected_roi_ids: tuple[int, ...]) -> bool:
     if not selected_roi_ids:
         return False

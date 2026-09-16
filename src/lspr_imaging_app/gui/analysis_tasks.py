@@ -326,6 +326,45 @@ def _effective_reference_radii(
     return inner_radius, outer_radius
 
 
+def roi_circular_geometry_signature(
+    roi: AreaRoi,
+    default_reference_inner_radius_px: float,
+    default_reference_outer_radius_px: float,
+) -> tuple[object, ...]:
+    """The one canonical circular-ROI geometry signature - center, sample
+    diameter, and EFFECTIVE (resolved) reference inner/outer diameter,
+    using `_effective_reference_radii`'s own resolution (a per-ROI
+    override wins when set, otherwise the current area_roi_settings
+    default applies) - the exact fallback the real pixel mask uses, so
+    this can never drift from what's actually being computed.
+
+    Shared by both the Sensogram and Spectra analysis-cache signatures
+    (see docs/analysis_caching_architecture.md) - previously each had its
+    own, differently-incomplete take on this: one captured only the
+    global default (missing a per-ROI diameter edit via "Edit reference
+    ROI diameter"), the other captured only the per-ROI override as
+    `roi.reference_inner_diameter_px or 0.0` (missing a global-setting
+    change for any ROI still using the default - `or 0.0` produces the
+    same constant regardless of what the default actually is). Diameters
+    throughout, not radii, matching the ROI's own storage unit and
+    avoiding a radius/diameter round-trip between the two callers.
+
+    Deliberately circular-only: sample/reference GEOMETRY TYPE and masks
+    (non-circular ROIs) are a separate, open question, out of scope for
+    this fix."""
+    inner_radius, outer_radius = _effective_reference_radii(
+        roi, default_reference_inner_radius_px, default_reference_outer_radius_px
+    )
+    return (
+        int(roi.area_roi_id),
+        round(float(roi.center_x), 3),
+        round(float(roi.center_y), 3),
+        round(float(roi.sample_radius_px) * 2.0, 3),
+        round(inner_radius * 2.0, 3),
+        round(outer_radius * 2.0, 3),
+    )
+
+
 def _roi_reach_box(
     roi: AreaRoi,
     sample_x: float,
@@ -562,7 +601,9 @@ def _roi_formula_spectrum_signature(
     spectral_cube_index: int,
     wavelength_values: tuple[float, ...],
     roi: AreaRoi,
-    chromatic_signatures: tuple[object, ...],
+    preprocessing_signatures: tuple[object, ...],
+    default_reference_inner_radius_px: float,
+    default_reference_outer_radius_px: float,
     reduction_method: str = "mean",
     trimmed_mean_fraction: float = 0.10,
     exclusion_signatures: tuple[object, ...] = (),
@@ -571,21 +612,35 @@ def _roi_formula_spectrum_signature(
     sample_mean/reference_mean (the reduction), not the formula-combined
     value, so it stays valid across a formula switch - see
     AnalysisController._roi_reduction_signature_elements and
-    processing.analysis.project_formula_spectrum."""
+    processing.analysis.project_formula_spectrum.
+
+    `preprocessing_signatures`: one `MainWindow._preprocessing_signature()`
+    tuple per wavelength (rotation/flip/crop/background-flatten/mask state,
+    which itself embeds the per-wavelength chromatic signature) - NOT just
+    chromatic alone. Closes the gap documented as item 4b in
+    docs/analysis_pipeline_redesign.md: before this, this signature only
+    tracked chromatic+exclusion state, so a rotation/crop/background-flatten
+    change had to rely entirely on `_invalidate_image_analysis_caches()`'s
+    bulk clear to correctly invalidate `_roi_formula_spectrum_cache` - this
+    makes the signature genuinely self-invalidating instead, matching what
+    the Sensogram side (`_sensorgram_spectral_cube_payload_signature`) has
+    always done via the same `_preprocessing_signature` call.
+
+    `default_reference_inner/outer_radius_px`: the CURRENT area_roi_settings
+    defaults, passed through to `roi_circular_geometry_signature` so this
+    signature correctly resolves this ROI's EFFECTIVE reference diameter
+    (per-ROI override if set, else the live default) instead of the old
+    `roi.reference_inner_diameter_px or 0.0`, which silently ignored global
+    default changes for any ROI still using it."""
     return (
         int(spectral_cube_index),
         tuple(round(float(value), 6) for value in wavelength_values),
-        int(roi.area_roi_id),
-        round(float(roi.center_x), 3),
-        round(float(roi.center_y), 3),
-        round(float(roi.sample_radius_px), 3),
-        round(float(roi.reference_inner_diameter_px or 0.0), 3),
-        round(float(roi.reference_outer_diameter_px or 0.0), 3),
+        roi_circular_geometry_signature(roi, default_reference_inner_radius_px, default_reference_outer_radius_px),
         roi.sample_geometry_type,
         roi.reference_geometry_type,
         _roi_mask_signature(roi.sample_mask),
         _roi_mask_signature(roi.reference_mask),
-        chromatic_signatures,
+        preprocessing_signatures,
         str(reduction_method),
         round(float(trimmed_mean_fraction), 4),
         exclusion_signatures,
@@ -671,7 +726,7 @@ def _scoped_formula_spectrum_task(
     compute_all_reduction_methods: bool = True,
     worker_count_override: int | None = None,
 ) -> FormulaSpectrumResult:
-    """Fast multi-ROI absorbance spectrum using OME-Zarr chunk-aware spatial reads.
+    """Multi-ROI absorbance spectrum using OME-Zarr chunk-aware spatial reads.
 
     `box` is a single bounding region, in full PROCESSED-image coordinates
     (matching ROI centers, external masks, etc.), precomputed by the caller to
@@ -1093,7 +1148,7 @@ def _scoped_formula_spectrum_task(
             if progress_callback is not None:
                 progress_callback(
                     int(round((item[0] + 1) / total * 100)),
-                    f"Fast spectrum {item[0]+1}/{total}: {float(item[1][0]):g} nm",
+                    f"Spectrum {item[0]+1}/{total}: {float(item[1][0]):g} nm",
                 )
     else:
         with ThreadPoolExecutor(max_workers=worker_count) as executor:
@@ -1106,7 +1161,7 @@ def _scoped_formula_spectrum_task(
                 if progress_callback is not None:
                     progress_callback(
                         int(round(done_count / total * 100)),
-                        f"Fast spectrum {done_count}/{total}",
+                        f"Spectrum {done_count}/{total}",
                     )
 
     wavelengths_out: list[float] = []
@@ -1245,6 +1300,7 @@ def _sensorgram_metric_task(
     spectral_cube_result_cache_get=None,
     spectral_cube_result_cache_store=None,
     metric_value_cache_get=None,
+    per_roi_metric_value_cache_get=None,
     spectral_cube_formula_spectrum_cache_get=None,
     spectral_cube_formula_spectrum_cache_store=None,
     wl_min: float | None = None,
@@ -1374,7 +1430,7 @@ def _sensorgram_metric_task(
             inner_percent = float(np.clip(float(percent), 0.0, 100.0))
             overall = compute_base + (((position - 1) + (inner_percent / 100.0)) / total) * compute_span
             # Cube position is prefixed onto whatever the inner task reports
-            # (e.g. "Fast spectrum 5/20: 650 nm") rather than only shown as a
+            # (e.g. "Spectrum 5/20: 650 nm") rather than only shown as a
             # fallback for when `text` is empty - the inner task always
             # supplies text, so without this prefix the status bar shows
             # per-wavelength progress with no indication of which cube (of
@@ -1395,6 +1451,22 @@ def _sensorgram_metric_task(
         # already produces; nothing currently plots a full-sweep
         # metric_signal series (only the live single-cube preview does, which
         # this shortcut never touches), so this loses no working UI.
+        # Per-ROI disk-backed shortcut: checked BEFORE the combined-selection
+        # one below, since it's a strict superset of what that one can find -
+        # every real per-ROI backup row exists regardless of which
+        # combination it was originally run as part of (_backup_per_roi_
+        # sensorgram_points writes one per real roi_id, always), so this
+        # succeeds for a combination never run together before as long as
+        # each individual member ROI has its own valid row. Closes the gap
+        # in the combined-only shortcut below: Stop, reselect a different
+        # ROI subset, Start again previously re-read pixels for every
+        # selected ROI even when each one individually was already done a
+        # moment ago. The combined check is kept as a fallback rather than
+        # replaced outright, out of caution - not because it's expected to
+        # ever fire when this one doesn't.
+        per_roi_disk_values = (
+            per_roi_metric_value_cache_get(spectral_cube_index) if per_roi_metric_value_cache_get is not None else None
+        )
         disk_metric_value = metric_value_cache_get(spectral_cube_index) if metric_value_cache_get is not None else None
         roi_formula_spectrum_results = None
         per_roi_metric_values = None
@@ -1404,7 +1476,23 @@ def _sensorgram_metric_task(
         # accurate per-point flag rather than assuming every point took
         # real compute time.
         freshly_computed = False
-        if disk_metric_value is not None:
+        if per_roi_disk_values:
+            # Same "no signal available" reporting as the combined shortcut
+            # below, same reason (metric_signal isn't persisted on disk).
+            per_roi_metric_values = {
+                int(roi_id): (float(value) if np.isfinite(value) else float("nan"), float("nan"))
+                for roi_id, value in per_roi_disk_values.items()
+            }
+            # "Combined" preview value = the first selected ROI's own value,
+            # matching _combine_roi_formula_spectrum_results/_sensorgram_
+            # metric_task's own existing convention elsewhere - never a
+            # pooled/averaged value across ROIs (see docs/analysis_caching_
+            # architecture.md's Stage 2 notes). per_roi_disk_values' own
+            # insertion order follows selected_roi_ids (see its builder).
+            first_metric_value = next(iter(per_roi_metric_values.values()))[0]
+            metric_float = first_metric_value
+            signal_float = float("nan")
+        elif disk_metric_value is not None:
             metric_float = float(disk_metric_value) if np.isfinite(disk_metric_value) else float("nan")
             signal_float = float("nan")
         else:

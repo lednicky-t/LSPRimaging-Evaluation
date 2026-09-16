@@ -220,7 +220,7 @@ class DatasetController:
         window._invalidate_background_profile_cache()
         window._current_image_key = None
         window._force_image_autorange_after_load = bool(reset_image_view)
-        window._sensorgram_cache.clear()
+        window._sensorgram_metric_cache.clear()
         window._sensorgram_running_signature = None
         window._pending_sensorgram_payload = None
         window._state.area_roi_settings = AreaRoiDetectionSettings()
@@ -610,7 +610,7 @@ class DatasetController:
         window._invalidate_image_analysis_caches()
         window._invalidate_background_profile_cache()
         window._current_image_key = None
-        window._sensorgram_cache.clear()
+        window._sensorgram_metric_cache.clear()
         window._sensorgram_running_signature = None
         window._pending_sensorgram_payload = None
         window.image_item.clear()
