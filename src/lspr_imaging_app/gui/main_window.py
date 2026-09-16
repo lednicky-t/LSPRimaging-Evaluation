@@ -87,6 +87,7 @@ from lspr_ui import (
 from lspr_imaging_app.gui.roi_table_helpers import (
     roi_table_headers,
 )
+from lspr_imaging_app.gui.group_table_controller import GroupTableController
 from lspr_imaging_app.gui.roi_table_controller import RoiTableController
 from lspr_imaging_app.gui.metadata_controller import MetadataController
 from lspr_imaging_app.gui.mask_controller import MaskController
@@ -289,6 +290,7 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, MeasurementCalibrationMixin,
         self._dataset_controller = DatasetController(self)
         self._render_manager = ImageRenderManager(self)
         self._roi_table_controller = RoiTableController(self)
+        self._group_table_controller = GroupTableController(self)
         self._metadata_controller = MetadataController(self)
         self._mask_controller = MaskController(self)
         self._chromatic_controller = ChromaticController(self)
@@ -397,6 +399,8 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, MeasurementCalibrationMixin,
         self._roi_list_selection_syncing = False
         self._roi_list_range_anchor_row: int | None = None
         self._roi_table_updating = False
+        self._group_list_selection_syncing = False
+        self._group_table_updating = False
         self._roi_clipboard: dict[str, object] | None = None
         self._selected_roi_ids: set[int] = set()
         self._selection_plot_highlight_signature: tuple[int, ...] | None = None
@@ -723,6 +727,11 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, MeasurementCalibrationMixin,
         self._reference_points_visible = True
         self._chromatic_reference_points_all_visible = False
         self._cached_rois_only_visible = self._settings_bool("layout/cached_rois_only_visible", False)
+        # "roi" or "group" - which table the ROI/Group panel toggle currently
+        # shows. Real restore happens in LayoutStateController.restore_layout_
+        # preferences(); this early default just gives _init_controllers()/
+        # layout_builder a safe value before that runs.
+        self._roi_list_view_mode = "roi"
 
         # Plot line-style settings, adjustable via the small settings icon
         # in each plot's corner overlay (plot_style_settings_dialog.py).
@@ -855,7 +864,7 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, MeasurementCalibrationMixin,
         self._roi_refresh_timer = QTimer(self)
         self._roi_refresh_timer.setSingleShot(True)
         self._roi_refresh_timer.setInterval(25)
-        self._roi_refresh_timer.timeout.connect(self._roi_table_controller.update_table)
+        self._roi_refresh_timer.timeout.connect(self._refresh_roi_and_group_tables)
 
         # Spectra/Sensogram corner overlay: cursor/crosshair + stats toggle
         # state (off by default, not persisted across restarts - matches
@@ -2795,6 +2804,12 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, MeasurementCalibrationMixin,
         self.roi_table.cellDoubleClicked.connect(self._roi_table_controller.on_cell_double_clicked)
         self.roi_table.viewport().setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.roi_table.viewport().customContextMenuRequested.connect(self._roi_table_controller.show_context_menu)
+        self.group_table.itemSelectionChanged.connect(self._group_table_controller.on_selection_changed)
+        self.group_table.itemChanged.connect(self._group_table_controller.on_item_changed)
+        self.group_table.cellDoubleClicked.connect(self._group_table_controller.on_cell_double_clicked)
+        self.group_table.viewport().setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.group_table.viewport().customContextMenuRequested.connect(self._group_table_controller.show_context_menu)
+        self.group_new_button.clicked.connect(self._group_table_controller.create_group)
         self.roi_export_button.clicked.connect(self._roi_table_controller.export_roi_table)
         self.roi_import_button.clicked.connect(self._roi_table_controller.import_roi_table)
         self.metadata_import_button.clicked.connect(self._metadata_controller.import_metadata)
@@ -3231,6 +3246,61 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, MeasurementCalibrationMixin,
         if self._roi_refresh_timer.isActive():
             self._roi_refresh_timer.stop()
         self._roi_refresh_timer.start()
+
+    def _refresh_roi_and_group_tables(self) -> None:
+        """The debounced _roi_refresh_timer's actual timeout target - ROIs
+        and groups are the same underlying state, so anything that
+        invalidates one table's rows invalidates the other's too."""
+        self._roi_table_controller.update_table()
+        self._group_table_controller.update_table()
+
+    def _apply_roi_selection(self, roi_ids: set[int]) -> None:
+        """Single place that applies a new ROI selection and refreshes every
+        view that depends on it (image overlay, summary text, the ROI
+        table's row highlighting, and - via _update_selection_dependent_plots
+        - the spectra/sensorgram plots). Used by both "select this group's
+        members" (_select_group_members_for_roi, the Group table's row
+        selection) and anywhere else that needs to select a specific ROI set
+        as a single unit rather than growing it row-by-row like a plain table
+        click does. Deliberately NOT used by RoiTableController.
+        on_selection_changed()/GroupTableController.sync_selection() - those
+        just mirror a selection the table itself already reflects, so
+        re-running _sync_roi_table_selection() there would fight the user's
+        own in-progress table interaction."""
+        self._selected_roi_ids = set(roi_ids)
+        self._update_roi_overlays()
+        self._update_roi_summary()
+        self._sync_roi_table_selection()
+        self._update_selection_dependent_plots(prompt_live_preview=True)
+
+    def _on_roi_group_view_toggled(self, index: int) -> None:
+        self._roi_list_view_mode = "group" if index == 1 else "roi"
+        self._settings.setValue("layout/roi_list_view_mode", self._roi_list_view_mode)
+        self._apply_roi_list_view_mode()
+
+    def _apply_roi_list_view_mode(self) -> None:
+        """Shows the table matching self._roi_list_view_mode and hides the
+        other - called both from the title toggle's click handler and from
+        LayoutStateController.restore_layout_preferences() on startup."""
+        showing_group = self._roi_list_view_mode == "group"
+        self.roi_table.setVisible(not showing_group)
+        self.roi_list_cached_button.setVisible(not showing_group)
+        self.group_table.setVisible(showing_group)
+        self.group_new_button.setVisible(showing_group)
+        if showing_group:
+            # Row *contents* are already kept current by the shared debounce
+            # timer regardless of which table is visible; this just makes
+            # sure a rebuild - and the row-highlight resync at the end of
+            # GroupTableController.update_table() - runs at least once before
+            # the group table is first shown.
+            self._update_roi_table()
+        else:
+            # The reverse direction: roi_table's rows were already current,
+            # but its highlighted-as-selected rows can be stale if the
+            # selection changed while the Group table was the visible one
+            # (RoiTableController.sync_selection() only runs as part of a row
+            # rebuild, and _selected_roi_ids can change without one).
+            self._sync_roi_table_selection()
 
     def _report_startup_progress(self, percent: int, message: str) -> None:
         callback = self._startup_progress_callback
@@ -7107,8 +7177,12 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, MeasurementCalibrationMixin,
         panel_name: str,
         allowed_areas: Qt.DockWidgetArea = Qt.DockWidgetArea.AllDockWidgetAreas,
         help_text: str | None = None,
+        title_options: tuple[str, str] | None = None,
+        on_title_option: Callable[[int], None] | None = None,
     ) -> PanelContainer:
-        panel = PanelContainer(title, content, self, help_text=help_text)
+        panel = PanelContainer(
+            title, content, self, help_text=help_text, title_options=title_options, on_title_option=on_title_option
+        )
         panel.setObjectName(panel_name)
         panel.setAllowedAreas(allowed_areas)
         return panel

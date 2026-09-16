@@ -232,9 +232,15 @@ PANEL_HELP: dict[str, PanelHelpEntry] = {
     "roi_table_panel": PanelHelpEntry(
         title="ROI table",
         description=(
-            "Lists every detected/added ROI pair (sample + reference) with its id, group, center, and diameters. "
-            "Selecting rows here decides which ROI(s) the Spectra and Sensorgram panels compute and plot; "
-            "double-click a cell to edit that ROI's geometry directly."
+            "Click 'ROI' / 'Group' in the panel's title to switch which table is shown. "
+            "ROI view lists every detected/added ROI pair (sample + reference) with its id, group, center, and "
+            "diameters; double-click a cell to edit that ROI's geometry directly. "
+            "Group view lists one row per group (name, colors, ROI count) plus an 'Ungrouped' row for ROIs not "
+            "in any group; double-click a name to rename it or a color swatch to recolor it, and right-click a "
+            "group for more actions (add/remove selected ROIs, delete the group). Use the '+' button to create "
+            "a new, empty group. "
+            "Selecting rows in either table selects the same underlying ROI(s) everywhere - the image overlay, "
+            "and the Spectra and Sensorgram panels."
         ),
     ),
     "image_area_panel": PanelHelpEntry(

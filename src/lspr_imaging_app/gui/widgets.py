@@ -312,6 +312,8 @@ class PanelContainer(QDockWidget):
         parent: QWidget | None = None,
         *,
         help_text: str | None = None,
+        title_options: tuple[str, str] | None = None,
+        on_title_option: Callable[[int], None] | None = None,
     ) -> None:
         super().__init__(title, parent)
         self._title = title
@@ -320,6 +322,15 @@ class PanelContainer(QDockWidget):
         self._subtitle_text = ""
         self._subtitle_tooltip = ""
         self._subtitle_label: QLabel | None = None
+        # Optional clickable title (e.g. "ROI" / "Group") in place of the plain
+        # title label - both segments stay visible, the active one bold/accent
+        # colored. self._active_title_index is real instance state (not
+        # re-derived from `title`), so refresh_theme()'s full title-bar rebuild
+        # keeps showing the right segment as active without extra bookkeeping.
+        self._title_options = title_options
+        self._on_title_option = on_title_option
+        self._active_title_index = 0
+        self._title_option_buttons: list[QToolButton] = []
         self.setObjectName(f"{title.replace(' ', '')}Panel")
         self.setWidget(content)
         self.setFeatures(
@@ -370,9 +381,12 @@ class PanelContainer(QDockWidget):
         layout.setSpacing(2)
         outer.addWidget(row)
 
-        label = QLabel(title, row)
-        label.setStyleSheet(f"color: {theme.text_primary}; font-weight: 600; background: transparent;")
-        layout.addWidget(label)
+        if self._title_options is not None:
+            self._add_title_option_buttons(row, layout, theme)
+        else:
+            label = QLabel(title, row)
+            label.setStyleSheet(f"color: {theme.text_primary}; font-weight: 600; background: transparent;")
+            layout.addWidget(label)
 
         subtitle_label = QLabel(self._subtitle_text, row)
         subtitle_label.setStyleSheet(f"color: {theme.text_muted}; font-weight: 400; background: transparent;")
@@ -434,6 +448,65 @@ class PanelContainer(QDockWidget):
         outer.addWidget(separator)
 
         return bar
+
+    def _add_title_option_buttons(self, row: QWidget, layout: QHBoxLayout, theme) -> None:
+        """Renders self._title_options (e.g. ("ROI", "Group")) as small
+        clickable segments in place of the plain title label - both stay
+        visible, the active one bold/accent-colored, same visual language as
+        the bracketed QToolButton toggles used elsewhere in this app's
+        panel/section title rows (see layout_builder.py's
+        _make_time_independent_toggle and siblings)."""
+        self._title_option_buttons = []
+        options = self._title_options or ()
+        for index, option_text in enumerate(options):
+            button = QToolButton(row)
+            button.setAutoRaise(True)
+            button.setCheckable(False)
+            button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
+            button.setCursor(Qt.CursorShape.PointingHandCursor)
+            button.setText(option_text)
+            button.clicked.connect(lambda *_, i=index: self._select_title_option(i))
+            layout.addWidget(button)
+            self._title_option_buttons.append(button)
+            if index < len(options) - 1:
+                divider = QLabel("/", row)
+                divider.setStyleSheet(f"color: {theme.text_dim}; background: transparent;")
+                layout.addWidget(divider)
+        self._restyle_title_option_buttons(theme)
+
+    def _restyle_title_option_buttons(self, theme) -> None:
+        for index, button in enumerate(self._title_option_buttons):
+            active = index == self._active_title_index
+            color = theme.accent_blue if active else theme.text_dim
+            weight = 600 if active else 400
+            button.setStyleSheet(
+                "QToolButton {"
+                f"  color: {color};"
+                "  background: transparent;"
+                "  border: none;"
+                f"  font-weight: {weight};"
+                "  padding: 4px 2px;"
+                "}"
+                "QToolButton:hover { text-decoration: underline; }"
+            )
+
+    def _select_title_option(self, index: int) -> None:
+        if index == self._active_title_index:
+            return
+        self._active_title_index = index
+        self._restyle_title_option_buttons(get_active_theme())
+        if self._on_title_option is not None:
+            self._on_title_option(index)
+
+    def set_active_title_option(self, index: int) -> None:
+        """Set which title option reads as active without firing
+        on_title_option - for restoring a persisted choice at startup, where
+        the caller is already handling the corresponding content swap itself."""
+        if index == self._active_title_index:
+            return
+        self._active_title_index = index
+        if self._title_option_buttons:
+            self._restyle_title_option_buttons(get_active_theme())
 
     def set_subtitle(self, text: str, tooltip: str = "") -> None:
         """Short status text shown after the panel title, e.g. live counts a

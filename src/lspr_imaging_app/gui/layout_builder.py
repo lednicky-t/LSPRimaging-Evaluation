@@ -1566,11 +1566,45 @@ def build_layout(window) -> None:
         "Double-click: Edit the clicked ROI field\n"
         "Use the table selection to choose one or more ROIs before copying or moving.",
     )
+    window.group_table = QTableWidget(window)
+    window.group_table.setColumnCount(4)
+    window.group_table.setHorizontalHeaderLabels(["Group", "Sample", "Reference", "ROIs"])
+    window.group_table.setAlternatingRowColors(False)
+    window.group_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+    window.group_table.setSelectionMode(QTableWidget.SelectionMode.ExtendedSelection)
+    window.group_table.setEditTriggers(QTableWidget.EditTrigger.DoubleClicked | QTableWidget.EditTrigger.EditKeyPressed)
+    window.group_table.setWordWrap(False)
+    window.group_table.verticalHeader().setVisible(False)
+    window.group_table.horizontalHeader().setDefaultAlignment(Qt.AlignmentFlag.AlignLeft)
+    window.group_table.horizontalHeader().setStretchLastSection(True)
+    window.group_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
+    window.group_table.horizontalHeader().setSortIndicatorShown(True)
+    window.group_table.setSortingEnabled(True)
+    window.group_table.setShowGrid(False)
+    group_table_font = window.group_table.font()
+    group_table_font.setPointSize(8)
+    window.group_table.setFont(group_table_font)
+    window.group_table.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Expanding)
+    window.group_table.setMaximumWidth(16777215)
+    window.group_table.setMinimumWidth(220)
+    window.group_table.installEventFilter(window)
+    window.group_table.viewport().installEventFilter(window)
+    window._set_help(
+        window.group_table,
+        "Group table keyboard shortcuts:\n"
+        "Double-click a name: Rename the group\n"
+        "Double-click a color swatch: Change that color\n"
+        "Right-click a row: More actions (add/remove ROIs, delete group)\n"
+        "Selecting a group selects all of its ROIs everywhere (image, spectra, sensorgram).",
+    )
+    window.group_table.setVisible(False)
+
     roi_list_panel = QWidget(window)
     window.roi_list_io_layout = QVBoxLayout(roi_list_panel)
     window.roi_list_io_layout.setContentsMargins(0, 0, 0, 0)
     window.roi_list_io_layout.setSpacing(4)
     window.roi_list_io_layout.addWidget(window.roi_table)
+    window.roi_list_io_layout.addWidget(window.group_table)
     roi_list_io_row = QHBoxLayout()
     roi_list_io_row.setContentsMargins(0, 0, 0, 0)
     roi_list_io_row.setSpacing(4)
@@ -1582,6 +1616,10 @@ def build_layout(window) -> None:
         icon=window._make_cached_rois_icon(window._cached_rois_only_visible),
     )
     window.roi_list_cached_button.setChecked(window._cached_rois_only_visible)
+    window.group_new_button = window._make_icon_tool_button(
+        "plus", "#22c55e", "Create a new, empty group. Add ROIs to it from the group's right-click menu."
+    )
+    window.group_new_button.setVisible(False)
     window.roi_export_button = window._make_icon_tool_button(
         "file-export", "#22c55e", "Save a named backup of the ROI table (JSON). The live table is already saved automatically as you edit."
     )
@@ -1589,6 +1627,7 @@ def build_layout(window) -> None:
         "file-import", "#38bdf8", "Load a saved ROI table (JSON), replacing the current one."
     )
     roi_list_io_row.addWidget(window.roi_list_cached_button)
+    roi_list_io_row.addWidget(window.group_new_button)
     roi_list_io_row.addStretch(1)
     roi_list_io_row.addWidget(window.roi_export_button)
     roi_list_io_row.addWidget(window.roi_import_button)
@@ -1664,7 +1703,12 @@ def build_layout(window) -> None:
     )
     window.workflow_panel.setMinimumWidth(340)
     window.roi_list_panel = window._create_panel_container(
-        "ROI table", roi_list_panel, panel_name="roiListPanel", help_text=panel_help_text("roi_table_panel")
+        "ROI table",
+        roi_list_panel,
+        panel_name="roiListPanel",
+        help_text=panel_help_text("roi_table_panel"),
+        title_options=("ROI", "Group"),
+        on_title_option=window._on_roi_group_view_toggled,
     )
     window.roi_list_panel.setMinimumWidth(240)
     window.image_panel = window._create_panel_container(

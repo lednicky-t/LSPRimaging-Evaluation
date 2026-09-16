@@ -317,11 +317,7 @@ class RoiGeometryMixin:
             return False
         if selected_ids == self._selected_roi_ids:
             return True
-        self._selected_roi_ids = selected_ids
-        self._update_roi_overlays()
-        self._update_roi_summary()
-        self._sync_roi_table_selection()
-        self._update_selection_dependent_plots(prompt_live_preview=True)
+        self._apply_roi_selection(selected_ids)
         return True
 
     def _ungroup_selected_rois(self) -> None:

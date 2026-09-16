@@ -240,6 +240,10 @@ class LayoutStateController:
             window.roi_list_cached_button.setIcon(window._make_cached_rois_icon(cached_rois_only_visible))
             window.roi_list_cached_button.blockSignals(False)
         window._cached_rois_only_visible = cached_rois_only_visible
+        roi_list_view_mode = str(window._settings.value("layout/roi_list_view_mode", "roi") or "roi")
+        window._roi_list_view_mode = roi_list_view_mode if roi_list_view_mode in ("roi", "group") else "roi"
+        window.roi_list_panel.set_active_title_option(1 if window._roi_list_view_mode == "group" else 0)
+        window._apply_roi_list_view_mode()
         window._suspend_collapsible_accordion = True
         try:
             window.dataset_section.set_pinned(window._settings_bool("dataset_section_pinned", False))
@@ -294,6 +298,7 @@ class LayoutStateController:
         window._settings.setValue("left_tab_index", window.left_tabs.currentIndex())
         window._settings.setValue("layout/roi_list_visible", bool(window.roi_list_panel.isVisible()))
         window._settings.setValue("layout/cached_rois_only_visible", bool(window._cached_rois_only_visible))
+        window._settings.setValue("layout/roi_list_view_mode", window._roi_list_view_mode)
         window._settings.setValue("dataset_section_expanded", window.dataset_section.is_expanded())
         window._settings.setValue("dataset_section_pinned", window.dataset_section.is_pinned())
         window._settings.setValue("summary_section_expanded", window.summary_section.is_expanded())
