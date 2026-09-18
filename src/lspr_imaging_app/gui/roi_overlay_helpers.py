@@ -70,6 +70,28 @@ def shade_group_member_color(
     return shaded
 
 
+def boost_color_for_selection(
+    base: QColor,
+    *,
+    saturation_boost: int = 70,
+    value_boost: int = 35,
+) -> QColor:
+    """`base` (a resolved ROI/group color) pushed toward more saturated and
+    brighter, for the "saturation boost" selection-highlight style (see
+    OverlayManager._update_roi_overlays) - keeps the same hue, so a selected
+    ROI still reads as belonging to its own group, just "lit up".
+
+    Both boosts clamp at 255, so a color already near-maximum saturation/
+    value (common for a categorical group palette) gets little or no visible
+    change from this alone - the "halo ring" style exists specifically to
+    stay legible in that case too; see its own docstring in
+    OverlayManager._update_roi_overlays for why."""
+    hue, saturation, value, alpha = base.getHsv()
+    boosted = QColor()
+    boosted.setHsv(hue, min(255, saturation + saturation_boost), min(255, value + value_boost), alpha)
+    return boosted
+
+
 def resolved_roi_plot_color(
     roi: AreaRoi,
     group: AreaRoiGroup | None,

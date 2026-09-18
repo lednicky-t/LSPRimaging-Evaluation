@@ -726,6 +726,12 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, MeasurementCalibrationMixin,
         self._highlight_visible = True
         self._reference_points_visible = True
         self._chromatic_reference_points_all_visible = False
+        # How a selected ROI is highlighted on the image overlay, without
+        # erasing its own group color - "halo" (a bright ring drawn just
+        # outside the ROI, default) or "saturation" (the ROI's own color
+        # pushed more saturated/bright). See OverlayManager._update_roi_
+        # overlays and Preferences > Appearance > "ROI selection highlight".
+        self._roi_selection_highlight_style = "halo"
         self._cached_rois_only_visible = self._settings_bool("layout/cached_rois_only_visible", False)
         # "roi" or "group" - which table the ROI/Group panel toggle currently
         # shows. Real restore happens in LayoutStateController.restore_layout_
@@ -7738,6 +7744,8 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, MeasurementCalibrationMixin,
             self.image_plot.removeItem(bundle.outer_curve)
         if bundle.label is not None:
             self.image_plot.removeItem(bundle.label)
+        if bundle.selection_halo is not None:
+            self.image_plot.removeItem(bundle.selection_halo)
 
     def _update_landmark_overlays(self) -> None:
         self._overlay_manager._update_landmark_overlays()

@@ -58,6 +58,18 @@ class PreferencesDialog(QDialog):
         self.theme_combo.addItem("Dark", "dark")
         self.theme_combo.addItem("Bright", "bright")
 
+        self.roi_selection_highlight_combo = QComboBox()
+        self.roi_selection_highlight_combo.addItem("Halo ring (recommended)", "halo")
+        self.roi_selection_highlight_combo.addItem("Saturation boost", "saturation")
+        self.roi_selection_highlight_combo.setToolTip(
+            "How a selected ROI is marked on the image, without hiding its own/its group's color:\n\n"
+            "Halo ring: the ROI keeps its own color; a bright dashed ring is drawn just outside it "
+            "to show it's selected. Stays legible no matter how saturated the group color already is.\n\n"
+            "Saturation boost: the ROI's own color is pushed more saturated/brighter when selected. "
+            "Simpler, but has little visible effect for a group color that's already near-maximum "
+            "saturation/brightness."
+        )
+
         # Startup
         self.startup_restore_combo = QComboBox()
         for seconds, label in _STARTUP_RESTORE_TIMEOUT_OPTIONS:
@@ -216,6 +228,7 @@ class PreferencesDialog(QDialog):
         appearance_layout.setHorizontalSpacing(16)
         appearance_layout.setVerticalSpacing(8)
         appearance_layout.addRow("Theme", self.theme_combo)
+        appearance_layout.addRow("ROI selection highlight", self.roi_selection_highlight_combo)
 
         startup_box = QGroupBox("Startup")
         startup_layout = QFormLayout(startup_box)
@@ -402,6 +415,10 @@ class PreferencesDialog(QDialog):
         if theme_index >= 0:
             self.theme_combo.setCurrentIndex(theme_index)
 
+        if hasattr(window, "_roi_selection_highlight_style"):
+            index = self.roi_selection_highlight_combo.findData(window._roi_selection_highlight_style)
+            self.roi_selection_highlight_combo.setCurrentIndex(index if index >= 0 else 0)
+
         if hasattr(window, "_startup_restore_timeout_seconds"):
             timeout = window._startup_restore_timeout_seconds()
             index = self.startup_restore_combo.findData(timeout)
@@ -440,6 +457,15 @@ class PreferencesDialog(QDialog):
         theme = str(self.theme_combo.currentData() or "dark")
         if hasattr(window, "_set_ui_theme"):
             window._set_ui_theme(theme)
+
+        if hasattr(window, "_roi_selection_highlight_style"):
+            style = str(self.roi_selection_highlight_combo.currentData() or "halo")
+            if style != window._roi_selection_highlight_style:
+                window._roi_selection_highlight_style = style
+                if hasattr(window, "_save_visual_preferences"):
+                    window._save_visual_preferences()
+                if hasattr(window, "_update_roi_overlays"):
+                    window._update_roi_overlays()
 
         if hasattr(window, "_set_startup_restore_timeout_seconds"):
             timeout = self.startup_restore_combo.currentData()

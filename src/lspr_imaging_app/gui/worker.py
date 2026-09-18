@@ -39,6 +39,7 @@ class RoiOverlayBundle:
     inner_curve: pg.PlotCurveItem | None = None
     outer_curve: pg.PlotCurveItem | None = None
     label: pg.TextItem | None = None
+    selection_halo: pg.PlotCurveItem | None = None
 
 
 @dataclass(slots=True)

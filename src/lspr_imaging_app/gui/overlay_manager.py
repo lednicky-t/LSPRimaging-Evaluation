@@ -14,8 +14,19 @@ from lspr_imaging_app.gui.worker import (
     MeasurementOverlayBundle,
     RoiOverlayBundle,
 )
-from lspr_imaging_app.gui.roi_overlay_helpers import CACHED_ROI_INDICATOR_COLOR, resolved_reference_color, resolved_roi_color
+from lspr_imaging_app.gui.roi_overlay_helpers import (
+    CACHED_ROI_INDICATOR_COLOR,
+    boost_color_for_selection,
+    resolved_reference_color,
+    resolved_roi_color,
+)
 from lspr_imaging_app.processing.preprocess import apply_spatial_mask
+
+# How far outside a selected ROI's own sample radius the "halo ring" selection-
+# highlight style (see _update_roi_overlays) is drawn, in the same pixel units
+# as sample_radius_px - a small, fixed margin rather than a fraction of the
+# radius, matching how the reference-ring radii are already plain pixel values.
+_SELECTION_HALO_MARGIN_PX = 3.0
 
 
 class OverlayManager:
@@ -67,6 +78,7 @@ class OverlayManager:
 
         reference_inner_radius = float(max(w._state.area_roi_settings.reference_inner_radius_px, 0))
         reference_outer_radius = float(max(w._state.area_roi_settings.reference_outer_radius_px, w._state.area_roi_settings.reference_inner_radius_px))
+        highlight_style = w._roi_selection_highlight_style
         for roi in display_rois:
             if roi_ids is not None and roi.area_roi_id not in roi_ids:
                 # Scoped refresh (interactive move in progress): this ROI's
@@ -103,28 +115,80 @@ class OverlayManager:
                 inferred_fill = QColor("#f59e0b")
                 inferred_fill.setAlphaF(w._alpha01(max(w._roi_alpha * 0.15, 0.08)))
                 brush = pg.mkBrush(inferred_fill)
-            if roi.area_roi_id in w._selected_roi_ids:
-                selected_color = QColor("#38bdf8")
-                selected_color.setAlphaF(1.0)
-                pen = pg.mkPen(selected_color, width=3)
-                selected_fill = QColor("#38bdf8")
-                selected_fill.setAlphaF(0.2)
-                brush = pg.mkBrush(selected_fill)
+            is_selected = roi.area_roi_id in w._selected_roi_ids
+            show_halo = False
+            if is_selected:
+                # Two user-selectable styles (Preferences > Appearance > "ROI
+                # selection highlight") for marking a selected ROI without
+                # erasing its own group color - a flat override color here
+                # used to make every selected ROI look identical regardless
+                # of group, which was the actual bug report this replaced.
+                if highlight_style == "saturation":
+                    # Push the ROI's own resolved color toward more saturated/
+                    # brighter rather than replacing it outright - see
+                    # boost_color_for_selection's docstring for why this alone
+                    # can be a weak cue when the group color is already near
+                    # maximum saturation/value.
+                    selected_color = boost_color_for_selection(resolved_roi_color(roi, group, w._sample_visual_color))
+                    selected_color.setAlphaF(1.0)
+                    pen = pg.mkPen(selected_color, width=3)
+                    selected_fill = boost_color_for_selection(resolved_roi_color(roi, group, w._sample_visual_color))
+                    selected_fill.setAlphaF(0.3)
+                    brush = pg.mkBrush(selected_fill)
+                else:
+                    # "halo": the ROI's own color is left untouched (just
+                    # solid/bolder so "selected" still reads at a glance), and
+                    # a separate bright ring drawn just outside it (below)
+                    # carries the actual selection cue - legible no matter how
+                    # saturated the group color already is.
+                    solid_color = resolved_roi_color(roi, group, w._sample_visual_color)
+                    solid_color.setAlphaF(1.0)
+                    pen = pg.mkPen(solid_color, width=3)
+                    solid_fill = resolved_roi_color(roi, group, w._sample_visual_color)
+                    solid_fill.setAlphaF(w._alpha01(max(w._roi_alpha * 0.35, 0.12)))
+                    brush = pg.mkBrush(solid_fill)
+                    show_halo = True
             bundle.curve.setData(xs, ys)
             bundle.curve.setPen(pen)
             bundle.curve.setFillLevel(roi.center_y)
             bundle.curve.setBrush(brush)
             bundle.curve.setVisible(w._rois_visible)
+            if show_halo:
+                halo_xs, halo_ys = w._roi_curve_points(
+                    source_roi, roi, source_roi.sample_radius_px + _SELECTION_HALO_MARGIN_PX
+                )
+                if bundle.selection_halo is None:
+                    bundle.selection_halo = pg.PlotCurveItem()
+                    bundle.selection_halo.setSkipFiniteCheck(True)
+                    w.image_plot.addItem(bundle.selection_halo, ignoreBounds=True)
+                halo_color = QColor("#f8fafc")
+                halo_color.setAlphaF(0.9)
+                bundle.selection_halo.setData(halo_xs, halo_ys)
+                bundle.selection_halo.setPen(pg.mkPen(halo_color, width=2.2, style=Qt.PenStyle.DashLine))
+                bundle.selection_halo.setVisible(w._rois_visible)
+            elif bundle.selection_halo is not None:
+                bundle.selection_halo.setVisible(False)
             if w._reference_visible and reference_outer_radius > 0.0:
                 reference_color = resolved_reference_color(roi, group, w._reference_visual_color)
                 reference_color.setAlphaF(w._alpha01(max(w._reference_alpha * 1.3, 0.18)))
                 reference_fill = resolved_reference_color(roi, group, w._reference_visual_color)
                 reference_fill.setAlphaF(w._alpha01(max(w._reference_alpha, 0.03)))
-                if roi.area_roi_id in w._selected_roi_ids:
-                    reference_color = QColor("#38bdf8")
-                    reference_color.setAlphaF(w._alpha01(0.85))
-                    reference_fill = QColor("#38bdf8")
-                    reference_fill.setAlphaF(w._alpha01(max(w._reference_alpha, 0.08)))
+                if is_selected:
+                    if highlight_style == "saturation":
+                        reference_color = boost_color_for_selection(
+                            resolved_reference_color(roi, group, w._reference_visual_color)
+                        )
+                        reference_color.setAlphaF(w._alpha01(0.85))
+                        reference_fill = boost_color_for_selection(
+                            resolved_reference_color(roi, group, w._reference_visual_color)
+                        )
+                        reference_fill.setAlphaF(w._alpha01(max(w._reference_alpha, 0.08)))
+                    else:
+                        # "halo": no flat override here either - the sample
+                        # ring's own halo (above) is already the selection
+                        # cue, this just reads a bit bolder to match.
+                        reference_color.setAlphaF(w._alpha01(0.95))
+                        reference_fill.setAlphaF(w._alpha01(max(w._reference_alpha * 1.4, 0.1)))
                 inner_pen = pg.mkPen(reference_color, width=1.4, style=Qt.PenStyle.DashLine)
                 outer_pen = pg.mkPen(reference_color, width=1.4, style=Qt.PenStyle.DotLine)
                 # Computed once and reused for both outline curves and the
@@ -171,7 +235,6 @@ class OverlayManager:
             label = w._array_label_for_roi(roi.area_roi_id)
             if label is not None and w._roi_labels_visible:
                 theme = get_active_theme()
-                is_selected = roi.area_roi_id in w._selected_roi_ids
                 if is_selected:
                     # Selected badge background (#0f766e teal) is a fixed
                     # accent, not theme-tracked (same reasoning as

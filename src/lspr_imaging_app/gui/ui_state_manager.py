@@ -174,6 +174,9 @@ class UIStateManager:
         window._reference_visible = window._read_bool_setting("visual/reference_rois_visible", window._reference_visible)
         window._highlight_visible = window._read_bool_setting("visual/highlight_visible", window._highlight_visible)
         window._reference_points_visible = window._read_bool_setting("visual/reference_points_visible", window._reference_points_visible)
+        window._roi_selection_highlight_style = str(
+            window._settings.value("visual/roi_selection_highlight_style", window._roi_selection_highlight_style)
+        )
         window._chromatic_reference_points_all_visible = window._read_bool_setting(
             "visual/chromatic_reference_points_all_visible",
             window._chromatic_reference_points_all_visible,
@@ -259,6 +262,7 @@ class UIStateManager:
         window._settings.setValue("visual/reference_rois_visible", window._reference_visible)
         window._settings.setValue("visual/highlight_visible", window._highlight_visible)
         window._settings.setValue("visual/reference_points_visible", window._reference_points_visible)
+        window._settings.setValue("visual/roi_selection_highlight_style", window._roi_selection_highlight_style)
         window._settings.setValue("visual/chromatic_reference_points_all_visible", window._chromatic_reference_points_all_visible)
         window._settings.setValue("visual/background_profile_visible", window._showing_background_profile_main)
         if window._current_processed_image is not None and not window._showing_background_profile_main:
