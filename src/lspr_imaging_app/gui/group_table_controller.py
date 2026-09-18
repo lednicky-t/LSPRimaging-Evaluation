@@ -280,22 +280,39 @@ class GroupTableController:
         if not color.isValid():
             return
         self.window._push_undo_point("New group")
+        # If ROIs are selected at creation time, the new group starts with
+        # them already as members (moved out of whatever group they were
+        # in, same "at most one group" rule as add_selected_rois_to_group)
+        # instead of forcing a separate "Add selected ROIs" step right after.
+        selected_ids = set(self.window._selected_roi_ids)
+        if selected_ids:
+            for other in self.window._state.area_roi_groups:
+                other.area_roi_ids = [rid for rid in other.area_roi_ids if rid not in selected_ids]
+            self.window._state.area_roi_groups = [
+                candidate for candidate in self.window._state.area_roi_groups if candidate.area_roi_ids
+            ]
         group = AreaRoiGroup(
             group_id=f"group_{len(self.window._state.area_roi_groups) + 1}",
             name=name,
             sample_color_hex=color.name(),
             reference_color_hex=self.window._reference_visual_color.name(),
-            area_roi_ids=[],
+            area_roi_ids=sorted(selected_ids),
         )
-        # Deliberately not filtered by "drop if area_roi_ids is empty" - unlike
-        # _ungroup_selected_rois/_destroy_groups_for_roi, where an empty group
-        # is always an accidental byproduct, this one is intentionally empty
-        # until the user adds ROIs to it via "Add selected ROIs to this group".
         self.window._state.area_roi_groups.append(group)
-        self.window._append_workflow_log(f"Groups | create empty '{name}'", level="success")
-        self.window._save_processing_state_for_dataset()
-        self.window._update_roi_table()
-        self.window.status_label.setText(f"Created empty group '{name}'. Add ROIs to it from its right-click menu.")
+        if selected_ids:
+            self.window._append_workflow_log(
+                f"Groups | create '{name}' with {len(selected_ids)} selected ROI(s)", level="success"
+            )
+            self.window._update_roi_overlays()
+            self.window._update_roi_summary()
+            self.window._save_processing_state_for_dataset()
+            self.window._update_roi_table()
+            self.window.status_label.setText(f"Created group '{name}' with {len(selected_ids)} selected ROI(s).")
+        else:
+            self.window._append_workflow_log(f"Groups | create empty '{name}'", level="success")
+            self.window._save_processing_state_for_dataset()
+            self.window._update_roi_table()
+            self.window.status_label.setText(f"Created empty group '{name}'. Add ROIs to it from its right-click menu.")
 
     def add_selected_rois_to_group(self, group_id: str) -> None:
         group = self._group_by_id(group_id)
@@ -349,6 +366,42 @@ class GroupTableController:
         self.window._save_processing_state_for_dataset()
         self.window._update_roi_table()
         self.window.status_label.setText(f"Removed {len(removable)} ROI(s) from '{group.name}'.")
+
+    def delete_selected_groups(self) -> None:
+        """Toolbar-button counterpart to delete_group's context-menu action:
+        deletes every group with a selected row in window.group_table (the
+        synthetic Ungrouped row has no group_id and is silently skipped)."""
+        table = self.window.group_table
+        selection_model = table.selectionModel()
+        if selection_model is None:
+            return
+        group_ids = {
+            group_id
+            for row in range(table.rowCount())
+            if selection_model.isRowSelected(row, table.rootIndex())
+            for group_id in [self._group_id_for_row(row)]
+            if group_id is not None
+        }
+        if not group_ids:
+            self.window.status_label.setText("Select a group first to delete it.")
+            return
+        groups = [group for group in self.window._state.area_roi_groups if group.group_id in group_ids]
+        if not groups:
+            return
+        self.window._push_undo_point("Delete group" if len(groups) == 1 else "Delete groups")
+        for group in groups:
+            self.window._append_workflow_log(f"Groups | delete '{group.name}'", level="warning")
+        self.window._state.area_roi_groups = [
+            candidate for candidate in self.window._state.area_roi_groups if candidate.group_id not in group_ids
+        ]
+        self.window._update_roi_overlays()
+        self.window._update_roi_summary()
+        self.window._save_processing_state_for_dataset()
+        self.window._update_roi_table()
+        if len(groups) == 1:
+            self.window.status_label.setText(f"Deleted group '{groups[0].name}'; its ROIs are now ungrouped.")
+        else:
+            self.window.status_label.setText(f"Deleted {len(groups)} groups; their ROIs are now ungrouped.")
 
     def delete_group(self, group_id: str) -> None:
         group = self._group_by_id(group_id)

@@ -220,17 +220,18 @@ class RoiGeometryMixin:
                 ordered.extend(row_group)
         return ordered
 
-    def _order_rois_as_array_column_major(
-        self,
-        rois: list[AreaRoi],
-        *,
-        rows: int | None,
-        cols: int | None,
-    ) -> list[AreaRoi]:
-        """Mirrors _order_rois_as_array with x/y (and rows/cols) swapped
-        throughout: groups ROIs into columns first, then numbers top-to-
-        bottom within each column, left column to right column - instead of
-        row-major's rows-first, left-to-right-within-row numbering."""
+    def _cluster_rois_into_columns(self, rois: list[AreaRoi], *, cols_hint: int | None) -> list[list[AreaRoi]]:
+        """Groups `rois` into left-to-right column clusters by x-position,
+        using the same distance-tolerance clustering _order_rois_as_array
+        uses for rows (_roi_reorder_row_band, sized from ROI spacing/
+        diameter so it scales with the array's own geometry). If cols_hint
+        is given (e.g. area_roi_settings.array_cols) and the natural
+        clustering doesn't produce that many columns, falls back to an even
+        left-to-right split into that many instead - the same "trust the
+        stated column count over noisy positions" rule reorder-by-column
+        already applied. Shared by _order_rois_as_array_column_major (which
+        also orders within each column) and _group_rois_by_column (which
+        only needs the grouping)."""
         if not rois:
             return []
         sorted_rois = sorted(rois, key=lambda roi: (float(roi.center_x), float(roi.center_y), int(roi.area_roi_id)))
@@ -254,11 +255,27 @@ class RoiGeometryMixin:
                 col_groups.append([roi])
                 col_centers.append(x)
 
-        if cols is not None and cols > 0 and len(col_groups) != cols:
-            col_groups = [list(group) for group in np.array_split(np.asarray(sorted_rois, dtype=object), cols)]
+        if cols_hint is not None and cols_hint > 0 and len(col_groups) != cols_hint:
+            col_groups = [list(group) for group in np.array_split(np.asarray(sorted_rois, dtype=object), cols_hint)]
 
-        col_groups = [sorted(group, key=lambda roi: (float(roi.center_y), int(roi.area_roi_id))) for group in col_groups]
         col_groups.sort(key=lambda group: float(np.mean([float(roi.center_x) for roi in group])) if group else 0.0)
+        return col_groups
+
+    def _order_rois_as_array_column_major(
+        self,
+        rois: list[AreaRoi],
+        *,
+        rows: int | None,
+        cols: int | None,
+    ) -> list[AreaRoi]:
+        """Mirrors _order_rois_as_array with x/y (and rows/cols) swapped
+        throughout: groups ROIs into columns first, then numbers top-to-
+        bottom within each column, left column to right column - instead of
+        row-major's rows-first, left-to-right-within-row numbering."""
+        if not rois:
+            return []
+        col_groups = self._cluster_rois_into_columns(rois, cols_hint=cols)
+        col_groups = [sorted(group, key=lambda roi: (float(roi.center_y), int(roi.area_roi_id))) for group in col_groups]
 
         ordered: list[AreaRoi] = []
         for col_group in col_groups:
@@ -267,6 +284,47 @@ class RoiGeometryMixin:
             else:
                 ordered.extend(col_group)
         return ordered
+
+    def _group_rois_by_column(self) -> None:
+        """Auto-organize action (the array-of-columns toolbar button next to
+        "New group"): replaces every existing group with one group per
+        detected column of ROIs, left to right, each given a distinct
+        palette color. Unlike create_group/_group_selected_rois, this always
+        acts on the whole dataset, not the current selection - it's a bulk
+        "lay out my array as columns" action, not a selection tool, matching
+        _reorder_rois_by_position's same all-ROIs scope."""
+        if not self._state.area_rois:
+            self.status_label.setText("No ROIs available to group by column.")
+            return
+        cols_hint = int(self._state.area_roi_settings.array_cols) or None
+        column_groups = self._cluster_rois_into_columns(list(self._state.area_rois), cols_hint=cols_hint)
+        if len(column_groups) < 2:
+            self.status_label.setText("Couldn't find more than one column among the current ROIs.")
+            return
+        self._push_undo_point("Group ROIs by column")
+        self._append_workflow_log(
+            f"Groups | auto-create {len(column_groups)} column group(s) from {len(self._state.area_rois)} ROI(s)",
+            level="success",
+        )
+        # Every ROI ends up in exactly one column group, so the old grouping
+        # scheme (whatever it was) is fully superseded rather than merged.
+        self._state.area_roi_groups = [
+            AreaRoiGroup(
+                group_id=f"group_col_{index + 1}",
+                name=f"Column {index + 1}",
+                sample_color_hex=self._next_group_palette_color_at(index).name(),
+                reference_color_hex=self._reference_visual_color.name(),
+                area_roi_ids=sorted(roi.area_roi_id for roi in column),
+            )
+            for index, column in enumerate(column_groups)
+        ]
+        self._update_roi_overlays()
+        self._update_roi_summary()
+        self._save_processing_state_for_dataset()
+        self._update_roi_table()
+        self.status_label.setText(
+            f"Created {len(column_groups)} column group(s) from {len(self._state.area_rois)} ROI(s)."
+        )
 
     def _group_for_roi(self, roi_id: int) -> AreaRoiGroup | None:
         for group in self._state.area_roi_groups:

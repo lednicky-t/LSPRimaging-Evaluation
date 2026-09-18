@@ -1617,9 +1617,23 @@ def build_layout(window) -> None:
     )
     window.roi_list_cached_button.setChecked(window._cached_rois_only_visible)
     window.group_new_button = window._make_icon_tool_button(
-        "plus", "#22c55e", "Create a new, empty group. Add ROIs to it from the group's right-click menu."
+        "plus",
+        "#22c55e",
+        "Create a new group. Any currently-selected ROIs are added to it right away "
+        "(moved out of their previous group, if any); otherwise it starts empty.",
     )
     window.group_new_button.setVisible(False)
+    window.group_delete_button = window._make_icon_tool_button(
+        "trash-2", "#ef4444", "Delete the selected group(s) in the table above. Their ROIs become ungrouped, not deleted."
+    )
+    window.group_delete_button.setVisible(False)
+    window.group_by_column_button = window._make_icon_tool_button(
+        "layout-columns",
+        "#38bdf8",
+        "Auto-create one group per column of ROIs, left to right, each with its own color. "
+        "Replaces the current grouping.",
+    )
+    window.group_by_column_button.setVisible(False)
     window.roi_export_button = window._make_icon_tool_button(
         "file-export", "#22c55e", "Save a named backup of the ROI table (JSON). The live table is already saved automatically as you edit."
     )
@@ -1628,6 +1642,8 @@ def build_layout(window) -> None:
     )
     roi_list_io_row.addWidget(window.roi_list_cached_button)
     roi_list_io_row.addWidget(window.group_new_button)
+    roi_list_io_row.addWidget(window.group_delete_button)
+    roi_list_io_row.addWidget(window.group_by_column_button)
     roi_list_io_row.addStretch(1)
     roi_list_io_row.addWidget(window.roi_export_button)
     roi_list_io_row.addWidget(window.roi_import_button)

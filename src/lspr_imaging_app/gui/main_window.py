@@ -2810,6 +2810,8 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, MeasurementCalibrationMixin,
         self.group_table.viewport().setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.group_table.viewport().customContextMenuRequested.connect(self._group_table_controller.show_context_menu)
         self.group_new_button.clicked.connect(self._group_table_controller.create_group)
+        self.group_delete_button.clicked.connect(self._group_table_controller.delete_selected_groups)
+        self.group_by_column_button.clicked.connect(self._group_rois_by_column)
         self.roi_export_button.clicked.connect(self._roi_table_controller.export_roi_table)
         self.roi_import_button.clicked.connect(self._roi_table_controller.import_roi_table)
         self.metadata_import_button.clicked.connect(self._metadata_controller.import_metadata)
@@ -3287,6 +3289,8 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, MeasurementCalibrationMixin,
         self.roi_list_cached_button.setVisible(not showing_group)
         self.group_table.setVisible(showing_group)
         self.group_new_button.setVisible(showing_group)
+        self.group_delete_button.setVisible(showing_group)
+        self.group_by_column_button.setVisible(showing_group)
         if showing_group:
             # Row *contents* are already kept current by the shared debounce
             # timer regardless of which table is visible; this just makes
