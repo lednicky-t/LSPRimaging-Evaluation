@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Callable
 
 import numpy as np
-from PyQt6.QtCore import QByteArray, QPointF, QRectF, QSize, Qt, QTimer, pyqtSignal
+from PyQt6.QtCore import QByteArray, QPointF, QRect, QRectF, QSize, Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import (
     QColor,
     QIcon,
@@ -15,6 +15,7 @@ from PyQt6.QtGui import (
 )
 from PyQt6.QtSvg import QSvgRenderer
 from PyQt6.QtWidgets import (
+    QApplication,
     QDockWidget,
     QDoubleSpinBox,
     QHBoxLayout,
@@ -345,6 +346,11 @@ class PanelContainer(QDockWidget):
         # dock-target hint overlay or risk an accidental snap-back. The float button
         # re-arms docking on click, tracked here so it can also gate a second click.
         self._dock_armed = False
+        # Maximize state, floating-only (see _build_title_bar/_on_maximize_button_clicked):
+        # whether this panel currently fills its screen's available geometry, and the
+        # geometry to restore when un-maximized.
+        self._maximized = False
+        self._pre_maximize_geometry: QRect | None = None
 
         theme = get_active_theme()
         self._apply_frame_style(theme)
@@ -461,6 +467,23 @@ class PanelContainer(QDockWidget):
         float_button.clicked.connect(self._on_float_button_clicked)
         layout.addWidget(float_button)
         self._float_button = float_button
+
+        # Only meaningful once floating (there's no "screen" to fill while docked into
+        # the main window) - starts hidden/reset and is shown by _on_top_level_changed.
+        maximize_button = QToolButton(row)
+        maximize_button.setIcon(self._make_maximize_icon())
+        maximize_button.setIconSize(QSize(18, 18))
+        maximize_button.setFixedSize(24, 24)
+        maximize_button.setAutoRaise(True)
+        maximize_button.setToolTip("Maximize this panel to fill the screen.")
+        maximize_button.setStyleSheet(
+            transparent_icon_button_stylesheet(hover=hex_to_rgba(theme.accent_blue, 0.22))
+            + "QToolButton:hover { border-radius: 4px; }"
+        )
+        maximize_button.clicked.connect(self._on_maximize_button_clicked)
+        maximize_button.setVisible(self.isFloating())
+        layout.addWidget(maximize_button)
+        self._maximize_button = maximize_button
 
         close_button = QToolButton(row)
         close_button.setIcon(self._make_close_icon())
@@ -583,6 +606,36 @@ class PanelContainer(QDockWidget):
         )
         self._apply_frame_style(get_active_theme())
         self._update_float_button_appearance()
+        # Maximizing only makes sense while floating - hide the button once docked, and
+        # forget any stale "maximized"/pre-maximize geometry so a later re-float starts
+        # fresh rather than restoring a leftover geometry from a previous floating spell.
+        self._maximize_button.setVisible(floating)
+        if not floating:
+            self._maximized = False
+            self._pre_maximize_geometry = None
+            self._update_maximize_button_appearance()
+
+    def _on_maximize_button_clicked(self) -> None:
+        if not self.isFloating():
+            return
+        if self._maximized:
+            self._maximized = False
+            if self._pre_maximize_geometry is not None:
+                self.setGeometry(self._pre_maximize_geometry)
+            self._pre_maximize_geometry = None
+        else:
+            self._pre_maximize_geometry = self.geometry()
+            screen = self.screen() or QApplication.primaryScreen()
+            if screen is not None:
+                self.setGeometry(screen.availableGeometry())
+            self._maximized = True
+        self._update_maximize_button_appearance()
+
+    def _update_maximize_button_appearance(self) -> None:
+        self._maximize_button.setIcon(self._make_maximize_icon(self._maximized))
+        self._maximize_button.setToolTip(
+            "Restore this panel to its previous size." if self._maximized else "Maximize this panel to fill the screen."
+        )
 
     def _update_float_button_appearance(self) -> None:
         if not self.isFloating():
@@ -620,6 +673,21 @@ class PanelContainer(QDockWidget):
     def _make_float_icon(color: str | None = None) -> QIcon:
         color = color if color is not None else get_active_theme().text_muted
         svg = tabler_icon_svg("external-link", color=color, stroke_width=2.2)
+        if svg:
+            renderer = QSvgRenderer(QByteArray(svg.encode("utf-8")))
+            if renderer.isValid():
+                pixmap = QPixmap(20, 20)
+                pixmap.fill(Qt.GlobalColor.transparent)
+                painter = QPainter(pixmap)
+                renderer.render(painter, QRectF(1.0, 1.0, 18.0, 18.0))
+                painter.end()
+                return QIcon(pixmap)
+        return QIcon()
+
+    @staticmethod
+    def _make_maximize_icon(maximized: bool = False, color: str | None = None) -> QIcon:
+        color = color if color is not None else get_active_theme().text_muted
+        svg = tabler_icon_svg("minimize" if maximized else "maximize", color=color, stroke_width=2.2)
         if svg:
             renderer = QSvgRenderer(QByteArray(svg.encode("utf-8")))
             if renderer.isValid():
