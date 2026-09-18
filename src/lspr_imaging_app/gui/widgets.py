@@ -332,6 +332,7 @@ class PanelContainer(QDockWidget):
         self._active_title_index = 0
         self._title_option_buttons: list[QToolButton] = []
         self.setObjectName(f"{title.replace(' ', '')}Panel")
+        self._frame_border_color: str | None = None
         self.setWidget(content)
         self.setFeatures(
             QDockWidget.DockWidgetFeature.DockWidgetMovable
@@ -346,7 +347,7 @@ class PanelContainer(QDockWidget):
         self._dock_armed = False
 
         theme = get_active_theme()
-        self.setStyleSheet(f"QDockWidget {{ color: {theme.text_primary}; }}")
+        self._apply_frame_style(theme)
         # QDockWidget's built-in close/float buttons hard-code their icon's pixel
         # size in Qt's C++ paint code; neither the stylesheet's width/height nor
         # a QSS "icon-size"/"image" override nor setIconSize() on the internal
@@ -365,8 +366,43 @@ class PanelContainer(QDockWidget):
         own and need to be rebuilt explicitly. Called from
         MainWindow._apply_theme_styles for every PanelContainer."""
         theme = get_active_theme()
-        self.setStyleSheet(f"QDockWidget {{ color: {theme.text_primary}; }}")
+        self._apply_frame_style(theme)
         self.setTitleBarWidget(self._build_title_bar(self._title, theme))
+
+    def _apply_frame_style(self, theme) -> None:
+        """A floating PanelContainer is a real top-level OS window, but with
+        no native title bar (setTitleBarWidget replaces it) the OS-drawn
+        window border is often just a 1px, barely-visible line - on Windows
+        11 especially, an unfocused floating panel can be almost impossible
+        to tell apart from whatever's behind it.
+
+        An earlier version of this tried to fake a border out of a QSS rule
+        on the title bar widget plus another on a wrapper around the content
+        widget (two separate child widgets contributing complementary sides
+        of the same rectangle). That produced visibly doubled lines: near
+        the title, the new top border sat right alongside the title bar's
+        own pre-existing underline separator; near the content, the new
+        border didn't quite line up pixel-for-pixel with the title bar's
+        one, since QDockWidget positions the two independently. Drawing a
+        single stroke directly on `self` in paintEvent() avoids both -
+        there's exactly one rectangle, and it can't misalign with itself.
+        `setContentsMargins` reserves the 1px ring so the title bar/content
+        children don't paint over it."""
+        self.setStyleSheet(f"QDockWidget {{ color: {theme.text_primary}; }}")
+        if self.isFloating():
+            self.setContentsMargins(1, 1, 1, 1)
+            self._frame_border_color = theme.toolbar_border
+        else:
+            self.setContentsMargins(0, 0, 0, 0)
+            self._frame_border_color = None
+        self.update()
+
+    def paintEvent(self, event) -> None:  # type: ignore[override]
+        super().paintEvent(event)
+        if self._frame_border_color is not None:
+            painter = QPainter(self)
+            painter.setPen(QPen(QColor(self._frame_border_color)))
+            painter.drawRect(self.rect().adjusted(0, 0, -1, -1))
 
     def _build_title_bar(self, title: str, theme) -> QWidget:
         bar = QWidget(self)
@@ -545,6 +581,7 @@ class PanelContainer(QDockWidget):
         self.setAllowedAreas(
             Qt.DockWidgetArea.NoDockWidgetArea if floating else Qt.DockWidgetArea.AllDockWidgetAreas
         )
+        self._apply_frame_style(get_active_theme())
         self._update_float_button_appearance()
 
     def _update_float_button_appearance(self) -> None:
