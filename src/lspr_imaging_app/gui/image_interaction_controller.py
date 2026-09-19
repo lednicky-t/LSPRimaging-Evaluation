@@ -70,6 +70,22 @@ class ImageInteractionController:
                 w._paste_roi_properties_from_table()
                 return True
 
+        group_table = getattr(w, "group_table", None)
+        if group_table is not None and watched is group_table and event.type() == QEvent.Type.KeyPress:
+            key_event = event
+            if key_event.matches(QKeySequence.StandardKey.Undo):
+                w._undo()
+                return True
+            if key_event.matches(QKeySequence.StandardKey.Redo):
+                w._redo()
+                return True
+            if key_event.key() == Qt.Key.Key_PageUp:
+                w._group_table_controller.move_selected(-1)
+                return True
+            if key_event.key() == Qt.Key.Key_PageDown:
+                w._group_table_controller.move_selected(1)
+                return True
+
         if watched is w.chromatic_landmark_id_spin and event.type() == QEvent.Type.KeyPress and w._active_tool == "chromatic_landmark":
             key_event = event
             if key_event.key() in {Qt.Key.Key_PageUp, Qt.Key.Key_PageDown}:

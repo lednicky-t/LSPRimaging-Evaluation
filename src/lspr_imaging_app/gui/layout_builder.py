@@ -1567,8 +1567,8 @@ def build_layout(window) -> None:
         "Use the table selection to choose one or more ROIs before copying or moving.",
     )
     window.group_table = QTableWidget(window)
-    window.group_table.setColumnCount(4)
-    window.group_table.setHorizontalHeaderLabels(["Group", "Sample", "Reference", "ROIs"])
+    window.group_table.setColumnCount(5)
+    window.group_table.setHorizontalHeaderLabels(["#", "Group", "Sample", "Reference", "ROIs"])
     window.group_table.setAlternatingRowColors(False)
     window.group_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
     window.group_table.setSelectionMode(QTableWidget.SelectionMode.ExtendedSelection)
@@ -1578,8 +1578,15 @@ def build_layout(window) -> None:
     window.group_table.horizontalHeader().setDefaultAlignment(Qt.AlignmentFlag.AlignLeft)
     window.group_table.horizontalHeader().setStretchLastSection(True)
     window.group_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
-    window.group_table.horizontalHeader().setSortIndicatorShown(True)
-    window.group_table.setSortingEnabled(True)
+    # Sorting is deliberately off (not just cosmetic - see move_group in
+    # GroupTableController): the "#" column is the group's actual position
+    # in area_roi_groups, which also drives default group colors and the
+    # sensorgram legend order, so letting a header click silently re-sort
+    # only the on-screen rows (without touching that list) would desync the
+    # displayed number from what it means. Move Up/Down (buttons, right-click
+    # menu, PageUp/PageDown) is the one way to reorder rows instead.
+    window.group_table.horizontalHeader().setSortIndicatorShown(False)
+    window.group_table.setSortingEnabled(False)
     window.group_table.setShowGrid(False)
     group_table_font = window.group_table.font()
     group_table_font.setPointSize(8)
@@ -1592,9 +1599,12 @@ def build_layout(window) -> None:
     window._set_help(
         window.group_table,
         "Group table keyboard shortcuts:\n"
+        "The '#' column is the group's order - it also sets the default group\n"
+        "color and the sensorgram legend order.\n"
         "Double-click a name: Rename the group\n"
         "Double-click a color swatch: Change that color\n"
-        "Right-click a row: More actions (add/remove ROIs, delete group)\n"
+        "PageUp / PageDown: Move the selected group up/down (changes its '#')\n"
+        "Right-click a row: More actions (move up/down, add/remove ROIs, delete group)\n"
         "Selecting a group selects all of its ROIs everywhere (image, spectra, sensorgram).",
     )
     window.group_table.setVisible(False)
@@ -1634,6 +1644,18 @@ def build_layout(window) -> None:
         "Replaces the current grouping.",
     )
     window.group_by_column_button.setVisible(False)
+    window.group_move_up_button = window._make_icon_tool_button(
+        "arrow-up",
+        "#38bdf8",
+        "Move the selected group up (decreases its '#'). Other groups shift down accordingly.",
+    )
+    window.group_move_up_button.setVisible(False)
+    window.group_move_down_button = window._make_icon_tool_button(
+        "arrow-down",
+        "#38bdf8",
+        "Move the selected group down (increases its '#'). Other groups shift up accordingly.",
+    )
+    window.group_move_down_button.setVisible(False)
     window.roi_export_button = window._make_icon_tool_button(
         "file-export", "#22c55e", "Save a named backup of the ROI table (JSON). The live table is already saved automatically as you edit."
     )
@@ -1643,6 +1665,8 @@ def build_layout(window) -> None:
     roi_list_io_row.addWidget(window.roi_list_cached_button)
     roi_list_io_row.addWidget(window.group_new_button)
     roi_list_io_row.addWidget(window.group_delete_button)
+    roi_list_io_row.addWidget(window.group_move_up_button)
+    roi_list_io_row.addWidget(window.group_move_down_button)
     roi_list_io_row.addWidget(window.group_by_column_button)
     roi_list_io_row.addStretch(1)
     roi_list_io_row.addWidget(window.roi_export_button)

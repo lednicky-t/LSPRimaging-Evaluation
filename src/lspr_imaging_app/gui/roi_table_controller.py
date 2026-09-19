@@ -286,6 +286,12 @@ class RoiTableController:
     def show_context_menu(self, pos) -> None:
         table = self.window.roi_table
         item = table.itemAt(pos)
+        # Diagnostic for a "right-click does nothing on the Group table"
+        # report (2026-09-19) - logged on the ROI table too, as a working
+        # comparison point, since this handler is reportedly unaffected.
+        logging.getLogger("lspr_imaging_app.workflow").debug(
+            "ROI table | context menu requested | pos=%s | item_row=%s", pos, None if item is None else item.row()
+        )
         if item is None:
             return
         row = item.row()

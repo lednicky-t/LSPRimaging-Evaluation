@@ -32,13 +32,20 @@ class RoiTableRowData:
 class GroupTableRowData:
     """One row of the Group table. `group_id is None` marks the synthetic
     "Ungrouped" row (every ROI not in a real AreaRoiGroup) - it has no
-    underlying model object, so rename/recolor/delete don't apply to it."""
+    underlying model object, so rename/recolor/delete don't apply to it.
+
+    `position` is the group's 1-based rank in `area_roi_groups` (the same
+    list order that already drives default group colors and the sensorgram
+    "Average by group" legend order) - it is not a stored field on
+    AreaRoiGroup, just that list position surfaced for display. `None` for
+    the synthetic Ungrouped row, which isn't part of that list."""
 
     group_id: str | None
     name: str
     sample_color: QColor
     reference_color: QColor
     roi_count: int
+    position: int | None
 
 
 def roi_table_headers(table: QTableWidget) -> None:
@@ -54,12 +61,13 @@ def roi_table_headers(table: QTableWidget) -> None:
 
 
 def group_table_headers(table: QTableWidget) -> None:
-    if table.columnCount() < 4:
+    if table.columnCount() < 5:
         return
-    table.setHorizontalHeaderItem(0, QTableWidgetItem("Group"))
-    table.setHorizontalHeaderItem(1, QTableWidgetItem("Sample"))
-    table.setHorizontalHeaderItem(2, QTableWidgetItem("Reference"))
-    table.setHorizontalHeaderItem(3, QTableWidgetItem("ROIs"))
+    table.setHorizontalHeaderItem(0, QTableWidgetItem("#"))
+    table.setHorizontalHeaderItem(1, QTableWidgetItem("Group"))
+    table.setHorizontalHeaderItem(2, QTableWidgetItem("Sample"))
+    table.setHorizontalHeaderItem(3, QTableWidgetItem("Reference"))
+    table.setHorizontalHeaderItem(4, QTableWidgetItem("ROIs"))
 
 
 def make_color_swatch_icon(color: QColor, size: int = 16) -> QIcon:
@@ -131,24 +139,32 @@ def append_group_table_row(table: QTableWidget, row: GroupTableRowData) -> None:
     table.insertRow(index)
     table.setRowHeight(index, 18)
 
+    # group_id lives on the position item (col 0) rather than the name item,
+    # since it's the one column present on every row (including one that
+    # gets renamed) that callers can rely on for row->group lookups.
+    position_item = QTableWidgetItem("" if row.position is None else str(row.position))
+    position_item.setFlags(position_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+    position_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+    position_item.setData(Qt.ItemDataRole.UserRole, row.group_id)
+    table.setItem(index, 0, position_item)
+
     name_item = QTableWidgetItem(row.name)
     if row.group_id is None:
         name_item.setFlags(name_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
     else:
         name_item.setFlags(name_item.flags() | Qt.ItemFlag.ItemIsEditable)
-    name_item.setData(Qt.ItemDataRole.UserRole, row.group_id)
-    table.setItem(index, 0, name_item)
+    table.setItem(index, 1, name_item)
 
     sample_item = QTableWidgetItem("")
     sample_item.setFlags(sample_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
     sample_item.setIcon(make_color_swatch_icon(row.sample_color))
-    table.setItem(index, 1, sample_item)
+    table.setItem(index, 2, sample_item)
 
     reference_item = QTableWidgetItem("")
     reference_item.setFlags(reference_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
     reference_item.setIcon(make_color_swatch_icon(row.reference_color))
-    table.setItem(index, 2, reference_item)
+    table.setItem(index, 3, reference_item)
 
     count_item = QTableWidgetItem(str(row.roi_count))
     count_item.setFlags(count_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
-    table.setItem(index, 3, count_item)
+    table.setItem(index, 4, count_item)

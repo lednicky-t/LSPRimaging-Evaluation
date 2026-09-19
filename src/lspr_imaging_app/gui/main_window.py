@@ -891,6 +891,28 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, MeasurementCalibrationMixin,
         self._roi_refresh_timer.setSingleShot(True)
         self._roi_refresh_timer.setInterval(25)
         self._roi_refresh_timer.timeout.connect(self._refresh_roi_and_group_tables)
+        self._group_reorder_undo_commit_timer = QTimer(self)
+        self._group_reorder_undo_commit_timer.setSingleShot(True)
+        # Same coalescing fix as _roi_move_undo_commit_timer above, applied
+        # to GroupTableController.move_group: a burst of rapid Move up/down
+        # clicks (reordering a group several positions) each used to pay for
+        # a full deepcopy(window._state) via _push_undo_point - measured at
+        # 300-450ms on a real ~160-ROI dataset (see the 2026-09-19 "move
+        # up/down still slow" log investigation), not the ~7ms a small
+        # synthetic dataset suggested. prepare()/commit_prepared() shares one
+        # deepcopy across the whole burst instead of paying it per click.
+        self._group_reorder_undo_commit_timer.setInterval(600)
+        self._group_reorder_undo_commit_timer.timeout.connect(self._commit_prepared_undo_snapshot)
+        self._group_reorder_sensorgram_timer = QTimer(self)
+        self._group_reorder_sensorgram_timer.setSingleShot(True)
+        # Same log investigation found _render_sensorgram_display() itself
+        # costing 460-620ms per click when the selection's ROIs have never
+        # been analyzed (RAM cache cold -> falls through to a real per-ROI
+        # HDF5 backup probe, see _sensorgram_trace_for_roi). A reorder click
+        # only needs the legend order to catch up once the user stops
+        # clicking, not after every intermediate step.
+        self._group_reorder_sensorgram_timer.setInterval(150)
+        self._group_reorder_sensorgram_timer.timeout.connect(self._refresh_group_reorder_sensorgram)
 
         # Spectra/Sensogram corner overlay: cursor/crosshair + stats toggle
         # state (off by default, not persisted across restarts - matches
@@ -2838,6 +2860,8 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, MeasurementCalibrationMixin,
         self.group_new_button.clicked.connect(self._group_table_controller.create_group)
         self.group_delete_button.clicked.connect(self._group_table_controller.delete_selected_groups)
         self.group_by_column_button.clicked.connect(self._group_rois_by_column)
+        self.group_move_up_button.clicked.connect(lambda *_args: self._group_table_controller.move_selected(-1))
+        self.group_move_down_button.clicked.connect(lambda *_args: self._group_table_controller.move_selected(1))
         self.roi_export_button.clicked.connect(self._roi_table_controller.export_roi_table)
         self.roi_import_button.clicked.connect(self._roi_table_controller.import_roi_table)
         self.metadata_import_button.clicked.connect(self._metadata_controller.import_metadata)
@@ -3317,6 +3341,8 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, MeasurementCalibrationMixin,
         self.group_new_button.setVisible(showing_group)
         self.group_delete_button.setVisible(showing_group)
         self.group_by_column_button.setVisible(showing_group)
+        self.group_move_up_button.setVisible(showing_group)
+        self.group_move_down_button.setVisible(showing_group)
         if showing_group:
             # Row *contents* are already kept current by the shared debounce
             # timer regardless of which table is visible; this just makes
@@ -6890,6 +6916,14 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, MeasurementCalibrationMixin,
 
     def _refresh_sensorgram(self) -> None:
         self._analysis_controller._refresh_sensorgram()
+
+    def _refresh_group_reorder_sensorgram(self) -> None:
+        """_group_reorder_sensorgram_timer's target - a plain redraw-from-
+        cache, not _refresh_sensorgram()'s live-preview recompute path
+        (calculate_sensorgram()), since a group reorder never invalidates
+        any ROI's own analyzed value."""
+        if hasattr(self, "_analysis_controller"):
+            self._analysis_controller._render_sensorgram_display()
 
     def _mark_formula_spectrum_dirty(self) -> None:
         self._analysis_controller._mark_formula_spectrum_dirty()
