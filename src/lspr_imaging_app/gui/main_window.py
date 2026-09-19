@@ -3826,11 +3826,21 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, MeasurementCalibrationMixin,
         current_index = rules.index(self._cube_time_timestamp_rule)
         self._cube_time_timestamp_rule = rules[(current_index + 1) % len(rules)]
         self._refresh_cube_time_display()
-        if self._sensorgram_metric_values.size:
-            # Re-derives the sensorgram's x-axis under the new rule
-            # immediately, rather than waiting for the next recompute -
-            # the underlying metric values are unchanged, only which
-            # timestamp represents each cube.
+        # Re-derives the sensorgram's x-axis under the new rule immediately,
+        # rather than waiting for the next recompute - the underlying metric
+        # values are unchanged, only which timestamp represents each cube.
+        # `_sensorgram_metric_values` is the single-ROI buffer only
+        # (set_sensorgram_series's own storage) - a >1-ROI group/individual
+        # selection draws straight onto sensorgram_curve/_sensorgram_series_
+        # items via _render_sensorgram_display instead and never touches it,
+        # so checking only that buffer left a multi-ROI selection's curve
+        # showing a stale x-axis under the old rule until the next unrelated
+        # re-render (same root cause as the 2026-09-18/19 "sensogram
+        # vanishes after group selection" bug - see plot_manager.py's
+        # update_single_spectral_cube_sensorgram).
+        if len(self._selected_spectrum_roi_ids()) > 1:
+            self._analysis_controller._render_sensorgram_display()
+        elif self._sensorgram_metric_values.size:
             self._analysis_controller.set_sensorgram_series(
                 self._sensorgram_spectral_cube_indices, self._sensorgram_metric_values
             )
@@ -8084,6 +8094,20 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, MeasurementCalibrationMixin,
         if spectrum_hit and sensorgram_hit:
             self._live_preview_prompt_selection_signature = selection_signature
             return
+        # Diagnostic for the 2026-09-18 "sensogram disappears after group
+        # selection" report: this deferred (0ms-later) re-check can reach
+        # mark_stale() below - which unconditionally wipes whatever
+        # _render_sensorgram_display just drew moments earlier via the
+        # synchronous half of _update_selection_dependent_plots - without
+        # ever popping the calculate-now dialog, if _prompt_live_preview_
+        # calculation_choice's own early-return guards (dataset/live-preview/
+        # startup state) apply. Logging the hit/miss split here pins down
+        # whether that's actually what's happening on the next repro.
+        self._append_workflow_log(
+            f"SG live-preview recheck | {len(selection_signature)} selected | "
+            f"spectrum_hit={spectrum_hit} sensorgram_hit={sensorgram_hit}",
+            level="debug",
+        )
         choice = self._prompt_live_preview_calculation_choice(
             spectrum_hit=spectrum_hit,
             sensorgram_hit=sensorgram_hit,
@@ -8121,7 +8145,30 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, MeasurementCalibrationMixin,
         # then no data" after a full "Start analysis" run). Checking for
         # empty data too makes this self-healing without weakening the skip
         # for the common case (same selection, already showing real data).
-        already_showing_data = self._sensorgram_spectral_cube_indices.size > 0
+        # `_sensorgram_spectral_cube_indices` alone only reflects the
+        # single-ROI buffer (set_sensorgram_series) - a >1-ROI group/
+        # individual selection draws straight onto sensorgram_curve/
+        # _sensorgram_series_items via _render_sensorgram_display and never
+        # touches it, so checking only that buffer made this evaluate False
+        # for every group selection, defeating the skip-redundant-redraw
+        # optimization below every single time (not a visible bug - group
+        # renders are idempotent - just wasted repeat work on every call,
+        # including the harmless press+release double-fire this check exists
+        # to collapse). Same root-cause family as the 2026-09-18/19
+        # "sensogram vanishes after group selection" bug.
+        try:
+            curve_x_data = self.sensorgram_curve.getData()[0]
+        except Exception:
+            curve_x_data = None
+        try:
+            series_items = self._sensorgram_series_items
+        except Exception:
+            series_items = None
+        already_showing_data = (
+            self._sensorgram_spectral_cube_indices.size > 0
+            or bool(series_items)
+            or (curve_x_data is not None and len(curve_x_data) > 0)
+        )
         if not force and selected_signature == self._selection_plot_highlight_signature and already_showing_data:
             return
         self._selection_plot_highlight_signature = selected_signature

@@ -826,24 +826,48 @@ class AnalysisController(AnalysisWorkerMixin, AnalysisChromaticGeometryMixin):
         combined-selection cache-hit check (see docs/analysis_caching_
         architecture.md) with a check built from the same atomic per-ROI
         data the render path already uses - one way to answer "is this
-        fresh", not two."""
+        fresh", not two.
+
+        Runs synchronously on the GUI thread (called directly from Start
+        analysis / start_pending_sensorgram_refresh, before anything is
+        handed to a background worker) - stage-timed per the 2026-09-19
+        "select-all-groups then Start analysis feels frozen, nothing shows
+        it's happening" report: for a large selection on a cold RAM cache
+        (e.g. right after app launch), every ROI here can fall through to
+        _sensorgram_trace_for_roi's disk-backup path, which is real per-ROI
+        HDF5 I/O + per-cube hash validation - exactly the kind of O(ROIs x
+        cubes) GUI-thread cost _refresh_cube_slider_cache_indicators's own
+        docstring already flags as a visible stall, and exactly the
+        blocking-not-crashing symptom (no error, just silence) that would
+        explain no other log line appearing for minutes."""
+        start_time = time.perf_counter()
         spectral_cube_signatures = self._sensorgram_spectral_cube_signatures(spectral_cubes)
-        if spectral_cube_signatures is None:
-            return False
-        cube_context_hashes_cache: list[dict[int, str]] = []
+        result = False
+        checked_count = 0
+        if spectral_cube_signatures is not None:
+            cube_context_hashes_cache: list[dict[int, str]] = []
 
-        def get_cube_context_hashes() -> dict[int, str]:
-            if not cube_context_hashes_cache:
-                cube_context_hashes_cache.append(self._sensorgram_cube_context_hashes(spectral_cubes))
-            return cube_context_hashes_cache[0]
+            def get_cube_context_hashes() -> dict[int, str]:
+                if not cube_context_hashes_cache:
+                    cube_context_hashes_cache.append(self._sensorgram_cube_context_hashes(spectral_cubes))
+                return cube_context_hashes_cache[0]
 
-        for roi_id in selected_roi_ids:
-            trace = self._sensorgram_trace_for_roi(
-                int(roi_id), spectral_cubes, spectral_cube_signatures, get_cube_context_hashes
-            )
-            if trace is None or not np.all(np.isfinite(trace)):
-                return False
-        return True
+            result = True
+            for roi_id in selected_roi_ids:
+                checked_count += 1
+                trace = self._sensorgram_trace_for_roi(
+                    int(roi_id), spectral_cubes, spectral_cube_signatures, get_cube_context_hashes
+                )
+                if trace is None or not np.all(np.isfinite(trace)):
+                    result = False
+                    break
+        elapsed_ms = (time.perf_counter() - start_time) * 1000.0
+        self.window._append_workflow_log(
+            f"SG availability pre-check | checked {checked_count}/{len(selected_roi_ids)} ROI(s) x "
+            f"{len(spectral_cubes)} cube(s) | available={result} | {elapsed_ms:.0f}ms",
+            level="debug",
+        )
+        return result
 
     def _apply_already_available_sensorgram_selection(
         self,

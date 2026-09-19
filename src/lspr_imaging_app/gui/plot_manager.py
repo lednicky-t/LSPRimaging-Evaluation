@@ -303,7 +303,24 @@ class PlotManager:
 
     def update_single_spectral_cube_sensorgram(self, metric_value: float | None, metric_signal: float | None) -> None:
         window = self._window
-        if window._sensorgram_running or window._sensorgram_spectral_cube_indices.size > 1:
+        # `_sensorgram_spectral_cube_indices` is only ever populated by the
+        # single-ROI code path (set_sensorgram_series) - the >1-ROI group/
+        # individual display (_render_sensorgram_display) draws straight
+        # onto sensorgram_curve/_sensorgram_series_items and never touches
+        # it, so it stays empty even while that display owns the curve.
+        # Without this check, this method (called on every Spectrum panel
+        # refresh, including right after a group selection) misread that
+        # empty buffer as "nothing shown yet", found no single-ROI metric
+        # value to plot (there isn't one for a multi-ROI selection), and
+        # wiped the multi-ROI curve moments after _render_sensorgram_display
+        # had just drawn it - root cause of the 2026-09-18/19 "sensogram
+        # flashes then vanishes after group selection" report, confirmed via
+        # a setData([]) call-site trace.
+        if (
+            window._sensorgram_running
+            or window._sensorgram_spectral_cube_indices.size > 1
+            or len(window._selected_spectrum_roi_ids()) > 1
+        ):
             self.update_sensorgram_current_point()
             return
         spectral_cube_index = window._current_spectral_cube()

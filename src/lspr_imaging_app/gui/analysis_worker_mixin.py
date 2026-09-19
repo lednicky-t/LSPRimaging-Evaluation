@@ -425,6 +425,21 @@ class AnalysisWorkerMixin:
             self.calculate_sensorgram()
 
     def clear_sensorgram(self, summary_text: str) -> None:
+        # Diagnostic for the 2026-09-18 "sensogram disappears after group
+        # selection" report: unlike _render_sensorgram_display (which only
+        # clears once it has confirmed there's nothing to draw), this method
+        # always wipes the multi-curve series items unconditionally -
+        # logging only when there was something visible to lose narrows down
+        # whether THIS is the call site responsible, and which caller
+        # (summary_text identifies the reason) triggered it.
+        had_multi_curve = bool(getattr(self.window, "_sensorgram_series_items", None))
+        had_single_trace = self.window._sensorgram_spectral_cube_indices.size > 0
+        if had_multi_curve or had_single_trace:
+            self.window._append_workflow_log(
+                f"SG clear | wiping {'multi-curve' if had_multi_curve else 'single-trace'} display "
+                f"| selected={sorted(self.window._selected_roi_ids)} | reason: {summary_text!r}",
+                level="debug",
+            )
         self.window._sensorgram_spectral_cube_indices = np.asarray([], dtype=np.int32)
         self.window._sensorgram_metric_values = np.asarray([], dtype=np.float64)
         self.window._sensorgram_metric_signal = np.asarray([], dtype=np.float64)
@@ -1896,10 +1911,9 @@ class AnalysisWorkerMixin:
         signature, spectral_cubes, selected_roi_ids, selected_source_rois = self.window._pending_sensorgram_payload
         self.window._pending_sensorgram_payload = None
         spectral_cubes = list(spectral_cubes)
-        if self._sensorgram_selection_fully_available(selected_roi_ids, spectral_cubes):
-            self._apply_already_available_sensorgram_selection(selected_roi_ids, spectral_cubes)
-            return
-        self._start_sensorgram_worker(signature, spectral_cubes, tuple(selected_roi_ids), list(selected_source_rois))
+        self._dispatch_sensorgram_availability_check(
+            signature, spectral_cubes, tuple(selected_roi_ids), list(selected_source_rois)
+        )
 
     def update_current_point(self) -> None:
         current_spectral_cube = self.window._current_spectral_cube()
@@ -1999,29 +2013,119 @@ class AnalysisWorkerMixin:
                 f"{self.window._analysis_metric_label()} | Updating {len(spectral_cubes)} spectral cubes"
             )
             return
-        # Replaces the old single combined-selection cache-hit check with
-        # one built from the same atomic per-ROI/per-cube data the render
-        # path already uses (see docs/analysis_caching_architecture.md) -
-        # naturally handles the "a Stopped run's partial result must not
-        # short-circuit a fresh Start analysis" case the old check needed a
-        # dedicated `cancelled` flag for: a stopped run leaves whichever
-        # cubes it actually finished in the cache and the rest genuinely
-        # missing, so incomplete coverage here already means "not fully
-        # available" without checking cancellation explicitly.
-        if self._sensorgram_selection_fully_available(selected_roi_ids, spectral_cubes):
+        # The "is this selection already fully computed" check (built from
+        # the same atomic per-ROI/per-cube data the render path already
+        # uses, replacing the old single combined-selection cache-hit check -
+        # see docs/analysis_caching_architecture.md) runs off the GUI thread,
+        # not here directly - see _dispatch_sensorgram_availability_check's
+        # own docstring for why (2026-09-19 "select all groups, Start
+        # analysis feels frozen" report). It naturally handles the "a
+        # Stopped run's partial result must not short-circuit a fresh Start
+        # analysis" case the old synchronous check needed a dedicated
+        # `cancelled` flag for: a stopped run leaves whichever cubes it
+        # actually finished in the cache and the rest genuinely missing, so
+        # incomplete coverage there already means "not fully available"
+        # without checking cancellation explicitly.
+        self._dispatch_sensorgram_availability_check(
+            cached_signature, spectral_cubes, selected_roi_ids, selected_source_rois
+        )
+
+    def _dispatch_sensorgram_availability_check(
+        self,
+        signature: tuple[object, ...],
+        spectral_cubes: list[int],
+        selected_roi_ids: tuple[int, ...],
+        selected_source_rois: list[AreaRoi],
+    ) -> None:
+        """Runs `_sensorgram_selection_fully_available` (an O(ROIs x cubes)
+        RAM/disk scan - see its own stage-timing log) off the GUI thread via
+        FunctionWorker, then applies the already-available result or
+        launches the real worker from the result callback, back on the GUI
+        thread (FunctionWorker's signals are queued cross-thread safely).
+
+        Root cause of the 2026-09-19 "select all groups, then Start analysis
+        feels frozen and nothing shows it's happening" report: this same
+        check used to run synchronously, right here, on the GUI thread. For
+        a large selection on a cold RAM cache (e.g. every ROI right after
+        app launch, the "select all groups" case), most ROIs fall through to
+        `_sensorgram_trace_for_roi`'s disk-backup path - real per-ROI HDF5
+        I/O plus per-cube hash validation, the same class of GUI-thread cost
+        `_refresh_cube_slider_cache_indicators`'s own docstring already
+        flags and moved off-thread for exactly this reason. A live repro
+        showed a 3+ minute gap with zero log output between "Start analysis"
+        and the eventual "SG cache hit" line - the GUI thread was blocked
+        the whole time with nothing able to paint or log.
+
+        Marks `_sensorgram_running` True for the whole checking phase,
+        mirroring `_start_sensorgram_worker`'s own use of that flag - so
+        Start analysis immediately shows busy state (addresses "nothing
+        shows it's happening") and a second press during the check falls
+        into the existing "a run is already in flight" queue branch above
+        instead of racing a second concurrent check."""
+        self.window._sensorgram_request_id += 1
+        request_id = self.window._sensorgram_request_id
+        self.window._sensorgram_running = True
+        self.window._sensorgram_running_signature = signature
+        self.window._update_analysis_control_state()
+        self.window._set_sensorgram_summary_text(
+            f"{self.window._analysis_metric_label()} | Checking cache for {len(selected_roi_ids)} ROI(s)..."
+        )
+        self.window._set_status_text(f"Checking cache for {len(selected_roi_ids)} ROI(s)...")
+
+        from lspr_imaging_app.gui.worker import FunctionWorker
+
+        def _check(selected_roi_ids=selected_roi_ids, spectral_cubes=spectral_cubes) -> bool:
+            return self._sensorgram_selection_fully_available(selected_roi_ids, spectral_cubes)
+
+        worker = FunctionWorker(_check)
+        worker.signals.result.connect(
+            lambda available, request_id=request_id: self._on_sensorgram_availability_checked(
+                request_id, available, signature, spectral_cubes, selected_roi_ids, selected_source_rois
+            )
+        )
+        worker.signals.error.connect(
+            lambda message, request_id=request_id: self._on_sensorgram_availability_check_failed(request_id, message)
+        )
+        worker.start()
+
+    def _on_sensorgram_availability_checked(
+        self,
+        request_id: int,
+        available: bool,
+        signature: tuple[object, ...],
+        spectral_cubes: list[int],
+        selected_roi_ids: tuple[int, ...],
+        selected_source_rois: list[AreaRoi],
+    ) -> None:
+        if request_id != self.window._sensorgram_request_id:
+            # Superseded by a newer check/run dispatched while this one was
+            # still in flight (selection changed, Start analysis pressed
+            # again, or a real run already took over) - same stale-result
+            # guard on_sensorgram_ready/on_sensorgram_failed already use.
+            return
+        if available:
             self.window._append_workflow_log(
                 f"SG cache hit | spectral_cubes {len(spectral_cubes)} | metric {self.window._analysis_metric_label()}",
                 level="debug",
             )
+            self.window._sensorgram_running = False
             self._apply_already_available_sensorgram_selection(selected_roi_ids, spectral_cubes)
+            self.window._update_analysis_control_state()
+            if self.window._pending_sensorgram_payload is not None:
+                self.start_pending_sensorgram_refresh()
             return
-        self.window._sensorgram_running_signature = cached_signature
-
         self.window._append_workflow_log(
             f"SG calc start | rois {len(selected_roi_ids)} | spectral_cubes {len(spectral_cubes)} | metric {self.window._analysis_metric_label()}",
             level="info",
         )
-        self._start_sensorgram_worker(cached_signature, spectral_cubes, selected_roi_ids, selected_source_rois)
+        self._start_sensorgram_worker(signature, spectral_cubes, selected_roi_ids, selected_source_rois)
+
+    def _on_sensorgram_availability_check_failed(self, request_id: int, message: str) -> None:
+        if request_id != self.window._sensorgram_request_id:
+            return
+        self.window._sensorgram_running = False
+        self.window._update_analysis_control_state()
+        self.window._background_error("Sensorgram cache check", message)
 
     def _stop_sensorgram_calculation(self) -> None:
         if not self.window._sensorgram_running or self.window._sensorgram_cancel_event is None:
