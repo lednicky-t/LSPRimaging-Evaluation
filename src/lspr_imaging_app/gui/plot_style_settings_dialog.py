@@ -38,6 +38,14 @@ from lspr_ui import get_active_theme
 # see roi_color_palettes.py and roi_overlay_helpers.resolved_roi_plot_color.
 # Colors ARE directly exposed for the sensogram's processed/group
 # statistics overlays, whose colors are fixed decorative literals today.
+#
+# One deliberate exception: the sensogram's "Average all" display mode has
+# no single ROI/group to inherit a color from once the selection spans more
+# than one group (or mixes grouped/ungrouped ROIs) - AnalysisController
+# already falls back to that group's own color whenever the whole selection
+# happens to be exactly one group, but a genuinely mixed selection still
+# needs *some* literal color, so that one case gets a real color picker
+# (window._sensorgram_average_all_color, "Raw trace" box below).
 
 _SEQUENTIAL_PALETTE_LABELS: list[tuple[str, str]] = [
     ("Viridis", "viridis"),
@@ -266,6 +274,7 @@ class SensorgramPlotSettingsDialog(_PlotStyleDialogBase):
 
         self.raw_width_spin = _line_width_spin(window._sensorgram_line_width_px)
         self.raw_style_combo = _line_style_combo(window._sensorgram_line_style)
+        self.average_all_color_button = _ColorSwatchButton(window._sensorgram_average_all_color)
 
         self.show_symbols_checkbox = QCheckBox("Show data point markers")
         self.show_symbols_checkbox.setChecked(bool(window._sensorgram_show_symbols))
@@ -287,6 +296,14 @@ class SensorgramPlotSettingsDialog(_PlotStyleDialogBase):
         raw_layout = QFormLayout(raw_box)
         raw_layout.addRow("Width", self.raw_width_spin)
         raw_layout.addRow("Style", self.raw_style_combo)
+        average_all_title = QLabel("\"Average all\" color (mixed selection)")
+        average_all_title.setToolTip(
+            "Used only in \"Average all\" mode, and only when the selected ROIs span more than one group "
+            "(or mix grouped and ungrouped ROIs). When the whole selection is a single group, that group's "
+            "own color is used instead."
+        )
+        self.average_all_color_button.setToolTip(average_all_title.toolTip())
+        raw_layout.addRow(average_all_title, self.average_all_color_button)
 
         points_box = QGroupBox("Raw trace data points")
         points_layout = QFormLayout(points_box)
@@ -313,8 +330,9 @@ class SensorgramPlotSettingsDialog(_PlotStyleDialogBase):
         layout.addWidget(processed_box)
         layout.addWidget(group_box)
         layout.addWidget(_note_label(
-            "The raw trace's color follows ROI selection (see the ROI list) or the palettes above; only "
-            "its width, style, and data point markers are adjustable here."
+            "The raw trace's color follows ROI/group selection (see the ROI list) or the palettes above; "
+            "the \"Average all\" color above only applies when a mixed-group selection has no single "
+            "ROI/group color to inherit."
         ))
         self._finish_ui(layout)
 
@@ -322,6 +340,7 @@ class SensorgramPlotSettingsDialog(_PlotStyleDialogBase):
         window = self._window
         window._sensorgram_line_width_px = float(self.raw_width_spin.value())
         window._sensorgram_line_style = self.raw_style_combo.currentData()
+        window._sensorgram_average_all_color = self.average_all_color_button.color()
         window._sensorgram_show_symbols = bool(self.show_symbols_checkbox.isChecked())
         window._sensorgram_symbol_size_px = float(self.symbol_size_spin.value())
         window._sensorgram_roi_gradient_palette = str(self.roi_gradient_combo.currentData() or "viridis")

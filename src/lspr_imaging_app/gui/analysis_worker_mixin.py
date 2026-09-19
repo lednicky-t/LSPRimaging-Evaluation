@@ -443,6 +443,7 @@ class AnalysisWorkerMixin:
         self.window._sensorgram_spectral_cube_indices = np.asarray([], dtype=np.int32)
         self.window._sensorgram_metric_values = np.asarray([], dtype=np.float64)
         self.window._sensorgram_metric_signal = np.asarray([], dtype=np.float64)
+        self.window._sensorgram_live_per_roi_values = {}
         self.window._pending_sensorgram_payload = None
         self.window.sensorgram_curve.setData([], [])
         self.window.sensorgram_current_point.setData([], [])
@@ -1374,6 +1375,19 @@ class AnalysisWorkerMixin:
             backup_per_roi_started = time.perf_counter()
             self._backup_per_roi_sensorgram_points(per_roi_metric_values, cube_index=int(point.spectral_cube_index))
             backup_per_roi_ms = (time.perf_counter() - backup_per_roi_started) * 1000.0
+            # Also feeds the live-during-run Sensogram display (see
+            # AnalysisController._render_live_sensorgram_update) - a plain
+            # dict append, O(1) per selected ROI per cube, deliberately not
+            # routed through the RAM-cache-signature machinery above (that
+            # exists to verify a value is still fresh against current
+            # settings; a value just delivered this tick needs no such
+            # check).
+            cube_index = int(point.spectral_cube_index)
+            live_traces = self.window._sensorgram_live_per_roi_values
+            for roi_id, (metric_value, _metric_signal) in per_roi_metric_values.items():
+                if not np.isfinite(metric_value):
+                    continue
+                live_traces.setdefault(int(roi_id), {})[cube_index] = float(metric_value)
         logging.getLogger("lspr_imaging_app.workflow").debug(
             "SG backup timing | cube %s | sensorgram_point=%.1fms formula_series=%.1fms per_roi_sensorgram=%.1fms (rois=%s)",
             int(point.spectral_cube_index),

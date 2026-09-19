@@ -85,6 +85,7 @@ class SessionStateManager:
                 image_exclusions,
                 area_roi_arrays,
                 statistics_settings,
+                selected_area_roi_ids,
             ) = payload
             window._state.preprocessing = preprocessing
             window._state.area_roi_settings = area_roi_settings
@@ -137,6 +138,23 @@ class SessionStateManager:
             window._update_roi_table()
             window._update_chromatic_control_state()
             window._restore_chromatic_view_after_load()
+            valid_roi_ids = {int(roi.area_roi_id) for roi in area_rois}
+            restored_selection = {roi_id for roi_id in selected_area_roi_ids if roi_id in valid_roi_ids}
+            if window._startup_restore_in_progress:
+                # Startup deliberately forces Live preview off right after this
+                # (see _on_startup_dataset_restore_done) specifically to avoid
+                # an automatic recompute racing the first image load, which
+                # hasn't happened yet at this point in the restore sequence -
+                # so only the selection STATE (table highlighting, overlays,
+                # summary text) is restored here; _apply_roi_selection's own
+                # plot refresh is deferred to run there instead, once Live
+                # preview is safely off and the first image has loaded.
+                window._selected_roi_ids = restored_selection
+                window._update_roi_overlays()
+                window._update_roi_summary()
+                window._sync_roi_table_selection()
+            else:
+                window._apply_roi_selection(restored_selection)
             window._report_startup_progress(60, "Processing profile restored.")
             if on_done is not None:
                 on_done()
@@ -163,6 +181,7 @@ class SessionStateManager:
             window._current_file_mask_path = None
             window._current_file_mask_session_source_path = None
             window._current_file_mask_wavelength_diffs = {}
+            window._selected_roi_ids = set()
             window._update_roi_table()
             window._normalize_mask_application_state()
             if on_done is not None:
@@ -212,6 +231,7 @@ class SessionStateManager:
         window._current_file_mask_path = None
         window._current_file_mask_session_source_path = None
         window._current_file_mask_wavelength_diffs = {}
+        window._selected_roi_ids = set()
         window._update_roi_table()
 
     def new_session(self) -> None:
@@ -376,6 +396,7 @@ class SessionStateManager:
                 image_exclusions=window._state.image_exclusions,
                 area_roi_arrays=window._state.area_roi_arrays,
                 statistics_settings=window._state.statistics_settings,
+                selected_area_roi_ids=window._selected_roi_ids,
             )
         except Exception as exc:
             window._append_workflow_log(
@@ -479,6 +500,7 @@ class SessionStateManager:
                 image_exclusions=window._state.image_exclusions,
                 area_roi_arrays=window._state.area_roi_arrays,
                 statistics_settings=window._state.statistics_settings,
+                selected_area_roi_ids=window._selected_roi_ids,
             )
             session_mask_payload = window._session_mask_payload()
             if session_mask_payload is None:
@@ -523,6 +545,7 @@ class SessionStateManager:
                 image_exclusions,
                 area_roi_arrays,
                 statistics_settings,
+                selected_area_roi_ids,
             ) = load_processing_profile(Path(source))
             window._state.preprocessing = preprocessing
             window._state.area_roi_settings = area_roi_settings
@@ -557,6 +580,8 @@ class SessionStateManager:
             window._refresh_image_exclusion_manage_dialog()
             window._current_image_key = None
             window._refresh_image()
+            valid_roi_ids = {int(roi.area_roi_id) for roi in area_rois}
+            window._apply_roi_selection({roi_id for roi_id in selected_area_roi_ids if roi_id in valid_roi_ids})
             window._save_processing_state_for_dataset(force=True, reason="import processing profile")
         except Exception as exc:
             window._end_busy(f"Import failed: {exc}")

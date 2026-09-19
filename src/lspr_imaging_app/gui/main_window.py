@@ -405,6 +405,7 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, MeasurementCalibrationMixin,
         self._selected_roi_ids: set[int] = set()
         self._selection_plot_highlight_signature: tuple[int, ...] | None = None
         self._sensorgram_selection_highlight_signature: tuple[int, ...] | None = None
+        self._sensorgram_active_curve_color: QColor | None = None
         self._live_preview_prompt_selection_signature: tuple[int, ...] | None = None
         self._chromatic_landmark_marker_id = 1
         self._selected_landmark_id: int | None = None
@@ -515,6 +516,17 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, MeasurementCalibrationMixin,
         # has to refit cubes already fitted. See `_sensorgram_metric_from_
         # cache`/`_store_sensorgram_metric_in_cache`.
         self._sensorgram_metric_cache: OrderedDict[tuple[object, ...], tuple[float, float]] = OrderedDict()
+        # Live, run-scoped accumulator: {roi_id: {spectral_cube_index: metric_value}},
+        # appended to directly from on_sensorgram_partial_result's own per-cube
+        # callback while a run is in progress - lets the live-growing plot show
+        # a proper Individual/Average all/Average by group view during a
+        # multi-ROI run instead of the single legacy "combine the spectra, fit
+        # once" trace _sensorgram_metric_task computes for that purpose (see
+        # AnalysisController._render_live_sensorgram_update). Reset at the
+        # start of every run (clear_sensorgram) - never consulted once a run
+        # ends, since _render_sensorgram_display's normal RAM/disk-backed path
+        # takes back over then.
+        self._sensorgram_live_per_roi_values: dict[int, dict[int, float]] = {}
         self._sensorgram_axis_range_cache: tuple[object, tuple[float, float]] | None = None
         self._analysis_cache_lock = threading.Lock()
         self._last_formula_spectrum_fit_seconds: float | None = None
@@ -771,6 +783,14 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, MeasurementCalibrationMixin,
         self._sensorgram_group_line_width_px = 2.2
         self._sensorgram_group_line_style = Qt.PenStyle.SolidLine
         self._sensorgram_group_color = QColor("#a855f7")
+        # "Average all" mode's raw-trace color when the current selection
+        # spans more than one group (or mixes grouped/ungrouped ROIs) - it
+        # has no single natural ROI/group color to inherit, so it needs a
+        # literal fallback. When the whole selection happens to be exactly
+        # one group, AnalysisController._render_sensorgram_display uses that
+        # group's own color instead (see analysis_controller.py, "average_all"
+        # branch) and this setting is not used.
+        self._sensorgram_average_all_color = QColor("#38bdf8")
 
         self._restore_visual_preferences()
         self._image_refresh_timer = QTimer(self)
@@ -3363,18 +3383,29 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, MeasurementCalibrationMixin,
         self._restore_control_preferences()
         self._report_startup_progress(76, "Preparing the first image...")
         # Live preview specifically stays off across a restart, regardless
-        # of its own persisted setting - ROI selection isn't restored
-        # either, so there is nothing useful for it to compute yet, and
-        # forcing it off here avoids an automatic recompute racing the
-        # first image load. Start analysis/preview themselves are NOT
-        # gated behind any panel-wide switch - they're always available,
-        # same as every other section's controls.
+        # of its own persisted setting - forcing it off here avoids an
+        # automatic recompute racing the first image load below (the
+        # restored ROI/group selection - see SessionStateManager.
+        # _on_processing_state_loaded - could otherwise trigger exactly that
+        # race the moment it's applied). Start analysis/preview themselves
+        # are NOT gated behind any panel-wide switch - they're always
+        # available, same as every other section's controls.
         self._analysis_live_preview_enabled = False
         self._settings.setValue("analysis/live_preview", False)
         # The dataset-load chain that got us here already kicked off (and, on a cache
         # hit, already applied) the first image - this call is a no-op in that case,
         # matching the pre-async code's own redundant call at this same point.
         self._refresh_image()
+        if self._selected_roi_ids:
+            # The restored selection's plot refresh was deliberately deferred
+            # from _on_processing_state_loaded until now - Live preview is
+            # off (forced above), so this safely shows "out of date - press
+            # Start analysis"/highlights the selection rather than silently
+            # painting cached data (same off-state behavior a normal
+            # in-session selection change already has, see
+            # _update_selection_dependent_plots) - no race with the image
+            # load above, since that's already finished by this point.
+            self._update_selection_dependent_plots(force=True)
         self._report_startup_progress(92, "Finalizing workspace...")
         if show_window:
             self._layout_state_controller.restore_saved_window_state_after_show()
@@ -5390,6 +5421,7 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, MeasurementCalibrationMixin,
             "file_mask_path": str(self._current_file_mask_path) if self._current_file_mask_path is not None else None,
             "file_mask_revision": int(self._external_mask_revision),
             "file_mask_shape": None if self._current_file_mask is None else tuple(int(v) for v in self._current_file_mask.shape),
+            "selected_area_roi_ids": sorted(int(roi_id) for roi_id in self._selected_roi_ids),
         }
         return json.dumps(payload, sort_keys=True, separators=(",", ":"))
 

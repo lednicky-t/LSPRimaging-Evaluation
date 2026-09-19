@@ -49,6 +49,16 @@ class AnalysisController(AnalysisWorkerMixin, AnalysisChromaticGeometryMixin):
         if len(selected_roi_ids) == 1:
             return QColor(self.window._roi_spectrum_color(int(selected_roi_ids[0])))
         if selected_roi_ids:
+            # _render_sensorgram_display() runs immediately before this (see
+            # _update_selection_dependent_plots) and already resolved the
+            # right color for the curve it just drew - group color when the
+            # selection collapses to one group/bucket, the mode's own
+            # "combined average" color otherwise. Reuse it instead of a
+            # hardcoded color, or a multi-ROI *group* selection would get its
+            # correct color overwritten with this generic blue right after.
+            active_color = getattr(self.window, "_sensorgram_active_curve_color", None)
+            if active_color is not None:
+                return QColor(active_color)
             return QColor("#38bdf8")
         return QColor("#22c55e")
 
@@ -1030,27 +1040,47 @@ class AnalysisController(AnalysisWorkerMixin, AnalysisChromaticGeometryMixin):
         """Draws the Sensogram plot's primary content for the current ROI
         selection and settings.sensorgram_display_mode.
 
-        Exactly one selected ROI (or a run still in progress) always keeps
-        using the existing single raw-trace pipeline unchanged
-        (window._sensorgram_metric_values, fed by the normal Start-analysis/
-        live-preview run - see set_sensorgram_series): there's nothing to
-        combine with one ROI, and re-fetching per-ROI data on every one of
-        the ~10/s live-preview redraws during a bulk run would be real,
-        avoidable per-selected-ROI cost for no visible benefit mid-run (the
-        plot already updates live from the raw trace during the run either
-        way). The new display modes only take over once a selection has
-        more than one ROI AND nothing is actively running.
+        Exactly one selected ROI always keeps using the existing single
+        raw-trace pipeline unchanged (window._sensorgram_metric_values, fed
+        by the normal Start-analysis/live-preview run - see
+        set_sensorgram_series): there's nothing to combine with one ROI.
 
         More than one selected ROI reads each ROI's own already-fitted
         sensogram value (never spectra/pixels) and combines them per mode -
-        never triggers any computation itself. A selected ROI with no
-        trace available yet (RAM cache or HDF5 backup) is simply reported
-        as missing via the summary text ("N of M selected ROI(s) not yet
-        analyzed | Press Start analysis") rather than computed here -
-        analysis only ever runs when the user explicitly presses Start
-        analysis, the same rule the single-ROI case above already follows."""
+        never triggers any computation itself. While idle, that value comes
+        from each ROI's own RAM cache/HDF5 backup entry
+        (_sensorgram_trace_for_roi); a selected ROI with no trace available
+        yet is simply reported as missing via the summary text ("N of M
+        selected ROI(s) not yet analyzed | Press Start analysis") rather
+        than computed here - analysis only ever runs when the user
+        explicitly presses Start analysis, the same rule the single-ROI
+        case above already follows.
+
+        While a run is actively in progress, the same mode-aware bucket
+        logic instead sources each ROI's value from window._sensorgram_
+        live_per_roi_values - a plain accumulator appended to directly from
+        the worker's own per-cube callback (on_sensorgram_partial_result) -
+        rather than _sensorgram_trace_for_roi's RAM/disk lookup: that
+        lookup's freshness check (_sensorgram_spectral_cube_signatures) is
+        real, avoidable O(cubes x wavelengths) cost that would otherwise
+        run on every ~10/s live-preview redraw during a bulk run (see
+        _render_live_sensorgram_update), and is pointless anyway - a value
+        just delivered this tick is by definition current. Before the
+        redesign that added Individual/Average all/Average by group, a
+        multi-ROI selection during a run showed a single legacy "average
+        each ROI's own spectrum, then fit once" trace
+        (_sensorgram_metric_task's "combined" value, analysis_tasks.py) -
+        that fallback still applies only when there's no live per-ROI data
+        yet for any bucket (e.g. the very first tick of a run)."""
         window = self.window
         selected_roi_ids = self._selected_spectrum_roi_ids()
+
+        if len(selected_roi_ids) > 1 and window._sensorgram_running:
+            if self._render_live_sensorgram_update(selected_roi_ids):
+                return
+            # No live per-ROI data for any bucket yet (run just started) -
+            # fall through to the single legacy raw-trace branch below,
+            # same as before this method became mode-aware during a run.
 
         if len(selected_roi_ids) <= 1 or window._sensorgram_running:
             spectral_cube_indices = window._sensorgram_spectral_cube_indices
@@ -1102,6 +1132,7 @@ class AnalysisController(AnalysisWorkerMixin, AnalysisChromaticGeometryMixin):
             self._clear_sensorgram_series_items()
             self._hide_sensorgram_aggregate_band()
             self._update_processed_trace_overlay(None, None)
+            window._sensorgram_active_curve_color = None
             return
         x_values = self._sensorgram_x_values(spectral_cubes)
         # Computed ONCE for this whole redraw and reused for every selected
@@ -1123,27 +1154,84 @@ class AnalysisController(AnalysisWorkerMixin, AnalysisChromaticGeometryMixin):
                 cube_context_hashes_cache.append(self._sensorgram_cube_context_hashes(spectral_cubes))
             return cube_context_hashes_cache[0]
 
+        buckets, aggregate = self._sensorgram_display_buckets(mode, selected_roi_ids)
+
+        def trace_for_roi(roi_id: int) -> np.ndarray | None:
+            return self._sensorgram_trace_for_roi(
+                roi_id, spectral_cubes, spectral_cube_signatures, get_cube_context_hashes
+            )
+
+        self._render_sensorgram_buckets(
+            x_values, selected_roi_ids, buckets, aggregate, settings, all_roi_ids, trace_for_roi, report_missing=True
+        )
+
+    def _sensorgram_display_buckets(
+        self, mode: str, selected_roi_ids: tuple[int, ...]
+    ) -> tuple[list[tuple[str, QColor | None, list[int]]], bool]:
+        """Partitions a multi-ROI selection into (label, color, member_ids)
+        buckets per settings.sensorgram_display_mode, and whether those
+        buckets should be aggregated (Average all/Average by group) or
+        shown one-per-ROI (Individual) - the pure "which mode means which
+        buckets" decision, independent of where each bucket's member trace
+        data actually comes from (RAM/disk cache while idle vs. the live
+        per-cube accumulator while a run is in progress - see
+        _render_sensorgram_display and _render_live_sensorgram_update,
+        which both call this)."""
+        window = self.window
         if mode == "average_by_group":
             buckets = self._sensorgram_group_buckets(selected_roi_ids) or [
-                ("Average", QColor("#38bdf8"), list(selected_roi_ids))
+                ("Average", QColor(window._sensorgram_average_all_color), list(selected_roi_ids))
             ]
-            aggregate = True
-        elif mode == "individual":
-            buckets = [(f"ROI {roi_id}", None, [int(roi_id)]) for roi_id in selected_roi_ids]
-            aggregate = False
-        else:  # "average_all"
-            buckets = [("Average", QColor("#38bdf8"), list(selected_roi_ids))]
-            aggregate = True
+            return buckets, True
+        if mode == "individual":
+            return [(f"ROI {roi_id}", None, [int(roi_id)]) for roi_id in selected_roi_ids], False
+        # "average_all"
+        # Same grouping partition "Average by group" uses, just to check
+        # whether this selection happens to be a single group in disguise -
+        # if so, use that group's own color (consistent with every other
+        # display mode) instead of the user's configurable "mixed selection"
+        # fallback color, which only applies once the selection actually
+        # spans more than one group or mixes grouped/ungrouped ROIs (see
+        # _sensorgram_average_all_color and the Sensogram plot settings
+        # dialog).
+        group_buckets = self._sensorgram_group_buckets(selected_roi_ids)
+        if len(group_buckets) == 1 and len(group_buckets[0][2]) == len(selected_roi_ids):
+            average_color = group_buckets[0][1]
+        else:
+            average_color = window._sensorgram_average_all_color
+        return [("Average", QColor(average_color), list(selected_roi_ids))], True
 
+    def _render_sensorgram_buckets(
+        self,
+        x_values: np.ndarray,
+        selected_roi_ids: tuple[int, ...],
+        buckets: list[tuple[str, QColor | None, list[int]]],
+        aggregate: bool,
+        settings,
+        all_roi_ids: list[int],
+        trace_for_roi: Callable[[int], np.ndarray | None],
+        *,
+        report_missing: bool,
+    ) -> bool:
+        """Shared aggregate-and-draw tail for _render_sensorgram_display
+        (idle, RAM/disk-backed traces) and _render_live_sensorgram_update
+        (mid-run, live per-cube accumulator) - identical rendering either
+        way, only where each bucket member's trace comes from differs
+        (`trace_for_roi`). `report_missing=False` (the live path) skips the
+        "N of M not yet analyzed" summary-text/hide-on-empty side effects,
+        which would fight the run's own progress text and would incorrectly
+        hide a perfectly good previous frame just because this particular
+        tick's live accumulator doesn't cover every bucket yet - the caller
+        falls back to the legacy single trace instead in that case. Returns
+        whether anything was actually drawn."""
+        window = self.window
         missing_ids: list[int] = []
         bucket_traces: list[tuple[str, QColor | None, np.ndarray]] = []
         bucket_bands: list[dict[str, np.ndarray] | None] = []
         for label, color, member_ids in buckets:
             member_traces: dict[int, np.ndarray] = {}
             for roi_id in member_ids:
-                trace = self._sensorgram_trace_for_roi(
-                    int(roi_id), spectral_cubes, spectral_cube_signatures, get_cube_context_hashes
-                )
+                trace = trace_for_roi(int(roi_id))
                 if trace is None:
                     missing_ids.append(int(roi_id))
                     continue
@@ -1174,7 +1262,7 @@ class AnalysisController(AnalysisWorkerMixin, AnalysisChromaticGeometryMixin):
                 bucket_traces.append((label, resolved_color, trace))
                 bucket_bands.append(None)
 
-        if missing_ids:
+        if missing_ids and report_missing:
             self._set_sensorgram_summary_text(
                 f"{len(missing_ids)} of {len(selected_roi_ids)} selected ROI(s) not yet analyzed | Press Start analysis"
             )
@@ -1190,15 +1278,17 @@ class AnalysisController(AnalysisWorkerMixin, AnalysisChromaticGeometryMixin):
             )
 
         if not bucket_traces:
-            window._append_workflow_log(
-                f"SG render | no bucket had any resolvable member out of {len(selected_roi_ids)} selected ROI(s) - hiding plot",
-                level="debug",
-            )
-            window.sensorgram_curve.hide()
-            self._clear_sensorgram_series_items()
-            self._hide_sensorgram_aggregate_band()
-            self._update_processed_trace_overlay(None, None)
-            return
+            if report_missing:
+                window._append_workflow_log(
+                    f"SG render | no bucket had any resolvable member out of {len(selected_roi_ids)} selected ROI(s) - hiding plot",
+                    level="debug",
+                )
+                window.sensorgram_curve.hide()
+                self._clear_sensorgram_series_items()
+                self._hide_sensorgram_aggregate_band()
+                self._update_processed_trace_overlay(None, None)
+                window._sensorgram_active_curve_color = None
+            return False
 
         if len(bucket_traces) == 1:
             self._clear_sensorgram_series_items()
@@ -1206,6 +1296,7 @@ class AnalysisController(AnalysisWorkerMixin, AnalysisChromaticGeometryMixin):
             valid = np.isfinite(x_values) & np.isfinite(y_values)
             window.sensorgram_curve.show()
             pen_color = QColor(color) if color is not None else QColor("#22c55e")
+            window._sensorgram_active_curve_color = QColor(pen_color)
             if np.any(valid):
                 window.sensorgram_curve.setData(x_values[valid], y_values[valid])
             else:
@@ -1241,26 +1332,67 @@ class AnalysisController(AnalysisWorkerMixin, AnalysisChromaticGeometryMixin):
             # here before and the earlier "SG render"/"SG disk backup"
             # diagnostics only cover outright data-retrieval failure, not a
             # silently-empty-looking-but-technically-successful draw.
+            if report_missing:
+                window._append_workflow_log(
+                    f"SG render | single-bucket curve | {int(np.sum(valid))}/{valid.size} valid points"
+                    + (
+                        f" | x[{float(np.min(x_values[valid])):.3g},{float(np.max(x_values[valid])):.3g}]"
+                        f" y[{float(np.min(y_values[valid])):.3g},{float(np.max(y_values[valid])):.3g}]"
+                        if np.any(valid)
+                        else " | no valid points - curve set empty"
+                    ),
+                    level="debug",
+                )
+            return True
+
+        if report_missing:
             window._append_workflow_log(
-                f"SG render | single-bucket curve | {int(np.sum(valid))}/{valid.size} valid points"
-                + (
-                    f" | x[{float(np.min(x_values[valid])):.3g},{float(np.max(x_values[valid])):.3g}]"
-                    f" y[{float(np.min(y_values[valid])):.3g},{float(np.max(y_values[valid])):.3g}]"
-                    if np.any(valid)
-                    else " | no valid points - curve set empty"
-                ),
+                f"SG render | {len(bucket_traces)} buckets | switching to multi-curve series-items view",
                 level="debug",
             )
-            return
-
-        window._append_workflow_log(
-            f"SG render | {len(bucket_traces)} buckets | switching to multi-curve series-items view",
-            level="debug",
-        )
         window.sensorgram_curve.hide()
         self._hide_sensorgram_aggregate_band()
         self._update_processed_trace_overlay(None, None)
+        window._sensorgram_active_curve_color = None
         self._render_sensorgram_series_items(x_values, bucket_traces, bucket_bands)
+        return True
+
+    def _render_live_sensorgram_update(self, selected_roi_ids: tuple[int, ...]) -> bool:
+        """Live-during-a-run counterpart to _render_sensorgram_display's
+        idle multi-ROI bucket logic - called from there while
+        window._sensorgram_running is True (itself reached on every ~10/s
+        coalesced live redraw tick, via set_sensorgram_series ->
+        _update_statistics_overlays -> _render_sensorgram_display).
+
+        Sources each selected ROI's own value from window._sensorgram_live_
+        per_roi_values instead of the RAM/disk-cache-verifying
+        _sensorgram_trace_for_roi path used while idle - see
+        _render_sensorgram_display's own docstring for why. Returns False
+        (caller falls back to the legacy single trace) when there isn't yet
+        at least one bucket with live data - e.g. the very first tick of a
+        run, before on_sensorgram_partial_result has delivered anything."""
+        window = self.window
+        cube_indices = [int(cube) for cube in window._sensorgram_spectral_cube_indices]
+        if not cube_indices:
+            return False
+        settings = window._state.statistics_settings
+        buckets, aggregate = self._sensorgram_display_buckets(settings.sensorgram_display_mode, selected_roi_ids)
+        x_values = self._sensorgram_x_values(cube_indices)
+        all_roi_ids = [int(r.area_roi_id) for r in window._state.area_rois]
+        live_traces = window._sensorgram_live_per_roi_values
+
+        def trace_for_roi(roi_id: int) -> np.ndarray | None:
+            per_cube = live_traces.get(int(roi_id))
+            if not per_cube:
+                return None
+            return np.asarray([per_cube.get(cube, float("nan")) for cube in cube_indices], dtype=np.float64)
+
+        drew = self._render_sensorgram_buckets(
+            x_values, selected_roi_ids, buckets, aggregate, settings, all_roi_ids, trace_for_roi, report_missing=False
+        )
+        if drew:
+            window.sensorgram_current_point.hide()
+        return drew
 
     def _set_sensorgram_summary_text(self, text: str) -> None:
         self.window.sensorgram_summary_label.setText(text)

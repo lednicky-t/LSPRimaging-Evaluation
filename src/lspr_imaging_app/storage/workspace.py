@@ -605,6 +605,7 @@ def build_processing_profile_payload(
     image_exclusions: list[ImageExclusionRule] | None = None,
     area_roi_arrays: list[RoiArrayGroup] | None = None,
     statistics_settings: StatisticsSettings | None = None,
+    selected_area_roi_ids: set[int] | list[int] | None = None,
 ) -> dict:
     payload = {
         "profile_type": "lspr_imaging_processing",
@@ -656,6 +657,11 @@ def build_processing_profile_payload(
         "chromatic_landmarks": [asdict(mark) for mark in (chromatic_landmarks or [])],
         "image_exclusions": [asdict(rule) for rule in (image_exclusions or [])],
         "statistics_settings": asdict(statistics_settings or StatisticsSettings()),
+        # Which ROI(s)/group the Spectra/Sensogram panels had selected, so a
+        # restored session shows the same selection instead of an empty
+        # panel - see main_window._apply_roi_selection and
+        # SessionStateManager._on_processing_state_loaded.
+        "selected_area_roi_ids": sorted(int(roi_id) for roi_id in (selected_area_roi_ids or [])),
     }
     if mask_settings is not None:
         payload["mask_settings"] = _encode_mask_settings(mask_settings)
@@ -684,6 +690,7 @@ def save_processing_profile(
     image_exclusions: list[ImageExclusionRule] | None = None,
     area_roi_arrays: list[RoiArrayGroup] | None = None,
     statistics_settings: StatisticsSettings | None = None,
+    selected_area_roi_ids: set[int] | list[int] | None = None,
 ) -> None:
     write_json_file(
         path,
@@ -699,6 +706,7 @@ def save_processing_profile(
             image_exclusions=image_exclusions,
             area_roi_arrays=area_roi_arrays,
             statistics_settings=statistics_settings,
+            selected_area_roi_ids=selected_area_roi_ids,
         ),
     )
 
@@ -738,6 +746,7 @@ def load_processing_profile(
     list[ImageExclusionRule],
     list[RoiArrayGroup],
     StatisticsSettings,
+    list[int],
 ]:
     payload = json.loads(path.read_text(encoding="utf-8"))
     preprocessing_payload = payload.get("preprocessing", payload)
@@ -1027,6 +1036,15 @@ def load_processing_profile(
         sensorgram_band=sensorgram_band,
     )
 
+    raw_selected_area_roi_ids = payload.get("selected_area_roi_ids", [])
+    selected_area_roi_ids: list[int] = []
+    if isinstance(raw_selected_area_roi_ids, list):
+        for raw_roi_id in raw_selected_area_roi_ids:
+            try:
+                selected_area_roi_ids.append(int(raw_roi_id))
+            except (TypeError, ValueError):
+                continue
+
     return (
         preprocessing,
         detection,
@@ -1039,4 +1057,5 @@ def load_processing_profile(
         image_exclusions,
         area_roi_arrays,
         statistics_settings,
+        selected_area_roi_ids,
     )

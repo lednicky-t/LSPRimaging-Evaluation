@@ -244,6 +244,15 @@ class UIStateManager:
         )
         if group_color.isValid():
             window._sensorgram_group_color = group_color
+        average_all_color = QColor(
+            str(
+                window._settings.value(
+                    "plot_style/sensorgram_average_all_color", window._sensorgram_average_all_color.name()
+                )
+            )
+        )
+        if average_all_color.isValid():
+            window._sensorgram_average_all_color = average_all_color
 
     def save_visual_preferences(self) -> None:
         window = self._window
@@ -293,6 +302,9 @@ class UIStateManager:
         )
         window._settings.setValue("plot_style/sensorgram_group_line_style", int(window._sensorgram_group_line_style.value))
         window._settings.setValue("plot_style/sensorgram_group_color", window._sensorgram_group_color.name())
+        window._settings.setValue(
+            "plot_style/sensorgram_average_all_color", window._sensorgram_average_all_color.name()
+        )
 
     def save_control_preferences(self) -> None:
         window = self._window
