@@ -790,3 +790,126 @@ still builds.
   `undo_manager` pattern, now proven out on two real modules. `GeometryModule`
   itself is now fully built (computational + cosmetic commands both done).
 - The panel layer isn't built beyond the scaffold stubs.
+
+## 2026-09-21: `BackgroundModule` built; `MaskModule` built (scoped narrower - see below)
+
+**`BackgroundModule`**: `set_flatten_background_settings()` replaces the
+scaffold stub - and fixes a bug found by actually running it, not just
+reading it: the old stub called `estimate.estimate_background(image)`,
+which raised `AttributeError` - that function doesn't exist in
+`estimate.py` (only `flatten_background()` does, estimate+apply combined).
+Deeper problem underneath the crash: checking the real caller
+(`processing/preprocess.py`) shows `flatten_background()` runs live,
+inline, per rendered frame from `BackgroundSettings` fields directly -
+there's no persisted "fitted model" object anywhere in the current app for
+this stage (`BackgroundSettings` itself confirms this: every field is a
+parameter/toggle, none is a result), unlike Chromatic's genuinely-stored
+per-image affine models the sketch's "owns the fitted background model"
+phrase was evidently modeled on. So this module's honest job is settings
+ownership, same shape as `GeometryModule`, not fit-and-cache - the old
+`fit_from_image`/`model()` pair is removed rather than fixed in place.
+One combined command (not six granular setters, deliberately unlike
+Geometry): checked the real UI wiring
+(`gui/main_window.py`'s `_update_image_processing_settings`) rather than
+assuming, and it's a settings-panel-with-an-Apply-button pushing exactly
+one `_push_undo_point("Image processing")` for the whole group - matched
+that shape and that exact undo label.
+
+**`MaskModule`**: scoped narrower than Geometry/Background after reading
+all 1216 lines of `gui/mask_controller.py` - Mask's real "apply" flow is
+async-worker-backed (`request_mask_candidate` backgrounds two of its four
+tool kinds) and file-I/O-heavy (`QFileDialog` load/save), not plain
+in-memory settings mutation. Built the two things that are:
+`set_tool_settings()` (every tuning parameter at once, same combined-Apply
+shape as Background) and `set_file_mask()`/`raw_mask()` (the committed
+raster mask, replacing those two stubs). `set_histogram_highlight_range()`
+handles the histogram widget's live drag-selection separately, matching
+`GeometryModule.set_measurement_anchors`'s split.
+
+Two findings from reading the real file, worth recording since they
+contradict what the sketch/model.py's ported field list would suggest:
+1. `window._state.mask` (`domain.models.MaskSettings`) is essentially
+   unused for its own tunable fields in the old app - grepped every write
+   to it; the *only* writes are `clear_preview_overlays()` resetting the
+   "New mask system state" fields (`histogram_enabled`/`histogram_mask`/
+   `figure_enabled`/`figure_mask`) to their defaults. Every real
+   tool-tuning value is read straight from its Qt spinbox each time
+   (`mask_settings_from_controls()`), never persisted through this
+   dataclass - so `MaskModule.set_tool_settings()` isn't a port of an
+   existing setter, it's these settings' first real owner. Deliberately
+   left the four "New mask system state" fields alone - no command
+   methods added for them, carried over exactly as inert as they were.
+2. `create_histogram_mask()` (`creation.py`) is dead code in the old app -
+   never called anywhere. The "histogram" mask tool's real candidate comes
+   from `current_histogram_highlight_mask_raw()` in `mask_controller.py`
+   instead, a completely different algorithm (selects by *displayed*
+   value range, then maps through processed<->raw coordinate maps) never
+   ported into `creation.py` as a pure function. Its fields
+   (`histogram_min_value`/`histogram_max_value`) are still included in
+   `set_tool_settings()` as real dataclass fields regardless of current
+   dead-code status - flagged rather than silently dropped.
+
+**Confirmed no undo-tracking for either module's new commands**: grepped
+`mask_controller.py` for `_push_undo_point` - zero matches, for any mask
+action, ever. Neither `BackgroundModule`'s nor `MaskModule`'s tool-tuning
+settings are undo-tracked either (`BackgroundModule`'s combined command
+*is* undo-tracked, matching the real `_push_undo_point("Image
+processing")` call the old app does make for that one).
+
+**New payload types**: `BackgroundComputationalChange` (one type, no
+cosmetic half - every `BackgroundSettings` field feeds
+`flatten_background()` directly). `MaskComputationalChange` +
+`MaskCosmeticChange` (two types, like Geometry) - only the committed
+`file_mask` is computational; tool-tuning settings and the histogram-
+highlight selection are cosmetic, on the same reasoning as Geometry's
+measurement anchors: unlike crop/rotate/flip (which apply continuously,
+every render), a Mask tool's settings only affect anything once a
+not-yet-built "apply" command merges a computed candidate into
+`file_mask` - until then, changing a threshold slider invalidates nothing
+already computed.
+
+**Real bug caught during implementation, not just porting**: a dataclass
+`==` compare across `MaskSettings` (which has two `np.ndarray | None`
+fields) returns an array, not a bool, once either field actually holds an
+array - `ndarray == ndarray` doesn't reduce to a scalar. `set_tool_settings`'s
+no-op check compares an explicit tuple of just the 8 scalar tunables
+instead of `new_settings == self._settings`, sidestepping this rather than
+relying on the fact that `histogram_mask`/`figure_mask` happen to always
+be `None` today (per finding 1 above - true now, but not a safe thing to
+build a no-op check on).
+
+**Verified with real calls** (scripted, no pytest harness yet): both
+modules' defensive-copy guarantees; `BackgroundModule`'s no-op-skip and
+clamping (`binning` floors at 1, `exclusion_dilation_px` floors at 0) and
+full undo-back-to-defaults; `MaskModule`'s `set_tool_settings`/
+`set_histogram_highlight_range` no-op-skip with zero undo-stack growth
+(confirming they're genuinely not undo-tracked); `set_file_mask`'s
+defensive copy (mutating the returned array doesn't touch internal state)
+and content-based no-op skip (a different array object with identical
+content is a no-op, matching the old app's `np.array_equal` check).
+Confirmed the rewrite-preview window still builds.
+
+**Not built this pass, explicitly flagged rather than guessed at** (the
+`MaskModule` remainder, all bigger/async/file-I/O-shaped, unlike anything
+built so far): computing an actual mask *candidate* from these settings
+and merging it into `file_mask` (`apply_histogram_mask`/`apply_relative_
+mask`/`apply_local_contrast_mask`/`apply_morphology_mask` and their
+`reset_*` counterparts, the `request_mask_candidate` worker/cache
+machinery behind them); brush painting (`apply_mask_brush`); mask file
+load/save; per-wavelength mask diffs (needed once off-reference painting
+under chromatic correction matters); porting `current_histogram_highlight_
+mask_raw()`'s real coordinate-map algorithm into `creation.py`.
+
+**Not done / still open, as of this entry**:
+- `RoiToolbox.display_position()` — stub; needs the Chromatic-affine
+  decision noted in `toolbox.py`'s module docstring.
+- `analysis/tasks.py`, `storage/session.py` — not yet started.
+- `MaskModule`'s async/file-I/O-shaped remainder — see above, deliberately
+  out of scope this pass.
+- `ChromaticModule`'s own command methods (`add_landmark`/`refit`) are
+  still `NotImplementedError` stubs, untouched this pass - `fitting.py` is
+  1539 lines and genuinely the biggest remaining chunk of the four Image
+  Tools sub-modules; deferred rather than rushed. `GeometryModule`/
+  `BackgroundModule`/`MaskModule` (within the scope noted above) are now
+  built.
+- The panel layer isn't built beyond the scaffold stubs.

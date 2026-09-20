@@ -13,6 +13,18 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 
+@dataclass(frozen=True)
+class BackgroundComputationalChange:
+    """Background's own computational-change payload (change_events.py's
+    two-type pattern, §3) - whole-image scope like
+    `GeometryComputationalChange`, no `roi_ids` field. Every field on
+    `BackgroundSettings` feeds `flatten_background()`
+    (`processing/preprocess.py` on `develop`/`main`), so unlike Geometry
+    there is no cosmetic half here - one payload type is enough."""
+
+    reason: str  # currently always "flatten_background_settings" - one combined command, see module.py
+
+
 @dataclass(slots=True)
 class BackgroundSettings:
     flatten_background_enabled: bool = False

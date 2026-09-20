@@ -17,6 +17,34 @@ from dataclasses import dataclass
 import numpy as np
 
 
+@dataclass(frozen=True)
+class MaskComputationalChange:
+    """Mask's own computational-change payload (change_events.py's
+    two-type pattern, §3) - whole-image scope like
+    `GeometryComputationalChange`/`BackgroundComputationalChange`, no
+    `roi_ids` field. Only the committed raster `file_mask` is computational
+    - it's what `ignored_pixel_mask`/`flatten_background` actually read.
+    Tool-tuning settings and the histogram-highlight selection are
+    `MaskCosmeticChange` instead (see that type's docstring)."""
+
+    reason: str  # "file_mask"
+
+
+@dataclass(frozen=True)
+class MaskCosmeticChange:
+    """Mask's cosmetic-change payload. `relative`/`local_contrast`/
+    `morphology`/`histogram` tool-tuning settings and the histogram-
+    highlight drag selection don't themselves invalidate any stored result
+    - unlike Geometry's crop/rotate/flip (which apply continuously, every
+    render), a Mask tool's settings only affect anything once an explicit
+    "apply" action (not built this pass - see module.py's docstring)
+    merges a computed candidate into `file_mask`. Until then, changing a
+    threshold slider is exactly like dragging Geometry's measurement ruler
+    - a preview input, not a result-affecting one."""
+
+    reason: str  # "tool_settings" | "histogram_highlight"
+
+
 @dataclass(slots=True)
 class MaskSettings:
     # Histogram-based mask (intensity ranges)
