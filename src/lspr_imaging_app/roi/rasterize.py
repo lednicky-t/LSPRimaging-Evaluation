@@ -15,10 +15,9 @@ module from circle/annulus rasterization, which the current app keeps in
 ``processing/chromatic.py`` alongside the chromatic-correction math (ported
 to ``image_tools/chromatic/affine.py`` - originally a single ``fitting.py``,
 later split into several files, see that build log's 2026-09-21 entry).
-That left
-"which module rasterizes what" ambiguous once ``roi_rasterize.py`` turned
-out to only handle the arbitrary-mask escape hatch. Chosen fix: pull the
-circle/annulus math (``transformed_circle_points``, ``transformed_disk_mask``,
+That left "which module rasterizes what" ambiguous once ``roi_rasterize.py``
+turned out to only handle the arbitrary-mask escape hatch. Chosen fix: pull
+the circle/annulus math (``transformed_circle_points``, ``transformed_disk_mask``,
 ``transformed_annulus_mask`` and their ``_for_patch`` variants) out of
 Chromatic and into this module, so every geometry type an ``AreaRoi`` can
 have - circle, annulus, or mask - rasterizes through one place. These
@@ -43,6 +42,16 @@ the same absolute pixel location for every wavelength; AGENTS.md's "masks
 are forward-transformed via Chromatic's warp_mask()" invariant describes the
 target state for a *future* chromatic-corrected-mask feature, not something
 this port silently adds - see the inline note on ``rasterize_sample``).
+**Scoped concretely, 2026-09-21 mask/ROI design conversation**: the fix is
+the same shape this module already uses for circle/annulus, not a new
+pattern - warp the expanded mask through
+``image_tools.chromatic.warp.warp_boolean_mask_affine(expanded_mask,
+affine_matrix)`` before returning it, using the same ``affine_matrix``
+parameter the circle/annulus branch already takes. ``image_tools/mask/
+raster_tools.py`` (the sibling module the ignore mask's own brush/threshold/
+morphology tools live in - renamed from ``creation.py`` in that same
+conversation) is the intended shared toolbox for whatever hand-drawn mask
+*authoring* a mask-geometry ROI eventually gets too, once that UI exists.
 """
 
 from __future__ import annotations

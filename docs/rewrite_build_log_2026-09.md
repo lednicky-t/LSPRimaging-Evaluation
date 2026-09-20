@@ -1032,3 +1032,111 @@ the rewrite-preview window still builds.
   see the previous entry. Mask/ROI tool-sharing design (maintainer raised
   this, not yet discussed in depth) is a separate open conversation.
 - The panel layer isn't built beyond the scaffold stubs.
+
+## 2026-09-21: Mask/ROI raster-tools design conversation - `creation.py` renamed to `raster_tools.py`, made shared-ready
+
+Design discussion with the maintainer, resolved before any code changed
+(their explicit request - "we can discuss after"). Two findings worth
+recording since they correct/sharpen earlier statements in this log and in
+`roi/rasterize.py`'s own docstring:
+
+**The ignore mask already undergoes the same chromatic-correction warp as
+ROIs - a prior message in this conversation described it as if it
+didn't, which was wrong.** Checked `gui/mask_controller.py`'s
+`current_external_mask()` (the real read-time resolution path): it warps
+the canonical reference-frame mask through `warp_boolean_mask_affine`
+(the same `ChromaticModule.affine_for()`-driven mechanism that moves
+circle/annulus ROI positions) *first*, and only *then* layers a sparse
+manual per-wavelength diff (`apply_mask_wavelength_diff`) on top as an
+optional touch-up. The earlier description conflated this always-on
+warp step with `apply_mask_brush`'s *write-time* branching (whether a new
+stroke goes straight into the canonical array or into the diff dict,
+depending on reference/off-reference + chromatic-correction-on) - a real,
+Mask-specific mechanism, but unrelated to whether CC-warping happens at
+all (it always does).
+
+**ROI arbitrary-mask geometry (`AreaRoi.sample_mask`/`reference_mask`, a
+`RoiMask`) does *not* yet get this same warp - a known, already-documented
+gap, not a design disagreement.** `roi/rasterize.py`'s own docstring
+(written during the earlier ROI-stage session) already states AGENTS.md's
+"masks are forward-transformed via Chromatic's `warp_mask()`" invariant as
+the *target* state, "not something this port silently adds." Scoped the
+fix concretely in that same docstring: warp the expanded mask through
+`image_tools.chromatic.warp.warp_boolean_mask_affine(expanded_mask,
+affine_matrix)` before returning it, using the same `affine_matrix`
+parameter the circle/annulus branch already takes - the identical pattern
+already in use, not a new one. Not built this pass (no mask-geometry ROI
+UI exists yet to need it), but now has a concrete "how," not just a "this
+should happen eventually."
+
+**Agreed design for shared raster tools**: `image_tools/mask/creation.py`
+already had two functions with zero Mask-specific coupling
+(`apply_morphology_to_mask`, the relative/local-contrast candidate
+generator) - renamed the file to `raster_tools.py` and decoupled the
+threshold/contrast generators from `MaskSettings` (now take plain scalar
+parameters, split `create_figure_mask(mode=...)` into
+`create_relative_contrast_mask`/`create_local_contrast_mask`) specifically
+so a caller with no `MaskSettings` instance - i.e. a future ROI
+mask-drawing command - can call them too. Zero existing callers anywhere
+in the rewrite (verified by grep before renaming), so this was a
+zero-migration-cost change.
+
+**Two new functions added**, the pieces that didn't already exist:
+- `brush_stamp_bounds(canvas_shape, center_xy, radius_px)` - the circular
+  brush footprint for one stroke, clamped to the canvas, returning
+  `(x0, x1, y0, y1, local_mask)` or `None` if fully off-edge. Deliberately
+  just the footprint, not a paint operation - it doesn't know or care
+  whether the caller writes directly into a canonical array or (Mask's own
+  wrinkle) accumulates into a sparse per-wavelength diff dict instead; see
+  the function's own docstring for why that branching stays out of this
+  shared toolbox rather than being generalized into it.
+- `apply_brush_stamp(canvas, center_xy, radius_px, value=...)` - the
+  direct-write convenience built on `brush_stamp_bounds`, for the common
+  case (both Mask's on-reference/CC-disabled case and, later, every ROI
+  mask-drawing edit, which has no per-wavelength-diff complication at all
+  per `roi/model.py`'s own "a mask sits at the same absolute pixel
+  location for every wavelength" note).
+- `merge_mask_candidate(current, candidate, subtract=...)` - named the
+  add/subtract-a-candidate operation that was previously just inlined in
+  the old app's apply-delta code (`np.logical_or`/`np.logical_and(~...)`),
+  so both future consumers call one function instead of re-deriving it.
+
+**Grayscale/weighted masks** (maintainer's stated future direction - the
+mask as intensity-weighted, not just binary include/exclude) deliberately
+**not** built into this pass: it would touch how `flatten_background`'s
+exclusion mask and `AreaRoiDetectionSettings.ignored_pixel_mask` consume
+the array (both expect boolean today) and any persisted weighting is an
+HDF5-schema decision - flagged as a real direction, not assumed or
+half-built.
+
+**Caching the per-wavelength chromatic warp** (maintainer's question) -
+agreed to defer until it's actually measured slow, per this repo's own
+performance-work rule (instrument, then optimize, don't guess); noted a
+cache would most naturally key the same way `ChromaticModule`'s own
+fitted models are keyed, wherever the analysis-store recompute planner
+ends up living (`analysis/tasks.py`, not started).
+
+**Verified with real calls** (scripted, no pytest harness yet): threshold
+mask correctness on a hand-computed 2x3 example; relative/local-contrast
+masks correctly flag a synthetic bright blob; a dilate-then-erode
+morphology round trip; `brush_stamp_bounds`/`apply_brush_stamp` on a
+centered stroke, an off-canvas stroke (`None`, no-op paint), and an
+edge-straddling stroke (paints only the in-bounds part); `apply_brush_stamp`
+confirmed non-mutating (original canvas untouched); `merge_mask_candidate`
+add/subtract correctness on overlapping regions. Confirmed `pyflakes`
+clean across the whole `src/lspr_imaging_app` tree and that the
+rewrite-preview window still builds.
+
+**Not done / still open, as of this entry**:
+- `RoiToolbox.display_position()` — stub; needs the Chromatic-affine
+  decision noted in `toolbox.py`'s module docstring.
+- `analysis/tasks.py`, `storage/session.py` — not yet started.
+- `ChromaticModule.add_landmark()`/`refit()` — still stubs.
+- `MaskModule`'s async/file-I/O-shaped remainder (candidate computation,
+  brush painting, file load/save) - the command methods that will
+  actually call `raster_tools.py` aren't built yet, only the toolbox
+  itself.
+- ROI mask-geometry chromatic warp (`roi/rasterize.py`'s scoped-but-
+  unbuilt task above) and ROI mask-drawing commands/UI - neither started;
+  no mask-geometry ROI editing exists yet at all.
+- The panel layer isn't built beyond the scaffold stubs.

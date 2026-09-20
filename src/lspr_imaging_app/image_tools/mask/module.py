@@ -41,17 +41,19 @@ the sketch** (matching this build log's established working method -
    were dead in the old app and nothing in this rewrite gives them meaning
    yet either.
 
-2. **`create_histogram_mask()` (`creation.py`) is dead code in the old
-   app - never called.** The "histogram" mask tool's real candidate comes
-   from `current_histogram_highlight_mask_raw()` in `mask_controller.py`
-   instead: a completely different algorithm (selects pixels by
-   *displayed* value range, then maps the selection through
-   processed<->raw coordinate maps) that was never ported into `creation.py`
-   as a pure function. `histogram_min_value`/`histogram_max_value` (the
-   fields `create_histogram_mask` actually reads) are included in
-   `set_tool_settings()` regardless, as real dataclass fields regardless of
-   current dead-code status - but porting the real coordinate-map algorithm
-   is future work, not assumed done here.
+2. **`create_histogram_mask()` (`raster_tools.py`, named `creation.py`
+   until the 2026-09-21 mask/ROI design conversation renamed it) is dead
+   code in the old app - never called.** The "histogram" mask tool's real
+   candidate comes from `current_histogram_highlight_mask_raw()` in
+   `mask_controller.py` instead: a completely different algorithm (selects
+   pixels by *displayed* value range, then maps the selection through
+   processed<->raw coordinate maps) that was never ported into
+   `raster_tools.py` as a pure function. `histogram_min_value`/
+   `histogram_max_value` (the fields `set_tool_settings()` stores, that a
+   future `create_histogram_mask()` call would read) are included
+   regardless, as real dataclass fields regardless of current dead-code
+   status - but porting the real coordinate-map algorithm is future work,
+   not assumed done here.
 
 **Not wired through `undo_manager`** - confirmed by grep: `mask_controller.py`
 never calls `_push_undo_point` anywhere, for any mask action (load, save,
@@ -69,6 +71,16 @@ machinery); brush painting (`apply_mask_brush`); mask file load/save
 (`_current_file_mask_wavelength_diffs`, needed once off-reference painting
 under chromatic correction matters). All flagged rather than guessed at -
 a distinctly bigger chunk than Geometry's calibration deferral was.
+
+**2026-09-21 addendum**: `raster_tools.py`'s pure functions (threshold/
+contrast candidate generation, morphology, brush footprint, candidate
+merge) are now built and shared-ready - see that file's module docstring
+for the mask/ROI design conversation this came out of, and
+`roi/rasterize.py`'s docstring for the matching not-yet-built ROI-mask
+chromatic-warp task. The command methods that would actually *call*
+`raster_tools.py` (the "apply" flow listed above) still aren't built -
+this addendum only changes what those commands, once written, will call
+into, not the command surface itself.
 """
 
 from __future__ import annotations
