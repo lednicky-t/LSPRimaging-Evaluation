@@ -293,3 +293,107 @@ Committed as `82146f5`.
   pure math consuming them are real so far.
 - Nothing on `rewrite` has been pushed to `origin` yet; the umbrella
   repo's submodule pointer is still deliberately not bumped.
+
+## 2026-09-20: ROI stage finished — reduction.py + rasterize.py ported, circle/annulus rasterization unified into `roi/`
+
+Scope-checked both remaining ROI-stage stubs before porting, per this
+session's working method. Two real findings, both differing from the
+sketch's assumption.
+
+**`roi/reduction.py` — placeholder shape was simply wrong (fixed directly,
+no check-in needed).** The stub guessed single-array functions (`mean
+(values)`, `plane_fit(values)`). The real `processing/roi_math.py` (175
+lines) is built around **sample+reference pairs**, not lone arrays —
+`reduce_sample_and_reference_all_methods()` computes every
+`REDUCTION_METHODS` entry from one already-extracted pixel pair in a single
+call, which is what lets switching "Reduction method" in the GUI be instant
+instead of re-reading pixels. `plane_fit` isn't a per-array function at all —
+it fits a plane to the *reference* ROI's pixels and evaluates it at the
+*sample* ROI's center, needing the reference region's pixel coordinates and
+the sample center as extra arguments. Same class of bug as the
+`AreaRoiGroup.group_id: int` and guessed `preprocess_image()` mismatches
+already caught on this branch. Ported verbatim (diffed programmatically via
+`ast.unparse` per function body, ignoring docstrings — confirmed
+byte-identical logic; only cross-references to old-app-only files were
+trimmed from two docstrings). `weighted_*` variants stay `NotImplementedError`
+— genuine §6a implementation work, not a port.
+
+**`roi/rasterize.py` — genuine scope mismatch, presented to the maintainer
+before porting.** The stub's guessed `rasterize_binary(roi, bounding_box)`
+implied this module rasterizes every ROI shape. The real
+`processing/roi_rasterize.py` (80 lines) only handles the "mask" geometry
+escape hatch (`crop_mask`/`expand_mask`/`expand_mask_to_patch`) — its own
+docstring is explicit that circle/annulus rasterization already lives in
+`processing/chromatic.py` (`transformed_disk_mask`/`transformed_annulus_mask`),
+already ported to `image_tools/chromatic/fitting.py` earlier this session.
+Presented two options: keep today's split (mask-geometry math in `roi/`,
+circle/annulus math stays in Chromatic) vs. unify into one dispatcher in
+`roi/` per AGENTS.md §6a's "one dispatcher, not per-shape code" preference.
+**Maintainer chose: unify into `roi/`.**
+
+Traced the real dependency shape before moving anything: `transformed_disk_
+mask`/`transformed_annulus_mask`/`transformed_circle_points` and their
+`_for_patch` variants take `affine_matrix` as a plain parameter — they don't
+reach into Chromatic's internal state — so moving them to `roi/rasterize.py`
+and having callers obtain the matrix via `ChromaticModule.affine_for()`
+(the module's only public surface per AGENTS.md) keeps the module boundary
+intact; `roi/rasterize.py` never imports or calls `ChromaticModule` itself.
+`apply_affine_to_points`/`invert_affine_matrix` stayed in `fitting.py` since
+other functions there (`fit_similarity_matrix`'s neighbors) still use them.
+Moved 7 functions total (`transformed_circle_points`, `transformed_disk_
+mask`, `_annulus_mask_in_box`, `annulus_reach_box`, `transformed_annulus_
+mask`, `transformed_annulus_mask_for_patch`, `transformed_disk_mask_for_
+patch`) verbatim — grep-confirmed no other in-repo new-code references to
+the old location, one stale docstring cross-reference in `fitting.py`'s
+`warp_boolean_mask_affine` updated to point at the new module.
+
+**New real dispatcher, not just a move**: also ported `_effective_reference_
+radii` and built `rasterize_sample`/`rasterize_reference` (+ `_for_patch`
+variants) from the inline `if roi.sample_geometry_type == "mask" ... else
+transformed_disk_mask(...)` dispatch that previously only existed inline
+inside `gui/analysis_tasks.py`'s `_selected_roi_masks_for_spectrum` —
+consolidated into one reusable per-ROI, per-side function in `roi/`, per the
+maintainer's "unify" choice. Deliberately **did not** port that function's
+own multi-ROI OR-accumulation loop (iterate every selected ROI, combine into
+one mask, patch/reach-window caching) — that's real analysis-layer looping
+logic (selection scope, exclusion, caching) that belongs to the not-yet-
+built `analysis/tasks.py`, not to ROI's own rasterization.
+
+**Real behavior preserved, not silently "fixed"**: mask-geometry ROIs are
+**not** re-warped by the chromatic affine in `rasterize_sample`/
+`rasterize_reference`, matching the current app's own documented limitation
+(`analysis_tasks.py`'s inline comment: "mask-geometry ROIs are not re-warped
+... revisit if chromatic-corrected arbitrary masks are needed"). This
+appears to conflict with AGENTS.md's "masks are forward-transformed via
+Chromatic's `warp_mask()`" invariant — resolved by reading that invariant as
+describing a *future* chromatic-corrected-mask feature, not something
+already true today; documented inline in `rasterize_sample`'s docstring
+rather than silently building a fix nobody asked for.
+
+Verified: pyflakes-clean, `ast.unparse`-diffed circle/annulus functions
+identical pre/post move. Exercised with real calls (not just import-
+checking) — disk/annulus mask geometry at an identity affine, `crop_mask`/
+`expand_mask` roundtrip, `rasterize_sample`/`rasterize_reference` against
+both circle+annulus and mask+"none" geometry ROIs, `_for_patch` variant
+agreement with the full-image variant at a (0,0) patch origin. Rewrite-
+preview window still builds, all 5 tabs present.
+
+**ROI stage is now fully ported**: `roi/model.py`, `roi/detection.py`,
+`roi/reduction.py`, `roi/rasterize.py` all real. `RoiToolbox`'s own command
+methods (`add_roi`, `move_roi`, ...) are still `NotImplementedError` stubs —
+wiring the toolbox's commands to this now-real math is separate work.
+
+**Not done / still open, as of this entry**:
+- `RoiToolbox`'s own command methods — still stubs; the math they'll call
+  (`roi/reduction.py`, `roi/rasterize.py`, `roi/detection.py`) is now real.
+- `analysis/tasks.py`, `storage/session.py` — not yet started. `analysis/
+  tasks.py` will own the multi-ROI OR-accumulation loop this entry
+  deliberately left out of `roi/rasterize.py`.
+- The genuinely-new design pieces (`analysis/provenance.py`+`planner.py`,
+  the §6a weighted-reduction/supersampling math — `roi/reduction.py`'s
+  `weighted_*` and `roi/rasterize.py`'s `rasterize_fractional`, the real
+  background estimate/apply split) — not yet started.
+- `GeometryModule`/`MaskModule`/`BackgroundModule`/`ChromaticModule`'s own
+  command methods are still `NotImplementedError` stubs.
+- Nothing on `rewrite` has been pushed to `origin` yet; the umbrella
+  repo's submodule pointer is still deliberately not bumped.
