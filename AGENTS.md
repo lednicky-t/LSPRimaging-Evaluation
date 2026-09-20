@@ -217,6 +217,10 @@ center-in-shape test. Full detail: architecture sketch §6a.
 - `docs/rewrite_feature_inventory_2026-09.md` — the evidence base.
 - `docs/rewrite_architecture_sketch_2026-09.md` — the full design this
   file summarizes.
+- `docs/rewrite_build_log_2026-09.md` — dated, append-only record of what's
+  actually been built on the `rewrite` branch so far, what was corrected
+  along the way and why, and what's still open. Read this first when
+  resuming the rewrite cold.
 - `docs/roi_system_roadmap.md` — the adopted ROI model plan (`Pair`
   vocabulary, geometry-type dispatcher).
 - `docs/qthreadpool_zarr_crash_investigation.md`,
