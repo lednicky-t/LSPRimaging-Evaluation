@@ -37,8 +37,8 @@ class RoiTablePanel(QWidget):
         """Not yet implemented - scaffolding only."""
         raise NotImplementedError
 
-    def _on_rename_group(self, group_id: int, name: str) -> None:
+    def _on_rename_group(self, group_id: str, name: str) -> None:
         self._roi_toolbox.rename_group(group_id, name)
 
-    def _on_move_group(self, group_id: int, new_index: int) -> None:
+    def _on_move_group(self, group_id: str, new_index: int) -> None:
         self._roi_toolbox.reorder_group(group_id, new_index)

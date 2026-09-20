@@ -29,8 +29,8 @@ class RoiToolbox(QObject):
     def __init__(self, parent: QObject | None = None) -> None:
         super().__init__(parent)
         self._rois: dict[int, AreaRoi] = {}
-        self._groups: dict[int, AreaRoiGroup] = {}
-        self._array_groups: dict[int, RoiArrayGroup] = {}
+        self._groups: dict[str, AreaRoiGroup] = {}
+        self._array_groups: dict[str, RoiArrayGroup] = {}
 
     # -- query interface ------------------------------------------------
 
@@ -82,33 +82,33 @@ class RoiToolbox(QObject):
         raise NotImplementedError
 
     @instrumented("RoiToolbox.create_group")
-    def create_group(self, name: str) -> int:
+    def create_group(self, name: str) -> str:
         """Not yet implemented - scaffolding only."""
         raise NotImplementedError
 
     @instrumented("RoiToolbox.rename_group")
-    def rename_group(self, group_id: int, name: str) -> None:
+    def rename_group(self, group_id: str, name: str) -> None:
         """Not yet implemented - scaffolding only."""
         raise NotImplementedError
 
     @instrumented("RoiToolbox.recolor_group")
-    def recolor_group(self, group_id: int, color: object) -> None:
+    def recolor_group(self, group_id: str, color: object) -> None:
         """Not yet implemented - scaffolding only."""
         raise NotImplementedError
 
     @instrumented("RoiToolbox.reorder_group")
-    def reorder_group(self, group_id: int, new_index: int) -> None:
+    def reorder_group(self, group_id: str, new_index: int) -> None:
         """Not yet implemented - scaffolding only."""
         raise NotImplementedError
 
     @instrumented("RoiToolbox.add_to_group")
-    def add_to_group(self, roi_id: int, group_id: int) -> None:
+    def add_to_group(self, roi_id: int, group_id: str) -> None:
         """Enforces "at most one group per ROI". Not yet implemented -
         scaffolding only."""
         raise NotImplementedError
 
     @instrumented("RoiToolbox.remove_from_group")
-    def remove_from_group(self, roi_id: int, group_id: int) -> None:
+    def remove_from_group(self, roi_id: int, group_id: str) -> None:
         """Not yet implemented - scaffolding only."""
         raise NotImplementedError
 
