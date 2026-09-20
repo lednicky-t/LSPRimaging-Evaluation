@@ -125,6 +125,42 @@ of the cube count.
 
 ---
 
+## Undo/redo
+
+Added 2026-09-20 (not in the original architecture sketch - designed when
+`RoiToolbox`'s command methods needed it and there was nowhere for it to
+live yet). Full detail: `undo/manager.py`'s module docstring.
+
+- **One shared `undo.undo_manager` instance**, not one stack per module.
+  Modules import it directly (`from ...undo import undo_manager`), the same
+  way every module already imports the shared `diagnostics_hub` - undo,
+  like diagnostics, is cross-cutting infrastructure, not domain state any
+  one module owns. A single global stack also matches ordinary user
+  expectation: undoing steps back through every module's edits in the order
+  they actually happened, not just one module's.
+- **Every mutating command pushes one typed `undo.FunctionCommand`**
+  (a label plus an `undo()`/`redo()` closure pair the command method writes
+  inline, closing over its own module's private state) - not a generic
+  before/after deep-clone of module state. This is deliberate: the old
+  app's `_push_undo_point` deep-copied the *entire* app state on every
+  single edit (every ROI, every mask array, every chromatic model), which
+  is exactly the kind of cost this architecture exists to avoid.
+- **`undo_manager.begin_batch(label)` / `end_batch()`** coalesce a burst of
+  pushes (e.g. every intermediate sample of a mouse drag) into one undo-stack
+  entry - mirrors the old app's prepare/commit-snapshot pattern for the same
+  reason.
+- **Selection is never undoable.** Matches the old app (selecting/
+  deselecting was never wrapped in `_push_undo_point` there either) and this
+  file's own "selecting/deselecting ROIs... must never implicitly trigger
+  computation" spirit - undo history is for state that affects results, not
+  where the cursor/selection happens to be.
+- `RoiToolbox` is the first module wired to this (2026-09-20); Geometry/
+  Mask/Chromatic/Background should adopt the identical pattern once their
+  own command methods are built past the `NotImplementedError` stub stage -
+  update this section with a second real example once that happens.
+
+---
+
 ## The analysis store and recompute rules
 
 Full detail: `docs/rewrite_architecture_sketch_2026-09.md` §5, §6, §6a.
@@ -227,3 +263,5 @@ center-in-shape test. Full detail: architecture sketch §6a.
   `docs/analysis_caching_architecture.md`,
   `docs/measurement_backup_performance_and_crash_recovery.md` — the
   incident writeups behind the non-negotiable invariants above.
+- `undo/manager.py` — the cross-module undo/redo design (see "Undo/redo"
+  above for the summary; that module's own docstring has the full reasoning).

@@ -37,4 +37,4 @@ class RoiComputationalChange:
     this payload's)."""
 
     roi_ids: tuple[int, ...]
-    reason: str  # "moved" | "resized" | "geometry_type_changed"
+    reason: str  # "moved" | "resized" | "geometry_type_changed" | "added" | "deleted" | "detected"
