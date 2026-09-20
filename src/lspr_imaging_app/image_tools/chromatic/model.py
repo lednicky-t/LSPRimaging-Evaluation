@@ -1,24 +1,36 @@
 """Chromatic model dataclasses (sketch §7 "Chromatic", §10).
 
-Placeholder shapes - TODO: mirror ``processing/chromatic.py``'s current
-model/landmark representation when this module is actually built.
+Ported verbatim from ``domain/models.py`` on ``develop``/``main`` -
+``ChromaticTransformModel`` (named ``ChromaticModel`` in the sketch's own
+prose, kept under its real, current name here rather than renamed, so a
+future diff against the source stays obvious) and
+``ChromaticLandmarkObservation``. No logic changed.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 
-@dataclass(frozen=True)
-class LandmarkObservation:
-    """One observed landmark pairing used to fit a :class:`ChromaticModel`.
-    TODO: port fields from ``processing/chromatic.py``."""
+@dataclass(slots=True)
+class ChromaticTransformModel:
+    spectral_cube_index: int
+    wavelength_nm: float
+    model_kind: str = "image_affine"
+    affine_matrix: list[list[float]] = field(default_factory=lambda: [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]])
+    global_shift_x_px: float = 0.0
+    global_shift_y_px: float = 0.0
+    rmse_px: float = 0.0
+    mean_score: float = 0.0
+    min_score: float = 0.0
+    tile_count: int = 0
+    inlier_count: int = 0
 
 
-@dataclass(frozen=True)
-class ChromaticModel:
-    """A fitted chromatic-correction model. Confirmed (sketch §7, 2026-09-20):
-    the fitted coefficients - not just the settings/landmarks that produced
-    them - must be captured into a cell's provenance record whenever this
-    model is used to compute a value, so an export is self-contained. TODO:
-    port fields from ``processing/chromatic.py``."""
+@dataclass(slots=True)
+class ChromaticLandmarkObservation:
+    landmark_id: int
+    spectral_cube_index: int
+    wavelength_nm: float
+    x_px: float
+    y_px: float
