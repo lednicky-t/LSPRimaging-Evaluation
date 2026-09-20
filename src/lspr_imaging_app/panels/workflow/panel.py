@@ -11,10 +11,13 @@ be a mechanical exercise, not a redesign.
 
 from __future__ import annotations
 
+import logging
 from enum import Enum, auto
 
 from PyQt6.QtCore import pyqtSignal
 from PyQt6.QtWidgets import QTabWidget, QWidget
+
+logger = logging.getLogger(__name__)
 
 
 class WorkflowStage(Enum):
@@ -35,9 +38,13 @@ class WorkflowPanel(QTabWidget):
         self.currentChanged.connect(self._on_tab_changed)
 
     def _on_tab_changed(self, index: int) -> None:
-        """Not yet implemented - scaffolding only (no stages/tabs added
-        yet)."""
-        raise NotImplementedError
+        """Deliberately a safe no-op, not ``NotImplementedError`` like this
+        module's other stubs: Qt fires ``currentChanged`` itself (including
+        as soon as the first tab is added), so this runs the moment any tab
+        exists, well before the real index->``WorkflowStage`` mapping and
+        ``stage_changed`` emission are designed. Not yet implemented -
+        scaffolding only."""
+        logger.debug("WorkflowPanel tab changed to index %s (stage mapping not yet implemented)", index)
 
     def set_status(self, message: str) -> None:
         """State/performance status only - no hover-hint text (per the

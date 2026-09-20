@@ -78,6 +78,8 @@ dependencies = [
 
 [project.scripts]
 lspri-evaluation = "lspr_imaging_app.app:main"
+# Rewrite-preview build (rewrite branch only, not the real app - see app_rewrite.py's docstring).
+lspri-evaluation-rewrite = "lspr_imaging_app.app_rewrite:main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}
