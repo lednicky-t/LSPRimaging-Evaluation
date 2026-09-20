@@ -506,3 +506,78 @@ built - no panel-side changes needed.
   the scaffold stubs.
 - Nothing on `rewrite` has been pushed to `origin` yet; the umbrella
   repo's submodule pointer is still deliberately not bumped.
+
+## 2026-09-20: Renumber-on-delete restored (supersedes the entry above's ID-scheme decision); undo/redo signal gap fixed
+
+The previous entry's "IDs are now stable/never-reused" decision was
+presented to the maintainer as a flagged, reconsiderable choice - they
+reconsidered it: **ROI ids must renumber contiguously on delete**, matching
+the old app's `_reindex_detected_rois`, but designed so undo/redo handles
+the renumbering correctly rather than avoiding it. Per this file's own
+append-only rule, the previous entry's reasoning isn't edited - this
+supersedes it.
+
+**How the renumbering is made undo/redo-safe**: `delete_rois()` computes one
+`old_id -> new_id` map up front, from the sorted surviving ids at the moment
+of the call, and both `apply()` and `revert()` reuse that same fixed map
+(`revert()` uses its reverse) rather than recomputing anything from
+whatever the live state looks like when undo/redo actually runs later. This
+is safe specifically because `undo_manager`'s stack is linear (see
+`undo/manager.py`): by the time this command's `revert()` runs, every
+command pushed after it has already been undone in reverse order, so the
+toolbox is guaranteed to be in exactly the post-`apply()` state the map was
+computed against. Group/array member-id references are remapped through
+the same map; a group/array `delete_rois` pruned for becoming empty is
+still correctly restored on undo (already true before this change, verified
+again after).
+
+**New cross-module concern surfaced, not yet resolved**: renumbering means
+any *other* module holding a roi_id across a delete (`SelectionModule`'s
+current selection; the future analysis store's per-ROI provenance) goes
+stale unless it also remaps. Added `RoiToolbox.roi_ids_renumbered`
+(`{old_id: new_id}`, survivors only, emitted on both `apply()` and
+`revert()`) specifically so those modules *can* subscribe without
+`RoiToolbox` reaching into their internals. Nothing subscribes yet -
+`SelectionModule`'s own command methods and `analysis/tasks.py` are both
+still stubs. Flagged in `toolbox.py`'s module docstring so this isn't
+forgotten once either is built: without a `roi_ids_renumbered` handler,
+they'll ship a real, silent "stale selection/provenance after a delete" bug.
+
+**Separate correctness gap found and fixed while doing this**: every
+command method's change signal (`geometry_changed`/`cosmetic_changed`) was
+being emitted once, right after the initial `apply()` call at the bottom of
+each method - never from inside `apply()`/`revert()` themselves. That meant
+calling `undo_manager.undo()` or `.redo()` later would correctly mutate
+state but emit nothing, so any panel or module reacting to those signals
+would never learn a Ctrl+Z happened. Moved every `emit()` inside its
+`apply`/`revert` closure, across every command method in the file (not just
+`delete_rois`), so undo/redo now notifies exactly like a fresh call would.
+This wasn't part of the maintainer's ask but was directly exposed by
+actually exercising undo/redo with signal listeners attached while
+verifying the renumbering fix, so it was fixed in the same pass rather than
+left for a future session to rediscover.
+
+Verified with real calls, not just import-checking: delete a middle ROI out
+of five, confirm survivors renumber contiguously and the reported
+`roi_ids_renumbered` map is exactly right; confirm a group holding the
+deleted ROI *and* a survivor keeps only the survivor's new id; confirm
+`add_roi` right after a delete continues the contiguous sequence; undo
+restores the original five ids and the original group membership, with the
+correct reverse map on `roi_ids_renumbered`; redo reproduces the exact same
+renumbering. Separately verified a plain `move_roi`'s signal now fires on
+`undo()` and `redo()`, not just the initial call. Re-ran the full prior
+CRUD/group regression suite from the previous entry - still passes
+unchanged. Rewrite-preview window still builds, all 5 tabs present.
+
+**Not done / still open, as of this entry** (unchanged from the previous
+entry, still open):
+- `RoiToolbox.display_position()` — stub; needs the Chromatic-affine
+  decision noted in `toolbox.py`'s module docstring.
+- `analysis/tasks.py`, `storage/session.py` — not yet started.
+- `SelectionModule`'s own command methods — still stubs; first real
+  consumer needed for `roi_ids_renumbered` to actually matter.
+- `GeometryModule`/`MaskModule`/`BackgroundModule`/`ChromaticModule`'s own
+  command methods are still `NotImplementedError` stubs.
+- The panel layer isn't built beyond the scaffold stubs.
+- Nothing on `rewrite` has been pushed to `origin` yet; the umbrella
+  repo's submodule pointer is still deliberately not bumped.
