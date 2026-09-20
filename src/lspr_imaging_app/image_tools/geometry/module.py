@@ -25,15 +25,40 @@ calls in `undo_manager.begin_batch()`/`end_batch()` itself, same as
 `RoiToolbox`'s callers would for `move_roi` - no command method here
 batches internally.
 
-**Not built this pass, scope boundary**: the display-only calibration/
-scale-bar/measurement-anchor fields on `GeometrySettings` (`display_units`
-through `measurement_anchor2_y_px`) have no command methods yet. Porting
-`gui/measurement_calibration_mixin.py`'s real logic (`_apply_measurement_
-calibration`'s px<->um math) is a separate, smaller chunk left for a future
-pass since nothing downstream is gated on it - no pure-math function in
-`transform.py` reads those fields (see `model.py`'s docstring). A
-`GeometryCosmeticChange` type isn't defined yet for the same reason - add
-it alongside those commands rather than now, to avoid an unused type.
+**Calibration/scale-bar commands added 2026-09-21**, ported from
+`gui/measurement_calibration_mixin.py` and the relevant bits of
+`gui/main_window.py`/`gui/overlay_manager.py` on `develop` (again, state
+mutation only - the ruler overlay drawing, scale-bar rendering, and
+spinbox/status-label wiring stay in the not-yet-built panel layer). These
+fields are cosmetic (`GeometryCosmeticChange`, never analysis-invalidating
+- confirmed by `transform.py` never reading them), but **not always
+undo-tracked**: matching the old app exactly, only `apply_measurement_
+calibration` pushed an undo point there (`_push_undo_point("Measurement
+calibration")`); dragging the ruler anchors (`_on_measurement_marker_
+moved`), toggling display units (`_toggle_display_units`), and toggling
+the scale bar (`_on_scale_bar_toggled`) never did. So `set_measurement_
+anchors`/`set_display_units`/`set_scale_bar_visible` are deliberately
+**not** wired through `undo_manager` here, while `apply_measurement_
+calibration` is - "cosmetic vs. computational" (recompute-triggering) and
+"undo-tracked vs. not" are independent axes, not the same distinction
+(`RoiToolbox.rename_group`/`recolor_group` are the existing counter-example
+in the other direction: cosmetic *and* undo-tracked).
+
+`can_display_micrometers()`/`microns_per_pixel_scalar()` are added to the
+query interface as pure derived reads (ported from `_can_display_
+micrometers`/`_microns_per_pixel_scalar`, which only ever read settings
+fields) - the px<->um label-formatting helpers themselves (`develop`'s
+`gui/ui_helpers.py`: `length_px_to_display` et al.) are trivial one-liners
+left for whichever panel needs them, not duplicated here.
+
+**Still not built**: `_normalize_display_units`'s defensive "silently
+fall back to px if calibration was lost" repair isn't ported - there is no
+command here that can *revoke* calibration once applied (matching the old
+app: no "uncalibrate" action exists), so the invariant it protects
+(`display_units == "um"` implies calibrated) can't currently be broken
+through this module's own command surface. Revisit if `storage/session.py`
+(not started) ever needs to load a session file with a corrupted/stale
+combination - flagged here rather than guessed at.
 """
 
 from __future__ import annotations
@@ -44,13 +69,14 @@ from PyQt6.QtCore import QObject, pyqtSignal
 
 from ...diagnostics import instrumented
 from ...undo import FunctionCommand, undo_manager
-from .model import CropDefinition, GeometryComputationalChange, GeometrySettings
+from .model import CropDefinition, GeometryComputationalChange, GeometryCosmeticChange, GeometrySettings
 
 
 class GeometryModule(QObject):
     """Owns crop/rotate/flip settings for the active dataset."""
 
     geometry_changed = pyqtSignal(GeometryComputationalChange)
+    cosmetic_changed = pyqtSignal(GeometryCosmeticChange)
 
     def __init__(self, parent: QObject | None = None) -> None:
         super().__init__(parent)
@@ -63,6 +89,22 @@ class GeometryModule(QObject):
         on this module's state, since command methods are the only way to
         change it."""
         return replace(self._settings, crop=replace(self._settings.crop))
+
+    def can_display_micrometers(self) -> bool:
+        """True once a real (both-axes-positive) calibration has been
+        applied - ported from `_can_display_micrometers` (`develop`)."""
+        settings = self._settings
+        return bool(settings.calibration_enabled) and settings.microns_per_pixel_x > 0.0 and settings.microns_per_pixel_y > 0.0
+
+    def microns_per_pixel_scalar(self) -> float:
+        """The effective isotropic µm/px scale - the average of the x/y
+        calibration factors, each floored at a tiny epsilon to avoid a
+        division-by-zero in any caller that divides by this (ported from
+        `_microns_per_pixel_scalar`, `develop`)."""
+        settings = self._settings
+        scale_x = max(float(settings.microns_per_pixel_x), 1e-9)
+        scale_y = max(float(settings.microns_per_pixel_y), 1e-9)
+        return 0.5 * (scale_x + scale_y)
 
     # -- commands -----------------------------------------------------------
 
@@ -190,3 +232,114 @@ class GeometryModule(QObject):
 
         apply()
         undo_manager.push(FunctionCommand("Reset crop", undo_fn=revert, redo_fn=apply))
+
+    # -- commands: calibration/scale-bar (cosmetic) --------------------------
+
+    @instrumented("GeometryModule.set_measurement_anchors")
+    def set_measurement_anchors(self, x1: float, y1: float, x2: float, y2: float) -> None:
+        """Move the two ruler markers `apply_measurement_calibration` reads
+        from - matching the old app's live drag update
+        (`_on_measurement_marker_moved`, `develop`), which never pushed an
+        undo point (see module docstring): repositioning the ruler is a
+        measuring aid, not itself a result-affecting action."""
+        new = (float(x1), float(y1), float(x2), float(y2))
+        old = (
+            self._settings.measurement_anchor1_x_px,
+            self._settings.measurement_anchor1_y_px,
+            self._settings.measurement_anchor2_x_px,
+            self._settings.measurement_anchor2_y_px,
+        )
+        if old == new:
+            return
+        (
+            self._settings.measurement_anchor1_x_px,
+            self._settings.measurement_anchor1_y_px,
+            self._settings.measurement_anchor2_x_px,
+            self._settings.measurement_anchor2_y_px,
+        ) = new
+        self.cosmetic_changed.emit(GeometryCosmeticChange(reason="measurement_anchors"))
+
+    @instrumented("GeometryModule.apply_measurement_calibration")
+    def apply_measurement_calibration(self, dx_um: float, dy_um: float) -> None:
+        """Convert the current ruler measurement (the two measurement
+        anchors) into a px<->um calibration - ported from
+        `_apply_measurement_calibration` (`develop`), including its exact
+        validation and asymmetric-axis fallback (only dx given -> y follows
+        x, and vice versa). Raises `ValueError` for the same three
+        preconditions the old app refused via a status-bar message instead
+        - this module has no status bar, so the panel layer is responsible
+        for catching this and showing it to the user, the same convention
+        `SelectionModule.set_cube`'s negative-index guard already uses."""
+        dx_um, dy_um = float(dx_um), float(dy_um)
+        if dx_um <= 0.0 and dy_um <= 0.0:
+            raise ValueError("Enter a real dx and/or dy in um before applying calibration.")
+        dx_px = self._settings.measurement_anchor2_x_px - self._settings.measurement_anchor1_x_px
+        dy_px = self._settings.measurement_anchor2_y_px - self._settings.measurement_anchor1_y_px
+        if dx_um > 0.0 and abs(dx_px) < 1e-6:
+            raise ValueError("dx between the ruler guides is zero, so dx calibration cannot be applied.")
+        if dy_um > 0.0 and abs(dy_px) < 1e-6:
+            raise ValueError("dy between the ruler guides is zero, so dy calibration cannot be applied.")
+
+        old = (
+            self._settings.microns_per_pixel_x,
+            self._settings.microns_per_pixel_y,
+            self._settings.calibration_enabled,
+            self._settings.display_units,
+        )
+        new_x, new_y = self._settings.microns_per_pixel_x, self._settings.microns_per_pixel_y
+        if dx_um > 0.0:
+            new_x = abs(dx_um / dx_px)
+        if dy_um > 0.0:
+            new_y = abs(dy_um / dy_px)
+        if dx_um > 0.0 and dy_um <= 0.0:
+            new_y = new_x
+        if dy_um > 0.0 and dx_um <= 0.0:
+            new_x = new_y
+        new = (new_x, new_y, True, "um")
+
+        def apply() -> None:
+            (
+                self._settings.microns_per_pixel_x,
+                self._settings.microns_per_pixel_y,
+                self._settings.calibration_enabled,
+                self._settings.display_units,
+            ) = new
+            self.cosmetic_changed.emit(GeometryCosmeticChange(reason="calibration"))
+
+        def revert() -> None:
+            (
+                self._settings.microns_per_pixel_x,
+                self._settings.microns_per_pixel_y,
+                self._settings.calibration_enabled,
+                self._settings.display_units,
+            ) = old
+            self.cosmetic_changed.emit(GeometryCosmeticChange(reason="calibration"))
+
+        apply()
+        undo_manager.push(FunctionCommand("Measurement calibration", undo_fn=revert, redo_fn=apply))
+
+    @instrumented("GeometryModule.set_display_units")
+    def set_display_units(self, units: str) -> None:
+        """Toggle px<->um display - old app's `_toggle_display_units`. Not
+        undo-tracked (see module docstring). Raises `ValueError` for "um"
+        before a real calibration exists, mirroring the old app's
+        status-bar refusal ("Calibrate the ruler first...")."""
+        units = str(units)
+        if units not in ("px", "um"):
+            raise ValueError(f"units must be 'px' or 'um', got {units!r}")
+        if units == "um" and not self.can_display_micrometers():
+            raise ValueError("Calibrate the ruler first before switching to micrometers.")
+        if units == self._settings.display_units:
+            return
+        self._settings.display_units = units
+        self.cosmetic_changed.emit(GeometryCosmeticChange(reason="display_units"))
+
+    @instrumented("GeometryModule.set_scale_bar_visible")
+    def set_scale_bar_visible(self, visible: bool) -> None:
+        """Not undo-tracked (see module docstring) - old app's
+        `_on_scale_bar_toggled`."""
+        visible = bool(visible)
+        if visible == self._settings.scale_bar_visible:
+            return
+        self._settings.scale_bar_visible = visible
+        self.cosmetic_changed.emit(GeometryCosmeticChange(reason="scale_bar_visible"))

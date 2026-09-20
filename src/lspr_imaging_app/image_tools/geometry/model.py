@@ -29,6 +29,21 @@ class GeometryComputationalChange:
     reason: str  # "image_tools_enabled" | "rotation" | "rotation_fill" | "flip" | "crop"
 
 
+@dataclass(frozen=True)
+class GeometryCosmeticChange:
+    """Geometry's cosmetic-change payload - the calibration/scale-bar/
+    measurement-anchor fields (`display_units` through
+    `measurement_anchor2_y_px`). Never invalidates stored analysis results:
+    confirmed by `transform.py`'s pure math never reading any of these
+    fields (see this file's own module docstring), matching
+    `RoiCosmeticChange`'s "never triggers Analysis Engine recompute"
+    contract. Added 2026-09-21 alongside the command methods that emit it -
+    left undefined (and unused) in the 2026-09-20 pass that built only the
+    computational commands, to avoid a dead type."""
+
+    reason: str  # "measurement_anchors" | "calibration" | "display_units" | "scale_bar_visible"
+
+
 @dataclass(slots=True)
 class CropDefinition:
     x: int = 0

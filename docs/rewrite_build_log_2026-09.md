@@ -710,3 +710,83 @@ pushed and `origin/rewrite` exists as of this session.
   are still `NotImplementedError` stubs — next candidates for the
   `undo_manager` pattern, now proven out on two real modules.
 - The panel layer isn't built beyond the scaffold stubs.
+
+## 2026-09-21: `GeometryModule`'s calibration/scale-bar commands built — closes the scope gap the previous entry flagged
+
+Folded in the deliberately-deferred piece from the previous entry, at the
+maintainer's request: `set_measurement_anchors`/`apply_measurement_
+calibration`/`set_display_units`/`set_scale_bar_visible`, ported from
+`gui/measurement_calibration_mixin.py` and the relevant state-mutation
+lines of `gui/main_window.py`/`gui/overlay_manager.py` on `develop` (ruler
+overlay drawing, scale-bar rendering, and spinbox/status-label wiring stay
+in the not-yet-built panel layer, same split as every other command port
+so far). Also added `can_display_micrometers()`/`microns_per_pixel_scalar()`
+to the query interface - pure derived reads ported from `_can_display_
+micrometers`/`_microns_per_pixel_scalar`, which only ever read settings
+fields, unlike the actual px<->um label-formatting helpers
+(`gui/ui_helpers.py`'s `length_px_to_display` et al.), which are trivial
+one-liners left for whichever panel needs them rather than duplicated here.
+
+**New payload type**: `GeometryCosmeticChange` (`reason: str`, colocated in
+`geometry/model.py` next to `GeometryComputationalChange`) - confirmed
+never analysis-invalidating by `transform.py` never reading any of these
+fields (the same fact the previous entry's scope-boundary decision rested
+on). New `GeometryModule.cosmetic_changed` signal.
+
+**Important nuance found while porting, worth flagging explicitly**:
+"cosmetic" (never triggers recompute) and "undo-tracked" turned out to be
+two independent axes, not the same distinction - checked the old app's
+actual behavior method-by-method rather than assuming every action in
+`measurement_calibration_mixin.py` pushed an undo point the way
+`RoiToolbox.rename_group`/`recolor_group` do (cosmetic *and*
+undo-tracked). It doesn't: only `_apply_measurement_calibration` calls
+`_push_undo_point`; dragging the ruler anchors, toggling display units,
+and toggling the scale bar never did there. Matched that exactly rather
+than "regularizing" it - `set_measurement_anchors`/`set_display_units`/
+`set_scale_bar_visible` are **not** wired through `undo_manager`, while
+`apply_measurement_calibration` is, pushed as `"Measurement calibration"`
+(the old app's exact label).
+
+**Validation ported as `ValueError`, not a silent status-bar refusal**:
+`apply_measurement_calibration` raises for the same three preconditions
+`_apply_measurement_calibration` guarded with an early `return` + status
+text (both dx/dy µm are non-positive; a requested axis's ruler delta is
+effectively zero), and `set_display_units("um")` raises if not yet
+calibrated (old app: `_toggle_display_units`'s "Calibrate the ruler
+first..." status message) - this module has no status bar, so the panel
+layer is responsible for catching these, the same convention established
+by `SelectionModule.set_cube`'s negative-index guard. The asymmetric-axis
+fallback (only Δx given → µm/px-y follows µm/px-x, and vice versa) was
+kept exactly as the old app computed it.
+
+**Deliberately not ported**: `_normalize_display_units`'s defensive
+"silently fall back to px if calibration was lost" repair - there is
+currently no command on this module that can *revoke* calibration once
+applied (matching the old app: no "uncalibrate" action exists either), so
+the invariant it protects can't actually be broken through this module's
+own command surface yet. Flagged in the module docstring for
+`storage/session.py` (not started) to revisit if a loaded session file
+ever needs that repair.
+
+**Verified with real calls** (scripted, no pytest harness yet):
+`set_display_units("um")` correctly refused before calibration;
+`set_measurement_anchors`'s no-op-skip and *not* pushing an undo entry;
+`apply_measurement_calibration(dx_um=50, dy_um=0)` against a 100px ruler
+producing `microns_per_pixel_x == microns_per_pixel_y == 0.5` (the
+symmetric-fallback case), `calibration_enabled=True`, `display_units=
+"um"`, and exactly one undo entry pushed; the zero-ruler-delta and
+both-axes-non-positive guards both raising `ValueError`;
+`set_scale_bar_visible` mutating state and emitting `cosmetic_changed`
+without touching the undo stack; undoing the calibration restoring the
+pre-calibration defaults exactly. Confirmed the rewrite-preview window
+still builds.
+
+**Not done / still open, as of this entry**:
+- `RoiToolbox.display_position()` — stub; needs the Chromatic-affine
+  decision noted in `toolbox.py`'s module docstring.
+- `analysis/tasks.py`, `storage/session.py` — not yet started.
+- `MaskModule`/`BackgroundModule`/`ChromaticModule`'s own command methods
+  are still `NotImplementedError` stubs — next candidates for the
+  `undo_manager` pattern, now proven out on two real modules. `GeometryModule`
+  itself is now fully built (computational + cosmetic commands both done).
+- The panel layer isn't built beyond the scaffold stubs.
