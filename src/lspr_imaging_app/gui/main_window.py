@@ -6187,14 +6187,24 @@ class MainWindow(MainWindowIcons, RoiGeometryMixin, MeasurementCalibrationMixin,
             self.wavelength_slider.set_reference_highlight(None)
 
     def _set_help(self, target: QWidget | QAction, summary: str, detail: str | None = None) -> None:
+        # Deliberately no setStatusTip() here (2026-09-19 fix): Qt shows a
+        # widget's status tip automatically on hover via the real
+        # QMainWindow status bar's showMessage(), which visually overlaps
+        # this app's own custom status row (status_label/_status_bar_message
+        # + _status_bar_hint + _status_bar_cache_stats, see
+        # _init_status_and_histogram_widgets) - hovering any help-tagged
+        # widget hid the actual analysis state (ROI/group counts, etc.) for
+        # as long as the mouse stayed over it. Nothing in this codebase reads
+        # .statusTip() back, so it existed only to drive that overlap. The
+        # tooltip (a popup near the cursor) and What's This text (for a
+        # future "?"-triggered popout / Shift+F1) already cover the two
+        # non-status-bar ways to surface this text.
         text = detail if detail is not None else summary
         if isinstance(target, QAction):
             target.setToolTip(summary)
-            target.setStatusTip(summary)
             target.setWhatsThis(text)
         else:
             target.setToolTip(summary)
-            target.setStatusTip(summary)
             target.setWhatsThis(text)
 
     def _show_shortcuts_dialog(self) -> None:
