@@ -552,9 +552,11 @@ lspr_imaging_app/
     instrumented.py         # @instrumented decorator + shared Diagnostics signal hub (§3)
 
   dataset/
-    model.py                # ImageDataset, ImageRecord, AcquisitionMetadata - dataclasses
-    io_tiff.py               # ports current io/dataset.py's TIFF-stack loading, largely as-is
-    io_ome_zarr.py            # ports current io/dataset.py's OME-Zarr loading/export, largely as-is
+    model.py                # ImageKey, ImageRecord, CompactImageTimings, ImageDataset - dataclasses
+    io.py                    # ports current io/dataset.py as one file, largely as-is
+                              # (corrected 2026-09-20: format-agnostic dispatch/caching/discovery
+                              # code is mixed throughout the real file, not separable into a
+                              # tiff-only/zarr-only split - see dataset/__init__.py's own note)
     module.py                # DatasetModule(QObject) - owns state, emits dataset_loaded/cleared
 
   image_tools/
@@ -603,7 +605,8 @@ lspr_imaging_app/
 ```
 
 **What ports largely as-is** (the clean numeric/IO core the feature
-inventory already validated): `dataset/io_*.py`, `image_tools/chromatic/
+inventory already validated): `dataset/io.py` (done 2026-09-20 - see the
+dataset/ note in §10's layout above), `image_tools/chromatic/
 fitting.py`, `image_tools/preprocess.py`, `roi/detection.py`,
 `analysis/tasks.py`, `storage/session.py`. **What's genuinely new work**:
 every `module.py`/`toolbox.py`/`engine.py` (the signal/command wrapper

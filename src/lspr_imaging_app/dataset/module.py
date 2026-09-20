@@ -8,10 +8,11 @@ way (AGENTS.md, "Module boundaries").
 
 from __future__ import annotations
 
+from lspr_core import ImagingAcquisitionMetadata
 from PyQt6.QtCore import QObject, pyqtSignal
 
 from ..diagnostics import instrumented
-from .model import AcquisitionMetadata, ImageDataset, ImageRecord
+from .model import ImageDataset, ImageRecord
 
 
 class DatasetModule(QObject):
@@ -39,7 +40,7 @@ class DatasetModule(QObject):
         """Not yet implemented - scaffolding only."""
         raise NotImplementedError
 
-    def acquisition_metadata(self) -> AcquisitionMetadata | None:
+    def acquisition_metadata(self) -> ImagingAcquisitionMetadata | None:
         """Not yet implemented - scaffolding only."""
         raise NotImplementedError
 
