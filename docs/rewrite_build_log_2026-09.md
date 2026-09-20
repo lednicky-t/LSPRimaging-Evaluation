@@ -913,3 +913,122 @@ mask_raw()`'s real coordinate-map algorithm into `creation.py`.
   `BackgroundModule`/`MaskModule` (within the scope noted above) are now
   built.
 - The panel layer isn't built beyond the scaffold stubs.
+
+## 2026-09-21: `chromatic/fitting.py` split into four files; dense tile-matching mode dropped
+
+Maintainer's request, after reviewing the previous entry's chromatic-fitting
+scope assessment: the single 1539-line `fitting.py` bundles three genuinely
+independent things, not one algorithm that grew large - split each into its
+own file rather than deferring the whole thing as one chunk.
+
+**`affine.py`** (210 lines) - the actual "points in, matrix out" math:
+`fit_affine_matrix`/`fit_similarity_matrix`, `apply_affine_to_points`,
+`affine_residuals`, `invert_affine_matrix`, `compose_affine_matrices`,
+`decompose_similarity_matrix`/`compose_similarity_matrix`,
+`identity_affine_matrix`, `transform_rois_affine`. Zero dependency on
+anything registration/detection-related - this is the part the maintainer's
+own mental model of the feature matches, and it was already this simple;
+splitting it out just makes that visible instead of buried in a 1539-line
+file.
+
+**`warp.py`** (83 lines) - apply a matrix to pixels instead of points:
+`warp_image_affine`, `warp_boolean_mask_affine`, `apply_mask_wavelength_diff`.
+Depends only on `affine.invert_affine_matrix`.
+
+**`landmark_autotrack.py`** (1059 lines) - the automatic landmark detection
++ tracking feature (Harris-corner or particle-centroid finding, then
+phase-correlation-predicted patch/centroid tracking wavelength-to-
+wavelength with trend-consistency drift correction). Confirmed still
+actively used (the previous entry's finding: it's the backend of a real
+worker task in `gui/analysis_tasks.py`) - kept deliberately independent per
+the maintainer's explicit request: zero dependency on `ChromaticModule` or
+any other Image Tools sub-module (only `roi.detection`/`roi.model`, for the
+optional "match against a real detected particle" refinement), and a
+narrow public surface (`auto_track_landmarks_over_wavelengths` -
+mirroring the "combined"/`kind="both"` mode confirmed as the one actually
+used - `default_landmark_anchors`, plus the four detect/track building
+blocks it's assembled from) so the algorithm can be retuned or rewritten
+later by touching only this one file, never `ChromaticModule` itself.
+
+**Two functions dropped, not carried into the split**:
+`_traceable_landmark_candidates`/`_select_spread_landmarks`, an alternate
+landmark-selection strategy - grepped every call site across the *old* app
+too (not just this rewrite) and found neither is ever called anywhere;
+dead code inherited from `fitting.py`'s own source, not something this
+split newly orphaned. Left out to keep `landmark_autotrack.py`'s surface
+matching what's genuinely used; recoverable from git history if ever
+needed.
+
+**Dense whole-image tile-matching mode dropped entirely** (maintainer's
+explicit go-ahead, after the previous entry's explanation): removed
+`estimate_affine_chromatic_transform` and `ChromaticRegistrationResult`
+(only ever used by that one function). Confirmed dead in the *old* app
+before removing anything - `chromatic_registration_mode` is hardcoded to
+`"landmark_radial"` at all three places that ever write it
+(`gui/chromatic_controller.py` x2, `gui/session_state_manager.py`); no UI
+control ever sets it to anything else, so `_estimate_chromatic_models_task`'s
+`else` branch (the only caller) never actually runs. `phase_correlation_
+shift`/`multiscale_phase_correlation_shift`/`_match_patch`/the subpixel-
+refinement helpers stayed - they're still needed by the confirmed-live
+auto-tracking path (`track_landmarks`/`track_spot_landmarks`), just not by
+the dense mode's own outer tiling loop, which is what's gone. Recoverable
+from `develop`'s git history if ever wanted back; not deleted there, only
+left unported here.
+
+**One duplication fixed as a direct consequence, not scope creep**: the old
+app's `landmark_radial` branch computed a fit's RMSE with an inline
+`np.sqrt(np.sum((apply_affine_to_points(...) - target_points) ** 2, axis=1))`
+- the exact same formula `affine_residuals()` already provides as a named
+function, just never called from there. Left as a note for whoever builds
+the not-yet-extracted wavelength-interpolation step (see below): call
+`affine.affine_residuals()` there instead of re-deriving the formula a
+third time.
+
+**Also fixed while touching these files**: `chromatic/module.py`'s
+`refit()` docstring previously pointed at
+`fitting.estimate_affine_chromatic_transform` as "the" thing to call - both
+wrong now (that function is gone) and wrong before (the landmark_radial
+path, the only live one, never called it either - it uses
+`affine.fit_similarity_matrix`/`fit_affine_matrix` plus a wavelength-
+interpolation step, not the dense-tile function). Corrected to describe
+the real source to port from
+(`gui/analysis_tasks.py`'s `_estimate_chromatic_models_task`).
+
+**Not done this pass**: the fourth piece - "fit at a few sampled
+wavelengths, interpolate the rest across the whole cube" - still lives
+inline in `gui/analysis_tasks.py`, not extracted into its own file. Not
+done speculatively; left for whoever actually builds `ChromaticModule.
+refit()`, since extracting it now with no real caller would be exactly the
+kind of premature module the maintainer didn't ask for. `ChromaticModule.
+add_landmark()`/`refit()` themselves are still `NotImplementedError` stubs
+- this pass only reorganized/pruned the math they'll eventually call.
+
+**Verified with real calls** (scripted, no pytest harness yet): a
+similarity-fit round-trip (`fit_similarity_matrix` recovers a known
+scale/rotation/shift transform to `1e-6`, `affine_residuals` near zero on
+the same data, `invert_affine_matrix` round-trips points back to their
+original positions); `warp_boolean_mask_affine` with an identity matrix
+leaves a mask unchanged; `apply_mask_wavelength_diff` is non-mutating; a
+full synthetic two-wavelength `auto_track_landmarks_over_wavelengths` run
+(6 synthetic Gaussian "particles", a known integer pixel shift between the
+two frames) correctly detects and tracks all 5 requested landmarks across
+both wavelengths; `default_landmark_anchors` still importable and callable
+directly (matching `gui/chromatic_controller.py`'s own direct call);
+`ChromaticModule.affine_for()`/`warp_mask()` still work correctly through
+the new `affine`/`warp` imports. Confirmed `pyflakes` clean across the
+entire `src/lspr_imaging_app` tree (not just the touched files) and that
+the rewrite-preview window still builds.
+
+**Not done / still open, as of this entry**:
+- `RoiToolbox.display_position()` — stub; needs the Chromatic-affine
+  decision noted in `toolbox.py`'s module docstring.
+- `analysis/tasks.py`, `storage/session.py` — not yet started.
+- `ChromaticModule.add_landmark()`/`refit()` — still `NotImplementedError`
+  stubs; the math they'll call is now split/pruned (`affine.py`/`warp.py`/
+  `landmark_autotrack.py`), but the wavelength-interpolation step and the
+  command methods themselves aren't built.
+- `MaskModule`'s async/file-I/O-shaped remainder (mask candidate
+  computation, brush painting, file load/save) - deliberately out of scope,
+  see the previous entry. Mask/ROI tool-sharing design (maintainer raised
+  this, not yet discussed in depth) is a separate open conversation.
+- The panel layer isn't built beyond the scaffold stubs.

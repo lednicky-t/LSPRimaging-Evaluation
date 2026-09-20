@@ -1,36 +1,53 @@
-"""Per-wavelength chromatic-aberration registration.
+"""Automatic landmark detection + tracking across a wavelength sweep.
 
-Each wavelength plane is geometrically registered against a reference plane
-(the plane a wavelength's own affine transform should map *onto*) so that a
-pixel at a given (x, y) in the reference corresponds to the same physical
-sample location in every other wavelength. The pipeline combines three
-standard building blocks rather than one named published algorithm:
+Finds a handful of trackable points on one image (a Harris corner response,
+or a real particle centroid) and follows them wavelength-by-wavelength
+through the rest of a sweep, so the user doesn't have to click landmarks on
+every single wavelength image by hand - only on the few sample wavelengths
+`ChromaticModule.refit()` actually fits a transform at (the rest are
+obtained by interpolating those fitted transforms across wavelength; see
+that module's docstring for the full workflow). Confirmed a real, actively
+used feature (the backend of `gui/analysis_tasks.py`'s auto-detect worker
+task on `develop`/`main`), not a scaffold - handle changes here with the
+same care as any other production algorithm.
 
-1. A global translation estimate via FFT phase correlation
-   (Kuglin, C. D. & Hines, D. C. "The phase correlation image alignment
-   method." Proc. IEEE Conf. Cybernetics and Society, 1975), refined with
-   `skimage.registration.phase_cross_correlation`'s upsampled cross-power
-   spectrum when available (Guizar-Sicairos, M., Thurman, S. T. & Fienup,
-   J. R. "Efficient subpixel image registration algorithms." Opt. Lett. 33,
-   156-158, 2008).
-2. Local tie points found by normalized cross-correlation template matching
-   on a grid of tiles, searched near the position the global shift predicts.
-3. A full affine (or similarity) transform fit through those tie points,
-   with a small iterative outlier-rejection loop (refit, drop the
-   highest-residual points, refit again) in place of a full RANSAC.
+**Deliberately kept "solo standing"** (maintainer's explicit request,
+2026-09-21): this file has exactly one real dependency outward -
+`roi.detection`/`roi.model`, for the "match against a real detected
+particle" refinement `detect_regional_spot_landmarks`/`track_spot_landmarks`
+optionally use - and zero dependency on `ChromaticModule` or any other
+Image Tools sub-module. `ChromaticModule` is expected to call in through
+this file's public functions only (`auto_track_landmarks_over_wavelengths`
+is the one actually driven by a worker task today;
+`detect_regional_landmarks`/`detect_regional_spot_landmarks`/
+`track_landmarks`/`track_spot_landmarks` are its own building blocks, also
+exposed directly since a future single-image "detect here" or
+single-step "track just this one" UI action may want to call one without
+running the whole sweep; `default_landmark_anchors` is a UI preview helper
+`gui/chromatic_controller.py` already calls directly on `develop`/`main`,
+to show where auto-detection *would* place points before it's run). None
+of this file's several private helpers (corner response, patch matching,
+subpixel refinement, sector layout, trend-consistency drift correction) are
+called from outside it. The intent is that this algorithm can be tuned,
+retuned, or replaced later by touching only this one file.
 
-`estimate_affine_chromatic_transform` runs the whole pipeline;
-`detect_regional_landmarks`/`track_landmarks` instead locate and follow a
-small set of user-visible feature points (for the manual/landmark
-correction path) using a Harris corner response
-(Harris, C. & Stephens, M. "A Combined Corner and Edge Detector." Proc. 4th
-Alvey Vision Conference, 1988) in place of template matching.
+**Two functions from the source this was split out of (`fitting.py`,
+2026-09-20/21) were *not* carried over**: `_traceable_landmark_candidates`/
+`_select_spread_landmarks`, an alternate landmark-selection strategy
+(rank-then-greedily-spread candidate corners) that turns out to be dead
+code in the old app too - grepped every call site; nothing in
+`gui/`/`processing/` ever calls either one, only `default_landmark_anchors`'
+`_landmark_sector_layout`-based per-anchor local search is actually wired
+up. Left out to keep this file's surface matching what's genuinely used;
+recoverable from `fitting.py`'s git history if ever needed.
+
+Split out of the former single `fitting.py` (2026-09-21, maintainer's
+request - see the rewrite build log for the full file-split reasoning).
+`affine.py`/`warp.py` hold the separate, much simpler point-fitting/pixel-
+warping math this file's output ultimately feeds into.
 """
 
 from __future__ import annotations
-
-from copy import copy
-from dataclasses import dataclass
 
 import numpy as np
 from scipy import ndimage, signal
@@ -42,22 +59,6 @@ except Exception:  # pragma: no cover - optional acceleration path
 
 from ...roi.detection import _masked_gaussian_filter, _refine_roi_center, detect_rois
 from ...roi.model import AreaRoi, AreaRoiDetectionSettings
-
-
-@dataclass(slots=True)
-class ChromaticRegistrationResult:
-    affine_matrix: np.ndarray
-    global_shift_x_px: float
-    global_shift_y_px: float
-    rmse_px: float
-    mean_score: float
-    min_score: float
-    tile_count: int
-    inlier_count: int
-
-
-def identity_affine_matrix() -> np.ndarray:
-    return np.array([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]], dtype=np.float64)
 
 
 def prepare_registration_image(image: np.ndarray) -> np.ndarray:
@@ -606,7 +607,8 @@ def auto_track_landmarks_over_wavelengths(
     spot centroids, `track_spot_landmarks` -- coarser but far more robust to
     the focus blur that grows toward longer wavelengths), or `"both"` (try
     both trackers and let the smooth-trend consistency check
-    (`_choose_trend_consistent_position`) pick between them at every step).
+    (`_choose_trend_consistent_position`) pick between them at every step -
+    the mode actually used in practice today).
 
     For `"centroid"`/`"both"`, `area_roi_settings` (if given) seeds the first
     image's landmarks from the full array-aware spot detector instead of a
@@ -719,145 +721,6 @@ def auto_track_landmarks_over_wavelengths(
     }
 
 
-def estimate_affine_chromatic_transform(
-    reference_image: np.ndarray,
-    target_image: np.ndarray,
-    *,
-    mode: str = "fast",
-    tile_size_px: int = 96,
-    search_radius_px: int = 24,
-    spacing_px: int | None = None,
-    subpixel_precision: int = 1,
-    reference_prepared: np.ndarray | None = None,
-) -> ChromaticRegistrationResult:
-    """Estimate the affine transform mapping `target_image` onto `reference_image`.
-
-    1. One global (x, y) shift via phase correlation over the whole image.
-    2. A grid of tile-sized tie points: for each tile in the reference, a
-       normalized-cross-correlation search (`_match_patch`) around the
-       shift-predicted position in the target, skipping near-uniform tiles
-       (`max_ref_std`) that carry no useful texture to match.
-    3. An affine fit through the tie points (`fit_affine_matrix`), then (in
-       "robust" mode) a few rounds of refit-and-drop-the-worst-residuals to
-       reject bad tie points before the final fit -- a lightweight stand-in
-       for full RANSAC, since the tie points are already fairly clean.
-
-    Falls back to a pure-translation matrix (no rotation/scale) if fewer than
-    3 tie points survive, since an affine fit needs at least 3 non-collinear
-    correspondences.
-
-    `reference_prepared`, if given, is used instead of recomputing
-    `prepare_registration_image(reference_image)` -- for a caller estimating
-    transforms for many target images against the same reference in one run
-    (one call per wavelength), this skips repeating the full-image Gaussian/
-    Sobel band-pass every time. Must be exactly `prepare_registration_image(reference_image)`'s
-    own output; passing anything else silently registers against the wrong image.
-    """
-    reference = prepare_registration_image(reference_image) if reference_prepared is None else reference_prepared
-    target = prepare_registration_image(target_image)
-    if mode == "robust":
-        global_shift_x, global_shift_y, _global_score = multiscale_phase_correlation_shift(reference, target)
-    else:
-        global_shift_x, global_shift_y, _global_score = phase_correlation_shift(reference, target)
-
-    image_height, image_width = reference.shape[:2]
-    tile_size = int(max(tile_size_px, 24))
-    search_radius = int(max(search_radius_px, 6))
-    if mode == "robust":
-        tile_size = max(tile_size, 64)
-        search_radius = max(int(round(search_radius * 1.5)), 10)
-        spacing = int(max(spacing_px or max(tile_size // 3, 16), 10))
-        score_threshold = 1.4
-        max_ref_std = 0.035
-    else:
-        spacing = int(max(spacing_px or max(tile_size // 2, 24), 12))
-        score_threshold = 2.0
-        max_ref_std = 0.05
-    half = tile_size // 2
-
-    source_points: list[tuple[float, float]] = []
-    target_points: list[tuple[float, float]] = []
-    scores: list[float] = []
-
-    for center_y in range(half + search_radius, image_height - half - search_radius, spacing):
-        for center_x in range(half + search_radius, image_width - half - search_radius, spacing):
-            reference_patch = reference[center_y - half : center_y + half, center_x - half : center_x + half]
-            if reference_patch.shape != (tile_size, tile_size):
-                continue
-            if float(np.std(reference_patch)) < max_ref_std:
-                continue
-
-            predicted_x = int(round(center_x + global_shift_x))
-            predicted_y = int(round(center_y + global_shift_y))
-            search_x0 = predicted_x - half - search_radius
-            search_y0 = predicted_y - half - search_radius
-            search_x1 = predicted_x + half + search_radius
-            search_y1 = predicted_y + half + search_radius
-            if search_x0 < 0 or search_y0 < 0 or search_x1 > image_width or search_y1 > image_height:
-                continue
-
-            search_area = target[search_y0:search_y1, search_x0:search_x1]
-            peak_x, peak_y, score = _match_patch(
-                reference_patch,
-                search_area,
-                score_threshold=score_threshold,
-                subpixel_precision=subpixel_precision,
-            )
-            if peak_x is None or peak_y is None:
-                continue
-            source_points.append((float(center_x), float(center_y)))
-            target_points.append((float(search_x0 + peak_x + half), float(search_y0 + peak_y + half)))
-            scores.append(float(score))
-
-    if len(source_points) < 3:
-        matrix = np.array(
-            [[1.0, 0.0, float(global_shift_x)], [0.0, 1.0, float(global_shift_y)]],
-            dtype=np.float64,
-        )
-        return ChromaticRegistrationResult(
-            affine_matrix=matrix,
-            global_shift_x_px=float(global_shift_x),
-            global_shift_y_px=float(global_shift_y),
-            rmse_px=0.0,
-            mean_score=float(np.mean(scores)) if scores else 0.0,
-            min_score=float(np.min(scores)) if scores else 0.0,
-            tile_count=len(source_points),
-            inlier_count=len(source_points),
-        )
-
-    source_array = np.asarray(source_points, dtype=np.float64)
-    target_array = np.asarray(target_points, dtype=np.float64)
-    score_array = np.asarray(scores, dtype=np.float64)
-    matrix = fit_affine_matrix(source_array, target_array)
-    residuals = affine_residuals(source_array, target_array, matrix)
-    iterations = 3 if mode == "robust" else 1
-    inliers = np.ones(source_array.shape[0], dtype=bool)
-    for _ in range(iterations):
-        residual_threshold = max(1.8 if mode == "robust" else 2.5, float(np.median(residuals[inliers])) * (2.0 if mode == "robust" else 2.5)) if residuals.size else (1.8 if mode == "robust" else 2.5)
-        next_inliers = residuals <= residual_threshold
-        if int(np.count_nonzero(next_inliers)) < 3:
-            break
-        if np.array_equal(next_inliers, inliers) and _ > 0:
-            break
-        inliers = next_inliers
-        matrix = fit_affine_matrix(source_array[inliers], target_array[inliers])
-        residuals = affine_residuals(source_array, target_array, matrix)
-    if int(np.count_nonzero(inliers)) >= 3:
-        score_array = score_array[inliers]
-        residuals = residuals[inliers]
-    rmse = float(np.sqrt(np.mean(residuals**2))) if residuals.size else 0.0
-    return ChromaticRegistrationResult(
-        affine_matrix=matrix,
-        global_shift_x_px=float(global_shift_x),
-        global_shift_y_px=float(global_shift_y),
-        rmse_px=rmse,
-        mean_score=float(np.mean(score_array)) if score_array.size else 0.0,
-        min_score=float(np.min(score_array)) if score_array.size else 0.0,
-        tile_count=len(source_points),
-        inlier_count=int(score_array.size),
-    )
-
-
 def phase_correlation_shift(reference_image: np.ndarray, target_image: np.ndarray) -> tuple[float, float, float]:
     """Estimate the whole-image (x, y) translation that best aligns the two images.
 
@@ -924,256 +787,6 @@ def multiscale_phase_correlation_shift(reference_image: np.ndarray, target_image
     return coarse_x + fine_x, coarse_y + fine_y, max(coarse_score, fine_score)
 
 
-def fit_affine_matrix(source_points_xy: np.ndarray, target_points_xy: np.ndarray) -> np.ndarray:
-    """Ordinary-least-squares affine fit (rotation + scale + shear + translation)
-    through matched point pairs.
-
-    Each output coordinate (target x, target y) is an independent linear
-    combination of (source x, source y, 1), solved by least squares
-    (`np.linalg.lstsq`) rather than an exact solve, so it works cleanly with
-    more than the minimum 3 point pairs -- extra, noisy correspondences
-    average out rather than making the system unsolvable. Returns a 2x3
-    matrix `[[a, b, tx], [c, d, ty]]` such that
-    `target = matrix @ [source_x, source_y, 1]`.
-    """
-    design = np.column_stack((source_points_xy[:, 0], source_points_xy[:, 1], np.ones(source_points_xy.shape[0])))
-    coeff_x, _, _, _ = np.linalg.lstsq(design, target_points_xy[:, 0], rcond=None)
-    coeff_y, _, _, _ = np.linalg.lstsq(design, target_points_xy[:, 1], rcond=None)
-    return np.vstack((coeff_x, coeff_y)).astype(np.float64, copy=False)
-
-
-def apply_affine_to_points(points_xy: np.ndarray, affine_matrix: np.ndarray) -> np.ndarray:
-    """Map `points_xy` (N x 2) through the 2x3 affine `matrix @ [x, y, 1]`."""
-    if points_xy.size == 0:
-        return points_xy.astype(np.float64, copy=True)
-    design = np.column_stack((points_xy[:, 0], points_xy[:, 1], np.ones(points_xy.shape[0], dtype=np.float64)))
-    return design @ affine_matrix.T
-
-
-def affine_residuals(source_points_xy: np.ndarray, target_points_xy: np.ndarray, affine_matrix: np.ndarray) -> np.ndarray:
-    """Per-point distance (px) between `affine_matrix @ source` and `target` -- the
-    fit-quality/outlier-rejection metric used throughout this module."""
-    predicted = apply_affine_to_points(source_points_xy, affine_matrix)
-    return np.sqrt(np.sum((predicted - target_points_xy) ** 2, axis=1))
-
-
-def invert_affine_matrix(affine_matrix: np.ndarray) -> np.ndarray:
-    """Invert a 2x3 affine matrix (linear part + translation), so
-    `apply_affine_to_points(apply_affine_to_points(p, m), invert_affine_matrix(m)) == p`.
-    """
-    linear = np.asarray(affine_matrix[:, :2], dtype=np.float64)
-    translation = np.asarray(affine_matrix[:, 2], dtype=np.float64)
-    inverse_linear = np.linalg.inv(linear)
-    inverse_translation = -inverse_linear @ translation
-    return np.column_stack((inverse_linear, inverse_translation))
-
-
-def compose_affine_matrices(outer: np.ndarray, inner: np.ndarray) -> np.ndarray:
-    """Chain two 2x3 affines into the single matrix equivalent to applying
-    `inner` first, then `outer`:
-    `apply_affine_to_points(p, compose_affine_matrices(outer, inner))
-    == apply_affine_to_points(apply_affine_to_points(p, inner), outer)`.
-
-    Standard affine composition: if `inner(x) = B x + b` and `outer(x) = A x + a`,
-    then `outer(inner(x)) = A(Bx + b) + a = (AB) x + (Ab + a)`. Used to re-anchor a
-    chain of landmark-fitted transforms onto a wavelength that was never itself
-    landmark-marked -- e.g. `compose_affine_matrices(anchor_to_target, reference_to_anchor)`
-    turns a landmark-fitted "anchor -> target" transform into a "true reference ->
-    target" one, via a reference<->anchor transform obtained separately (typically
-    itself interpolated, since the reference wavelength need not be landmark-marked).
-    """
-    outer_linear = np.asarray(outer[:, :2], dtype=np.float64)
-    outer_translation = np.asarray(outer[:, 2], dtype=np.float64)
-    inner_linear = np.asarray(inner[:, :2], dtype=np.float64)
-    inner_translation = np.asarray(inner[:, 2], dtype=np.float64)
-    composed_linear = outer_linear @ inner_linear
-    composed_translation = outer_linear @ inner_translation + outer_translation
-    return np.column_stack((composed_linear, composed_translation))
-
-
-def warp_image_affine(
-    image: np.ndarray,
-    affine_matrix: np.ndarray,
-    *,
-    output_shape: tuple[int, int] | None = None,
-    order: int = 1,
-    cval: float = 0.0,
-) -> np.ndarray:
-    if output_shape is None:
-        output_shape = image.shape[:2]
-    inverse_xy = invert_affine_matrix(affine_matrix)
-    ixx, ixy = float(inverse_xy[0, 0]), float(inverse_xy[0, 1])
-    iyx, iyy = float(inverse_xy[1, 0]), float(inverse_xy[1, 1])
-    off_x, off_y = float(inverse_xy[0, 2]), float(inverse_xy[1, 2])
-    matrix_rc = np.array([[iyy, iyx], [ixy, ixx]], dtype=np.float64)
-    offset_rc = np.array([off_y, off_x], dtype=np.float64)
-    return ndimage.affine_transform(
-        image,
-        matrix=matrix_rc,
-        offset=offset_rc,
-        output_shape=output_shape,
-        order=order,
-        mode="constant",
-        cval=cval,
-        prefilter=order > 1,
-    )
-
-
-def warp_boolean_mask_affine(
-    mask: np.ndarray,
-    affine_matrix: np.ndarray,
-    *,
-    output_shape: tuple[int, int] | None = None,
-) -> np.ndarray:
-    """Warp a boolean mask through a chromatic affine (nearest-neighbor, so the
-    result stays a clean boolean array) -- lets a full-image mask (e.g. the
-    ignore-mask) follow a specific wavelength's per-wavelength-corrected
-    geometry, the same way roi.rasterize's transformed_disk_mask/
-    transformed_annulus_mask already do for circle/annulus ROIs.
-    """
-    warped = warp_image_affine(
-        mask.astype(np.float32, copy=False),
-        affine_matrix,
-        output_shape=output_shape,
-        order=0,
-        cval=0.0,
-    )
-    return warped >= 0.5
-
-
-def apply_mask_wavelength_diff(mask: np.ndarray, diff: dict[tuple[int, int], bool] | None) -> np.ndarray:
-    """Apply a sparse per-wavelength ignore-mask diff - `{(row, col): value}`,
-    already in `mask`'s own pixel space - on top of `mask`. Non-mutating; a
-    no-op when `diff` is empty/None, which is the common case (most
-    wavelengths have no manual edits - see MaskController.apply_wavelength_diff,
-    the mask analogue of AreaRoi.per_wavelength for ROI positions). Entries
-    outside `mask`'s bounds are ignored rather than raising, since a diff can
-    outlive a preprocessing change that shrinks the image (e.g. a new crop).
-    """
-    if not diff:
-        return mask
-    result = mask.copy()
-    height, width = result.shape[:2]
-    for (row, col), value in diff.items():
-        if 0 <= row < height and 0 <= col < width:
-            result[row, col] = bool(value)
-    return result
-
-
-def fit_similarity_matrix(source_points_xy: np.ndarray, target_points_xy: np.ndarray) -> np.ndarray:
-    """Least-squares fit of a *similarity* transform (uniform scale + rotation +
-    translation only -- no shear or independent x/y scale) through matched
-    point pairs.
-
-    Implements Umeyama's closed-form solution (Umeyama, S. "Least-squares
-    estimation of transformation parameters between two point patterns."
-    IEEE Trans. Pattern Anal. Mach. Intell. 13(4), 376-380, 1991): center
-    both point sets, take the SVD of their cross-covariance, and read the
-    optimal rotation off `V @ U.T` (flipping the last singular vector if
-    that rotation has determinant < 0, which would mean a reflection rather
-    than a rotation); the optimal scale is the sum of singular values
-    divided by the source points' variance.
-
-    Used for the "radial"/landmark-based correction mode, where a handful of
-    user-picked points should only ever imply a rigid-plus-zoom transform,
-    not an arbitrary shear -- so a small number of noisy landmarks can't
-    accidentally warp the image. Raises `ValueError` with fewer than 2 point
-    pairs, or if the source points are degenerate (all coincident).
-    """
-    if source_points_xy.shape[0] < 2 or target_points_xy.shape[0] < 2:
-        raise ValueError("At least two landmark pairs are required for the radial landmark model.")
-    source = np.asarray(source_points_xy, dtype=np.float64)
-    target = np.asarray(target_points_xy, dtype=np.float64)
-    source_mean = np.mean(source, axis=0)
-    target_mean = np.mean(target, axis=0)
-    source_centered = source - source_mean
-    target_centered = target - target_mean
-    covariance = source_centered.T @ target_centered / max(source.shape[0], 1)
-    u, singular_values, vt = np.linalg.svd(covariance)
-    rotation = vt.T @ u.T
-    if np.linalg.det(rotation) < 0:
-        vt[-1, :] *= -1.0
-        rotation = vt.T @ u.T
-    source_variance = float(np.mean(np.sum(source_centered**2, axis=1)))
-    if source_variance <= 1e-12:
-        raise ValueError("Landmarks are degenerate and cannot define a radial transform.")
-    scale = float(np.sum(singular_values) / source_variance)
-    linear = scale * rotation
-    translation = target_mean - linear @ source_mean
-    return np.column_stack((linear, translation))
-
-
-def decompose_similarity_matrix(affine_matrix: np.ndarray) -> tuple[float, float, float, float]:
-    """Read a similarity matrix's `(scale, angle_rad, shift_x_px, shift_y_px)`
-    back out of its 2x3 form -- the inverse of `compose_similarity_matrix`,
-    used to show a human-editable scale/rotation/shift in the GUI instead of
-    raw matrix coefficients.
-    """
-    matrix = np.asarray(affine_matrix, dtype=np.float64)
-    linear = matrix[:, :2]
-    scale_x = float(np.hypot(linear[0, 0], linear[1, 0]))
-    scale_y = float(np.hypot(linear[0, 1], linear[1, 1]))
-    scale = max((scale_x + scale_y) * 0.5, 1e-12)
-    angle_rad = float(np.arctan2(linear[1, 0], linear[0, 0]))
-    return scale, angle_rad, float(matrix[0, 2]), float(matrix[1, 2])
-
-
-def compose_similarity_matrix(scale: float, angle_rad: float, shift_x_px: float, shift_y_px: float) -> np.ndarray:
-    """Build a 2x3 similarity matrix from `(scale, angle_rad, shift_x_px,
-    shift_y_px)` -- the inverse of `decompose_similarity_matrix`."""
-    cos_angle = float(np.cos(angle_rad))
-    sin_angle = float(np.sin(angle_rad))
-    return np.array(
-        [
-            [float(scale) * cos_angle, -float(scale) * sin_angle, float(shift_x_px)],
-            [float(scale) * sin_angle, float(scale) * cos_angle, float(shift_y_px)],
-        ],
-        dtype=np.float64,
-    )
-
-
-def transform_rois_affine(
-    rois: list[AreaRoi],
-    affine_matrix: np.ndarray,
-    *,
-    clamp_shape: tuple[int, int] | None = None,
-) -> list[AreaRoi]:
-    if not rois:
-        return []
-    source_points = np.asarray([(roi.center_x, roi.center_y) for roi in rois], dtype=np.float64)
-    target_points = apply_affine_to_points(source_points, affine_matrix)
-    linear = np.asarray(affine_matrix[:, :2], dtype=np.float64)
-    singular_values = np.linalg.svd(linear, compute_uv=False)
-    scale = float(np.max(singular_values))
-    scale = max(scale, 1e-6)
-    transformed: list[AreaRoi] = []
-    max_x = float(clamp_shape[1] - 1) if clamp_shape is not None else None
-    max_y = float(clamp_shape[0] - 1) if clamp_shape is not None else None
-    for index, roi in enumerate(rois):
-        target_x = float(target_points[index, 0])
-        target_y = float(target_points[index, 1])
-        # Shallow copy, not deepcopy: only center_x/center_y/sample_radius_px
-        # get reassigned below (rebinding a scalar attribute on the copy
-        # never touches the original), and every caller of this function's
-        # result (ROI overlay rendering, rois_for_preprocessing's exclusion
-        # mask) only ever reads those three fields off the transformed
-        # copy - never per_wavelength, which stays shared by reference and
-        # is never mutated through it. Deep-copying it here on every ROI on
-        # every call, just to discard the copy unused, was a real cost when
-        # per_wavelength held one entry per (cube, wavelength) in the whole
-        # dataset under the old eager-population design; it's just a handful
-        # of manual nudges now, but the shallow copy is still the right call.
-        transformed_roi = copy(roi)
-        transformed_roi.center_x = target_x
-        transformed_roi.center_y = target_y
-        transformed_roi.sample_radius_px = max(float(roi.sample_radius_px) * scale, 1.0)
-        if max_x is not None and max_y is not None:
-            transformed_roi.center_x = float(np.clip(transformed_roi.center_x, 0.0, max_x))
-            transformed_roi.center_y = float(np.clip(transformed_roi.center_y, 0.0, max_y))
-        transformed.append(transformed_roi)
-    return transformed
-
-
 def _corner_response(image: np.ndarray) -> np.ndarray:
     """Harris corner response (Harris, C. & Stephens, M. "A Combined Corner
     and Edge Detector." Proc. 4th Alvey Vision Conference, 1988):
@@ -1200,99 +813,6 @@ def _corner_response(image: np.ndarray) -> np.ndarray:
     if scale > 1e-6:
         gradient /= scale
     return (response * (1.0 + gradient)).astype(np.float32, copy=False)
-
-
-def _traceable_landmark_candidates(
-    image: np.ndarray,
-    feature_count: int,
-    *,
-    patch_radius_px: int = 10,
-) -> list[tuple[float, float, float]]:
-    prepared = prepare_registration_image(image)
-    response = _corner_response(prepared)
-    image_height, image_width = prepared.shape[:2]
-    if image_height <= 0 or image_width <= 0:
-        return []
-
-    border_margin = max(int(round(min(image_height, image_width) * 0.08)), int(patch_radius_px) * 2, 18)
-    suppression = max(3, int(round(max(int(patch_radius_px) * 2 + 1, 5))))
-    local_max = ndimage.maximum_filter(response, size=suppression, mode="nearest")
-    candidate_mask = np.isfinite(response) & (response > 0.0) & (response == local_max)
-    if border_margin * 2 < image_width:
-        candidate_mask[:, :border_margin] = False
-        candidate_mask[:, image_width - border_margin :] = False
-    if border_margin * 2 < image_height:
-        candidate_mask[:border_margin, :] = False
-        candidate_mask[image_height - border_margin :, :] = False
-
-    ys, xs = np.nonzero(candidate_mask)
-    if xs.size == 0:
-        return []
-
-    scores = response[ys, xs].astype(np.float64, copy=False)
-    center_x = float(image_width - 1) * 0.5
-    center_y = float(image_height - 1) * 0.5
-    max_radius = max(float(np.hypot(center_x, center_y)), 1e-6)
-    radial_distance = np.hypot(xs.astype(np.float64) - center_x, ys.astype(np.float64) - center_y) / max_radius
-    combined_score = scores * (1.0 + 0.35 * radial_distance)
-    order = np.argsort(combined_score)[::-1]
-    return [(float(xs[index]), float(ys[index]), float(combined_score[index])) for index in order]
-
-
-def _select_spread_landmarks(
-    candidates: list[tuple[float, float, float]],
-    feature_count: int,
-    image_shape: tuple[int, int],
-    *,
-    patch_radius_px: int = 10,
-) -> list[tuple[float, float, float]]:
-    image_height, image_width = image_shape[:2]
-    count = max(int(feature_count), 1)
-    if not candidates:
-        return []
-
-    target_spacing = max(
-        int(round(np.sqrt(max(float(image_height * image_width), 1.0) / max(count, 1)) * 0.75)),
-        int(patch_radius_px) * 3,
-        18,
-    )
-    spacing_candidates = [target_spacing, int(round(target_spacing * 0.85)), int(round(target_spacing * 0.7)), int(round(target_spacing * 0.55)), 0]
-
-    def pick(min_distance: float) -> list[tuple[float, float, float]]:
-        selected: list[tuple[float, float, float]] = []
-        min_distance_sq = float(min_distance) * float(min_distance)
-        for candidate in candidates:
-            x, y, _score = candidate
-            if not selected:
-                selected.append(candidate)
-                if len(selected) >= count:
-                    break
-                continue
-            if any((x - sel_x) ** 2 + (y - sel_y) ** 2 < min_distance_sq for sel_x, sel_y, _sel_score in selected):
-                continue
-            selected.append(candidate)
-            if len(selected) >= count:
-                break
-        return selected
-
-    selected: list[tuple[float, float, float]] = []
-    for spacing in spacing_candidates:
-        selected = pick(float(spacing))
-        if len(selected) >= count:
-            break
-
-    if len(selected) < count:
-        chosen_points = {(round(x, 6), round(y, 6)) for x, y, _score in selected}
-        for candidate in candidates:
-            key = (round(candidate[0], 6), round(candidate[1], 6))
-            if key in chosen_points:
-                continue
-            selected.append(candidate)
-            chosen_points.add(key)
-            if len(selected) >= count:
-                break
-
-    return selected[:count]
 
 
 def default_landmark_anchors(

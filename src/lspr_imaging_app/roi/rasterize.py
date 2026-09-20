@@ -13,7 +13,9 @@ before filling it in, exactly like the code it was ported/unified from.
 ``docs/rewrite_build_log_2026-09.md``): sketch §10 originally split this
 module from circle/annulus rasterization, which the current app keeps in
 ``processing/chromatic.py`` alongside the chromatic-correction math (ported
-to ``image_tools/chromatic/fitting.py`` earlier this session). That left
+to ``image_tools/chromatic/affine.py`` - originally a single ``fitting.py``,
+later split into several files, see that build log's 2026-09-21 entry).
+That left
 "which module rasterizes what" ambiguous once ``roi_rasterize.py`` turned
 out to only handle the arbitrary-mask escape hatch. Chosen fix: pull the
 circle/annulus math (``transformed_circle_points``, ``transformed_disk_mask``,
@@ -47,7 +49,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from ..image_tools.chromatic.fitting import apply_affine_to_points, invert_affine_matrix
+from ..image_tools.chromatic.affine import apply_affine_to_points, invert_affine_matrix
 from .model import AreaRoi, RoiMask
 
 # -- arbitrary-mask geometry: crop/expand between stored and working form ---
@@ -117,8 +119,9 @@ def _blit(out: np.ndarray, roi_mask: RoiMask, *, offset_x: int, offset_y: int) -
 
 # -- circle/annulus geometry: reach-box-limited affine rasterization --------
 # Moved verbatim from image_tools/chromatic/fitting.py (itself a verbatim
-# port of processing/chromatic.py) - only this module's docstring context
-# changed, the math did not.
+# port of processing/chromatic.py, before fitting.py was later split into
+# affine.py/warp.py/landmark_autotrack.py) - only this module's docstring
+# context changed, the math did not.
 
 
 def transformed_circle_points(
