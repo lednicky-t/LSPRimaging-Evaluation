@@ -209,3 +209,87 @@ Rewrite-preview window still builds. Committed as `4ae80f5`.
 - Nothing on `rewrite` has been pushed to `origin` yet. The umbrella
   repo's tracked `apps/LSPRi/eva` submodule pointer still points at the
   stable `develop` commit, deliberately not bumped to track this branch.
+
+## 2026-09-20: Image Tools preprocess.py ported — geometry/mask/background split, settings decomposed
+
+Scope-checked `processing/preprocess.py` (966 lines) per this session's
+working method before porting it. Two real findings, both surfaced to the
+maintainer before writing any code (mirroring how the `io.py` finding was
+handled):
+
+**Finding 1**: sketch §10 implies `preprocess.py`'s logic splits cleanly
+across `geometry.py`/`mask.py`/`background/{estimate,apply}.py`. It
+doesn't — the real file mixes all three: ~410 lines of self-contained
+spatial-transform math (only reads `PreprocessingSettings`), ~350 lines of
+background flattening (reads `PreprocessingSettings` *and* ROI's
+`AreaRoi`/`AreaRoiDetectionSettings` for exclusion — not `MaskSettings`),
+and ~50 lines of self-contained mask-creation math (only reads
+`MaskSettings`), composed by one ~130-line `apply_preprocessing()`.
+Presented three options (split now / port as one file first / defer);
+maintainer chose **split by concern now**.
+
+**Finding 2**: `PreprocessingSettings` itself (the dataclass these
+functions consume) is a 40-field grab-bag mixing geometry (rotation/flip/
+crop/display/calibration), background-flatten, and chromatic-correction
+(`chromatic_*`/`reference_*`) fields in one dataclass — the sketch only
+ever said Geometry owns its "spatial fields," never specifying the actual
+boundary, and this shapes the not-yet-designed `storage/session.py`
+persistence format. Presented two options (decompose now / keep unsplit
+for later); maintainer chose **decompose now**.
+
+**Mechanics**: traced each ambiguous field's real GUI consumer on
+`develop`/`main` before placing it, rather than guessing — e.g.
+`local_reference_normalization_enabled` moved to `BackgroundSettings`
+because its checkbox (`background_local_reference_check`) lives in the
+Background GUI section; `histogram_highlight_min/max_value` moved to
+`MaskSettings` because it's the persisted state behind
+`mask_controller.py`'s `current_histogram_highlight_mask_raw` (an actual
+mask-candidate input, not just a cosmetic readout); `image_tools_enabled`
+confirmed Geometry-only via `io/dataset.py`'s own comment ("Image tools
+(rotation/flip/crop) ... Calibration ... rides along with the same flag").
+`GridBoundsDefinition`/`ChromaticSettings` went to `chromatic/model.py`
+since chromatic's own pure math never actually reads them today (they're
+for the not-yet-implemented `add_landmark`/`refit`).
+
+Built: `image_tools/geometry/` (new package — `model.py`'s
+`GeometrySettings`/`CropDefinition`, `transform.py`'s 13 spatial-transform
+functions, `module.py`'s relocated `GeometryModule` stub),
+`image_tools/mask/` (new package, same shape — `creation.py`'s 3
+mask-math functions), `image_tools/background/model.py` (new —
+`BackgroundSettings`; `estimate.py`'s stub replaced with the 8 real
+background functions), `image_tools/chromatic/model.py` (added
+`ChromaticSettings`/`GridBoundsDefinition`), and `image_tools/preprocess.py`
+(the real `apply_preprocessing()` composer, replacing the scaffold's
+guessed and completely unused `preprocess_image()` stub — another
+placeholder-shape mismatch in the same family as the `group_id: int` bug,
+caught the same way: check the real call sites before trusting a guessed
+signature).
+
+**`apply.py`'s stub is unchanged, deliberately**: today's `flatten_background`
+still does estimate-and-apply in one call, exactly as ported — splitting
+that into a real reusable model object `apply.py` could consume is the
+already-flagged genuine new work (§7 "Background"), not something this
+port invents an answer for.
+
+Verified every ported function byte-for-byte identical to its source
+(diffed programmatically, not by eye) except type annotations
+(`PreprocessingSettings` → `GeometrySettings`/`BackgroundSettings`/
+`MaskSettings`) and one cosmetic constant reordering. Confirmed
+pyflakes-clean, `apply_preprocessing()` runs correctly end-to-end (plain
+call and a rotate+crop call), and the rewrite-preview window still builds.
+Committed as `82146f5`.
+
+**Not done / still open, as of this entry**:
+- `roi/reduction.py`/`roi/rasterize.py` — still placeholder stubs; real
+  sources are `processing/roi_math.py`/`processing/roi_rasterize.py`, not
+  yet scope-checked.
+- `analysis/tasks.py`, `storage/session.py` — not yet started.
+- The genuinely-new design pieces (`analysis/provenance.py`+`planner.py`,
+  the §6a weighted-reduction/supersampling math, the real background
+  estimate/apply split) — not yet started.
+- `GeometryModule`/`MaskModule`/`BackgroundModule`/`ChromaticModule`'s own
+  command methods (`set_crop`, `set_rotation`, ...) are still
+  `NotImplementedError` stubs — only their settings dataclasses and the
+  pure math consuming them are real so far.
+- Nothing on `rewrite` has been pushed to `origin` yet; the umbrella
+  repo's submodule pointer is still deliberately not bumped.
