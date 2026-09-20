@@ -581,3 +581,56 @@ entry, still open):
 - The panel layer isn't built beyond the scaffold stubs.
 - Nothing on `rewrite` has been pushed to `origin` yet; the umbrella
   repo's submodule pointer is still deliberately not bumped.
+
+## 2026-09-20: `SelectionModule`'s command methods built — closes the `roi_ids_renumbered` gap
+
+`set_cube`/`set_wavelength`/`set_roi_selection` are now real (`selection/
+module.py`), replacing the scaffold stubs. Each is a plain mutate + emit,
+no-op-skipped when the new value equals the current one (same convention
+`RoiToolbox`'s command methods already use) - `set_cube` also rejects a
+negative index. **Deliberately not wired through `undo.undo_manager`**:
+selection was never part of `_push_undo_point` in the old app either, and
+the sketch (§9) settles that selection can never trigger recompute, which
+extends naturally to "selection isn't undo history" - undo is for state
+that affects results, not where the cursor happens to be.
+
+**Closes the cross-module gap `RoiToolbox.delete_rois()` flagged** (see
+previous two entries, and `roi/toolbox.py`'s module docstring before this
+edit): added `SelectionModule.remap_roi_ids(id_map)`, connected to
+`RoiToolbox.roi_ids_renumbered` in `app_rewrite.build_main_window()` (the
+one place that wires cross-module signals - `SelectionModule` itself holds
+no `RoiToolbox` reference, per AGENTS.md's "no module reaches into another
+module's internals"). A selected id absent from the map (i.e. it was the
+one deleted, not renumbered) is dropped, not treated as an error - deleting
+a currently-selected ROI is an ordinary event.
+
+**Verified with real calls** (scripted, not pytest - no test harness exists
+yet for the rewrite modules): no-op skip confirmed for repeated identical
+`set_cube`/`set_wavelength`/`set_roi_selection` calls (no duplicate signal
+emission); negative `set_cube` raises; and the full delete/undo/redo cycle
+against `RoiToolbox` was exercised directly - select ROIs `{2, 3, 5}` out of
+five, delete ROI 3 (survivors `{1,2,4,5}` renumber to `{1,2,3,4}`),
+selection correctly becomes `{2, 4}` (id 3 dropped since it was the one
+deleted, id 5→4 remapped) with exactly one `roi_selection_changed`
+emission; `undo_manager.
+undo()` restores the original five ROIs and remaps the still-live part of
+the selection back through the reverse map to `{2, 5}` (id 3 does **not**
+reappear in the selection - correct, since selection isn't undo-tracked,
+only the surviving members' ids get un-renumbered); `undo_manager.redo()`
+reproduces the original post-delete selection `{2, 4}` exactly. Confirmed
+the rewrite-preview window (`app_rewrite.build_main_window()`) still builds
+with the new cross-module `connect()` in place. `roi/toolbox.py`'s module
+docstring updated to record the gap as closed rather than open.
+
+**Not done / still open, as of this entry**:
+- `RoiToolbox.display_position()` — stub; needs the Chromatic-affine
+  decision noted in `toolbox.py`'s module docstring.
+- `analysis/tasks.py`, `storage/session.py` — not yet started.
+- `GeometryModule`/`MaskModule`/`BackgroundModule`/`ChromaticModule`'s own
+  command methods are still `NotImplementedError` stubs — next candidates
+  to adopt the `undo_manager` pattern, now proven out on two modules
+  (`RoiToolbox`, and by deliberate contrast `SelectionModule`'s decision
+  *not* to use it).
+- The panel layer isn't built beyond the scaffold stubs.
+- Nothing on `rewrite` has been pushed to `origin` yet; the umbrella
+  repo's submodule pointer is still deliberately not bumped.

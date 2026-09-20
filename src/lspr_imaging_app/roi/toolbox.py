@@ -29,18 +29,18 @@ undoable (an explicit `old_id -> new_id` map, reversed on undo, not a generic
 diff). `add_roi`/`detect_rois` were already contiguous-by-construction and
 needed no change.
 
-**Cross-module consequence, flagged since it isn't resolved yet**:
-renumbering on delete means any *other* module holding onto a roi_id across
-a delete (`SelectionModule`'s current selection; the future analysis store's
-per-ROI provenance, keyed by roi_id) goes stale unless it also remaps.
-`delete_rois()` emits `roi_ids_renumbered` (an `{old_id: new_id}` dict, for
-survivors only) precisely so those modules *can* subscribe and remap their
-own state without this module reaching into theirs (AGENTS.md's "no module
-reads or writes another module's internals" rule) - nothing subscribes yet,
-since `SelectionModule`'s own command methods and `analysis/tasks.py` are
-both still stubs/not-yet-built. Flag this when either is built: they need a
-`roi_ids_renumbered` handler or a real user-visible bug (stale selection/
-provenance after a delete) will ship silently.
+**Cross-module consequence**: renumbering on delete means any *other*
+module holding onto a roi_id across a delete (`SelectionModule`'s current
+selection; the future analysis store's per-ROI provenance, keyed by
+roi_id) goes stale unless it also remaps. `delete_rois()` emits
+`roi_ids_renumbered` (an `{old_id: new_id}` dict, for survivors only)
+precisely so those modules *can* subscribe and remap their own state
+without this module reaching into theirs (AGENTS.md's "no module reads or
+writes another module's internals" rule). **`SelectionModule` now
+subscribes** (`selection/module.py`'s `remap_roi_ids()`, wired in
+`app_rewrite.build_main_window()`) - built 2026-09-20. `analysis/tasks.py`
+is still not built and will need its own handler for per-ROI provenance
+when it lands.
 
 **Undo/redo**: every mutating command below pushes one
 `undo.FunctionCommand` to the shared `undo.undo_manager` (see that module's

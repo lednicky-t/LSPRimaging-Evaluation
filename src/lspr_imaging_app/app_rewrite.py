@@ -72,6 +72,14 @@ def build_main_window() -> QMainWindow:
     selection = SelectionModule()
     analysis_engine = AnalysisEngine()
 
+    # SelectionModule holds no RoiToolbox reference of its own (AGENTS.md,
+    # "no module reaches into another's internals") - this is the one place
+    # that connects RoiToolbox's roi_ids_renumbered signal to Selection's
+    # remap_roi_ids(), so a delete-driven ROI renumber never leaves a stale
+    # selected id behind (see roi/toolbox.py's module docstring, "Cross-
+    # module consequence", and selection/module.py).
+    roi_toolbox.roi_ids_renumbered.connect(selection.remap_roi_ids)
+
     image_panel = ImagePanel(dataset, geometry, mask, chromatic, background, roi_toolbox, selection)
     histogram_panel = HistogramPanel(image_panel)
     roi_table_panel = RoiTablePanel(roi_toolbox)
