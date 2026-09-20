@@ -397,3 +397,112 @@ wiring the toolbox's commands to this now-real math is separate work.
   command methods are still `NotImplementedError` stubs.
 - Nothing on `rewrite` has been pushed to `origin` yet; the umbrella
   repo's submodule pointer is still deliberately not bumped.
+
+## 2026-09-20: Cross-module undo/redo added; RoiToolbox's real command methods built
+
+Started as "port RoiToolbox's stub command methods" (the next item after
+the ROI stage's math finished), but scope-checking the source first showed
+this was the biggest task on this branch so far: the real logic is scattered
+across `gui/roi_geometry_mixin.py` (553 lines) and `gui/roi_table_controller.py`
+(732 lines), tangled with dialogs, undo snapshots, status-bar text, and
+table/overlay redraw calls - plus ~250 more lines of delegate methods living
+directly on `MainWindow` (`_rename_roi_group_from_table`, `_edit_roi_color_
+from_table`, ...). A clean, concrete instance of the god-object pattern
+`docs/rewrite_feature_inventory_2026-09.md` diagnosed.
+
+**Undo/redo gap surfaced and resolved before porting anything.** Nearly
+every one of those old-app mutations wraps a `_push_undo_point()`/
+`_prepare_undo_snapshot()` call - a deepcopy-based undo stack on
+`MainWindow`. Neither the architecture sketch nor `AGENTS.md` designs
+undo/redo anywhere for the rewrite. Asked the maintainer how to handle it
+rather than guessing at a cross-cutting design silently; they asked for a
+**proper (not minimal) design, scoped to handle every module**, not just
+ROI. Built `undo/manager.py`: one shared `undo_manager` instance (matches
+`diagnostics_hub`'s existing process-wide singleton pattern exactly -
+modules import it directly, no constructor injection), typed
+`FunctionCommand` objects (a label plus `undo()`/`redo()` closures a command
+method writes inline over its own state - not a generic before/after
+deep-clone, which is what made the old app's version expensive: a deepcopy
+of the *entire* app state, every ROI/mask/chromatic model, on every single
+edit), `begin_batch()`/`end_batch()` for coalescing a drag gesture's many
+intermediate pushes into one undo-stack entry, redo-stack invalidation on a
+fresh push, and a `max_depth`-bounded stack. Verified with real push/undo/
+redo/batch/nested-batch-raises/empty-batch-no-op scenarios, not just import-
+checking. `AGENTS.md` gets a new "Undo/redo" section for the next module
+that needs it.
+
+**RoiToolbox's real command methods**, consolidated from the scattered
+source above with dialogs/status-text/table-rendering deliberately left
+out (those belong to the not-yet-built panel layer, which will prompt for
+input then call these command methods with resolved values): `add_roi`
+(a real gap in the original stub list - there was no command for placing a
+single manual ROI at all), `move_roi`, `resize_roi`, `delete_roi`/
+`delete_rois` (bulk primitive, prunes and correctly restores empty groups/
+arrays on undo), `detect_rois` (bulk replace, takes already-detected ROIs
+rather than running detection itself - that stays off the GUI thread per
+AGENTS.md, the same threading boundary the old app's async worker already
+enforced), `create_group`/`rename_group`/`recolor_group`/`reorder_group`/
+`add_to_group` (enforces "at most one group per ROI" by evicting from any
+prior group first)/`remove_from_group`, and `request_move` (forwards to
+`move_roi`; image-bounds clamping is the Image panel's job now, since this
+module has no image to clamp against).
+
+**Two scaffold bugs found and fixed, not guessed past**:
+- `RoiToolbox` had a duplicated `set_selection`/`selection_changed` pair
+  alongside `SelectionModule`'s own - AGENTS.md is explicit that
+  `SelectionModule` alone owns ROI selection ("the one intentionally shared
+  piece of state"). Removed the duplicate; grep-confirmed nothing in the
+  panel scaffolds referenced it.
+- `RoiComputationalChange`'s documented `reason` values
+  (`change_events.py`) didn't include `"added"`/`"deleted"`/`"detected"` -
+  extended the comment to match the real reasons these new methods emit.
+
+**Deliberate behavior change, flagged prominently (not buried)**: ROI IDs
+are now stable and never reused (an incrementing counter), instead of the
+old app's `_reindex_detected_rois` renumbering every ID to stay contiguous
+after each delete. Reasoning: reindexing-on-delete is what makes undo of a
+delete hard to get right (it would have to reverse the renumbering cascade
+into every group/array reference too); it only existed because the old
+list-based representation conflated ID with position, and the scaffold's
+`dict[int, AreaRoi]` (already chosen before this session) doesn't need
+that. User-visible effect: the ROI table's numbering can show gaps after a
+delete (e.g. "1, 2, 4, 5") instead of always staying contiguous - documented
+in `toolbox.py`'s module docstring for the maintainer to react to if this
+isn't wanted.
+
+**Deliberately not done this pass** (documented in `toolbox.py`'s own
+docstring, not silently skipped): `display_position()` stays a stub - needs
+a decision on how `RoiToolbox` obtains a Chromatic affine (hold a
+`ChromaticModule` reference vs. take `affine_matrix` as an explicit
+parameter, matching `roi/rasterize.py`'s precedent) that nothing in this
+pass forced. The old app's spatial array-reordering feature
+(`_reorder_rois_by_position`/`_order_rois_as_array`/`_group_rois_by_column`)
+isn't ported - separate, UI-heavy feature, distinct from `reorder_group`
+(group *display* order, which this pass does implement). Geometry-type
+switching (circle/annulus <-> mask) isn't built - no mask-editing UI exists
+yet to drive it.
+
+Verified: pyflakes-clean. Exercised with real calls (not just import-
+checking) - full CRUD + group lifecycle + undo/redo round-trips for every
+command, including the "at most one group per ROI" invariant and undo
+correctly restoring a group that `delete_rois` had pruned for being empty.
+Rewrite-preview window still builds, all 5 tabs present. Panel scaffolds
+(`panels/image`, `panels/roi_table`) already called `request_move`/
+`rename_group`/`reorder_group` with signatures matching what was actually
+built - no panel-side changes needed.
+
+**Not done / still open, as of this entry**:
+- `RoiToolbox.display_position()` — stub; needs the Chromatic-affine
+  decision noted above.
+- `analysis/tasks.py`, `storage/session.py` — not yet started.
+- The genuinely-new design pieces (`analysis/provenance.py`+`planner.py`,
+  the §6a weighted-reduction/supersampling math, the real background
+  estimate/apply split) — not yet started.
+- `GeometryModule`/`MaskModule`/`BackgroundModule`/`ChromaticModule`'s own
+  command methods are still `NotImplementedError` stubs — first candidates
+  to adopt the new `undo_manager` pattern once built.
+- The panel layer (dialogs, table rendering, overlay drawing) that will
+  actually call `RoiToolbox`'s now-real command methods isn't built beyond
+  the scaffold stubs.
+- Nothing on `rewrite` has been pushed to `origin` yet; the umbrella
+  repo's submodule pointer is still deliberately not bumped.
