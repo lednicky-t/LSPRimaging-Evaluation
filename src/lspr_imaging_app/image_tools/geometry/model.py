@@ -16,6 +16,19 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 
+@dataclass(frozen=True)
+class GeometryComputationalChange:
+    """Geometry's own computational-change payload (change_events.py's
+    two-type pattern, §3) - whole-image scope, not per-ROI, so unlike
+    `RoiComputationalChange` there is no `roi_ids` field: crop/rotate/flip
+    change what every pixel in the processed image is, not a subset of
+    ROIs. Colocated here rather than in the shared `change_events.py`
+    (that file's own docstring: "each should define its own analogous
+    pair, colocated in its own module file")."""
+
+    reason: str  # "image_tools_enabled" | "rotation" | "rotation_fill" | "flip" | "crop"
+
+
 @dataclass(slots=True)
 class CropDefinition:
     x: int = 0

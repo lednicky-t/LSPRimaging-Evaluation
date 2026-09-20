@@ -612,8 +612,7 @@ against `RoiToolbox` was exercised directly - select ROIs `{2, 3, 5}` out of
 five, delete ROI 3 (survivors `{1,2,4,5}` renumber to `{1,2,3,4}`),
 selection correctly becomes `{2, 4}` (id 3 dropped since it was the one
 deleted, id 5→4 remapped) with exactly one `roi_selection_changed`
-emission; `undo_manager.
-undo()` restores the original five ROIs and remaps the still-live part of
+emission; `undo_manager.undo()` restores the original five ROIs and remaps the still-live part of
 the selection back through the reverse map to `{2, 5}` (id 3 does **not**
 reappear in the selection - correct, since selection isn't undo-tracked,
 only the surviving members' ids get un-renumbered); `undo_manager.redo()`
@@ -634,3 +633,80 @@ docstring updated to record the gap as closed rather than open.
 - The panel layer isn't built beyond the scaffold stubs.
 - Nothing on `rewrite` has been pushed to `origin` yet; the umbrella
   repo's submodule pointer is still deliberately not bumped.
+
+## 2026-09-20: `GeometryModule`'s command methods built
+
+`set_image_tools_enabled`/`set_rotation`/`set_rotation_fill_dark`/
+`set_flip`/`set_crop`/`clear_crop` replace the scaffold stubs
+(`image_tools/geometry/module.py`), the first Image Tools sub-module past
+`NotImplementedError`. Ported the real state-mutation logic out of
+`gui/image_tools_controller.py` on `develop` - that file's tool-activation
+state, pyqtgraph `RectROI` sync, and overlay redraw calls stay in the
+not-yet-built panel layer, same split as `RoiToolbox`'s own port. Two
+methods weren't in the original stub list, matching `RoiToolbox.add_roi`
+being a real gap found the same way: `set_image_tools_enabled` (the
+link/unlink toggle) and `set_rotation_fill_dark` (edge-stretch vs. 0-fill
+for rotation padding) both had real old-app actions with no scaffold
+counterpart.
+
+**Adopts the `undo_manager` pattern** exactly like `RoiToolbox` (the
+pattern's second real user, as flagged in the previous entry) - every
+setter pushes one `FunctionCommand` with the mutation re-run from inside
+`apply()`/`revert()`, same as `RoiToolbox`, and is a no-op (no undo entry)
+when the new value already matches, same no-op-skip convention.
+**By deliberate contrast with `SelectionModule`**: Geometry's changes are
+computational (they resample the pixel grid), so unlike Selection they
+*do* belong in undo history - this is the concrete case the
+`SelectionModule` entry's "selection isn't undo history" reasoning was
+drawing the line against.
+
+**New payload type**: `GeometryComputationalChange` (`reason: str`,
+colocated in `geometry/model.py` per `change_events.py`'s own instruction
+for each Image Tools module to define its own analogous type) - no
+`roi_ids` field, since Geometry's scope is the whole processed image, not
+a subset of ROIs, unlike `RoiComputationalChange`. Replaces
+`geometry_changed`'s old bare `pyqtSignal()` placeholder.
+
+**`GeometryModule.settings()` returns a defensive copy** (`dataclasses.
+replace()` on both the settings object and its nested `CropDefinition`) -
+verified a caller mutating the returned object (`s.rotation_angle_deg =
+999`, `s.crop.x = 999`) has zero effect on the module's real state. Used
+`dataclasses.replace`, not the newer `copy.replace` (Python 3.13+ only;
+this repo's floor is 3.12 per `pyproject.toml`).
+
+**Scope boundary, deliberate**: `GeometrySettings`' display-only
+calibration/scale-bar/measurement-anchor fields (`display_units` through
+`measurement_anchor2_y_px`) get no command methods this pass - nothing in
+`transform.py`'s pure math reads them (per `model.py`'s own docstring), so
+nothing downstream is gated on them, unlike crop/rotate/flip. The real
+logic to port for those lives in `gui/measurement_calibration_mixin.py`'s
+`_apply_measurement_calibration` on `develop` - left for a future pass,
+flagged in `geometry/module.py`'s own docstring rather than silently
+skipped. No `GeometryCosmeticChange` type defined yet for the same reason
+(would be dead code until those commands exist).
+
+**Verified with real calls** (scripted, no pytest harness yet): every
+setter's no-op-skip (a repeated identical call emits nothing twice); the
+defensive-copy guarantee above; `set_crop` implies `enabled=True` matching
+the old app's `crop_roi_changed`; a full undo of all 6 pushed commands
+(rotation, flip, rotation-fill, crop, image-tools-link, crop-set again)
+returns every field to `GeometrySettings()`'s defaults, and redo reproduces
+the exact final state; `clear_crop` correctly restores the prior crop
+rectangle on undo (not an empty one). Confirmed the rewrite-preview window
+still builds.
+
+**Correction to the previous entry**: "nothing on `rewrite` has been
+pushed to `origin` yet" is now stale - the `SelectionModule` commit was
+pushed and `origin/rewrite` exists as of this session.
+
+**Not done / still open, as of this entry**:
+- `RoiToolbox.display_position()` — stub; needs the Chromatic-affine
+  decision noted in `toolbox.py`'s module docstring.
+- `analysis/tasks.py`, `storage/session.py` — not yet started.
+- `GeometryModule`'s calibration/scale-bar command methods — deliberately
+  out of scope this pass (see above); `gui/measurement_calibration_mixin.py`
+  on `develop` has the real logic to port.
+- `MaskModule`/`BackgroundModule`/`ChromaticModule`'s own command methods
+  are still `NotImplementedError` stubs — next candidates for the
+  `undo_manager` pattern, now proven out on two real modules.
+- The panel layer isn't built beyond the scaffold stubs.
