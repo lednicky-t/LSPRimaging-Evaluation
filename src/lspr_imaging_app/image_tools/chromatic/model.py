@@ -1,10 +1,18 @@
 """Chromatic model dataclasses (sketch §7 "Chromatic", §10).
 
-Ported verbatim from ``domain/models.py`` on ``develop``/``main`` -
 ``ChromaticTransformModel`` (named ``ChromaticModel`` in the sketch's own
 prose, kept under its real, current name here rather than renamed, so a
 future diff against the source stays obvious) and
-``ChromaticLandmarkObservation``. No logic changed.
+``ChromaticLandmarkObservation`` ported verbatim from ``domain/models.py`` on
+``develop``/``main``. No logic changed.
+
+``ChromaticSettings``/``GridBoundsDefinition`` added 2026-09-20: split out of
+the old app's ``PreprocessingSettings`` grab-bag (its ``chromatic_*``/
+``reference_*`` fields) - see ``image_tools/geometry/model.py``'s docstring
+for the full reasoning. Chromatic's own pure math (``fitting.py``) never
+actually reads these - registration parameters are consumed by
+``ChromaticModule``'s not-yet-implemented ``add_landmark``/``refit``, once
+those exist.
 """
 
 from __future__ import annotations
@@ -34,3 +42,35 @@ class ChromaticLandmarkObservation:
     wavelength_nm: float
     x_px: float
     y_px: float
+
+
+@dataclass(slots=True)
+class GridBoundsDefinition:
+    """A user-adjustable rectangle (image pixel space) that the chromatic
+    reference-point search grid is laid out within, instead of nearly the
+    whole image. `enabled=False` (the default) means "use the automatic
+    full-image extent" -- unset until the user explicitly drags the overlay.
+    """
+
+    x: int = 0
+    y: int = 0
+    width: int = 0
+    height: int = 0
+    enabled: bool = False
+
+
+@dataclass(slots=True)
+class ChromaticSettings:
+    chromatic_correction_enabled: bool = False
+    chromatic_registration_mode: str = "landmark_radial"
+    chromatic_landmark_kind: str = "corner"
+    chromatic_landmark_model: str = "similarity"
+    chromatic_grid_bounds: GridBoundsDefinition = field(default_factory=GridBoundsDefinition)
+    chromatic_sample_image_count: int = 5
+    chromatic_feature_count: int = 15
+    chromatic_subpixel_precision: int = 4
+    chromatic_tile_size_px: int = 96
+    chromatic_search_radius_px: int = 24
+    reference_mode: str = "auto"
+    reference_wavelength_nm: float | None = None
+    reference_spectral_cube_index: int = 0

@@ -1,6 +1,6 @@
 """``MaskModule`` - algorithmic + raster file mask (sketch §7 "Image Tools", §10).
 
-Owns algorithmic mask settings and the raster file-mask. Emits
+Owns ``MaskSettings`` (see ``model.py``) and the raster file-mask. Emits
 ``mask_changed`` (computational). Masks are authored and stored in raw pixel
 space (AGENTS.md non-negotiable invariant) - this module calls
 :meth:`~lspr_imaging_app.image_tools.chromatic.module.ChromaticModule.warp_mask`
@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from PyQt6.QtCore import QObject, pyqtSignal
 
-from ..diagnostics import instrumented
+from ...diagnostics import instrumented
 
 
 class MaskModule(QObject):

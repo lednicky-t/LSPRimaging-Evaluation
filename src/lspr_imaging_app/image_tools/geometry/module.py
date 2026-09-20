@@ -1,16 +1,17 @@
 """``GeometryModule`` - crop/rotate/flip (sketch §7 "Image Tools", §10).
 
-Owns ``PreprocessingSettings``' spatial fields. Emits ``geometry_changed``
-(a computational change - AGENTS.md non-negotiable invariant: rotation/flip/
-crop are not display-only, they resample the actual pixel grid every
-downstream calculation reads).
+Owns ``GeometrySettings`` (split out of the old app's ``PreprocessingSettings``
+- see ``model.py``'s docstring). Emits ``geometry_changed`` (a computational
+change - AGENTS.md non-negotiable invariant: rotation/flip/crop are not
+display-only, they resample the actual pixel grid every downstream
+calculation reads).
 """
 
 from __future__ import annotations
 
 from PyQt6.QtCore import QObject, pyqtSignal
 
-from ..diagnostics import instrumented
+from ...diagnostics import instrumented
 
 
 class GeometryModule(QObject):
