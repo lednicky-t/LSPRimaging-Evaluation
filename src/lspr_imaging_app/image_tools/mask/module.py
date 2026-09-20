@@ -61,26 +61,41 @@ create, apply-delta, brush paint). Every command below matches that
 exactly, the same rigor `SelectionModule`/parts of `GeometryModule` already
 applied to actions the old app itself never undo-tracked.
 
-**Not built this pass** (the async/file-I/O-heavy remainder): computing an
-actual mask *candidate* from these settings and merging it into
-`file_mask` (`apply_histogram_mask`/`apply_relative_mask`/
-`apply_local_contrast_mask`/`apply_morphology_mask` and their `reset_*`
-counterparts, all backed by `request_mask_candidate`'s worker/cache
-machinery); brush painting (`apply_mask_brush`); mask file load/save
-(`load_mask_from_file`/`save_mask_to_file`); per-wavelength mask diffs
-(`_current_file_mask_wavelength_diffs`, needed once off-reference painting
-under chromatic correction matters). All flagged rather than guessed at -
-a distinctly bigger chunk than Geometry's calibration deferral was.
+**"Apply" command methods built 2026-09-21**, closing most of the gap the
+previous addendum flagged: `apply_candidate()`/`apply_morphology()`/
+`paint_brush()`, calling into `raster_tools.py`'s now-built pure functions.
+Ported the real old-app semantics after actually reading the button
+wiring, not guessed: `gui/main_window.py`'s morphology buttons are
+literally tooltipped "Add the current morphology preview to the current
+mask" / "Subtract the current morphology preview from the current mask" -
+morphology, like the threshold/contrast tools, produces a *candidate*
+(here: the current mask run through erode/dilate/open/close) that the user
+then merges in additively or subtractively, **not** a direct replacement
+of the mask with the morphed result. So all four old-app tools
+(histogram/relative/local_contrast/morphology) share the exact same
+merge step (`apply_candidate`) - they only differ in how the candidate
+itself gets computed, which is why `apply_candidate` takes an
+already-computed candidate rather than a tool-kind string: the
+image-based tools (histogram/relative/local_contrast) need a raw image
+this module doesn't own (`Dataset`'s job), so their candidate has to be
+computed by the caller anyway (`raster_tools.create_relative_contrast_
+mask(image, ...)` etc., using this module's own `settings()`) - only
+`apply_morphology` gets a convenience wrapper, since morphology's
+candidate needs nothing but this module's own current mask.
 
-**2026-09-21 addendum**: `raster_tools.py`'s pure functions (threshold/
-contrast candidate generation, morphology, brush footprint, candidate
-merge) are now built and shared-ready - see that file's module docstring
-for the mask/ROI design conversation this came out of, and
-`roi/rasterize.py`'s docstring for the matching not-yet-built ROI-mask
-chromatic-warp task. The command methods that would actually *call*
-`raster_tools.py` (the "apply" flow listed above) still aren't built -
-this addendum only changes what those commands, once written, will call
-into, not the command surface itself.
+**Still not built** (the genuinely async/file-I/O-heavy remainder):
+`request_mask_candidate`'s worker/cache machinery for the two image-based
+tools that are actually slow (relative/local_contrast reload the raw
+image + run scipy filtering - histogram/morphology are cheap and
+synchronous even in the old app); mask file load/save
+(`load_mask_from_file`/`save_mask_to_file`); per-wavelength mask diffs
+(`_current_file_mask_wavelength_diffs` - the off-reference,
+chromatic-correction-enabled branch of `apply_mask_brush`, where a stroke
+accumulates into a sparse diff instead of touching the canonical mask;
+`paint_brush()` below only implements the on-reference/CC-disabled direct-
+write branch, deliberately - see its own docstring for why the other
+branch needs a design decision this module can't make alone). All flagged
+rather than guessed at.
 """
 
 from __future__ import annotations
@@ -91,6 +106,7 @@ import numpy as np
 from PyQt6.QtCore import QObject, pyqtSignal
 
 from ...diagnostics import instrumented
+from . import raster_tools
 from .model import MaskComputationalChange, MaskCosmeticChange, MaskSettings
 
 
@@ -220,3 +236,68 @@ class MaskModule(QObject):
             return
         self._file_mask = None if normalized is None else normalized.copy()
         self.mask_changed.emit(MaskComputationalChange(reason="file_mask"))
+
+    @instrumented("MaskModule.apply_candidate")
+    def apply_candidate(self, candidate: np.ndarray, *, subtract: bool = False) -> None:
+        """Merge an already-computed candidate mask into `file_mask` -
+        `subtract=False` (the old app's "Apply") ORs it in, `subtract=True`
+        ("Reset"/really "Subtract") ANDs it out (`raster_tools.merge_mask_
+        candidate`). The caller computes `candidate` itself - a raw image
+        this module doesn't own is needed for the histogram/relative/
+        local-contrast tools (`raster_tools.create_histogram_mask`/
+        `create_relative_contrast_mask`/`create_local_contrast_mask`
+        against a `Dataset`-supplied image and this module's own
+        `settings()`) - matching every other "commands take already-
+        resolved values" convention in this codebase
+        (`RoiToolbox.detect_rois`'s calling convention). `apply_morphology`
+        below is the one exception with its own convenience wrapper, since
+        its candidate needs nothing but this module's own current mask.
+
+        A missing `file_mask` is treated as all-unmasked (matching the old
+        app's `_finish_apply_mask_delta`, which does the same when no
+        current mask canvas exists yet)."""
+        candidate = np.asarray(candidate, dtype=bool)
+        base = self._file_mask if self._file_mask is not None else np.zeros(candidate.shape, dtype=bool)
+        if base.shape != candidate.shape:
+            raise ValueError(f"candidate shape {candidate.shape} does not match file_mask shape {base.shape}")
+        merged = raster_tools.merge_mask_candidate(base, candidate, subtract=subtract)
+        self.set_file_mask(merged)
+
+    @instrumented("MaskModule.apply_morphology")
+    def apply_morphology(self, operation: str, radius_px: int, *, subtract: bool = False) -> None:
+        """Run a morphological operation (`"erode"`/`"dilate"`/`"open"`/
+        `"close"`) against the *current* `file_mask` to get a candidate,
+        then merge it in exactly like `apply_candidate` - see this
+        module's own docstring for why morphology is a candidate-then-
+        merge operation here, not a direct replacement. A no-op if there's
+        no current mask to run morphology against."""
+        if self._file_mask is None:
+            return
+        candidate = raster_tools.apply_morphology_to_mask(self._file_mask, operation, radius_px)
+        self.apply_candidate(candidate, subtract=subtract)
+
+    @instrumented("MaskModule.paint_brush")
+    def paint_brush(self, center_xy: tuple[float, float], radius_px: float, *, value: bool) -> None:
+        """Paint one circular brush stroke directly into `file_mask`, in
+        raw pixel space (`raster_tools.apply_brush_stamp`) -
+        `value=True` to add to the mask, `False` to erase from it. This is
+        the old app's on-reference-image (or chromatic-correction-disabled)
+        branch of `apply_mask_brush` - the *only* branch built here.
+
+        The other branch - off-reference with chromatic correction on,
+        where a stroke accumulates into a sparse per-wavelength diff
+        instead of touching this canonical mask at all (see
+        `raster_tools.brush_stamp_bounds`'s docstring) - isn't built:
+        it needs this module to know the current chromatic-correction
+        state and whether the displayed wavelength is the reference,
+        cross-module facts it doesn't own and hasn't been designed to
+        receive yet (as a parameter from the caller, most likely - not
+        decided). Requires an existing `file_mask`; unlike the old app's
+        `manual_mask_required(create_if_missing=True)`, this module can't
+        default one into existence on the caller's behalf, since it has no
+        image-shape knowledge of its own - the caller creates one first
+        (`set_file_mask(np.zeros(raw_shape, dtype=bool))`)."""
+        if self._file_mask is None:
+            raise ValueError("paint_brush requires an existing file_mask - call set_file_mask first.")
+        painted = raster_tools.apply_brush_stamp(self._file_mask, center_xy, radius_px, value=value)
+        self.set_file_mask(painted)

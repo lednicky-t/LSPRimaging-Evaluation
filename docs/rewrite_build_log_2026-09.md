@@ -1140,3 +1140,74 @@ rewrite-preview window still builds.
   unbuilt task above) and ROI mask-drawing commands/UI - neither started;
   no mask-geometry ROI editing exists yet at all.
 - The panel layer isn't built beyond the scaffold stubs.
+
+## 2026-09-21: `MaskModule`'s "apply" command methods built - `apply_candidate`/`apply_morphology`/`paint_brush`
+
+Closes most of the previous entry's remaining gap: real commands that
+call into `raster_tools.py`, replacing the "toolbox built, nothing calls
+it yet" state.
+
+**Read the real button wiring before designing the morphology command,
+rather than guessing from the earlier `apply_mask_delta`/`candidate_mask_
+for_tool` code alone** - `gui/main_window.py`'s morphology buttons are
+tooltipped "Add the current morphology preview to the current mask" /
+"Subtract the current morphology preview from the current mask." That
+settles an ambiguity flagged internally while designing this: morphology
+is **not** a direct mask replacement (`mask = erode(mask)`) - like the
+threshold/contrast tools, it produces a *candidate* (the current mask run
+through erode/dilate/open/close) that the user then merges in additively
+or subtractively, via the exact same OR/AND-NOT merge every other tool
+uses. This is why `apply_candidate(candidate, *, subtract=False)` is one
+generic command shared by all four old-app tools, not a per-tool method -
+they only differ in how the candidate gets computed. `apply_morphology`
+is the one convenience wrapper (candidate = `raster_tools.apply_
+morphology_to_mask(current_mask, operation, radius_px)`, then
+`apply_candidate`), since morphology is the only one of the four that
+needs no external image - histogram/relative/local-contrast all need a
+raw image this module doesn't own (`Dataset`'s job), so their candidates
+have to be computed by the caller (a future panel) via `raster_tools`
+directly, using this module's own `settings()`.
+
+**`paint_brush(center_xy, radius_px, value=...)`** implements only the
+old app's on-reference/chromatic-correction-disabled branch of
+`apply_mask_brush` (direct write via `raster_tools.apply_brush_stamp`).
+The off-reference/CC-enabled branch (accumulate into a sparse per-
+wavelength diff instead of touching the canonical mask) is deliberately
+not built - it needs this module to know cross-module facts (is CC on,
+is the displayed wavelength the reference) it doesn't own and hasn't been
+designed to receive, most likely as caller-supplied parameters, not
+decided yet. Requires an existing `file_mask` and raises rather than
+defaulting one into existence, since (unlike the old app's `manual_mask_
+required(create_if_missing=True)`) this module has no image-shape
+knowledge to create a blank one from - the caller creates one first.
+
+**None of the three wired through `undo_manager`** - consistent with
+every other Mask command and the confirmed-by-grep finding that no mask
+action was ever undo-tracked in the old app.
+
+**Verified with real calls** (scripted, no pytest harness yet):
+`apply_candidate` against no existing mask (treated as all-unmasked,
+matching the old app's `_finish_apply_mask_delta`) and a shape-mismatch
+`ValueError`; `apply_morphology` correctly growing a mask via dilate+add
+and shrinking it via erode+subtract, and a no-op when no mask exists yet;
+`paint_brush` raising without an existing mask, then painting/erasing
+correctly once one exists; a direct cross-check that `apply_morphology`'s
+result matches calling `raster_tools.apply_morphology_to_mask` +
+`merge_mask_candidate` by hand; confirmed zero undo-stack growth across
+all of the above. Confirmed `pyflakes` clean across the whole
+`src/lspr_imaging_app` tree and that the rewrite-preview window still
+builds.
+
+**Not done / still open, as of this entry**:
+- `RoiToolbox.display_position()` — stub; needs the Chromatic-affine
+  decision noted in `toolbox.py`'s module docstring.
+- `analysis/tasks.py`, `storage/session.py` — not yet started.
+- `ChromaticModule.add_landmark()`/`refit()` — still stubs.
+- `MaskModule`'s remaining async/file-I/O-shaped pieces: worker/cache
+  machinery for the two genuinely-slow image-based tools (relative/
+  local-contrast), mask file load/save, and the per-wavelength-diff
+  branch of `paint_brush` (needs the cross-module design decision noted
+  above).
+- ROI mask-geometry chromatic warp and ROI mask-drawing commands/UI -
+  neither started.
+- The panel layer isn't built beyond the scaffold stubs.
