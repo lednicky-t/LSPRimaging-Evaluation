@@ -19,10 +19,21 @@ what specifically moved where.
 from __future__ import annotations
 
 from copy import copy
+from typing import TYPE_CHECKING
 
 import numpy as np
 
-from ...roi.model import AreaRoi
+if TYPE_CHECKING:
+    # Type-only: roi/toolbox.py now imports this module directly
+    # (2026-09-21, display_position()), and roi/__init__.py imports
+    # toolbox.py - a real (not just type-checking-time) import here would
+    # be circular (roi -> toolbox -> chromatic.affine -> roi.model ->
+    # (needs the roi package, already mid-init) -> ImportError). Safe to
+    # defer to TYPE_CHECKING only: AreaRoi is never used as a runtime
+    # value in this file (`from __future__ import annotations` already
+    # means the type hint itself is never evaluated), only as a type
+    # annotation on transform_rois_affine's `rois` parameter.
+    from ...roi.model import AreaRoi
 
 
 def identity_affine_matrix() -> np.ndarray:

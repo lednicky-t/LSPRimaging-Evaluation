@@ -1377,3 +1377,55 @@ branch is unchanged (still matches plain `expand_mask_to_patch`).
 - `MaskModule`'s remaining async/file-I/O-shaped pieces and UI layer -
   still open, see prior entries.
 - The panel layer isn't built beyond the scaffold stubs.
+
+## 2026-09-21: `RoiToolbox.display_position()` built; a real circular import caught and fixed
+
+**`display_position()`** - the one remaining ROI-stage stub, settled by
+precedent rather than a fresh decision: every cross-module boundary built
+this session (`roi/rasterize.py`'s dispatchers, `MaskModule.resolve_mask_
+source()`) takes an already-resolved matrix/result as a plain parameter
+instead of holding a reference to the module that produced it, so this
+does too - takes `affine_matrix` (the caller's job to get from
+`ChromaticModule.affine_for(image_key)`), never reaches into Chromatic.
+A manual per-wavelength nudge (`AreaRoi.per_wavelength`) wins outright
+when one exists for the queried `image_key`, already being expressed in
+that wavelength's own display space.
+
+**Real bug caught while wiring this up, not just ported**: importing
+`apply_affine_to_points` from `image_tools.chromatic.affine` directly in
+`roi/toolbox.py` created an actual circular import -
+`roi/__init__.py` imports `toolbox.py`, which now imports
+`chromatic/affine.py`, which itself imports `roi.model.AreaRoi` (for
+`transform_rois_affine`'s type hint) - and since Python has to import the
+`roi` *package* (running `__init__.py`, which is mid-way through importing
+`toolbox.py`) before it can reach `roi.model` as a submodule, this failed
+with `ImportError: cannot import name 'apply_affine_to_points' from
+partially initialized module`. Fixed at the root rather than routed
+around: `chromatic/affine.py`'s `AreaRoi` import moved under `TYPE_CHECKING`
+- safe because `from __future__ import annotations` (already present)
+means the annotation is never evaluated at runtime, and nothing in that
+file uses `AreaRoi` as an actual runtime value, only as
+`transform_rois_affine`'s parameter type. Confirmed this was latent
+(the import existed before today, just never triggered from this specific
+direction until `toolbox.py` started importing `chromatic.affine` too).
+
+**Verified with real calls** (scripted): identity affine leaves a
+position unchanged; a translation affine shifts it by the expected
+offset; a per-wavelength nudge overrides the affine-computed position
+entirely for its exact `image_key` while a different `image_key` on the
+same ROI still uses the affine. Re-ran every verification script from
+this session's earlier chromatic/mask/ROI entries after the circular-
+import fix to confirm nothing else broke. Confirmed `pyflakes` clean
+across `src/lspr_imaging_app` and that the rewrite-preview window builds.
+
+**Not done / still open, as of this entry**:
+- `analysis/tasks.py`, `storage/session.py` — not yet started.
+- `ChromaticModule` owning `ChromaticSettings`/`add_landmark`/`refit` -
+  still open.
+- `rasterize_sample_for_patch`/`rasterize_reference_for_patch`'s mask-
+  geometry reach-box warp - scoped in the previous entry, not built.
+- ROI mask-drawing commands/UI - not started.
+- `MaskModule`'s remaining async/file-I/O-shaped pieces and UI layer -
+  still open.
+- The panel layer isn't built beyond the scaffold stubs. Every ROI-stage
+  stub named in the sketch is now built.

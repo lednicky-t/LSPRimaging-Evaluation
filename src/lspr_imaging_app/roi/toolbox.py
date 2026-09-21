@@ -65,12 +65,20 @@ selection)". Removed the duplicate here; selection lives only on
 state talk to both modules directly (RoiToolbox never reaches into
 SelectionModule per the "no module reaches into another's internals" rule).
 
-**Not yet built, scope boundary for this pass**: `display_position()` stays
-`NotImplementedError` - it needs a decision about how RoiToolbox obtains a
-chromatic affine (hold a ChromaticModule reference, vs. taking
-`affine_matrix` as an explicit parameter like `roi/rasterize.py`'s
-dispatchers do) that wasn't forced by anything in this pass, so it's left
-open rather than guessed. The old app's spatial array-reordering feature
+**`display_position()` built 2026-09-21**, settled by strong precedent
+rather than a fresh decision: every other cross-module boundary built this
+session (`roi/rasterize.py`'s dispatchers, `MaskModule.resolve_mask_
+source()`) takes an already-resolved `affine_matrix`/warp result as a
+plain parameter rather than holding a reference to the module that
+produced it, so `display_position()` follows the same shape - it takes
+`affine_matrix` (the caller's job to obtain via `ChromaticModule.
+affine_for(image_key)`), never reaching into Chromatic itself. A manual
+per-wavelength nudge (`AreaRoi.per_wavelength`, see that field's own
+docstring in `model.py`) wins outright when one exists for the queried
+`image_key`, since it's already expressed in that wavelength's own display
+space with nothing left to transform.
+
+The old app's spatial array-reordering feature
 (`_reorder_rois_by_position`/`_order_rois_as_array`/`_group_rois_by_column` -
 renumbering ROIs into row/column order) is not ported here either - it's a
 separate, UI-heavy feature distinct from `reorder_group` (which this module
@@ -84,10 +92,12 @@ from __future__ import annotations
 import copy
 import itertools
 
+import numpy as np
 from PyQt6.QtCore import QObject, pyqtSignal
 
 from ..change_events import RoiComputationalChange, RoiCosmeticChange
 from ..diagnostics import instrumented
+from ..image_tools.chromatic.affine import apply_affine_to_points
 from ..undo import FunctionCommand, undo_manager
 from .model import AreaRoi, AreaRoiGroup, RoiArrayGroup
 
@@ -136,13 +146,28 @@ class RoiToolbox(QObject):
                 return group
         return None
 
-    def display_position(self, roi_id: int, image_key: object) -> tuple[float, float]:
-        """Resolve ``roi_id``'s position in ``image_key``'s display space,
-        folding in Chromatic's ``affine_for`` internally - callers never
-        compose the chromatic transform themselves (sketch §7). Not yet
-        implemented - needs a decision on how this module obtains Chromatic's
-        affine (see module docstring)."""
-        raise NotImplementedError
+    def display_position(self, roi_id: int, image_key: tuple[int, float], affine_matrix: np.ndarray) -> tuple[float, float]:
+        """Resolve `roi_id`'s position in `image_key`'s display space -
+        callers never compose the chromatic transform themselves (sketch
+        §7), they just fetch `affine_matrix` from `ChromaticModule.
+        affine_for(image_key)` and hand it over (see module docstring for
+        why this module takes it as a parameter rather than reaching into
+        Chromatic itself).
+
+        A manual per-wavelength nudge (`roi.per_wavelength`, written while
+        viewing a non-reference wavelength - see that field's docstring in
+        `model.py`) wins outright when one exists for `image_key` exactly:
+        it's already expressed directly in that wavelength's own display
+        space, nothing left to transform. Otherwise the ROI's reference-
+        frame center is mapped through `affine_matrix`."""
+        roi = self._rois[roi_id]
+        if roi.per_wavelength:
+            nudge = roi.per_wavelength.get(image_key)
+            if nudge is not None:
+                return float(nudge[0]), float(nudge[1])
+        point = np.asarray([[roi.center_x, roi.center_y]], dtype=np.float64)
+        transformed = apply_affine_to_points(point, affine_matrix)
+        return float(transformed[0, 0]), float(transformed[0, 1])
 
     # -- command API (§7): single-ROI mutation ---------------------------
 
