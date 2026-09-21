@@ -1801,3 +1801,74 @@ below):
   2026-09-20 preprocess.py scope-check entry), not new findings, called
   out here only so this entry's grep-based check is complete.
 - The panel layer isn't built beyond the scaffold stubs.
+
+## 2026-09-21: `DatasetModule` built - the Dataset stage's own gap, closed
+
+Picked up the gap flagged in the previous entry: `dataset/module.py`'s
+`QObject` state-owner was still the original scaffold stub (all six
+methods raising `NotImplementedError`), unlike `dataset/io.py`/`model.py`
+(the pure IO/dataclass layer it wraps), ported back on 2026-09-20.
+
+**Confirmed the sketch's narrow four-method query surface
+(`current_image`/`wavelengths`/`spectral_cubes`/`acquisition_metadata`)
+is actually sufficient, rather than assuming it from the sketch's prose**:
+checked every `dataset/io.py` function a future caller would need pixel
+data from. `dataset_load_plane_roi` already accepts an optional
+pre-looked-up `record` parameter specifically so a caller doesn't need
+the full `ImageDataset` to avoid an O(N) scan; `dataset_load_plane`/
+`dataset_plane_shape` need nothing from `ImageDataset` beyond the one
+`ImageRecord` a lookup already resolves to. So `current_image()` handing
+back an `ImageRecord` is enough for a caller to reach every one of those
+functions without this module ever exposing the raw dataset object -
+matching its own "no other module may read dataset state any other way"
+rule instead of quietly working around it for convenience.
+
+**`current_image()` raises two different errors on purpose**: `RuntimeError`
+if no dataset is loaded at all (a caller asking before any load happened
+is a caller bug), `KeyError` - same message shape as `dataset_load_plane`'s
+own miss - if a dataset is loaded but has no record at that exact key. The
+two other query methods (`wavelengths()`/`spectral_cubes()`) return an
+empty tuple rather than raising when nothing is loaded, since unlike
+`current_image` there's no specific key being asked for that could be
+"missing."
+
+**`clear_dataset()` built deliberately minimal, not a full port of the old
+app's method of the same name**: `gui/dataset_controller.py`'s
+`clear_dataset` resets a dozen *other* pieces of window state in the same
+method (record maps, mask state, sensorgram caches, image caches, UI
+widgets) - exactly the "one method touches everything" entanglement
+pattern this whole rewrite exists to undo (see the feature inventory).
+This module's version clears only its own `_dataset` reference and emits
+`dataset_cleared`; every other module that holds dataset-derived state is
+expected to subscribe and reset itself. No subscriber exists yet (no
+panel layer), so this contract is unverified end-to-end - flagged for
+whoever wires the first subscriber, not assumed correct just because it
+matches the intended design on paper.
+
+**No no-op check on `load_dataset()`** (unlike `clear_dataset()`, which
+skips emitting when already empty, matching this codebase's usual
+convention): a reload is a deliberate user action even when the freshly
+re-scanned dataset happens to be structurally identical to what was
+already loaded, so it always replaces and always emits.
+
+**Verified with real calls** (scripted): every query method's before-load
+empty/`None`/`RuntimeError` behavior; `clear_dataset()` on an
+already-empty module emits nothing (signal-spy checked); a real load with
+three records across two cubes/two wavelengths resolves `wavelengths()`/
+`spectral_cubes()`/`current_image()` correctly, including the `KeyError`
+path for a wavelength that isn't in the dataset; `clear_dataset()` after a
+real load does emit and does reset every query method back to its
+before-load state. Confirmed `pyflakes` clean and the rewrite-preview
+window still builds.
+
+**Not done / still open, as of this entry**:
+- `analysis/tasks.py`, `storage/session.py` — not yet started.
+- `MaskModule`'s worker/cache dispatch for the two slow candidate tools,
+  and its `QFileDialog` file-picker wiring - deferred to the panel layer.
+- ROI mask-drawing commands/UI - not started.
+- §6a fractional pixel weighting and the background estimate/apply split -
+  both pre-existing, already-documented deferrals, unchanged by this entry.
+- Every module's own command/query surface named in the sketch is now
+  built (Dataset, ROI, Chromatic, Geometry, Background, Mask, Selection).
+  What remains across the board is the panel layer and the two
+  not-yet-started subsystems above - not a missing module-layer piece.
