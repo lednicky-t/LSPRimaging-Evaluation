@@ -1,9 +1,10 @@
 """``ChromaticModule`` (sketch §7 "Chromatic", §10).
 
-Owns landmarks + fitted model. Exposes ``affine_for()``/``warp_mask()`` as
-its **only** public surface - ROI/Mask code must never reach into this
-module's internals (AGENTS.md, "Module boundaries"; sketch §7). Emits
-``chromatic_model_changed`` (computational).
+Owns landmarks + fitted model. Exposes ``affine_for()``/``warp_mask()``/
+``affine_between()``/``warp_mask_between()`` as its **only** public surface
+- ROI/Mask code must never reach into this module's internals (AGENTS.md,
+"Module boundaries"; sketch §7). Emits ``chromatic_model_changed``
+(computational).
 
 The math this module will eventually call lives in three sibling files,
 split out of a single former ``fitting.py`` (2026-09-21, maintainer's
@@ -17,6 +18,17 @@ interpolate the rest), still lives inline in the old app's
 ``gui/analysis_tasks.py`` (``_estimate_chromatic_models_task``) and hasn't
 been extracted yet - that's `refit()`'s job once it's actually built, not
 done speculatively here.
+
+**``affine_between()``/``warp_mask_between()`` added 2026-09-21**, from a
+mask/ROI design conversation about time-varying ignore masks (see the build
+log's matching entry): a mask can now be authored at any frame, not only
+the reference wavelength, so warping needs to work frame-to-frame in
+general, not just reference->X. No new math - both are built entirely from
+``affine_for()`` (already reference->X) plus ``affine.py``'s existing
+``invert_affine_matrix``/``compose_affine_matrices``, the same "pivot
+through the reference" composition the old app's wavelength-interpolation
+code already uses to re-express a transform relative to a different anchor
+wavelength.
 """
 
 from __future__ import annotations
@@ -63,6 +75,30 @@ class ChromaticModule(QObject):
 
     def warp_mask(self, mask: np.ndarray, image_key: tuple[int, float]) -> np.ndarray:
         return warp.warp_boolean_mask_affine(mask, self.affine_for(image_key))
+
+    def affine_between(self, from_key: tuple[int, float], to_key: tuple[int, float]) -> np.ndarray:
+        """The matrix mapping something authored in `from_key`'s geometry
+        into `to_key`'s geometry - the general case `affine_for()` is a
+        special case of (`affine_for(K)` == `affine_between(reference_key,
+        K)`). Undoes `from_key`'s mapping back to reference space, then
+        applies `to_key`'s mapping forward - the same pivot-through-the-
+        reference composition the old app's wavelength-interpolation code
+        already uses to re-express a transform relative to a different
+        anchor wavelength (`compose_affine_matrices(anchor_to_target,
+        reference_to_anchor)`, see `refit()`'s docstring)."""
+        if from_key == to_key:
+            # Avoid M @ invert(M) float noise for a very common case -
+            # warping something to the exact frame it was authored at.
+            return affine.identity_affine_matrix()
+        return affine.compose_affine_matrices(
+            self.affine_for(to_key),
+            affine.invert_affine_matrix(self.affine_for(from_key)),
+        )
+
+    def warp_mask_between(self, mask: np.ndarray, from_key: tuple[int, float], to_key: tuple[int, float]) -> np.ndarray:
+        """Like `warp_mask()`, but for a mask authored at an arbitrary
+        `from_key` rather than always the reference frame."""
+        return warp.warp_boolean_mask_affine(mask, self.affine_between(from_key, to_key))
 
     # -- landmark-editing commands ------------------------------------------
 

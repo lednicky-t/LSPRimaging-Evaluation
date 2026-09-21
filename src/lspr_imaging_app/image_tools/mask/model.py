@@ -22,12 +22,24 @@ class MaskComputationalChange:
     """Mask's own computational-change payload (change_events.py's
     two-type pattern, §3) - whole-image scope like
     `GeometryComputationalChange`/`BackgroundComputationalChange`, no
-    `roi_ids` field. Only the committed raster `file_mask` is computational
-    - it's what `ignored_pixel_mask`/`flatten_background` actually read.
-    Tool-tuning settings and the histogram-highlight selection are
-    `MaskCosmeticChange` instead (see that type's docstring)."""
+    `roi_ids` field. Only a committed mask change is computational - it's
+    what `ignored_pixel_mask`/`flatten_background` actually read. Tool-
+    tuning settings and the histogram-highlight selection are
+    `MaskCosmeticChange` instead (see that type's docstring).
 
-    reason: str  # "file_mask"
+    `frame`/`scope` added 2026-09-21 for the timeline-based mask storage
+    (see `MaskChange`'s docstring and the rewrite build log's matching
+    entry) - without them a subscriber has no way to know *which* frame(s)
+    a change affects: a `"persistent"` change at cube 3 means "cube 3
+    onward may be stale", an `"individual"` one means "just this one
+    frame". No real subscriber exists yet (`analysis/tasks.py` isn't
+    built), but this is free information available at emit time, the same
+    reasoning that justified `RoiToolbox.roi_ids_renumbered` before
+    anything subscribed to it."""
+
+    reason: str  # "mask_change"
+    frame: tuple[int, float]
+    scope: str  # "individual" | "persistent"
 
 
 @dataclass(frozen=True)
@@ -37,12 +49,38 @@ class MaskCosmeticChange:
     highlight drag selection don't themselves invalidate any stored result
     - unlike Geometry's crop/rotate/flip (which apply continuously, every
     render), a Mask tool's settings only affect anything once an explicit
-    "apply" action (not built this pass - see module.py's docstring)
-    merges a computed candidate into `file_mask`. Until then, changing a
-    threshold slider is exactly like dragging Geometry's measurement ruler
-    - a preview input, not a result-affecting one."""
+    "apply" action merges a computed candidate into a mask change. Until
+    then, changing a threshold slider is exactly like dragging Geometry's
+    measurement ruler - a preview input, not a result-affecting one."""
 
     reason: str  # "tool_settings" | "histogram_highlight"
+
+
+@dataclass(slots=True)
+class MaskChange:
+    """One committed ignore-mask edit, timeline-tagged (2026-09-21 mask/ROI
+    design conversation - see the rewrite build log's matching entry for
+    the full reasoning `MaskModule` implements this against).
+
+    `frame` is the `(cube_index, wavelength_nm)` this mask was *authored*
+    at - not normalized back to the reference frame. Scientifically, what
+    matters is where the edit happened; chromatic correction (`ChromaticModule.
+    warp_mask_between`) can always re-express it in any other frame's
+    geometry on demand, so there's no need to force every edit through the
+    reference frame just to store it.
+
+    `scope` is `"individual"` (applies to this exact `frame` only) or
+    `"persistent"` (applies to `frame`'s whole cube, and every cube after,
+    until a later persistent change supersedes it - cube granularity only,
+    no per-wavelength splitting of persistence). Persistent changes are
+    stored as full replacements, not diffs, so each one can be verified
+    independently and a lost/corrupted change can't silently corrupt every
+    mask downstream of it.
+    """
+
+    frame: tuple[int, float]
+    scope: str
+    mask: np.ndarray
 
 
 @dataclass(slots=True)

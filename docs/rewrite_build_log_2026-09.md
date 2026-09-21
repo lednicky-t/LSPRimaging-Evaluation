@@ -1211,3 +1211,120 @@ builds.
 - ROI mask-geometry chromatic warp and ROI mask-drawing commands/UI -
   neither started.
 - The panel layer isn't built beyond the scaffold stubs.
+
+## 2026-09-21: Time-varying ignore mask - `ChromaticModule` frame-to-frame warp + `MaskModule` timeline storage
+
+Followed a multi-turn design conversation with the maintainer (see this
+file's earlier 2026-09-21 mask/ROI-sharing entry for where it started) to
+its conclusion via a written, approved plan
+(`C:\Users\Admin\.claude\plans\recursive-coalescing-kurzweil.md`) before
+touching code - this was flagged mid-conversation as a data-format-
+adjacent decision needing explicit sign-off, not something to build
+incrementally from chat alone, per `CLAUDE.md`'s hard-rule list.
+
+**The agreed model**: the ignore mask can now vary by cube (cubes are
+sequential time points), not just by wavelength within one fixed mask.
+Every edit is tagged with the exact `(cube_index, wavelength_nm)` frame it
+was authored at (never normalized back to the reference frame - "it is not
+important that everything is coming from one wavelength, it's important
+where the change happened") and a scope: `"individual"` (applies to that
+one frame only) or `"persistent"` (applies to that whole cube and every
+cube after, until superseded - cube granularity only). Persistent changes
+are stored as full replacements, not diffs, the maintainer's explicit call
+for independent verifiability and to avoid a diff-chain where one lost
+link corrupts everything downstream.
+
+**`ChromaticModule.affine_between()`/`warp_mask_between()`** (`image_tools/
+chromatic/module.py`) generalize `affine_for()`/`warp_mask()` from
+"reference -> any wavelength" to "any frame -> any frame" - needed because
+a mask can now be authored at an arbitrary wavelength, not only the
+reference. No new math: pivots through the reference using `affine.py`'s
+existing `invert_affine_matrix`/`compose_affine_matrices`, the identical
+composition the old app's wavelength-interpolation code already uses to
+re-anchor a landmark-fitted transform onto a different wavelength. `affine_
+between(K, K)` short-circuits to exact identity rather than relying on
+`M @ invert(M)` to land there by luck. `affine_for`/`warp_mask` are kept
+unchanged as the simpler call for the common reference-authored case.
+
+**`MaskModule`'s storage redesign** (`image_tools/mask/model.py`+
+`module.py`): the single `self._file_mask: np.ndarray | None` is replaced
+by `MaskChange` records (`frame`, `scope`, `mask`) in two dicts -
+`_individual_changes` keyed by exact frame, `_persistent_changes` keyed by
+starting cube index. `resolve_mask_source(frame)` is the query primitive:
+an exact individual match wins outright; otherwise the latest persistent
+change at or before `frame`'s cube applies; `None` if nothing applies yet.
+It deliberately returns the mask **as authored**, not warped into the
+queried frame's geometry - this module holds no `ChromaticModule`
+reference (AGENTS.md boundary rule) and leaves the warp to the caller,
+the identical one-directional pattern `roi/rasterize.py` already uses for
+`affine_matrix`.
+
+`set_file_mask`/`raw_mask` are replaced by `set_mask_change`/
+`resolve_mask_source`. `apply_candidate`/`apply_morphology`/`paint_brush`
+now take an explicit `base_mask` parameter instead of reading an implicit
+single mask - there's no longer one canonical mask to read, and this
+module can't resolve the CC-correct starting canvas for a target frame
+without the warp step it doesn't own. This also fixes what would
+otherwise have been a real bug: editing a *new* cube needs to start from
+whatever's already in effect there (inherited from the last persistent
+change), not a blank canvas - only the caller (who *can* call
+`ChromaticModule`) can resolve that correctly. `MaskComputationalChange`/
+`MaskCosmeticChange` gained `frame`/`scope` fields so a future subscriber
+knows what's affected (a persistent change means "cube N onward may be
+stale", individual means "just this frame") - free information at emit
+time, same reasoning as `RoiToolbox.roi_ids_renumbered`.
+
+The old app's `apply_mask_brush` per-wavelength-diff mechanism (flagged as
+not-built in the previous entry, pending a cross-module design decision)
+is superseded rather than separately built: its "just this one wavelength"
+case is now exactly `scope="individual"`, no separate diff-dict mechanism
+needed.
+
+**Why no explicit opt-in toggle was built**: falls out of the design for
+free. If only one persistent change ever exists (at the dataset's first
+cube), every cube resolves to it identically - same behavior and cost as
+today's single mask, no branch anywhere for "is this feature on." Whether
+a panel *offers* per-frame editing controls is a UI decision, not
+something this module needs to gate.
+
+**Verified with real calls** (scripted, no pytest harness yet), covering
+every scenario in the approved plan: `affine_between`/`warp_mask_between`
+cross-checked against manually composing two synthetic per-wavelength
+similarity transforms by hand, a round-trip (A -> B -> A) returning the
+original points to `1e-8`, and `affine_between(K, K)` exact identity; the
+full timeline scenario - a baseline persistent change at cube 0, a new
+persistent change introduced at cube 3 authored at a *non-reference*
+wavelength (540nm, not the dataset's 500nm reference), an individual
+override at one exact frame inside cube 4 - confirmed cubes 0-2 resolve to
+the baseline, cubes 3+ resolve to the cube-3 change, cube 4's individual
+frame resolves to its own override while cube 4's *other* wavelengths and
+cube 5 are unaffected, and removing the cube-3 persistent change falls
+back to the baseline for cubes 3+ with zero effect on the individual
+override; `apply_candidate`/`apply_morphology`/`paint_brush` each
+correctly writing a new change reflected immediately by `resolve_mask_
+source`; the shape-mismatch `ValueError` guard; zero undo-stack growth
+throughout. Confirmed `pyflakes` clean across `src/lspr_imaging_app` and
+that the rewrite-preview window still builds.
+
+**Not done / still open, as of this entry** (per the plan's explicit
+"deferred" list):
+- `RoiToolbox.display_position()` — stub; needs the Chromatic-affine
+  decision noted in `toolbox.py`'s module docstring.
+- `analysis/tasks.py`, `storage/session.py` — not yet started; `MaskChange`
+  HDF5 persistence has no schema yet.
+- `ChromaticModule` owning `ChromaticSettings`/`add_landmark`/`refit` -
+  separate, already-tracked open item (and its `affine_for` docstring's
+  stale "toggle lives in GeometryModule" line is now flagged twice, worth
+  fixing whenever that item gets picked up).
+- UI: per-frame mask editing controls, "which frames have edits"
+  indicators, dataset slider markers - maintainer's own words, "that's
+  UI," explicitly out of scope.
+- Time-varying treatment for chromatic transforms or background removal -
+  raised as later, lower-priority extensions of the same idea, not this
+  pass.
+- `MaskModule`'s remaining async/file-I/O-shaped pieces (worker/cache
+  machinery for relative/local-contrast, mask file load/save).
+- ROI mask-geometry chromatic warp and ROI mask-drawing commands/UI -
+  neither started (the warp side is now trivial given `warp_mask_between`
+  - `roi/rasterize.py`'s mask-geometry branch just needs to call it).
+- The panel layer isn't built beyond the scaffold stubs.
