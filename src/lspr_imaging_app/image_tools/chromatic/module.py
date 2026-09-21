@@ -4,7 +4,7 @@ Owns landmarks + fitted model. Exposes ``affine_for()``/``warp_mask()``/
 ``affine_between()``/``warp_mask_between()`` as its **only** public surface
 - ROI/Mask code must never reach into this module's internals (AGENTS.md,
 "Module boundaries"; sketch §7). Emits ``chromatic_model_changed``
-(computational).
+(:class:`~.model.ChromaticModelChange`).
 
 The math this module will eventually call lives in three sibling files,
 split out of a single former ``fitting.py`` (2026-09-21, maintainer's
@@ -67,6 +67,29 @@ module was explicitly built matching the *ungated* one. Whether
 `affine_for()`/`warp_mask()` need a gated variant too is a real open
 question for whoever wires up a caller that needs "no correction, ever,
 while the toggle is off" - not decided here.
+
+**Landmark commands built 2026-09-21** - `add_landmark()`/
+`remove_landmark()`/`clear_landmarks()` replace the `add_landmark` scaffold
+stub, ported from `gui/chromatic_controller.py`'s `upsert_current_landmark`/
+`clear_landmark`/`clear_landmarks`. Landmarks are keyed by
+`(landmark_id, spectral_cube_index, wavelength_nm)` (a dict, not the old
+app's list+linear-scan - the same dict-over-list upgrade this session's
+other modules already made, e.g. `RoiToolbox`): placing the same
+`landmark_id` again at the same `(cube, wavelength)` moves it, never
+duplicates, exactly matching `upsert_current_landmark`'s behavior. Every
+one of the three commands clears every fitted model and disables
+`chromatic_correction_enabled` - confirmed by reading the old app's
+`finalize_landmark_edit`, called unconditionally from every landmark-edit
+path there: a landmark's position changing invalidates the *whole* fit it
+fed into, not just one wavelength's, since `refit()`'s wavelength-
+interpolation step composes every sampled wavelength's fit together. All
+three undo-tracked (`"Chromatic landmarks"`, matching the old app's own
+label for all of them).
+
+`refit()` itself is still a stub - the wavelength-interpolation extraction
+its own docstring describes is a distinctly bigger, separate piece of
+work, not bundled into this pass just because landmark editing is now
+real.
 """
 
 from __future__ import annotations
@@ -79,7 +102,13 @@ from PyQt6.QtCore import QObject, pyqtSignal
 from ...diagnostics import instrumented
 from ...undo import FunctionCommand, undo_manager
 from . import affine, warp
-from .model import ChromaticLandmarkObservation, ChromaticSettings, ChromaticTransformModel, GridBoundsDefinition
+from .model import (
+    ChromaticLandmarkObservation,
+    ChromaticModelChange,
+    ChromaticSettings,
+    ChromaticTransformModel,
+    GridBoundsDefinition,
+)
 
 
 class ChromaticModule(QObject):
@@ -89,15 +118,29 @@ class ChromaticModule(QObject):
     (``gui/chromatic_controller.py``), which is genuinely one model per
     image, not one global model."""
 
-    chromatic_model_changed = pyqtSignal()  # computational - TODO: payload shape
+    chromatic_model_changed = pyqtSignal(ChromaticModelChange)
 
     def __init__(self, parent: QObject | None = None) -> None:
         super().__init__(parent)
         self._settings = ChromaticSettings()
         self._models: dict[tuple[int, float], ChromaticTransformModel] = {}
-        self._landmarks: list[ChromaticLandmarkObservation] = []
+        # Keyed by (landmark_id, spectral_cube_index, wavelength_nm) - see
+        # add_landmark()'s docstring for why this is a dict, not the old
+        # app's list+linear-scan.
+        self._landmarks: dict[tuple[int, int, float], ChromaticLandmarkObservation] = {}
 
     # -- query interface ------------------------------------------------
+
+    def landmarks(self) -> tuple[ChromaticLandmarkObservation, ...]:
+        return tuple(self._landmarks.values())
+
+    def landmarks_for_image(self, image_key: tuple[int, float]) -> tuple[ChromaticLandmarkObservation, ...]:
+        cube_index, wavelength_nm = int(image_key[0]), float(image_key[1])
+        return tuple(
+            mark
+            for mark in self._landmarks.values()
+            if mark.spectral_cube_index == cube_index and mark.wavelength_nm == wavelength_nm
+        )
 
     def settings(self) -> ChromaticSettings:
         """A defensive copy - the caller's own; mutating it has no effect
@@ -196,10 +239,113 @@ class ChromaticModule(QObject):
 
     # -- landmark-editing commands ------------------------------------------
 
+    def _model_snapshot(self) -> tuple[dict[tuple[int, float], ChromaticTransformModel], bool]:
+        """A read-only snapshot of `self._models`/`chromatic_correction_
+        enabled` - never mutates. Every landmark-editing command below
+        takes this snapshot *before* checking for a no-op, then only
+        mutates from inside its own `apply()`/`revert()` closures (the
+        same convention every other command in this codebase follows -
+        see `RoiToolbox.delete_rois()`)."""
+        return dict(self._models), self._settings.chromatic_correction_enabled
+
+    def _clear_models(self) -> None:
+        self._models.clear()
+        self._settings.chromatic_correction_enabled = False
+
+    def _restore_models(self, old_models: dict[tuple[int, float], ChromaticTransformModel], old_correction_enabled: bool) -> None:
+        self._models = dict(old_models)
+        self._settings.chromatic_correction_enabled = old_correction_enabled
+
     @instrumented("ChromaticModule.add_landmark")
     def add_landmark(self, observation: ChromaticLandmarkObservation) -> None:
-        """Not yet implemented - scaffolding only."""
-        raise NotImplementedError
+        """Add or move one landmark - upserts by `(landmark_id,
+        spectral_cube_index, wavelength_nm)`, matching the old app's
+        `upsert_current_landmark` exactly: placing the same `landmark_id`
+        again at the same `(cube, wavelength)` moves it, never duplicates.
+
+        Clears every fitted model and disables `chromatic_correction_
+        enabled` - any existing fit was made from the landmark set this
+        call just changed, so it's stale the instant this runs (matches
+        the old app's `finalize_landmark_edit`, called unconditionally
+        from every landmark-edit path). A no-op (no undo entry) if an
+        identical observation already exists at this exact key. Undo-
+        tracked (old app: `"Chromatic landmarks"`)."""
+        key = (int(observation.landmark_id), int(observation.spectral_cube_index), float(observation.wavelength_nm))
+        new_observation = replace(observation, landmark_id=key[0], spectral_cube_index=key[1], wavelength_nm=key[2])
+        old_observation = self._landmarks.get(key)
+        if (
+            old_observation is not None
+            and old_observation.x_px == new_observation.x_px
+            and old_observation.y_px == new_observation.y_px
+        ):
+            return
+        old_models, old_correction_enabled = self._model_snapshot()
+
+        def apply() -> None:
+            self._landmarks[key] = new_observation
+            self._clear_models()
+            self.chromatic_model_changed.emit(ChromaticModelChange(reason="landmarks_changed"))
+
+        def revert() -> None:
+            if old_observation is None:
+                self._landmarks.pop(key, None)
+            else:
+                self._landmarks[key] = old_observation
+            self._restore_models(old_models, old_correction_enabled)
+            self.chromatic_model_changed.emit(ChromaticModelChange(reason="landmarks_changed"))
+
+        apply()
+        undo_manager.push(FunctionCommand("Chromatic landmarks", undo_fn=revert, redo_fn=apply))
+
+    @instrumented("ChromaticModule.remove_landmark")
+    def remove_landmark(self, landmark_id: int, image_key: tuple[int, float]) -> None:
+        """Remove one landmark from one image only - old app's
+        `clear_landmark` ("Reset a single reference point on the current
+        image only, unlike clear_landmarks() which wipes every point on
+        every image"). Same model-invalidation and undo-tracking as
+        `add_landmark`. A no-op if no landmark exists at this exact
+        `(landmark_id, image_key)`."""
+        key = (int(landmark_id), int(image_key[0]), float(image_key[1]))
+        if key not in self._landmarks:
+            return
+        old_observation = self._landmarks[key]
+        old_models, old_correction_enabled = self._model_snapshot()
+
+        def apply() -> None:
+            self._landmarks.pop(key, None)
+            self._clear_models()
+            self.chromatic_model_changed.emit(ChromaticModelChange(reason="landmarks_changed"))
+
+        def revert() -> None:
+            self._landmarks[key] = old_observation
+            self._restore_models(old_models, old_correction_enabled)
+            self.chromatic_model_changed.emit(ChromaticModelChange(reason="landmarks_changed"))
+
+        apply()
+        undo_manager.push(FunctionCommand("Chromatic landmarks", undo_fn=revert, redo_fn=apply))
+
+    @instrumented("ChromaticModule.clear_landmarks")
+    def clear_landmarks(self) -> None:
+        """Wipe every landmark on every image - old app's
+        `clear_landmarks`. Same model-invalidation and undo-tracking as
+        `add_landmark`. A no-op if there are no landmarks to clear."""
+        if not self._landmarks:
+            return
+        old_landmarks = dict(self._landmarks)
+        old_models, old_correction_enabled = self._model_snapshot()
+
+        def apply() -> None:
+            self._landmarks.clear()
+            self._clear_models()
+            self.chromatic_model_changed.emit(ChromaticModelChange(reason="landmarks_changed"))
+
+        def revert() -> None:
+            self._landmarks = dict(old_landmarks)
+            self._restore_models(old_models, old_correction_enabled)
+            self.chromatic_model_changed.emit(ChromaticModelChange(reason="landmarks_changed"))
+
+        apply()
+        undo_manager.push(FunctionCommand("Chromatic landmarks", undo_fn=revert, redo_fn=apply))
 
     @instrumented("ChromaticModule.refit")
     def refit(self) -> None:

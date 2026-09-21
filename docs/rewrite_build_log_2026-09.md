@@ -1494,3 +1494,62 @@ verification script from this session to confirm no regression. Confirmed
   geometry reach-box warp - scoped, not built.
 - `MaskModule`'s remaining async/file-I/O-shaped pieces and UI layer.
 - The panel layer isn't built beyond the scaffold stubs.
+
+## 2026-09-21: `ChromaticModule.add_landmark()`/`remove_landmark()`/`clear_landmarks()` built
+
+Turned out to be more tractable than `refit()` on its own - split out and
+built separately rather than treating "the landmark workflow" as one
+inseparable chunk. Ported from `gui/chromatic_controller.py`'s
+`upsert_current_landmark`/`clear_landmark`/`clear_landmarks`.
+
+**Landmarks are now a dict, not the old app's list** - keyed by
+`(landmark_id, spectral_cube_index, wavelength_nm)`, matching the exact
+uniqueness the old app's own linear-scan upsert already enforced by hand.
+`add_landmark()` upserts by that key: placing the same `landmark_id` again
+at the same `(cube, wavelength)` moves it in place, never duplicates -
+verified this distinction explicitly (a same-key resubmission updates,
+a different `landmark_id` *or* different wavelength creates a new entry).
+
+**Every one of the three commands invalidates every fitted model and
+disables `chromatic_correction_enabled`** - confirmed by reading the old
+app's `finalize_landmark_edit`, called unconditionally from every
+landmark-edit path there: a landmark's position changing invalidates the
+*whole* fit it fed into (every wavelength's model derives from the same
+landmark set via `refit()`'s wavelength-interpolation step), not just one
+wavelength's. A small real bug caught and fixed before verification, not
+after: an early draft of `add_landmark()` mutated `self._models`/
+`chromatic_correction_enabled` directly *before* the no-op check, outside
+any `apply()`/`revert()` closure - breaking the "only mutate inside the
+closures, so undo/redo actually works" convention every other command in
+this codebase follows. Replaced with a read-only `_model_snapshot()`
+helper shared by all three commands, fixed before it was ever run.
+
+**New typed payload**: `ChromaticModelChange` (`reason: str`) - one type,
+not a cosmetic/computational pair like `Roi`/`Geometry`/`Mask`, since every
+landmark edit is whole-app-scope by nature (invalidates every model at
+once, no per-item identifier makes sense). `chromatic_model_changed`'s
+signal is now typed with it, replacing the old bare `pyqtSignal()`
+placeholder.
+
+`refit()` itself is still a stub - genuinely separate, bigger work (the
+wavelength-interpolation extraction its own docstring already describes),
+not bundled in just because landmark editing is now real.
+
+**Verified with real calls** (scripted): upsert-vs-duplicate distinction
+confirmed for same-key/different-landmark_id/different-wavelength cases;
+model + correction-enabled invalidation confirmed on every one of the
+three commands; `remove_landmark`'s no-op-when-absent; a full undo/redo
+round trip through 7 pushed commands returning to the exact same empty
+landmark state on both ends. Re-ran every prior chromatic/ROI verification
+script from this session - no regressions. Confirmed `pyflakes` clean and
+the rewrite-preview window still builds.
+
+**Not done / still open, as of this entry**:
+- `analysis/tasks.py`, `storage/session.py` — not yet started.
+- `ChromaticModule.refit()` (and the wavelength-interpolation extraction,
+  and a `start_workflow`-equivalent bundling the settings fields flagged
+  in the previous entry) - still the one real stub left in Chromatic.
+- `rasterize_sample_for_patch`/`rasterize_reference_for_patch`'s mask-
+  geometry reach-box warp - scoped, not built.
+- `MaskModule`'s remaining async/file-I/O-shaped pieces and UI layer.
+- The panel layer isn't built beyond the scaffold stubs.

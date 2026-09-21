@@ -12,8 +12,17 @@ the old app's ``PreprocessingSettings`` grab-bag (its ``chromatic_*``/
 for the full reasoning. Chromatic's own pure math (``affine.py``/``warp.py``/
 ``landmark_autotrack.py`` - originally one ``fitting.py``, split 2026-09-21)
 never actually reads these - registration parameters are consumed by
-``ChromaticModule``'s not-yet-implemented ``add_landmark``/``refit``, once
-those exist.
+``ChromaticModule``'s ``add_landmark``/not-yet-implemented ``refit``.
+
+``ChromaticModelChange`` added 2026-09-21, alongside ``ChromaticModule``'s
+``add_landmark``/``remove_landmark``/``clear_landmarks`` - every landmark
+edit invalidates every fitted model (matching the old app's
+``finalize_landmark_edit``: a landmark's position changing means the whole
+fit it fed into is stale, not just one wavelength's), so unlike
+``Roi``/``Geometry``/``Mask``'s cosmetic/computational split, Chromatic's
+one signal covers both "the landmark set changed" and (once ``refit()``
+exists) "the fitted models changed" - always whole-app-scope, so no
+per-item identifier field is needed, just ``reason``.
 """
 
 from __future__ import annotations
@@ -43,6 +52,15 @@ class ChromaticLandmarkObservation:
     wavelength_nm: float
     x_px: float
     y_px: float
+
+
+@dataclass(frozen=True)
+class ChromaticModelChange:
+    """Emitted whenever the landmark set or fitted models change - see
+    module docstring for why this is one type, not a cosmetic/
+    computational pair."""
+
+    reason: str  # "landmarks_changed" | "refit"
 
 
 @dataclass(slots=True)
