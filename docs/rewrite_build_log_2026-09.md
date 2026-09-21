@@ -1681,3 +1681,123 @@ rewrite-preview window still builds.
   built on both the full-image and patch-scoped paths; only the
   authoring/drawing side is missing).
 - The panel layer isn't built beyond the scaffold stubs.
+
+## 2026-09-21: `MaskModule`'s pure file I/O built; scoped its async remainder to the panel layer
+
+Picked up "MaskModule's remaining async/file-I/O-shaped pieces" from the
+previous entry - splitting it into two genuinely different kinds of work
+before touching code, rather than assuming the whole thing is this
+module's job.
+
+**Real architecture finding, checked against precedent before building
+anything**: `RoiToolbox.detect_rois()` already established (see its own
+docstring) that a potentially-slow, dataset-touching computation is run
+by the *caller*, off the GUI thread, with the module only ever accepting
+an already-computed result - the module itself never dispatches async
+work. Applying that same precedent to Mask's `request_mask_candidate`
+(background dispatch + an LRU cache for the "relative"/"local_contrast"
+tools, which reload the raw image and run scipy filtering) means it isn't
+MaskModule work at all - it's panel-layer orchestration, deferred until
+panels get built, exactly like ROI detection's own dispatch. Presented
+this split to the maintainer before building either half; chosen scope:
+pure file I/O now, defer the worker/cache question entirely.
+
+**`image_tools/mask/io.py` added** - `read_mask_image`/`write_mask_image`,
+a verbatim port of the read/threshold and write/encode logic from
+`gui/mask_controller.py`'s `read_mask_image`/the PNG-writing half of
+`save_mask_to_file` (`develop`/`main`), minus the `QFileDialog` picker
+that chooses the path - that stays panel work, matching the file's own
+docstring. `>= 128` read threshold and `0/255` write encoding kept
+consistent with each other explicitly (documented in both docstrings,
+since getting them out of sync would silently corrupt a round trip).
+Exported from `image_tools/mask/__init__.py` alongside the existing
+`MaskSettings`/`MaskModule` exports.
+
+**Verified with real calls** (scripted): a round trip (write a small
+boolean array, read it back, confirm exact equality and `dtype=bool`)
+through a not-yet-existing nested directory (confirms the parent-`mkdir`
+behavior); the shape-mismatch `ValueError` path, checked against both the
+old and new dimensions appearing in the message text. Confirmed
+`pyflakes` clean and the rewrite-preview window still builds.
+
+## 2026-09-21: `ChromaticModule.start_workflow()` built - the last flagged Chromatic gap closed
+
+Picked up the "flagged loose end" named in several previous entries: a
+`start_workflow`-equivalent bundling `chromatic_correction_enabled`/
+`chromatic_sample_image_count`/`chromatic_feature_count`/`reference_mode`/
+`reference_wavelength_nm`/`reference_spectral_cube_index`, deferred
+because building a setter for these needed `add_landmark`/`refit` to
+exist first to know the right shape - both are now built (see the two
+entries above this one from earlier today).
+
+Ported from `gui/chromatic_controller.py`'s `start_workflow`: sets
+`chromatic_registration_mode="landmark_radial"`, `reference_mode=
+"manual"`, the four caller-given values, and forces `chromatic_
+correction_enabled=False`, then wipes every landmark and fitted model -
+starting a fresh workflow invalidates whatever was fit under a possibly
+different reference/sample count, the same reasoning `add_landmark`/
+`refit` already apply per-edit, just at workflow-reset granularity.
+
+**Scoped narrower than the old app's method, on purpose, following this
+session's now-consistent worker-dispatch precedent** (see the MaskModule
+entry above): the old `start_workflow` immediately called `auto_detect_
+landmarks()`, dispatching an async background computation. That's panel
+work, not this module's - the panel should call `start_workflow()`, then
+separately run detection off-thread and call `add_landmark()` per result,
+mirroring `RoiToolbox.detect_rois()`'s own caller contract. Also doesn't
+touch current cube/wavelength selection (`SelectionModule`'s job) or any
+UI widget - every value comes in pre-resolved. `sample_image_count` is
+stored as given, not pre-normalized to an odd count here - `sampled_
+wavelengths()`/`refit()` already do that normalization downstream against
+whatever candidate wavelength list is current at call time, so redoing it
+in `start_workflow()` would just be a second, possibly-stale copy of the
+same logic.
+
+**No-op rule matches this module's existing commands**: skipped only when
+every given value already matches current settings *and* there's nothing
+to wipe (no landmarks, no models) - unlike a plain setter, "start a
+workflow" is a real action whenever it actually clears something, even if
+the target settings happen to already match. Undo-tracked as one combined
+entry ("Chromatic workflow", the old app's own label) - settings change
+and landmark/model wipe happen together as a single user-visible action.
+
+**Every Chromatic scaffold stub named in the sketch, plus every gap this
+session's own build-log entries flagged along the way, is now built.**
+What's left in Chromatic is UI/orchestration - a panel to call this
+method and drive `auto_detect_landmarks`/`add_landmark` off-thread - not
+a missing module command.
+
+**Verified with real calls** (scripted): baseline defaults confirmed
+before any call; every one of the four given values lands correctly in
+`settings()`, with `chromatic_registration_mode`/`reference_mode`/
+`chromatic_correction_enabled` forced as documented; a call with
+unchanged settings but an existing landmark still wipes it and pushes a
+new undo entry (confirmed via undo-stack depth); a true no-op (identical
+settings, nothing to clear) pushes no entry; a full undo/redo round trip
+back to and from factory-default settings. Confirmed `pyflakes` clean and
+the rewrite-preview window still builds.
+
+**Not done / still open, as of this entry** (checked with a fresh
+`grep -rn "raise NotImplementedError"` across every built package before
+writing this, rather than assuming from memory - caught the correction
+below):
+- `analysis/tasks.py`, `storage/session.py` — not yet started.
+- `MaskModule`'s worker/cache dispatch for the two slow candidate tools,
+  and its `QFileDialog` file-picker wiring - deferred to the panel layer
+  (see this entry's own finding above); the pure file I/O half is done.
+- ROI mask-drawing commands/UI - not started.
+- **`DatasetModule` itself (`dataset/module.py`) is still the original
+  scaffold stub, all six methods raising `NotImplementedError`** - only
+  its IO/model layer (`dataset/io.py`, `dataset/model.py`) was ever
+  ported (2026-09-20). Every other module's command surface (ROI,
+  Chromatic, Geometry, Background, Mask, Selection) is real; Dataset's
+  own `QObject` state-owner is the one exception, not yet caught by any
+  prior entry's "what's left" list - flagging it now so it isn't
+  silently assumed done.
+- §6a fractional pixel weighting (`roi/reduction.py`'s `weighted_*`
+  functions, `roi/rasterize.py`'s `rasterize_fractional`) and the
+  background estimate/apply split (`image_tools/background/apply.py`) -
+  both pre-existing, already-documented deferrals (AGENTS.md, the
+  2026-09-20 preprocess.py scope-check entry), not new findings, called
+  out here only so this entry's grep-based check is complete.
+- The panel layer isn't built beyond the scaffold stubs.

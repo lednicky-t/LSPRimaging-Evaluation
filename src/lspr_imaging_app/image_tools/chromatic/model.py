@@ -60,7 +60,7 @@ class ChromaticModelChange:
     module docstring for why this is one type, not a cosmetic/
     computational pair."""
 
-    reason: str  # "landmarks_changed" | "refit"
+    reason: str  # "landmarks_changed" | "refit" | "workflow_started"
 
 
 @dataclass(slots=True)

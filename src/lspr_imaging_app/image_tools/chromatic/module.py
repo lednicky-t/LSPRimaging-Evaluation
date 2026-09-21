@@ -92,11 +92,19 @@ Matches the old app's exact cube-broadcasting behavior: one fit per
 unique *wavelength*, applied identically to every cube - chromatic models
 don't vary by cube today (see `refit()`'s own docstring). Does not enable
 `chromatic_correction_enabled`, matching the old app exactly. Every
-Chromatic scaffold stub named in the sketch is now built - a
-`start_workflow`-equivalent bundling the remaining `ChromaticSettings`
-fields (flagged in the settings-ownership entry above) is the one
-Chromatic piece still open, and it's UI-adjacent orchestration, not a
-missing command.
+Chromatic scaffold stub named in the sketch is now built.
+
+**`start_workflow()` built 2026-09-21** - the settings-bundling command
+flagged as open above, closing the last named gap in this module. Takes
+every value pre-resolved (sample count, feature count, reference cube/
+wavelength) rather than reading a dataset or UI widget, and deliberately
+does not call `auto_detect_landmarks()` the way the old app's own
+`start_workflow` immediately did - that's async panel-layer dispatch, not
+this module's job (see the method's own docstring, and `mask/module.py`'s
+docstring for the identical reasoning applied to mask-candidate
+computation). What's left in Chromatic now is genuinely UI/orchestration -
+the panel to call this and then drive `auto_detect_landmarks`/`add_
+landmark` off-thread - not a missing module command.
 """
 
 from __future__ import annotations
@@ -449,3 +457,116 @@ class ChromaticModule(QObject):
 
         apply()
         undo_manager.push(FunctionCommand("Chromatic correction", undo_fn=revert, redo_fn=apply))
+
+    @instrumented("ChromaticModule.start_workflow")
+    def start_workflow(
+        self,
+        *,
+        sample_image_count: int,
+        feature_count: int,
+        reference_spectral_cube_index: int,
+        reference_wavelength_nm: float,
+    ) -> None:
+        """Reset the landmark-based registration workflow for a fresh pass -
+        the settings-bundling command flagged as open in this module's own
+        docstring (`update_settings`/`start_workflow` on `gui/chromatic_
+        controller.py`, `develop`/`main`). Sets `chromatic_registration_
+        mode="landmark_radial"`, `reference_mode="manual"`, the four given
+        values, and forces `chromatic_correction_enabled=False` - matching
+        the old app's `start_workflow` exactly - then wipes every landmark
+        and fitted model, since starting a fresh workflow with a possibly
+        different reference/sample count invalidates whatever was fit
+        before (the same reasoning `add_landmark`/`refit` already apply per-
+        edit, just at workflow-reset granularity here).
+
+        Takes every value already resolved rather than reading a dataset or
+        a UI widget - matches this codebase's "commands take already-
+        resolved values" convention (`RoiToolbox.detect_rois`,
+        `MaskModule.apply_candidate`). A caller (the future Workflow panel)
+        is responsible for: confirming a dataset is loaded, picking the
+        current spectral cube, and choosing `reference_wavelength_nm` -
+        typically the middle entry of `self.sample_wavelengths_for_cube(...)`
+        on that cube's own available wavelengths, the same "sample first,
+        anchor on the middle sample" logic the old app's `start_workflow`
+        used, now already available as this module's own query method
+        rather than needing to be re-derived. `sample_image_count` is
+        stored as given (clamped only to a sane minimum) - the actual
+        odd-count normalization already happens downstream, inside
+        `sampled_wavelengths()`/`refit()` themselves, against whatever
+        candidate wavelength list is current at call time, so duplicating
+        that normalization here would just be a second, possibly stale copy
+        of the same logic.
+
+        Deliberately does **not** call `auto_detect_landmarks()` the way the
+        old app's `start_workflow` immediately did - that dispatches an
+        async background-thread computation, which by this rewrite's
+        established convention (see `mask/module.py`'s docstring for the
+        identical reasoning around mask-candidate computation) is the
+        panel's job, not this module's: the panel runs detection off the
+        GUI thread and then calls `add_landmark()` per result, same as
+        `RoiToolbox.detect_rois()` taking already-detected ROIs. Also does
+        not touch current cube/wavelength selection (`SelectionModule`'s
+        job) or any UI widget state.
+
+        No-op-skipped only when every given value already matches current
+        settings *and* there are no landmarks/models to wipe - unlike a
+        plain setter, "start a workflow" is a real action even when the
+        target settings happen to already match, as long as it actually
+        clears something. Undo-tracked as one combined entry ("Chromatic
+        workflow", the old app's own label for this action) covering the
+        settings change and the landmark/model wipe together, since a user
+        undoing this expects both to come back at once."""
+        new_settings = (
+            "landmark_radial",
+            max(int(sample_image_count), 1),
+            max(int(feature_count), 1),
+            "manual",
+            max(int(reference_spectral_cube_index), 0),
+            float(reference_wavelength_nm),
+            False,
+        )
+        old_settings = (
+            self._settings.chromatic_registration_mode,
+            self._settings.chromatic_sample_image_count,
+            self._settings.chromatic_feature_count,
+            self._settings.reference_mode,
+            self._settings.reference_spectral_cube_index,
+            self._settings.reference_wavelength_nm,
+            self._settings.chromatic_correction_enabled,
+        )
+        if new_settings == old_settings and not self._landmarks and not self._models:
+            return
+
+        old_landmarks = dict(self._landmarks)
+        old_models = dict(self._models)
+
+        def apply() -> None:
+            (
+                self._settings.chromatic_registration_mode,
+                self._settings.chromatic_sample_image_count,
+                self._settings.chromatic_feature_count,
+                self._settings.reference_mode,
+                self._settings.reference_spectral_cube_index,
+                self._settings.reference_wavelength_nm,
+                self._settings.chromatic_correction_enabled,
+            ) = new_settings
+            self._landmarks.clear()
+            self._models.clear()
+            self.chromatic_model_changed.emit(ChromaticModelChange(reason="workflow_started"))
+
+        def revert() -> None:
+            (
+                self._settings.chromatic_registration_mode,
+                self._settings.chromatic_sample_image_count,
+                self._settings.chromatic_feature_count,
+                self._settings.reference_mode,
+                self._settings.reference_spectral_cube_index,
+                self._settings.reference_wavelength_nm,
+                self._settings.chromatic_correction_enabled,
+            ) = old_settings
+            self._landmarks = dict(old_landmarks)
+            self._models = dict(old_models)
+            self.chromatic_model_changed.emit(ChromaticModelChange(reason="workflow_started"))
+
+        apply()
+        undo_manager.push(FunctionCommand("Chromatic workflow", undo_fn=revert, redo_fn=apply))
