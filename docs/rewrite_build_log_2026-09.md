@@ -1429,3 +1429,68 @@ across `src/lspr_imaging_app` and that the rewrite-preview window builds.
   still open.
 - The panel layer isn't built beyond the scaffold stubs. Every ROI-stage
   stub named in the sketch is now built.
+
+## 2026-09-21: `ChromaticModule` settings ownership + `set_grid_bounds`/`clear_grid_bounds`
+
+Closes the "doesn't hold a `ChromaticSettings` instance" gap flagged twice
+in earlier entries. `__init__` now sets `self._settings = ChromaticSettings()`;
+`settings()` returns a defensive copy (deep-ish, like `GeometryModule`'s -
+`chromatic_grid_bounds` is a nested dataclass needing its own copy, same
+reason `GeometrySettings.crop` does).
+
+**Scoped to what's genuinely independent of the landmark workflow, after
+checking rather than assuming**: `set_grid_bounds()`/`clear_grid_bounds()`
+(the reference-point search-area rectangle) are undo-tracked - confirmed
+by reading `gui/chromatic_controller.py`'s `grid_roi_changed`/`reset_
+grid_bounds`, which do push undo points there (`"Chromatic search area"`/
+`"Reset chromatic search area"`), unlike every Mask command. Worth calling
+out: this session's rule has been "check each module's own undo-tracking
+by reading its real code, never assume from another module's precedent" -
+this is the first case this session where that check came back "yes,
+actually undo-tracked," after several modules in a row where it came back
+no.
+
+**Every other `ChromaticSettings` field deliberately not exposed by a
+command yet**: read the old app's actual writers for `chromatic_
+correction_enabled`/`chromatic_sample_image_count`/`chromatic_feature_
+count`/`reference_mode`/`reference_wavelength_nm`/`reference_spectral_
+cube_index` and found they're all set as part of bigger workflow actions
+(`update_settings`, `start_workflow` - which also clears landmarks/models
+and computes which wavelengths to sample) rather than a standalone
+settings-apply form the way Background's fields are. Building a generic
+setter for them now would mean guessing at a shape that `add_landmark`/
+`refit`/a `start_workflow` equivalent should actually define once built -
+left for that pass instead. `chromatic_registration_mode`/`chromatic_
+tile_size_px`/`chromatic_search_radius_px` are vestigial (only the removed
+dense tile-matching mode ever read them) - kept on the dataclass, exposed
+by no command, matching this app's existing "carry dead fields, don't
+invent meaning" discipline.
+
+**`affine_for()`'s docstring corrected**, not just left stale: it claimed
+the CC-enabled toggle "lives in GeometryModule's settings, not built yet"
+- wrong even when written (it's always been `ChromaticSettings.chromatic_
+correction_enabled`). `affine_for()` still doesn't gate on it, but now
+explicitly *because* the old app has two different functions for this
+(`affine_for_image_key`, gated; `affine_for_image_key_any`, not - this
+module was built matching the ungated one) and picking one for the gated
+case needs a real caller to motivate it, not a guess.
+
+**Verified with real calls** (scripted): defensive-copy guarantee on both
+the settings object and its nested grid-bounds; `set_grid_bounds` implying
+`enabled=True`; no-op-skip; a full undo/redo round trip through set ->
+clear -> undo -> undo back to defaults. Re-ran every prior chromatic/ROI
+verification script from this session to confirm no regression. Confirmed
+`pyflakes` clean and the rewrite-preview window still builds.
+
+**Not done / still open, as of this entry**:
+- `analysis/tasks.py`, `storage/session.py` — not yet started.
+- `ChromaticModule.add_landmark()`/`refit()` (and by extension a
+  `start_workflow`-equivalent command, and the rest of `ChromaticSettings`'
+  fields) - still stubs; the math they'll call is fully ready
+  (`affine.py`, the wavelength-interpolation pattern already documented in
+  `refit()`'s own docstring), settings ownership is now ready too, but the
+  workflow logic itself isn't built.
+- `rasterize_sample_for_patch`/`rasterize_reference_for_patch`'s mask-
+  geometry reach-box warp - scoped, not built.
+- `MaskModule`'s remaining async/file-I/O-shaped pieces and UI layer.
+- The panel layer isn't built beyond the scaffold stubs.
