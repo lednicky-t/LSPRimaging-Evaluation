@@ -1328,3 +1328,52 @@ that the rewrite-preview window still builds.
   neither started (the warp side is now trivial given `warp_mask_between`
   - `roi/rasterize.py`'s mask-geometry branch just needs to call it).
 - The panel layer isn't built beyond the scaffold stubs.
+
+## 2026-09-21: ROI mask-geometry chromatic warp - half of it, not all of it
+
+Followed up on the previous entry's "now trivial" claim - turned out to be
+correct for half of `roi/rasterize.py`'s four mask-geometry call sites and
+wrong for the other half, caught before writing the wrong fix rather than
+after.
+
+**`rasterize_sample`/`rasterize_reference` now warp mask geometry**
+(`roi/rasterize.py`) - `expand_mask(roi.sample_mask, image_shape)` then
+`chromatic.warp.warp_boolean_mask_affine(expanded, affine_matrix,
+output_shape=image_shape)`, the exact same `affine_matrix` parameter the
+circle/annulus branch already takes. Genuinely the trivial case: both
+functions already returned a full-image-sized array before this change
+(that's what `expand_mask` always did), so there's no new memory cost.
+Verified with a hand-computed translation affine (a mask block shifted by
+a known offset lands exactly where expected) and confirmed identity-affine
+warp exactly reproduces the old unwarped output.
+
+**`rasterize_sample_for_patch`/`rasterize_reference_for_patch` are
+deliberately left unwarped** - this is the half that wasn't actually
+trivial. These two exist specifically to avoid materializing a full-image-
+sized array per ROI (AGENTS.md's non-negotiable invariant, with a measured
+8-14GB RAM cost at realistic ROI counts if violated). Naively warping the
+full expanded mask and then cropping to the patch would do exactly that -
+defeating the function's whole purpose. A correct fix needs its own small
+reach-box calculation (transform the stored `RoiMask`'s bounding-box
+corners through `affine_matrix` to bound how far the warped result can
+reach in target space, mirroring `annulus_reach_box`'s existing circle-
+radius version of the same idea) before warping only within that box -
+real, scoped design work, not a drop-in call. Flagged in both the module
+docstring and each function's own docstring rather than either skipped
+silently or built in a way that risks quietly reintroducing the memory
+blowup this function exists to prevent. Verified the `_for_patch` mask
+branch is unchanged (still matches plain `expand_mask_to_patch`).
+
+**Not done / still open, as of this entry**:
+- `RoiToolbox.display_position()` — stub; needs the Chromatic-affine
+  decision noted in `toolbox.py`'s module docstring.
+- `analysis/tasks.py`, `storage/session.py` — not yet started.
+- `ChromaticModule` owning `ChromaticSettings`/`add_landmark`/`refit` -
+  still open.
+- `rasterize_sample_for_patch`/`rasterize_reference_for_patch`'s mask-
+  geometry reach-box warp - scoped above, not built.
+- ROI mask-drawing commands/UI - not started (the warp math they'd need is
+  now half-built, per above).
+- `MaskModule`'s remaining async/file-I/O-shaped pieces and UI layer -
+  still open, see prior entries.
+- The panel layer isn't built beyond the scaffold stubs.

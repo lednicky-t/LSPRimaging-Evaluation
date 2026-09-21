@@ -36,22 +36,33 @@ site. That function's own multi-ROI OR-accumulation loop (iterate every
 analysis-layer work for the not-yet-built ``analysis/tasks.py`` to own; this
 module only rasterizes one ROI's one side at a time.
 
-Mask-geometry ROIs are **not** re-warped by the chromatic affine transform
-here, matching the current app's own documented limitation (a mask sits at
-the same absolute pixel location for every wavelength; AGENTS.md's "masks
-are forward-transformed via Chromatic's warp_mask()" invariant describes the
-target state for a *future* chromatic-corrected-mask feature, not something
-this port silently adds - see the inline note on ``rasterize_sample``).
-**Scoped concretely, 2026-09-21 mask/ROI design conversation**: the fix is
-the same shape this module already uses for circle/annulus, not a new
-pattern - warp the expanded mask through
-``image_tools.chromatic.warp.warp_boolean_mask_affine(expanded_mask,
-affine_matrix)`` before returning it, using the same ``affine_matrix``
-parameter the circle/annulus branch already takes. ``image_tools/mask/
-raster_tools.py`` (the sibling module the ignore mask's own brush/threshold/
-morphology tools live in - renamed from ``creation.py`` in that same
-conversation) is the intended shared toolbox for whatever hand-drawn mask
-*authoring* a mask-geometry ROI eventually gets too, once that UI exists.
+**Mask-geometry ROIs are now re-warped by the chromatic affine transform in
+`rasterize_sample`/`rasterize_reference` (2026-09-21, closing the gap
+flagged in the previous entry)** - `expand_mask` places the stored
+`RoiMask` (authored in the reference frame's processed-image space) into a
+full-image-sized array, then `image_tools.chromatic.warp.
+warp_boolean_mask_affine` maps it through the same `affine_matrix`
+parameter the circle/annulus branch already takes, exactly the same
+pattern, no new one. Both non-patch functions already return a full-
+image-sized array regardless (that's what `expand_mask` always did), so
+this adds no new memory cost there.
+
+**`rasterize_sample_for_patch`/`rasterize_reference_for_patch`'s mask
+branch is deliberately NOT warped yet** - turned out not to be the
+"trivial, same pattern" fix it looked like from the outside. Naively
+warping the full expanded mask and *then* cropping to the patch would
+materialize a full-image-sized intermediate array inside the one code path
+that exists specifically to avoid that (AGENTS.md's non-negotiable
+invariant: "cache per-ROI analysis masks at that ROI's own small bounding
+box, never full-image-plane size - full-size caching measured 8-14GB RAM
+at realistic ROI counts"). A correct fix needs its own small reach-box
+calculation - transform the stored `RoiMask`'s bounding-box corners through
+`affine_matrix` to find how far the warped result can reach in target
+space (the same idea `annulus_reach_box` below already uses for a circle's
+radius, just for an arbitrary box's corners instead), then warp only
+within that reach box. Not built - flagged rather than done in a way that
+risks silently reintroducing the exact memory blowup this function exists
+to prevent.
 """
 
 from __future__ import annotations
@@ -59,6 +70,7 @@ from __future__ import annotations
 import numpy as np
 
 from ..image_tools.chromatic.affine import apply_affine_to_points, invert_affine_matrix
+from ..image_tools.chromatic.warp import warp_boolean_mask_affine
 from .model import AreaRoi, RoiMask
 
 # -- arbitrary-mask geometry: crop/expand between stored and working form ---
@@ -329,14 +341,16 @@ def rasterize_sample(
 ) -> np.ndarray:
     """One ROI's sample-region mask, full-image-sized.
 
-    Mask geometry is not re-warped by `affine_matrix` — it sits at the same
-    absolute pixel location for every wavelength, matching the current app's
-    documented behavior (fine for the current opt-in use of "mask" geometry;
-    revisit via Chromatic's `warp_mask()` if chromatic-corrected arbitrary
-    masks are needed).
+    Mask geometry is re-warped by `affine_matrix` like every other geometry
+    type (2026-09-21) - `roi.sample_mask` is authored in the reference
+    frame's processed-image space, expanded to full-image size, then
+    forward-transformed the same way `transformed_disk_mask` transforms a
+    circle's points, so it follows the current wavelength's geometry
+    instead of sitting at a fixed pixel location regardless of wavelength.
     """
     if roi.sample_geometry_type == "mask" and roi.sample_mask is not None:
-        return expand_mask(roi.sample_mask, image_shape)
+        expanded = expand_mask(roi.sample_mask, image_shape)
+        return warp_boolean_mask_affine(expanded, affine_matrix, output_shape=image_shape)
     return transformed_disk_mask(
         image_shape, (float(roi.center_x), float(roi.center_y)), float(roi.sample_radius_px), affine_matrix
     )
@@ -349,7 +363,10 @@ def rasterize_sample_for_patch(
     affine_matrix: np.ndarray,
 ) -> np.ndarray:
     """Same as `rasterize_sample`, scoped to a patch (see
-    `transformed_disk_mask_for_patch`)."""
+    `transformed_disk_mask_for_patch`). Mask geometry here is **not**
+    affine-warped yet, unlike `rasterize_sample` - see this module's own
+    docstring for why that's not a safe "same pattern" fix to make in
+    passing."""
     if roi.sample_geometry_type == "mask" and roi.sample_mask is not None:
         return expand_mask_to_patch(roi.sample_mask, patch_origin_xy, patch_shape)
     return transformed_disk_mask_for_patch(
@@ -367,11 +384,12 @@ def rasterize_reference(
 ) -> np.ndarray:
     """One ROI's reference-region mask, full-image-sized. Empty when
     `reference_geometry_type == "none"` (some ROIs have no reference
-    region). See `rasterize_sample` on why mask geometry isn't affine-warped.
+    region). See `rasterize_sample` on mask geometry's affine-warp.
     """
     image_height, image_width = image_shape[:2]
     if roi.reference_geometry_type == "mask" and roi.reference_mask is not None:
-        return expand_mask(roi.reference_mask, image_shape)
+        expanded = expand_mask(roi.reference_mask, image_shape)
+        return warp_boolean_mask_affine(expanded, affine_matrix, output_shape=image_shape)
     if roi.reference_geometry_type == "none":
         return np.zeros((image_height, image_width), dtype=bool)
     inner_radius, outer_radius = _effective_reference_radii(roi, default_inner_radius_px, default_outer_radius_px)
@@ -391,7 +409,8 @@ def rasterize_reference_for_patch(
     default_inner_radius_px: float = 0.0,
     default_outer_radius_px: float = 0.0,
 ) -> np.ndarray:
-    """Same as `rasterize_reference`, scoped to a patch."""
+    """Same as `rasterize_reference`, scoped to a patch. Mask geometry here
+    is **not** affine-warped yet - see `rasterize_sample_for_patch`."""
     patch_h, patch_w = patch_shape[:2]
     if roi.reference_geometry_type == "mask" and roi.reference_mask is not None:
         return expand_mask_to_patch(roi.reference_mask, patch_origin_xy, patch_shape)
