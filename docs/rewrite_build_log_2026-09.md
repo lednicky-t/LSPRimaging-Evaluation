@@ -1553,3 +1553,78 @@ the rewrite-preview window still builds.
   geometry reach-box warp - scoped, not built.
 - `MaskModule`'s remaining async/file-I/O-shaped pieces and UI layer.
 - The panel layer isn't built beyond the scaffold stubs.
+
+## 2026-09-21: `ChromaticModule.refit()` built - `wavelength_interpolation.py` extracted
+
+Turned out more tractable than expected once `add_landmark`/`remove_
+landmark`/`clear_landmarks` were already done - the remaining piece was
+"extract the math, wire it to this module's own settings," not a new
+design. Ported from the old app's `gui/analysis_tasks.py`
+(`_estimate_chromatic_models_task`'s `landmark_radial` branch, its only
+live branch, plus `_sampled_wavelengths`/`_normalized_odd_count`) into a
+new pure-math file, `chromatic/wavelength_interpolation.py` - no Qt/
+worker/dataset dependency, matching every other pure-math file in this
+package.
+
+**The algorithm, faithfully ported**: fit a transform only at a handful of
+evenly-spaced *sampled* wavelengths that have every expected landmark
+marked (never every wavelength - the whole point of sampling), anchored on
+whichever sampled wavelength is closest to the true reference (the
+reference itself need not be landmark-marked). Every other wavelength's
+transform is obtained by linearly interpolating the fitted matrices'
+coefficients across the sample axis. Every result - sampled or
+interpolated - is then re-expressed relative to the *true* reference by
+composing with a reference<->anchor transform, the same "translate a
+measurement between two arbitrary basepoints" trick already used
+elsewhere in this codebase (`affine.compose_affine_matrices`).
+
+**`ChromaticModule.refit(image_keys, reference_key)`** wires this to the
+module's own state: groups `self._landmarks` by wavelength (reference
+cube only, matching the old app's own filter), reads `chromatic_sample_
+image_count`/`chromatic_feature_count`/`chromatic_landmark_model` from
+`self._settings`, and matches the old app's exact cube-broadcasting
+behavior - one fit per unique *wavelength*, applied identically to every
+cube in `image_keys` at that wavelength (chromatic models don't vary by
+cube today; per the earlier mask/ROI design conversation, that's a later,
+lower-priority extension). Does **not** enable `chromatic_correction_
+enabled` - confirmed by reading the old app's `_on_models_ready`, which
+explicitly turns the toggle off after every (re)fit. Undo-tracked
+(`"Chromatic correction"`, the old app's own label, pushed before its
+worker dispatch there).
+
+**`sample_wavelengths_for_cube()`** added as a companion query method -
+mirrors `refit()`'s own internal sampling exactly, so a future caller
+knows which wavelengths to prompt the user to mark landmarks on *before*
+attempting a fit, rather than discovering it only from a raised
+`ValueError`.
+
+**Verified with real calls** (scripted, no pytest harness yet) - not just
+"doesn't crash", checked against a known ground truth: built a synthetic
+scenario with a deliberately wavelength-varying similarity transform,
+placed landmark points consistent with that transform at every sampled
+wavelength, ran `refit()`, and confirmed (a) the reference wavelength's
+own resolved model is identity to `1e-6`, (b) every sampled wavelength's
+fitted model matches the true relative-to-reference transform to `1e-6`,
+(c) both error paths raise with the old app's exact messages (no
+landmarks at all; an incomplete sample wavelength) and push no undo entry;
+`chromatic_correction_enabled` confirmed to stay `False` after a
+successful refit; a full undo confirmed every model reverts to identity/
+unfitted. Re-ran every prior chromatic/ROI verification script from this
+session - no regressions. Confirmed `pyflakes` clean and the
+rewrite-preview window still builds.
+
+**Every Chromatic scaffold stub named in the original sketch is now
+built.** What's left there is UI-adjacent orchestration (a `start_
+workflow`-equivalent bundling the remaining `ChromaticSettings` fields,
+flagged in the settings-ownership entry), not a missing command.
+
+**Not done / still open, as of this entry**:
+- `analysis/tasks.py`, `storage/session.py` — not yet started.
+- A `start_workflow`-equivalent command bundling `chromatic_correction_
+  enabled`/`chromatic_sample_image_count`/`chromatic_feature_count`/
+  `reference_mode`/`reference_wavelength_nm`/`reference_spectral_cube_
+  index` - scoped in the settings-ownership entry, not built.
+- `rasterize_sample_for_patch`/`rasterize_reference_for_patch`'s mask-
+  geometry reach-box warp - scoped, not built.
+- `MaskModule`'s remaining async/file-I/O-shaped pieces and UI layer.
+- The panel layer isn't built beyond the scaffold stubs.

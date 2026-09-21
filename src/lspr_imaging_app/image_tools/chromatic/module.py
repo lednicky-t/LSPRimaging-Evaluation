@@ -6,18 +6,16 @@ Owns landmarks + fitted model. Exposes ``affine_for()``/``warp_mask()``/
 "Module boundaries"; sketch §7). Emits ``chromatic_model_changed``
 (:class:`~.model.ChromaticModelChange`).
 
-The math this module will eventually call lives in three sibling files,
-split out of a single former ``fitting.py`` (2026-09-21, maintainer's
-request - see the rewrite build log for the full reasoning): ``affine.py``
-(point-based fit/apply, the actually-simple core), ``warp.py`` (apply a
-matrix to pixels instead of points), and ``landmark_autotrack.py`` (the
-automatic landmark detection/tracking feature, kept deliberately
-independent of this module - see that file's own docstring). A fourth
-piece, wavelength interpolation (fit at a few sampled wavelengths,
-interpolate the rest), still lives inline in the old app's
-``gui/analysis_tasks.py`` (``_estimate_chromatic_models_task``) and hasn't
-been extracted yet - that's `refit()`'s job once it's actually built, not
-done speculatively here.
+The math this module calls lives in four sibling files, split out of a
+single former ``fitting.py`` (2026-09-21, maintainer's request - see the
+rewrite build log for the full reasoning): ``affine.py`` (point-based
+fit/apply, the actually-simple core), ``warp.py`` (apply a matrix to
+pixels instead of points), ``landmark_autotrack.py`` (the automatic
+landmark detection/tracking feature, kept deliberately independent of
+this module - see that file's own docstring), and
+``wavelength_interpolation.py`` (fit at a few sampled wavelengths,
+interpolate the rest - extracted from the old app's ``gui/analysis_
+tasks.py`` as part of building `refit()`, not speculatively beforehand).
 
 **``affine_between()``/``warp_mask_between()`` added 2026-09-21**, from a
 mask/ROI design conversation about time-varying ignore masks (see the build
@@ -86,10 +84,19 @@ interpolation step composes every sampled wavelength's fit together. All
 three undo-tracked (`"Chromatic landmarks"`, matching the old app's own
 label for all of them).
 
-`refit()` itself is still a stub - the wavelength-interpolation extraction
-its own docstring describes is a distinctly bigger, separate piece of
-work, not bundled into this pass just because landmark editing is now
-real.
+**`refit()` built 2026-09-21** - `wavelength_interpolation.py` (fit at
+sampled wavelengths, interpolate/re-anchor the rest) plus a
+`sample_wavelengths_for_cube()` query method (so a caller knows which
+wavelengths to prompt for landmark-marking before attempting a fit).
+Matches the old app's exact cube-broadcasting behavior: one fit per
+unique *wavelength*, applied identically to every cube - chromatic models
+don't vary by cube today (see `refit()`'s own docstring). Does not enable
+`chromatic_correction_enabled`, matching the old app exactly. Every
+Chromatic scaffold stub named in the sketch is now built - a
+`start_workflow`-equivalent bundling the remaining `ChromaticSettings`
+fields (flagged in the settings-ownership entry above) is the one
+Chromatic piece still open, and it's UI-adjacent orchestration, not a
+missing command.
 """
 
 from __future__ import annotations
@@ -101,7 +108,7 @@ from PyQt6.QtCore import QObject, pyqtSignal
 
 from ...diagnostics import instrumented
 from ...undo import FunctionCommand, undo_manager
-from . import affine, warp
+from . import affine, warp, wavelength_interpolation
 from .model import (
     ChromaticLandmarkObservation,
     ChromaticModelChange,
@@ -347,23 +354,98 @@ class ChromaticModule(QObject):
         apply()
         undo_manager.push(FunctionCommand("Chromatic landmarks", undo_fn=revert, redo_fn=apply))
 
-    @instrumented("ChromaticModule.refit")
-    def refit(self) -> None:
-        """Refit every (cube, wavelength) model from current landmarks and
-        emit :attr:`chromatic_model_changed`. Not yet implemented -
-        scaffolding only.
+    def sample_wavelengths_for_cube(self, wavelengths_nm: list[float]) -> list[float]:
+        """Which of `wavelengths_nm` (the reference cube's own available
+        wavelengths) should be landmark-marked before calling `refit()` -
+        matches `refit()`'s own internal sampling exactly
+        (`wavelength_interpolation.sampled_wavelengths`), so a caller can
+        prompt for the right set before attempting a fit. 0 nm
+        (broadband/no-filter) is dropped, matching the old app's
+        `candidate_chromatic_wavelengths` - the UI never lets the user mark
+        landmarks on it."""
+        candidates = sorted({float(w) for w in wavelengths_nm if float(w) != 0.0})
+        return wavelength_interpolation.sampled_wavelengths(candidates, self._settings.chromatic_sample_image_count)
 
-        The real logic to port lives in the old app's
-        ``gui/analysis_tasks.py`` (``_estimate_chromatic_models_task``'s
-        ``mode == "landmark_radial"`` branch, its only live branch - see
-        the rewrite build log's chromatic-fitting file-split entry): fit a
-        transform (``affine.fit_similarity_matrix``/``fit_affine_matrix``)
-        only at the few *sampled* wavelengths that have landmarks marked,
-        then interpolate each fitted matrix's coefficients
-        (``affine.compose_affine_matrices`` for re-anchoring onto the true
-        reference wavelength) across every other wavelength - never
-        re-fitting per wavelength, which is the whole point of sampling
-        only a few. That interpolation step isn't extracted into its own
-        file yet; do that as part of building this method, not
-        speculatively beforehand."""
-        raise NotImplementedError
+    @instrumented("ChromaticModule.refit")
+    def refit(self, image_keys: list[tuple[int, float]], reference_key: tuple[int, float]) -> None:
+        """Refit every `(cube, wavelength)` model in `image_keys` from the
+        current landmark set, anchored on `reference_key`. Uses this
+        module's own `chromatic_sample_image_count`/`chromatic_feature_
+        count`/`chromatic_landmark_model` settings - the wavelength-
+        interpolation math itself lives in `wavelength_interpolation.py`
+        (extracted from the old app's `_estimate_chromatic_models_task`'s
+        `landmark_radial` branch as part of building this method, not
+        speculatively beforehand).
+
+        Matches the old app's exact cube-broadcasting behavior: a
+        transform is fit once per unique *wavelength* (from landmarks
+        marked on `reference_key`'s cube only), then applied identically
+        to every cube in `image_keys` at that wavelength - chromatic
+        models don't vary by cube today, only by wavelength (per the
+        mask/ROI design conversation's own conclusion: per-cube variation
+        for chromatic transforms is a later, lower-priority extension, not
+        this pass).
+
+        Does **not** enable `chromatic_correction_enabled` - matches the
+        old app's `_on_models_ready`, which explicitly turns the toggle
+        off after every (re)fit, requiring the user to separately turn
+        correction on. Raises `ValueError` (propagated from
+        `wavelength_interpolation.fit_wavelength_transforms`) if the
+        current landmarks aren't complete enough to fit - the caller's job
+        to catch and display, same convention as `GeometryModule.
+        apply_measurement_calibration`'s guards. Undo-tracked (old app:
+        `"Chromatic correction"`, pushed before its worker dispatch)."""
+        reference_cube, reference_wavelength = int(reference_key[0]), float(reference_key[1])
+        landmarks_by_wavelength: dict[float, dict[int, tuple[float, float]]] = {}
+        for mark in self._landmarks.values():
+            if mark.spectral_cube_index != reference_cube:
+                continue
+            landmarks_by_wavelength.setdefault(mark.wavelength_nm, {})[mark.landmark_id] = (mark.x_px, mark.y_px)
+
+        feature_count = max(int(self._settings.chromatic_feature_count), 1)
+        expected_feature_ids = list(range(1, feature_count + 1))
+        reference_cube_wavelengths = [float(w) for cube_index, w in image_keys if int(cube_index) == reference_cube]
+        sample_wls = self.sample_wavelengths_for_cube(reference_cube_wavelengths)
+        target_wavelengths = sorted({float(wavelength_nm) for _cube_index, wavelength_nm in image_keys})
+        use_similarity = self._settings.chromatic_landmark_model == "similarity"
+
+        fitted = wavelength_interpolation.fit_wavelength_transforms(
+            landmarks_by_wavelength,
+            sample_wls,
+            expected_feature_ids,
+            reference_wavelength,
+            target_wavelengths,
+            use_similarity=use_similarity,
+        )
+        model_kind = "landmark_similarity" if use_similarity else "landmark_affine"
+
+        new_models: dict[tuple[int, float], ChromaticTransformModel] = {}
+        for cube_index, wavelength_nm in image_keys:
+            matrix, rmse, feature_count_for_wavelength = fitted[float(wavelength_nm)]
+            new_models[(int(cube_index), float(wavelength_nm))] = ChromaticTransformModel(
+                spectral_cube_index=int(cube_index),
+                wavelength_nm=float(wavelength_nm),
+                model_kind=model_kind,
+                affine_matrix=[[float(value) for value in row] for row in matrix.tolist()],
+                global_shift_x_px=float(matrix[0, 2]),
+                global_shift_y_px=float(matrix[1, 2]),
+                rmse_px=rmse,
+                mean_score=1.0,
+                min_score=1.0,
+                tile_count=feature_count_for_wavelength,
+                inlier_count=feature_count_for_wavelength,
+            )
+
+        old_models, old_correction_enabled = self._model_snapshot()
+
+        def apply() -> None:
+            self._models = dict(new_models)
+            self._settings.chromatic_correction_enabled = False
+            self.chromatic_model_changed.emit(ChromaticModelChange(reason="refit"))
+
+        def revert() -> None:
+            self._restore_models(old_models, old_correction_enabled)
+            self.chromatic_model_changed.emit(ChromaticModelChange(reason="refit"))
+
+        apply()
+        undo_manager.push(FunctionCommand("Chromatic correction", undo_fn=revert, redo_fn=apply))
