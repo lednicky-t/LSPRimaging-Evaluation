@@ -48,26 +48,26 @@ image-sized array regardless (that's what `expand_mask` always did), so
 this adds no new memory cost there.
 
 **`rasterize_sample_for_patch`/`rasterize_reference_for_patch`'s mask
-branch is deliberately NOT warped yet** - turned out not to be the
+branch is now warped too (2026-09-21)** - turned out not to be the
 "trivial, same pattern" fix it looked like from the outside. Naively
-warping the full expanded mask and *then* cropping to the patch would
-materialize a full-image-sized intermediate array inside the one code path
-that exists specifically to avoid that (AGENTS.md's non-negotiable
+warping the full expanded mask and *then* cropping to the patch would have
+materialized a full-image-sized intermediate array inside the one code
+path that exists specifically to avoid that (AGENTS.md's non-negotiable
 invariant: "cache per-ROI analysis masks at that ROI's own small bounding
 box, never full-image-plane size - full-size caching measured 8-14GB RAM
-at realistic ROI counts"). A correct fix needs its own small reach-box
-calculation - transform the stored `RoiMask`'s bounding-box corners through
-`affine_matrix` to find how far the warped result can reach in target
-space (the same idea `annulus_reach_box` below already uses for a circle's
-radius, just for an arbitrary box's corners instead), then warp only
-within that reach box. Not built - flagged rather than done in a way that
-risks silently reintroducing the exact memory blowup this function exists
-to prevent.
+at realistic ROI counts"). Built instead: `_mask_reach_box` (the
+arbitrary-mask analogue of `annulus_reach_box` below, transforming the
+stored `RoiMask`'s bounding-box corners through `affine_matrix` rather
+than a circle's radius) bounds how far the warped result can reach in
+target space, and `_warp_roi_mask_into_box`/`expand_mask_to_patch_warped`
+warp only within that bound, reading directly from `roi_mask.mask`'s own
+small array - the full source/target canvases are never materialized.
 """
 
 from __future__ import annotations
 
 import numpy as np
+from scipy import ndimage
 
 from ..image_tools.chromatic.affine import apply_affine_to_points, invert_affine_matrix
 from ..image_tools.chromatic.warp import warp_boolean_mask_affine
@@ -110,6 +110,135 @@ def expand_mask_to_patch(
     out = np.zeros((int(patch_shape[0]), int(patch_shape[1])), dtype=bool)
     px0, py0 = int(patch_origin_xy[0]), int(patch_origin_xy[1])
     _blit(out, roi_mask, offset_x=-px0, offset_y=-py0)
+    return out
+
+
+# -- mask geometry: reach-box-limited affine warp (2026-09-21) --------------
+# The mask-geometry counterpart to annulus_reach_box/_annulus_mask_in_box
+# below - built once circle/annulus's own reach-box pattern made clear what
+# shape the fix needed, see module docstring for why "warp the full mask,
+# then crop to the patch" was rejected instead.
+
+
+def _mask_reach_box(roi_mask: RoiMask, affine_matrix: np.ndarray) -> tuple[int, int, int, int]:
+    """The axis-aligned target-space bounding box `roi_mask`'s own bounding
+    box maps to under `affine_matrix` - the arbitrary-mask analogue of
+    `annulus_reach_box`, for a rectangle's corners instead of a circle's
+    radius. A small integer margin is added on every side as a safety
+    margin around the float->int rounding, matching `annulus_reach_box`'s
+    own `+ 3.0` padding in spirit."""
+    x0, y0 = float(roi_mask.x0), float(roi_mask.y0)
+    height, width = roi_mask.mask.shape[:2]
+    corners = np.array(
+        [[x0, y0], [x0 + width, y0], [x0, y0 + height], [x0 + width, y0 + height]],
+        dtype=np.float64,
+    )
+    transformed = apply_affine_to_points(corners, affine_matrix)
+    x_min, y_min = transformed.min(axis=0)
+    x_max, y_max = transformed.max(axis=0)
+    return (
+        int(np.floor(x_min)) - 2,
+        int(np.floor(y_min)) - 2,
+        int(np.ceil(x_max)) + 2,
+        int(np.ceil(y_max)) + 2,
+    )
+
+
+def _warp_roi_mask_into_box(
+    roi_mask: RoiMask,
+    affine_matrix: np.ndarray,
+    box: tuple[int, int, int, int],
+) -> np.ndarray:
+    """Warp `roi_mask` (authored in source/reference space) through
+    `affine_matrix`, returning only `box`'s `(x0, y0, x1, y1)` sub-region of
+    the result - never materializing the full target-space canvas, the
+    reason `rasterize_sample_for_patch`/`rasterize_reference_for_patch`
+    exist in the first place. Nearest-neighbor (`order=0`), matching
+    `chromatic.warp.warp_boolean_mask_affine`'s boolean-safe convention -
+    this reimplements that function's inverse-matrix construction rather
+    than calling it, since it needs to target an arbitrary sub-box instead
+    of always starting output at (0, 0), and to read from `roi_mask.mask`'s
+    own small local array (indexed from `(0, 0)`, offset by
+    `roi_mask.x0`/`roi_mask.y0`) instead of a full-canvas-sized input.
+
+    **Pads `roi_mask.mask` by a few pixels before warping** - found by
+    testing against `expand_mask` + `warp_boolean_mask_affine` on a full
+    canvas (the already-verified ground truth) rather than assumed:
+    `scipy.ndimage.affine_transform`'s `order=0`/`mode="constant"` boundary
+    handling does not treat a computed source coordinate within half a
+    pixel of index 0 (or the last valid index) as in-bounds the way a
+    simple "round to nearest" model would predict - any coordinate that
+    rounds to a valid edge index but isn't itself comfortably inside
+    `[0, size)` gets the constant fill instead, silently dropping real
+    mask content that legitimately sits at `roi_mask.mask`'s own edge
+    (verified directly: `affine_transform` on a tiny array with an offset
+    of `-0.1` already returns the fill value, not index 0). Padding with a
+    margin of false pixels keeps every real sample comfortably away from
+    that boundary, at negligible cost (the padded array is still small -
+    this is the same reach-box-bounded array the whole point of this
+    function is to keep small, just a few pixels larger on each side).
+    """
+    box_x0, box_y0, box_x1, box_y1 = box
+    box_h, box_w = box_y1 - box_y0, box_x1 - box_x0
+    if box_h <= 0 or box_w <= 0:
+        return np.zeros((max(box_h, 0), max(box_w, 0)), dtype=bool)
+    pad = 4
+    padded_mask = np.pad(roi_mask.mask, pad, mode="constant", constant_values=False)
+    inverse_xy = invert_affine_matrix(affine_matrix)
+    ixx, ixy = float(inverse_xy[0, 0]), float(inverse_xy[0, 1])
+    iyx, iyy = float(inverse_xy[1, 0]), float(inverse_xy[1, 1])
+    off_x, off_y = float(inverse_xy[0, 2]), float(inverse_xy[1, 2])
+    matrix_rc = np.array([[iyy, iyx], [ixy, ixx]], dtype=np.float64)
+    # Full-canvas offset (as warp_boolean_mask_affine would compute it),
+    # shifted for this box's own origin (box_y0/box_x0 - we're resolving
+    # target pixel (r + box_y0, c + box_x0) for local pixel (r, c)) and
+    # the padded array's own local origin (index (0, 0) of `padded_mask`
+    # corresponds to source position (roi_mask.y0 - pad, roi_mask.x0 - pad),
+    # not roi_mask.x0/y0 directly, now that padding shifted it).
+    offset_rc = np.array([off_y, off_x], dtype=np.float64)
+    box_origin_rc = np.array([float(box_y0), float(box_x0)], dtype=np.float64)
+    mask_origin_rc = np.array([float(roi_mask.y0 - pad), float(roi_mask.x0 - pad)], dtype=np.float64)
+    local_offset = offset_rc + matrix_rc @ box_origin_rc - mask_origin_rc
+    warped = ndimage.affine_transform(
+        padded_mask.astype(np.float32, copy=False),
+        matrix=matrix_rc,
+        offset=local_offset,
+        output_shape=(box_h, box_w),
+        order=0,
+        mode="constant",
+        cval=0.0,
+        prefilter=False,
+    )
+    return warped >= 0.5
+
+
+def expand_mask_to_patch_warped(
+    roi_mask: RoiMask,
+    patch_origin_xy: tuple[int, int],
+    patch_shape: tuple[int, int],
+    affine_matrix: np.ndarray,
+) -> np.ndarray:
+    """Like `expand_mask_to_patch`, but forward-transformed through
+    `affine_matrix` first (see `rasterize_sample`'s mask-geometry warp) -
+    the patch-scoped counterpart, bounded by `_mask_reach_box` so only the
+    region the warped mask can actually reach is ever touched, never the
+    full patch/image regardless of patch size (AGENTS.md's non-negotiable
+    invariant - see this module's own docstring for why "warp then crop"
+    was rejected instead)."""
+    patch_h, patch_w = patch_shape[:2]
+    px0, py0 = int(patch_origin_xy[0]), int(patch_origin_xy[1])
+    reach_x0, reach_y0, reach_x1, reach_y1 = _mask_reach_box(roi_mask, affine_matrix)
+    local_x0 = max(reach_x0 - px0, 0)
+    local_x1 = min(reach_x1 - px0, patch_w)
+    local_y0 = max(reach_y0 - py0, 0)
+    local_y1 = min(reach_y1 - py0, patch_h)
+    out = np.zeros((patch_h, patch_w), dtype=bool)
+    if local_x0 >= local_x1 or local_y0 >= local_y1:
+        return out
+    warped_local = _warp_roi_mask_into_box(
+        roi_mask, affine_matrix, (px0 + local_x0, py0 + local_y0, px0 + local_x1, py0 + local_y1)
+    )
+    out[local_y0:local_y1, local_x0:local_x1] = warped_local
     return out
 
 
@@ -363,12 +492,12 @@ def rasterize_sample_for_patch(
     affine_matrix: np.ndarray,
 ) -> np.ndarray:
     """Same as `rasterize_sample`, scoped to a patch (see
-    `transformed_disk_mask_for_patch`). Mask geometry here is **not**
-    affine-warped yet, unlike `rasterize_sample` - see this module's own
-    docstring for why that's not a safe "same pattern" fix to make in
-    passing."""
+    `transformed_disk_mask_for_patch`). Mask geometry is now affine-warped
+    here too (2026-09-21), via `expand_mask_to_patch_warped`'s own
+    reach-box bound - the full-canvas-cost trap this function exists to
+    avoid, see this module's own docstring."""
     if roi.sample_geometry_type == "mask" and roi.sample_mask is not None:
-        return expand_mask_to_patch(roi.sample_mask, patch_origin_xy, patch_shape)
+        return expand_mask_to_patch_warped(roi.sample_mask, patch_origin_xy, patch_shape, affine_matrix)
     return transformed_disk_mask_for_patch(
         patch_origin_xy, patch_shape, (float(roi.center_x), float(roi.center_y)), float(roi.sample_radius_px), affine_matrix
     )
@@ -409,11 +538,11 @@ def rasterize_reference_for_patch(
     default_inner_radius_px: float = 0.0,
     default_outer_radius_px: float = 0.0,
 ) -> np.ndarray:
-    """Same as `rasterize_reference`, scoped to a patch. Mask geometry here
-    is **not** affine-warped yet - see `rasterize_sample_for_patch`."""
+    """Same as `rasterize_reference`, scoped to a patch. Mask geometry is
+    affine-warped here too - see `rasterize_sample_for_patch`."""
     patch_h, patch_w = patch_shape[:2]
     if roi.reference_geometry_type == "mask" and roi.reference_mask is not None:
-        return expand_mask_to_patch(roi.reference_mask, patch_origin_xy, patch_shape)
+        return expand_mask_to_patch_warped(roi.reference_mask, patch_origin_xy, patch_shape, affine_matrix)
     if roi.reference_geometry_type == "none":
         return np.zeros((patch_h, patch_w), dtype=bool)
     inner_radius, outer_radius = _effective_reference_radii(roi, default_inner_radius_px, default_outer_radius_px)

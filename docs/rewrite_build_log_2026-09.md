@@ -1628,3 +1628,56 @@ flagged in the settings-ownership entry), not a missing command.
   geometry reach-box warp - scoped, not built.
 - `MaskModule`'s remaining async/file-I/O-shaped pieces and UI layer.
 - The panel layer isn't built beyond the scaffold stubs.
+
+## 2026-09-21: `rasterize_sample_for_patch`/`rasterize_reference_for_patch`'s mask-geometry reach-box warp built - a real scipy boundary bug found and fixed before it shipped
+
+Closes the last piece flagged from the earlier "ROI mask-geometry chromatic
+warp" entry. Built `_mask_reach_box` (the arbitrary-mask analogue of
+`annulus_reach_box`, transforming the stored `RoiMask`'s bounding-box
+corners through `affine_matrix` instead of a circle's radius) and
+`_warp_roi_mask_into_box`/`expand_mask_to_patch_warped`, which warp only
+within that bound, reading directly from `roi_mask.mask`'s own small array
+- the full source/target canvases are never materialized, preserving the
+reason these `_for_patch` functions exist (AGENTS.md's non-negotiable
+invariant).
+
+**A real bug caught by testing against the already-verified ground truth,
+not assumed correct from the math alone**: verification against
+`rasterize_sample`'s full-image path (patch == whole image should give
+identical output) failed for rotated/sheared affines - 20 pixels silently
+missing, always near the mask's own edge. Traced to a genuine
+`scipy.ndimage.affine_transform` behavior that didn't match the "rounds to
+nearest, so anything within 0.5px of the boundary is in-bounds" mental
+model this function's design assumed: verified directly with a minimal
+repro (a 2x2 array, `order=0`, `mode="constant"`) that an offset of just
+`-0.1` already returns the constant-fill value, not index 0 - `order=0`'s
+boundary handling is stricter than symmetric rounding. This only showed up
+because the fix samples directly into `roi_mask.mask`'s own tiny array,
+where real content can legitimately sit right at index `(0, 0)`; the
+already-correct full-canvas path (`expand_mask` + `warp_boolean_mask_
+affine`) never hit this, since the same physical location is always deep
+in a large array's interior there, nowhere near its own edge. Fixed by
+padding `roi_mask.mask` with a small margin (4px) of `False` before
+warping, keeping every real sample comfortably away from the array
+boundary - confirmed this resolves every previously-failing case across
+four different affine matrices (identity, translation, rotation+scale,
+shear-like) and four different patch windows (full-image, a sub-window, a
+corner that misses the mask entirely, and a far corner that should stay
+empty).
+
+**Verified with real calls** (scripted): the fix above; direct pixel-for-
+pixel equality between the patch-scoped result and the already-verified
+full-image result, cropped to the same window, across all sixteen
+(matrix × patch-window) combinations; the reference-side dispatcher
+confirmed to use the identical warp. Confirmed `pyflakes` clean and the
+rewrite-preview window still builds.
+
+**Not done / still open, as of this entry**:
+- `analysis/tasks.py`, `storage/session.py` — not yet started.
+- A `start_workflow`-equivalent command bundling the remaining
+  `ChromaticSettings` fields - scoped, not built.
+- `MaskModule`'s remaining async/file-I/O-shaped pieces and UI layer.
+- ROI mask-drawing commands/UI - not started (the warp math is now fully
+  built on both the full-image and patch-scoped paths; only the
+  authoring/drawing side is missing).
+- The panel layer isn't built beyond the scaffold stubs.
