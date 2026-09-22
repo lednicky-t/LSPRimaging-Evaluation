@@ -26,6 +26,17 @@ those functions without this module ever handing out the raw dataset
 object - matching its own "no other module may read dataset state any
 other way" rule instead of quietly working around it.
 
+**Real correction (2026-09-22): "sufficient" turned out to mean "enough to
+reach the loading functions," not "enough to actually load pixels."**
+Found while wiring `AnalysisEngine` to real data: none of the four query
+methods return actual pixel data, and every `dataset/io.py` loading
+function needs the full `ImageDataset` as a parameter - which this module
+still correctly never hands out. Added a fifth method, `load_plane()`,
+that does the loading *internally* (reusing `current_image()`'s own record
+resolution rather than re-deriving it) and returns pixels only - the "no
+other module reads dataset state any other way" rule is unchanged, this
+is one more narrow read, not a loosening of it.
+
 **`clear_dataset()` is deliberately minimal** - it clears only this
 module's own `_dataset` reference and emits `dataset_cleared`, unlike the
 old app's `DatasetController.clear_dataset` (`gui/dataset_controller.py`),
@@ -43,11 +54,12 @@ subscriber, not assumed correct.
 
 from __future__ import annotations
 
+import numpy as np
 from lspr_core import ImagingAcquisitionMetadata
 from PyQt6.QtCore import QObject, pyqtSignal
 
 from ..diagnostics import instrumented
-from .io import dataset_get_record
+from .io import dataset_get_record, load_image_array
 from .model import ImageDataset, ImageRecord
 
 
@@ -77,6 +89,23 @@ class DatasetModule(QObject):
         if record is None:
             raise KeyError(f"No record found for spectral_cube_index={cube_index}, wavelength={wavelength}")
         return record
+
+    def load_plane(self, cube_index: int, wavelength: float) -> np.ndarray:
+        """Load the full (cube_index, wavelength) plane's pixel data -
+        the pixel-loading counterpart to `current_image()`'s metadata-only
+        lookup (added 2026-09-22, see module docstring's "real correction"
+        note). Same `RuntimeError`/`KeyError` semantics as `current_image`,
+        since this calls it directly rather than re-deriving the record via
+        `dataset.io.dataset_load_plane` (which would redundantly repeat the
+        same lookup internally).
+
+        The returned array is read-only (`dataset.io.load_image_array`'s
+        own caching contract - see that function's docstring) - safe for
+        every existing caller in this codebase, which all only ever read
+        from a loaded image, never mutate it in place; a caller that
+        genuinely needs to mutate the result must copy it first."""
+        record = self.current_image(cube_index, wavelength)
+        return load_image_array(str(record.path))
 
     def wavelengths(self) -> tuple[float, ...]:
         """Every distinct wavelength in the loaded dataset, sorted - an

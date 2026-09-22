@@ -2321,3 +2321,38 @@ silently break the real path while fixing the scaffold one.
   entry (five scripts) was standalone and uncommitted, same open question
   as every prior entry.
 - Nothing from this entry has been committed yet.
+
+## 2026-09-22 (same day, continued): `DatasetModule.load_plane` built - closes the gap the previous entry flagged
+
+Added a fifth query method, `load_plane(cube_index, wavelength) -> np.ndarray`,
+closing the real gap flagged while building `engine.py` above: the original
+four-method surface was confirmed sufficient to *reach* every
+`dataset/io.py` loading function, but none of those four actually return
+pixel data, and the loading functions all need the full `ImageDataset`
+this module deliberately never exposes. `load_plane()` does the loading
+internally (reusing `current_image()`'s own record resolution rather than
+re-deriving it via `dataset.io.dataset_load_plane`, avoiding a redundant
+second lookup) - the "no other module reads dataset state any other way"
+rule is unchanged, this is one more narrow read, not a loosening of it.
+
+Verified with a standalone script (4 checks) against a **real TIFF file
+written to a temp directory** (via `tifffile.imwrite`), not a mock -
+`RuntimeError` before any dataset is loaded, correct shape and exact pixel
+values after loading a real dataset pointed at the real file, `KeyError`
+for a (cube, wavelength) combination that doesn't exist. Confirmed
+pyflakes-clean.
+
+This unblocks constructing `AnalysisEngine` with `load_plane=dataset_
+module.load_plane` for real pixel access - **not done in this entry**:
+wiring the *rest* of `AnalysisEngine`'s real callables
+(`resolve_mask`/`chromatic_affine`/`rois`/etc. into `app_rewrite.py`)
+surfaces further real gaps on inspection (e.g. `DatasetModule.wavelengths()`
+is dataset-*global*, not per-cube - using it for every cube would silently
+mis-handle a dataset where a cube is missing a wavelength another cube
+has; `resolve_mask` needs `ChromaticModule.warp_mask_between` when a
+mask's authored frame differs from the queried one, not yet checked
+against that method's real signature) - flagging these now rather than
+guessing through them, since each is its own small investigation, not
+assumed-safe scope creep of "wire up the engine."
+
+Not committed yet, alongside this entry.
