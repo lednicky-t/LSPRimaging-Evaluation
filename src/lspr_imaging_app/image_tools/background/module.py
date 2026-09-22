@@ -15,10 +15,13 @@ def fit_from_image(self, image: np.ndarray) -> None:
 Two problems, found by actually running it (`estimate.estimate_background`
 raised `AttributeError` - no such function exists in `estimate.py`; see
 `git blame`/the build log for how this was caught): first, the obvious
-bug - `estimate.py` only ever defines `flatten_background()` (estimate
-*and* apply combined in one call, per that file's own docstring - the
-real estimate/apply split is explicitly deferred future work, not done).
-Second, a deeper one the docstring's "owns the fitted background model"
+bug - `estimate.py` only ever defined `flatten_background()` (estimate
+*and* apply combined in one call, per that file's own docstring at the
+time - the estimate/apply split was still deferred future work then; it
+was built later the same day, see `apply.py`/`estimate.py`'s own
+docstrings - but even with that split, the *module* level still has no
+fitted model to cache, for the second reason below). Second, a deeper one
+the docstring's "owns the fitted background model"
 framing had baked in: checking `processing/preprocess.py` on `develop`
 (the real caller) shows `flatten_background()` is invoked **live, inline,
 per rendered frame**, from `BackgroundSettings` fields directly - there is

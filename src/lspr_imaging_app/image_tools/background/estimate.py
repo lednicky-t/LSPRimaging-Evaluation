@@ -3,13 +3,14 @@ of the estimate/apply split discussed in sketch §7 "Background") - ports the
 background functions out of ``processing/preprocess.py`` (sketch §10's
 ``preprocess.py`` note) verbatim.
 
-**Not yet the real estimate/apply split**: today's ``flatten_background``
-still does both estimate *and* apply (subtract-then-recenter) in one call,
-same as the source it was ported from - splitting that into a real
-reusable "model" object ``apply.py`` could consume is flagged in the sketch
-as new work, not a port, and is deliberately deferred (see the rewrite
-build log's 2026-09-20 "preprocess.py scope-check" entry). ``apply.py``
-stays a stub until that split actually happens.
+**Estimate/apply split built 2026-09-21**: ``flatten_background`` below now
+computes the background estimate (and, on the binned+region path, the
+scalar baseline) itself, then hands both to ``apply.apply_background()`` for
+the actual subtract-recenter-clip - it no longer inlines that arithmetic.
+Behavior is unchanged (verified byte-for-byte identical against the
+pre-split inline version); this only moves the "cheap formula" half into its
+own reusable function, per ``apply.py``'s docstring for why it isn't a
+cached "model" object.
 
 Note the ``mask_settings`` parameter below is ``AreaRoiDetectionSettings``
 (ROI's own ignored-pixel settings, via ``ignored_pixel_mask``) - not this
@@ -27,6 +28,7 @@ from scipy import ndimage
 
 from ...roi.detection import ignored_pixel_mask
 from ...roi.model import AreaRoi, AreaRoiDetectionSettings
+from .apply import apply_background
 
 
 def flatten_background(
@@ -88,11 +90,9 @@ def flatten_background(
         )
         baseline = float(np.median(background_full[valid_mask])) if np.any(valid_mask) else float(np.median(background_full))
         if region is None:
-            flattened = image_f32 - background_full + baseline
-        else:
-            x0, y0, x1, y1 = region
-            flattened = image_f32[y0:y1, x0:x1] - background_full[y0:y1, x0:x1] + baseline
-        return np.clip(flattened, 0.0, 65535.0)
+            return apply_background(image_f32, background_full, baseline)
+        x0, y0, x1, y1 = region
+        return apply_background(image_f32[y0:y1, x0:x1], background_full[y0:y1, x0:x1], baseline)
 
     # binning_factor > 1 and a region was requested: skip the expensive
     # full-resolution upsample entirely, only computing the small region's
@@ -119,8 +119,7 @@ def flatten_background(
         exclusion_dilation_px=dilation_px,
     )
     x0, y0, x1, y1 = region
-    flattened = image_f32[y0:y1, x0:x1] - background_region + baseline
-    return np.clip(flattened, 0.0, 65535.0)
+    return apply_background(image_f32[y0:y1, x0:x1], background_region, baseline)
 
 
 def estimate_background_profile(

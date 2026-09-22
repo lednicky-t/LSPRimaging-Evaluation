@@ -1,6 +1,8 @@
 """ROI mask rasterization - the one dispatcher for every geometry type
-(circle/annulus/mask today; §6a fractional weighting extends the same
-dispatch, not a per-shape rewrite).
+(circle/annulus/mask), plus `rasterize_fractional` (§6a fractional pixel
+weighting, built 2026-09-22) - a coverage-weighted variant of the same
+dispatch via one shared supersample-and-downsample engine, not a per-shape
+rewrite.
 
 No Qt import allowed in this file (AGENTS.md testing rule). AGENTS.md
 non-negotiable invariant: cache per-ROI analysis masks at that ROI's own
@@ -65,6 +67,8 @@ small array - the full source/target canvases are never materialized.
 """
 
 from __future__ import annotations
+
+from collections.abc import Callable
 
 import numpy as np
 from scipy import ndimage
@@ -553,7 +557,117 @@ def rasterize_reference_for_patch(
     )
 
 
-# -- §6a fractional pixel weighting: genuinely new work, not a port ---------
+# -- §6a fractional pixel weighting (built 2026-09-22) ----------------------
+# One shared engine (_reach_box_coverage) for every geometry type, per
+# AGENTS.md's "don't reach for shape-specific exact-intersection formulas" -
+# only the `point_test` callable plugged into it differs per geometry.
+
+
+def _reach_box_coverage(
+    box: tuple[int, int, int, int],
+    affine_matrix: np.ndarray,
+    supersample_factor: int,
+    point_test: Callable[[np.ndarray, np.ndarray], np.ndarray],
+) -> np.ndarray:
+    """§6a's shared supersample-and-downsample engine. Generalizes
+    `_annulus_mask_in_box`'s own pattern - map target-space points back
+    through the inverse affine to native/source space and test them there -
+    from one sample point per output pixel (a pixel's center) to
+    `supersample_factor ** 2` evenly-spaced sub-pixel samples per pixel,
+    averaged into a [0, 1] coverage fraction. Returns an array shaped
+    `(box_y1 - box_y0, box_x1 - box_x0)`.
+
+    `point_test` is the only thing that differs per geometry type: a
+    distance-from-center formula for circle/annulus
+    (`_circle_annulus_point_test`), a nearest-neighbor lookup into the
+    stored `RoiMask` array for mask geometry (`_mask_point_test`) - the
+    sampling/averaging/reach-box-bounding machinery itself is identical
+    either way, so a new geometry type only ever needs a new `point_test`,
+    never a new copy of this function.
+
+    Because `affine_matrix` is linear, an evenly-spaced sub-pixel grid in
+    target space maps to an evenly-spaced (just skewed/scaled) grid in
+    source space - so this stays exactly correct for any shear/anisotropic-
+    scale affine, not just similarity transforms. That matters here: the
+    real chromatic fit (`fit_affine_matrix`, ordinary-least-squares over
+    matched landmarks) is an unconstrained 6-parameter affine, so a circle
+    can genuinely warp into an ellipse in target space - this is why the
+    per-pixel-sample-then-inverse-map approach is used instead of the
+    simpler-looking "draw a same-radius circle at the transformed center",
+    which would be wrong whenever the fit has any shear or anisotropic
+    scale.
+    """
+    box_x0, box_y0, box_x1, box_y1 = box
+    box_h, box_w = box_y1 - box_y0, box_x1 - box_x0
+    if box_h <= 0 or box_w <= 0:
+        return np.zeros((max(box_h, 0), max(box_w, 0)), dtype=np.float32)
+    n = max(int(supersample_factor), 1)
+    ss_h, ss_w = box_h * n, box_w * n
+    ss_yy, ss_xx = np.indices((ss_h, ss_w), dtype=np.float64)
+    # Sub-sample (J + 0.5) / n is the closed form of "pixel j's k-th of n
+    # evenly-spaced sub-offsets, (k + 0.5) / n" for J = j * n + k - avoids
+    # building/broadcasting a separate per-pixel offset grid.
+    target_x = box_x0 + (ss_xx.ravel() + 0.5) / n
+    target_y = box_y0 + (ss_yy.ravel() + 0.5) / n
+    target_points = np.column_stack((target_x, target_y))
+    inverse_affine = invert_affine_matrix(affine_matrix)
+    source_points = apply_affine_to_points(target_points, inverse_affine)
+    covered = point_test(source_points[:, 0], source_points[:, 1]).reshape(ss_h, ss_w)
+    # Average-pool n x n sub-samples back to one coverage fraction per output
+    # pixel - same reshape-mean technique as background/estimate.py's
+    # _bin_array_mean, just downsampling a coverage grid instead of an image.
+    coverage = covered.reshape(box_h, n, box_w, n).mean(axis=(1, 3), dtype=np.float64)
+    return coverage.astype(np.float32, copy=False)
+
+
+def _circle_annulus_point_test(
+    center_xy: tuple[float, float],
+    inner_radius: float,
+    outer_radius: float,
+) -> Callable[[np.ndarray, np.ndarray], np.ndarray]:
+    """Native-space point test for `_reach_box_coverage`: is
+    `(source_x, source_y)` within `[inner_radius, outer_radius]` of
+    `center_xy`? Same formula `_annulus_mask_in_box` uses per-pixel-center,
+    evaluated per sub-sample here instead. `inner_radius=0.0` gives a plain
+    disk (the sample side's geometry).
+    """
+    center_x, center_y = float(center_xy[0]), float(center_xy[1])
+    inner_sq = float(inner_radius) * float(inner_radius)
+    outer_sq = float(outer_radius) * float(outer_radius)
+
+    def point_test(source_x: np.ndarray, source_y: np.ndarray) -> np.ndarray:
+        dx = source_x - center_x
+        dy = source_y - center_y
+        distance_sq = dx * dx + dy * dy
+        return (distance_sq <= outer_sq) & (distance_sq >= inner_sq)
+
+    return point_test
+
+
+def _mask_point_test(roi_mask: RoiMask) -> Callable[[np.ndarray, np.ndarray], np.ndarray]:
+    """Native-space point test for `_reach_box_coverage`, mask geometry: is
+    `(source_x, source_y)` - rounded to the nearest stored mask pixel -
+    `True` in `roi_mask.mask`? A mask has no continuous boundary beyond its
+    own stored pixels (unlike circle/annulus's exact formula), so
+    "coverage" here reflects how many of a target pixel's back-projected
+    sub-samples land on a `True` source pixel, nearest-neighbor - not a
+    claim of sub-pixel precision the stored mask never had. Out-of-bounds
+    sub-samples (outside `roi_mask`'s own small stored array) count as not
+    covered, same as `expand_mask`'s implicit zero-fill.
+    """
+    mask = roi_mask.mask
+    mask_h, mask_w = mask.shape[:2]
+    origin_x, origin_y = int(roi_mask.x0), int(roi_mask.y0)
+
+    def point_test(source_x: np.ndarray, source_y: np.ndarray) -> np.ndarray:
+        col = np.round(source_x - origin_x).astype(np.int64)
+        row = np.round(source_y - origin_y).astype(np.int64)
+        in_bounds = (row >= 0) & (row < mask_h) & (col >= 0) & (col < mask_w)
+        covered = np.zeros(source_x.shape, dtype=bool)
+        covered[in_bounds] = mask[row[in_bounds], col[in_bounds]]
+        return covered
+
+    return point_test
 
 
 def rasterize_fractional(
@@ -562,12 +676,67 @@ def rasterize_fractional(
     image_shape: tuple[int, int],
     affine_matrix: np.ndarray,
     supersample_factor: int = 8,
-    **kwargs: object,
+    *,
+    default_inner_radius_px: float = 0.0,
+    default_outer_radius_px: float = 0.0,
 ) -> np.ndarray:
-    """§6a fractional pixel weighting via supersample-and-downsample, for
+    """§6a fractional pixel weighting: one ROI's sample- or reference-region
+    coverage, full-image-sized, with values in `[0, 1]` instead of
+    `rasterize_sample`/`rasterize_reference`'s plain boolean - 1.0 where a
+    pixel is fully inside the ROI, 0.0 fully outside, and a fraction at
+    whichever edge the affine-warped boundary cuts through. Works for
     whichever geometry `roi`'s `side` ("sample"/"reference") actually has -
-    circle, annulus, or mask. One shared implementation for every geometry
-    type (AGENTS.md §6a: don't reach for shape-specific exact-intersection
-    formulas). Not yet implemented - scaffolding only.
+    circle, annulus, or mask - by building the matching `point_test` and
+    handing it to the shared `_reach_box_coverage` engine; see that
+    function's docstring for why one engine suffices for every geometry
+    type instead of a per-shape rewrite.
+
+    Reach-box-bounded internally (never supersamples beyond where the shape
+    can possibly reach, AGENTS.md's non-negotiable invariant) even though
+    the *returned* array is full-`image_shape`-sized - matching
+    `transformed_annulus_mask`'s own full-size-output-but-bounded-cost
+    pattern, not a new cost profile. A patch-scoped (`_for_patch`) variant,
+    mirroring `rasterize_sample_for_patch`, is deliberately not built here -
+    nothing calls this yet (no caller exists until `analysis/tasks.py` is
+    built), so a second variant would be speculative; add one once a real
+    caller needs it.
     """
-    raise NotImplementedError
+    image_height, image_width = image_shape[:2]
+    geometry_type = roi.sample_geometry_type if side == "sample" else roi.reference_geometry_type
+    if side == "reference" and geometry_type == "none":
+        return np.zeros((image_height, image_width), dtype=np.float32)
+
+    if geometry_type == "mask":
+        roi_mask = roi.sample_mask if side == "sample" else roi.reference_mask
+        if roi_mask is None:
+            return np.zeros((image_height, image_width), dtype=np.float32)
+        reach_x0, reach_y0, reach_x1, reach_y1 = _mask_reach_box(roi_mask, affine_matrix)
+        box = (
+            max(reach_x0, 0), max(reach_y0, 0),
+            min(reach_x1, image_width), min(reach_y1, image_height),
+        )
+        point_test = _mask_point_test(roi_mask)
+    else:
+        center_xy = (float(roi.center_x), float(roi.center_y))
+        if side == "sample":
+            inner_radius, outer_radius = 0.0, float(roi.sample_radius_px)
+        else:
+            inner_radius, outer_radius = _effective_reference_radii(roi, default_inner_radius_px, default_outer_radius_px)
+        if outer_radius <= 0.0:
+            return np.zeros((image_height, image_width), dtype=np.float32)
+        transformed_center, reach = annulus_reach_box(center_xy, outer_radius, affine_matrix)
+        box = (
+            max(int(np.floor(transformed_center[0] - reach)), 0),
+            max(int(np.floor(transformed_center[1] - reach)), 0),
+            min(int(np.ceil(transformed_center[0] + reach)) + 1, image_width),
+            min(int(np.ceil(transformed_center[1] + reach)) + 1, image_height),
+        )
+        point_test = _circle_annulus_point_test(center_xy, inner_radius, outer_radius)
+
+    box_x0, box_y0, box_x1, box_y1 = box
+    if box_x0 >= box_x1 or box_y0 >= box_y1:
+        return np.zeros((image_height, image_width), dtype=np.float32)
+    coverage_local = _reach_box_coverage(box, affine_matrix, supersample_factor, point_test)
+    coverage = np.zeros((image_height, image_width), dtype=np.float32)
+    coverage[box_y0:box_y1, box_x0:box_x1] = coverage_local
+    return coverage

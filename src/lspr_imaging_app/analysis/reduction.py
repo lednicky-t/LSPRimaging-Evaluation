@@ -1,5 +1,15 @@
-"""Pure per-ROI pixel reduction math (sketch §10: "ports roi_math.py,
-extended with weighted variants per §6a").
+"""Pure per-ROI pixel reduction math (sketch §10: ports `roi_math.py`).
+
+**Moved here from `roi/reduction.py` on 2026-09-21** - maintainer decision:
+turning masked pixel values into a scalar (mean/median/trimmed_mean/
+plane_fit) is an analysis computation, not a ROI concern, so this whole
+file (not just the not-yet-built `weighted_*` variants) belongs under
+`analysis/`, not `roi/`. The ROI Toolbox owns geometry/masks (see
+`roi/rasterize.py`, which stays in `roi/` - it turns a shape into a mask,
+never reads image pixel values); this module owns turning pixels into
+numbers. Nothing on `rewrite` imported `roi/reduction.py` yet at the time
+of the move (checked: `roi/toolbox.py` never referenced it), so this was a
+zero-fixup file move, not a rewire.
 
 No Qt import allowed in this file (AGENTS.md testing rule). AGENTS.md
 non-negotiable invariants: never pool pixels across ROIs before computing
@@ -21,9 +31,10 @@ center, needing the reference region's pixel coordinates and the sample
 center as extra arguments. Ported verbatim below (diffed after - only
 `REDUCTION_METHODS`'s docstring/import block unchanged, no logic altered).
 
-The ``weighted_*`` variants are new work for §6a (fractional pixel
-weighting), not a port - ``weighted_median``/``weighted_trimmed_mean`` need
-genuine weighted-median-style algorithms, not just "pass weights through".
+The ``weighted_*`` variants are §6a (fractional pixel weighting) -
+deliberately deferred until the analysis stage itself gets built (see
+AGENTS.md); left as `NotImplementedError` stubs here rather than
+implemented now.
 """
 
 from __future__ import annotations

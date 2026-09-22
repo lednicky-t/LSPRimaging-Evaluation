@@ -1872,3 +1872,193 @@ window still builds.
   built (Dataset, ROI, Chromatic, Geometry, Background, Mask, Selection).
   What remains across the board is the panel layer and the two
   not-yet-started subsystems above - not a missing module-layer piece.
+
+## 2026-09-21: `roi/reduction.py` moved to `analysis/reduction.py`; background estimate/apply split built
+
+Two small corrections, both maintainer decisions, not new findings from
+code:
+
+**§6a rescoped from ROI to Analysis.** Discussing what was left, maintainer
+clarified §6a fractional pixel weighting belongs to the analysis stage, not
+ROI - "ROI should [not] do any calculations." Asked a follow-up since
+`roi/reduction.py` already held *real, already-ported* (unweighted)
+reduction math (`reduce_mean`/`reduce_median`/`reduce_trimmed_mean`/
+`reduce_plane_fit_reference`/`reduce_sample_and_reference[_all_methods]`),
+not just the not-yet-built `weighted_*` stubs the original §6a conversation
+was about: should that existing code move too, or just future weighted
+work? Maintainer's answer: **move all of it** - any "masked pixels →
+scalar" computation is an analysis concern, regardless of whether it's
+weighted.
+
+`roi/reduction.py` → `analysis/reduction.py` via `git mv` (history
+preserved). Checked for callers first: nothing on `rewrite` imported it yet
+(`roi/toolbox.py` never referenced it) - a zero-fixup file move, not a
+rewire. `roi/rasterize.py` (including its still-stubbed `rasterize_fractional`
+for §6a) stays in `roi/` - it turns a shape into a raster/weight mask and
+never reads pixel values, so it's geometry, not a "calculation" by the same
+principle; the maintainer's question and decision were specifically about
+`reduction.py`, and this boundary was inferred from their stated
+reasoning, not separately confirmed - flag if that's wrong. Updated
+`AGENTS.md` (module boundaries, the §6a section, the testing-rules file
+list) and `docs/rewrite_architecture_sketch_2026-09.md` (§10 file tree,
+the "what's new work" paragraph) to point at the new location; updated
+`roi/model.py`'s two comments referencing the old path. Verified
+pyflakes-clean and the rewrite-preview window still builds.
+
+**Background estimate/apply split built.** `image_tools/background/
+apply.py`'s `apply_background(image, background, baseline)` is now real -
+the cheap subtract-recenter-clip formula that used to be inlined at the end
+of `estimate.py`'s `flatten_background`. `flatten_background` now composes
+`estimate_background_profile()`/`_background_baseline()` (unchanged) with
+`apply_background()` instead of inlining that arithmetic itself, across all
+three of its paths (plain, region-scoped, binned+region).
+
+**Deliberately not a cached "model" object**: `BackgroundModule`'s own
+2026-09-21-earlier docstring already established there's no persisted
+background model anywhere in the app to cache - `flatten_background` runs
+live, inline, per rendered frame, straight from `BackgroundSettings`, unlike
+Chromatic's genuinely-stored per-(cube, wavelength) affine models. Building
+a `BackgroundModel` dataclass for `apply_background` to consume would be
+machinery for a caller that doesn't exist - `apply_background` instead just
+takes whatever background array/baseline the caller already computed and
+applies it, matching what `apply.py`'s docstring called for ("cheap
+formula/lookup") without inventing unneeded state.
+
+Verified with a standalone script (not committed) comparing the refactored
+`flatten_background` against an independent reimplementation of the
+original inline arithmetic, across 6 cases (plain; with ROI exclusion;
+region-scoped; region-scoped with ROI; binned+region; binned+region with
+ROI and exclusion dilation) - `np.array_equal` (bit-for-bit, not just
+`allclose`) true in every case. Updated `estimate.py`/`apply.py`/
+`BackgroundModule`'s docstrings to match (the `BackgroundModule` one keeps
+its original historical narrative about the bug that was fixed earlier
+that day, with a note appended rather than rewritten, since the split
+hadn't happened yet at the point that narrative describes). Confirmed
+pyflakes-clean and the rewrite-preview window still builds.
+
+**Not done / still open, as of this entry**:
+- `analysis/tasks.py`, `storage/session.py` — not yet started.
+- `MaskModule`'s worker/cache dispatch for the two slow candidate tools,
+  and its `QFileDialog` file-picker wiring - deferred to the panel layer.
+- ROI mask-drawing commands/UI - not started.
+- §6a fractional pixel weighting itself is still unimplemented (only its
+  target location moved) - `analysis/reduction.py`'s `weighted_*` stubs
+  and `roi/rasterize.py`'s `rasterize_fractional` stub are both still
+  `NotImplementedError`, deferred until the analysis stage is actually
+  built.
+- Nothing from this entry has been committed yet.
+
+## 2026-09-22: `roi/rasterize.py`'s `rasterize_fractional` built (§6a's raster half)
+
+Maintainer wanted to focus specifically on §6a next and get a working,
+tested implementation, not just discuss it further. Scoped to the raster
+half only (`roi/rasterize.py`) - `analysis/reduction.py`'s `weighted_*`
+stubs stay deferred, unchanged by this entry, per the maintainer's own
+framing ("this would be mostly issue of CC" - the raster/coverage problem,
+not the reduction-math problem).
+
+**Real correctness constraint that shaped the design**: checked
+`fit_affine_matrix` (`processing/chromatic.py:927`, what
+`estimate_affine_chromatic_transform` - the real production CC fit -
+actually calls) before designing anything. It's an unconstrained
+6-parameter affine (independent x/y scale *and* shear allowed, fit by
+OLS through matched landmarks), not a similarity transform - so a circle
+in native space can genuinely warp into an ellipse in target space. That
+ruled out the simpler-looking "draw a same-radius circle at the
+transformed center" approach (wrong under any shear/anisotropic scale) in
+favor of extending the existing, already-correct-for-any-affine pattern
+`_annulus_mask_in_box` already uses: map target-space points *backward*
+through the inverse affine to native space and test them there.
+
+**One shared engine, not per-geometry-type code** (matching AGENTS.md's
+"don't reach for shape-specific exact-intersection formulas" and the
+one-dispatcher-not-per-shape-code direction): `_reach_box_coverage`
+generalizes `_annulus_mask_in_box`'s single-point-per-pixel test to
+`supersample_factor ** 2` evenly-spaced sub-pixel samples per pixel,
+averaged into a `[0, 1]` coverage fraction - reach-box-bounded exactly like
+every other function in this file, so the returned array is
+`image_shape`-sized but the actual computation never touches more than the
+shape's own bounding box. The only thing that differs per geometry type is
+a `point_test(source_x, source_y) -> bool array` callable plugged into it:
+`_circle_annulus_point_test` (a distance-from-center formula) or
+`_mask_point_test` (nearest-neighbor lookup into the stored `RoiMask`
+array - a mask has no continuous boundary beyond its own pixels, unlike
+circle/annulus, so "coverage" there reflects how many back-projected
+sub-samples land on a `True` source pixel, not sub-pixel precision the
+mask never had). Both `rasterize_sample`/`rasterize_reference`'s existing
+dispatch-by-geometry-type logic and `_effective_reference_radii`/
+`annulus_reach_box`/`_mask_reach_box` are reused as-is, not reimplemented.
+
+**Not cached** - `rasterize_fractional` recomputes on every call. Flagged
+in `AGENTS.md` as a real candidate for the same per-key caching
+`ChromaticModule` already does (depends only on ROI geometry + the affine,
+both fixed per cube/wavelength) but deliberately not built now: no caller
+exists yet (`analysis/tasks.py` isn't built), and building a cache with
+nothing to validate it against would be speculative. A patch-scoped
+(`_for_patch`) variant, mirroring `rasterize_sample_for_patch`, was
+likewise not built for the same reason - flagged, not silently skipped.
+
+**Verified with a standalone script** (not committed - no established
+location for rewrite-branch unit tests exists yet; the umbrella's
+`tests/unit/test_lspri_*.py` files test the stable `develop`-branch app by
+import path and would break for anyone whose submodule isn't on
+`rewrite` if a rewrite-only-module test were added there. Flagging this as
+an open question for whoever builds real committed test coverage for this
+branch, not deciding it here). 17 checks, all passing:
+- Interior pixels match `transformed_disk_mask`'s existing boolean result
+  exactly (coverage `1.0`); exterior pixels match `0.0`; the boundary band
+  contains genuinely fractional values (feature isn't a no-op).
+- **Area conservation**: `sum(coverage)` in target space matches
+  `source_area * |det(affine linear part)|` to `<0.01%` relative error,
+  across identity, sub-pixel-translation, and shear+anisotropic-scale
+  affines - catches the "circle becomes ellipse" case directly, not just
+  by inspection. (First run of this check failed at 5.5% error under a
+  stronger shear/scale combination - turned out to be the test's own bug,
+  not the implementation's: that affine pushed the transformed disk
+  partly outside the 200px test canvas, so part of its true area was
+  legitimately clipped by `image_shape`'s edge, which the test's expected-
+  area formula didn't account for. Fixed by keeping the transformed shape
+  inside the canvas rather than by loosening the tolerance - see the
+  Performance Work section's rule on this.)
+- **Convergence**: max per-pixel error vs. a `supersample_factor=64`
+  reference shrinks monotonically at `2 < 4 < 8 < 16`; the default (`8`)
+  stays under `0.05` of a full pixel's weight.
+- **Independent oracle**: a plain nested-`for`-loop Python reimplementation
+  (no shared code with `_reach_box_coverage`) matches the vectorized
+  implementation exactly (not `allclose` - bit-for-bit) at 8 sample points
+  under a shear+anisotropic-scale affine - guards against a
+  vectorization/broadcasting bug the module's own internal consistency
+  can't catch.
+- **Translation sanity check**: `translate_affine(+10, 0)` shifts the
+  coverage pattern exactly +10 columns (not rows) - catches x/y transpose
+  bugs, a real recurring bug class in this codebase's image code.
+- **Mask geometry**: binary (all `1.0`/`0.0`, no partial values) at an
+  identity affine; genuinely fractional edge values under a sub-pixel
+  shift. (Second failed run, same session: a *0.5*-pixel shift produced
+  zero partial values - not a bug either. Nearest-neighbor rounding
+  buckets are exactly one pixel wide, so a translation of *exactly* 0.5
+  happens to realign every target pixel's sub-samples onto a single source
+  pixel's rounding bucket - a genuine degenerate case of nearest-neighbor
+  sampling specifically at that value, not representative of a real
+  chromatic shift. Fixed by testing a non-half-integer shift instead.)
+- Reference side with `geometry_type == "none"` returns all zeros; output
+  dtype/shape check; strictly-zero-outside-the-reach-box check.
+
+Confirmed pyflakes-clean and the rewrite-preview window still builds. Not
+committed yet.
+
+**Not done / still open, as of this entry**:
+- `analysis/tasks.py`, `storage/session.py` — not yet started.
+- `MaskModule`'s worker/cache dispatch for the two slow candidate tools,
+  and its `QFileDialog` file-picker wiring - deferred to the panel layer.
+- ROI mask-drawing commands/UI - not started.
+- `analysis/reduction.py`'s `weighted_*` functions (the reduction-math half
+  of §6a) - still `NotImplementedError`, deferred until the analysis stage
+  is built, per this entry's own scoping.
+- `rasterize_fractional` has no `_for_patch` variant and no caching yet -
+  both deliberately deferred until a real caller exists (see above).
+- No committed, permanent test coverage for anything on `rewrite` yet -
+  every verification so far (this entry included) has been a standalone,
+  uncommitted script. Where rewrite-branch tests should permanently live
+  is an open question, not yet decided.
+- Nothing from this entry has been committed yet.

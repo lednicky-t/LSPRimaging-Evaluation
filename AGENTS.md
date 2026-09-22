@@ -79,7 +79,10 @@ Full detail: `docs/rewrite_architecture_sketch_2026-09.md` §2, §7, §10.
   intended duplication of *affordances*, not of logic). Follows
   `docs/roi_system_roadmap.md`'s `Pair` vocabulary and geometry-type
   dispatcher — adopt that roadmap, don't re-derive a new ROI model.
-- `analysis/` — the store, the recompute planner, background workers.
+- `analysis/` — the store, the recompute planner, background workers, and
+  the reduction math that turns masked pixel values into a scalar
+  (`reduction.py`, moved here from `roi/` on 2026-09-21 — turning pixels
+  into numbers is a calculation, not something the ROI Toolbox does).
   Never triggers computation on its own; only `run_analysis(scope)`,
   called explicitly by the user, computes anything.
 - `selection/` — the one intentionally shared piece of state (current
@@ -187,22 +190,58 @@ Full detail: `docs/rewrite_architecture_sketch_2026-09.md` §5, §6, §6a.
 
 ---
 
-## Fractional pixel weighting (planned, not yet built)
+## Fractional pixel weighting (§6a)
 
 An optional, per-analysis-toggle enhancement: weight boundary pixels by
 the fraction of their area inside the ROI shape, instead of a binary
 center-in-shape test. Full detail: architecture sketch §6a.
 
-- Default implementation approach: supersample the shape at higher
-  internal resolution and downsample — one implementation for every
-  geometry type (circle/rectangle/polygon/arbitrary mask), matching the
-  ROI roadmap's one-dispatcher-not-per-shape-code direction. Don't reach
-  for shape-specific exact-intersection formulas (e.g. `cv2.
-  intersectConvexConvex`) unless supersampling proves insufficient
-  somewhere specific.
+**Split across two module boundaries (corrected 2026-09-21)**: producing
+the fractional-weight *raster* from an ROI's shape is geometry and stays in
+`roi/rasterize.py`. Consuming those weights to turn pixel values into a
+scalar (`weighted_mean`/`weighted_median`/`weighted_trimmed_mean`/
+`weighted_plane_fit`) is a calculation, not a ROI concern — those stubs (and
+the rest of the unweighted reduction math they extend) live in
+`analysis/reduction.py`, moved out of `roi/` entirely on 2026-09-21 (see the
+rewrite build log). The ROI Toolbox produces masks/weights; Analysis turns
+pixels into numbers.
+
+**The raster half is built (2026-09-22)**: `roi/rasterize.py`'s
+`rasterize_fractional` is real, for all three geometry types (circle,
+annulus, mask) via one shared engine (`_reach_box_coverage`) that only
+swaps out the per-geometry point-test — not per-shape code paths. The
+reduction half (`analysis/reduction.py`'s `weighted_*` stubs) is still not
+built - deliberately deferred until the analysis stage itself is built, not
+because it's blocked on the raster half.
+
+- Implementation approach used: supersample-and-downsample — one shared
+  engine for every geometry type (circle/rectangle/polygon/arbitrary
+  mask), matching the ROI roadmap's one-dispatcher-not-per-shape-code
+  direction, per-pixel inverse-affine-mapped (not "draw a circle at the
+  transformed center", which is wrong whenever the chromatic fit has shear
+  or anisotropic scale - the real fit, `fit_affine_matrix`, is an
+  unconstrained 6-parameter affine, so this isn't a hypothetical edge
+  case). Exact analytical per-shape formulas (e.g. `cv2.
+  intersectConvexConvex`) were deliberately not used - supersampling
+  proved sufficient (see the rewrite build log's 2026-09-22 entry for the
+  verification numbers) and keeps one implementation instead of one per
+  shape.
+- Mask geometry gets the same fractional treatment as circle/annulus, via
+  a nearest-neighbor lookup into the stored `RoiMask` array as its
+  point-test (rather than a continuous formula, since a mask has no
+  boundary information beyond its own stored pixels) - not exempted from
+  §6a the way an earlier draft of this note implied.
+- Not yet cached: `rasterize_fractional` recomputes on every call today.
+  Since it depends only on ROI geometry + the chromatic affine (both fixed
+  per spectral cube/wavelength, never per time-frame), it's a candidate for
+  the same per-key caching `ChromaticModule` already does for its own
+  affine models - deferred until a real caller (`analysis/tasks.py`) exists
+  to need it, rather than building a cache with no caller to validate it
+  against.
 - This is real implementation work, not a free toggle: `median` and
-  `trimmed_mean` need genuine weighted-median-style algorithms, not just
-  "pass weights through" to the unweighted versions.
+  `trimmed_mean` (in `analysis/reduction.py`, not yet built) need genuine
+  weighted-median-style algorithms, not just "pass weights through" to the
+  unweighted versions.
 
 ---
 
@@ -210,7 +249,7 @@ center-in-shape test. Full detail: architecture sketch §6a.
 
 - Every pure-computation file (`*/fitting.py`, `*/detection.py`,
   `analysis/tasks.py`, `analysis/provenance.py`, `analysis/planner.py`,
-  `roi/reduction.py`, `roi/rasterize.py`) must be importable and testable
+  `analysis/reduction.py`, `roi/rasterize.py`) must be importable and testable
   with **zero Qt/GUI/dataset dependency** — this is structural, not a
   suggestion: if a test for one of these needs a `QApplication`, something
   is wired wrong.

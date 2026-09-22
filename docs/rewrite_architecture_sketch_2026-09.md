@@ -529,9 +529,11 @@ Still open:
 
 1. `provenance_table.json`'s deduplication scheme (how cells reference a
    shared fingerprint blob without repeating it) is named but not designed.
-2. Fractional pixel weighting (§6a) is sketched at the method level
-   (supersample-and-downsample recommended) but the weighted-median/
-   weighted-trimmed-mean math it requires isn't designed yet.
+2. Fractional pixel weighting (§6a): the raster half is built
+   (`roi/rasterize.py`'s `rasterize_fractional`, 2026-09-22 - supersample-
+   and-downsample, one shared engine for every geometry type). The
+   weighted-median/weighted-trimmed-mean math the reduction half needs
+   (`analysis/reduction.py`) still isn't designed.
 
 ---
 
@@ -575,13 +577,16 @@ lspr_imaging_app/
   roi/
     model.py                  # AreaRoi, AreaRoiGroup, RoiArrayGroup - the Pair vocabulary from roi_system_roadmap.md
     detection.py               # pure math - ports roi_detection.py / roi_array_geometry.py largely as-is
-    reduction.py                # pure math - mean/median/trimmed_mean/plane_fit, ports roi_math.py,
-                                 # extended with weighted variants per §6a (new work, not a port)
     rasterize.py                 # pure math - mask/pixel-weight rasterization, ports roi_rasterize.py,
-                                  # extended with supersample-and-downsample per §6a (new work)
+                                  # extended with supersample-and-downsample per §6a (new work) - produces
+                                  # a raster/weight mask from shape, never reads pixel values
     toolbox.py                  # RoiToolbox(QObject) - the command API + signals from §7
 
   analysis/
+    reduction.py                # pure math - mean/median/trimmed_mean/plane_fit, ports roi_math.py, extended
+                                 # with weighted variants per §6a (new work, not a port) - moved here from
+                                 # roi/ 2026-09-21: turning masked pixels into a scalar is a calculation,
+                                 # not something the ROI Toolbox does
     provenance.py              # ProvenanceRecord + fingerprint computation + dedup table - new, per §5
     planner.py                  # plan_recompute() - new, per §6
     tasks.py                     # pure per-cell compute - ports analysis_tasks.py largely as-is
@@ -613,6 +618,6 @@ every `module.py`/`toolbox.py`/`engine.py` (the signal/command wrapper
 classes - today's app has none of these, since it has no event system at
 all), `analysis/provenance.py` + `planner.py` (§5/§6, replacing today's
 several independent, sometimes-incomplete cache signatures), and the
-weighted-reduction/supersampling work in `roi/reduction.py` and
+weighted-reduction/supersampling work in `analysis/reduction.py` and
 `roi/rasterize.py` (§6a, a genuinely new feature, not a port of anything
 existing).

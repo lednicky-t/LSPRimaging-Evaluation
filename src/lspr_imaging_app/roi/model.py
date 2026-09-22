@@ -124,11 +124,13 @@ class AreaRoiDetectionSettings:
     array_rows: int = 0
     array_cols: int = 0
     array_spacing_px: int = 0
-    # ROI's math: how each ROI pair's masked pixels become the per-wavelength
+    # How each ROI pair's masked pixels become the per-wavelength
     # sample/reference value ("mean"/"median"/"trimmed_mean"/"plane_fit"), and
-    # how those two values combine into the final value. Shared across every
-    # ROI pair - no per-ROI override yet, see roi/reduction.py. No
-    # trimmed_mean_fraction field: that's a fixed constant (roi/reduction.py's
-    # DEFAULT_TRIMMED_MEAN_FRACTION, once ported), not a per-session setting.
+    # how those two values combine into the final value - the actual reduction
+    # math lives in analysis/reduction.py (moved out of roi/ 2026-09-21), this
+    # is just the selected method name. Shared across every ROI pair - no
+    # per-ROI override yet. No trimmed_mean_fraction field: that's a fixed
+    # constant (analysis/reduction.py's DEFAULT_TRIMMED_MEAN_FRACTION), not a
+    # per-session setting.
     reduction_method: str = "mean"
     formula_key: str = "absorbance"
