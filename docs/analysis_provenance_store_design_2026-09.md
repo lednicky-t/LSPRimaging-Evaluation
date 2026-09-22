@@ -191,8 +191,49 @@ Full detail and what's still deferred: `docs/rewrite_build_log_2026-09.md`,
   (simulating an app restart) rehydrates prior results with zero
   recomputation.
 
+## Reference-ring exclusion modes (added 2026-09-23)
+
+A seventh input, added after a correctness gap was found while
+investigating sketch §6's "ROI-adjacency exception": the old app removes
+pixels belonging to other ROIs' sample apertures from a reference ring
+(otherwise a nearby, often much brighter sample spot inside the ring
+biases the reference mean), and the rewrite's `compute_cell` had no way to
+do that - it only ever saw one ROI.
+
+Maintainer's decision, as a toggle rather than always-on:
+- `"none"` - no cross-ROI exclusion; ROIs interact only through the ignore
+  mask. Current default.
+- `"exclude_all_sample_rois"` - a reference ring never counts a pixel
+  inside *any* ROI's sample aperture. Overlapping *reference* rings are
+  still counted normally; only sample pixels are removed.
+
+**Computed from every ROI, never from the selected subset** - the old app
+built this union from the selected ROIs, which made a stored value depend
+on what else happened to be selected when it was computed. Making it
+all-ROIs removes that dependency entirely and is what keeps the
+fingerprint tractable.
+
+**Fingerprint impact**: in `"exclude_all_sample_rois"` mode, moving ROI X
+genuinely changes ROI Y's reference pixels, so Y's stored value must be
+invalidated when X moves - `sample_exclusion_digest(all_rois)` is recorded
+in `SettingsSnapshot` for exactly this. It's recorded *only* in that mode:
+in `"none"` mode other ROIs aren't an input, and including it would
+invalidate every cell on any ROI move for no reason. It lives in the
+snapshot (not `ProvenanceRecord`) because snapshots are deduplicated and
+referenced by a small integer - embedding an all-ROI digest in every
+(ROI x cube) cell instead would be the difference between a few hundred KB
+and well over a GB at realistic counts.
+
 ## Still open
 
+- **Which mode should be the default.** Currently `"none"` (preserves
+  "everything as it is"). Worth noting the stable app effectively behaved
+  like `"exclude_all_sample_rois"` whenever more than one ROI was selected,
+  so `"none"` is not strictly "what the old app did" - it matches the
+  old app's *single-ROI* behavior. Flagged for the maintainer rather than
+  silently picking the scientifically-preferable one.
+- No UI exposes the toggle yet - it's an injected setting on
+  `AnalysisEngine` with no panel behind it (the panel layer doesn't exist).
 - TIFF→OME-Zarr "carry masks/backgrounds along" tooling - noted in chat as
   likely unnecessary work (frame identity via `ImageKey` doesn't change
   between formats, so no re-keying is needed); at most a "copy the

@@ -74,6 +74,7 @@ from ..image_tools.preprocess import apply_preprocessing
 from ..roi.model import AreaRoi
 from ..roi.rasterize import rasterize_reference, rasterize_sample
 from .provenance import (
+    DEFAULT_REFERENCE_EXCLUSION_MODE,
     FrameNamingScheme,
     ProvenanceRecord,
     SettingsSnapshot,
@@ -81,6 +82,7 @@ from .provenance import (
     persist_chromatic_snapshot,
     persist_mask_snapshot,
     roi_geometry_fingerprint_fields,
+    sample_exclusion_digest,
 )
 from .reduction import reduce_sample_and_reference
 
@@ -126,6 +128,31 @@ class CellResult:
     provenance: ProvenanceRecord
 
 
+def _sample_exclusion_union(
+    all_rois: tuple[AreaRoi, ...],
+    image_shape: tuple[int, int],
+    affine_matrix: np.ndarray,
+) -> np.ndarray:
+    """Union of every ROI's sample-aperture mask at this wavelength's
+    geometry - the thing a reference ring subtracts in
+    `"exclude_all_sample_rois"` mode.
+
+    **Includes the ROI's own sample aperture, not just its neighbours'** -
+    a deliberate, small difference from the old app, which skipped the
+    union entirely when only one ROI was selected and otherwise included
+    self. That made single-ROI and multi-ROI runs behave differently at
+    the same geometry (a ROI whose sample circle pokes inside its own
+    reference ring got those pixels counted with one ROI selected and
+    dropped with two). Excluding every sample aperture unconditionally is
+    both simpler and consistent: a reference ring never counts sample
+    pixels, full stop.
+    """
+    union = np.zeros(image_shape, dtype=bool)
+    for other in all_rois:
+        union |= rasterize_sample(other, image_shape, affine_matrix)
+    return union
+
+
 def compute_cell(
     roi: AreaRoi,
     cube_index: int,
@@ -139,6 +166,9 @@ def compute_cell(
     chromatic_dir: Path,
     settings_dir: Path,
     naming: FrameNamingScheme,
+    all_rois: tuple[AreaRoi, ...] = (),
+    reference_exclusion_mode: str = DEFAULT_REFERENCE_EXCLUSION_MODE,
+    sample_exclusion_cache: dict[tuple[int, float], np.ndarray] | None = None,
     cancel_event=None,
 ) -> CellResult | None:
     """Compute one (ROI, cube) cell's reduced spectrum (raw sample/
@@ -151,6 +181,25 @@ def compute_cell(
     when actually analyzed" moment the provenance design doc calls for -
     a mask/chromatic file only gets created once a cell genuinely needing
     it is computed, never during planning/preview.
+
+    `reference_exclusion_mode` (see `provenance.REFERENCE_EXCLUSION_MODES`)
+    selects whether this ROI's reference ring drops pixels belonging to
+    sample apertures. In `"exclude_all_sample_rois"` mode the union is
+    built from **`all_rois`, every ROI - never a selected subset**, so a
+    cell's value never depends on what else happened to be selected when
+    it was computed (the old app's `all_selected_sample_mask` did depend
+    on that; see `provenance.REFERENCE_EXCLUSION_MODES`' docstring).
+
+    `sample_exclusion_cache` memoizes that union per (cube, wavelength) -
+    it is identical for every cell at a given frame, and rebuilding it per
+    cell would be O(ROIs x cells) rasterizations instead of O(ROIs). Passed
+    in rather than held internally so its lifetime is the caller's to
+    decide (one `run_analysis` call), following the same explicit
+    cache-as-parameter convention the old app's
+    `_scoped_formula_spectrum_task` already used for `roi_mask_cache`. No
+    lock: only one `AnalysisWorker` task runs at a time and it processes
+    cells sequentially, so unlike the old app's `ThreadPoolExecutor` there
+    is no concurrent access to guard.
 
     `cancel_event` (a `threading.Event`, typed loosely here to avoid
     importing `threading` into type signatures this file doesn't otherwise
@@ -196,6 +245,17 @@ def compute_cell(
             default_inner_radius_px=default_reference_inner_radius_px,
             default_outer_radius_px=default_reference_outer_radius_px,
         )
+        if reference_exclusion_mode == "exclude_all_sample_rois" and all_rois:
+            cache_key = (int(cube_index), float(wavelength_nm))
+            union = None if sample_exclusion_cache is None else sample_exclusion_cache.get(cache_key)
+            if union is None:
+                union = _sample_exclusion_union(all_rois, image_shape, wl_input.chromatic_affine)
+                if sample_exclusion_cache is not None:
+                    sample_exclusion_cache[cache_key] = union
+            # Sample pixels only - reference rings overlapping each other are
+            # counted normally (the maintainer's explicit framing of this
+            # mode; see REFERENCE_EXCLUSION_MODES).
+            reference_mask = reference_mask & ~union
         stage_seconds["rasterize"] += time.perf_counter() - t0
 
         t0 = time.perf_counter()
@@ -230,6 +290,16 @@ def compute_cell(
             chromatic=chromatic_ref,
             background=asdict(wl_input.background_settings),
             reduction_method=reduction_method,
+            reference_exclusion_mode=reference_exclusion_mode,
+            # Only recorded when it actually affects the result - in "none"
+            # mode other ROIs' geometry is genuinely not an input, so
+            # including it would invalidate every cell on any ROI move for
+            # no reason.
+            sample_exclusion=(
+                sample_exclusion_digest(all_rois)
+                if reference_exclusion_mode == "exclude_all_sample_rois" and all_rois
+                else None
+            ),
         )
 
     if not sample_values:

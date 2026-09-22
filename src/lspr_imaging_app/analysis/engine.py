@@ -50,12 +50,14 @@ from ..image_tools.geometry.model import GeometrySettings
 from ..roi.model import AreaRoi
 from .planner import AnalysisScope, CurrentInputs, plan_recompute
 from .provenance import (
+    DEFAULT_REFERENCE_EXCLUSION_MODE,
     FrameNamingScheme,
     InMemoryProvenanceStore,
     MaskSnapshotRef,
     SettingsSnapshot,
     persist_chromatic_snapshot,
     roi_geometry_fingerprint_fields,
+    sample_exclusion_digest,
 )
 from .store import read_all_cells, write_cell
 from .tasks import CellResult, WavelengthComputeInput, compute_cell
@@ -111,6 +113,7 @@ class AnalysisEngine(QObject):
         resolve_mask: Callable[[int, float], MaskResolution | None] | None = None,
         reduction_method: Callable[[], str] | None = None,
         default_reference_radii: Callable[[], tuple[float, float]] | None = None,
+        reference_exclusion_mode: Callable[[], str] = lambda: DEFAULT_REFERENCE_EXCLUSION_MODE,
         masks_dir: Path = Path("analysis/masks"),
         chromatic_dir: Path = Path("analysis/chromatic"),
         settings_dir: Path = Path("analysis/settings"),
@@ -141,7 +144,14 @@ class AnalysisEngine(QObject):
         constructs without error; only their *action* methods raise until
         actually wired). `AnalysisEngine()` with no arguments constructs
         fine; `run_analysis()`/`preview_recompute()` raise until real
-        callables are supplied. `data_h5_path` has a harmless placeholder
+        callables are supplied.
+
+        ``reference_exclusion_mode`` is the one exception to that rule -
+        it gets a real default rather than an `_unwired` raiser, because
+        unlike the others it isn't module state that has to be read from
+        somewhere: it's a plain analysis setting with a documented safe
+        default (`"none"`, i.e. no cross-ROI exclusion). See
+        `provenance.REFERENCE_EXCLUSION_MODES` for what the modes mean. `data_h5_path` has a harmless placeholder
         default too - rehydration below only checks whether that path
         exists (`store.read_all_cells`'s own contract: a missing file
         returns an empty result, not an error) and never writes anything,
@@ -158,6 +168,7 @@ class AnalysisEngine(QObject):
         self._resolve_mask = resolve_mask or _unwired("resolve_mask")
         self._reduction_method = reduction_method or _unwired("reduction_method")
         self._default_reference_radii = default_reference_radii or _unwired("default_reference_radii")
+        self._reference_exclusion_mode = reference_exclusion_mode
         self._trimmed_mean_fraction = trimmed_mean_fraction
         self._masks_dir = masks_dir
         self._chromatic_dir = chromatic_dir
@@ -242,6 +253,15 @@ class AnalysisEngine(QObject):
         background = self._background_settings()
         reduction_method = self._reduction_method()
         naming = self._naming()
+        exclusion_mode = self._reference_exclusion_mode()
+        all_rois = self._rois()
+        # Must match what compute_cell records, or every cell would look
+        # stale the moment it's compared against its own stored fingerprint.
+        exclusion_digest = (
+            sample_exclusion_digest(all_rois)
+            if exclusion_mode == "exclude_all_sample_rois" and all_rois
+            else None
+        )
         cube_settings: dict[int, dict[float, SettingsSnapshot]] = {}
         for cube_index in self._cube_indices():
             wavelength_settings: dict[float, SettingsSnapshot] = {}
@@ -265,9 +285,10 @@ class AnalysisEngine(QObject):
                 wavelength_settings[wavelength_nm] = SettingsSnapshot(
                     geometry=asdict(geometry), mask=mask_ref, chromatic=chromatic_ref,
                     background=asdict(background), reduction_method=reduction_method,
+                    reference_exclusion_mode=exclusion_mode, sample_exclusion=exclusion_digest,
                 )
             cube_settings[cube_index] = wavelength_settings
-        roi_geometries = {roi.area_roi_id: roi_geometry_fingerprint_fields(roi) for roi in self._rois()}
+        roi_geometries = {roi.area_roi_id: roi_geometry_fingerprint_fields(roi) for roi in all_rois}
         return CurrentInputs(
             reduction_method=reduction_method, cube_settings=cube_settings,
             roi_geometries=roi_geometries, settings_dir=self._settings_dir,
@@ -307,6 +328,14 @@ class AnalysisEngine(QObject):
         reduction_method = current_inputs.reduction_method
         default_inner, default_outer = self._default_reference_radii()
         cancel_event = self._worker.cancel_event
+        exclusion_mode = self._reference_exclusion_mode()
+        all_rois = tuple(rois_by_id.values())
+        # One cache for this whole run: the sample-exclusion union is
+        # identical for every cell at a given (cube, wavelength), so this
+        # turns O(ROIs x cells) rasterizations into O(ROIs). Scoped to the
+        # run rather than held on self so it can't go stale against a later
+        # ROI edit - a new run builds a fresh one.
+        sample_exclusion_cache: dict[tuple[int, float], np.ndarray] = {}
 
         def run() -> None:
             total = len(plan.to_recompute)
@@ -322,7 +351,8 @@ class AnalysisEngine(QObject):
                     reduction_method=reduction_method, trimmed_mean_fraction=self._trimmed_mean_fraction,
                     default_reference_inner_radius_px=default_inner, default_reference_outer_radius_px=default_outer,
                     masks_dir=self._masks_dir, chromatic_dir=self._chromatic_dir, settings_dir=self._settings_dir,
-                    naming=naming, cancel_event=cancel_event,
+                    naming=naming, all_rois=all_rois, reference_exclusion_mode=exclusion_mode,
+                    sample_exclusion_cache=sample_exclusion_cache, cancel_event=cancel_event,
                 )
                 if result is not None:
                     self._results[(roi_id, cube_index)] = result

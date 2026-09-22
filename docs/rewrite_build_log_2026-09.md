@@ -2510,3 +2510,107 @@ file format round-trips in isolation. Confirmed pyflakes-clean across
 - No committed, permanent test coverage - two more standalone,
   uncommitted scripts this entry, same open question as every prior entry.
 - Nothing from this entry has been committed yet.
+
+## 2026-09-23: reference-ring exclusion modes - a real correctness gap in already-committed `compute_cell`, found and closed
+
+Item 3 of the maintainer's "1-4" list was "the ROI-adjacency exception in
+`plan_recompute`" - investigating it (as flagged: it needed its own look
+at the old app's mechanism rather than a guess) turned up something
+bigger than a planner rule.
+
+**The gap**: `gui/analysis_tasks.py`'s `_means_for` (lines 994-999)
+subtracts `all_selected_sample_mask` - the union of every *selected* ROI's
+sample circle - from each ROI's reference ring, because "a nearby selected
+ROI's (often much brighter) sample spot can fall inside this ROI's
+reference ring and bias its reference mean." The rewrite's `compute_cell`
+takes a single `roi: AreaRoi` and had no way to do this - it was never
+given the information. So for any two ROIs close enough that one's sample
+circle overlaps the other's reference ring, it computed a **biased
+reference value**: a genuine correctness bug in code committed earlier the
+same session, not a missing optimization. Flagged to the maintainer before
+touching anything, per this repo's "flag any change that measurably
+alters computed values" rule (and because the fix changes an
+already-tested signature).
+
+**Maintainer's design decision, which simplified the hard part away**:
+make it a toggle with two modes rather than always-on, and - crucially -
+compute the exclusion from **all ROIs, never the selected subset**:
+- `"none"` (current default) - no cross-ROI exclusion at all.
+- `"exclude_all_sample_rois"` - a reference ring never counts a pixel
+  inside any ROI's sample aperture; overlapping *reference* rings are
+  still counted normally.
+
+The all-ROIs part is what makes this tractable: the old app's
+selection-scoped union meant a cell's correct value depended on what else
+happened to be selected when it ran - a genuinely unpleasant thing to
+fingerprint. As a deterministic function of ROI geometry alone, it's just
+another recorded input.
+
+**One deliberate difference from the old app**, documented at
+`_sample_exclusion_union`: the union includes the ROI's *own* sample
+aperture, unconditionally. The old app skipped the union entirely for a
+single selected ROI but included self once two were selected, so the same
+geometry behaved differently depending on how many ROIs were selected.
+Excluding every sample aperture always is both simpler and consistent.
+
+**Fingerprint handling** - the maintainer was unsure this was needed; it
+is, and cheaply: in exclusion mode, moving ROI X really does change ROI
+Y's reference pixels, so Y's stored value has to be invalidated when X
+moves or a reopened session shows a stale, biased number with nothing
+indicating it. `sample_exclusion_digest(all_rois)` is recorded in
+`SettingsSnapshot` - **only in that mode** (in `"none"` mode other ROIs
+genuinely aren't an input, and recording it would invalidate every cell on
+any ROI move for nothing). It lives in the snapshot rather than
+`ProvenanceRecord` because snapshots are already deduplicated behind a
+small integer version: embedding an all-ROI digest in every (ROI x cube)
+cell would be the difference between a few hundred KB and well over a GB
+at realistic counts.
+
+**Performance**: the union is identical for every cell at a given (cube,
+wavelength), so building it per cell would be O(ROIs x cells)
+rasterizations. `compute_cell` takes a `sample_exclusion_cache` dict and
+memoizes into it, making it O(ROIs); the cache is created per
+`run_analysis` call in `engine.py` (scoped to the run so it can't go stale
+against a later ROI edit). Passed as an explicit parameter rather than
+held internally, following the same convention the old app's
+`_scoped_formula_spectrum_task` already used for `roi_mask_cache` - minus
+its lock, since only one `AnalysisWorker` task runs at a time and it
+processes cells sequentially.
+
+Verified with a standalone script (16 checks) using geometry where ROI B's
+sample circle genuinely sits inside ROI A's reference ring, with B's
+sample filled far brighter than background so the bias is unmistakable
+rather than hypothetical:
+- `"none"` mode: A's reference is measurably biased upward by B.
+- `"exclude_all_sample_rois"`: A's reference is *exactly* the background
+  fill - the bias is gone, not merely reduced.
+- A's own sample value is byte-identical between modes (only the reference
+  ring is filtered), and overlapping reference rings are not over-excluded.
+- **The staleness property both ways**: in exclusion mode, moving a
+  different ROI changes this ROI's fingerprint; in `"none"` mode it
+  deliberately does not.
+- Cache correctness: populated once per (cube, wavelength), cached results
+  identical to uncached, and a second ROI through the same cache still
+  computes its own distinct value.
+- End-to-end through `AnalysisEngine`, including the planner agreeing with
+  what `compute_cell` recorded - without that, every cell would look
+  permanently stale.
+
+Confirmed pyflakes-clean, the rewrite-preview window still builds, and
+`AnalysisEngine()` with no arguments still constructs (the scaffold
+contract): `reference_exclusion_mode` is the one constructor callable with
+a real default rather than an `_unwired` raiser, since unlike the others
+it's a plain setting, not module state that must be read from somewhere.
+
+### Not done / still open, as of this entry
+
+- **Which mode should be the default** - currently `"none"`. Worth the
+  maintainer's explicit call: the stable app effectively behaved like
+  `"exclude_all_sample_rois"` whenever more than one ROI was selected, so
+  `"none"` matches its *single-ROI* behavior, not "what the old app did"
+  generally.
+- No UI exposes the toggle - injected setting only, no panel behind it.
+- `BackgroundModule`'s timeline extension (item 4 of the "1-4" list) - not
+  started.
+- `storage/session.py` - untouched, separate piece.
+- Nothing from this entry has been committed yet.

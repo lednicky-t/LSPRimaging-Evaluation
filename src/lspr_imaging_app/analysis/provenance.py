@@ -241,6 +241,62 @@ def persist_chromatic_snapshot(
 # -- settings snapshot: ties one combination of inputs together --------------
 
 
+REFERENCE_EXCLUSION_MODES: tuple[str, ...] = ("none", "exclude_all_sample_rois")
+"""How a reference ring treats pixels belonging to sample apertures
+(2026-09-22 maintainer decision - see `sample_exclusion_digest` below and
+`tasks.py`'s `compute_cell` for the mechanism):
+
+- ``"none"`` - no cross-ROI exclusion at all; a reference ring counts every
+  pixel inside it that the ignore mask doesn't remove.
+- ``"exclude_all_sample_rois"`` - a reference ring never counts a pixel that
+  falls inside *any* ROI's sample aperture. Reference rings overlapping each
+  other are still counted normally - only sample pixels are removed.
+
+**Deliberately computed from every ROI, never from "the currently selected
+ones"** - the old app (`gui/analysis_tasks.py`'s `all_selected_sample_mask`)
+built this union from the selected subset, which made a cell's correct value
+depend on *what else happened to be selected when it was computed* - a
+genuinely nasty dependency to fingerprint. Making it all-ROIs removes that
+entirely: the exclusion is a deterministic function of ROI geometry alone.
+"""
+
+DEFAULT_REFERENCE_EXCLUSION_MODE = "none"
+
+
+def sample_exclusion_digest(rois: list[AreaRoi] | tuple[AreaRoi, ...]) -> list:
+    """Every ROI's *sample*-side geometry, sorted by id - the fingerprint
+    input that makes `"exclude_all_sample_rois"` mode safe to cache.
+
+    Needed because in that mode, moving ROI X genuinely changes ROI Y's
+    reference-ring pixel set (X's sample circle carves into it), so Y's
+    stored value must be invalidated when X moves - otherwise a reopened
+    session shows a stale, biased reference value with nothing to indicate
+    it. Only the *sample* side matters: reference rings overlapping each
+    other are counted normally in this mode, so reference radii are not an
+    input to the exclusion.
+
+    Lives in `SettingsSnapshot` (not `ProvenanceRecord`) on purpose: the
+    snapshot is already deduplicated and referenced by a small integer
+    version, so this is written a handful of times per run rather than
+    embedded in all (ROI x cube) cells - the difference between a few
+    hundred KB and well over a GB at realistic ROI/cube counts.
+    """
+    digest: list = []
+    for roi in sorted(rois, key=lambda item: int(item.area_roi_id)):
+        digest.append({
+            "area_roi_id": int(roi.area_roi_id),
+            "center_x": float(roi.center_x),
+            "center_y": float(roi.center_y),
+            "sample_radius_px": float(roi.sample_radius_px),
+            "sample_diameter_px": roi.sample_diameter_px,
+            "sample_geometry_type": roi.sample_geometry_type,
+            "sample_mask": None if roi.sample_mask is None else {
+                "x0": roi.sample_mask.x0, "y0": roi.sample_mask.y0, "mask": roi.sample_mask.mask.tolist(),
+            },
+        })
+    return digest
+
+
 @dataclass(frozen=True)
 class SettingsSnapshot:
     """One combination of dataset-wide/per-frame inputs, as actually in
@@ -260,6 +316,12 @@ class SettingsSnapshot:
     chromatic: ChromaticSnapshotRef | None
     background: dict  # BackgroundSettings, as a plain dict - see docstring
     reduction_method: str
+    reference_exclusion_mode: str = DEFAULT_REFERENCE_EXCLUSION_MODE
+    sample_exclusion: list | None = None
+    """`sample_exclusion_digest(all_rois)`'s output when
+    `reference_exclusion_mode` needs it, `None` otherwise - see that
+    function's docstring for why this lives here rather than on
+    `ProvenanceRecord`."""
 
     def as_json(self) -> dict:
         return {
@@ -274,6 +336,8 @@ class SettingsSnapshot:
             },
             "background": self.background,
             "reduction_method": self.reduction_method,
+            "reference_exclusion_mode": self.reference_exclusion_mode,
+            "sample_exclusion": self.sample_exclusion,
         }
 
 
