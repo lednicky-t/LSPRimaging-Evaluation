@@ -23,12 +23,16 @@ leaving the whole class NotImplementedError pending that one method. Once
 callables) exist, wiring this up is a small change at construction time -
 nothing about the logic below needs to change.
 
-**`get_metric`/`get_spectrum`/`status_summary` are real, but backed by an
-in-memory store, not `data.h5`** - same reason: `data.h5`'s schema isn't
-designed yet (see `provenance.py`'s `ProvenanceStore`/
-`InMemoryProvenanceStore` docstrings). Everything computed via
-`run_analysis` in this session is queryable through these methods; none of
-it survives a restart yet.
+**`get_metric`/`get_spectrum`/`status_summary` are backed by an in-memory
+store, `data.h5`-persisted as of 2026-09-22 - not a per-query file read**:
+`data.h5` now exists (`store.py`), but every read still goes through the
+in-memory `_results`/`InMemoryProvenanceStore`, rehydrated from `data.h5`
+once at construction (`read_all_cells`) rather than read per-query - see
+`store.py`'s own module docstring for why (HDF5 doesn't support safe
+concurrent cross-thread read/write, and this sidesteps that by
+construction rather than adding locking). `run_analysis` writes each
+computed cell to both the in-memory store and `data.h5` together, so a
+restart now genuinely recovers prior results instead of starting empty.
 """
 
 from __future__ import annotations
@@ -53,6 +57,7 @@ from .provenance import (
     persist_chromatic_snapshot,
     roi_geometry_fingerprint_fields,
 )
+from .store import read_all_cells, write_cell
 from .tasks import CellResult, WavelengthComputeInput, compute_cell
 from .worker import AnalysisWorker
 
@@ -109,6 +114,7 @@ class AnalysisEngine(QObject):
         masks_dir: Path = Path("analysis/masks"),
         chromatic_dir: Path = Path("analysis/chromatic"),
         settings_dir: Path = Path("analysis/settings"),
+        data_h5_path: Path = Path("analysis/data.h5"),
         trimmed_mean_fraction: float = 0.10,
         parent: QObject | None = None,
     ) -> None:
@@ -135,7 +141,11 @@ class AnalysisEngine(QObject):
         constructs without error; only their *action* methods raise until
         actually wired). `AnalysisEngine()` with no arguments constructs
         fine; `run_analysis()`/`preview_recompute()` raise until real
-        callables are supplied.
+        callables are supplied. `data_h5_path` has a harmless placeholder
+        default too - rehydration below only checks whether that path
+        exists (`store.read_all_cells`'s own contract: a missing file
+        returns an empty result, not an error) and never writes anything,
+        so a scaffold-only construction is still side-effect-free.
         """
         super().__init__(parent)
         self._load_plane = load_plane or _unwired("load_plane")
@@ -152,11 +162,20 @@ class AnalysisEngine(QObject):
         self._masks_dir = masks_dir
         self._chromatic_dir = chromatic_dir
         self._settings_dir = settings_dir
+        self._data_h5_path = data_h5_path
 
         self._worker = AnalysisWorker()
         self._store = InMemoryProvenanceStore()
         self._results: dict[tuple[int, int], CellResult] = {}
         self._selected_roi_ids: tuple[int, ...] = ()
+
+        # Rehydrate from a previous session's data.h5, if any (sketch §5's
+        # "Restore semantics": "HDF5 present -> every cell's own provenance
+        # is already known"). A missing/empty file is a normal fresh-dataset
+        # case, not an error (store.read_all_cells's own contract).
+        for (roi_id, cube_index), result in read_all_cells(self._data_h5_path).items():
+            self._results[(roi_id, cube_index)] = result
+            self._store.record(roi_id, cube_index, result.provenance)
 
     # -- query interface ------------------------------------------------
 
@@ -308,6 +327,7 @@ class AnalysisEngine(QObject):
                 if result is not None:
                     self._results[(roi_id, cube_index)] = result
                     self._store.record(roi_id, cube_index, result.provenance)
+                    write_cell(self._data_h5_path, roi_id, cube_index, result)
                     self.store_updated.emit()
                 self.analysis_progress.emit(completed / max(total, 1))
             self.analysis_complete.emit()

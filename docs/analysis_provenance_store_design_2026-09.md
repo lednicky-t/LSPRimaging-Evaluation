@@ -174,14 +174,25 @@ Full detail and what's still deferred: `docs/rewrite_build_log_2026-09.md`,
   `settings_v2.json`, ...), same dedup-by-content-comparison rule as
   masks/chromatic models. `SettingsSnapshot.as_json()` is the real field
   shape (`geometry`, `mask`, `chromatic`, `background`, `reduction_method`).
+- **`data.h5` itself, built 2026-09-22** (`analysis/store.py`) - maintainer
+  confirmed compatibility with `packages/lspr_io`'s existing
+  `lspr_measurement` schema is explicitly not a goal right now (that schema's
+  `signature_hash` is one opaque combined hash, which is exactly the
+  single-hash shape this whole design moved away from - see "Why
+  file-based provenance" above); the store uses its own minimal,
+  independent identity stamp instead. Avoids HDF5's lack of safe
+  concurrent cross-thread read/write by construction, not locking:
+  `AnalysisEngine` bulk-loads `data.h5` into `InMemoryProvenanceStore`
+  once at construction and answers every query from memory afterward,
+  never reading the file per-query; `run_analysis` writes each computed
+  cell to both the in-memory store and the file together, from the single
+  background thread that ever computes anything. Verified: a second,
+  independent `AnalysisEngine` instance pointed at the same `data.h5` path
+  (simulating an app restart) rehydrates prior results with zero
+  recomputation.
 
 ## Still open
 
-- **`data.h5` itself** - blocks `ProvenanceStore`'s real implementation and
-  `AnalysisEngine.get_metric`/`get_spectrum`/`status_summary`'s real
-  persistence. `InMemoryProvenanceStore` (a working, non-persistent stand-in
-  with the same interface) is what everything currently runs against - see
-  the build log entry.
 - TIFF→OME-Zarr "carry masks/backgrounds along" tooling - noted in chat as
   likely unnecessary work (frame identity via `ImageKey` doesn't change
   between formats, so no re-keying is needed); at most a "copy the

@@ -2416,3 +2416,97 @@ and provenance implications, separate work not started. `AGENTS.md`'s §6a
 section updated to reflect both halves now being built.
 
 Not committed yet, alongside this entry.
+
+## 2026-09-22 (same day, continued): `data.h5` built (`analysis/store.py`) - the biggest remaining gap from the "1-4" list, closed
+
+Maintainer's second item from the earlier "1-4" priority list. Flagged in
+the prior `engine.py` entry as needing a check-in before design (touches
+the suite-wide HDF5 contract and `packages/lspr_io`) - checked in before
+writing anything, per that flag.
+
+**Real finding surfaced during that check-in, not assumed**: `packages/
+lspr_io` isn't a generic HDF5 helper library - it's `lspr_measurement`,
+an already-shipped, versioned schema (currently 6.7) the *stable* LSPRi
+Evaluation app already writes to, and it already does something
+structurally similar to this session's `analysis/` work: per-ROI
+absorbance spectra and sensorgram points (schema 6.4), every reduction
+method stored rather than just the active one (schema 6.7 - the same
+"don't bake Formula into what's stored" principle `tasks.py` was built
+around, independently arrived at), and a `signature_hash` (schema 6.6) -
+a sha256 of the combined preprocessing/chromatic/ROI/exclusion cache
+signature, serving the same "is this row still valid" role
+`ProvenanceRecord` does.
+
+**Maintainer's decision, presented with the real trade-off**: don't reuse
+`lspr_measurement`'s mechanism. Its `signature_hash` is one opaque
+combined hash - structurally the same shape as this session's *first*,
+rejected provenance draft (before the maintainer pushed back twice, first
+on the dedup table, then on filenames, in favor of separate,
+individually-versioned, human-readable files). Reusing it would have
+quietly reintroduced exactly what was steered away from. Confirmed:
+compatibility with the stable app's export format is not a goal right
+now; the store also doesn't need to follow the suite-wide HDF5
+identity-stamping convention if it's simpler not to - built with a light,
+independent identity stamp instead (`schema_name`/`schema_version`/
+`app_name`/`app_version`/`created_at_utc`, stamped once via `_ensure_
+identity`), not `lspr_io`'s registered schema.
+
+**Design decision to avoid HDF5's lack of safe concurrent cross-thread
+read/write, by construction rather than locking**: `compute_cell` runs on
+`AnalysisWorker`'s single background thread; adding a per-query file read
+to `get_metric`/`get_spectrum` (the originally-sketched `ProvenanceStore`
+shape) would have meant the GUI thread reading the file while the worker
+thread might be mid-write. Instead: `AnalysisEngine` bulk-loads `data.h5`
+into `InMemoryProvenanceStore` **once, at construction**
+(`store.read_all_cells`) and answers every query from memory afterward,
+exactly as it already did before this entry; `run_analysis` writes each
+computed cell to both the in-memory store and the file, from the same
+single thread that computes it. This is a real design decision, not a
+placeholder - `ProvenanceStore` (the originally-sketched per-query-read
+class) is documented as **superseded, not blocked**: no HDF5-reading
+implementation of it is planned, `InMemoryProvenanceStore` is the real,
+permanent store.
+
+**Layout**: `/cells/roi_<id>/cube_<index>/` groups, each holding
+`wavelengths_nm`/`sample_values`/`reference_values` datasets plus
+`roi_geometry_json`/`reduction_method`/`per_wavelength_settings_json`
+attrs (JSON-serialized `ProvenanceRecord` fields). A recompute deletes and
+recreates its cell's group - always replaces, never duplicates, matching
+sketch §5's "one ongoing file, not a version-hashed folder."
+
+**Real trap caught by testing, not assumed safe**: `ProvenanceRecord.
+per_wavelength_settings` is `tuple[tuple[float, int], ...]` - JSON
+round-trips a tuple-of-tuples as a list-of-lists, which would silently
+break the dataclass `==` comparison `plan_recompute` depends on
+(`(500.0, 1) != [500.0, 1]` in Python, even with identical logical
+content). `read_all_cells` explicitly reconstructs nested tuples; a
+dedicated test asserts the roundtripped `per_wavelength_settings` is a
+tuple of tuples, not lists, specifically to guard against this regressing
+silently.
+
+Verified with two standalone scripts. First (14 checks): `write_cell`/
+`read_all_cells` round-trip fidelity, including the exact property
+`plan_recompute` actually depends on (`CellResult == CellResult` and
+`ProvenanceRecord == ProvenanceRecord` after a full write-then-read
+cycle, not just "the numbers look right"), the tuple-vs-list trap above,
+overwrite-not-duplicate semantics on recompute, and identity-stamp
+presence. Second (9 checks) - **the real end-to-end restart test**: a
+completely independent second `AnalysisEngine` instance, constructed
+fresh and pointed at the same `data.h5` path (simulating an app restart),
+rehydrates the prior session's result with **zero** `load_plane` calls -
+proving persistence actually works across a restart, not just that the
+file format round-trips in isolation. Confirmed pyflakes-clean across
+`analysis/` and the rewrite-preview window still builds.
+
+### Not done / still open, as of this entry
+
+- The ROI-adjacency exception in `plan_recompute` - unchanged, still not
+  handled (see the earlier `analysis/` entry).
+- `preview_recompute`'s settings-snapshot side effect - unchanged, still a
+  known simplification (see the earlier `analysis/` entry).
+- `BackgroundModule`'s timeline extension (item 4 of the "1-4" list) - not
+  started.
+- `storage/session.py` - untouched, separate piece.
+- No committed, permanent test coverage - two more standalone,
+  uncommitted scripts this entry, same open question as every prior entry.
+- Nothing from this entry has been committed yet.

@@ -386,37 +386,41 @@ def compute_fingerprint(
 
 
 class ProvenanceStore:
-    """Read-only view of what's on disk now - the ``stored`` argument to
-    :func:`~lspr_imaging_app.analysis.planner.plan_recompute`.
+    """Documents the read-only interface :func:`~lspr_imaging_app.analysis.
+    planner.plan_recompute` needs for its ``stored`` argument -
+    ``fingerprint_for(roi_id, cube_index) -> ProvenanceRecord | None``.
+    Not an ABC/Protocol (nothing enforces it at runtime - `plan_recompute`
+    works with any duck-typed object that has the method, verified by its
+    own tests using a hand-written fake with no inheritance from this
+    class), just a documented shape.
 
-    **Not yet implemented - blocked on `data.h5`'s schema**, not merely
-    unstarted: reading "what's currently stored for this cell" means
-    reading `analysis/data.h5`, whose actual HDF5 layout hasn't been
-    designed yet (deferred pending the suite-wide HDF5 identity-field
-    contract and whether to reuse `packages/lspr_io`'s schema-stamping
-    helpers - see the design doc / chat history, 2026-09-22). Everything
-    else in this module (fingerprint computation, file-backed snapshot
-    persistence) is real and usable without this.
-
-    Use `InMemoryProvenanceStore` (below) in the meantime - same
-    `fingerprint_for` interface, so `plan_recompute`/`AnalysisEngine` can
-    run for real today; swap it for this class once `data.h5` exists, no
-    other caller code needs to change.
+    **Superseded by a different design (2026-09-22), not "blocked" -
+    no separate `data.h5`-reading implementation of this class was ever
+    built or is planned.** `data.h5` exists now (`store.py`), but the
+    design that got built avoids ever reading it per-query at all: HDF5
+    doesn't support safe concurrent cross-thread read/write, so
+    `AnalysisEngine` instead bulk-loads everything into
+    `InMemoryProvenanceStore` once at construction (`store.read_all_cells`)
+    and answers every query from memory afterward - see `store.py`'s
+    module docstring for the full reasoning. `InMemoryProvenanceStore` is
+    the real, permanent implementation of this interface, not a temporary
+    stand-in.
     """
 
     def fingerprint_for(self, roi_id: int, cube_index: int) -> ProvenanceRecord | None:
-        raise NotImplementedError("blocked on analysis/data.h5's schema - see class docstring")
+        raise NotImplementedError("not implemented and not planned - see class docstring")
 
 
 class InMemoryProvenanceStore:
-    """A working, non-persistent stand-in for `ProvenanceStore` - same
-    `fingerprint_for(roi_id, cube_index)` interface, backed by a plain
-    dict instead of `data.h5`. **Temporary**: everything here is lost on
-    process exit, by design - this exists so `plan_recompute`/
-    `AnalysisEngine` can actually run end-to-end today rather than waiting
-    on `data.h5`'s schema to be designed first. `record()` is how a caller
-    (`AnalysisEngine`, after a real `compute_cell` call) adds an entry;
-    nothing in this class computes anything itself.
+    """The real, permanent implementation of the `ProvenanceStore`
+    interface - not a temporary stand-in (an earlier version of this
+    docstring called it one, before `data.h5`/`store.py` existed and the
+    write-through-plus-bulk-rehydration design was settled; see
+    `ProvenanceStore`'s own docstring). Backed by a plain in-memory dict,
+    populated either by `record()` (called by `AnalysisEngine` after a real
+    `compute_cell` call) or by bulk-loading `data.h5`'s contents at
+    construction (`store.read_all_cells`) - either way, nothing in this
+    class touches a file itself.
     """
 
     def __init__(self) -> None:
