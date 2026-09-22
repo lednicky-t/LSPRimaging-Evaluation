@@ -1,41 +1,429 @@
-"""Per-cell provenance records + fingerprint computation + dedup table
-(sketch §5 "The analysis store: one file, per-cell provenance"). New code,
+"""Per-cell provenance: fingerprinting + the file-backed dedup/versioning
+scheme (sketch §5 "The analysis store: one file, per-cell provenance", full
+detail in `docs/analysis_provenance_store_design_2026-09.md`). New code,
 not a port.
 
-No Qt import allowed in this file (AGENTS.md testing rule). Still open
-(sketch §9, item 1): ``provenance_table.json``'s deduplication scheme (how
-cells reference a shared fingerprint blob without repeating it) is named but
-not designed - this file's dedup-table shape is a placeholder.
+No Qt import allowed in this file (AGENTS.md testing rule) - every function
+here takes plain, already-resolved values (settings dataclasses, arrays,
+plain dicts), never a live QObject module reference. Gathering those values
+*from* the real modules (`GeometryModule.settings()`,
+`MaskModule.resolve_mask_source()`, `ChromaticModule.affine_for()`, ...) is
+`engine.py`/`worker.py`'s job, not this file's.
+
+**Six provenance inputs, not five** - widened from the sketch's original
+list 2026-09-22 (see the design doc): `GeometryModule`'s crop/rotate/flip
+settings are a real fingerprint input too, since they change the pixel grid
+every ROI's coordinates are already defined against.
 """
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
+from pathlib import Path
+
+import numpy as np
+
+from ..roi.model import AreaRoi
+
+# -- naming: frame identity + adaptive numeric formatting --------------------
+
+
+def cube_digit_width(max_cube_index: int) -> int:
+    """Zero-padding width for a cube index, derived from the real dataset
+    (the highest cube index actually present) rather than a fixed guess -
+    `cube007` sorts correctly next to `cube008`/`cube100` in a folder
+    listing; an unpadded `cube7`/`cube8`/`cube100` would not."""
+    return max(len(str(max(int(max_cube_index), 0))), 1)
+
+
+def wavelength_decimal_precision(wavelengths_nm: list[float], max_decimals: int = 3) -> int:
+    """Smallest decimal precision at which every wavelength in the dataset
+    stays distinguishable from every other - checked once per dataset, then
+    used for every wavelength-derived filename in it (mixing precisions
+    within one dataset would break simple pattern-matching/sorting). `0`
+    (whole nm, e.g. `wl500`) is expected to be sufficient for real
+    acquisition hardware - confirmed with the maintainer 2026-09-22 - but
+    this stays correct if two configured wavelengths ever round to the same
+    whole nanometer."""
+    for decimals in range(max_decimals + 1):
+        rounded = [round(float(wl), decimals) for wl in wavelengths_nm]
+        if len(set(rounded)) == len(wavelengths_nm):
+            return decimals
+    return max_decimals  # pathological collision even at max precision - not this scheme's problem to solve further
+
+
+def format_wavelength(wavelength_nm: float, decimals: int) -> str:
+    if decimals == 0:
+        return str(int(round(float(wavelength_nm))))
+    return f"{float(wavelength_nm):.{decimals}f}"
+
+
+@dataclass(frozen=True)
+class FrameNamingScheme:
+    """Per-dataset numeric formatting, derived once (see `cube_digit_width`/
+    `wavelength_decimal_precision`) and reused for every provenance filename
+    in that dataset's `analysis/` folder."""
+
+    cube_digits: int
+    wavelength_decimals: int
+
+    @classmethod
+    def for_dataset(cls, cube_indices: list[int], wavelengths_nm: list[float]) -> "FrameNamingScheme":
+        max_cube = max(cube_indices) if cube_indices else 0
+        return cls(
+            cube_digits=cube_digit_width(max_cube),
+            wavelength_decimals=wavelength_decimal_precision(wavelengths_nm),
+        )
+
+    def frame_tag(self, cube_index: int, wavelength_nm: float) -> str:
+        cube_part = str(int(cube_index)).zfill(self.cube_digits)
+        wl_part = format_wavelength(wavelength_nm, self.wavelength_decimals)
+        return f"cube{cube_part}_wl{wl_part}"
+
+
+# -- versioning + dedup: sequential per-group counters, no hashing -----------
+
+
+def next_version(existing: dict[int, object], candidate: object, *, equal) -> tuple[int, bool]:
+    """Core dedup/versioning rule shared by every provenance-input kind
+    (mask/background/chromatic/settings-snapshot): `existing` maps already-
+    assigned version numbers (1-based) to their stored content for this same
+    group (e.g. this exact (cube, wavelength, tag) group - there are only
+    ever a handful of versions per group in practice, so a direct content
+    comparison is cheap and needs no hashing - see the design doc's
+    "Versioning and dedup" section for why this replaced an earlier
+    hash-based draft). Returns `(version, is_new)`: if `candidate` matches
+    an existing version's content (via the caller-supplied `equal`
+    predicate), reuses that version number and `is_new=False` - nothing new
+    should be written. Otherwise returns the next unused version number and
+    `is_new=True`.
+    """
+    for version, stored in existing.items():
+        if equal(stored, candidate):
+            return version, False
+    return (max(existing.keys()) + 1 if existing else 1), True
+
+
+def _arrays_equal(a: np.ndarray, b: np.ndarray) -> bool:
+    return a.shape == b.shape and bool(np.array_equal(a, b))
+
+
+def _json_values_equal(a: dict, b: dict) -> bool:
+    return a == b
+
+
+# -- mask / background / chromatic snapshots: file-backed, versioned ---------
+
+
+@dataclass(frozen=True)
+class MaskSnapshotRef:
+    """A reference to one versioned mask image file - what a
+    `ProvenanceRecord`/settings snapshot actually stores, not the pixel
+    data itself."""
+
+    cube_index: int
+    wavelength_nm: float
+    tag: str  # "persi" or "indiv" - see design doc; matches MaskModule's own "persistent"/"individual" scope
+    version: int
+
+    def filename(self, naming: FrameNamingScheme) -> str:
+        return f"mask_{naming.frame_tag(self.cube_index, self.wavelength_nm)}_{self.tag}_v{self.version}.png"
+
+
+@dataclass(frozen=True)
+class ChromaticSnapshotRef:
+    cube_index: int
+    wavelength_nm: float
+    version: int
+
+    def filename(self, naming: FrameNamingScheme) -> str:
+        return f"chromatic_{naming.frame_tag(self.cube_index, self.wavelength_nm)}_v{self.version}.json"
+
+
+def _existing_mask_versions(masks_dir: Path, cube_index: int, wavelength_nm: float, tag: str, naming: FrameNamingScheme) -> dict[int, np.ndarray]:
+    """Reads back whatever mask versions already exist on disk for this
+    exact (cube, wavelength, tag) group, for `next_version` to compare
+    against. Local import of `cv2` (this app's existing dependency for
+    16-bit-safe PNG I/O - see the design doc's "Formats" section) kept
+    inside the function so this module stays importable without it in
+    contexts that never touch the filesystem (e.g. unit tests that only
+    exercise `compute_fingerprint`)."""
+    import cv2
+
+    prefix = f"mask_{naming.frame_tag(cube_index, wavelength_nm)}_{tag}_v"
+    found: dict[int, np.ndarray] = {}
+    if not masks_dir.is_dir():
+        return found
+    for path in masks_dir.glob(f"{prefix}*.png"):
+        suffix = path.stem[len(prefix):]
+        if not suffix.isdigit():
+            continue
+        version = int(suffix)
+        image = cv2.imread(str(path), cv2.IMREAD_UNCHANGED)
+        if image is not None:
+            found[version] = image
+    return found
+
+
+def persist_mask_snapshot(
+    masks_dir: Path,
+    mask_8bit: np.ndarray,
+    *,
+    cube_index: int,
+    wavelength_nm: float,
+    tag: str,
+    naming: FrameNamingScheme,
+) -> MaskSnapshotRef:
+    """Write `mask_8bit` (a coverage-fraction mask, 0-255, matching the same
+    fractional-weighting headroom as ROI's §6a rasterization) as a new
+    versioned file, or return a reference to an already-identical existing
+    version without writing anything - the "written lazily, only when
+    actually analyzed" rule (design doc) is the *caller's* job (only call
+    this once a cell is genuinely being computed), not something this
+    function enforces itself.
+    """
+    if tag not in ("persi", "indiv"):
+        raise ValueError(f"tag must be 'persi' or 'indiv', got {tag!r}")
+    mask_8bit = np.asarray(mask_8bit, dtype=np.uint8)
+    existing = _existing_mask_versions(masks_dir, cube_index, wavelength_nm, tag, naming)
+    version, is_new = next_version(existing, mask_8bit, equal=_arrays_equal)
+    ref = MaskSnapshotRef(cube_index=cube_index, wavelength_nm=wavelength_nm, tag=tag, version=version)
+    if is_new:
+        import cv2
+
+        masks_dir.mkdir(parents=True, exist_ok=True)
+        cv2.imwrite(str(masks_dir / ref.filename(naming)), mask_8bit)
+    return ref
+
+
+def _existing_chromatic_versions(chromatic_dir: Path, cube_index: int, wavelength_nm: float, naming: FrameNamingScheme) -> dict[int, dict]:
+    prefix = f"chromatic_{naming.frame_tag(cube_index, wavelength_nm)}_v"
+    found: dict[int, dict] = {}
+    if not chromatic_dir.is_dir():
+        return found
+    for path in chromatic_dir.glob(f"{prefix}*.json"):
+        suffix = path.stem[len(prefix):]
+        if not suffix.isdigit():
+            continue
+        try:
+            found[int(suffix)] = json.loads(path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            continue
+    return found
+
+
+def persist_chromatic_snapshot(
+    chromatic_dir: Path,
+    affine_matrix: np.ndarray,
+    *,
+    cube_index: int,
+    wavelength_nm: float,
+    naming: FrameNamingScheme,
+    round_decimals: int = 9,
+) -> ChromaticSnapshotRef:
+    """Same lazy/versioned/deduplicated treatment as
+    `persist_mask_snapshot`, for a chromatic affine matrix instead of a mask
+    image. `round_decimals` matches sketch §5's fixed rounding (absorbs
+    floating-point re-serialization noise, not a materiality judgment) so
+    two runs that land on the same model don't spuriously get different
+    versions."""
+    payload = {"affine_matrix": np.round(np.asarray(affine_matrix, dtype=np.float64), round_decimals).tolist()}
+    existing = _existing_chromatic_versions(chromatic_dir, cube_index, wavelength_nm, naming)
+    version, is_new = next_version(existing, payload, equal=_json_values_equal)
+    ref = ChromaticSnapshotRef(cube_index=cube_index, wavelength_nm=wavelength_nm, version=version)
+    if is_new:
+        chromatic_dir.mkdir(parents=True, exist_ok=True)
+        (chromatic_dir / ref.filename(naming)).write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    return ref
+
+
+# -- settings snapshot: ties one combination of inputs together --------------
+
+
+@dataclass(frozen=True)
+class SettingsSnapshot:
+    """One combination of dataset-wide/per-frame inputs, as actually in
+    effect when a cell was computed. Dedup'd and versioned the same way as
+    masks/chromatic models (a flat, dataset-wide sequential counter - not
+    tied to one specific frame the way a mask edit is, since a "combination"
+    isn't authored at a single frame).
+
+    **Background is a plain settings dict here, not a `MaskSnapshotRef`-
+    style image reference** - interim scope, see the design doc:
+    `BackgroundModule` has no persistent/individual timeline yet to hang a
+    per-frame image on, unlike `MaskModule`. Revisit once/if it gets one.
+    """
+
+    geometry: dict  # GeometrySettings, as a plain dict (small, dataset-wide, changes rarely)
+    mask: MaskSnapshotRef | None
+    chromatic: ChromaticSnapshotRef | None
+    background: dict  # BackgroundSettings, as a plain dict - see docstring
+    reduction_method: str
+
+    def as_json(self) -> dict:
+        return {
+            "geometry": self.geometry,
+            "mask": None if self.mask is None else {
+                "cube_index": self.mask.cube_index, "wavelength_nm": self.mask.wavelength_nm,
+                "tag": self.mask.tag, "version": self.mask.version,
+            },
+            "chromatic": None if self.chromatic is None else {
+                "cube_index": self.chromatic.cube_index, "wavelength_nm": self.chromatic.wavelength_nm,
+                "version": self.chromatic.version,
+            },
+            "background": self.background,
+            "reduction_method": self.reduction_method,
+        }
+
+
+def _existing_settings_versions(settings_dir: Path) -> dict[int, dict]:
+    found: dict[int, dict] = {}
+    if not settings_dir.is_dir():
+        return found
+    for path in settings_dir.glob("settings_v*.json"):
+        suffix = path.stem[len("settings_v"):]
+        if not suffix.isdigit():
+            continue
+        try:
+            found[int(suffix)] = json.loads(path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            continue
+    return found
+
+
+def persist_settings_snapshot(settings_dir: Path, snapshot: SettingsSnapshot) -> int:
+    """Write `snapshot` as a new version, or return the version number of an
+    already-identical existing one. Returns the plain version number (the
+    snapshot's own id) - `ProvenanceRecord` stores these, not the full
+    snapshot content."""
+    payload = snapshot.as_json()
+    existing = _existing_settings_versions(settings_dir)
+    version, is_new = next_version(existing, payload, equal=_json_values_equal)
+    if is_new:
+        settings_dir.mkdir(parents=True, exist_ok=True)
+        (settings_dir / f"settings_v{version}.json").write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    return version
+
+
+# -- the cell-level provenance record ----------------------------------------
+
+
+def roi_geometry_fingerprint_fields(roi: AreaRoi) -> dict:
+    """Just the geometry-affecting fields of `roi` - deliberately excludes
+    metadata (score, label, notes, created_by, quality_score, inferred,
+    support_*, array_id, per_wavelength) that doesn't affect where pixels
+    are read from, matching the sketch's cosmetic-vs-computational split
+    applied to a ROI's own fields, not just to other modules' settings.
+    Shared by `compute_fingerprint`'s callers (`tasks.py`, `engine.py`) so
+    there's exactly one definition of what counts as "this ROI's geometry"
+    for provenance purposes."""
+    return {
+        "center_x": float(roi.center_x),
+        "center_y": float(roi.center_y),
+        "sample_radius_px": float(roi.sample_radius_px),
+        "sample_geometry_type": roi.sample_geometry_type,
+        "sample_mask": None if roi.sample_mask is None else {
+            "x0": roi.sample_mask.x0, "y0": roi.sample_mask.y0, "mask": roi.sample_mask.mask.tolist(),
+        },
+        "sample_diameter_px": roi.sample_diameter_px,
+        "reference_geometry_type": roi.reference_geometry_type,
+        "reference_mask": None if roi.reference_mask is None else {
+            "x0": roi.reference_mask.x0, "y0": roi.reference_mask.y0, "mask": roi.reference_mask.mask.tolist(),
+        },
+        "reference_inner_diameter_px": roi.reference_inner_diameter_px,
+        "reference_outer_diameter_px": roi.reference_outer_diameter_px,
+    }
 
 
 @dataclass(frozen=True)
 class ProvenanceRecord:
-    """The narrow, complete set of discretized inputs that produced one
-    (ROI, cube) cell's value: this ROI's own geometry, the mask state within
-    this ROI's own reach box only, the chromatic affine for that image key,
-    the background model, the reduction method (sketch §5). Position/
-    radius/model values are compared with a small fixed rounding (e.g.
-    1e-9) to absorb floating-point re-serialization noise, not as a
-    materiality judgment (sketch §5, "Simplified 2026-09-20")."""
+    """The complete set of inputs that produced one (ROI, cube) cell's
+    stored spectrum. `roi_geometry` and `reduction_method` don't vary across
+    a cube's wavelengths (ROI position is not time/wavelength-varying yet;
+    reduction method is a session-wide choice); `per_wavelength_settings`
+    can, since a mask/chromatic individual override is frame-specific -
+    holds one settings-snapshot version id per wavelength actually present
+    in this cell's spectrum."""
+
+    roi_geometry: dict  # this ROI's own AreaRoi geometry fields, as a plain dict
+    reduction_method: str
+    per_wavelength_settings: tuple[tuple[float, int], ...]  # (wavelength_nm, settings_snapshot_version)
+
+
+def compute_fingerprint(
+    roi_geometry: dict,
+    reduction_method: str,
+    per_wavelength_settings: dict[float, SettingsSnapshot],
+    settings_dir: Path,
+) -> ProvenanceRecord:
+    """Compute the current, live fingerprint for one (ROI, cube) cell -
+    cheap: `per_wavelength_settings`'s snapshots are already-resolved plain
+    data (the caller gathered them from the real modules), this only needs
+    to resolve each into its version id via `persist_settings_snapshot`'s
+    same dedup rule - but does **not** persist anything to `data.h5` or
+    write mask/chromatic image files itself (those are written separately,
+    by whichever code actually persists a computed cell - see
+    `persist_mask_snapshot`/`persist_chromatic_snapshot`, called by the
+    caller before this, once real content exists to snapshot).
+
+    Note this still touches `settings_dir` (reads/writes the settings-
+    snapshot JSON) - not literally zero I/O despite "cheap, no pixel
+    access" framing inherited from the sketch's original wording; "cheap"
+    means no image decode/raster/reduce work, not zero disk access.
+    """
+    resolved = tuple(
+        sorted(
+            (wavelength_nm, persist_settings_snapshot(settings_dir, snapshot))
+            for wavelength_nm, snapshot in per_wavelength_settings.items()
+        )
+    )
+    return ProvenanceRecord(
+        roi_geometry=roi_geometry,
+        reduction_method=reduction_method,
+        per_wavelength_settings=resolved,
+    )
 
 
 class ProvenanceStore:
     """Read-only view of what's on disk now - the ``stored`` argument to
-    :func:`~lspr_imaging_app.analysis.planner.plan_recompute`. Not yet
-    implemented - scaffolding only."""
+    :func:`~lspr_imaging_app.analysis.planner.plan_recompute`.
+
+    **Not yet implemented - blocked on `data.h5`'s schema**, not merely
+    unstarted: reading "what's currently stored for this cell" means
+    reading `analysis/data.h5`, whose actual HDF5 layout hasn't been
+    designed yet (deferred pending the suite-wide HDF5 identity-field
+    contract and whether to reuse `packages/lspr_io`'s schema-stamping
+    helpers - see the design doc / chat history, 2026-09-22). Everything
+    else in this module (fingerprint computation, file-backed snapshot
+    persistence) is real and usable without this.
+
+    Use `InMemoryProvenanceStore` (below) in the meantime - same
+    `fingerprint_for` interface, so `plan_recompute`/`AnalysisEngine` can
+    run for real today; swap it for this class once `data.h5` exists, no
+    other caller code needs to change.
+    """
 
     def fingerprint_for(self, roi_id: int, cube_index: int) -> ProvenanceRecord | None:
-        """Not yet implemented - scaffolding only."""
-        raise NotImplementedError
+        raise NotImplementedError("blocked on analysis/data.h5's schema - see class docstring")
 
 
-def compute_fingerprint(*args: object, **kwargs: object) -> ProvenanceRecord:
-    """Compute the current, live fingerprint for one (ROI, cube) cell -
-    cheap, no pixel access, just reading current settings/geometry (sketch
-    §5). Not yet implemented - scaffolding only."""
-    raise NotImplementedError
+class InMemoryProvenanceStore:
+    """A working, non-persistent stand-in for `ProvenanceStore` - same
+    `fingerprint_for(roi_id, cube_index)` interface, backed by a plain
+    dict instead of `data.h5`. **Temporary**: everything here is lost on
+    process exit, by design - this exists so `plan_recompute`/
+    `AnalysisEngine` can actually run end-to-end today rather than waiting
+    on `data.h5`'s schema to be designed first. `record()` is how a caller
+    (`AnalysisEngine`, after a real `compute_cell` call) adds an entry;
+    nothing in this class computes anything itself.
+    """
+
+    def __init__(self) -> None:
+        self._fingerprints: dict[tuple[int, int], ProvenanceRecord] = {}
+
+    def fingerprint_for(self, roi_id: int, cube_index: int) -> ProvenanceRecord | None:
+        return self._fingerprints.get((roi_id, cube_index))
+
+    def record(self, roi_id: int, cube_index: int, fingerprint: ProvenanceRecord) -> None:
+        self._fingerprints[(roi_id, cube_index)] = fingerprint

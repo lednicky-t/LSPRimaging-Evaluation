@@ -210,15 +210,20 @@ itself isn't one of that cell's inputs. This matches your own observation
 that changing the calculation range is a "global tool that definitely
 won't touch anything."
 
+**File shape superseded (2026-09-22)** - the sketch below (one
+`provenance_table.json`, dedup by hashed fingerprint blob) was the original
+placeholder; design discussion replaced it with a file-per-provenance-input
+scheme instead (masks/backgrounds as real image files, sequential per-frame
+version numbers instead of hashing, settings-snapshot JSONs that reference
+them). Full detail: `docs/analysis_provenance_store_design_2026-09.md`.
+This section's *rules* above (one HDF5 file, per-cell fingerprints, the
+locality rules) are unaffected - only the on-disk shape of a cell's
+provenance record changed.
+
 ```
 analysis/
   data.h5                 # every (ROI, cube) reduced value + its provenance record
-  provenance_table.json   # small deduplicated table of distinct fingerprint blobs -
-                           # cells reference one by id, avoiding repeating identical
-                           # settings/model state per cell; doubles as the
-                           # human-readable "what produced this value" export
-                           # (chromatic model coefficients included, for full
-                           # export reproducibility - see the Chromatic note in §7)
+  provenance_table.json   # superseded - see docs/analysis_provenance_store_design_2026-09.md
 ```
 
 ### Restore semantics (same spirit, simpler in practice)
@@ -527,8 +532,11 @@ question 3 from the previous round).
 
 Still open:
 
-1. `provenance_table.json`'s deduplication scheme (how cells reference a
-   shared fingerprint blob without repeating it) is named but not designed.
+1. ~~`provenance_table.json`'s deduplication scheme~~ - resolved
+   2026-09-22, see `docs/analysis_provenance_store_design_2026-09.md`
+   (file-per-input, sequential per-frame versions, no hashing). A few
+   pieces of that design are themselves still open - see that doc's own
+   "Still open" section.
 2. Fractional pixel weighting (§6a): the raster half is built
    (`roi/rasterize.py`'s `rasterize_fractional`, 2026-09-22 - supersample-
    and-downsample, one shared engine for every geometry type). The

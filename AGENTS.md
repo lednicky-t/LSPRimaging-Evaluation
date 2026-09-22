@@ -166,7 +166,11 @@ live yet). Full detail: `undo/manager.py`'s module docstring.
 
 ## The analysis store and recompute rules
 
-Full detail: `docs/rewrite_architecture_sketch_2026-09.md` §5, §6, §6a.
+Full detail: `docs/rewrite_architecture_sketch_2026-09.md` §5, §6, §6a; the
+on-disk shape of a cell's provenance record (masks/backgrounds as real
+image files, per-frame version numbers, settings-snapshot JSONs) is in
+`docs/analysis_provenance_store_design_2026-09.md`, which supersedes §5's
+original `provenance_table.json` sketch.
 
 - **One ongoing HDF5 file per dataset.** Not a folder of settings-hashed
   version files — that design was proposed and explicitly rejected.

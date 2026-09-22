@@ -2062,3 +2062,262 @@ committed yet.
   uncommitted script. Where rewrite-branch tests should permanently live
   is an open question, not yet decided.
 - Nothing from this entry has been committed yet.
+
+## 2026-09-22: `analysis/` built - provenance, planner, worker, tasks,
+## engine all real; store still in-memory (`data.h5` not designed yet)
+
+Maintainer's direction for this session, explicitly: build `analysis/`
+"correctly from the start," don't be limited by the old app's design, and
+flag anything deferred rather than let it get lost. What follows is a
+large batch - five files went from `NotImplementedError` scaffolds to real,
+individually-verified implementations - preceded by an extensive design
+conversation (see `docs/analysis_provenance_store_design_2026-09.md`,
+built the same session) that settled the provenance file scheme before any
+of this was written.
+
+### `provenance.py` - naming, versioning, dedup, fingerprinting
+
+Real implementation of the whole design doc: `FrameNamingScheme` (adaptive
+cube-digit-padding and wavelength-decimal-precision, both derived from the
+real dataset, not guessed); `next_version` (the shared sequential-
+version-with-content-comparison dedup rule, no hashing - the same
+mechanism for masks, chromatic models, and settings snapshots);
+`persist_mask_snapshot`/`persist_chromatic_snapshot`/
+`persist_settings_snapshot` (lazy, file-backed, dedup'd); `ProvenanceRecord`
+(real fields) and `compute_fingerprint`. `ProvenanceStore` stays
+`NotImplementedError` - genuinely blocked on `data.h5`'s schema, not
+unstarted (see "Not done" below) - but a new `InMemoryProvenanceStore`
+implements the identical `fingerprint_for` interface as a working,
+non-persistent stand-in, which is what everything below actually runs
+against today.
+
+**Two real findings, both fixed before writing any provenance code**:
+1. `MaskModule` (`image_tools/mask/module.py`) already implements exactly
+   the persistent/individual timeline this session's design conversation
+   spent a long time re-deriving from scratch - built 2026-09-21, a prior
+   session, using `scope: "individual" | "persistent"` as its real,
+   shipped terminology. The design doc's filename tag was `persi`/`local`
+   at that point - renamed to `persi`/`indiv` to match the real code
+   instead of inventing a second word for the same concept.
+2. Geometry (`GeometryModule`'s crop/rotate/flip) was missing from the
+   sketch's original five-input provenance list - a real gap, not stylistic:
+   crop/rotate changes the pixel grid every ROI's coordinates are already
+   defined against, so a geometry change silently not triggering recompute
+   would be a correctness bug. Widened to six inputs; design doc updated.
+
+Verified with a standalone script (26 checks): naming/padding edge cases,
+dedup reusing identical content vs. assigning new versions for different
+content, floating-point noise below the rounding threshold still dedups,
+8-bit mask and 16-bit background PNG round-trip exactly through `cv2`
+(confirming the format choice from the design conversation actually works,
+not just "should work"), and - the property `plan_recompute` actually
+depends on - recomputing an unchanged live fingerprint produces an
+*exactly equal* `ProvenanceRecord`, while a real input change produces a
+different one.
+
+### `planner.py` - `plan_recompute`, correctness-first
+
+Real `plan_recompute`/`CurrentInputs`/`RecomputePlan`/`AnalysisScope`.
+Scoped deliberately: recomputes every in-scope cell's live fingerprint
+fresh and compares to stored - always correct, not yet optimized to skip
+fingerprint recomputation for cells a locality rule could already rule out
+unaffected. **The one locality rule that's a correctness requirement, not
+an optimization - the ROI-adjacency exception (sketch §6: a nearby ROI's
+reference-ring exclusion can affect this ROI's own fingerprint too) - is
+NOT handled**, flagged explicitly in the module docstring as a named
+follow-up needing its own investigation into the old app's exact mechanism,
+not guessed at.
+
+**Real tension found and documented, not silently resolved**:
+`compute_fingerprint` (needed to get a *comparable* live fingerprint) calls
+`persist_settings_snapshot` as a side effect, which can write a new
+settings-snapshot JSON even during a pure preview/plan that never actually
+computes anything. This is *not* the "don't store every edit" problem the
+design doc's lazy-write rule was protecting against - that rule is about
+mask/background/chromatic image files, none of which `compute_fingerprint`
+ever touches (only `compute_cell` persists those) - so the actual cost is
+a handful of small orphaned JSON files at worst, not the thousands-of-images
+problem. Flagged as a known simplification in `planner.py`'s module
+docstring rather than solved: a fully side-effect-free preview needs
+comparing live state against stored file *content* directly, real
+follow-up work.
+
+Verified with a standalone script (7 checks) using a hand-written
+`FakeStore` (`ProvenanceStore`'s real implementation doesn't exist yet, but
+`plan_recompute` only needs its interface) - matching-fingerprint cells
+skip, stale/missing ones recompute, `ALL_ROIS`/`SELECTED_ROIS` scope
+filtering, and re-running `plan_recompute` with unchanged live state is
+idempotent (creates no new settings files on the second call).
+
+### `worker.py` - minimal threading primitive, not a `FunctionWorker` port
+
+Deliberately smaller than the old app's `FunctionWorker` (a much larger
+`QRunnable` with its own progress/partial-result Qt plumbing) - this class
+is just "run one callable on a fresh `threading.Thread`, expose a stable,
+cooperatively-checked cancel flag." Progress/result reporting is the
+caller's job: the task closure can safely `.emit()` a Qt signal directly
+from this background thread (Qt queues a cross-thread `.emit()`
+automatically - the same guarantee `FunctionWorker`'s own docstring already
+documents), no extra machinery needed here. Cancellation is checked
+**between cells, never mid-cell** - the "beyond sketch" idea from this
+session's earlier design conversation - so a cancelled run always leaves a
+valid, if partial, result set.
+
+Verified with a standalone script (7 checks: not-running state, submit-
+while-running raises, cancellation actually stops a running task early,
+`cancel_event` is cleared - not left set - on a fresh `submit()`). One
+check was flaky on a bare-`time.sleep`-based test (a real thread-scheduling
+race in the *test*, not the implementation - `cancel_event.clear()` happens
+synchronously on the main thread before the new thread starts, so there's
+no race in the actual code); passed on a second run. Noted for whenever
+this becomes a real committed test: synchronize on an event/queue, not a
+sleep duration.
+
+### `tasks.py` - `compute_cell`, a genuine rewrite of the per-cell arithmetic, not a port
+
+**"Ports `analysis_tasks.py` largely as-is" did not survive contact with
+the real code** (same family as the `dataset/io.py` §10 correction): the
+old app's closest equivalent, `_sensorgram_metric_task` (~400 lines), is
+deeply entangled with *bulk multi-ROI* concerns this file's job doesn't
+own - GC toggling, a `ThreadPoolExecutor` prefetch stage, a `roi_mask_cache`
+shared across an entire multi-ROI run, worker-count calibration, and a
+cancellation story spread across several paragraphs of comment explaining
+edge cases. `compute_cell` is a correct rewrite of the per-cell arithmetic
+that function performs internally, deliberately without its batch-level
+optimizations - those belong in a different layer (batching/caching around
+repeated `compute_cell` calls), to be built once there's a real dataset to
+measure against, not guessed at now (AGENTS.md's Performance Work rules).
+
+**Real correction to this file's own stub**: the scaffold's
+`compute_cell` returned a bare `float`. Sketch §6 is explicit - "Formula,
+Fit method, Metric choice - never touch the stored cells at all". Baking
+`formula_value` into what gets stored would mean a Formula change (e.g.
+absorbance → ratio) silently requiring a full recompute purely because a
+*display*-math choice changed the shape of what's on disk. `compute_cell`
+now stops at the raw reduced (sample, reference) pair per wavelength
+(`CellResult`); formula math becomes a query-time concern for whichever
+future code reads `get_spectrum`/`get_metric` - `formula_value` itself
+(`processing/analysis.py`) isn't even imported here.
+
+**Persists mask/chromatic/settings snapshots as a real side effect of
+`compute_cell` itself** - deliberately here, not in `compute_fingerprint`
+(see `planner.py`'s section above): this is the actual "written lazily,
+only when analyzed" moment.
+
+**Two flagged, unverified assumptions**, documented in the module
+docstring rather than guessed at confidently:
+1. `MaskModule`'s resolved mask is passed to `apply_preprocessing` as
+   `external_mask` with `external_mask_processed=False` (assumed authored
+   in raw image space) - not confirmed against the real mask-drawing GUI
+   code. Wrong would silently misalign the mask, not crash.
+2. Uses `roi/rasterize.py`'s binary `rasterize_sample`/`rasterize_reference`,
+   not `rasterize_fractional` (§6a) - deliberate: `analysis/reduction.py`'s
+   `weighted_*` functions that would consume fractional weights are still
+   `NotImplementedError`, so there's nothing yet to plug a fractional mask
+   into.
+
+Verified with a standalone script (14 checks) using a known step-function
+synthetic image (uniform fill regions, so expected sample/reference means
+are exactly computable by hand). **Two of the first-run failures were
+themselves informative test bugs, not implementation bugs**: (a) the test's
+hand-built annulus mask used strict `>` at the inner radius while
+`rasterize_reference` correctly uses `>=` (12 boundary pixels disagreed -
+confirmed by direct mask comparison, not assumed); (b) a wrong test
+expectation that two wavelengths sharing an *identical-valued* chromatic
+affine should share one settings snapshot - they don't, by design, since
+each wavelength's chromatic reference is genuinely independent even when
+its content happens to coincide. Final passing checks include: correct
+values for both wavelengths, reduction-method choice actually changing the
+provenance (mean vs. median → different settings-snapshot ids) while
+producing identical *values* over a uniform region (a mean-equals-median
+degenerate-case sanity check), cancellation before the first wavelength
+returns `None` with nothing persisted, and a mask supplied without
+raising, with its snapshot file actually written.
+
+### `engine.py` - real orchestration, built against injected callables
+
+**Real, load-bearing gap found while wiring this up**: `DatasetModule`
+(`dataset/module.py`) deliberately exposes only 4 narrow query methods -
+none of them load actual pixels (`dataset_load_plane` needs the full
+`ImageDataset`, which `DatasetModule` never exposes, per its own "no other
+module may read dataset state any other way" rule, confirmed in this same
+build log's 2026-09-21 `DatasetModule` entry). `DatasetModule` needs a 5th
+method (e.g. `load_plane(cube_index, wavelength_nm) -> np.ndarray`) before
+this engine can be wired to the real module - not guessed at or worked
+around here. Built `AnalysisEngine`'s constructor against injected
+callables (`load_plane`, `rois`, `chromatic_affine`, `resolve_mask`, ...)
+instead, so this file's own orchestration logic is real, complete, and
+testable today with fake callables standing in for the real modules -
+wiring it up later is a small change at construction time, not a logic
+change.
+
+**Real fix, caught by checking the scaffold's own documented contract**:
+the first version of this constructor required every callable as a
+mandatory keyword argument, which broke `app_rewrite.py`'s existing
+`AnalysisEngine()` no-args call - violating this scaffold's own stated
+rule ("every module constructs without error, only action methods raise
+`NotImplementedError`", from `app_rewrite.py`'s own module docstring).
+Fixed: every callable now defaults to `None`, resolved through a small
+`_unwired()` helper that raises only when actually *called* -
+`AnalysisEngine()` constructs fine again; `run_analysis()`/
+`preview_recompute()` raise until real callables are supplied. Confirmed
+the rewrite-preview window still builds after the fix.
+
+`get_metric`/`get_spectrum`/`status_summary` are real, but read from the
+in-memory `_results`/`InMemoryProvenanceStore`, not `data.h5` - same
+blocker as `ProvenanceStore`. `get_metric`'s own return shape is flagged
+as a real gap against the sketch (`-> float | None`): since formula math
+isn't stored (see `tasks.py` section above) and no Formula/Fit/Metric
+query layer exists yet either, it currently returns the raw
+`(*sample_values, *reference_values)` tuple, not a single derived scalar -
+documented in its own docstring rather than faked with a wrong number.
+`preview_recompute()` (the third "beyond sketch" idea from this session's
+earlier design conversation) is real and side-effect-light per the
+`planner.py` caveat above.
+
+Verified with two standalone scripts. First (14 checks, unwired-callable
+version before the scaffold-compatibility fix was found necessary):
+`preview_recompute` before any run correctly shows every cell needing
+recompute; `run_analysis` dispatches through the real `AnalysisWorker`,
+completes (`analysis_complete` fires), computes distinct values per
+distinct (cube, wavelength) input (not a fluke of a single fixed test
+image), `load_plane` called exactly once per (cube, wavelength) per cell;
+**re-running `run_analysis`/`preview_recompute` with nothing changed
+loads zero planes and shows zero cells needing recompute** - the actual
+end-to-end dedup property, verified through the whole stack (provenance →
+planner → worker → tasks → engine), not just at one layer in isolation;
+`SELECTED_ROIS` scope filtering. Second script (2 checks, after the
+constructor fix): the real wired-callable path still completes and
+computes correctly, confirming the scaffold-compatibility fix didn't
+silently break the real path while fixing the scaffold one.
+
+### Not done / still open, as of this entry
+
+- **`data.h5` itself - the single biggest remaining gap.** Blocks
+  `ProvenanceStore`'s real implementation and `get_metric`/`get_spectrum`/
+  `status_summary`'s real persistence (all currently backed by
+  `InMemoryProvenanceStore` + an in-memory dict - working, but lost on
+  restart). Also blocks the suite-wide HDF5 identity-field contract
+  question (`packages/lspr_io` reuse) flagged earlier this session.
+- **`DatasetModule.load_plane`** (or equivalent) - the real gap found
+  while building `engine.py`. Needed before `AnalysisEngine` can be
+  constructed with real callables instead of test fakes.
+- **The ROI-adjacency exception** in `plan_recompute` - a correctness
+  requirement, not yet handled, needs its own investigation into the old
+  app's exact mechanism (see `planner.py` section above).
+- **`preview_recompute`'s settings-snapshot side effect** - a known,
+  low-cost simplification (small JSON files only, never mask/background/
+  chromatic images), not solved - see `planner.py` section above.
+- **Two unverified assumptions in `tasks.py`** (mask coordinate space;
+  binary vs. fractional rasterization) - see that section above.
+- `analysis/reduction.py`'s `weighted_*` functions (§6a's reduction half)
+  - still not built, unrelated to this entry's scope.
+- `BackgroundModule`'s image-file provenance treatment - still blocked on
+  it needing a `MaskModule`-style timeline, per the design doc; background
+  provenance currently persists as a settings dict, not an image, inside
+  `SettingsSnapshot`.
+- `storage/session.py` - untouched, separate piece.
+- No committed, permanent test coverage - every verification in this
+  entry (five scripts) was standalone and uncommitted, same open question
+  as every prior entry.
+- Nothing from this entry has been committed yet.
