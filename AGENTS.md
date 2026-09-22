@@ -210,13 +210,21 @@ the rest of the unweighted reduction math they extend) live in
 rewrite build log). The ROI Toolbox produces masks/weights; Analysis turns
 pixels into numbers.
 
-**The raster half is built (2026-09-22)**: `roi/rasterize.py`'s
-`rasterize_fractional` is real, for all three geometry types (circle,
-annulus, mask) via one shared engine (`_reach_box_coverage`) that only
-swaps out the per-geometry point-test — not per-shape code paths. The
-reduction half (`analysis/reduction.py`'s `weighted_*` stubs) is still not
-built - deliberately deferred until the analysis stage itself is built, not
-because it's blocked on the raster half.
+**Both halves are now built (raster: 2026-09-22 morning; reduction:
+2026-09-22 later the same day)**: `roi/rasterize.py`'s `rasterize_fractional`
+is real, for all three geometry types (circle, annulus, mask) via one
+shared engine (`_reach_box_coverage`) that only swaps out the per-geometry
+point-test — not per-shape code paths. `analysis/reduction.py`'s
+`weighted_mean`/`weighted_median`/`weighted_trimmed_mean`/`weighted_plane_fit`
+are real too, each individually verified (500-3000 random trials each) to
+reduce exactly (or to float noise, for `weighted_median`'s interpolation-
+based formula) to its unweighted counterpart when every weight is equal —
+the AGENTS.md rule below, actually checked, not just satisfied by
+construction. **Not yet connected to each other**: `analysis/tasks.py`'s
+`compute_cell` still calls the binary `rasterize_sample`/
+`rasterize_reference`, not `rasterize_fractional` — wiring fractional
+weighting into the real per-cell pipeline (a toggle, a mask-array plumb-
+through, provenance implications) is separate, not-yet-started work.
 
 - Implementation approach used: supersample-and-downsample — one shared
   engine for every geometry type (circle/rectangle/polygon/arbitrary
@@ -242,10 +250,14 @@ because it's blocked on the raster half.
   affine models - deferred until a real caller (`analysis/tasks.py`) exists
   to need it, rather than building a cache with no caller to validate it
   against.
-- This is real implementation work, not a free toggle: `median` and
-  `trimmed_mean` (in `analysis/reduction.py`, not yet built) need genuine
-  weighted-median-style algorithms, not just "pass weights through" to the
-  unweighted versions.
+- This was real implementation work, not a free toggle, as predicted:
+  `weighted_median` needed a genuine linear-interpolation-on-cumulative-
+  weight algorithm (not "pass weights through" to `np.median`), and
+  `weighted_trimmed_mean` needed its own explicit design choice
+  (trim by element count, then weighted-mean the remainder - see that
+  function's own docstring for why a weight-based trim wouldn't have
+  provably matched the unweighted version). Both built and verified
+  2026-09-22, see `analysis/reduction.py`.
 
 ---
 

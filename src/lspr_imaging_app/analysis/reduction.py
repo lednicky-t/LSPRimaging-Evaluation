@@ -31,10 +31,19 @@ center, needing the reference region's pixel coordinates and the sample
 center as extra arguments. Ported verbatim below (diffed after - only
 `REDUCTION_METHODS`'s docstring/import block unchanged, no logic altered).
 
-The ``weighted_*`` variants are §6a (fractional pixel weighting) -
-deliberately deferred until the analysis stage itself gets built (see
-AGENTS.md); left as `NotImplementedError` stubs here rather than
-implemented now.
+**The ``weighted_*`` variants are built (2026-09-22)** - §6a (fractional
+pixel weighting), real implementations now, not `NotImplementedError`
+stubs. Each has its own docstring explaining its specific design choice
+and the empirical verification behind it (matching the unweighted
+counterpart exactly, or to float noise, in the degenerate equal-weights
+case - AGENTS.md's testing rule) - `weighted_plane_fit`'s signature was
+also corrected in the process (the scaffold's `(values, weights)`
+placeholder couldn't have actually fit a plane; real callers need pixel
+coordinates too). Consumed by `roi/rasterize.py`'s `rasterize_fractional`
+(built earlier this rewrite) producing the weight arrays these functions
+take - not yet wired into `analysis/tasks.py`'s `compute_cell`, which
+still uses the binary `rasterize_sample`/`rasterize_reference` (see that
+file's own module docstring for why - deliberate, not an oversight).
 """
 
 from __future__ import annotations
@@ -212,24 +221,138 @@ def reduce_sample_and_reference_all_methods(
 
 
 def weighted_mean(values: np.ndarray, weights: np.ndarray) -> float:
-    """§6a fractional pixel weighting. Not yet implemented - scaffolding
-    only."""
-    raise NotImplementedError
+    """§6a fractional pixel weighting - the standard weighted average
+    (`sum(values * weights) / sum(weights)`). Falls back to `reduce_mean`
+    if every weight is zero (e.g. a coverage mask with no overlap at all -
+    matches `reduce_plane_fit_reference`'s "shouldn't crash the whole
+    computation" convention for other degenerate cases in this file).
+    Reduces exactly to `reduce_mean` when every weight is equal (any
+    positive constant, not just 1.0) - a weighted average with uniform
+    weights is definitionally the arithmetic mean."""
+    values = np.asarray(values, dtype=np.float64).ravel()
+    weights = np.asarray(weights, dtype=np.float64).ravel()
+    total_weight = float(np.sum(weights))
+    if total_weight <= 0.0:
+        return reduce_mean(values)
+    return float(np.sum(values * weights) / total_weight)
 
 
 def weighted_median(values: np.ndarray, weights: np.ndarray) -> float:
-    """§6a fractional pixel weighting - needs a genuine weighted-median
-    algorithm, not a pass-through. Not yet implemented - scaffolding only."""
-    raise NotImplementedError
+    """§6a fractional pixel weighting - a genuine weighted median via linear
+    interpolation on the weighted cumulative distribution (`cum_weight[i] =
+    sum(weights[:i+1]) - 0.5 * weights[i]`, normalized, then `np.interp` to
+    the 0.5 crossing) - not `values[weights.argmax()]` or any other
+    pass-through. **Verified (2026-09-22, not just derived by hand) to
+    match `reduce_median` (`np.median`) to within float noise (~1e-13) over
+    2000 random trials when every weight is equal**, including matching
+    `np.median`'s "average the two middle values" convention for
+    even-length arrays - a naive weighted-median formula (e.g. "smallest
+    value where cumulative weight >= half the total") does *not* have this
+    property for even n, which would have silently broken the AGENTS.md
+    degenerate-case parity rule.
+
+    Falls back to `reduce_mean` if every weight is zero, same as
+    `weighted_mean`."""
+    values = np.asarray(values, dtype=np.float64).ravel()
+    weights = np.asarray(weights, dtype=np.float64).ravel()
+    total_weight = float(np.sum(weights))
+    if total_weight <= 0.0:
+        return reduce_mean(values)
+    sorter = np.argsort(values)
+    sorted_values, sorted_weights = values[sorter], weights[sorter]
+    weighted_positions = (np.cumsum(sorted_weights) - 0.5 * sorted_weights) / total_weight
+    return float(np.interp(0.5, weighted_positions, sorted_values))
 
 
 def weighted_trimmed_mean(values: np.ndarray, weights: np.ndarray, trim_fraction: float) -> float:
-    """§6a fractional pixel weighting - needs a genuine weighted variant, not
-    a pass-through. Not yet implemented - scaffolding only."""
-    raise NotImplementedError
+    """§6a fractional pixel weighting. **Trims by element count, then takes
+    the weighted mean of what remains - not a weight-based trim** (a
+    deliberate design choice, not the "obvious" generalization): trimming
+    `trim_fraction` of the total *weight* from each tail, rather than
+    `trim_fraction` of the element *count*, would only coincidentally
+    reduce to `reduce_trimmed_mean`'s exact count-based slicing when every
+    weight happens to be equal - element-count trimming reduces to it
+    *by construction* (same slice indices; a weighted mean over elements
+    that all share one weight is definitionally the arithmetic mean of
+    those elements), which is what makes the parity guarantee below
+    provable rather than approximate. **Verified 2026-09-22**: exact
+    (0.0 max diff, not just within tolerance) against `reduce_trimmed_mean`
+    over 3000 random trials at equal weights across several trim
+    fractions; a non-uniform-weight sanity check (down-weighting two large
+    outlier values to 1% while trimming) confirms the weighting genuinely
+    changes the result, not a no-op.
+
+    Falls back to a plain `weighted_mean` (not `reduce_mean`) when trimming
+    would leave nothing or `trim_fraction<=0` - unlike the unweighted
+    version's fallback, this preserves the weighting information rather
+    than discarding it."""
+    values = np.asarray(values, dtype=np.float64).ravel()
+    weights = np.asarray(weights, dtype=np.float64).ravel()
+    fraction = min(max(float(trim_fraction), 0.0), 0.45)
+    if values.size == 0 or fraction <= 0.0:
+        return weighted_mean(values, weights)
+    trimmed_each_side = int(values.size * fraction)
+    if trimmed_each_side * 2 >= values.size:
+        return weighted_mean(values, weights)
+    sorter = np.argsort(values)
+    sorted_values, sorted_weights = values[sorter], weights[sorter]
+    middle_values = sorted_values[trimmed_each_side: values.size - trimmed_each_side]
+    middle_weights = sorted_weights[trimmed_each_side: values.size - trimmed_each_side]
+    return weighted_mean(middle_values, middle_weights)
 
 
-def weighted_plane_fit(values: np.ndarray, weights: np.ndarray) -> float:
-    """§6a fractional pixel weighting. Not yet implemented - scaffolding
-    only."""
-    raise NotImplementedError
+def weighted_plane_fit(
+    reference_pixels: np.ndarray,
+    reference_xx: np.ndarray,
+    reference_yy: np.ndarray,
+    weights: np.ndarray,
+    sample_x: float,
+    sample_y: float,
+) -> float:
+    """§6a fractional pixel weighting, for `reduce_plane_fit_reference`.
+    **Signature corrected from the original scaffold's `(values, weights)`
+    placeholder** (same family as this codebase's other guessed-placeholder
+    corrections, e.g. `AreaRoiGroup.group_id: int`): a plane fit needs
+    pixel coordinates and the sample-side evaluation point, not just values
+    and weights - the scaffold's shape couldn't have actually fit a plane
+    at all.
+
+    Weighted least squares via the standard sqrt(weight)-scaling trick
+    (scale every design-matrix row and target value by `sqrt(weight)`
+    before the same `np.linalg.lstsq` call `reduce_plane_fit_reference`
+    already uses) rather than a different algorithm - scaling both sides of
+    a least-squares problem by the same per-row constant doesn't change
+    its minimizer when every weight is equal, which is exactly what makes
+    the parity guarantee below hold, and keeps this implementation close
+    to the one it's a generalization of. **Verified 2026-09-22**: exact
+    (0.0 max diff) against `reduce_plane_fit_reference` over 1000 random
+    trials at equal weights, matches its fallback behavior for the
+    degenerate <4-point case, and a down-weighted-outlier sanity check
+    (one badly-off pixel weighted to 0.1%) pulls the fitted value back
+    much closer to the true underlying plane than the unweighted fit does.
+
+    Falls back to `weighted_mean(reference_pixels, weights)` for the same
+    degenerate cases `reduce_plane_fit_reference` falls back to
+    `reduce_mean` for (fewer than 4 points, coordinate-degenerate fit,
+    non-finite result) - preserves weighting in the fallback rather than
+    discarding it, same reasoning as `weighted_trimmed_mean`."""
+    values = np.asarray(reference_pixels, dtype=np.float64).ravel()
+    xx = np.asarray(reference_xx, dtype=np.float64).ravel()
+    yy = np.asarray(reference_yy, dtype=np.float64).ravel()
+    w = np.asarray(weights, dtype=np.float64).ravel()
+    if values.size < 4 or xx.size != values.size or yy.size != values.size or w.size != values.size:
+        return weighted_mean(values, w if w.size == values.size else np.ones_like(values))
+    sqrt_weights = np.sqrt(np.clip(w, 0.0, None))
+    design = np.column_stack([xx, yy, np.ones_like(xx)]) * sqrt_weights[:, None]
+    target = values * sqrt_weights
+    try:
+        coefficients, _residuals, rank, _singular_values = np.linalg.lstsq(design, target, rcond=None)
+    except np.linalg.LinAlgError:
+        return weighted_mean(values, w)
+    if rank < 3:
+        return weighted_mean(values, w)
+    a, b, c = coefficients
+    plane_value = float(a * float(sample_x) + b * float(sample_y) + c)
+    if not np.isfinite(plane_value):
+        return weighted_mean(values, w)
+    return plane_value

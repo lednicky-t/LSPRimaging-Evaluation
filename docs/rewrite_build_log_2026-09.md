@@ -2356,3 +2356,63 @@ guessing through them, since each is its own small investigation, not
 assumed-safe scope creep of "wire up the engine."
 
 Not committed yet, alongside this entry.
+
+## 2026-09-22 (same day, continued): `analysis/reduction.py`'s `weighted_*` functions built - §6a's reduction half
+
+Maintainer picked this as the first of four follow-up items ("1-4" from
+the prior status update) - self-contained, and its prerequisite ("wait
+until the analysis stage exists") was satisfied by this same day's earlier
+`analysis/` work.
+
+**Prototyped and numerically verified each formula in a scratch script
+before writing the real implementation** - not derived by hand and trusted:
+- `weighted_mean` - the standard `sum(values*weights)/sum(weights)`.
+- `weighted_median` - a genuine concern, not a formality: a naive "smallest
+  value where cumulative weight crosses 50%" formula does *not* reduce to
+  `np.median`'s "average the two middle values" convention for even-length
+  arrays at equal weights, which would have silently broken AGENTS.md's
+  degenerate-case parity rule. Used linear interpolation on the weighted
+  cumulative distribution instead (`np.interp` on `(cumsum(weights) - 0.5*
+  weights) / total`) - verified against `np.median` over 2000 random
+  trials (odd and even n both), max diff ~1e-13 (float noise, not a real
+  difference).
+- `weighted_trimmed_mean` - trims by **element count** (matching
+  `reduce_trimmed_mean`'s exact `int(n*fraction)` slicing), then takes the
+  weighted mean of the surviving middle elements - deliberately not a
+  weight-based trim, which would only *coincidentally* match the unweighted
+  version when weights happen to be equal rather than matching *by
+  construction*. Verified exact (0.0 max diff, not just within tolerance)
+  over 3000 random trials.
+- `weighted_plane_fit` - **signature corrected while implementing**, same
+  family as this branch's other guessed-placeholder-shape bugs (`AreaRoiGroup.
+  group_id: int`, the `preprocess_image()` stub): the scaffold's
+  `(values, weights) -> float` couldn't have actually fit a plane - real
+  callers need pixel coordinates and the sample-side evaluation point too.
+  Fixed to `(reference_pixels, reference_xx, reference_yy, weights,
+  sample_x, sample_y)`, matching `reduce_plane_fit_reference`'s real shape
+  plus weights. Implemented via the standard sqrt(weight)-scaling trick
+  (scale every design-matrix row and target by `sqrt(weight)`, same
+  `np.linalg.lstsq` call the unweighted version already uses) rather than a
+  different algorithm - verified exact (0.0 max diff) over 1000 random
+  trials at equal weights, correct fallback behavior for the degenerate
+  <4-point case, and a down-weighted-outlier sanity check pulling a fitted
+  value much closer to the true underlying plane than the unweighted fit.
+
+Every function falls back to (weighted, not plain) `reduce_mean`-equivalent
+behavior for its own degenerate case (zero total weight, insufficient
+points for a plane fit, non-finite result) rather than raising - matching
+this file's existing fallback conventions.
+
+Verified with a standalone script (12 checks, all passing): the four
+equal-weights-parity checks above, plus a "genuinely down-weights an
+outlier" sanity check for each function (confirms the weighting isn't a
+no-op pass-through), the even-n `np.median` convention check specifically,
+and a return-type check. Confirmed pyflakes-clean.
+
+**Not done in this entry**: wiring `rasterize_fractional`'s weight arrays
+into `analysis/tasks.py`'s `compute_cell` (still uses the binary
+`rasterize_sample`/`rasterize_reference`) - a toggle, mask-array plumbing,
+and provenance implications, separate work not started. `AGENTS.md`'s §6a
+section updated to reflect both halves now being built.
+
+Not committed yet, alongside this entry.
