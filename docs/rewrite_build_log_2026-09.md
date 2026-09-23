@@ -2787,3 +2787,133 @@ all five tabs.
 - Still no committed test coverage. This entry's script is the strongest
   candidate yet to become one, since it exercises every module together
   against real files.
+
+## 2026-09-23 (same day, continued): `ImagePanel` built - the first real panel
+
+The panel layer was six files of scaffolding totalling ~400 lines, with
+every `_redraw` raising `NotImplementedError`. `panels/image/` is now real:
+it renders the processed image for the current frame, draws ROI overlays,
+and turns clicks and drags into module commands.
+
+### What it does
+
+**Renders off the GUI thread** (`panels/image/render.py`, new). A plain
+`threading.Thread`, never `QThreadPool` (AGENTS.md's zarr rule - the same
+choice `analysis/worker.py` makes, for the same
+`STATUS_HEAP_CORRUPTION` reason). **Latest request wins**: dragging a
+wavelength control can queue dozens of renders a second and only the last
+is ever seen, so pending-but-unstarted requests are dropped. This is the
+lossy-UI half of the acquisition app's lossless-acquisition/lossy-UI rule
+applied to display - deliberately the opposite of `AnalysisWorker`, which
+drops nothing, because there every requested cell is one the user asked to
+keep. A request that is superseded *after* the worker already picked it up
+is caught a second time on arrival, by serial number.
+
+`RenderRequest` carries settings **by value**, snapshotted on the GUI
+thread, rather than letting the worker call back into the modules - reading
+module state from a background thread while the GUI thread may be mutating
+it is exactly the race this architecture avoids by convention. The modules'
+`settings()` methods already return defensive copies, so this is free.
+
+**Owns no state another module owns.** No ROI list, no selection set, no
+settings copy; every draw re-reads. That is the single thing the old app
+broke hardest, and it is cheap here because every query is an in-memory
+read.
+
+**Every gesture is a command call, never a mutation.** A drag calls
+`RoiToolbox.request_move`; a click calls `SelectionModule.set_roi_selection`;
+the navigation controls call `set_cube`/`set_wavelength`. The panel then
+redraws *because a module emitted a change* - which is what makes undo work
+without the panel knowing undo exists: Ctrl+Z emits the same signals a
+fresh edit does, and the panel reacts identically. Verified directly rather
+than assumed (see below).
+
+**Overlays** are three `PlotDataItem`s (sample, reference, selected) for the
+whole scene rather than items per ROI - NaN separators with
+`connect="finite"` let one item draw any number of disjoint circles, so
+adding an ROI costs an array append rather than a new `QGraphicsItem`. That
+matters because the overlay is rebuilt on every selection change, not just
+on an ROI edit.
+
+**Overlays are drawn synchronously** while only pixels go off-thread: a
+coalesced 100 ms round trip to a worker would make dragging an ROI feel
+broken, and the overlay is a few thousand points of pure numpy.
+
+### Two correctness details worth recording
+
+**The drawn ring must be the measured ring.** `roi/rasterize.py`'s
+`_effective_reference_radii` is now public `effective_reference_radii`, and
+the panel uses it rather than re-deriving the per-ROI
+`reference_inner/outer_diameter_px` override rule. Re-deriving it would mean
+the ring drawn and the ring measured could silently disagree - the exact
+class of error an overlay exists to rule out. Same reasoning for the
+sample-diameter override.
+
+**The displayed image must be the analyzed image.** `_mask_for_compute` (new
+that morning, in `analysis/tasks.py`) moved to
+`image_tools/preprocess.resolve_external_mask`, and both the panel and
+`compute_cell` call it. The transform order it encodes - spatial transform
+first, chromatic warp second, `external_mask_processed=True` - is subtle
+enough (see the earlier entry today) that having two call sites re-derive it
+independently would be a matter of time.
+
+**A cube short a wavelength is handled, not errored.** `_current_wavelength`
+snaps the selected wavelength to the nearest one the *current cube* actually
+has. Switching to a cube missing 550 nm shows 500 or 600 rather than an
+error - the same uneven-dataset case `wavelengths_for_cube` was added for.
+
+### Verified
+
+One standalone script, 33 checks, all passing - a real `QApplication` built
+in-process without ever calling `.exec()`, real widgets, real TIFF files,
+driven entirely by direct method and signal calls, never screen coordinates
+(AGENTS.md's testability rule, matching
+`tests/integration/test_lspri_preferences_dialog.py`'s existing pattern).
+
+Notable: an image genuinely rendering after a dataset load and the worker
+confirmed to be on its own thread; a crop changing the displayed shape
+64x80 -> 40x48 and disabling image tools restoring it; the exact overlay
+point counts for 2 ROIs (2 sample circles, 4 reference circles); hit-testing
+at centre, inside the radius, and on empty image; selection moving an ROI
+between the normal and highlight curves; a drag reaching `RoiToolbox` as a
+`"moved"` change, **and `undo_manager.undo()` moving the ROI back and
+redrawing the panel - with the panel containing no undo code at all**;
+switching to the short cube snapping the wavelength; a missing frame
+surfacing as a status message rather than a crash; a stale result being
+dropped rather than drawn; and `dataset_cleared` resetting the panel (the
+first real subscriber to that signal, which `DatasetModule`'s docstring had
+flagged as unverified end to end).
+
+`pyflakes`-clean; the rewrite-preview window still builds with all five
+tabs; the previous entry's 34-check engine script still passes unchanged
+after the `resolve_external_mask` move.
+
+### Deliberately not built here
+
+Each is its own piece of work, not something this panel should invent an
+answer for:
+
+- Crop/rotate tool interaction (the draggable rectangle, the rotation
+  handle). `GeometryModule`'s commands are real; the old app's tool UI
+  (`gui/image_tools_controller.py`) is tangled with pyqtgraph `RectROI`
+  sync that needs its own port.
+- Mask painting and preview overlays, the intensity-highlight overlay, the
+  histogram-driven highlight - `MaskModule`'s async candidate machinery
+  isn't built either.
+- Cursor readout, scale bar, ruler overlay - `GeometryModule` already owns
+  the calibration state they would draw from.
+- ROI creation by click and resize by handle. `add_roi`/`resize_roi` are
+  real commands; this panel only moves and selects so far.
+- Splitting "redraw overlay only" out of "re-render pixels". Currently every
+  change schedules the same redraw. That is a real optimization once there
+  is a dataset big enough to measure against - guessing at it now would be
+  the premature kind AGENTS.md's performance rules warn about.
+
+### Not done / still open, as of this entry
+
+- The other five panels are still scaffolding.
+- `AnalysisWorker` still swallows a task exception (flagged in the previous
+  entry, unchanged).
+- `BackgroundModule`'s timeline extension - not started.
+- `storage/session.py` - untouched.
+- Still no committed test coverage. Two strong candidate scripts now.

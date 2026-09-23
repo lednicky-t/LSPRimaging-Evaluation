@@ -87,10 +87,8 @@ from pathlib import Path
 import numpy as np
 
 from ..image_tools.background.model import BackgroundSettings
-from ..image_tools.chromatic.warp import warp_boolean_mask_affine
 from ..image_tools.geometry.model import GeometrySettings
-from ..image_tools.geometry.transform import apply_spatial_mask
-from ..image_tools.preprocess import apply_preprocessing
+from ..image_tools.preprocess import apply_preprocessing, resolve_external_mask
 from ..roi.model import AreaRoi
 from ..roi.rasterize import rasterize_reference, rasterize_sample
 from .provenance import (
@@ -166,33 +164,21 @@ class CellResult:
 
 
 def _mask_for_compute(wl_input: WavelengthComputeInput) -> np.ndarray | None:
-    """Turn the as-authored (raw-space) ignore mask into the processed-space
-    mask `apply_preprocessing` should be handed with
-    `external_mask_processed=True`.
+    """This cell's ignore mask in processed space - a thin adapter over
+    `image_tools.preprocess.resolve_external_mask`, which owns the actual
+    transform order and the reasoning behind it.
 
-    Two steps, in the old app's order (see module docstring's assumption-1
-    note): crop/rotate/flip it exactly as the image itself will be
-    transformed, *then* apply the chromatic warp - because the chromatic
-    affine is expressed in processed image space, so warping a raw-space
-    mask with it would land the mask somewhere meaningless whenever a crop
-    or rotation is active.
-
-    Done unconditionally rather than only when a warp is needed, matching
-    the old app's analysis path (`gui/analysis_tasks.py` always passes
-    `external_mask_processed=True`). Masking in raw space first and letting
-    the image transform carry the zeros along would be *nearly* equivalent
-    with no warp in play, but not exactly: the image transform interpolates
-    (`order=1`), so zeroed pixels would bleed into their neighbours at mask
-    edges. One path, one behavior.
+    Shared with the Image panel deliberately: the displayed image and the
+    analyzed image resolve their mask through the same function, so they
+    cannot silently diverge. Applied unconditionally (always
+    `external_mask_processed=True`), matching the old app's analysis path -
+    masking in raw space first is only *nearly* equivalent even with no
+    warp, since the image transform interpolates (`order=1`) and would
+    bleed zeroed pixels into their neighbours at mask edges.
     """
-    if wl_input.resolved_mask is None:
-        return None
-    mask = apply_spatial_mask(np.asarray(wl_input.resolved_mask, dtype=bool), wl_input.geometry_settings)
-    if mask is None:
-        return None
-    if wl_input.mask_warp_affine is not None:
-        mask = warp_boolean_mask_affine(mask, wl_input.mask_warp_affine)
-    return mask
+    return resolve_external_mask(
+        wl_input.resolved_mask, wl_input.geometry_settings, wl_input.mask_warp_affine
+    )
 
 
 def _sample_exclusion_union(

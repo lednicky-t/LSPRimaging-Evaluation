@@ -28,11 +28,54 @@ import numpy as np
 from ..roi.model import AreaRoi, AreaRoiDetectionSettings
 from .background.estimate import flatten_background
 from .background.model import BackgroundSettings
+from .chromatic.warp import warp_boolean_mask_affine
 from .geometry.model import GeometrySettings
-from .geometry.transform import apply_spatial_preprocessing, rotation_fill_pixel_mask
+from .geometry.transform import (
+    apply_spatial_mask,
+    apply_spatial_preprocessing,
+    rotation_fill_pixel_mask,
+)
 from .mask.model import MaskSettings
 
 _LOGGER = logging.getLogger(__name__)
+
+
+def resolve_external_mask(
+    authored_mask: np.ndarray | None,
+    geometry_settings: GeometrySettings,
+    warp_affine: np.ndarray | None = None,
+) -> np.ndarray | None:
+    """Turn an ignore mask **as authored** (raw image space, per
+    `MaskModule.resolve_mask_source`) into the processed-space mask that
+    `apply_preprocessing` should be handed with
+    ``external_mask_processed=True``.
+
+    Two steps, and the order is the whole point (see the 2026-09-23 build
+    log entry): crop/rotate/flip the mask exactly as the image itself will
+    be transformed, *then* apply the chromatic warp - because the chromatic
+    affine is expressed in **processed** image space, so warping a
+    raw-space mask with it lands the mask somewhere meaningless whenever a
+    crop or rotation is active.
+
+    `warp_affine` is `ChromaticModule.affine_between(authored_frame, frame)`
+    and is only needed when the mask was authored at a different frame than
+    the one being rendered; `None` means no re-registration, which is the
+    common case. Taken as a plain matrix rather than this module reaching
+    into `ChromaticModule`, the same one-directional convention
+    `roi/rasterize.py` follows.
+
+    Lives here, rather than privately inside `analysis/tasks.py` where it
+    started, so the Image panel renders against exactly the mask analysis
+    computes against - the two agreeing by construction rather than by two
+    call sites happening to stay in step."""
+    if authored_mask is None:
+        return None
+    mask = apply_spatial_mask(np.asarray(authored_mask, dtype=bool), geometry_settings)
+    if mask is None:
+        return None
+    if warp_affine is not None:
+        mask = warp_boolean_mask_affine(mask, warp_affine)
+    return mask
 
 
 def apply_preprocessing(

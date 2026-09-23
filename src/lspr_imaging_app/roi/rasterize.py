@@ -440,7 +440,7 @@ def transformed_disk_mask_for_patch(
 # multi-ROI OR-accumulation - that stays analysis/tasks.py's job).
 
 
-def _effective_reference_radii(
+def effective_reference_radii(
     roi: AreaRoi,
     default_inner_radius_px: float,
     default_outer_radius_px: float,
@@ -451,6 +451,12 @@ def _effective_reference_radii(
     (set via the ROI table or the "Edit reference ROI region" dialog) to
     override the shared area_roi_settings default for that ROI only. Falls
     back to the shared default when the ROI has no override.
+
+    Public as of 2026-09-23 (was ``_effective_reference_radii``): the Image
+    panel draws the reference ring it is about to measure, so it needs the
+    same radii this module rasterizes with. Re-deriving the override rule in
+    the panel would mean the drawn ring and the measured ring could disagree
+    - which is exactly the class of silent error overlays exist to rule out.
     """
     inner_radius = (
         float(roi.reference_inner_diameter_px) / 2.0
@@ -525,7 +531,7 @@ def rasterize_reference(
         return warp_boolean_mask_affine(expanded, affine_matrix, output_shape=image_shape)
     if roi.reference_geometry_type == "none":
         return np.zeros((image_height, image_width), dtype=bool)
-    inner_radius, outer_radius = _effective_reference_radii(roi, default_inner_radius_px, default_outer_radius_px)
+    inner_radius, outer_radius = effective_reference_radii(roi, default_inner_radius_px, default_outer_radius_px)
     if outer_radius <= 0.0:
         return np.zeros((image_height, image_width), dtype=bool)
     return transformed_annulus_mask(
@@ -549,7 +555,7 @@ def rasterize_reference_for_patch(
         return expand_mask_to_patch_warped(roi.reference_mask, patch_origin_xy, patch_shape, affine_matrix)
     if roi.reference_geometry_type == "none":
         return np.zeros((patch_h, patch_w), dtype=bool)
-    inner_radius, outer_radius = _effective_reference_radii(roi, default_inner_radius_px, default_outer_radius_px)
+    inner_radius, outer_radius = effective_reference_radii(roi, default_inner_radius_px, default_outer_radius_px)
     if outer_radius <= 0.0:
         return np.zeros((patch_h, patch_w), dtype=bool)
     return transformed_annulus_mask_for_patch(
@@ -721,7 +727,7 @@ def rasterize_fractional(
         if side == "sample":
             inner_radius, outer_radius = 0.0, float(roi.sample_radius_px)
         else:
-            inner_radius, outer_radius = _effective_reference_radii(roi, default_inner_radius_px, default_outer_radius_px)
+            inner_radius, outer_radius = effective_reference_radii(roi, default_inner_radius_px, default_outer_radius_px)
         if outer_radius <= 0.0:
             return np.zeros((image_height, image_width), dtype=np.float32)
         transformed_center, reach = annulus_reach_box(center_xy, outer_radius, affine_matrix)
