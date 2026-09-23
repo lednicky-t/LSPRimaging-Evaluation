@@ -24,7 +24,8 @@ from pathlib import Path
 
 import numpy as np
 
-from ..roi.model import AreaRoi
+from ..image_tools.background.model import BackgroundSettings
+from ..roi.model import AreaRoi, AreaRoiDetectionSettings
 
 # -- naming: frame identity + adaptive numeric formatting --------------------
 
@@ -368,6 +369,63 @@ def sample_exclusion_digest(rois: list[AreaRoi] | tuple[AreaRoi, ...]) -> list:
     return digest
 
 
+def background_exclusion_digest(
+    rois: list[AreaRoi] | tuple[AreaRoi, ...],
+    background_settings: BackgroundSettings,
+    detection_settings: AreaRoiDetectionSettings | None,
+) -> dict | None:
+    """What the *background estimate* excluded - the fingerprint half of
+    actually wiring `rois`/`mask_settings` into `apply_preprocessing`
+    (2026-09-23; see `tasks.py`'s `compute_cell` for the compute half).
+
+    Returns `None` whenever background flattening is off or neither
+    exclusion toggle is on, and `SettingsSnapshot.as_json()` then omits the
+    field entirely rather than writing `null`. That is deliberate: a
+    snapshot this change cannot possibly affect has to serialize exactly as
+    it did before the field existed, or simply adding it would invalidate
+    every stored cell of every existing analysis for no reason.
+
+    Two independent parts, each recorded only while its own toggle is on:
+
+    - ``"rois"`` - every ROI's background-exclusion geometry. With ROI
+      exclusion on, moving ROI X changes the background estimate under ROI
+      Y, so Y's stored value must be invalidated when X moves. Exactly the
+      invalidation problem `sample_exclusion_digest` exists for on the
+      reference-ring side, and the same answer. Only the three fields
+      `background/estimate.py`'s `_roi_exclusion_mask` actually reads:
+      it works off `sample_radius_px` directly and never consults
+      `sample_diameter_px` or a sample mask, so recording those would
+      invalidate cells on edits the background estimate cannot see.
+    - ``"ignore_marked_pixels"`` - the one `AreaRoiDetectionSettings` field
+      that reaches the background estimate (`roi/detection.py`'s
+      `ignored_pixel_mask` gates the entire external mask on it). Flipping
+      it changes the estimate while `BackgroundSettings` stays identical,
+      so nothing else in the snapshot would notice.
+
+    **Computed from every ROI, never a selected subset** - same reasoning as
+    `REFERENCE_EXCLUSION_MODES`, and the maintainer's explicit instruction
+    for this fix in the 2026-09-23 build log entry: the old app built its
+    background exclusion from the selected ROIs, which made a stored value
+    depend on what happened to be selected when it was computed.
+    """
+    if not background_settings.flatten_background_enabled:
+        return None
+    digest: dict = {}
+    if background_settings.flatten_background_exclude_area_rois and rois:
+        digest["rois"] = [
+            {
+                "area_roi_id": int(roi.area_roi_id),
+                "center_x": float(roi.center_x),
+                "center_y": float(roi.center_y),
+                "sample_radius_px": float(roi.sample_radius_px),
+            }
+            for roi in sorted(rois, key=lambda item: int(item.area_roi_id))
+        ]
+    if background_settings.flatten_background_exclude_mask and detection_settings is not None:
+        digest["ignore_marked_pixels"] = bool(detection_settings.ignore_marked_pixels)
+    return digest or None
+
+
 @dataclass(frozen=True)
 class SettingsSnapshot:
     """One combination of dataset-wide/per-frame inputs, as actually in
@@ -377,15 +435,26 @@ class SettingsSnapshot:
     isn't authored at a single frame).
 
     **Background is a plain settings dict here, not a `MaskSnapshotRef`-
-    style image reference** - interim scope, see the design doc:
-    `BackgroundModule` has no persistent/individual timeline yet to hang a
-    per-frame image on, unlike `MaskModule`. Revisit once/if it gets one.
+    style image reference - and that is the final design, not a placeholder**
+    (maintainer's decision 2026-09-23; an earlier version of this docstring
+    called it interim scope pending a `MaskModule`-style timeline on
+    `BackgroundModule`, which will not be built). Only the *method* is
+    recorded, and since `BackgroundSettings` is flat and dataset-wide it is
+    identical for every cube and wavelength.
+
+    The computed background profile is deliberately **not** stored anywhere.
+    It is a deterministic function of the raw frame plus `geometry`, `mask`
+    and `background` - all already in this snapshot - so recording it would
+    add no invalidation power, only ~4 GB of audit artifact per analysis of
+    a full dataset. See the design doc's background row for the measurements
+    behind that, and for the one thing it gives up (an algorithm change to
+    `estimate_background_profile` will not invalidate stored cells).
     """
 
     geometry: dict  # GeometrySettings, as a plain dict (small, dataset-wide, changes rarely)
     mask: MaskSnapshotRef | None
     chromatic: ChromaticSnapshotRef | None
-    background: dict  # BackgroundSettings, as a plain dict - see docstring
+    background: dict  # BackgroundSettings (the method), as a plain dict - see docstring; the computed profile is never stored
     reduction_method: str
     reference_exclusion_mode: str = DEFAULT_REFERENCE_EXCLUSION_MODE
     sample_exclusion: list | None = None
@@ -393,9 +462,14 @@ class SettingsSnapshot:
     `reference_exclusion_mode` needs it, `None` otherwise - see that
     function's docstring for why this lives here rather than on
     `ProvenanceRecord`."""
+    background_exclusion: dict | None = None
+    """`background_exclusion_digest(...)`'s output - what the background
+    estimate excluded, `None` when it excluded nothing. Unlike every other
+    field this one is *omitted* from `as_json()` when `None` rather than
+    written as `null`; see that function's docstring for why."""
 
     def as_json(self) -> dict:
-        return {
+        payload = {
             "geometry": self.geometry,
             "mask": None if self.mask is None else {
                 "cube_index": self.mask.cube_index, "wavelength_nm": self.mask.wavelength_nm,
@@ -410,6 +484,17 @@ class SettingsSnapshot:
             "reference_exclusion_mode": self.reference_exclusion_mode,
             "sample_exclusion": self.sample_exclusion,
         }
+        # Added 2026-09-23, and added *conditionally* on purpose: this
+        # payload is compared key-for-key against already-written snapshot
+        # files to dedup them (`persist_settings_snapshot`), so an
+        # unconditional `"background_exclusion": null` would differ from
+        # every file written before the field existed and mint a fresh
+        # version - invalidating every stored cell of every analysis where
+        # background flattening is off, i.e. exactly the analyses this
+        # change cannot affect. See `background_exclusion_digest`.
+        if self.background_exclusion is not None:
+            payload["background_exclusion"] = self.background_exclusion
+        return payload
 
 
 def _existing_settings_versions(settings_dir: Path) -> dict[int, dict]:

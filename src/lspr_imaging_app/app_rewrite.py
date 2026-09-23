@@ -26,12 +26,15 @@ from __future__ import annotations
 import logging
 import sys
 
+from pathlib import Path
+
 from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import QApplication, QLabel, QMainWindow, QVBoxLayout, QWidget
 
 from lspr_ui import app_icon, set_active_theme, GRAY_DARK_THEME
 
-from .analysis import AnalysisEngine
+from .analysis import AnalysisEngine, AnalysisSettingsModule
+from .analysis.provenance import FrameNamingScheme
 from .dataset import DatasetModule
 from .gui.app_theme import apply_app_theme
 from .image_tools import BackgroundModule, ChromaticModule, GeometryModule, MaskModule
@@ -43,9 +46,12 @@ from .panels.spectra import SpectraPanel
 from .panels.workflow import WorkflowPanel
 from .roi import RoiToolbox
 from .selection import SelectionModule
-from .storage.session import SessionState
+from .storage.session import SessionState, load_session
+from .storage.session_autosave import SessionAutosave
 from .undo import undo_manager
 from .version_rewrite import rewrite_version_string
+
+logger = logging.getLogger(__name__)
 
 
 def _not_functional_banner() -> QWidget:
@@ -67,6 +73,7 @@ def _build_analysis_engine(
     chromatic: ChromaticModule,
     background: BackgroundModule,
     roi_toolbox: RoiToolbox,
+    analysis_settings: AnalysisSettingsModule | None = None,
 ) -> AnalysisEngine:
     """Gather the engine's narrow per-module reads into the callables it
     takes at construction (2026-09-23 - previously ``AnalysisEngine()`` with
@@ -107,6 +114,19 @@ def _build_analysis_engine(
             roi_toolbox.detection_settings().reference_inner_radius_px,
             roi_toolbox.detection_settings().reference_outer_radius_px,
         ),
+        # The whole object, for apply_preprocessing's `mask_settings` - what
+        # makes `flatten_background_exclude_mask` actually exclude the ignore
+        # mask from the background estimate (2026-09-23; see analysis/tasks.py).
+        detection_settings=roi_toolbox.detection_settings,
+        # The query layer's fit/metric half. Optional, unlike the reads
+        # above: without a settings module the engine answers `get_metric`
+        # using MetricSettings' defaults rather than raising, because these
+        # can never make a stored cell wrong - only derive it differently.
+        **(
+            {}
+            if analysis_settings is None
+            else {"metric_settings": analysis_settings.metric_settings}
+        ),
     )
 
 
@@ -117,6 +137,7 @@ def capture_session(
     background: BackgroundModule,
     roi_toolbox: RoiToolbox,
     selection: SelectionModule,
+    analysis_settings: AnalysisSettingsModule,
 ) -> SessionState:
     """Read every module's current state into a plain, Qt-free
     :class:`SessionState` (2026-09-23).
@@ -138,6 +159,8 @@ def capture_session(
         chromatic_models=chromatic.models(),
         chromatic_landmarks=chromatic.landmarks(),
         detection_settings=roi_toolbox.detection_settings(),
+        metric_settings=analysis_settings.metric_settings(),
+        statistics_settings=analysis_settings.statistics_settings(),
         rois=roi_toolbox.rois(),
         groups=roi_toolbox.groups(),
         arrays=roi_toolbox.array_groups(),
@@ -155,6 +178,7 @@ def apply_session(
     background: BackgroundModule,
     roi_toolbox: RoiToolbox,
     selection: SelectionModule,
+    analysis_settings: AnalysisSettingsModule,
 ) -> None:
     """Push a loaded :class:`SessionState` into every module.
 
@@ -173,12 +197,110 @@ def apply_session(
     mask.restore_state(state.mask_settings, state.mask_changes)
     chromatic.restore_state(state.chromatic_settings, state.chromatic_models, state.chromatic_landmarks)
     roi_toolbox.restore_state(state.detection_settings, state.rois, state.groups, state.arrays)
+    analysis_settings.restore_state(state.metric_settings, state.statistics_settings)
 
     selection.set_cube(state.selected_cube)
     selection.set_wavelength(state.selected_wavelength)
     selection.set_roi_selection(set(state.selected_roi_ids))
 
     undo_manager.clear()
+
+
+def _frame_naming(dataset: DatasetModule) -> FrameNamingScheme:
+    """The dataset's own frame-tag scheme, which saving and loading a
+    session must agree on or a mask PNG's filename won't be found again
+    (`storage/session.py`'s `save_session`).
+
+    Same derivation as ``AnalysisEngine._naming``. Two copies rather than
+    one shared helper because the two sit on opposite sides of the module
+    boundary and neither owns the dataset - worth collapsing into
+    ``DatasetModule`` itself if a third caller ever appears."""
+    cube_indices = list(dataset.spectral_cubes())
+    wavelengths: list[float] = []
+    for cube_index in cube_indices:
+        wavelengths.extend(dataset.wavelengths_for_cube(cube_index))
+    return FrameNamingScheme.for_dataset(cube_indices, wavelengths)
+
+
+def _build_session_autosave(
+    dataset: DatasetModule,
+    geometry: GeometryModule,
+    mask: MaskModule,
+    chromatic: ChromaticModule,
+    background: BackgroundModule,
+    roi_toolbox: RoiToolbox,
+    selection: SelectionModule,
+    analysis_settings: AnalysisSettingsModule,
+) -> SessionAutosave:
+    """Give ``save_session``/``load_session`` the triggers they were built
+    without (2026-09-23): load when a dataset opens, autosave while it is
+    open, flush before anything replaces it.
+
+    Same shape and reasoning as ``_build_analysis_engine`` above - this is
+    the one place that knows about every module, so the knowledge of *what
+    counts as a change* lives here rather than inside
+    ``storage/session_autosave.py``, which stays a pure debounce.
+
+    Every computational **and** cosmetic signal is connected. The
+    cosmetic/computational split exists to tell the analysis store what may
+    be stale (sketch §3); it says nothing about what is worth persisting,
+    and a relabelled or recoloured ROI is exactly as worth keeping as a
+    moved one."""
+    autosave = SessionAutosave(
+        capture=lambda: capture_session(
+            geometry, mask, chromatic, background, roi_toolbox, selection, analysis_settings
+        ),
+        naming=lambda: _frame_naming(dataset),
+    )
+
+    def restore_for(dataset_model: object) -> None:
+        # `set_root(None)` first: it flushes whatever the *previous* dataset
+        # still had pending, while that dataset's root is still the current
+        # one. Doing it after the switch would write the old dataset's edits
+        # into the new dataset's folder.
+        root = Path(dataset_model.home)
+        autosave.set_root(None)
+        try:
+            state = load_session(root)
+        except Exception:
+            # `load_session` raises on a file it cannot read or does not
+            # recognise, deliberately (see its docstring) - starting from
+            # defaults silently would look exactly like a dataset that was
+            # never set up. Autosave stays off for this root so the app
+            # cannot overwrite a recoverable file with blank state.
+            logger.exception("Could not read the session for %s - continuing with defaults", root)
+            autosave.set_root(root, enabled=False)
+            return
+        if state is not None:
+            # Restoring emits from every module it touches; without this the
+            # restore would schedule a save of what was just loaded.
+            with autosave.suspended():
+                apply_session(
+                    state, geometry, mask, chromatic, background,
+                    roi_toolbox, selection, analysis_settings,
+                )
+        autosave.set_root(root)
+
+    dataset.dataset_loaded.connect(restore_for)
+    dataset.dataset_cleared.connect(lambda: autosave.set_root(None))
+
+    for signal in (
+        geometry.geometry_changed, geometry.cosmetic_changed,
+        mask.mask_changed, mask.cosmetic_changed,
+        background.background_model_changed,
+        chromatic.chromatic_model_changed,
+        roi_toolbox.geometry_changed, roi_toolbox.cosmetic_changed,
+        roi_toolbox.roi_ids_renumbered,
+        # Neither cosmetic nor computational (see AnalysisSettingsChange) -
+        # but just as much part of the session: a baseline-corrected trace
+        # reads as relative shift rather than absolute value, so losing the
+        # setting changes what the plot means on the next open.
+        analysis_settings.settings_changed,
+        selection.cube_changed, selection.wavelength_changed, selection.roi_selection_changed,
+    ):
+        signal.connect(autosave.schedule)
+
+    return autosave
 
 
 def build_main_window() -> QMainWindow:
@@ -193,7 +315,10 @@ def build_main_window() -> QMainWindow:
     background = BackgroundModule()
     roi_toolbox = RoiToolbox()
     selection = SelectionModule()
-    analysis_engine = _build_analysis_engine(dataset, geometry, mask, chromatic, background, roi_toolbox)
+    analysis_settings = AnalysisSettingsModule()
+    analysis_engine = _build_analysis_engine(
+        dataset, geometry, mask, chromatic, background, roi_toolbox, analysis_settings
+    )
 
     # SelectionModule holds no RoiToolbox reference of its own (AGENTS.md,
     # "no module reaches into another's internals") - this is the one place
@@ -211,6 +336,13 @@ def build_main_window() -> QMainWindow:
     # ImageDataset.home).
     dataset.dataset_loaded.connect(lambda ds: analysis_engine.set_storage_root(ds.home))
     dataset.dataset_cleared.connect(lambda: analysis_engine.set_storage_root(None))
+
+    # Connected after the engine's own dataset hooks above, so a restored
+    # session's signals land on panels that are already looking at the right
+    # store. Qt calls slots in connection order.
+    session_autosave = _build_session_autosave(
+        dataset, geometry, mask, chromatic, background, roi_toolbox, selection, analysis_settings
+    )
 
     # AnalysisScope.SELECTED_ROIS means "whatever is selected right now".
     # Setting it never triggers computation (sketch §7) - it only decides
@@ -243,6 +375,18 @@ def build_main_window() -> QMainWindow:
     window.setWindowTitle(rewrite_version_string())
     window.setCentralWidget(central)
     window.resize(1100, 720)
+
+    # Parented now that there is a window to own it, so it dies with the
+    # window rather than living on as an orphan QObject holding a timer.
+    session_autosave.setParent(window)
+    # On the application, not on `closeEvent`: the same reasoning ImagePanel
+    # documents for its render thread - `closeEvent` reaches only top-level
+    # windows, and `aboutToQuit` is where a normal quit actually arrives.
+    # Unsaved edits inside the debounce window would otherwise be lost every
+    # time the app is closed within 2.5 s of the last edit.
+    app = QApplication.instance()
+    if app is not None:
+        app.aboutToQuit.connect(session_autosave.flush)
     return window
 
 

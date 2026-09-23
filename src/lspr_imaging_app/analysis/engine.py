@@ -23,6 +23,18 @@ leaving the whole class NotImplementedError pending that one method. Once
 callables) exist, wiring this up is a small change at construction time -
 nothing about the logic below needs to change.
 
+**The query layer (layers 2-3) was added 2026-09-23** - `formula_spectrum`/
+`get_fit`/`get_metric`/`metric_trace` below, over `query.py`'s pure
+functions. They re-derive from what is already in memory: a formula, fit or
+metric change never invalidates a stored cell, never reads a pixel, and
+never triggers a run (sketch §6's last bullet). The fit is memoized per
+cell against a settings fingerprint, because a sensorgram asks for one per
+cube per ROI and a gaussian fit is ~1 ms - see `request_metric_traces` for
+the background path a panel is expected to use. Pillar II (smoothing,
+baseline, group aggregation - `statistics.py`) deliberately does **not**
+live here: it is cheap, purely visual, and belongs to whichever panel is
+displaying (see `docs/analysis_pipeline_layers.md`).
+
 **`get_metric`/`get_spectrum`/`status_summary` are backed by an in-memory
 store, `data.h5`-persisted as of 2026-09-22 - not a per-query file read**:
 `data.h5` now exists (`store.py`), but every read still goes through the
@@ -47,14 +59,17 @@ from PyQt6.QtCore import QObject, pyqtSignal
 from ..diagnostics import instrumented
 from ..image_tools.background.model import BackgroundSettings
 from ..image_tools.geometry.model import GeometrySettings
-from ..roi.model import AreaRoi
+from ..roi.model import AreaRoi, AreaRoiDetectionSettings
 from .planner import AnalysisScope, CurrentInputs, plan_recompute
 from .reduction import DEFAULT_TRIMMED_MEAN_FRACTION
+from .query import FormulaSpectrum, FitResult, fit_spectrum, formula_spectrum, metric_value
+from .settings import MetricSettings
 from .provenance import (
     DEFAULT_REFERENCE_EXCLUSION_MODE,
     FrameNamingScheme,
     InMemoryProvenanceStore,
     SettingsSnapshot,
+    background_exclusion_digest,
     mask_scope_tag,
     persist_chromatic_snapshot,
     resolve_mask_snapshot_ref,
@@ -101,6 +116,7 @@ class AnalysisEngine(QObject):
     analysis_progress = pyqtSignal(float)  # batched/coalesced (§8), not per-cube
     store_updated = pyqtSignal()
     analysis_complete = pyqtSignal()
+    metric_traces_ready = pyqtSignal(object)  # dict[int, np.ndarray], see request_metric_traces
 
     def __init__(
         self,
@@ -116,6 +132,8 @@ class AnalysisEngine(QObject):
         resolve_mask: Callable[[int, float], MaskResolution | None] | None = None,
         reduction_method: Callable[[], str] | None = None,
         default_reference_radii: Callable[[], tuple[float, float]] | None = None,
+        detection_settings: Callable[[], AreaRoiDetectionSettings] | None = None,
+        metric_settings: Callable[[], MetricSettings] = MetricSettings,
         reference_exclusion_mode: Callable[[], str] = lambda: DEFAULT_REFERENCE_EXCLUSION_MODE,
         storage_root: Path | None = None,
         trimmed_mean_fraction: float = DEFAULT_TRIMMED_MEAN_FRACTION,
@@ -147,10 +165,17 @@ class AnalysisEngine(QObject):
           engine never warps it and never calls into Chromatic or Mask
           itself, matching the module boundary rule every other module
           already follows.
-        - ``reduction_method`` / ``default_reference_radii`` - both read
-          ``RoiToolbox.detection_settings()`` (`reduction_method`, and
-          `reference_inner/outer_radius_px` for ROIs that don't override
-          them).
+        - ``reduction_method`` / ``default_reference_radii`` /
+          ``detection_settings`` - all three read
+          ``RoiToolbox.detection_settings()``: the first two pull one field
+          each (`reduction_method`, and `reference_inner/outer_radius_px`
+          for ROIs that don't override them), while the third hands the
+          whole object to `compute_cell` for `apply_preprocessing`'s
+          `mask_settings` (added 2026-09-23 with the background-exclusion
+          fix - see `tasks.py`'s module docstring). Three reads of one
+          object is redundant and worth collapsing into one the next time
+          this constructor is touched; left alone here so the fix didn't
+          also reshape a just-tested public surface.
 
         ``storage_root`` is the folder this analysis writes under - its
         `analysis/` subfolder holds `data.h5` plus the mask/chromatic/
@@ -167,6 +192,16 @@ class AnalysisEngine(QObject):
         actually wired). `AnalysisEngine()` with no arguments constructs
         fine; `run_analysis()`/`preview_recompute()` raise until real
         callables are supplied.
+
+        ``metric_settings`` - ``AnalysisSettingsModule.metric_settings()``,
+        the fit/metric half of the query layer (`query.py`). Like
+        ``reference_exclusion_mode`` below it gets a real default rather
+        than an `_unwired` raiser, because an engine with no settings
+        module attached should still answer `get_metric` using the
+        documented defaults instead of raising - these settings can never
+        make a stored cell wrong, only re-derive it differently. The
+        *formula* half is read from ``detection_settings().formula_key``,
+        where the old app already keeps it.
 
         ``reference_exclusion_mode`` is the one exception to that rule -
         it gets a real default rather than an `_unwired` raiser, because
@@ -186,10 +221,18 @@ class AnalysisEngine(QObject):
         self._resolve_mask = resolve_mask or _unwired("resolve_mask")
         self._reduction_method = reduction_method or _unwired("reduction_method")
         self._default_reference_radii = default_reference_radii or _unwired("default_reference_radii")
+        self._detection_settings = detection_settings or _unwired("detection_settings")
         self._reference_exclusion_mode = reference_exclusion_mode
+        self._metric_settings = metric_settings
         self._trimmed_mean_fraction = trimmed_mean_fraction
 
         self._worker = AnalysisWorker()
+        # A second worker, not the one above: `run_analysis` holds that one
+        # for the length of a run, and a panel asking for a sensorgram trace
+        # must not have to wait for an analysis to finish (or, worse, get a
+        # RuntimeError from `submit` because one is in flight).
+        self._derived_worker = AnalysisWorker()
+        self._metric_cache: dict[tuple[int, int], tuple[tuple, float | None]] = {}
         self._store = InMemoryProvenanceStore()
         self._results: dict[tuple[int, int], CellResult] = {}
         self._selected_roi_ids: tuple[int, ...] = ()
@@ -258,6 +301,11 @@ class AnalysisEngine(QObject):
         self._storage_root = None if root is None else Path(root)
         self._results = {}
         self._store = InMemoryProvenanceStore()
+        # Derived values belong to the dataset they were derived from; a
+        # (roi_id, cube_index) key means something different under a
+        # different dataset, so keeping them would show one dataset's
+        # sensorgram against another's.
+        self._metric_cache.clear()
         if self._storage_root is not None:
             for (roi_id, cube_index), result in read_all_cells(self._data_h5_path).items():
                 self._results[(roi_id, cube_index)] = result
@@ -266,25 +314,132 @@ class AnalysisEngine(QObject):
 
     # -- query interface ------------------------------------------------
 
-    def get_metric(self, roi_id: int, cube_index: int) -> tuple[float, ...] | None:
-        """Raw reduced (sample, reference) values are what's stored - see
-        `tasks.py`'s module docstring for why formula math isn't baked in
-        here (a query-time concern, not yet built - there is no `Formula`/
-        `Fit`/`Metric` layer above this yet, so this currently returns the
-        stored per-wavelength *pairs*, not a single derived scalar, which
-        is a real gap against the sketch's `get_metric() -> float | None`
-        signature, flagged rather than faked with a wrong number).
-        Returns ``None`` if not yet analyzed - never computes on read
-        (sketch §7)."""
-        result = self._results.get((roi_id, cube_index))
-        if result is None:
-            return None
-        return result.sample_values + result.reference_values
-
     def get_spectrum(self, roi_id: int, cube_index: int) -> CellResult | None:
         """Returns the stored `CellResult` (wavelengths + raw sample/
         reference pairs + provenance), or `None` if not yet analyzed."""
         return self._results.get((roi_id, cube_index))
+
+    # -- the query layer: layers 2-3, derived, never stored ------------------
+    #
+    # Everything below re-derives from what `get_spectrum` already holds.
+    # None of it can invalidate a stored cell, none of it reads a pixel, and
+    # none of it may trigger a run - a cell nobody has analyzed answers
+    # `None`, and a panel shows "needs analysis" rather than quietly
+    # computing it (sketch §7).
+
+    def _query_fingerprint(self) -> tuple:
+        """Every setting that changes a derived value, as one comparable
+        tuple - the cache key's other half.
+
+        Comparing this on read is why nothing has to *subscribe* to a
+        settings change to stay correct: a changed setting simply misses
+        the cache. A subscription would be a second thing to keep in step
+        with the settings that actually matter, and forgetting to update it
+        would show a stale plot with no error."""
+        metric = self._metric_settings()
+        return (
+            str(self._detection_settings().formula_key),
+            str(metric.fit_method), int(metric.poly_order),
+            metric.fit_wl_min, metric.fit_wl_max, str(metric.metric_key),
+        )
+
+    def formula_spectrum(self, roi_id: int, cube_index: int) -> FormulaSpectrum | None:
+        """Layer 2: this ROI's own spectrum under the current formula, or
+        `None` if the cell isn't analyzed.
+
+        Not cached: it is one vectorized expression over arrays already in
+        memory, so caching it would cost more in bookkeeping than it
+        saves - unlike the fit below."""
+        result = self._results.get((roi_id, cube_index))
+        if result is None:
+            return None
+        return formula_spectrum(
+            result.wavelengths_nm, result.sample_values, result.reference_values,
+            self._detection_settings().formula_key,
+        )
+
+    def get_fit(self, roi_id: int, cube_index: int) -> FitResult | None:
+        """The fitted curve for one cell, for the Spectra panel to draw
+        over the measured points. `None` when the cell isn't analyzed *or*
+        when the fit method is `"none"` - a panel wanting to tell those
+        apart checks `formula_spectrum` for the first."""
+        spectrum = self.formula_spectrum(roi_id, cube_index)
+        if spectrum is None:
+            return None
+        metric = self._metric_settings()
+        return fit_spectrum(
+            spectrum, metric.fit_method, poly_order=metric.poly_order,
+            wl_min=metric.fit_wl_min, wl_max=metric.fit_wl_max,
+        )
+
+    def get_metric(self, roi_id: int, cube_index: int) -> float | None:
+        """Layer 3: one number per (ROI, cube) - the metric *wavelength*,
+        which is what a sensorgram plots, since a shifting peak is the
+        measurement. `None` if the cell isn't analyzed or the fit didn't
+        converge.
+
+        Memoized per cell against `_query_fingerprint`, because this is the
+        expensive one: a gaussian `curve_fit` is ~1 ms, and a sensorgram
+        asks for one per cube per ROI."""
+        cached = self._metric_cache.get((roi_id, cube_index))
+        fingerprint = self._query_fingerprint()
+        if cached is not None and cached[0] == fingerprint:
+            return cached[1]
+
+        spectrum = self.formula_spectrum(roi_id, cube_index)
+        if spectrum is None:
+            return None
+        metric = self._metric_settings()
+        wavelength, _value = metric_value(
+            spectrum, metric.fit_method, metric.metric_key,
+            poly_order=metric.poly_order, wl_min=metric.fit_wl_min, wl_max=metric.fit_wl_max,
+        )
+        self._metric_cache[(roi_id, cube_index)] = (fingerprint, wavelength)
+        return wavelength
+
+    def metric_trace(self, roi_id: int, cube_indices: tuple[int, ...] | None = None) -> np.ndarray:
+        """One ROI's sensorgram trace: its metric per cube, in cube order,
+        `NaN` where nothing is stored.
+
+        **NaN rather than a short array**: every ROI's trace has to stay
+        aligned to the same x axis for `statistics.aggregate_traces` to
+        stack them, and a missing cube is a real, ordinary state (that cell
+        has not been analyzed, or its fit didn't converge) - dropping the
+        point would silently shift every later point left.
+
+        Synchronous, and safe to call from the GUI thread only for a trace
+        that is already cached. Use `request_metric_traces` otherwise."""
+        cubes = self._cube_indices() if cube_indices is None else cube_indices
+        return np.asarray(
+            [
+                value if (value := self.get_metric(roi_id, cube_index)) is not None else np.nan
+                for cube_index in cubes
+            ],
+            dtype=np.float64,
+        )
+
+    def request_metric_traces(self, roi_ids: tuple[int, ...]) -> None:
+        """Compute `metric_trace` for each of `roi_ids` off the GUI thread,
+        then emit `metric_traces_ready` with `{roi_id: trace}`.
+
+        This is the entry point a panel uses. AGENTS.md forbids fitting on
+        the GUI thread, and the arithmetic backs that up: 160 ROIs x 300
+        cubes is 48,000 fits, ~48 s with a gaussian - a freeze, not a
+        stutter. Once warm the cache answers instantly, so the cost is paid
+        once per settings change rather than once per redraw.
+
+        Silently does nothing if a previous request is still running: this
+        is a display query, so the newest answer is the only one that
+        matters and the in-flight one is about to produce it anyway. Unlike
+        `run_analysis`, dropping a request here loses nothing - nothing is
+        stored from it."""
+        if self._derived_worker.is_running():
+            return
+
+        def run() -> None:
+            self.metric_traces_ready.emit({roi_id: self.metric_trace(roi_id) for roi_id in roi_ids})
+
+        self._derived_worker.submit(run)
 
     def status_summary(self) -> AnalysisStatus:
         all_cells = tuple(
@@ -338,6 +493,15 @@ class AnalysisEngine(QObject):
             if exclusion_mode == "exclude_all_sample_rois" and all_rois
             else None
         )
+        # Same requirement for the background estimate's own ROI/mask
+        # exclusion (2026-09-23). Both digests are pure geometry and
+        # settings - no pixel is read to build them, which is what keeps
+        # `preview_recompute` cheap enough to answer "how many cells will
+        # recompute" without estimating a background for every frame in the
+        # dataset (the design trap recorded in the same build log entry).
+        background_digest = background_exclusion_digest(
+            all_rois, background, self._detection_settings()
+        )
         cube_settings: dict[int, dict[float, SettingsSnapshot]] = {}
         for cube_index in self._cube_indices():
             wavelength_settings: dict[float, SettingsSnapshot] = {}
@@ -369,6 +533,7 @@ class AnalysisEngine(QObject):
                     geometry=asdict(geometry), mask=mask_ref, chromatic=chromatic_ref,
                     background=asdict(background), reduction_method=reduction_method,
                     reference_exclusion_mode=exclusion_mode, sample_exclusion=exclusion_digest,
+                    background_exclusion=background_digest,
                 )
             cube_settings[cube_index] = wavelength_settings
         roi_geometries = {roi.area_roi_id: roi_geometry_fingerprint_fields(roi) for roi in all_rois}
@@ -421,6 +586,12 @@ class AnalysisEngine(QObject):
         cancel_event = self._worker.cancel_event
         exclusion_mode = self._reference_exclusion_mode()
         all_rois = tuple(rois_by_id.values())
+        # Read once here, on the GUI thread, not per cell from the worker:
+        # the modules are only ever touched from the GUI thread (the same
+        # convention `panels/image/render.py`'s RenderRequest follows), and
+        # a run must in any case compute every cell against one consistent
+        # set of settings rather than picking up an edit halfway through.
+        detection = self._detection_settings()
         # One cache for this whole run: the sample-exclusion union is
         # identical for every cell at a given (cube, wavelength), so this
         # turns O(ROIs x cells) rasterizations into O(ROIs). Scoped to the
@@ -429,29 +600,49 @@ class AnalysisEngine(QObject):
         sample_exclusion_cache: dict[tuple[int, float], np.ndarray] = {}
 
         def run() -> None:
-            total = len(plan.to_recompute)
-            for completed, (roi_id, cube_index) in enumerate(plan.to_recompute, start=1):
-                if cancel_event.is_set():
-                    break
-                roi = rois_by_id.get(roi_id)
-                if roi is None:
-                    continue
-                wavelength_inputs = self._gather_wavelength_inputs(cube_index)
-                result = compute_cell(
-                    roi, cube_index, wavelength_inputs,
-                    reduction_method=reduction_method, trimmed_mean_fraction=self._trimmed_mean_fraction,
-                    default_reference_inner_radius_px=default_inner, default_reference_outer_radius_px=default_outer,
-                    masks_dir=self._masks_dir, chromatic_dir=self._chromatic_dir, settings_dir=self._settings_dir,
-                    naming=naming, all_rois=all_rois, reference_exclusion_mode=exclusion_mode,
-                    sample_exclusion_cache=sample_exclusion_cache, cancel_event=cancel_event,
-                )
-                if result is not None:
-                    self._results[(roi_id, cube_index)] = result
-                    self._store.record(roi_id, cube_index, result.provenance)
-                    write_cell(self._data_h5_path, roi_id, cube_index, result)
-                    self.store_updated.emit()
-                self.analysis_progress.emit(completed / max(total, 1))
-            self.analysis_complete.emit()
+            # `finally`, so a failure partway through still tells whoever is
+            # waiting that the run is over (2026-09-23). Without it, a
+            # raising cell left `analysis_complete` unemitted forever and a
+            # panel showing "analyzing..." with no way back - and in a
+            # packaged build the traceback went to a stderr nobody reads.
+            # `AnalysisWorker` now logs it; this half makes sure the UI
+            # recovers. Cells already computed stay in the store: each is
+            # written whole, so a partial run is valid, just incomplete.
+            try:
+                total = len(plan.to_recompute)
+                for completed, (roi_id, cube_index) in enumerate(plan.to_recompute, start=1):
+                    if cancel_event.is_set():
+                        break
+                    roi = rois_by_id.get(roi_id)
+                    if roi is None:
+                        continue
+                    wavelength_inputs = self._gather_wavelength_inputs(cube_index)
+                    result = compute_cell(
+                        roi, cube_index, wavelength_inputs,
+                        reduction_method=reduction_method, trimmed_mean_fraction=self._trimmed_mean_fraction,
+                        default_reference_inner_radius_px=default_inner, default_reference_outer_radius_px=default_outer,
+                        masks_dir=self._masks_dir, chromatic_dir=self._chromatic_dir, settings_dir=self._settings_dir,
+                        naming=naming, all_rois=all_rois, detection_settings=detection,
+                        reference_exclusion_mode=exclusion_mode,
+                        sample_exclusion_cache=sample_exclusion_cache, cancel_event=cancel_event,
+                    )
+                    if result is not None:
+                        self._results[(roi_id, cube_index)] = result
+                        self._store.record(roi_id, cube_index, result.provenance)
+                        write_cell(self._data_h5_path, roi_id, cube_index, result)
+                        # The settings fingerprint hasn't changed, but the
+                        # numbers underneath it have - the one invalidation
+                        # case `_query_fingerprint` cannot detect on its own.
+                        # A single-key pop, never an iteration: the derived
+                        # worker may be reading this dict from its own thread
+                        # (see request_metric_traces), and under the GIL a
+                        # keyed get/set/pop is safe where iterating while
+                        # another thread mutates is not.
+                        self._metric_cache.pop((roi_id, cube_index), None)
+                        self.store_updated.emit()
+                    self.analysis_progress.emit(completed / max(total, 1))
+            finally:
+                self.analysis_complete.emit()
 
         self._worker.submit(run)
 

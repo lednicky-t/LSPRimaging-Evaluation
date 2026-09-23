@@ -30,8 +30,11 @@ responsible for actually checking it between units of work.
 
 from __future__ import annotations
 
+import logging
 import threading
 from collections.abc import Callable
+
+logger = logging.getLogger(__name__)
 
 
 class AnalysisWorker:
@@ -43,6 +46,13 @@ class AnalysisWorker:
 
     def __init__(self) -> None:
         self._thread: threading.Thread | None = None
+        self.last_error: BaseException | None = None
+        """The exception that ended the most recent task, or `None` if it
+        finished cleanly. Cleared at the start of each `submit()`. Exposed
+        so a caller (or a test) can ask "did that actually work" without
+        parsing the log - there is no error *signal* here because this
+        class deliberately owns no Qt plumbing (see the module docstring);
+        reporting stays the task's own job."""
         self.cancel_event = threading.Event()
         """Public and stable across this worker's whole lifetime (not
         replaced per-``submit``) - a caller can capture it in a task
@@ -61,8 +71,29 @@ class AnalysisWorker:
         if self.is_running():
             raise RuntimeError("AnalysisWorker already has a task in flight")
         self.cancel_event.clear()
-        self._thread = threading.Thread(target=task, daemon=True)
+        self.last_error = None
+        self._thread = threading.Thread(target=self._run, args=(task,), daemon=True)
         self._thread.start()
+
+    def _run(self, task: Callable[[], object]) -> None:
+        """Run `task`, recording and logging anything it raises rather than
+        letting it escape (2026-09-23).
+
+        A bare ``threading.Thread(target=task)`` sends an uncaught exception
+        to ``threading.excepthook``, i.e. to stderr - which in a packaged
+        GUI build goes nowhere anyone will look, so an analysis that died on
+        its third cell was indistinguishable from one still working. Logging
+        it here puts the traceback in the session log file like every other
+        failure in this app, and `last_error` makes it inspectable.
+
+        Re-raising is deliberately *not* done: there is no caller left on
+        this thread to catch it, so it would only land back on the same
+        excepthook this exists to avoid."""
+        try:
+            task()
+        except BaseException as exc:  # noqa: BLE001 - nothing above this frame can catch it
+            self.last_error = exc
+            logger.exception("Analysis task failed")
 
     def cancel(self) -> None:
         """Signals cooperative cancellation - sets `cancel_event`, nothing

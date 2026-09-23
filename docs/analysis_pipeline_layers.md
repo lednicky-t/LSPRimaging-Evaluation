@@ -108,3 +108,32 @@ Individual / Average all / Average by group - that only ever average
 already-fitted per-ROI sensogram values. See
 `gui/analysis_controller.py`'s sensogram trace-fetch/aggregation code for
 the current implementation.
+
+## Where this lives on the `rewrite` branch (2026-09-23)
+
+The layering above is now built as separate modules rather than being a
+description of how the GUI happens to be arranged. Read this table before
+`analysis/query.py` or `analysis/statistics.py`:
+
+| Layer | Stable build | `rewrite` branch |
+|---|---|---|
+| 1. ROI math | `processing/roi_math.py`, inside `gui/analysis_tasks.py`'s loop | `analysis/reduction.py`, called by `analysis/tasks.py`; the result is what `data.h5` stores |
+| 2. Formula spectrum | `processing/analysis.py` | `analysis/query.py` (`formula_spectrum`) |
+| 3. Metric trace | `processing/analysis.py` | `analysis/query.py` (`fit_spectrum`, `metric_value`) |
+| Pillar II | `processing/trace_statistics.py` + inline ordering in `gui/analysis_controller.py` | `analysis/statistics.py`, ordering included (`apply_statistics`) |
+| The settings | GUI combo boxes, read back via `window._analysis_metric_key()` | `analysis/settings_module.py`, persisted in the session's `"analysis"` block |
+
+Two things the split makes structural rather than conventional:
+
+- **Layers 2-3 never see more than one ROI.** `formula_spectrum` takes one
+  ROI's numbers, so the "never pool pixels across ROIs" rule cannot be
+  broken by a future caller passing a combined array - there is nowhere to
+  put one.
+- **Pillar II only ever receives traces.** `aggregate_traces` takes
+  `{roi_id: trace}` - arrays of already-fitted layer-3 values. The retired
+  "average the spectra, then fit once" path is not expressible through it.
+
+Layers 2-3 are also *derived*, never stored: `compute_cell` stops at the
+reduced (sample, reference) pairs, so changing formula, fit or metric
+re-derives from memory and recomputes nothing. See the 2026-09-23 build-log
+entry for why that needed a cache and a second worker anyway.

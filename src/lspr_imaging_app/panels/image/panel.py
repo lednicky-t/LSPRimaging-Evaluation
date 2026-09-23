@@ -332,6 +332,12 @@ class ImagePanel(QWidget):
                 background=self._background.settings(),
                 authored_mask=authored_mask,
                 mask_warp_affine=warp_affine,
+                # Every ROI, not the selection - these feed the background
+                # estimate's exclusion, not the overlay (see RenderRequest).
+                # `_redraw` already re-runs on every ROI edit, so this adds
+                # no re-render that wasn't happening anyway.
+                rois=tuple(self._roi_toolbox.rois()),
+                detection=self._roi_toolbox.detection_settings(),
                 serial=self._latest_serial,
             )
         )

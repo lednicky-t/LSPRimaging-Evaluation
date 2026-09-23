@@ -68,6 +68,24 @@ the crop/rotation happens to be. `_mask_for_compute` now does it in the
 old app's order unconditionally, and the mask *persisted into provenance*
 stays the as-authored one (see `compute_cell`).
 
+**Background-exclusion port gap closed 2026-09-23.** This file used to call
+`apply_preprocessing` with neither `rois` nor `mask_settings`, which left
+*both* of `BackgroundSettings`' exclusion toggles inert on the analysis path
+- `flatten_background_exclude_area_rois` (which defaults **on**) and
+`flatten_background_exclude_mask`. The old app's equivalent bulk path wires
+both explicitly (`gui/analysis_tasks.py`), so this was a port gap rather than
+inherited behaviour, and the mask half compounded: `preprocess.py` zeroes
+masked pixels into the processed image, and inside
+`background/estimate.py`'s `_combined_exclusion_mask` the ignore mask only
+reaches the exclusion set *through* `mask_settings` - so those zeros were
+left to drag the local background average down, the exact failure the fix
+above that line was written to prevent. Both are now passed; the ROI set is
+**all** ROIs, never a selected subset (maintainer's instruction, same
+reasoning as `REFERENCE_EXCLUSION_MODES`). Measured impact, before it was
+fixed: ~0.13% median shift in the sample/reference ratio, but only 2 of 160
+ROIs drifting by more than one shot-noise floor across a 300-cube run - see
+the 2026-09-23 build log entry for the full numbers.
+
 **Assumption 2 (rasterization) unchanged and still deliberate**:
 `roi/rasterize.py`'s binary `rasterize_sample`/`rasterize_reference` are
 used here, not `rasterize_fractional` (§6a). `analysis/reduction.py`'s
@@ -89,13 +107,14 @@ import numpy as np
 from ..image_tools.background.model import BackgroundSettings
 from ..image_tools.geometry.model import GeometrySettings
 from ..image_tools.preprocess import apply_preprocessing, resolve_external_mask
-from ..roi.model import AreaRoi
+from ..roi.model import AreaRoi, AreaRoiDetectionSettings
 from ..roi.rasterize import rasterize_reference, rasterize_sample
 from .provenance import (
     DEFAULT_REFERENCE_EXCLUSION_MODE,
     FrameNamingScheme,
     ProvenanceRecord,
     SettingsSnapshot,
+    background_exclusion_digest,
     compute_fingerprint,
     mask_scope_tag,
     persist_chromatic_snapshot,
@@ -220,6 +239,7 @@ def compute_cell(
     settings_dir: Path,
     naming: FrameNamingScheme,
     all_rois: tuple[AreaRoi, ...] = (),
+    detection_settings: AreaRoiDetectionSettings | None = None,
     reference_exclusion_mode: str = DEFAULT_REFERENCE_EXCLUSION_MODE,
     sample_exclusion_cache: dict[tuple[int, float], np.ndarray] | None = None,
     cancel_event=None,
@@ -242,6 +262,16 @@ def compute_cell(
     cell's value never depends on what else happened to be selected when
     it was computed (the old app's `all_selected_sample_mask` did depend
     on that; see `provenance.REFERENCE_EXCLUSION_MODES`' docstring).
+
+    `detection_settings` (`RoiToolbox.detection_settings()`) is passed
+    straight through to `apply_preprocessing` as its `mask_settings`, which
+    is what lets `flatten_background_exclude_mask` actually exclude the
+    ignore mask from the background estimate (see the module docstring's
+    port-gap note). Only its `ignore_marked_pixels` field reaches that far
+    today, but the whole object is passed rather than that one flag, so this
+    stays correct if `ignored_pixel_mask` ever reads another field. `None`
+    restores the old, silently-inert behaviour - kept only so a test can
+    call this function without one.
 
     `sample_exclusion_cache` memoizes that union per (cube, wavelength) -
     it is identical for every cell at a given frame, and rebuilding it per
@@ -285,6 +315,20 @@ def compute_cell(
             wl_input.raw_image,
             wl_input.geometry_settings,
             wl_input.background_settings,
+            # Both of these only ever feed the *background estimate*, and
+            # `apply_preprocessing` gates each on its own
+            # `BackgroundSettings` toggle - so passing them unconditionally
+            # here is correct, not a behaviour change when the toggles are
+            # off. See the module docstring's port-gap note.
+            #
+            # Deliberately **not** chromatically warped, matching both the
+            # old app and `_roi_exclusion_mask`'s own shape: it grows each
+            # ROI's radius by 35% before excluding it, a margin far wider
+            # than the sub-pixel-to-few-pixel shift a chromatic affine
+            # applies, so warping would cost a per-frame transform to move
+            # a boundary that is already deliberately loose.
+            rois=list(all_rois) or None,
+            mask_settings=detection_settings,
             # Processed-space, chromatically warped - see _mask_for_compute
             # and the module docstring's assumption-1 note.
             external_mask=_mask_for_compute(wl_input),
@@ -360,6 +404,16 @@ def compute_cell(
                 sample_exclusion_digest(all_rois)
                 if reference_exclusion_mode == "exclude_all_sample_rois" and all_rois
                 else None
+            ),
+            # Same idea, for the *other* place other ROIs became an input
+            # above: with background ROI exclusion on, moving ROI X changes
+            # the background under ROI Y. Self-gating (returns None unless
+            # flattening and an exclusion toggle are both on), so no
+            # condition is needed here - and it must stay identical to
+            # engine.py's planning-side call, or every cell would look
+            # stale against its own stored fingerprint.
+            background_exclusion=background_exclusion_digest(
+                all_rois, wl_input.background_settings, detection_settings
             ),
         )
 

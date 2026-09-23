@@ -91,10 +91,26 @@ concern.
    background gets the same treatment as the chromatic model — versioned
    per `(cube, wavelength)`, no scope tag, because like a chromatic model it
    is frame-specific by nature.
-3. Storing the *computed profile* (rather than the sigma/binning settings
+3. ~~Storing the *computed profile* (rather than the sigma/binning settings
    that produced it) is still worth doing and is unaffected by this: it
    records what was actually subtracted and survives a later change to the
-   estimation algorithm.
+   estimation algorithm.~~
+
+   **Superseded the same day (2026-09-23) - the profile is not stored.**
+   Maintainer's decision: record only the method (`BackgroundSettings`),
+   which being flat and dataset-wide is identical for every cube and
+   wavelength. The profile is a deterministic function of inputs the
+   settings snapshot already fingerprints, so storing it buys no
+   invalidation power at all - it would be a pure audit artifact, and at
+   ~488 KiB per frame that artifact costs ~4.0 GB per analysis of a
+   314-cube x 27-wavelength dataset. Downsampling it to something smaller
+   was measured and rejected (4x downsampling already costs 107 ADU RMS
+   round-trip, 55% of the shot-noise floor). Full reasoning and what it
+   gives up: `docs/analysis_provenance_store_design_2026-09.md`, the
+   background row.
+
+   Note this does **not** touch conclusions 1 and 2 above, which stand:
+   per-frame re-estimation stays, and the `persi`/`indiv` tag stays dropped.
 
 ## Caveats, stated plainly
 

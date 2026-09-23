@@ -3119,3 +3119,478 @@ builds.
 - `BackgroundModule`'s timeline extension - not started.
 - `statistics_settings`/`image_exclusions` have no owner, so nothing
   persists them.
+
+## 2026-09-23 (same day, continued): background provenance closed out - the computed profile is not stored, and `BackgroundModule`'s timeline is dropped
+
+Two decisions, and the second one cancelled the piece of work that was
+queued. No behavioural code change landed: the only edits are this document,
+`docs/analysis_provenance_store_design_2026-09.md`,
+`docs/background_drift_measurement_2026-09.md`, and two now-wrong comments in
+`analysis/provenance.py`.
+
+### Decision 1: no persistent/individual timeline (settled by measurement)
+
+Covered in full by `docs/background_drift_measurement_2026-09.md`, written
+earlier the same day. Short version: the provenance design doc's `persi`/
+`indiv` tag on background presumed an "estimate once, carry it forward"
+concept that exists nowhere in the code, and whether it *should* exist was a
+scientific question. Measured rather than argued, on
+`04_Bulk_sensitivity_...`: the illumination reshapes monotonically, and the
+non-uniform part of the drift - the part that does **not** cancel in a
+sample/reference ratio - crosses the single-frame shot-noise floor by about
+cube 5 and reaches ~2.9x it by cube 39. Per-frame re-estimation stays.
+
+**This removes "`BackgroundModule`'s timeline extension - not started" from
+the previous entry's still-open list.** It was never a gap; it was a
+prerequisite for a design that turned out to be wrong.
+
+### Decision 2: the computed profile is not stored at all (maintainer's call)
+
+The design doc asked for the profile as a 16-bit PNG per frame. Dropped. Only
+the method (`BackgroundSettings`) is recorded, and being flat and dataset-wide
+that is identical for every cube and wavelength - which is exactly what
+`SettingsSnapshot.background` has carried since 2026-09-22. So the feature is
+complete as already built, and what the original row called an "interim
+fallback" is the finished design.
+
+The reasoning, so nobody rebuilds it: the profile is a **deterministic
+function of inputs the snapshot already fingerprints** - the raw frame,
+`geometry`, `mask`, `background`. Storing it buys **zero** invalidation
+power. Its only value would be as an audit artifact, and the cost of that
+artifact was measured, not estimated:
+
+| | per frame | full 314-cube x 27-wl analysis |
+|---|---|---|
+| 16-bit PNG, full res, level 3 | 488 KiB, 116 ms | ~4.0 GB, ~16 min |
+| raw frame, for scale | 2340 KiB | 30 GB (the dataset) |
+
+float32 -> uint16 quantization costs 0.5 ADU max against a ~193 ADU
+single-frame shot-noise floor, so 16-bit was never the problem. **Downsampling
+to shrink it was tested and rejected**: sigma=48 px suggests there is no fine
+detail worth keeping, but the vignetting gradient at the frame edges is
+steeper than that implies - 4x downsampling round-trips at 107 ADU RMS (55% of
+shot noise), 8x at 499, 16x at 771. So the real choice was 4 GB or nothing,
+for something that improves no computation.
+
+**What this gives up, recorded deliberately**: changing
+`estimate_background_profile()`'s algorithm will **not** invalidate stored
+cells - their recorded `BackgroundSettings` is unchanged, so fingerprints
+still match. Storing the profile would not have fixed that either (it records;
+it does not invalidate). The cheap fix if it ever matters is an algorithm
+version constant in the settings snapshot, bumped by hand. Not built - the
+estimator is a verbatim port nobody plans to change.
+
+### Design trap found while planning the implementation, worth keeping
+
+Had the profile been stored as a content-deduplicated versioned file the way
+masks are, it would have re-introduced the exact bug
+`resolve_mask_snapshot_ref` was written to fix. `_gather_current_inputs()`
+fingerprints every frame with **no pixel access** - that is what makes
+`preview_recompute` cheap. A background ref versioned by comparing profile
+*pixels* would have forced planning to estimate the background for all 8478
+frames just to answer "how many cells will recompute": ~38 minutes at
+binning=2. The workable scheme was to version it by the settings that
+*determine* the profile (geometry + mask ref + `BackgroundSettings`), keeping
+plan-time resolution to JSON comparisons. Recorded because the same trap
+applies to any future file-backed provenance input whose identity is
+expensive to compute.
+
+Also noted at the time: a PNG cannot carry the scalar baseline, and
+`apply_background()` is `image - background + baseline`, so a stored profile
+alone would not have been enough to reconstruct the subtraction.
+
+### Separate regression found while reading this, NOT fixed here
+
+`analysis/tasks.py`'s `compute_cell` calls `apply_preprocessing` without
+`rois` or `mask_settings`, so both background-exclusion toggles are inert on
+the rewrite's analysis path: `flatten_background_exclude_area_rois` (defaults
+**on**) and `flatten_background_exclude_mask`. The old app's equivalent bulk
+path wires both explicitly (`gui/analysis_tasks.py:907-913`), so this is a
+port gap, not inherited behaviour.
+
+The mask half compounds: `preprocess.py` zeroes masked pixels into the
+processed image, and inside `_combined_exclusion_mask` the ignore mask only
+reaches the exclusion set *through* `mask_settings` - so those zeros are left
+to drag the local background average down, which is the exact failure the
+comment above that line says was fixed. The fix landed; it is inert on this
+path. Rotation-fill exclusion is unaffected (passed separately,
+unconditionally).
+
+Dormant for now: `flatten_background_enabled` is `False` in
+`04_Bulk_sensitivity_...`'s saved profile, and nothing is wrong when
+flattening is off. When it is fixed, the exclusion ROI set should be **all**
+ROIs, not the selected subset the old app used - same reasoning as the
+2026-09-23 reference-ring exclusion entry.
+
+**How much it actually costs, measured before deciding urgency** (real frame,
+real 160-ROI table, identity geometry, sigma=48/binning=2; current `rois=None`
+behaviour vs. the `rois=all` the saved profile asks for). Scripts
+`bg_exclusion_impact.py`/`bg_exclusion_drift.py`, scratch, reproducible from
+this entry:
+
+| | median | worst ROI |
+|---|---|---|
+| shift in sample mean | 794 ADU (4.1x shot noise) | 4883 ADU |
+| shift in **sample/reference ratio** | 0.0012 = 0.13% (0.3x shot noise) | 0.0155 = 1.6% (3.8x) |
+| **change in that ratio bias over 300 cubes** | 0.0001 (**0.02x** shot noise) | 0.0068 (1.7x) |
+
+The absolute shift is large but ~99% of it is uniform and cancels in the
+ratio. What survives is a **near-constant per-ROI offset**: only 2 of 160 ROIs
+move by more than one shot-noise floor across the entire run. So a sensorgram,
+which reads *changes* in that ratio, barely sees this - which is why the
+verdict is "real, fix it, not urgent" rather than "results are wrong".
+
+**What that measurement does not cover**: the mask half. This profile has
+`ignore_marked_pixels=False` and `flatten_background_exclude_mask=False`, so
+there was no real mask to test against, and the numbers above are the ROI half
+only. The mask half is plausibly worse, not better - a masked region is set to
+literal 0, a far bigger perturbation of a local average than a nanoparticle
+spot is. Measure it separately, on a dataset that actually uses an ignore
+mask, before assuming these numbers transfer.
+
+## 2026-09-23 (same day, continued): the background-exclusion regression fixed, and session autosave wired
+
+Three pieces, applied from what the previous entries had written down but
+left undone. The first changes computed values; the other two don't.
+
+### 1. `compute_cell` now passes `rois` and `mask_settings`
+
+The regression the previous entry found and deliberately did not fix.
+`apply_preprocessing` gates each of these on its own `BackgroundSettings`
+toggle internally, so passing them unconditionally is a no-op whenever
+flattening is off - which is why the fix is two arguments rather than a
+branch.
+
+The ROI set is **all** ROIs, per that entry's own instruction; the old app
+used the selected subset, which made a stored value depend on what happened
+to be selected when it was computed.
+
+**The display path had the same gap**, which the entry didn't mention:
+`panels/image/render.py` also called `apply_preprocessing` without either
+argument, under a comment promising that what is displayed and what is
+measured "cannot drift apart". Fixing only analysis would have made that
+comment false in exactly the case it was written for. `RenderRequest` now
+carries `rois`/`detection`, and **neither has a default**: the obvious
+default for both is "nothing to exclude", which is precisely the inert case
+that caused this bug, so a new call site has to say what it means.
+
+No extra re-render comes with it - `ImagePanel._redraw` was already
+connected to `roi_toolbox.geometry_changed` and re-submits a full render on
+every ROI edit regardless.
+
+**Numeric impact**: as measured in the previous entry - median 0.13% shift
+in the sample/reference ratio, 4.1x shot noise in the *sample* mean but
+~99% of that cancelling in the ratio, and only 2 of 160 ROIs drifting by
+more than one shot-noise floor across a 300-cube run. Any stored analysis
+computed with flattening on is now invalidated and will recompute; one with
+flattening off is untouched (see the `as_json()` note below, which is what
+makes that true).
+
+### 2. The fingerprint half, which the flagged fix did not mention
+
+Wiring ROIs into the background estimate makes *other ROIs an input to this
+ROI's value* - the same invalidation problem `sample_exclusion_digest` was
+written for on the reference-ring side, arrived at from a different
+direction. Without it the fix would be a half-fix of the worst kind: the
+background would correctly exclude a moved ROI while every other ROI's
+stored cell kept a value computed against a background that no longer
+exists, with nothing on screen to say so.
+
+`background_exclusion_digest(rois, background_settings, detection_settings)`
+records it into `SettingsSnapshot.background_exclusion`, computed by the
+identical call on both the compute side (`tasks.py`) and the planning side
+(`engine.py`) - if those two ever disagree, every cell looks permanently
+stale, which is exactly the bug the mask-version placeholder caused earlier
+the same day and the reason that test file sets a mask.
+
+Three deliberate narrowings:
+
+- **Only the three fields `_roi_exclusion_mask` actually reads** (id,
+  centre, `sample_radius_px`). It works off the radius field directly and
+  never consults `sample_diameter_px` or a sample mask, so recording those
+  would invalidate cells on edits the background estimate cannot see.
+- **Only `ignore_marked_pixels`** from `AreaRoiDetectionSettings` - the one
+  field that reaches the estimate, via `ignored_pixel_mask` gating the whole
+  external mask on it. Flipping it changes the result while
+  `BackgroundSettings` stays identical, so nothing else in the snapshot
+  would notice.
+- **Omitted from `as_json()` entirely when `None`**, not written as `null`.
+  Snapshots are deduplicated by comparing the payload against
+  already-written files, so an unconditional null key would differ from
+  every pre-existing file and force a full recompute of precisely those
+  analyses this change cannot affect.
+
+The digest is pure geometry and settings - no pixel is read to build it,
+which keeps `preview_recompute` cheap and avoids the design trap the
+previous entry recorded (a background ref versioned by profile *pixels*
+would have made "how many cells will recompute" a 38-minute question).
+
+**Not chromatically warped**, matching the old app and the shape of
+`_roi_exclusion_mask` itself: it grows each ROI's radius by 35% before
+excluding it, a margin far wider than the shift a chromatic affine applies.
+
+**Still redundant, and left that way on purpose**: `apply_preprocessing` is
+called per (cell x wavelength), so the same frame's background is estimated
+once per ROI - and the ROI exclusion now adds an O(ROIs) rasterization to
+each of those. That redundancy predates this change and belongs to the
+batch-caching layer `tasks.py`'s docstring defers to `worker.py`/`engine.py`;
+adding a second cache here would optimize the inner half of something whose
+outer half is the real waste.
+
+### 3. `AnalysisWorker` no longer loses a task exception
+
+`threading.Thread(target=task)` sends an uncaught exception to
+`threading.excepthook`, i.e. to a stderr a packaged GUI build has nowhere to
+show - so an analysis that died on its third cell was indistinguishable from
+one still running. The worker now catches, logs with a traceback, and keeps
+it on `last_error`; `run_analysis`'s task body emits `analysis_complete` from
+a `finally`, so the UI stops waiting for a run that is over. Cells computed
+before the failure stay in the store: each is written whole, so a partial run
+is valid, just incomplete.
+
+Re-raising is deliberately not done - there is no caller left on that thread
+to catch it, so it would land straight back on the excepthook this exists to
+avoid.
+
+### 4. Session autosave - `save_session`/`load_session` finally have triggers
+
+The previous entry's first still-open item. `storage/session_autosave.py`
+(new) holds the debounce; `app_rewrite._build_session_autosave` holds the
+knowledge of what counts as a change, next to `_build_analysis_engine` for
+the same reason - it is the one place that knows every module, and keeping
+it there leaves the autosave itself a pure, module-free timer.
+
+**Policy ported from the old app**, interval included: 2500 ms single-shot,
+restarted per change, with checkpoints (dataset switch, session load,
+application quit) bypassing it via `flush()`. Quit is hooked on
+`aboutToQuit`, not `closeEvent`, the same correction `ImagePanel` documents
+for its render thread.
+
+Every computational **and** cosmetic signal schedules a save. The
+cosmetic/computational split says what may be *stale*; it says nothing about
+what is worth *keeping*, and a relabelled ROI is exactly as worth keeping as
+a moved one.
+
+Two deliberate departures from the old app:
+
+- **A plain dirty flag, not a content signature.** The old app rebuilds the
+  whole payload to compare it - it has to, because its triggers fire whether
+  or not anything really changed, and that rebuild is itself measured in
+  seconds on a real dataset. Here a save is only ever scheduled by a
+  module's own change signal, so "was anything scheduled since the last
+  successful write" answers the same question for free.
+- **The write is synchronous on the GUI thread.** The old app moved it to a
+  worker after finding it froze the UI for a beat. That may well need doing
+  here too, but it needs a real measurement first, and doing it safely means
+  serializing concurrent writes to one file. `capture_session` already
+  returns defensive copies, so it stays a small change when there is a
+  number to justify it.
+
+**The destructive case, handled explicitly**: `load_session` raises on a
+file it cannot parse, by design. The modules are then sitting at defaults,
+which is *not* what that file describes - so autosaving would replace a
+recoverable session with blank state and destroy the only copy. A failed
+load therefore accepts the root with `enabled=False`: the app runs, nothing
+is written to that dataset until it is opened successfully. A failed *write*
+likewise leaves the change pending rather than marking it saved.
+
+`set_root` flushes against the **previous** root before switching, because
+the pending timer carries no root of its own - a pending edit written after
+the switch would land in the new dataset's folder.
+
+### Verified
+
+`tests/integration/test_lspri_rewrite_session_autosave.py` (15 tests, new)
+and four added to `test_lspri_rewrite_analysis_engine.py`; 763 LSPRi tests
+pass, pyflakes clean across the package.
+
+The two background-exclusion tests fail for deliberately different reasons
+if the fix is reverted - one pins the computed value against an independent
+reference computation (with a guard asserting the two references actually
+differ, so it cannot pass vacuously), the other pins the invalidation. A
+third asserts the converse: with the exclusion off, moving one ROI must not
+drag every other cell into a recompute.
+
+### Not done / still open, as of this entry
+
+- The other five panels are still scaffolding.
+- **The mask half of the exclusion impact is still unmeasured** - the
+  previous entry's numbers cover the ROI half only, on a profile with no
+  ignore mask. A masked region is set to literal 0, plausibly a bigger
+  perturbation of a local average than a nanoparticle spot; worth measuring
+  on a dataset that uses one before assuming those numbers transfer.
+- `AnalysisEngine` now reads `RoiToolbox.detection_settings()` through three
+  separate callables (`reduction_method`, `default_reference_radii`,
+  `detection_settings`). Worth collapsing into one the next time that
+  constructor is touched; not done here to avoid reshaping a just-tested
+  surface as a side effect of a bug fix.
+- `_frame_naming` in `app_rewrite.py` duplicates `AnalysisEngine._naming`.
+  Two copies is tolerable; a third means it belongs on `DatasetModule`.
+- Session autosave has no "unsaved changes" indicator and no manual save -
+  it is invisible until it fails.
+- `statistics_settings`/`image_exclusions` still have no owner, so nothing
+  persists them.
+
+## 2026-09-23 (same day, continued): the query layer - formula, fit, metric, statistics
+
+The last big non-GUI piece. `compute_cell` has stored raw reduced (sample,
+reference) pairs since 2026-09-22 specifically so that everything here is a
+*re-derivation* rather than a recompute; until now nothing consumed them, so
+`get_metric` returned the raw pairs and its own docstring called that a gap.
+Both display panels were blocked behind it.
+
+Four new files, all in `analysis/`: `query.py` (layers 2-3), `statistics.py`
+(Pillar II), `settings.py` + `settings_module.py` (the owner).
+
+### What maps onto what
+
+`docs/analysis_pipeline_layers.md` already specified the layering - this is
+that document built, not a new design:
+
+| Layer | Where it now lives |
+|---|---|
+| 1. ROI math (reduction) | `analysis/reduction.py` - already built, stored in `data.h5` |
+| 2. Formula spectrum | `query.formula_spectrum` - 4 formulas |
+| 3. Metric trace (fit -> peak/centroid) | `query.fit_spectrum` / `metric_value` |
+| Pillar II: Statistics | `statistics.py` - spikes, smoothing, baseline, group aggregation |
+
+The ports are genuinely verbatim this time, unlike `tasks.py`'s was: these
+were already pure functions over two arrays in `processing/analysis.py` and
+`processing/trace_statistics.py`, with no batch-dispatch or caching
+entanglement to strip out. The clamps and fallbacks came over with their
+reasoning intact, including the polynomial order cap that exists because an
+over-fitted curve's edge oscillation once got reported as the peak.
+
+Two small consolidations while porting:
+
+- **One `formula_values`, not a scalar and a vector version.** The old app
+  keeps both and has to pin them together with a test so they cannot drift.
+  Nothing in the rewrite needs the scalar form - a single wavelength is a
+  length-1 array - so there is one implementation and nothing to drift.
+- **`apply_statistics` is new.** The stable app applies spike rejection,
+  then smoothing, then baseline in that order, but inline in the sensorgram
+  controller, so the ordering rule lives in a comment rather than in a
+  function. It is now one callable with the reasoning attached: spikes
+  first, because smoothing first spreads one bad frame across a window,
+  after which the spike filter no longer sees an outlier to reject. There
+  is a test that asserts exactly that, by comparing against the wrong
+  order.
+
+### Where the settings live - maintainer's decision
+
+A new `AnalysisSettingsModule`, chosen over two alternatives that were put
+up with their trade-offs:
+
+- Extending `AreaRoiDetectionSettings` would have been less code
+  (`reduction_method`/`formula_key` are already there) but would have put
+  sensorgram smoothing and baseline windows inside an ROI-*detection*
+  dataclass - regrowing the grab-bag the September decomposition split.
+- Panel ownership would have matched the "self-sufficient panels" idea, but
+  the Sensorgram's metric is read off the *same fit* the Spectra panel
+  configures, so one pipeline would have had two owners that must agree.
+
+**This takes `statistics_settings` off the "no owner, so nothing persists
+them" list** it has been on since the session format was built. Session
+schema 1.0 -> 1.1, additive: a 1.0 file still loads and both settings groups
+fall back to their defaults, which is the correct reading of a session
+written before they could be configured at all. There is a test that
+downgrades a real file to 1.0 and checks exactly that.
+
+`formula_key` stays where it is, in `AreaRoiDetectionSettings` next to
+`reduction_method` - moving it would have been a second change riding along
+with this one. Recorded as the one split seam in an otherwise clean
+separation.
+
+**Nothing here is undo-tracked**, unlike every other settings module. The
+undo stack records changes to the *experiment* - where a ROI is, what the
+crop is. These change only how already-measured numbers are displayed, are
+one click to put back, and interleaving them would mean Ctrl+Z after
+nudging a smoothing window silently rewinds a ROI edit instead. Same
+treatment `SelectionModule` already gets.
+
+### A third change category, and why
+
+`AnalysisSettingsChange` is neither cosmetic nor computational, and saying
+so explicitly seemed better than forcing it into one:
+
+- *Computational* means stored cells may be stale. These never can - nothing
+  they touch is on disk.
+- *Cosmetic* means "redraw, the numbers are unchanged". These are not that
+  either - switching maximum to centroid changes every plotted value.
+
+So: nothing on disk invalidated, every derived value in memory invalidated.
+
+### The sketch's "computed live" does not survive real scale
+
+Sketch Â§6 says Formula/Fit/Metric are "computed live from whatever's already
+in the store". True in principle, unusable as written: 160 ROIs x 300 cubes
+is 48,000 fits, and a gaussian `curve_fit` is ~1 ms - ~48 s per redraw, on
+the GUI thread, which AGENTS.md forbids outright anyway. So the layer is
+pure functions *plus*:
+
+- **A memo cache keyed by a settings fingerprint.** Deliberately not a
+  subscription: a changed setting simply misses the cache. A subscription
+  would be a second thing to keep in step with the settings that actually
+  matter, and forgetting to update it would show a stale plot with no
+  error. The one case a fingerprint cannot see is a *recompute* under
+  unchanged settings, so `run_analysis` pops that cell's entry as it writes
+  it - a single-key pop, never an iteration, since the derived worker may
+  be reading the same dict from its own thread.
+- **A second `AnalysisWorker`.** `run_analysis` holds the first one for the
+  length of a run; a panel asking for a sensorgram trace must not wait for
+  an analysis to finish, or get a `RuntimeError` from `submit`.
+  `request_metric_traces` drops a request while one is in flight - unlike
+  an analysis run, nothing is stored from a display query, so the newest
+  answer is the only one that matters.
+
+This follows `docs/rewrite_feature_inventory_2026-09.md`'s own instruction
+for this area: "Build the 'is this (ROI, cube, settings) already computed'
+answer as one function from day one."
+
+**Pillar II deliberately stays out of the engine.** Smoothing 300 points is
+microseconds and the result is purely visual, so it belongs to whichever
+panel is displaying - which also keeps group aggregation next to the group
+membership it needs from `RoiToolbox`.
+
+**A trace is NaN-padded, never shortened.** Every ROI's trace has to stay
+aligned to one x axis for `aggregate_traces` to stack them, and a missing
+cube is ordinary (not analyzed, or the fit didn't converge) - dropping the
+point would silently shift every later point left.
+
+### Verified
+
+`tests/unit/test_lspri_rewrite_query.py` (24 tests, new, no Qt) and a
+`RewriteQueryLayerTest` class in the engine's integration file; 797 LSPRi
+tests pass, pyflakes clean.
+
+The formula tests use values worked out by hand from the definitions rather
+than copied out of the implementation - otherwise they would pin whatever
+the code happens to do, sign error included.
+
+**A test that passed for the wrong reason, caught and fixed**: the first
+version of the cache test switched fit method and asserted the metric
+changed. It failed, and the failure was the test's fault, not the code's -
+this dataset's spectrum rises monotonically to 600 nm, so every fit method
+agrees on the peak and a method change cannot distinguish a live cache from
+a stale one. Narrowing the fit *window* instead moves the answer whatever
+the fit does. Worth recording because the fix is not "loosen the assertion":
+the test was measuring nothing, and would have passed just as happily with
+the cache permanently stale.
+
+### Not done / still open, as of this entry
+
+- **The panels themselves.** `SpectraPanel` and `SensorgramPanel` are still
+  49-85 line stubs whose `_redraw` raises - they now have everything they
+  need, which was the point of this piece. The other three panels are
+  untouched.
+- **No UI exposes any of these settings**, same as the reference-exclusion
+  toggle - `AnalysisSettingsModule` is real and persisted, with no panel
+  behind it yet.
+- The metric cache is unbounded. Fine at a few hundred ROIs x a few hundred
+  cubes (one float per cell), worth revisiting only if a dataset makes it
+  measurably large - not a guess worth acting on now.
+- `image_exclusions` still has no owner (`statistics_settings` now does).
+- A metric that needs more than one cube - the correlation-based shift
+  `analysis_pipeline_layers.md` mentions as a possible layer-3 method -
+  does not fit `metric_value`'s one-spectrum-in signature. Not needed yet;
+  flagged because the signature would have to widen, not just gain a key.

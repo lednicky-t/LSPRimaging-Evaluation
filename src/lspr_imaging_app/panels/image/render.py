@@ -41,6 +41,7 @@ from PyQt6.QtCore import QObject, pyqtSignal
 from ...image_tools.background.model import BackgroundSettings
 from ...image_tools.geometry.model import GeometrySettings
 from ...image_tools.preprocess import apply_preprocessing, resolve_external_mask
+from ...roi.model import AreaRoi, AreaRoiDetectionSettings
 
 logger = logging.getLogger(__name__)
 
@@ -63,6 +64,25 @@ class RenderRequest:
     background: BackgroundSettings
     authored_mask: np.ndarray | None
     mask_warp_affine: np.ndarray | None
+    rois: tuple[AreaRoi, ...]
+    """Every ROI, for the background estimate's ROI exclusion - not the
+    selected ones, and nothing to do with the overlay (the panel draws that
+    itself, on the GUI thread). Carried here for the same reason analysis
+    passes it (2026-09-23): with `flatten_background_exclude_area_rois` on,
+    which is the default, an ROI's own bright spot pulling on the local
+    background average is exactly what the toggle exists to prevent - and
+    if the displayed image left it in while the analysed one took it out,
+    the two would show different pixel values for the same frame."""
+    detection: AreaRoiDetectionSettings | None
+    """`RoiToolbox.detection_settings()`, for the background estimate's
+    ignore-mask exclusion (`flatten_background_exclude_mask`). Same
+    reasoning as `rois`; see `analysis/tasks.py`'s module docstring.
+
+    Neither this nor `rois` has a default, deliberately: the value that
+    would be the obvious default for both ("nothing to exclude") is exactly
+    what silently disabled these toggles on the analysis path for a week,
+    so a new call site has to say what it means rather than inherit the
+    inert case by omission."""
     serial: int
     """Monotonic per-panel counter. The panel ignores a result whose serial
     isn't the newest it asked for - belt and braces next to the worker's own
@@ -161,6 +181,13 @@ class ImageRenderer(QObject):
                 raw,
                 request.geometry,
                 request.background,
+                # Both only feed the background estimate, and each is gated
+                # on its own BackgroundSettings toggle inside - passing them
+                # unconditionally changes nothing when flattening is off.
+                # Same arguments analysis/tasks.py passes, so a displayed
+                # pixel and an analysed pixel are the same number.
+                rois=list(request.rois) or None,
+                mask_settings=request.detection,
                 # The same resolution analysis uses, so what is displayed and
                 # what is measured cannot drift apart (see resolve_external_mask).
                 external_mask=resolve_external_mask(

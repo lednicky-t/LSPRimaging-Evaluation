@@ -82,6 +82,7 @@ from ..analysis.provenance import (
     mask_scope_tag,
     persist_mask_snapshot,
 )
+from ..analysis.settings import MetricSettings, StatisticsSettings
 from ..image_tools.background.model import BackgroundSettings
 from ..image_tools.chromatic.model import (
     ChromaticLandmarkObservation,
@@ -96,11 +97,17 @@ from ..roi.model import AreaRoi, AreaRoiDetectionSettings, AreaRoiGroup, RoiArra
 logger = logging.getLogger(__name__)
 
 SESSION_SCHEMA_NAME = "lspri_rewrite_session"
-SESSION_SCHEMA_VERSION = "1.0"
+SESSION_SCHEMA_VERSION = "1.1"
 """Bumped major for a breaking change, minor for an additive one - the same
 rule `docs/schemas/hdf_standard.md` sets for measurement files. `load_session`
 rejects an unknown schema name and an incompatible major version rather than
-guessing at a file it doesn't understand."""
+guessing at a file it doesn't understand.
+
+1.0 -> 1.1 (2026-09-23): added the `"analysis"` block (`MetricSettings` +
+`StatisticsSettings`), when the query layer gave those an owner. Additive,
+so a 1.0 file still loads - the block is simply absent and both fall back
+to their defaults, which is the correct reading of a session written before
+they could be configured at all."""
 
 _MASK_SCOPES = ("persistent", "individual")
 
@@ -315,6 +322,8 @@ class SessionState:
     chromatic_models: tuple[ChromaticTransformModel, ...] = ()
     chromatic_landmarks: tuple[ChromaticLandmarkObservation, ...] = ()
     detection_settings: AreaRoiDetectionSettings = field(default_factory=AreaRoiDetectionSettings)
+    metric_settings: MetricSettings = field(default_factory=MetricSettings)
+    statistics_settings: StatisticsSettings = field(default_factory=StatisticsSettings)
     rois: tuple[AreaRoi, ...] = ()
     groups: tuple[AreaRoiGroup, ...] = ()
     arrays: tuple[RoiArrayGroup, ...] = ()
@@ -430,6 +439,13 @@ def save_session(root: Path, state: SessionState, naming: FrameNamingScheme) -> 
             "models": [asdict(model) for model in state.chromatic_models],
             "landmarks": [asdict(landmark) for landmark in state.chromatic_landmarks],
         },
+        # Its own block, not folded into "roi": these drive the query layer
+        # (how stored numbers are displayed), and nothing in them can make a
+        # stored cell stale - see analysis/settings.py.
+        "analysis": {
+            "metric": asdict(state.metric_settings),
+            "statistics": asdict(state.statistics_settings),
+        },
         "roi": {
             "detection_settings": asdict(state.detection_settings),
             "rois": [_encode_area_roi(roi) for roi in state.rois],
@@ -482,6 +498,7 @@ def load_session(root: Path) -> SessionState | None:
     mask_block = payload.get("mask") or {}
     chromatic_block = payload.get("chromatic") or {}
     roi_block = payload.get("roi") or {}
+    analysis_block = payload.get("analysis") or {}
     selection_block = payload.get("selection") or {}
 
     return SessionState(
@@ -500,6 +517,11 @@ def load_session(root: Path) -> SessionState | None:
         detection_settings=_decode_settings(
             roi_block.get("detection_settings"), AreaRoiDetectionSettings()
         ),
+        # Absent in a 1.0 file - `_decode_settings` returns the default,
+        # which is the right reading of a session written before these
+        # could be configured.
+        metric_settings=_decode_settings(analysis_block.get("metric"), MetricSettings()),
+        statistics_settings=_decode_settings(analysis_block.get("statistics"), StatisticsSettings()),
         rois=tuple(_decode_area_rois(roi_block.get("rois"))),
         groups=tuple(_decode_dataclass_list(roi_block.get("groups"), AreaRoiGroup)),
         arrays=tuple(_decode_dataclass_list(roi_block.get("arrays"), RoiArrayGroup)),
