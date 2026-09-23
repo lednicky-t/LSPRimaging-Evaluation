@@ -134,11 +134,20 @@ class MaskModule(QObject):
         module docstring's finding 1)."""
         return replace(self._settings)
 
-    def resolve_mask_source(self, frame: tuple[int, float]) -> tuple[tuple[int, float], np.ndarray] | None:
-        """The raw stored mask that applies at `frame`, and the frame it
-        was authored at - `None` if nothing applies yet (no persistent
+    def resolve_mask_source(self, frame: tuple[int, float]) -> tuple[tuple[int, float], np.ndarray, str] | None:
+        """The raw stored mask that applies at `frame`, the frame it was
+        authored at, and which timeline it came from (`"persistent"` or
+        `"individual"`) - `None` if nothing applies yet (no persistent
         change has ever been set at or before `frame`'s cube, and no
         individual override exists at `frame` exactly).
+
+        The scope is returned rather than left for the caller to
+        re-derive (added 2026-09-23, while wiring `AnalysisEngine`): the
+        analysis store records *which* timeline a mask came from in its
+        provenance filename, and the only other way to learn that would be
+        for the caller to inspect this module's private
+        `_individual_changes`/`_persistent_changes` dicts - exactly the
+        boundary violation the query interface exists to prevent.
 
         Returns the mask **as authored**, in its own frame's geometry, not
         warped into `frame`'s geometry - if the returned frame differs
@@ -155,12 +164,12 @@ class MaskModule(QObject):
         persistent change (or individual change for given frame)")."""
         if frame in self._individual_changes:
             change = self._individual_changes[frame]
-            return change.frame, change.mask
+            return change.frame, change.mask, change.scope
         candidate_cubes = [cube for cube in self._persistent_changes if cube <= frame[0]]
         if not candidate_cubes:
             return None
         change = self._persistent_changes[max(candidate_cubes)]
-        return change.frame, change.mask
+        return change.frame, change.mask, change.scope
 
     # -- commands -----------------------------------------------------------
 
@@ -290,8 +299,8 @@ class MaskModule(QObject):
         ("Reset"/really "Subtract") ANDs it out (`raster_tools.merge_mask_
         candidate`).
 
-        `base_mask` is the caller's job to resolve - typically
-        `resolve_mask_source(target_frame)`'s result, warped into
+        `base_mask` is the caller's job to resolve - typically the mask out
+        of `resolve_mask_source(target_frame)`'s triple, warped into
         `target_frame`'s geometry via `ChromaticModule.warp_mask_between`
         if it came from a different frame (see module docstring: this
         module can't do that warp itself). Painting/merging onto whatever

@@ -49,13 +49,15 @@ from ..image_tools.background.model import BackgroundSettings
 from ..image_tools.geometry.model import GeometrySettings
 from ..roi.model import AreaRoi
 from .planner import AnalysisScope, CurrentInputs, plan_recompute
+from .reduction import DEFAULT_TRIMMED_MEAN_FRACTION
 from .provenance import (
     DEFAULT_REFERENCE_EXCLUSION_MODE,
     FrameNamingScheme,
     InMemoryProvenanceStore,
-    MaskSnapshotRef,
     SettingsSnapshot,
+    mask_scope_tag,
     persist_chromatic_snapshot,
+    resolve_mask_snapshot_ref,
     roi_geometry_fingerprint_fields,
     sample_exclusion_digest,
 )
@@ -110,15 +112,13 @@ class AnalysisEngine(QObject):
         geometry_settings: Callable[[], GeometrySettings] | None = None,
         background_settings: Callable[[], BackgroundSettings] | None = None,
         chromatic_affine: Callable[[int, float], np.ndarray] | None = None,
+        chromatic_affine_between: Callable[[tuple[int, float], tuple[int, float]], np.ndarray] | None = None,
         resolve_mask: Callable[[int, float], MaskResolution | None] | None = None,
         reduction_method: Callable[[], str] | None = None,
         default_reference_radii: Callable[[], tuple[float, float]] | None = None,
         reference_exclusion_mode: Callable[[], str] = lambda: DEFAULT_REFERENCE_EXCLUSION_MODE,
-        masks_dir: Path = Path("analysis/masks"),
-        chromatic_dir: Path = Path("analysis/chromatic"),
-        settings_dir: Path = Path("analysis/settings"),
-        data_h5_path: Path = Path("analysis/data.h5"),
-        trimmed_mean_fraction: float = 0.10,
+        storage_root: Path | None = None,
+        trimmed_mean_fraction: float = DEFAULT_TRIMMED_MEAN_FRACTION,
         parent: QObject | None = None,
     ) -> None:
         """Every callable parameter is a narrow read from a real module,
@@ -126,17 +126,39 @@ class AnalysisEngine(QObject):
         see module docstring for why this is callables rather than direct
         module references today.
 
-        - ``load_plane(cube_index, wavelength_nm) -> raw image`` - the
-          gap flagged in the module docstring.
+        - ``load_plane(cube_index, wavelength_nm) -> raw image`` -
+          ``DatasetModule.load_plane()``.
+        - ``wavelengths_for_cube(cube_index)`` -
+          ``DatasetModule.wavelengths_for_cube()``. **Not**
+          ``DatasetModule.wavelengths()``, which is the union across every
+          cube - see that method's own docstring.
         - ``chromatic_affine(cube_index, wavelength_nm) -> 2x3 matrix`` -
-          ``ChromaticModule.affine_for()``, already real.
+          ``ChromaticModule.affine_for()``.
+        - ``chromatic_affine_between(from_key, to_key) -> 2x3 matrix`` -
+          ``ChromaticModule.affine_between()``. Used only to re-register an
+          ignore mask authored at a *different* frame; `compute_cell`
+          applies it, in processed space, after its own spatial transform
+          (see `tasks.py`'s `_mask_for_compute`). Optional: omitted, masks
+          are used as authored, which is correct whenever no chromatic
+          model has been fitted.
         - ``resolve_mask(cube_index, wavelength_nm) -> (authored_frame,
-          mask_array, scope) | None`` - wraps
-          ``MaskModule.resolve_mask_source()`` plus, when the authored
-          frame differs from the queried one, the caller's own
-          ``ChromaticModule.warp_mask_between`` call (this engine never
-          calls into Chromatic or Mask directly, matching the module
-          boundary rule every other module already follows).
+          mask_array, scope) | None`` - ``MaskModule.resolve_mask_source()``
+          directly, no wrapping. It returns the mask **as authored**; this
+          engine never warps it and never calls into Chromatic or Mask
+          itself, matching the module boundary rule every other module
+          already follows.
+        - ``reduction_method`` / ``default_reference_radii`` - both read
+          ``RoiToolbox.detection_settings()`` (`reduction_method`, and
+          `reference_inner/outer_radius_px` for ROIs that don't override
+          them).
+
+        ``storage_root`` is the folder this analysis writes under - its
+        `analysis/` subfolder holds `data.h5` plus the mask/chromatic/
+        settings snapshot files. `None` (the default) means "no dataset
+        loaded yet", in which case nothing is read or written at all;
+        `set_storage_root()` points it at the real dataset once one is
+        loaded. See that method for why this can't just be a constructor
+        argument in practice.
 
         **Every callable defaults to `None`, in which case calling it
         raises `NotImplementedError`** - matches this scaffold's
@@ -149,13 +171,8 @@ class AnalysisEngine(QObject):
         ``reference_exclusion_mode`` is the one exception to that rule -
         it gets a real default rather than an `_unwired` raiser, because
         unlike the others it isn't module state that has to be read from
-        somewhere: it's a plain analysis setting with a documented safe
-        default (`"none"`, i.e. no cross-ROI exclusion). See
-        `provenance.REFERENCE_EXCLUSION_MODES` for what the modes mean. `data_h5_path` has a harmless placeholder
-        default too - rehydration below only checks whether that path
-        exists (`store.read_all_cells`'s own contract: a missing file
-        returns an empty result, not an error) and never writes anything,
-        so a scaffold-only construction is still side-effect-free.
+        somewhere: it's a plain analysis setting. See
+        `provenance.REFERENCE_EXCLUSION_MODES` for what the modes mean.
         """
         super().__init__(parent)
         self._load_plane = load_plane or _unwired("load_plane")
@@ -165,28 +182,87 @@ class AnalysisEngine(QObject):
         self._geometry_settings = geometry_settings or _unwired("geometry_settings")
         self._background_settings = background_settings or _unwired("background_settings")
         self._chromatic_affine = chromatic_affine or _unwired("chromatic_affine")
+        self._chromatic_affine_between = chromatic_affine_between
         self._resolve_mask = resolve_mask or _unwired("resolve_mask")
         self._reduction_method = reduction_method or _unwired("reduction_method")
         self._default_reference_radii = default_reference_radii or _unwired("default_reference_radii")
         self._reference_exclusion_mode = reference_exclusion_mode
         self._trimmed_mean_fraction = trimmed_mean_fraction
-        self._masks_dir = masks_dir
-        self._chromatic_dir = chromatic_dir
-        self._settings_dir = settings_dir
-        self._data_h5_path = data_h5_path
 
         self._worker = AnalysisWorker()
         self._store = InMemoryProvenanceStore()
         self._results: dict[tuple[int, int], CellResult] = {}
         self._selected_roi_ids: tuple[int, ...] = ()
+        self._storage_root: Path | None = None
+        self.set_storage_root(storage_root)
 
-        # Rehydrate from a previous session's data.h5, if any (sketch §5's
-        # "Restore semantics": "HDF5 present -> every cell's own provenance
-        # is already known"). A missing/empty file is a normal fresh-dataset
-        # case, not an error (store.read_all_cells's own contract).
-        for (roi_id, cube_index), result in read_all_cells(self._data_h5_path).items():
-            self._results[(roi_id, cube_index)] = result
-            self._store.record(roi_id, cube_index, result.provenance)
+    # -- where this analysis is stored --------------------------------------
+
+    @property
+    def _analysis_dir(self) -> Path:
+        """Every snapshot/`data.h5` path is derived from this.
+
+        Falls back to a relative `analysis/` when no storage root is set.
+        No real run ever reaches that fallback (`run_analysis` refuses
+        without a root, see below), but keeping the path properties total
+        means a scaffold-only `AnalysisEngine()` still constructs and can be
+        inspected without raising - the contract every other module in
+        `app_rewrite.py` follows."""
+        if self._storage_root is None:
+            return Path("analysis")
+        return self._storage_root / "analysis"
+
+    @property
+    def _masks_dir(self) -> Path:
+        return self._analysis_dir / "masks"
+
+    @property
+    def _chromatic_dir(self) -> Path:
+        return self._analysis_dir / "chromatic"
+
+    @property
+    def _settings_dir(self) -> Path:
+        return self._analysis_dir / "settings"
+
+    @property
+    def _data_h5_path(self) -> Path:
+        return self._analysis_dir / "data.h5"
+
+    def storage_root(self) -> Path | None:
+        """The dataset folder this engine reads/writes its analysis under,
+        or `None` if no dataset is loaded."""
+        return self._storage_root
+
+    def set_storage_root(self, root: Path | None) -> None:
+        """Point this engine at a dataset's own folder and rehydrate from
+        whatever that folder already has stored, discarding any previous
+        dataset's results.
+
+        **Why this isn't simply a constructor argument** (found 2026-09-23,
+        while wiring the engine to real modules): the store belongs beside
+        the dataset (`ImageDataset.data_root`), but the engine is
+        constructed at application start, when no dataset is loaded yet.
+        Baking the path in at construction would force either rebuilding
+        the engine on every dataset load - tearing down and re-`connect()`-
+        ing every panel with it - or writing one dataset's results into
+        another dataset's folder. Re-pointing a live engine is the only
+        version of this that stays correct across a dataset switch.
+
+        Rehydrates from the new root's `data.h5` if present (sketch §5's
+        "Restore semantics": "HDF5 present -> every cell's own provenance is
+        already known"). A missing or empty file is the ordinary
+        fresh-dataset case, not an error (`store.read_all_cells`'s own
+        contract). Emits `store_updated` either way, so panels redraw -
+        including the empty case, where the correct redraw is "clear what
+        the previous dataset left on screen"."""
+        self._storage_root = None if root is None else Path(root)
+        self._results = {}
+        self._store = InMemoryProvenanceStore()
+        if self._storage_root is not None:
+            for (roi_id, cube_index), result in read_all_cells(self._data_h5_path).items():
+                self._results[(roi_id, cube_index)] = result
+                self._store.record(roi_id, cube_index, result.provenance)
+        self.store_updated.emit()
 
     # -- query interface ------------------------------------------------
 
@@ -269,14 +345,21 @@ class AnalysisEngine(QObject):
                 mask_resolution = self._resolve_mask(cube_index, wavelength_nm)
                 mask_ref = None
                 if mask_resolution is not None:
-                    (authored_cube, authored_wl), _mask_array, scope_tag = mask_resolution
-                    # Preview/planning purposefully does NOT persist a real
-                    # mask file (see preview_recompute's docstring) - a
-                    # version number of 0 is a placeholder identity used
-                    # only for fingerprint comparison, never written to
-                    # disk. Real persistence (a real version number) only
-                    # happens inside compute_cell.
-                    mask_ref = MaskSnapshotRef(cube_index=authored_cube, wavelength_nm=authored_wl, tag=scope_tag, version=0)
+                    (authored_cube, authored_wl), mask_array, scope = mask_resolution
+                    # Planning still writes no mask file (the design doc's
+                    # "written lazily, only when actually analyzed" rule) -
+                    # but it must resolve the *real* version, not a
+                    # placeholder, or the fingerprint it builds can never
+                    # match the one compute_cell records. See
+                    # resolve_mask_snapshot_ref's docstring for the bug this
+                    # replaced. The same as-authored mask compute_cell
+                    # persists, so both sides hash identical content.
+                    mask_8bit = np.asarray(mask_array, dtype=bool).astype(np.uint8) * 255
+                    mask_ref, _is_new = resolve_mask_snapshot_ref(
+                        self._masks_dir, mask_8bit,
+                        cube_index=authored_cube, wavelength_nm=authored_wl,
+                        tag=mask_scope_tag(scope), naming=naming,
+                    )
                 chromatic_ref = persist_chromatic_snapshot(
                     self._chromatic_dir, self._chromatic_affine(cube_index, wavelength_nm),
                     cube_index=cube_index, wavelength_nm=wavelength_nm,
@@ -317,7 +400,15 @@ class AnalysisEngine(QObject):
         emitted once per completed cell, not batched into a timer yet
         (sketch §8's redraw-pacing idea applies to *display panels*
         consuming this signal, not to this engine emitting it - a panel
-        should coalesce on its own end)."""
+        should coalesce on its own end).
+
+        Raises `RuntimeError` if no storage root has been set - running
+        would otherwise write `data.h5` and every snapshot file into
+        whatever the process's working directory happens to be, which is
+        silently wrong rather than obviously wrong (the results would
+        compute fine and simply never be found again)."""
+        if self._storage_root is None:
+            raise RuntimeError("No storage root is set - load a dataset before running analysis.")
         rois_by_id = {roi.area_roi_id: roi for roi in self._rois()}
         current_inputs = self._gather_current_inputs()
         plan = plan_recompute(
@@ -373,13 +464,22 @@ class AnalysisEngine(QObject):
             resolved_mask = None
             mask_authored_frame = None
             mask_scope = None
+            mask_warp_affine = None
             if mask_resolution is not None:
                 mask_authored_frame, resolved_mask, mask_scope = mask_resolution
+                frame = (int(cube_index), float(wavelength_nm))
+                # Only when the mask came from a different frame than the one
+                # being computed - `affine_between` would return identity
+                # anyway, but skipping it also skips a pointless warp of a
+                # full-image mask per wavelength.
+                if self._chromatic_affine_between is not None and mask_authored_frame != frame:
+                    mask_warp_affine = self._chromatic_affine_between(mask_authored_frame, frame)
             inputs[wavelength_nm] = WavelengthComputeInput(
                 wavelength_nm=wavelength_nm,
                 raw_image=self._load_plane(cube_index, wavelength_nm),
                 geometry_settings=geometry, background_settings=background,
                 chromatic_affine=self._chromatic_affine(cube_index, wavelength_nm),
                 resolved_mask=resolved_mask, mask_authored_frame=mask_authored_frame, mask_scope=mask_scope,
+                mask_warp_affine=mask_warp_affine,
             )
         return inputs

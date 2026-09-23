@@ -113,6 +113,26 @@ class ImageDataset:
     def spectral_cube_indices(self) -> list[int]:
         return sorted({record.key.spectral_cube_index for record in self.records})
 
+    def wavelengths_for_cube(self, spectral_cube_index: int) -> list[float]:
+        """The wavelengths *this one cube* actually has records for, sorted.
+
+        **New on the `rewrite` branch (2026-09-23), not part of `domain/
+        models.py`'s verbatim port** - added while wiring `AnalysisEngine`
+        to real modules. `wavelengths_nm` above is dataset-*global* (the
+        union across every cube); using it per-cube would silently pretend
+        a cube has a wavelength it never recorded, and the analysis engine
+        would then try to load a plane that doesn't exist. A real risk
+        rather than a hypothetical one: an aborted or partially-failed
+        acquisition is exactly how a cube ends up short a wavelength.
+        """
+        return sorted(
+            {
+                record.key.wavelength_nm
+                for record in self.records
+                if record.key.spectral_cube_index == int(spectral_cube_index)
+            }
+        )
+
     @property
     def is_ome_zarr(self) -> bool:
         return str(self.source_format).lower() in {"ome_zarr", "ome-zarr", "zarr"}

@@ -91,6 +91,7 @@ from __future__ import annotations
 
 import copy
 import itertools
+from dataclasses import replace
 
 import numpy as np
 from PyQt6.QtCore import QObject, pyqtSignal
@@ -99,7 +100,7 @@ from ..change_events import RoiComputationalChange, RoiCosmeticChange
 from ..diagnostics import instrumented
 from ..image_tools.chromatic.affine import apply_affine_to_points
 from ..undo import FunctionCommand, undo_manager
-from .model import AreaRoi, AreaRoiGroup, RoiArrayGroup
+from .model import AreaRoi, AreaRoiDetectionSettings, AreaRoiGroup, RoiArrayGroup
 
 
 class RoiToolbox(QObject):
@@ -121,6 +122,7 @@ class RoiToolbox(QObject):
         self._rois: dict[int, AreaRoi] = {}
         self._groups: dict[str, AreaRoiGroup] = {}
         self._array_groups: dict[str, RoiArrayGroup] = {}
+        self._detection_settings = AreaRoiDetectionSettings()
         self._roi_id_counter = itertools.count(1)
         self._group_id_counter = itertools.count(1)
 
@@ -128,6 +130,28 @@ class RoiToolbox(QObject):
 
     def rois(self) -> tuple[AreaRoi, ...]:
         return tuple(self._rois.values())
+
+    def detection_settings(self) -> AreaRoiDetectionSettings:
+        """The shared ROI detection/reduction settings - a defensive copy,
+        same guarantee `GeometryModule.settings()` makes.
+
+        **Ownership decided 2026-09-23, while wiring `AnalysisEngine`**:
+        nothing owned `AreaRoiDetectionSettings` anywhere in the rewrite -
+        every module took it as a function *parameter* (`roi/detection.py`,
+        `image_tools/background/estimate.py`, `image_tools/preprocess.py`,
+        `image_tools/chromatic/landmark_autotrack.py`), so there was no
+        module to read it from when the engine needed
+        `reference_inner/outer_radius_px` (its default reference-ring radii
+        for ROIs that don't override them) and `reduction_method`. Put here
+        because this is the ROI stage's state owner and the dataclass is
+        ROI-stage settings throughout.
+
+        **Open question, deliberately not answered here**: `reduction_method`
+        and `formula_key` are arguably analysis-stage rather than ROI-stage
+        concerns. They live in this one dataclass because the old app put
+        them there (`domain/models.py`), and splitting a ported dataclass is
+        a design change on its own - flagged rather than done silently."""
+        return replace(self._detection_settings)
 
     def roi_by_id(self, roi_id: int) -> AreaRoi:
         return self._rois[roi_id]
@@ -170,6 +194,39 @@ class RoiToolbox(QObject):
         return float(transformed[0, 0]), float(transformed[0, 1])
 
     # -- command API (§7): single-ROI mutation ---------------------------
+
+    @instrumented("RoiToolbox.set_detection_settings")
+    def set_detection_settings(self, settings: AreaRoiDetectionSettings) -> None:
+        """Replace the shared detection/reduction settings wholesale.
+
+        One combined command rather than a setter per field, deliberately -
+        the same shape (and the same reasoning) as
+        `BackgroundModule.set_flatten_background_settings`: the old app's
+        real UI is a settings panel with an Apply button pushing exactly one
+        `_push_undo_point("Detection settings")` (`gui/main_window.py`) for
+        the whole group, not one undo entry per spinbox. Undo label matches
+        the old app's exactly.
+
+        Emits `geometry_changed`, not `cosmetic_changed`: every field here
+        either changes which ROIs detection finds or how their pixels reduce
+        to a value, so anything already computed against the old settings is
+        stale. `reason="detection_settings"` with an empty `roi_ids` -
+        nothing about any *individual* ROI changed, the shared inputs did."""
+        if settings == self._detection_settings:
+            return
+        old_settings = self._detection_settings
+        new_settings = replace(settings)
+
+        def apply() -> None:
+            self._detection_settings = new_settings
+            self.geometry_changed.emit(RoiComputationalChange(roi_ids=(), reason="detection_settings"))
+
+        def revert() -> None:
+            self._detection_settings = old_settings
+            self.geometry_changed.emit(RoiComputationalChange(roi_ids=(), reason="detection_settings"))
+
+        apply()
+        undo_manager.push(FunctionCommand("Detection settings", undo_fn=revert, redo_fn=apply))
 
     @instrumented("RoiToolbox.add_roi")
     def add_roi(self, x: float, y: float, *, sample_radius_px: float = 10.0) -> int:

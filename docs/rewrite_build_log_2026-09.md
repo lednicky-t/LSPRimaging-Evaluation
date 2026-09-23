@@ -2614,3 +2614,176 @@ it's a plain setting, not module state that must be read from somewhere.
   started.
 - `storage/session.py` - untouched, separate piece.
 - Nothing from this entry has been committed yet.
+
+## 2026-09-23: `AnalysisEngine` wired to the real modules - four gaps closed, two real bugs found by running it
+
+`app_rewrite.py` constructed `AnalysisEngine()` with no arguments, i.e.
+every action method raised. It is now built by `_build_analysis_engine()`
+with real callables into every module. Doing that surfaced the gaps the
+previous entries flagged as "needs its own small investigation", plus two
+bugs that only a real run could expose - which is the point of this entry:
+neither was visible from reading the code.
+
+### The four gaps, closed
+
+**1. `DatasetModule.wavelengths()` is dataset-global.** Confirmed, and it
+matters: `ImageDataset.records` is a flat list, so a cube missing one
+wavelength (an aborted acquisition) is an ordinary state, and driving a
+per-cube loop off the global union would ask `load_plane` for a plane that
+does not exist. Added `ImageDataset.wavelengths_for_cube()` (marked in its
+own docstring as new on this branch, **not** part of `domain/models.py`'s
+verbatim port) and `DatasetModule.wavelengths_for_cube()` as a sixth query.
+
+**2. `resolve_mask` needed `warp_mask_between` - and the wiring the engine's
+own docstring described would have been wrong.** See "real bug 1" below.
+`MaskModule.resolve_mask_source()` now returns a triple
+(`(authored_frame, mask, scope)`), because the analysis store records which
+timeline a mask came from and the only other way to learn that would be for
+the caller to read `MaskModule`'s private dicts. No callers existed yet, so
+the signature was free to change. Scope stays in `MaskModule`'s own
+`"persistent"`/`"individual"` vocabulary; `provenance.mask_scope_tag()` is
+the single place it becomes the `persi`/`indiv` filename tag.
+
+**3. Nothing owned `AreaRoiDetectionSettings`.** Every module took it as a
+function *parameter* (`roi/detection.py`, `image_tools/background/
+estimate.py`, `image_tools/preprocess.py`, `chromatic/landmark_autotrack.py`)
+- so when the engine needed `reference_inner/outer_radius_px` and
+`reduction_method`, there was no module to read them from. `RoiToolbox` now
+owns it: `detection_settings()` (defensive copy) + `set_detection_settings()`,
+one combined command in `BackgroundModule`'s shape, undo-tracked with the
+old app's exact label `"Detection settings"` (`gui/main_window.py:7427`).
+New `RoiComputationalChange` reason `"detection_settings"`, carrying an
+empty `roi_ids` - the shared inputs changed, no individual ROI did.
+**Flagged, not decided**: `reduction_method`/`formula_key` are arguably
+analysis-stage, not ROI-stage; they live here because the old app's
+dataclass put them here, and splitting a ported dataclass is its own design
+change.
+
+**4. The store's path depends on a dataset that isn't loaded at construction
+time.** `masks_dir`/`chromatic_dir`/`settings_dir`/`data_h5_path` were
+constructor arguments defaulting to *relative* paths, so a real run would
+have written `data.h5` into whatever the process's working directory
+happened to be. Replaced with one `set_storage_root(root)` that re-points a
+live engine and rehydrates from the new root's `data.h5`, with the four
+paths derived as properties; `app_rewrite` connects it to `dataset_loaded`
+(using `ImageDataset.home`, not `folder`, so an analysis never lands inside
+a raw TIFF/OME-Zarr folder it doesn't own) and `dataset_cleared`. Rebuilding
+the engine per dataset was the alternative and is worse - every panel's
+`connect()` would have to be torn down and rebuilt. `run_analysis` now
+raises without a root rather than writing somewhere arbitrary.
+
+### Real bug 1: the ignore mask was going to be applied in the wrong coordinate space
+
+`tasks.py`'s flagged "assumption 1" (mask authored in raw space, passed with
+`external_mask_processed=False`) was **half right**, and the wrong half
+mattered. Traced the old app rather than guessing again
+(`gui/mask_controller.py`'s `external_mask_for_record`, plus its callers in
+`gui/analysis_tasks.py`/`gui/analysis_worker_mixin.py`):
+
+- The authored mask genuinely is in **raw** image space - it is read from a
+  file sized to `load_image_shape(record.path)`. That half held.
+- But the **chromatic affine is expressed in processed space** (the same
+  space `rasterize_sample`/`rasterize_reference` work in, off
+  `processed.shape`). The engine's documented plan was for the caller to
+  `warp_mask_between` the mask before handing it over - i.e. warp a
+  raw-space mask with a processed-space matrix. With any crop or rotation
+  active that puts the ignore mask somewhere meaningless. Exactly the
+  CLAUDE.md pitfall ("mixing coordinate spaces produces silently wrong
+  results"), and it would not have crashed - just quietly excluded the
+  wrong pixels.
+
+The old app's analysis path does `apply_spatial_mask(...)` then
+`warp_boolean_mask_affine(...)` then `external_mask_processed=True`. New
+`tasks.py:_mask_for_compute` does exactly that, unconditionally (one path,
+one behavior - masking in raw space first is only *nearly* equivalent even
+with no warp, since the image transform interpolates and would bleed zeroed
+pixels into their neighbours at mask edges). `WavelengthComputeInput` gains
+`mask_warp_affine`, supplied by the engine from
+`ChromaticModule.affine_between` and only when the authored frame differs
+from the queried one.
+
+`resolved_mask` now explicitly carries the mask **as authored**, unwarped,
+and that is still what gets persisted to provenance - a per-wavelength
+warped variant written under the authored frame's filename would mint a new
+version per wavelength for what is really one mask.
+
+### Real bug 2: with any mask set, every cell was permanently stale
+
+Found by the end-to-end script, not by reading: `preview_recompute` kept
+reporting every cell as needing recompute even immediately after a
+successful full run, and a restart re-ran everything.
+
+Cause: planning may not write mask files (the design doc's "written lazily"
+rule), so `_gather_current_inputs` substituted `MaskSnapshotRef(version=0)`
+as a placeholder. But that placeholder goes into the `SettingsSnapshot` the
+planner fingerprints, while `compute_cell` records the **real** version. The
+two could therefore never match. Effect: with any ignore mask present,
+"N cells will be recomputed" always said *all* of them, every run recomputed
+everything from scratch forever, and the whole provenance/dedup design was
+silently inert. The settings-snapshot files gave it away in passing -
+`settings_v13.json` after a handful of previews.
+
+Fix: `provenance.resolve_mask_snapshot_ref()` splits version-*resolution*
+from the write. Planning now asks "which version would this exact content
+be?", reading existing PNGs but writing nothing - so an already-persisted
+mask resolves to its existing version and the fingerprints match, while a
+genuinely new mask resolves to the version it will get and correctly fails
+to match. `persist_mask_snapshot` is now that function plus the write.
+Costs planning the mask-PNG readback it used to skip; buys a
+`preview_recompute` that tells the truth.
+
+This also means the previous entry's end-to-end verification passed only
+because it never set a mask. Worth recording as a lesson for the eventual
+test suite: the dedup property needs a case *with* a mask, which is the one
+where it breaks.
+
+### Also in this pass
+
+- `DEFAULT_REFERENCE_EXCLUSION_MODE` is now `"exclude_all_sample_rois"`
+  (maintainer's call, 2026-09-23, closing the open question the previous
+  entry left). `"none"` was the safe default, not the right one: the stable
+  app effectively behaved like exclusion whenever more than one ROI was
+  selected, which is the normal case.
+- `trimmed_mean_fraction` defaults to `reduction.DEFAULT_TRIMMED_MEAN_FRACTION`
+  instead of a duplicated literal `0.10`.
+- `selection.roi_selection_changed` to `engine.set_selected_rois` wired
+  (sorted, since the signal carries a set whose order isn't meaningful).
+
+### Verified
+
+One standalone script, 34 checks, all passing - against **real TIFF files
+written to a temp directory** and a real `data.h5`, with a deliberately
+uneven dataset (two cubes, one of them missing a wavelength). Notable ones:
+the uneven cube producing a 2-wavelength cell next to a 3-wavelength one end
+to end; `run_analysis` refusing without a storage root; `data.h5` landing
+beside the dataset; `_mask_for_compute` equalling `apply_spatial_mask`
+exactly in the no-warp case and coming out in processed shape (40x48) rather
+than raw (64x80); the dedup property **with a mask set** in all three forms
+(second preview plans zero, a fresh engine rehydrates identical values, and
+that fresh engine also plans zero); a detection-settings change correctly
+invalidating everything; and clearing the storage root dropping results. The
+script also caught a wrong property name in the wiring itself (`data_root`,
+which doesn't exist - it is `ImageDataset.home`).
+
+Confirmed pyflakes-clean and the rewrite-preview window still builds with
+all five tabs.
+
+### Not done / still open, as of this entry
+
+- **`AnalysisWorker` swallows a task exception.** If the run callable
+  raises, the thread dies, `analysis_complete` never fires, and the UI would
+  wait forever with nothing reported. Noticed while debugging the harness
+  (the failure looked identical to "still running"). Not fixed here - it
+  wants a deliberate error-signal design, not a bare try/except.
+- `preview_recompute` still writes a settings-snapshot JSON as a side
+  effect - unchanged, and now the *only* remaining planning side effect.
+- `rasterize_fractional`/`weighted_*` still not wired into `compute_cell` -
+  no longer blocked (the weighted functions exist), but it changes computed
+  values and wants its own toggle and a check-in.
+- No UI exposes the exclusion-mode toggle, reduction method, or detection
+  settings - all command-only, no panel behind them.
+- `BackgroundModule`'s timeline extension - not started.
+- `storage/session.py` - untouched.
+- Still no committed test coverage. This entry's script is the strongest
+  candidate yet to become one, since it exercises every module together
+  against real files.

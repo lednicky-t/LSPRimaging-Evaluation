@@ -43,20 +43,38 @@ indexing" - `apply_preprocessing`/`rasterize_sample`/`rasterize_reference`
 do the real work; this file composes already-pure functions, no new pixel
 math.**
 
-**Two flagged, unverified assumptions - not guessed at confidently**:
-1. `MaskModule`'s resolved mask is passed as `apply_preprocessing`'s
-   `external_mask` with `external_mask_processed=False` (i.e., assumed
-   authored in *raw* image space, needing this call's own crop/rotate/flip
-   step same as the raw image does) - not confirmed against the real
-   mask-drawing GUI code, which would show which coordinate space a
-   mask is actually painted in. Getting this wrong wouldn't crash
-   anything, just silently misalign the mask against the image it's
-   supposed to exclude from - flag for whoever wires a real panel to this.
-2. `roi/rasterize.py`'s binary `rasterize_sample`/`rasterize_reference` are
-   used here, not `rasterize_fractional` (§6a) - deliberate, not an
-   oversight: `analysis/reduction.py`'s `weighted_*` functions that would
-   actually *consume* fractional weights are still `NotImplementedError`,
-   so there's nothing yet to plug a fractional mask into.
+**Assumption 1 (mask coordinate space) resolved 2026-09-23 - and it was
+half wrong; see `_mask_for_compute` below.** Traced the old app's real
+analysis path (`gui/mask_controller.py`'s `external_mask_for_record`, and
+`gui/analysis_tasks.py`/`gui/analysis_worker_mixin.py`'s callers):
+
+- The *authored* mask genuinely is in **raw image space** - it is read
+  from a file sized to `load_image_shape(record.path)`, so the original
+  "needs this call's own crop/rotate/flip" half of the assumption was
+  right.
+- But the **chromatic affine is defined in processed space**, not raw
+  (the same space `rasterize_sample`/`rasterize_reference` rasterize ROIs
+  into, off `processed.shape`). So a mask authored at a *different* frame
+  cannot be warped while still in raw space, which is what the original
+  `resolve_mask`/`external_mask_processed=False` wiring would have done.
+  It has to be transformed into processed space first and warped there -
+  exactly the order the old app uses
+  (`apply_spatial_mask(...)` → `warp_boolean_mask_affine(...)` →
+  `external_mask_processed=True`).
+
+Getting that order wrong wouldn't crash - it would silently misalign the
+ignore mask against the image it is meant to exclude from, by whatever
+the crop/rotation happens to be. `_mask_for_compute` now does it in the
+old app's order unconditionally, and the mask *persisted into provenance*
+stays the as-authored one (see `compute_cell`).
+
+**Assumption 2 (rasterization) unchanged and still deliberate**:
+`roi/rasterize.py`'s binary `rasterize_sample`/`rasterize_reference` are
+used here, not `rasterize_fractional` (§6a). `analysis/reduction.py`'s
+`weighted_*` functions that would consume fractional weights now exist
+(built 2026-09-22), so this is no longer blocked - but wiring them is a
+real change to computed values behind its own toggle, not something this
+file switches to on its own.
 """
 
 from __future__ import annotations
@@ -69,7 +87,9 @@ from pathlib import Path
 import numpy as np
 
 from ..image_tools.background.model import BackgroundSettings
+from ..image_tools.chromatic.warp import warp_boolean_mask_affine
 from ..image_tools.geometry.model import GeometrySettings
+from ..image_tools.geometry.transform import apply_spatial_mask
 from ..image_tools.preprocess import apply_preprocessing
 from ..roi.model import AreaRoi
 from ..roi.rasterize import rasterize_reference, rasterize_sample
@@ -79,6 +99,7 @@ from .provenance import (
     ProvenanceRecord,
     SettingsSnapshot,
     compute_fingerprint,
+    mask_scope_tag,
     persist_chromatic_snapshot,
     persist_mask_snapshot,
     roi_geometry_fingerprint_fields,
@@ -101,19 +122,35 @@ class WavelengthComputeInput:
     background_settings: BackgroundSettings
     chromatic_affine: np.ndarray
     resolved_mask: np.ndarray | None
-    """`MaskModule.resolve_mask_source(...)`'s result, if any applies at
-    this wavelength - already warped into this wavelength's own geometry
-    if it was authored at a different frame (the caller's job, via
-    `ChromaticModule.warp_mask_between`, per `MaskModule`'s own module
-    boundary rule - this file never reaches into Chromatic itself
-    either)."""
+    """The mask that applies at this wavelength **exactly as authored** -
+    raw image space, not warped - i.e. `MaskModule.resolve_mask_source`'s
+    mask handed straight through.
+
+    Deliberately *not* pre-warped by the caller (corrected 2026-09-23, see
+    module docstring): the warp has to happen in processed space, which
+    only `compute_cell` is in a position to do, and provenance needs the
+    as-authored mask anyway - a per-wavelength warped variant persisted
+    under the authored frame's filename would churn version numbers for
+    what is really one mask."""
     mask_authored_frame: tuple[int, float] | None
     """The `(cube_index, wavelength_nm)` the mask was actually authored at
     (for provenance file naming) - `None` if `resolved_mask` is `None`."""
     mask_scope: str | None
-    """`"persi"` or `"indiv"` (matching `MaskModule`'s own `"persistent"`/
-    `"individual"` - see the provenance design doc) - `None` if
-    `resolved_mask` is `None`."""
+    """`MaskModule`'s own scope vocabulary, `"persistent"` or
+    `"individual"` - `None` if `resolved_mask` is `None`. Translated to the
+    `persi`/`indiv` filename tag by `provenance.mask_scope_tag`, not by the
+    caller."""
+    mask_warp_affine: np.ndarray | None = None
+    """The 2x3 affine mapping the authored frame's **processed-space**
+    geometry into this wavelength's, i.e.
+    `ChromaticModule.affine_between(mask_authored_frame, (cube, wavelength))`.
+
+    `None` (or identity) means no warp is needed - the overwhelmingly
+    common case, since a mask authored at this exact frame, or any mask at
+    all when no chromatic model has been fitted, needs no re-registration.
+    Passed as a plain matrix rather than this file reaching into
+    `ChromaticModule`, the same one-directional convention
+    `roi/rasterize.py` already follows."""
 
 
 @dataclass(frozen=True)
@@ -126,6 +163,36 @@ class CellResult:
     sample_values: tuple[float, ...]
     reference_values: tuple[float, ...]
     provenance: ProvenanceRecord
+
+
+def _mask_for_compute(wl_input: WavelengthComputeInput) -> np.ndarray | None:
+    """Turn the as-authored (raw-space) ignore mask into the processed-space
+    mask `apply_preprocessing` should be handed with
+    `external_mask_processed=True`.
+
+    Two steps, in the old app's order (see module docstring's assumption-1
+    note): crop/rotate/flip it exactly as the image itself will be
+    transformed, *then* apply the chromatic warp - because the chromatic
+    affine is expressed in processed image space, so warping a raw-space
+    mask with it would land the mask somewhere meaningless whenever a crop
+    or rotation is active.
+
+    Done unconditionally rather than only when a warp is needed, matching
+    the old app's analysis path (`gui/analysis_tasks.py` always passes
+    `external_mask_processed=True`). Masking in raw space first and letting
+    the image transform carry the zeros along would be *nearly* equivalent
+    with no warp in play, but not exactly: the image transform interpolates
+    (`order=1`), so zeroed pixels would bleed into their neighbours at mask
+    edges. One path, one behavior.
+    """
+    if wl_input.resolved_mask is None:
+        return None
+    mask = apply_spatial_mask(np.asarray(wl_input.resolved_mask, dtype=bool), wl_input.geometry_settings)
+    if mask is None:
+        return None
+    if wl_input.mask_warp_affine is not None:
+        mask = warp_boolean_mask_affine(mask, wl_input.mask_warp_affine)
+    return mask
 
 
 def _sample_exclusion_union(
@@ -232,8 +299,10 @@ def compute_cell(
             wl_input.raw_image,
             wl_input.geometry_settings,
             wl_input.background_settings,
-            external_mask=wl_input.resolved_mask,
-            external_mask_processed=False,  # flagged assumption - see module docstring
+            # Processed-space, chromatically warped - see _mask_for_compute
+            # and the module docstring's assumption-1 note.
+            external_mask=_mask_for_compute(wl_input),
+            external_mask_processed=True,
         )
         stage_seconds["preprocess"] += time.perf_counter() - t0
 
@@ -275,10 +344,16 @@ def compute_cell(
         mask_ref = None
         if wl_input.resolved_mask is not None and wl_input.mask_authored_frame is not None and wl_input.mask_scope is not None:
             mask_cube, mask_wl = wl_input.mask_authored_frame
+            # The **as-authored** mask, not `_mask_for_compute`'s
+            # processed/warped one: this file is named after the frame the
+            # mask was authored at, and every wavelength that inherits that
+            # same mask must therefore persist byte-identical pixels, or the
+            # content-dedup in `persist_mask_snapshot` would mint a new
+            # version per wavelength for what is really one mask.
             mask_8bit = np.asarray(wl_input.resolved_mask, dtype=bool).astype(np.uint8) * 255
             mask_ref = persist_mask_snapshot(
                 masks_dir, mask_8bit, cube_index=mask_cube, wavelength_nm=mask_wl,
-                tag=wl_input.mask_scope, naming=naming,
+                tag=mask_scope_tag(wl_input.mask_scope), naming=naming,
             )
         chromatic_ref = persist_chromatic_snapshot(
             chromatic_dir, wl_input.chromatic_affine, cube_index=cube_index,

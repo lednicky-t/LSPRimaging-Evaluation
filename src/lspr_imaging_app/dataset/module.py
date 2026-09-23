@@ -37,6 +37,12 @@ resolution rather than re-deriving it) and returns pixels only - the "no
 other module reads dataset state any other way" rule is unchanged, this
 is one more narrow read, not a loosening of it.
 
+**Second correction, same cause (2026-09-23)**: `wavelengths()` is
+dataset-*global*, and `AnalysisEngine` needs per-cube wavelengths - driving
+a per-cube loop off the global union would ask for planes a cube may not
+have. Added `wavelengths_for_cube()` as a sixth query rather than letting
+the engine iterate the global list and swallow the resulting `KeyError`s.
+
 **`clear_dataset()` is deliberately minimal** - it clears only this
 module's own `_dataset` reference and emits `dataset_cleared`, unlike the
 old app's `DatasetController.clear_dataset` (`gui/dataset_controller.py`),
@@ -115,6 +121,23 @@ class DatasetModule(QObject):
         if self._dataset is None:
             return ()
         return tuple(self._dataset.wavelengths_nm)
+
+    def wavelengths_for_cube(self, cube_index: int) -> tuple[float, ...]:
+        """The wavelengths *one* cube actually has records for, sorted -
+        empty tuple if no dataset is loaded (or if that cube has no records
+        at all), same "no specific key was asked for" reasoning as
+        `wavelengths()`.
+
+        **Use this, not `wavelengths()`, for anything that then loads a
+        plane** (added 2026-09-23 while wiring `AnalysisEngine`).
+        `wavelengths()` is the union across every cube, so feeding it to a
+        per-cube loop would ask for a (cube, wavelength) pair that may not
+        exist - `load_plane` would raise `KeyError` for a cube that is
+        merely short one wavelength, which a partially-failed acquisition
+        makes an ordinary occurrence rather than a corrupt-data case."""
+        if self._dataset is None:
+            return ()
+        return tuple(self._dataset.wavelengths_for_cube(int(cube_index)))
 
     def spectral_cubes(self) -> tuple[int, ...]:
         """Every distinct spectral cube index in the loaded dataset,

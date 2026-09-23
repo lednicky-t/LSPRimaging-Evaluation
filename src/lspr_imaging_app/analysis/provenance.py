@@ -116,6 +116,28 @@ def _json_values_equal(a: dict, b: dict) -> bool:
 # -- mask / background / chromatic snapshots: file-backed, versioned ---------
 
 
+MASK_SCOPE_TAGS: dict[str, str] = {"persistent": "persi", "individual": "indiv"}
+"""Translates `MaskModule`'s own scope vocabulary into this layer's
+fixed-width filename tag.
+
+Two vocabularies exist on purpose, and this is the single place they meet
+(added 2026-09-23, while wiring `AnalysisEngine`). `MaskModule` says
+`"persistent"`/`"individual"` because that is what the timeline actually
+means; filenames say `persi`/`indiv` because both are 5 characters, which
+keeps a directory listing aligned (see the provenance design doc). Doing
+the translation here rather than in whoever wires the engine keeps the
+knowledge of the filename format inside the module that owns the format."""
+
+
+def mask_scope_tag(scope: str) -> str:
+    """`MASK_SCOPE_TAGS` as a lookup that fails loudly on an unknown scope
+    rather than silently writing a mask under a wrong-length tag."""
+    try:
+        return MASK_SCOPE_TAGS[scope]
+    except KeyError:
+        raise ValueError(f"scope must be one of {tuple(MASK_SCOPE_TAGS)}, got {scope!r}") from None
+
+
 @dataclass(frozen=True)
 class MaskSnapshotRef:
     """A reference to one versioned mask image file - what a
@@ -166,6 +188,48 @@ def _existing_mask_versions(masks_dir: Path, cube_index: int, wavelength_nm: flo
     return found
 
 
+def resolve_mask_snapshot_ref(
+    masks_dir: Path,
+    mask_8bit: np.ndarray,
+    *,
+    cube_index: int,
+    wavelength_nm: float,
+    tag: str,
+    naming: FrameNamingScheme,
+) -> tuple[MaskSnapshotRef, bool]:
+    """Work out which version this exact mask content *is* (or would be),
+    reading existing files but **writing nothing**. Returns the ref plus
+    whether it is new (i.e. not yet on disk).
+
+    **Exists to fix a real bug, found 2026-09-23 by running a real analysis
+    with an ignore mask set.** Planning (`AnalysisEngine._gather_current_
+    inputs`) may not write mask files - the design doc's "written lazily,
+    only when actually analyzed" rule - so it used to substitute
+    `version=0` as a placeholder identity. But that placeholder goes
+    straight into the `SettingsSnapshot` the planner fingerprints, while
+    `compute_cell` records the *real* version. The two could therefore
+    never match: with any mask present, every cell looked permanently
+    stale, so "N cells will be recomputed" always said "all of them" and
+    every run recomputed everything from scratch, forever.
+
+    Splitting version-resolution out of the write is what lets planning ask
+    "which version would this content be?" honestly. If the mask has been
+    persisted before, this finds that existing version and the fingerprints
+    match; if it genuinely is new, it returns the version it will get, which
+    correctly fails to match any stored fingerprint.
+
+    Cost: planning now reads back the existing mask PNGs for each frame
+    instead of skipping them. That is the same I/O `compute_cell` already
+    does, and it buys a `preview_recompute` that tells the truth."""
+    if tag not in ("persi", "indiv"):
+        raise ValueError(f"tag must be 'persi' or 'indiv', got {tag!r}")
+    mask_8bit = np.asarray(mask_8bit, dtype=np.uint8)
+    existing = _existing_mask_versions(masks_dir, cube_index, wavelength_nm, tag, naming)
+    version, is_new = next_version(existing, mask_8bit, equal=_arrays_equal)
+    ref = MaskSnapshotRef(cube_index=cube_index, wavelength_nm=wavelength_nm, tag=tag, version=version)
+    return ref, is_new
+
+
 def persist_mask_snapshot(
     masks_dir: Path,
     mask_8bit: np.ndarray,
@@ -183,17 +247,14 @@ def persist_mask_snapshot(
     this once a cell is genuinely being computed), not something this
     function enforces itself.
     """
-    if tag not in ("persi", "indiv"):
-        raise ValueError(f"tag must be 'persi' or 'indiv', got {tag!r}")
-    mask_8bit = np.asarray(mask_8bit, dtype=np.uint8)
-    existing = _existing_mask_versions(masks_dir, cube_index, wavelength_nm, tag, naming)
-    version, is_new = next_version(existing, mask_8bit, equal=_arrays_equal)
-    ref = MaskSnapshotRef(cube_index=cube_index, wavelength_nm=wavelength_nm, tag=tag, version=version)
+    ref, is_new = resolve_mask_snapshot_ref(
+        masks_dir, mask_8bit, cube_index=cube_index, wavelength_nm=wavelength_nm, tag=tag, naming=naming,
+    )
     if is_new:
         import cv2
 
         masks_dir.mkdir(parents=True, exist_ok=True)
-        cv2.imwrite(str(masks_dir / ref.filename(naming)), mask_8bit)
+        cv2.imwrite(str(masks_dir / ref.filename(naming)), np.asarray(mask_8bit, dtype=np.uint8))
     return ref
 
 
@@ -260,7 +321,17 @@ genuinely nasty dependency to fingerprint. Making it all-ROIs removes that
 entirely: the exclusion is a deterministic function of ROI geometry alone.
 """
 
-DEFAULT_REFERENCE_EXCLUSION_MODE = "none"
+DEFAULT_REFERENCE_EXCLUSION_MODE = "exclude_all_sample_rois"
+"""Maintainer's call (2026-09-23), changed from the initial `"none"`: a
+reference ring should never count sample pixels by default.
+
+`"none"` was only ever the *safe* default (it changes nothing relative to
+code that predates the mode), not the *right* one. The stable app
+effectively behaved like `"exclude_all_sample_rois"` whenever more than one
+ROI was selected, which is the normal case - so `"none"` matched its
+single-ROI behavior only, and shipping it as the default would mean a
+biased reference value for any two ROIs close enough that one's sample
+circle falls inside the other's reference ring."""
 
 
 def sample_exclusion_digest(rois: list[AreaRoi] | tuple[AreaRoi, ...]) -> list:

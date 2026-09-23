@@ -58,6 +58,56 @@ def _not_functional_banner() -> QWidget:
     return banner
 
 
+def _build_analysis_engine(
+    dataset: DatasetModule,
+    geometry: GeometryModule,
+    mask: MaskModule,
+    chromatic: ChromaticModule,
+    background: BackgroundModule,
+    roi_toolbox: RoiToolbox,
+) -> AnalysisEngine:
+    """Gather the engine's narrow per-module reads into the callables it
+    takes at construction (2026-09-23 - previously ``AnalysisEngine()`` with
+    no arguments at all, i.e. every action method raised).
+
+    The engine takes callables rather than module references on purpose:
+    it is the one component that needs to read from *every* other module,
+    and holding six module references would make it the god object this
+    rewrite exists to avoid (see
+    ``docs/rewrite_feature_inventory_2026-09.md``). Naming each read
+    explicitly here keeps the full list of what analysis depends on visible
+    in one place - and keeps the engine unit-testable with plain fakes, no
+    Qt modules required.
+
+    No storage root is passed: the store lives beside the dataset, which
+    isn't loaded yet at this point. ``build_main_window`` connects
+    ``dataset_loaded`` to ``set_storage_root``.
+    """
+    return AnalysisEngine(
+        load_plane=dataset.load_plane,
+        # Per-cube, never DatasetModule.wavelengths() - that is the union
+        # across every cube, and a cube short one wavelength (an aborted
+        # acquisition) would make the engine ask for a plane that isn't
+        # there.
+        cube_indices=dataset.spectral_cubes,
+        wavelengths_for_cube=dataset.wavelengths_for_cube,
+        rois=roi_toolbox.rois,
+        geometry_settings=geometry.settings,
+        background_settings=background.settings,
+        chromatic_affine=lambda cube_index, wavelength_nm: chromatic.affine_for((cube_index, wavelength_nm)),
+        chromatic_affine_between=chromatic.affine_between,
+        # Handed through as authored, unwarped - compute_cell does the
+        # re-registration, in processed space (see tasks.py's
+        # _mask_for_compute).
+        resolve_mask=lambda cube_index, wavelength_nm: mask.resolve_mask_source((cube_index, wavelength_nm)),
+        reduction_method=lambda: roi_toolbox.detection_settings().reduction_method,
+        default_reference_radii=lambda: (
+            roi_toolbox.detection_settings().reference_inner_radius_px,
+            roi_toolbox.detection_settings().reference_outer_radius_px,
+        ),
+    )
+
+
 def build_main_window() -> QMainWindow:
     """Construct every rewrite module and wire the panels to them, per the
     module boundaries in AGENTS.md / sketch §7. No module reaches into
@@ -70,7 +120,7 @@ def build_main_window() -> QMainWindow:
     background = BackgroundModule()
     roi_toolbox = RoiToolbox()
     selection = SelectionModule()
-    analysis_engine = AnalysisEngine()
+    analysis_engine = _build_analysis_engine(dataset, geometry, mask, chromatic, background, roi_toolbox)
 
     # SelectionModule holds no RoiToolbox reference of its own (AGENTS.md,
     # "no module reaches into another's internals") - this is the one place
@@ -79,6 +129,24 @@ def build_main_window() -> QMainWindow:
     # selected id behind (see roi/toolbox.py's module docstring, "Cross-
     # module consequence", and selection/module.py).
     roi_toolbox.roi_ids_renumbered.connect(selection.remap_roi_ids)
+
+    # The analysis store lives beside the dataset, so it can only be located
+    # once one is loaded - see AnalysisEngine.set_storage_root for why the
+    # engine is re-pointed rather than rebuilt. `home`, not `folder`: it is
+    # the folder derived data is allowed to be written into, so an analysis
+    # never lands inside a raw TIFF/OME-Zarr folder it doesn't own (see
+    # ImageDataset.home).
+    dataset.dataset_loaded.connect(lambda ds: analysis_engine.set_storage_root(ds.home))
+    dataset.dataset_cleared.connect(lambda: analysis_engine.set_storage_root(None))
+
+    # AnalysisScope.SELECTED_ROIS means "whatever is selected right now".
+    # Setting it never triggers computation (sketch §7) - it only decides
+    # what the *next* explicitly-requested run covers.
+    # sorted(): roi_selection_changed carries a set, whose iteration order is
+    # not meaningful - the engine's scope tuple should be stable run to run.
+    selection.roi_selection_changed.connect(
+        lambda roi_ids: analysis_engine.set_selected_rois(tuple(sorted(roi_ids)))
+    )
 
     image_panel = ImagePanel(dataset, geometry, mask, chromatic, background, roi_toolbox, selection)
     histogram_panel = HistogramPanel(image_panel)
