@@ -80,6 +80,15 @@ class BackgroundModule(QObject):
         change it (same guarantee `GeometryModule.settings()` makes)."""
         return replace(self._settings)
 
+    # -- session restore ------------------------------------------------
+
+    def restore_settings(self, settings: BackgroundSettings) -> None:
+        """Replace this module's whole state as a session load, not a user
+        edit - not undo-tracked, but does emit, for the same reasons
+        `GeometryModule.restore_settings` documents."""
+        self._settings = replace(settings)
+        self.background_model_changed.emit(BackgroundComputationalChange(reason="session_restored"))
+
     # -- commands -----------------------------------------------------------
 
     @instrumented("BackgroundModule.set_flatten_background_settings")

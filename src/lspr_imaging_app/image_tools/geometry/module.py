@@ -90,6 +90,26 @@ class GeometryModule(QObject):
         change it."""
         return replace(self._settings, crop=replace(self._settings.crop))
 
+    # -- session restore ------------------------------------------------
+
+    def restore_settings(self, settings: GeometrySettings) -> None:
+        """Replace this module's whole state, as a *session load* rather
+        than a user edit (added 2026-09-23 for `storage/session.py`).
+
+        Deliberately **not** undo-tracked, unlike every command method
+        here. Loading a session is not an edit to undo *past* - Ctrl+Z
+        immediately after opening a dataset should do nothing, not
+        rewind the file that was just opened. The caller clears the undo
+        stack after restoring every module, so what the user does next is
+        the first undoable thing.
+
+        Still emits both change signals: panels have to redraw against the
+        restored state, and a restore is exactly as much a reason to redraw
+        as an edit is."""
+        self._settings = replace(settings, crop=replace(settings.crop))
+        self.geometry_changed.emit(GeometryComputationalChange(reason="session_restored"))
+        self.cosmetic_changed.emit(GeometryCosmeticChange(reason="session_restored"))
+
     def can_display_micrometers(self) -> bool:
         """True once a real (both-axes-positive) calibration has been
         applied - ported from `_can_display_micrometers` (`develop`)."""

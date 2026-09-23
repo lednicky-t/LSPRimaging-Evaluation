@@ -26,7 +26,10 @@ class RoiCosmeticChange:
     Analysis Engine recompute."""
 
     roi_ids: tuple[int, ...]
-    reason: str  # "recolor" | "relabel" | "regroup" - for logging only
+    # "session_restored" carries an empty `roi_ids` and means every ROI was
+    # replaced at once by a session load - a subscriber that narrows work by
+    # roi_id must treat it as "no narrowing possible".
+    reason: str  # "recolor" | "relabel" | "regroup" | "session_restored" - for logging only
 
 
 @dataclass(frozen=True)
@@ -40,4 +43,4 @@ class RoiComputationalChange:
     # "detection_settings" carries an empty `roi_ids`: the shared detection/
     # reduction settings changed, which invalidates every ROI's stored result
     # without any individual ROI having changed.
-    reason: str  # "moved" | "resized" | "geometry_type_changed" | "added" | "deleted" | "detected" | "detection_settings"
+    reason: str  # "moved" | "resized" | "geometry_type_changed" | "added" | "deleted" | "detected" | "detection_settings" | "session_restored"

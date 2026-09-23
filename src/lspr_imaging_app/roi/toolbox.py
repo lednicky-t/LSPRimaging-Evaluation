@@ -103,6 +103,23 @@ from ..undo import FunctionCommand, undo_manager
 from .model import AreaRoi, AreaRoiDetectionSettings, AreaRoiGroup, RoiArrayGroup
 
 
+def _highest_group_number(groups: dict[str, AreaRoiGroup]) -> int:
+    """The largest `n` among `"group_<n>"` ids, or 0 if there are none.
+
+    `create_group` mints ids as `f"group_{next(counter)}"`, so restoring a
+    session has to resume that counter past whatever was loaded, or the next
+    group created would reuse an existing id and silently replace it. Ids
+    that don't match the pattern (hand-edited, or from a future scheme) are
+    ignored rather than treated as an error - they simply can't collide with
+    a generated one."""
+    highest = 0
+    for group_id in groups:
+        _, _, suffix = str(group_id).partition("group_")
+        if suffix.isdigit():
+            highest = max(highest, int(suffix))
+    return highest
+
+
 class RoiToolbox(QObject):
     """Owns ROI/group state; exposes a query interface plus the full
     command API. No other module or panel may hold its own copy of ROI or
@@ -192,6 +209,35 @@ class RoiToolbox(QObject):
         point = np.asarray([[roi.center_x, roi.center_y]], dtype=np.float64)
         transformed = apply_affine_to_points(point, affine_matrix)
         return float(transformed[0, 0]), float(transformed[0, 1])
+
+    # -- session restore ------------------------------------------------
+
+    def restore_state(
+        self,
+        detection_settings: AreaRoiDetectionSettings,
+        rois: tuple[AreaRoi, ...],
+        groups: tuple[AreaRoiGroup, ...],
+        arrays: tuple[RoiArrayGroup, ...],
+    ) -> None:
+        """Replace every piece of this module's state as a session load -
+        not undo-tracked, but emits, for the reasons
+        `GeometryModule.restore_settings` documents.
+
+        **The id counter is restored too, not reset.** `add_roi` hands out
+        `next(self._roi_id_counter)`, and `delete_rois` keeps ids
+        contiguous - so after restoring N ROIs the counter has to resume at
+        the highest restored id plus one. Resetting it to 1 would make the
+        very first ROI added after opening a session collide with an
+        existing one and silently replace it. Same for group ids, whose
+        `"group-<n>"` form is parsed back out for the same reason."""
+        self._detection_settings = replace(detection_settings)
+        self._rois = {int(roi.area_roi_id): roi for roi in rois}
+        self._groups = {str(group.group_id): group for group in groups}
+        self._array_groups = {str(array_group.array_id): array_group for array_group in arrays}
+        self._roi_id_counter = itertools.count(max(self._rois, default=0) + 1)
+        self._group_id_counter = itertools.count(_highest_group_number(self._groups) + 1)
+        self.geometry_changed.emit(RoiComputationalChange(roi_ids=(), reason="session_restored"))
+        self.cosmetic_changed.emit(RoiCosmeticChange(roi_ids=(), reason="session_restored"))
 
     # -- command API (§7): single-ROI mutation ---------------------------
 

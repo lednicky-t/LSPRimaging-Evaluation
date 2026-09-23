@@ -43,6 +43,8 @@ from .panels.spectra import SpectraPanel
 from .panels.workflow import WorkflowPanel
 from .roi import RoiToolbox
 from .selection import SelectionModule
+from .storage.session import SessionState
+from .undo import undo_manager
 from .version_rewrite import rewrite_version_string
 
 
@@ -106,6 +108,77 @@ def _build_analysis_engine(
             roi_toolbox.detection_settings().reference_outer_radius_px,
         ),
     )
+
+
+def capture_session(
+    geometry: GeometryModule,
+    mask: MaskModule,
+    chromatic: ChromaticModule,
+    background: BackgroundModule,
+    roi_toolbox: RoiToolbox,
+    selection: SelectionModule,
+) -> SessionState:
+    """Read every module's current state into a plain, Qt-free
+    :class:`SessionState` (2026-09-23).
+
+    Lives here for the same reason ``_build_analysis_engine`` does: this is
+    the one place that knows about every module, and keeping the knowledge
+    here leaves ``storage/session.py`` a pure data layer that a test can
+    drive with dataclasses and no Qt at all.
+
+    Every query below already returns a defensive copy, so the captured
+    state cannot be mutated out from under the caller by continued use of
+    the app while it is being written."""
+    return SessionState(
+        geometry=geometry.settings(),
+        background=background.settings(),
+        mask_settings=mask.settings(),
+        mask_changes=mask.mask_changes(),
+        chromatic_settings=chromatic.settings(),
+        chromatic_models=chromatic.models(),
+        chromatic_landmarks=chromatic.landmarks(),
+        detection_settings=roi_toolbox.detection_settings(),
+        rois=roi_toolbox.rois(),
+        groups=roi_toolbox.groups(),
+        arrays=roi_toolbox.array_groups(),
+        selected_cube=selection.current_cube(),
+        selected_wavelength=selection.current_wavelength(),
+        selected_roi_ids=tuple(sorted(selection.selected_roi_ids())),
+    )
+
+
+def apply_session(
+    state: SessionState,
+    geometry: GeometryModule,
+    mask: MaskModule,
+    chromatic: ChromaticModule,
+    background: BackgroundModule,
+    roi_toolbox: RoiToolbox,
+    selection: SelectionModule,
+) -> None:
+    """Push a loaded :class:`SessionState` into every module.
+
+    Uses each module's ``restore_*`` method rather than its command API:
+    those replace state wholesale, push nothing onto the undo stack, and
+    still emit, so panels redraw. **The undo stack is then cleared**, which
+    is the point of not tracking the restore - Ctrl+Z straight after
+    opening a dataset should do nothing at all, not rewind past the file
+    that was just opened into a half-restored state that never existed.
+
+    Selection is applied last, through its ordinary setters: it is not
+    undo-tracked in the first place (see ``selection/module.py``), and
+    setting it after the ROIs exist means the selected ids are real."""
+    geometry.restore_settings(state.geometry)
+    background.restore_settings(state.background)
+    mask.restore_state(state.mask_settings, state.mask_changes)
+    chromatic.restore_state(state.chromatic_settings, state.chromatic_models, state.chromatic_landmarks)
+    roi_toolbox.restore_state(state.detection_settings, state.rois, state.groups, state.arrays)
+
+    selection.set_cube(state.selected_cube)
+    selection.set_wavelength(state.selected_wavelength)
+    selection.set_roi_selection(set(state.selected_roi_ids))
+
+    undo_manager.clear()
 
 
 def build_main_window() -> QMainWindow:

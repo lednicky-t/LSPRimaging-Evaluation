@@ -37,9 +37,15 @@ class MaskComputationalChange:
     reasoning that justified `RoiToolbox.roi_ids_renumbered` before
     anything subscribed to it."""
 
-    reason: str  # "mask_change"
-    frame: tuple[int, float]
-    scope: str  # "individual" | "persistent"
+    reason: str  # "mask_change" | "session_restored"
+    frame: tuple[int, float] | None
+    scope: str | None  # "individual" | "persistent"
+    """`None` on both means *every* frame may have changed - emitted only by
+    `MaskModule.restore_state`, which replaces the whole timeline at once
+    (added 2026-09-23 for session loading). A subscriber that narrows its
+    work by frame must treat `None` as "no narrowing possible, redo
+    everything", which is correct: after a session load nothing it computed
+    against the previous timeline is still trustworthy."""
 
 
 @dataclass(frozen=True)

@@ -171,6 +171,45 @@ class MaskModule(QObject):
         change = self._persistent_changes[max(candidate_cubes)]
         return change.frame, change.mask, change.scope
 
+    def mask_changes(self) -> tuple[MaskChange, ...]:
+        """The whole timeline, persistent changes first then individual
+        ones, each group ordered by frame - for session persistence
+        (added 2026-09-23).
+
+        Deterministic ordering so that saving an unchanged session twice
+        produces an identical file, which is what lets an autosave's
+        "did anything change" check be a plain comparison. `MaskChange` is
+        frozen and its `mask` was already copied on the way in
+        (`set_mask_change` stores `normalized.copy()`), so handing the
+        records out directly is safe."""
+        persistent = [self._persistent_changes[cube] for cube in sorted(self._persistent_changes)]
+        individual = [self._individual_changes[frame] for frame in sorted(self._individual_changes)]
+        return tuple(persistent + individual)
+
+    # -- session restore ------------------------------------------------
+
+    def restore_state(self, settings: MaskSettings, changes: tuple[MaskChange, ...]) -> None:
+        """Replace the settings *and* the whole change timeline as a
+        session load - not undo-tracked, but emits, for the reasons
+        `GeometryModule.restore_settings` documents.
+
+        Rebuilds both timeline dicts from scratch rather than merging, so a
+        restore always lands on exactly what was saved. The keying matches
+        `set_mask_change`'s: individual changes by full frame, persistent
+        ones by cube only (a persistent change applies from its cube
+        onward, so only one per cube can be in effect)."""
+        self._settings = replace(settings)
+        self._individual_changes = {}
+        self._persistent_changes = {}
+        for change in changes:
+            if change.scope == "individual":
+                self._individual_changes[change.frame] = change
+            elif change.scope == "persistent":
+                self._persistent_changes[change.frame[0]] = change
+            else:
+                raise ValueError(f"scope must be one of {_SCOPES}, got {change.scope!r}")
+        self.mask_changed.emit(MaskComputationalChange(reason="session_restored", frame=None, scope=None))
+
     # -- commands -----------------------------------------------------------
 
     @instrumented("MaskModule.set_tool_settings")

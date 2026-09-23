@@ -2992,3 +2992,130 @@ before/after comparisons AGENTS.md already requires for compute changes.
   `compute_cell`'s reference-exclusion mode end to end (that one has a
   standalone 16-check script from 2026-09-23 that could be converted the
   same way).
+
+## 2026-09-23 (same day, continued): `storage/session.py` built - session save/load, and the `restore_*` surface it needed
+
+### Scope-check first: "ports `storage/workspace.py` mostly as-is" holds for one third of it
+
+- **The ROI half ports directly.** `_encode_area_roi` and the
+  `RoiMask`/`per_wavelength` encoders came over with their logic intact,
+  including the documented performance reason for enumerating fields by
+  hand instead of `asdict()` (the recursive deep-copy of `per_wavelength`
+  and the mask arrays measured ~2 s of ~3.6 s per 160 ROIs on a real
+  dataset, paid on every close and every autosave's unchanged-check - and
+  then thrown away, since all three fields get their own encoding
+  immediately afterwards).
+- **The settings half cannot port.** The old `processing_profile.json` has
+  one flat `"preprocessing"` block mirroring `PreprocessingSettings`'s 40
+  fields, and that dataclass no longer exists - the 2026-09-20
+  decomposition split it four ways.
+- **The mask half has no old format at all.** The old app stored one
+  `session_mask` (a single boolean array inline in JSON) plus per-frame
+  pixel diffs; `MaskModule` holds a *timeline* of `MaskChange` records.
+
+### Maintainer's two decisions, presented with trade-offs before any code
+
+1. **A new per-module format, and no importer for old
+   `processing_profile.json` files.** Each top-level block is one module's
+   own state. The rejected alternative was keeping the old flat shape with
+   a translation layer, which would have to track two different
+   decompositions forever and re-couple the new modules to exactly the
+   grab-bag boundary the September split removed.
+2. **Mask pixels to versioned PNGs**, through the same
+   `persist_mask_snapshot` mechanism `analysis/provenance.py` uses, rather
+   than inline in the JSON or in a third HDF5 file.
+
+**A wrong claim caught by testing, worth recording**: the first draft of
+this file's docstring said identical masks across frames "collapse to one
+file for free". They don't - the dedup is per `(frame, scope)` group,
+because the frame is part of the filename. What it actually buys is that
+re-saving an *unchanged* session rewrites no mask file at all, which is the
+property an autosave needs. Content-addressing across frames would mean
+hash-named files, which the provenance design doc deliberately rejected in
+favour of readable names. The test asserted the wrong number, which is how
+the wrong docstring surfaced.
+
+Session masks live in `session/masks/`, not `analysis/masks/`: same kind of
+thing, different question ("what is the mask now" vs "what mask produced
+this stored cell"), and sharing a folder would make deleting a stale
+analysis quietly destroy current session state.
+
+### The `restore_*` surface, which loading turned out to require
+
+Loading a session cannot go through the command API. `RoiToolbox` has no
+way to set explicit ROI ids (`add_roi` mints them from a counter),
+`ChromaticModule` had no model setter at all, and every `GeometryModule`
+setter pushes an undo entry - so a restore would have arrived as half a
+dozen undoable edits. Added one method per module:
+`GeometryModule.restore_settings`, `BackgroundModule.restore_settings`,
+`MaskModule.restore_state`, `ChromaticModule.restore_state`,
+`RoiToolbox.restore_state`.
+
+Each replaces state wholesale, pushes **nothing** onto the undo stack, and
+still **emits**, so panels redraw. `apply_session` then calls
+`undo_manager.clear()`. That is the point of not tracking a restore: Ctrl+Z
+straight after opening a dataset should do nothing, not rewind past the
+file that was just opened into a half-restored state that never existed.
+
+Two query methods were missing and got added alongside:
+`MaskModule.mask_changes()` and `ChromaticModule.models()`, both returning
+a deterministically ordered tuple - so saving unchanged state twice
+produces an identical file, which is what lets an autosave's "did anything
+change" check be a plain comparison.
+
+**The id-counter trap, found while writing `RoiToolbox.restore_state`**:
+restoring N ROIs has to resume the id counter past the highest restored id,
+and the group counter past the highest `"group_<n>"`. Resetting either to 1
+would make the first ROI or group created after opening a session silently
+*replace* an existing one rather than be added. Pinned by a test.
+
+**New change reasons**: `"session_restored"` on Roi/Geometry/Background/
+Mask/Chromatic payloads, all carrying empty or `None` narrowing fields,
+documented as "no narrowing possible, redo everything" - which is correct,
+since after a session load nothing computed against the previous state is
+still trustworthy. `MaskComputationalChange.frame`/`scope` became
+`| None` for exactly this.
+
+`capture_session`/`apply_session` live in `app_rewrite.py`, next to
+`_build_analysis_engine`, for the same reason: that is the one place that
+knows about every module, and keeping it there leaves `storage/session.py`
+a pure, Qt-free data layer a test can drive with plain dataclasses.
+
+### Not persisted, deliberately
+
+The old profile's `statistics_settings` (no counterpart exists anywhere in
+the rewrite) and `image_exclusions` (`ImageExclusionRule` is referenced only
+inside `dataset/io.py` and owned by no module). Both want a real owner
+first; a session format is the wrong place to decide that.
+
+### Verified
+
+A standalone script (32 checks) plus a committed test file,
+`tests/integration/test_lspri_rewrite_session.py` (17 tests) - total
+rewrite coverage is now 49 tests. Covers: the file layout and schema stamp;
+mask pixels going to PNGs with only references in the JSON; no ndarray
+leaking into the mask-settings block; a full round trip into a *completely
+fresh* set of modules for every block; `RoiMask` and `per_wavelength`
+surviving (JSON has no tuple keys - the field a naive encoder loses
+silently); an individual mask change still winning over the persistent one
+after restore; the undo stack cleared; both id counters resuming; re-saving
+unchanged state being byte-identical and writing no new PNGs; a missing
+session returning `None`; a foreign schema and a future major version both
+rejected rather than silently defaulted; and an orphaned mask reference
+dropping just that change while keeping the ROIs and settings.
+
+pyflakes-clean across the whole package; the rewrite-preview window still
+builds.
+
+### Not done / still open, as of this entry
+
+- **Nothing calls `save_session`/`load_session` yet.** No autosave, no
+  save-on-close, no load-on-dataset-open - `app_rewrite.py` has the
+  capture/apply pair but no trigger. Wiring that needs a debounce policy
+  (the old app's `SessionStateManager` has one worth reading first), so it
+  is its own piece rather than tacked on here.
+- The other five panels are still scaffolding.
+- `AnalysisWorker` still swallows a task exception.
+- `BackgroundModule`'s timeline extension - not started.
+- `statistics_settings`/`image_exclusions` have no owner, so nothing
+  persists them.

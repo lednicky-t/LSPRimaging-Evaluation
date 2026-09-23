@@ -149,6 +149,16 @@ class ChromaticModule(QObject):
     def landmarks(self) -> tuple[ChromaticLandmarkObservation, ...]:
         return tuple(self._landmarks.values())
 
+    def models(self) -> tuple[ChromaticTransformModel, ...]:
+        """Every fitted per-image model, ordered by `(cube, wavelength)` -
+        for session persistence (added 2026-09-23). Deterministic ordering
+        so saving an unchanged session twice produces an identical file.
+
+        `affine_for()` stays the way *other modules* get at a transform;
+        this is for whoever writes the session, which needs the records
+        themselves (rmse, scores, tile counts) rather than one matrix."""
+        return tuple(self._models[key] for key in sorted(self._models))
+
     def landmarks_for_image(self, image_key: tuple[int, float]) -> tuple[ChromaticLandmarkObservation, ...]:
         cube_index, wavelength_nm = int(image_key[0]), float(image_key[1])
         return tuple(
@@ -206,6 +216,34 @@ class ChromaticModule(QObject):
         """Like `warp_mask()`, but for a mask authored at an arbitrary
         `from_key` rather than always the reference frame."""
         return warp.warp_boolean_mask_affine(mask, self.affine_between(from_key, to_key))
+
+    # -- session restore ------------------------------------------------
+
+    def restore_state(
+        self,
+        settings: ChromaticSettings,
+        models: tuple[ChromaticTransformModel, ...],
+        landmarks: tuple[ChromaticLandmarkObservation, ...],
+    ) -> None:
+        """Replace settings, fitted models and landmarks as a session load
+        - not undo-tracked, but emits, for the reasons
+        `GeometryModule.restore_settings` documents.
+
+        Re-keys both dicts from the restored records rather than trusting
+        any stored key, so the in-memory keying stays this module's own
+        business regardless of how a file happened to order things. No id
+        counter to advance: unlike `RoiToolbox`, this module never mints a
+        `landmark_id` - `add_landmark` upserts whatever id the caller
+        supplies (see its docstring)."""
+        self._settings = replace(settings, chromatic_grid_bounds=replace(settings.chromatic_grid_bounds))
+        self._models = {
+            (int(model.spectral_cube_index), float(model.wavelength_nm)): model for model in models
+        }
+        self._landmarks = {
+            (int(mark.landmark_id), int(mark.spectral_cube_index), float(mark.wavelength_nm)): mark
+            for mark in landmarks
+        }
+        self.chromatic_model_changed.emit(ChromaticModelChange(reason="session_restored"))
 
     # -- settings commands ----------------------------------------------
 
