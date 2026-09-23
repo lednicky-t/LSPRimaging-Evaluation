@@ -133,7 +133,16 @@ class ImageRenderer(QObject):
                 request = self._take_pending()
                 if request is None:
                     break
-                self.rendered.emit(self._render(request))
+                result = self._render(request)
+                # Re-check after rendering, not just before: `stop()` is
+                # typically called during application shutdown, and a render
+                # that was already in flight when it arrived must not emit
+                # into a widget Qt is in the middle of destroying. This is
+                # the same class of shutdown race behind this app's
+                # documented PyQt6-sip crash-on-close.
+                if self._stopping:
+                    return
+                self.rendered.emit(result)
 
     def _render(self, request: RenderRequest) -> RenderResult:
         started = time.perf_counter()

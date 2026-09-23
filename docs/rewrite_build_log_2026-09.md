@@ -2917,3 +2917,78 @@ answer for:
 - `BackgroundModule`'s timeline extension - not started.
 - `storage/session.py` - untouched.
 - Still no committed test coverage. Two strong candidate scripts now.
+
+## 2026-09-23 (same day, continued): committed test coverage - the gap every prior entry flagged, closed
+
+Every entry on this branch has ended with "no committed, permanent test
+coverage - every verification was a standalone, uncommitted script". Those
+scripts have now been turned into real tests, while the two they came from
+were still fresh.
+
+**Location decided by the maintainer** (asked, because it is the first thing
+on this branch to land in a *different repo*): the umbrella repo's
+`tests/`, alongside every other Suite test, each file guarded by a
+module-level `unittest.SkipTest` when the rewrite modules aren't importable.
+So on a stable checkout the whole file skips cleanly; on a `rewrite`
+checkout it runs. The alternative considered was a new `apps/LSPRi/eva/tests/`
+inside the submodule - rejected because it would give the Suite a second
+test location and the files would have to move anyway once the rewrite
+replaces the stable app. Verified the guard really does register as a skip
+rather than a collection error, rather than assuming pytest's behavior.
+
+**Three files, 35 tests:**
+
+- `tests/unit/test_lspri_rewrite_analysis_core.py` (14) - genuinely pure,
+  no Qt and no files, which is what keeps it in `tests/unit` per the
+  documented split: per-cube wavelengths on the dataclass, the
+  persistent/individual to persi/indiv translation and its loud failure,
+  the exclusion-mode default, `effective_reference_radii`'s override rules,
+  and `resolve_external_mask`'s coordinate-space contract.
+- `tests/integration/test_lspri_rewrite_analysis_engine.py` (13) - the real
+  module graph `_build_analysis_engine` wires, against real TIFFs and a
+  real `data.h5`.
+- `tests/integration/test_lspri_rewrite_image_panel.py` (12) - a real
+  `QApplication` built in-process without `.exec()`, driven by direct
+  method and signal calls, never screen coordinates.
+
+**What was chosen to pin, and why** - these are regression guards for
+things that fail *silently*, not coverage for its own sake:
+
+- **The dedup tests set an ignore mask on purpose**, and the test file says
+  so in its own docstring. That is the exact condition under which the
+  placeholder-mask-version bug appeared; without a mask it is invisible,
+  which is how it survived the previous session's own end-to-end
+  verification. A future edit that reintroduces a planning-side placeholder
+  now fails a test instead of quietly making every run a full recompute.
+- **`resolve_external_mask`'s transform order** is pinned by asserting the
+  *shape* of the result (40x48 processed, not 64x80 raw) after a warp - if
+  the warp ran first, in raw space, the shape would give it away. Getting
+  this wrong misaligns the ignore mask rather than raising.
+- **Off-thread rendering** is asserted directly (the render thread is alive
+  and is not the calling thread). It regresses invisibly: the panel keeps
+  working, it just freezes under load.
+- **A drag being undoable** pins the one-way flow - the panel has no undo
+  code, so if a future handler "just" mutates ROI state directly, the
+  feature still appears to work and only undo breaks.
+- **`effective_reference_radii`** is pinned because the Image panel draws
+  the ring analysis measures; a re-derivation drifting apart would show a
+  ring that isn't the one being measured.
+
+**Not pinned, deliberately**: numerical values of computed
+sample/reference pairs. Those need a real dataset with known physics to be
+meaningful, and asserting on synthetic-noise values would only pin the
+random seed. The tests assert structure (which wavelengths, finite values,
+which cells recompute) and leave numerical correctness to the standalone
+before/after comparisons AGENTS.md already requires for compute changes.
+
+### Not done / still open, as of this entry
+
+- The other five panels are still scaffolding.
+- `AnalysisWorker` still swallows a task exception.
+- `BackgroundModule`'s timeline extension - not started.
+- `storage/session.py` - untouched.
+- Coverage is deliberately shallow in places: nothing exercises
+  `ChromaticModule.refit`, the background/mask modules' own commands, or
+  `compute_cell`'s reference-exclusion mode end to end (that one has a
+  standalone 16-check script from 2026-09-23 that could be converted the
+  same way).

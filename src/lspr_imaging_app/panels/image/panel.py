@@ -56,6 +56,7 @@ import pyqtgraph as pg
 from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtGui import QColor
 from PyQt6.QtWidgets import (
+    QApplication,
     QDoubleSpinBox,
     QHBoxLayout,
     QLabel,
@@ -118,6 +119,15 @@ class ImagePanel(QWidget):
 
         self._renderer = ImageRenderer(dataset.load_plane, parent=self)
         self._renderer.rendered.connect(self._on_rendered)
+        # `closeEvent` only reaches top-level windows, and this panel lives
+        # inside a tab strip - so on a normal application quit it would
+        # never fire, leaving the render thread emitting into a widget Qt is
+        # tearing down. That is the shape of this app's documented
+        # PyQt6-sip crash-on-close, so the shutdown hook is on the
+        # application, where it actually fires.
+        app = QApplication.instance()
+        if app is not None:
+            app.aboutToQuit.connect(self._renderer.stop)
 
         self._redraw_timer = QTimer(self)
         self._redraw_timer.setSingleShot(True)
@@ -438,6 +448,10 @@ class ImagePanel(QWidget):
     # -- teardown -----------------------------------------------------------
 
     def closeEvent(self, event) -> None:  # noqa: N802 - Qt naming
+        """Covers the case where this panel *is* shown as its own window
+        (a detached/floating panel). The application-level `aboutToQuit`
+        hook in `__init__` covers the normal in-a-tab case, which this
+        never sees - see that comment. `stop()` is safe to call twice."""
         self._renderer.stop()
         super().closeEvent(event)
 
