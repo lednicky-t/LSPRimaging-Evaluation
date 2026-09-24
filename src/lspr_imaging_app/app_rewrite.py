@@ -29,17 +29,20 @@ import sys
 from pathlib import Path
 
 from PyQt6.QtCore import Qt
-from PyQt6.QtWidgets import QApplication, QLabel, QMainWindow, QVBoxLayout, QWidget
+from PyQt6.QtGui import QActionGroup
+from PyQt6.QtWidgets import QApplication, QLabel, QMainWindow, QMenu, QStatusBar, QWidget
 
-from lspr_ui import app_icon, set_active_theme, GRAY_DARK_THEME
+from lspr_ui import app_icon, set_active_theme, BRIGHT_THEME, GRAY_DARK_THEME
 
 from .analysis import AnalysisEngine, AnalysisSettingsModule
 from .analysis.provenance import FrameNamingScheme
 from .dataset import DatasetModule
 from .gui.app_theme import apply_app_theme
 from .image_tools import BackgroundModule, ChromaticModule, GeometryModule, MaskModule
+from .panels.dock_container import PanelContainer
 from .panels.histogram import HistogramPanel
 from .panels.image import ImagePanel
+from .panels.layout_presets import wire_view_menu
 from .panels.roi_table import RoiTablePanel
 from .panels.sensorgram import SensorgramPanel
 from .panels.spectra import SpectraPanel
@@ -54,16 +57,90 @@ from .version_rewrite import rewrite_version_string
 logger = logging.getLogger(__name__)
 
 
-def _not_functional_banner() -> QWidget:
-    banner = QLabel(
-        "Scaffold preview only - nothing here loads data or computes anything yet.\n"
-        "Every panel is real code wired to real modules, but every module method\n"
-        "still raises NotImplementedError until it's actually built."
+def _not_functional_reminder() -> QWidget:
+    """A permanent status-bar widget, not a central banner - the window's
+    central area is dock widgets now (see ``build_main_window``), so there's
+    no fixed-position banner slot left to eat screen space. Permanent (added
+    via ``QStatusBar.addPermanentWidget``) so ``WorkflowPanel``'s transient
+    stage-status messages (left side of the bar) never cover it."""
+    label = QLabel(
+        "Scaffold preview - every panel is real code wired to real modules, "
+        "but every module method still raises NotImplementedError until it's actually built."
     )
-    banner.setAlignment(Qt.AlignmentFlag.AlignCenter)
-    banner.setWordWrap(True)
-    banner.setStyleSheet("padding: 10px; font-weight: 600;")
-    return banner
+    label.setStyleSheet("padding: 0 8px; font-weight: 600;")
+    return label
+
+
+def _build_menu_bar(window: QMainWindow) -> tuple[QMenu, QMenu]:
+    """Standard File/Edit/View/Options/Help menus
+    (``docs/rewrite_gui_shell_design_2026-09.md`` §2). Only File->Exit is
+    real so far - View gets theme switching and layout presets (below),
+    Options gets the presets' auto-apply toggle (below - standing in for a
+    not-yet-built Preferences dialog), Edit gets undo/redo
+    (``undo.undo_manager`` already exists and has nothing wired to it yet),
+    Help is an empty placeholder. Adding them now, even empty, keeps the
+    menu *bar* itself - not just its contents - something later work fills
+    in rather than builds from scratch.
+
+    Returns (View menu, Options menu) so the caller can add the theme/
+    preset actions once the panels those actions need to act on actually
+    exist."""
+    menu_bar = window.menuBar()
+    file_menu = menu_bar.addMenu("&File")
+    file_menu.addAction("E&xit", window.close)
+    menu_bar.addMenu("&Edit")
+    view_menu = menu_bar.addMenu("&View")
+    options_menu = menu_bar.addMenu("&Options")
+    menu_bar.addMenu("&Help")
+    return view_menu, options_menu
+
+
+def _wire_theme_menu(view_menu: QMenu, window: QMainWindow, image_panel: ImagePanel) -> None:
+    """View -> Theme: Dark / Bright, exclusive-checkable (design doc §6).
+
+    No persistence yet (there is no settings/Preferences layer in the
+    rewrite to persist into - the stable app's equivalent,
+    ``MainWindow._set_ui_theme``, writes to ``QSettings``). Every live
+    theme switch has to explicitly touch three kinds of chrome, in this
+    order, matching the stable app's own ``_apply_theme_styles``:
+
+    1. The QApplication-level palette/QSS (``apply_app_theme``) - covers
+       every standard Qt widget.
+    2. Every ``PanelContainer``'s title bar - baked-in per-widget
+       stylesheets at construction time, not QSS, so they don't pick up a
+       switch on their own (see ``PanelContainer.refresh_theme``'s own
+       docstring).
+    3. Pyqtgraph canvases - also don't respond to QSS (see
+       ``ImagePanel.refresh_theme``). Only ``ImagePanel`` has a real one
+       today; Histogram/Spectra/Sensorgram get the same call once their
+       real plot widgets exist (currently still ``NotImplementedError``
+       stubs - see the build log) - ``getattr(..., None)`` guards each one
+       so this doesn't have to change when they do.
+    """
+    theme_menu = view_menu.addMenu("Theme")
+    group = QActionGroup(window)
+    group.setExclusive(True)
+
+    dark_action = theme_menu.addAction("Dark")
+    dark_action.setCheckable(True)
+    dark_action.setChecked(True)  # matches set_active_theme(GRAY_DARK_THEME) at startup (main())
+    group.addAction(dark_action)
+
+    bright_action = theme_menu.addAction("Bright")
+    bright_action.setCheckable(True)
+    group.addAction(bright_action)
+
+    def switch_theme(theme) -> None:
+        set_active_theme(theme)
+        app = QApplication.instance()
+        if app is not None:
+            apply_app_theme(app, theme)
+        image_panel.refresh_theme()
+        for dock in window.findChildren(PanelContainer):
+            dock.refresh_theme()
+
+    dark_action.triggered.connect(lambda checked: switch_theme(GRAY_DARK_THEME) if checked else None)
+    bright_action.triggered.connect(lambda checked: switch_theme(BRIGHT_THEME) if checked else None)
 
 
 def _build_analysis_engine(
@@ -358,23 +435,73 @@ def build_main_window() -> QMainWindow:
     roi_table_panel = RoiTablePanel(roi_toolbox)
     spectra_panel = SpectraPanel(analysis_engine, roi_toolbox, selection)
     sensorgram_panel = SensorgramPanel(analysis_engine, roi_toolbox, dataset, selection)
-
     workflow = WorkflowPanel()
-    workflow.addTab(image_panel, "Image")
-    workflow.addTab(histogram_panel, "Histogram")
-    workflow.addTab(roi_table_panel, "ROI / Groups")
-    workflow.addTab(spectra_panel, "Spectra")
-    workflow.addTab(sensorgram_panel, "Sensorgram")
-
-    central = QWidget()
-    layout = QVBoxLayout(central)
-    layout.addWidget(_not_functional_banner())
-    layout.addWidget(workflow)
 
     window = QMainWindow()
     window.setWindowTitle(rewrite_version_string())
-    window.setCentralWidget(central)
-    window.resize(1100, 720)
+    window.resize(1400, 900)
+    view_menu, options_menu = _build_menu_bar(window)
+    _wire_theme_menu(view_menu, window, image_panel)
+
+    status_bar = QStatusBar(window)
+    window.setStatusBar(status_bar)
+    status_bar.addPermanentWidget(_not_functional_reminder())
+    # WorkflowPanel.set_status() (state/performance text, no hover-hints -
+    # design doc §2) shows as a transient message on the bar's left side;
+    # the reminder above is permanent, on the right, so neither covers the
+    # other.
+    workflow.status_requested.connect(status_bar.showMessage)
+
+    # Each panel dock-wrapped via the shared PanelContainer (undock/float/
+    # maximize/close - see panels/dock_container.py), matching how the
+    # stable app already docks every panel. This default arrangement is
+    # just a starting point, not a preset: named, user-editable presets
+    # (design doc §5) replace it once built - for now the user can drag
+    # panels anywhere via PanelContainer's own controls. Closing a panel
+    # (its title bar's close button) currently has no way back short of
+    # restarting - a View-menu "show panel" toggle is design doc §5/§6
+    # territory, not yet built.
+    # collapsible=True - the only panel this applies to (design doc §4).
+    workflow_dock = PanelContainer("Workflow", workflow, window, collapsible=True)
+    image_dock = PanelContainer("Image", image_panel, window)
+    histogram_dock = PanelContainer("Histogram", histogram_panel, window)
+    roi_table_dock = PanelContainer("ROI / Groups", roi_table_panel, window)
+    spectra_dock = PanelContainer("Spectra", spectra_panel, window)
+    sensorgram_dock = PanelContainer("Sensorgram", sensorgram_panel, window)
+
+    window.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, workflow_dock)
+    window.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, image_dock)
+    window.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, roi_table_dock)
+    window.splitDockWidget(image_dock, histogram_dock, Qt.Orientation.Vertical)
+    window.addDockWidget(Qt.DockWidgetArea.BottomDockWidgetArea, spectra_dock)
+    window.tabifyDockWidget(spectra_dock, sensorgram_dock)
+    spectra_dock.raise_()
+    # Fixed-ish width (design doc §4) - an initial size, not a hard clamp;
+    # the user can still drag it wider/narrower (§1, "give the user real
+    # freedom to rearrange").
+    window.resizeDocks([workflow_dock], [320], Qt.Orientation.Horizontal)
+
+    # Named panel presets (design doc §5). Deliberately not applied here at
+    # startup - every dock stays visible until the user explicitly picks a
+    # preset (View -> Panel Presets) or turns on the Options menu's
+    # auto-apply toggle, which only then starts reacting to stage changes.
+    # Forcing a preset at launch while that toggle defaults to off would
+    # contradict "manual application always available, auto-apply is
+    # opt-in" (§5).
+    wire_view_menu(
+        view_menu,
+        options_menu,
+        window,
+        workflow,
+        workflow_dock,
+        {
+            "Image": image_dock,
+            "Histogram": histogram_dock,
+            "ROI / Groups": roi_table_dock,
+            "Spectra": spectra_dock,
+            "Sensorgram": sensorgram_dock,
+        },
+    )
 
     # Parented now that there is a window to own it, so it dies with the
     # window rather than living on as an orphan QObject holding a timer.

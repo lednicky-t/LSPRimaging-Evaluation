@@ -3594,3 +3594,239 @@ the cache permanently stale.
   `analysis_pipeline_layers.md` mentions as a possible layer-3 method -
   does not fit `metric_value`'s one-spectrum-in signature. Not needed yet;
   flagged because the signature would have to widen, not just gain a key.
+
+## 2026-09-24: GUI shell - real menu bar/status bar, all six panels dock-wrapped
+
+First implementation pass on `docs/rewrite_gui_shell_design_2026-09.md`
+(agreed with the maintainer the same day). Previously `WorkflowPanel` was a
+bare `QTabWidget` that itself hosted Image/Histogram/ROI-table/Spectra/
+Sensorgram as its own tabs - placeholder wiring from the original scaffold,
+not the design: per the design doc, those five are each their own dock
+widget, and Workflow is docked alongside them (left), not their container.
+
+**Ported `PanelContainer`** (`panels/dock_container.py`, new) from the
+*stable* app's `gui/widgets.py` - a `QDockWidget` with a custom title bar
+(float/maximize/close, optional help button, optional subtitle) already
+proven in production there: real undock/float/resize, a fix for Qt's own
+bug where a restored floating panel can land off-screen, and "docking
+disabled while floating" so dragging a floating panel over the main window
+doesn't trigger an accidental snap-back. Two deliberate trims, not a
+verbatim copy this time (both documented in the new file's own docstring):
+
+1. The source's help-button icon falls back to the `lucide` icon library
+   through `MainWindowIcons` - a dependency this app's icon policy
+   (`packages/lspr_ui/ICONS.md`) avoids. Replaced with the vendored
+   `info-circle` tabler icon, rendered through the same inline SVG-to-QIcon
+   pattern the class already uses for close/float/maximize.
+2. The source's `title_options` clickable-segment title and its
+   `_make_chevron_icon`/`_make_apply_icon` helpers were left out - nothing
+   in the rewrite's six fixed panels needs a toggleable title yet.
+   `_make_pin_icon` was kept despite being unused today, specifically for
+   the design doc §4 auto-hide-to-strip work still to come.
+
+**`WorkflowPanel` rebuilt** (`panels/workflow/panel.py`) to match the
+design: four stage tabs (Dataset/Image Tools/ROI Selection/Analysis, each a
+"not built yet" placeholder for now - real per-stage settings forms are
+separate future work, out of scope for this shell-only pass), a real
+`stage_changed` signal driven by tab index instead of the scaffold's
+logging-only stub, and `set_status()` now actually emits (`status_requested`)
+instead of raising `NotImplementedError`.
+
+**`app_rewrite.build_main_window()` rewired**: real `QMenuBar`
+(File/Edit/View/Options/Help - only File->Exit is real so far, the rest are
+empty placeholders the design doc's later pieces fill in) and `QStatusBar`
+(`WorkflowPanel.status_requested` feeds transient messages on the left; the
+old "scaffold preview" banner moved from a central widget to a permanent
+status-bar label on the right, since the window's central area is dock
+widgets now and there's no fixed banner slot left). All six panels wrapped
+in `PanelContainer` and docked: Workflow left (sized to 320px via
+`resizeDocks`, not a hard clamp - the user can still drag it wider, per the
+design doc's "give the user real freedom" principle), Image the main area
+with Histogram split below it, ROI table on the right, Spectra/Sensorgram
+tabbed together along the bottom. **Explicitly a default arrangement, not a
+preset** - the design doc's named, user-editable presets (§5) aren't built
+yet; closing a panel via its title bar today has no way back short of
+restarting, since the View-menu "show panel" toggle that would fix that is
+also §5/§6 territory, not yet built.
+
+**Not done this pass, deliberately** (the rest of the design doc):
+presets (apply/save-current/reset, `Ctrl+Shift+1-4`, the auto-apply-on-
+stage-change Preferences toggle), theme switching wired into the View menu
+(the `apply_app_theme`/`GRAY_DARK_THEME`/`BRIGHT_THEME` infrastructure is
+already real, just not reachable from this window yet), pyqtgraph canvas
+theming (Image/Histogram/Spectra/Sensorgram backgrounds don't follow the
+active theme yet), and the Workflow panel's auto-hide-to-strip collapse
+(flagged in the design doc itself as new engineering with no existing
+pattern to port).
+
+Verified: pyflakes-clean on every changed/new file. Exercised with real
+calls, not just import-checking (`QT_QPA_PLATFORM=offscreen`): all 6 panels
+present as docked (non-floating) `QDockWidget`s; the menu bar has the five
+expected top-level menus; `WorkflowPanel.setCurrentIndex(2)` emits
+`stage_changed(WorkflowStage.ROI_SELECTION)`; `set_status()` reaches the
+real status bar's `currentMessage()`. 797 LSPRi tests pass (full LSPRi-
+scoped subset, `pytest tests/ -k lspri` - this is a shell/wiring change
+touching no scientific-compute code, so the app's own subset was run
+rather than the full suite, per the maintainer's usual test-scope
+guidance).
+
+## 2026-09-24 (same day, continued): theme switching wired; named panel presets built
+
+Second implementation pass on `docs/rewrite_gui_shell_design_2026-09.md`,
+same day as the shell restructure above.
+
+**Theme switching (design doc §6)**: View -> Theme -> Dark/Bright, exclusive
+-checkable, in `app_rewrite._wire_theme_menu`. The `GRAY_DARK_THEME`/
+`BRIGHT_THEME`/`apply_app_theme` infrastructure was already real
+(`packages/lspr_ui`) - what didn't exist was anything in this window
+calling it after startup. Switching now does the same three things the
+stable app's `MainWindow._apply_theme_styles` already does: the
+QApplication-level palette/QSS (`apply_app_theme`), every `PanelContainer`'s
+title bar (`refresh_theme()` - baked-in per-widget stylesheets, doesn't
+follow QSS), and pyqtgraph canvases (`refresh_theme()` doesn't follow QSS
+either). Only `ImagePanel` has a real pyqtgraph canvas today
+(`GraphicsLayoutWidget`) - added its `refresh_theme()` and an initial call
+from `_build_ui` so it's themed correctly even before any live switch.
+Histogram/Spectra/Sensorgram will need the same one-line `refresh_theme()`
+once their real plot widgets exist (still `NotImplementedError` stubs) -
+`_wire_theme_menu`'s docstring flags this so it isn't rediscovered as a bug
+later. **Not persisted across restarts** - no settings/`QSettings` layer in
+the rewrite yet, unlike the stable app's `ui/theme` value; flagged rather
+than silently limited.
+
+**Named panel presets (design doc §5)**: new `panels/layout_presets.py` -
+`LayoutPresetManager` (apply/save-current/reset-to-default against one
+`QMainWindow`'s docks) plus `wire_view_menu`, which builds View -> Panel
+Presets (the four presets from the design doc's table, `Ctrl+Shift+1-4`,
+exclusive-checkable, synced to whichever preset is actually active
+including when auto-apply - not a menu click - is what applied it) and the
+Options menu's "Automatically Apply Layout Preset on Stage Change" toggle
+(off by default, per the design doc's reasoning - see the doc's own record
+of that decision). Options menu stands in for a not-yet-built Preferences
+dialog - flagged in `wire_view_menu`'s docstring, not silently treated as
+the toggle's permanent home.
+
+**Built-in presets are visibility-only, not a hand-authored geometry blob**
+- a deliberate scope call made while writing this, not something the design
+doc specified either way. Authoring realistic default dock sizes/split
+orientation directly in code would mean guessing at numbers nobody has
+looked at; instead, applying a never-customized preset just shows/hides
+the right docks (per the design doc's table) and leaves whatever geometry
+is already on screen alone. The first `Save Current Layout to Active
+Preset` upgrades that slot to a real `QMainWindow.saveState()` blob, which
+then restores exact geometry, not just visibility - `LayoutPresetManager`
+was verified doing exactly this (see below), so the two tiers are already
+proven to compose correctly, not just designed to.
+
+**Not persisted across restarts either** - same reason as theme: no
+settings layer yet. A saved preset blob only lives for the current run.
+
+**Startup deliberately applies no preset** - all six docks stay visible at
+launch, same as before this pass. Auto-applying one at startup while the
+auto-apply toggle defaults to off would contradict "manual application
+always available, auto-apply is opt-in" (design doc §5) - the first preset
+effect only happens when the user acts (a menu click, a shortcut, or
+turning the toggle on and then changing a stage tab).
+
+**`Dataset` stage and `Results` preset, both confirmed by construction**:
+`STAGE_TO_PRESET` maps `WorkflowStage.DATASET` to the `"Image Tools"`
+preset (per the design doc's decision not to give Dataset its own preset)
+and has no entry for `"Results"` at all, since no workflow stage
+corresponds to it (Spectra/Sensorgram are pure downstream consumers, per
+sketch §1) - auto-apply can never reach for Results, matching the design
+doc exactly rather than needing a special-case guard.
+
+Verified: pyflakes-clean. Exercised with real calls
+(`QT_QPA_PLATFORM=offscreen`), not just import-checking: theme switch
+changes `ImagePanel`'s pyqtgraph background color and every `PanelContainer`
+survives `refresh_theme()`; each of the four presets shows exactly its
+documented panel set; save-current-then-switch-away-then-back restores the
+customized (not default) visibility; reset-to-default reverts it; the
+auto-apply toggle is confirmed off by default (a stage change does nothing
+while off) and, once turned on, a Dataset-stage tab switch applies the
+Image Tools preset exactly. 797 LSPRi tests pass (full LSPRi-scoped subset,
+`pytest tests/ -k lspri`), same as the previous entry's baseline - nothing
+regressed.
+
+**Not done this pass, deliberately** - the last remaining design doc piece:
+the Workflow panel's auto-hide-to-strip collapse (§4), explicitly the
+riskiest one (the design doc itself leaves "hover-to-peek vs.
+click-to-expand" as an open interaction question) - worth a quick check-in
+on the exact interaction shape before building it, rather than guessing and
+risking a rebuild once the maintainer actually sees it.
+
+## 2026-09-24 (same day, continued): Workflow panel collapse - click-to-expand, not hover-to-peek
+
+Third and last implementation pass on `docs/rewrite_gui_shell_design_
+2026-09.md`, same day as the two entries above. The design doc's own open
+question (hover-to-peek flyout vs. plain click-to-expand) was put to the
+maintainer before building anything - **click-to-expand chosen**,
+explicitly for its lower cost: no new overlay/mouse-tracking/z-order
+machinery, reuses the dock mechanics already in place from the shell
+restructure.
+
+**`PanelContainer` gained an optional `collapsible` flag** (default
+`False`, so every panel but Workflow is unaffected). When collapsible, the
+title bar gets a chevron-left "collapse" button; `_set_collapsed(True)`
+swaps the dock's content for a full-height chevron-right button (the whole
+36px-wide strip is clickable, not just a small icon glued to the top -
+nothing to miss), swaps the title bar for a bare 1px divider (no room for a
+label plus buttons at that width, and the point of collapsing is giving the
+click target the full height), and fixes the dock's width via
+`setFixedWidth`. Expanding reverses all three and releases the width
+clamp - `setMinimumWidth(0)` + `setMaximumWidth(16777215)`, since Qt has no
+single call to "unfix" a width once fixed (confirmed by the smoke test
+below: Qt's own layout pass then recalculates a real minimum from the
+restored content, not literally 0 - the point was only that it's no longer
+stuck at 36px, which it wasn't).
+
+**Two correctness traps found and fixed while building this, both from
+reasoning about what already exists rather than from a bug report**:
+
+1. **The exact "phantom top-level window" pattern this repo's own
+   `CLAUDE.md` documents (Common Pitfalls) - triggered on *swap-out*, not
+   construction, so it wasn't obviously the same bug at first glance.**
+   `QDockWidget.setWidget(new)` doesn't destroy the widget it replaces - it
+   leaves the old one parentless. A parentless widget that is still
+   `visible` (the content *was* on screen the instant before collapsing) is
+   a real top-level OS window for however long it stays that way, same as
+   the documented `LaunchCard` bug, just approached from the opposite
+   direction (losing a parent instead of never having one). Fixed by
+   explicitly `.hide()`-ing the outgoing widget in the same call that
+   displaces it, before the event loop gets a chance to paint anything.
+2. **`refresh_theme()` and `_on_top_level_changed` both assumed the normal
+   title bar's buttons (`_float_button`, `_maximize_button`) always exist.**
+   They don't, while collapsed - the collapsed title bar is a bare divider
+   with no buttons at all. `refresh_theme()` now rebuilds whichever variant
+   (collapsed strip vs. normal bar) is actually active instead of always
+   rebuilding the normal one. `_on_top_level_changed` now returns early
+   while collapsed, found by reasoning through a real path that reaches it
+   even when collapsed: Qt's native drag-the-title-bar-to-float gesture
+   still works on the 1px collapsed title bar (it's a real title-bar area
+   as far as Qt's dock machinery is concerned, however thin), so a user
+   could float a collapsed panel without ever touching a button - which
+   would otherwise hit an `AttributeError` reaching for buttons that were
+   never built. Confirmed by exercising exactly that path in the smoke
+   test, not just reasoning about it.
+
+Verified: pyflakes-clean. Exercised with real calls
+(`QT_QPA_PLATFORM=offscreen`): collapsing sets a 36px fixed width and hides
+(not destroys) the content, which survives and is restored correctly on
+expand; clicking the collapsed strip's button expands it; a theme switch
+while collapsed rebuilds the collapsed strip/divider without crashing or
+silently reverting to the normal title bar; floating and re-docking a
+*collapsed* panel both work without the `AttributeError` finding 2 above
+would otherwise cause; a non-collapsible panel (`Image`) is confirmed
+unaffected (`_collapsible=False`, normal title bar, normal float/maximize
+behavior throughout). 797 LSPRi tests pass (same subset as the previous two
+entries).
+
+**This closes out a first implementation pass on all four pieces of
+`docs/rewrite_gui_shell_design_2026-09.md`** (window shell, icon-placement
+principle, panel presets, theming). Still open, all already flagged in
+their own entries above: exact icon-by-icon placement on Image/ROI-table
+panels still needs a real pass once those panels' own toolbars exist;
+preset/theme choices still don't persist across restarts (no app-level
+settings layer in the rewrite yet); Histogram/Spectra/Sensorgram still need
+their own `refresh_theme()` once their real plot widgets are built; a
+closed panel has no menu-driven way back yet.

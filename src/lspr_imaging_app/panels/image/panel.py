@@ -65,6 +65,8 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+from lspr_ui import get_active_theme
+
 from ...dataset import DatasetModule
 from ...image_tools import BackgroundModule, ChromaticModule, GeometryModule, MaskModule
 from ...roi import RoiToolbox
@@ -145,6 +147,7 @@ class ImagePanel(QWidget):
         # pitfall, which cost ~6 rounds of screen-recording analysis to find
         # the last time it was hit.
         self._view = pg.GraphicsLayoutWidget(parent=self)
+        self.refresh_theme()
         self._plot = self._view.addPlot()
         self._plot.invertY(True)  # image row 0 at the top, like the old app
         self._plot.setAspectLocked(True)
@@ -222,6 +225,21 @@ class ImagePanel(QWidget):
         self._selection.cube_changed.connect(self._schedule_redraw)
         self._selection.wavelength_changed.connect(self._schedule_redraw)
         self._selection.roi_selection_changed.connect(self._schedule_redraw)
+
+    # -- theming --------------------------------------------------------------
+
+    def refresh_theme(self) -> None:
+        """Re-applies the active theme's canvas background.
+
+        Pyqtgraph's ``GraphicsLayoutWidget`` draws its own canvas and does
+        not respond to Qt stylesheets/palette at all - unlike the rest of
+        this app's chrome, it needs to be told about a theme switch
+        explicitly (design doc §6, ``docs/rewrite_gui_shell_design_
+        2026-09.md``). Called once at construction (see ``_build_ui``) and
+        again by the shell on every live theme switch - the overlay curve
+        colors are deliberately theme-invariant (see ``lspr_ui``'s
+        ``GuiTheme`` docstring) so only the background changes here."""
+        self._view.setBackground(get_active_theme().toolbar_bg)
 
     # -- dataset lifecycle --------------------------------------------------
 
