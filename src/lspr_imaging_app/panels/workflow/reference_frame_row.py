@@ -51,7 +51,6 @@ class ReferenceFrameRow(QWidget):
         theme = get_active_theme()
 
         label = QLabel("Define reference frame:", self)
-        label.setWordWrap(True)
 
         self._auto_button = QToolButton(self)
         self._auto_button.setCheckable(True)
@@ -88,24 +87,24 @@ class ReferenceFrameRow(QWidget):
         # rather than chasing another "is this text short enough" bound.
         self._status_label.setWordWrap(True)
 
-        # Three rows, not one (2026-09-25, measured for real at the
-        # Workflow panel's fixed 340px width): the label text alone
-        # ("Define reference frame:") is already ~276px, so even
-        # label+icons together (~336px) doesn't fit next to each other -
-        # each piece needs its own row. See form_rows.py's docstring for
-        # the same reasoning applied elsewhere.
-        icon_row = QHBoxLayout()
-        icon_row.setContentsMargins(0, 0, 0, 0)
-        icon_row.setSpacing(6)
-        icon_row.addWidget(self._auto_button)
-        icon_row.addWidget(self._manual_button)
-        icon_row.addStretch(1)
+        # Title + both icons share one row (2026-09-27, maintainer's
+        # explicit call) - re-measured for real at the Workflow panel's
+        # fixed 340px width and it fits within the 320px budget (see
+        # test_lspri_workflow_panel_width_budget.py), unlike an earlier
+        # 2026-09-25 measurement that put the label alone at ~276px; that
+        # number doesn't reproduce against the actual themed widget.
+        title_row = QHBoxLayout()
+        title_row.setContentsMargins(0, 0, 0, 0)
+        title_row.setSpacing(6)
+        title_row.addWidget(label)
+        title_row.addWidget(self._auto_button)
+        title_row.addWidget(self._manual_button)
+        title_row.addStretch(1)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(4, 2, 4, 2)
         layout.setSpacing(2)
-        layout.addWidget(label)
-        layout.addLayout(icon_row)
+        layout.addLayout(title_row)
         layout.addWidget(self._status_label)
 
         self._reference_frame_module.reference_frame_changed.connect(self._refresh)

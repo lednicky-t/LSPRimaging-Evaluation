@@ -152,13 +152,15 @@ def _build_dataset_section(
         parent=parent,
     )
 
+    experimental_plan_content = ExperimentalPlanSection(dataset, selection, parent)
     children = _nested_children(
         parent,
         CollapsibleSection(
             "Experimental plan",
-            ExperimentalPlanSection(dataset, selection, parent),
+            experimental_plan_content,
             expanded=False,
             title_color=_nested_title_color(),
+            header_extra=experimental_plan_content.header_stats_label,
             parent=parent,
         ),
         summary_section,
@@ -178,7 +180,13 @@ def _build_dataset_section(
 
     # Starts expanded (the accordion's initial active stage) - see
     # WorkflowPanel.__init__.
-    return CollapsibleSection("Dataset:", dataset_inner, expanded=True, parent=parent)
+    return CollapsibleSection(
+        "Dataset:",
+        dataset_inner,
+        expanded=True,
+        header_extra=summary_content.dataset_header_stats_label,
+        parent=parent,
+    )
 
 
 def _build_image_tools_section(parent: QWidget, background: BackgroundModule, mask: MaskModule) -> CollapsibleSection:

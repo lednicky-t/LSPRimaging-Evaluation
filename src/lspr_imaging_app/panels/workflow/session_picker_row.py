@@ -66,7 +66,12 @@ class SessionPickerRow(QWidget):
         self._new_icon.clicked.connect(self._on_new_clicked)
 
         row = QHBoxLayout(self)
-        row.setContentsMargins(0, 0, 0, 0)
+        # Matches DatasetFolderRow/ReferenceFrameRow's own left/right margin
+        # (4px) - those are this row's siblings in the Dataset section's
+        # top-level stack (panel.py's dataset_inner_layout), so a 0-margin
+        # row here left the combo box starting 4px further left than the
+        # folder field/reference-frame row above and below it.
+        row.setContentsMargins(4, 2, 4, 2)
         row.setSpacing(4)
         row.addWidget(self._combo, 1)
         row.addWidget(self._new_icon)

@@ -19,7 +19,7 @@ import logging
 import os
 from pathlib import Path
 
-from PyQt6.QtWidgets import QFileDialog, QHBoxLayout, QLabel, QLineEdit, QMessageBox, QVBoxLayout, QWidget
+from PyQt6.QtWidgets import QFileDialog, QHBoxLayout, QLineEdit, QMessageBox, QVBoxLayout, QWidget
 
 from lspr_ui import get_active_theme
 
@@ -33,6 +33,7 @@ from ...dataset.io import (
 from ...dataset.model import ImageDataset
 from ..dock_container import _render_tabler_icon
 from .dataset_summary import _format_bytes
+from .eliding_label import ElidingLabel
 from .free_standing import make_free_standing_icon_label
 
 logger = logging.getLogger(__name__)
@@ -85,8 +86,10 @@ class DatasetFolderRow(QWidget):
         folder_row.addWidget(self._browse_icon)
         folder_row.addWidget(self._explorer_icon)
 
-        self._status_label = QLabel("", self)
-        self._status_label.setWordWrap(True)
+        # ElidingLabel, not a word-wrapped QLabel - "cannot open folder"/
+        # load-failed/exception messages here can carry a full path with no
+        # whitespace break point (see eliding_label.py's docstring).
+        self._status_label = ElidingLabel("", self)
         self._status_label.setStyleSheet(f"color: {theme.text_muted};")
         self._status_label.setVisible(False)
 

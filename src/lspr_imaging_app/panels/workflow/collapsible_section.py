@@ -27,7 +27,7 @@ from PyQt6.QtWidgets import QHBoxLayout, QMessageBox, QToolButton, QVBoxLayout, 
 
 from lspr_ui import collapsible_toggle_stylesheet, get_active_theme, transparent_icon_button_stylesheet
 
-from ..dock_container import _render_tabler_icon
+from ..dock_container import _TITLE_BAR_ICON_HOVER, _render_tabler_icon
 
 
 class CollapsibleSection(QWidget):
@@ -72,7 +72,7 @@ class CollapsibleSection(QWidget):
             self._apply_button.setIconSize(QSize(18, 18))
             self._apply_button.setFixedSize(22, 22)
             self._apply_button.setToolTip(apply_tooltip or "Toggle whether this section's setting is applied.")
-            self._apply_button.setStyleSheet(transparent_icon_button_stylesheet())
+            self._apply_button.setStyleSheet(transparent_icon_button_stylesheet(hover=_TITLE_BAR_ICON_HOVER))
             self._apply_button.toggled.connect(self._set_applied)
 
         self._help_button: QToolButton | None = None
@@ -85,7 +85,7 @@ class CollapsibleSection(QWidget):
             self._help_button.setIconSize(QSize(16, 16))
             self._help_button.setFixedSize(22, 22)
             self._help_button.setToolTip("Show section help.")
-            self._help_button.setStyleSheet(transparent_icon_button_stylesheet())
+            self._help_button.setStyleSheet(transparent_icon_button_stylesheet(hover=_TITLE_BAR_ICON_HOVER))
             help_message = help_text or "No help written for this section yet."
             self._help_button.clicked.connect(lambda *_: QMessageBox.information(self, title, help_message))
 
@@ -164,10 +164,10 @@ class CollapsibleSection(QWidget):
         theme = get_active_theme()
         if self._help_button is not None:
             self._help_button.setIcon(_render_tabler_icon("info-circle", theme.text_primary))
-            self._help_button.setStyleSheet(transparent_icon_button_stylesheet())
+            self._help_button.setStyleSheet(transparent_icon_button_stylesheet(hover=_TITLE_BAR_ICON_HOVER))
         if self._apply_button is not None:
             self._apply_button.setIcon(self._make_apply_icon(self._apply_button.isChecked()))
-            self._apply_button.setStyleSheet(transparent_icon_button_stylesheet())
+            self._apply_button.setStyleSheet(transparent_icon_button_stylesheet(hover=_TITLE_BAR_ICON_HOVER))
 
     @staticmethod
     def _make_chevron_icon(expanded: bool) -> QIcon:

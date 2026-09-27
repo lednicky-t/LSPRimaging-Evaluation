@@ -53,8 +53,9 @@ from PyQt6.QtWidgets import QFileDialog, QHBoxLayout, QLabel, QLineEdit, QMessag
 from lspr_ui import get_active_theme, transparent_icon_button_stylesheet
 
 from ...dataset import DatasetModule
+from ...dataset.io import acquisition_metadata_sidecar_path, experimental_data_dir
 from ...dataset.model import ImageDataset
-from ...io.metadata_import import import_metadata_files
+from ...io.metadata_import import CLASSIFICATION_UNKNOWN, classify_metadata_file, import_metadata_files
 from ...selection import SelectionModule
 from ...storage.workspace import save_acquisition_metadata_sidecar
 from ..dock_container import _render_tabler_icon
@@ -65,6 +66,42 @@ _SOURCE_FORMAT_LABELS = {
     SOURCE_FORMAT_LSPRI_ACQUISITION_V6_4: "Native acquisition file (v6.4)",
     SOURCE_FORMAT_LEGACY_MEASURING_TIMES_CSV: "Legacy export (measureing_times.csv + metaData.txt)",
 }
+
+
+def _experimental_data_file_counts(dataset_folder: Path) -> tuple[int, int] | None:
+    """(recognized, total) file count for `Experimental_data/`, or `None`
+    when there's no well-defined "total" to report against.
+
+    There's no declared manifest anywhere saying "this dataset should have
+    N metadata files" - the app only discovers metadata post-hoc, by
+    pattern-matching whatever happens to be on disk
+    (`dataset.io.load_acquisition_metadata`). Guessing a total independent
+    of what's actually there would misfire for the common, normal case of
+    a dataset with no acquisition metadata at all. The one place a real,
+    non-guessed ratio exists is `Experimental_data/`'s own file listing -
+    "how many of the files actually placed there were recognized" is just
+    a count of what's there, classified exactly like the manual "Import
+    metadata..." action (`classify_metadata_file`), not an assumption.
+
+    Mirrors `load_acquisition_metadata`'s own priority order: if a sidecar
+    `analysis/acquisition_metadata.json` exists, *that* is what actually
+    got loaded (checked first, same as the loader), not anything in
+    `Experimental_data/` - so this returns `None` rather than a
+    possibly-unrelated ratio. Likewise `None` for a native HDF5 or legacy
+    CSV/TXT pair found nearby (outside `Experimental_data/`): both are a
+    single "found it or didn't" unit by the time `load_acquisition_metadata`
+    reaches them, so a ratio there would only ever read as 100%.
+    """
+    if acquisition_metadata_sidecar_path(dataset_folder).exists():
+        return None
+    experimental_dir = experimental_data_dir(dataset_folder)
+    if not experimental_dir.is_dir():
+        return None
+    files = [path for path in experimental_dir.iterdir() if path.is_file()]
+    if not files:
+        return None
+    recognized = sum(1 for path in files if classify_metadata_file(path) != CLASSIFICATION_UNKNOWN)
+    return recognized, len(files)
 
 
 def _describe_metadata(metadata: ImagingAcquisitionMetadata) -> str:
@@ -85,13 +122,37 @@ def _describe_metadata(metadata: ImagingAcquisitionMetadata) -> str:
 
 class ExperimentalPlanSection(QWidget):
     """File path + Import/Export row, the existing read-only summary, and
-    a live current-frame comment/step preview."""
+    a live current-frame comment/step preview.
+
+    `header_stats_label` (2026-09-27, maintainer request) is a separate,
+    public `QLabel` - not part of this widget's own layout, meant to be
+    re-parented into the owning `CollapsibleSection`'s title row
+    (`header_extra=`), same relationship `DatasetSummarySection.
+    header_stats_label` has to the "Summary" section. Two independent
+    completeness signals, shown together when both apply
+    (`_experimental_data_file_counts`'s docstring explains why only
+    `Experimental_data/` gets a file-count ratio at all):
+
+    - `{n_recognized}/{n_files} files` - only when the metadata actually
+      came from `Experimental_data/`, since that's the one source with a
+      real (not guessed) "how many files are here" to count against.
+    - `{n_timed}/{n_total} timed` - per-image timing coverage, meaningful
+      regardless of source: a partial import (e.g. a legacy CSV missing
+      rows for a crashed acquisition run) still parses without error, so
+      this is the only signal that catches data missing *within* an
+      otherwise-complete set of files.
+
+    Amber (`theme.accent_gold`) when either ratio is short of 100%, so
+    "something is missing" is visible without reading the numbers."""
 
     def __init__(self, dataset: DatasetModule, selection: SelectionModule, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._dataset_module = dataset
         self._selection_module = selection
         theme = get_active_theme()
+
+        self.header_stats_label = QLabel("", parent)
+        self.header_stats_label.setStyleSheet(f"color: {theme.text_dim};")
 
         self._path_edit = QLineEdit(self)
         self._path_edit.setReadOnly(True)
@@ -151,13 +212,48 @@ class ExperimentalPlanSection(QWidget):
         metadata = dataset.acquisition_metadata
         if metadata is None:
             self._status_label.setText("No acquisition metadata found for this dataset.")
+            self.header_stats_label.setText("")
         else:
             self._status_label.setText(_describe_metadata(metadata))
+
+            stat_parts: list[str] = []
+            tooltip_parts: list[str] = []
+            complete = True
+
+            file_counts = _experimental_data_file_counts(dataset.folder)
+            if file_counts is not None:
+                n_recognized, n_files = file_counts
+                stat_parts.append(f"{n_recognized}/{n_files} files")
+                files_complete = n_recognized >= n_files
+                complete = complete and files_complete
+                tooltip_parts.append(
+                    f"{n_recognized} of {n_files} file(s) in Experimental_data/ were recognized as metadata."
+                    if files_complete
+                    else f"Only {n_recognized} of {n_files} file(s) in Experimental_data/ were recognized as "
+                    "metadata - the rest were skipped as unrecognized."
+                )
+
+            n_total = len(dataset.records)
+            n_timed = len(metadata.image_timings)
+            stat_parts.append(f"{n_timed}/{n_total} timed")
+            timed_complete = n_total == 0 or n_timed >= n_total
+            complete = complete and timed_complete
+            tooltip_parts.append(
+                "Images with acquisition timing recorded, out of the total loaded."
+                if timed_complete
+                else f"Only {n_timed} of {n_total} images have acquisition timing recorded - the import may be incomplete."
+            )
+
+            self.header_stats_label.setText(" · ".join(stat_parts))
+            theme = get_active_theme()
+            self.header_stats_label.setStyleSheet(f"color: {theme.text_dim if complete else theme.accent_gold};")
+            self.header_stats_label.setToolTip(" ".join(tooltip_parts))
         self._refresh_current_frame_preview()
 
     def _on_dataset_cleared(self) -> None:
         self._status_label.setText("No dataset loaded.")
         self._current_frame_label.setText("")
+        self.header_stats_label.setText("")
 
     def _refresh_current_frame_preview(self, *_args: object) -> None:
         metadata = self._dataset_module.rehydrated_acquisition_metadata()

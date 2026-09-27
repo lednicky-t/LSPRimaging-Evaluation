@@ -95,6 +95,23 @@ class ShardWriteResult:
 
 def _load_image(path_str: str) -> np.ndarray:
     path = Path(path_str)
+    # Re-exporting a dataset that was itself loaded from OME-Zarr (e.g. to
+    # change chunk size/shard mode) hands us records whose `.path` is a
+    # synthetic, non-existent per-plane key (`{cube}.{wl}.0.0` under the
+    # array dir - see dataset/io.py's `_ome_zarr_plane_path`/
+    # `_read_ome_zarr_plane_by_path`), not a real file. tifffile/PIL below
+    # can't open that - it has to be routed through the same zarr-aware
+    # reader the main process already uses for OME-Zarr reads
+    # (dataset_load_plane/dataset_load_plane_roi). Each worker process
+    # opens its own read-only zarr handle here (lazy import: this module
+    # otherwise stays free of zarr/dataset.io imports at module scope so
+    # worker startup stays fast); the underlying store reads are plain
+    # stateless file I/O, safe from a separate process.
+    from lspr_imaging_app.dataset.io import OME_ZARR_ARRAY_DIRNAME, _ome_zarr_array_dir, _ome_zarr_root, _read_ome_zarr_plane_by_path
+
+    ome_root = _ome_zarr_root(path.parent.parent if path.parent.name == OME_ZARR_ARRAY_DIRNAME else path.parent)
+    if ome_root is not None and path.parent == _ome_zarr_array_dir(ome_root):
+        return _read_ome_zarr_plane_by_path(path, ome_root)
     if path.suffix.lower() in {".tif", ".tiff"}:
         try:
             from tifffile import imread as _tif_read

@@ -50,11 +50,13 @@ from lspr_io import is_imaging_measurement_file, read_imaging_acquisition_metada
 from lspr_imaging_app.domain.exclusions import ImageExclusionRule, is_excluded
 from lspr_imaging_app.domain.models import PreprocessingSettings
 from lspr_imaging_app.io.image_naming import IMAGE_PATTERN
-from lspr_imaging_app.io.legacy_metadata import find_and_import_legacy_metadata
+from lspr_imaging_app.io.legacy_metadata import find_and_import_legacy_metadata, find_legacy_metadata_files
+from lspr_imaging_app.io.metadata_import import import_metadata_files
 from lspr_imaging_app.storage.workspace import (
     acquisition_metadata_from_payload,
     build_acquisition_metadata_payload,
     load_acquisition_metadata_sidecar,
+    save_acquisition_metadata_sidecar,
 )
 from lspr_imaging_app.processing.preprocess import apply_spatial_preprocessing
 
@@ -67,6 +69,7 @@ OME_ZARR_ARRAY_DIRNAME = "0"
 OME_ZARR_ARRAY_META_FILENAME = ".zarray"
 OME_ZARR_LSPR_KEY = "lspr"
 OME_ZARR_ACQUISITION_METADATA_KEY = "lspr_acquisition_metadata"
+EXPERIMENTAL_DATA_DIRNAME = "Experimental_data"
 _OME_ZARR_IMPORT_ERROR: ImportError | None = None
 
 # Adaptive worker-count tuning for export_ome_zarr_dataset (module-level so tests
@@ -173,6 +176,10 @@ def acquisition_metadata_sidecar_path(dataset_folder: Path) -> Path:
     return dataset_folder / "analysis" / "acquisition_metadata.json"
 
 
+def experimental_data_dir(dataset_folder: Path) -> Path:
+    return dataset_folder / EXPERIMENTAL_DATA_DIRNAME
+
+
 def load_acquisition_metadata(dataset_folder: Path) -> ImagingAcquisitionMetadata | None:
     """Load whatever camera/illumination/cube-timing metadata is available
     for `dataset_folder`, checking sources in order:
@@ -181,9 +188,17 @@ def load_acquisition_metadata(dataset_folder: Path) -> ImagingAcquisitionMetadat
        (from an explicit "Import metadata..." action or edits made in the
        metadata preview dialog). Checked first so user edits persist across
        reloads instead of being silently overwritten by a fresh auto-detect.
-    2. A native v6.4 HDF5 file found nearby.
-    3. The legacy `measureing_times.csv`/`metaData.txt` pair found nearby.
-    4. None - most datasets (including every OME-Zarr export made before
+    2. `Experimental_data/` - raw acquisition file(s) an export copied in
+       (see `_export_experimental_data`), or that a maintainer dropped in by
+       hand. Classified by content exactly like the manual "Import
+       metadata..." action (`import_metadata_files`), so any mix of a
+       native HDF5 file, a legacy CSV/TXT pair, or a previously exported
+       sidecar JSON is recognized regardless of filename - and a file added
+       here later (after the export that created the folder) is picked up
+       on the next load too, not just what existed at export time.
+    3. A native v6.4 HDF5 file found nearby.
+    4. The legacy `measureing_times.csv`/`metaData.txt` pair found nearby.
+    5. None - most datasets (including every OME-Zarr export made before
        this existed) have none of the above, which is not an error.
     """
     sidecar_path = acquisition_metadata_sidecar_path(dataset_folder)
@@ -192,6 +207,15 @@ def load_acquisition_metadata(dataset_folder: Path) -> ImagingAcquisitionMetadat
             return load_acquisition_metadata_sidecar(sidecar_path)
         except (OSError, ValueError) as exc:
             _LOGGER.warning("Could not read acquisition metadata sidecar %s: %s", sidecar_path, exc)
+
+    experimental_dir = experimental_data_dir(dataset_folder)
+    if experimental_dir.is_dir():
+        candidate_files = sorted(path for path in experimental_dir.iterdir() if path.is_file())
+        if candidate_files:
+            try:
+                return import_metadata_files(candidate_files).metadata
+            except ValueError:
+                pass  # nothing recognized in there - fall through to the other sources
 
     native_path = find_native_imaging_measurement_file(dataset_folder)
     if native_path is not None:
@@ -1672,7 +1696,62 @@ def _export_ome_zarr_dataset_to_path(
     if dataset.acquisition_metadata is not None:
         group.attrs[OME_ZARR_ACQUISITION_METADATA_KEY] = build_acquisition_metadata_payload(dataset.acquisition_metadata)
 
+    _export_experimental_data(dataset, destination)
     return destination
+
+
+def _export_experimental_data(dataset: ImageDataset, destination: Path) -> None:
+    """Carry the source dataset's raw acquisition file(s) into the export,
+    at ``experimental_data_dir(destination)`` - archival copies a maintainer
+    (or another tool) can open directly, on top of the ``lspr_acquisition_
+    metadata`` zarr attrs above (machine-readable) and the
+    ``analysis/acquisition_metadata.json`` sidecar this also writes below
+    (human-readable, and the thing `load_acquisition_metadata` actually
+    auto-loads first on the next open).
+
+    Three cases, in order:
+
+    1. The source already has an `Experimental_data/` folder (a prior
+       export being re-chunked, or a TIFF-stack folder someone populated by
+       hand) - copied forward verbatim. Never re-derived, so re-exporting a
+       dataset any number of times never loses or regenerates this.
+    2. Otherwise, whichever real file(s) back the source's metadata -
+       a native v6.4 HDF5 file, or the legacy CSV/TXT pair - found nearby
+       exactly like `load_acquisition_metadata`'s own discovery, then
+       copied in (not moved - the originals stay where they were).
+    3. Nothing found in either of the above: no `Experimental_data/` is
+       created - there is nothing to preserve.
+
+    Failure here (a locked file, a permissions error) is logged and
+    swallowed rather than failing the whole export - the pixel data is what
+    actually matters and has already been written successfully by the time
+    this runs.
+    """
+    try:
+        source_dir = experimental_data_dir(dataset.folder)
+        dest_dir = experimental_data_dir(destination)
+        if source_dir.is_dir():
+            shutil.copytree(source_dir, dest_dir, dirs_exist_ok=True)
+        else:
+            source_files: list[Path] = []
+            native_path = find_native_imaging_measurement_file(dataset.folder)
+            if native_path is not None:
+                source_files.append(native_path)
+            else:
+                legacy_pair = find_legacy_metadata_files(dataset.folder)
+                if legacy_pair is not None:
+                    source_files.extend(legacy_pair)
+            if source_files:
+                dest_dir.mkdir(parents=True, exist_ok=True)
+                for path in source_files:
+                    shutil.copy2(path, dest_dir / path.name)
+
+        if dataset.acquisition_metadata is not None:
+            sidecar_path = acquisition_metadata_sidecar_path(destination)
+            sidecar_path.parent.mkdir(parents=True, exist_ok=True)
+            save_acquisition_metadata_sidecar(sidecar_path, dataset.acquisition_metadata)
+    except OSError as exc:
+        _LOGGER.warning("Could not copy experimental data/metadata sidecar into %s: %s", destination, exc)
 
 
 def load_image_array(path_str: str) -> np.ndarray:

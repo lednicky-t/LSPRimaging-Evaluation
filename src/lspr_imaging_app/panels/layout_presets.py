@@ -84,6 +84,8 @@ class LayoutPresetManager:
         window: QMainWindow,
         workflow_dock: PanelContainer,
         docks_by_name: dict[str, PanelContainer],
+        *,
+        state_version: int = 0,
     ) -> None:
         self._window = window
         self._workflow_dock = workflow_dock
@@ -91,6 +93,15 @@ class LayoutPresetManager:
         self._custom_blobs: dict[str, QByteArray] = {}
         self._current: str | None = None
         self._on_applied: list = []
+        # Passed through to every saveState()/restoreState() call below - a
+        # saved preset blob is exactly as vulnerable to a dock-topology
+        # change as the plain main-window layout state is (see
+        # app_rewrite.py's _DOCK_LAYOUT_STATE_VERSION docstring for the
+        # full incident): restoreState() silently mis-applies an
+        # old-topology blob's sizes onto the new tree's nodes rather than
+        # rejecting it, which looks like a stuck/unresizable layout, not
+        # like what it actually is.
+        self._state_version = state_version
 
     def current(self) -> str | None:
         return self._current
@@ -100,7 +111,7 @@ class LayoutPresetManager:
             raise ValueError(f"Unknown layout preset: {name!r}")
         blob = self._custom_blobs.get(name)
         if blob is not None:
-            self._window.restoreState(blob)
+            self._window.restoreState(blob, self._state_version)
             # restoreState() restores whatever visibility the blob was
             # saved with - re-assert Workflow visible regardless, since
             # it's meant to survive independently of preset choice (§4).
@@ -122,7 +133,7 @@ class LayoutPresetManager:
         if target is None:
             logger.debug("save_current called with no active preset - nothing to save into")
             return
-        self._custom_blobs[target] = self._window.saveState()
+        self._custom_blobs[target] = self._window.saveState(self._state_version)
 
     def reset_to_default(self, name: str) -> None:
         """Discard *name*'s saved blob, reverting it to the visibility-only
@@ -163,6 +174,7 @@ def wire_view_menu(
     *,
     initial_auto_apply: bool = False,
     on_auto_apply_changed=None,
+    state_version: int = 0,
 ) -> LayoutPresetManager:
     """Builds View -> Panel Presets (apply/save/reset, Ctrl+Shift+1-4) and
     the Options menu's auto-apply-on-stage-change toggle (design doc §5).
@@ -177,7 +189,7 @@ def wire_view_menu(
     caller reads the saved value in and gets told about every change so it
     can write it back out; this function still owns no persistence itself,
     same "chrome, not storage" split every other module here follows."""
-    manager = LayoutPresetManager(window, workflow_dock, docks_by_name)
+    manager = LayoutPresetManager(window, workflow_dock, docks_by_name, state_version=state_version)
 
     presets_menu = view_menu.addMenu("Panel Presets")
     group = QActionGroup(window)

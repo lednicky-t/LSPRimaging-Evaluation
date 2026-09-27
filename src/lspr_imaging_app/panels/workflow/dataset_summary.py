@@ -59,10 +59,16 @@ def _format_bytes(num_bytes: int) -> str:
 
 class DatasetSummarySection(QWidget):
     """Size/count stats, live from `DatasetModule`. `header_stats_label`
-    is a separate, public `QLabel` - not part of this widget's own layout -
-    meant to be re-parented into the owning `CollapsibleSection`'s title
-    row (`header_extra=`), same relationship the source's
-    `summary_header_stats_label` has to `dataset_section`."""
+    and `dataset_header_stats_label` are separate, public `QLabel`s - not
+    part of this widget's own layout - meant to be re-parented into a
+    `CollapsibleSection`'s title row (`header_extra=`): `header_stats_label`
+    into this content's own "Summary" section (same relationship the
+    source's `summary_header_stats_label` has to `dataset_section`),
+    `dataset_header_stats_label` into the *top-level* "Dataset:" section
+    one level up (2026-09-27, maintainer request) - a terser
+    type/size/cube-wavelength readout visible even while "Summary" itself
+    is collapsed, since that's the one thing every dataset always has
+    regardless of source format."""
 
     def __init__(self, dataset: DatasetModule, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -71,6 +77,9 @@ class DatasetSummarySection(QWidget):
 
         self.header_stats_label = QLabel("", parent)
         self.header_stats_label.setStyleSheet(f"color: {theme.text_dim};")
+
+        self.dataset_header_stats_label = QLabel("", parent)
+        self.dataset_header_stats_label.setStyleSheet(f"color: {theme.text_dim};")
 
         self._images_label = QLabel("Images: -", self)
         self._size_label = QLabel("Dataset size: -", self)
@@ -120,6 +129,7 @@ class DatasetSummarySection(QWidget):
 
     def _on_dataset_cleared(self) -> None:
         self.header_stats_label.setText("")
+        self.dataset_header_stats_label.setText("")
         self._base_rows.setVisible(False)
         self._ome_zarr_rows.setVisible(False)
 
@@ -182,6 +192,9 @@ class DatasetSummarySection(QWidget):
         # 2026-09-25) - kept in the expanded body below.
         self.header_stats_label.setText(f"Size: {size_text}, Cubes: {cube_text}, WL: {wavelength_text}")
 
+        type_text = "OME-Zarr" if is_ome_zarr else "TIFF Stack"
+        self.dataset_header_stats_label.setText(f"{type_text} · {size_text} · C/WL: {cube_text}/{wavelength_text}")
+
         self._images_label.setText(f"Images: {len(records)}")
         self._size_label.setText(f"Dataset size: {size_text}")
         self._cubes_label.setText(f"Spectral cubes: {cube_text}")
@@ -198,5 +211,16 @@ class DatasetSummarySection(QWidget):
                 widget.deleteLater()
         if zarr_summary is not None:
             for label, value in zarr_summary.field_lines():
-                self._ome_zarr_layout.addWidget(QLabel(f"{label}: {value}", self))
+                if label == "Source folder":
+                    # Redundant with the folder path field above
+                    # (dataset_folder_row.py) and a full absolute path is the
+                    # one field long enough to blow the panel's fixed width
+                    # budget (see test_lspri_workflow_panel_width_budget.py) -
+                    # the stable app's own summary never shows this field
+                    # either (gui/main_window.py:1165-1183 lists every other
+                    # field_lines() entry but this one).
+                    continue
+                field_label = QLabel(f"{label}: {value}", self)
+                field_label.setWordWrap(True)
+                self._ome_zarr_layout.addWidget(field_label)
         self._ome_zarr_rows.setVisible(zarr_summary is not None)

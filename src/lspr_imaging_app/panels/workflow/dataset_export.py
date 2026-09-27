@@ -85,6 +85,7 @@ from ...dataset.io import (
 )
 from ...dataset.model import ImageDataset
 from ..dock_container import _render_tabler_icon
+from .eliding_label import ElidingLabel
 from .form_rows import stacked_field
 
 _CHUNK_GRID_ACTIVE_COLOR = "#84cc16"  # same lime the reference-frame row uses for its active toggle
@@ -160,8 +161,13 @@ class DatasetExportSection(QWidget):
             "Omit pixel data for excluded images/wavelengths/spectral cubes from the export."
         )
 
-        self._status_label = QLabel("No export running.", self)
-        self._status_label.setWordWrap(True)
+        # ElidingLabel, not a word-wrapped QLabel - this label's text comes
+        # from export progress/finished/failed signals and can carry a full
+        # destination path or an OSError message with a path baked in,
+        # neither of which has a break point word-wrap can use (see
+        # eliding_label.py's docstring for the measured overflow this caused
+        # 2026-09-27).
+        self._status_label = ElidingLabel("No export running.", self)
 
         self._progress_bar = QProgressBar(self)
         self._progress_bar.setRange(0, 100)

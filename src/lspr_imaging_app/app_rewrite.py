@@ -34,17 +34,20 @@ from PyQt6.QtCore import Qt, QByteArray
 from PyQt6.QtGui import QActionGroup
 from PyQt6.QtWidgets import QApplication, QLabel, QMainWindow, QMenu, QStatusBar, QWidget
 
-from lspr_ui import app_icon, set_active_theme, BRIGHT_THEME, GRAY_DARK_THEME
+from lspr_ui import app_icon, set_active_theme
 
 from .analysis import AnalysisEngine, AnalysisSettingsModule
 from .analysis.provenance import FrameNamingScheme
 from .dataset import DatasetModule
-from .gui.app_theme import apply_app_theme
+from .gui.app_theme import LSPRI_BRIGHT_THEME, LSPRI_DARK_THEME, apply_app_theme
+from .gui.windows_titlebar import apply_windows_titlebar_color
 from .image_tools import BackgroundModule, ChromaticModule, GeometryModule, MaskModule
 from .panels.dock_container import PanelContainer
+from .panels.fixed_width_separator_guard import FixedWidthSeparatorGuard
 from .panels.histogram import HistogramPanel
 from .panels.image import ImagePanel
 from .panels.layout_presets import wire_view_menu
+from .panels.panel_visibility import ensure_floating_panels_on_screen, wire_panel_visibility_menu
 from .panels.roi_table import RoiTablePanel
 from .panels.sensorgram import SensorgramPanel
 from .panels.spectra import SpectraPanel
@@ -60,6 +63,24 @@ from .undo import undo_manager
 from .version_rewrite import rewrite_version_string
 
 logger = logging.getLogger(__name__)
+
+# Bump this whenever a change reshapes the dock area *topology* - which
+# splitDockWidget/addDockWidget calls build the tree, not just panel
+# content (2026-09-27, found the hard way: reordering the Spectra/Image/
+# ROI-table split calls to fix a resize bug - see the comments around
+# those calls below - silently corrupted every existing saved layout.
+# QMainWindow.restoreState() maps a saved blob's per-node sizes onto the
+# *current* tree by position, not by identity; a differently-shaped tree
+# still "restores successfully" (returns True) but applies old sizes to
+# the wrong nodes - reproduced headlessly: one panel getting squeezed to
+# ~49px, doing effectively nothing, next to another ballooning to fill
+# the rest, which looks exactly like a stuck/unresizable dock, not like
+# what it actually is (a stale blob). Passing an explicit, mismatched
+# version to both saveState()/restoreState() makes Qt reject an
+# incompatible old blob outright (restoreState returns False, nothing is
+# applied) instead of silently mis-applying it - falls back to this
+# function's own fresh layout instead of a corrupted one.
+_DOCK_LAYOUT_STATE_VERSION = 1
 
 
 def _not_functional_reminder() -> QWidget:
@@ -161,11 +182,12 @@ def _wire_theme_menu(
             dock.refresh_theme()
         for section in window.findChildren(CollapsibleSection):
             section.refresh_theme()
+        apply_windows_titlebar_color(window, theme)
         if on_theme_changed is not None:
             on_theme_changed(name)
 
-    dark_action.triggered.connect(lambda checked: switch_theme(GRAY_DARK_THEME, "dark") if checked else None)
-    bright_action.triggered.connect(lambda checked: switch_theme(BRIGHT_THEME, "bright") if checked else None)
+    dark_action.triggered.connect(lambda checked: switch_theme(LSPRI_DARK_THEME, "dark") if checked else None)
+    bright_action.triggered.connect(lambda checked: switch_theme(LSPRI_BRIGHT_THEME, "bright") if checked else None)
 
 
 def _build_analysis_engine(
@@ -482,7 +504,7 @@ def build_main_window(
     # Applied before any panel is constructed - several read `get_active_
     # theme()` at construction time (e.g. `DatasetFolderRow`), so the right
     # theme has to already be active, not just switched on afterward.
-    theme_obj = BRIGHT_THEME if settings.theme == "bright" else GRAY_DARK_THEME
+    theme_obj = LSPRI_BRIGHT_THEME if settings.theme == "bright" else LSPRI_DARK_THEME
     set_active_theme(theme_obj)
     _app_for_theme = QApplication.instance()
     if _app_for_theme is not None:
@@ -611,9 +633,36 @@ def build_main_window(
     # geometries headlessly, not just reading the code (see design doc §4).
     window.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, workflow_dock)
     window.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, image_dock)
+    # Split order matters here, found 2026-09-27 debugging a "can't resize
+    # the docks' height" report: this establishes the top-row/Spectra
+    # split *before* subdividing the top row into columns, not after.
+    #
+    # The earlier version called `addDockWidget(Bottom, spectra_dock)`
+    # instead of a split, which looked equivalent (Spectra still ended up
+    # spanning the full width, visually) but isn't: it put Spectra in a
+    # *separate* outer Qt dock area (Bottom) from the nested split tree
+    # Image/Histogram/ROI table live in (built entirely from
+    # `splitDockWidget` calls anchored on image_dock). Confirmed headlessly
+    # (precise simulated mouse drags, not just reading the code) that a
+    # QMainWindowLayout separator sitting *between* two different outer
+    # areas - one of which contains further nested splits - resizes only
+    # one direction reliably: dragging to shrink the top row worked, but
+    # dragging to grow it (shrink Spectra) silently did nothing, even
+    # though Spectra had hundreds of spare pixels to give up.
+    #
+    # Splitting Spectra off image_dock instead makes it part of the same
+    # nested tree, which resizes correctly in both directions - *and*,
+    # done in this order (before roi_table_dock/histogram_dock split image_
+    # dock further), Spectra still ends up a sibling of the whole top-row
+    # group rather than nested inside just one of its columns, so it still
+    # spans the full width below Image *and* ROI table, not just below
+    # Image. Reordering the two splits below (roi_table_dock/histogram_dock
+    # first, this split after) reproduces the full-width look but brings
+    # back the one-directional resize bug - both properties depend on this
+    # exact order, confirmed by testing each ordering directly.
+    window.splitDockWidget(image_dock, spectra_dock, Qt.Orientation.Vertical)
     window.splitDockWidget(image_dock, roi_table_dock, Qt.Orientation.Horizontal)
     window.splitDockWidget(image_dock, histogram_dock, Qt.Orientation.Vertical)
-    window.addDockWidget(Qt.DockWidgetArea.BottomDockWidgetArea, spectra_dock)
     window.tabifyDockWidget(spectra_dock, sensorgram_dock)
     spectra_dock.raise_()
     # Qt's default BottomLeftCorner ownership belongs to BottomDockWidgetArea,
@@ -622,9 +671,41 @@ def build_main_window(
     # LeftDockWidgetArea makes Workflow's column - and only Workflow's,
     # since nothing else lives in that area - reserve the full window
     # height; Spectra/Sensorgram still extend under Image/Histogram/ROI
-    # table exactly as before (BottomRightCorner is untouched, still owned
-    # by BottomDockWidgetArea).
+    # table exactly as before. Still needed even though Spectra no longer
+    # goes through `addDockWidget(Bottom, ...)` above - corner ownership
+    # governs how the *outer* Left/Right/Bottom areas relate to each other
+    # regardless of how a dock ended up nested within one of them.
     window.setCorner(Qt.Corner.BottomLeftCorner, Qt.DockWidgetArea.LeftDockWidgetArea)
+
+    # Workflow's separator to Image can never actually resize anything
+    # (Workflow is fixed_width=340 above) - without this, Qt's own hover
+    # highlight/drag still activate there anyway, since QMainWindow::
+    # separator has no notion of "this segment is a no-op" (see
+    # panels/fixed_width_separator_guard.py for why an event filter, not a
+    # painted overlay, is what fixes this). Kept alive on the window
+    # itself - installEventFilter does not keep the Python wrapper alive
+    # on its own.
+    window._workflow_separator_guard = FixedWidthSeparatorGuard(window, workflow_dock, window)
+    window.installEventFilter(window._workflow_separator_guard)
+
+    # View -> Panels: Show/Hide all + one checkable, Ctrl+1..6-shortcut
+    # toggleViewAction() per dock (panels/panel_visibility.py) - the
+    # recovery path a closed-and-lost panel had no way back from before
+    # this (found 2026-09-27: undocking Workflow, then losing it, had no
+    # fix short of restarting). Order here fixes each panel's shortcut -
+    # matches the stable app's own Ctrl+1..5 assignment (Workflow/Image/
+    # Histogram/Spectra/Sensorgram) so existing muscle memory carries over,
+    # plus Ctrl+6 for ROI / Groups (unbound in the stable app, no reason to
+    # leave the same gap here).
+    panel_docks = {
+        "Workflow": workflow_dock,
+        "Image": image_dock,
+        "Histogram": histogram_dock,
+        "Spectra": spectra_dock,
+        "Sensorgram": sensorgram_dock,
+        "ROI / Groups": roi_table_dock,
+    }
+    wire_panel_visibility_menu(view_menu, panel_docks)
 
     # Named panel presets (design doc §5). A never-customized preset is
     # still not applied here at startup - every dock stays visible until the
@@ -652,6 +733,7 @@ def build_main_window(
         },
         initial_auto_apply=settings.auto_apply_preset_on_stage_change,
         on_auto_apply_changed=lambda checked: _persist(auto_apply_preset_on_stage_change=bool(checked)),
+        state_version=_DOCK_LAYOUT_STATE_VERSION,
     )
     if settings.layout_presets:
         layout_preset_manager.load_custom_blobs({
@@ -665,9 +747,17 @@ def build_main_window(
             logger.exception("Could not restore the saved window geometry")
     if settings.main_window_state:
         try:
-            window.restoreState(QByteArray(base64.b64decode(settings.main_window_state)))
+            window.restoreState(
+                QByteArray(base64.b64decode(settings.main_window_state)), _DOCK_LAYOUT_STATE_VERSION
+            )
         except Exception:
             logger.exception("Could not restore the saved window layout")
+    # Must run after restoreState() (which is what applies a floating
+    # panel's saved geometry) - a panel left floating on a monitor that's
+    # since been unplugged/reordered would otherwise reopen off-screen and
+    # be unreachable, the second half of the "undocked and now I can't see
+    # it" report this module fixes (panels/panel_visibility.py).
+    ensure_floating_panels_on_screen(panel_docks, window)
 
     # "Reopen Last Dataset on Launch" (2026-09-26) - stands in for a real
     # Preferences dialog exactly like the auto-apply-preset toggle above
@@ -696,7 +786,9 @@ def build_main_window(
             # to write on; every dock drag would otherwise mean a write.
             _persist(
                 main_window_geometry=base64.b64encode(bytes(window.saveGeometry())).decode("ascii"),
-                main_window_state=base64.b64encode(bytes(window.saveState())).decode("ascii"),
+                main_window_state=base64.b64encode(
+                    bytes(window.saveState(_DOCK_LAYOUT_STATE_VERSION))
+                ).decode("ascii"),
                 layout_presets={
                     name: base64.b64encode(bytes(blob)).decode("ascii")
                     for name, blob in layout_preset_manager.custom_blobs().items()
@@ -720,6 +812,8 @@ def build_main_window(
                 logger.exception("Could not auto-reopen the last dataset at %s", last_folder)
         else:
             logger.info("Last dataset folder %s no longer exists - skipping auto-reopen", last_folder)
+
+    apply_windows_titlebar_color(window, theme_obj)
 
     return window
 

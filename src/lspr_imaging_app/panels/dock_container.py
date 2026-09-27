@@ -44,8 +44,8 @@ build_main_window``); every other panel passes the defaults
 
 from __future__ import annotations
 
-from PyQt6.QtCore import QByteArray, QRect, QRectF, QSize, Qt
-from PyQt6.QtGui import QColor, QIcon, QPainter, QPen, QPixmap
+from PyQt6.QtCore import QByteArray, QRect, QRectF, QSize, Qt, pyqtSignal
+from PyQt6.QtGui import QColor, QFontMetrics, QIcon, QPainter, QPen, QPixmap
 from PyQt6.QtSvg import QSvgRenderer
 from PyQt6.QtWidgets import (
     QApplication,
@@ -65,6 +65,27 @@ from lspr_ui import (
     transparent_icon_button_stylesheet,
 )
 
+# Neutral translucent grey, not a theme color (2026-09-27, VS Code style
+# pass) - matches dock_separator_stylesheet's own rgba(128,128,128,...)
+# reasoning in gui/app_theme.py: VS Code's real toolbar-icon hover
+# (`toolbar.hoverBackground`) is itself a semi-transparent grey, not a
+# tinted accent color, and titling every title-bar icon (help/collapse/
+# float/maximize) in accent_blue on hover was part of what made this read
+# as generic app chrome instead of VS Code's specific, restrained look.
+# The close button keeps its own accent_red hover (matches OS/VS Code
+# convention for a close control specifically, not a generic mismatch).
+_TITLE_BAR_ICON_HOVER = "rgba(128, 128, 128, 0.20)"
+
+# Card-style docked-panel framing (2026-09-27, VS Code style pass - the
+# maintainer's own screenshot of VS Code's real docked-panel look: each
+# panel its own rounded-corner outline with a visible gap/canvas-colored
+# space between adjacent panels, not panels touching edge to edge). See
+# PanelContainer._apply_frame_style/paintEvent.
+# Gap halved (2026-09-27, follow-up, maintainer request) from an original
+# 5px.
+_CARD_GAP_PX = 3
+_CARD_RADIUS_PX = 6
+
 
 def _render_tabler_icon(name: str, color: str, *, stroke_width: float = 2.2) -> QIcon:
     """Shared 20x20 render used by every title-bar icon below - matches
@@ -82,6 +103,67 @@ def _render_tabler_icon(name: str, color: str, *, stroke_width: float = 2.2) -> 
     renderer.render(painter, QRectF(1.0, 1.0, 18.0, 18.0))
     painter.end()
     return QIcon(pixmap)
+
+
+class _VerticalLabel(QWidget):
+    """Plain text rotated 90 degrees, read bottom-to-top - the collapsed
+    strip (36px wide, see ``PanelContainer._collapsed_width``) has no
+    horizontal room for its title, only vertical; this is what makes a
+    collapsed panel self-explanatory instead of just a bare arrow (2026-09-27,
+    found via the maintainer collapsing/hiding Workflow and it no longer
+    being obvious what that strip was)."""
+
+    def __init__(self, text: str, color: str, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._text = text
+        self._color = QColor(color)
+        # Passive display only - clicks must fall through to the strip
+        # widget underneath (_ClickableStrip), which is what actually
+        # expands the panel; without this, a click landing on this label's
+        # own rect would be swallowed here and never reach it.
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+
+    def sizeHint(self) -> QSize:
+        metrics = QFontMetrics(self.font())
+        # Swapped on purpose: the label's on-screen *width* is the rotated
+        # text's height (font height), and its *height* is the text's
+        # unrotated length - matches the coordinate swap paintEvent performs.
+        return QSize(metrics.height() + 4, metrics.horizontalAdvance(self._text) + 8)
+
+    def paintEvent(self, event) -> None:  # type: ignore[override]
+        painter = QPainter(self)
+        painter.setPen(self._color)
+        # Rotate around the strip's own center, not the text's - the
+        # untranslated origin sits at this widget's top-left, so the origin
+        # has to move to the middle of the (still-unrotated) width before
+        # rotating, then again to the vertical center of the (rotated)
+        # width, which becomes the label's height.
+        painter.translate(self.width() / 2, self.height() / 2)
+        painter.rotate(-90)
+        metrics = QFontMetrics(self.font())
+        text_width = metrics.horizontalAdvance(self._text)
+        painter.drawText(
+            QRect(int(-text_width / 2), int(-metrics.height() / 2), text_width, metrics.height()),
+            Qt.AlignmentFlag.AlignCenter,
+            self._text,
+        )
+        painter.end()
+
+
+class _ClickableStrip(QWidget):
+    """A whole-widget clickable area - `QToolButton` can't lay out an
+    icon-above-rotated-text combination the way `_build_collapsed_strip`
+    needs, so this is a plain `QWidget` (children laid out via a normal
+    `QVBoxLayout`) with its own click handling instead, keeping the
+    original "no dead area to miss a click on" property that class's
+    docstring calls out."""
+
+    clicked = pyqtSignal()
+
+    def mousePressEvent(self, event) -> None:  # type: ignore[override]
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.clicked.emit()
+        super().mousePressEvent(event)
 
 
 class PanelContainer(QDockWidget):
@@ -104,6 +186,8 @@ class PanelContainer(QDockWidget):
         self._subtitle_label: QLabel | None = None
         self.setObjectName(f"{title.replace(' ', '')}Panel")
         self._frame_border_color: str | None = None
+        self._frame_fill_color: str | None = None
+        self._frame_radius: int = 0
         # Click-to-collapse to a thin strip (design doc §4) - Workflow only
         # today. `_collapsed_width` is deliberately generous next to VS
         # Code's ~48px sidebar rail: this strip has to fit a whole button
@@ -172,27 +256,89 @@ class PanelContainer(QDockWidget):
         single stroke directly on ``self`` in paintEvent() avoids the doubled
         -line artifacts a QSS-based border produced (see source history) -
         there's exactly one rectangle, and it can't misalign with itself.
-        ``setContentsMargins`` reserves the 1px ring so the title bar/content
-        children don't paint over it."""
+        ``setContentsMargins`` reserves the ring so the title bar/content
+        children don't paint over it.
+
+        Docked panels get real card framing (2026-09-27, VS Code style pass)
+        - a rounded-corner outline with a visible gap around it, not just a
+        floating window's thin 1px edge. Left as the simple sharp-rect/1px
+        style for a *floating* panel: it's a real top-level OS window with
+        its own rectangular shape at the compositor level, so true rounded
+        exterior corners there would need masking the window's shape, not
+        just painting a rounded line inside a still-rectangular window
+        (which would leave the window's actual four corners a visibly
+        different, unrounded color poking out past the drawn curve) -
+        floating panels are a separate, real piece of work, not covered by
+        this pass."""
         self.setStyleSheet(f"QDockWidget {{ color: {theme.text_primary}; }}")
         if self.isFloating():
             self.setContentsMargins(1, 1, 1, 1)
             self._frame_border_color = theme.toolbar_border
+            self._frame_fill_color = None
+            self._frame_radius = 0
         else:
-            self.setContentsMargins(0, 0, 0, 0)
-            self._frame_border_color = None
+            self.setContentsMargins(_CARD_GAP_PX, _CARD_GAP_PX, _CARD_GAP_PX, _CARD_GAP_PX)
+            self._frame_border_color = theme.toolbar_border
+            # theme.toolbar_bg, not theme.window_bg (2026-09-27, follow-up -
+            # maintainer screenshot comparison against real VS Code): a
+            # panel's own interior is meant to be a *darker* shade than the
+            # canvas/gap around it (real VS Code: #1e1e1e editor vs #252526
+            # sidebar) - window_bg governs the gap itself (via the
+            # QApplication-wide palette, showing through outside this
+            # rounded rect) and is deliberately the *lighter* value in the
+            # VS Code Dark theme now, so filling this card with window_bg
+            # too would make the whole panel the wrong (lighter) shade.
+            # toolbar_bg is already what ImagePanel uses for its plot
+            # canvas fill - same "darker interior" role, reused here rather
+            # than introducing a third color concept.
+            self._frame_fill_color = theme.toolbar_bg
+            self._frame_radius = _CARD_RADIUS_PX
+            # The content widget itself is a plain QWidget with no
+            # stylesheet of its own - without this, it inherits window_bg
+            # from the app-wide QSS rule (QWidget { background-color: ... })
+            # and paints that *over* the darker card fill just drawn above,
+            # since a child widget's own paint happens after its parent's.
+            # Pinning it to the same toolbar_bg here is what actually makes
+            # the interior read as the darker shade instead of the lighter
+            # gap color bleeding through.
+            self._content.setStyleSheet(f"background-color: {theme.toolbar_bg};")
         self.update()
 
     def paintEvent(self, event) -> None:  # type: ignore[override]
         super().paintEvent(event)
-        if self._frame_border_color is not None:
-            painter = QPainter(self)
-            painter.setPen(QPen(QColor(self._frame_border_color)))
+        if self._frame_border_color is None:
+            return
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        painter.setPen(QPen(QColor(self._frame_border_color)))
+        painter.setBrush(QColor(self._frame_fill_color) if self._frame_fill_color is not None else Qt.BrushStyle.NoBrush)
+        if self._frame_radius:
+            # Border line centered in the reserved gap (half the gap
+            # between the widget's outer edge and the inset border, half
+            # between the border and the content it encloses).
+            inset = _CARD_GAP_PX // 2
+            rect = self.rect().adjusted(inset, inset, -1 - inset, -1 - inset)
+            painter.drawRoundedRect(rect, self._frame_radius, self._frame_radius)
+        else:
             painter.drawRect(self.rect().adjusted(0, 0, -1, -1))
 
     def _build_title_bar(self, title: str, theme) -> QWidget:
         bar = QWidget(self)
-        bar.setStyleSheet(f"background: {theme.window_bg};")
+        # Transparent, not theme.window_bg (2026-09-27, VS Code style pass -
+        # found via a card border that visibly failed to close along its
+        # top edge). QDockWidget positions a custom title bar widget flush
+        # against the dock's absolute top-left corner, *ignoring* the
+        # contentsMargins reserved for the card gap in _apply_frame_style
+        # (confirmed by inspecting its geometry directly: title bar y=0 even
+        # with a 5px top margin set) - so an opaque bar background paints
+        # straight over the top-left arc of the rounded border
+        # PanelContainer.paintEvent draws *underneath* it, erasing that
+        # portion of the loop. Transparent lets the parent's own paintEvent
+        # fill (same window_bg color) and border stroke show through
+        # instead, which is what actually closes the loop - not a
+        # difference in what color gets painted, since both were window_bg,
+        # just which widget paints it and in what order.
+        bar.setStyleSheet("background: transparent;")
         outer = QVBoxLayout(bar)
         outer.setContentsMargins(0, 0, 0, 0)
         outer.setSpacing(0)
@@ -204,7 +350,11 @@ class PanelContainer(QDockWidget):
         outer.addWidget(row)
 
         label = QLabel(title, row)
-        label.setStyleSheet(f"color: {theme.text_primary}; font-weight: 600; background: transparent;")
+        # font-weight 400, not 600 (2026-09-27, VS Code style pass) - VS
+        # Code's own editor-group/tab titles are regular weight, not
+        # semi-bold; the heavier weight was part of what made this read as
+        # a generic app chrome rather than VS Code's specific look.
+        label.setStyleSheet(f"color: {theme.text_primary}; font-weight: 400; background: transparent;")
         layout.addWidget(label)
 
         subtitle_label = QLabel(self._subtitle_text, row)
@@ -225,7 +375,7 @@ class PanelContainer(QDockWidget):
             help_button.setAutoRaise(True)
             help_button.setToolTip("Show panel help.")
             help_button.setStyleSheet(
-                transparent_icon_button_stylesheet(hover=hex_to_rgba(theme.accent_blue, 0.22))
+                transparent_icon_button_stylesheet(hover=_TITLE_BAR_ICON_HOVER)
                 + "QToolButton:hover { border-radius: 4px; }"
             )
             help_button.clicked.connect(lambda *_: QMessageBox.information(self, title, help_text))
@@ -239,7 +389,7 @@ class PanelContainer(QDockWidget):
             collapse_button.setAutoRaise(True)
             collapse_button.setToolTip(f"Collapse {title} to a thin strip.")
             collapse_button.setStyleSheet(
-                transparent_icon_button_stylesheet(hover=hex_to_rgba(theme.accent_blue, 0.22))
+                transparent_icon_button_stylesheet(hover=_TITLE_BAR_ICON_HOVER)
                 + "QToolButton:hover { border-radius: 4px; }"
             )
             collapse_button.clicked.connect(lambda: self._set_collapsed(True))
@@ -252,7 +402,7 @@ class PanelContainer(QDockWidget):
         float_button.setAutoRaise(True)
         float_button.setToolTip("Undock this panel into a floating window.")
         float_button.setStyleSheet(
-            transparent_icon_button_stylesheet(hover=hex_to_rgba(theme.accent_blue, 0.22))
+            transparent_icon_button_stylesheet(hover=_TITLE_BAR_ICON_HOVER)
             + "QToolButton:hover { border-radius: 4px; }"
         )
         float_button.clicked.connect(self._on_float_button_clicked)
@@ -269,7 +419,7 @@ class PanelContainer(QDockWidget):
         maximize_button.setAutoRaise(True)
         maximize_button.setToolTip("Maximize this panel to fill the screen.")
         maximize_button.setStyleSheet(
-            transparent_icon_button_stylesheet(hover=hex_to_rgba(theme.accent_blue, 0.22))
+            transparent_icon_button_stylesheet(hover=_TITLE_BAR_ICON_HOVER)
             + "QToolButton:hover { border-radius: 4px; }"
         )
         maximize_button.clicked.connect(self._on_maximize_button_clicked)
@@ -290,14 +440,10 @@ class PanelContainer(QDockWidget):
         close_button.clicked.connect(self.close)
         layout.addWidget(close_button)
 
-        # A plain widget (not a border-bottom in the stylesheet) - Qt
-        # mis-renders a QSS border-bottom set on a QDockWidget custom title
-        # bar as a short underline hugging the label text instead of a
-        # full-width rule, so the separator is drawn explicitly.
-        separator = QWidget(bar)
-        separator.setFixedHeight(1)
-        separator.setStyleSheet(f"background: {theme.toolbar_border};")
-        outer.addWidget(separator)
+        # No divider line under the title (2026-09-27, maintainer request) -
+        # the title row is now visually part of the same card as the
+        # content below it, matching VS Code's own panels, rather than a
+        # separately-boxed header.
 
         return bar
 
@@ -352,21 +498,34 @@ class PanelContainer(QDockWidget):
             outgoing_widget.hide()
 
     def _build_collapsed_strip(self, theme) -> QWidget:
-        """The entire collapsed dock is one big clickable button - deliberately
+        """The entire collapsed dock is one big clickable area - deliberately
         not just an icon glued to the top, so there's no dead area to miss
-        a click on in a 36px-wide strip."""
-        button = QToolButton()
-        button.setIcon(_render_tabler_icon("chevron-right", theme.text_muted))
-        button.setIconSize(QSize(18, 18))
-        button.setToolTip(f"Expand {self._title}.")
-        button.setCursor(Qt.CursorShape.PointingHandCursor)
-        button.setAutoRaise(True)
-        button.setStyleSheet(
-            f"QToolButton {{ background: {theme.window_bg}; border: none; }}"
-            f"QToolButton:hover {{ background: {hex_to_rgba(theme.accent_blue, 0.14)}; }}"
+        a click on in a 36px-wide strip. The chevron alone used to be the
+        whole strip; a rotated title label underneath it (2026-09-27,
+        maintainer request) makes a collapsed panel self-explanatory instead
+        of reading as a stray arrow with no indication of what it expands."""
+        strip = _ClickableStrip()
+        strip.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        strip.setToolTip(f"Expand {self._title}.")
+        strip.setCursor(Qt.CursorShape.PointingHandCursor)
+        strip.setStyleSheet(
+            f"_ClickableStrip {{ background: {theme.window_bg}; }}"
+            f"_ClickableStrip:hover {{ background: {hex_to_rgba(theme.accent_blue, 0.14)}; }}"
         )
-        button.clicked.connect(lambda: self._set_collapsed(False))
-        return button
+        strip.clicked.connect(lambda: self._set_collapsed(False))
+
+        layout = QVBoxLayout(strip)
+        layout.setContentsMargins(0, 8, 0, 8)
+        layout.setSpacing(8)
+
+        icon_label = QLabel(strip)
+        icon_label.setPixmap(_render_tabler_icon("chevron-right", theme.text_muted).pixmap(QSize(18, 18)))
+        # Same click-passthrough reasoning as _VerticalLabel above.
+        icon_label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        layout.addWidget(icon_label, 0, Qt.AlignmentFlag.AlignHCenter)
+        layout.addWidget(_VerticalLabel(self._title, theme.text_muted, strip), 1, Qt.AlignmentFlag.AlignHCenter)
+
+        return strip
 
     def _build_collapsed_title_bar(self, theme) -> QWidget:
         """A bare divider line, not the normal title bar - at 36px wide
