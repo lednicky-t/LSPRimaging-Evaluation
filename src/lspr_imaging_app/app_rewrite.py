@@ -80,7 +80,24 @@ logger = logging.getLogger(__name__)
 # incompatible old blob outright (restoreState returns False, nothing is
 # applied) instead of silently mis-applying it - falls back to this
 # function's own fresh layout instead of a corrupted one.
-_DOCK_LAYOUT_STATE_VERSION = 1
+# Bumped to 2 (2026-09-27): tabifyDockWidget(spectra_dock, sensorgram_dock)
+# replaced with a plain splitDockWidget - a saved blob from before this
+# change still had Spectra/Sensorgram tabified, and restoreState() was
+# reapplying that tabbed grouping on every launch regardless of what this
+# function's own layout calls built, which is exactly the silent-stale-blob
+# failure mode this version guard exists to catch.
+# Bumped to 3 (2026-09-28): dragging one panel onto another to merge them
+# into a tab group was manually done at least once (Histogram onto Image)
+# before `window.setDockOptions(...)` below dropped AllowTabbedDocks and
+# removed that drop target - that manual tab group got saved under version
+# 2 and kept being treated as a valid, current-version blob on every
+# relaunch, restoring the same unwanted tab group even after the drop
+# target that created it was gone. This is the same silent-stale-blob
+# pattern as the version-2 bump above, just triggered by an interactive
+# drag instead of a code change - restoreState() reconstructs whatever
+# topology a saved blob describes (including tab groups) regardless of
+# what setDockOptions currently allows *creating* interactively.
+_DOCK_LAYOUT_STATE_VERSION = 3
 
 
 def _not_functional_reminder() -> QWidget:
@@ -579,6 +596,16 @@ def build_main_window(
     window = QMainWindow()
     window.setWindowTitle(rewrite_version_string())
     window.resize(1400, 900)
+    # Qt's default dock options include AllowTabbedDocks, which is what let
+    # a plain drag of one panel's title bar onto another's create a tab
+    # group interactively - the exact behavior the maintainer asked to
+    # remove (2026-09-27), not just the one `tabifyDockWidget` call this
+    # function used to make in code. AnimatedDocks/AllowNestedDocks are
+    # Qt's other two defaults, kept so ordinary dragging and the nested
+    # Image/Histogram/ROI-table split tree built below still work; leaving
+    # AllowTabbedDocks out means dropping a panel onto another's center now
+    # simply isn't offered as a target - only the split zones are.
+    window.setDockOptions(QMainWindow.DockOption.AnimatedDocks | QMainWindow.DockOption.AllowNestedDocks)
     view_menu, options_menu = _build_menu_bar(window)
     _wire_theme_menu(
         view_menu, window, image_panel,
@@ -663,8 +690,18 @@ def build_main_window(
     window.splitDockWidget(image_dock, spectra_dock, Qt.Orientation.Vertical)
     window.splitDockWidget(image_dock, roi_table_dock, Qt.Orientation.Horizontal)
     window.splitDockWidget(image_dock, histogram_dock, Qt.Orientation.Vertical)
-    window.tabifyDockWidget(spectra_dock, sensorgram_dock)
-    spectra_dock.raise_()
+    # Spectra and Sensorgram were tabified here until 2026-09-27: Qt's own
+    # tabify mechanism draws the tab strip as a separate native QTabBar row
+    # sitting *above* each dock's own PanelContainer title bar, so a
+    # tabified pair always showed two stacked header rows (the native tab
+    # strip, then whichever panel's own title bar/buttons) - not fixable by
+    # styling alone, since Qt has no public way to put buttons inside its
+    # own tab strip. A plain vertical split keeps both panels permanently
+    # visible instead, each with its own single-row header exactly like
+    # every other panel here, at the cost of splitting height between them
+    # rather than only showing one at a time (maintainer's explicit choice
+    # over rebuilding this as one merged panel with a custom tab strip).
+    window.splitDockWidget(spectra_dock, sensorgram_dock, Qt.Orientation.Vertical)
     # Qt's default BottomLeftCorner ownership belongs to BottomDockWidgetArea,
     # which is what let Spectra/Sensorgram extend under the left column in
     # the first place (confirmed headlessly). Reassigning it to
