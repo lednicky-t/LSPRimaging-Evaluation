@@ -1,22 +1,48 @@
 """``WorkflowPanel`` (sketch §7 "Workflow shell", §10;
-``docs/rewrite_gui_shell_design_2026-09.md`` §4).
+``docs/rewrite_gui_shell_design_2026-09.md`` §4, §4a).
 
-A thin navigation/status host - hosts the stage tabs (Dataset -> Image Tools
--> ROI Selection -> Analysis, with Spectra/Sensorgram as pure downstream
-consumers, per sketch §1), shows which stage is active, and reports status
-text for the main window's status bar - and otherwise owns no scientific
-state. Replaces ``MainWindow``'s role as a god object; should stay small
-enough that removing it and rewiring the modules directly would be a
-mechanical exercise, not a redesign.
+A thin navigation/status host - hosts the stage sections (Dataset -> Image
+tools -> ROI editor -> Analysis -> Outputs, with Spectra/Sensorgram as pure
+downstream *display* consumers, per sketch §1 - Outputs is a fifth
+*Workflow* stage, not a display panel, holding settings for how results are
+visualized/formatted before export), shows which stage is active, and
+reports status text for the main window's status bar - and otherwise owns no
+scientific state. Replaces ``MainWindow``'s role as a god object; should
+stay small enough that removing it and rewiring the modules directly would
+be a mechanical exercise, not a redesign.
 
 **Not the five display panels.** Earlier scaffolding had this class host
 Image/Histogram/ROI-table/Spectra/Sensorgram as its own tabs - that was
 placeholder wiring, not the design: per the GUI shell design doc, those five
 are each their own dock widget, and this panel is docked alongside them
-(left, per the stable app's own precedent), not their container. Each stage
-tab here holds that stage's *settings* (detection thresholds, crop/rotate
-fields, ..., per the design doc §3's Workflow-vs-panel icon split) - real
-settings forms are still future work; each tab is a placeholder for now.
+(left, per the stable app's own precedent), not their container.
+
+**Visual structure copied from the stable app 2026-09-24 (design doc §4a),
+content still not.** An earlier version of this file used a ``QTabWidget``
+with one page per stage - discovered, on trying to match the stable app's
+actual look, to not match it: the stable app's equivalent
+(``gui/layout_builder.py:1411-1429``) builds a ``QTabWidget`` with exactly
+*one* tab and then calls ``tabBar().hide()`` - there are no real stage tabs
+there at all, just one continuously scrollable page holding all 5 top-level
+``CollapsibleSection``s stacked vertically, each independently expandable.
+This file now matches that: no ``QTabWidget``, one scroll area, 5 top-level
+sections.
+
+**One deliberate deviation from the source, at the maintainer's explicit
+request**: the source lets multiple top-level sections sit expanded at once
+(no real exclusivity, despite section titles' plain accordion look - see
+design doc §4a's finding that the source's own pin/"accordion" language is
+vestigial). Here, exactly one top-level section is expanded at all times -
+a real single-open accordion (``WorkflowPanel._on_section_toggled``) -
+which is what makes "current stage" well-defined enough to drive
+``stage_changed`` (and, through it, ``layout_presets.py``'s
+auto-apply-preset-on-stage-change feature) at all. Nested child sections
+within a stage are unaffected - multiple of those can still be open
+together, exactly as in the source.
+
+Every section's body is still a plain "not built yet" placeholder - real
+settings forms are separate future work, and the maintainer expects this
+tree's exact shape to keep changing as they land.
 """
 
 from __future__ import annotations
@@ -25,7 +51,23 @@ import logging
 from enum import Enum, auto
 
 from PyQt6.QtCore import Qt, pyqtSignal
-from PyQt6.QtWidgets import QLabel, QTabWidget, QWidget
+from PyQt6.QtWidgets import QFrame, QLabel, QScrollArea, QVBoxLayout, QWidget
+
+from lspr_ui import get_active_theme
+
+from ...dataset import DatasetModule
+from ...image_tools import BackgroundModule, MaskModule
+from ...selection import ReferenceFrameModule, SelectionModule
+from ...storage.session_coordinator import SessionCoordinator
+from .background_removal import BackgroundRemovalSection
+from .collapsible_section import CollapsibleSection
+from .dataset_experimental_plan import ExperimentalPlanSection
+from .dataset_export import DatasetExportSection
+from .dataset_folder_row import DatasetFolderRow
+from .dataset_summary import DatasetSummarySection
+from .mask_settings import MaskSettingsSection
+from .reference_frame_row import ReferenceFrameRow
+from .session_picker_row import SessionPickerRow
 
 logger = logging.getLogger(__name__)
 
@@ -35,44 +77,300 @@ class WorkflowStage(Enum):
     IMAGE_TOOLS = auto()
     ROI_SELECTION = auto()
     ANALYSIS = auto()
+    OUTPUTS = auto()
 
 
-# Tab order fixes the index -> stage mapping _on_tab_changed relies on.
-_STAGE_ORDER: tuple[tuple[WorkflowStage, str], ...] = (
-    (WorkflowStage.DATASET, "Dataset"),
-    (WorkflowStage.IMAGE_TOOLS, "Image Tools"),
-    (WorkflowStage.ROI_SELECTION, "ROI Selection"),
-    (WorkflowStage.ANALYSIS, "Analysis"),
-)
-
-
-def _stage_placeholder(stage_name: str) -> QWidget:
-    label = QLabel(f"{stage_name} settings - not built yet.")
-    label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+def _section_placeholder(name: str) -> QWidget:
+    label = QLabel(f"{name} - not built yet.")
     label.setWordWrap(True)
-    label.setStyleSheet("padding: 10px;")
+    label.setStyleSheet(f"color: {get_active_theme().text_muted}; padding: 4px 2px;")
     return label
 
 
-class WorkflowPanel(QTabWidget):
-    """Hosts the stage tabs. Owns no scientific state - it wires
-    already-constructed modules' settings UI together, nothing more."""
+def _nested_title_color() -> str:
+    """Dimmed title color for a section nested under a top-level stage
+    section - matches the source's own ``_nested_title_color`` exactly
+    (``gui/layout_builder.py``), so nesting depth reads the same way."""
+    return get_active_theme().text_dim
+
+
+def _nested_children(parent: QWidget, *sections: CollapsibleSection) -> QWidget:
+    """Groups child sections under their parent - **no left-indent**
+    (2026-09-25, maintainer's explicit call: the dimmed title color from
+    ``_nested_title_color`` is distinction enough on its own, and every
+    px of width matters against the Workflow panel's fixed-width budget -
+    see ``test_lspri_workflow_panel_width_budget.py``). The source's
+    ``_nested_section_group`` uses a 16px left margin for the same
+    purpose; deliberately not ported here."""
+    outer = QWidget(parent)
+    layout = QVBoxLayout(outer)
+    layout.setContentsMargins(0, 2, 0, 2)
+    layout.setSpacing(4)
+    for section in sections:
+        layout.addWidget(section)
+    return outer
+
+
+def _build_dataset_section(
+    parent: QWidget,
+    dataset: DatasetModule,
+    selection: SelectionModule,
+    reference_frame: ReferenceFrameModule,
+    session_coordinator: SessionCoordinator,
+) -> CollapsibleSection:
+    """Ported from the source's ``dataset_section`` + its top row (folder
+    field + browse/explorer icons, *outside* the nested sections) + its
+    nested Summary/Reference/Export/Metadata children
+    (``gui/layout_builder.py``) - restructured 2026-09-25 per the
+    maintainer's explicit spec, no longer a straight port:
+
+    - **No standalone Reference section.** Replaced by a compact
+      "Define reference frame:" row (``reference_frame_row.py``) sitting
+      alongside the folder row, outside the nested accordion - real
+      Auto/Manual icon toggles and a live ``[Ref.frame: Cube #, WL #]``
+      readout, backed by the new ``ReferenceFrameModule`` (see that
+      module's own docstring for the module-boundary/scope reasoning).
+    - **"Metadata" renamed "Experimental plan" and moved first** among the
+      nested sections (``dataset_experimental_plan.py``, superseding
+      ``dataset_metadata.py``) - a file-path + Import/Export icon row, the
+      existing read-only summary, and a live current-frame comment/step
+      preview linked to ``SelectionModule``.
+    - **Summary and Export unchanged** from the 2026-09-25 rebuild earlier
+      this session (real title-row mini-summary, conditional OME-Zarr
+      block, real OME-Zarr export)."""
+    folder_row = DatasetFolderRow(dataset, parent)
+    session_picker_row = SessionPickerRow(session_coordinator, parent)
+    reference_frame_row = ReferenceFrameRow(reference_frame, selection, parent)
+
+    summary_content = DatasetSummarySection(dataset, parent)
+    summary_section = CollapsibleSection(
+        "Summary",
+        summary_content,
+        expanded=True,
+        title_color=_nested_title_color(),
+        header_extra=summary_content.header_stats_label,
+        parent=parent,
+    )
+
+    children = _nested_children(
+        parent,
+        CollapsibleSection(
+            "Experimental plan",
+            ExperimentalPlanSection(dataset, selection, parent),
+            expanded=False,
+            title_color=_nested_title_color(),
+            parent=parent,
+        ),
+        summary_section,
+        CollapsibleSection(
+            "Export", DatasetExportSection(dataset, parent), expanded=False, title_color=_nested_title_color(), parent=parent
+        ),
+    )
+
+    dataset_inner = QWidget(parent)
+    dataset_inner_layout = QVBoxLayout(dataset_inner)
+    dataset_inner_layout.setContentsMargins(0, 0, 0, 0)
+    dataset_inner_layout.setSpacing(4)
+    dataset_inner_layout.addWidget(folder_row)
+    dataset_inner_layout.addWidget(session_picker_row)
+    dataset_inner_layout.addWidget(reference_frame_row)
+    dataset_inner_layout.addWidget(children)
+
+    # Starts expanded (the accordion's initial active stage) - see
+    # WorkflowPanel.__init__.
+    return CollapsibleSection("Dataset:", dataset_inner, expanded=True, parent=parent)
+
+
+def _build_image_tools_section(parent: QWidget, background: BackgroundModule, mask: MaskModule) -> CollapsibleSection:
+    """Ported from the source's ``image_tools_section`` + its nested
+    Transforms/Mask/Chromatic correction/Background removal children.
+
+    **Background removal and Mask are real** (2026-09-24,
+    ``background_removal.py``/``mask_settings.py``). Background removal
+    was the first section to use the apply toggle for real
+    (``BackgroundModule``'s whole settings surface is one command). Mask
+    gets no apply toggle - ``MaskSettings`` has no on/off field to back one
+    (see ``mask_settings.py``'s docstring), and only its tool-tuning
+    numbers are built here, not the Apply/Reset/Show actions that compute
+    a real mask candidate (those need a background worker and
+    ``ChromaticModule`` coordination `MaskModule` explicitly defers).
+    Transforms/Chromatic correction are still placeholders: per the design
+    doc §3 icon-placement split, most of their real controls live on the
+    Image panel's own toolbar instead, which doesn't exist yet."""
+    background_removal_content = BackgroundRemovalSection(background, parent)
+    background_removal_section = CollapsibleSection(
+        "Background removal",
+        background_removal_content,
+        expanded=True,
+        applied=background.settings().flatten_background_enabled,
+        apply_tooltip="Apply or skip background removal from the processing pipeline.",
+        title_color=_nested_title_color(),
+        parent=parent,
+    )
+    # Two-way: the header's apply toggle drives the module (a click always
+    # pushes every current form value, not just `enabled` - matches
+    # BackgroundModule's one-call settings API); an external settings
+    # change (e.g. session restore) syncs the header back, signals blocked
+    # so that sync doesn't re-trigger a push right back at the module -
+    # same "set_applied via blockSignals" pattern the source's own
+    # `_set_section_applied` uses (`gui/main_window.py:5233`).
+    background_removal_section.apply_changed.connect(background_removal_content.set_enabled)
+
+    def _sync_apply_toggle(_change: object) -> None:
+        blocked = background_removal_section.blockSignals(True)
+        try:
+            background_removal_section.set_applied(background.settings().flatten_background_enabled)
+        finally:
+            background_removal_section.blockSignals(blocked)
+
+    background.background_model_changed.connect(_sync_apply_toggle)
+
+    children = _nested_children(
+        parent,
+        CollapsibleSection(
+            "Transforms", _section_placeholder("Transforms"), expanded=True, title_color=_nested_title_color(), parent=parent
+        ),
+        CollapsibleSection(
+            "Mask", MaskSettingsSection(mask, parent), expanded=True, title_color=_nested_title_color(), parent=parent
+        ),
+        CollapsibleSection(
+            "Chromatic correction",
+            _section_placeholder("Chromatic correction"),
+            expanded=False,
+            title_color=_nested_title_color(),
+            parent=parent,
+        ),
+        background_removal_section,
+    )
+    return CollapsibleSection("Image tools:", children, expanded=False, parent=parent)
+
+
+def _build_roi_selection_section(parent: QWidget) -> CollapsibleSection:
+    """Ported from the source's ``roi_editor_section`` - just "Circles"
+    today, since Rectangles/Freehand were removed dead placeholders (see
+    design doc §4a). A single-child accordion is arguably pointless on its
+    own; kept faithful to the source for now since the maintainer expects
+    this tree to be revisited once ROI Selection's real controls land."""
+    children = _nested_children(
+        parent,
+        CollapsibleSection(
+            "Circles",
+            _section_placeholder("Circle ROI detection/editing"),
+            expanded=True,
+            title_color=_nested_title_color(),
+            parent=parent,
+        ),
+    )
+    return CollapsibleSection("ROI editor", children, expanded=False, parent=parent)
+
+
+def _build_analysis_section(parent: QWidget) -> CollapsibleSection:
+    """Ported from the source's ``analysis_section`` + its nested ROI's
+    math/Metric trace/Statistics children (the range/scope controls that
+    sat above them there, and the Run/Stop/Live-preview header controls,
+    are real interactive controls tied to ``AnalysisEngine`` - left for
+    when this section gets wired to one, not ported as inert
+    placeholders)."""
+    children = _nested_children(
+        parent,
+        CollapsibleSection(
+            "ROI's math", _section_placeholder("ROI's math"), expanded=True, title_color=_nested_title_color(), parent=parent
+        ),
+        CollapsibleSection(
+            "Metric trace", _section_placeholder("Metric trace"), expanded=True, title_color=_nested_title_color(), parent=parent
+        ),
+        CollapsibleSection(
+            "Statistics", _section_placeholder("Statistics"), expanded=False, title_color=_nested_title_color(), parent=parent
+        ),
+    )
+    return CollapsibleSection("Analysis", children, expanded=False, parent=parent)
+
+
+def _build_outputs_section(parent: QWidget) -> CollapsibleSection:
+    """Outputs stage: flat, no nested children - per design doc §4a, this
+    is new (not a straight port): settings for how results are
+    visualized/formatted before export. The source's closest analogue
+    ("Results / Export": export/open-folder/compact/upgrade buttons) was
+    also flat, but is only a starting point for this stage's eventual
+    scope, not its final content."""
+    return CollapsibleSection("Outputs", _section_placeholder("Outputs"), expanded=False, parent=parent)
+
+
+class WorkflowPanel(QWidget):
+    """Hosts the stage sections. Owns no scientific state - it wires
+    already-constructed modules' settings UI together, nothing more.
+
+    Takes each domain module it actually has real content for -
+    ``dataset`` today, more to follow as later stages get built "one by
+    one" (per the maintainer's own framing, 2026-09-24). A stage with no
+    module passed yet still renders as a placeholder, same as before this
+    module started taking any arguments at all."""
 
     stage_changed = pyqtSignal(WorkflowStage)
     # State/performance text only (no hover-hint text, per the design doc) -
     # the main window connects this to its QStatusBar.
     status_requested = pyqtSignal(str)
 
-    def __init__(self, parent: QWidget | None = None) -> None:
+    def __init__(
+        self,
+        dataset: DatasetModule,
+        background: BackgroundModule,
+        mask: MaskModule,
+        selection: SelectionModule,
+        reference_frame: ReferenceFrameModule,
+        session_coordinator: SessionCoordinator,
+        parent: QWidget | None = None,
+    ) -> None:
         super().__init__(parent)
-        for stage, label in _STAGE_ORDER:
-            self.addTab(_stage_placeholder(label), label)
-        self.currentChanged.connect(self._on_tab_changed)
+        # Order fixes the on-screen stacking order.
+        self._sections: list[tuple[WorkflowStage, CollapsibleSection]] = [
+            (
+                WorkflowStage.DATASET,
+                _build_dataset_section(self, dataset, selection, reference_frame, session_coordinator),
+            ),
+            (WorkflowStage.IMAGE_TOOLS, _build_image_tools_section(self, background, mask)),
+            (WorkflowStage.ROI_SELECTION, _build_roi_selection_section(self)),
+            (WorkflowStage.ANALYSIS, _build_analysis_section(self)),
+            (WorkflowStage.OUTPUTS, _build_outputs_section(self)),
+        ]
 
-    def _on_tab_changed(self, index: int) -> None:
-        if 0 <= index < len(_STAGE_ORDER):
-            stage, _label = _STAGE_ORDER[index]
+        page = QWidget(self)
+        page_layout = QVBoxLayout(page)
+        page_layout.setContentsMargins(4, 4, 4, 4)
+        page_layout.setSpacing(4)
+        for _stage, section in self._sections:
+            page_layout.addWidget(section)
+        page_layout.addStretch(1)
+
+        scroll = QScrollArea(self)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll.setWidget(page)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.addWidget(scroll)
+
+        for stage, section in self._sections:
+            section.expanded_changed.connect(
+                lambda expanded, st=stage, sec=section: self._on_section_toggled(st, sec, expanded)
+            )
+
+    def _on_section_toggled(self, stage: WorkflowStage, section: CollapsibleSection, expanded: bool) -> None:
+        """Real single-open accordion across the 5 top-level stage sections
+        (maintainer's explicit request, 2026-09-24 - see module docstring).
+        Expanding one collapses every other; collapsing the only open one
+        re-opens it instead, so exactly one is open at all times and
+        ``stage_changed`` always reflects a real, unambiguous "current
+        stage"."""
+        if expanded:
+            for _other_stage, other in self._sections:
+                if other is not section and other.is_expanded():
+                    other.set_expanded(False)
             self.stage_changed.emit(stage)
+        elif not any(sec.is_expanded() for _st, sec in self._sections):
+            section.set_expanded(True)
 
     def set_status(self, message: str) -> None:
         self.status_requested.emit(message)

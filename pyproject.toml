@@ -45,6 +45,11 @@ dependencies = [
     # investigation.md's Follow-up #11 "leading hypothesis: CPU frequency
     # throttling", never confirmed for lack of exactly this instrumentation).
     "psutil>=7.2,<8",
+    # Resolves the shared per-user suite config directory for the rewrite's
+    # app-level settings file (storage/app_settings.py) - same convention
+    # `lspr_acq_shell.user_profile` already uses for lspr_settings.json/
+    # lspr_users.json, and the same pin sLSPR acq already carries.
+    "platformdirs>=4.10,<5",
     "lspr-ui>=0.1.0",
     "lspr-core>=0.1.0",
     "lspr-io>=0.1.0",

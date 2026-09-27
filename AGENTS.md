@@ -164,6 +164,66 @@ live yet). Full detail: `undo/manager.py`'s module docstring.
 
 ---
 
+## Sessions and app-level settings
+
+Added 2026-09-26. Full detail: `docs/rewrite_build_log_2026-09.md`'s
+2026-09-26 entry; the maintainer's decisions and the stable app's own
+comparable-but-partial "sessions" feature (which only forked processing
+settings, never the ROI table or measurement backup) are recorded there.
+
+- **Dataset** vs. **session**, as vocabulary: a dataset is the raw images +
+  acquisition metadata, never written to. A session is one complete,
+  independently-reproducible working copy of everything *derived* from a
+  dataset — ROI table, masks, geometry/background/chromatic/mask settings,
+  and its own analysis results (`analysis/data.h5`). Two sessions over the
+  same dataset never share a file.
+- **Layout**: `<dataset home>/sessions/index.json` (the manifest -
+  `storage/session_index.py`) plus one `<dataset home>/sessions/<id>/`
+  folder per session, each holding its own `session.json`, `masks/`, and
+  `analysis/` — exactly what `storage/session.py`/`analysis/engine.py`
+  already built, just one directory level deeper than before sessions
+  existed. A session id is a creation timestamp (`YYYY-MM-DD_HHMMSS`) —
+  sortable and human-readable in a plain folder listing, same "readable
+  over hash" precedent `analysis/provenance.py` already set for mask/
+  chromatic version numbers.
+- **New sessions always start blank** — maintainer's explicit decision.
+  Nothing clones a prior session's ROIs/settings into a new one; don't add
+  a "duplicate as new" path without checking that decision again first.
+- **This pass is create + switch only.** Rename, duplicate-as-new, and
+  delete are deliberately not built — `SessionRecord.label` exists so a
+  rename has somewhere to land later without a schema change, but nothing
+  sets it yet. `panels/workflow/session_picker_row.py`'s UI reflects exactly
+  this: a combo box to switch, one button to create, nothing else.
+- **No importer for the stable app's pre-existing files.** A dataset
+  previously opened in the stable app has `analysis/roi_table.json`,
+  `analysis/measurement_backup.h5`, `analysis/processing_profile.json`
+  sitting directly under `home`, outside any session folder. Opening that
+  same dataset here for the first time creates a fresh, empty first session
+  and leaves those files exactly where they are — nothing reads, migrates,
+  or deletes them. Not an oversight: those files aren't raw data (so
+  nothing is lost by ignoring them), but they also don't map cleanly onto
+  this app's very different per-module `SessionState` shape.
+- **`storage/session_coordinator.py`'s `SessionCoordinator`** is the one
+  place that knows which session is active for the loaded dataset. It knows
+  nothing about the scientific modules a restore touches — `app_rewrite.py`
+  (`_wire_session_coordinator`) is still the one place that knows about
+  every module, subscribing to `SessionCoordinator.active_session_changed`
+  to actually run `apply_session`/`analysis_engine.set_storage_root()`, the
+  same "callables in, no module references held" pattern `AnalysisEngine`
+  and `SessionAutosave` already use.
+- **App-level settings** (`storage/app_settings.py`, a separate concern
+  from the per-dataset/per-session state above): last dataset folder
+  (auto-reopened on launch by default, toggle in the Options menu), theme,
+  window geometry, and named layout-preset blobs — a JSON file (not
+  `QSettings`) in the shared suite config directory, same reasoning
+  `storage/session.py` is Qt-free: testable without a `QApplication`. Which
+  *session* is active for a dataset is deliberately **not** stored here —
+  that lives in the dataset's own `sessions/index.json` so it travels with
+  the dataset (e.g. copied to another machine), not tied to one machine's
+  app settings.
+
+---
+
 ## The analysis store and recompute rules
 
 Full detail: `docs/rewrite_architecture_sketch_2026-09.md` §5, §6, §6a; the
@@ -172,8 +232,15 @@ image files, per-frame version numbers, settings-snapshot JSONs) is in
 `docs/analysis_provenance_store_design_2026-09.md`, which supersedes §5's
 original `provenance_table.json` sketch.
 
-- **One ongoing HDF5 file per dataset.** Not a folder of settings-hashed
-  version files — that design was proposed and explicitly rejected.
+- **One ongoing HDF5 file per session.** Not a folder of settings-hashed
+  version files — that design was proposed and explicitly rejected. This is
+  about the *recompute engine* never automatically materializing many
+  cached copies keyed by a settings hash; it does not forbid the "Sessions"
+  feature below, where a *user-initiated*, named, one-at-a-time fork gets
+  its own folder — each session still gets exactly one ongoing HDF5 file,
+  forever, and the fork only ever happens on an explicit create/switch
+  action, never automatically. (Worded "per dataset" before sessions
+  existed, 2026-09-26 — see that section.)
 - Each stored cell (one ROI × one cube) carries its own **provenance
   record**: the narrow set of inputs that produced it (this ROI's
   geometry, the mask state within its own reach box, the chromatic affine
@@ -300,6 +367,13 @@ through, provenance implications) is separate, not-yet-started work.
   even indirectly.
 - Don't design anything here as shared infrastructure for a future
   acquisition app — that scope was explicitly cut for this rewrite.
+- Don't make a new session clone a prior session's settings/ROIs — new
+  sessions start blank, an explicit maintainer decision (2026-09-26).
+- Don't build session rename/duplicate/delete, or an importer for the
+  stable app's pre-existing `analysis/roi_table.json`/`measurement_backup.h5`/
+  `processing_profile.json`, without checking in again first — both were
+  explicitly scoped out of the first pass (see "Sessions and app-level
+  settings" above), not overlooked.
 
 ---
 

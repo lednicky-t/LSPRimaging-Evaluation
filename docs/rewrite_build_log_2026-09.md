@@ -3830,3 +3830,639 @@ preset/theme choices still don't persist across restarts (no app-level
 settings layer in the rewrite yet); Histogram/Spectra/Sensorgram still need
 their own `refresh_theme()` once their real plot widgets are built; a
 closed panel has no menu-driven way back yet.
+
+## 2026-09-24 (same day, continued): Workflow panel corrected to match the
+## source's real structure (no tabs); the panel's first real content -
+## Dataset stage's "Summary" section - built end to end
+
+Fourth pass the same day, following a maintainer request to make the
+Workflow panel's visualization match the stable app "as much as possible."
+
+**Tabs removed - the source never had them.** The GUI shell pass above
+built `WorkflowPanel` as a `QTabWidget`, one page per `WorkflowStage`. Trying
+to actually match the stable app's look found this wasn't the source's
+design at all: `gui/layout_builder.py:1411-1429` builds a `QTabWidget` with
+exactly *one* tab and calls `tabBar().hide()` - the real UI is one
+continuously scrollable page holding all 5 top-level `CollapsibleSection`s
+stacked vertically. `panels/workflow/panel.py` now matches that: plain
+`QWidget` + one `QScrollArea`, no tab bar.
+
+**Real single-open accordion - the maintainer's explicit deviation from the
+source.** The source lets several top-level sections sit expanded at once
+(no real exclusivity, despite the accordion look - see the earlier pin-
+button finding: no real mutual-exclusion logic exists in the source at
+all). Asked directly, the maintainer chose real exclusivity instead:
+expanding one top-level section now collapses every other, and collapsing
+the only open one snaps it back open rather than leaving nothing expanded
+(`WorkflowPanel._on_section_toggled`). This is also what makes `stage_changed`
+well-defined now that there's no tab-click to hang it on.
+
+**Dataset stage's "Summary" section built for real** (`dataset_summary.py`,
+new) - folder browse/load plus the size/count summary, the first section
+to move past a placeholder. Ported from the stable app's
+`DatasetController` (`browse_folder`/`load_dataset_from_folder`/
+`_on_dataset_loaded`/`_prompt_dataset_candidate_choice`), deliberately
+scoped down to just what a "Summary" section owns - not the ~25 other
+pieces of window state the source's version also resets in the same method
+(record maps, caches, session restore, ROI/mask state, ...), each of which
+belongs to whichever *other* rewrite module owns that state and is expected
+to subscribe to `DatasetModule.dataset_loaded`/`dataset_cleared` itself.
+
+**`DatasetModule` gained `load_dataset_from_folder()`** (plus
+`dataset_load_failed`/`dataset_choice_needed` signals) - the module now owns
+the async load command itself, matching how `AnalysisEngine.run_analysis()`
+already owns its own `AnalysisWorker`, rather than the UI widget reaching
+around it. **One deliberate threading deviation from the source**: the
+source runs this on a `QThreadPool`-based `FunctionWorker`
+(`gui/worker.py`); this uses `AnalysisWorker` (plain `threading.Thread`)
+instead, because `load_dataset` probes for OME-Zarr candidates and
+`analysis/worker.py` documents a since-learned, non-negotiable invariant in
+this rewrite: never let a `QThreadPool` worker touch, even indirectly, an
+OME-Zarr read (root-caused to a native `STATUS_HEAP_CORRUPTION` crash) -
+worth copying the source's *behavior*, not its threading primitive.
+
+Verified: pyflakes-clean. Exercised with real calls
+(`QT_QPA_PLATFORM=offscreen`), not just import-checking: a real synthetic
+TIFF-stack folder loaded end to end through a background thread, into
+`DatasetModule`, with `DatasetSummarySection`'s label showing the correct
+image/cube/wavelength/size summary; the accordion's exactly-one-open
+invariant holds under direct expand/collapse calls; a nonexistent folder
+correctly emits `dataset_load_failed` (verified at the `DatasetModule`
+level - the widget's own failure path shows a real modal `QMessageBox`,
+which headless testing can't dismiss, so that leg was verified by code
+inspection instead of execution); the full rewrite window still builds.
+797 LSPRi tests pass (same subset as prior entries - unaffected, since
+nothing outside `panels/workflow/` and `dataset/module.py` changed).
+
+**Not done this pass, deliberately**: Reference/Export/Metadata (Dataset's
+other three nested sections) are still placeholders - next in line, per the
+maintainer's explicit "one by one" instruction. The multi-candidate
+chooser dialog (`_prompt_dataset_candidate_choice`) is ported and wired but
+not exercised end-to-end in this pass (needs a real ambiguous-folder
+fixture and a way to click a `QMessageBox` button programmatically -
+deferred, not skipped for a substantive reason).
+
+## 2026-09-24 (same day, continued): Dataset stage's "Export" section built;
+## "Reference" skipped - it needs state no rewrite module owns yet
+
+Fifth pass the same day, continuing "one by one" through the Dataset
+stage's nested sections.
+
+**Export built for real** (`dataset_export.py`, new; `DatasetModule.
+export_to_ome_zarr` added alongside it) - destination folder + Export/
+Cancel + a live progress bar, backed by `dataset.io.export_ome_zarr_dataset`
+exactly as the stable app's own OME-Zarr export uses, again via
+`AnalysisWorker` (plain `threading.Thread`) rather than the source's
+`QThreadPool`-based `FunctionWorker`, same reasoning as `load_dataset_from_
+folder` (zarr writes, not just reads, are exactly the thing the documented
+`STATUS_HEAP_CORRUPTION` invariant exists to keep off a `QThreadPool`).
+`DatasetModule` gained a *second*, independent `AnalysisWorker`
+(`_export_worker`) rather than reusing the load one - a load and an export
+are unrelated operations with no reason to serialize against each other,
+mirroring `AnalysisEngine`'s own two-worker (`_worker`/`_derived_worker`)
+precedent.
+
+**Scoped down from the source on purpose, flagged in the new file's own
+docstring rather than silently dropped**: no chunk-size/compression/
+shard-mode widgets yet (the module method already accepts them as keyword
+options - just not surfaced), no auto-generated descriptive folder name
+(`build_ome_zarr_export_folder_name` needs the dataset's shape/dtype
+probed first - skipped for this pass), no destination-collision prompt
+("this will replace an existing export" - `export_ome_zarr_dataset` itself
+still writes safely to a temp sibling and swaps in only on success either
+way, so this is a missing confirmation step, not a missing safety net).
+**No modal dialog on export failure**, unlike `DatasetSummarySection`'s
+load-failure path - a cancelled export reaches `export_failed` through the
+same path as a real error (`export_ome_zarr_dataset` raises
+`RuntimeError("... cancelled.")` when the cancel event fires, deliberately
+not given its own signal - see `DatasetModule.export_to_ome_zarr`'s
+docstring), and popping a "failed" dialog in response to the user's own
+Cancel click would be bad UX; a later pass could distinguish the two and
+only dialog on a real error.
+
+**"Reference" skipped, not just deferred.** Investigated what the source's
+Reference section actually does (`gui/main_window.py`: `_set_reference_
+mode`, `_auto_reference_image_key_for_spectral_cube`,
+`_reference_contrast_score`, ...) before starting to port it: Auto/Manual
+selection of one *reference image* (a specific cube+wavelength) - Auto
+re-picks the best-contrast wavelength in the current spectral cube live,
+Manual locks to whatever's currently being viewed. This needs new state
+(the mode, plus the manual key) that **no existing rewrite module owns** -
+confirmed by checking, not assumed: `image_tools/chromatic/module.py` has a
+same-named `reference_mode`/`reference_wavelength_nm`, but that's a
+different concept entirely (chromatic correction's own registration-target
+wavelength), and neither `SelectionModule` (current cube/wavelength) nor
+`DatasetModule` (candidate records) claims this state today. Building it
+properly means deciding *where this state lives* first - a real design
+question, not a straightforward port - so it was skipped rather than
+guessed at. Metadata (the fourth Dataset child) remains a plain "not
+started yet" placeholder, no investigation blocker, just next in the queue.
+
+Verified: pyflakes-clean. Exercised with real calls
+(`QT_QPA_PLATFORM=offscreen`): a real synthetic TIFF dataset exported to a
+real `.ome.zarr` folder end to end (progress bar updates, destination path
+in the finished message matches the actual written folder including the
+source's own `.ome.zarr` suffix normalization); exporting with no dataset
+loaded fails immediately with `RuntimeError`, surfaced as status text, not
+a crash; the full rewrite window still builds. 797 LSPRi tests pass (same
+subset as every prior entry this branch - unaffected, since nothing outside
+`panels/workflow/` and `dataset/module.py` changed).
+
+**Not done this pass, deliberately**: Reference (see above - blocked on a
+state-ownership decision, not effort) and Metadata (Dataset's remaining two
+nested sections) are still placeholders.
+
+## 2026-09-24 (same day, continued): Dataset stage's "Metadata" section
+## built, read-only - closes out this pass on Dataset's four nested sections
+
+Sixth pass the same day. **Dataset's nested-section tree is now
+Summary/Export/Metadata real, Reference deliberately skipped** (see the
+previous entry) - closing out this pass on the Dataset stage before moving
+to the next one, per the maintainer's "one by one" instruction.
+
+**Metadata built read-only, on purpose** (`dataset_metadata.py`, new) -
+shows whatever `DatasetModule.acquisition_metadata()` already has
+(source format, operator, start time, wavelength/timing/comment counts,
+notes), live on `dataset_loaded`/`dataset_cleared`. **Not** the source's
+import/export buttons or Cube/Time display toggle - investigated first,
+same as Reference: `DatasetModule` has no command to *attach* metadata
+after a dataset is already loaded (only `dataset.io.load_dataset` reads it,
+automatically, at load time), so a real "Import" button needs that command
+added first, not just a widget; the Cube/Time toggle is view-wide display
+state relabeling a slider several *other* panels share, with no obvious
+owner among the rewrite's modules yet, same unresolved-ownership shape as
+Reference. Export (of metadata specifically, not OME-Zarr - Dataset's
+separate Export section already covers that) wasn't investigated this pass
+at all. All three flagged in the new file's own docstring rather than
+silently dropped. What *is* real: this needed no new module state at all,
+since the data was already there - showing it live is legitimate progress
+even without the write-side actions.
+
+Verified: pyflakes-clean. Exercised with real calls
+(`QT_QPA_PLATFORM=offscreen`): a real synthetic dataset with real legacy
+`measureing_times.csv`/`metaData.txt` sidecar files loaded end to end,
+correctly parsed into operator/start-time/wavelength-count/timing-count/
+comment-count and shown in the section; clearing the dataset resets the
+label; the full rewrite window still builds. 797 LSPRi tests pass (same
+subset as every prior entry this branch).
+
+**Not done this pass**: Reference remains skipped (state-ownership
+question, see above). Image Tools/ROI editor/Analysis/Outputs are still
+entirely placeholders - next stage in the "one by one" queue.
+
+## 2026-09-24 (same day, continued): Image Tools stage's "Background
+## removal" section built - the first section using the apply toggle for real
+
+Seventh pass the same day, moving to the Image Tools stage.
+
+**Background removal chosen first among Image Tools' four children**,
+deliberately, not just next-in-list: Transforms (crop/rotate/flip) and
+Chromatic correction both need either a canvas/toolbar this rewrite
+doesn't have yet (Image panel's own toolbar - design doc §3's icon-
+placement split puts the actual crop/rotate/landmark-placement controls
+there, not in Workflow) or live interaction Mask also partly needs
+(painting/drawing). Background removal's whole settings surface -
+sigma/binning/exclusion/local-reference - is plain form controls with no
+canvas dependency, and `BackgroundModule` (real since 2026-09-21) exposes
+it as one command, `set_flatten_background_settings`. Checked this before
+starting, not assumed.
+
+**`background_removal.py`, new** - sigma spin (3-2000 px)/binning combo
+(1x1/2x2/4x4)/ignore-ROI+ignore-mask checkboxes/dilation spin (0-100 px)/
+local-reference checkbox, every change live-pushed to the module in one
+call (matching the source's own `_update_image_processing_settings`
+pattern - every widget's signal already fires on every change there too).
+Two deliberate simplifications from the source, flagged in the file's own
+docstring: plain `QCheckBox`es instead of the source's icon-toggle buttons
+(same function, no vendored exclusion-icon rendering needed); no "Profile"
+button or background-*image* file controls (a real-pixel background
+estimate is a different feature from this formula-settings form - see the
+architecture sketch's estimation-vs-application split).
+
+**First real use of `CollapsibleSection`'s apply toggle** (built
+2026-09-24, unused until now - every other real section so far had nothing
+to attach it to). Two-way, wired in `panel.py._build_image_tools_section`:
+the header toggle drives `BackgroundRemovalSection.set_enabled()` (which
+still pushes every current form value, not just `enabled` - matches the
+module's one-call API); a `background_model_changed` from *outside* this
+section (e.g. a future session restore) syncs the header back via
+`set_applied()` with signals blocked, so that sync doesn't loop back into
+another push - the exact `blockSignals`-around-`set_applied` shape the
+source's own `_set_section_applied` uses (`gui/main_window.py:5233`,
+noted when it was first read during the earlier `CollapsibleSection` port).
+
+Verified: pyflakes-clean. Exercised with real calls
+(`QT_QPA_PLATFORM=offscreen`): changing the sigma spinbox and the
+ignore-mask checkbox both reach `BackgroundModule.settings()` correctly;
+`restore_settings()` (module -> widget direction) updates every form
+control without re-triggering a push back (no feedback loop); the header
+apply toggle disables background removal in the module when unchecked, and
+correctly re-syncs when the module's settings change from outside the
+toggle; the full rewrite window still builds. 797 LSPRi tests pass (same
+subset as every prior entry this branch).
+
+**Not done this pass**: Transforms/Mask/Chromatic correction (Image Tools'
+other three children) are still placeholders - Mask is the most likely
+next candidate (most of its controls are also plain forms; only "Drawing"
+needs canvas interaction), Transforms/Chromatic correction more likely
+wait on the Image panel's own toolbar existing first.
+
+## 2026-09-24 (same day, continued): Image Tools stage's "Mask" section
+## built - tool-tuning numbers only, and a real cross-concern fix found
+## along the way
+
+Eighth pass the same day, continuing into Image Tools' Mask child.
+
+**`mask_settings.py`, new** - relative-threshold/relative-profile-sigma/
+local-contrast-sigma/local-contrast-z/morphology-radius/brush-size, all
+live-pushed to `MaskModule.set_tool_settings` on every change, same shape
+as Background removal. Relative threshold is shown as a percentage
+(0.1-500.0%, matching the source's `mask_relative_threshold_spin`) and
+divided by 100 on push, since `MaskSettings.relative_threshold_fraction`
+stores the raw fraction.
+
+**Real finding while reading the source's equivalent spinboxes**: in the
+stable app, `mask_relative_profile_sigma_spin`/`mask_local_contrast_sigma_
+spin`/`mask_local_contrast_z_spin` each feed *two* different concerns from
+one shared widget - ROI detection (`_update_roi_detection_settings`,
+writing into `window._state.area_roi_settings`) *and* the mask preview
+(`_refresh_mask_previews`) - exactly the cross-concern entanglement this
+rewrite exists to undo (`docs/rewrite_feature_inventory_2026-09.md`,
+`lspri_entanglement_diagnosis_2026_09` memory). `MaskModule.
+set_tool_settings` is a clean, Mask-only command; `RoiToolbox.
+detection_settings()` is a separate, already-distinct read
+(`analysis/engine.py`'s `_build_analysis_engine` already treats them as
+two unrelated inputs). This section only calls the former - if ROI
+detection ever needs the same numbers, that has to be a deliberate choice
+by whoever wires it, not a rediscovery of the old shared-spinbox accident.
+
+**No apply toggle**, unlike Background removal - checked `MaskSettings`
+before assuming one belonged: there's no `mask_enabled`-shaped boolean
+field. Masking's real on/off state is "does the timeline have any
+committed `MaskChange`", not a settings flag - these tunables are inputs
+to a not-yet-built "apply" action.
+
+**Histogram-range passthrough, verified explicitly, not just assumed
+correct**: `set_tool_settings` takes `histogram_min_value`/
+`histogram_max_value` as part of its one combined call, but this form has
+no widgets for them (they belong to a not-yet-built Histogram-panel
+selection, a different feature from `histogram_highlight_min_value`/
+`histogram_highlight_max_value`, which `set_histogram_highlight_range`
+owns separately - confirmed by reading both methods, not assumed from the
+similar names). Every push reads the module's *current* values for these
+two fields first and passes them straight through unchanged, so tuning a
+slider can never silently clobber a selection this form doesn't even show.
+An initial ad-hoc check of this used the wrong field name and looked like
+a bug for a moment (`histogram_min_value` vs. `histogram_highlight_min_
+value`) - re-verified against the right one before trusting it.
+
+Verified: pyflakes-clean. Exercised with real calls
+(`QT_QPA_PLATFORM=offscreen`): changing the relative-threshold and
+morphology-radius controls both reach `MaskModule.settings()` correctly
+(threshold converted to/from a fraction correctly); `restore_state()`
+(module -> widget direction) updates every form control without
+re-triggering a push; `histogram_min_value`/`histogram_max_value` survive
+an unrelated form push unchanged, confirmed with a real non-`None` seeded
+value; the full rewrite window still builds. 797 LSPRi tests pass (same
+subset as every prior entry this branch).
+
+**Not done this pass**: Transforms/Chromatic correction (Image Tools' last
+two children) are still placeholders - both more likely wait on the Image
+panel's own toolbar/canvas existing first, per the design doc §3 split.
+Mask's actual Apply/Reset/Show candidate-computation actions remain
+unbuilt too (see `mask_settings.py`'s own docstring) - this pass is tuning
+numbers only.
+
+## 2026-09-25: Dataset section rebuilt for real visual/behavioral fidelity
+## - folder row split out, real free-standing icons, real Summary layout
+
+Ninth pass, first on a new day. Maintainer asked to go back and match the
+stable app's Dataset section in real detail - icons, layout, behavior -
+rather than the functionally-equivalent-but-visually-flat version built
+2026-09-24. Investigated the source's actual widget construction
+(`gui/main_window.py`/`main_window_icons.py`/`layout_builder.py`) before
+touching code, not assumed from memory - found three things worth
+recording for future sections too:
+
+1. **A shared "free standing" widget family** (the source's own naming):
+   `ClickableIconLabel(QLabel)` - a five-line class, plain label + a
+   `clicked` signal from `mousePressEvent`, no button chrome at all - plus
+   two checkable subclasses (icon swaps on toggle / text itself swaps on
+   toggle) not ported yet, no consumer needs them today.
+2. **A second, related pattern** for bracketed cycling toggles
+   (`[Cube]`/`[Time]`, `[λ,t]`/`[λ]`, `[disk]`/`[RAM]`) - non-checkable
+   `QToolButton`, text-only, click cycles state, gold when active/dim when
+   not, underline on hover, a `.sync_appearance` callback stashed on the
+   button for external refresh. Not needed by anything built yet (first
+   candidate would be Metadata's Cube/Time toggle, still out of scope - see
+   that section's own state-ownership note).
+3. **`OmeZarrExportSummary.field_lines()`** (`dataset/io.py`) already
+   returns the exact (label, value) pairs the source's OME-Zarr summary
+   block shows - reused directly instead of re-deriving the same
+   formatting a second time, once found.
+
+**Folder path field + browse/explorer icons moved out of Summary**
+(`dataset_folder_row.py`, new) to their own top-level row, matching the
+source's actual placement exactly: `top_row_widget` sits *above* the
+nested Summary/Reference/Export/Metadata sections in `dataset_inner`, not
+inside any one of them. Now uses real chrome-less icons
+(`free_standing.py`, new - `ClickableIconLabel` ported) - tabler
+`folder-search` (blue `#38bdf8`) for browse, `folder-open` (amber
+`#f59e0b`) for open-in-explorer - replacing yesterday's plain
+`QPushButton`s. All the load/candidate-choice orchestration moved here
+unchanged; this widget now only shows transient load-status text, not the
+dataset's stats.
+
+**Summary rebuilt as real display data** (`dataset_summary.py`, rewritten)
+- two real surfaces, matching the source:
+- A compact title-row readout (`header_stats_label`, passed as the
+  `CollapsibleSection`'s `header_extra`) - **Size/Cubes/Wavelengths only**,
+  Images deliberately dropped per the maintainer's explicit call ("doesn't
+  matter" for the title row).
+- The expanded body, "same as in stable version" per the maintainer -
+  paired Images+Size / Cubes+Wavelengths rows, Resolution (read from the
+  first image file), Dataset's date (earliest file's mtime) - Images
+  *is* shown here, only the title row omits it.
+- A conditional OME-Zarr block, hidden entirely for a plain TIFF stack,
+  populated from `read_existing_ome_zarr_summary(...).field_lines()` when
+  the loaded dataset is a real OME-Zarr export: image size, cube x
+  wavelength count, chunk/shard, compression, dtype, image-tools-applied
+  (+ rotation/flip/crop only if tools were actually applied at export
+  time), pixel size, source folder.
+
+Verified: pyflakes-clean. Exercised with real calls
+(`QT_QPA_PLATFORM=offscreen`), two datasets: a plain synthetic TIFF stack
+(confirmed title row reads "Size: ..., Cubes: 1, WL: 2" with no Images
+figure, body has all six fields, OME-Zarr block correctly hidden) and a
+real OME-Zarr export of that same data through `DatasetModule.
+export_to_ome_zarr` (confirmed the OME-Zarr block becomes visible and its
+seven lines - image size, cube x wavelength, chunk/shard, compression,
+dtype, image-tools-applied, source folder - all read correctly from the
+real written export); the full rewrite window still builds. 797 LSPRi
+tests pass (same subset as every prior entry this branch).
+
+**Not done this pass**: Reference, Export's and Metadata's own icon/layout
+fidelity (still last session's simplified forms - Export needs the
+chunk/compression/shard tuning surface and live estimates, Metadata needs
+its import/export icon buttons and the Cube/Time toggle), and the two
+checkable "free standing" widget variants (no consumer yet). Next in the
+maintainer's "section by section" plan.
+
+## 2026-09-25 (same day, continued): Reference replaced with a compact row;
+## Metadata renamed "Experimental plan", moved first, given real import/
+## export and a live comment/step preview
+
+Second pass this session, maintainer's explicit spec for both changes
+rather than a straight port.
+
+**"Reference" is no longer a standalone section.** Replaced with a
+"Define reference frame:" row (`reference_frame_row.py`, new) sitting
+alongside the folder row, outside the nested accordion - real Auto/Manual
+icon toggles (`QButtonGroup`, tabler `robot`/`manual-gearbox`, lime
+`#84cc16` when active - the exact color the source hardcodes, no
+`lspr_ui` theme token for it) plus a live `[Ref.frame: Cube #, WL #]`
+readout.
+
+**New module: `ReferenceFrameModule`** (`selection/reference_frame_
+module.py`) - not part of the original sketch's module list, added
+because nothing else owns "which frame is the reference" (checked, not
+assumed - see the 2026-09-24 Export-section entry's finding that
+`ChromaticModule`'s same-named `reference_mode` is a different concept).
+Deliberately narrow per AGENTS.md's module-boundary rule: it holds no
+`SelectionModule` reference and cannot resolve "Auto" mode's frame by
+itself - the row widget reads `SelectionModule.current_cube()`/
+`current_wavelength()` directly for Auto, and calls `set_manual_frame()`
+with an already-resolved cube/wavelength for Manual, the same
+"commands take already-resolved values" convention `MaskModule.
+apply_candidate` established. **Scoped down from the source's "Auto"
+mode, flagged in the module's own docstring**: the source picks the
+best-contrast wavelength in the current cube (real pixel loading +
+scoring for every candidate); this rewrite's Auto simply mirrors whatever
+`SelectionModule` currently shows, live - no scoring algorithm, revisit
+once a real image canvas exists to judge the difference against. Wired to
+reset (back to Auto, manual snapshot cleared) whenever the dataset loads
+or clears, in `app_rewrite.build_main_window` - a manual reference must
+never silently point at a frame from an unloaded dataset.
+
+**"Metadata" renamed "Experimental plan", moved first among Dataset's
+nested sections** (`dataset_experimental_plan.py`, new, supersedes and
+deletes `dataset_metadata.py`). Real import/export this time, not
+read-only: a file-path field + Import/Export icon buttons in one row,
+ported from the stable app's `MetadataController`
+(`gui/metadata_controller.py`). `io/metadata_import.py`'s
+`import_metadata_files` turned out to be pure, Qt-free classify-then-
+import logic with zero GUI dependency - reused directly, nothing to
+strip, the same way `dataset/io.py` already reaches into the shared
+(not-yet-relocated) `io/legacy_metadata.py` for legacy parsing.
+
+**`DatasetModule` gained three things** for this: `set_acquisition_
+metadata()` (the missing "attach after load" command flagged in the
+2026-09-24 Metadata entry - also persists the `analysis/acquisition_
+metadata.json` sidecar, matching the source's import behavior, and
+re-emits `dataset_loaded` rather than a new signal since every existing
+subscriber already reacts correctly to the same mutated object),
+`rehydrated_acquisition_metadata()` (expands timing back to real
+per-frame entries - needed by both metadata export, which must not
+silently lose per-image timestamps to compaction, and the live preview
+below, which needs `timing_for()` to actually find entries), and
+`dataset_home()` (a narrow folder-path query for file-dialog defaults and
+the sidecar path - not "dataset state" in the sense the module-boundary
+rule protects, just a folder path).
+
+**Live comment/step preview, linked to `SelectionModule`** - the
+maintainer's actual phrase was "linked preview of comments and step based
+on actually previewed image." Turned out to be one existing mechanism,
+not two: a pump-plan "step" and a "comment" are both
+`ImagingAcquisitionMetadata.comment_events` (`lspr_core.imaging_models.
+ImagingCommentEvent`'s own docstring confirms a legacy CSV's per-row
+"Note pump plan" column imports into this same sparse transition log).
+Resolved via `timing_for(cube, wavelength)` -> `acquired_at_unix_ms` ->
+`comment_at(...)`, refreshed on `SelectionModule.cube_changed`/
+`wavelength_changed`.
+
+**One honest gap, flagged rather than faked**: the file-path field only
+ever shows a path after an explicit Import (or Export) this session - it
+does not attempt to show whichever file `dataset.io.load_dataset`
+auto-discovered at load time, since that path isn't tracked anywhere and
+re-deriving it would risk showing the wrong file if discovery logic ever
+changes.
+
+Verified: pyflakes-clean. Exercised with real calls
+(`QT_QPA_PLATFORM=offscreen`): the reference-frame row's Auto mode tracked
+a real `SelectionModule` cube/wavelength change live; clicking Manual
+correctly snapshotted the then-current frame and stopped tracking further
+selection changes; clicking Auto again resumed live tracking. For
+Experimental plan: loaded a real dataset with real legacy sidecar files,
+confirmed the live preview showed the correct per-wavelength pump-plan
+note at WL470 ("Pump is not running") and WL480 ("Pump is running");
+exported the loaded metadata to a real JSON file and re-imported it,
+confirming the round-trip preserved the operator field exactly; the full
+rewrite window still builds. 797 LSPRi tests pass (same subset as every
+prior entry this branch).
+
+**Not done this pass**: the multi-candidate import path (mixing a legacy
+CSV with a native file, etc.) wasn't exercised end-to-end, only the
+single-file JSON round-trip - `import_metadata_files` itself is ported
+unchanged and already has its own real notes/skip logic, so this is a
+coverage gap in verification, not a known bug. Export's/Summary's icon
+fidelity from two entries ago remains open too.
+
+## 2026-09-25 (same day, continued): three real width overflows found and
+## fixed against the Workflow panel's fixed 340px width; a permanent
+## automated check added so this stops being a per-section manual step
+
+Third pass this session. Maintainer noticed (correctly) that fixing the
+Workflow panel's width (§4, 2026-09-24) creates an ongoing obligation
+every section built since then has been silently exposed to: a fixed-
+width dock can't grow to accommodate a row that's actually wider than it
+- unlike the *display* panels, which the design doc's own "give the user
+real freedom" principle explicitly exempts this one from. Asked directly
+whether this had already gone wrong and, separately, whether there's a
+way to stop it recurring - both real, useful questions, answered by
+actually measuring rather than eyeballing the code.
+
+**Measured every section's `minimumSizeHint()` inside the real, fixed-
+width dock (`QT_QPA_PLATFORM=offscreen`, not a visual check)** - found
+three real overflows, all invisible from reading the source: `Reference
+FrameRow` (~650px, later ~392px after a first fix, still over), `Mask
+SettingsSection` (~414px), `BackgroundRemovalSection` (~506px), against a
+~320px usable budget (340px dock minus headroom for a vertical scrollbar
+that only appears once content overflows the window height - a widget
+has to already fit before one is ever visible, or everything shifts the
+moment it appears).
+
+**Root cause, both forms**: `QFormLayout`/`QHBoxLayout` rows whose label
+text is more than a couple words - "Local contrast sigma", "Local
+reference normalization", "Define reference frame:" - request whatever
+width the label+field naturally need, with nothing to stop that from
+exceeding what the fixed-width dock actually has. Qt doesn't clip or warn
+about this; the dock (or its content) is simply forced wider than 340px,
+which a real user would see as the panel refusing to actually stay
+fixed-width, or content getting cut off - exactly the maintainer's "adjust
+the width... or put them on other row" framing.
+
+**Fix, three tiers, from most to least reusable**:
+1. **`form_rows.py`'s `stacked_field()`, new** - label directly above the
+   field instead of beside it (a `QFormLayout` row's width is
+   label-width + field-width; a stacked row's is `max(label-width,
+   field-width)`, almost always much less). Applied to Mask
+   (`mask_settings.py`) and Background removal (`background_removal.py`),
+   replacing their `QFormLayout`s outright - this is the reusable piece
+   future sections should reach for first, not a one-off patch.
+2. **Word-wrap on labels showing unbounded live data**
+   (`reference_frame_row.py`) - the `[Ref.frame: Cube #, WL #]` readout
+   still overflowed even after switching to a 3-row layout and bounding
+   the wavelength to one decimal, because a large spectral-cube index (a
+   real possibility for a long time-series dataset - tested with 4 digits)
+   makes the text long regardless of formatting. `setWordWrap(True)` is
+   the robust fix - it grows down instead of sideways no matter how wide
+   the numbers get, rather than chasing "is this text short enough" for
+   every possible value.
+3. **Abbreviated one specific label** ("Local reference normalization" ->
+   "Local reference norm.", full wording moved to the tooltip) where
+   neither of the above applied cleanly - a checkbox's own text has
+   nowhere to wrap to without the checkbox itself moving.
+
+**Permanent automated check added**, directly answering "how do I not go
+wrong again": `tests/test_lspri_workflow_panel_width_budget.py` (repo
+root `tests/integration/`) builds the real rewrite window, measures every
+`CollapsibleSection`'s `minimumSizeHint()` against the same 320px budget,
+and separately injects a large cube index + imprecise wavelength into
+`ReferenceFrameRow` to catch dynamic-content overflow a static layout
+check alone would miss (the row starts out showing short placeholder
+text, so a plain pass/fail on initial state wouldn't have caught the bug
+that was actually found). Runs as part of `pytest tests/ -k lspri` - no
+longer a manual "remember to measure this" step; a future section that
+overflows fails the suite the same way a broken import would.
+
+Verified: pyflakes-clean. The three new/updated width-budget tests pass
+individually and as part of the full LSPRi-scoped subset; re-measured
+every section headlessly after each fix (not just re-read the code) -
+confirmed all 17 `CollapsibleSection`s now fit the 320px budget, including
+under the worst-case cube/wavelength values that exposed the reference-
+frame row's remaining gap after the first, incomplete fix; the full
+rewrite window still builds. 797 LSPRi tests pass (same subset as every
+prior entry, plus the 3 new width-budget tests).
+
+**Not done this pass**: the width budget (~320px) is a conservative
+estimate reasoned from the 340px dock minus scrollbar headroom, not
+independently confirmed against Qt's actual scrollbar width on this
+platform/style - close enough to have caught three real bugs, but worth
+tightening with a real measurement if a section ever passes this check
+and still looks tight in practice.
+
+## 2026-09-25 (same day, continued): nested-section left-indent dropped
+
+Small follow-up to the width-budget pass. `_nested_children` (`panel.py`)
+indented nested sections 16px left, matching the source's
+`_nested_section_group` exactly - maintainer's call: the dimmed title
+color (`_nested_title_color`) already distinguishes nesting depth on its
+own, and every pixel counts against the fixed-width budget just measured.
+Margin changed from `(16, 2, 0, 2)` to `(0, 2, 0, 2)`; no other change.
+Verified: pyflakes-clean, full window still builds, 800 LSPRi tests pass
+(the width-budget tests included, unaffected - they measure width against
+budget, and this change only makes things narrower).
+
+## 2026-09-25 (same day, continued): Export section rebuilt with real
+## chunk/shard/compression/skip-excluded controls; a real blind spot found
+## in yesterday's width-budget test and fixed
+
+Fourth pass this session. Maintainer's spec: copy the source's Export
+settings for real (not just a bare destination field), Chunk size and
+Shard each their own row, other info underneath them, and the Export
+trigger as a labeled button placed *after* all the settings - the
+source's icon-only button sits first, above them.
+
+**`dataset_export.py` rebuilt** - Chunk size (4-4096px) and Shard
+("1 image"/"1 spectral cube") each via `form_rows.stacked_field` (own
+row, label above field), then live chunk/total read-time estimate labels
+underneath (`dataset.io.estimate_ome_zarr_export_chunk_plane_read`/
+`..._dataset_total_read` - pure, cheap functions, called with
+`calibration=None` rather than running the source's real disk-timing
+probe, so still-real chunk counts with no estimated milliseconds),
+Compression/Skip-excluded checkboxes, then the Export/Cancel buttons
+last. **No new `DatasetModule` surface needed** - width/height/dtype for
+the descriptive folder name (`dataset.io.build_ome_zarr_export_folder_
+name`, the same naming scheme the source uses) come from one real plane
+loaded via the already-existing `load_plane()`, cached on `dataset_
+loaded` rather than re-probed on every chunk-size edit.
+
+**Scoped down from the source, flagged in the file's own docstring**: no
+name-prompt dialog (defaults to the dataset's own folder name - what the
+source's prompt defaults to anyway), no destination-collision comparison/
+replace dialog (`export_ome_zarr_dataset` already writes safely to a temp
+sibling regardless, per its own docstring - a missing confirmation
+prompt, not a missing safety net), no plan-confirmation dialog.
+
+**A second real blind spot found in yesterday's width-budget test,
+fixed**: `test_every_collapsible_section_fits_the_width_budget` measured
+every section in whatever state it happened to start in - and Export
+starts *collapsed* (`expanded=False`). A collapsed `CollapsibleSection`'s
+`minimumSizeHint()` turned out not to reliably reflect its real content
+width: the rebuilt Export form's first version (before catching this)
+measured ~140px collapsed vs. its real ~392px once actually expanded, all
+from one checkbox label ("Compression (lz4 + bitshuffle)") that had never
+been laid out at real size while hidden. Fixed the test itself, not just
+the one section: it now force-expands every top-level stage in turn (they
+stay a real single-open accordion - expanding one collapses the others,
+so this can't be done all at once) and every nested child within it,
+before measuring anything. **Verified this actually closes the gap, not
+just asserted it**: reverted the checkbox-label fix, confirmed the
+improved test now fails with the real 392px measurement, then restored
+the fix and confirmed it passes again - the same "prove it, don't assume
+it" standard the earlier width-budget entry itself applied.
+
+Verified: pyflakes-clean. Exercised with real calls
+(`QT_QPA_PLATFORM=offscreen`): loaded a real synthetic dataset, confirmed
+the chunk-estimate/total labels update live and correctly on a chunk-size
+change; exported it for real, confirming the destination folder name
+matches the source's exact naming scheme (`<name>_<w>x<h>_<cubes>x
+<wavelengths>_c<chunk><shard><compression>_<dtype>.ome.zarr`); the fixed
+test genuinely catches a real overflow (see above) and passes once fixed;
+the full rewrite window still builds. 800 LSPRi tests pass (unaffected
+count - this pass touched one existing file plus the test file, no new
+Workflow-panel section added).
+
+**Not done this pass**: the name-prompt/collision/confirmation dialogs
+listed above as scoped out. Calibrated (not just chunk-count) read-time
+estimates remain future work, same reasoning as the scope-out.

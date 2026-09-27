@@ -99,13 +99,46 @@ and ROI table panels exist to port real toolbar code into, not just names.
 
 ---
 
-## 4. Workflow panel: fixed-width, always visible, collapsible
+## 4. Workflow panel: a tool panel, not a display panel
 
-- **Fixed(ish) width**: the sub-tab content described in sketch §7 (Finding
-  ROIs / Editing ROIs / ROI Groups, plus Dataset/Image Tools/Analysis stage
-  content) stays a reasonable, roughly-constant width rather than growing
-  with content — this is what "fixed to width" solves, so it doesn't
-  compete for screen space the display panels need.
+**Decided 2026-09-24 (updated)**: Workflow is conceptually different from
+the other five panels, and should be designed as such rather than as "one
+more dock among six." The other five (Image, Histogram, ROI table, Spectra,
+Sensorgram) *display results/data* — resizable, closable, includable or not
+per preset (§5). Workflow is a *control* panel ordered by the workflow
+itself, closer to a tool palette (Inkscape's left tool panel, or a
+Photoshop-style docked toolbox) than to a data view. That difference in kind
+is why it gets different rules, not just different defaults:
+
+- **Always full window height, docked left.** Not negotiated away by
+  splitting with another dock or by the bottom (Spectra/Sensorgram) dock
+  area intruding under it — it owns its own column top to bottom.
+  Implementation note (found while investigating this): the *current*
+  scaffold in `app_rewrite.build_main_window` does not actually achieve
+  this — `addDockWidget(Left, workflow_dock)` followed by
+  `addDockWidget(Left, image_dock)` with no explicit split between them
+  makes Qt stack Workflow/Image/Histogram in one shared vertical column
+  (confirmed by inspecting real dock geometries headlessly), and the
+  bottom dock area's default corner ownership lets Spectra/Sensorgram
+  extend under that column too. Needs an explicit `splitDockWidget`
+  chain, mirroring the stable app's own pattern
+  (`layout_state_controller.py:610-615`: `workflow_panel → roi_list_panel
+  → image_panel → histogram_panel`, all `Horizontal`), plus a `setCorner`
+  call so the bottom area doesn't reach under Workflow's column. Not yet
+  fixed — tracked here until it is.
+- **Real fixed width, not just an initial size.** Supersedes this
+  section's earlier "fixed(ish)" wording: the previous
+  `resizeDocks([workflow_dock], [320], ...)` call only set a *starting*
+  width and left the splitter draggable, on the "give the user real
+  freedom to rearrange" principle (§1) — that principle is for the
+  display panels, not this one. A tool panel with a draggable edge invites
+  it to be squeezed down until its own controls clip or hide, which is
+  exactly the failure mode being designed against here. `PanelContainer`
+  already has the machinery this needs from the collapse feature (§ below)
+  — `setFixedWidth`, released via `setMinimumWidth(0)` /
+  `setMaximumWidth(16777215)` — extending it to a permanent fixed-when-
+  expanded width is a small change, not new engineering. Exact pixel value
+  still TBD.
 - **Always present across every preset** (§5) — presets govern which
   *display* panels (Image/Histogram/ROI table/Spectra/Sensorgram) are shown,
   not Workflow itself.
@@ -125,6 +158,80 @@ and ROI table panels exist to port real toolbar code into, not just names.
 
 ---
 
+## 4a. Workflow panel content: porting the stable app's `CollapsibleSection` tree
+
+**Decided 2026-09-24**, after reviewing the stable app's actual
+`CollapsibleSection` structure (`gui/widgets.py:116`, assembled in
+`gui/layout_builder.py`) and how it behaves at runtime, not just how it
+looks:
+
+- **The section tree itself carries over as-is for now** (subject to change
+  once each stage's real controls are ported in). Full tree, for reference:
+  ```
+  Dataset:                     [Summary, Reference, Export, Metadata]
+  Image tools:                 [Transforms, Mask, Chromatic correction, Background removal]
+  ROI editor:                  [Circles]
+  Analysis:                    [ROI's math, Metric trace, Statistics]
+  Outputs:                     (flat today, will grow — see below)
+  ```
+  Each top-level entry maps to one `WorkflowStage` member
+  (`panels/workflow/panel.py`) except **Outputs**, which has no
+  corresponding stage today (see below). The stable app's old flat
+  "Results / Export" section (export/open-folder/compact/upgrade buttons)
+  is this stage's starting content, not its final scope.
+- **No tabs — corrected 2026-09-24, after actually matching the source's
+  visuals.** An earlier pass here built this as a `QTabWidget` with one page
+  per stage - discovered, on trying to copy the stable app's look "as much
+  as possible" (the maintainer's own framing), to not match it at all: the
+  source (`gui/layout_builder.py:1411-1429`) builds a `QTabWidget` with
+  exactly *one* tab and calls `tabBar().hide()` - there are no real stage
+  tabs, just one continuously scrollable page holding all 5 top-level
+  sections stacked vertically. `WorkflowPanel` now matches that: a plain
+  `QWidget` + one `QScrollArea`, no tab bar, mirroring the source's own
+  `_make_left_tab_page` helper.
+- **Real single-open accordion across the 5 top-level sections — a
+  deliberate deviation from the source, at the maintainer's explicit
+  request.** The source lets several top-level sections sit expanded
+  simultaneously (no real exclusivity enforced, despite looking like an
+  accordion - the same investigation that found the pin button vestigial,
+  below, also found no actual mutual-exclusion logic anywhere in the
+  source). Here, expanding one top-level section collapses every other one,
+  and collapsing the only open section snaps it back open rather than
+  leaving nothing expanded (`WorkflowPanel._on_section_toggled`) - so
+  exactly one is open at all times. This is what makes "current stage"
+  well-defined enough to drive `stage_changed` (and, through it, §5's
+  auto-apply-preset-on-stage-change) at all, now that there's no tab-switch
+  event to hang it on. Nested child sections *within* a stage are
+  unaffected - several of those can still be open together, exactly as in
+  the source.
+- **The pin button is dropped.** Investigation found it's vestigial in the
+  stable app: every section's pinned state is persisted to settings and its
+  icon toggles, but nothing reads `is_pinned()` anywhere — there is no real
+  accordion/auto-collapse behavior left to pin *against* (the one surviving
+  fragment, `_on_roi_editor_mode_section_toggled`, just keeps the sole
+  remaining "Circles" section from collapsing to nothing, a leftover from
+  when Rectangles/Freehand modes also existed). Its tooltip promises
+  behavior the code doesn't deliver. Not porting it removes dead UI rather
+  than losing real function.
+- **Expand/collapse (real) and apply-toggle (real, drives actual
+  processing behavior) both carry over.** Help-button popups carry over
+  too, pending real help text per section.
+- **Renamed to "Outputs"** (2026-09-24, superseding the "Results" name used
+  earlier in this doc and the build log) — becomes its own top-level
+  stage/section, not folded into Analysis. Scope, per the maintainer:
+  settings that shape how results are *visualized and formatted before
+  export* — display/visualization options and export data-format choices —
+  not the export action itself in isolation. A placeholder today, to be
+  filled in later with the real categories/controls as they're designed,
+  same as every other stage tab currently is. `WorkflowStage`
+  (`panels/workflow/panel.py`) needs a fifth member (`OUTPUTS`) once this is
+  built; not added yet. Deliberately *not* called "Results" — that name is
+  now reserved for the panel preset in §5, and the two would otherwise
+  collide in the View menu (see this doc's prior open-questions entry,
+  now resolved this way).
+
+---
+
 ## 5. View/Panel presets
 
 Four built-in presets (starting point, not final — see the file header):
@@ -134,7 +241,7 @@ Four built-in presets (starting point, not final — see the file header):
 | **Image Tools** | Image, Histogram | Also what the **Dataset** workflow stage uses — no separate Dataset preset; browsing/loading a dataset doesn't need a different arrangement than Image Tools work does. |
 | **ROI** | Image, ROI table | |
 | **Analysis** | Image, Spectra, Sensorgram, ROI table | |
-| **Results** | Image, Spectra, Sensorgram | Same panel set as Analysis minus ROI table — deliberately close to it; the maintainer expects these two to converge/diverge further once actually used, not a settled distinction. |
+| **Visualization** | Image, Spectra, Sensorgram | Renamed from "Results" (2026-09-24) to free that name for the new **Outputs** Workflow stage (§4a), which is unrelated (export/format settings, not a panel arrangement). Same panel set as Analysis minus ROI table — deliberately close to it; the maintainer expects these two to converge/diverge further once actually used, not a settled distinction. |
 
 Workflow panel is outside this table — always present, independent of preset
 (§4).
@@ -198,11 +305,49 @@ changes with the theme.
 
 - Exact icon-by-icon placement (§3) — needs a real pass once Image/ROI
   table panels exist.
-- Auto-hide-to-strip interaction details (§4) — hover-to-peek vs.
-  click-to-expand, pin persistence across restarts.
+- ~~Auto-hide-to-strip interaction details (§4) — hover-to-peek vs.
+  click-to-expand~~ — resolved 2026-09-24, click-to-expand (see build log).
+  Pin persistence across restarts no longer applies — §4a drops the pin
+  button as dead UI.
 - Keyboard shortcut collision check for `Ctrl+Shift+1..4` (§5) against this
   app's real `QAction` map, once one exists.
 - Arbitrary user-created presets beyond the four fixed slots (§5) — raised,
   not committed.
-- Analysis vs. Results preset convergence/divergence (§5) — expected to
-  change once used for real work.
+- Analysis vs. Visualization preset convergence/divergence (§5) — expected
+  to change once used for real work. (Renamed from "Results" 2026-09-24 to
+  resolve the naming collision with the new "Outputs" Workflow stage —
+  §4a/§5 — this is now resolved, not open.)
+- ~~Workflow panel's exact fixed pixel width (§4) — not chosen yet~~ —
+  resolved 2026-09-24: 340px, matching the stable app's own
+  `workflow_panel.setMinimumWidth(340)`. `PanelContainer` gained a real
+  `fixed_width` constructor option (`panels/dock_container.py`) to enforce
+  it — confirmed headlessly: `minimumWidth() == maximumWidth() == 340` while
+  expanded, `== 36` while collapsed, restored to 340 on re-expand.
+- ~~The `app_rewrite.py` dock-layout fix (§4) — diagnosed, not yet
+  applied~~ — resolved 2026-09-24: Workflow is now the sole occupant of
+  `LeftDockWidgetArea` (Image/Histogram/ROI table moved to
+  `RightDockWidgetArea` + explicit splits), plus
+  `setCorner(BottomLeftCorner, LeftDockWidgetArea)` so Spectra/Sensorgram no
+  longer extends under Workflow's column. Confirmed headlessly: Workflow's
+  dock geometry spans the full window height (861 of 900px, the remainder
+  being the menu bar), while Spectra/Sensorgram still correctly extends
+  under Image/Histogram/ROI table as before.
+- ~~Workflow content still needs the stable app's `CollapsibleSection` tree
+  actually ported in (§4a)~~ — resolved 2026-09-24: the tree (§4a's table)
+  is built, in `panels/workflow/collapsible_section.py` (the widget, pin
+  dropped) and `panels/workflow/panel.py` (per-stage builders). Every
+  section's *body* is still a plain "not built yet" placeholder — real
+  settings forms remain separate future work, and per the maintainer this
+  tree's exact shape is still expected to change once they land. Sections
+  that had a real apply toggle in the source (Transforms/Mask/Chromatic
+  correction/Background removal) don't get one here yet either — `applied=`
+  needs real backing state from a domain module, which `WorkflowPanel`
+  holds no reference to; an inert toggle would look functional without
+  being so. Confirmed headlessly: 5 top-level sections × 12 nested children
+  = 17 total, matching the design tree exactly; the single-open accordion
+  (see above) correctly collapses the others when one expands and snaps
+  back open rather than leaving nothing expanded; theme switching now also
+  refreshes every `CollapsibleSection` (wired into `_wire_theme_menu`, same
+  pattern as `PanelContainer`). Superseded the very first version of this
+  entry, which used `QTabWidget` tabs — see this section's "No tabs" bullet
+  above for why that didn't actually match the source.

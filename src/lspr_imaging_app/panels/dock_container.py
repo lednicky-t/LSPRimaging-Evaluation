@@ -26,11 +26,20 @@ floating safety, the paintEvent-drawn floating border, the subtitle label):
    left out - nothing in the rewrite's six fixed panels needs a toggleable
    title yet.
 
-**One addition the source doesn't have at all**: the optional
-``collapsible`` constructor flag (design doc §4) - click-to-collapse to a
-thin strip, not the source's static title bar. Used only by the Workflow
-panel today (``app_rewrite.build_main_window``); every other panel passes
-the default (``collapsible=False``) and is unaffected.
+**Two additions the source doesn't have at all**:
+
+- The optional ``collapsible`` constructor flag (design doc §4) -
+  click-to-collapse to a thin strip, not the source's static title bar.
+- The optional ``fixed_width`` constructor flag (design doc §4, updated
+  2026-09-24): unlike the source's panels (and every other rewrite panel),
+  the Workflow panel is a *tool* panel, not a data-display panel - it should
+  not be draggable down to a width that clips its own controls. When set,
+  the expanded (non-collapsed) width is clamped exactly, not just given as
+  an initial ``resizeDocks`` size the user can still drag away from.
+
+Both are used only by the Workflow panel today (``app_rewrite.
+build_main_window``); every other panel passes the defaults
+(``collapsible=False``, ``fixed_width=None``) and is unaffected.
 """
 
 from __future__ import annotations
@@ -84,6 +93,7 @@ class PanelContainer(QDockWidget):
         *,
         help_text: str | None = None,
         collapsible: bool = False,
+        fixed_width: int | None = None,
     ) -> None:
         super().__init__(title, parent)
         self._title = title
@@ -101,7 +111,12 @@ class PanelContainer(QDockWidget):
         self._collapsible = collapsible
         self._collapsed = False
         self._collapsed_width = 36
+        # Real width clamp while expanded (design doc §4, tool-panel vs.
+        # display-panel distinction) - see class docstring.
+        self._fixed_width = fixed_width
         self.setWidget(content)
+        if self._fixed_width is not None:
+            self.setFixedWidth(self._fixed_width)
         self.setFeatures(
             QDockWidget.DockWidgetFeature.DockWidgetMovable
             | QDockWidget.DockWidgetFeature.DockWidgetFloatable
@@ -320,6 +335,11 @@ class PanelContainer(QDockWidget):
             self.setWidget(self._content)
             self._content.show()
             self.setTitleBarWidget(self._build_title_bar(self._title, theme))
+            if self._fixed_width is not None:
+                # Re-clamp to the panel's own fixed width, not left
+                # unlimited - the line above only undoes the *collapsed*
+                # width's clamp.
+                self.setFixedWidth(self._fixed_width)
         # Explicitly hidden before the event loop can repaint: a widget
         # QDockWidget.setWidget() just displaced becomes parentless, and a
         # visible parentless widget is a real top-level OS window for

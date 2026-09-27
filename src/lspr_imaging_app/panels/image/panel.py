@@ -87,6 +87,7 @@ paid far more often than the image's."""
 _DEFAULT_SAMPLE_COLOR = "#f59e0b"
 _DEFAULT_REFERENCE_COLOR = "#38bdf8"
 _SELECTED_COLOR = "#f8fafc"
+_CHUNK_GRID_COLOR = "#a3a3a3"
 
 
 class ImagePanel(QWidget):
@@ -116,6 +117,11 @@ class ImagePanel(QWidget):
         self._serial = itertools.count(1)
         self._latest_serial = 0
         self._drag_roi_id: int | None = None
+        # (height, width) of the last successfully rendered plane - the
+        # chunk-grid preview needs real pixel dimensions and only this
+        # panel's own render result has them (`DatasetModule` holds no
+        # per-frame shape query - see its query-surface docstring).
+        self._last_image_shape: tuple[int, int] | None = None
 
         self._build_ui()
 
@@ -166,6 +172,7 @@ class ImagePanel(QWidget):
         self._sample_curve = self._add_curve(_DEFAULT_SAMPLE_COLOR, width=1.5)
         self._reference_curve = self._add_curve(_DEFAULT_REFERENCE_COLOR, width=1.0)
         self._selection_curve = self._add_curve(_SELECTED_COLOR, width=2.5)
+        self._chunk_grid_curve = self._add_curve(_CHUNK_GRID_COLOR, width=1.0, dashed=True)
 
         self._status = QLabel("No dataset loaded.", self)
         self._status.setWordWrap(True)
@@ -194,8 +201,11 @@ class ImagePanel(QWidget):
 
         self._image_item.scene().sigMouseClicked.connect(self._on_scene_clicked)
 
-    def _add_curve(self, color_hex: str, *, width: float) -> pg.PlotDataItem:
-        curve = pg.PlotDataItem(pen=pg.mkPen(QColor(color_hex), width=width), connect="finite")
+    def _add_curve(self, color_hex: str, *, width: float, dashed: bool = False) -> pg.PlotDataItem:
+        pen = pg.mkPen(QColor(color_hex), width=width)
+        if dashed:
+            pen.setStyle(Qt.PenStyle.DashLine)
+        curve = pg.PlotDataItem(pen=pen, connect="finite")
         self._plot.addItem(curve)
         return curve
 
@@ -207,6 +217,10 @@ class ImagePanel(QWidget):
         redraw is cheaper than the bookkeeping to distinguish them."""
         self._dataset.dataset_loaded.connect(self._on_dataset_loaded)
         self._dataset.dataset_cleared.connect(self._on_dataset_cleared)
+        # Direct update, not `_schedule_redraw` - the preview only needs the
+        # already-cached last render shape, so redrawing it shouldn't wait on
+        # (or trigger) a full coalesced image re-render.
+        self._dataset.chunk_grid_preview_changed.connect(self._update_chunk_grid)
 
         self._geometry.geometry_changed.connect(self._schedule_redraw)
         self._geometry.cosmetic_changed.connect(self._schedule_redraw)
@@ -256,6 +270,8 @@ class ImagePanel(QWidget):
         self._sample_curve.clear()
         self._reference_curve.clear()
         self._selection_curve.clear()
+        self._chunk_grid_curve.clear()
+        self._last_image_shape = None
         self._refresh_navigation_ranges()
         self._status.setText("No dataset loaded.")
 
@@ -374,6 +390,8 @@ class ImagePanel(QWidget):
             f"Cube {result.request.cube_index}, {result.request.wavelength_nm:g} nm "
             f"- {result.image.shape[1]}x{result.image.shape[0]} px"
         )
+        self._last_image_shape = result.image.shape[:2]
+        self._update_chunk_grid()
 
     # -- overlays -----------------------------------------------------------
 
@@ -411,6 +429,30 @@ class ImagePanel(QWidget):
         self._sample_curve.setData(sample_x, sample_y)
         self._reference_curve.setData(reference_x, reference_y)
         self._selection_curve.setData(selection_x, selection_y)
+
+    def _update_chunk_grid(self) -> None:
+        """Draw (or clear) the Export section's chunk-grid preview - lines
+        at every `chunk_size_px` boundary over the last rendered plane, so
+        the maintainer can see how the chosen chunk size will actually
+        divide up the image before exporting. Reads `DatasetModule` only
+        (see its `chunk_grid_preview` docstring) - never touches the Export
+        section's widgets."""
+        enabled, chunk_px = self._dataset.chunk_grid_preview()
+        if not enabled or self._last_image_shape is None or chunk_px <= 0:
+            self._chunk_grid_curve.clear()
+            return
+        height, width = self._last_image_shape
+        xs: list[float] = []
+        ys: list[float] = []
+        x = 0.0
+        while x <= width:
+            _append_polyline(xs, ys, np.array([x, x]), np.array([0.0, float(height)]))
+            x += chunk_px
+        y = 0.0
+        while y <= height:
+            _append_polyline(xs, ys, np.array([0.0, float(width)]), np.array([y, y]))
+            y += chunk_px
+        self._chunk_grid_curve.setData(xs, ys)
 
     @staticmethod
     def _sample_radius(roi: AreaRoi) -> float:

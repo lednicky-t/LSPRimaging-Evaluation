@@ -23,12 +23,14 @@ would just be more code to throw away once the real shell (sketch §7
 
 from __future__ import annotations
 
+import base64
 import logging
 import sys
 
+from collections.abc import Callable
 from pathlib import Path
 
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import Qt, QByteArray
 from PyQt6.QtGui import QActionGroup
 from PyQt6.QtWidgets import QApplication, QLabel, QMainWindow, QMenu, QStatusBar, QWidget
 
@@ -47,10 +49,13 @@ from .panels.roi_table import RoiTablePanel
 from .panels.sensorgram import SensorgramPanel
 from .panels.spectra import SpectraPanel
 from .panels.workflow import WorkflowPanel
+from .panels.workflow.collapsible_section import CollapsibleSection
 from .roi import RoiToolbox
-from .selection import SelectionModule
+from .selection import ReferenceFrameModule, SelectionModule
+from .storage.app_settings import AppSettings, load_app_settings, save_app_settings
 from .storage.session import SessionState, load_session
 from .storage.session_autosave import SessionAutosave
+from .storage.session_coordinator import SessionCoordinator
 from .undo import undo_manager
 from .version_rewrite import rewrite_version_string
 
@@ -95,14 +100,26 @@ def _build_menu_bar(window: QMainWindow) -> tuple[QMenu, QMenu]:
     return view_menu, options_menu
 
 
-def _wire_theme_menu(view_menu: QMenu, window: QMainWindow, image_panel: ImagePanel) -> None:
+def _wire_theme_menu(
+    view_menu: QMenu,
+    window: QMainWindow,
+    image_panel: ImagePanel,
+    *,
+    initial_theme: str = "dark",
+    on_theme_changed: Callable[[str], None] | None = None,
+) -> None:
     """View -> Theme: Dark / Bright, exclusive-checkable (design doc §6).
 
-    No persistence yet (there is no settings/Preferences layer in the
-    rewrite to persist into - the stable app's equivalent,
-    ``MainWindow._set_ui_theme``, writes to ``QSettings``). Every live
-    theme switch has to explicitly touch three kinds of chrome, in this
-    order, matching the stable app's own ``_apply_theme_styles``:
+    **Persisted since 2026-09-26** via `storage/app_settings.py` - the
+    caller applies `initial_theme` (a plain "dark"/"bright" string, matching
+    `AppSettings.theme`) *before* this function runs (see
+    `build_main_window`, which calls `set_active_theme`/`apply_app_theme`
+    at the very top, before any panel reads `get_active_theme()`); this
+    function only has to make the menu's checked action match that, and
+    report every future change back through `on_theme_changed` so the
+    caller can write it out. Every live theme switch has to explicitly
+    touch three kinds of chrome, in this order, matching the stable app's
+    own ``_apply_theme_styles``:
 
     1. The QApplication-level palette/QSS (``apply_app_theme``) - covers
        every standard Qt widget.
@@ -116,6 +133,9 @@ def _wire_theme_menu(view_menu: QMenu, window: QMainWindow, image_panel: ImagePa
        real plot widgets exist (currently still ``NotImplementedError``
        stubs - see the build log) - ``getattr(..., None)`` guards each one
        so this doesn't have to change when they do.
+    4. Every ``CollapsibleSection`` inside the Workflow panel's stage tabs
+       (2026-09-24, design doc §4a) - same reason as #2: baked-in
+       stylesheets, not QSS.
     """
     theme_menu = view_menu.addMenu("Theme")
     group = QActionGroup(window)
@@ -123,14 +143,15 @@ def _wire_theme_menu(view_menu: QMenu, window: QMainWindow, image_panel: ImagePa
 
     dark_action = theme_menu.addAction("Dark")
     dark_action.setCheckable(True)
-    dark_action.setChecked(True)  # matches set_active_theme(GRAY_DARK_THEME) at startup (main())
+    dark_action.setChecked(initial_theme != "bright")
     group.addAction(dark_action)
 
     bright_action = theme_menu.addAction("Bright")
     bright_action.setCheckable(True)
+    bright_action.setChecked(initial_theme == "bright")
     group.addAction(bright_action)
 
-    def switch_theme(theme) -> None:
+    def switch_theme(theme, name: str) -> None:
         set_active_theme(theme)
         app = QApplication.instance()
         if app is not None:
@@ -138,9 +159,13 @@ def _wire_theme_menu(view_menu: QMenu, window: QMainWindow, image_panel: ImagePa
         image_panel.refresh_theme()
         for dock in window.findChildren(PanelContainer):
             dock.refresh_theme()
+        for section in window.findChildren(CollapsibleSection):
+            section.refresh_theme()
+        if on_theme_changed is not None:
+            on_theme_changed(name)
 
-    dark_action.triggered.connect(lambda checked: switch_theme(GRAY_DARK_THEME) if checked else None)
-    bright_action.triggered.connect(lambda checked: switch_theme(BRIGHT_THEME) if checked else None)
+    dark_action.triggered.connect(lambda checked: switch_theme(GRAY_DARK_THEME, "dark") if checked else None)
+    bright_action.triggered.connect(lambda checked: switch_theme(BRIGHT_THEME, "bright") if checked else None)
 
 
 def _build_analysis_engine(
@@ -309,9 +334,8 @@ def _build_session_autosave(
     selection: SelectionModule,
     analysis_settings: AnalysisSettingsModule,
 ) -> SessionAutosave:
-    """Give ``save_session``/``load_session`` the triggers they were built
-    without (2026-09-23): load when a dataset opens, autosave while it is
-    open, flush before anything replaces it.
+    """Build the debounce, and wire every module's own change signal to
+    ``schedule()`` it (2026-09-23).
 
     Same shape and reasoning as ``_build_analysis_engine`` above - this is
     the one place that knows about every module, so the knowledge of *what
@@ -322,44 +346,21 @@ def _build_session_autosave(
     cosmetic/computational split exists to tell the analysis store what may
     be stale (sketch §3); it says nothing about what is worth persisting,
     and a relabelled or recoloured ROI is exactly as worth keeping as a
-    moved one."""
+    moved one.
+
+    **Does not itself decide *where* to save** (2026-09-26) - that used to
+    be `dataset_model.home` directly, wired here via a `dataset_loaded`
+    handler. Now that a dataset can hold several named sessions
+    (`storage/session_index.py`), *which* folder is active is
+    `SessionCoordinator`'s job, not this function's - see
+    `_wire_session_coordinator` below, which is what actually calls
+    `autosave.set_root()`."""
     autosave = SessionAutosave(
         capture=lambda: capture_session(
             geometry, mask, chromatic, background, roi_toolbox, selection, analysis_settings
         ),
         naming=lambda: _frame_naming(dataset),
     )
-
-    def restore_for(dataset_model: object) -> None:
-        # `set_root(None)` first: it flushes whatever the *previous* dataset
-        # still had pending, while that dataset's root is still the current
-        # one. Doing it after the switch would write the old dataset's edits
-        # into the new dataset's folder.
-        root = Path(dataset_model.home)
-        autosave.set_root(None)
-        try:
-            state = load_session(root)
-        except Exception:
-            # `load_session` raises on a file it cannot read or does not
-            # recognise, deliberately (see its docstring) - starting from
-            # defaults silently would look exactly like a dataset that was
-            # never set up. Autosave stays off for this root so the app
-            # cannot overwrite a recoverable file with blank state.
-            logger.exception("Could not read the session for %s - continuing with defaults", root)
-            autosave.set_root(root, enabled=False)
-            return
-        if state is not None:
-            # Restoring emits from every module it touches; without this the
-            # restore would schedule a save of what was just loaded.
-            with autosave.suspended():
-                apply_session(
-                    state, geometry, mask, chromatic, background,
-                    roi_toolbox, selection, analysis_settings,
-                )
-        autosave.set_root(root)
-
-    dataset.dataset_loaded.connect(restore_for)
-    dataset.dataset_cleared.connect(lambda: autosave.set_root(None))
 
     for signal in (
         geometry.geometry_changed, geometry.cosmetic_changed,
@@ -380,11 +381,113 @@ def _build_session_autosave(
     return autosave
 
 
-def build_main_window() -> QMainWindow:
+def _wire_session_coordinator(
+    coordinator: SessionCoordinator,
+    autosave: SessionAutosave,
+    analysis_engine: AnalysisEngine,
+    geometry: GeometryModule,
+    mask: MaskModule,
+    chromatic: ChromaticModule,
+    background: BackgroundModule,
+    roi_toolbox: RoiToolbox,
+    selection: SelectionModule,
+    analysis_settings: AnalysisSettingsModule,
+) -> None:
+    """Restore into every module whenever the *active session* changes -
+    on a dataset load, an explicit session switch, or a new session's
+    creation (2026-09-26).
+
+    This is `restore_for`'s old body (see `_build_session_autosave`'s
+    2026-09-23 history), moved here and re-keyed off
+    `SessionCoordinator.active_session_changed` instead of
+    `DatasetModule.dataset_loaded` directly - a session switch has to run
+    the exact same restore with no new dataset load involved, so the two
+    triggers need to share one implementation rather than duplicate it.
+    Also now repoints `AnalysisEngine.set_storage_root()` (previously wired
+    directly to `dataset_loaded` in `build_main_window`), so the engine and
+    the session always agree on which folder is active."""
+
+    def restore(root: Path | None) -> None:
+        # Flush whatever the *previous* session still had pending first,
+        # while its root is still the current one - matches the ordering
+        # `restore_for` used before sessions existed, for the same reason
+        # (a late-arriving write must land in the session it belongs to,
+        # not the new one).
+        autosave.set_root(None)
+        if root is None:
+            analysis_engine.set_storage_root(None)
+            return
+        analysis_engine.set_storage_root(root)
+        try:
+            state = load_session(root)
+        except Exception:
+            # `load_session` raises on a file it cannot read or does not
+            # recognise, deliberately (see its docstring) - starting from
+            # defaults silently would look exactly like a session that was
+            # never set up. Autosave stays off for this root so the app
+            # cannot overwrite a recoverable file with blank state.
+            logger.exception("Could not read the session for %s - continuing with defaults", root)
+            autosave.set_root(root, enabled=False)
+            return
+        # `state or SessionState()`, never skipped on `None`: a session with
+        # no `session.json` yet is not only the harmless "first ever load"
+        # case (modules already start out empty then) - it is also what a
+        # brand-new session created via `SessionCoordinator.create_new()`
+        # looks like *while switching away from a session that had real
+        # in-memory state*. Skipping the apply there would leave the
+        # previous session's ROIs/masks/settings sitting in every module,
+        # silently bleeding into whatever gets saved to the new session's
+        # folder next - caught by
+        # `test_a_second_session_is_independent_of_the_first` (2026-09-26).
+        # Restoring emits from every module it touches; without the
+        # `suspended()` guard the restore would schedule a save of what was
+        # just loaded/reset.
+        with autosave.suspended():
+            apply_session(
+                state or SessionState(), geometry, mask, chromatic, background,
+                roi_toolbox, selection, analysis_settings,
+            )
+        autosave.set_root(root)
+
+    coordinator.active_session_changed.connect(restore)
+
+
+def build_main_window(
+    initial_settings: AppSettings | None = None,
+    on_settings_changed: Callable[[AppSettings], None] | None = None,
+) -> QMainWindow:
     """Construct every rewrite module and wire the panels to them, per the
     module boundaries in AGENTS.md / sketch §7. No module reaches into
     another's internals here - this function only connects the public,
-    already-defined constructor seams."""
+    already-defined constructor seams.
+
+    **`initial_settings`/`on_settings_changed` (2026-09-26)** - the app-level
+    settings layer (`storage/app_settings.py`): last dataset, theme, window
+    geometry, layout presets. Injected the same way `AnalysisEngine`/
+    `SessionAutosave` take callables instead of reading global state
+    directly - `main()` is the only real caller that passes a loaded
+    `AppSettings` and a callback that actually writes to disk; every
+    existing test that calls `build_main_window()` with no arguments keeps
+    doing zero settings-file I/O and no auto-reopen (`AppSettings()`'s
+    defaults have `last_dataset_folder=None`, so the auto-reopen guard
+    below is always a no-op without a real settings file behind it)."""
+    settings = initial_settings if initial_settings is not None else AppSettings()
+
+    def _persist(**changes: object) -> None:
+        for key, value in changes.items():
+            setattr(settings, key, value)
+        if on_settings_changed is not None:
+            on_settings_changed(settings)
+
+    # Applied before any panel is constructed - several read `get_active_
+    # theme()` at construction time (e.g. `DatasetFolderRow`), so the right
+    # theme has to already be active, not just switched on afterward.
+    theme_obj = BRIGHT_THEME if settings.theme == "bright" else GRAY_DARK_THEME
+    set_active_theme(theme_obj)
+    _app_for_theme = QApplication.instance()
+    if _app_for_theme is not None:
+        apply_app_theme(_app_for_theme, theme_obj)
+
     dataset = DatasetModule()
     geometry = GeometryModule()
     mask = MaskModule()
@@ -392,7 +495,9 @@ def build_main_window() -> QMainWindow:
     background = BackgroundModule()
     roi_toolbox = RoiToolbox()
     selection = SelectionModule()
+    reference_frame = ReferenceFrameModule()
     analysis_settings = AnalysisSettingsModule()
+    session_coordinator = SessionCoordinator()
     analysis_engine = _build_analysis_engine(
         dataset, geometry, mask, chromatic, background, roi_toolbox, analysis_settings
     )
@@ -405,21 +510,33 @@ def build_main_window() -> QMainWindow:
     # module consequence", and selection/module.py).
     roi_toolbox.roi_ids_renumbered.connect(selection.remap_roi_ids)
 
-    # The analysis store lives beside the dataset, so it can only be located
-    # once one is loaded - see AnalysisEngine.set_storage_root for why the
-    # engine is re-pointed rather than rebuilt. `home`, not `folder`: it is
-    # the folder derived data is allowed to be written into, so an analysis
-    # never lands inside a raw TIFF/OME-Zarr folder it doesn't own (see
+    # Which session-scoped folder the analysis store and the session
+    # autosave both point at is now `SessionCoordinator`'s job, not a plain
+    # `ds.home` read here (2026-09-26 - see AGENTS.md's "Sessions" section
+    # and `storage/session_index.py`). `home`, not `folder`: it is the
+    # folder derived data is allowed to be written into, so a session never
+    # lands inside a raw TIFF/OME-Zarr folder it doesn't own (see
     # ImageDataset.home).
-    dataset.dataset_loaded.connect(lambda ds: analysis_engine.set_storage_root(ds.home))
-    dataset.dataset_cleared.connect(lambda: analysis_engine.set_storage_root(None))
-
-    # Connected after the engine's own dataset hooks above, so a restored
-    # session's signals land on panels that are already looking at the right
-    # store. Qt calls slots in connection order.
     session_autosave = _build_session_autosave(
         dataset, geometry, mask, chromatic, background, roi_toolbox, selection, analysis_settings
     )
+    _wire_session_coordinator(
+        session_coordinator, session_autosave, analysis_engine,
+        geometry, mask, chromatic, background, roi_toolbox, selection, analysis_settings,
+    )
+    dataset.dataset_loaded.connect(lambda ds: session_coordinator.bind_dataset(ds.home))
+    dataset.dataset_cleared.connect(session_coordinator.unbind)
+
+    # A manual reference frame must never silently outlive the dataset it
+    # was captured against - see ReferenceFrameModule.reset's docstring.
+    dataset.dataset_loaded.connect(lambda _ds: reference_frame.reset())
+    dataset.dataset_cleared.connect(reference_frame.reset)
+
+    # Remembers the last-opened dataset for the next launch's auto-reopen
+    # (see the end of this function) - a dataset open is already a
+    # deliberate, infrequent action, so this writes immediately rather than
+    # going through the session autosave's debounce.
+    dataset.dataset_loaded.connect(lambda ds: _persist(last_dataset_folder=str(ds.home)))
 
     # AnalysisScope.SELECTED_ROIS means "whatever is selected right now".
     # Setting it never triggers computation (sketch §7) - it only decides
@@ -435,13 +552,17 @@ def build_main_window() -> QMainWindow:
     roi_table_panel = RoiTablePanel(roi_toolbox)
     spectra_panel = SpectraPanel(analysis_engine, roi_toolbox, selection)
     sensorgram_panel = SensorgramPanel(analysis_engine, roi_toolbox, dataset, selection)
-    workflow = WorkflowPanel()
+    workflow = WorkflowPanel(dataset, background, mask, selection, reference_frame, session_coordinator)
 
     window = QMainWindow()
     window.setWindowTitle(rewrite_version_string())
     window.resize(1400, 900)
     view_menu, options_menu = _build_menu_bar(window)
-    _wire_theme_menu(view_menu, window, image_panel)
+    _wire_theme_menu(
+        view_menu, window, image_panel,
+        initial_theme=settings.theme,
+        on_theme_changed=lambda name: _persist(theme=name),
+    )
 
     status_bar = QStatusBar(window)
     window.setStatusBar(status_bar)
@@ -457,38 +578,66 @@ def build_main_window() -> QMainWindow:
     # stable app already docks every panel. This default arrangement is
     # just a starting point, not a preset: named, user-editable presets
     # (design doc §5) replace it once built - for now the user can drag
-    # panels anywhere via PanelContainer's own controls. Closing a panel
-    # (its title bar's close button) currently has no way back short of
-    # restarting - a View-menu "show panel" toggle is design doc §5/§6
-    # territory, not yet built.
-    # collapsible=True - the only panel this applies to (design doc §4).
-    workflow_dock = PanelContainer("Workflow", workflow, window, collapsible=True)
+    # the *display* panels anywhere via PanelContainer's own controls.
+    # Closing a panel (its title bar's close button) currently has no way
+    # back short of restarting - a View-menu "show panel" toggle is design
+    # doc §5/§6 territory, not yet built.
+    # Workflow gets collapsible=True and a real fixed_width (design doc §4):
+    # unlike the five display panels, it's a tool panel (settings ordered by
+    # workflow stage), not a data view - not draggable down to a width that
+    # clips its own controls. 340px matches the stable app's own
+    # workflow_panel minimum width (layout_builder.py:1744), reused here
+    # rather than inventing a new number.
+    workflow_dock = PanelContainer("Workflow", workflow, window, collapsible=True, fixed_width=340)
     image_dock = PanelContainer("Image", image_panel, window)
     histogram_dock = PanelContainer("Histogram", histogram_panel, window)
     roi_table_dock = PanelContainer("ROI / Groups", roi_table_panel, window)
     spectra_dock = PanelContainer("Spectra", spectra_panel, window)
     sensorgram_dock = PanelContainer("Sensorgram", sensorgram_panel, window)
 
+    # Workflow is added to LeftDockWidgetArea *alone* - every other panel
+    # goes into RightDockWidgetArea/BottomDockWidgetArea instead of being
+    # split off from workflow_dock, so Workflow's column is a Qt dock area
+    # of its own rather than sharing one with Image/Histogram. That
+    # separation is what setCorner (below) needs to give Workflow real full
+    # -height without also forcing Image/Histogram/ROI table to reserve
+    # full height and pushing Spectra/Sensorgram out from under them.
+    #
+    # Found and fixed 2026-09-24: an earlier version of this function added
+    # both workflow_dock and image_dock to LeftDockWidgetArea, which made Qt
+    # stack them vertically in one shared column (Workflow/Image/Histogram
+    # on top of each other, each getting only a sliver of the window's
+    # height) instead of side by side - confirmed by inspecting real dock
+    # geometries headlessly, not just reading the code (see design doc §4).
     window.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, workflow_dock)
-    window.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, image_dock)
-    window.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, roi_table_dock)
+    window.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, image_dock)
+    window.splitDockWidget(image_dock, roi_table_dock, Qt.Orientation.Horizontal)
     window.splitDockWidget(image_dock, histogram_dock, Qt.Orientation.Vertical)
     window.addDockWidget(Qt.DockWidgetArea.BottomDockWidgetArea, spectra_dock)
     window.tabifyDockWidget(spectra_dock, sensorgram_dock)
     spectra_dock.raise_()
-    # Fixed-ish width (design doc §4) - an initial size, not a hard clamp;
-    # the user can still drag it wider/narrower (§1, "give the user real
-    # freedom to rearrange").
-    window.resizeDocks([workflow_dock], [320], Qt.Orientation.Horizontal)
+    # Qt's default BottomLeftCorner ownership belongs to BottomDockWidgetArea,
+    # which is what let Spectra/Sensorgram extend under the left column in
+    # the first place (confirmed headlessly). Reassigning it to
+    # LeftDockWidgetArea makes Workflow's column - and only Workflow's,
+    # since nothing else lives in that area - reserve the full window
+    # height; Spectra/Sensorgram still extend under Image/Histogram/ROI
+    # table exactly as before (BottomRightCorner is untouched, still owned
+    # by BottomDockWidgetArea).
+    window.setCorner(Qt.Corner.BottomLeftCorner, Qt.DockWidgetArea.LeftDockWidgetArea)
 
-    # Named panel presets (design doc §5). Deliberately not applied here at
-    # startup - every dock stays visible until the user explicitly picks a
-    # preset (View -> Panel Presets) or turns on the Options menu's
-    # auto-apply toggle, which only then starts reacting to stage changes.
-    # Forcing a preset at launch while that toggle defaults to off would
-    # contradict "manual application always available, auto-apply is
-    # opt-in" (§5).
-    wire_view_menu(
+    # Named panel presets (design doc §5). A never-customized preset is
+    # still not applied here at startup - every dock stays visible until the
+    # user explicitly picks one, or the auto-apply toggle (now itself
+    # persisted, see below) reacts to a stage change. Forcing a preset at
+    # launch while that toggle happens to be off would contradict "manual
+    # application always available, auto-apply is opt-in" (§5). A preset
+    # slot that *was* customized and saved does get its real geometry back,
+    # but only via the raw `window.restoreState()` call below (the most
+    # recent on-screen arrangement, whichever preset produced it) - not by
+    # re-`apply()`-ing the preset itself, which would restore that slot's
+    # own blob from whenever it was last explicitly saved, possibly older.
+    layout_preset_manager = wire_view_menu(
         view_menu,
         options_menu,
         window,
@@ -501,7 +650,32 @@ def build_main_window() -> QMainWindow:
             "Spectra": spectra_dock,
             "Sensorgram": sensorgram_dock,
         },
+        initial_auto_apply=settings.auto_apply_preset_on_stage_change,
+        on_auto_apply_changed=lambda checked: _persist(auto_apply_preset_on_stage_change=bool(checked)),
     )
+    if settings.layout_presets:
+        layout_preset_manager.load_custom_blobs({
+            name: QByteArray(base64.b64decode(blob))
+            for name, blob in settings.layout_presets.items()
+        })
+    if settings.main_window_geometry:
+        try:
+            window.restoreGeometry(QByteArray(base64.b64decode(settings.main_window_geometry)))
+        except Exception:
+            logger.exception("Could not restore the saved window geometry")
+    if settings.main_window_state:
+        try:
+            window.restoreState(QByteArray(base64.b64decode(settings.main_window_state)))
+        except Exception:
+            logger.exception("Could not restore the saved window layout")
+
+    # "Reopen Last Dataset on Launch" (2026-09-26) - stands in for a real
+    # Preferences dialog exactly like the auto-apply-preset toggle above
+    # (neither has one yet).
+    reopen_action = options_menu.addAction("Reopen Last Dataset on Launch")
+    reopen_action.setCheckable(True)
+    reopen_action.setChecked(settings.auto_reopen_last_dataset)
+    reopen_action.toggled.connect(lambda checked: _persist(auto_reopen_last_dataset=bool(checked)))
 
     # Parented now that there is a window to own it, so it dies with the
     # window rather than living on as an orphan QObject holding a timer.
@@ -514,6 +688,39 @@ def build_main_window() -> QMainWindow:
     app = QApplication.instance()
     if app is not None:
         app.aboutToQuit.connect(session_autosave.flush)
+
+        def _persist_on_quit() -> None:
+            # Window geometry/state and layout-preset blobs only make sense
+            # to capture here, at quit - unlike theme/last-dataset/auto-apply
+            # above, there is no single "the user just changed this" moment
+            # to write on; every dock drag would otherwise mean a write.
+            _persist(
+                main_window_geometry=base64.b64encode(bytes(window.saveGeometry())).decode("ascii"),
+                main_window_state=base64.b64encode(bytes(window.saveState())).decode("ascii"),
+                layout_presets={
+                    name: base64.b64encode(bytes(blob)).decode("ascii")
+                    for name, blob in layout_preset_manager.custom_blobs().items()
+                },
+                active_layout_preset=layout_preset_manager.current(),
+            )
+
+        app.aboutToQuit.connect(_persist_on_quit)
+
+    # Auto-reopen the last dataset (2026-09-26, on by default - see the
+    # "Reopen Last Dataset on Launch" toggle above). Safe on a fresh/test
+    # `AppSettings()` (no `on_settings_changed` given): `last_dataset_folder`
+    # is `None` until a real settings file has actually recorded one, so
+    # this is a no-op for every existing zero-argument caller.
+    if settings.auto_reopen_last_dataset and settings.last_dataset_folder:
+        last_folder = Path(settings.last_dataset_folder)
+        if last_folder.is_dir():
+            try:
+                dataset.load_dataset_from_folder(last_folder)
+            except RuntimeError:
+                logger.exception("Could not auto-reopen the last dataset at %s", last_folder)
+        else:
+            logger.info("Last dataset folder %s no longer exists - skipping auto-reopen", last_folder)
+
     return window
 
 
@@ -523,10 +730,9 @@ def main() -> None:
     app.setApplicationName("LSPR Imaging (Rewrite Preview)")
     app.setApplicationVersion(rewrite_version_string())
     app.setWindowIcon(app_icon())
-    set_active_theme(GRAY_DARK_THEME)
-    apply_app_theme(app)
 
-    window = build_main_window()
+    initial_settings = load_app_settings()
+    window = build_main_window(initial_settings, on_settings_changed=save_app_settings)
     window.show()
     sys.exit(app.exec())
 

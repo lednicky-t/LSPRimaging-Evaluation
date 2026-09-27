@@ -50,21 +50,26 @@ PRESET_PANELS: dict[str, frozenset[str]] = {
     "Image Tools": frozenset({"Image", "Histogram"}),
     "ROI": frozenset({"Image", "ROI / Groups"}),
     "Analysis": frozenset({"Image", "Spectra", "Sensorgram", "ROI / Groups"}),
-    "Results": frozenset({"Image", "Spectra", "Sensorgram"}),
+    "Visualization": frozenset({"Image", "Spectra", "Sensorgram"}),
 }
 PRESET_NAMES: tuple[str, ...] = tuple(PRESET_PANELS)
 
-# Only 3 of the 4 workflow stages map to a preset - Dataset intentionally
-# reuses Image Tools' preset (maintainer's own call: browsing/loading a
-# dataset doesn't need a different arrangement than Image Tools work does),
-# and Results has no corresponding stage at all (Spectra/Sensorgram are
-# pure downstream consumers, per sketch §1, not a workflow stage of their
-# own) - so auto-apply (see wire_view_menu) never reaches for "Results".
+# Renamed from "Results" 2026-09-24 (design doc §4a/§5) - that name now
+# belongs to the Outputs Workflow stage below, an unrelated concept (export/
+# visualization *settings*, not a panel arrangement); keeping both named
+# "Results" would have collided in the View menu.
+
+# All 5 workflow stages now map to a preset - Dataset intentionally reuses
+# Image Tools' preset (maintainer's own call: browsing/loading a dataset
+# doesn't need a different arrangement than Image Tools work does), and
+# Outputs reuses Visualization (viewing/formatting results before export is
+# the same display arrangement as viewing them for analysis).
 STAGE_TO_PRESET: dict[WorkflowStage, str] = {
     WorkflowStage.DATASET: "Image Tools",
     WorkflowStage.IMAGE_TOOLS: "Image Tools",
     WorkflowStage.ROI_SELECTION: "ROI",
     WorkflowStage.ANALYSIS: "Analysis",
+    WorkflowStage.OUTPUTS: "Visualization",
 }
 
 
@@ -132,6 +137,21 @@ class LayoutPresetManager:
         when auto-apply (not a menu click) is what triggered it."""
         self._on_applied.append(callback)
 
+    def custom_blobs(self) -> dict[str, QByteArray]:
+        """Every preset slot that has been saved-to at least once, keyed by
+        preset name - what `storage/app_settings.py`'s persistence layer
+        reads to serialize (2026-09-26)."""
+        return dict(self._custom_blobs)
+
+    def load_custom_blobs(self, blobs: dict[str, QByteArray]) -> None:
+        """Restore previously-saved preset blobs (2026-09-26) - call once at
+        startup, before any preset is applied. A real setter rather than
+        reaching into `_custom_blobs` from outside: this class owns that
+        dict, matching AGENTS.md's "no module reaches into another's
+        internals" rule even though this particular class is chrome, not a
+        domain module."""
+        self._custom_blobs = dict(blobs)
+
 
 def wire_view_menu(
     view_menu: QMenu,
@@ -140,6 +160,9 @@ def wire_view_menu(
     workflow_panel,
     workflow_dock: PanelContainer,
     docks_by_name: dict[str, PanelContainer],
+    *,
+    initial_auto_apply: bool = False,
+    on_auto_apply_changed=None,
 ) -> LayoutPresetManager:
     """Builds View -> Panel Presets (apply/save/reset, Ctrl+Shift+1-4) and
     the Options menu's auto-apply-on-stage-change toggle (design doc §5).
@@ -147,7 +170,13 @@ def wire_view_menu(
     The toggle lives in Options rather than a Preferences dialog because
     the rewrite has no Preferences dialog yet - stands in for one until it
     exists, flagged here rather than silently placed as if this were the
-    final location."""
+    final location.
+
+    `initial_auto_apply`/`on_auto_apply_changed` (2026-09-26): this toggle's
+    checked state is now persisted by `storage/app_settings.py` - the
+    caller reads the saved value in and gets told about every change so it
+    can write it back out; this function still owns no persistence itself,
+    same "chrome, not storage" split every other module here follows."""
     manager = LayoutPresetManager(window, workflow_dock, docks_by_name)
 
     presets_menu = view_menu.addMenu("Panel Presets")
@@ -176,7 +205,9 @@ def wire_view_menu(
 
     auto_apply_action = options_menu.addAction("Automatically Apply Layout Preset on Stage Change")
     auto_apply_action.setCheckable(True)
-    auto_apply_action.setChecked(False)  # off by default (design doc §5) - never surprises a new user
+    # Off by default on a truly fresh settings file (design doc §5) - never
+    # surprises a new user; a returning one gets back whatever they last set.
+    auto_apply_action.setChecked(initial_auto_apply)
 
     def on_stage_changed(stage: WorkflowStage) -> None:
         if not auto_apply_action.isChecked():
@@ -186,5 +217,8 @@ def wire_view_menu(
             manager.apply(preset_name)
 
     workflow_panel.stage_changed.connect(on_stage_changed)
+
+    if on_auto_apply_changed is not None:
+        auto_apply_action.toggled.connect(on_auto_apply_changed)
 
     return manager
