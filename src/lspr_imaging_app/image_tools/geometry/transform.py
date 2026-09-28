@@ -156,6 +156,64 @@ def _combined_export_transform(
     return combined_matrix, combined_offset, (y1 - y0, x1 - x0)
 
 
+def combined_geometry_affine_xy(
+    raw_shape: tuple[int, int],
+    old_settings: GeometrySettings,
+    new_settings: GeometrySettings,
+) -> np.ndarray:
+    """The 2x3 forward affine `[[a,b,tx],[c,d,ty]]` (`target_xy = M @ [x, y, 1]`,
+    same convention as ``image_tools/chromatic/affine.py``'s fitted matrices,
+    and the one ``roi/rasterize.py``'s mask-warp helpers already expect)
+    mapping an OLD-processed-space point/pixel straight to its NEW-processed-
+    space position, after a rotation/flip/crop edit - used to keep ROI
+    centers and freeform ROI masks aligned with the image instead of going
+    stale (``docs/image_tools_coordinate_spaces.md``'s "known gap").
+
+    Built from ``combined_transform_for_box``'s existing processed-space ->
+    raw-space map (``box=(0, 0, 1, 1)`` picks out just the crop origin/matrix,
+    independent of any particular box size - see that function's own
+    convention), composed old -> raw -> new. The old-space matrix's inverse
+    is its own transpose: rotation is orthogonal and a flip is a +-1
+    diagonal, and a product of orthogonal matrices is orthogonal, so this
+    never needs a general (and potentially ill-conditioned) matrix inverse.
+
+    **Verified two ways, not just derived** (see the rewrite build log's
+    matching entry): against ``apply_spatial_preprocessing`` itself (plant a
+    marked point in a raw image, render it under both settings, check this
+    matrix predicts the same before/after positions the real renderer
+    produces - agreement within resampling/centroid noise, <0.22px, across
+    rotation/flip/crop combinations) and, with no image or interpolation
+    involved at all, as a pure round-trip (old point -> raw -> new -> raw)
+    matching the original raw point to 1e-14, i.e. floating-point noise, not
+    approximation error.
+    """
+    old_matrix_rc, old_offset_rc, _ = combined_transform_for_box(raw_shape, old_settings, (0, 0, 1, 1))
+    new_matrix_rc, new_offset_rc, _ = combined_transform_for_box(raw_shape, new_settings, (0, 0, 1, 1))
+    new_inverse_rc = new_matrix_rc.T  # orthogonal -> transpose is the exact inverse
+    combined_matrix_rc = new_inverse_rc @ old_matrix_rc
+    combined_offset_rc = new_inverse_rc @ (old_offset_rc - new_offset_rc)
+    return np.array(
+        [
+            [combined_matrix_rc[1, 1], combined_matrix_rc[1, 0], combined_offset_rc[1]],
+            [combined_matrix_rc[0, 1], combined_matrix_rc[0, 0], combined_offset_rc[0]],
+        ]
+    )
+
+
+def remap_point_for_geometry_change(
+    point_xy: tuple[float, float],
+    raw_shape: tuple[int, int],
+    old_settings: GeometrySettings,
+    new_settings: GeometrySettings,
+) -> tuple[float, float]:
+    """Where an OLD-processed-space point ends up in NEW-processed-space
+    after a rotation/flip/crop edit - see `combined_geometry_affine_xy`."""
+    matrix = combined_geometry_affine_xy(raw_shape, old_settings, new_settings)
+    x, y = float(point_xy[0]), float(point_xy[1])
+    out = matrix @ np.array([x, y, 1.0])
+    return float(out[0]), float(out[1])
+
+
 def combined_transform_for_box(
     in_shape: tuple[int, int],
     settings: GeometrySettings,

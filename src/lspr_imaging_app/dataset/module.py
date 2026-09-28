@@ -77,6 +77,7 @@ from .io import (
     export_ome_zarr_dataset,
     load_dataset,
     load_image_array,
+    load_image_shape,
 )
 from .model import ImageDataset, ImageRecord, rehydrated_acquisition_metadata
 
@@ -153,6 +154,19 @@ class DatasetModule(QObject):
         genuinely needs to mutate the result must copy it first."""
         record = self.current_image(cube_index, wavelength)
         return load_image_array(str(record.path))
+
+    def raw_plane_shape(self) -> tuple[int, int] | None:
+        """The raw (height, width) every frame in the loaded dataset shares -
+        an assumption already made elsewhere in this app (e.g. chunked
+        OME-Zarr export assumes one shape for the whole dataset). `None` if
+        no dataset is loaded. Reads only one image's header
+        (`dataset.io.load_image_shape`), never a full plane, unlike
+        `load_plane` - added for `RoiGeometrySync`, which needs a raw shape
+        to remap ROI positions/masks on a rotation/flip/crop edit but has no
+        reason to hold a whole frame in memory to get it."""
+        if self._dataset is None or not self._dataset.records:
+            return None
+        return load_image_shape(str(self._dataset.records[0].path))
 
     def wavelengths(self) -> tuple[float, ...]:
         """Every distinct wavelength in the loaded dataset, sorted - an

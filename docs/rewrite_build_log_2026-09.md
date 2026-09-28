@@ -4466,3 +4466,172 @@ Workflow-panel section added).
 **Not done this pass**: the name-prompt/collision/confirmation dialogs
 listed above as scoped out. Calibrated (not just chunk-count) read-time
 estimates remain future work, same reasoning as the scope-out.
+
+## 2026-09-28 - Transforms: crop, reset-crop, flip icons
+
+Extended `panels/workflow/transforms_settings.py`'s icon row (rotate /
+reset rotation / rotation fill) with a crop group and a flip group: crop
+tool toggle (tabler `crop`, sky blue when active), **reset crop** (the crop
+glyph plus the same diagonal slash as reset rotation - shared
+`_slashed_icon` helper, one extra `<path>` injected into the vendored SVG),
+and checkable flip H / flip V (tabler `flip-horizontal`/`flip-vertical`).
+Reset crop calls `GeometryModule.clear_crop()` and is disabled when no crop
+is set; flips call `set_flip()`; all buttons re-sync from `geometry_changed`
+so undo/redo/session restore update them. Row is ~252px min width (budget
+320). **Crop tool toggle is not wired to a canvas box-drag yet** - it only
+emits `crop_tool_toggled`, same as the rotate tool (Image panel has no
+canvas interaction yet). Measure controls still to do.
+
+Verified: pyflakes-clean; headless exercise (flip toggles, crop set/reset,
+undo-path re-sync) passed; width-budget test passes.
+
+## 2026-09-28 - Rotate-by-line tool, ActiveTool, controls table
+
+Migrated/rewrote the stable rotate tool. Primary workflow is now IrfanView-
+style: activate Rotate, click two points that should be level, the image
+rotates by the smaller of the two solutions. The stable app's arrow keys are
+kept (0.1 deg, Ctrl 1, Shift 5; Left/Down negative).
+
+**Gestures (maintainer's spec):** LMB click = point 1, next LMB click = point
+2 and apply; RMB click cancels point 1 (Esc also does); a dashed rubber-band
+line follows the cursor after point 1, with a live "line is X deg from
+horizontal - clicking rotates by Y deg" readout. No button is held or dragged.
+MMB-drag pans, wheel zooms; **LMB-drag and RMB-drag are switched off**
+(`ImageViewBox`) so a shaky click never pans/zooms. Only LMB selects ROIs now
+(a middle click used to clear the selection). All of this is one table in
+`panels/image/image_controls.py` - the help text and the behavior come from
+the same place; extend that table when a tool claims a gesture.
+
+**New pieces**
+- `image_tools/geometry/alignment.py` - pure angle math. **Sign verified
+  against the real `apply_spatial_preprocessing`, not assumed**: adding +tilt
+  (tilt positive = slopes down-right on screen) to `rotation_angle_deg`
+  levels a line; with exactly ONE flip on (H xor V) the displayed tilt is
+  mirrored so the correction is negated; both flips = 180 deg turn, no
+  negation. Tests: `tests/unit/test_lspri_rewrite_rotation_alignment.py`
+  (draws a line of known tilt, corrects, measures - all flip combinations
+  and an already-rotated start).
+- `image_tools/active_tool.py` - `ActiveToolModule`/`ImageTool`: the shared
+  "which canvas tool is on" state (rotate/crop/measure, at most one). Replaces
+  the stable `window._active_tool` string. Transient UI state on purpose: not
+  undoable, not persisted, not a change event. The Transforms buttons drive it
+  and follow it; the Image panel routes clicks/keys by it.
+- `panels/image/rotate_line_tool.py` - the two-click state machine + rubber
+  band. It only ever calls `GeometryModule.set_rotation` (one undo step per
+  result, redraw through the usual signal). **Two-click results are rounded to
+  0.01 deg** (maintainer's decision): max rounding error 0.005 deg = ~0.2px at
+  2500px from the centre, well under the method's own click uncertainty (1px
+  over a 1000px baseline = 0.057 deg). Arrow steps (0.1/1/5 deg) are not
+  rounded that way, only cleaned to 1e-6 deg against float noise.
+
+**Crop while rotating (maintainer's spec):** rotation is applied before
+flip before crop (already the order in `transform.py`). While Rotate is
+active the panel renders the image **uncropped** and draws the existing crop
+as a fixed dashed outline; the crop is untouched and re-applied on exit.
+Caveat known/accepted: crop is stored in pixel coordinates of the rotated
+canvas, which changes size with the angle (`reshape=True`), so a fixed crop
+box covers slightly different content after a rotation (a few px for
+alignment-sized angles). **ROI overlay is hidden while a preview tool is
+active** - ROI coordinates are in cropped/processed space and would be drawn
+in the wrong place over the uncropped preview.
+
+**Not done:** crop *tool* (box drag) - its button already takes part in the
+ActiveTool exclusivity but has no canvas behavior, so it neither shows a hint
+nor blocks ROI selection; measure tool; chunk-grid preview is still drawn
+against the uncropped image size while rotating (cosmetic).
+
+## 2026-09-28 - ROI/mask remap on rotation/flip/crop (closes the "known gap")
+
+Implements the maintainer's design decision from the same-day discussion:
+existing ROIs (and freeform ROI masks) now move with the image when
+rotation/flip/crop changes, instead of silently going stale
+(`docs/image_tools_coordinate_spaces.md`'s long-standing gap). Verified
+math two independent ways before writing any dispatch code - see below.
+
+**`image_tools/geometry/transform.py`: `combined_geometry_affine_xy`/
+`remap_point_for_geometry_change`** - the old-processed -> raw -> new-
+processed point map, composed from the existing (already-trusted)
+`combined_transform_for_box`. The new-side inverse is its own transpose
+(rotate+flip is always orthogonal - a product of orthogonal matrices stays
+orthogonal), never a general matrix inverse. **Verified two ways, not just
+derived**: (1) against `apply_spatial_preprocessing` itself - planted a
+point, rendered under old/new settings, compared - agreement within
+~0.22px (resampling/centroid noise) across rotation/flip/crop/refine
+combinations; (2) a pure round-trip with zero image/interpolation
+involved (point -> raw -> new -> raw) matching the original to 1e-14, i.e.
+float noise, not approximation error.
+
+**`roi/rasterize.py`: `remap_roi_mask`** - the freeform-mask counterpart,
+reusing `_mask_reach_box`/`_warp_roi_mask_into_box` (built for the
+*chromatic* affine) with a geometry-derived matrix instead - zero new
+raster-warp code. Verified pixel-for-pixel against `apply_spatial_mask`
+(already relied on elsewhere) for a real rotation: 0 mismatched pixels out
+of 800. **Finding, not assumption**: empirically confirmed (200 randomized
+rotate/flip/crop combos, plus a full angle sweep on a 1x1 mask) that a
+non-empty mask cannot actually warp to zero area under this pipeline -
+rotate/flip are orthogonal, crop only ever contributes a translation, so
+the composition is bijective and area-preserving. The `None`-on-empty
+return is kept as a cheap defensive guard, not a real code path today -
+documented as such rather than oversold. Also found and fixed my own
+mistake here: a crop offset does **not** bound the warp's own box math (it
+only shifts an origin), so a first draft that clamped the reach box to
+`raw_shape` was a dimension-mismatched no-op at best - removed; a box
+outside the visible image is left for the point of use to clip, matching
+`_blit`'s existing "clip, don't crash" convention.
+
+**`roi/toolbox.py`: `RoiToolbox.remap_all` + `_remap_roi_shape`** -
+`detect_rois`'s bulk-command shape (snapshot old state, mutate, one undo
+entry via `undo_manager.push`), dispatching **per ROI side by geometry
+type** (`sample_geometry_type`/`reference_geometry_type`), per the
+maintainer's explicit ask ("distinguish which sub-pipe to use for
+different geometries", not a circle-only special case):
+circle/annulus -> center point only (radii never scale in this pipeline);
+mask -> `remap_roi_mask`; rectangle/polygon -> explicit `NotImplementedError`-
+documented branch, reported in `unsupported_shapes_skipped` - visible now,
+not a silently-discovered gap once those shapes exist later. Also remaps
+`per_wavelength` manual overrides (same processed-space convention as
+`center_x`/`center_y`, would otherwise go stale identically). Takes
+ready-made `remap_point`/`remap_mask` callables rather than a raw shape +
+before/after settings - same one-directional convention `display_position`
+already uses for Chromatic; this module still has zero import of
+`image_tools.geometry`.
+
+**`roi_geometry_sync.py` (new top-level module, deliberately not inside
+`image_tools/` or `roi/`)** - `RoiGeometrySync`: listens to `GeometryModule.
+geometry_changed`, remaps only on `"rotation"`/`"flip"`/`"crop"` (skips
+`"image_tools_enabled"`/`"rotation_fill"` - neither moves a coordinate -
+and `"session_restored"` - a loaded session's ROIs are already consistent
+with its own saved geometry; remapping them again would corrupt them).
+Keeps its own "last known settings" + cached raw shape (from the new
+`DatasetModule.raw_plane_shape()`, a header-only read), re-baselined on
+dataset load/clear so a dataset switch never diffs against the previous
+dataset's geometry. Emits `status_changed` -> `status_bar.showMessage`
+(wired in `app_rewrite.py`, next to `ActiveToolModule`).
+
+**One undo step for a rotation and the ROI shift it causes**
+(`panels/image/rotate_line_tool.py`'s `_rotate_by` now wraps its
+`set_rotation` call in `undo_manager.begin_batch()`/`end_batch()`).
+`GeometryModule.set_rotation` emits `geometry_changed` synchronously inside
+`apply()`, *before* its own undo push - so without batching, `RoiGeometrySync`'s
+remap-triggered push would land on the stack **before** the rotation's own,
+reversing undo order. `_BatchCommand.undo()` reverses in push order
+regardless of order pushed, so batching fixes this without either module
+needing to know about the other. Same one-line wrap will be needed for
+crop/flip once their tools call `set_crop`/`set_flip` from a UI gesture.
+
+Verified: pyflakes-clean across all touched/new files. 16 new unit tests
+(`test_lspri_rewrite_roi_geometry_remap.py`: point-remap against the real
+transform + round-trip, mask-remap against `apply_spatial_mask`, the
+per-shape dispatcher) + 10 new integration tests
+(`test_lspri_rewrite_roi_geometry_sync.py`: reason filtering, dataset
+lifecycle rebaselining, status text, the real rotate-tool gesture producing
+one undo step that reverts both the angle and the ROI position) all pass.
+Broader sanity sweep (335 ROI/mask/geometry/dataset/rotate-related LSPRi
+tests) passes with no regressions.
+
+**Not done this pass** (flagged, not silently skipped): rectangle/polygon
+ROI remap (no such ROI shape exists in the rewrite yet - `_remap_roi_shape`
+has the dispatch branch ready, raises until one is built); a rectangle/
+polygon's future orientation-angle field will need the same rotation-delta
+treatment the point/mask remap already gets, noted in `_remap_roi_shape`'s
+docstring for whoever builds that shape.

@@ -32,10 +32,10 @@ does, and the panel reacts identically.
 **Not built here, deliberately** - each is its own piece of work, not
 something this panel should invent an answer for:
 
-- Crop/rotate interaction (the draggable crop rectangle, the rotation
-  handle). ``GeometryModule``'s commands are real; a tool UI to drive them
-  is not, and the old app's version (`gui/image_tools_controller.py`) is
+- The draggable crop rectangle (crop *tool*). ``GeometryModule``'s commands
+  are real; the old app's version (`gui/image_tools_controller.py`) is
   tangled with pyqtgraph ``RectROI`` sync that needs its own port.
+  (**Rotation is built** - 2026-09-28, ``rotate_line_tool.py``.)
 - Mask painting/preview overlays, the intensity-highlight overlay, and the
   histogram-driven highlight (`MaskModule`'s async candidate machinery
   isn't built either - see its module docstring).
@@ -44,16 +44,29 @@ something this panel should invent an answer for:
 - ROI creation by click and ROI resize by handle. ``add_roi``/``resize_roi``
   are real commands; this panel currently only moves and selects, which is
   what makes the overlay worth looking at in the first place.
+
+**Active tool** (2026-09-28): which canvas tool is on comes from the shared
+``ActiveToolModule`` - the panel never decides it. While a *preview* tool
+(currently rotate) is active, the panel (a) renders the image **uncropped**,
+with the existing crop drawn as a fixed outline, so the user sees what is in
+and out of the crop while aligning - the crop stays put in pixel terms and is
+re-applied when the tool is switched off; (b) hides the ROI overlay, because
+ROI positions live in *processed* (cropped) space and would sit at the wrong
+place over an uncropped image (CLAUDE.md: mixing the spaces silently gives
+wrong results); and (c) routes left/right clicks and keys to the tool. With
+no tool active, a left click selects ROIs as before. Mouse/keyboard rules:
+``image_controls.py``.
 """
 
 from __future__ import annotations
 
 import itertools
 import logging
+from dataclasses import replace
 
 import numpy as np
 import pyqtgraph as pg
-from PyQt6.QtCore import Qt, QTimer
+from PyQt6.QtCore import QEvent, QObject, Qt, QTimer
 from PyQt6.QtGui import QColor
 from PyQt6.QtWidgets import (
     QApplication,
@@ -68,12 +81,15 @@ from PyQt6.QtWidgets import (
 from lspr_ui import get_active_theme
 
 from ...dataset import DatasetModule
-from ...image_tools import BackgroundModule, ChromaticModule, GeometryModule, MaskModule
+from ...image_tools import ActiveToolModule, BackgroundModule, ChromaticModule, GeometryModule, ImageTool, MaskModule
+from ...image_tools.geometry.model import CropDefinition
 from ...roi import RoiToolbox
 from ...roi.model import AreaRoi
 from ...roi.rasterize import effective_reference_radii, transformed_circle_points
 from ...selection import SelectionModule
+from .image_controls import ImageViewBox, controls_text
 from .render import ImageRenderer, RenderRequest, RenderResult
+from .rotate_line_tool import RotateLineTool
 
 logger = logging.getLogger(__name__)
 
@@ -88,6 +104,17 @@ _DEFAULT_SAMPLE_COLOR = "#f59e0b"
 _DEFAULT_REFERENCE_COLOR = "#38bdf8"
 _SELECTED_COLOR = "#f8fafc"
 _CHUNK_GRID_COLOR = "#a3a3a3"
+_CROP_OUTLINE_COLOR = "#38bdf8"  # the crop button's active blue
+
+_CANVAS_TOOLS = frozenset({ImageTool.ROTATE})
+"""Tools that currently own clicks/keys on the canvas. Crop and measure can
+be switched on from the Workflow panel but do nothing on the image yet, so
+they neither show a hint nor take clicks away from ROI selection."""
+
+_PREVIEW_TOOLS = frozenset({ImageTool.ROTATE})
+"""Tools that work on the *uncropped* image: while one is active the image is
+rendered without its crop, the crop is drawn as an outline, and the ROI
+overlay (cropped-space coordinates) is hidden. See the module docstring."""
 
 
 class ImagePanel(QWidget):
@@ -103,6 +130,7 @@ class ImagePanel(QWidget):
         background: BackgroundModule,
         roi_toolbox: RoiToolbox,
         selection: SelectionModule,
+        active_tool: ActiveToolModule,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
@@ -113,6 +141,8 @@ class ImagePanel(QWidget):
         self._background = background
         self._roi_toolbox = roi_toolbox
         self._selection = selection
+        self._active_tool = active_tool
+        self._tool_status = ""
 
         self._serial = itertools.count(1)
         self._latest_serial = 0
@@ -154,7 +184,9 @@ class ImagePanel(QWidget):
         # the last time it was hit.
         self._view = pg.GraphicsLayoutWidget(parent=self)
         self.refresh_theme()
-        self._plot = self._view.addPlot()
+        # ImageViewBox: middle-drag pans, wheel zooms, left/right drags do
+        # nothing (image_controls.py).
+        self._plot = self._view.addPlot(viewBox=ImageViewBox())
         self._plot.invertY(True)  # image row 0 at the top, like the old app
         self._plot.setAspectLocked(True)
         self._plot.hideAxis("left")
@@ -173,9 +205,20 @@ class ImagePanel(QWidget):
         self._reference_curve = self._add_curve(_DEFAULT_REFERENCE_COLOR, width=1.0)
         self._selection_curve = self._add_curve(_SELECTED_COLOR, width=2.5)
         self._chunk_grid_curve = self._add_curve(_CHUNK_GRID_COLOR, width=1.0, dashed=True)
+        # Drawn only while a preview tool is active (see `_draw_overlays`).
+        self._crop_outline_curve = self._add_curve(_CROP_OUTLINE_COLOR, width=1.5, dashed=True)
+
+        self._rotate_tool = RotateLineTool(self._plot, self._geometry, parent=self)
+        self._rotate_tool.status_changed.connect(self._on_tool_status)
 
         self._status = QLabel("No dataset loaded.", self)
         self._status.setWordWrap(True)
+
+        # Which controls are live for the active tool + its dynamic status
+        # (live angle etc.). Hidden while no tool is active.
+        self._tool_hint = QLabel("", self)
+        self._tool_hint.setWordWrap(True)
+        self._tool_hint.setVisible(False)
 
         self._cube_spin = QSpinBox(self)
         self._cube_spin.setPrefix("Cube ")
@@ -197,9 +240,16 @@ class ImagePanel(QWidget):
 
         layout = QVBoxLayout(self)
         layout.addLayout(controls)
+        layout.addWidget(self._tool_hint)
         layout.addWidget(self._view, 1)
 
-        self._image_item.scene().sigMouseClicked.connect(self._on_scene_clicked)
+        scene = self._image_item.scene()
+        scene.sigMouseClicked.connect(self._on_scene_clicked)
+        scene.sigMouseMoved.connect(self._on_scene_moved)
+        # Arrow keys/Esc for the active tool. An event filter on the view
+        # (not `keyPressEvent` here) because the graphics view would
+        # otherwise consume arrow keys itself to scroll.
+        self._view.installEventFilter(self)
 
     def _add_curve(self, color_hex: str, *, width: float, dashed: bool = False) -> pg.PlotDataItem:
         pen = pg.mkPen(QColor(color_hex), width=width)
@@ -221,6 +271,8 @@ class ImagePanel(QWidget):
         # already-cached last render shape, so redrawing it shouldn't wait on
         # (or trigger) a full coalesced image re-render.
         self._dataset.chunk_grid_preview_changed.connect(self._update_chunk_grid)
+
+        self._active_tool.active_tool_changed.connect(self._on_active_tool_changed)
 
         self._geometry.geometry_changed.connect(self._schedule_redraw)
         self._geometry.cosmetic_changed.connect(self._schedule_redraw)
@@ -271,9 +323,13 @@ class ImagePanel(QWidget):
         self._reference_curve.clear()
         self._selection_curve.clear()
         self._chunk_grid_curve.clear()
+        self._crop_outline_curve.clear()
         self._last_image_shape = None
         self._refresh_navigation_ranges()
         self._status.setText("No dataset loaded.")
+        # A tool with no image under it has nothing to do; the Workflow
+        # panel's buttons follow this signal.
+        self._active_tool.clear()
 
     def _refresh_navigation_ranges(self) -> None:
         """Point the cube/wavelength controls at what the dataset actually
@@ -357,12 +413,17 @@ class ImagePanel(QWidget):
             if authored_frame != frame:
                 warp_affine = self._chromatic.affine_between(authored_frame, frame)
 
+        geometry = self._geometry.settings()
+        if self._active_tool.active() in _PREVIEW_TOOLS and geometry.crop.enabled:
+            # Uncropped preview - the crop is drawn as an outline instead.
+            geometry = replace(geometry, crop=CropDefinition())
+
         self._latest_serial = next(self._serial)
         self._renderer.submit(
             RenderRequest(
                 cube_index=cube_index,
                 wavelength_nm=wavelength_nm,
-                geometry=self._geometry.settings(),
+                geometry=geometry,
                 background=self._background.settings(),
                 authored_mask=authored_mask,
                 mask_warp_affine=warp_affine,
@@ -396,6 +457,15 @@ class ImagePanel(QWidget):
     # -- overlays -----------------------------------------------------------
 
     def _draw_overlays(self) -> None:
+        self._draw_crop_outline()
+        if self._active_tool.active() in _PREVIEW_TOOLS:
+            # ROI positions are in cropped/processed space; over the
+            # uncropped preview they would be drawn in the wrong place.
+            self._sample_curve.clear()
+            self._reference_curve.clear()
+            self._selection_curve.clear()
+            return
+
         rois = self._roi_toolbox.rois()
         if not rois:
             self._sample_curve.clear()
@@ -429,6 +499,19 @@ class ImagePanel(QWidget):
         self._sample_curve.setData(sample_x, sample_y)
         self._reference_curve.setData(reference_x, reference_y)
         self._selection_curve.setData(selection_x, selection_y)
+
+    def _draw_crop_outline(self) -> None:
+        """The existing crop as a dashed rectangle over the uncropped
+        preview - only while a preview tool is active. Crop coordinates are
+        in the rotated+flipped canvas, which is exactly what the uncropped
+        preview shows (transform order: rotate -> flip -> crop)."""
+        crop = self._geometry.settings().crop
+        if self._active_tool.active() not in _PREVIEW_TOOLS or not crop.enabled or crop.width <= 0 or crop.height <= 0:
+            self._crop_outline_curve.clear()
+            return
+        x0, y0 = float(crop.x), float(crop.y)
+        x1, y1 = x0 + float(crop.width), y0 + float(crop.height)
+        self._crop_outline_curve.setData([x0, x1, x1, x0, x0], [y0, y0, y1, y1, y0])
 
     def _update_chunk_grid(self) -> None:
         """Draw (or clear) the Export section's chunk-grid preview - lines
@@ -464,14 +547,72 @@ class ImagePanel(QWidget):
 
     # -- interaction --------------------------------------------------------
 
+    def _on_active_tool_changed(self, tool: ImageTool | None) -> None:
+        self._rotate_tool.set_active(tool is ImageTool.ROTATE)
+        self._tool_status = ""
+        self._refresh_tool_hint(tool)
+        if tool is ImageTool.ROTATE:
+            # So the arrow keys reach the tool without an extra click.
+            self._view.setFocus()
+        # Preview tools swap cropped <-> uncropped and show/hide the ROI overlay.
+        self._schedule_redraw()
+
+    def _on_tool_status(self, text: str) -> None:
+        self._tool_status = text
+        self._refresh_tool_hint(self._active_tool.active())
+
+    def _refresh_tool_hint(self, tool: ImageTool | None) -> None:
+        if tool not in _CANVAS_TOOLS:
+            # No tool, or one with no canvas behavior yet (crop, measure):
+            # nothing to explain, and clicks keep selecting ROIs.
+            self._tool_hint.setVisible(False)
+            self._tool_hint.setText("")
+            return
+        text = controls_text(tool)
+        if self._tool_status:
+            text += "\n" + self._tool_status
+        self._tool_hint.setText(text)
+        self._tool_hint.setVisible(True)
+
+    def _in_view(self, scene_pos: object) -> bool:
+        return bool(self._plot.vb.sceneBoundingRect().contains(scene_pos))
+
+    def _on_scene_moved(self, scene_pos: object) -> None:
+        # Cheap early-out: this fires on every mouse move over the scene.
+        if self._rotate_tool.first_point() is None or not self._in_view(scene_pos):
+            return
+        point = self._plot.vb.mapSceneToView(scene_pos)
+        self._rotate_tool.on_mouse_moved(float(point.x()), float(point.y()))
+
+    def eventFilter(self, watched: QObject, event: QEvent) -> bool:  # noqa: N802 - Qt naming
+        if watched is self._view and event.type() == QEvent.Type.KeyPress:
+            if self._rotate_tool.handle_key(event.key(), event.modifiers()):
+                event.accept()
+                return True
+        return super().eventFilter(watched, event)
+
     def _on_scene_clicked(self, event: object) -> None:
-        """Select the ROI under the cursor, or clear the selection when the
-        click lands on empty image. Ctrl/Shift toggles instead of replacing,
-        matching the platform convention for multi-select lists."""
+        """Route a click: to the active tool, or - with no tool active -
+        select the ROI under the cursor (clear the selection when the click
+        lands on empty image). Ctrl/Shift toggles instead of replacing,
+        matching the platform convention for multi-select lists. Only the
+        left button selects; the middle button is for panning."""
         try:
             scene_pos = event.scenePos()
         except AttributeError:  # pragma: no cover - defensive against pyqtgraph versions
             return
+        button = getattr(event, "button", lambda: Qt.MouseButton.LeftButton)()
+        if self._active_tool.active() is ImageTool.ROTATE:
+            if not self._in_view(scene_pos):
+                return
+            if button == Qt.MouseButton.LeftButton:
+                p = self._plot.vb.mapSceneToView(scene_pos)
+                self._rotate_tool.on_left_click(float(p.x()), float(p.y()))
+            elif button == Qt.MouseButton.RightButton:
+                self._rotate_tool.on_right_click()
+            return
+        if button != Qt.MouseButton.LeftButton:
+            return  # not a select gesture
         point = self._plot.vb.mapSceneToView(scene_pos)
         roi_id = self.roi_at(float(point.x()), float(point.y()))
         modifiers = getattr(event, "modifiers", lambda: Qt.KeyboardModifier.NoModifier)()

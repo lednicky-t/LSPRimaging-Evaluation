@@ -75,6 +75,8 @@ from scipy import ndimage
 
 from ..image_tools.chromatic.affine import apply_affine_to_points, invert_affine_matrix
 from ..image_tools.chromatic.warp import warp_boolean_mask_affine
+from ..image_tools.geometry.model import GeometrySettings
+from ..image_tools.geometry.transform import combined_geometry_affine_xy
 from .model import AreaRoi, RoiMask
 
 # -- arbitrary-mask geometry: crop/expand between stored and working form ---
@@ -244,6 +246,67 @@ def expand_mask_to_patch_warped(
     )
     out[local_y0:local_y1, local_x0:local_x1] = warped_local
     return out
+
+
+# -- mask geometry: re-anchor to a new rotation/flip/crop (2026-09-28) ------
+# `_mask_reach_box`/`_warp_roi_mask_into_box` were built for the *chromatic*
+# per-frame affine; a geometry (rotate/flip/crop) edit needs the identical
+# "warp a small cropped mask through a forward affine, without ever
+# materializing a full-canvas array" operation, just with a different matrix
+# (`combined_geometry_affine_xy`, old-processed -> new-processed) - so it
+# reuses both helpers rather than re-implementing the warp.
+
+
+def remap_roi_mask(
+    roi_mask: RoiMask,
+    raw_shape: tuple[int, int],
+    old_settings: GeometrySettings,
+    new_settings: GeometrySettings,
+) -> RoiMask | None:
+    """`roi_mask`, re-expressed in NEW-processed-space after a rotation/flip/
+    crop edit that changed `old_settings` to `new_settings` - the mask-
+    geometry counterpart of
+    `image_tools.geometry.transform.remap_point_for_geometry_change` for an
+    ROI's ``center_x``/``center_y``. `box` (from `_mask_reach_box`) is
+    already in NEW-processed space and is not clamped to `raw_shape` here -
+    that would be a dimension mismatch (raw-space bounds against a
+    processed-space box); like every other `RoiMask`-producing path in this
+    module, a box that ends up partially or fully outside the visible image
+    is left for the point of use to clip, not clipped at creation
+    (`_blit`'s own "clip, don't crash" convention) - so an extreme crop
+    offset alone never triggers the `None` case below; it still returns a
+    valid, correctly-positioned mask, however far outside the new crop that
+    position is (verified: 200 randomized rotation/flip/crop combinations,
+    including wildly-offset crops, never produced `None` - see the rewrite
+    build log's matching entry).
+
+    Returns `None` only when the affine-warped mask has no True pixels left
+    at all. **This is a defensive guard, not a realistic outcome of a plain
+    geometry edit**: rotation/flip here are always orthogonal maps and crop
+    only ever contributes a translation (see `combined_geometry_affine_xy`)
+    - that composition is bijective and (up to ~1px boundary rounding, not
+    zero) area-preserving, so a non-empty mask was not observed to ever warp
+    to nothing in testing (not even a single-pixel mask, across 179
+    rotation angles). Kept anyway as a cheap safety net, and reported rather
+    than silently returned as an all-False mask - which would read as "no
+    exclusion" instead of "this needs attention" - should some future change
+    to this pipeline (e.g. a scale factor) ever make it reachable; the
+    caller (`RoiToolbox.remap_all`) surfaces that to the user.
+
+    Re-crops the warped result to its own true bounding box afterward (like
+    `crop_mask`, but offset by `box`'s own origin rather than assuming
+    (0, 0)), so the mask stays a *small* array anchored near wherever it
+    moved to, never the reach box's own (deliberately padded) extent."""
+    matrix = combined_geometry_affine_xy(raw_shape, old_settings, new_settings)
+    box = _mask_reach_box(roi_mask, matrix)
+    box_x0, box_y0, box_x1, box_y1 = box
+    warped = _warp_roi_mask_into_box(roi_mask, matrix, box)
+    yy, xx = np.nonzero(warped)
+    if xx.size == 0:
+        return None
+    x0, x1 = int(xx.min()), int(xx.max()) + 1
+    y0, y1 = int(yy.min()), int(yy.max()) + 1
+    return RoiMask(x0=box_x0 + x0, y0=box_y0 + y0, mask=warped[y0:y1, x0:x1].copy())
 
 
 def _blit(out: np.ndarray, roi_mask: RoiMask, *, offset_x: int, offset_y: int) -> None:

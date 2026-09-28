@@ -43,4 +43,4 @@ class RoiComputationalChange:
     # "detection_settings" carries an empty `roi_ids`: the shared detection/
     # reduction settings changed, which invalidates every ROI's stored result
     # without any individual ROI having changed.
-    reason: str  # "moved" | "resized" | "geometry_type_changed" | "added" | "deleted" | "detected" | "detection_settings" | "session_restored"
+    reason: str  # "moved" | "resized" | "geometry_type_changed" | "added" | "deleted" | "detected" | "detection_settings" | "session_restored" | "remapped"

@@ -41,7 +41,7 @@ from .analysis.provenance import FrameNamingScheme
 from .dataset import DatasetModule
 from .gui.app_theme import LSPRI_BRIGHT_THEME, LSPRI_DARK_THEME, apply_app_theme
 from .gui.windows_titlebar import apply_windows_titlebar_color
-from .image_tools import BackgroundModule, ChromaticModule, GeometryModule, MaskModule
+from .image_tools import ActiveToolModule, BackgroundModule, ChromaticModule, GeometryModule, MaskModule
 from .panels.dock_container import PanelContainer
 from .panels.fixed_width_separator_guard import FixedWidthSeparatorGuard
 from .panels.histogram import HistogramPanel
@@ -54,6 +54,7 @@ from .panels.spectra import SpectraPanel
 from .panels.workflow import WorkflowPanel
 from .panels.workflow.collapsible_section import CollapsibleSection
 from .roi import RoiToolbox
+from .roi_geometry_sync import RoiGeometrySync
 from .selection import ReferenceFrameModule, SelectionModule
 from .storage.app_settings import AppSettings, load_app_settings, save_app_settings
 from .storage.session import SessionState, load_session
@@ -529,10 +530,16 @@ def build_main_window(
 
     dataset = DatasetModule()
     geometry = GeometryModule()
+    # Transient UI mode (which canvas tool is on) - not undoable/persisted; see its docstring.
+    active_tool = ActiveToolModule()
     mask = MaskModule()
     chromatic = ChromaticModule()
     background = BackgroundModule()
     roi_toolbox = RoiToolbox()
+    # Keeps existing ROI positions/masks aligned with the image whenever
+    # rotation/flip/crop changes - see its own module docstring for why this
+    # lives outside both `image_tools/` and `roi/`.
+    roi_geometry_sync = RoiGeometrySync(geometry, roi_toolbox, dataset)
     selection = SelectionModule()
     reference_frame = ReferenceFrameModule()
     analysis_settings = AnalysisSettingsModule()
@@ -586,12 +593,14 @@ def build_main_window(
         lambda roi_ids: analysis_engine.set_selected_rois(tuple(sorted(roi_ids)))
     )
 
-    image_panel = ImagePanel(dataset, geometry, mask, chromatic, background, roi_toolbox, selection)
+    image_panel = ImagePanel(dataset, geometry, mask, chromatic, background, roi_toolbox, selection, active_tool)
     histogram_panel = HistogramPanel(image_panel)
     roi_table_panel = RoiTablePanel(roi_toolbox)
     spectra_panel = SpectraPanel(analysis_engine, roi_toolbox, selection)
     sensorgram_panel = SensorgramPanel(analysis_engine, roi_toolbox, dataset, selection)
-    workflow = WorkflowPanel(dataset, background, mask, selection, reference_frame, session_coordinator)
+    workflow = WorkflowPanel(
+        dataset, geometry, active_tool, background, mask, selection, reference_frame, session_coordinator
+    )
 
     window = QMainWindow()
     window.setWindowTitle(rewrite_version_string())
@@ -621,6 +630,7 @@ def build_main_window(
     # the reminder above is permanent, on the right, so neither covers the
     # other.
     workflow.status_requested.connect(status_bar.showMessage)
+    roi_geometry_sync.status_changed.connect(status_bar.showMessage)
 
     # Each panel dock-wrapped via the shared PanelContainer (undock/float/
     # maximize/close - see panels/dock_container.py), matching how the

@@ -91,7 +91,9 @@ from __future__ import annotations
 
 import copy
 import itertools
-from dataclasses import replace
+import logging
+from collections.abc import Callable
+from dataclasses import dataclass, replace
 
 import numpy as np
 from PyQt6.QtCore import QObject, pyqtSignal
@@ -100,7 +102,39 @@ from ..change_events import RoiComputationalChange, RoiCosmeticChange
 from ..diagnostics import instrumented
 from ..image_tools.chromatic.affine import apply_affine_to_points
 from ..undo import FunctionCommand, undo_manager
-from .model import AreaRoi, AreaRoiDetectionSettings, AreaRoiGroup, RoiArrayGroup
+from .model import AreaRoi, AreaRoiDetectionSettings, AreaRoiGroup, RoiArrayGroup, RoiMask
+
+logger = logging.getLogger(__name__)
+
+_CIRCLE_GEOMETRY_TYPES = ("circle", "annulus")
+"""Geometry types whose only remapped field is the ROI center - radius/
+diameter fields are invariant under this app's transform pipeline (rotate,
+flip, crop - never a scale change), so there is nothing else to do for them."""
+
+
+@dataclass(frozen=True)
+class RoiRemapReport:
+    """What one `RoiToolbox.remap_all` call actually did - enough for a
+    caller to build a status message without re-deriving it from
+    `RoiComputationalChange`."""
+
+    remapped_roi_ids: tuple[int, ...]
+    """Every ROI whose center (and, for a mask-geometry side, raster) moved."""
+    mask_shapes_remapped: int
+    """How many sample/reference sides were mask-geometry and were warped."""
+    mask_shapes_lost: tuple[int, ...]
+    """ROI ids whose mask-geometry side warped to zero area - expected to be
+    empty in practice (see `roi.rasterize.remap_roi_mask`'s docstring) - and
+    was therefore left at its old position rather than replaced with an
+    empty mask; see `remap_all`'s docstring."""
+    unsupported_shapes_skipped: tuple[int, ...]
+    """ROI ids with a geometry type this pipeline doesn't remap yet
+    (rectangle/polygon - not a shape any ROI can have today, see
+    `_remap_roi_shape`'s docstring) - left entirely at their old position."""
+
+    @property
+    def needs_attention(self) -> bool:
+        return bool(self.mask_shapes_lost or self.unsupported_shapes_skipped)
 
 
 def _highest_group_number(groups: dict[str, AreaRoiGroup]) -> int:
@@ -118,6 +152,46 @@ def _highest_group_number(groups: dict[str, AreaRoiGroup]) -> int:
         if suffix.isdigit():
             highest = max(highest, int(suffix))
     return highest
+
+
+def _remap_roi_shape(
+    roi: AreaRoi,
+    side: str,
+    remap_mask: Callable[[RoiMask], RoiMask | None],
+) -> tuple[RoiMask | None, bool, bool]:
+    """One ROI's one side (`"sample"` or `"reference"`) through
+    `RoiToolbox.remap_all`'s per-geometry-type dispatch. Returns
+    `(new_mask_value, lost, unsupported)`: `new_mask_value` is what
+    `{side}_mask` should become (unchanged from its current value unless the
+    geometry type is `"mask"` and the warp succeeded); `lost`/`unsupported`
+    are never both true, and one flag is on only when `new_mask_value` is
+    the *old*, deliberately-unchanged value - see `remap_all`'s docstring
+    for what each case means.
+
+    This is the one place a new ROI shape's remap sub-pipeline gets added -
+    a new `elif geometry_type == "rectangle": return _remap_rectangle(...)`
+    branch (plus, separately, the ROI's own orientation-angle field, since a
+    rectangle/polygon's rotation needs remapping the way a circle's radius
+    never does) - not a change to `remap_all` itself."""
+    geometry_type = getattr(roi, f"{side}_geometry_type")
+    current_mask = getattr(roi, f"{side}_mask")
+    if geometry_type in _CIRCLE_GEOMETRY_TYPES:
+        return current_mask, False, False
+    if geometry_type == "mask":
+        if current_mask is None:  # inconsistent state (type says mask, field is empty) - nothing to warp
+            return None, False, False
+        remapped = remap_mask(current_mask)
+        if remapped is None:
+            logger.warning(
+                "ROI %d's %s mask warped to zero area on a geometry edit - left at its old position.",
+                roi.area_roi_id, side,
+            )
+            return current_mask, True, False
+        return remapped, False, False
+    # "rectangle"/"polygon" (roi_system_roadmap.md) or any other geometry
+    # type this pipeline doesn't yet know how to remap - left untouched
+    # rather than guessed at.
+    return current_mask, False, True
 
 
 class RoiToolbox(QObject):
@@ -476,6 +550,127 @@ class RoiToolbox(QObject):
         apply()
         undo_manager.push(FunctionCommand("Detect ROIs", undo_fn=revert, redo_fn=apply))
         return list(new_rois.keys())
+
+    @instrumented("RoiToolbox.remap_all")
+    def remap_all(
+        self,
+        remap_point: Callable[[float, float], tuple[float, float]],
+        remap_mask: Callable[[RoiMask], RoiMask | None],
+    ) -> RoiRemapReport:
+        """Move every ROI's stored position - and, for a freeform-mask-
+        geometry side, its raster - to match a rotation/flip/crop edit that
+        just happened. Closes `docs/image_tools_coordinate_spaces.md`'s
+        "known gap" (ROI positions silently going stale after a geometry
+        edit) instead of leaving it for the maintainer to work around by
+        hand.
+
+        Called by `RoiGeometrySync` (app-level wiring) whenever a geometry
+        edit actually changes rotation/flip/crop - never by this module or
+        `GeometryModule` reaching into the other directly. `remap_point`/
+        `remap_mask` are supplied ready-made by the caller, the same one-
+        directional convention `display_position()`'s `affine_matrix`
+        parameter already uses for Chromatic: this module has no import of
+        `image_tools.geometry` and does not need to know a raw image shape
+        or a before/after `GeometrySettings` exists.
+
+        **Dispatches per ROI side by geometry type**
+        (`sample_geometry_type`/`reference_geometry_type`) via
+        `_remap_roi_shape` - not a circle-only special case with everything
+        else bolted on:
+        - `"circle"`/`"annulus"`: only the center moves (radius/diameter
+          fields are invariant - this pipeline never scales).
+        - `"mask"`: the stored raster is re-warped via `remap_mask`
+          (`roi.rasterize.remap_roi_mask`). In the near-unreachable case that
+          warping leaves no area at all (see that function's docstring for
+          why this pipeline essentially never does), that one side is left
+          at its **old** mask and position rather than silently replaced
+          with an empty one, and reported in `mask_shapes_lost` - an empty
+          mask would read as "nothing excluded here", not "this needs
+          attention".
+        - `"rectangle"`/`"polygon"`: not a shape any ROI can have yet (no
+          such ROI editor exists in the rewrite - `roi_system_roadmap.md`),
+          so there is nothing to remap; reported in
+          `unsupported_shapes_skipped` so this is visible now rather than a
+          silent gap discovered only once those shapes exist.
+
+        Every ROI's center is also checked against `per_wavelength` - a
+        manual per-wavelength position override is stored in the exact same
+        processed-space convention as `center_x`/`center_y` (see that
+        field's own docstring) and would otherwise go stale exactly like the
+        center itself.
+
+        One undo entry for the whole batch (`detect_rois`'s pattern): a
+        rotate/flip/crop edit and the ROI shift it causes are one user
+        gesture, not two - the caller (`RoiGeometrySync`, wired inside the
+        same `undo_manager.begin_batch()`/`end_batch()` window as the
+        geometry edit itself) relies on this being exactly one push."""
+        old_positions: dict[int, tuple[float, float, dict | None, RoiMask | None, RoiMask | None]] = {}
+        new_positions: dict[int, tuple[float, float, dict | None, RoiMask | None, RoiMask | None]] = {}
+        mask_shapes_remapped = 0
+        mask_shapes_lost: list[int] = []
+        unsupported_shapes_skipped: list[int] = []
+
+        for roi_id, roi in self._rois.items():
+            old_positions[roi_id] = (
+                roi.center_x,
+                roi.center_y,
+                None if roi.per_wavelength is None else dict(roi.per_wavelength),
+                roi.sample_mask,
+                roi.reference_mask,
+            )
+            new_center = remap_point(roi.center_x, roi.center_y)
+            new_per_wavelength = (
+                None
+                if roi.per_wavelength is None
+                else {key: remap_point(*value) for key, value in roi.per_wavelength.items()}
+            )
+            new_sample_mask, sample_lost, sample_unsupported = _remap_roi_shape(
+                roi, "sample", remap_mask
+            )
+            new_reference_mask, reference_lost, reference_unsupported = _remap_roi_shape(
+                roi, "reference", remap_mask
+            )
+            if sample_lost or reference_lost:
+                mask_shapes_lost.append(roi_id)
+            if sample_unsupported or reference_unsupported:
+                unsupported_shapes_skipped.append(roi_id)
+            mask_shapes_remapped += (
+                roi.sample_geometry_type == "mask" and not sample_lost
+            ) + (roi.reference_geometry_type == "mask" and not reference_lost)
+            new_positions[roi_id] = (
+                new_center[0], new_center[1], new_per_wavelength, new_sample_mask, new_reference_mask,
+            )
+
+        if not old_positions:
+            return RoiRemapReport((), 0, (), ())
+
+        def _write(values: dict[int, tuple[float, float, dict | None, RoiMask | None, RoiMask | None]]) -> None:
+            for roi_id, (x, y, per_wavelength, sample_mask, reference_mask) in values.items():
+                roi = self._rois[roi_id]
+                roi.center_x, roi.center_y = x, y
+                roi.per_wavelength = per_wavelength
+                roi.sample_mask = sample_mask
+                roi.reference_mask = reference_mask
+
+        affected_ids = tuple(sorted(old_positions))
+
+        def apply() -> None:
+            _write(new_positions)
+            self.geometry_changed.emit(RoiComputationalChange(roi_ids=affected_ids, reason="remapped"))
+
+        def revert() -> None:
+            _write(old_positions)
+            self.geometry_changed.emit(RoiComputationalChange(roi_ids=affected_ids, reason="remapped"))
+
+        apply()
+        label = "Reposition ROI" if len(affected_ids) == 1 else f"Reposition {len(affected_ids)} ROIs"
+        undo_manager.push(FunctionCommand(label, undo_fn=revert, redo_fn=apply))
+        return RoiRemapReport(
+            remapped_roi_ids=affected_ids,
+            mask_shapes_remapped=mask_shapes_remapped,
+            mask_shapes_lost=tuple(mask_shapes_lost),
+            unsupported_shapes_skipped=tuple(unsupported_shapes_skipped),
+        )
 
     # -- command API (§7): groups -----------------------------------------
 

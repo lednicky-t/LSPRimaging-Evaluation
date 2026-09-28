@@ -15,9 +15,10 @@ during the 2026-09-20 ``preprocess.py`` port - see the rewrite build log's
 "preprocess.py scope-check" entry for the field-by-field reasoning.
 """
 
+from .active_tool import ActiveToolModule, ImageTool
 from .background import BackgroundModule
 from .chromatic import ChromaticModule
 from .geometry import GeometryModule
 from .mask import MaskModule
 
-__all__ = ["GeometryModule", "MaskModule", "ChromaticModule", "BackgroundModule"]
+__all__ = ["GeometryModule", "MaskModule", "ChromaticModule", "BackgroundModule", "ActiveToolModule", "ImageTool"]

@@ -56,7 +56,7 @@ from PyQt6.QtWidgets import QFrame, QLabel, QScrollArea, QVBoxLayout, QWidget
 from lspr_ui import get_active_theme
 
 from ...dataset import DatasetModule
-from ...image_tools import BackgroundModule, MaskModule
+from ...image_tools import ActiveToolModule, BackgroundModule, GeometryModule, MaskModule
 from ...selection import ReferenceFrameModule, SelectionModule
 from ...storage.session_coordinator import SessionCoordinator
 from .background_removal import BackgroundRemovalSection
@@ -68,6 +68,7 @@ from .dataset_summary import DatasetSummarySection
 from .mask_settings import MaskSettingsSection
 from .reference_frame_row import ReferenceFrameRow
 from .session_picker_row import SessionPickerRow
+from .transforms_settings import TransformsSection
 
 logger = logging.getLogger(__name__)
 
@@ -189,9 +190,21 @@ def _build_dataset_section(
     )
 
 
-def _build_image_tools_section(parent: QWidget, background: BackgroundModule, mask: MaskModule) -> CollapsibleSection:
+def _build_image_tools_section(
+    parent: QWidget,
+    geometry: GeometryModule,
+    active_tool: ActiveToolModule,
+    background: BackgroundModule,
+    mask: MaskModule,
+) -> CollapsibleSection:
     """Ported from the source's ``image_tools_section`` + its nested
     Transforms/Mask/Chromatic correction/Background removal children.
+
+    **Transforms is partly real** (2026-09-28, ``transforms_settings.py``):
+    the rotation / crop / flip icon row only - measure controls are not
+    built yet. The rotate tool is wired to the Image panel through
+    ``ActiveToolModule``; the crop-tool button has no canvas behavior yet
+    (see that file).
 
     **Background removal and Mask are real** (2026-09-24,
     ``background_removal.py``/``mask_settings.py``). Background removal
@@ -236,7 +249,7 @@ def _build_image_tools_section(parent: QWidget, background: BackgroundModule, ma
     children = _nested_children(
         parent,
         CollapsibleSection(
-            "Transforms", _section_placeholder("Transforms"), expanded=True, title_color=_nested_title_color(), parent=parent
+            "Transforms", TransformsSection(geometry, active_tool, parent), expanded=True, title_color=_nested_title_color(), parent=parent
         ),
         CollapsibleSection(
             "Mask", MaskSettingsSection(mask, parent), expanded=True, title_color=_nested_title_color(), parent=parent
@@ -322,6 +335,8 @@ class WorkflowPanel(QWidget):
     def __init__(
         self,
         dataset: DatasetModule,
+        geometry: GeometryModule,
+        active_tool: ActiveToolModule,
         background: BackgroundModule,
         mask: MaskModule,
         selection: SelectionModule,
@@ -336,7 +351,7 @@ class WorkflowPanel(QWidget):
                 WorkflowStage.DATASET,
                 _build_dataset_section(self, dataset, selection, reference_frame, session_coordinator),
             ),
-            (WorkflowStage.IMAGE_TOOLS, _build_image_tools_section(self, background, mask)),
+            (WorkflowStage.IMAGE_TOOLS, _build_image_tools_section(self, geometry, active_tool, background, mask)),
             (WorkflowStage.ROI_SELECTION, _build_roi_selection_section(self)),
             (WorkflowStage.ANALYSIS, _build_analysis_section(self)),
             (WorkflowStage.OUTPUTS, _build_outputs_section(self)),
