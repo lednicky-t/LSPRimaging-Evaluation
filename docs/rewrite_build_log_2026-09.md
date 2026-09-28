@@ -4635,3 +4635,50 @@ has the dispatch branch ready, raises until one is built); a rectangle/
 polygon's future orientation-angle field will need the same rotation-delta
 treatment the point/mask remap already gets, noted in `_remap_roi_shape`'s
 docstring for whoever builds that shape.
+
+## 2026-09-28 - Workflow accordion restores the last open stage
+
+`WorkflowPanel` (`panels/workflow/panel.py`) always opened with the Dataset
+stage expanded and the other four collapsed, no matter what the user had
+open when they last quit - each top-level section's `expanded=` was a
+literal baked into its `_build_*_section()` builder, and nothing read or
+wrote which one was current. Found while investigating whether Workflow
+accordion state was restored at all (it wasn't - see the previous session's
+answer in this doc's git history for the full trace through
+`CollapsibleSection`, `QMainWindow.saveState()`'s dock-only scope, and
+`storage/app_settings.py`).
+
+Fixed the same way `storage/app_settings.py`'s own docstring promised:
+"every future app-level setting is one more dataclass field, not a new
+mechanism."
+
+- `AppSettings.active_workflow_stage: str | None` - `WorkflowStage.name`
+  (e.g. `"IMAGE_TOOLS"`), not the enum itself, so the settings file stays
+  Qt/app-free. `None` (missing field, first-ever launch, or an old
+  settings file predating this field) means "no saved stage" and falls
+  back to the existing hardcoded default (Dataset open).
+- `WorkflowPanel.__init__` gained `initial_stage: WorkflowStage | None`.
+  When given, it directly `set_expanded()`s each section to match *before*
+  the `expanded_changed` -> `_on_section_toggled` signals are wired up a
+  few lines later - so seeding the initial state can't itself fire a
+  spurious `stage_changed`/re-persist, and doesn't depend on the
+  single-open-accordion cascade being reentrant-safe during construction.
+- `app_rewrite.py` decodes `settings.active_workflow_stage` via
+  `WorkflowStage[name]`, catching `KeyError` (an unrecognised name -
+  hand-edited JSON, or a build with different stage names) back to
+  `None`/the old default rather than crashing startup, and connects
+  `workflow.stage_changed` to `_persist(active_workflow_stage=stage.name)`
+  - immediate-persist-on-change, same pattern as `theme`/
+  `auto_apply_preset_on_stage_change`, since switching stages is a
+  deliberate occasional click, not a continuous drag like window geometry
+  (which stays batched to `aboutToQuit`).
+
+Verified: `tests/integration/test_lspri_workflow_panel_stage_restore.py`
+(new - no saved stage falls back to Dataset; a saved stage opens instead
+and the accordion still has exactly one section open; an unrecognised
+saved stage name falls back silently instead of raising; switching stages
+calls the settings-changed callback with the new stage's name) +
+`test_lspri_rewrite_app_settings.py`'s round-trip test extended to cover
+the new field. 14/14 pass across both files plus the pre-existing width-
+budget test (unaffected: it builds with default `AppSettings()`, i.e.
+`initial_stage=None`, so behaves exactly as before this change).

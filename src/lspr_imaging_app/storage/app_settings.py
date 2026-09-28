@@ -68,6 +68,13 @@ class AppSettings:
     active_layout_preset: str | None = None
     layout_presets: dict[str, str] = field(default_factory=dict)
     auto_apply_preset_on_stage_change: bool = False
+    # `WorkflowStage.name` (e.g. "IMAGE_TOOLS") of the top-level Workflow
+    # accordion section left open at last quit - see
+    # `panels/workflow/panel.py:WorkflowPanel`. A plain string, not the enum
+    # itself, so this file stays Qt/app-free; `None` means "no saved stage
+    # yet", which the reader falls back to each section's own hardcoded
+    # default for (currently: Dataset starts open).
+    active_workflow_stage: str | None = None
 
 
 def _decode(payload: dict) -> AppSettings:

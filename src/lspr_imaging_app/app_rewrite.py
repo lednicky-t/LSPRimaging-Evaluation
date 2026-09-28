@@ -51,7 +51,7 @@ from .panels.panel_visibility import ensure_floating_panels_on_screen, wire_pane
 from .panels.roi_table import RoiTablePanel
 from .panels.sensorgram import SensorgramPanel
 from .panels.spectra import SpectraPanel
-from .panels.workflow import WorkflowPanel
+from .panels.workflow import WorkflowPanel, WorkflowStage
 from .panels.workflow.collapsible_section import CollapsibleSection
 from .roi import RoiToolbox
 from .roi_geometry_sync import RoiGeometrySync
@@ -598,9 +598,34 @@ def build_main_window(
     roi_table_panel = RoiTablePanel(roi_toolbox)
     spectra_panel = SpectraPanel(analysis_engine, roi_toolbox, selection)
     sensorgram_panel = SensorgramPanel(analysis_engine, roi_toolbox, dataset, selection)
+    # `WorkflowStage[...]` raises KeyError/TypeError for anything that isn't
+    # a live member name - a settings file from a build with different stage
+    # names, hand-edited JSON, or simply no saved value yet (`None`) all fall
+    # back the same way: `initial_stage=None`, which makes WorkflowPanel use
+    # its own hardcoded default (Dataset open) exactly as before this field
+    # existed.
+    try:
+        initial_stage: WorkflowStage | None = (
+            WorkflowStage[settings.active_workflow_stage] if settings.active_workflow_stage else None
+        )
+    except KeyError:
+        initial_stage = None
     workflow = WorkflowPanel(
-        dataset, geometry, active_tool, background, mask, selection, reference_frame, session_coordinator
+        dataset,
+        geometry,
+        active_tool,
+        background,
+        mask,
+        selection,
+        reference_frame,
+        session_coordinator,
+        initial_stage=initial_stage,
     )
+    # Immediate persist-on-change, same pattern as theme/auto_apply above -
+    # switching the open stage is a deliberate, occasional click, not a
+    # continuous drag (unlike window geometry, which is batched to quit
+    # instead - see `_persist_on_quit` below).
+    workflow.stage_changed.connect(lambda stage: _persist(active_workflow_stage=stage.name))
 
     window = QMainWindow()
     window.setWindowTitle(rewrite_version_string())

@@ -179,8 +179,10 @@ def _build_dataset_section(
     dataset_inner_layout.addWidget(reference_frame_row)
     dataset_inner_layout.addWidget(children)
 
-    # Starts expanded (the accordion's initial active stage) - see
-    # WorkflowPanel.__init__.
+    # Starts expanded - the accordion's fallback initial active stage when
+    # there's no saved `active_workflow_stage` to restore yet (first-ever
+    # launch, or a settings file predating that field). See
+    # WorkflowPanel.__init__'s `initial_stage` handling.
     return CollapsibleSection(
         "Dataset:",
         dataset_inner,
@@ -342,6 +344,7 @@ class WorkflowPanel(QWidget):
         selection: SelectionModule,
         reference_frame: ReferenceFrameModule,
         session_coordinator: SessionCoordinator,
+        initial_stage: WorkflowStage | None = None,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
@@ -356,6 +359,21 @@ class WorkflowPanel(QWidget):
             (WorkflowStage.ANALYSIS, _build_analysis_section(self)),
             (WorkflowStage.OUTPUTS, _build_outputs_section(self)),
         ]
+
+        if initial_stage is not None:
+            # Restores the stage the user last had open (2026-09-28 settings
+            # layer, `AppSettings.active_workflow_stage`) over each section's
+            # own hardcoded default above. Set directly, not via
+            # `_on_section_toggled`'s cascade, because the `expanded_changed`
+            # -> `_on_section_toggled` wiring below hasn't happened yet at
+            # this point in `__init__` - so this seeding can't itself emit a
+            # spurious `stage_changed` (nothing is connected to it yet) and
+            # doesn't need the cascade to be reentrant-safe during
+            # construction. Each `CollapsibleSection` still updates its own
+            # chevron/visibility immediately, since `set_expanded` always
+            # does that regardless of what's listening on the outside.
+            for stage, section in self._sections:
+                section.set_expanded(stage is initial_stage)
 
         page = QWidget(self)
         page_layout = QVBoxLayout(page)

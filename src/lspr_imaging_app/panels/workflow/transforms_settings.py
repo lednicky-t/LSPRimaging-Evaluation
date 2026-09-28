@@ -75,15 +75,17 @@ def _rotate_icon(color: str) -> QIcon:
 
 
 def _slashed_icon(name: str, color: str) -> QIcon:
-    """A vendored tabler glyph with a top-left -> bottom-right slash added
-    (the usual "off/none" convention). Built by inserting one extra `<path>`
-    into the vendored SVG (rather than vendoring a second icon file) so the
-    slashed and plain icons can never drift apart in stroke width or
-    geometry."""
+    """A vendored tabler glyph with a top-right -> bottom-left slash added
+    (the maintainer's preferred reset-icon convention - tabler's own
+    `*-off` icons use the opposite diagonal, top-left -> bottom-right, but
+    that reads worse against these two particular glyphs). Built by
+    inserting one extra `<path>` into the vendored SVG (rather than
+    vendoring a second icon file) so the slashed and plain icons can never
+    drift apart in stroke width or geometry."""
     svg = tabler_icon_svg(name, color=color, stroke_width=_STROKE_WIDTH)
     if not svg:
         return QIcon()
-    svg = svg.replace("</svg>", '  <path d="M3 3l18 18" />\n</svg>')
+    svg = svg.replace("</svg>", '  <path d="M21 3l-18 18" />\n</svg>')
     renderer = QSvgRenderer(QByteArray(svg.encode("utf-8")))
     if not renderer.isValid():
         return QIcon()
