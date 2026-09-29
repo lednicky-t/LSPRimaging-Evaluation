@@ -45,7 +45,7 @@ _TOOL_CONTROLS: dict[ImageTool | None, tuple[Control, ...]] = {
     None: (Control("Left-click", "select the ROI under the cursor (Ctrl/Shift adds to the selection)"),),
     ImageTool.ROTATE: (
         Control("Left-click", "place point 1, then point 2 - the image rotates so the two points are level"),
-        Control("Right-click", "menu with Cancel rotation (Esc also cancels point 1 directly)"),
+        Control("Right-click", "menu with Cancel rotation - exits Rotate mode (Esc only cancels point 1)"),
         Control("Arrow keys", "rotate by 0.1 deg (Ctrl 1 deg, Shift 5 deg)"),
     ),
     ImageTool.CROP: (
@@ -54,7 +54,8 @@ _TOOL_CONTROLS: dict[ImageTool | None, tuple[Control, ...]] = {
         Control("Left-drag (inside)", "move the rectangle"),
         Control("x: / y: fields", "type an exact width/height"),
         Control("checkmark", "apply the crop"),
-        Control("Right-click", "menu with Apply crop / Cancel crop"),
+        Control("Right-click", "menu with Apply crop / Cancel crop - Cancel exits Crop mode"),
+        Control("Esc", "discard an unapplied resize/move, stay in Crop mode"),
     ),
 }
 

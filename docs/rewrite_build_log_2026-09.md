@@ -4843,3 +4843,188 @@ roi_geometry_sync.py` (26/26) + `test_lspri_rewrite_analysis_engine.py`/
 `test_lspri_workflow_panel_width_budget.py`/`test_lspri_workflow_panel_
 stage_restore.py` (60/60) - every test that touches `panels/image/` or
 `app_rewrite.py`. 163/163 total. ruff/pyflakes clean.
+
+## 2026-09-29 (same day, continued): size-controls polish, two real bugs from manual testing
+
+Maintainer tried the crop tool in the actual app and found three things
+the tests above didn't catch (all in `panels/image/`, GUI feel/interaction
+issues no automated test exercises the way a person clicking through it
+does):
+
+**Size-controls polish.** `crop_size_controls.py`'s "x:"/"y:" fields used
+`QSpinBox`'s own default `sizeHint()` (no explicit width) - much wider
+than their 3-4 digit content needs, which read as large gaps between the
+two fields and the apply button. Fixed width now, computed from
+`QFontMetrics` for `"x: 9999"` plus room for the spin arrows (works out to
+~65px per field instead of QSpinBox's default). Layout spacing tightened
+2px. Also repositioned: was anchored to the rectangle's bottom-*left*
+corner; now bottom-*right*, so the apply button sits flush against the
+crop's own right edge with the fields packed to its left, not floating
+under the middle of nothing.
+
+**Bug: apply didn't visibly do anything.** Working as built, but not as
+intended - `CropTool.apply()` commits to `GeometryModule` correctly, but
+Crop stays in `_PREVIEW_TOOLS`, which unconditionally renders the
+*uncropped* frame while the tool is active - so applying never produced
+any visible change until the tool was switched off some other way. Fixed
+one layer up, in `panel.py`'s `_on_crop_apply_requested`: a *successful*
+apply now also switches Crop off (`ActiveToolModule.set_active(CROP,
+False)`), which is what actually makes the panel render the cropped
+result. `CropTool.apply()` itself is unchanged - still just commits,
+still doesn't touch its own active state - the "and then exit" policy
+lives at the panel level on purpose (crop_tool.py's docstring was updated
+to explain the split, since `CropToolTest` still exercises `CropTool` in
+isolation, where a second resize-and-apply pass without ever deactivating
+is exactly what it's testing). A *failed* apply (Image Tools switched
+off) leaves the session running - nothing changed, so nothing to exit.
+
+**Bug: the right-click menu "was visible but completely dead"** - no
+hover highlight, no click response, as the maintainer first reported it.
+**First diagnosis was wrong.** Suspected a Qt/Windows reentrancy issue
+(`QMenu.exec()` called synchronously from inside pyqtgraph's own mouse-
+grab bookkeeping) and "fixed" it by deferring the menu via `QTimer.
+singleShot(0, ...)` - shipped, and the maintainer confirmed it did not
+help, still dead. Asked the maintainer three diagnostic questions (does
+clicking elsewhere dismiss it; does Rotate's menu have the same problem;
+multi-monitor/mixed-DPI setup) rather than guess a second time blind -
+the answer ("the menu is not active when I do nothing with [a] previous
+crop, but... it also can be working, both applied and cancel" + "Rotate's
+menu is also broken") pointed at the real cause immediately: **every
+right-click with nothing pending opened a menu with every one of its
+items disabled**. Both menus are single-purpose (Rotate: one action;
+Crop: two, sharing one enabled condition) - unlike an Edit menu where
+Undo can be grayed out while Cut/Paste stay clickable, disabling the
+tool's one shared condition disables the *entire* menu, and a menu with
+nothing clickable in it looks exactly like "broken", not "informative
+like a standard Undo item" (which was the original, wrong reasoning for
+building it that way). Not a Qt bug at all - reverted the `QTimer.
+singleShot` deferral entirely (back to a plain, synchronous, return-value
+`show_tool_context_menu`) and fixed the actual cause instead:
+`_show_rotate_context_menu`/`_show_crop_context_menu` now check first and
+open no menu at all when nothing would be enabled, rather than opening
+one that has nothing to click.
+
+Verified: `test_lspri_rewrite_crop_tool.py` (47/47 - the size-controls
+polish tests plus apply-exits-and-renders-cropped/failed-apply-stays-open
+from this entry's earlier pass, plus the right-click tests rewritten to
+assert *no menu opens* with nothing pending instead of an all-disabled
+one) + `test_lspri_rewrite_rotate_tool.py` (34/34, same rewrite for its
+right-click test) + `test_lspri_rewrite_image_panel.py`/`test_lspri_
+rewrite_roi_geometry_sync.py` (22/22, unaffected). 103/103 total.
+ruff/pyflakes clean.
+
+## 2026-09-29 (same day, continued again): "Cancel" always means "exit the tool"
+
+The "no menu at all with nothing pending" fix above was still not what
+the maintainer wanted: "when there is nothing to do, there still should
+be cancel option, so the tool using is canceled (same like clicking on
+tool icon in workflow)". Reworked once more, in `panel.py`'s
+`_show_rotate_context_menu`/`_show_crop_context_menu`:
+
+- **"Cancel" no longer means "drop the in-progress edit, stay in the
+  tool"** - it means "exit the tool entirely", the same as clicking the
+  Workflow panel's Rotate/Crop button again
+  (`ActiveToolModule.set_active(tool, False)`). Deactivating already drops
+  whatever was pending as a side effect (`RotateLineTool.set_active`'s
+  `_clear_first_point()`, `CropTool.set_active`'s `self._rect = None`), so
+  the handler is just the one `set_active(..., False)` call - no separate
+  `cancel()` call needed first.
+- **"Cancel" is now unconditionally enabled**, for both tools - always
+  exiting the tool is always a valid thing to do. This is also what
+  finally, properly fixes the "menu has nothing clickable in it" problem
+  the previous two entries were chasing: with "Cancel" always enabled,
+  there is always at least one clickable item, so the earlier "just don't
+  open the menu when nothing is enabled" workaround is gone too - the menu
+  always opens now. Crop's "Apply crop" is still conditionally disabled
+  (`CropTool.has_pending_changes`) - it is no longer the *only* item that
+  can be, so it can't strand the whole menu.
+- `context_menu.py`'s module docstring updated to describe *why* "Cancel"
+  carries the "always enabled" burden rather than restating the same
+  general "don't open an all-disabled menu" rule a third time.
+
+Every right-click test in both tool test files needed rewriting again -
+not just re-verifying "no menu opens", but the *opposite* claim ("Cancel"
+is enabled and, when chosen, exits the tool) - plus new tests for
+canceling with a pending edit (discards it) and canceling with nothing
+pending (exits cleanly, `GeometryModule` untouched either way).
+
+Verified: `test_lspri_rewrite_crop_tool.py` (49/49) + `test_lspri_rewrite_
+rotate_tool.py` (34/34) + `test_lspri_rewrite_image_panel.py`/`test_lspri_
+rewrite_roi_geometry_sync.py` (22/22, unaffected). 105/105 total.
+ruff/pyflakes clean.
+
+## 2026-09-29 (same day, continued yet again): apply button's cursor
+
+Maintainer asked whether the cursor changes hovering the crop tool's
+apply (checkmark) button - it didn't. Root cause: `CropSizeControls`
+(`crop_size_controls.py`) is a real `QWidget` parented to the image
+view's viewport, and `panel.py`'s `_on_scene_moved` continuously sets
+*that viewport's* cursor to a resize/move shape as the mouse crosses the
+crop rectangle's edges (`_CURSOR_FOR_CROP_HANDLE`). A widget with no
+cursor of its own shows its parent's - so the whole floating size-
+controls widget, apply button included, silently inherited whatever
+resize cursor the viewport last had, with no explicit override of its
+own to block that. Fixed with two `setCursor()` calls: `ArrowCursor` on
+the `CropSizeControls` widget itself (blocks the inheritance for the
+whole floating widget - the spin boxes get a sane default too, not just
+the button) and `PointingHandCursor` on the apply button specifically,
+overriding that again since it is the one thing in the widget that is
+actually clickable.
+
+Verified: `test_lspri_rewrite_crop_tool.py` (50/50, one new test asserting
+both cursors directly) + `test_lspri_rewrite_rotate_tool.py` (34/34,
+unaffected) + `test_lspri_rewrite_image_panel.py`/`test_lspri_rewrite_
+roi_geometry_sync.py` (22/22, unaffected). 106/106 total. ruff/pyflakes
+clean.
+
+## 2026-09-29 (same day, continued once more): cleanup pass over the whole Rotate/Crop/context-menu stretch
+
+Maintainer asked for a manual review of everything built across this
+session's several rounds (rotate right-click menu, crop tool, size
+controls, context-menu deferral chased and reverted, "Cancel always
+enabled" rework) before committing. Read every touched file fresh looking
+for leftovers from the back-and-forth. Two real findings, both fixed with
+tests, not just prose:
+
+- **`RotateLineTool`'s live status message was stale.** "Point 1 set -
+  click point 2 (right-click or Esc cancels)" dated from *before* right-
+  click became a menu (an earlier session) and was never updated when it
+  did - it told the user right-click "cancels", when by then it opened a
+  menu whose "Cancel rotation" choice exits Rotate mode entirely, a
+  materially different action from Esc's in-place point-1 cancel. Now:
+  "...(right-click for options, Esc cancels point 1)". The module
+  docstring's own description of the split had the same staleness (still
+  said "this class only exposes `cancel()` for [the menu] to call", which
+  stopped being true the moment "Cancel" started exiting the tool instead)
+  - corrected alongside it.
+- **`CropTool.cancel()` had silently become unreachable in the real app.**
+  Once "Cancel crop" started exiting the tool directly
+  (`ActiveToolModule.set_active(CROP, False)`) instead of calling
+  `cancel()` first, nothing in `panel.py` called `cancel()` at all any
+  more - unlike Rotate, which still reaches its own `cancel()` via Esc.
+  Grepped to confirm: zero callers outside `CropToolTest`'s direct unit
+  tests. Rather than delete a working, tested, genuinely useful method
+  (discard an unapplied resize/move *without* leaving Crop mode - a real,
+  different gesture from "I'm done, get me out"), gave Crop the same Esc
+  path Rotate already has: `CropTool.handle_key(key)` (mirrors `RotateLine
+  Tool.handle_key`'s shape, minus the `modifiers` parameter - Crop has no
+  arrow-key behavior to gate on Shift/Ctrl) wired into `panel.py`'s
+  `eventFilter` right after Rotate's own call, and a `Control("Esc", ...)`
+  row added to Crop's `image_controls.py` entry so the info icon's tooltip
+  says so.
+
+Everything else read clean on a fresh pass: no dead imports, no leftover
+`QTimer`/callback-API traces from the reverted deferral (confirmed by
+grep, not just memory), no duplicate or superseded tests sitting next to
+their replacements in either test file's `def test_` listing.
+
+Verified: `test_lspri_rewrite_crop_tool.py` (54/54 - three new for Esc:
+discards-but-stays-active, not-consumed-with-nothing-pending, and one
+through a real `QKeyEvent`/`eventFilter` round trip mirroring Rotate's
+own such test) + `test_lspri_rewrite_rotate_tool.py` (34/34, comment-only
+changes) + `test_lspri_rewrite_image_panel.py`/`test_lspri_rewrite_roi_
+geometry_sync.py` (22/22) + `test_lspri_rewrite_analysis_engine.py`/
+`test_lspri_rewrite_session.py`/`test_lspri_rewrite_session_autosave.py`/
+`test_lspri_workflow_panel_width_budget.py`/`test_lspri_workflow_panel_
+stage_restore.py` (60/60) - every test that touches `panels/image/` or
+`app_rewrite.py`. 170/170 total. ruff/pyflakes clean.

@@ -11,10 +11,12 @@ line, and the image rotates so they do.
   cursor from point 1, with a live readout of the angle it would apply.
 - Left-click #2 places point 2 and applies the rotation (one undo step),
   then the tool is ready for another pair, so a second pass can refine.
-- Right-click opens a context menu with "Cancel rotation" (2026-09-29 -
-  built in `panels/image/panel.py`, this class only exposes `cancel()`
-  for it to call); Esc cancels point 1 directly, no menu. Either way the
-  next left-click starts over.
+- Right-click opens a context menu with "Cancel rotation" - built in
+  `panels/image/panel.py`, which exits Rotate mode entirely on that
+  choice (`ActiveToolModule.set_active(ROTATE, False)`), the same as
+  clicking the Workflow panel's Rotate button again. Esc, unlike the menu,
+  only cancels point 1 and stays in Rotate mode (`cancel()`, below) - the
+  two are deliberately not the same action.
 - Arrow keys: 0.1 deg per press, Ctrl 1 deg, Shift 5 deg - Left/Down turn one
   way, Right/Up the other, exactly the stable app's convention.
 - No button is ever held or dragged (panning is the middle button, handled
@@ -109,7 +111,7 @@ class RotateLineTool(QObject):
             self._first = (float(x), float(y))
             self._marker.setData([x], [y])
             self._marker.setVisible(True)
-            self.status_changed.emit("Point 1 set - click point 2 (right-click or Esc cancels).")
+            self.status_changed.emit("Point 1 set - click point 2 (right-click for options, Esc cancels point 1).")
             return
         first, self._first = self._first, None
         self._hide_band()

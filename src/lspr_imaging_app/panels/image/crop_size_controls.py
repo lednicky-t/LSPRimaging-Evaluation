@@ -5,19 +5,23 @@ A real `QWidget` (`QSpinBox`/`QToolButton`, both real `QAbstractButton`/
 input widgets - CLAUDE.md's GUI-testability rule), not a pyqtgraph overlay
 item: those two need actual keyboard/click input, which painted graphics
 items don't take. `panel.py` owns positioning it in screen pixels (it must
-track the rectangle's bottom-left corner through pan/zoom, which is a
-`QGraphicsView` concern this widget has no part in) and parents it at
-construction time (CLAUDE.md's phantom-top-level-window pitfall).
+track the rectangle's bottom-right corner through pan/zoom - the apply
+button flush with the crop's right edge, the maintainer's spec, 2026-09-29
+- which is a `QGraphicsView` concern this widget has no part in) and
+parents it at construction time (CLAUDE.md's phantom-top-level-window
+pitfall).
 """
 
 from __future__ import annotations
 
-from PyQt6.QtCore import QSize, pyqtSignal
+from PyQt6.QtCore import QSize, Qt, pyqtSignal
+from PyQt6.QtGui import QFontMetrics
 from PyQt6.QtWidgets import QHBoxLayout, QSpinBox, QToolButton, QWidget
 
 from lspr_ui import GuiTheme, load_tabler_icon, transparent_icon_button_stylesheet
 
 _APPLY_COLOR = "#22c55e"
+_MAX_DIGITS = 4  # maintainer's spec (2026-09-29): fields sized for up to 4-digit pixel counts
 
 
 class CropSizeControls(QWidget):
@@ -41,6 +45,17 @@ class CropSizeControls(QWidget):
         super().__init__(parent)
         self.setAutoFillBackground(True)
         self.setObjectName("cropSizeControls")
+        # A widget with no cursor of its own shows its *parent's* - and the
+        # parent here is the image view's viewport, whose cursor panel.py
+        # keeps changing to a resize/move shape as the mouse crosses the
+        # crop rectangle's edges (`_on_scene_moved`). Without this, that
+        # stray resize cursor bleeds onto this whole floating widget and
+        # never changes back, including over the apply button (maintainer
+        # noticed, 2026-09-29: hovering it gave no "this is clickable" cue
+        # at all). An explicit cursor here blocks that inheritance for the
+        # whole widget; the apply button below overrides it again with its
+        # own, since it specifically wants a hand, not a plain arrow.
+        self.setCursor(Qt.CursorShape.ArrowCursor)
 
         self._width_spin = QSpinBox(self)
         self._width_spin.setPrefix("x: ")
@@ -52,6 +67,17 @@ class CropSizeControls(QWidget):
         self._height_spin.setRange(1, 1)
         self._height_spin.editingFinished.connect(self._on_edited)
 
+        # Fixed, tight width for both fields - sized for "x: " + 4 digits,
+        # not QSpinBox's own much wider default sizeHint (which is what
+        # produced the big gaps the maintainer flagged, 2026-09-29: with no
+        # explicit width each field claims far more room than its content
+        # needs, so the horizontal layout's spacing alone looks huge).
+        metrics = QFontMetrics(self._width_spin.font())
+        field_width = metrics.horizontalAdvance("x: " + "9" * _MAX_DIGITS) + 28  # +28: spin arrows + padding
+        for spin in (self._width_spin, self._height_spin):
+            spin.setFixedWidth(field_width)
+            spin.setAlignment(Qt.AlignmentFlag.AlignRight)
+
         self._apply_button = QToolButton(self)
         self._apply_button.setAutoRaise(True)
         # tabler's "checkbox" glyph (a checked box) is the maintainer's own
@@ -61,11 +87,12 @@ class CropSizeControls(QWidget):
         self._apply_button.setFixedSize(22, 22)
         self._apply_button.setToolTip("Apply crop")
         self._apply_button.setStyleSheet(transparent_icon_button_stylesheet(hover="#22c55e33"))
+        self._apply_button.setCursor(Qt.CursorShape.PointingHandCursor)
         self._apply_button.clicked.connect(self.apply_requested)
 
         layout = QHBoxLayout(self)
-        layout.setContentsMargins(4, 2, 4, 2)
-        layout.setSpacing(4)
+        layout.setContentsMargins(3, 2, 3, 2)
+        layout.setSpacing(2)
         layout.addWidget(self._width_spin)
         layout.addWidget(self._height_spin)
         layout.addWidget(self._apply_button)

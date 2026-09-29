@@ -665,6 +665,9 @@ class ImagePanel(QWidget):
             if self._rotate_tool.handle_key(event.key(), event.modifiers()):
                 event.accept()
                 return True
+            if self._crop_tool.handle_key(event.key()):
+                event.accept()
+                return True
         return super().eventFilter(watched, event)
 
     def _on_scene_clicked(self, event: object) -> None:
@@ -714,29 +717,34 @@ class ImagePanel(QWidget):
             self._selection.set_roi_selection({roi_id})
 
     def _show_rotate_context_menu(self) -> None:
-        """Right-click while Rotate is active (2026-09-29, replacing an
-        instant cancel): a menu with a single "Cancel rotation" action, so
-        an accidental right-click can no longer silently drop an
-        in-progress point 1 - the user has to actually choose it. Disabled
-        (not hidden) when there is nothing to cancel, matching how a
-        standard Undo menu item behaves, rather than the menu's shape
-        changing click to click. Built on `context_menu.py`'s shared
-        helper - see its docstring for why."""
-        chosen = show_tool_context_menu(self, [("Cancel rotation", self._rotate_tool.first_point() is not None)])
-        if chosen == "Cancel rotation":
-            self._rotate_tool.cancel()
+        """Right-click while Rotate is active: a menu with a single "Cancel
+        rotation" action, always enabled (2026-09-29, maintainer's spec) -
+        it exits Rotate mode entirely, the same as clicking the Workflow
+        panel's Rotate button again (`ActiveToolModule.set_active(ROTATE,
+        False)` already drops any in-progress point 1 as a side effect of
+        deactivating - `RotateLineTool.set_active`'s own `_clear_first_
+        point()` call - so there is nothing extra to do first). Always
+        being enabled is also what keeps the menu from ever having nothing
+        clickable in it - see `context_menu.py`'s docstring for why that
+        matters."""
+        if show_tool_context_menu(self, [("Cancel rotation", True)]) == "Cancel rotation":
+            self._active_tool.set_active(ImageTool.ROTATE, False)
 
     def _show_crop_context_menu(self) -> None:
-        """Right-click while Crop is active: "Apply crop" / "Cancel crop",
-        both disabled together when there is nothing not-yet-applied (see
-        `CropTool.has_pending_changes`) - the same design as Rotate's menu,
-        via the same shared helper, just with a second action."""
-        pending = self._crop_tool.has_pending_changes()
-        chosen = show_tool_context_menu(self, [("Apply crop", pending), ("Cancel crop", pending)])
+        """Right-click while Crop is active: "Apply crop" (enabled only
+        with something pending, `CropTool.has_pending_changes`) and
+        "Cancel crop", always enabled - like Rotate's menu, it exits Crop
+        mode entirely (`ActiveToolModule.set_active(CROP, False)`), the
+        same as clicking the Workflow panel's Crop button again, dropping
+        any not-yet-applied edit along the way. "Cancel" always being
+        clickable is what keeps this menu from ever having nothing
+        clickable in it, even with "Apply" grayed out - see
+        `context_menu.py`'s docstring."""
+        chosen = show_tool_context_menu(self, [("Apply crop", self._crop_tool.has_pending_changes()), ("Cancel crop", True)])
         if chosen == "Apply crop":
             self._on_crop_apply_requested()
         elif chosen == "Cancel crop":
-            self._crop_tool.cancel()
+            self._active_tool.set_active(ImageTool.CROP, False)
 
     def _on_crop_drag_event(self, ev: object) -> bool:
         """`ImageViewBox`'s left-drag handler (image_controls.py). Declines
@@ -759,8 +767,18 @@ class ImagePanel(QWidget):
         return True
 
     def _on_crop_apply_requested(self) -> None:
-        self._crop_tool.apply()
-        self._reposition_crop_controls()
+        """Apply and exit crop mode (maintainer's spec, 2026-09-29): a
+        successful apply switches Crop off, which is what makes the panel
+        actually show the cropped result - while any preview tool
+        (`_PREVIEW_TOOLS`) is active the panel always renders the
+        *uncropped* frame, on purpose, so staying in Crop mode after
+        applying would keep showing the full frame with no visible change.
+        A failed apply (nothing to apply, or Image Tools switched off)
+        leaves the session exactly as it was."""
+        if self._crop_tool.apply():
+            self._active_tool.set_active(ImageTool.CROP, False)
+        else:
+            self._reposition_crop_controls()
 
     def _on_crop_tool_changed(self) -> None:
         """`CropTool.changed`: refresh the floating size-controls widget
@@ -780,9 +798,11 @@ class ImagePanel(QWidget):
         self._reposition_crop_controls()
 
     def _reposition_crop_controls(self) -> None:
-        """Moves the (real QWidget) size controls to just outside the
-        rectangle's bottom-left corner, in the view's current screen
-        pixels - called on every rectangle change and on every pan/zoom
+        """Moves the (real QWidget) size controls just under the
+        rectangle's bottom-right corner - the apply button flush with the
+        crop's right edge, the fields packed tightly to its left
+        (maintainer's spec, 2026-09-29) - in the view's current screen
+        pixels. Called on every rectangle change and on every pan/zoom
         (`sigTransformChanged`), since a `QWidget` child, unlike the
         pyqtgraph overlay items `CropTool` itself owns, does not track the
         view transform on its own."""
@@ -790,11 +810,11 @@ class ImagePanel(QWidget):
         if not self._crop_tool.is_active() or rect is None:
             self._crop_controls.setVisible(False)
             return
-        x, y, _w, h = rect
-        scene_pos = self._plot.vb.mapViewToScene(QPointF(float(x), float(y + h)))
+        x, y, w, h = rect
+        scene_pos = self._plot.vb.mapViewToScene(QPointF(float(x + w), float(y + h)))
         view_pos = self._view.mapFromScene(scene_pos)
-        margin = 6
-        self._crop_controls.move(view_pos.x() + margin, view_pos.y() + margin)
+        margin = 4
+        self._crop_controls.move(view_pos.x() - self._crop_controls.width(), view_pos.y() + margin)
         self._crop_controls.set_apply_enabled(self._crop_tool.has_pending_changes())
         self._crop_controls.setVisible(True)
         self._crop_controls.raise_()

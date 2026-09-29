@@ -23,14 +23,25 @@ vanishes at low zoom nor swallows half the image at high zoom.
   original image it will move as much to original direction and then rest
   do the opposite site."
 
-**Stays live across repeated applies.** `apply()` commits the current
-rectangle to `GeometryModule.set_crop(...)` (one undo step, batched with
-the ROI remap it triggers - the same reasoning `rotate_line_tool.py`'s
-`_rotate_by` documents) but does not end the editing session - the
-rectangle remains exactly as resizable/movable afterward, so a second,
-third, ... pass can refine and re-apply. Only `cancel()` (discards any
-edit not yet applied, reverting to whatever `GeometryModule` currently
-holds) or deactivating the tool ends a session.
+**`apply()` commits, nothing more.** It pushes the current rectangle to
+`GeometryModule.set_crop(...)` (one undo step, batched with the ROI remap
+it triggers - the same reasoning `rotate_line_tool.py`'s `_rotate_by`
+documents) and leaves this class's own state untouched - the rectangle
+stays exactly as resizable/movable as it was, so `CropToolTest` can (and
+does) drive a second resize-and-apply pass directly. Whether a *session*
+ends there is deliberately not this class's call: `panel.py`'s
+`_on_crop_apply_requested` is the one that decides "apply also exits Crop
+mode" (maintainer's spec, 2026-09-29 - added after the first cut left
+Crop's own preview-uncropped rule, below, showing no visible change on
+apply) by switching `ActiveToolModule` off afterward, which reaches this
+class only indirectly, through `set_active(False)`. The right-click menu's
+"Cancel crop" ends a session the same indirect way. `cancel()` itself
+(discards any edit not yet applied, reverting to whatever `GeometryModule`
+currently holds, *without* ending the session) is reachable a different
+way - Esc, via `handle_key` - exactly mirroring `RotateLineTool`'s own
+Esc/right-click-menu split, and for the same reason: a quick "undo my
+last drag" while staying in the tool is a different gesture from "I'm
+done, get me out".
 
 **Pre-fills from the existing crop** (maintainer's explicit choice,
 2026-09-29): activating the tool with a crop already applied starts the
@@ -217,6 +228,18 @@ class CropTool(QObject):
         self._drag_start = None
         self._redraw()
         self.changed.emit()
+
+    def handle_key(self, key: int) -> bool:
+        """Esc: discard a not-yet-applied edit, staying in Crop mode -
+        unlike the right-click menu's "Cancel crop", which exits the tool
+        entirely (see the module docstring's "apply() commits, nothing
+        more" note - the same split applies to cancelling). Mirrors
+        `RotateLineTool.handle_key`'s shape so `panel.py`'s `eventFilter`
+        can treat both tools the same way; no modifiers to check yet, so
+        no `modifiers` parameter. Returns whether the key was consumed."""
+        if key != Qt.Key.Key_Escape:
+            return False
+        return self.cancel()
 
     def hover_handle(self, x: float, y: float) -> str | None:
         """Which handle a (non-dragging) hover is over, for cursor hinting
