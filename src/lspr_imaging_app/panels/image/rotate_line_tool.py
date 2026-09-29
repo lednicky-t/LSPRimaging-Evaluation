@@ -11,7 +11,10 @@ line, and the image rotates so they do.
   cursor from point 1, with a live readout of the angle it would apply.
 - Left-click #2 places point 2 and applies the rotation (one undo step),
   then the tool is ready for another pair, so a second pass can refine.
-- Right-click (or Esc) cancels point 1; the next left-click starts over.
+- Right-click opens a context menu with "Cancel rotation" (2026-09-29 -
+  built in `panels/image/panel.py`, this class only exposes `cancel()`
+  for it to call); Esc cancels point 1 directly, no menu. Either way the
+  next left-click starts over.
 - Arrow keys: 0.1 deg per press, Ctrl 1 deg, Shift 5 deg - Left/Down turn one
   way, Right/Up the other, exactly the stable app's convention.
 - No button is ever held or dragged (panning is the middle button, handled
@@ -70,7 +73,12 @@ class RotateLineTool(QObject):
         pen = pg.mkPen(QColor(_TOOL_COLOR), width=1.5)
         pen.setStyle(Qt.PenStyle.DashLine)
         self._band = pg.PlotCurveItem(pen=pen)
-        self._marker = pg.ScatterPlotItem(size=9, brush=pg.mkBrush(QColor(_TOOL_COLOR)), pen=pg.mkPen(None))
+        # symbol="+": a cross marks the exact clicked pixel more precisely
+        # than the default filled circle, which hides it under the mark
+        # itself (2026-09-29, maintainer's request).
+        self._marker = pg.ScatterPlotItem(
+            size=11, symbol="+", brush=pg.mkBrush(QColor(_TOOL_COLOR)), pen=pg.mkPen(None)
+        )
         for item in (self._band, self._marker):
             item.setZValue(20)
             item.setVisible(False)
@@ -116,9 +124,6 @@ class RotateLineTool(QObject):
             self.status_changed.emit("The two points are too close together - click point 1 again.")
             return
         self._rotate_by(correction, prefix="Aligned", decimals=_CLICK_ANGLE_DECIMALS)
-
-    def on_right_click(self) -> None:
-        self.cancel()
 
     def cancel(self) -> bool:
         """Drop point 1 if there is one. Returns whether anything was

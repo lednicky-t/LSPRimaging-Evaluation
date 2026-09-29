@@ -4682,3 +4682,63 @@ calls the settings-changed callback with the new stage's name) +
 the new field. 14/14 pass across both files plus the pre-existing width-
 budget test (unaffected: it builds with default `AppSettings()`, i.e.
 `initial_stage=None`, so behaves exactly as before this change).
+
+## 2026-09-29 - Rotate right-click menu, permanent info icon, status bar routing
+
+Three maintainer-requested Image-panel UX changes, all in
+`panels/image/panel.py` unless noted.
+
+**Right-click now opens a menu instead of cancelling instantly.**
+`RotateLineTool.on_right_click()` (`rotate_line_tool.py`) is gone; a
+right-click while Rotate is active now calls the panel's new
+`_show_rotate_context_menu()`, which pops a `QMenu` at `QCursor.pos()` with
+one action, "Cancel rotation", enabled only when `RotateLineTool.first_
+point()` is not `None`. Choosing it calls the same `RotateLineTool.cancel()`
+Esc already used - Esc itself is untouched (still cancels point 1 directly,
+no menu). Point: an accidental right-click can no longer silently drop an
+in-progress point 1 - the user now has to actually pick the action, and a
+disabled item explains "nothing to cancel" the same way a standard Undo
+entry would, rather than the menu changing shape click to click.
+
+**The always-hidden-until-a-tool-is-active text row is gone**, replaced by
+a permanent 18x18 "i" icon (`load_tabler_icon("info-circle", ...)`, the
+same vendored icon `panels/dock_container.py`'s panel-help buttons use) in
+the top controls row, next to the dataset status label. Hovering it shows
+`image_controls.py::controls_text(tool)` - the tool's own controls if it
+has a row there, else the plain-image row (left-click selects + the
+always-available drag/zoom) - via a plain `setToolTip()` on tool change, no
+new state to keep in sync since the tooltip is only ever *read*, not
+pushed. `_CANVAS_TOOLS` (only ever used to decide whether to show/hide the
+old row) is deleted along with it; nothing else referenced it.
+
+**Live per-gesture status moved to the status bar.** The rotate tool's
+transient text (the live angle readout while placing point 2, "switched
+off" when Image Tools is disabled, etc.) doesn't belong on a tooltip nobody
+is hovering mid-gesture, so `ImagePanel` gained a `tool_status_changed =
+pyqtSignal(str)`, emitted from the same place the old row's text used to be
+built (`_on_tool_status`, plus an empty-string emit on every tool switch to
+drop a stale message). `app_rewrite.py` connects it to `status_bar.
+showMessage`, right alongside the two other panels already wired that way
+(`workflow.status_requested`, `roi_geometry_sync.status_changed`) - one
+status bar for every panel's transient text, not a bespoke label per panel.
+
+**Point-3 correction:** flagged to the maintainer that no "crop two-point"
+tool exists on this branch (`panels/image/panel.py`'s own module docstring
+has said since 2026-09-23 that the draggable crop rectangle isn't built
+here yet), since the only two-click gesture in the app is Rotate's. The
+maintainer confirmed that's what they meant - "rotate by two points", not
+crop. Changed `RotateLineTool._marker` (`rotate_line_tool.py`) from a
+filled circle (pyqtgraph's default `symbol="o"`) to a filled plus-sign
+(`symbol="+"`, size bumped 9->11 since a `+`'s "ink" covers less of its
+bounding box than a circle's, so the unchanged size would have read as
+smaller) - a cross marks the exact clicked pixel instead of covering it, as
+the maintainer asked.
+
+Verified: `tests/integration/test_lspri_rewrite_rotate_tool.py` (34/34
+pass, including three new/rewritten right-click tests - menu's action
+cancels, is disabled with nothing pending, and a dismissed menu leaves
+point 1 alone - all driven by patching `QMenu.exec()` rather than letting
+it block on a real event loop) + `test_lspri_rewrite_image_panel.py` and
+`test_lspri_rewrite_roi_geometry_sync.py` (22/22, unaffected) +
+`test_lspri_workflow_panel_stage_restore.py` (4/4, exercises `app_rewrite.
+build_main_window` end to end, covering the new status-bar connection).

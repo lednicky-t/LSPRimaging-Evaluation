@@ -656,6 +656,12 @@ def build_main_window(
     # other.
     workflow.status_requested.connect(status_bar.showMessage)
     roi_geometry_sync.status_changed.connect(status_bar.showMessage)
+    # A canvas tool's live status (e.g. the rotate tool's angle readout
+    # while placing point 2) - 2026-09-29, replacing an always-in-layout
+    # text row under the Image panel with a permanent info icon there for
+    # the *static* controls; the *live* per-gesture text belongs here, on
+    # the same bar every other panel's transient status already uses.
+    image_panel.tool_status_changed.connect(status_bar.showMessage)
 
     # Each panel dock-wrapped via the shared PanelContainer (undock/float/
     # maximize/close - see panels/dock_container.py), matching how the

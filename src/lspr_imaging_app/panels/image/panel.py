@@ -66,19 +66,20 @@ from dataclasses import replace
 
 import numpy as np
 import pyqtgraph as pg
-from PyQt6.QtCore import QEvent, QObject, Qt, QTimer
-from PyQt6.QtGui import QColor
+from PyQt6.QtCore import QEvent, QObject, Qt, QTimer, pyqtSignal
+from PyQt6.QtGui import QColor, QCursor
 from PyQt6.QtWidgets import (
     QApplication,
     QDoubleSpinBox,
     QHBoxLayout,
     QLabel,
+    QMenu,
     QSpinBox,
     QVBoxLayout,
     QWidget,
 )
 
-from lspr_ui import get_active_theme
+from lspr_ui import get_active_theme, load_tabler_icon
 
 from ...dataset import DatasetModule
 from ...image_tools import ActiveToolModule, BackgroundModule, ChromaticModule, GeometryModule, ImageTool, MaskModule
@@ -106,11 +107,6 @@ _SELECTED_COLOR = "#f8fafc"
 _CHUNK_GRID_COLOR = "#a3a3a3"
 _CROP_OUTLINE_COLOR = "#38bdf8"  # the crop button's active blue
 
-_CANVAS_TOOLS = frozenset({ImageTool.ROTATE})
-"""Tools that currently own clicks/keys on the canvas. Crop and measure can
-be switched on from the Workflow panel but do nothing on the image yet, so
-they neither show a hint nor take clicks away from ROI selection."""
-
 _PREVIEW_TOOLS = frozenset({ImageTool.ROTATE})
 """Tools that work on the *uncropped* image: while one is active the image is
 rendered without its crop, the crop is drawn as an outline, and the ROI
@@ -120,6 +116,14 @@ overlay (cropped-space coordinates) is hidden. See the module docstring."""
 class ImagePanel(QWidget):
     """Renders the current processed image with ROI overlays. Owns no
     computation and no ROI/group state (AGENTS.md)."""
+
+    # A tool's *live* status while a gesture is in progress (angle readout
+    # etc.) - relayed to the app's status bar (app_rewrite.py), the same
+    # place every other panel's transient status already goes. The tool's
+    # *static* "what do the buttons do" text is not a signal at all; it
+    # lives on the permanent info icon's tooltip instead (see
+    # `_refresh_tool_info`), because it only needs to be re-read, not pushed.
+    tool_status_changed = pyqtSignal(str)
 
     def __init__(
         self,
@@ -214,11 +218,19 @@ class ImagePanel(QWidget):
         self._status = QLabel("No dataset loaded.", self)
         self._status.setWordWrap(True)
 
-        # Which controls are live for the active tool + its dynamic status
-        # (live angle etc.). Hidden while no tool is active.
-        self._tool_hint = QLabel("", self)
-        self._tool_hint.setWordWrap(True)
-        self._tool_hint.setVisible(False)
+        # A permanent "i" icon (2026-09-29, replacing a text row that only
+        # appeared while a tool with canvas behavior was active): hovering
+        # it shows the active tool's controls - image_controls.py's single
+        # source of truth, so this can never drift from what is actually
+        # wired. Always visible, so the help is reachable with no tool
+        # active too (it then shows the plain-image controls). A live
+        # in-progress status (e.g. the rotate tool's angle readout) is not
+        # part of it - nobody is hovering a corner icon mid-gesture, so that
+        # goes to the status bar instead (`tool_status_changed`, wired in
+        # app_rewrite.py).
+        self._tool_info = QLabel(self)
+        self._tool_info.setFixedSize(18, 18)
+        self._refresh_tool_info(None)
 
         self._cube_spin = QSpinBox(self)
         self._cube_spin.setPrefix("Cube ")
@@ -237,10 +249,11 @@ class ImagePanel(QWidget):
         controls.addWidget(self._wavelength_spin)
         controls.addStretch(1)
         controls.addWidget(self._status, 2)
+        controls.addSpacing(6)
+        controls.addWidget(self._tool_info)
 
         layout = QVBoxLayout(self)
         layout.addLayout(controls)
-        layout.addWidget(self._tool_hint)
         layout.addWidget(self._view, 1)
 
         scene = self._image_item.scene()
@@ -304,8 +317,14 @@ class ImagePanel(QWidget):
         2026-09.md``). Called once at construction (see ``_build_ui``) and
         again by the shell on every live theme switch - the overlay curve
         colors are deliberately theme-invariant (see ``lspr_ui``'s
-        ``GuiTheme`` docstring) so only the background changes here."""
+        ``GuiTheme`` docstring) so only the background changes here.
+
+        Also re-renders the tool info icon, whose color is baked into a
+        themed pixmap - but only once that widget exists: this method's
+        first call happens mid-``_build_ui``, before it does."""
         self._view.setBackground(get_active_theme().toolbar_bg)
+        if hasattr(self, "_tool_info"):
+            self._refresh_tool_info(self._active_tool.active())
 
     # -- dataset lifecycle --------------------------------------------------
 
@@ -550,7 +569,8 @@ class ImagePanel(QWidget):
     def _on_active_tool_changed(self, tool: ImageTool | None) -> None:
         self._rotate_tool.set_active(tool is ImageTool.ROTATE)
         self._tool_status = ""
-        self._refresh_tool_hint(tool)
+        self.tool_status_changed.emit("")  # drop a stale status from the tool just switched away from
+        self._refresh_tool_info(tool)
         if tool is ImageTool.ROTATE:
             # So the arrow keys reach the tool without an extra click.
             self._view.setFocus()
@@ -559,20 +579,16 @@ class ImagePanel(QWidget):
 
     def _on_tool_status(self, text: str) -> None:
         self._tool_status = text
-        self._refresh_tool_hint(self._active_tool.active())
+        self.tool_status_changed.emit(text)
 
-    def _refresh_tool_hint(self, tool: ImageTool | None) -> None:
-        if tool not in _CANVAS_TOOLS:
-            # No tool, or one with no canvas behavior yet (crop, measure):
-            # nothing to explain, and clicks keep selecting ROIs.
-            self._tool_hint.setVisible(False)
-            self._tool_hint.setText("")
-            return
-        text = controls_text(tool)
-        if self._tool_status:
-            text += "\n" + self._tool_status
-        self._tool_hint.setText(text)
-        self._tool_hint.setVisible(True)
+    def _refresh_tool_info(self, tool: ImageTool | None) -> None:
+        """Point the info icon's tooltip at *tool*'s controls. Always shows
+        something - a tool with no row of its own (crop, measure) and no
+        tool at all both fall back to `image_controls.py`'s plain-image
+        row (left-click selects, plus the always-available drag/zoom)."""
+        theme = get_active_theme()
+        self._tool_info.setPixmap(load_tabler_icon("info-circle", color=theme.text_muted, size=16).pixmap(16, 16))
+        self._tool_info.setToolTip(controls_text(tool))
 
     def _in_view(self, scene_pos: object) -> bool:
         return bool(self._plot.vb.sceneBoundingRect().contains(scene_pos))
@@ -609,7 +625,7 @@ class ImagePanel(QWidget):
                 p = self._plot.vb.mapSceneToView(scene_pos)
                 self._rotate_tool.on_left_click(float(p.x()), float(p.y()))
             elif button == Qt.MouseButton.RightButton:
-                self._rotate_tool.on_right_click()
+                self._show_rotate_context_menu()
             return
         if button != Qt.MouseButton.LeftButton:
             return  # not a select gesture
@@ -627,6 +643,21 @@ class ImagePanel(QWidget):
             self._selection.set_roi_selection(current)
         else:
             self._selection.set_roi_selection({roi_id})
+
+    def _show_rotate_context_menu(self) -> None:
+        """Right-click while Rotate is active (2026-09-29, replacing an
+        instant cancel): a menu with a single "Cancel rotation" action, so
+        an accidental right-click can no longer silently drop an
+        in-progress point 1 - the user has to actually choose it. Disabled
+        (not hidden) when there is nothing to cancel, matching how a
+        standard Undo menu item behaves, rather than the menu's shape
+        changing click to click."""
+        menu = QMenu(self)
+        cancel_action = menu.addAction("Cancel rotation")
+        cancel_action.setEnabled(self._rotate_tool.first_point() is not None)
+        chosen = menu.exec(QCursor.pos())
+        if chosen is cancel_action:
+            self._rotate_tool.cancel()
 
     def roi_at(self, x: float, y: float) -> int | None:
         """The ROI whose sample aperture contains display-space point

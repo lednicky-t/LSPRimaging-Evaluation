@@ -42,7 +42,7 @@ _TOOL_CONTROLS: dict[ImageTool | None, tuple[Control, ...]] = {
     None: (Control("Left-click", "select the ROI under the cursor (Ctrl/Shift adds to the selection)"),),
     ImageTool.ROTATE: (
         Control("Left-click", "place point 1, then point 2 - the image rotates so the two points are level"),
-        Control("Right-click", "cancel point 1 (Esc also cancels)"),
+        Control("Right-click", "menu with Cancel rotation (Esc also cancels point 1 directly)"),
         Control("Arrow keys", "rotate by 0.1 deg (Ctrl 1 deg, Shift 5 deg)"),
     ),
 }
