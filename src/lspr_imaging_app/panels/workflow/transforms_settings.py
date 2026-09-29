@@ -34,10 +34,10 @@ width budget.
 the shared "which canvas tool is on" state the Image panel reads. That makes
 the tools mutually exclusive without the buttons knowing about each other:
 switching one on switches the other off, and the buttons re-sync when the
-active tool changes from elsewhere (e.g. a dataset being closed). The rotate
-tool is real (`panels/image/rotate_line_tool.py`); **the crop tool button has
-no canvas behavior yet** (crop box drag isn't built), but it already takes
-part in the exclusivity. Reset rotation, fill, reset crop and flip are real -
+active tool changes from elsewhere (e.g. a dataset being closed). Both tools
+are real: rotate (`panels/image/rotate_line_tool.py`) and, since 2026-09-29,
+crop (`panels/image/crop_tool.py` - a click-drag rectangle, not the old
+app's `pg.RectROI`). Reset rotation, fill, reset crop and flip are real too -
 they call `GeometryModule` directly.
 """
 

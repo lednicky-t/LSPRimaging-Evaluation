@@ -12,13 +12,16 @@ slightly shaky click can never turn into an accidental pan, and each button
 keeps exactly one meaning: clicks belong to the active tool (or ROI
 selection), and panning is the middle button's job.
 
-A tool that needs a drag gesture later (e.g. dragging a crop box) claims it
-for itself, in its own row of `_TOOL_CONTROLS` - it does not re-enable the
-view's default drags.
+A tool that needs a drag gesture claims it for itself, in its own row of
+`_TOOL_CONTROLS` - it does not re-enable the view's default drags. The Crop
+tool (2026-09-29, `crop_tool.py`) is the first: `ImageViewBox.set_left_drag_
+handler` lets it intercept left-button drags while it is active, everything
+else still ignored exactly as before.
 """
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 
 import pyqtgraph as pg
@@ -45,6 +48,14 @@ _TOOL_CONTROLS: dict[ImageTool | None, tuple[Control, ...]] = {
         Control("Right-click", "menu with Cancel rotation (Esc also cancels point 1 directly)"),
         Control("Arrow keys", "rotate by 0.1 deg (Ctrl 1 deg, Shift 5 deg)"),
     ),
+    ImageTool.CROP: (
+        Control("Left-drag (empty area)", "draw a new crop rectangle"),
+        Control("Left-drag (edge/corner)", "resize that side, or both sides at a corner"),
+        Control("Left-drag (inside)", "move the rectangle"),
+        Control("x: / y: fields", "type an exact width/height"),
+        Control("checkmark", "apply the crop"),
+        Control("Right-click", "menu with Apply crop / Cancel crop"),
+    ),
 }
 
 
@@ -60,10 +71,27 @@ def controls_text(tool: ImageTool | None) -> str:
 
 class ImageViewBox(pg.ViewBox):
     """`pg.ViewBox` with the drag rules above: only the middle button drags
-    (pans). Wheel zoom is inherited unchanged; clicks are untouched (they
-    reach the scene's ``sigMouseClicked`` as before)."""
+    (pans), unless a tool has claimed the left button for itself (see
+    `set_left_drag_handler`). Wheel zoom is inherited unchanged; clicks are
+    untouched (they reach the scene's ``sigMouseClicked`` as before)."""
+
+    def __init__(self, *args: object, **kwargs: object) -> None:
+        super().__init__(*args, **kwargs)
+        self._left_drag_handler: Callable[[object], bool] | None = None
+
+    def set_left_drag_handler(self, handler: Callable[[object], bool] | None) -> None:
+        """*handler* gets every left-button drag event first and returns
+        whether it claimed it. Returning `False` (or `None`/no handler set)
+        falls back to the default "left drag does nothing" rule - a tool
+        that isn't currently active just declines every event, rather than
+        this class needing to know which tool, if any, is on."""
+        self._left_drag_handler = handler
 
     def mouseDragEvent(self, ev, axis=None):  # noqa: N802 - Qt/pyqtgraph naming
+        if ev.button() == Qt.MouseButton.LeftButton and self._left_drag_handler is not None:
+            if self._left_drag_handler(ev):
+                ev.accept()
+                return
         if ev.button() != Qt.MouseButton.MiddleButton:
             ev.ignore()
             return

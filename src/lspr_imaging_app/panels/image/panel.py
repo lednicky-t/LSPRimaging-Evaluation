@@ -32,10 +32,6 @@ does, and the panel reacts identically.
 **Not built here, deliberately** - each is its own piece of work, not
 something this panel should invent an answer for:
 
-- The draggable crop rectangle (crop *tool*). ``GeometryModule``'s commands
-  are real; the old app's version (`gui/image_tools_controller.py`) is
-  tangled with pyqtgraph ``RectROI`` sync that needs its own port.
-  (**Rotation is built** - 2026-09-28, ``rotate_line_tool.py``.)
 - Mask painting/preview overlays, the intensity-highlight overlay, and the
   histogram-driven highlight (`MaskModule`'s async candidate machinery
   isn't built either - see its module docstring).
@@ -44,16 +40,22 @@ something this panel should invent an answer for:
 - ROI creation by click and ROI resize by handle. ``add_roi``/``resize_roi``
   are real commands; this panel currently only moves and selects, which is
   what makes the overlay worth looking at in the first place.
+  (**Rotation is built** - 2026-09-28, ``rotate_line_tool.py``. **Crop is
+  built** - 2026-09-29, ``crop_tool.py`` - deliberately *not* a port of the
+  old app's ``gui/image_tools_controller.py``/``pg.RectROI``: no separate
+  handle widgets, the rectangle's own border is the grab zone.)
 
 **Active tool** (2026-09-28): which canvas tool is on comes from the shared
 ``ActiveToolModule`` - the panel never decides it. While a *preview* tool
-(currently rotate) is active, the panel (a) renders the image **uncropped**,
+(rotate or crop) is active, the panel (a) renders the image **uncropped**,
 with the existing crop drawn as a fixed outline, so the user sees what is in
 and out of the crop while aligning - the crop stays put in pixel terms and is
 re-applied when the tool is switched off; (b) hides the ROI overlay, because
 ROI positions live in *processed* (cropped) space and would sit at the wrong
 place over an uncropped image (CLAUDE.md: mixing the spaces silently gives
-wrong results); and (c) routes left/right clicks and keys to the tool. With
+wrong results); and (c) routes left/right clicks and keys to the tool - Crop
+additionally claims left-button *drags* (``ImageViewBox.set_left_drag_
+handler``, ``image_controls.py``), the one tool so far that needs one. With
 no tool active, a left click selects ROIs as before. Mouse/keyboard rules:
 ``image_controls.py``.
 """
@@ -66,14 +68,13 @@ from dataclasses import replace
 
 import numpy as np
 import pyqtgraph as pg
-from PyQt6.QtCore import QEvent, QObject, Qt, QTimer, pyqtSignal
-from PyQt6.QtGui import QColor, QCursor
+from PyQt6.QtCore import QEvent, QObject, QPointF, Qt, QTimer, pyqtSignal
+from PyQt6.QtGui import QColor
 from PyQt6.QtWidgets import (
     QApplication,
     QDoubleSpinBox,
     QHBoxLayout,
     QLabel,
-    QMenu,
     QSpinBox,
     QVBoxLayout,
     QWidget,
@@ -88,6 +89,9 @@ from ...roi import RoiToolbox
 from ...roi.model import AreaRoi
 from ...roi.rasterize import effective_reference_radii, transformed_circle_points
 from ...selection import SelectionModule
+from .context_menu import show_tool_context_menu
+from .crop_size_controls import CropSizeControls
+from .crop_tool import CropTool
 from .image_controls import ImageViewBox, controls_text
 from .render import ImageRenderer, RenderRequest, RenderResult
 from .rotate_line_tool import RotateLineTool
@@ -107,10 +111,28 @@ _SELECTED_COLOR = "#f8fafc"
 _CHUNK_GRID_COLOR = "#a3a3a3"
 _CROP_OUTLINE_COLOR = "#38bdf8"  # the crop button's active blue
 
-_PREVIEW_TOOLS = frozenset({ImageTool.ROTATE})
+_PREVIEW_TOOLS = frozenset({ImageTool.ROTATE, ImageTool.CROP})
 """Tools that work on the *uncropped* image: while one is active the image is
 rendered without its crop, the crop is drawn as an outline, and the ROI
-overlay (cropped-space coordinates) is hidden. See the module docstring."""
+overlay (cropped-space coordinates) is hidden. See the module docstring.
+Crop joined 2026-09-29: the whole point of the tool is choosing a new crop
+from the full available frame, not just the region an old crop already
+kept."""
+
+_CURSOR_FOR_CROP_HANDLE: dict[str | None, Qt.CursorShape] = {
+    "n": Qt.CursorShape.SizeVerCursor,
+    "s": Qt.CursorShape.SizeVerCursor,
+    "e": Qt.CursorShape.SizeHorCursor,
+    "w": Qt.CursorShape.SizeHorCursor,
+    "ne": Qt.CursorShape.SizeBDiagCursor,
+    "sw": Qt.CursorShape.SizeBDiagCursor,
+    "nw": Qt.CursorShape.SizeFDiagCursor,
+    "se": Qt.CursorShape.SizeFDiagCursor,
+    "move": Qt.CursorShape.SizeAllCursor,
+}
+"""Cursor feedback for `CropTool.hover_handle`'s result - the tool draws no
+separate handle graphics (see crop_tool.py's docstring), so the cursor
+shape is the only hint that an edge/corner/interior is grabbable."""
 
 
 class ImagePanel(QWidget):
@@ -214,6 +236,25 @@ class ImagePanel(QWidget):
 
         self._rotate_tool = RotateLineTool(self._plot, self._geometry, parent=self)
         self._rotate_tool.status_changed.connect(self._on_tool_status)
+
+        self._crop_tool = CropTool(self._plot, self._geometry, parent=self)
+        self._crop_tool.status_changed.connect(self._on_tool_status)
+        self._crop_tool.changed.connect(self._on_crop_tool_changed)
+        # Left-button drags do nothing by default (image_controls.py); Crop
+        # is the first tool to claim them - declines (returns False) unless
+        # it is the active tool, so every other case is untouched.
+        self._plot.vb.set_left_drag_handler(self._on_crop_drag_event)
+        self._plot.vb.sigTransformChanged.connect(self._reposition_crop_controls)
+
+        # A real QWidget (QSpinBox/QToolButton need actual input, unlike a
+        # painted overlay item - see crop_size_controls.py), parented to the
+        # viewport so it draws on top of the graphics content. Positioned in
+        # screen pixels by `_reposition_crop_controls`; hidden until Crop is
+        # active and has a rectangle to show a size for.
+        self._crop_controls = CropSizeControls(self._view.viewport(), get_active_theme())
+        self._crop_controls.setVisible(False)
+        self._crop_controls.size_edited.connect(self._crop_tool.set_size)
+        self._crop_controls.apply_requested.connect(self._on_crop_apply_requested)
 
         self._status = QLabel("No dataset loaded.", self)
         self._status.setWordWrap(True)
@@ -325,6 +366,8 @@ class ImagePanel(QWidget):
         self._view.setBackground(get_active_theme().toolbar_bg)
         if hasattr(self, "_tool_info"):
             self._refresh_tool_info(self._active_tool.active())
+        if hasattr(self, "_crop_controls"):
+            self._crop_controls.refresh_theme(get_active_theme())
 
     # -- dataset lifecycle --------------------------------------------------
 
@@ -471,6 +514,13 @@ class ImagePanel(QWidget):
             f"- {result.image.shape[1]}x{result.image.shape[0]} px"
         )
         self._last_image_shape = result.image.shape[:2]
+        # The crop tool's clamp bound - correct the instant Crop is active
+        # (the frame it renders is the *uncropped* one, `_PREVIEW_TOOLS`),
+        # briefly stale (the smaller, cropped shape) right as the tool is
+        # first switched on, self-correcting once the next preview render
+        # lands ~100ms later (`_schedule_redraw` already runs on every
+        # active-tool change).
+        self._crop_tool.set_frame_size(result.image.shape[1], result.image.shape[0])
         self._update_chunk_grid()
 
     # -- overlays -----------------------------------------------------------
@@ -568,6 +618,8 @@ class ImagePanel(QWidget):
 
     def _on_active_tool_changed(self, tool: ImageTool | None) -> None:
         self._rotate_tool.set_active(tool is ImageTool.ROTATE)
+        self._crop_tool.set_active(tool is ImageTool.CROP)
+        self._view.viewport().unsetCursor()  # drop any resize/move cursor left over from Crop
         self._tool_status = ""
         self.tool_status_changed.emit("")  # drop a stale status from the tool just switched away from
         self._refresh_tool_info(tool)
@@ -595,6 +647,14 @@ class ImagePanel(QWidget):
 
     def _on_scene_moved(self, scene_pos: object) -> None:
         # Cheap early-out: this fires on every mouse move over the scene.
+        if self._active_tool.active() is ImageTool.CROP and self._in_view(scene_pos):
+            point = self._plot.vb.mapSceneToView(scene_pos)
+            handle = self._crop_tool.hover_handle(float(point.x()), float(point.y()))
+            cursor = _CURSOR_FOR_CROP_HANDLE.get(handle)
+            if cursor is None:
+                self._view.viewport().unsetCursor()
+            else:
+                self._view.viewport().setCursor(cursor)
         if self._rotate_tool.first_point() is None or not self._in_view(scene_pos):
             return
         point = self._plot.vb.mapSceneToView(scene_pos)
@@ -627,6 +687,15 @@ class ImagePanel(QWidget):
             elif button == Qt.MouseButton.RightButton:
                 self._show_rotate_context_menu()
             return
+        if self._active_tool.active() is ImageTool.CROP:
+            # A plain (non-drag) left-click has nothing to do - dragging is
+            # handled separately, by ImageViewBox's left-drag handler
+            # (`_on_crop_drag_event`), since a real drag never reaches
+            # `sigMouseClicked` at all (pyqtgraph routes it as a drag
+            # event once the mouse has moved past its click threshold).
+            if button == Qt.MouseButton.RightButton and self._in_view(scene_pos):
+                self._show_crop_context_menu()
+            return
         if button != Qt.MouseButton.LeftButton:
             return  # not a select gesture
         point = self._plot.vb.mapSceneToView(scene_pos)
@@ -651,13 +720,84 @@ class ImagePanel(QWidget):
         in-progress point 1 - the user has to actually choose it. Disabled
         (not hidden) when there is nothing to cancel, matching how a
         standard Undo menu item behaves, rather than the menu's shape
-        changing click to click."""
-        menu = QMenu(self)
-        cancel_action = menu.addAction("Cancel rotation")
-        cancel_action.setEnabled(self._rotate_tool.first_point() is not None)
-        chosen = menu.exec(QCursor.pos())
-        if chosen is cancel_action:
+        changing click to click. Built on `context_menu.py`'s shared
+        helper - see its docstring for why."""
+        chosen = show_tool_context_menu(self, [("Cancel rotation", self._rotate_tool.first_point() is not None)])
+        if chosen == "Cancel rotation":
             self._rotate_tool.cancel()
+
+    def _show_crop_context_menu(self) -> None:
+        """Right-click while Crop is active: "Apply crop" / "Cancel crop",
+        both disabled together when there is nothing not-yet-applied (see
+        `CropTool.has_pending_changes`) - the same design as Rotate's menu,
+        via the same shared helper, just with a second action."""
+        pending = self._crop_tool.has_pending_changes()
+        chosen = show_tool_context_menu(self, [("Apply crop", pending), ("Cancel crop", pending)])
+        if chosen == "Apply crop":
+            self._on_crop_apply_requested()
+        elif chosen == "Cancel crop":
+            self._crop_tool.cancel()
+
+    def _on_crop_drag_event(self, ev: object) -> bool:
+        """`ImageViewBox`'s left-drag handler (image_controls.py). Declines
+        (returns `False`) whenever Crop isn't the active tool, so it has no
+        effect on any other tool or on plain ROI dragging - only one thing
+        in the whole panel claims left-button drags at a time."""
+        if self._active_tool.active() is not ImageTool.CROP:
+            return False
+        scene_pos = ev.scenePos()
+        point = self._plot.vb.mapSceneToView(scene_pos)
+        x, y = float(point.x()), float(point.y())
+        if ev.isStart():
+            if not self._in_view(scene_pos):
+                return False
+            return self._crop_tool.begin_gesture(x, y)
+        if ev.isFinish():
+            self._crop_tool.end_gesture()
+            return True
+        self._crop_tool.update_gesture(x, y)
+        return True
+
+    def _on_crop_apply_requested(self) -> None:
+        self._crop_tool.apply()
+        self._reposition_crop_controls()
+
+    def _on_crop_tool_changed(self) -> None:
+        """`CropTool.changed`: refresh the floating size-controls widget
+        it does not own (see crop_size_controls.py's docstring). No redraw
+        here - the rendered pixels never change until `apply()`, which
+        already triggers one via `GeometryModule.geometry_changed`."""
+        # Max *before* size: QSpinBox.setValue() clamps to whatever range is
+        # already set, so on the very first activation (spin boxes still at
+        # their construction-time range of [1, 1]) setting a pre-filled
+        # rectangle's real width/height first would silently clip it to 1.
+        frame = self._crop_tool.frame_size()
+        if frame is not None:
+            self._crop_controls.set_max_size(*frame)
+        rect = self._crop_tool.rect()
+        if rect is not None:
+            self._crop_controls.set_size(rect[2], rect[3])
+        self._reposition_crop_controls()
+
+    def _reposition_crop_controls(self) -> None:
+        """Moves the (real QWidget) size controls to just outside the
+        rectangle's bottom-left corner, in the view's current screen
+        pixels - called on every rectangle change and on every pan/zoom
+        (`sigTransformChanged`), since a `QWidget` child, unlike the
+        pyqtgraph overlay items `CropTool` itself owns, does not track the
+        view transform on its own."""
+        rect = self._crop_tool.rect()
+        if not self._crop_tool.is_active() or rect is None:
+            self._crop_controls.setVisible(False)
+            return
+        x, y, _w, h = rect
+        scene_pos = self._plot.vb.mapViewToScene(QPointF(float(x), float(y + h)))
+        view_pos = self._view.mapFromScene(scene_pos)
+        margin = 6
+        self._crop_controls.move(view_pos.x() + margin, view_pos.y() + margin)
+        self._crop_controls.set_apply_enabled(self._crop_tool.has_pending_changes())
+        self._crop_controls.setVisible(True)
+        self._crop_controls.raise_()
 
     def roi_at(self, x: float, y: float) -> int | None:
         """The ROI whose sample aperture contains display-space point

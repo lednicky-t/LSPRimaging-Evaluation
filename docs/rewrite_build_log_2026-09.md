@@ -4742,3 +4742,104 @@ it block on a real event loop) + `test_lspri_rewrite_image_panel.py` and
 `test_lspri_rewrite_roi_geometry_sync.py` (22/22, unaffected) +
 `test_lspri_workflow_panel_stage_restore.py` (4/4, exercises `app_rewrite.
 build_main_window` end to end, covering the new status-bar connection).
+
+## 2026-09-29 - Crop tool: click-drag rectangle, size fields, shared context menu
+
+Built the crop tool's canvas behavior from scratch - the module docstring's
+"Not built here, deliberately" note about it is gone. Explicitly **not** a
+port of the old app's `gui/image_tools_controller.py` (`pg.RectROI` with
+per-fraction scale handles the maintainer called "strange"); no separate
+handle widgets at all - the rectangle's own border is the grab zone.
+
+**New files, `panels/image/`:**
+
+- `crop_tool.py` - `CropTool`, the gesture/state machine (mirrors
+  `rotate_line_tool.py`'s split: owns the pyqtgraph overlay items and the
+  transient rectangle state, calls `GeometryModule.set_crop`/nothing else
+  for the actual commit). Public API is direct-call testable, no screen
+  coordinates: `begin_gesture`/`update_gesture`/`end_gesture` (drag
+  lifecycle), `set_size` (the size fields), `apply`/`cancel`,
+  `hover_handle` (cursor hinting), `set_frame_size` (the clamp bound).
+- `crop_size_controls.py` - `CropSizeControls`, a real `QWidget`
+  ("x:"/"y:" `QSpinBox`es + a checkmark `QToolButton` apply - tabler's
+  vendored `checkbox` glyph turned out to already be exactly the
+  maintainer's "check icon box", no new icon needed). Real widgets, not a
+  painted overlay, because they need actual keyboard/click input
+  (CLAUDE.md's GUI-testability rule) - `panel.py` positions it in screen
+  pixels next to the rectangle's bottom-left corner.
+- `context_menu.py` - `show_tool_context_menu(parent, actions)`, pulled out
+  of the previous session's one-off `_show_rotate_context_menu` per the
+  maintainer's explicit request ("this context menu can be some general
+  function/worker/tool, we will use it in more tools... design will
+  stay"). Rotate's menu (one action) and Crop's (two) both go through it
+  now.
+
+**Gestures** (`_hit_test`, screen-pixel-constant grab margin via
+`ViewBox.viewPixelSize()`, so it neither vanishes at low zoom nor swallows
+half the image at high): drag an edge to resize one side, a corner to
+resize two, the interior to move the rectangle, an empty area (or nothing
+yet) to draw a new one. `image_controls.py`'s `ImageViewBox` gained
+`set_left_drag_handler` for this - left-button drags did nothing at all
+before (by design, so a shaky click could never turn into an accidental
+pan); Crop is the first tool to claim them, and only while it is the
+active tool (checked inside the handler itself, so `ImageViewBox` needs no
+knowledge of which tool, if any, is on).
+
+**Two clamping rules, deliberately different** (both maintainer's exact
+spec, see crop_tool.py's module docstring for the full reasoning):
+a resize-drag never moves the edge you are not dragging (drag the right
+edge into the frame boundary and it stops there); editing the size fields
+is anchored at the current top-left corner, but reflects the anchor back
+just enough to fit if the requested size does not fit from there. Getting
+these two confused was the single biggest risk in the whole feature -
+`CropToolTest` has a dedicated test for each direction.
+
+**Pre-fills from the existing crop** (maintainer's explicit choice, asked
+via clarifying question): activating Crop with one already applied starts
+the rectangle right there; dragging in the darkened area outside it starts
+a fresh one instead. **Stays live across repeated applies** - `apply()`
+commits to `GeometryModule.set_crop` (one undo step, batched with the ROI
+remap it triggers, same reasoning as rotate's `_rotate_by`) but does not
+end the session, so a second, third, ... pass can refine and re-apply;
+only `cancel()` (reverts to whatever `GeometryModule` currently holds -
+*not* the same as the existing "Reset crop" button, which clears the crop
+entirely) or deactivating the tool ends one. An external crop change while
+active and idle (Reset crop, undo/redo) is adopted rather than left stale
+(`CropTool._on_geometry_changed`).
+
+**Darkening overlay** ("illustrate it is cut out"): one `QGraphicsPathItem`
+per rectangle, an even-odd-fill path of the full frame minus the crop
+rectangle - not four separate strip items - so it never has an edge case at
+a corner. Crop joined `_PREVIEW_TOOLS` (was rotate-only) for this to even
+make sense: the whole point of the tool is choosing from the *full*
+available frame, not just what an old crop already kept.
+
+**Known rough edge, accepted rather than fixed**: `CropTool.set_frame_size`
+is fed every render's shape unconditionally, but while no preview tool is
+active that shape is the *cropped* one - so for the ~100ms coalesce delay
+plus render time right after Crop is switched on, the clamp bound (and
+thus the darkening overlay's outer edge) can be briefly wrong before the
+next (uncropped) render corrects it. Self-correcting, no data ever
+committed during that window - not worth the deeper render-pipeline
+plumbing a synchronous fix would need.
+
+**Bug caught by its own test before commit**: `_on_crop_tool_changed`
+originally pushed the rectangle's size into the spin boxes *before* their
+max - harmless once the max had already been set by an earlier activation,
+but on a pre-filled first activation (a real crop already applied, frame
+size already known - the common case) `QSpinBox.setValue()` silently
+clips to the construction-time default range of `[1, 1]`. Caught by
+`test_size_controls_show_the_full_prefilled_size_on_first_activation`,
+confirmed by temporarily reverting the fix and watching the test fail
+(`1 != 48`) before restoring it.
+
+Verified: `test_lspri_rewrite_crop_tool.py` (new, 43/43 - 29 pure `CropTool`
+tests on a real shown/ranged `pg.PlotItem` with no `ImagePanel` at all, 14
+through the real panel/`ImageViewBox` wiring) + `test_lspri_rewrite_rotate_
+tool.py` (34/34, one test moved from Crop to Measure now that Crop has real
+canvas behavior) + `test_lspri_rewrite_image_panel.py`/`test_lspri_rewrite_
+roi_geometry_sync.py` (26/26) + `test_lspri_rewrite_analysis_engine.py`/
+`test_lspri_rewrite_session.py`/`test_lspri_rewrite_session_autosave.py`/
+`test_lspri_workflow_panel_width_budget.py`/`test_lspri_workflow_panel_
+stage_restore.py` (60/60) - every test that touches `panels/image/` or
+`app_rewrite.py`. 163/163 total. ruff/pyflakes clean.
