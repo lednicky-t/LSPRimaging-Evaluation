@@ -5481,3 +5481,63 @@ dx/dy, and d's own zero-length guard) + `test_lspri_rewrite_rotate_
 tool.py`/`test_lspri_rewrite_crop_tool.py`/`test_lspri_rewrite_
 measurement_calibration.py` (33/33, 54/54, 21/21 - all unaffected).
 154/154 total.
+
+## 2026-09-29 (same day, continued a sixth time): Transforms row reorder, and a cleanup pass over the whole Measure stretch
+
+Maintainer asked for a small icon reorder, then explicitly asked for a
+cleanup pass + test run before calling this feature done - the same
+"maintainer asked for a manual review before committing" request the
+Rotate/Crop stretch got a few entries back, applied here for the first
+time to Measure's own five-round history.
+
+**Reorder**: `TransformsSection` goes back to one row - flip H/V moved
+from after crop to between rotation and crop, and Measure folded back in
+at the end of the same row instead of the second row it got three entries
+ago. That second row no longer earns its keep now that Measure's own
+fields/apply live entirely in its floating on-canvas controls, not in this
+row at all - there was never anything else it would have held. Pure
+layout: `QVBoxLayout(row1, row2)` collapsed to one `QHBoxLayout`, no
+signal/attribute changes, so no behavioral test needed touching.
+
+**Cleanup pass, read every touched file fresh looking for leftovers from
+the five rounds of back-and-forth** (not a re-read of the diffs - the
+whole current state of each file, the same method the Rotate/Crop cleanup
+entry used and the same reason: diffs show what changed in one step, not
+what a change three steps ago left inconsistent with a change two steps
+later). Real findings, not just prose - each confirmed by grep or by
+tracing call sites, not assumed:
+
+- **`MeasureLineTool._report_measurement`'s `is_fresh_placement` parameter
+  was dead.** Moving the "reset" emission to point 1's placement (two
+  entries back, for the live-hover-preview feature) left both of
+  `_report_measurement`'s two call sites - point 2's click and a
+  post-commit drag - passing `is_fresh_placement=False` unconditionally.
+  The parameter had nothing left to vary. Removed; the method now always
+  emits `False` and says why in one line, instead of a caller-supplied
+  value that never actually differed.
+- **Two module docstrings claimed Crop was "the one tool" claiming
+  left-button drags.** True when written (2026-09-29, before Measure's
+  drag-to-reposition existed); false since two entries ago, when Measure
+  joined it. Both `panel.py`'s and `image_controls.py`'s module docstrings
+  still said it. Fixed to name both tools and how `_on_left_drag_event`
+  dispatches between them.
+- **`_refresh_tool_info`'s docstring still described Crop and Measure as
+  "a tool with no row of its own"** in `image_controls.py`'s
+  `_TOOL_CONTROLS` - stale from before either got a real controls row
+  (both have had one since they were first built). Fixed to state the
+  actual current rule (every real tool has one; only "no tool" falls
+  back).
+
+Everything else read clean: no dead imports (confirmed - `QVBoxLayout`
+was the one import the reorder made unused, already removed as part of
+the edit itself, not left for this pass to catch), no leftover unused
+methods, no duplicate or superseded tests sitting next to their
+replacements in `test_lspri_rewrite_measure_tool.py`'s now 46-test
+listing.
+
+Verified: `test_lspri_rewrite_measure_tool.py`/`test_lspri_rewrite_
+rotate_tool.py`/`test_lspri_rewrite_crop_tool.py`/`test_lspri_rewrite_
+measurement_calibration.py`/`test_lspri_workflow_panel_width_budget.py`
+(46/46, 33/33, 54/54, 21/21, 3/3) - every test that touches
+`panels/image/`, `panels/workflow/transforms_settings.py`, or
+`GeometryModule`. 157/157 total.

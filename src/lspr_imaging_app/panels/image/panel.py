@@ -59,13 +59,14 @@ re-applied when the tool is switched off; (b) hides the ROI overlay, because
 ROI positions live in *processed* (cropped) space and would sit at the wrong
 place over an uncropped image (CLAUDE.md: mixing the spaces silently gives
 wrong results); and (c) routes left/right clicks and keys to the tool - Crop
-additionally claims left-button *drags* (``ImageViewBox.set_left_drag_
-handler``, ``image_controls.py``), the one tool so far that needs one. With
-no tool active, a left click selects ROIs as before. Measure is deliberately
-**not** a preview tool - calibration is measured against whatever is
-currently displayed (already-cropped/rotated), not the raw frame, so the
-ROI overlay stays visible while measuring too. Mouse/keyboard
-rules: ``image_controls.py``.
+and Measure additionally claim left-button *drags* (``ImageViewBox.set_
+left_drag_handler``, dispatched by ``_on_left_drag_event`` to whichever of
+the two is active - Crop for drawing/resizing the rectangle, Measure for
+repositioning an already-placed point). With no tool active, a left click
+selects ROIs as before. Measure is deliberately **not** a preview tool -
+calibration is measured against whatever is currently displayed
+(already-cropped/rotated), not the raw frame, so the ROI overlay stays
+visible while measuring too. Mouse/keyboard rules: ``image_controls.py``.
 """
 
 from __future__ import annotations
@@ -658,9 +659,10 @@ class ImagePanel(QWidget):
 
     def _refresh_tool_info(self, tool: ImageTool | None) -> None:
         """Point the info icon's tooltip at *tool*'s controls. Always shows
-        something - a tool with no row of its own (crop, measure) and no
-        tool at all both fall back to `image_controls.py`'s plain-image
-        row (left-click selects, plus the always-available drag/zoom)."""
+        something - every real tool has its own row in `image_controls.py`'s
+        `_TOOL_CONTROLS` now; only no tool at all falls back to its
+        plain-image row (left-click selects, plus the always-available
+        drag/zoom)."""
         theme = get_active_theme()
         self._tool_info.setPixmap(load_tabler_icon("info-circle", color=theme.text_muted, size=16).pixmap(16, 16))
         self._tool_info.setToolTip(controls_text(tool))

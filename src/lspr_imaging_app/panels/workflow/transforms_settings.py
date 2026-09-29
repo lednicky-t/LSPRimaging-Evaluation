@@ -1,16 +1,17 @@
-"""Image Tools stage - "Transforms" section: rotate / crop / flip icon row,
-plus a second row for the Measure tool.
+"""Image Tools stage - "Transforms" section: one row of rotate / flip /
+crop / measure icons.
 
 The stable app's Transforms controls (rotate tool, reset rotation,
 rotation-fill color, crop tool, reset crop, flip H/V, measure tool -
 `gui/main_window.py`'s `rotate_action`/`reset_rotation_action`/
 `rotation_fill_dark_button`/`crop_action`/`reset_crop_action`/
-`flip_*_action`/`measure_action`). The stable app packs all seven into one
-long row; here Measure gets its own row underneath instead (maintainer's
-spec, 2026-09-29) - its floating on-canvas controls (`measure_controls.py`)
-carry the fields/apply the stable app put in a second row of this same
-widget, so there is nothing left for this row to hold beyond the one
-tool-toggle button.
+`flip_*_action`/`measure_action`), all eight in one row, in four groups:
+rotation | flip | crop | measure (maintainer's ordering, 2026-09-29 - flip
+moved between rotation and crop, and Measure folded back into this same
+row instead of a second one underneath it, now that there's nothing left
+in that second row to justify its own space - Measure's floating
+on-canvas controls, `measure_controls.py`, carry the fields/apply the
+stable app put in a second row of this same widget).
 
 Icon choices, per the maintainer's spec (2026-09-28):
 
@@ -32,11 +33,11 @@ Icon choices, per the maintainer's spec (2026-09-28):
   green `#22c55e` / teal `#2dd4bf` when on (the source's literals).
 - **Measure tool**: same vendored tabler `ruler-measure` glyph as the
   stable app (`MainWindowIcons._make_measure_icon`), but blue `#38bdf8`
-  when active rather than the source's green literal - own row, see module
-  docstring. Deliberately *not* matching the stable app's color here: the
-  maintainer's explicit preference (2026-09-29, "similar like cropping
-  rectangle... keep it for most of the tools") overrides the "match the
-  stable app" default this file otherwise follows.
+  when active rather than the source's green literal - last group in the
+  row, see module docstring. Deliberately *not* matching the stable app's
+  color here: the maintainer's explicit preference (2026-09-29, "similar
+  like cropping rectangle... keep it for most of the tools") overrides the
+  "match the stable app" default this file otherwise follows.
 
 All of them are drawn smaller than the stable app's (28x28 button / 22px icon
 vs. 36x36 / 28px) so the row costs less of the Workflow panel's fixed
@@ -60,7 +61,7 @@ import logging
 from PyQt6.QtCore import QByteArray, QRectF, QSize, Qt
 from PyQt6.QtGui import QIcon, QPainter, QPixmap
 from PyQt6.QtSvg import QSvgRenderer
-from PyQt6.QtWidgets import QHBoxLayout, QToolButton, QVBoxLayout, QWidget
+from PyQt6.QtWidgets import QHBoxLayout, QToolButton, QWidget
 
 from lspr_ui import get_active_theme, load_tabler_icon, tabler_icon_svg, transparent_icon_button_stylesheet
 
@@ -74,7 +75,7 @@ _FLIP_H_ACTIVE_COLOR = "#22c55e"
 _FLIP_V_ACTIVE_COLOR = "#2dd4bf"
 _MEASURE_ACTIVE_COLOR = "#38bdf8"  # same blue as Crop's - maintainer's preferred tool color (2026-09-29, was green)
 _BUTTON_SIZE = 28
-# Extra gap between the rotation | crop | flip groups (on top of the 6px spacing).
+# Extra gap between the rotation | flip | crop | measure groups (on top of the 6px spacing).
 _GROUP_GAP = 6
 _ICON_SIZE = 22
 # Rendered at 2x and scaled down by Qt, so the smaller icon stays crisp
@@ -197,29 +198,21 @@ class TransformsSection(QWidget):
         )
         self._measure_button.toggled.connect(self._on_measure_toggled)
 
-        row1 = QHBoxLayout()
-        row1.setSpacing(6)
-        row1.addWidget(self._rotate_button)
-        row1.addWidget(self._reset_button)
-        row1.addWidget(self._fill_button)
-        row1.addSpacing(_GROUP_GAP)
-        row1.addWidget(self._crop_button)
-        row1.addWidget(self._reset_crop_button)
-        row1.addSpacing(_GROUP_GAP)
-        row1.addWidget(self._flip_h_button)
-        row1.addWidget(self._flip_v_button)
-        row1.addStretch(1)
-
-        row2 = QHBoxLayout()
-        row2.setSpacing(6)
-        row2.addWidget(self._measure_button)
-        row2.addStretch(1)
-
-        layout = QVBoxLayout(self)
+        layout = QHBoxLayout(self)
         layout.setContentsMargins(4, 4, 4, 4)
-        layout.setSpacing(4)
-        layout.addLayout(row1)
-        layout.addLayout(row2)
+        layout.setSpacing(6)
+        layout.addWidget(self._rotate_button)
+        layout.addWidget(self._reset_button)
+        layout.addWidget(self._fill_button)
+        layout.addSpacing(_GROUP_GAP)
+        layout.addWidget(self._flip_h_button)
+        layout.addWidget(self._flip_v_button)
+        layout.addSpacing(_GROUP_GAP)
+        layout.addWidget(self._crop_button)
+        layout.addWidget(self._reset_crop_button)
+        layout.addSpacing(_GROUP_GAP)
+        layout.addWidget(self._measure_button)
+        layout.addStretch(1)
 
         self._refresh_rotate_icon()
         self._refresh_crop_icon()

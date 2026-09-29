@@ -13,10 +13,13 @@ keeps exactly one meaning: clicks belong to the active tool (or ROI
 selection), and panning is the middle button's job.
 
 A tool that needs a drag gesture claims it for itself, in its own row of
-`_TOOL_CONTROLS` - it does not re-enable the view's default drags. The Crop
-tool (2026-09-29, `crop_tool.py`) is the first: `ImageViewBox.set_left_drag_
-handler` lets it intercept left-button drags while it is active, everything
-else still ignored exactly as before.
+`_TOOL_CONTROLS` - it does not re-enable the view's default drags. Crop
+(2026-09-29, `crop_tool.py`) was the first: `ImageViewBox.set_left_drag_
+handler` lets it intercept left-button drags while it is active. Measure
+(also 2026-09-29, added later the same day - dragging an already-placed
+point) is the second; `panel.py`'s `_on_left_drag_event` dispatches a drag
+to whichever of the two is currently active, everything else still ignored
+exactly as before.
 """
 
 from __future__ import annotations

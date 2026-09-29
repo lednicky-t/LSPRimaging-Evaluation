@@ -169,7 +169,7 @@ class MeasureLineTool(QObject):
         self._hover = None
         self._point1, self._point2 = first, (float(x), float(y))
         self._redraw_placed()
-        self._report_measurement(is_fresh_placement=False)
+        self._report_measurement()
         distance_px = self._distance_px()
         self.status_changed.emit(f"Ruler placed - {distance_px:.1f} px. Drag either point to fine-tune, or enter the real distance and Apply.")
 
@@ -245,7 +245,7 @@ class MeasureLineTool(QObject):
         else:
             self._point2 = moved
         self._redraw_placed()
-        self._report_measurement(is_fresh_placement=False)
+        self._report_measurement()
 
     def end_gesture(self) -> None:
         self._drag_point = None
@@ -271,9 +271,13 @@ class MeasureLineTool(QObject):
         dx, dy = self._point2[0] - self._point1[0], self._point2[1] - self._point1[1]
         return (dx * dx + dy * dy) ** 0.5
 
-    def _report_measurement(self, *, is_fresh_placement: bool) -> None:
+    def _report_measurement(self) -> None:
+        """Called once a real pair exists (point 2 committed, or a drag of
+        either point) - always `is_fresh_placement=False`. The only `True`
+        emission is the direct one at point 1's placement, above - see the
+        `measured` signal's own docstring for why that is the sole reset."""
         self._geometry.set_measurement_anchors(self._point1[0], self._point1[1], self._point2[0], self._point2[1])
-        self.measured.emit(self._point2[0] - self._point1[0], self._point2[1] - self._point1[1], is_fresh_placement)
+        self.measured.emit(self._point2[0] - self._point1[0], self._point2[1] - self._point1[1], False)
 
     def _redraw_placed(self) -> None:
         x1, y1 = self._point1
