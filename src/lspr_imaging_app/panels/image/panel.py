@@ -35,15 +35,20 @@ something this panel should invent an answer for:
 - Mask painting/preview overlays, the intensity-highlight overlay, and the
   histogram-driven highlight (`MaskModule`'s async candidate machinery
   isn't built either - see its module docstring).
-- The cursor readout, scale bar, and ruler overlay - ``GeometryModule``
-  already owns the calibration state they would draw from.
+- The cursor readout and scale bar - ``GeometryModule`` already owns the
+  calibration state they would draw from. (The ruler itself is built -
+  2026-09-29, ``measure_line_tool.py`` - two-click placement, drag either
+  placed point to fine-tune, and its floating fields; a persistent
+  always-visible scale bar is a separate, still-unbuilt overlay.)
 - ROI creation by click and ROI resize by handle. ``add_roi``/``resize_roi``
   are real commands; this panel currently only moves and selects, which is
   what makes the overlay worth looking at in the first place.
   (**Rotation is built** - 2026-09-28, ``rotate_line_tool.py``. **Crop is
   built** - 2026-09-29, ``crop_tool.py`` - deliberately *not* a port of the
   old app's ``gui/image_tools_controller.py``/``pg.RectROI``: no separate
-  handle widgets, the rectangle's own border is the grab zone.)
+  handle widgets, the rectangle's own border is the grab zone. **Measure is
+  built** - 2026-09-29, ``measure_line_tool.py``/``measure_controls.py`` -
+  a two-click ruler, not the old app's draggable crosses.)
 
 **Active tool** (2026-09-28): which canvas tool is on comes from the shared
 ``ActiveToolModule`` - the panel never decides it. While a *preview* tool
@@ -56,8 +61,11 @@ place over an uncropped image (CLAUDE.md: mixing the spaces silently gives
 wrong results); and (c) routes left/right clicks and keys to the tool - Crop
 additionally claims left-button *drags* (``ImageViewBox.set_left_drag_
 handler``, ``image_controls.py``), the one tool so far that needs one. With
-no tool active, a left click selects ROIs as before. Mouse/keyboard rules:
-``image_controls.py``.
+no tool active, a left click selects ROIs as before. Measure is deliberately
+**not** a preview tool - calibration is measured against whatever is
+currently displayed (already-cropped/rotated), not the raw frame, so the
+ROI overlay stays visible while measuring too. Mouse/keyboard
+rules: ``image_controls.py``.
 """
 
 from __future__ import annotations
@@ -93,6 +101,8 @@ from .context_menu import show_tool_context_menu
 from .crop_size_controls import CropSizeControls
 from .crop_tool import CropTool
 from .image_controls import ImageViewBox, controls_text
+from .measure_controls import MeasureCalibrationControls
+from .measure_line_tool import MeasureLineTool
 from .render import ImageRenderer, RenderRequest, RenderResult
 from .rotate_line_tool import RotateLineTool
 
@@ -243,7 +253,7 @@ class ImagePanel(QWidget):
         # Left-button drags do nothing by default (image_controls.py); Crop
         # is the first tool to claim them - declines (returns False) unless
         # it is the active tool, so every other case is untouched.
-        self._plot.vb.set_left_drag_handler(self._on_crop_drag_event)
+        self._plot.vb.set_left_drag_handler(self._on_left_drag_event)
         self._plot.vb.sigTransformChanged.connect(self._reposition_crop_controls)
 
         # A real QWidget (QSpinBox/QToolButton need actual input, unlike a
@@ -255,6 +265,15 @@ class ImagePanel(QWidget):
         self._crop_controls.setVisible(False)
         self._crop_controls.size_edited.connect(self._crop_tool.set_size)
         self._crop_controls.apply_requested.connect(self._on_crop_apply_requested)
+
+        self._measure_tool = MeasureLineTool(self._plot, self._geometry, parent=self)
+        self._measure_tool.status_changed.connect(self._on_tool_status)
+        self._measure_tool.measured.connect(self._on_measure_tool_measured)
+
+        self._measure_controls = MeasureCalibrationControls(self._view.viewport(), get_active_theme())
+        self._measure_controls.setVisible(False)
+        self._measure_controls.apply_requested.connect(self._on_measure_apply_requested)
+        self._plot.vb.sigTransformChanged.connect(self._reposition_measure_controls)
 
         self._status = QLabel("No dataset loaded.", self)
         self._status.setWordWrap(True)
@@ -368,6 +387,8 @@ class ImagePanel(QWidget):
             self._refresh_tool_info(self._active_tool.active())
         if hasattr(self, "_crop_controls"):
             self._crop_controls.refresh_theme(get_active_theme())
+        if hasattr(self, "_measure_controls"):
+            self._measure_controls.refresh_theme(get_active_theme())
 
     # -- dataset lifecycle --------------------------------------------------
 
@@ -619,6 +640,8 @@ class ImagePanel(QWidget):
     def _on_active_tool_changed(self, tool: ImageTool | None) -> None:
         self._rotate_tool.set_active(tool is ImageTool.ROTATE)
         self._crop_tool.set_active(tool is ImageTool.CROP)
+        self._measure_tool.set_active(tool is ImageTool.MEASURE)
+        self._reposition_measure_controls()
         self._view.viewport().unsetCursor()  # drop any resize/move cursor left over from Crop
         self._tool_status = ""
         self.tool_status_changed.emit("")  # drop a stale status from the tool just switched away from
@@ -655,10 +678,21 @@ class ImagePanel(QWidget):
                 self._view.viewport().unsetCursor()
             else:
                 self._view.viewport().setCursor(cursor)
-        if self._rotate_tool.first_point() is None or not self._in_view(scene_pos):
-            return
-        point = self._plot.vb.mapSceneToView(scene_pos)
-        self._rotate_tool.on_mouse_moved(float(point.x()), float(point.y()))
+        if self._active_tool.active() is ImageTool.MEASURE and self._in_view(scene_pos):
+            point = self._plot.vb.mapSceneToView(scene_pos)
+            handle = self._measure_tool.hover_handle(float(point.x()), float(point.y()))
+            if handle is None:
+                self._view.viewport().unsetCursor()
+            else:
+                # Same "move" cursor as dragging Crop's interior - both mean
+                # "drag this to reposition it".
+                self._view.viewport().setCursor(Qt.CursorShape.SizeAllCursor)
+        if self._rotate_tool.first_point() is not None and self._in_view(scene_pos):
+            point = self._plot.vb.mapSceneToView(scene_pos)
+            self._rotate_tool.on_mouse_moved(float(point.x()), float(point.y()))
+        if self._measure_tool.first_point() is not None and self._in_view(scene_pos):
+            point = self._plot.vb.mapSceneToView(scene_pos)
+            self._measure_tool.on_mouse_moved(float(point.x()), float(point.y()))
 
     def eventFilter(self, watched: QObject, event: QEvent) -> bool:  # noqa: N802 - Qt naming
         if watched is self._view and event.type() == QEvent.Type.KeyPress:
@@ -666,6 +700,9 @@ class ImagePanel(QWidget):
                 event.accept()
                 return True
             if self._crop_tool.handle_key(event.key()):
+                event.accept()
+                return True
+            if self._measure_tool.handle_key(event.key()):
                 event.accept()
                 return True
         return super().eventFilter(watched, event)
@@ -689,6 +726,15 @@ class ImagePanel(QWidget):
                 self._rotate_tool.on_left_click(float(p.x()), float(p.y()))
             elif button == Qt.MouseButton.RightButton:
                 self._show_rotate_context_menu()
+            return
+        if self._active_tool.active() is ImageTool.MEASURE:
+            if not self._in_view(scene_pos):
+                return
+            if button == Qt.MouseButton.LeftButton:
+                p = self._plot.vb.mapSceneToView(scene_pos)
+                self._measure_tool.on_left_click(float(p.x()), float(p.y()))
+            elif button == Qt.MouseButton.RightButton:
+                self._show_measure_context_menu()
             return
         if self._active_tool.active() is ImageTool.CROP:
             # A plain (non-drag) left-click has nothing to do - dragging is
@@ -730,6 +776,16 @@ class ImagePanel(QWidget):
         if show_tool_context_menu(self, [("Cancel rotation", True)]) == "Cancel rotation":
             self._active_tool.set_active(ImageTool.ROTATE, False)
 
+    def _show_measure_context_menu(self) -> None:
+        """Right-click while Measure is active: a menu with a single
+        "Cancel measurement" action, always enabled - same shape and
+        reasoning as `_show_rotate_context_menu` (exits Measure mode
+        entirely, the same as clicking the Workflow panel's Measure button
+        again; always-enabled is what keeps the menu from ever having
+        nothing clickable in it, see `context_menu.py`)."""
+        if show_tool_context_menu(self, [("Cancel measurement", True)]) == "Cancel measurement":
+            self._active_tool.set_active(ImageTool.MEASURE, False)
+
     def _show_crop_context_menu(self) -> None:
         """Right-click while Crop is active: "Apply crop" (enabled only
         with something pending, `CropTool.has_pending_changes`) and
@@ -746,11 +802,15 @@ class ImagePanel(QWidget):
         elif chosen == "Cancel crop":
             self._active_tool.set_active(ImageTool.CROP, False)
 
+    def _on_left_drag_event(self, ev: object) -> bool:
+        """`ImageViewBox`'s single left-drag handler slot - dispatches to
+        whichever tool (if any) claims the drag. Crop and Measure each
+        decline (return `False`) unless *they* are the active tool, so at
+        most one of them ever claims a given drag, and neither has any
+        effect on plain ROI dragging."""
+        return self._on_crop_drag_event(ev) or self._on_measure_drag_event(ev)
+
     def _on_crop_drag_event(self, ev: object) -> bool:
-        """`ImageViewBox`'s left-drag handler (image_controls.py). Declines
-        (returns `False`) whenever Crop isn't the active tool, so it has no
-        effect on any other tool or on plain ROI dragging - only one thing
-        in the whole panel claims left-button drags at a time."""
         if self._active_tool.active() is not ImageTool.CROP:
             return False
         scene_pos = ev.scenePos()
@@ -764,6 +824,27 @@ class ImagePanel(QWidget):
             self._crop_tool.end_gesture()
             return True
         self._crop_tool.update_gesture(x, y)
+        return True
+
+    def _on_measure_drag_event(self, ev: object) -> bool:
+        """Drags an already-placed point (maintainer's request, 2026-09-29
+        - added after the click-twice-only version shipped). A drag that
+        doesn't start on an existing point is left unclaimed - a *new* pair
+        is placed by ordinary clicks (`on_left_click`), not by dragging
+        empty space."""
+        if self._active_tool.active() is not ImageTool.MEASURE:
+            return False
+        scene_pos = ev.scenePos()
+        point = self._plot.vb.mapSceneToView(scene_pos)
+        x, y = float(point.x()), float(point.y())
+        if ev.isStart():
+            if not self._in_view(scene_pos):
+                return False
+            return self._measure_tool.begin_gesture(x, y)
+        if ev.isFinish():
+            self._measure_tool.end_gesture()
+            return True
+        self._measure_tool.update_gesture(x, y)
         return True
 
     def _on_crop_apply_requested(self) -> None:
@@ -818,6 +899,82 @@ class ImagePanel(QWidget):
         self._crop_controls.set_apply_enabled(self._crop_tool.has_pending_changes())
         self._crop_controls.setVisible(True)
         self._crop_controls.raise_()
+
+    def _on_measure_tool_measured(self, dx_px: float, dy_px: float, is_fresh_placement: bool) -> None:
+        """`MeasureLineTool.measured`: the current measurement changed -
+        point 1 just placed (a reset), the cursor moving toward point 2
+        before it's clicked, point 2's click committing the pair, or a
+        later drag of either point (`MeasureLineTool.measured`'s own
+        docstring has the full list). Show the floating controls with the
+        current px deltas either way.
+
+        **If a calibration already exists**, the tool doubles as a plain
+        ruler: the um fields are live-filled from the existing microns-per-
+        pixel scale on *every* update (maintainer's spec, 2026-09-29 -
+        "moving... should automatically use this coefficient"). Typing a
+        different value still works afterward (to re-calibrate against a
+        different reference), it just gets overwritten by the next
+        placement/hover/drag the same way a plain placement's 0 used to.
+
+        **Without a calibration yet**, the um fields reset to 0 only when
+        `is_fresh_placement` is `True` - point 1 just being placed, i.e. a
+        brand-new measurement session starting - not on every hover/drag
+        update after that: fine-tuning where point 2 lands, before or after
+        it's clicked, must not throw away a distance already typed in for
+        the first-time calibration this measurement is building toward."""
+        self._measure_controls.set_deltas(dx_px, dy_px)
+        if self._geometry.can_display_micrometers():
+            settings = self._geometry.settings()
+            self._measure_controls.set_um_values(
+                abs(dx_px) * settings.microns_per_pixel_x, abs(dy_px) * settings.microns_per_pixel_y
+            )
+        elif is_fresh_placement:
+            self._measure_controls.reset_um_fields()
+        self._reposition_measure_controls()
+
+    def _reposition_measure_controls(self) -> None:
+        """Moves the floating calibration controls so the Apply button (not
+        the widget's top-left corner) sits under the ruler's second point -
+        or, while point 2 hasn't been clicked yet, under the live cursor
+        (`current_anchor_point()`, maintainer's "live measurement" request,
+        2026-09-29) - with the px/um fields to its left (maintainer's spec,
+        2026-09-29) - same idea as `_reposition_crop_controls`, just
+        anchored at a point in the middle of the widget instead of at one
+        edge. Called on every placement, every hover/drag update, and every
+        pan/zoom. Hidden whenever Measure isn't active or nothing has been
+        placed/hovered yet."""
+        point = self._measure_tool.current_anchor_point()
+        if not self._measure_tool.is_active() or point is None:
+            self._measure_controls.setVisible(False)
+            return
+        x, y = point
+        scene_pos = self._plot.vb.mapViewToScene(QPointF(float(x), float(y)))
+        view_pos = self._view.mapFromScene(scene_pos)
+        margin = 4
+        apply_center_x = self._measure_controls.apply_button_center_x()
+        self._measure_controls.move(view_pos.x() - apply_center_x, view_pos.y() + margin)
+        self._measure_controls.setVisible(True)
+        self._measure_controls.raise_()
+
+    def _on_measure_apply_requested(self, dx_um: float, dy_um: float) -> None:
+        """`MeasureCalibrationControls.apply_requested`. A `ValueError`
+        (no real dx/dy entered, or a zero pixel delta on the requested
+        axis - `GeometryModule.apply_measurement_calibration`'s own three
+        guards) is reported as a status message rather than raised, the
+        same convention `RotateLineTool`/`CropTool` callers already use for
+        this module's other guarded commands. A *successful* apply exits
+        Measure mode (maintainer's spec, 2026-09-29 - "apply, the tool will
+        cancel and settings will [be] applied"), the same shape as
+        `_on_crop_apply_requested`: a failed attempt leaves the session
+        exactly as it was, still in the tool, so a mistyped value doesn't
+        also cost the placed ruler."""
+        try:
+            self._geometry.apply_measurement_calibration(dx_um, dy_um)
+        except ValueError as exc:
+            self._on_tool_status(str(exc))
+            return
+        self._on_tool_status("Measurement calibration applied - display units switched to micrometers.")
+        self._active_tool.set_active(ImageTool.MEASURE, False)
 
     def roi_at(self, x: float, y: float) -> int | None:
         """The ROI whose sample aperture contains display-space point

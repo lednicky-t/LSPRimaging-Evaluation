@@ -340,10 +340,17 @@ class GeometryModule(QObject):
 
     @instrumented("GeometryModule.set_display_units")
     def set_display_units(self, units: str) -> None:
-        """Toggle px<->um display - old app's `_toggle_display_units`. Not
-        undo-tracked (see module docstring). Raises `ValueError` for "um"
-        before a real calibration exists, mirroring the old app's
-        status-bar refusal ("Calibrate the ruler first...")."""
+        """Toggle px<->um display - old app's `_toggle_display_units`.
+        Not undo-tracked (see module docstring). Raises `ValueError` for
+        "um" before a real calibration exists, mirroring the old app's
+        status-bar refusal ("Calibrate the ruler first...").
+
+        **"mm" was added then reverted the same day** (2026-09-29): briefly
+        extended for the Measure tool's unit toggle, but the toggle itself
+        was cut from scope before shipping - "we can skip the switch, do
+        only px to um... no other units for now" - so the third value went
+        with it. Revisit if a real second unit-consumer (a scale bar, a ROI
+        table column) ever needs one."""
         units = str(units)
         if units not in ("px", "um"):
             raise ValueError(f"units must be 'px' or 'um', got {units!r}")

@@ -5028,3 +5028,456 @@ geometry_sync.py` (22/22) + `test_lspri_rewrite_analysis_engine.py`/
 `test_lspri_workflow_panel_width_budget.py`/`test_lspri_workflow_panel_
 stage_restore.py` (60/60) - every test that touches `panels/image/` or
 `app_rewrite.py`. 170/170 total. ruff/pyflakes clean.
+
+## 2026-09-29 (same day, continued): Measure tool - the third Image Tools canvas tool, closing the gap `GeometryModule`'s calibration commands left open on 2026-09-21
+
+The command layer (`apply_measurement_calibration`/`set_measurement_
+anchors`/`set_display_units`/`set_scale_bar_visible`/`can_display_
+micrometers`/`microns_per_pixel_scalar`) had sat unused since the
+2026-09-21 entry - "the panel layer isn't built" was still true for this
+one piece even after Rotate and Crop both got real canvas tools. Built the
+GUI layer only; zero changes to that command layer's behavior beyond one
+guard (below).
+
+**`measure_line_tool.py`** (`MeasureLineTool`): a near-twin of
+`rotate_line_tool.py`'s two-click state machine - maintainer's own choice,
+to keep the two Image Tools canvas gestures consistent, over porting the
+old app's draggable ruler crosses (`gui/measurement_calibration_mixin.py`'s
+`_on_measurement_marker_moved` on `develop`). On the second click it calls
+`set_measurement_anchors` (cosmetic, not undo-tracked - fired once instead
+of continuously) and emits `measured(dx_px, dy_px)`. No arrow-key nudges
+(nothing to nudge - the tool itself never changes a pixel). Stays active
+after placing a pair, like Rotate's "ready for another pair", not like
+Crop's exit-on-apply - there is no destructive change to force an exit
+from.
+
+One deliberate deviation from `RotateLineTool` worth flagging: its rubber
+band disappears the instant the second click applies a rotation, because
+there is nothing left to look at once the pixels have moved. Measure's
+placed line stays on screen instead (a second `PlotCurveItem`/
+`ScatterPlotItem` pair, solid rather than dashed) - the whole point of this
+tool is comparing the line against image features while typing a distance
+and deciding whether to Apply. First draft hid it the same way Rotate does;
+caught in review before it reached the maintainer, since a ruler that
+vanishes the moment you place it would make calibration nearly impossible
+to line up correctly. Clears only on a new first click or on deactivate,
+not incidentally.
+
+**`measure_controls.py`** (`MeasureCalibrationControls`): a twin of
+`crop_size_controls.py`'s floating-widget pattern rather than a new one -
+`dx`/`dy` read-only px labels (`QLabel`, not disabled spin boxes -
+CLAUDE.md's testability rule is about *clickable* widgets, a label needs no
+input widget at all) + editable um `QDoubleSpinBox` pair (matching the old
+app's `measurement_um_x_spin`/`measurement_um_y_spin` exactly: range
+0-1,000,000, decimals=0) + the same green tabler `checkbox` apply icon Crop
+uses + a borderless `QToolButton` unit-cycle toggle (px -> um -> mm -> px).
+Owns no `GeometryModule` reference, like `CropSizeControls` - it only
+emits `apply_requested(dx_um, dy_um)`/`unit_cycle_requested()`; `panel.py`
+makes the actual module calls and reports the result back via `set_deltas`/
+`set_unit_display`, catching the `ValueError`s `apply_measurement_
+calibration`/`set_display_units` raise and turning them into status text
+(the same convention already used for every other guarded command in this
+panel). The um fields reset to 0 on every new measurement (`set_deltas`) -
+a freshly placed ruler is a new physical distance, and carrying over a
+previously typed number would risk calibrating against the wrong pair of
+points.
+
+**"mm" added to `set_display_units`** (maintainer's request, confirmed
+before building - the old app only ever had px/um) - one line, extending
+the allowed set and the calibration-required gate from `("px", "um")` to
+`("px", "um", "mm")`. Pure display formatting: mm is µm/1000, no separate
+calibration math, so no new field on `GeometrySettings`. `next_unit()` (a
+module-level function in `measure_controls.py`, not a method - so the
+widget itself never needs a `GeometryModule` reference just to know what
+"cycle" means) does the px -> um -> mm -> px wrap-around; `panel.py` calls
+it against `GeometryModule.settings().display_units` and lets
+`set_display_units` do the actual validation.
+
+**Not a preview tool** - unlike Rotate/Crop, Measure doesn't join
+`_PREVIEW_TOOLS`. Calibration is measured against whatever is currently
+displayed (already-cropped/rotated); there is no reason to see beyond the
+current processed image the way choosing a *new* crop needs to. The ROI
+overlay stays visible while measuring.
+
+**Workflow panel**: `transforms_settings.py`'s `TransformsSection` gained a
+second row (maintainer's spec) holding just the one Measure toggle button -
+the old app packed all seven Transforms controls (including Measure) into
+one long row; here Measure's floating on-canvas controls carry the fields/
+apply/unit-toggle the old app put in a second row of this same widget, so
+there is nothing left for this row to hold beyond the tool toggle itself.
+Icon: vendored tabler `ruler-measure` (already in `lspr_ui`'s icon_assets -
+no new dependency), green `#22c55e` active, same literal the old app
+hardcodes.
+
+**Test gap closed alongside this**: `GeometryModule`'s calibration commands
+had *zero* pytest coverage before this entry - the 2026-09-21 entry says as
+much ("verified with real calls, scripted, no pytest harness yet") and
+nothing since had added any. New `tests/unit/test_lspri_rewrite_
+measurement_calibration.py` (20 tests) pins the symmetric/asymmetric-axis
+fallback, all three `ValueError` guards, the "cosmetic vs. undo-tracked are
+independent axes" split, and the mm addition - against the module directly,
+no Qt event loop needed.
+
+**Removed**: `test_lspri_rewrite_rotate_tool.py`'s
+`test_a_tool_without_canvas_behavior_does_not_take_clicks` - its premise
+("Measure can be switched on but does nothing on the image yet") stopped
+being true the moment this landed, and there is no tool left in the enum
+without real canvas behavior to exercise it with.
+
+Verified: `test_lspri_rewrite_measure_tool.py` (22/22, new) +
+`test_lspri_rewrite_measurement_calibration.py` (20/20, new) +
+`test_lspri_rewrite_rotate_tool.py` (33/33, one test removed as above) +
+`test_lspri_rewrite_crop_tool.py` (54/54, unaffected). 129/129 total.
+
+## 2026-09-29 (same day, continued once more): Measure tool - maintainer tried it, four real changes came back
+
+Maintainer tried the first cut in the actual app rather than just reading
+the diff (exactly the "static verification has limits" case CLAUDE.md
+already anticipates for GUI work) and reported four things, all fixed:
+
+**1. The floating controls' background didn't give enough contrast.** The
+first cut used `theme.toolbar_section_bg` (`crop_size_controls.py`'s own
+formula, copied as-is) - fine for Crop's widget, which sits over Crop's own
+semi-transparent dark overlay, but wrong here: Measure has no such overlay
+behind it, so the widget floats directly over whatever the image looks
+like, and a *theme* color can't guarantee contrast against arbitrary image
+content (a light theme's background, or its text color, can easily land
+close in luminance to a bright image). Fix: reuse `crop_tool.py`'s own
+`_OVERLAY_COLOR` wash (`rgba(0, 0, 0, 140)`, duplicated as a literal with a
+comment cross-reference - that constant is that module's private detail,
+not exported) as a fixed, theme-independent background, with fixed light
+text (`#f8fafc`/`#cbd5e1`) to match. Fixed dark background + theme-driven
+text was the actual bug shape: in a light theme, `theme.text_primary`
+would have been a dark color painted on what was *already* a light
+background, and would have stayed dark-on-dark once the background below
+was hardened without also hardening the text - caught before that
+half-fix shipped.
+
+**2. Layout was a single cramped row of 6 widgets and, per the maintainer,
+"not well aligned."** Rebuilt as a `QGridLayout`: px labels (row 0) above
+their matching um fields (row 1), same x/y columns, Apply spanning both
+rows immediately to the right, unit toggle spanning both rows past that -
+"px on top, um/mm below" and "toggle to the right of the calibration
+button", the maintainer's own ordering. Both columns get a shared fixed
+width (`QFontMetrics`-sized for the widest field, same technique
+`crop_size_controls.py` uses) so the two rows actually line up instead of
+each auto-sizing to its own content - the second, quieter half of "not well
+aligned".
+
+**3. Positioning anchored the wrong edge.** First cut put the widget's
+top-left corner at the ruler's second point, growing rightward - unlike
+`crop_size_controls.py`, which anchors its *last* widget (Apply) at the
+crop rectangle's corner and grows left. Wrong for two reasons: it doesn't
+match the maintainer's explicit spec ("align the apply button to the
+second point... fields should be on the left"), and it could clip off the
+right edge of the viewport for any point placed left-of-center - plausibly
+why the maintainer's report of "I don't see a unit toggle" wasn't actually
+a missing feature (it was in the code the whole time) but the *last*
+widget in a row that could run past the visible area. Fixed via
+`MeasureCalibrationControls.apply_button_center_x()` - a widget-local
+lookup of where Apply's column center actually is post-layout -
+`panel.py`'s `_reposition_measure_controls` now solves for the widget's
+top-left such that Apply's center lands exactly on the second point,
+whatever the layout looks like on either side of it.
+
+**4. Placed points needed to be draggable after all.** The maintainer had
+explicitly chosen click-twice-only over draggable crosses when asked
+up front (this doc's earlier entry) - tried it, and asked for dragging
+back, closer to (but not identical to) the stable app's always-visible
+crosses: hover a placed point for a move cursor, drag it to reposition.
+Added directly to `MeasureLineTool` rather than as a separate class: both
+points are now retained as `_point1`/`_point2` (previously only `_point2`
+was kept - `_point1` was thrown away once placement completed, since
+nothing needed it afterward) with `hover_handle`/`begin_gesture`/
+`update_gesture`/`end_gesture`, the same four-method shape `CropTool`
+already established for its own drag - so `panel.py`'s single `ImageViewBox`
+left-drag slot needed to become a dispatcher (`_on_left_drag_event`, tries
+Crop's handler then Measure's, each still independently declining when it
+isn't the active tool) rather than being hard-wired to Crop alone. Cursor
+reuses the same `SizeAllCursor` Crop's own interior-drag already means
+"move this".
+
+One nuance worth flagging: `measured` gained a third argument,
+`is_fresh_placement`. A drag update calls `set_measurement_anchors` live
+(cosmetic, not undo-tracked - consistent with the original design) and
+must refresh the px labels, but must *not* reset the editable um fields the
+way a brand-new two-click placement does - the maintainer is fine-tuning a
+point while keeping an already-typed target distance, not starting a new
+measurement. First draft reset them unconditionally on every `measured`
+emission (copy-pasted from the placement path); caught before it reached
+the maintainer, since it would have silently thrown away a typed number on
+every drag frame.
+
+Verified: `test_lspri_rewrite_measure_tool.py` (30/30 - eight new: drag
+moves point1/point2 independently, an off-point drag and a pre-placement
+drag are both left unclaimed, dragging doesn't reset typed um values,
+dragging isn't an undo step, the hover cursor, and Apply landing under
+point 2) + `test_lspri_rewrite_rotate_tool.py`/`test_lspri_rewrite_
+crop_tool.py` (33/33, 54/54 - unaffected by the drag-dispatcher refactor)
++ `test_lspri_rewrite_measurement_calibration.py` (20/20, untouched).
+137/137 total.
+
+## 2026-09-29 (same day, continued a third time): Measure tool - screenshot review, unit toggle cut from scope, square-pixel auto-calc added
+
+Maintainer sent an actual screenshot this time (not just a description) -
+the floating controls' numbers were unreadable against a bright dataset
+image, and the layout read as scattered across a wide stretch of the
+image rather than one compact control. Three real fixes plus one scope
+decision came back.
+
+**The single shared container background never painted as a visible
+block.** The previous entry's fix (a fixed `rgba(0,0,0,140)` background on
+`#measureCalibrationControls`, replacing a theme color) was the right
+*color* but the wrong *target* - the screenshot showed bare text floating
+directly on the image with no dark rectangle behind it at all, spread out
+over roughly half the image width. Root cause not fully pinned (plausibly
+a `QGridLayout` sizing/stacking interaction with the pyqtgraph-viewport
+parent that was never actually exercised visually before this point - see
+CLAUDE.md's own caution that static verification has limits), but the fix
+the maintainer asked for sidesteps needing to pin it exactly: **individual
+chip backgrounds per number**, not one container background. Each
+`QLabel`/`QDoubleSpinBox`/the Apply button now paints its own
+`rgba(0,0,0,140)` rounded chip via `objectName("measureChip")` + a
+`QSS #measureChip` selector, rather than relying on a parent-level
+background that apparently never reliably painted. This is also exactly
+what the stable app already does for the same problem - its scale-bar
+label comment (`gui/measurement_calibration_mixin.py`) explicitly calls
+out "a small solid chip, same convention as the ROI/landmark tags" for
+text that has to stay legible over arbitrary image content. Each chip
+paints itself regardless of container geometry, so this is also more
+robust than the container approach even setting the visibility bug aside.
+
+**Condensed**: field width's padding tightened (7 placeholder digits + 20px
+pad -> 6 digits + 12px), grid spacing 6px -> 3px, container margins removed
+entirely (0,0,0,0) - chips supply their own visual separation now, so the
+layout can pack tighter than a shared-background version could.
+
+**Unit toggle removed from this widget, and cut from scope entirely.** Two
+separate maintainer decisions: placement ("I was misunderstood that switch
+is next to apply button - remove it from there") and scope ("I also decide
+we can skip the switch, and do only px to um transform - no other units
+for now"). Removed `_unit_button`/`unit_cycle_requested` from
+`measure_controls.py`, `next_unit()`, and `panel.py`'s `_on_measure_unit_
+cycle_requested`/`_sync_measure_unit_display` wiring. `GeometryModule.
+set_display_units` reverted to accepting only `("px", "um")` - the "mm"
+extension from two entries ago is gone, with an explicit regression test
+(`test_rejects_mm_no_longer_a_supported_unit`) pinning the reversal rather
+than silently dropping the case. The underlying `display_units` field
+itself is untouched (still exists, still gets set to "um" on a successful
+`apply_measurement_calibration` - that was always independent of whether a
+UI toggle exists to flip it manually).
+
+**Square-pixel auto-calc of the sibling axis** (new capability, maintainer's
+spec): "when one of x,y values is set by user, the other one is
+autocalculated... pixels are square and scaling is in both x,y same."
+Editing dx_um (on `editingFinished`, matching `crop_size_controls.py`'s
+commit-not-every-keystroke convention) fills dy_um with
+`dx_um * (dy_px/dx_px)`, symmetrically for dy_um - constructed so that
+`abs(computed/target_px) == abs(typed/source_px)`, the same scale, so
+feeding both fields through `apply_measurement_calibration` unchanged
+reproduces the exact numeric result its own pre-existing symmetric
+fallback (only one axis given -> the other inherits the scale) already
+produced - this widget needed no knowledge that fallback exists to stay
+consistent with it. Guarded against a ~zero source pixel span (a
+perfectly vertical or horizontal ruler on the *other* axis - nothing to
+derive a scale from, left alone rather than dividing by ~zero).
+
+**A design contradiction caught before it reached tests, not by them**:
+the first draft of this feature's docstring claimed a user could type a
+second, independent value into the sibling field afterward to "override"
+the auto-fill. Re-reading the actual `_sync_sibling` implementation while
+writing that sentence showed it was false - editing *either* field always
+re-derives the *other* from it, so a second edit re-syncs both fields to
+the new scale rather than leaving an independent pair. Decided this is
+actually the more correct behavior (there is no way to express "these two
+axes really do have different scales" through this UI, matching the
+maintainer's own framing of square pixels as the assumed model, not an
+optional one) and fixed the docstring to match reality instead of adding
+code to make reality match the wrong docstring. One test (`test_editing_
+the_second_field_afterward_overrides_the_auto_fill`) was testing the false
+claim and passing anyway, for an unrelated reason - see next paragraph -
+so it never would have caught this; replaced with `test_editing_the_
+other_field_afterward_re_syncs_to_the_new_scale`, which asserts the
+re-sync explicitly.
+
+**Three new tests silently passed for the wrong reason, caught in review
+before being counted as coverage**: they clicked a second point at
+x=100, but `setUp`'s view range is only `xRange=(0.0, 80.0)` - `_in_view`
+rejected the out-of-range click, so `on_left_click`'s completion branch
+(which calls `set_measurement_anchors` and emits `measured`) never ran,
+`_dx_px`/`_dy_px` stayed at the widget's construction-time 0.0/0.0, and the
+auto-calc's zero-pixel-span guard made every assertion pass by doing
+nothing at all - not by exercising the feature. Two more of the six new
+tests actually failed outright on the same mistake, which is what
+triggered checking the other four instead of trusting the green run.
+Fixed by keeping every click within the configured view range (`crop_
+tool.py`'s and `rotate_line_tool.py`'s own tests already do this
+correctly - this file's new tests were the one place that didn't).
+
+Verified: `test_lspri_rewrite_measure_tool.py` (31/31 - net +1: six new for
+the auto-calc feature, three unit-toggle tests and the `UnitCycleTest`
+class's two removed) + `test_lspri_rewrite_measurement_calibration.py`
+(21/21 - the combined mm/um test split into three: um-refused, um-allowed,
+mm-rejected) + `test_lspri_rewrite_rotate_tool.py`/`test_lspri_rewrite_
+crop_tool.py` (33/33, 54/54 - unaffected). 139/139 total.
+
+## 2026-09-29 (same day, continued a fourth time): Measure tool - a real screenshot review, apply now exits, live calibrated readout added
+
+The chip-background fix from the previous entry worked ("the background is
+fine" - first confirmed-working round of visual feedback on this feature).
+Four more things came back from the same screenshot, one of them a real
+missing behavior rather than polish.
+
+**Apply exits Measure mode now** - the one substantive behavior change.
+Every other Image Tools tool's Apply/commit action already exits
+(`_on_crop_apply_requested`); Measure's first cut deliberately stayed
+active ("measuring is likely to need a second look... no destructive pixel
+change to force an exit from" - a reasonable guess, wrong per the
+maintainer's actual expectation: "it should cancel and settings applied").
+`_on_measure_apply_requested` now calls `_active_tool.set_active(MEASURE,
+False)` on a *successful* apply only - a failed one (bad input) leaves the
+session in the tool, matching Crop's own failed-apply behavior, so a typo
+doesn't also cost the placed ruler. Caught while implementing this that no
+existing test actually asserted either the old "stays active" behavior or
+the new "exits" one - `test_apply_exits_measure_mode`/`test_a_failed_
+apply_stays_in_measure_mode` close that gap.
+
+**Apply button moved into the um row and enlarged.** It was vertically
+centered across both rows (spanning px row + um row); the maintainer found
+it "too small" and wanted it "in same row as second row" instead. Moved to
+row 1 only (no rowspan), icon grown to fill nearly the whole chip
+(18px -> 22px icon in a 28px -> 26px button, plus explicit `padding: 0px`
+in the QSS chip rule to remove Qt's default button padding, which was
+fighting the icon-size change on its own).
+
+**Absolute values only.** `Δy -2.7 px` in the screenshot - the maintainer
+wants distances, not signed displacements. `MeasureCalibrationControls.
+set_deltas` now stores `abs(dx_px)`/`abs(dy_px)` rather than the raw
+signed values `MeasureLineTool` computes (which still has to stay signed
+internally - `GeometryModule.set_measurement_anchors` needs real point
+coordinates, not distances). `set_um_values` (see below) floors the same
+way.
+
+**Tool color changed to blue** (`#38bdf8`, `CropTool`'s own literal) for
+both the on-canvas line/crosses (`measure_line_tool.py`) and the Workflow
+button's active state (`transforms_settings.py`) - was green, matching the
+stable app's icon literal (2026-09-28's "port the stable app's choice"
+default). Explicit maintainer override: "similar like cropping rectangle...
+keep it for most of the tools if not ask otherwise" - noted in both
+docstrings as a deliberate deviation from the "match the stable app" rule
+this file otherwise follows, and as the new default going forward. The
+Apply checkmark's green stays green - that already matches Crop's own
+apply button, which keeps its checkmark green despite its on-canvas color
+being the same blue; tool-identity color and "confirm" color are already
+two different things in this codebase, this didn't need to change.
+
+**New capability: once a calibration exists, Measure doubles as a plain
+ruler.** "When some calibration coefficient is applied, and moving those
+measurement tool and selecting some distance should automatically use this
+coefficient to give numbers in second um rows." `_on_measure_tool_measured`
+now checks `GeometryModule.can_display_micrometers()` on *every* placement
+or drag update (not just fresh placements): if calibrated, the um fields
+are live-filled from the existing microns-per-pixel scale
+(`set_um_values`, not `reset_um_fields`) instead of being zeroed or left
+untouched. This intentionally overrides the earlier "dragging must not
+reset a manually-typed value" rule from two entries ago - that rule was
+protecting a first-time-calibration workflow (type a known distance, fine-
+tune the points, keep the typed number); once calibrated, the dominant
+workflow becomes "just read the distance off", and a stale manually-typed
+number sitting in the field while the ruler visibly moves would be
+actively misleading. Typing over the live-filled value still works (to
+re-calibrate against a different reference), it's just no longer
+protected from being overwritten by the next placement/drag - a real,
+known trade-off, not an oversight, and easy to revisit if it turns out
+annoying in practice.
+
+**Test-writing note, same pattern as two entries ago**: two of the eight
+new/changed tests in this round used click coordinates outside `setUp`'s
+configured view range, which - as documented there now - silently drops
+the click rather than raising anything, so a test can pass while never
+exercising what it claims to. Caught before commit this time by
+deliberately checking every new test's coordinates against the view range
+rather than discovering it via failures; the two pre-existing tests that
+happened to pass "by coincidence" (default `GeometrySettings` anchor
+values happening to match what a real click would have produced) were
+fixed alongside for consistency even though they weren't failing.
+
+Verified: `test_lspri_rewrite_measure_tool.py` (37/37 - six new: apply
+exits/stays-on-failure, no-negative-numbers, calibrated-readout on
+placement and on drag, and the no-calibration-still-resets-to-zero
+counterpart) + `test_lspri_rewrite_rotate_tool.py`/`test_lspri_rewrite_
+crop_tool.py`/`test_lspri_rewrite_measurement_calibration.py` (33/33,
+54/54, 21/21 - all unaffected). 145/145 total.
+
+## 2026-09-29 (same day, continued a fifth time): Measure tool - live preview while placing, and a third "d" field tied into the same square-pixel model
+
+Two requests this round, one UX (show the fields earlier) and one a real
+addition to the calibration-input surface (a third field). Checked with the
+maintainer before building the second one, since it was a genuine fork
+(read-only display vs. an editable field wired into the calibration input
+path) rather than a UI detail - picked "editable, decomposes into dx/dy".
+
+**Live measurement while placing point 2, not just after it's clicked.**
+`MeasureLineTool.on_mouse_moved` now does, while hovering with point 1
+already down, exactly what a drag of an *already-placed* point does:
+calls `GeometryModule.set_measurement_anchors` and emits `measured` using
+the cursor as a provisional point 2. The rubber-band line remains the only
+visual difference between "still placing" and "placed" - the numbers and
+`GeometryModule`'s own state now track the cursor continuously either way.
+Concretely this means Apply already works correctly even if point 2 is
+never clicked at all - the maintainer can watch the live numbers and hit
+Apply directly, which was not previously possible or intended but falls
+out for free from treating hover-before-commit and drag-after-commit as
+the same underlying gesture.
+
+**`is_fresh_placement` moved from "point 2 just clicked" to "point 1 just
+clicked"** - a consequence of the above, not a separate decision. Once
+hovering shows live fields, resetting them *again* when point 2 commits
+would wipe out anything typed while fine-tuning position before that
+click - a real bug caught while implementing, not by a test (there wasn't
+one for this exact sequence). Now there is exactly one reset per
+measurement session, fired the instant point 1 is placed
+(`measured(0.0, 0.0, True)`); every later hover/click-2/drag emission for
+that session is `False`. `current_anchor_point()` (renamed from
+`last_second_point()` - it now also has to report the live hover position,
+not just a committed point 2) is what `panel.py` positions the floating
+controls against either way.
+
+**Apply button, third correction**: moved from spanning the px+um rows to
+the um row only, per the earlier "align it in same row as second row"
+note not being fully satisfied the first attempt covered (it had already
+been moved out of a 2-row span into a 1-row grid, but the *icon itself*
+still read small inside its chip) - icon grown from 18px to 22px in a
+28px->26px button, plus explicit `padding: 0px` in the QSS rule, since
+Qt's own default button padding was fighting the icon-size change on its
+own.
+
+**"d" (the straight-line distance, hypotenuse) added as a third column**,
+restructured as a 3x3 grid with a header row ("dx"/"dy"/"d" labels
+replacing the old per-cell "Δx "/"Δy " prefixes, which are now
+redundant with the header) - maintainer's spec: "often you know the total
+distance between two features but not its x/y components". Made editable,
+and wired into the *same* single-scale model dx/dy already used rather
+than as a separate calculation bolted on: typing into any one of the three
+um fields (dx, dy, or d) is mathematically equivalent to specifying one
+isotropic um/px scale (`typed value / that field's own px reference` -
+`d_px = sqrt(dx_px^2 + dy_px^2)`), and the other two are recomputed from
+that single scale via their own px components. One function
+(`_apply_scale`) now backs all three edit handlers, replacing the
+dx/dy-only pairwise `_sync_sibling` from two entries ago - a genuine
+simplification, not just an addition, once the pattern was framed as "one
+scale, three views of it" instead of "keep these two in sync". `d_um`
+never reaches `apply_requested`/`GeometryModule.apply_measurement_
+calibration` - it stays a derived, always-consistent convenience; dx_um/
+dy_um alone are still what gets applied, and they are already guaranteed
+consistent with whatever d_um shows by construction.
+
+Verified: `test_lspri_rewrite_measure_tool.py` (46/46 - five new for live
+hover preview: shows/hides correctly, live-updates `GeometryModule`,
+Apply works without ever clicking point 2, the single-reset-at-point-1
+guarantee, hovering before point 1 is a no-op; four new for "d": the
+hypotenuse label, editing dx also updates d, editing d decomposes into
+dx/dy, and d's own zero-length guard) + `test_lspri_rewrite_rotate_
+tool.py`/`test_lspri_rewrite_crop_tool.py`/`test_lspri_rewrite_
+measurement_calibration.py` (33/33, 54/54, 21/21 - all unaffected).
+154/154 total.

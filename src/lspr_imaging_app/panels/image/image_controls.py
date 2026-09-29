@@ -57,6 +57,12 @@ _TOOL_CONTROLS: dict[ImageTool | None, tuple[Control, ...]] = {
         Control("Right-click", "menu with Apply crop / Cancel crop - Cancel exits Crop mode"),
         Control("Esc", "discard an unapplied resize/move, stay in Crop mode"),
     ),
+    ImageTool.MEASURE: (
+        Control("Left-click", "place point 1, then point 2 - fields update live while positioning point 2"),
+        Control("Left-drag (on a placed point)", "move that point to fine-tune the ruler"),
+        Control("Right-click", "menu with Cancel measurement - exits Measure mode (Esc only cancels point 1)"),
+        Control("dx / dy / d fields", "enter any one real distance (the others fill in, assuming square pixels), then apply"),
+    ),
 }
 
 
