@@ -55,7 +55,7 @@ from .panels.workflow import WorkflowPanel, WorkflowStage
 from .panels.workflow.collapsible_section import CollapsibleSection
 from .roi import RoiToolbox
 from .roi_geometry_sync import RoiGeometrySync
-from .selection import ReferenceFrameModule, SelectionModule
+from .selection import HighlightRangeModule, ReferenceFrameModule, SelectionModule
 from .storage.app_settings import AppSettings, load_app_settings, save_app_settings
 from .storage.session import SessionState, load_session
 from .storage.session_autosave import SessionAutosave
@@ -542,6 +542,7 @@ def build_main_window(
     roi_geometry_sync = RoiGeometrySync(geometry, roi_toolbox, dataset)
     selection = SelectionModule()
     reference_frame = ReferenceFrameModule()
+    highlight_range = HighlightRangeModule()
     analysis_settings = AnalysisSettingsModule()
     session_coordinator = SessionCoordinator()
     analysis_engine = _build_analysis_engine(
@@ -578,6 +579,11 @@ def build_main_window(
     dataset.dataset_loaded.connect(lambda _ds: reference_frame.reset())
     dataset.dataset_cleared.connect(reference_frame.reset)
 
+    # A Highlight range selected against one dataset's intensity scale is
+    # meaningless for whatever gets opened next - same reasoning as the
+    # reference-frame reset just above.
+    dataset.dataset_cleared.connect(highlight_range.clear_range)
+
     # Remembers the last-opened dataset for the next launch's auto-reopen
     # (see the end of this function) - a dataset open is already a
     # deliberate, infrequent action, so this writes immediately rather than
@@ -594,7 +600,7 @@ def build_main_window(
     )
 
     image_panel = ImagePanel(dataset, geometry, mask, chromatic, background, roi_toolbox, selection, active_tool)
-    histogram_panel = HistogramPanel(image_panel)
+    histogram_panel = HistogramPanel(image_panel, geometry, mask, chromatic, roi_toolbox, highlight_range)
     roi_table_panel = RoiTablePanel(roi_toolbox)
     spectra_panel = SpectraPanel(analysis_engine, roi_toolbox, selection)
     sensorgram_panel = SensorgramPanel(analysis_engine, roi_toolbox, dataset, selection)
@@ -620,12 +626,20 @@ def build_main_window(
         reference_frame,
         session_coordinator,
         initial_stage=initial_stage,
+        initial_subsections=settings.expanded_subsections,
     )
     # Immediate persist-on-change, same pattern as theme/auto_apply above -
     # switching the open stage is a deliberate, occasional click, not a
     # continuous drag (unlike window geometry, which is batched to quit
     # instead - see `_persist_on_quit` below).
     workflow.stage_changed.connect(lambda stage: _persist(active_workflow_stage=stage.name))
+
+    def _persist_subsection(key: str, expanded: bool) -> None:
+        updated = dict(settings.expanded_subsections)
+        updated[key] = expanded
+        _persist(expanded_subsections=updated)
+
+    workflow.subsection_expanded_changed.connect(_persist_subsection)
 
     window = QMainWindow()
     window.setWindowTitle(rewrite_version_string())

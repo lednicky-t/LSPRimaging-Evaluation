@@ -98,6 +98,7 @@ from ...roi import RoiToolbox
 from ...roi.model import AreaRoi
 from ...roi.rasterize import effective_reference_radii, transformed_circle_points
 from ...selection import SelectionModule
+from ..cursor_overlay import CursorOverlay
 from .context_menu import show_tool_context_menu
 from .crop_size_controls import CropSizeControls
 from .crop_tool import CropTool
@@ -157,6 +158,27 @@ class ImagePanel(QWidget):
     # lives on the permanent info icon's tooltip instead (see
     # `_refresh_tool_info`), because it only needs to be re-read, not pushed.
     tool_status_changed = pyqtSignal(str)
+
+    # The currently displayed plane, exactly as shown (post crop/rotate/
+    # mask/CC/background, pre-overlay), plus the (cube_index, wavelength_nm)
+    # it belongs to - the one narrow read the Histogram panel needs (sketch
+    # §7's "pulls 'current displayed image' from Image panel"), added
+    # 2026-09-29 rather than having Histogram run its own second render of
+    # the same frame. The frame is carried alongside the array rather than
+    # left for the receiver to re-read from `SelectionModule` - by the time
+    # a render completes, `SelectionModule` may already have moved on to a
+    # different frame (a fast wavelength drag queues renders faster than
+    # they complete), and matching ROI/mask geometry against the wrong frame
+    # would be a real correctness bug, not just a cosmetic lag. `RenderResult
+    # .request` already carries the frame the array was actually requested
+    # for (see `_on_rendered` below), so this only forwards it.
+    image_rendered = pyqtSignal(np.ndarray, int, float)
+    # Companion to `image_rendered` - the Histogram panel's other half of
+    # "read Image, don't read Dataset directly" (sketch §7): without this,
+    # Histogram would need its own `DatasetModule` reference just to learn
+    # "nothing is displayed anymore", widening its dependency list for one
+    # narrow case `ImagePanel` already knows about.
+    image_cleared = pyqtSignal()
 
     def __init__(
         self,
@@ -325,6 +347,21 @@ class ImagePanel(QWidget):
         # otherwise consume arrow keys itself to scroll.
         self._view.installEventFilter(self)
 
+        # Cursor-crosshair toggle (maintainer's request, 2026-09-29 - "copy
+        # all functions, as hiding, showing values" from the stable app's
+        # cursor-toggle overlay). Shares `cursor_overlay.CursorOverlay` with
+        # the Histogram plot; only `_cursor_value_at` (a pixel lookup here,
+        # a nearest-bin lookup there) differs.
+        self._cursor_overlay = CursorOverlay(
+            scene_view=self._view,
+            plot_item=self._plot,
+            overlay_parent=self._view.viewport(),
+            value_at=self._cursor_value_at,
+            theme=get_active_theme(),
+            on_changed=self._reposition_cursor_overlay,
+        )
+        self._reposition_cursor_overlay()
+
     def _add_curve(self, color_hex: str, *, width: float, dashed: bool = False) -> pg.PlotDataItem:
         pen = pg.mkPen(QColor(color_hex), width=width)
         if dashed:
@@ -390,6 +427,8 @@ class ImagePanel(QWidget):
             self._crop_controls.refresh_theme(get_active_theme())
         if hasattr(self, "_measure_controls"):
             self._measure_controls.refresh_theme(get_active_theme())
+        if hasattr(self, "_cursor_overlay"):
+            self._cursor_overlay.refresh_theme(get_active_theme())
 
     # -- dataset lifecycle --------------------------------------------------
 
@@ -411,6 +450,7 @@ class ImagePanel(QWidget):
         self._last_image_shape = None
         self._refresh_navigation_ranges()
         self._status.setText("No dataset loaded.")
+        self.image_cleared.emit()
         # A tool with no image under it has nothing to do; the Workflow
         # panel's buttons follow this signal.
         self._active_tool.clear()
@@ -530,7 +570,9 @@ class ImagePanel(QWidget):
             self._status.setText(f"Cannot show this frame: {result.error}")
             self._image_item.clear()
             return
-        self._image_item.setImage(np.asarray(result.image, dtype=np.float32), autoLevels=True)
+        image = np.asarray(result.image, dtype=np.float32)
+        self._image_item.setImage(image, autoLevels=True)
+        self.image_rendered.emit(image, result.request.cube_index, result.request.wavelength_nm)
         self._status.setText(
             f"Cube {result.request.cube_index}, {result.request.wavelength_nm:g} nm "
             f"- {result.image.shape[1]}x{result.image.shape[0]} px"
@@ -978,6 +1020,40 @@ class ImagePanel(QWidget):
         self._on_tool_status("Measurement calibration applied - display units switched to micrometers.")
         self._active_tool.set_active(ImageTool.MEASURE, False)
 
+    # -- cursor readout -------------------------------------------------------
+
+    def _cursor_value_at(self, view_x: float, view_y: float) -> tuple[float, float, str] | None:
+        """Floors to the pixel under the cursor and reads its displayed
+        intensity - `_image_item.image` is exactly what is on screen
+        (post crop/rotate/mask/CC/background, `_on_rendered`'s own float32
+        array), so this reads no state this panel doesn't already own.
+        `None` off the image entirely, matching `CursorOverlay`'s "show
+        nothing" contract for an out-of-data cursor position."""
+        image = self._image_item.image
+        if image is None:
+            return None
+        col = int(np.floor(view_x))
+        row = int(np.floor(view_y))
+        height, width = image.shape[:2]
+        if not (0 <= row < height and 0 <= col < width):
+            return None
+        value = float(image[row, col])
+        return col + 0.5, row + 0.5, f"({col}, {row}) = {value:.1f}"
+
+    def _reposition_cursor_overlay(self) -> None:
+        """Top-right corner of the view - nothing else floats there today
+        (the tool-info icon lives in the controls row below the canvas, not
+        over it), so unlike Histogram's cursor icon this needs no sibling
+        to avoid. Also called on every toggle/mouse-move (`CursorOverlay`'s
+        `on_changed`), since the label's width changes between the small
+        icon and the (usually wider) live text."""
+        label = self._cursor_overlay.icon_label
+        label.adjustSize()
+        margin = 6
+        x = self._view.viewport().width() - label.width() - margin
+        label.move(x, margin)
+        label.raise_()
+
     def roi_at(self, x: float, y: float) -> int | None:
         """The ROI whose sample aperture contains display-space point
         (x, y), or `None`. Public because it is the one piece of this
@@ -1001,6 +1077,11 @@ class ImagePanel(QWidget):
         """Forwards a drag gesture to the owning module - never mutates ROI
         state directly."""
         self._roi_toolbox.request_move(roi_id, x, y)
+
+    def resizeEvent(self, event) -> None:  # noqa: N802 - Qt naming
+        super().resizeEvent(event)
+        if hasattr(self, "_cursor_overlay"):
+            self._reposition_cursor_overlay()
 
     # -- teardown -----------------------------------------------------------
 

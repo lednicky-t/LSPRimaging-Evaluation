@@ -5541,3 +5541,151 @@ measurement_calibration.py`/`test_lspri_workflow_panel_width_budget.py`
 (46/46, 33/33, 54/54, 21/21, 3/3) - every test that touches
 `panels/image/`, `panels/workflow/transforms_settings.py`, or
 `GeometryModule`. 157/157 total.
+
+## 2026-09-29/30: Histogram panel built - the first real implementation, not a port
+
+`panels/histogram/panel.py` went from the scaffold's `NotImplementedError`
+stub to a real, working panel across two days of maintainer feedback. Where
+things ended up, for a future session extending this:
+
+**Stable-app analysis first** (before any code): stable's histogram
+(~1,400-1,600 lines across 13 files) is entangled the same way the rest of
+that app is - `PlotManager`/`OverlayManager`/`MaskController` all take
+`window` and reach into 20-30 attributes. Decision: port the clean math
+kernel verbatim (`processing/roi_histogram.py`'s `estimate_roi_intensity_
+range` -> `panels/histogram/compute.py`, unchanged), rebuild the
+widget/wiring layer fresh against this branch's modules. Two structural
+improvements over stable, both deliberate: %/counts and linear/log are
+independent toggles (stable coupled log-mode to counts); the x-axis is
+fixed `[0, 65535]` always (stable let it float to the observed data range).
+
+**New shared cross-cutting module**: `selection/highlight_range_module.py`
+(`HighlightRangeModule`) - the Highlight-range selection, following the
+precedent `SelectionModule`/`ReferenceFrameModule` already set for state
+several independent modules legitimately need. Maintainer's explicit
+direction (2026-09-29): Mask and ROI Toolbox should read this module
+directly and never need a reference to `HistogramPanel` at all - this is
+why it exists as its own module rather than a `HistogramPanel.range_
+selected` signal. **Not yet wired**: `MaskModule.set_histogram_highlight_
+range`/`RoiToolbox.set_detection_settings` both already have the consumer-
+side method waiting, but nothing calls them from `HighlightRangeModule.
+range_changed` yet - real follow-up work, not done here.
+
+**`ImagePanel` gained two new signals** (`image_rendered(image, cube_index,
+wavelength_nm)`, `image_cleared()`) - the "one narrow read" Histogram needs
+per the original sketch, added rather than having Histogram run a second,
+independent render of the same frame. `HistogramPanel` subscribes to only
+these two signals and nothing else (`resolve_mask_source`/`affine_for`/
+`.rois()` etc. are read as plain queries at redraw time) - deliberate:
+`ImagePanel` already re-renders on every geometry/mask/chromatic/ROI change,
+so a second subscription to those same signals here would be redundant.
+
+**Panel/plot split** (`panel.py` owns wiring and module queries, `plot.py`
+owns the pyqtgraph widget) matches Spectra/Sensorgram's own split.
+`HistogramPlot` is the first plot in this app to leave pyqtgraph's native
+right-click menu enabled (`panels/histogram/plot.py`'s module docstring has
+the reasoning) - every other plot disables it. X is locked to `[0, 65535]`
+against every trigger, not just the visible "A" button: `setMouseEnabled(x=
+False, y=True)` blocks interactive drag/wheel, and a `sigXRangeChanged`
+listener (`_on_x_range_changed`) snaps X back the instant anything else
+moves it (the right-click menu's "View All"/"Auto" reaches `ViewBox.
+autoRange()` by a door `hideButtons()` alone does not close - both were
+needed, confirmed by direct `ViewBox` testing, not assumed).
+
+**Highlight range starts unset and the region is hidden until it has a
+value** - the only interactive way to give it one (dragging the region)
+requires it to already be visible, so `HistogramPanel._ensure_highlight_
+range_seeded` seeds it to the current frame's own observed `[min, max]` the
+first time real data arrives, never overwriting an existing value. Resets
+via `dataset.dataset_cleared -> highlight_range.clear_range` (wired in
+`app_rewrite.py`), so a new dataset gets its own fresh seed.
+
+**Shared `panels/cursor_overlay.py`** (`CursorOverlay`) - a toggleable
+crosshair + live value readout, ported from stable's `plot_overlay_
+controller.py` cursor-toggle half (its separate "stats" overlay was not
+requested, not built). Used by both `HistogramPlot` (snaps to the nearest
+bin on the "All pixels" curve) and `ImagePanel` (reads the actual pixel
+under the cursor) - the two `value_at` callbacks are the only per-panel
+code; positioning is each panel's own job (a `CursorOverlay` has no opinion
+on where its icon sits, only how it behaves once placed).
+
+**Settings gear icon + `HistogramPlotSettingsDialog`** - the first
+instance of this pattern in the rewrite (Spectra/Sensorgram will likely
+copy it once built); non-modal, live-apply, not Ok/Cancel. Axis mode,
+scale, bin size, and one line-width control for all curves today - the
+maintainer's own framing was "other things which will come later," not a
+finished settings surface.
+
+**The Highlight-range readout widget took five rounds to get its sizing
+right** (`panels/histogram/highlight_range_controls.py`) - full account,
+including the real lesson about `.text()`/`.width()` not being evidence of
+anything on their own, is in this app's `CLAUDE.md` "Common Pitfalls"
+section. Worth reading before building any other tightly-grouped floating
+text/number field in this app.
+
+**Still open, named so a future session doesn't have to re-derive it from
+this conversation**: wiring `HighlightRangeModule.range_changed` to Mask
+and ROI Toolbox (both consumer methods exist and are tested independently,
+just not connected to this signal yet); the "wand" auto-range button
+(`compute.estimate_roi_intensity_range` is ported and ready, no UI calls
+it); the Residual curve (marked "maybe" by the maintainer, not built).
+
+Verified throughout: `tests/integration/test_lspri_rewrite_histogram_
+panel.py` (25/25) and `test_lspri_rewrite_image_panel.py` (12/12, including
+the two new cursor-overlay tests), plus repeated full-window offscreen
+smoke tests (`QT_QPA_PLATFORM=offscreen`, `build_main_window()`).
+
+**Cleanup pass before commit**: 4 parallel review agents (reuse/
+simplification/efficiency/altitude - `/simplify`'s standard method) over
+the diff. Fixed, each verified against the actual pyqtgraph/Qt behavior
+rather than taken on faith:
+- X-axis lock rebuilt on `ViewBox.setLimits(xMin/xMax/minXRange/
+  maxXRange)` - pyqtgraph's own purpose-built mechanism, checked against
+  the installed source (`ViewBox.updateViewRange` is the one choke point
+  every range-changing path funnels through) - replacing the `sigXRangeChanged`
+  snap-back listener from two entries ago, which only ever closed doors as
+  they were found. Confirmed by the same direct `ViewBox.autoRange()` test
+  that caught the original bug: X still doesn't move.
+- `highlight_range_controls.py`'s field width now measured via
+  `QFontMetrics.boundingRect` (documented by Qt as covering actual
+  rendered pixels) instead of `horizontalAdvance` (a cursor-advance
+  metric) - the explicit margin stays, as defense in depth, not a
+  replacement for measuring the right thing.
+- `cursor_overlay.py`'s toggle icon rebuilt on a real checkable
+  `QToolButton` (was a `QLabel` + hand-rolled `eventFilter` click
+  detection) - this app's own CLAUDE.md GUI-testability rule, missed when
+  first built. Shared by both Histogram and Image panels, so the fix
+  landed in both places at once.
+- `panel.py`: extracted the three-times-repeated mask-to-curve pattern
+  into `_set_curve_from_mask`; dropped a redundant `&finite` pre-filter
+  now that `compute.population_counts` already does its own (caught a
+  real bug introduced while extracting the helper - `mask=None` meant two
+  different things for the All-pixels curve vs. the three optional
+  curves, fixed before it shipped, not after); the bin-size handler now
+  goes through `_schedule_redraw()` like every other trigger, instead of
+  bypassing the coalescing timer.
+- Docstrings tightened across `panel.py`/`plot.py`/`highlight_range_
+  controls.py`/CLAUDE.md - several had accumulated a blow-by-blow "here's
+  what we tried" narrative from being written live during debugging;
+  that history stays in this log, code comments now describe current
+  design and non-obvious why, not a change log.
+
+Consciously not applied (reported, judged out of scope for a quality-only
+pass, not silently dropped): moving the "don't overwrite an existing
+Highlight range" seed policy from `panel.py` into `HighlightRangeModule`
+itself (real, but the reviewing agent's own words were "not broken
+today"); relocating the `_blocked` signal-suppression context manager out
+of `image/panel.py` into a shared spot now that `plot.py` wants the same
+pattern (mechanical, but touches a third file for a ~5-line duplication);
+consolidating `panel.py`'s paired `_image`/`_frame` fields into one
+(cosmetic, not fixing any actual redundant work); caching raw per-bin
+counts to skip mask/ROI recompute on a percent-vs-counts toggle (a real
+feature, not a cleanup, and this codebase's own performance philosophy
+asks for a measured need first, not a speculative one).
+
+Re-verified after the cleanup pass: 39/39 (Histogram + Image panel
+suites), 142/143 on the broader Image-panel-dependent suite (the one
+failure is `crop_size_controls.py`'s own pre-existing font-metric-
+environment-dependent test, untouched by this work), full-window smoke
+test. Nothing committed as of this entry - five back-to-back sessions of
+uncommitted changes on `rewrite`, now going to commit.
