@@ -66,6 +66,10 @@ _TOOL_CONTROLS: dict[ImageTool | None, tuple[Control, ...]] = {
         Control("Right-click", "menu with Cancel measurement - exits Measure mode (Esc only cancels point 1)"),
         Control("dx / dy / d fields", "enter any one real distance (the others fill in, assuming square pixels), then apply"),
     ),
+    ImageTool.ADD_ROI: (
+        Control("Left-click", "place a new ROI at the cursor - stays active for placing several in a row"),
+        Control("Right-click", "menu with Exit tool"),
+    ),
 }
 
 

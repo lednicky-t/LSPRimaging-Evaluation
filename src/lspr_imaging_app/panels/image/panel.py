@@ -99,6 +99,7 @@ from ...roi.model import AreaRoi
 from ...roi.rasterize import effective_reference_radii, transformed_circle_points
 from ...selection import SelectionModule
 from ..cursor_overlay import CursorOverlay
+from .canvas_tools import CanvasToolsBar
 from .context_menu import show_tool_context_menu
 from .crop_size_controls import CropSizeControls
 from .crop_tool import CropTool
@@ -335,9 +336,16 @@ class ImagePanel(QWidget):
         controls.addSpacing(6)
         controls.addWidget(self._tool_info)
 
+        self._canvas_tools = CanvasToolsBar(self._roi_toolbox, self._active_tool, self)
+        canvas_row = QHBoxLayout()
+        canvas_row.setContentsMargins(0, 0, 0, 0)
+        canvas_row.setSpacing(0)
+        canvas_row.addWidget(self._canvas_tools)
+        canvas_row.addWidget(self._view, 1)
+
         layout = QVBoxLayout(self)
         layout.addLayout(controls)
-        layout.addWidget(self._view, 1)
+        layout.addLayout(canvas_row, 1)
 
         scene = self._image_item.scene()
         scene.sigMouseClicked.connect(self._on_scene_clicked)
@@ -789,6 +797,15 @@ class ImagePanel(QWidget):
             if button == Qt.MouseButton.RightButton and self._in_view(scene_pos):
                 self._show_crop_context_menu()
             return
+        if self._active_tool.active() is ImageTool.ADD_ROI:
+            if not self._in_view(scene_pos):
+                return
+            if button == Qt.MouseButton.LeftButton:
+                p = self._plot.vb.mapSceneToView(scene_pos)
+                self._roi_toolbox.add_roi(float(p.x()), float(p.y()))
+            elif button == Qt.MouseButton.RightButton:
+                self._show_add_roi_context_menu()
+            return
         if button != Qt.MouseButton.LeftButton:
             return  # not a select gesture
         point = self._plot.vb.mapSceneToView(scene_pos)
@@ -845,6 +862,16 @@ class ImagePanel(QWidget):
             self._on_crop_apply_requested()
         elif chosen == "Cancel crop":
             self._active_tool.set_active(ImageTool.CROP, False)
+
+    def _show_add_roi_context_menu(self) -> None:
+        """Right-click while Add ROI is active: a menu with a single "Exit
+        tool" action, always enabled - same shape as Rotate/Measure's own
+        "Cancel ..." menus (`_show_rotate_context_menu`/`_show_measure_
+        context_menu`), just not labeled "Cancel" since there is no
+        in-progress point to drop - each click here is already a complete,
+        independent action."""
+        if show_tool_context_menu(self, [("Exit tool", True)]) == "Exit tool":
+            self._active_tool.set_active(ImageTool.ADD_ROI, False)
 
     def _on_left_drag_event(self, ev: object) -> bool:
         """`ImageViewBox`'s single left-drag handler slot - dispatches to
