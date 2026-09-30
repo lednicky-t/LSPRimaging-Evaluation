@@ -157,10 +157,21 @@ live yet). Full detail: `undo/manager.py`'s module docstring.
   file's own "selecting/deselecting ROIs... must never implicitly trigger
   computation" spirit - undo history is for state that affects results, not
   where the cursor/selection happens to be.
-- `RoiToolbox` is the first module wired to this (2026-09-20); Geometry/
-  Mask/Chromatic/Background should adopt the identical pattern once their
-  own command methods are built past the `NotImplementedError` stub stage -
-  update this section with a second real example once that happens.
+- **Updated 2026-09-30 (was stale)**: `RoiToolbox`, `GeometryModule`,
+  `ChromaticModule`, and `BackgroundModule` are all wired to this now, each
+  pushing a `FunctionCommand` per mutating command (e.g. `GeometryModule`'s
+  "Crop"/"Flip"/"Adjust rotation", `ChromaticModule`'s "Chromatic
+  landmarks"/"Chromatic correction", `BackgroundModule`'s "Image
+  processing").
+- **`MaskModule` is the one deliberate exception - not wired, and not a
+  gap.** Confirmed by grep against the old app before this module was
+  built: `gui/mask_controller.py` never calls `_push_undo_point` for any
+  mask action either (load, save, create, apply-delta, brush paint) - this
+  matches existing behavior on purpose, the same "the old app never
+  undo-tracked this either" reasoning the Selection bullet above already
+  uses. See `image_tools/mask/module.py`'s own module docstring for the
+  full account. Don't wire Mask to undo without checking this decision
+  again first - it was deliberate, not an oversight waiting to be fixed.
 
 ---
 

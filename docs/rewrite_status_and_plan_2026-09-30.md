@@ -41,9 +41,13 @@ Transforms/Mask/Crop/Rotate/Measure, which do.
   commands), `image_tools/mask/module.py` (algorithmic + file mask,
   paint/morphology), `image_tools/chromatic/module.py` (landmarks, refit,
   `affine_for`/`warp_mask`), `image_tools/background/module.py`
-  (estimate/apply split) are all built, all wired to the shared
-  `undo.undo_manager` (see §3 - AGENTS.md's undo section is stale on this
-  point, all four modules already do this, not just RoiToolbox).
+  (estimate/apply split) are all built. **Correction (2026-09-30, this
+  claim was wrong in this doc's first version and in AGENTS.md until fixed
+  the same day)**: Geometry, Chromatic, and Background are wired to the
+  shared `undo.undo_manager`; **Mask deliberately is not** - its own module
+  docstring documents that the old app's `mask_controller.py` never
+  undo-tracked mask edits either, so this matches existing behavior on
+  purpose, not a gap. See §3.
 - UI: Transforms (crop/rotate/flip/Measure) has real, maintainer-tested
   controls including right-click menus and live previews - this is the
   single most polished corner of the rewrite. Mask has a real settings
@@ -111,9 +115,11 @@ Transforms/Mask/Crop/Rotate/Measure, which do.
   `HighlightRangeModule` - the newest, added with Histogram) - real, small,
   matches the sketch's "one intentionally shared piece of state" design.
 - `undo/manager.py` - real, one shared `undo_manager`, `FunctionCommand`,
-  `begin_batch`/`end_batch`. Wired into all 5 command-owning modules (ROI
-  Toolbox + all 4 Image Tools modules) - ahead of what AGENTS.md's own text
-  currently claims (see §3).
+  `begin_batch`/`end_batch`. Wired into 4 of 5 command-owning modules (ROI
+  Toolbox, Geometry, Chromatic, Background); `Mask` is a deliberate,
+  documented exception, matching the old app's own never-undo-tracked mask
+  edits (see §3). AGENTS.md's text was stale on both points until corrected
+  2026-09-30.
 - `storage/session.py`, `session_coordinator.py`, `session_index.py`,
   `app_settings.py` - real. Sessions (create + switch only, blank start, no
   rename/duplicate/delete - deliberately scoped that way, see AGENTS.md) and
@@ -150,7 +156,7 @@ wall at ROI Selection.
 | Sensorgram panel | Entire panel | Same as Spectra, plus reading Dataset's acquisition metadata for the pump-plan-step overlay (proposed, not yet built anywhere) | This is the panel the entire rewrite exists to fix - see §3's pitfall about not reintroducing its old bug pattern |
 | Fractional-pixel-weighting wiring | `analysis/tasks.py`'s `compute_cell` still calls binary rasterization, not `rasterize_fractional` | **Corrected while writing this doc: not simply mechanical.** `compute_cell` (18 parameters already, `analysis/tasks.py:228`) has no "fractional enabled" concept anywhere yet - adding one means deciding where the toggle lives (per-analysis? persistent setting?), threading it through `compute_cell`'s call chain from `engine.py`/`worker.py`, and deciding whether it becomes part of a cell's provenance fingerprint (enabling it would change every already-computed cell's *result* without changing its *inputs* under the current fingerprint scheme - a real gap the simplified "any input change triggers recompute" rule doesn't obviously cover, since this isn't an input, it's a reduction-method variant). Both raster and weighted-reduction math are done and verified; the wiring has open questions, moved to §6 | Both halves (raster + weighted reduction) are already built and independently verified - only the integration has unresolved design surface |
 | Highlight-range → Mask/ROI wiring | `HighlightRangeModule.range_changed` isn't connected to `MaskModule.set_histogram_highlight_range` or `RoiToolbox.set_detection_settings` yet | **Half mechanical, half an open question - see §4** | `set_histogram_highlight_range(min, max)` matches the signal's payload directly; `set_detection_settings(settings: AreaRoiDetectionSettings)` does not - see §4, item 1 |
-| AGENTS.md undo section | Says "RoiToolbox is the first module wired... Geometry/Mask/Chromatic/Background should adopt the identical pattern once built" | Update the doc - all four already do this | Pure doc-staleness, zero code risk, five-minute fix whenever someone's next in that file |
+| AGENTS.md undo section | **Done 2026-09-30.** Said "RoiToolbox is the first module wired... Geometry/Mask/Chromatic/Background should adopt the identical pattern once built" - actually inaccurate two ways: three of the four (not all four) had already adopted it, and Mask deliberately never will | Updated to name Geometry/Chromatic/Background as wired, and to document Mask's exception explicitly (matches the old app's own mask_controller.py, which never undo-tracked mask edits either) | Pure doc-correction, zero code risk |
 
 **Pattern to keep watching for** (already happened twice, will likely happen
 again): when an architecture-sketch assumption meets the real code, it's
@@ -249,11 +255,16 @@ being kept as-is, not re-litigated.
    Don't spend time "fixing" it without first confirming it still fails and
    understanding why (see this app's `CLAUDE.md` "Qt widget sizing
    verification" pitfall about not trusting `.text()`/`.width()` alone).
-7. **`AGENTS.md`'s undo section is already stale** (says only `RoiToolbox`
-   is wired; all four Image Tools modules are too, per this session's grep).
-   Small, but a reminder that this file needs the same "update as you go"
-   discipline the build log gets - a design doc nobody re-reads against
-   reality drifts exactly the way the stable app's docs did.
+7. **Fixed 2026-09-30**: `AGENTS.md`'s undo section was stale, and this
+   doc's first version repeated its mistake uncorrected - both said all
+   four Image Tools modules were wired to undo. A closer re-check found
+   `MaskModule` deliberately isn't (its own docstring explains why - see
+   §3). Both docs now name Mask as an intentional exception rather than
+   claiming uniform coverage. Worth remembering as a small case of the
+   pattern this doc warns about elsewhere: a claim copied from one doc into
+   another without re-checking the code carries the first doc's error
+   forward - re-verify against the actual file, every time, even when a
+   summary already exists.
 
 ---
 
