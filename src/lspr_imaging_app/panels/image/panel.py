@@ -102,6 +102,7 @@ from ...roi.rasterize import effective_reference_radii, transformed_circle_point
 from ...selection import ReferenceFrameModule, SelectionModule
 from ...selection.reference_frame_module import MODE_AUTO
 from ..cursor_overlay import CursorOverlay
+from ..workflow.transforms_settings import TransformsSection
 from .canvas_tools import _ICON_SIZE, CanvasToolsBar, style_bar_icon_button
 from .context_menu import show_tool_context_menu
 from .crop_size_controls import CropSizeControls
@@ -113,6 +114,7 @@ from .measure_controls import MeasureCalibrationControls
 from .measure_line_tool import MeasureLineTool
 from .render import ImageRenderer, RenderRequest, RenderResult
 from .rotate_line_tool import RotateLineTool
+from .tool_ribbon import ImageToolRibbon
 
 logger = logging.getLogger(__name__)
 
@@ -375,20 +377,39 @@ class ImagePanel(QWidget):
         # canvas's left edge to a horizontal bar across its top - maintainer
         # request, "since frames are usually landscapes" - a left rail
         # wastes more of a landscape frame's width than a top bar wastes of
-        # its height). Select/Add ROI on the left (`CanvasToolsBar`); the
-        # cursor-readout and "i" info icons on the right - both used to
-        # float as manually `.move()`d overlays on the canvas itself
-        # (`_reposition_cursor_overlay`/`_reposition_tool_info`, both
-        # removed with this change); now they're ordinary widgets in a real
-        # `QHBoxLayout`, so Qt repositions them on any resize for free.
+        # its height). A category ribbon on the left (`ImageToolRibbon`,
+        # added 2026-09-30 - "Image tools"/"Histogram"/"ROIs" tabs over a
+        # fixed-height tool row, ribbon-style; "Histogram" is still a seeded
+        # placeholder - see `tool_ribbon.py`'s module docstring for why
+        # Select/Add ROI (`CanvasToolsBar`) landed under "ROIs" rather than
+        # "Image tools"); the cursor-readout and "i" info icons on the right
+        # - both used to float as manually `.move()`d overlays on the canvas
+        # itself (`_reposition_cursor_overlay`/`_reposition_tool_info`, both
+        # removed with an earlier change); now they're ordinary widgets in a
+        # real `QHBoxLayout`, so Qt repositions them on any resize for free.
         self._canvas_tools = CanvasToolsBar(self._roi_toolbox, self._active_tool, self)
+        # A second `TransformsSection` instance (2026-09-30, maintainer
+        # request - "duplicate transform tools and put them in image tools
+        # of image panel"), wired to the same `GeometryModule`/
+        # `ActiveToolModule` the Workflow panel's own Transforms row uses -
+        # see that class's module docstring for why this is a second front
+        # door onto the same backend, not a copy that can drift out of sync.
+        self._transforms_section = TransformsSection(self._geometry, self._active_tool, self)
 
         self._top_bar = QWidget(self)
         self._top_bar.setObjectName("imageTopBar")
         top_bar_layout = QHBoxLayout(self._top_bar)
         top_bar_layout.setContentsMargins(4, 2, 6, 2)
         top_bar_layout.setSpacing(6)
-        top_bar_layout.addWidget(self._canvas_tools)
+        self._tool_ribbon = ImageToolRibbon(
+            [
+                ("Image tools", self._transforms_section),
+                ("Histogram", None),
+                ("ROIs", self._canvas_tools),
+            ],
+            self,
+        )
+        top_bar_layout.addWidget(self._tool_ribbon)
         top_bar_layout.addStretch(1)
 
         # Cursor-crosshair toggle (maintainer's request, 2026-09-29 - "copy
@@ -682,6 +703,8 @@ class ImagePanel(QWidget):
             self._cursor_overlay.refresh_theme(get_active_theme())
         if hasattr(self, "_canvas_tools"):
             self._canvas_tools.refresh_theme(get_active_theme())
+        if hasattr(self, "_tool_ribbon"):
+            self._tool_ribbon.refresh_theme(get_active_theme())
         if hasattr(self, "_controls_bar"):
             self._refresh_controls_bar_theme()
         if hasattr(self, "_top_bar"):
