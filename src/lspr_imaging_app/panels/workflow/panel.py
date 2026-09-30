@@ -88,6 +88,15 @@ def _section_placeholder(name: str) -> QWidget:
     return label
 
 
+def _subsection_key(stage: WorkflowStage, title: str) -> str:
+    """Stable identifier for a nested section's persisted expand/collapse
+    state - `AppSettings.expanded_subsections` is keyed by this. Combines
+    the stage so two stages can each have a section with the same title
+    without colliding (none currently do, but nothing enforces uniqueness
+    across stages, only within one - see each `_build_*_section`)."""
+    return f"{stage.name}:{title}"
+
+
 def _nested_title_color() -> str:
     """Dimmed title color for a section nested under a top-level stage
     section - matches the source's own ``_nested_title_color`` exactly
@@ -118,7 +127,7 @@ def _build_dataset_section(
     selection: SelectionModule,
     reference_frame: ReferenceFrameModule,
     session_coordinator: SessionCoordinator,
-) -> CollapsibleSection:
+) -> tuple[CollapsibleSection, list[tuple[str, CollapsibleSection]]]:
     """Ported from the source's ``dataset_section`` + its top row (folder
     field + browse/explorer icons, *outside* the nested sections) + its
     nested Summary/Reference/Export/Metadata children
@@ -154,21 +163,23 @@ def _build_dataset_section(
     )
 
     experimental_plan_content = ExperimentalPlanSection(dataset, selection, parent)
-    children = _nested_children(
-        parent,
-        CollapsibleSection(
-            "Experimental plan",
-            experimental_plan_content,
-            expanded=False,
-            title_color=_nested_title_color(),
-            header_extra=experimental_plan_content.header_stats_label,
-            parent=parent,
-        ),
-        summary_section,
-        CollapsibleSection(
-            "Export", DatasetExportSection(dataset, parent), expanded=False, title_color=_nested_title_color(), parent=parent
-        ),
+    experimental_plan_section = CollapsibleSection(
+        "Experimental plan",
+        experimental_plan_content,
+        expanded=False,
+        title_color=_nested_title_color(),
+        header_extra=experimental_plan_content.header_stats_label,
+        parent=parent,
     )
+    export_section = CollapsibleSection(
+        "Export", DatasetExportSection(dataset, parent), expanded=False, title_color=_nested_title_color(), parent=parent
+    )
+    children = _nested_children(parent, experimental_plan_section, summary_section, export_section)
+    subsections = [
+        ("Experimental plan", experimental_plan_section),
+        ("Summary", summary_section),
+        ("Export", export_section),
+    ]
 
     dataset_inner = QWidget(parent)
     dataset_inner_layout = QVBoxLayout(dataset_inner)
@@ -183,13 +194,14 @@ def _build_dataset_section(
     # there's no saved `active_workflow_stage` to restore yet (first-ever
     # launch, or a settings file predating that field). See
     # WorkflowPanel.__init__'s `initial_stage` handling.
-    return CollapsibleSection(
+    top_section = CollapsibleSection(
         "Dataset:",
         dataset_inner,
         expanded=True,
         header_extra=summary_content.dataset_header_stats_label,
         parent=parent,
     )
+    return top_section, subsections
 
 
 def _build_image_tools_section(
@@ -198,7 +210,7 @@ def _build_image_tools_section(
     active_tool: ActiveToolModule,
     background: BackgroundModule,
     mask: MaskModule,
-) -> CollapsibleSection:
+) -> tuple[CollapsibleSection, list[tuple[str, CollapsibleSection]]]:
     """Ported from the source's ``image_tools_section`` + its nested
     Transforms/Mask/Chromatic correction/Background removal children.
 
@@ -248,75 +260,85 @@ def _build_image_tools_section(
 
     background.background_model_changed.connect(_sync_apply_toggle)
 
-    children = _nested_children(
-        parent,
-        CollapsibleSection(
-            "Transforms", TransformsSection(geometry, active_tool, parent), expanded=True, title_color=_nested_title_color(), parent=parent
-        ),
-        CollapsibleSection(
-            "Mask", MaskSettingsSection(mask, parent), expanded=True, title_color=_nested_title_color(), parent=parent
-        ),
-        CollapsibleSection(
-            "Chromatic correction",
-            _section_placeholder("Chromatic correction"),
-            expanded=False,
-            title_color=_nested_title_color(),
-            parent=parent,
-        ),
-        background_removal_section,
+    transforms_section = CollapsibleSection(
+        "Transforms", TransformsSection(geometry, active_tool, parent), expanded=True, title_color=_nested_title_color(), parent=parent
     )
-    return CollapsibleSection("Image tools:", children, expanded=False, parent=parent)
+    mask_section = CollapsibleSection(
+        "Mask", MaskSettingsSection(mask, parent), expanded=True, title_color=_nested_title_color(), parent=parent
+    )
+    chromatic_section = CollapsibleSection(
+        "Chromatic correction",
+        _section_placeholder("Chromatic correction"),
+        expanded=False,
+        title_color=_nested_title_color(),
+        parent=parent,
+    )
+    children = _nested_children(
+        parent, transforms_section, mask_section, chromatic_section, background_removal_section
+    )
+    subsections = [
+        ("Transforms", transforms_section),
+        ("Mask", mask_section),
+        ("Chromatic correction", chromatic_section),
+        ("Background removal", background_removal_section),
+    ]
+    top_section = CollapsibleSection("Image tools:", children, expanded=False, parent=parent)
+    return top_section, subsections
 
 
-def _build_roi_selection_section(parent: QWidget) -> CollapsibleSection:
+def _build_roi_selection_section(parent: QWidget) -> tuple[CollapsibleSection, list[tuple[str, CollapsibleSection]]]:
     """Ported from the source's ``roi_editor_section`` - just "Circles"
     today, since Rectangles/Freehand were removed dead placeholders (see
     design doc §4a). A single-child accordion is arguably pointless on its
     own; kept faithful to the source for now since the maintainer expects
     this tree to be revisited once ROI Selection's real controls land."""
-    children = _nested_children(
-        parent,
-        CollapsibleSection(
-            "Circles",
-            _section_placeholder("Circle ROI detection/editing"),
-            expanded=True,
-            title_color=_nested_title_color(),
-            parent=parent,
-        ),
+    circles_section = CollapsibleSection(
+        "Circles",
+        _section_placeholder("Circle ROI detection/editing"),
+        expanded=True,
+        title_color=_nested_title_color(),
+        parent=parent,
     )
-    return CollapsibleSection("ROI editor", children, expanded=False, parent=parent)
+    children = _nested_children(parent, circles_section)
+    top_section = CollapsibleSection("ROI editor", children, expanded=False, parent=parent)
+    return top_section, [("Circles", circles_section)]
 
 
-def _build_analysis_section(parent: QWidget) -> CollapsibleSection:
+def _build_analysis_section(parent: QWidget) -> tuple[CollapsibleSection, list[tuple[str, CollapsibleSection]]]:
     """Ported from the source's ``analysis_section`` + its nested ROI's
     math/Metric trace/Statistics children (the range/scope controls that
     sat above them there, and the Run/Stop/Live-preview header controls,
     are real interactive controls tied to ``AnalysisEngine`` - left for
     when this section gets wired to one, not ported as inert
     placeholders)."""
-    children = _nested_children(
-        parent,
-        CollapsibleSection(
-            "ROI's math", _section_placeholder("ROI's math"), expanded=True, title_color=_nested_title_color(), parent=parent
-        ),
-        CollapsibleSection(
-            "Metric trace", _section_placeholder("Metric trace"), expanded=True, title_color=_nested_title_color(), parent=parent
-        ),
-        CollapsibleSection(
-            "Statistics", _section_placeholder("Statistics"), expanded=False, title_color=_nested_title_color(), parent=parent
-        ),
+    roi_math_section = CollapsibleSection(
+        "ROI's math", _section_placeholder("ROI's math"), expanded=True, title_color=_nested_title_color(), parent=parent
     )
-    return CollapsibleSection("Analysis", children, expanded=False, parent=parent)
+    metric_trace_section = CollapsibleSection(
+        "Metric trace", _section_placeholder("Metric trace"), expanded=True, title_color=_nested_title_color(), parent=parent
+    )
+    statistics_section = CollapsibleSection(
+        "Statistics", _section_placeholder("Statistics"), expanded=False, title_color=_nested_title_color(), parent=parent
+    )
+    children = _nested_children(parent, roi_math_section, metric_trace_section, statistics_section)
+    subsections = [
+        ("ROI's math", roi_math_section),
+        ("Metric trace", metric_trace_section),
+        ("Statistics", statistics_section),
+    ]
+    top_section = CollapsibleSection("Analysis", children, expanded=False, parent=parent)
+    return top_section, subsections
 
 
-def _build_outputs_section(parent: QWidget) -> CollapsibleSection:
+def _build_outputs_section(parent: QWidget) -> tuple[CollapsibleSection, list[tuple[str, CollapsibleSection]]]:
     """Outputs stage: flat, no nested children - per design doc §4a, this
     is new (not a straight port): settings for how results are
     visualized/formatted before export. The source's closest analogue
     ("Results / Export": export/open-folder/compact/upgrade buttons) was
     also flat, but is only a starting point for this stage's eventual
     scope, not its final content."""
-    return CollapsibleSection("Outputs", _section_placeholder("Outputs"), expanded=False, parent=parent)
+    top_section = CollapsibleSection("Outputs", _section_placeholder("Outputs"), expanded=False, parent=parent)
+    return top_section, []
 
 
 class WorkflowPanel(QWidget):
@@ -330,6 +352,12 @@ class WorkflowPanel(QWidget):
     module started taking any arguments at all."""
 
     stage_changed = pyqtSignal(WorkflowStage)
+    # A nested (non-top-level) section's expand/collapse toggled - carries
+    # its `_subsection_key(stage, title)` and the new state. Unlike
+    # `stage_changed`, several of these can be open at once (no accordion
+    # exclusivity for nested sections - see module docstring), so each
+    # toggle is reported independently rather than as one "current" value.
+    subsection_expanded_changed = pyqtSignal(str, bool)
     # State/performance text only (no hover-hint text, per the design doc) -
     # the main window connects this to its QStatusBar.
     status_requested = pyqtSignal(str)
@@ -345,19 +373,28 @@ class WorkflowPanel(QWidget):
         reference_frame: ReferenceFrameModule,
         session_coordinator: SessionCoordinator,
         initial_stage: WorkflowStage | None = None,
+        initial_subsections: dict[str, bool] | None = None,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
         # Order fixes the on-screen stacking order.
-        self._sections: list[tuple[WorkflowStage, CollapsibleSection]] = [
+        built = [
             (
                 WorkflowStage.DATASET,
-                _build_dataset_section(self, dataset, selection, reference_frame, session_coordinator),
+                *_build_dataset_section(self, dataset, selection, reference_frame, session_coordinator),
             ),
-            (WorkflowStage.IMAGE_TOOLS, _build_image_tools_section(self, geometry, active_tool, background, mask)),
-            (WorkflowStage.ROI_SELECTION, _build_roi_selection_section(self)),
-            (WorkflowStage.ANALYSIS, _build_analysis_section(self)),
-            (WorkflowStage.OUTPUTS, _build_outputs_section(self)),
+            (WorkflowStage.IMAGE_TOOLS, *_build_image_tools_section(self, geometry, active_tool, background, mask)),
+            (WorkflowStage.ROI_SELECTION, *_build_roi_selection_section(self)),
+            (WorkflowStage.ANALYSIS, *_build_analysis_section(self)),
+            (WorkflowStage.OUTPUTS, *_build_outputs_section(self)),
+        ]
+        self._sections: list[tuple[WorkflowStage, CollapsibleSection]] = [
+            (stage, section) for stage, section, _subsections in built
+        ]
+        self._subsections: list[tuple[str, CollapsibleSection]] = [
+            (_subsection_key(stage, title), section)
+            for stage, _section, subsections in built
+            for title, section in subsections
         ]
 
         if initial_stage is not None:
@@ -374,6 +411,17 @@ class WorkflowPanel(QWidget):
             # does that regardless of what's listening on the outside.
             for stage, section in self._sections:
                 section.set_expanded(stage is initial_stage)
+
+        if initial_subsections:
+            # Same idea, one level down (2026-09-29 settings layer,
+            # `AppSettings.expanded_subsections`) - a key missing from the
+            # dict (first launch, or a section that predates this field)
+            # just leaves that section on its own hardcoded default, same
+            # as `initial_stage=None` above. No accordion cascade to worry
+            # about here since nested sections don't exclude each other.
+            for key, section in self._subsections:
+                if key in initial_subsections:
+                    section.set_expanded(bool(initial_subsections[key]))
 
         page = QWidget(self)
         page_layout = QVBoxLayout(page)
@@ -396,6 +444,10 @@ class WorkflowPanel(QWidget):
         for stage, section in self._sections:
             section.expanded_changed.connect(
                 lambda expanded, st=stage, sec=section: self._on_section_toggled(st, sec, expanded)
+            )
+        for key, section in self._subsections:
+            section.expanded_changed.connect(
+                lambda expanded, k=key: self.subsection_expanded_changed.emit(k, expanded)
             )
 
     def _on_section_toggled(self, stage: WorkflowStage, section: CollapsibleSection, expanded: bool) -> None:

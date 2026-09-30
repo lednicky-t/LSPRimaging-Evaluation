@@ -75,6 +75,15 @@ class AppSettings:
     # yet", which the reader falls back to each section's own hardcoded
     # default for (currently: Dataset starts open).
     active_workflow_stage: str | None = None
+    # Expand/collapse state of *nested* Workflow sections (e.g. "Transforms"
+    # under Image tools), keyed by `"<WorkflowStage.name>:<section title>"`
+    # (see `panels/workflow/panel.py`'s `_subsection_key`). Unlike the single
+    # top-level stage above, several nested sections can be open at once, so
+    # this needs a dict rather than one string. A key missing from this dict
+    # (first-ever launch, or a section title/stage that no longer exists)
+    # falls back to that section's own hardcoded `expanded=` default, the
+    # same graceful-degradation `active_workflow_stage` already relies on.
+    expanded_subsections: dict[str, bool] = field(default_factory=dict)
 
 
 def _decode(payload: dict) -> AppSettings:
@@ -82,6 +91,8 @@ def _decode(payload: dict) -> AppSettings:
     kwargs = {key: value for key, value in payload.items() if key in known}
     if not isinstance(kwargs.get("layout_presets"), dict):
         kwargs.pop("layout_presets", None)
+    if not isinstance(kwargs.get("expanded_subsections"), dict):
+        kwargs.pop("expanded_subsections", None)
     try:
         return replace(AppSettings(), **kwargs)
     except (TypeError, ValueError):
