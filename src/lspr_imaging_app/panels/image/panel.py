@@ -83,6 +83,7 @@ from PyQt6.QtGui import QColor, QFontMetrics
 from PyQt6.QtWidgets import (
     QApplication,
     QCompleter,
+    QFrame,
     QHBoxLayout,
     QLabel,
     QSpinBox,
@@ -95,7 +96,8 @@ from lspr_ui import get_active_theme, load_tabler_icon
 
 from ...dataset import DatasetModule
 from ...image_tools import ActiveToolModule, BackgroundModule, ChromaticModule, GeometryModule, ImageTool, MaskModule
-from ...image_tools.geometry.model import CropDefinition
+from ...image_tools.geometry.model import CropDefinition, GeometrySettings
+from ...image_tools.preprocess import resolve_external_mask
 from ...roi import RoiToolbox
 from ...roi.model import AreaRoi
 from ...roi.rasterize import effective_reference_radii, transformed_circle_points
@@ -110,6 +112,7 @@ from .crop_tool import CropTool
 from .data_axis_slider import DataAxisSlider
 from .guided_value_spinbox import GuidedValueSpinBox
 from .image_controls import ImageViewBox, controls_text
+from .mask_overlay_controls import MaskOverlayControls
 from .measure_controls import MeasureCalibrationControls
 from .measure_line_tool import MeasureLineTool
 from .render import ImageRenderer, RenderRequest, RenderResult
@@ -151,6 +154,20 @@ def _slider_axis_title_style(color: str) -> str:
     titles use identical numbers instead of two hand-copied versions that
     can drift."""
     return f"color: {color}; font-size: 11px; font-weight: 600;"
+
+
+def _vertical_separator(parent: QWidget) -> QFrame:
+    """A thin vertical divider line - used to visually split the "Image
+    tools" tab's Transforms group from the mask-overlay controls group
+    (maintainer request: "can be separated by |"). `QFrame`'s line frames
+    draw using the widget's foreground color, which the `color` stylesheet
+    property sets - the usual Qt trick for recoloring a frame line."""
+    line = QFrame(parent)
+    line.setFrameShape(QFrame.Shape.VLine)
+    line.setFrameShadow(QFrame.Shadow.Plain)
+    line.setFixedHeight(28)  # matches the row's own icon-button height
+    line.setStyleSheet(f"color: {get_active_theme().control_border};")
+    return line
 
 _PREVIEW_TOOLS = frozenset({ImageTool.ROTATE, ImageTool.CROP})
 """Tools that work on the *uncropped* image: while one is active the image is
@@ -262,6 +279,17 @@ class ImagePanel(QWidget):
         self._reference_frame = reference_frame
         self._active_tool = active_tool
         self._tool_status = ""
+
+        # Mask-overlay display state (cosmetic only - see
+        # mask_overlay_controls.py's module docstring for why this lives
+        # here and not on MaskModule). `_mask_overlay_state` caches the last
+        # resolved (authored_mask, geometry, warp_affine, hidden) tuple so a
+        # pure visibility/color/alpha change can redraw the tint without
+        # re-resolving the mask or touching the async pixel-render pipeline.
+        self._mask_overlay_visible = True
+        self._mask_overlay_color = QColor(get_active_theme().mask_color)
+        self._mask_overlay_alpha = 0.5
+        self._mask_overlay_state: tuple[np.ndarray | None, GeometrySettings | None, np.ndarray | None, bool] | None = None
         # Mirrors the last `frame_status_changed` emission (same "cached
         # alongside the signal" shape as `_tool_status` above) - lets a test
         # (or any other direct caller) read the current frame-status text
@@ -330,6 +358,15 @@ class ImagePanel(QWidget):
         self._image_item = pg.ImageItem(axisOrder="row-major")
         self._plot.addItem(self._image_item)
 
+        # Mask-overlay tint, drawn between the image and the ROI curves
+        # below (so ROI markers stay legible over it). Row-major, matching
+        # `_image_item` - no transpose needed, unlike the stable app's
+        # `ignore_mask_item` (col-major `pg.ImageItem`, hence its transpose
+        # in `overlay_manager._update_ignore_mask_overlay`).
+        self._mask_overlay_item = pg.ImageItem(axisOrder="row-major")
+        self._mask_overlay_item.hide()
+        self._plot.addItem(self._mask_overlay_item)
+
         # Three curve items for the whole overlay rather than per-ROI items:
         # with NaN separators between ROIs, one PlotDataItem draws any number
         # of disjoint circles, so adding an ROI costs array append, not a new
@@ -396,6 +433,32 @@ class ImagePanel(QWidget):
         # door onto the same backend, not a copy that can drift out of sync.
         self._transforms_section = TransformsSection(self._geometry, self._active_tool, self)
 
+        # Mask-overlay show/hide + color + transparency (2026-09-30,
+        # maintainer request - "implement the mask overlay features" ported
+        # from the stable app), sharing the "Image tools" tab with
+        # Transforms above, separated by a vertical divider - see
+        # mask_overlay_controls.py's module docstring for why this state
+        # lives on the panel rather than on `MaskModule`.
+        self._mask_overlay_controls = MaskOverlayControls(
+            visible=self._mask_overlay_visible,
+            color=self._mask_overlay_color,
+            alpha=self._mask_overlay_alpha,
+            parent=self,
+        )
+        self._mask_overlay_controls.visibility_changed.connect(self._on_mask_overlay_visibility_changed)
+        self._mask_overlay_controls.color_changed.connect(self._on_mask_overlay_color_changed)
+        self._mask_overlay_controls.alpha_changed.connect(self._on_mask_overlay_alpha_changed)
+        self._mask_overlay_separator = _vertical_separator(self)
+
+        image_tools_content = QWidget(self)
+        image_tools_content_layout = QHBoxLayout(image_tools_content)
+        image_tools_content_layout.setContentsMargins(0, 0, 0, 0)
+        image_tools_content_layout.setSpacing(6)
+        image_tools_content_layout.addWidget(self._transforms_section)
+        image_tools_content_layout.addWidget(self._mask_overlay_separator)
+        image_tools_content_layout.addWidget(self._mask_overlay_controls)
+        image_tools_content_layout.addStretch(1)
+
         self._top_bar = QWidget(self)
         self._top_bar.setObjectName("imageTopBar")
         top_bar_layout = QHBoxLayout(self._top_bar)
@@ -403,7 +466,7 @@ class ImagePanel(QWidget):
         top_bar_layout.setSpacing(6)
         self._tool_ribbon = ImageToolRibbon(
             [
-                ("Image tools", self._transforms_section),
+                ("Image tools", image_tools_content),
                 ("Histogram", None),
                 ("ROIs", self._canvas_tools),
             ],
@@ -703,6 +766,10 @@ class ImagePanel(QWidget):
             self._cursor_overlay.refresh_theme(get_active_theme())
         if hasattr(self, "_canvas_tools"):
             self._canvas_tools.refresh_theme(get_active_theme())
+        if hasattr(self, "_mask_overlay_controls"):
+            self._mask_overlay_controls.refresh_theme(get_active_theme())
+        if hasattr(self, "_mask_overlay_separator"):
+            self._mask_overlay_separator.setStyleSheet(f"color: {get_active_theme().control_border};")
         if hasattr(self, "_tool_ribbon"):
             self._tool_ribbon.refresh_theme(get_active_theme())
         if hasattr(self, "_controls_bar"):
@@ -741,6 +808,8 @@ class ImagePanel(QWidget):
         and panel holding dataset-derived state to reset itself (see its
         module docstring) - this is the first subscriber to actually do so."""
         self._image_item.clear()
+        self._mask_overlay_item.hide()
+        self._mask_overlay_state = None
         self._sample_curve.clear()
         self._reference_curve.clear()
         self._selection_curve.clear()
@@ -1042,6 +1111,7 @@ class ImagePanel(QWidget):
 
         cubes = self._dataset.spectral_cubes()
         if not cubes:
+            self._update_mask_overlay(None, None, None, hidden=True)
             return
         cube_index = self._current_cube()
         wavelength_nm = self._current_wavelength()
@@ -1056,7 +1126,14 @@ class ImagePanel(QWidget):
                 warp_affine = self._chromatic.affine_between(authored_frame, frame)
 
         geometry = self._geometry.settings()
-        if self._active_tool.active() in _PREVIEW_TOOLS and geometry.crop.enabled:
+        preview_active = self._active_tool.active() in _PREVIEW_TOOLS
+        # The overlay tint must match the *displayed* geometry exactly - a
+        # preview tool shows the image uncropped (see below), a different
+        # coordinate space than `authored_mask`/`warp_affine` were resolved
+        # for, so it hides then, the same "wrong coordinate space" reasoning
+        # `_draw_overlays` already applies to the ROI overlay above.
+        self._update_mask_overlay(authored_mask, geometry, warp_affine, hidden=preview_active)
+        if preview_active and geometry.crop.enabled:
             # Uncropped preview - the crop is drawn as an outline instead.
             geometry = replace(geometry, crop=CropDefinition())
 
@@ -1191,6 +1268,60 @@ class ImagePanel(QWidget):
         x0, y0 = float(crop.x), float(crop.y)
         x1, y1 = x0 + float(crop.width), y0 + float(crop.height)
         self._crop_outline_curve.setData([x0, x1, x1, x0, x0], [y0, y0, y1, y1, y0])
+
+    # -- mask overlay (display-only, see mask_overlay_controls.py) ----------
+
+    def _update_mask_overlay(
+        self,
+        authored_mask: np.ndarray | None,
+        geometry: GeometrySettings | None,
+        warp_affine: np.ndarray | None,
+        *,
+        hidden: bool,
+    ) -> None:
+        """Redraw the mask-overlay tint from an already-resolved mask -
+        synchronous GUI-thread work, same as `_draw_overlays` (a few
+        thousand boolean pixels, cheap next to a full image re-render).
+
+        Caches its arguments as `self._mask_overlay_state` so a pure
+        visibility/color/alpha change (`_on_mask_overlay_*` below) can
+        redraw without re-resolving the mask or touching the async
+        pixel-render pipeline at all - none of those three controls change
+        what is *computed*, only how the already-resolved mask is drawn."""
+        self._mask_overlay_state = (authored_mask, geometry, warp_affine, hidden)
+        if hidden or not self._mask_overlay_visible or authored_mask is None or geometry is None:
+            self._mask_overlay_item.hide()
+            return
+        mask = resolve_external_mask(authored_mask, geometry, warp_affine)
+        if mask is None or not np.any(mask):
+            self._mask_overlay_item.hide()
+            return
+        overlay = np.zeros((*mask.shape, 4), dtype=np.uint8)
+        overlay[mask] = (
+            self._mask_overlay_color.red(),
+            self._mask_overlay_color.green(),
+            self._mask_overlay_color.blue(),
+            int(round(self._mask_overlay_alpha * 255.0)),
+        )
+        self._mask_overlay_item.setImage(overlay, autoLevels=False)
+        self._mask_overlay_item.show()
+
+    def _redraw_mask_overlay_from_cache(self) -> None:
+        if self._mask_overlay_state is not None:
+            authored_mask, geometry, warp_affine, hidden = self._mask_overlay_state
+            self._update_mask_overlay(authored_mask, geometry, warp_affine, hidden=hidden)
+
+    def _on_mask_overlay_visibility_changed(self, visible: bool) -> None:
+        self._mask_overlay_visible = bool(visible)
+        self._redraw_mask_overlay_from_cache()
+
+    def _on_mask_overlay_color_changed(self, color: QColor) -> None:
+        self._mask_overlay_color = QColor(color)
+        self._redraw_mask_overlay_from_cache()
+
+    def _on_mask_overlay_alpha_changed(self, alpha: float) -> None:
+        self._mask_overlay_alpha = float(alpha)
+        self._redraw_mask_overlay_from_cache()
 
     def _update_chunk_grid(self) -> None:
         """Draw (or clear) the Export section's chunk-grid preview - lines
