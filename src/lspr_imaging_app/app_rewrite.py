@@ -599,10 +599,43 @@ def build_main_window(
         lambda roi_ids: analysis_engine.set_selected_rois(tuple(sorted(roi_ids)))
     )
 
-    image_panel = ImagePanel(
-        dataset, geometry, mask, chromatic, background, roi_toolbox, selection, active_tool, reference_frame
+    # `None` unless all four were actually saved together (first-ever launch,
+    # or an older settings file from before this field existed, both leave
+    # them at the dataclass default of `None`) - see `ImagePanel.__init__`'s
+    # own docstring for why a missing saved range just means "let pyqtgraph's
+    # default auto-range fit the first image", not an error.
+    _saved_view_range = (
+        settings.image_view_x_min, settings.image_view_x_max,
+        settings.image_view_y_min, settings.image_view_y_max,
     )
-    histogram_panel = HistogramPanel(image_panel, geometry, mask, chromatic, roi_toolbox, highlight_range)
+    initial_view_range = (
+        ((_saved_view_range[0], _saved_view_range[1]), (_saved_view_range[2], _saved_view_range[3]))
+        if None not in _saved_view_range else None
+    )
+    image_panel = ImagePanel(
+        dataset, geometry, mask, chromatic, background, roi_toolbox, selection, active_tool, reference_frame,
+        initial_view_range=initial_view_range,
+    )
+    image_panel.view_range_changed.connect(
+        lambda x_min, x_max, y_min, y_max: _persist(
+            image_view_x_min=x_min, image_view_x_max=x_max, image_view_y_min=y_min, image_view_y_max=y_max,
+        )
+    )
+    histogram_panel = HistogramPanel(
+        image_panel, geometry, mask, chromatic, roi_toolbox, highlight_range,
+        initial_percent_mode=settings.histogram_percent_mode,
+        initial_log_y=settings.histogram_log_y,
+        initial_bin_width=settings.histogram_bin_width_px,
+        initial_line_width=settings.histogram_line_width_px,
+    )
+    histogram_panel.display_settings_changed.connect(
+        lambda percent_mode, log_y, bin_width_px, line_width_px: _persist(
+            histogram_percent_mode=percent_mode,
+            histogram_log_y=log_y,
+            histogram_bin_width_px=float(bin_width_px),
+            histogram_line_width_px=float(line_width_px),
+        )
+    )
     roi_table_panel = RoiTablePanel(roi_toolbox)
     spectra_panel = SpectraPanel(analysis_engine, roi_toolbox, selection)
     sensorgram_panel = SensorgramPanel(analysis_engine, roi_toolbox, dataset, selection)

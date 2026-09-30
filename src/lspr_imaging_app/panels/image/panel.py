@@ -117,6 +117,11 @@ from .rotate_line_tool import RotateLineTool
 logger = logging.getLogger(__name__)
 
 _REDRAW_COALESCE_MS = 100  # sketch §8 - the already-validated coalescing window
+# Slower than the redraw coalesce above on purpose: this debounces a settings
+# *write* (one JSON file per `AppSettings._persist` call - see
+# `app_rewrite.py`), not a redraw, so there is no reason to pay disk I/O on
+# every intermediate frame of a drag/zoom the way a 100ms redraw would.
+_VIEW_RANGE_PERSIST_DEBOUNCE_MS = 600
 _CIRCLE_POINTS = 48
 """Vertices per drawn circle. 48 is smooth at any zoom a screen can show
 while keeping the whole overlay to a few thousand points for a few hundred
@@ -214,6 +219,14 @@ class ImagePanel(QWidget):
     # error is not "what frame is displayed", it's "why nothing is".
     frame_status_changed = pyqtSignal(str)
 
+    # The viewport's pan/zoom, as (x_min, x_max, y_min, y_max) in image pixel
+    # coordinates - `app_rewrite.py`'s other half of `initial_view_range`
+    # below, written back to `AppSettings` the same debounced-then-persist
+    # shape every other display panel already uses for its redraw (this is a
+    # settings write, not a redraw, so it uses its own slower timer - see
+    # `_view_range_debounce_timer`).
+    view_range_changed = pyqtSignal(float, float, float, float)
+
     def __init__(
         self,
         dataset: DatasetModule,
@@ -226,8 +239,17 @@ class ImagePanel(QWidget):
         active_tool: ActiveToolModule,
         reference_frame: ReferenceFrameModule,
         parent: QWidget | None = None,
+        *,
+        initial_view_range: tuple[tuple[float, float], tuple[float, float]] | None = None,
     ) -> None:
         super().__init__(parent)
+        # Applied once, the first time a real image lands (`_on_rendered`) -
+        # not here, since no plane exists yet to set a view against. `None`
+        # (first launch, or a settings file with no saved range yet) just
+        # means "let pyqtgraph's own default auto-range fit the first image",
+        # exactly like every launch before this feature existed.
+        self._initial_view_range = initial_view_range
+        self._view_range_restored = False
         self._dataset = dataset
         self._geometry = geometry
         self._mask = mask
@@ -271,6 +293,12 @@ class ImagePanel(QWidget):
         self._redraw_timer.setSingleShot(True)
         self._redraw_timer.setInterval(_REDRAW_COALESCE_MS)
         self._redraw_timer.timeout.connect(self._redraw)
+
+        self._view_range_persist_timer = QTimer(self)
+        self._view_range_persist_timer.setSingleShot(True)
+        self._view_range_persist_timer.setInterval(_VIEW_RANGE_PERSIST_DEBOUNCE_MS)
+        self._view_range_persist_timer.timeout.connect(self._emit_view_range_changed)
+        self._plot.vb.sigRangeChanged.connect(self._on_view_range_changed)
 
         self._connect_modules()
         self._refresh_navigation_ranges()
@@ -1042,6 +1070,18 @@ class ImagePanel(QWidget):
             return
         image = np.asarray(result.image, dtype=np.float32)
         self._image_item.setImage(image, autoLevels=True)
+        if not self._view_range_restored:
+            # Once only, ever, on this panel's first successful render - a
+            # later frame navigation must never snap the view back to this
+            # saved position (that would fight the user's own panning/
+            # zooming for the rest of the session). `None` (first-ever
+            # launch, or a settings file with nothing saved yet) leaves
+            # pyqtgraph's own auto-range in charge, same as before this
+            # existed.
+            self._view_range_restored = True
+            if self._initial_view_range is not None:
+                x_range, y_range = self._initial_view_range
+                self._plot.vb.setRange(xRange=x_range, yRange=y_range, padding=0.0)
         self.image_rendered.emit(image, result.request.cube_index, result.request.wavelength_nm)
         self._set_frame_status(f"Cube {result.request.cube_index}, {result.request.wavelength_nm:.0f} nm")
         self._last_image_shape = result.image.shape[:2]
@@ -1053,6 +1093,22 @@ class ImagePanel(QWidget):
         # active-tool change).
         self._crop_tool.set_frame_size(result.image.shape[1], result.image.shape[0])
         self._update_chunk_grid()
+
+    # -- viewport persistence -------------------------------------------------
+
+    def _on_view_range_changed(self, _vb: object, _ranges: object) -> None:
+        """`ViewBox.sigRangeChanged` fires on every pan/zoom step and on
+        every auto-range refit after a new render - both are real "this is
+        where the view is now" moments, so both restart the debounce rather
+        than trying to tell them apart. Reads the range back from the
+        `ViewBox` itself when the timer fires (`_emit_view_range_changed`),
+        not from this signal's own arguments, so a burst of these only ever
+        reports the final, settled range."""
+        self._view_range_persist_timer.start()
+
+    def _emit_view_range_changed(self) -> None:
+        x_range, y_range = self._plot.vb.viewRange()
+        self.view_range_changed.emit(float(x_range[0]), float(x_range[1]), float(y_range[0]), float(y_range[1]))
 
     # -- overlays -----------------------------------------------------------
 

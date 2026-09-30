@@ -45,7 +45,7 @@ from __future__ import annotations
 from collections.abc import Callable
 
 import numpy as np
-from PyQt6.QtCore import QTimer
+from PyQt6.QtCore import QTimer, pyqtSignal
 from PyQt6.QtWidgets import QVBoxLayout, QWidget
 
 from ...image_tools import ChromaticModule, GeometryModule, MaskModule
@@ -65,6 +65,14 @@ class HistogramPanel(QWidget):
     """Plots a histogram of the currently displayed image and drives the
     shared Highlight-range selection."""
 
+    # Carries the whole settings-dialog state (percent_mode, log_y,
+    # bin_width_px, line_width_px) after any one of them changes - one signal
+    # rather than four, since `app_rewrite.py`'s only use for it is writing
+    # all four back to `AppSettings` together (2026-09-30, same "app-level
+    # setting is one field plus one wiring line" mechanism `AppSettings`'s
+    # own docstring describes for `active_workflow_stage`/`theme`/etc).
+    display_settings_changed = pyqtSignal(bool, bool, int, float)
+
     def __init__(
         self,
         image_panel: ImagePanel,
@@ -74,6 +82,11 @@ class HistogramPanel(QWidget):
         roi_toolbox: RoiToolbox,
         highlight_range: HighlightRangeModule,
         parent: QWidget | None = None,
+        *,
+        initial_percent_mode: bool = True,
+        initial_log_y: bool = False,
+        initial_bin_width: float = compute.DEFAULT_BIN_WIDTH,
+        initial_line_width: float = DEFAULT_LINE_WIDTH,
     ) -> None:
         super().__init__(parent)
         self._image_panel = image_panel
@@ -85,13 +98,19 @@ class HistogramPanel(QWidget):
 
         self._image: np.ndarray | None = None
         self._frame: tuple[int, float] | None = None
-        self._bin_width = compute.DEFAULT_BIN_WIDTH
-        self._percent_mode = True
-        self._log_y = False
-        self._line_width = DEFAULT_LINE_WIDTH
+        self._bin_width = float(initial_bin_width)
+        self._percent_mode = bool(initial_percent_mode)
+        self._log_y = bool(initial_log_y)
+        self._line_width = float(initial_line_width)
         self._settings_dialog: HistogramPlotSettingsDialog | None = None
 
         self._build_ui()
+        # Applied after `_build_ui` constructs `self._plot`, same as the
+        # settings dialog's own live-apply handlers below - `_bin_width` and
+        # `_percent_mode` need no equivalent push, since `_redraw` (called
+        # once real data arrives) already reads them fresh every time.
+        self._plot.set_log_y(self._log_y)
+        self._plot.set_line_width(self._line_width)
 
         self._redraw_timer = QTimer(self)
         self._redraw_timer.setSingleShot(True)
@@ -301,10 +320,12 @@ class HistogramPanel(QWidget):
         self._percent_mode = index == 0
         self._update_y_label()
         self._redraw()
+        self._emit_display_settings_changed()
 
     def _on_settings_scale_changed(self, index: int) -> None:
         self._log_y = index == 1
         self._plot.set_log_y(self._log_y)
+        self._emit_display_settings_changed()
 
     def _on_settings_bin_width_changed(self, value: int) -> None:
         # Coalesced, not immediate: a `QSpinBox` fires `valueChanged` on
@@ -313,7 +334,14 @@ class HistogramPanel(QWidget):
         # already debounces through `_schedule_redraw`.
         self._bin_width = float(value)
         self._schedule_redraw()
+        self._emit_display_settings_changed()
 
     def _on_settings_line_width_changed(self, value: float) -> None:
         self._line_width = value
         self._plot.set_line_width(value)
+        self._emit_display_settings_changed()
+
+    def _emit_display_settings_changed(self) -> None:
+        self.display_settings_changed.emit(
+            self._percent_mode, self._log_y, int(self._bin_width), self._line_width
+        )

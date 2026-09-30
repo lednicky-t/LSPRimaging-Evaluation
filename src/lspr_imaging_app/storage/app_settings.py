@@ -84,6 +84,23 @@ class AppSettings:
     # falls back to that section's own hardcoded `expanded=` default, the
     # same graceful-degradation `active_workflow_stage` already relies on.
     expanded_subsections: dict[str, bool] = field(default_factory=dict)
+    # Histogram panel's settings-dialog controls (`panels/histogram/panel.py`)
+    # - a visual/display preference, not dataset-derived, so it belongs here
+    # rather than in the per-dataset session file. Defaults mirror
+    # `compute.DEFAULT_BIN_WIDTH` / `plot.DEFAULT_LINE_WIDTH`; kept as plain
+    # literals rather than imported so this file stays free of any `panels/`
+    # (Qt-heavy) dependency.
+    histogram_percent_mode: bool = True
+    histogram_log_y: bool = False
+    histogram_bin_width_px: float = 512.0
+    histogram_line_width_px: float = 1.5
+    # Last Image panel viewport (pan/zoom), in image pixel coordinates -
+    # `ImagePanel(initial_view_range=...)`. All four are `None` together
+    # (never applied) until the panel reports a real range at least once.
+    image_view_x_min: float | None = None
+    image_view_x_max: float | None = None
+    image_view_y_min: float | None = None
+    image_view_y_max: float | None = None
 
 
 def _decode(payload: dict) -> AppSettings:
