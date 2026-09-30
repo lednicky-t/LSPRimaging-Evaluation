@@ -43,6 +43,22 @@ Where a click actually lands - the scene/view coordinate mapping, and the
 dispatch table (`_on_scene_clicked`), exactly where Rotate/Crop/Measure's
 own click handling already lives. This bar only ever toggles which tool is
 active; it holds no canvas-interaction logic of its own.
+
+**Sized to hug its icons, with a 1px border seam (revised 2026-09-30,
+maintainer request)** - `_BUTTON_SIZE`/`_ICON_SIZE` shrunk from the first
+pass's `28`/`22` (borrowed from the Transforms row's own buttons, sized for
+a horizontal row with room to spare) to `22`/`16`: a vertical strip docked
+to the canvas edge should read as a thin rail, not a second toolbar's worth
+of width. `refresh_theme()` (new) gives the strip's right edge - the one
+side that actually touches the canvas - a subtle `theme.toolbar_border`
+line, since `ImagePanel`'s canvas background (`toolbar_bg`) and this bar's
+own background are otherwise visually identical, reading as one continuous
+area with no boundary between "controls" and "image". Same convention
+`CropSizeControls`/`MeasureCalibrationControls` already use (an object-name
+-scoped inline stylesheet, re-applied at construction and on every live
+theme switch via `ImagePanel.refresh_theme`) - only the right edge is
+bordered here, since the other three sides border this panel's own chrome,
+not the canvas.
 """
 
 from __future__ import annotations
@@ -53,16 +69,18 @@ from dataclasses import dataclass
 from PyQt6.QtCore import QSize
 from PyQt6.QtWidgets import QMenu, QToolButton, QVBoxLayout, QWidget
 
-from lspr_ui import get_active_theme, load_tabler_icon, transparent_icon_button_stylesheet
+from lspr_ui import GuiTheme, get_active_theme, load_tabler_icon, transparent_icon_button_stylesheet
 
 from ...image_tools import ActiveToolModule, ImageTool
 from ...roi import RoiToolbox
 
-_BUTTON_SIZE = 28
-_ICON_SIZE = 22
+_BUTTON_SIZE = 22
+_ICON_SIZE = 16
 _RENDER_SIZE = _ICON_SIZE * 2
 _STROKE_WIDTH = 2.1
 _ADD_ROI_ACTIVE_COLOR = "#38bdf8"  # same blue as Crop/Measure - the maintainer's preferred tool color
+_BAR_MARGIN = 2
+_BAR_SPACING = 3
 
 
 @dataclass(frozen=True)
@@ -159,13 +177,28 @@ class CanvasToolsBar(QWidget):
         self._add_roi_button = _ToolGroupButton([add_roi_variant], self)
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(4, 4, 4, 4)
-        layout.setSpacing(6)
+        layout.setContentsMargins(_BAR_MARGIN, _BAR_MARGIN, _BAR_MARGIN, _BAR_MARGIN)
+        layout.setSpacing(_BAR_SPACING)
         layout.addWidget(self._select_button)
         layout.addWidget(self._add_roi_button)
         layout.addStretch(1)
 
+        self.setObjectName("canvasToolsBar")
+        self.refresh_theme(get_active_theme())
+
         active_tool.active_tool_changed.connect(self._on_active_tool_changed)
+
+    def refresh_theme(self, theme: GuiTheme) -> None:
+        """A subtle 1px seam where this strip meets the canvas - without
+        it, the strip's background and the pyqtgraph canvas right next to
+        it (`ImagePanel.refresh_theme` sets that to the same `toolbar_bg`
+        this app's base chrome already uses) read as one continuous flat
+        area with no visual boundary. Only the right edge needs it - the
+        other three sides border the panel's own chrome, not the canvas.
+        Called at construction and again on a live theme switch (see
+        `ImagePanel.refresh_theme`), matching `CropSizeControls`/
+        `MeasureCalibrationControls`' identical convention."""
+        self.setStyleSheet(f"#canvasToolsBar {{ border: none; border-right: 1px solid {theme.toolbar_border}; }}")
 
     def _on_active_tool_changed(self, _tool: object) -> None:
         self._select_button.refresh()

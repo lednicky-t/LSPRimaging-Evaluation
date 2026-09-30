@@ -54,7 +54,7 @@ from lspr_ui import get_active_theme, transparent_icon_button_stylesheet
 
 from ...dataset import DatasetModule
 from ...dataset.io import acquisition_metadata_sidecar_path, experimental_data_dir
-from ...dataset.model import ImageDataset
+from ...dataset.model import CubeIntervalStats, ImageDataset
 from ...io.metadata_import import CLASSIFICATION_UNKNOWN, classify_metadata_file, import_metadata_files
 from ...selection import SelectionModule
 from ...storage.workspace import save_acquisition_metadata_sidecar
@@ -118,6 +118,41 @@ def _describe_metadata(metadata: ImagingAcquisitionMetadata) -> str:
     if metadata.notes:
         lines.append(f"Notes: {metadata.notes}")
     return "\n".join(lines)
+
+
+def _format_seconds(value_s: float) -> str:
+    """Plain seconds below a minute (the common case for imaging kinetics -
+    "8.0 s" reads better than "0:08"), M:SS above it. Deliberately a small
+    local formatter rather than reusing the stable app's `_format_elapsed_
+    seconds` - that one formats large *absolute elapsed times* (spans of
+    minutes to hours); nothing in this rewrite has ported it yet, and a
+    cube-to-cube gap is a different quantity worth its own formatter rather
+    than a speculative shared one with a single caller so far."""
+    if value_s < 60.0:
+        return f"{value_s:.1f} s"
+    minutes, seconds = divmod(int(round(value_s)), 60)
+    return f"{minutes}:{seconds:02d} min"
+
+
+def _format_cube_interval_line(stats: CubeIntervalStats) -> str:
+    """Compact "mean ± std" - matches how a measurement's central value and
+    spread are normally reported together (maintainer's call, 2026-09-30:
+    mean-with-spread, not a single robust median, so an irregular gap shows
+    up as spread rather than being silently absorbed - see `cube_interval_
+    stats`'s own docstring). Falls back to a bare mean when there's only
+    one gap to measure (`std_s` needs at least two)."""
+    mean_text = _format_seconds(stats.mean_s)
+    if stats.std_s is None:
+        return f"Cube interval: ~{mean_text} (1 gap)"
+    return f"Cube interval: ~{mean_text} ± {_format_seconds(stats.std_s)} ({stats.n_gaps} gaps)"
+
+
+def _format_cube_interval_tooltip(stats: CubeIntervalStats) -> str:
+    return (
+        "Mean time between consecutive cubes' start times (the first frame of each cube's "
+        f"wavelength sweep), across {stats.n_gaps} cube-to-cube gap(s): min {_format_seconds(stats.min_s)}, "
+        f"max {_format_seconds(stats.max_s)}."
+    )
 
 
 class ExperimentalPlanSection(QWidget):
@@ -214,7 +249,7 @@ class ExperimentalPlanSection(QWidget):
             self._status_label.setText("No acquisition metadata found for this dataset.")
             self.header_stats_label.setText("")
         else:
-            self._status_label.setText(_describe_metadata(metadata))
+            description = _describe_metadata(metadata)
 
             stat_parts: list[str] = []
             tooltip_parts: list[str] = []
@@ -248,10 +283,26 @@ class ExperimentalPlanSection(QWidget):
             theme = get_active_theme()
             self.header_stats_label.setStyleSheet(f"color: {theme.text_dim if complete else theme.accent_gold};")
             self.header_stats_label.setToolTip(" ".join(tooltip_parts))
+
+            # Computed last, deliberately - `cube_interval_stats()` goes
+            # through `compact_dataset_image_timings`, which empties
+            # `metadata.image_timings` as a side effect (see that
+            # function's docstring). `description` and `n_timed` above
+            # already read everything they need from `metadata.
+            # image_timings` before this point, so the order here matters:
+            # moving this earlier would silently zero out the "N/M timed"
+            # stat above.
+            interval_stats = self._dataset_module.cube_interval_stats()
+            self._status_label.setToolTip("")
+            if interval_stats is not None:
+                description += f"\n{_format_cube_interval_line(interval_stats)}"
+                self._status_label.setToolTip(_format_cube_interval_tooltip(interval_stats))
+            self._status_label.setText(description)
         self._refresh_current_frame_preview()
 
     def _on_dataset_cleared(self) -> None:
         self._status_label.setText("No dataset loaded.")
+        self._status_label.setToolTip("")
         self._current_frame_label.setText("")
         self.header_stats_label.setText("")
 

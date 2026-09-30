@@ -79,7 +79,14 @@ from .io import (
     load_image_array,
     load_image_shape,
 )
-from .model import ImageDataset, ImageRecord, rehydrated_acquisition_metadata
+from .model import (
+    CubeIntervalStats,
+    ImageDataset,
+    ImageRecord,
+    compact_dataset_image_timings,
+    cube_interval_stats,
+    rehydrated_acquisition_metadata,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -172,7 +179,11 @@ class DatasetModule(QObject):
         """Every distinct wavelength in the loaded dataset, sorted - an
         empty tuple (not an error) if no dataset is loaded, since unlike
         `current_image` there's no specific key being asked for that could
-        be "missing"."""
+        be "missing".
+
+        **`0.0`, if present, is not a spectral wavelength** - see
+        `wavelengths_for_cube`'s docstring below for the canonical
+        statement of why."""
         if self._dataset is None:
             return ()
         return tuple(self._dataset.wavelengths_nm)
@@ -189,7 +200,33 @@ class DatasetModule(QObject):
         per-cube loop would ask for a (cube, wavelength) pair that may not
         exist - `load_plane` would raise `KeyError` for a cube that is
         merely short one wavelength, which a partially-failed acquisition
-        makes an ordinary occurrence rather than a corrupt-data case."""
+        makes an ordinary occurrence rather than a corrupt-data case.
+
+        **`0.0`, if present, is the dataset's dark/background frame (LED
+        off, no illumination), not a spectral sample point** - a real,
+        ordinarily-acquired image (so it belongs in this list, gets a real
+        `ImageRecord`, and is a genuine, selectable index everywhere this
+        list feeds a UI control), but its job is estimating the sensor's
+        own dark-current offset for subtraction from the real wavelengths'
+        pixel values, not contributing a point to a spectrum. Confirmed,
+        not assumed - the stable app already has a real, working consumer
+        of exactly this convention: `gui/analysis_worker_mixin.py`'s
+        `dark_frame_pixel_impact()` (`dark_mask = wavelengths == 0.0`) uses
+        the 0 nm entry to simulate dark-current subtraction and measure its
+        effect on a computed formula value (e.g. absorbance); `docs/
+        row_banding_artifact_analysis_2026-09.md` independently refers to
+        the same thing as "`WL0`, LED off". **Any code that treats "all
+        wavelengths" as spectral data (a fit, a spectrum plot, an average
+        across wavelength) must exclude `0.0` explicitly, via
+        `dataset.model.is_dark_frame_wavelength`** - it is real data, just
+        not spectral data, and nothing in this query surface filters it out
+        automatically. `AnalysisEngine` (`analysis/engine.py`) is the real
+        enforcement point today - `_gather_wavelength_inputs`/
+        `_gather_current_inputs`/`_naming` all exclude it before building
+        `compute_cell` inputs, settings-snapshot fingerprints, and the
+        per-dataset filename scheme, so a dark frame never becomes a point
+        in a stored spectrum, fit, or metric (fixed 2026-09-30 - see the
+        build log for the gap this closed)."""
         if self._dataset is None:
             return ()
         return tuple(self._dataset.wavelengths_for_cube(int(cube_index)))
@@ -243,6 +280,23 @@ class DatasetModule(QObject):
         if self._dataset is None:
             return None
         return rehydrated_acquisition_metadata(self._dataset)
+
+    def cube_interval_stats(self) -> CubeIntervalStats | None:
+        """Mean/min/max/std of the dataset's time between consecutive
+        cubes' start times, in seconds - see `dataset.model.
+        cube_interval_stats`'s docstring for the full reasoning behind
+        "cube interval" as the term, "earliest frame" as a cube's fixed
+        time definition, and mean-with-spread over a single median. `None`
+        if no dataset is loaded, the dataset has no acquisition timing, or
+        fewer than two cubes have timing recorded.
+
+        Goes through `compact_dataset_image_timings` (lazy, idempotent -
+        see that function's own docstring), matching `rehydrated_
+        acquisition_metadata`'s pattern above rather than reading
+        `_dataset.compact_image_timings` directly."""
+        if self._dataset is None:
+            return None
+        return cube_interval_stats(compact_dataset_image_timings(self._dataset))
 
     # -- commands -----------------------------------------------------------
 

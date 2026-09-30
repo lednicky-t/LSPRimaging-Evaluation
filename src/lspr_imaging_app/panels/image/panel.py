@@ -73,15 +73,16 @@ from __future__ import annotations
 
 import itertools
 import logging
+import statistics
 from dataclasses import replace
 
 import numpy as np
 import pyqtgraph as pg
-from PyQt6.QtCore import QEvent, QObject, QPointF, Qt, QTimer, pyqtSignal
+from PyQt6.QtCore import QEvent, QObject, QPointF, QStringListModel, Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import QColor
 from PyQt6.QtWidgets import (
     QApplication,
-    QDoubleSpinBox,
+    QCompleter,
     QHBoxLayout,
     QLabel,
     QSpinBox,
@@ -97,12 +98,15 @@ from ...image_tools.geometry.model import CropDefinition
 from ...roi import RoiToolbox
 from ...roi.model import AreaRoi
 from ...roi.rasterize import effective_reference_radii, transformed_circle_points
-from ...selection import SelectionModule
+from ...selection import ReferenceFrameModule, SelectionModule
+from ...selection.reference_frame_module import MODE_AUTO
 from ..cursor_overlay import CursorOverlay
 from .canvas_tools import CanvasToolsBar
 from .context_menu import show_tool_context_menu
 from .crop_size_controls import CropSizeControls
 from .crop_tool import CropTool
+from .data_axis_slider import DataAxisSlider
+from .guided_value_spinbox import GuidedValueSpinBox
 from .image_controls import ImageViewBox, controls_text
 from .measure_controls import MeasureCalibrationControls
 from .measure_line_tool import MeasureLineTool
@@ -123,6 +127,22 @@ _DEFAULT_REFERENCE_COLOR = "#38bdf8"
 _SELECTED_COLOR = "#f8fafc"
 _CHUNK_GRID_COLOR = "#a3a3a3"
 _CROP_OUTLINE_COLOR = "#38bdf8"  # the crop button's active blue
+
+# Cube/Wavelength navigation rows (ported from the stable app's
+# docs/image_area_slider_redesign.md). The reference-highlight colors are
+# the stable app's own hardcoded literals, not lspr_ui theme tokens - same
+# convention `reference_frame_row.py`'s `_ACTIVE_COLOR` already uses for the
+# same feature's Auto/Manual buttons.
+_REFERENCE_CUBE_HIGHLIGHT = "#facc15"
+_REFERENCE_WAVELENGTH_HIGHLIGHT = "#84cc16"
+
+
+def _slider_axis_title_style(color: str) -> str:
+    """Shared 11px/600 style for the Cube/λ slider-title labels - ported
+    from the stable app's `layout_builder._slider_axis_title_style` so both
+    titles use identical numbers instead of two hand-copied versions that
+    can drift."""
+    return f"color: {color}; font-size: 11px; font-weight: 600;"
 
 _PREVIEW_TOOLS = frozenset({ImageTool.ROTATE, ImageTool.CROP})
 """Tools that work on the *uncropped* image: while one is active the image is
@@ -191,6 +211,7 @@ class ImagePanel(QWidget):
         roi_toolbox: RoiToolbox,
         selection: SelectionModule,
         active_tool: ActiveToolModule,
+        reference_frame: ReferenceFrameModule,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
@@ -201,6 +222,7 @@ class ImagePanel(QWidget):
         self._background = background
         self._roi_toolbox = roi_toolbox
         self._selection = selection
+        self._reference_frame = reference_frame
         self._active_tool = active_tool
         self._tool_status = ""
 
@@ -316,25 +338,93 @@ class ImagePanel(QWidget):
         self._tool_info.setFixedSize(18, 18)
         self._refresh_tool_info(None)
 
+        # Cube and Wavelength navigation - ported from the stable app's
+        # tick/axis-style redesign (docs/image_area_slider_redesign.md):
+        # each axis gets its own full-width row (title -> slider -> spin ->
+        # one trailing icon button) rather than splitting one row, so each
+        # slider gets the full available width and the two axes read as
+        # parallel strips. The Cube/Time toggle title-button and the
+        # "exclude this image" icon button are *not* ported - see this
+        # panel's module docstring "Not built here, deliberately" note for
+        # why (no elapsed-time mapping / no exclusions subsystem exists on
+        # this branch yet).
         self._cube_spin = QSpinBox(self)
-        self._cube_spin.setPrefix("Cube ")
         self._cube_spin.setEnabled(False)
         self._cube_spin.valueChanged.connect(self._on_cube_spin_changed)
 
-        self._wavelength_spin = QDoubleSpinBox(self)
-        self._wavelength_spin.setSuffix(" nm")
+        self._cube_slider = DataAxisSlider(Qt.Orientation.Horizontal, self)
+        self._cube_slider.setEnabled(False)
+        self._cube_slider.set_accent_color(get_active_theme().accent_gold)
+        self._cube_slider.valueChanged.connect(self._on_cube_slider_changed)
+
+        cube_title = QLabel("Cube", self)
+        cube_title.setStyleSheet(_slider_axis_title_style(get_active_theme().text_muted))
+        cube_row = QHBoxLayout()
+        cube_row.setContentsMargins(0, 0, 0, 0)
+        cube_row.setSpacing(5)
+        cube_row.addWidget(cube_title)
+        cube_row.addWidget(self._cube_slider, 1)
+        cube_row.addWidget(self._cube_spin)
+
+        self._wavelength_spin = GuidedValueSpinBox(self)
         self._wavelength_spin.setDecimals(1)
         self._wavelength_spin.setSingleStep(1.0)
         self._wavelength_spin.setEnabled(False)
         self._wavelength_spin.valueChanged.connect(self._on_wavelength_spin_changed)
 
-        controls = QHBoxLayout()
-        controls.addWidget(self._cube_spin)
-        controls.addWidget(self._wavelength_spin)
-        controls.addStretch(1)
-        controls.addWidget(self._status, 2)
-        controls.addSpacing(6)
-        controls.addWidget(self._tool_info)
+        self._wavelength_completer = QCompleter(self)
+        self._wavelength_completer.setCompletionMode(QCompleter.CompletionMode.PopupCompletion)
+        self._wavelength_completer.setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
+        self._wavelength_completer.setFilterMode(Qt.MatchFlag.MatchStartsWith)
+        self._wavelength_completer.setModel(QStringListModel([], self))
+        self._wavelength_spin.lineEdit().setCompleter(self._wavelength_completer)
+        self._wavelength_completer.activated[str].connect(self._on_wavelength_completion_activated)
+        self._wavelength_spin.lineEdit().textEdited.connect(self._on_wavelength_text_edited)
+
+        self._wavelength_slider = DataAxisSlider(Qt.Orientation.Horizontal, self)
+        self._wavelength_slider.setEnabled(False)
+        self._wavelength_slider.set_accent_color(get_active_theme().accent_blue)
+        self._wavelength_slider.valueChanged.connect(self._on_wavelength_slider_changed)
+
+        wavelength_title = QLabel("λ (nm)", self)
+        wavelength_title.setStyleSheet(_slider_axis_title_style(get_active_theme().text_muted))
+        wavelength_title.setToolTip("Wavelength (nm)")
+        wavelength_row = QHBoxLayout()
+        wavelength_row.setContentsMargins(0, 0, 0, 0)
+        wavelength_row.setSpacing(5)
+        wavelength_row.addWidget(wavelength_title)
+        wavelength_row.addWidget(self._wavelength_slider, 1)
+        wavelength_row.addWidget(self._wavelength_spin)
+
+        # Both rows' titles and number fields share one width each (2026-09-
+        # 30, maintainer request) - without this, "Cube" and "λ (nm)" size
+        # to their own text and "197"/"470.0" size to their own digits, so
+        # the two sliders started at slightly different x positions and the
+        # two number fields didn't line up on the right either.
+        title_width = max(cube_title.sizeHint().width(), wavelength_title.sizeHint().width())
+        cube_title.setFixedWidth(title_width)
+        wavelength_title.setFixedWidth(title_width)
+        spin_width = max(self._cube_spin.sizeHint().width(), self._wavelength_spin.sizeHint().width())
+        self._cube_spin.setFixedWidth(spin_width)
+        self._wavelength_spin.setFixedWidth(spin_width)
+
+        navigation = QVBoxLayout()
+        navigation.setContentsMargins(0, 0, 0, 0)
+        navigation.setSpacing(4)
+        navigation.addLayout(cube_row)
+        navigation.addLayout(wavelength_row)
+
+        status_row = QHBoxLayout()
+        status_row.addStretch(1)
+        status_row.addWidget(self._status, 2)
+        status_row.addSpacing(6)
+        status_row.addWidget(self._tool_info)
+
+        controls = QVBoxLayout()
+        controls.setContentsMargins(0, 0, 0, 0)
+        controls.setSpacing(4)
+        controls.addLayout(navigation)
+        controls.addLayout(status_row)
 
         self._canvas_tools = CanvasToolsBar(self._roi_toolbox, self._active_tool, self)
         canvas_row = QHBoxLayout()
@@ -343,9 +433,25 @@ class ImagePanel(QWidget):
         canvas_row.addWidget(self._canvas_tools)
         canvas_row.addWidget(self._view, 1)
 
+        # A real QWidget, not a bare layout - QSS `border` only applies to
+        # widgets, and this bar needs one (see `_refresh_controls_bar_
+        # theme`) for the same reason `CanvasToolsBar` does: its background
+        # and the canvas's are otherwise visually identical, so the seam
+        # where this bar ends and the canvas begins needs a boundary drawn
+        # explicitly, not left to two adjacent flat colors that happen to
+        # differ.
+        self._controls_bar = QWidget(self)
+        self._controls_bar.setObjectName("imageNavigationBar")
+        self._controls_bar.setLayout(controls)
+        self._refresh_controls_bar_theme()
+
+        # Navigation now sits below the canvas (2026-09-30, maintainer
+        # request) - `_refresh_controls_bar_theme` draws its border on
+        # whichever edge actually touches the canvas, so moving this bar
+        # means flipping that edge too (border-top now, was border-bottom).
         layout = QVBoxLayout(self)
-        layout.addLayout(controls)
         layout.addLayout(canvas_row, 1)
+        layout.addWidget(self._controls_bar)
 
         scene = self._image_item.scene()
         scene.sigMouseClicked.connect(self._on_scene_clicked)
@@ -411,6 +517,17 @@ class ImagePanel(QWidget):
         self._selection.wavelength_changed.connect(self._schedule_redraw)
         self._selection.roi_selection_changed.connect(self._schedule_redraw)
 
+        # Keeps the nav widgets truthful for *any* source of a selection
+        # change, not just this panel's own spin/slider handlers - e.g. the
+        # "jump to reference" button below, or a future panel that also
+        # calls `SelectionModule.set_cube`/`set_wavelength`. Matches this
+        # panel's own "redraw because the module emitted a change" rule
+        # (module docstring) - these are the same rule applied to the nav
+        # widgets, not just the canvas.
+        self._selection.cube_changed.connect(self._on_selection_cube_changed)
+        self._selection.wavelength_changed.connect(self._on_selection_wavelength_changed)
+        self._reference_frame.reference_frame_changed.connect(self._update_reference_highlight)
+
     # -- theming --------------------------------------------------------------
 
     def refresh_theme(self) -> None:
@@ -437,6 +554,22 @@ class ImagePanel(QWidget):
             self._measure_controls.refresh_theme(get_active_theme())
         if hasattr(self, "_cursor_overlay"):
             self._cursor_overlay.refresh_theme(get_active_theme())
+        if hasattr(self, "_canvas_tools"):
+            self._canvas_tools.refresh_theme(get_active_theme())
+        if hasattr(self, "_controls_bar"):
+            self._refresh_controls_bar_theme()
+
+    def _refresh_controls_bar_theme(self) -> None:
+        """Subtle 1px seam above the Cube/λ navigation rows, where this bar
+        meets the canvas above it (moved below the canvas 2026-09-30,
+        maintainer request - was `border-bottom` when this bar sat above
+        the canvas) - same reasoning and convention as `CanvasToolsBar.
+        refresh_theme` (only the touching edge is bordered, not all four
+        sides)."""
+        theme = get_active_theme()
+        self._controls_bar.setStyleSheet(
+            f"#imageNavigationBar {{ border: none; border-top: 1px solid {theme.toolbar_border}; }}"
+        )
 
     # -- dataset lifecycle --------------------------------------------------
 
@@ -465,25 +598,60 @@ class ImagePanel(QWidget):
 
     def _refresh_navigation_ranges(self) -> None:
         """Point the cube/wavelength controls at what the dataset actually
-        has. Both are blocked while being reprogrammed so that re-ranging
-        them doesn't emit a spurious "the user changed the wavelength"."""
+        has. Blocked while being reprogrammed so that re-ranging them
+        doesn't emit a spurious "the user changed the wavelength"."""
         cubes = self._dataset.spectral_cubes()
         with _blocked(self._cube_spin):
             self._cube_spin.setEnabled(bool(cubes))
             self._cube_spin.setRange(min(cubes) if cubes else 0, max(cubes) if cubes else 0)
             if cubes:
                 self._cube_spin.setValue(self._current_cube())
+        with _blocked(self._cube_slider):
+            self._cube_slider.setEnabled(bool(cubes))
+            self._cube_slider.setMinimum(0)
+            self._cube_slider.setMaximum(max(len(cubes) - 1, 0))
+            self._cube_slider.setSingleStep(1)
+            self._cube_slider.setPageStep(1)
+            self._cube_slider.set_ticks(list(cubes), self._cube_slider_major_ticks(cubes))
+            if cubes and self._current_cube() in cubes:
+                self._cube_slider.setValue(cubes.index(self._current_cube()))
         self._refresh_wavelength_range()
+        self._update_reference_highlight()
 
     def _refresh_wavelength_range(self) -> None:
+        """Re-fetches the *current cube's* wavelength set, not the dataset's
+        whole/union list - a cube can be short a wavelength another cube
+        has (`DatasetModule.wavelengths_for_cube`'s own docstring), so this
+        must be called on every cube change, not just once per dataset load
+        (the stable app assumes one fixed wavelength list for the whole
+        dataset - see docs/image_area_slider_redesign.md - which does not
+        hold here)."""
         wavelengths = self._dataset.wavelengths_for_cube(self._current_cube())
+        wavelength = self._current_wavelength(wavelengths)
         with _blocked(self._wavelength_spin):
             self._wavelength_spin.setEnabled(bool(wavelengths))
             if wavelengths:
                 self._wavelength_spin.setRange(min(wavelengths), max(wavelengths))
-                self._wavelength_spin.setValue(self._current_wavelength(wavelengths))
+                self._wavelength_spin.setValue(wavelength)
             else:
                 self._wavelength_spin.setRange(0.0, 0.0)
+        with _blocked(self._wavelength_slider):
+            self._wavelength_slider.setEnabled(bool(wavelengths))
+            self._wavelength_slider.setMinimum(0)
+            self._wavelength_slider.setMaximum(max(len(wavelengths) - 1, 0))
+            self._wavelength_slider.setSingleStep(1)
+            self._wavelength_slider.setPageStep(1)
+            # No caller-side wiring needed for the scale-break glyph -
+            # `DataAxisSlider` detects an unusually large consecutive gap in
+            # `wavelengths` itself (e.g. a real 0 nm dark/reference frame
+            # followed by the first real spectral wavelength) and draws it
+            # automatically. See that widget's module docstring for why an
+            # earlier same-day version that invented a synthetic "0" tick
+            # here was wrong.
+            self._wavelength_slider.set_ticks(list(wavelengths), self._wavelength_slider_major_ticks(wavelengths))
+            if wavelengths and wavelength in wavelengths:
+                self._wavelength_slider.setValue(wavelengths.index(wavelength))
+        self._refresh_wavelength_completer_model(wavelengths)
 
     def _current_cube(self) -> int:
         return int(self._selection.current_cube())
@@ -504,13 +672,197 @@ class ImagePanel(QWidget):
         return float(min(wavelengths, key=lambda wl: abs(wl - selected)))
 
     # -- navigation ---------------------------------------------------------
+    # Two ways to change the same value (slider drag, spin box edit) both go
+    # through `SelectionModule.set_cube`/`set_wavelength` - never straight to
+    # the other widget - so the module stays the single source of truth
+    # (module docstring's one-way flow) and `_on_selection_*_changed` below
+    # is the only place either widget's *displayed* value is set.
 
     def _on_cube_spin_changed(self, value: int) -> None:
         self._selection.set_cube(int(value))
-        self._refresh_wavelength_range()
+
+    def _on_cube_slider_changed(self, index: int) -> None:
+        cubes = self._dataset.spectral_cubes()
+        if not cubes or index >= len(cubes):
+            return
+        self._selection.set_cube(int(cubes[index]))
 
     def _on_wavelength_spin_changed(self, value: float) -> None:
         self._selection.set_wavelength(float(value))
+
+    def _on_wavelength_slider_changed(self, index: int) -> None:
+        wavelengths = self._dataset.wavelengths_for_cube(self._current_cube())
+        if not wavelengths or index >= len(wavelengths):
+            return
+        self._selection.set_wavelength(float(wavelengths[index]))
+
+    def _on_selection_cube_changed(self, _cube_index: int) -> None:
+        # The wavelength set can differ per cube, so a cube change must
+        # re-range the wavelength controls too, not just re-display the
+        # cube controls' new value.
+        with _blocked(self._cube_spin):
+            self._cube_spin.setValue(self._current_cube())
+        cubes = self._dataset.spectral_cubes()
+        with _blocked(self._cube_slider):
+            if self._current_cube() in cubes:
+                self._cube_slider.setValue(cubes.index(self._current_cube()))
+        self._refresh_wavelength_range()
+        self._update_reference_highlight()
+
+    def _on_selection_wavelength_changed(self, _wavelength: float) -> None:
+        wavelengths = self._dataset.wavelengths_for_cube(self._current_cube())
+        wavelength = self._current_wavelength(wavelengths)
+        with _blocked(self._wavelength_spin):
+            if wavelengths:
+                self._wavelength_spin.setValue(wavelength)
+        with _blocked(self._wavelength_slider):
+            if wavelengths and wavelength in wavelengths:
+                self._wavelength_slider.setValue(wavelengths.index(wavelength))
+        self._update_reference_highlight()
+
+    # -- wavelength jump field (QCompleter) ----------------------------------
+
+    def _refresh_wavelength_completer_model(self, wavelengths: tuple[float, ...]) -> None:
+        decimals = self._wavelength_spin.decimals()
+        texts = [f"{value:.{decimals}f}" for value in wavelengths]
+        self._wavelength_completer.setModel(QStringListModel(texts, self))
+
+    def _on_wavelength_completion_activated(self, text: str) -> None:
+        line_edit = self._wavelength_spin.lineEdit()
+        line_edit.setStyleSheet("")
+        line_edit.setText(text)
+        self._wavelength_spin.interpretText()
+
+    def _on_wavelength_text_edited(self, text: str) -> None:
+        line_edit = self._wavelength_spin.lineEdit()
+        stripped = text.strip()
+        if not stripped or not self._dataset.wavelengths_for_cube(self._current_cube()):
+            line_edit.setStyleSheet("")
+            return
+        self._wavelength_completer.setCompletionPrefix(stripped)
+        if self._wavelength_completer.completionCount() == 0:
+            line_edit.setStyleSheet(f"border: 1px solid {get_active_theme().accent_red};")
+        else:
+            line_edit.setStyleSheet("")
+
+    # -- reference-frame highlight (ReferenceFrameModule) --------------------
+
+    def _resolve_reference_frame(self) -> tuple[int, float] | None:
+        """Same resolution rule `panels/workflow/reference_frame_row.py`
+        uses: Auto mirrors whatever is currently being viewed live; Manual
+        reads the stored snapshot. Duplicated here rather than shared,
+        matching this codebase's "one backend, several front doors"
+        convention - `ReferenceFrameModule` deliberately holds no
+        `SelectionModule` reference (see its own docstring), so every
+        front door resolves Auto mode itself."""
+        if self._reference_frame.mode() == MODE_AUTO:
+            return (self._selection.current_cube(), self._selection.current_wavelength())
+        return self._reference_frame.manual_frame()
+
+    def _update_reference_highlight(self) -> None:
+        """Highlights the slider handle (gold for cube, green for
+        wavelength) whenever the currently-displayed cube/wavelength is the
+        reference - ported from the stable app's
+        `_update_reference_navigation_styles` (spin-box background recolor
+        omitted: this panel's spin boxes are plain `QSpinBox`/
+        `GuidedValueSpinBox`, and the slider handle color already carries
+        the same information without a second, redundant cue)."""
+        reference = self._resolve_reference_frame()
+        if reference is None:
+            self._cube_slider.set_reference_highlight(None)
+            self._wavelength_slider.set_reference_highlight(None)
+            return
+        reference_cube, reference_wavelength = reference
+        cube_is_reference = int(self._current_cube()) == int(reference_cube)
+        wavelength_is_reference = abs(float(self._current_wavelength()) - float(reference_wavelength)) < 1e-6
+        self._cube_slider.set_reference_highlight(_REFERENCE_CUBE_HIGHLIGHT if cube_is_reference else None)
+        self._wavelength_slider.set_reference_highlight(
+            _REFERENCE_WAVELENGTH_HIGHLIGHT if wavelength_is_reference else None
+        )
+
+    # -- slider tick labels ---------------------------------------------------
+
+    def _wavelength_slider_major_ticks(self, values: tuple[float, ...]) -> dict[int, str]:
+        """Indices to label on the wavelength axis slider: evenly spaced by
+        array index (same shape as `_cube_slider_major_ticks` below), each
+        labeled with the *real* wavelength value at that index - never a
+        rounded "nice" boundary number.
+
+        **Real bug, fixed 2026-09-30** (maintainer report: clicked where the
+        slider said "400", landed on 470 nm). The first-pass port of the
+        stable app's `MainWindow._wavelength_slider_major_ticks` labeled
+        each tick with the nearest round 100 nm boundary (`"400"`,
+        `"500"`, ...) but positioned it at whichever *real* value happened
+        to be closest to that boundary - for a dense, roughly-uniform grid
+        the two are close enough not to notice, but this rewrite's
+        wavelength set is per-cube (`DatasetModule.wavelengths_for_cube`)
+        and can be genuinely irregular or gappy for a given cube (a cube
+        can be short a wavelength another cube has), so "closest real value
+        to 400" can legitimately be 470 - a label that is simply wrong
+        about what clicking it selects, not just imprecise. Labeling with
+        the real value at each shown index (rounded for display, matching
+        the stable app's own tick text width) makes the label always
+        exactly true, the same "no such thing as a mismatch" fix the cube
+        slider already got for free by not trying to hit round numbers in
+        the first place.
+
+        **Always labels both sides of a large gap** (added alongside
+        `DataAxisSlider._large_gap_boundaries`, which draws the scale-break
+        glyph there - see that widget's module docstring for the full
+        story of a same-day, now-reverted attempt to handle this with a
+        synthetic "0" tick instead): the routine "every Nth index" rule
+        below has no reason to land exactly on a gap's own edges, but a
+        break glyph with an unlabeled tick on one side would read as
+        "0 // <blank>" instead of "0 // 470". This mirrors the widget's own
+        gap-detection as an independent copy, not a cross-class import -
+        the widget reads pixel-rendering values, this reads the values
+        about to be handed to it; same math, different callers.
+
+        The gap this most commonly marks, for this slider specifically, is
+        a real one, not an artifact: `DatasetModule.wavelengths_for_cube`'s
+        docstring (`dataset/module.py`) has the confirmed domain fact and
+        code pointers - `0.0`, when present, is the dataset's dark/
+        background frame (LED off), a real image but not a spectral sample
+        point, which is exactly why it sits far in value from the first
+        real wavelength."""
+        count = len(values)
+        if count < 2:
+            return {}
+        interval = self._nice_count_interval(count)
+        majors = {index: f"{values[index]:.0f}" for index in range(0, count, interval)}
+        if count >= 3:
+            gaps = [values[i + 1] - values[i] for i in range(count - 1)]
+            positive_gaps = [gap for gap in gaps if gap > 0]
+            typical_gap = statistics.median(positive_gaps) if positive_gaps else 0.0
+            if typical_gap > 0:
+                for i, gap in enumerate(gaps):
+                    if gap > typical_gap * DataAxisSlider._GAP_BREAK_RATIO:
+                        majors[i] = f"{values[i]:.0f}"
+                        majors[i + 1] = f"{values[i + 1]:.0f}"
+        return majors
+
+    def _cube_slider_major_ticks(self, values: tuple[int, ...]) -> dict[int, str]:
+        """Indices to label on the cube axis slider: the raw cube index at a
+        "nice" interval. Ported from the stable app's
+        `MainWindow._cube_slider_major_ticks` - **scoped down**: the
+        source's Cube/Time toggle (labeling by elapsed acquisition time
+        instead of raw index) is not ported, since the elapsed-seconds
+        mapping it reuses lives in the stable app's `AnalysisController`,
+        which has no equivalent on this branch yet. See the rewrite status
+        doc's gap list."""
+        count = len(values)
+        if count < 2:
+            return {}
+        interval = self._nice_count_interval(count)
+        return {index: str(values[index]) for index in range(0, count, interval)}
+
+    @staticmethod
+    def _nice_count_interval(count: int, target_ticks: int = 8) -> int:
+        candidates = (1, 2, 5, 10, 20, 25, 50, 100, 200, 500, 1000)
+        for candidate in candidates:
+            if count / candidate <= target_ticks:
+                return candidate
+        return candidates[-1]
 
     # -- rendering ----------------------------------------------------------
 

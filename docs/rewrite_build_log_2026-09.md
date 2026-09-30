@@ -5689,3 +5689,760 @@ failure is `crop_size_controls.py`'s own pre-existing font-metric-
 environment-dependent test, untouched by this work), full-window smoke
 test. Nothing committed as of this entry - five back-to-back sessions of
 uncommitted changes on `rewrite`, now going to commit.
+
+---
+
+## 2026-09-30: Cube/Wavelength navigation slider ported from the stable app
+
+Maintainer's request: port the stable app's Cube/λ slider (`docs/
+image_area_slider_redesign.md`) into the Image panel with as much of its
+functionality/design as the rewrite's current backend actually supports,
+and name what's still missing for feature parity. The panel previously had
+only bare `QSpinBox`/`QDoubleSpinBox` fields for cube/wavelength - no
+slider at all.
+
+**Ported as new files, unchanged logic**: `panels/image/data_axis_slider.py`
+(`DataAxisSlider` - the custom-painted `QSlider`: tick rail, major-label
+overlap avoidance, click/drag-to-jump, `set_reference_highlight`,
+`set_tick_cache_state`) and `panels/image/guided_value_spinbox.py`
+(`GuidedValueSpinBox` - the wavelength jump field's focus-dependent suffix
+trick for `QCompleter` prefix-matching). Diffed against the stable
+originals after pasting: only the import blocks changed.
+
+**`panel.py` changes** (not a mechanical port past this point - the
+module architecture is different enough that the wiring had to be
+redesigned, not copied):
+
+- Two full-width rows (title → slider → spin → icon), replacing the old
+  single `QHBoxLayout` of two spin boxes - same layout shape as `gui/
+  layout_builder.py`'s `image_slicer_row`.
+- **Real correction to a stable-app assumption, not a port**: the stable
+  slider's wavelength ticks are set once per dataset load
+  (`_wavelength_values` = the dataset-wide union of wavelengths). This
+  rewrite's `DatasetModule.wavelengths_for_cube(cube)` is deliberately
+  per-cube (a cube can be short a wavelength - see that method's
+  docstring), so `_refresh_wavelength_range()` (and therefore the
+  wavelength slider's ticks) must be recomputed on every cube change, not
+  just at load. Added `test_wavelength_slider_reranges_for_a_cube_short_
+  a_wavelength` specifically because the test dataset already exercises
+  this case (cube 1 is short 550.0 nm) and the old spin-only code happened
+  to paper over it by re-querying on every read; a slider's ticks do not
+  self-correct that way.
+- **`SelectionModule` kept as the single source of truth, not the slider**
+  (a deliberate departure from the stable app's "the slider's own `value()`
+  index is truth, the spin box is a display-only mirror synced only when a
+  render settles" design - see the stable redesign doc). Both slider and
+  spin box call `SelectionModule.set_cube`/`set_wavelength` on change, and
+  `_on_selection_cube_changed`/`_on_selection_wavelength_changed`
+  (subscribed to `SelectionModule`'s own signals) are the *only* place
+  either widget's displayed value is set. This was already this panel's
+  own documented rule for the canvas ("redraw because the module emitted a
+  change, not because a handler decided to redraw") - applying the same
+  rule to the nav widgets closes a real, pre-existing gap: before this
+  change, nothing kept `_cube_spin`/`_wavelength_spin` in sync if
+  `SelectionModule` were ever changed from outside this panel (it never
+  was yet, so this was latent, not observed) - now it is impossible to
+  regress. Covered by `test_selection_changed_elsewhere_still_updates_
+  the_nav_widgets`. The stable app's render-completion-decoupled sync
+  exists there because its redraw path is expensive; the rewrite's nav
+  widgets are cheap Qt property writes regardless of how often
+  `SelectionModule` fires, so no decoupling was needed to avoid GUI-thread
+  cost - the coalesced 100ms redraw timer (unrelated to this widget sync)
+  still absorbs the actual pixel-render cost exactly as before.
+- **Reference-frame highlight ported and fully wired**, because
+  `ReferenceFrameModule` (2026-09-25) and its Auto/Manual resolution rule
+  already exist (`panels/workflow/reference_frame_row.py`). Duplicated
+  that row's own Auto/Manual resolution logic locally
+  (`_resolve_reference_frame`) rather than sharing it, matching this
+  codebase's established "one backend, several front doors" convention -
+  `ReferenceFrameModule` deliberately holds no `SelectionModule` reference
+  (see its docstring), so every front door resolves Auto mode itself.
+  Ported the "jump to reference" star-icon button too
+  (`_on_reference_jump_clicked`).
+- **`ImagePanel.__init__` gained a new required `reference_frame:
+  ReferenceFrameModule` parameter.** This rippled into every test file
+  that constructs `ImagePanel` directly (6 files:
+  `test_lspri_rewrite_canvas_tools_bar.py`, `..._histogram_panel.py`,
+  `..._rotate_tool.py`, `..._measure_tool.py`, `..._crop_tool.py`,
+  `..._roi_geometry_sync.py`, plus the Image panel's own test file) -
+  found by grepping the whole umbrella `tests/` tree, not just the
+  submodule, after the first fix attempt only covered the latter and
+  broke 125 tests across the other six files. All six now construct a
+  plain `ReferenceFrameModule()` and pass it positionally, matching
+  `app_rewrite.py`'s real wiring (which already had a `reference_frame`
+  instance in scope from the Dataset section's build).
+
+**Deliberately not ported, and why** (each is a real, separate piece of
+work, not a "just wire it up" gap):
+
+1. **Cube/Time toggle** (label the cube slider by elapsed acquisition time
+   instead of raw index). The stable version reuses
+   `AnalysisController._sensorgram_x_values`/`_format_elapsed_seconds` -
+   neither has an equivalent on this branch; the Sensorgram panel is still
+   a `NotImplementedError` stub (see the 2026-09-30 status doc). Closer
+   than it looks, though: `DatasetModule.acquisition_metadata()` already
+   exists, so the *data* is there - only the elapsed-seconds-mapping/
+   formatting utility functions are missing. Kept the cube title as a
+   plain `QLabel("Cube")`, not the stable app's clickable toggle button,
+   so there is nothing to click that would silently do nothing.
+2. **Image-exclusion button** ("exclude this image/wavelength/cube from
+   processing"). `domain/exclusions.py` was never ported to this branch at
+   all (flagged with no assigned new home back on 2026-09-20) - the
+   backend this button would drive does not exist, so no button was added
+   rather than shipping a dead one.
+3. **Cache-indicator tick coloring** (blue ticks = "this cube already has
+   every selected ROI's spectrum cached"). `DataAxisSlider.
+   set_tick_cache_state` was ported (it's free - part of the widget) but
+   nothing calls it. The real work is the debounced background scan
+   (`AnalysisController._refresh_cube_slider_cache_indicators` in the
+   stable app) plus deciding its rewrite-appropriate equivalent against
+   `InMemoryProvenanceStore`/`AnalysisEngine` - both exist as backend, but
+   there is no Analysis-stage UI or ROI-selection UI yet to select ROIs
+   from, so there is nothing to scan on behalf of yet either. Natural
+   follow-up once the Analysis stage UI (next on the rewrite status doc's
+   plan) exists.
+4. **Spin-box background recolor** on reference-match (the stable app also
+   tints `spectral_cube_spin`'s background gold/green, in addition to the
+   slider handle). Omitted as redundant, not missing - the slider handle
+   color already carries the same information once the slider exists,
+   which it didn't in the stable app's original single-spin-box design.
+
+**Verification**: pyflakes-clean on every touched file; the Image panel's
+own suite grew from 14 to 23 tests (9 new, covering slider ranging/
+re-ranging, drag-driven selection changes in both directions, the
+external-change sync gap fix, the reference-highlight/jump button, and the
+per-cube completer model) - 23/23. Full `-k "lspri and rewrite"` slice:
+359/360, the one failure being the same pre-existing `crop_size_controls.py`
+font-metric-environment test named in the entry above, confirmed still
+failing identically before this session's changes (not a regression).
+Full-window offscreen smoke test (`build_main_window()`) still builds and
+shows cleanly. Nothing committed as of this entry.
+
+---
+
+## 2026-09-30 (same day, later): Cube sampling interval - reading and displaying the dataset's typical time-between-cubes
+
+Maintainer follow-up to the slider port above, after reading its Cube/Time-
+toggle gap item: asked to (a) confirm what acquisition-timing metadata
+already exists, (b) fix "a cube's time" to always mean its first-acquired
+frame (no start/middle/end choice, unlike the stable app), (c) compute and
+show the dataset's typical time between cubes in the Experimental Plan
+section, and (d) pick the scientifically correct term for that value.
+
+**Research first, via a dedicated Explore agent** (this session's context
+was mid-way through the slider work) - confirmed against real file:line
+citations rather than assumed:
+
+- `ImagingAcquisitionMetadata`/`ImagingCubeTiming` (`lspr_core.
+  imaging_models`, shared package) already carry real per-(cube,
+  wavelength) timestamps (`acquired_at_unix_ms`) - both the native v6.4
+  HDF5 path and the legacy `measureing_times.csv` import path populate
+  them; the rewrite's `dataset/model.py` already has `CompactImageTimings`
+  (`earliest_ms_by_cube`/`latest_ms_by_cube`, verbatim-ported 2026-09-20)
+  as the memory-light form. None of this was missing - it exists, is
+  shared with the stable app's own data model, and was simply never wired
+  to anything that reads `earliest_ms_by_cube` on this branch yet.
+- **The stable app's "choice of start/middle/end" is real** (`_cube_time_
+  timestamp_rule`, three values `"first"/"last"/"midpoint"`, default
+  `"first"`, `gui/main_window.py:325`) - but confirmed **display-only**:
+  `analysis_worker_mixin._acquisition_timestamp_ms_for_cube` (what
+  actually gets written to `measurement_backup.h5`) always uses the
+  earliest frame regardless of that toggle (`analysis_controller.py:206-
+  208`'s own docstring says so explicitly). So fixing this rewrite to
+  "first frame only, no toggle" isn't a simplification that loses
+  information the stable app's *persisted* data actually uses - it matches
+  the stable app's own ground truth, only dropping a *display* preference
+  the maintainer explicitly said not to carry over.
+- **Confirmed nothing computes "average time between cubes" anywhere in
+  the stable app** - grepped `interval`/`period`/`cadence`/`framerate`/
+  `sampling_interval`/`acquisition_interval` across every `gui/`/`domain/`/
+  `io/` file; every hit was an unrelated `QTimer.setInterval` or axis-tick-
+  spacing helper. This is genuinely new computation, not a port.
+- **No separate "experiment plan" data model exists** - "Experimental
+  plan" is just this branch's renamed label for the same
+  `ImagingAcquisitionMetadata` the stable app calls "Metadata"
+  (`dataset_experimental_plan.py`'s own docstring already said so; the
+  research agent confirmed no sibling `ExperimentPlan`/planned-interval
+  concept exists anywhere in the imaging-specific code - `lspr_core.
+  ExperimentPlan`/`ExperimentPlanStep` is a *different*, singleLSPR-style
+  fluidics/pump-plan-step model, not an imaging acquisition schedule).
+
+**Implementation** - three files, in dependency order:
+
+1. `dataset/model.py`: new free function `cube_sampling_interval_s(compact:
+   CompactImageTimings) -> float | None` - median of the gaps between
+   consecutive cubes' `earliest_ms_by_cube` entries (sorted by cube index,
+   not insertion order), `None` below two timed cubes. **Deliberately a
+   free function, not a new method on `CompactImageTimings`** - that class
+   is a verbatim port meant to stay byte-for-byte diffable against the
+   stable app's `domain/models.py` original (module docstring already said
+   so); a third companion function alongside `compact_dataset_image_
+   timings`/`rehydrated_acquisition_metadata` keeps that property while
+   still living next to the data it operates on.
+2. `dataset/module.py`: `DatasetModule.cube_sampling_interval_s()` - the
+   query surface, going through `compact_dataset_image_timings` (lazy,
+   idempotent) rather than reading `_dataset.compact_image_timings`
+   directly, matching `rehydrated_acquisition_metadata()`'s existing
+   pattern right above it.
+3. `panels/workflow/dataset_experimental_plan.py`: `_on_dataset_loaded`
+   appends a "Sampling interval: ~X s (median cube-to-cube gap)" line
+   (`_format_sampling_interval`, a small local formatter - seconds under a
+   minute, M:SS above). **One real ordering trap found and fixed before it
+   shipped**: `cube_sampling_interval_s()` triggers `compact_dataset_
+   image_timings`, which *empties* `metadata.image_timings` as a
+   documented side effect - the existing "N/M timed" header stat reads
+   that same list's length. Computing the interval before that stat would
+   have silently zeroed it. Fixed by moving the interval computation to
+   the very end of `_on_dataset_loaded`, after every other read of
+   `metadata.image_timings` - covered by a dedicated regression test
+   (`test_the_n_over_m_timed_header_stat_is_unaffected_by_compaction`)
+   specifically so this can't quietly regress later.
+
+**Term chosen: "sampling interval"**, not "period" - period implies strict
+periodicity (a signal repeating every exactly-T seconds); real acquisition
+timestamps have jitter (I/O, hardware settle time, scheduling), so
+consecutive cube-start gaps are never exactly equal. "Sampling interval" is
+the standard time-series/instrumentation term for "the typical time
+between successive samples" without that periodicity claim - the same
+word a UV-Vis kinetics run or a plate reader's read interval would use.
+Reasoning is written into `cube_sampling_interval_s`'s own docstring so it
+doesn't need re-deriving later.
+
+**Median, not mean, of the gaps** - a single atypically long gap (a paused
+run, a stage adjustment) would pull a naive average upward for an
+otherwise-regular acquisition; the median stays representative of the
+common case. Verified directly: a 5-cube series with one 60s gap among
+four 8s gaps still reports 8.0s, not ~20s
+(`test_one_atypically_long_gap_does_not_skew_the_median`).
+
+**Not built in this pass, deliberately** - the Cube/Time slider-label
+toggle itself (ticks/spinbox showing elapsed time instead of raw index)
+was the original ask that prompted this investigation, but this session's
+concrete deliverable was the sampling-interval reading/display and the
+cube-time-definition decision, not the full toggle. That's real, separable
+follow-up work (needs the elapsed-seconds-mapping/formatting equivalent of
+the stable app's `AnalysisController._sensorgram_x_values`/
+`_format_elapsed_seconds`, ported to whichever module ends up owning it -
+`DatasetModule` is a reasonable home now that `cube_sampling_interval_s()`
+already lives there, but not decided) - now genuinely unblocked (the
+metadata read side is proven and tested) rather than blocked on missing
+data, which was this rewrite's status doc's original (correct, at the
+time) assessment.
+
+**Verification**: pyflakes-clean on all three touched files plus both new
+test files. `test_lspri_rewrite_cube_sampling_interval.py` (9/9 - pure
+`dataset/model.py`/`dataset/module.py` logic, regular cadence, the
+skewed-median case, cube-index-sort-not-insertion-order, sub-cube-count
+edge cases, and compaction idempotency) and `test_lspri_rewrite_
+experimental_plan_section.py` (5/5 - the real `ExperimentalPlanSection`
+widget, including the header-stat ordering regression test above). Full
+`-k "lspri and rewrite"` slice: 373/374, same single pre-existing font-
+metric failure as every entry above, confirmed unrelated. Nothing
+committed as of this entry.
+
+---
+
+## 2026-09-30 (same day, third pass): "cube interval" replaces "sampling interval"; mean+std replaces median
+
+Maintainer feedback on the pass above, same session: rename the term and
+switch the statistic. Two decisions revised in place, not superseded by a
+different approach:
+
+1. **"Cube interval", not "sampling interval"** - more specific about what
+   the actual sample unit is (a cube, this app's own vocabulary for one
+   full wavelength sweep = one sensorgram time point), at no cost to the
+   "interval, not period" reasoning from the first pass, which still holds
+   and is still documented in the function's docstring.
+2. **Mean + spread, not a single median** - reversing the first pass's
+   choice. The median was specifically chosen to hide a single atypical
+   gap (an operator pause) from skewing the "typical" number; the
+   maintainer's call is the opposite: report the mean, and make any
+   irregularity *visible* via spread stats alongside it, rather than have
+   a robust point estimate quietly absorb it.
+
+**Implementation**: `cube_sampling_interval_s(compact) -> float | None` in
+`dataset/model.py` became `cube_interval_stats(compact) ->
+CubeIntervalStats | None`, a small frozen dataclass (`mean_s`, `min_s`,
+`max_s`, `n_gaps`, `std_s: float | None` - `None` with only one gap, since
+a spread needs two data points). `DatasetModule.cube_sampling_interval_s()`
+renamed to `.cube_interval_stats()` to match. `dataset_experimental_plan.py`
+now shows `"Cube interval: ~8.0 ± 0.3 s (41 gaps)"` (or `"~8.0 s (1 gap)"`
+with only one gap) as the compact line, with **min/max moved to the status
+label's tooltip** rather than crowding the main text - `statistics.stdev`
+(sample, n-1) is used for `std_s`. The ordering trap fixed in the previous
+pass (compute the interval stats *after* every other read of `metadata.
+image_timings`, since compaction empties that list) carries over unchanged
+- the fix was about call order, not about which statistic gets computed.
+
+**Renamed test files** to match (same coverage, updated assertions/names,
+one new case added): `test_lspri_rewrite_cube_sampling_interval.py` ->
+`test_lspri_rewrite_cube_interval_stats.py` (now also covers: the
+skewed-gap case asserts mean *and* max/std actually reveal the irregular
+gap rather than checking it's hidden; the exactly-one-gap `std_s is None`
+case). `test_lspri_rewrite_experimental_plan_section.py` updated in place
+(new tooltip-content test; new exactly-one-gap "(1 gap)", no "±" suffix
+test).
+
+**Verification**: pyflakes-clean on all five touched/renamed files. New
+unit suite 9/9 (`test_lspri_rewrite_cube_interval_stats.py`), new
+integration suite 7/7 (`test_lspri_rewrite_experimental_plan_section.py`).
+Full `-k "lspri and rewrite"` slice: 375/376, same single pre-existing
+font-metric failure as every prior entry, confirmed unrelated. Nothing
+committed as of this entry.
+
+---
+
+## 2026-09-30 (same day, fourth pass): Histogram X-axis zoom/pan re-enabled; "autoscale" redefined as "back to the full 16-bit range"
+
+Maintainer bug report: the Histogram plot's X-axis couldn't be zoomed or
+panned at all, "Autoscale" (the corner "A" button/right-click menu) should
+reset X to the full 16-bit range starting at 0, and the "A" button itself
+wasn't appearing when the view was actually out of autoscale. This is a
+direct reversal of a design this same file had from its original build
+(2026-09-29): X used to be hard-locked to `[0, 65535]`
+(`ViewBox.setLimits(minXRange=maxXRange=full_span)`, `setMouseEnabled(x=
+False)`, `hideButtons()` removing the "A" button outright) - a prior
+maintainer report at the time had asked for exactly that lock, after
+"autoranging... jump[ed] to proposed range" (i.e. X refitting to
+data). Both reports are real and not in conflict once distinguished:
+"don't let X silently jump to a data-dependent range" (2026-09-29, still
+true) vs. "let me manually zoom/pan, but give 'autoscale' back the full
+sensor range as its meaning" (2026-09-30, this entry) - the fix keeps the
+first property while adding the second.
+
+**`plot.py` changes**:
+- `view_box.setLimits(...)` keeps `xMin`/`xMax`/`maxXRange` (still can't
+  pan past the sensor's real range or zoom out further than seeing all of
+  it) but drops `minXRange` - the exact line that made zooming in
+  physically impossible.
+- `setMouseEnabled(x=True, y=True)` - X now takes wheel/drag like any
+  ordinary axis.
+- `hideButtons()` removed entirely, so pyqtgraph's own `PlotItem.
+  updateButtons()` decides show/hide again (hidden while both axes already
+  match auto-range, shown on hover once they don't) - this alone fixes the
+  reported "A doesn't show when out of autoscale" symptom, no new
+  visibility-tracking code needed.
+- **The actual reason "autoscale" needed its own code, not just un-hiding
+  the button**: pyqtgraph's native meaning for both the "A" button and the
+  right-click menu's "View All"/"Auto" is "fit to whatever data is
+  currently on screen" - for an intensity histogram, X is a fixed physical
+  range (a 16-bit sensor's possible values), not a data-dependent one, so
+  the maintainer's "back to full 16-bit range" is a different meaning than
+  pyqtgraph's default. Both doors were confirmed (by reading the installed
+  pyqtgraph source, not assumed) to reach different underlying methods -
+  the button calls `PlotItem.enableAutoRange()` (continuous auto-tracking
+  mode), the menu's `ViewBoxMenu.autoRange` calls `self.view().autoRange()`
+  directly (a one-shot fit) - so a single wrapped instance method was the
+  only way to give both the same new meaning without duplicating logic
+  kept in sync by hand: `__init__` saves the ViewBox's native `autoRange`
+  bound method, replaces it on the instance (not the class - every other
+  plot in the app is unaffected) with a wrapper that calls the native
+  implementation first (so Y still fits data normally) and then forces X
+  back to `[0, 65535]`. `_on_auto_button_clicked` (replacing
+  `autoBtnClicked`, wired via disconnect/reconnect on `autoBtn.clicked`)
+  calls this same wrapped `autoRange()` instead of `enableAutoRange()`, so
+  both doors land on one implementation.
+
+**Six tests in `test_lspri_rewrite_histogram_panel.py` updated** - three
+renamed/rewritten to pin the new behavior instead of the old lock
+(`test_auto_range_button_is_not_permanently_hidden`, `test_auto_range_
+resets_x_to_the_full_16bit_range_not_data_bounds` - covers the menu door
+via a direct `vb.autoRange()` call, `test_x_axis_mouse_interaction_is_
+enabled`), three new (`test_auto_button_click_resets_x_to_the_full_range` -
+covers the button door separately, since it's a genuinely different code
+path; `test_x_axis_can_actually_zoom_in`; `test_x_axis_cannot_be_panned_
+outside_the_sensor_range`). `test_x_axis_spans_the_full_16bit_range_
+regardless_of_data` (bin-edge computation, unrelated to viewbox zoom/pan)
+was untouched and still passes.
+
+**Verified directly against the running widget**, not just the test
+suite: constructed a real `HistogramPlot`, confirmed `mouseEnabled() ==
+[True, True]`, `buttonsHidden == False`, a manual `setXRange` zoom holds,
+clicking the "A" handler and calling `vb.autoRange()` (the menu's own
+call) both reset X to exactly `[0.0, 65535.0]`, and an out-of-bounds pan
+attempt gets clamped rather than escaping the sensor range.
+
+**Verification**: pyflakes-clean on `plot.py` and the test file. Histogram
+suite grew from 26 to 28 tests, 28/28. Full `-k "lspri and rewrite"`
+slice: 378/379 (up from 375/376 - +3 net new tests), same single
+pre-existing font-metric failure as every prior entry in this log,
+confirmed unrelated. Nothing committed as of this entry.
+
+---
+
+## 2026-09-30 (same day, fifth pass): Canvas tools bar tightened; 1px border seam on both Image-panel bars
+
+Maintainer bug report: the Image panel's canvas tools bar (the vertical
+Select/Add ROI icon strip docked to the canvas, built earlier the same day)
+was too wide with icons too big, and the bars inside the Image panel have
+no visible boundary against the canvas because they share its background.
+
+**Sizing** (`canvas_tools.py`): `_BUTTON_SIZE`/`_ICON_SIZE` shrunk from
+`28`/`22` (borrowed as-is from the horizontal Transforms row's own buttons
+when this bar was first built) to `22`/`16`; layout margins `4px`/spacing
+`6px` tightened to `2px`/`3px` (`_BAR_MARGIN`/`_BAR_SPACING`, new named
+constants). Net effect: the bar's own width drops from 36px to 26px, and
+`sizeHint().width()` is now pinned by test to exactly `_BUTTON_SIZE + 2 *
+_BAR_MARGIN` - i.e. defined to hug its one column of buttons, not an
+independent guess.
+
+**Border seam, both bars** - the real fix, not just resizing: this app's
+theme already has a token built for exactly this
+(`GuiTheme.toolbar_border`, used by several existing `#toolbarSection`
+-style QSS rules in `lspr_ui/theme.py` for the stable app), and this
+exact `panels/image/` directory already has the convention for applying it
+to a non-pyqtgraph widget that floats near the canvas
+(`CropSizeControls`/`MeasureCalibrationControls`'s `refresh_theme(theme)`
+method + an object-name-scoped inline stylesheet, re-applied at
+construction and on every live theme switch via `ImagePanel.
+refresh_theme`) - followed the same convention for both bars rather than
+inventing new styling:
+
+- `CanvasToolsBar` (new `refresh_theme(theme)` method, object name
+  `canvasToolsBar`): `border-right: 1px solid {theme.toolbar_border}` -
+  only the right edge, since that is the one side that actually touches
+  the canvas; the other three border this panel's own chrome.
+- The Image panel's own Cube/λ navigation rows + status row - previously a
+  bare `QVBoxLayout` (`controls`) added directly to the panel's layout, not
+  a widget, so it had nothing a QSS `border` rule could attach to. Wrapped
+  in a real `QWidget` (`self._controls_bar`, object name
+  `imageNavigationBar`) with a new `ImagePanel._refresh_controls_bar_theme`
+  method: `border-bottom: 1px solid {theme.toolbar_border}` - only the
+  bottom edge, where this bar meets the canvas below it.
+
+Both wired into `ImagePanel.refresh_theme()` (the existing live-theme-
+switch entry point) via the same `hasattr(self, "_x")` guard already used
+for `_crop_controls`/`_measure_controls`/`_cursor_overlay`, so a theme
+switch updates the border color exactly like every other themed overlay in
+this panel - pinned by two new tests forcing `BRIGHT_THEME` and checking
+`toolbar_border` shows up in the resulting stylesheet.
+
+**Verified directly against a running widget**: bar width 26px (was
+implicitly ~36px), button size exactly 22x22, both stylesheets contain
+`border-right`/`border-bottom: 1px solid #2a313b` (dark theme's
+`toolbar_border`) and nothing else.
+
+**Verification**: pyflakes-clean on all four touched files. Canvas-tools-
+bar suite grew from 15 to 19 tests (+4: button/bar sizing, border-present-
+on-one-edge-only, theme-switch), Image-panel suite grew from 23 to 25
+(+2: same border/theme-switch pair for the navigation bar) - 19/19 and
+25/25. Full `-k "lspri and rewrite"` slice: 384/385, same single
+pre-existing font-metric failure as every prior entry in this log,
+confirmed unrelated. Nothing committed as of this entry.
+
+---
+
+## 2026-09-30 (same day, sixth pass): Wavelength slider tick labels lied about what clicking them selects - real bug, fixed
+
+Maintainer bug report with a screenshot: clicked the wavelength slider
+where it read "400", the status line showed "Cube 197, 470 nm" - a real
+70 nm discrepancy, not a rounding nit. Suspected a "0 nm" wavelength being
+involved.
+
+**Diagnosis.** Not a 0 nm issue - `DatasetModule.wavelengths_for_cube`
+derives its values purely from real loaded `ImageRecord`s, no synthetic
+entry gets injected anywhere in that path (checked `dataset/model.py`'s
+`wavelengths_for_cube` and `dataset/io.py`, no such default exists). The
+actual bug: `_wavelength_slider_major_ticks` (ported earlier the same day
+from the stable app's tick-redesign doc) picked a **rounded 100 nm
+boundary** ("400") as the label text, but positioned that label at
+whichever **real** wavelength happened to be numerically closest to that
+boundary - two different numbers, silently conflated. For a dense,
+roughly-uniform wavelength grid the two are close enough that nobody
+notices; this rewrite's wavelength set is per-cube
+(`wavelengths_for_cube`, "a cube can be short a wavelength another cube
+has" - own docstring, 2026-09-23), so a specific cube's actual available
+wavelengths can legitimately have a gap right where a round-100 boundary
+falls. Cube 197 evidently has nothing near 400 nm but does have 470 nm -
+so "closest real value to the fabricated label 400" resolved to index
+470, and clicking there is `_on_wavelength_slider_changed`'s job:
+correctly resolve *that* index to *its* real value (470), which is right
+by definition - the *label* was simply wrong about what index it was
+sitting on. This was in fact the exact, already-named risk flagged when
+this widget was ported the same day ("Known, deliberate limitation... a
+non-uniform wavelength grid would make position drift from what the
+labels say... flagged to the maintainer as a bigger follow-up if it ever
+matters for real data") - it now does.
+
+**Fix, not a workaround**: labels no longer try to hit round numbers at
+all. `_wavelength_slider_major_ticks` now picks evenly-spaced *indices*
+(via the same `_nice_count_interval` helper `_cube_slider_major_ticks`
+already uses) and labels each with the **real value at that index**,
+rounded for display only (`f"{values[index]:.0f}"`) - the same shape the
+cube slider already had, which is exactly why the cube slider never had
+this bug in the first place: it was never trying to hit a "nice" number,
+only ever labeling the real value at a chosen index. A label can now never
+disagree with what clicking it selects, for any gap shape. Cosmetic
+trade-off, named rather than hidden: labels are no longer guaranteed
+round numbers ("471" instead of "470"/"400") - correct-but-plain beats
+clean-but-wrong for this app's own stated priority order (correctness
+above GUI polish). `from math import ceil, floor` removed from `panel.py`
+- no longer used by anything after this fix.
+
+**Verification**: pyflakes-clean. Three new tests pin the exact reported
+scenario (a deliberately gappy `(200, 250, 470, 500, 600)` set - the tick
+nearest 400 must read "470", never "400"; every label equals `values[index]`
+exactly, not just near it), the small-dataset every-point-labeled case,
+and the empty/single-point edge cases. Image-panel suite 25 -> 28, 28/28.
+Full `-k "lspri and rewrite"` slice: 387/388, same single pre-existing
+font-metric failure as every prior entry in this log, confirmed unrelated.
+Nothing committed as of this entry.
+
+---
+
+## 2026-09-30 (same day, seventh pass): Wavelength slider gets a "0 nm" origin and a scale-break glyph
+
+Maintainer follow-up to the tick-label fix above: wavelength is a
+ratio-scale physical quantity with a real, meaningful zero - a plot of it
+should either draw the axis from 0 or explicitly mark that it doesn't, not
+silently start at the first real data point as if there were nothing
+before it. Asked for the first real tick to stay labeled (already true
+since the previous fix - `_wavelength_slider_major_ticks` always includes
+index 0) and for a "0" origin plus an axis/scale break between it and the
+first real wavelength, the standard convention for "this axis has a real
+zero, the gap to the data is real too, but it's compressed rather than
+drawn to scale."
+
+**`DataAxisSlider` (`data_axis_slider.py`) gained `set_axis_break(label)`**
+- reserves a small fixed zone (`_BREAK_ZONE_WIDTH = 26px`) at the very left
+of the track for a fixed origin tick+label plus a break glyph (two short
+parallel diagonal strokes crossing the rail - `_paint_axis_break`), then
+the real, selectable track begins exactly where it always has, just
+shifted right by that reserved width. `None` (the default) disables it
+completely - zero behavior change for any caller that doesn't opt in.
+**Deliberately opt-in per instance, not a global widget change**: the cube
+slider never calls it and renders exactly as before - an index axis (cube
+number) has no physically meaningful zero-gap the way a wavelength does,
+enumeration already starts at the first real item.
+
+**Implementation notes**:
+- `_track_rect()` is the single source of truth both `paintEvent` and
+  hit-testing (`_index_from_x`) already read from - growing its left inset
+  when a break is set means every other method treats the break zone as
+  "outside the track" automatically, no separate case needed in the click/
+  drag handlers.
+- The origin label, its tick, and the break glyph are drawn entirely
+  within the reserved zone (verified by construction: `_BREAK_ZONE_WIDTH`
+  comfortably fits "0" + a 3-digit label + the glyph with margin, and
+  confirmed by rendering a real slider to a pixmap and inspecting the
+  geometry directly, not just trusting the numbers).
+- Font setup (`painter.font()`/`setPixelSize(9)`) moved earlier in
+  `paintEvent` so the origin label can share it - previously only set up
+  inside the `count > 1` tick-drawing branch, which the origin draw needed
+  independently of how many real ticks exist.
+- `panel.py`: `_refresh_wavelength_range` calls `set_axis_break("0" if
+  wavelengths else None)` - always on once a dataset with wavelengths is
+  loaded (real wavelengths are never actually 0 nm, so this is
+  unconditional, not a threshold check), cleared on an empty dataset. The
+  cube slider's own setup is untouched.
+
+**Verified against a rendered pixmap**, not just geometry assertions: grabbed
+a real `DataAxisSlider` with a break enabled, confirmed by direct pixel-
+region inspection that the break glyph, origin tick, and the real track's
+first tick+handle land in the expected positions with no overlap. Label
+*text* legibility could not be confirmed the same way - this sandbox's
+offscreen Qt platform has no real fonts loaded, so glyphs render as tofu
+boxes regardless of what string was requested (this app's CLAUDE.md "Qt
+widget sizing verification" pitfall) - label *content* is instead verified
+by the unit/integration tests' string assertions, which do not depend on
+font rendering at all.
+
+**Verification**: pyflakes-clean. New `test_lspri_rewrite_data_axis_slider.py`
+(6/6 - track-rect reservation math, restore-on-clear, same-label-is-a-
+no-op, hit-testing clamps into the real track only, paints without error
+enabled/disabled/with-and-without-break) plus 3 new Image-panel tests
+(wavelength slider gets the break once loaded, cube slider never does,
+break clears with the dataset) - Image-panel suite 28 -> 31, 31/31. Full
+`-k "lspri and rewrite"` slice: 396/397, same single pre-existing
+font-metric failure as every prior entry in this log, confirmed unrelated.
+Nothing committed as of this entry.
+
+---
+
+## 2026-09-30 (same day, eighth pass): Axis-break redesign (real bug in the previous pass) + Image panel navigation polish
+
+Maintainer report with a screenshot, on the axis-break feature from the
+previous pass, same day: "created two 0 ticks, first one not working
+(cannot be dragged there)."
+
+**Root cause, confirmed by direct experiment, not guessed**: verified via
+a script that `_wavelength_slider_major_ticks` correctly labels a normal
+gappy array's index 0 with its real value (e.g. "470", not "0") - no bug
+there. The screenshot's genuine two-"0"s meant the maintainer's *actual
+loaded dataset* has a real `wavelength_nm=0.0` record at index 0 (almost
+certainly a dark/reference frame acquired and stored alongside the real
+spectral images) - which the previous pass's `set_axis_break("0")` had no
+way to know about: it always drew a synthetic, fixed "0" origin *outside*
+the real value range regardless of what the real data already contained,
+so a dataset that already started at a real 0 nm got a fake, non-draggable
+"0" duplicate sitting right next to the real, draggable one. Confirmed by
+rendering both scenarios (synthetic-only data, and a real 0.0-containing
+array) to pixmaps and inspecting them directly - the failure only shows up
+in the second case, exactly matching the report.
+
+**Redesign, not a patch**: `DataAxisSlider.set_axis_break()` removed
+entirely - no synthetic tick, no reserved zone, no caller opt-in. Replaced
+with `_large_gap_boundaries()`, a private method that detects an unusually
+large consecutive gap (more than 4x the dataset's own median gap) directly
+in the *real* `_tick_values` array already passed to `set_ticks`, and
+`_paint_gap_break()`, which draws the same "//" scale-break glyph on the
+rail between the two real ticks flanking a detected gap - both stay real,
+labeled, and selectable, exactly like every other tick. This self-contained
+design (no caller wiring needed at all - `panel.py`'s `set_axis_break(...)`
+call site was deleted outright) naturally handles both cases correctly:
+a dataset with a real 0 nm frame shows the break between the real 0 and
+the real first spectral wavelength (both draggable); a dataset with no 0 nm
+data at all simply never invents one. `_wavelength_slider_major_ticks`
+(`panel.py`) gained a matching rule - always force-label both indices
+flanking a detected gap (mirroring the widget's own detection as an
+independent copy, sharing the same `DataAxisSlider._GAP_BREAK_RATIO`
+threshold constant rather than a second hardcoded `4.0`) - so the glyph
+never ends up flanked by an unlabeled tick.
+
+**Verified against a rendered pixmap of the exact reported scenario**: a
+dataset with real wavelengths `(0.0, 470.0, 500.0, 550.0, 600.0)` (0.0 as a
+real record, like a dark/reference frame) - the handle sits on the real,
+single "0"-labeled tick, the break glyph appears immediately after it, and
+"470" labels the next real tick, with no duplicate and no dead zone.
+
+**Same-message follow-up requests, all straightforward, all implemented**:
+- **Navigation moved to the bottom of the Image panel** - `_build_ui`'s
+  outer layout now adds `canvas_row` before `_controls_bar`;
+  `_refresh_controls_bar_theme`'s border flipped from `border-bottom` to
+  `border-top` to match (the bar's border always goes on whichever edge
+  touches the canvas).
+- **"Cube "/" nm" removed from the number fields** - `_cube_spin.setPrefix`
+  and `_wavelength_spin.setSuffix` calls deleted; the row's own title label
+  ("Cube" / "λ (nm)") already said what the number means, so the field
+  repeating it was redundant.
+- **Reference-jump ("star") icon removed** - the button, its layout
+  placement, and `_on_reference_jump_clicked` (now a zero-caller method)
+  all deleted. The separate reference-highlight *coloring* of the slider
+  handle (gold/green when viewing the reference frame) is untouched - a
+  different feature (a color, not an icon) the maintainer did not ask to
+  remove.
+- **Titles and number fields aligned across both rows** - "Cube"/"λ (nm)"
+  are different lengths, and so are their number fields' typical contents,
+  so without a shared width the two sliders started at slightly different
+  x positions and the two fields didn't line up on the right either. Both
+  title labels now share one `setFixedWidth` (the wider of the two's
+  `sizeHint`), both spin boxes share another.
+- Unused imports cleaned up after the button removal (`QToolButton`,
+  `QSize`, `transparent_icon_button_stylesheet`).
+
+**Tests**: `test_lspri_rewrite_data_axis_slider.py` rewritten for the new
+gap-detection design (7/7 - regular grid has no break, break detected at a
+real gap, boundary-index direction, multiple gaps, fewer-than-three-points
+guard, both flanking ticks stay real/selectable, paints without error).
+Three obsolete `set_axis_break`-era tests removed from
+`test_lspri_rewrite_image_panel.py`, two new ones added for the matching
+force-label rule in `_wavelength_slider_major_ticks`; the two reference-
+jump-button tests removed; one new test each for prefix/suffix removal,
+shared title/field widths, and canvas-before-navigation layout order; the
+border-side test flipped to `border-top`. Image-panel suite 31 -> 32,
+32/32. Full `-k "lspri and rewrite"` slice: 398/399, same single
+pre-existing font-metric failure as every prior entry in this log,
+confirmed unrelated. Nothing committed as of this entry.
+
+---
+
+## 2026-09-30 (same day, ninth pass): "0 nm = dark frame" documented at its canonical spot
+
+Maintainer follow-up, confirming the gap-detection redesign above matches
+intent (dataset-driven, no synthetic ticks, no break at all when there's no
+real gap) and asking for the "0 nm is a dark/background frame, a different
+job than every other wavelength" domain fact to be written down, noting it
+was probably already documented somewhere.
+
+**It was** - found and confirmed, not assumed: the stable app's
+`gui/analysis_worker_mixin.py` has a real, working consumer of exactly this
+convention, `dark_frame_pixel_impact()` (`dark_mask = wavelengths == 0.0`,
+used to simulate dark-current subtraction and measure its effect on a
+computed formula value like absorbance); `docs/row_banding_artifact_
+analysis_2026-09.md` independently calls the same thing "`WL0`, LED off".
+Confirms the previous entry's "almost certainly a dark/reference frame"
+was correct, not a guess that happened to work.
+
+**Written down at its canonical spot**: `DatasetModule.wavelengths_for_cube`
+(`dataset/module.py`) - the query surface every rewrite consumer of
+wavelength data actually goes through - gained the confirmed statement,
+its code pointers (both sources above), and an explicit warning for future
+code: *any code that treats "all wavelengths" as spectral data (a fit, a
+spectrum plot, an average across wavelength) must exclude `0.0` explicitly
+- nothing in this query surface filters it out automatically.* `wavelengths()`
+got a one-line pointer to the same docstring. `dataset/model.py`'s
+`ImageKey` (a verbatim port that must stay byte-for-byte diffable against
+the stable app's `domain/models.py` original - confirmed stable's own
+`ImageKey` also carries no docstring, so adding one here would have been a
+real deviation) got a plain `#` comment above the class instead, pointing
+at the canonical docstring rather than repeating it. `data_axis_slider.py`
+and `panel.py`'s own gap-detection docstrings (previous entry) were
+trimmed to cross-reference the canonical spot instead of each carrying
+their own copy of the explanation.
+
+**Not yet done, flagged rather than silently skipped**: nothing in the
+rewrite's `analysis/` package excludes `wavelength == 0.0` from spectral
+computations yet (Spectra panel, any future fit/average-across-wavelength
+code) - the stable app's `dark_frame_pixel_impact` is a diagnostic/
+measurement tool, not a filter wired into the main compute path either, so
+this isn't a regression, but it is the kind of gap the new docstring's
+explicit warning exists to prevent going unnoticed once real spectral
+compute code is built on this branch.
+
+**Verification**: pyflakes-clean on all four touched files (docstring/
+comment-only changes, no logic touched). Full test files covering them
+(`test_lspri_rewrite_data_axis_slider.py`, `test_lspri_rewrite_cube_
+interval_stats.py`, `test_lspri_rewrite_image_panel.py`) re-run: 48/48,
+confirming the docstring-only nature of this pass. Nothing committed as of
+this entry.
+
+## 2026-09-30 (same day, tenth pass): the "not yet done" claim above was wrong - `AnalysisEngine` already had the gap live
+
+Maintainer follow-up on the previous entry, asking for the dark-frame
+exclusion rule to actually be implemented: does the dataset have a `0.0` nm
+frame, and if so, exclude it from every routine that treats "all
+wavelengths" as spectral data, while keeping it selectable/previewable in
+the Image panel (already true - see the ninth-pass entry, untouched here).
+
+**Correction to the previous entry's framing, found while scoping the
+work**: it said "nothing in the rewrite's `analysis/` package excludes
+`wavelength == 0.0` from spectral computations yet... this isn't a
+regression" on the reasoning that no real spectral compute code existed yet
+to have the gap. That reasoning was wrong - `AnalysisEngine` (`analysis/
+engine.py`) is not a placeholder here, it's real, wired backend code (the
+status doc's own words: "the computational backend is largely complete and
+wired end-to-end"). Three of its methods already iterated every wavelength
+`DatasetModule.wavelengths_for_cube` returns with no filter -
+`_gather_wavelength_inputs` (feeds `compute_cell`), `_gather_current_inputs`
+(the planning-time fingerprint), and `_naming` (the snapshot filename
+scheme). A dataset with a real `0.0` nm frame would have had it silently
+become a point in a stored `CellResult`, then in `formula_spectrum`, then
+fed to a gaussian/polynomial fit and eligible to be picked as the
+"maximum"/"centroid" metric - a live, reachable bug once a real dataset with
+a dark frame is analyzed, not a future risk.
+
+**Fixed**: all three methods now skip `is_dark_frame_wavelength(wavelength)`
+(new helper in `dataset/model.py`, next to a new `DARK_FRAME_WAVELENGTH_NM`
+constant - both placed there rather than in `analysis/`, matching where the
+domain fact is already canonically documented).
+`_gather_current_inputs`/`_gather_wavelength_inputs` had to be fixed
+*together*, not just the compute side: they build the live/stored halves of
+the same fingerprint comparison (`plan_recompute`/`compute_fingerprint`), so
+excluding the dark frame from only one would have made every cell look
+permanently stale against its own stored fingerprint - the same failure
+shape as the placeholder-mask-version bug from 2026-09-23. `DatasetModule.
+wavelengths_for_cube`'s docstring was updated to point at `AnalysisEngine`
+as the real (not aspirational) enforcement site. Full policy written down at
+`docs/dark_frame_wavelength_zero_policy.md`, including what this does *not*
+cover yet: a real dark-current-subtraction *compensation* mode is future
+work with its own open design questions (deliberately out of scope here,
+matching the fractional-pixel-weighting toggle's already-flagged shape).
+
+**Verification**: new `RewriteDarkFrameExclusionTest` (`tests/integration/
+test_lspri_rewrite_analysis_engine.py`) - a real one-cube, four-wavelength
+(including `0.0`) dataset through the real `_build_analysis_engine` module
+graph, asserting the stored cell/formula spectrum/metric all exclude the
+dark frame, and that `preview_recompute` reports the cell up to date after
+one run (the fingerprint-agreement check, not just a stored-value check).
+`test_lspri_rewrite_analysis_core.py` and `test_lspri_rewrite_analysis_
+engine.py` re-run in full alongside it.

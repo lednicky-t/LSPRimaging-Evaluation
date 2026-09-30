@@ -56,6 +56,7 @@ from pathlib import Path
 import numpy as np
 from PyQt6.QtCore import QObject, pyqtSignal
 
+from ..dataset.model import is_dark_frame_wavelength
 from ..diagnostics import instrumented
 from ..image_tools.background.model import BackgroundSettings
 from ..image_tools.geometry.model import GeometrySettings
@@ -506,6 +507,14 @@ class AnalysisEngine(QObject):
         for cube_index in self._cube_indices():
             wavelength_settings: dict[float, SettingsSnapshot] = {}
             for wavelength_nm in self._wavelengths_for_cube(cube_index):
+                # The dark/background frame (0.0 nm, when present) is real
+                # data but not a spectral sample point - excluded here, and
+                # identically in `_gather_wavelength_inputs` below, so the
+                # planning-time fingerprint and the compute-time snapshot
+                # dict this feeds always agree on which wavelengths exist.
+                # See `dataset.model.is_dark_frame_wavelength`.
+                if is_dark_frame_wavelength(wavelength_nm):
+                    continue
                 mask_resolution = self._resolve_mask(cube_index, wavelength_nm)
                 mask_ref = None
                 if mask_resolution is not None:
@@ -546,7 +555,13 @@ class AnalysisEngine(QObject):
         cube_indices = list(self._cube_indices())
         wavelengths: list[float] = []
         for cube_index in cube_indices:
-            wavelengths.extend(self._wavelengths_for_cube(cube_index))
+            # Excluded for the same reason as `_gather_current_inputs`: the
+            # dark frame never gets a mask/chromatic snapshot written
+            # through this pipeline (post-exclusion, nothing analyzes it),
+            # so it shouldn't influence the filename precision derived here.
+            wavelengths.extend(
+                wl for wl in self._wavelengths_for_cube(cube_index) if not is_dark_frame_wavelength(wl)
+            )
         return FrameNamingScheme.for_dataset(cube_indices, wavelengths)
 
     # -- the only entry point that triggers computation ---------------------
@@ -647,10 +662,22 @@ class AnalysisEngine(QObject):
         self._worker.submit(run)
 
     def _gather_wavelength_inputs(self, cube_index: int) -> dict[float, WavelengthComputeInput]:
+        """Per-wavelength compute inputs for `compute_cell`, one cube's
+        worth. Excludes the dark/background frame (0.0 nm, when present):
+        it is real, ordinarily-acquired data, but not a spectral sample
+        point, so it must never become an entry in a stored `CellResult` -
+        which `formula_spectrum`/`fit_spectrum`/`metric_from_spectrum`
+        (`query.py`) would then treat as a genuine point in the spectrum,
+        eligible to be fit or picked as a "maximum"/"centroid" metric. See
+        `dataset.model.is_dark_frame_wavelength` and
+        `DatasetModule.wavelengths_for_cube`'s docstring for the domain fact
+        this enforces."""
         geometry = self._geometry_settings()
         background = self._background_settings()
         inputs: dict[float, WavelengthComputeInput] = {}
         for wavelength_nm in self._wavelengths_for_cube(cube_index):
+            if is_dark_frame_wavelength(wavelength_nm):
+                continue
             mask_resolution = self._resolve_mask(cube_index, wavelength_nm)
             resolved_mask = None
             mask_authored_frame = None

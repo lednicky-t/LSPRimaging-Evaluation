@@ -8,16 +8,47 @@ other modules and are ported separately when those modules are built. No
 logic changed from the original - see the original's own docstrings
 (preserved here) for why ``CompactImageTimings`` exists (a documented
 PyQt6-sip crash-correlation mitigation, not a style choice).
+
+``cube_interval_stats``/``CubeIntervalStats`` (2026-09-30) are a third
+companion pair, **not part of the verbatim port** - same "new on the
+rewrite branch" category as `ImageDataset.wavelengths_for_cube` below.
+Added as a free function operating on `CompactImageTimings` rather than a
+new method on that class, so the class itself stays byte-for-byte
+diffable against the stable app's `domain/models.py` original.
 """
 
 from __future__ import annotations
 
+import statistics
 from dataclasses import dataclass
 from pathlib import Path
 
 from lspr_core import ImagingAcquisitionMetadata, ImagingCubeTiming
 
 
+DARK_FRAME_WAVELENGTH_NM = 0.0
+"""The dataset's dark/background frame (LED off, no illumination), when one
+was acquired - a real, ordinarily-acquired image, but not a spectral sample
+point: its job is estimating the sensor's own dark-current offset for
+subtraction from the real wavelengths, not contributing a point to a
+spectrum. See `DatasetModule.wavelengths_for_cube`'s docstring (`dataset/
+module.py`) for the canonical statement and code pointers."""
+
+
+def is_dark_frame_wavelength(wavelength_nm: float) -> bool:
+    """Whether `wavelength_nm` is the dark/background frame, not a real
+    spectral sample point - the one check every consumer of a per-cube
+    wavelength list must apply before treating "all wavelengths" as
+    spectral data (a fit, a spectrum plot, an average across wavelength).
+    See `DARK_FRAME_WAVELENGTH_NM` above."""
+    return float(wavelength_nm) == DARK_FRAME_WAVELENGTH_NM
+
+
+# `wavelength_nm == 0.0` is the dataset's dark/background frame - see
+# `DARK_FRAME_WAVELENGTH_NM`/`is_dark_frame_wavelength` above. Kept as a
+# comment here, not a docstring, since `ImageKey` itself is a verbatim port
+# (module docstring above) that must stay byte-for-byte diffable against
+# the stable app's `domain/models.py` original.
 @dataclass(slots=True, frozen=True)
 class ImageKey:
     wavelength_nm: float
@@ -218,3 +249,71 @@ def rehydrated_acquisition_metadata(dataset: ImageDataset) -> ImagingAcquisition
     if dataset.compact_image_timings is None or metadata.image_timings:
         return metadata
     return metadata.model_copy(update={"image_timings": dataset.compact_image_timings.to_timings()})
+
+
+@dataclass(frozen=True, slots=True)
+class CubeIntervalStats:
+    """Summary of the gaps between consecutive cubes' start times, in
+    seconds - see `cube_interval_stats`'s own docstring for what "a cube's
+    start time" means and why this is called "interval", not "period"."""
+
+    mean_s: float
+    min_s: float
+    max_s: float
+    n_gaps: int
+    std_s: float | None
+    """Sample standard deviation (`statistics.stdev`, n-1) of the gaps -
+    `None` when there's only one gap, since a spread needs at least two
+    data points to mean anything."""
+
+
+def cube_interval_stats(compact: CompactImageTimings) -> CubeIntervalStats | None:
+    """Summary statistics (mean/min/max/std) of the dataset's time between
+    consecutive cubes, in seconds - `None` if fewer than two cubes have
+    recorded timing (i.e. zero gaps to summarize).
+
+    **A cube's own "time" is fixed as its earliest-acquired frame**
+    (`compact.earliest_ms_by_cube` - the first wavelength captured in that
+    cube's sweep), never a middle/last/mean of the sweep. This matches the
+    stable app's own *persisted* ground truth: `analysis_worker_mixin.
+    _acquisition_timestamp_ms_for_cube` (what actually gets written to
+    `measurement_backup.h5`) always uses the earliest frame too - the
+    stable app's separate `_cube_time_timestamp_rule` ("first"/"last"/
+    "midpoint") only ever changes a *display* preference (the Cube/Time
+    spinbox text, the sensorgram x-axis label), never which frame counts as
+    a cube's time. This rewrite does not carry that display toggle
+    (deliberately simplified, maintainer's explicit call, 2026-09-30) - the
+    earliest frame is the only definition, full stop.
+
+    **Named "cube interval", not "sampling interval" or "period"**
+    (maintainer's call, 2026-09-30, revising this function's first-pass
+    name): "interval" over "period" because a period implies strict
+    periodicity (a signal that repeats every exactly-T seconds) - real
+    acquisition timestamps have jitter (I/O, hardware settle time, USB/
+    serial scheduling), so consecutive cube-start gaps are never exactly
+    equal. "Cube" over the more generic "sampling" because it names the
+    actual sample unit this app's own vocabulary already uses everywhere
+    else (a cube is one full wavelength sweep = one sensorgram time point) -
+    more specific than the generic time-series term, at no cost to
+    correctness.
+
+    **Mean, not median, of the gaps** (maintainer's call, 2026-09-30,
+    reversing this function's first-pass choice): a single atypically long
+    gap (the operator paused the run, adjusted the stage) does pull the
+    mean upward for an otherwise-regular acquisition - but that is now
+    visible rather than hidden, via `std_s`/`min_s`/`max_s` alongside it,
+    rather than a median silently absorbing it. A mean with its spread
+    reported is a more complete, more standard representation of "what did
+    this dataset's cadence actually look like" than a single robust point
+    estimate."""
+    ordered_ms = [compact.earliest_ms_by_cube[cube_index] for cube_index in sorted(compact.earliest_ms_by_cube)]
+    if len(ordered_ms) < 2:
+        return None
+    gaps_s = [(later - earlier) / 1000.0 for earlier, later in zip(ordered_ms, ordered_ms[1:])]
+    return CubeIntervalStats(
+        mean_s=float(statistics.mean(gaps_s)),
+        min_s=float(min(gaps_s)),
+        max_s=float(max(gaps_s)),
+        n_gaps=len(gaps_s),
+        std_s=float(statistics.stdev(gaps_s)) if len(gaps_s) >= 2 else None,
+    )

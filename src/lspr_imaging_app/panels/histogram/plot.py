@@ -22,19 +22,40 @@ crosshair toggle, both fixed to the top-right corner (the gear opens
 level state), and a "[min, max]" Highlight-range readout centered under the
 region near the x-axis, live during a drag.
 
-**X is locked to `[0, 65535]` via `ViewBox.setLimits`** - the pyqtgraph API
-built for exactly this ("Set limits that constrain the possible view
-ranges"), enforced at the one choke point every range-changing path
-(button, right-click menu's "View All"/"Auto", wheel, drag, any future
-caller) already funnels through, rather than catching and reversing each
-door individually. `hideButtons()` additionally removes the corner "A"
-button outright (every other plot in the app already does this, since an
-"A" button has no sensible behavior once X can never move and Y already
-auto-ranges on its own); `setMouseEnabled(x=False, y=True)` keeps
-interactive drag/wheel from even attempting to move X, for a clean feel
-rather than a rubber-band snap-back, while leaving Y fully interactive.
-Native right-click menu is kept enabled throughout (the maintainer's
-explicit choice, right below).
+**X is zoomable/pannable, bounded to `[0, 65535]`** (revised 2026-09-30 -
+X was originally locked entirely; the maintainer asked for real zoom/pan
+instead). `ViewBox.setLimits(xMin=..., xMax=..., maxXRange=...)` still
+bounds every range-changing path (button, right-click menu, wheel, drag,
+any future caller) at pyqtgraph's own choke point, but only caps how far
+out you can zoom/pan - `minXRange` is deliberately *not* pinned to the
+full span anymore, so zooming in actually works. `setMouseEnabled(x=True,
+y=True)` lets wheel/drag move X like any ordinary plot axis.
+
+**The corner "A" (auto-range) button is native pyqtgraph, not hidden** -
+`hideButtons()` was removed for the same reason: with X actually zoomable,
+"jump back to seeing everything" is a real, needed action again.
+pyqtgraph's own `PlotItem.updateButtons()` already shows/hides it exactly
+when needed (hidden while the current view already matches auto-range on
+both axes, shown on hover once it doesn't) - no code here has to track
+that state itself.
+
+**But "auto-range" for X does not mean pyqtgraph's default "fit to
+whatever data happens to be on screen"** - X is a 16-bit sensor's fixed
+possible value range (`compute.DEFAULT_INTENSITY_MIN`/`MAX`), not an
+arbitrary data-dependent quantity, so both the corner "A" button *and* the
+right-click menu's "View All"/"Auto" actions reset X to the full
+`[0, 65535]` range specifically, while Y keeps pyqtgraph's normal
+fit-to-data behavior. One implementation, reached by both doors: `__init__`
+wraps this `ViewBox` instance's own `autoRange()` bound method (not the
+`ViewBox` class, which would affect every other plot in the app) -
+`ViewBoxMenu.autoRange` calls `self.view().autoRange()` directly, and
+`_on_auto_button_clicked` (replacing `PlotItem.autoBtnClicked`'s default
+`enableAutoRange()` call) calls the same wrapped method. Matches this
+exact plot's own prior fix history: an earlier 2026-09-29 bug report found
+that hiding the "A" button alone missed the right-click menu reaching the
+same underlying range change by a different door - the same two-doors
+shape recurs here, so both are wired through one implementation this time
+rather than patched separately.
 """
 
 from __future__ import annotations
@@ -94,28 +115,50 @@ class HistogramPlot(QWidget):
         self._plot_item.showGrid(x=False, y=True, alpha=0.15)
         self._plot_item.setLabel("bottom", "Intensity (DN)")
         self._plot_item.setXRange(compute.DEFAULT_INTENSITY_MIN, compute.DEFAULT_INTENSITY_MAX, padding=0.0)
-        self._plot_item.hideButtons()
         self._legend = self._plot_item.addLegend(offset=(8, 8))
 
         view_box = self._plot_item.getViewBox()
         # `setLimits` is pyqtgraph's own mechanism for exactly this - it
-        # clips every range-changing path (button, right-click menu's "View
-        # All"/"Auto", wheel, drag, any future caller) at one shared choke
-        # point (`ViewBox.updateViewRange`), verified directly against the
-        # installed pyqtgraph source rather than assumed. `minXRange ==
-        # maxXRange == the full span` additionally makes X impossible to
-        # zoom, not just impossible to pan past its bounds. `setMouseEnabled
-        # (x=False)` is not load-bearing for correctness here (`setLimits`
-        # alone already blocks an X drag past its bounds) but keeps the
-        # interaction feel clean - a drag on X does nothing at all, rather
-        # than visibly moving and snapping back.
+        # clips every range-changing path (button, right-click menu, wheel,
+        # drag, any future caller) at one shared choke point (`ViewBox.
+        # updateViewRange`), verified directly against the installed
+        # pyqtgraph source rather than assumed. Only bounds *how far* X can
+        # zoom/pan (can't go outside the sensor's real range, can't zoom out
+        # past seeing all of it) - `minXRange` is deliberately left at
+        # pyqtgraph's own default (effectively unbounded) so zooming in
+        # keeps working right down to a single bin.
         view_box.setLimits(
             xMin=compute.DEFAULT_INTENSITY_MIN,
             xMax=compute.DEFAULT_INTENSITY_MAX,
-            minXRange=compute.DEFAULT_INTENSITY_MAX - compute.DEFAULT_INTENSITY_MIN,
             maxXRange=compute.DEFAULT_INTENSITY_MAX - compute.DEFAULT_INTENSITY_MIN,
         )
-        view_box.setMouseEnabled(x=False, y=True)
+        view_box.setMouseEnabled(x=True, y=True)
+        # `ViewBox.autoRange()` is the one implementation *both* doors that
+        # can trigger an "autoscale" reach: the corner "A" button
+        # (`_on_auto_button_clicked` below calls it directly) and the
+        # right-click menu's "View All"/"Auto" actions (`ViewBoxMenu.
+        # autoRange` calls `self.view().autoRange()` - confirmed against the
+        # installed pyqtgraph source). Wrapping the bound method on this one
+        # `ViewBox` instance (not overriding the class, which would affect
+        # every other plot in the app) means both doors land on "X goes back
+        # to the full sensor range, Y fits the data" from one implementation,
+        # not two kept in sync by hand.
+        _native_auto_range = view_box.autoRange
+
+        def _auto_range_full_x(padding=None, items=None, item=None) -> None:
+            _native_auto_range(padding=padding, items=items, item=item)
+            view_box.setXRange(compute.DEFAULT_INTENSITY_MIN, compute.DEFAULT_INTENSITY_MAX, padding=0.0)
+
+        view_box.autoRange = _auto_range_full_x
+        # Replaces `PlotItem.autoBtnClicked`'s default `enableAutoRange()`
+        # call (continuous auto-tracking mode) with a one-shot call to the
+        # wrapped `autoRange()` above - see module docstring for why X's
+        # "auto-range" means something more specific here (the sensor's
+        # fixed full range, not a data-dependent one). The button itself
+        # (show/hide on hover vs. auto-range state) stays 100% native
+        # pyqtgraph - only what a click *does* changes.
+        self._plot_item.autoBtn.clicked.disconnect()
+        self._plot_item.autoBtn.clicked.connect(self._on_auto_button_clicked)
 
         self._all_pixels_curve = self._add_curve(get_active_theme().text_primary, "All pixels")
         self._sample_curve = self._add_curve(_SAMPLE_COLOR, "Sample ROI")
@@ -178,6 +221,26 @@ class HistogramPlot(QWidget):
         )
         self._curve_colors[curve] = color_hex
         return curve
+
+    def _on_auto_button_clicked(self) -> None:
+        """Replaces `PlotItem.autoBtnClicked`'s default `enableAutoRange()`
+        call - see the `__init__` comment above `view_box.autoRange =
+        _auto_range_full_x` for why this goes through the wrapped
+        `autoRange()` (X back to the full `[0, 65535]` sensor range, Y fit
+        to whatever data is currently on screen) rather than pyqtgraph's
+        own continuous auto-tracking mode.
+
+        Mirrors the two other things the native handler does after
+        resolving the range, so the button's own show/hide bookkeeping and
+        any other `sigRangeChangedManually` listener elsewhere keep working
+        identically: hide the button immediately (`updateButtons()` would
+        also hide it once the range settles, but not before the next hover/
+        range-changed event) and emit the same signal the native click
+        does."""
+        view_box = self._plot_item.getViewBox()
+        view_box.autoRange()
+        self._plot_item.autoBtn.hide()
+        self._plot_item.sigRangeChangedManually.emit(view_box.mouseEnabled())
 
     # -- theming --------------------------------------------------------------
 

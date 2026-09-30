@@ -599,7 +599,9 @@ def build_main_window(
         lambda roi_ids: analysis_engine.set_selected_rois(tuple(sorted(roi_ids)))
     )
 
-    image_panel = ImagePanel(dataset, geometry, mask, chromatic, background, roi_toolbox, selection, active_tool)
+    image_panel = ImagePanel(
+        dataset, geometry, mask, chromatic, background, roi_toolbox, selection, active_tool, reference_frame
+    )
     histogram_panel = HistogramPanel(image_panel, geometry, mask, chromatic, roi_toolbox, highlight_range)
     roi_table_panel = RoiTablePanel(roi_toolbox)
     spectra_panel = SpectraPanel(analysis_engine, roi_toolbox, selection)
