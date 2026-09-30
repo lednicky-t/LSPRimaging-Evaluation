@@ -79,13 +79,14 @@ from dataclasses import replace
 import numpy as np
 import pyqtgraph as pg
 from PyQt6.QtCore import QEvent, QObject, QPointF, QStringListModel, Qt, QTimer, pyqtSignal
-from PyQt6.QtGui import QColor
+from PyQt6.QtGui import QColor, QFontMetrics
 from PyQt6.QtWidgets import (
     QApplication,
     QCompleter,
     QHBoxLayout,
     QLabel,
     QSpinBox,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
@@ -101,7 +102,7 @@ from ...roi.rasterize import effective_reference_radii, transformed_circle_point
 from ...selection import ReferenceFrameModule, SelectionModule
 from ...selection.reference_frame_module import MODE_AUTO
 from ..cursor_overlay import CursorOverlay
-from .canvas_tools import CanvasToolsBar
+from .canvas_tools import _ICON_SIZE, CanvasToolsBar, style_bar_icon_button
 from .context_menu import show_tool_context_menu
 from .crop_size_controls import CropSizeControls
 from .crop_tool import CropTool
@@ -201,6 +202,18 @@ class ImagePanel(QWidget):
     # narrow case `ImagePanel` already knows about.
     image_cleared = pyqtSignal()
 
+    # What frame is on screen ("Cube 0, 550 nm") - the old bottom status
+    # row's replacement (2026-09-30, maintainer request: that row, plus its
+    # trailing "- WxH px" resolution text, is gone; this is shown instead as
+    # the dock title bar's centered subtitle, via `app_rewrite.py` wiring
+    # this straight to `PanelContainer.set_subtitle`). Render *errors*
+    # ("Cannot show this frame: ...") deliberately do not go through this
+    # signal - they go through `tool_status_changed` instead (a transient
+    # status-bar message, the same convention every other guarded command in
+    # this panel already uses - see `_on_measure_apply_requested`), since an
+    # error is not "what frame is displayed", it's "why nothing is".
+    frame_status_changed = pyqtSignal(str)
+
     def __init__(
         self,
         dataset: DatasetModule,
@@ -225,6 +238,11 @@ class ImagePanel(QWidget):
         self._reference_frame = reference_frame
         self._active_tool = active_tool
         self._tool_status = ""
+        # Mirrors the last `frame_status_changed` emission (same "cached
+        # alongside the signal" shape as `_tool_status` above) - lets a test
+        # (or any other direct caller) read the current frame-status text
+        # without needing a dock title bar in the loop to observe it.
+        self._frame_status = ""
 
         self._serial = itertools.count(1)
         self._latest_serial = 0
@@ -256,6 +274,10 @@ class ImagePanel(QWidget):
 
         self._connect_modules()
         self._refresh_navigation_ranges()
+        # No dataset yet at construction - same text `_on_dataset_cleared`
+        # emits later, so the dock title bar's subtitle never sits blank
+        # while genuinely nothing is loaded.
+        self._set_frame_status("No dataset loaded.")
 
     # -- construction -------------------------------------------------------
 
@@ -321,8 +343,53 @@ class ImagePanel(QWidget):
         self._measure_controls.apply_requested.connect(self._on_measure_apply_requested)
         self._plot.vb.sigTransformChanged.connect(self._reposition_measure_controls)
 
-        self._status = QLabel("No dataset loaded.", self)
-        self._status.setWordWrap(True)
+        # Top toolbar (2026-09-30, flipped from a vertical strip along the
+        # canvas's left edge to a horizontal bar across its top - maintainer
+        # request, "since frames are usually landscapes" - a left rail
+        # wastes more of a landscape frame's width than a top bar wastes of
+        # its height). Select/Add ROI on the left (`CanvasToolsBar`); the
+        # cursor-readout and "i" info icons on the right - both used to
+        # float as manually `.move()`d overlays on the canvas itself
+        # (`_reposition_cursor_overlay`/`_reposition_tool_info`, both
+        # removed with this change); now they're ordinary widgets in a real
+        # `QHBoxLayout`, so Qt repositions them on any resize for free.
+        self._canvas_tools = CanvasToolsBar(self._roi_toolbox, self._active_tool, self)
+
+        self._top_bar = QWidget(self)
+        self._top_bar.setObjectName("imageTopBar")
+        top_bar_layout = QHBoxLayout(self._top_bar)
+        top_bar_layout.setContentsMargins(4, 2, 6, 2)
+        top_bar_layout.setSpacing(6)
+        top_bar_layout.addWidget(self._canvas_tools)
+        top_bar_layout.addStretch(1)
+
+        # Cursor-crosshair toggle (maintainer's request, 2026-09-29 - "copy
+        # all functions, as hiding, showing values" from the stable app's
+        # cursor-toggle overlay). Shares `cursor_overlay.CursorOverlay` with
+        # the Histogram plot; only `_cursor_value_at` (a pixel lookup here,
+        # a nearest-bin lookup there) differs. No `on_changed` callback
+        # (2026-09-30) - its icon used to need manual repositioning when its
+        # width changed (icon vs. live text); now that it is a normal
+        # `QHBoxLayout` item, Qt already re-lays-out this row for free
+        # whenever a child's size hint changes.
+        self._cursor_overlay = CursorOverlay(
+            scene_view=self._view,
+            plot_item=self._plot,
+            overlay_parent=self._top_bar,
+            value_at=self._cursor_value_at,
+            theme=get_active_theme(),
+        )
+        # Restyled to match Select/Add ROI (2026-09-30, maintainer request -
+        # "make cursor and i icon same as other icons in the bar... this
+        # apply for all icons later applied, they should have same style"):
+        # overrides the class's own default sizing (`theme.compact_icon_
+        # inner`, tuned instead for Histogram's settings-gear button, a
+        # different icon this class knows nothing about) with this bar's
+        # shared look. `fixed_width=False` - unlike a plain toggle, this
+        # button must still grow to show live text ("(38, 30) = 123.4")
+        # while enabled; only the height and icon size need to match.
+        style_bar_icon_button(self._cursor_overlay.icon_label, fixed_width=False)
+        top_bar_layout.addWidget(self._cursor_overlay.icon_label)
 
         # A permanent "i" icon (2026-09-29, replacing a text row that only
         # appeared while a tool with canvas behavior was active): hovering
@@ -334,9 +401,19 @@ class ImagePanel(QWidget):
         # part of it - nobody is hovering a corner icon mid-gesture, so that
         # goes to the status bar instead (`tool_status_changed`, wired in
         # app_rewrite.py).
-        self._tool_info = QLabel(self)
-        self._tool_info.setFixedSize(18, 18)
+        #
+        # A real `QToolButton` now, not a `QLabel` (2026-09-30, maintainer
+        # request - same size/chrome as every other icon in this bar, via
+        # `style_bar_icon_button`) - it does nothing on click (there is
+        # nothing to toggle, only a tooltip to show on hover), but a plain
+        # `QLabel` had no hover affordance at all and would have stood out
+        # as visually inconsistent next to Select/Add ROI/the cursor icon.
+        self._tool_info = QToolButton(self._top_bar)
+        style_bar_icon_button(self._tool_info)
         self._refresh_tool_info(None)
+        top_bar_layout.addWidget(self._tool_info)
+
+        self._refresh_top_bar_theme()
 
         # Cube and Wavelength navigation - ported from the stable app's
         # tick/axis-style redesign (docs/image_area_slider_redesign.md):
@@ -367,7 +444,10 @@ class ImagePanel(QWidget):
         cube_row.addWidget(self._cube_spin)
 
         self._wavelength_spin = GuidedValueSpinBox(self)
-        self._wavelength_spin.setDecimals(1)
+        # No decimal point (2026-09-30, maintainer request) - the dataset's
+        # wavelengths are whole nanometers in practice, and a bare integer
+        # reads faster in a field this narrow.
+        self._wavelength_spin.setDecimals(0)
         self._wavelength_spin.setSingleStep(1.0)
         self._wavelength_spin.setEnabled(False)
         self._wavelength_spin.valueChanged.connect(self._on_wavelength_spin_changed)
@@ -404,7 +484,17 @@ class ImagePanel(QWidget):
         title_width = max(cube_title.sizeHint().width(), wavelength_title.sizeHint().width())
         cube_title.setFixedWidth(title_width)
         wavelength_title.setFixedWidth(title_width)
-        spin_width = max(self._cube_spin.sizeHint().width(), self._wavelength_spin.sizeHint().width())
+        # Narrowed and sized off "00:00:00" (2026-09-30, maintainer request),
+        # not the widgets' own `sizeHint()` - a plain cube index needs far
+        # less room, but the cube field is meant to grow into an HH:MM:SS
+        # elapsed-time display later (see this panel's module docstring,
+        # "Not built here, deliberately" - no elapsed-time mapping exists on
+        # this branch yet), and re-widening every dependent layout calc when
+        # that lands would be needless churn. The wavelength field shares
+        # the same width so the two number fields line up on the right,
+        # same as the two titles above.
+        metrics = QFontMetrics(self._cube_spin.font())
+        spin_width = metrics.horizontalAdvance("00:00:00") + 28  # + spin-arrow/frame padding
         self._cube_spin.setFixedWidth(spin_width)
         self._wavelength_spin.setFixedWidth(spin_width)
 
@@ -414,28 +504,27 @@ class ImagePanel(QWidget):
         navigation.addLayout(cube_row)
         navigation.addLayout(wavelength_row)
 
-        status_row = QHBoxLayout()
-        status_row.addStretch(1)
-        status_row.addWidget(self._status, 2)
-        status_row.addSpacing(6)
-        status_row.addWidget(self._tool_info)
-
+        # No status row here anymore (2026-09-30, maintainer request) - the
+        # "Cube X, wl nm" text it used to show now lives in the dock title
+        # bar (`frame_status_changed`, wired to `PanelContainer.set_subtitle`
+        # in app_rewrite.py); the trailing "- WxH px" resolution text is not
+        # shown anywhere anymore.
+        #
+        # Left/right margin only, no top/bottom (2026-09-30, maintainer
+        # request, "small stylish" follow-up - scoped to just this nav bar
+        # after an earlier pass put it on the whole panel by mistake): a
+        # bare 10px breathing room so the "Cube"/"λ (nm)" titles don't start
+        # flush against the dock's left edge and the number fields don't
+        # end flush against its right edge. Top/bottom stay flush - nothing
+        # else in this bar needs the room.
         controls = QVBoxLayout()
-        controls.setContentsMargins(0, 0, 0, 0)
+        controls.setContentsMargins(10, 0, 10, 0)
         controls.setSpacing(4)
         controls.addLayout(navigation)
-        controls.addLayout(status_row)
-
-        self._canvas_tools = CanvasToolsBar(self._roi_toolbox, self._active_tool, self)
-        canvas_row = QHBoxLayout()
-        canvas_row.setContentsMargins(0, 0, 0, 0)
-        canvas_row.setSpacing(0)
-        canvas_row.addWidget(self._canvas_tools)
-        canvas_row.addWidget(self._view, 1)
 
         # A real QWidget, not a bare layout - QSS `border` only applies to
         # widgets, and this bar needs one (see `_refresh_controls_bar_
-        # theme`) for the same reason `CanvasToolsBar` does: its background
+        # theme`) for the same reason the top bar does: its background
         # and the canvas's are otherwise visually identical, so the seam
         # where this bar ends and the canvas begins needs a boundary drawn
         # explicitly, not left to two adjacent flat colors that happen to
@@ -445,12 +534,36 @@ class ImagePanel(QWidget):
         self._controls_bar.setLayout(controls)
         self._refresh_controls_bar_theme()
 
+        # Canvas column: top bar (Select/Add ROI + cursor/info icons, both
+        # built above), then the pyqtgraph view itself.
+        canvas_column = QVBoxLayout()
+        canvas_column.setContentsMargins(0, 0, 0, 0)
+        canvas_column.setSpacing(0)
+        canvas_column.addWidget(self._top_bar)
+        canvas_column.addWidget(self._view, 1)
+
         # Navigation now sits below the canvas (2026-09-30, maintainer
         # request) - `_refresh_controls_bar_theme` draws its border on
         # whichever edge actually touches the canvas, so moving this bar
         # means flipping that edge too (border-top now, was border-bottom).
+        #
+        # Zero margins/spacing (2026-09-30, real bug found via headless
+        # geometry probe, maintainer report of "wide borders around the
+        # image area, biggest from the top") - every *other* layout in this
+        # method explicitly zeroes its margins; this one, the outermost, was
+        # the one left at Qt's style-default ~11px on all four sides. That
+        # is invisible as a distinct line (this panel's own background and
+        # the canvas's are the same `toolbar_bg`), but it reads as extra
+        # dark space padding out the canvas, the toolbar strip, and the
+        # nav bar equally - worst at the top because it stacked on top of
+        # the dock's own title bar, which the other three sides have
+        # nothing equivalent to. (A 10px left/right margin was briefly
+        # added here too, then moved to just the nav bar's own `controls`
+        # layout above - the canvas/toolbar were meant to stay flush.)
         layout = QVBoxLayout(self)
-        layout.addLayout(canvas_row, 1)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+        layout.addLayout(canvas_column, 1)
         layout.addWidget(self._controls_bar)
 
         scene = self._image_item.scene()
@@ -460,21 +573,6 @@ class ImagePanel(QWidget):
         # (not `keyPressEvent` here) because the graphics view would
         # otherwise consume arrow keys itself to scroll.
         self._view.installEventFilter(self)
-
-        # Cursor-crosshair toggle (maintainer's request, 2026-09-29 - "copy
-        # all functions, as hiding, showing values" from the stable app's
-        # cursor-toggle overlay). Shares `cursor_overlay.CursorOverlay` with
-        # the Histogram plot; only `_cursor_value_at` (a pixel lookup here,
-        # a nearest-bin lookup there) differs.
-        self._cursor_overlay = CursorOverlay(
-            scene_view=self._view,
-            plot_item=self._plot,
-            overlay_parent=self._view.viewport(),
-            value_at=self._cursor_value_at,
-            theme=get_active_theme(),
-            on_changed=self._reposition_cursor_overlay,
-        )
-        self._reposition_cursor_overlay()
 
     def _add_curve(self, color_hex: str, *, width: float, dashed: bool = False) -> pg.PlotDataItem:
         pen = pg.mkPen(QColor(color_hex), width=width)
@@ -558,18 +656,27 @@ class ImagePanel(QWidget):
             self._canvas_tools.refresh_theme(get_active_theme())
         if hasattr(self, "_controls_bar"):
             self._refresh_controls_bar_theme()
+        if hasattr(self, "_top_bar"):
+            self._refresh_top_bar_theme()
 
     def _refresh_controls_bar_theme(self) -> None:
-        """Subtle 1px seam above the Cube/λ navigation rows, where this bar
-        meets the canvas above it (moved below the canvas 2026-09-30,
-        maintainer request - was `border-bottom` when this bar sat above
-        the canvas) - same reasoning and convention as `CanvasToolsBar.
-        refresh_theme` (only the touching edge is bordered, not all four
-        sides)."""
+        """No border (2026-09-30, maintainer request - reverses the subtle
+        seam line added 2026-09-27/30) - the bar now sits flush against the
+        canvas above it (zero spacing, see `_build_ui`'s outer layout), and
+        the maintainer found the line distracting rather than clarifying.
+        Kept as a live-theme-switch hook (called from `refresh_theme`) even
+        though it sets no border today, since some future styling here may
+        still need to react to a theme switch."""
+        self._controls_bar.setStyleSheet("#imageNavigationBar { border: none; }")
+
+    def _refresh_top_bar_theme(self) -> None:
+        """A single-pixel seam along the bottom edge, where this bar meets
+        the canvas below it (2026-09-30, maintainer request - "make there a
+        bo[r]der on the bottom to separate it from the image area") - same
+        convention as `_refresh_controls_bar_theme`'s old border (only the
+        edge that actually touches the canvas is bordered)."""
         theme = get_active_theme()
-        self._controls_bar.setStyleSheet(
-            f"#imageNavigationBar {{ border: none; border-top: 1px solid {theme.toolbar_border}; }}"
-        )
+        self._top_bar.setStyleSheet(f"#imageTopBar {{ border: none; border-bottom: 1px solid {theme.toolbar_border}; }}")
 
     # -- dataset lifecycle --------------------------------------------------
 
@@ -590,7 +697,7 @@ class ImagePanel(QWidget):
         self._crop_outline_curve.clear()
         self._last_image_shape = None
         self._refresh_navigation_ranges()
-        self._status.setText("No dataset loaded.")
+        self._set_frame_status("No dataset loaded.")
         self.image_cleared.emit()
         # A tool with no image under it has nothing to do; the Workflow
         # panel's buttons follow this signal.
@@ -927,16 +1034,16 @@ class ImagePanel(QWidget):
             # render.py's "latest request wins"), not an error.
             return
         if result.error is not None or result.image is None:
-            self._status.setText(f"Cannot show this frame: {result.error}")
+            # A render error, not "what frame is displayed" - goes to the
+            # status bar (`tool_status_changed`), not the dock title bar
+            # subtitle (see `frame_status_changed`'s docstring).
+            self._on_tool_status(f"Cannot show this frame: {result.error}")
             self._image_item.clear()
             return
         image = np.asarray(result.image, dtype=np.float32)
         self._image_item.setImage(image, autoLevels=True)
         self.image_rendered.emit(image, result.request.cube_index, result.request.wavelength_nm)
-        self._status.setText(
-            f"Cube {result.request.cube_index}, {result.request.wavelength_nm:g} nm "
-            f"- {result.image.shape[1]}x{result.image.shape[0]} px"
-        )
+        self._set_frame_status(f"Cube {result.request.cube_index}, {result.request.wavelength_nm:.0f} nm")
         self._last_image_shape = result.image.shape[:2]
         # The crop tool's clamp bound - correct the instant Crop is active
         # (the frame it renders is the *uncropped* one, `_PREVIEW_TOOLS`),
@@ -1059,14 +1166,24 @@ class ImagePanel(QWidget):
         self._tool_status = text
         self.tool_status_changed.emit(text)
 
+    def _set_frame_status(self, text: str) -> None:
+        self._frame_status = text
+        self.frame_status_changed.emit(text)
+
     def _refresh_tool_info(self, tool: ImageTool | None) -> None:
         """Point the info icon's tooltip at *tool*'s controls. Always shows
         something - every real tool has its own row in `image_controls.py`'s
         `_TOOL_CONTROLS` now; only no tool at all falls back to its
         plain-image row (left-click selects, plus the always-available
-        drag/zoom)."""
+        drag/zoom).
+
+        Rendered at `_ICON_SIZE * 2` and displayed at `_ICON_SIZE`
+        (`style_bar_icon_button`'s `setIconSize`) - the same 2x-render-for-
+        crispness convention `_ToolGroupButton.refresh` already uses for
+        Select/Add ROI's icons, not a fresh choice."""
         theme = get_active_theme()
-        self._tool_info.setPixmap(load_tabler_icon("info-circle", color=theme.text_muted, size=16).pixmap(16, 16))
+        render_size = _ICON_SIZE * 2
+        self._tool_info.setIcon(load_tabler_icon("info-circle", color=theme.text_muted, size=render_size))
         self._tool_info.setToolTip(controls_text(tool))
 
     def _in_view(self, scene_pos: object) -> bool:
@@ -1419,20 +1536,6 @@ class ImagePanel(QWidget):
         value = float(image[row, col])
         return col + 0.5, row + 0.5, f"({col}, {row}) = {value:.1f}"
 
-    def _reposition_cursor_overlay(self) -> None:
-        """Top-right corner of the view - nothing else floats there today
-        (the tool-info icon lives in the controls row below the canvas, not
-        over it), so unlike Histogram's cursor icon this needs no sibling
-        to avoid. Also called on every toggle/mouse-move (`CursorOverlay`'s
-        `on_changed`), since the label's width changes between the small
-        icon and the (usually wider) live text."""
-        label = self._cursor_overlay.icon_label
-        label.adjustSize()
-        margin = 6
-        x = self._view.viewport().width() - label.width() - margin
-        label.move(x, margin)
-        label.raise_()
-
     def roi_at(self, x: float, y: float) -> int | None:
         """The ROI whose sample aperture contains display-space point
         (x, y), or `None`. Public because it is the one piece of this
@@ -1456,11 +1559,6 @@ class ImagePanel(QWidget):
         """Forwards a drag gesture to the owning module - never mutates ROI
         state directly."""
         self._roi_toolbox.request_move(roi_id, x, y)
-
-    def resizeEvent(self, event) -> None:  # noqa: N802 - Qt naming
-        super().resizeEvent(event)
-        if hasattr(self, "_cursor_overlay"):
-            self._reposition_cursor_overlay()
 
     # -- teardown -----------------------------------------------------------
 

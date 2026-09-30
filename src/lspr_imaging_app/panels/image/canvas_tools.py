@@ -1,13 +1,24 @@
-"""Image panel's own on-canvas tool bar (2026-09-30).
+"""Image panel's own on-canvas tool bar (2026-09-30, flipped horizontal
+2026-09-30 same day - see below).
 
-A vertical strip of icon buttons docked to the left edge of the Image
-panel's canvas - deliberately separate from the Workflow panel's Transforms
-row (`panels/workflow/transforms_settings.py`), per the maintainer's own
-distinction: Rotate/Crop/Flip/Measure resample the actual pixel grid
-(AGENTS.md's non-negotiable invariant on that), while the tools that belong
-here are the "soft" ones - visualization/inspection and ROI manipulation -
-that never touch pixel data. Pan and zoom need no tool or icon at all
-(`image_controls.py`: middle-drag pans, wheel zooms, always).
+A horizontal strip of icon buttons docked to the top edge of the Image
+panel's canvas, on the left side of `panel.py`'s shared top bar (the
+cursor-readout and "i" info icons live in the rest of that bar, not here -
+see `panel.py`'s `_build_ui`) - deliberately separate from the Workflow
+panel's Transforms row (`panels/workflow/transforms_settings.py`), per the
+maintainer's own distinction: Rotate/Crop/Flip/Measure resample the actual
+pixel grid (AGENTS.md's non-negotiable invariant on that), while the tools
+that belong here are the "soft" ones - visualization/inspection and ROI
+manipulation - that never touch pixel data. Pan and zoom need no tool or
+icon at all (`image_controls.py`: middle-drag pans, wheel zooms, always).
+
+**Flipped from a vertical left-edge strip to a horizontal top-edge one**
+(2026-09-30, maintainer request - "since frames are usually landscapes"): a
+left rail wastes more of a landscape frame's width than a top bar wastes of
+its height. This widget only lays out its own two buttons horizontally now;
+`panel.py`'s wrapping top bar is what actually borders the canvas (a single
+bottom seam, not this widget's own edge) and owns the cursor/info icons
+that sit to this widget's right.
 
 **Still drives the same shared `ActiveToolModule`/`ImageTool` state machine
 Rotate/Crop/Measure use** (see `active_tool.py`'s module docstring for why
@@ -44,21 +55,20 @@ dispatch table (`_on_scene_clicked`), exactly where Rotate/Crop/Measure's
 own click handling already lives. This bar only ever toggles which tool is
 active; it holds no canvas-interaction logic of its own.
 
-**Sized to hug its icons, with a 1px border seam (revised 2026-09-30,
-maintainer request)** - `_BUTTON_SIZE`/`_ICON_SIZE` shrunk from the first
-pass's `28`/`22` (borrowed from the Transforms row's own buttons, sized for
-a horizontal row with room to spare) to `22`/`16`: a vertical strip docked
-to the canvas edge should read as a thin rail, not a second toolbar's worth
-of width. `refresh_theme()` (new) gives the strip's right edge - the one
-side that actually touches the canvas - a subtle `theme.toolbar_border`
-line, since `ImagePanel`'s canvas background (`toolbar_bg`) and this bar's
-own background are otherwise visually identical, reading as one continuous
-area with no boundary between "controls" and "image". Same convention
-`CropSizeControls`/`MeasureCalibrationControls` already use (an object-name
--scoped inline stylesheet, re-applied at construction and on every live
-theme switch via `ImagePanel.refresh_theme`) - only the right edge is
-bordered here, since the other three sides border this panel's own chrome,
-not the canvas.
+**Sized to hug its icons** - `_BUTTON_SIZE`/`_ICON_SIZE` shrunk from the
+first pass's `28`/`22` (borrowed from the Transforms row's own buttons,
+sized for a horizontal row with room to spare) to `22`/`16`: this strip
+should read as compact, not a second toolbar's worth of size. No border of
+its own (dropped with the flip to horizontal, 2026-09-30) - it no longer
+sits at the canvas's own edge, so `panel.py`'s wrapping top bar is what
+draws the one seam that matters (its own bottom edge, against the canvas).
+
+**`style_bar_icon_button()`** (2026-09-30, maintainer request - "make
+cursor and i icon same as other icons in the bar... this apply for all
+icons later applied") applies that same size/chrome to any `QToolButton`,
+not just this bar's own two - `panel.py`'s cursor-readout and "i" icons go
+through it too, so every icon sharing this row is guaranteed to match
+rather than relying on each caller copying the same numbers correctly.
 """
 
 from __future__ import annotations
@@ -67,7 +77,7 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 
 from PyQt6.QtCore import QSize
-from PyQt6.QtWidgets import QMenu, QToolButton, QVBoxLayout, QWidget
+from PyQt6.QtWidgets import QHBoxLayout, QMenu, QToolButton, QWidget
 
 from lspr_ui import GuiTheme, get_active_theme, load_tabler_icon, transparent_icon_button_stylesheet
 
@@ -81,6 +91,27 @@ _STROKE_WIDTH = 2.1
 _ADD_ROI_ACTIVE_COLOR = "#38bdf8"  # same blue as Crop/Measure - the maintainer's preferred tool color
 _BAR_MARGIN = 2
 _BAR_SPACING = 3
+
+
+def style_bar_icon_button(button: QToolButton, *, fixed_width: bool = True) -> None:
+    """Applies this bar's shared icon-button look - size, hover chrome - to
+    *button*. The single place that look lives (2026-09-30, maintainer
+    request: "make cursor and i icon same as other icons in the bar...
+    this apply for all icons later applied, they should have same style"),
+    so `panel.py`'s cursor-readout/"i" icons, `_ToolGroupButton` below, and
+    any future icon added to this row all go through one function instead
+    of each copying the same four numbers and risking drift.
+
+    `fixed_width=False` for a button that must grow to show live text
+    (the cursor-readout toggle, whose label becomes e.g. "(38, 30) = 123.4"
+    while enabled) - height and icon size still match every other button
+    here, only the width stays free to grow."""
+    button.setIconSize(QSize(_ICON_SIZE, _ICON_SIZE))
+    button.setFixedHeight(_BUTTON_SIZE)
+    if fixed_width:
+        button.setFixedWidth(_BUTTON_SIZE)
+    button.setAutoRaise(True)
+    button.setStyleSheet(transparent_icon_button_stylesheet())
 
 
 @dataclass(frozen=True)
@@ -110,10 +141,7 @@ class _ToolGroupButton(QToolButton):
         self._current = self._variants[0]
 
         self.setCheckable(True)
-        self.setAutoRaise(True)
-        self.setFixedSize(_BUTTON_SIZE, _BUTTON_SIZE)
-        self.setIconSize(QSize(_ICON_SIZE, _ICON_SIZE))
-        self.setStyleSheet(transparent_icon_button_stylesheet())
+        style_bar_icon_button(self)
         self.clicked.connect(self._on_clicked)
 
         if len(self._variants) > 1:
@@ -176,12 +204,15 @@ class CanvasToolsBar(QWidget):
         self._select_button = _ToolGroupButton([select_variant], self)
         self._add_roi_button = _ToolGroupButton([add_roi_variant], self)
 
-        layout = QVBoxLayout(self)
+        # Horizontal, no trailing stretch (2026-09-30, flipped from a
+        # vertical strip) - this widget now just hugs its two buttons
+        # side by side; `panel.py`'s wrapping top bar is the one that
+        # stretches to push the cursor/info icons to the far right.
+        layout = QHBoxLayout(self)
         layout.setContentsMargins(_BAR_MARGIN, _BAR_MARGIN, _BAR_MARGIN, _BAR_MARGIN)
         layout.setSpacing(_BAR_SPACING)
         layout.addWidget(self._select_button)
         layout.addWidget(self._add_roi_button)
-        layout.addStretch(1)
 
         self.setObjectName("canvasToolsBar")
         self.refresh_theme(get_active_theme())
@@ -189,16 +220,12 @@ class CanvasToolsBar(QWidget):
         active_tool.active_tool_changed.connect(self._on_active_tool_changed)
 
     def refresh_theme(self, theme: GuiTheme) -> None:
-        """A subtle 1px seam where this strip meets the canvas - without
-        it, the strip's background and the pyqtgraph canvas right next to
-        it (`ImagePanel.refresh_theme` sets that to the same `toolbar_bg`
-        this app's base chrome already uses) read as one continuous flat
-        area with no visual boundary. Only the right edge needs it - the
-        other three sides border the panel's own chrome, not the canvas.
-        Called at construction and again on a live theme switch (see
-        `ImagePanel.refresh_theme`), matching `CropSizeControls`/
-        `MeasureCalibrationControls`' identical convention."""
-        self.setStyleSheet(f"#canvasToolsBar {{ border: none; border-right: 1px solid {theme.toolbar_border}; }}")
+        """No border of its own (2026-09-30, flipped from a vertical strip -
+        see module docstring) - it no longer sits directly against the
+        canvas, so there's no seam here to draw. Still called at
+        construction and on every live theme switch (`ImagePanel.
+        refresh_theme`) in case a future revision needs to react to one."""
+        self.setStyleSheet("#canvasToolsBar { border: none; }")
 
     def _on_active_tool_changed(self, _tool: object) -> None:
         self._select_button.refresh()

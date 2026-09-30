@@ -357,11 +357,17 @@ class PanelContainer(QDockWidget):
         label.setStyleSheet(f"color: {theme.text_primary}; font-weight: 400; background: transparent;")
         layout.addWidget(label)
 
+        # Centered between the title and the button row (2026-09-30,
+        # maintainer request, Image panel's Cube/wavelength readout) - a
+        # stretch of equal weight on both sides of the label puts it at the
+        # midpoint of whatever space is left between them, rather than
+        # crowding it right up against the title the way a single trailing
+        # stretch would.
+        layout.addStretch(1)
         subtitle_label = QLabel(self._subtitle_text, row)
         subtitle_label.setStyleSheet(f"color: {theme.text_muted}; font-weight: 400; background: transparent;")
         subtitle_label.setToolTip(self._subtitle_tooltip)
         subtitle_label.setVisible(bool(self._subtitle_text))
-        layout.addSpacing(6)
         layout.addWidget(subtitle_label)
         self._subtitle_label = subtitle_label
         layout.addStretch(1)
