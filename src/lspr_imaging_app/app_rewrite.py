@@ -623,14 +623,14 @@ def build_main_window(
     )
     histogram_panel = HistogramPanel(
         image_panel, geometry, mask, chromatic, roi_toolbox, highlight_range,
-        initial_percent_mode=settings.histogram_percent_mode,
+        initial_y_mode=settings.histogram_y_mode,
         initial_log_y=settings.histogram_log_y,
         initial_bin_width=settings.histogram_bin_width_px,
         initial_line_width=settings.histogram_line_width_px,
     )
     histogram_panel.display_settings_changed.connect(
-        lambda percent_mode, log_y, bin_width_px, line_width_px: _persist(
-            histogram_percent_mode=percent_mode,
+        lambda y_mode, log_y, bin_width_px, line_width_px: _persist(
+            histogram_y_mode=y_mode,
             histogram_log_y=log_y,
             histogram_bin_width_px=float(bin_width_px),
             histogram_line_width_px=float(line_width_px),

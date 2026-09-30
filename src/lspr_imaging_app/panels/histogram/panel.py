@@ -56,7 +56,7 @@ from ...selection import HighlightRangeModule
 from ..image.panel import ImagePanel
 from . import compute
 from .plot import DEFAULT_LINE_WIDTH, HistogramPlot
-from .settings_dialog import HistogramPlotSettingsDialog
+from .settings_dialog import Y_MODES, HistogramPlotSettingsDialog
 
 _REDRAW_COALESCE_MS = 100  # sketch §8 - matches every other display panel
 
@@ -65,13 +65,19 @@ class HistogramPanel(QWidget):
     """Plots a histogram of the currently displayed image and drives the
     shared Highlight-range selection."""
 
-    # Carries the whole settings-dialog state (percent_mode, log_y,
-    # bin_width_px, line_width_px) after any one of them changes - one signal
-    # rather than four, since `app_rewrite.py`'s only use for it is writing
-    # all four back to `AppSettings` together (2026-09-30, same "app-level
-    # setting is one field plus one wiring line" mechanism `AppSettings`'s
-    # own docstring describes for `active_workflow_stage`/`theme`/etc).
-    display_settings_changed = pyqtSignal(bool, bool, int, float)
+    # Carries the whole settings-dialog state (y_mode, log_y, bin_width_px,
+    # line_width_px) after any one of them changes - one signal rather than
+    # four, since `app_rewrite.py`'s only use for it is writing all four
+    # back to `AppSettings` together (2026-09-30, same "app-level setting is
+    # one field plus one wiring line" mechanism `AppSettings`'s own
+    # docstring describes for `active_workflow_stage`/`theme`/etc). `y_mode`
+    # is one of `settings_dialog.Y_MODES` ("percent"/"counts"/"normalized"),
+    # not a bool - widened 2026-09-30 to add the "Normalized (peak = 1)"
+    # mode (maintainer's spec: "normalization would be towards highest
+    # value"), which needs a third state a percent/counts bool cannot hold.
+    display_settings_changed = pyqtSignal(str, bool, int, float)
+
+    _Y_LABELS = {"percent": "Pixels (%)", "counts": "Counts", "normalized": "Normalized"}
 
     def __init__(
         self,
@@ -83,7 +89,7 @@ class HistogramPanel(QWidget):
         highlight_range: HighlightRangeModule,
         parent: QWidget | None = None,
         *,
-        initial_percent_mode: bool = True,
+        initial_y_mode: str = "percent",
         initial_log_y: bool = False,
         initial_bin_width: float = compute.DEFAULT_BIN_WIDTH,
         initial_line_width: float = DEFAULT_LINE_WIDTH,
@@ -99,15 +105,20 @@ class HistogramPanel(QWidget):
         self._image: np.ndarray | None = None
         self._frame: tuple[int, float] | None = None
         self._bin_width = float(initial_bin_width)
-        self._percent_mode = bool(initial_percent_mode)
+        self._y_mode = initial_y_mode if initial_y_mode in Y_MODES else "percent"
         self._log_y = bool(initial_log_y)
         self._line_width = float(initial_line_width)
         self._settings_dialog: HistogramPlotSettingsDialog | None = None
+        # Set only by `_on_settings_bin_width_changed`, consumed and cleared
+        # by `_redraw` once the (debounced) redraw it is waiting for
+        # actually happens - see `_redraw`'s own comment for why the Y
+        # refit can't just happen immediately in the settings handler.
+        self._pending_y_refit = False
 
         self._build_ui()
         # Applied after `_build_ui` constructs `self._plot`, same as the
         # settings dialog's own live-apply handlers below - `_bin_width` and
-        # `_percent_mode` need no equivalent push, since `_redraw` (called
+        # `_y_mode` need no equivalent push, since `_redraw` (called
         # once real data arrives) already reads them fresh every time.
         self._plot.set_log_y(self._log_y)
         self._plot.set_line_width(self._line_width)
@@ -128,6 +139,7 @@ class HistogramPanel(QWidget):
         self._plot.min_edited.connect(self._on_highlight_min_edited)
         self._plot.max_edited.connect(self._on_highlight_max_edited)
         self._plot.settings_requested.connect(self._show_settings_dialog)
+        self._plot.y_axis_double_clicked.connect(self._cycle_y_mode)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -158,6 +170,7 @@ class HistogramPanel(QWidget):
     def _redraw(self) -> None:
         if self._image is None or self._frame is None:
             self._plot.clear()
+            self._pending_y_refit = False
             return
 
         image = self._image
@@ -188,6 +201,21 @@ class HistogramPanel(QWidget):
         self._set_curve_from_mask(self._plot.set_sample, sample_mask, edges, image, total_pixels)
         self._set_curve_from_mask(self._plot.set_reference, reference_mask, edges, image, total_pixels)
 
+        if self._pending_y_refit:
+            # A bin-size change just redrew the curves with a different
+            # number/width of bins - pyqtgraph's own continuous Y auto-range
+            # only keeps tracking automatically if nothing has ever disabled
+            # it (e.g. the user previously zoomed/panned), so a manual bin
+            # change after that point could otherwise leave Y sitting at
+            # its old fit against the new curve shape (maintainer's report,
+            # 2026-09-30: "when I do autoscale it will [not] fit the plot to
+            # area, it is stale"). Doing this here, after the real redraw
+            # above, rather than immediately in `_on_settings_bin_width_
+            # changed`, is what makes it fit the *new* data - that handler
+            # only schedules the redraw (debounced), it doesn't perform it.
+            self._pending_y_refit = False
+            self._plot.refit_y()
+
     def _set_curve_from_mask(
         self,
         setter: Callable[[np.ndarray, np.ndarray], None],
@@ -211,7 +239,11 @@ class HistogramPanel(QWidget):
         setter(edges, self._scaled(counts, total_pixels))
 
     def _scaled(self, counts: np.ndarray, total_pixels: int) -> np.ndarray:
-        return compute.as_percent(counts, total_pixels) if self._percent_mode else counts
+        if self._y_mode == "percent":
+            return compute.as_percent(counts, total_pixels)
+        if self._y_mode == "normalized":
+            return compute.as_normalized(counts)
+        return counts
 
     def _resolve_ignore_mask(self) -> np.ndarray | None:
         assert self._frame is not None
@@ -248,7 +280,7 @@ class HistogramPanel(QWidget):
     # -- axis controls ------------------------------------------------------
 
     def _update_y_label(self) -> None:
-        self._plot.set_y_label("Pixels (%)" if self._percent_mode else "Counts")
+        self._plot.set_y_label(self._Y_LABELS[self._y_mode])
 
     # -- highlight range ----------------------------------------------------
 
@@ -301,7 +333,7 @@ class HistogramPanel(QWidget):
     def _show_settings_dialog(self) -> None:
         if self._settings_dialog is None:
             dialog = HistogramPlotSettingsDialog(
-                percent_mode=self._percent_mode,
+                y_mode=self._y_mode,
                 log_y=self._log_y,
                 bin_width=int(self._bin_width),
                 line_width=self._line_width,
@@ -316,11 +348,30 @@ class HistogramPanel(QWidget):
         self._settings_dialog.raise_()
         self._settings_dialog.activateWindow()
 
+    def _cycle_y_mode(self) -> None:
+        """Double-clicking the Y axis (`plot.py`'s `y_axis_double_clicked`)
+        steps to the next entry in `Y_MODES`, wrapping around - maintainer's
+        spec, 2026-09-30: "can y axis be switchable also by double clicking
+        on it." Goes through the same `_apply_y_mode` the settings dialog's
+        combo uses, and keeps that combo's own selection in sync if it
+        happens to be open at the time, so the two controls can never show
+        a different mode from each other."""
+        next_index = (Y_MODES.index(self._y_mode) + 1) % len(Y_MODES)
+        if self._settings_dialog is not None:
+            self._settings_dialog.axis_mode_combo.setCurrentIndex(next_index)  # triggers _on_settings_axis_mode_changed
+        else:
+            self._apply_y_mode(Y_MODES[next_index])
+            self._emit_display_settings_changed()
+
     def _on_settings_axis_mode_changed(self, index: int) -> None:
-        self._percent_mode = index == 0
+        self._apply_y_mode(Y_MODES[index])
+        self._emit_display_settings_changed()
+
+    def _apply_y_mode(self, mode: str) -> None:
+        self._y_mode = mode
         self._update_y_label()
         self._redraw()
-        self._emit_display_settings_changed()
+        self._plot.refit_y()
 
     def _on_settings_scale_changed(self, index: int) -> None:
         self._log_y = index == 1
@@ -331,8 +382,13 @@ class HistogramPanel(QWidget):
         # Coalesced, not immediate: a `QSpinBox` fires `valueChanged` on
         # every step of holding its arrow button or scrolling the mouse
         # wheel over it, same as any other redraw trigger this panel
-        # already debounces through `_schedule_redraw`.
+        # already debounces through `_schedule_redraw`. `_pending_y_refit`
+        # rides along with that same debounce - see `_redraw`'s comment for
+        # why the refit has to wait for the redraw it's attached to, rather
+        # than happening here immediately (which would just fit Y to the
+        # *old* bins, one redraw too early).
         self._bin_width = float(value)
+        self._pending_y_refit = True
         self._schedule_redraw()
         self._emit_display_settings_changed()
 
@@ -343,5 +399,5 @@ class HistogramPanel(QWidget):
 
     def _emit_display_settings_changed(self) -> None:
         self.display_settings_changed.emit(
-            self._percent_mode, self._log_y, int(self._bin_width), self._line_width
+            self._y_mode, self._log_y, int(self._bin_width), self._line_width
         )

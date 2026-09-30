@@ -62,13 +62,14 @@ from __future__ import annotations
 
 import numpy as np
 import pyqtgraph as pg
-from PyQt6.QtCore import QPointF, QSize, Qt, pyqtSignal
+from PyQt6.QtCore import QPointF, Qt, pyqtSignal
 from PyQt6.QtGui import QColor, QResizeEvent
 from PyQt6.QtWidgets import QToolButton, QVBoxLayout, QWidget
 
-from lspr_ui import get_active_theme, load_tabler_icon, tint_tabler_icon, transparent_icon_button_stylesheet
+from lspr_ui import get_active_theme, load_tabler_icon, tint_tabler_icon
 
 from ..cursor_overlay import CursorOverlay
+from ..image.canvas_tools import style_bar_icon_button
 from . import compute
 from .highlight_range_controls import HighlightRangeReadout
 
@@ -102,6 +103,11 @@ class HistogramPlot(QWidget):
     min_edited = pyqtSignal(float)
     max_edited = pyqtSignal(float)
     settings_requested = pyqtSignal()
+    # Double-clicking the left (Y) axis - maintainer's spec, 2026-09-30:
+    # "can y axis be switchable also by double clicking on it." `panel.py`
+    # owns what "switchable" means (cycling `Y_MODES`); this plot only
+    # reports the gesture, same query/command split as `settings_requested`.
+    y_axis_double_clicked = pyqtSignal()
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -116,6 +122,13 @@ class HistogramPlot(QWidget):
         self._plot_item.setLabel("bottom", "Intensity (DN)")
         self._plot_item.setXRange(compute.DEFAULT_INTENSITY_MIN, compute.DEFAULT_INTENSITY_MAX, padding=0.0)
         self._legend = self._plot_item.addLegend(offset=(8, 8))
+
+        # `AxisItem` has no built-in double-click signal of its own (unlike
+        # a `QWidget`) - overriding the bound method on this one axis
+        # instance, not the `AxisItem` class, is the same one-instance-only
+        # monkeypatch technique already used below for `view_box.autoRange`.
+        left_axis = self._plot_item.getAxis("left")
+        left_axis.mouseDoubleClickEvent = self._on_y_axis_double_clicked
 
         view_box = self._plot_item.getViewBox()
         # `setLimits` is pyqtgraph's own mechanism for exactly this - it
@@ -179,13 +192,23 @@ class HistogramPlot(QWidget):
         theme = get_active_theme()
 
         self._settings_button = QToolButton(viewport)
-        self._settings_button.setAutoRaise(True)
         self._settings_button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly)
-        self._settings_button.setIconSize(QSize(theme.compact_icon_inner, theme.compact_icon_inner))
-        self._settings_button.setFixedSize(theme.compact_icon_outer, theme.compact_icon_outer)
+        # Sized to match the Image panel's own overlay icons (2026-09-30,
+        # maintainer request - "change cursor and setting icon size to
+        # match size of icons in image panel"), not this class's previous
+        # `theme.compact_icon_inner/outer` default (22/26px): that token is
+        # used elsewhere in the app for toolbar-row buttons with room to
+        # spare, but the Image panel's own floating-overlay icons (crop's
+        # apply checkmark, the canvas tools bar, its cursor/"i" icons - see
+        # `style_bar_icon_button`'s own docstring) are deliberately smaller
+        # (16/22px) to read as compact corner chrome, not a second toolbar.
+        # `style_bar_icon_button` is that one shared place the Image panel
+        # already funnels its own cursor-icon override through - reusing it
+        # here instead of copying its four numbers keeps both panels'
+        # corner icons from drifting apart again.
+        style_bar_icon_button(self._settings_button, fixed_width=True)
         self._settings_button.setToolTip("Histogram plot settings")
         self._settings_button.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._settings_button.setStyleSheet(transparent_icon_button_stylesheet())
         self._settings_button.clicked.connect(self.settings_requested)
 
         self._range_readout = HighlightRangeReadout(
@@ -206,6 +229,15 @@ class HistogramPlot(QWidget):
             theme=theme,
             on_changed=self._reposition_cursor_overlay,
         )
+        # Overrides `CursorOverlay`'s own default sizing (`theme.compact_
+        # icon_inner`, tuned for this plot's *previous* settings-gear size)
+        # with the Image panel's shared look - same override `image/panel.
+        # py` applies to its own `CursorOverlay` instance, for the same
+        # reason (see the settings-button comment above). `fixed_width=
+        # False`: this button must still grow to show live text (e.g.
+        # "42345 DN, 12.3") once toggled on; only the height/icon size need
+        # to match.
+        style_bar_icon_button(self._cursor_overlay.icon_label, fixed_width=False)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -241,6 +273,10 @@ class HistogramPlot(QWidget):
         view_box.autoRange()
         self._plot_item.autoBtn.hide()
         self._plot_item.sigRangeChangedManually.emit(view_box.mouseEnabled())
+
+    def _on_y_axis_double_clicked(self, event) -> None:  # noqa: N802 - Qt naming
+        event.accept()
+        self.y_axis_double_clicked.emit()
 
     # -- theming --------------------------------------------------------------
 
@@ -293,7 +329,41 @@ class HistogramPlot(QWidget):
         if enabled == self._log_y:
             return
         self._log_y = enabled
+        view_box = self._plot_item.getViewBox()
+        current_x_range = view_box.viewRange()[0]
         self._plot_item.setLogMode(x=False, y=enabled)
+        # `setLogMode` -> `PlotItem.updateLogMode()` calls pyqtgraph's own
+        # `enableAutoRange()` with no axis argument, which re-enables
+        # *continuous* auto-range on X too, not just Y - a pyqtgraph-side
+        # effect that has nothing to do with log mode itself, and it would
+        # silently undo this class's own X design (X only ever moves via an
+        # explicit user/menu action, never by continuously tracking
+        # whatever's on screen - see the class docstring) the next time any
+        # unrelated item change fires. Re-asserting the current X range
+        # right after (a no-op visually) disables continuous auto-range for
+        # X again without moving it, closing that gap.
+        view_box.setXRange(*current_x_range, padding=0.0)
+
+    def refit_y(self) -> None:
+        """One-shot Y-axis fit-to-data, deliberately leaving X untouched -
+        used after a bin-size or Y-axis-mode change so the user never has
+        to reach for the corner "A" button just to see the new curve's
+        actual shape (maintainer's report, 2026-09-30: after changing
+        either, "it is stale" until autoscale is invoked by hand - pyqtgraph
+        only keeps Y continuously auto-fitting until *anything* sets an
+        explicit range, including a previous manual zoom/pan or this same
+        wrapped `autoRange()`, after which it stays wherever it was until
+        asked again). Not routed through the wrapped `view_box.autoRange()`
+        above - that call's whole point is to *also* reset X back to the
+        full sensor range, which is the right behavior for "jump back to
+        seeing everything" but wrong here: changing how the Y-axis reads
+        should never silently move whatever X region the user was already
+        looking at."""
+        view_box = self._plot_item.getViewBox()
+        y_bounds = view_box.childrenBounds()[1]
+        if y_bounds is None:
+            return
+        view_box.setYRange(*y_bounds)
 
     def set_line_width(self, width: float) -> None:
         """One width for every curve - the maintainer's own framing was a

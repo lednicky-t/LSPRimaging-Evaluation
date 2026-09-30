@@ -89,8 +89,13 @@ class AppSettings:
     # rather than in the per-dataset session file. Defaults mirror
     # `compute.DEFAULT_BIN_WIDTH` / `plot.DEFAULT_LINE_WIDTH`; kept as plain
     # literals rather than imported so this file stays free of any `panels/`
-    # (Qt-heavy) dependency.
-    histogram_percent_mode: bool = True
+    # (Qt-heavy) dependency. `histogram_y_mode` replaced the earlier
+    # `histogram_percent_mode: bool` (2026-09-30, adding the "Normalized
+    # (peak = 1)" mode - `settings_dialog.Y_MODES` - needs a third state a
+    # bool can't hold); an old settings file with the retired bool field
+    # just falls back to this field's "percent" default, the same graceful
+    # degradation `expanded_subsections` already relies on for stale keys.
+    histogram_y_mode: str = "percent"
     histogram_log_y: bool = False
     histogram_bin_width_px: float = 512.0
     histogram_line_width_px: float = 1.5

@@ -65,6 +65,21 @@ def as_percent(counts: np.ndarray, total_pixel_count: int) -> np.ndarray:
     return counts / float(total_pixel_count) * 100.0
 
 
+def as_normalized(counts: np.ndarray) -> np.ndarray:
+    """`counts` divided by its own peak, so the tallest bin reads as `1.0`
+    (maintainer's spec, 2026-09-30: "normalization would be towards highest
+    value"). Deliberately per-curve, not shared across curves the way
+    `as_percent`'s `total_pixel_count` is - this mode exists to compare
+    *shape* (where each population's peak sits, how wide it is) rather than
+    relative population size, so each curve gets its own independent peak.
+    An empty/all-zero curve (e.g. no ROI drawn yet) has no peak to divide
+    by and stays at zero rather than dividing by zero."""
+    peak = float(np.max(counts)) if counts.size else 0.0
+    if peak <= 0.0:
+        return np.zeros_like(counts)
+    return counts / peak
+
+
 def estimate_roi_intensity_range(
     values: np.ndarray,
     *,
