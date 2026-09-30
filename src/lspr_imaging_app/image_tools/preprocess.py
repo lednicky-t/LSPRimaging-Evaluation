@@ -34,6 +34,7 @@ from .geometry.transform import (
     apply_spatial_mask,
     apply_spatial_preprocessing,
     rotation_fill_pixel_mask,
+    spatial_coordinate_maps,
 )
 from .mask.model import MaskSettings
 
@@ -76,6 +77,53 @@ def resolve_external_mask(
     if warp_affine is not None:
         mask = warp_boolean_mask_affine(mask, warp_affine)
     return mask
+
+
+def histogram_highlight_mask_to_raw(
+    processed_image: np.ndarray,
+    min_value: float | None,
+    max_value: float | None,
+    raw_shape: tuple[int, int],
+    geometry_settings: GeometrySettings,
+) -> np.ndarray:
+    """The currently-displayed image's ``[min_value, max_value]`` intensity
+    selection (the Histogram panel's highlight range - *processed/displayed*
+    value space) mapped back into a **raw-space** boolean mask, via
+    `spatial_coordinate_maps` - the real port of the stable app's
+    `current_histogram_highlight_mask_raw` (`gui/mask_controller.py`).
+    Either bound may be `None` to leave that side unconstrained; both `None`
+    means nothing selected.
+
+    Raw space, not processed space, because `MaskModule` stores masks
+    exactly as authored in the *raw* frame (see its module docstring) -
+    `resolve_external_mask` re-derives the processed-space view from that
+    raw mask on every render, so storing this selection already in
+    processed space here would silently double-transform it the next time
+    geometry changes. Lives here rather than in `mask/raster_tools.py`
+    (pure Mask-only math) because it needs `GeometryModule`'s spatial
+    transform - AGENTS.md's module-boundary rule keeps Mask and Geometry
+    each independent, so cross-module math lands here instead, the same
+    reason `resolve_external_mask` above does."""
+    if min_value is None and max_value is None:
+        return np.zeros(raw_shape, dtype=bool)
+    selection = np.isfinite(processed_image)
+    if min_value is not None:
+        selection &= processed_image >= float(min_value)
+    if max_value is not None:
+        selection &= processed_image <= float(max_value)
+    raw_mask = np.zeros(raw_shape, dtype=bool)
+    x_map, y_map = spatial_coordinate_maps(raw_shape, geometry_settings)
+    if x_map.shape != selection.shape:
+        # The processed image and the freshly-computed coordinate maps
+        # disagree in shape - geometry changed between the last render and
+        # this call. Nothing sane to select; the caller's next click (after
+        # the next render lands) will be consistent again.
+        return raw_mask
+    raw_x = np.rint(x_map[selection]).astype(np.int32, copy=False)
+    raw_y = np.rint(y_map[selection]).astype(np.int32, copy=False)
+    valid = (raw_x >= 0) & (raw_x < raw_shape[1]) & (raw_y >= 0) & (raw_y < raw_shape[0])
+    raw_mask[raw_y[valid], raw_x[valid]] = True
+    return raw_mask
 
 
 def apply_preprocessing(

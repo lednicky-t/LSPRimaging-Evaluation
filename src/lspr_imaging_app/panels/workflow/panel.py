@@ -49,6 +49,7 @@ from __future__ import annotations
 
 import logging
 from enum import Enum, auto
+from typing import TYPE_CHECKING
 
 from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtWidgets import QFrame, QLabel, QScrollArea, QVBoxLayout, QWidget
@@ -56,8 +57,8 @@ from PyQt6.QtWidgets import QFrame, QLabel, QScrollArea, QVBoxLayout, QWidget
 from lspr_ui import get_active_theme
 
 from ...dataset import DatasetModule
-from ...image_tools import ActiveToolModule, BackgroundModule, GeometryModule, MaskModule
-from ...selection import ReferenceFrameModule, SelectionModule
+from ...image_tools import ActiveToolModule, BackgroundModule, ChromaticModule, GeometryModule, MaskModule
+from ...selection import HighlightRangeModule, ReferenceFrameModule, SelectionModule
 from ...storage.session_coordinator import SessionCoordinator
 from .background_removal import BackgroundRemovalSection
 from .collapsible_section import CollapsibleSection
@@ -65,10 +66,22 @@ from .dataset_experimental_plan import ExperimentalPlanSection
 from .dataset_export import DatasetExportSection
 from .dataset_folder_row import DatasetFolderRow
 from .dataset_summary import DatasetSummarySection
+from .mask_highlight_actions import MaskHighlightActions
 from .mask_settings import MaskSettingsSection
 from .reference_frame_row import ReferenceFrameRow
 from .session_picker_row import SessionPickerRow
 from .transforms_settings import TransformsSection
+
+if TYPE_CHECKING:
+    # Deferred: `panels.image.panel` imports `workflow.transforms_settings`
+    # (above), so importing `ImagePanel` at module level here would be a
+    # real import cycle (workflow/__init__.py pulls in this whole file to
+    # get `WorkflowPanel`, which would then try to import a still-
+    # mid-import `image.panel`) - see `mask_highlight_actions.py`'s
+    # docstring for the full trace. `from __future__ import annotations`
+    # already makes every annotation in this file a string, so this
+    # class is never actually needed at runtime, only by a type checker.
+    from ..image.panel import ImagePanel
 
 logger = logging.getLogger(__name__)
 
@@ -210,6 +223,10 @@ def _build_image_tools_section(
     active_tool: ActiveToolModule,
     background: BackgroundModule,
     mask: MaskModule,
+    chromatic: ChromaticModule,
+    dataset: DatasetModule,
+    highlight_range: HighlightRangeModule,
+    image_panel: ImagePanel,
 ) -> tuple[CollapsibleSection, list[tuple[str, CollapsibleSection]]]:
     """Ported from the source's ``image_tools_section`` + its nested
     Transforms/Mask/Chromatic correction/Background removal children.
@@ -225,13 +242,20 @@ def _build_image_tools_section(
     was the first section to use the apply toggle for real
     (``BackgroundModule``'s whole settings surface is one command). Mask
     gets no apply toggle - ``MaskSettings`` has no on/off field to back one
-    (see ``mask_settings.py``'s docstring), and only its tool-tuning
-    numbers are built here, not the Apply/Reset/Show actions that compute
-    a real mask candidate (those need a background worker and
-    ``ChromaticModule`` coordination `MaskModule` explicitly defers).
-    Transforms/Chromatic correction are still placeholders: per the design
-    doc §3 icon-placement split, most of their real controls live on the
-    Image panel's own toolbar instead, which doesn't exist yet."""
+    (see ``mask_settings.py``'s docstring).
+
+    **Mask's histogram-highlight actions built 2026-09-30**
+    (``mask_highlight_actions.py``, maintainer request): a Persistent/
+    Individual scope toggle plus Add/Subtract-highlighted-pixels icon
+    buttons, stacked below the tuning form in the same "Mask" section body -
+    this is the "compute and commit a candidate" half ``mask_settings.py``'s
+    docstring flagged as deferred, now built for the histogram-highlight
+    tool specifically (the cheap, synchronous one - the relative/local-
+    contrast tools still need the background-worker machinery
+    ``MaskModule``'s docstring describes, not built here). Transforms/
+    Chromatic correction are still placeholders: per the design doc §3
+    icon-placement split, most of their real controls live on the Image
+    panel's own toolbar instead, which doesn't exist yet."""
     background_removal_content = BackgroundRemovalSection(background, parent)
     background_removal_section = CollapsibleSection(
         "Background removal",
@@ -263,8 +287,16 @@ def _build_image_tools_section(
     transforms_section = CollapsibleSection(
         "Transforms", TransformsSection(geometry, active_tool, parent), expanded=True, title_color=_nested_title_color(), parent=parent
     )
+    mask_content = QWidget(parent)
+    mask_content_layout = QVBoxLayout(mask_content)
+    mask_content_layout.setContentsMargins(0, 0, 0, 0)
+    mask_content_layout.setSpacing(0)
+    mask_content_layout.addWidget(MaskSettingsSection(mask, parent))
+    mask_content_layout.addWidget(
+        MaskHighlightActions(mask, geometry, chromatic, dataset, highlight_range, image_panel, parent)
+    )
     mask_section = CollapsibleSection(
-        "Mask", MaskSettingsSection(mask, parent), expanded=True, title_color=_nested_title_color(), parent=parent
+        "Mask", mask_content, expanded=True, title_color=_nested_title_color(), parent=parent
     )
     chromatic_section = CollapsibleSection(
         "Chromatic correction",
@@ -369,8 +401,11 @@ class WorkflowPanel(QWidget):
         active_tool: ActiveToolModule,
         background: BackgroundModule,
         mask: MaskModule,
+        chromatic: ChromaticModule,
         selection: SelectionModule,
         reference_frame: ReferenceFrameModule,
+        highlight_range: HighlightRangeModule,
+        image_panel: ImagePanel,
         session_coordinator: SessionCoordinator,
         initial_stage: WorkflowStage | None = None,
         initial_subsections: dict[str, bool] | None = None,
@@ -383,7 +418,12 @@ class WorkflowPanel(QWidget):
                 WorkflowStage.DATASET,
                 *_build_dataset_section(self, dataset, selection, reference_frame, session_coordinator),
             ),
-            (WorkflowStage.IMAGE_TOOLS, *_build_image_tools_section(self, geometry, active_tool, background, mask)),
+            (
+                WorkflowStage.IMAGE_TOOLS,
+                *_build_image_tools_section(
+                    self, geometry, active_tool, background, mask, chromatic, dataset, highlight_range, image_panel
+                ),
+            ),
             (WorkflowStage.ROI_SELECTION, *_build_roi_selection_section(self)),
             (WorkflowStage.ANALYSIS, *_build_analysis_section(self)),
             (WorkflowStage.OUTPUTS, *_build_outputs_section(self)),
