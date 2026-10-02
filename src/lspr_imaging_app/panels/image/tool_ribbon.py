@@ -4,8 +4,12 @@ the active category's tools, Office/Inkscape/Photoshop-style (maintainer's
 own reference points, 2026-09-30).
 
 Replaces the single-row bar `panel.py` used to embed directly: `panel.py`
-now builds one `ImageToolRibbon` with three seeded categories - "Image
-tools", "Histogram", "ROIs" - and embeds that instead. `CanvasToolsBar`
+now builds one `ImageToolRibbon` with four seeded categories - "Image
+tools", "Mask", "Histogram", "ROIs" - and embeds that instead. "Mask" holds
+`MaskOverlayControls` (show/hide + color + transparency for the mask-overlay
+tint) - it used to share "Image tools" with `TransformsSection`, separated
+by a vertical divider, until it got its own tab (2026-10-01, maintainer
+request - keep the mask icons out of "Image tools"). `CanvasToolsBar`
 (`canvas_tools.py`) is unchanged and is now just the "ROIs" category's
 content widget: Select and Add ROI are both ROI actions (Select's own
 tooltip is "Left-click an ROI to select it, drag to move it"), so they
@@ -34,10 +38,11 @@ the maintainer's plan is to add them once a category actually has enough
 tools to need grouping within itself, not to guess at that structure now.
 
 **The bottom row is a fixed height** regardless of which category is
-showing (`_ROW_HEIGHT` - the taller of `CanvasToolsBar`'s and
-`TransformsSection`'s own natural heights), so switching tabs never resizes
-the Image panel's top bar - `QStackedWidget` would otherwise report
-whichever page happens to be the tallest.
+showing (`_ROW_HEIGHT` - the tallest of `CanvasToolsBar`'s,
+`TransformsSection`'s, and the "Mask" tab's captioned-icon-groups' own
+natural heights), so switching tabs never resizes the Image panel's top bar
+- `QStackedWidget` would otherwise report whichever page happens to be the
+tallest.
 
 **Tabs are plain checkable `QToolButton`s in a `QButtonGroup`**, not a
 `QTabBar`/`QTabWidget` - this ribbon's whole point is a category row wired
@@ -62,13 +67,22 @@ from ..workflow.transforms_settings import ROW_HEIGHT as _TRANSFORMS_ROW_HEIGHT
 from .canvas_tools import _BAR_MARGIN, _BUTTON_SIZE
 
 _CANVAS_TOOLS_ROW_HEIGHT = _BUTTON_SIZE + 2 * _BAR_MARGIN
-# The taller of the two real categories' own natural heights - today that's
-# the "Image tools" tab's `TransformsSection` (36px: 28px buttons + 4px
-# margins) over the "ROIs" tab's `CanvasToolsBar` (26px). Shorter content
-# (a placeholder, or `CanvasToolsBar`) just sits centered in the extra room -
-# see module docstring for why one fixed height for every category, not a
+# The "Mask" tab's two icon groups (`panel.py`'s `_labeled_icon_group`,
+# 2026-10-02) each carry a small caption under their icons now - 28px icon
+# row (`MaskScopeToggle`/`MaskOverlayControls`'s own button size) + 2px
+# group spacing + 12px for one line of 9px-font caption text (measured via
+# `QLabel.sizeHint()`, not guessed - font rendering isn't just the pixel
+# size). Kept as a literal here rather than imported from `panel.py` -
+# `panel.py` imports this module, so the reverse would be a real cycle.
+_MASK_GROUP_ROW_HEIGHT = 42
+# The tallest of the real categories' own natural heights - today that's
+# this "Mask" group height (42px) over the "Image tools" tab's
+# `TransformsSection` (36px: 28px buttons + 4px margins) over the "ROIs"
+# tab's `CanvasToolsBar` (26px). Shorter content (a placeholder, or
+# `CanvasToolsBar`) just sits centered in the extra room - see module
+# docstring for why one fixed height for every category, not a
 # per-category one, is the point.
-_ROW_HEIGHT = max(_CANVAS_TOOLS_ROW_HEIGHT, _TRANSFORMS_ROW_HEIGHT)
+_ROW_HEIGHT = max(_CANVAS_TOOLS_ROW_HEIGHT, _TRANSFORMS_ROW_HEIGHT, _MASK_GROUP_ROW_HEIGHT)
 _TAB_HEIGHT = 20
 _TAB_FONT_SIZE_PX = 11
 

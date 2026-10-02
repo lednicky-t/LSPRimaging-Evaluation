@@ -1,8 +1,12 @@
-"""Image Tools ribbon - mask overlay display controls (2026-09-30): a
+"""Image panel tool ribbon - "Mask" tab display controls (2026-09-30): a
 show/hide toggle, a color swatch, and a transparency slider, ported from
 the stable app's mask-overlay controls (`gui/main_window.py`'s
 `show_mask_check`/`mask_color_button`/`mask_alpha_slider`, wired in
-`gui/overlay_manager.py`'s `_update_ignore_mask_overlay`).
+`gui/overlay_manager.py`'s `_update_ignore_mask_overlay`). Originally shared
+the "Image tools" tab with `TransformsSection`, separated by a vertical
+divider; moved into its own "Mask" tab (2026-10-01, maintainer request) so
+"Image tools" stays Transforms-only - see `panel.py`'s `_build_ui` for the
+tab wiring.
 
 This is display-only cosmetic state, not a `MaskModule` command.
 `MaskModule` owns the ignore mask itself - which pixels are excluded,
@@ -21,7 +25,11 @@ own local `gui/widgets.py` one - the rewrite tree never imports from the
 old `gui` package, see AGENTS.md's module-boundary rule) for the
 transparency control, and the vendored `mask`/`mask-off` Tabler icons for
 the toggle, matching the stable app's own icon choice
-(`MainWindowIcons._make_view_toggle_icon`, kind="mask")."""
+(`MainWindowIcons._make_view_toggle_icon`, kind="mask"). `mask-off`'s
+crossing line was flipped to the opposite diagonal in the vendored SVG
+itself (2026-10-02, maintainer request) - it's a suite-wide shared asset
+(`lspr_ui/icon_assets/mask-off.svg`), so the stable app's own "mask
+visible/hidden" toggle picks up the same look."""
 
 from __future__ import annotations
 
@@ -37,7 +45,13 @@ _RENDER_SIZE = _ICON_SIZE * 2  # rendered at 2x, scaled down - crisper than a na
 _STROKE_WIDTH = 2.1
 _ACTIVE_COLOR = "#22c55e"  # the stable app's literal for "overlay visible"
 _SWATCH_SIZE = 14
-_SLIDER_WIDTH = 28
+# Narrower than `CompactWedgeSlider`'s own 24px default minimum (2026-10-02,
+# maintainer request: "make this control a bit narrow... the triangle will
+# be more steeper") - the wedge's height is fixed at 12px
+# (`CompactWedgeSlider.setMaximumHeight`), so narrowing the width is the only
+# way to steepen its slope; 28px read as a shallow, wide ramp, 18px reads as
+# a visibly steeper wedge while staying wide enough to drag accurately.
+_SLIDER_WIDTH = 18
 
 
 class MaskOverlayControls(QWidget):

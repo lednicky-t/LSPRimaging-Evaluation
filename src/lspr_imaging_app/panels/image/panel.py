@@ -86,6 +86,7 @@ from PyQt6.QtWidgets import (
     QFrame,
     QHBoxLayout,
     QLabel,
+    QSizePolicy,
     QSpinBox,
     QToolButton,
     QVBoxLayout,
@@ -95,7 +96,15 @@ from PyQt6.QtWidgets import (
 from lspr_ui import get_active_theme, load_tabler_icon
 
 from ...dataset import DatasetModule
-from ...image_tools import ActiveToolModule, BackgroundModule, ChromaticModule, GeometryModule, ImageTool, MaskModule
+from ...image_tools import (
+    ActiveToolModule,
+    BackgroundModule,
+    ChromaticModule,
+    GeometryModule,
+    ImageTool,
+    MaskModule,
+    MaskScopeModule,
+)
 from ...image_tools.geometry.model import CropDefinition, GeometrySettings
 from ...image_tools.preprocess import resolve_external_mask
 from ...roi import RoiToolbox
@@ -113,6 +122,7 @@ from .data_axis_slider import DataAxisSlider
 from .guided_value_spinbox import GuidedValueSpinBox
 from .image_controls import ImageViewBox, controls_text
 from .mask_overlay_controls import MaskOverlayControls
+from .mask_scope_toggle import MaskScopeToggle
 from .measure_controls import MeasureCalibrationControls
 from .measure_line_tool import MeasureLineTool
 from .render import ImageRenderer, RenderRequest, RenderResult
@@ -157,17 +167,68 @@ def _slider_axis_title_style(color: str) -> str:
 
 
 def _vertical_separator(parent: QWidget) -> QFrame:
-    """A thin vertical divider line - used to visually split the "Image
-    tools" tab's Transforms group from the mask-overlay controls group
-    (maintainer request: "can be separated by |"). `QFrame`'s line frames
-    draw using the widget's foreground color, which the `color` stylesheet
-    property sets - the usual Qt trick for recoloring a frame line."""
+    """A thin vertical divider line - used in the "Mask" ribbon tab to
+    visually split the Persistent/Individual scope toggle (left) from the
+    mask-overlay display controls (maintainer request, 2026-10-02: "put them
+    on the left side and separate from rest by | line"). `QFrame`'s line
+    frames draw using the widget's foreground color, which the `color`
+    stylesheet property sets - the usual Qt trick for recoloring a frame
+    line.
+
+    Expands to fill the row's height rather than a fixed pixel value
+    (2026-10-02 - each side is now a `_labeled_icon_group`, two rows tall:
+    icons plus a caption underneath, so a height guessed for a single icon
+    row would read as visibly short) - `QHBoxLayout` stretches a child with
+    an `Expanding` vertical policy to match the tallest sibling in the row
+    for free, so this stays correct however tall the captioned groups end
+    up being."""
     line = QFrame(parent)
     line.setFrameShape(QFrame.Shape.VLine)
     line.setFrameShadow(QFrame.Shadow.Plain)
-    line.setFixedHeight(28)  # matches the row's own icon-button height
+    line.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Expanding)
     line.setStyleSheet(f"color: {get_active_theme().control_border};")
     return line
+
+
+_GROUP_LABEL_FONT_SIZE_PX = 9
+
+
+def _group_label_style() -> str:
+    """Small, muted caption style for `_labeled_icon_group` below - clearly
+    quieter than the Cube/λ slider titles (`_slider_axis_title_style`: 11px/
+    600/`text_muted`), on purpose: those are navigation labels meant to be
+    read; this is a caption meant to be noticed only on a second look.
+    `text_dim` is this theme's one step darker/more muted than `text_muted`
+    (see `lspr_ui`'s `GuiTheme`)."""
+    return f"color: {get_active_theme().text_dim}; font-size: {_GROUP_LABEL_FONT_SIZE_PX}px;"
+
+
+def _labeled_icon_group(parent: QWidget, content: QWidget, label_text: str) -> tuple[QWidget, QLabel]:
+    """Wraps an icon row with a small, muted caption centered underneath it
+    (maintainer request, 2026-10-02: non-intrusive section labels - "State"/
+    "Visibility" under the Mask tab's two icon groups, each group's own
+    boundary already implied by the tab's edge and the `|` divider between
+    groups, so no extra bordered box is drawn here). Deliberately plain text
+    below the row, not `lspr_ui`'s `toolbarSectionTitle` convention (sLSPR
+    Evaluation's own `main_window.py`) - that one sits *above* a single
+    control and reads as a form label; this one sits *below* a row of icons
+    and reads as a caption, which is why it needs to stay quieter (smaller,
+    `text_dim`, no bold) rather than reusing that style verbatim.
+
+    Returns the wrapping group widget and the label itself - callers keep
+    the label reference only to restyle it on a live theme switch (see
+    `panel.py`'s `refresh_theme`); nothing reads its text back."""
+    group = QWidget(parent)
+    layout = QVBoxLayout(group)
+    layout.setContentsMargins(0, 0, 0, 0)
+    layout.setSpacing(2)
+    layout.addWidget(content, 0, Qt.AlignmentFlag.AlignHCenter)
+    label = QLabel(label_text, group)
+    label.setAlignment(Qt.AlignmentFlag.AlignHCenter)
+    label.setStyleSheet(_group_label_style())
+    layout.addWidget(label, 0, Qt.AlignmentFlag.AlignHCenter)
+    return group, label
+
 
 _PREVIEW_TOOLS = frozenset({ImageTool.ROTATE, ImageTool.CROP})
 """Tools that work on the *uncropped* image: while one is active the image is
@@ -259,6 +320,7 @@ class ImagePanel(QWidget):
         reference_frame: ReferenceFrameModule,
         parent: QWidget | None = None,
         *,
+        mask_scope: MaskScopeModule,
         initial_view_range: tuple[tuple[float, float], tuple[float, float]] | None = None,
     ) -> None:
         super().__init__(parent)
@@ -272,6 +334,7 @@ class ImagePanel(QWidget):
         self._dataset = dataset
         self._geometry = geometry
         self._mask = mask
+        self._mask_scope = mask_scope
         self._chromatic = chromatic
         self._background = background
         self._roi_toolbox = roi_toolbox
@@ -415,8 +478,8 @@ class ImagePanel(QWidget):
         # request, "since frames are usually landscapes" - a left rail
         # wastes more of a landscape frame's width than a top bar wastes of
         # its height). A category ribbon on the left (`ImageToolRibbon`,
-        # added 2026-09-30 - "Image tools"/"Histogram"/"ROIs" tabs over a
-        # fixed-height tool row, ribbon-style; "Histogram" is still a seeded
+        # added 2026-09-30 - "Image tools"/"Mask"/"Histogram"/"ROIs" tabs over
+        # a fixed-height tool row, ribbon-style; "Histogram" is still a seeded
         # placeholder - see `tool_ribbon.py`'s module docstring for why
         # Select/Add ROI (`CanvasToolsBar`) landed under "ROIs" rather than
         # "Image tools"); the cursor-readout and "i" info icons on the right
@@ -433,10 +496,19 @@ class ImagePanel(QWidget):
         # door onto the same backend, not a copy that can drift out of sync.
         self._transforms_section = TransformsSection(self._geometry, self._active_tool, self)
 
+        # Persistent/Individual mask-edit scope toggle (2026-10-02,
+        # maintainer request - copy these icons into the Image panel's own
+        # "Mask" tab too). Reads/drives the same `MaskScopeModule` the
+        # Workflow panel's `MaskHighlightActions` uses, so the two toggles
+        # can never disagree about where a new mask edit lands - see
+        # `mask_scope_toggle.py`'s module docstring.
+        self._mask_scope_toggle = MaskScopeToggle(self._mask_scope, self)
+
         # Mask-overlay show/hide + color + transparency (2026-09-30,
         # maintainer request - "implement the mask overlay features" ported
-        # from the stable app), sharing the "Image tools" tab with
-        # Transforms above, separated by a vertical divider - see
+        # from the stable app). Moved into its own "Mask" ribbon tab
+        # (2026-10-01, maintainer request - keep the mask icons out of
+        # "Image tools" so that tab stays Transforms-only) - see
         # mask_overlay_controls.py's module docstring for why this state
         # lives on the panel rather than on `MaskModule`.
         self._mask_overlay_controls = MaskOverlayControls(
@@ -448,16 +520,34 @@ class ImagePanel(QWidget):
         self._mask_overlay_controls.visibility_changed.connect(self._on_mask_overlay_visibility_changed)
         self._mask_overlay_controls.color_changed.connect(self._on_mask_overlay_color_changed)
         self._mask_overlay_controls.alpha_changed.connect(self._on_mask_overlay_alpha_changed)
-        self._mask_overlay_separator = _vertical_separator(self)
+        self._mask_scope_separator = _vertical_separator(self)
 
         image_tools_content = QWidget(self)
         image_tools_content_layout = QHBoxLayout(image_tools_content)
         image_tools_content_layout.setContentsMargins(0, 0, 0, 0)
         image_tools_content_layout.setSpacing(6)
         image_tools_content_layout.addWidget(self._transforms_section)
-        image_tools_content_layout.addWidget(self._mask_overlay_separator)
-        image_tools_content_layout.addWidget(self._mask_overlay_controls)
         image_tools_content_layout.addStretch(1)
+
+        # Scope toggle on the left, a vertical divider, then the overlay
+        # display controls (maintainer request, 2026-10-02: "put them on the
+        # left side and separate from rest by | line"), each group captioned
+        # ("State"/"Visibility") below its icons - same request, "some
+        # non-intrusive labels... smaller fonts, more darker" - see
+        # `_labeled_icon_group`'s own docstring for the style reasoning.
+        mask_state_group, self._mask_state_label = _labeled_icon_group(self, self._mask_scope_toggle, "State")
+        mask_visibility_group, self._mask_visibility_label = _labeled_icon_group(
+            self, self._mask_overlay_controls, "Visibility"
+        )
+
+        mask_content = QWidget(self)
+        mask_content_layout = QHBoxLayout(mask_content)
+        mask_content_layout.setContentsMargins(0, 0, 0, 0)
+        mask_content_layout.setSpacing(6)
+        mask_content_layout.addWidget(mask_state_group)
+        mask_content_layout.addWidget(self._mask_scope_separator)
+        mask_content_layout.addWidget(mask_visibility_group)
+        mask_content_layout.addStretch(1)
 
         self._top_bar = QWidget(self)
         self._top_bar.setObjectName("imageTopBar")
@@ -467,6 +557,7 @@ class ImagePanel(QWidget):
         self._tool_ribbon = ImageToolRibbon(
             [
                 ("Image tools", image_tools_content),
+                ("Mask", mask_content),
                 ("Histogram", None),
                 ("ROIs", self._canvas_tools),
             ],
@@ -768,8 +859,13 @@ class ImagePanel(QWidget):
             self._canvas_tools.refresh_theme(get_active_theme())
         if hasattr(self, "_mask_overlay_controls"):
             self._mask_overlay_controls.refresh_theme(get_active_theme())
-        if hasattr(self, "_mask_overlay_separator"):
-            self._mask_overlay_separator.setStyleSheet(f"color: {get_active_theme().control_border};")
+        if hasattr(self, "_mask_scope_toggle"):
+            self._mask_scope_toggle.refresh_theme(get_active_theme())
+        if hasattr(self, "_mask_scope_separator"):
+            self._mask_scope_separator.setStyleSheet(f"color: {get_active_theme().control_border};")
+        for label_attr in ("_mask_state_label", "_mask_visibility_label"):
+            if hasattr(self, label_attr):
+                getattr(self, label_attr).setStyleSheet(_group_label_style())
         if hasattr(self, "_tool_ribbon"):
             self._tool_ribbon.refresh_theme(get_active_theme())
         if hasattr(self, "_controls_bar"):

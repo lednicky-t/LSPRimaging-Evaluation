@@ -41,7 +41,14 @@ from .analysis.provenance import FrameNamingScheme
 from .dataset import DatasetModule
 from .gui.app_theme import LSPRI_BRIGHT_THEME, LSPRI_DARK_THEME, apply_app_theme
 from .gui.windows_titlebar import apply_windows_titlebar_color
-from .image_tools import ActiveToolModule, BackgroundModule, ChromaticModule, GeometryModule, MaskModule
+from .image_tools import (
+    ActiveToolModule,
+    BackgroundModule,
+    ChromaticModule,
+    GeometryModule,
+    MaskModule,
+    MaskScopeModule,
+)
 from .panels.dock_container import PanelContainer
 from .panels.fixed_width_separator_guard import FixedWidthSeparatorGuard
 from .panels.histogram import HistogramPanel
@@ -533,6 +540,10 @@ def build_main_window(
     # Transient UI mode (which canvas tool is on) - not undoable/persisted; see its docstring.
     active_tool = ActiveToolModule()
     mask = MaskModule()
+    # Transient UI mode (which scope a *new* mask edit would land in) - shared
+    # between the Workflow panel's Mask section and the Image panel's own
+    # "Mask" tab; see image_tools/mask_scope.py's docstring.
+    mask_scope = MaskScopeModule()
     chromatic = ChromaticModule()
     background = BackgroundModule()
     roi_toolbox = RoiToolbox()
@@ -614,6 +625,7 @@ def build_main_window(
     )
     image_panel = ImagePanel(
         dataset, geometry, mask, chromatic, background, roi_toolbox, selection, active_tool, reference_frame,
+        mask_scope=mask_scope,
         initial_view_range=initial_view_range,
     )
     image_panel.view_range_changed.connect(
@@ -663,6 +675,7 @@ def build_main_window(
         highlight_range,
         image_panel,
         session_coordinator,
+        mask_scope,
         initial_stage=initial_stage,
         initial_subsections=settings.expanded_subsections,
     )

@@ -25,6 +25,16 @@ reading the code rather than assumed, matching the maintainer's stated
 expectation exactly ("canonical should be whole cube and cubes onwards"),
 so no `MaskModule` change was needed for that part.
 
+**The toggle itself moved out to `MaskScopeModule`/`MaskScopeToggle`**
+(2026-10-02, maintainer request: copy the Persistent/Individual icons into
+the Image panel's own "Mask" tab too) - this widget used to own the toggle
+as a private `QButtonGroup`; a second copy elsewhere could only have
+duplicated that, not stayed in sync with it, which would have made "which
+scope does Add/Subtract actually use" ambiguous. This widget now takes a
+`MaskScopeModule` it shares with whoever else shows the toggle, and reads
+`scope_module.scope()` instead of its own buttons' checked state - see
+`image_tools/mask_scope.py`'s module docstring for the full reasoning.
+
 Cube-to-cube consistency for a persistent mask still relies on the
 existing "chromatic models don't vary by cube" simplifying assumption
 (`ChromaticModule`'s own docstring) - no per-cube sample-drift registration
@@ -40,14 +50,15 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 from PyQt6.QtCore import QSize
-from PyQt6.QtWidgets import QButtonGroup, QHBoxLayout, QToolButton, QWidget
+from PyQt6.QtWidgets import QHBoxLayout, QToolButton, QWidget
 
-from lspr_ui import get_active_theme, load_tabler_icon, transparent_icon_button_stylesheet
+from lspr_ui import load_tabler_icon, transparent_icon_button_stylesheet
 
 from ...dataset import DatasetModule
-from ...image_tools import ChromaticModule, GeometryModule, MaskModule
+from ...image_tools import ChromaticModule, GeometryModule, MaskModule, MaskScopeModule
 from ...image_tools.preprocess import histogram_highlight_mask_to_raw
 from ...selection import HighlightRangeModule
+from ..image.mask_scope_toggle import MaskScopeToggle
 
 if TYPE_CHECKING:
     # Deferred, not a plain import: `panels.image.panel` imports
@@ -72,7 +83,6 @@ _RENDER_SIZE = _ICON_SIZE * 2  # rendered at 2x, scaled down - crisper than a na
 _STROKE_WIDTH = 2.1
 _ADD_COLOR = "#22c55e"  # the stable app's own literal for this action
 _SUBTRACT_COLOR = "#ef4444"
-_SCOPE_ACTIVE_COLOR = "#38bdf8"  # Crop/Measure's own "tool active" blue, reused for "scope selected"
 
 
 def _action_button(parent: QWidget, icon_name: str, color: str, tooltip: str) -> QToolButton:
@@ -86,25 +96,9 @@ def _action_button(parent: QWidget, icon_name: str, color: str, tooltip: str) ->
     return button
 
 
-def _scope_toggle_button(parent: QWidget, icon_name: str, tooltip: str) -> QToolButton:
-    """Icon-only, no text label - same width-budget fix already applied to
-    Transforms' rotation-fill control (`transforms_settings.py`'s own
-    docstring: a text label there read clearly but pushed the row 20px past
-    the Workflow panel's 320px budget). The tooltip carries the words a
-    label would have."""
-    button = QToolButton(parent)
-    button.setCheckable(True)
-    button.setAutoRaise(True)
-    button.setFixedSize(_BUTTON_SIZE, _BUTTON_SIZE)
-    button.setIconSize(QSize(_ICON_SIZE, _ICON_SIZE))
-    button.setStyleSheet(transparent_icon_button_stylesheet())
-    button.setToolTip(tooltip)
-    button.setIcon(load_tabler_icon(icon_name, color=get_active_theme().text_dim, size=_RENDER_SIZE, stroke_width=_STROKE_WIDTH))
-    return button
-
-
 class MaskHighlightActions(QWidget):
-    """Persistent/Individual scope toggle + Add/Subtract-highlighted-pixels
+    """Persistent/Individual scope toggle (`MaskScopeToggle`, shared state -
+    see this file's module docstring) + Add/Subtract-highlighted-pixels
     buttons, acting on the currently-displayed image and the Histogram
     panel's highlight-range selection (`HighlightRangeModule`)."""
 
@@ -116,6 +110,7 @@ class MaskHighlightActions(QWidget):
         dataset: DatasetModule,
         highlight_range: HighlightRangeModule,
         image_panel: ImagePanel,
+        mask_scope: MaskScopeModule,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
@@ -124,6 +119,7 @@ class MaskHighlightActions(QWidget):
         self._chromatic = chromatic
         self._dataset = dataset
         self._highlight_range = highlight_range
+        self._mask_scope = mask_scope
         # The last image ImagePanel actually rendered, and the exact frame
         # it belongs to - same "read from the one panel that already has
         # it" convention the Histogram panel uses (`image_rendered`'s own
@@ -137,23 +133,7 @@ class MaskHighlightActions(QWidget):
         self._last_image: np.ndarray | None = None
         self._last_frame: tuple[int, float] | None = None
 
-        # "stack-3" (a layered stack - this cube and every one after it) /
-        # "focus-2" (one exact frame) - icon-only, see `_scope_toggle_button`.
-        self._persistent_button = _scope_toggle_button(
-            self, "stack-3", "Persistent scope: new mask edits apply to this cube and every cube after it."
-        )
-        self._persistent_button.setChecked(True)
-        self._persistent_button.toggled.connect(self._refresh_scope_icons)
-
-        self._individual_button = _scope_toggle_button(
-            self, "focus-2", "Individual scope: new mask edits apply to this exact (cube, wavelength) frame only."
-        )
-        self._individual_button.toggled.connect(self._refresh_scope_icons)
-
-        self._scope_group = QButtonGroup(self)
-        self._scope_group.setExclusive(True)
-        self._scope_group.addButton(self._persistent_button)
-        self._scope_group.addButton(self._individual_button)
+        self._scope_toggle = MaskScopeToggle(mask_scope, self)
 
         self._add_button = _action_button(
             self, "square-rounded-plus", _ADD_COLOR, "Add the highlighted histogram pixels to the mask."
@@ -172,14 +152,12 @@ class MaskHighlightActions(QWidget):
         layout = QHBoxLayout(self)
         layout.setContentsMargins(4, 4, 4, 4)
         layout.setSpacing(2)
-        layout.addWidget(self._persistent_button)
-        layout.addWidget(self._individual_button)
+        layout.addWidget(self._scope_toggle)
         layout.addSpacing(6)
         layout.addWidget(self._add_button)
         layout.addWidget(self._subtract_button)
         layout.addStretch(1)
 
-        self._refresh_scope_icons()
         image_panel.image_rendered.connect(self._on_image_rendered)
         image_panel.image_cleared.connect(self._on_image_cleared)
         self._highlight_range.range_changed.connect(self._refresh_enabled)
@@ -200,14 +178,8 @@ class MaskHighlightActions(QWidget):
         self._add_button.setEnabled(enabled)
         self._subtract_button.setEnabled(enabled)
 
-    def _refresh_scope_icons(self, *_args: object) -> None:
-        theme = get_active_theme()
-        for button, icon_name in ((self._persistent_button, "stack-3"), (self._individual_button, "focus-2")):
-            color = _SCOPE_ACTIVE_COLOR if button.isChecked() else theme.text_dim
-            button.setIcon(load_tabler_icon(icon_name, color=color, size=_RENDER_SIZE, stroke_width=_STROKE_WIDTH))
-
     def _current_scope(self) -> str:
-        return "persistent" if self._persistent_button.isChecked() else "individual"
+        return self._mask_scope.scope().value
 
     def _resolve_base_mask(self, target_frame: tuple[int, float], raw_shape: tuple[int, int]) -> np.ndarray:
         """`apply_candidate`'s own docstring: the caller resolves `base_mask`

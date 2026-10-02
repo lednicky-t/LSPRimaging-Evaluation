@@ -57,7 +57,7 @@ from PyQt6.QtWidgets import QFrame, QLabel, QScrollArea, QVBoxLayout, QWidget
 from lspr_ui import get_active_theme
 
 from ...dataset import DatasetModule
-from ...image_tools import ActiveToolModule, BackgroundModule, ChromaticModule, GeometryModule, MaskModule
+from ...image_tools import ActiveToolModule, BackgroundModule, ChromaticModule, GeometryModule, MaskModule, MaskScopeModule
 from ...selection import HighlightRangeModule, ReferenceFrameModule, SelectionModule
 from ...storage.session_coordinator import SessionCoordinator
 from .background_removal import BackgroundRemovalSection
@@ -227,6 +227,7 @@ def _build_image_tools_section(
     dataset: DatasetModule,
     highlight_range: HighlightRangeModule,
     image_panel: ImagePanel,
+    mask_scope: MaskScopeModule,
 ) -> tuple[CollapsibleSection, list[tuple[str, CollapsibleSection]]]:
     """Ported from the source's ``image_tools_section`` + its nested
     Transforms/Mask/Chromatic correction/Background removal children.
@@ -293,7 +294,7 @@ def _build_image_tools_section(
     mask_content_layout.setSpacing(0)
     mask_content_layout.addWidget(MaskSettingsSection(mask, parent))
     mask_content_layout.addWidget(
-        MaskHighlightActions(mask, geometry, chromatic, dataset, highlight_range, image_panel, parent)
+        MaskHighlightActions(mask, geometry, chromatic, dataset, highlight_range, image_panel, mask_scope, parent)
     )
     mask_section = CollapsibleSection(
         "Mask", mask_content, expanded=True, title_color=_nested_title_color(), parent=parent
@@ -407,6 +408,7 @@ class WorkflowPanel(QWidget):
         highlight_range: HighlightRangeModule,
         image_panel: ImagePanel,
         session_coordinator: SessionCoordinator,
+        mask_scope: MaskScopeModule,
         initial_stage: WorkflowStage | None = None,
         initial_subsections: dict[str, bool] | None = None,
         parent: QWidget | None = None,
@@ -421,7 +423,8 @@ class WorkflowPanel(QWidget):
             (
                 WorkflowStage.IMAGE_TOOLS,
                 *_build_image_tools_section(
-                    self, geometry, active_tool, background, mask, chromatic, dataset, highlight_range, image_panel
+                    self, geometry, active_tool, background, mask, chromatic, dataset, highlight_range, image_panel,
+                    mask_scope,
                 ),
             ),
             (WorkflowStage.ROI_SELECTION, *_build_roi_selection_section(self)),
