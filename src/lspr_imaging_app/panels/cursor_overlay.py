@@ -180,7 +180,7 @@ class CursorOverlay(QObject):
         if not self._enabled:
             return
         pos = event[0]
-        if not self._scene_view.sceneBoundingRect().contains(pos):
+        if not self._plot_item.vb.sceneBoundingRect().contains(pos):
             return
         mouse_point = self._plot_item.vb.mapSceneToView(pos)
         result = self._value_at(float(mouse_point.x()), float(mouse_point.y()))

@@ -38,4 +38,4 @@ def format_pixel_value(value: float) -> str:
     """The displayed intensity, or "no data" for a pixel without a value."""
     if not np.isfinite(value):
         return NO_DATA_TEXT
-    return f"{value:.1f}"
+    return f"{value:.0f}"

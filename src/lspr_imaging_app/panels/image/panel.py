@@ -87,6 +87,7 @@ from PyQt6.QtGui import QColor, QFontMetrics
 from PyQt6.QtWidgets import (
     QApplication,
     QCompleter,
+    QGraphicsView,
     QHBoxLayout,
     QLabel,
     QSpinBox,
@@ -264,6 +265,10 @@ class ImagePanel(QWidget):
     # Label of the ribbon tab now shown ("Image tools"/"Mask"/"Histogram"/"ROIs") -
     # lets the Histogram plot honour the area selection only while its own tab is open.
     ribbon_category_changed = pyqtSignal(str)
+    # Intensity under the Image cursor (2026-10-03), or None once the cursor
+    # is switched off / the pixel has no value. The Histogram marks it as a
+    # tick on its x axis. Display only - carries no state anyone must keep.
+    cursor_value_changed = pyqtSignal(object)
 
     def __init__(
         self,
@@ -384,6 +389,10 @@ class ImagePanel(QWidget):
         # pitfall, which cost ~6 rounds of screen-recording analysis to find
         # the last time it was hit.
         self._view = pg.GraphicsLayoutWidget(parent=self)
+        # Repaint the whole canvas on every change: the cursor crosshair's
+        # InfiniteLines span the full view, and Qt's partial-update rectangles
+        # left stale copies of them behind as ghost lines (2026-10-03).
+        self._view.setViewportUpdateMode(QGraphicsView.ViewportUpdateMode.FullViewportUpdate)
         self.refresh_theme()
         # ImageViewBox: middle-drag pans, wheel zooms, left/right drags do
         # nothing (image_controls.py).
@@ -659,6 +668,14 @@ class ImagePanel(QWidget):
         top_bar_layout = QHBoxLayout(self._top_bar)
         top_bar_layout.setContentsMargins(4, 2, 6, 2)
         top_bar_layout.setSpacing(6)
+        # Always-visible leading tab, no caption (2026-10-03). Filled with
+        # the cursor toggle and the area-selection picker just below, once
+        # the cursor overlay exists.
+        self._general_row = QWidget(self)
+        general_row_layout = QHBoxLayout(self._general_row)
+        general_row_layout.setContentsMargins(0, 0, 0, 0)
+        general_row_layout.setSpacing(2)
+        self._area_picker = AreaSelectionPicker(self._area_selection, self._active_tool, self._general_row)
         self._tool_ribbon = ImageToolRibbon(
             [
                 ("Image tools", image_tools_content),
@@ -667,20 +684,9 @@ class ImagePanel(QWidget):
                 ("ROIs", self._canvas_tools),
             ],
             self,
+            pinned=self._general_row,
         )
         self._tool_ribbon.category_changed.connect(self.ribbon_category_changed)
-        # "General" - always visible, left of the tabs (2026-10-03). Filled
-        # with the cursor toggle and the area-selection picker just below,
-        # once the cursor overlay exists.
-        self._general_row = QWidget(self)
-        general_row_layout = QHBoxLayout(self._general_row)
-        general_row_layout.setContentsMargins(0, 0, 0, 0)
-        general_row_layout.setSpacing(2)
-        self._area_picker = AreaSelectionPicker(self._area_selection, self._active_tool, self._general_row)
-        general_group, self._general_label = labeled_icon_group(self, self._general_row, "General")
-        self._general_separator = vertical_separator(self)
-        top_bar_layout.addWidget(general_group, 0, Qt.AlignmentFlag.AlignBottom)
-        top_bar_layout.addWidget(self._general_separator)
         top_bar_layout.addWidget(self._tool_ribbon)
         top_bar_layout.addStretch(1)
 
@@ -1016,10 +1022,6 @@ class ImagePanel(QWidget):
             self._tool_ribbon.refresh_theme(get_active_theme())
         if hasattr(self, "_area_picker"):
             self._area_picker.refresh_theme(get_active_theme())
-        if hasattr(self, "_general_separator"):
-            self._general_separator.setStyleSheet(f"color: {get_active_theme().control_border};")
-        if hasattr(self, "_general_label"):
-            self._general_label.setStyleSheet(group_label_style())
         if hasattr(self, "_cursor_readout"):
             self._style_cursor_readout()
         if hasattr(self, "_controls_bar"):
@@ -1041,6 +1043,8 @@ class ImagePanel(QWidget):
         self._cursor_readout.adjustSize()
         self._cursor_readout.setVisible(bool(text))
         self._cursor_readout.raise_()
+        if not text:
+            self.cursor_value_changed.emit(None)
 
     def area_selection(self) -> AreaSelectionModule:
         """The shared area selection - editors read it from here so each
@@ -2176,7 +2180,9 @@ class ImagePanel(QWidget):
         height, width = image.shape[:2]
         if not (0 <= row < height and 0 <= col < width):
             return None
-        return col + 0.5, row + 0.5, f"({col}, {row}) = {format_pixel_value(float(image[row, col]))}"
+        value = float(image[row, col])
+        self.cursor_value_changed.emit(value if np.isfinite(value) else None)
+        return col + 0.5, row + 0.5, f"({col}, {row}) = {format_pixel_value(value)}"
 
     def roi_at(self, x: float, y: float) -> int | None:
         """The ROI whose sample aperture contains display-space point

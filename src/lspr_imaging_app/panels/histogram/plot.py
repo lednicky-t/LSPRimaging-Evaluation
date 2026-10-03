@@ -81,6 +81,8 @@ _REFERENCE_COLOR = "#38bdf8"
 _IGNORE_MASK_COLOR = "#ef4444"
 _HIGHLIGHT_BRUSH = (56, 189, 248, 35)
 _HIGHLIGHT_LINE = (56, 189, 248, 160)
+_VALUE_TICK_COLOR = "#facc15"
+_VALUE_TICK_SPAN = 0.06
 _CORNER_MARGIN_PX = 6
 DEFAULT_LINE_WIDTH = 1.5
 
@@ -193,6 +195,16 @@ class HistogramPlot(QWidget):
         self._region.sigRegionChanged.connect(self._on_region_changed_live)
         self._region.sigRegionChangeFinished.connect(self._on_region_drag_finished)
         self._plot_item.addItem(self._region)
+
+        # Short yellow tick on the x axis marking the pixel intensity under
+        # the Image panel's cursor (2026-10-03). `span` is the fraction of
+        # the view height it covers, measured up from the axis.
+        self._value_tick = pg.InfiniteLine(
+            angle=90, movable=False, pen=pg.mkPen(_VALUE_TICK_COLOR, width=2), span=(0.0, _VALUE_TICK_SPAN)
+        )
+        self._value_tick.setZValue(20)
+        self._value_tick.hide()
+        self._plot_item.addItem(self._value_tick, ignoreBounds=True)
 
         viewport = self._plot_widget.viewport()
 
@@ -396,6 +408,14 @@ class HistogramPlot(QWidget):
     def _apply_curve_pens(self) -> None:
         for curve, color_hex in self._curve_colors.items():
             curve.setPen(pg.mkPen(QColor(color_hex), width=self._line_width))
+
+    def set_value_tick(self, value: float | None) -> None:
+        """Marks *value* (DN) on the x axis; `None` hides the tick."""
+        if value is None:
+            self._value_tick.hide()
+            return
+        self._value_tick.setPos(float(value))
+        self._value_tick.show()
 
     # -- highlight range ----------------------------------------------------
 

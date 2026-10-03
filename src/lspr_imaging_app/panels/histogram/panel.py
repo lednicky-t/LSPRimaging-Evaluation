@@ -153,6 +153,7 @@ class HistogramPanel(QWidget):
         # the ribbon's "Histogram" tab is the one open (maintainer's spec).
         self._image_panel.area_selection().selection_changed.connect(self._schedule_redraw)
         self._image_panel.ribbon_category_changed.connect(self._schedule_redraw)
+        self._image_panel.cursor_value_changed.connect(self._plot.set_value_tick)
 
     # -- image lifecycle --------------------------------------------------------
 

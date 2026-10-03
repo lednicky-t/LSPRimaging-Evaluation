@@ -62,8 +62,17 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 
-from PyQt6.QtCore import pyqtSignal
-from PyQt6.QtWidgets import QButtonGroup, QHBoxLayout, QLabel, QStackedWidget, QToolButton, QVBoxLayout, QWidget
+from PyQt6.QtCore import Qt, pyqtSignal
+from PyQt6.QtWidgets import (
+    QButtonGroup,
+    QFrame,
+    QHBoxLayout,
+    QLabel,
+    QStackedWidget,
+    QToolButton,
+    QVBoxLayout,
+    QWidget,
+)
 
 from lspr_ui import GuiTheme, get_active_theme
 
@@ -138,8 +147,14 @@ class ImageToolRibbon(QWidget):
 
     category_changed = pyqtSignal(str)
 
-    def __init__(self, categories: Sequence[tuple[str, QWidget | None]], parent: QWidget | None = None) -> None:
+    def __init__(
+        self,
+        categories: Sequence[tuple[str, QWidget | None]],
+        parent: QWidget | None = None,
+        pinned: QWidget | None = None,
+    ) -> None:
         super().__init__(parent)
+        self._pinned_separator: QFrame | None = None
         if not categories:
             raise ValueError("ImageToolRibbon needs at least one category")
         self.setObjectName("imageToolRibbon")
@@ -171,11 +186,29 @@ class ImageToolRibbon(QWidget):
         self._tab_buttons[0].setChecked(True)
         self._stack.setCurrentIndex(0)
 
-        layout = QVBoxLayout(self)
+        layout = QVBoxLayout()
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(1)
         layout.addLayout(tab_row)
         layout.addWidget(self._stack)
+
+        outer = QHBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(6)
+        if pinned is not None:
+            # Always-visible leading tab (2026-10-03): no caption; its
+            # content sits on the content row, under a blank tab-strip slot.
+            pinned_column = QVBoxLayout()
+            pinned_column.setContentsMargins(_BAR_MARGIN, 0, 0, 0)
+            pinned_column.setSpacing(1)
+            pinned_column.addSpacing(_TAB_HEIGHT)
+            pinned_column.addWidget(pinned, 0, Qt.AlignmentFlag.AlignTop)
+            pinned_column.addStretch(1)
+            outer.addLayout(pinned_column)
+            self._pinned_separator = QFrame(self)
+            self._pinned_separator.setFrameShape(QFrame.Shape.VLine)
+            outer.addWidget(self._pinned_separator)
+        outer.addLayout(layout)
 
         self.refresh_theme(get_active_theme())
 
@@ -198,3 +231,5 @@ class ImageToolRibbon(QWidget):
         stylesheet = _tab_button_stylesheet(theme)
         for button in self._tab_buttons:
             button.setStyleSheet(stylesheet)
+        if self._pinned_separator is not None:
+            self._pinned_separator.setStyleSheet(f"color: {theme.control_border};")
