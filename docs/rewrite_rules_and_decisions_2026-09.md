@@ -1,4 +1,6 @@
-# AGENTS.md — LSPRi Evaluation
+# Rewrite rules and decisions (design record) - LSPRi Evaluation
+
+> This is the design record for the LSPRi rewrite. `CLAUDE.md` in this app holds the authoritative rules; read that first.
 
 ## Status and scope
 
@@ -10,7 +12,7 @@ file gives a more specific rule for this app, this file wins for this app.
 
 **This app is undergoing a from-scratch architectural rewrite**, on a
 dedicated long-lived branch inside this same repository. This is a
-deliberate, explicitly-approved exception to the root `AGENTS.md`'s "Do
+deliberate, explicitly-approved exception to the root `CLAUDE.md`'s "Do
 not rewrite the whole application architecture without explicit approval"
 rule. The approval and its reasoning are recorded in:
 
@@ -354,7 +356,7 @@ through, provenance implications) is separate, not-yet-started work.
 - Any weighted reduction method must be tested for numerical parity
   against its unweighted counterpart in the degenerate all-weights-equal
   case — they must produce identical results there.
-- Follow the root `AGENTS.md`'s numerical-tolerance and simulated-hardware
+- Follow the root `CLAUDE.md`'s numerical-tolerance and simulated-hardware
   testing rules; nothing about this rewrite changes those.
 
 ---
@@ -395,8 +397,8 @@ through, provenance implications) is separate, not-yet-started work.
   file summarizes.
 - `docs/rewrite_build_log_2026-09.md` — dated, append-only record of what's
   actually been built on the `rewrite` branch so far, what was corrected
-  along the way and why, and what's still open. Read this first when
-  resuming the rewrite cold.
+  along the way and why, and what's still open. It is 436 KB: search it by date or keyword, never read it in full.
+  Start with `docs/rewrite_status_and_plan_2026-09-30.md`.
 - `docs/roi_system_roadmap.md` — the adopted ROI model plan (`Pair`
   vocabulary, geometry-type dispatcher).
 - `docs/qthreadpool_zarr_crash_investigation.md`,
@@ -405,3 +407,11 @@ through, provenance implications) is separate, not-yet-started work.
   incident writeups behind the non-negotiable invariants above.
 - `undo/manager.py` — the cross-module undo/redo design (see "Undo/redo"
   above for the summary; that module's own docstring has the full reasoning).
+
+## Historical: spot to sample/reference ROI rename (2026-08)
+
+The old app's `spot`/`ring` names were renamed to sample ROI and reference ROI (a terminology-only first phase). Code identifiers are now `sample_*`, `reference_*`, `AreaRoi`, `AreaRoiGroup`, and `AreaRoiDetectionSettings` throughout `processing/` and `gui/`. The old `DetectedSpot`, `SpotGroup`, and `SpotDetectionSettings` aliases were removed. `processing/spot_detection.py` became `processing/roi_detection.py` (`detect_rois`, not `detect_spots`). JSON files saved before the rename still load through legacy-key fallbacks in `storage/workspace.py`.
+
+Still intentionally "spot": the unrelated `RoiDefinition` rectangle-stamp annotation tool, and the chromatic-correction "Spots" landmark-tracking option (`detect_regional_spot_landmarks`, `track_spot_landmarks`, `spot_radius_px`, `spot_mode`). That feature chooses which blob type to track for image registration. It is not the sample/reference ROI pair.
+
+The larger Template/Placement/Pair ROI model was future work in the original note. See `docs/roi_implementation_direction.md`.

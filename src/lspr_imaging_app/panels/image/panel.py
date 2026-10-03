@@ -32,9 +32,13 @@ does, and the panel reacts identically.
 **Not built here, deliberately** - each is its own piece of work, not
 something this panel should invent an answer for:
 
-- Mask painting/preview overlays, the intensity-highlight overlay, and the
-  histogram-driven highlight (`MaskModule`'s async candidate machinery
-  isn't built either - see its module docstring).
+- Mask painting/preview overlays (`MaskModule`'s async candidate machinery
+  isn't built either - see its module docstring). **The histogram
+  intensity-highlight overlay is built** - 2026-10-02, mirrors the
+  mask-overlay tint's own shape (`_update_highlight_overlay`,
+  `histogram_highlight_overlay_controls.py`), reading
+  `HighlightRangeModule.current_range()` against the already-displayed
+  pixel array instead of a resolved mask.
 - The cursor readout and scale bar - ``GeometryModule`` already owns the
   calibration state they would draw from. (The ruler itself is built -
   2026-09-29, ``measure_line_tool.py`` - two-click placement, drag either
@@ -83,11 +87,10 @@ from PyQt6.QtGui import QColor, QFontMetrics
 from PyQt6.QtWidgets import (
     QApplication,
     QCompleter,
-    QFrame,
     QHBoxLayout,
     QLabel,
-    QSizePolicy,
     QSpinBox,
+    QStackedWidget,
     QToolButton,
     QVBoxLayout,
     QWidget,
@@ -102,6 +105,8 @@ from ...image_tools import (
     ChromaticModule,
     GeometryModule,
     ImageTool,
+    MaskEditTool,
+    MaskEditToolModule,
     MaskModule,
     MaskScopeModule,
 )
@@ -110,9 +115,10 @@ from ...image_tools.preprocess import resolve_external_mask
 from ...roi import RoiToolbox
 from ...roi.model import AreaRoi
 from ...roi.rasterize import effective_reference_radii, transformed_circle_points
-from ...selection import ReferenceFrameModule, SelectionModule
+from ...selection import HighlightRangeModule, ReferenceFrameModule, SelectionModule
 from ...selection.reference_frame_module import MODE_AUTO
 from ..cursor_overlay import CursorOverlay
+from ..ribbon_group import group_label_style, labeled_icon_group, vertical_separator
 from ..workflow.transforms_settings import TransformsSection
 from .canvas_tools import _ICON_SIZE, CanvasToolsBar, style_bar_icon_button
 from .context_menu import show_tool_context_menu
@@ -120,7 +126,17 @@ from .crop_size_controls import CropSizeControls
 from .crop_tool import CropTool
 from .data_axis_slider import DataAxisSlider
 from .guided_value_spinbox import GuidedValueSpinBox
+from .histogram_highlight_overlay_controls import HistogramHighlightOverlayControls
 from .image_controls import ImageViewBox, controls_text
+from .mask_edit_panels import (
+    DrawEditPanel,
+    HistogramSelectionEditPanel,
+    LocalContrastEditPanel,
+    MorphologyEditPanel,
+    ThresholdEditPanel,
+)
+from .mask_edit_tool_picker import MaskEditToolPicker
+from .mask_file_actions import MaskClearAction, MaskPngActions
 from .mask_overlay_controls import MaskOverlayControls
 from .mask_scope_toggle import MaskScopeToggle
 from .measure_controls import MeasureCalibrationControls
@@ -164,70 +180,6 @@ def _slider_axis_title_style(color: str) -> str:
     titles use identical numbers instead of two hand-copied versions that
     can drift."""
     return f"color: {color}; font-size: 11px; font-weight: 600;"
-
-
-def _vertical_separator(parent: QWidget) -> QFrame:
-    """A thin vertical divider line - used in the "Mask" ribbon tab to
-    visually split the Persistent/Individual scope toggle (left) from the
-    mask-overlay display controls (maintainer request, 2026-10-02: "put them
-    on the left side and separate from rest by | line"). `QFrame`'s line
-    frames draw using the widget's foreground color, which the `color`
-    stylesheet property sets - the usual Qt trick for recoloring a frame
-    line.
-
-    Expands to fill the row's height rather than a fixed pixel value
-    (2026-10-02 - each side is now a `_labeled_icon_group`, two rows tall:
-    icons plus a caption underneath, so a height guessed for a single icon
-    row would read as visibly short) - `QHBoxLayout` stretches a child with
-    an `Expanding` vertical policy to match the tallest sibling in the row
-    for free, so this stays correct however tall the captioned groups end
-    up being."""
-    line = QFrame(parent)
-    line.setFrameShape(QFrame.Shape.VLine)
-    line.setFrameShadow(QFrame.Shadow.Plain)
-    line.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Expanding)
-    line.setStyleSheet(f"color: {get_active_theme().control_border};")
-    return line
-
-
-_GROUP_LABEL_FONT_SIZE_PX = 9
-
-
-def _group_label_style() -> str:
-    """Small, muted caption style for `_labeled_icon_group` below - clearly
-    quieter than the Cube/λ slider titles (`_slider_axis_title_style`: 11px/
-    600/`text_muted`), on purpose: those are navigation labels meant to be
-    read; this is a caption meant to be noticed only on a second look.
-    `text_dim` is this theme's one step darker/more muted than `text_muted`
-    (see `lspr_ui`'s `GuiTheme`)."""
-    return f"color: {get_active_theme().text_dim}; font-size: {_GROUP_LABEL_FONT_SIZE_PX}px;"
-
-
-def _labeled_icon_group(parent: QWidget, content: QWidget, label_text: str) -> tuple[QWidget, QLabel]:
-    """Wraps an icon row with a small, muted caption centered underneath it
-    (maintainer request, 2026-10-02: non-intrusive section labels - "State"/
-    "Visibility" under the Mask tab's two icon groups, each group's own
-    boundary already implied by the tab's edge and the `|` divider between
-    groups, so no extra bordered box is drawn here). Deliberately plain text
-    below the row, not `lspr_ui`'s `toolbarSectionTitle` convention (sLSPR
-    Evaluation's own `main_window.py`) - that one sits *above* a single
-    control and reads as a form label; this one sits *below* a row of icons
-    and reads as a caption, which is why it needs to stay quieter (smaller,
-    `text_dim`, no bold) rather than reusing that style verbatim.
-
-    Returns the wrapping group widget and the label itself - callers keep
-    the label reference only to restyle it on a live theme switch (see
-    `panel.py`'s `refresh_theme`); nothing reads its text back."""
-    group = QWidget(parent)
-    layout = QVBoxLayout(group)
-    layout.setContentsMargins(0, 0, 0, 0)
-    layout.setSpacing(2)
-    layout.addWidget(content, 0, Qt.AlignmentFlag.AlignHCenter)
-    label = QLabel(label_text, group)
-    label.setAlignment(Qt.AlignmentFlag.AlignHCenter)
-    label.setStyleSheet(_group_label_style())
-    layout.addWidget(label, 0, Qt.AlignmentFlag.AlignHCenter)
-    return group, label
 
 
 _PREVIEW_TOOLS = frozenset({ImageTool.ROTATE, ImageTool.CROP})
@@ -318,6 +270,7 @@ class ImagePanel(QWidget):
         selection: SelectionModule,
         active_tool: ActiveToolModule,
         reference_frame: ReferenceFrameModule,
+        highlight_range: HighlightRangeModule,
         parent: QWidget | None = None,
         *,
         mask_scope: MaskScopeModule,
@@ -340,6 +293,7 @@ class ImagePanel(QWidget):
         self._roi_toolbox = roi_toolbox
         self._selection = selection
         self._reference_frame = reference_frame
+        self._highlight_range = highlight_range
         self._active_tool = active_tool
         self._tool_status = ""
 
@@ -353,6 +307,18 @@ class ImagePanel(QWidget):
         self._mask_overlay_color = QColor(get_active_theme().mask_color)
         self._mask_overlay_alpha = 0.5
         self._mask_overlay_state: tuple[np.ndarray | None, GeometrySettings | None, np.ndarray | None, bool] | None = None
+
+        # Histogram highlight-overlay display state (cosmetic only - see
+        # histogram_highlight_overlay_controls.py's module docstring for why
+        # this lives here and not on `HighlightRangeModule`). Unlike the mask
+        # overlay above, there is nothing to "resolve" - the tint is just the
+        # already-displayed pixel array thresholded against
+        # `HighlightRangeModule.current_range()` - so `_current_display_image`
+        # caches that array instead of a resolved-mask tuple.
+        self._highlight_overlay_visible = True
+        self._highlight_overlay_color = QColor(get_active_theme().highlight_color)
+        self._highlight_overlay_alpha = 0.42  # the stable app's own literal (`_highlight_alpha`)
+        self._current_display_image: np.ndarray | None = None
         # Mirrors the last `frame_status_changed` emission (same "cached
         # alongside the signal" shape as `_tool_status` above) - lets a test
         # (or any other direct caller) read the current frame-status text
@@ -429,6 +395,13 @@ class ImagePanel(QWidget):
         self._mask_overlay_item = pg.ImageItem(axisOrder="row-major")
         self._mask_overlay_item.hide()
         self._plot.addItem(self._mask_overlay_item)
+
+        # Histogram highlight-overlay tint (2026-10-02) - same row-major
+        # shape as `_mask_overlay_item` just above, a separate item so the
+        # two tints can be shown/hidden/recolored independently.
+        self._highlight_overlay_item = pg.ImageItem(axisOrder="row-major")
+        self._highlight_overlay_item.hide()
+        self._plot.addItem(self._highlight_overlay_item)
 
         # Three curve items for the whole overlay rather than per-ROI items:
         # with NaN separators between ROIs, one PlotDataItem draws any number
@@ -520,7 +493,71 @@ class ImagePanel(QWidget):
         self._mask_overlay_controls.visibility_changed.connect(self._on_mask_overlay_visibility_changed)
         self._mask_overlay_controls.color_changed.connect(self._on_mask_overlay_color_changed)
         self._mask_overlay_controls.alpha_changed.connect(self._on_mask_overlay_alpha_changed)
-        self._mask_scope_separator = _vertical_separator(self)
+        self._mask_scope_separator = vertical_separator(self)
+
+        # Histogram highlight-overlay show/hide + color + transparency
+        # (2026-10-02, maintainer request - "add the toggle to show/hide
+        # histogram selection in image... add color selection and
+        # transparency control (similar to mask icons)"), ported from the
+        # stable app the same way `MaskOverlayControls` was. Fills the
+        # "Histogram" ribbon tab, previously a seeded placeholder (see
+        # tool_ribbon.py's module docstring).
+        self._highlight_overlay_controls = HistogramHighlightOverlayControls(
+            visible=self._highlight_overlay_visible,
+            color=self._highlight_overlay_color,
+            alpha=self._highlight_overlay_alpha,
+            parent=self,
+        )
+        self._highlight_overlay_controls.visibility_changed.connect(self._on_highlight_overlay_visibility_changed)
+        self._highlight_overlay_controls.color_changed.connect(self._on_highlight_overlay_color_changed)
+        self._highlight_overlay_controls.alpha_changed.connect(self._on_highlight_overlay_alpha_changed)
+
+        # Mask "Edit" group (2026-10-02, maintainer request - "next to the
+        # visibility section in Mask, add Edit section... a pickup menu"
+        # offering Histogram selection/Threshold/Local contrast/Morphology/
+        # Draw, each with its own small control row swapped in underneath).
+        # `MaskEditToolModule` is owned privately here, not threaded through
+        # `app_rewrite.py` like `MaskScopeModule`/`HighlightRangeModule` -
+        # see that module's own docstring for why nothing else needs to
+        # share it yet.
+        self._mask_edit_tool = MaskEditToolModule(self)
+        self._mask_edit_picker = MaskEditToolPicker(self._mask_edit_tool, self)
+
+        self._mask_edit_stack = QStackedWidget(self)
+        self._mask_edit_panel_order: tuple[MaskEditTool, ...] = (
+            MaskEditTool.HISTOGRAM_SELECTION,
+            MaskEditTool.THRESHOLD,
+            MaskEditTool.LOCAL_CONTRAST,
+            MaskEditTool.MORPHOLOGY,
+            MaskEditTool.DRAW,
+        )
+        self._mask_edit_stack.addWidget(
+            HistogramSelectionEditPanel(
+                self._mask, self._geometry, self._chromatic, self._dataset, self._highlight_range, self, self._mask_scope
+            )
+        )
+        self._mask_edit_stack.addWidget(ThresholdEditPanel(self._mask))
+        self._mask_edit_stack.addWidget(LocalContrastEditPanel(self._mask))
+        self._mask_edit_stack.addWidget(
+            MorphologyEditPanel(self._mask, self._chromatic, self._dataset, self, self._mask_scope)
+        )
+        self._mask_edit_stack.addWidget(DrawEditPanel(self._mask))
+        self._on_mask_edit_tool_changed(self._mask_edit_tool.tool())
+        self._mask_edit_tool.tool_changed.connect(self._on_mask_edit_tool_changed)
+
+        self._mask_visibility_separator = vertical_separator(self)
+
+        # "General" (Clear) and "PNG" (Load/Save) groups (2026-10-02,
+        # maintainer request - split from an earlier single "Automatic
+        # edit" group into these two: "these two icons [load/save] should
+        # be in 'PNG' section... put [Clear] in solo section 'General'").
+        # Neither is part of the `MaskEditToolModule` picker/stack - both
+        # are plain standalone action rows, same shape as
+        # `MaskOverlayControls`.
+        self._mask_clear_action = MaskClearAction(self._mask, self, self)
+        self._mask_general_separator = vertical_separator(self)
+        self._mask_png_actions = MaskPngActions(self._mask, self._dataset, self._mask_scope, self, self)
+        self._mask_edit_separator = vertical_separator(self)
 
         image_tools_content = QWidget(self)
         image_tools_content_layout = QHBoxLayout(image_tools_content)
@@ -535,19 +572,58 @@ class ImagePanel(QWidget):
         # ("State"/"Visibility") below its icons - same request, "some
         # non-intrusive labels... smaller fonts, more darker" - see
         # `_labeled_icon_group`'s own docstring for the style reasoning.
-        mask_state_group, self._mask_state_label = _labeled_icon_group(self, self._mask_scope_toggle, "State")
-        mask_visibility_group, self._mask_visibility_label = _labeled_icon_group(
+        # "General" (Clear) is the Mask tab's own leftmost group (2026-10-02,
+        # maintainer request: "put section the most left").
+        mask_general_group, self._mask_general_label = labeled_icon_group(self, self._mask_clear_action, "General")
+        mask_state_group, self._mask_state_label = labeled_icon_group(self, self._mask_scope_toggle, "State")
+        mask_visibility_group, self._mask_visibility_label = labeled_icon_group(
             self, self._mask_overlay_controls, "Visibility"
         )
+        # "Edit" renamed "Manual edit" (2026-10-02, maintainer request) now
+        # that a sibling group ("PNG" - Load/Save) sits next to it.
+        #
+        # **The caption wraps only the picker, not the picker+stack pair**
+        # (2026-10-02, maintainer report: the label was centering under the
+        # *reserved* stack width - as wide as Morphology's own widest
+        # panel, 1 spinbox + 4 buttons - rather than under whatever's
+        # actually visible, so it visually floated away from the picker
+        # whenever a narrower panel like Histogram selection's was shown).
+        # The stack itself sits as a plain, uncaptioned sibling to the
+        # group's right (top-aligned, so its icon row lines up with every
+        # other group's icon row rather than the group's full 42px caption
+        # height) - the same "label only where it has one fixed thing to
+        # sit under" rule every other group here already follows.
+        mask_edit_group, self._mask_edit_label = labeled_icon_group(self, self._mask_edit_picker, "Manual edit")
+        mask_png_group, self._mask_png_label = labeled_icon_group(self, self._mask_png_actions, "PNG")
 
         mask_content = QWidget(self)
         mask_content_layout = QHBoxLayout(mask_content)
         mask_content_layout.setContentsMargins(0, 0, 0, 0)
         mask_content_layout.setSpacing(6)
+        mask_content_layout.addWidget(mask_general_group)
+        mask_content_layout.addWidget(self._mask_general_separator)
         mask_content_layout.addWidget(mask_state_group)
         mask_content_layout.addWidget(self._mask_scope_separator)
         mask_content_layout.addWidget(mask_visibility_group)
+        mask_content_layout.addWidget(self._mask_visibility_separator)
+        mask_content_layout.addWidget(mask_edit_group)
+        mask_content_layout.addWidget(self._mask_edit_stack, 0, Qt.AlignmentFlag.AlignTop)
+        mask_content_layout.addWidget(self._mask_edit_separator)
+        mask_content_layout.addWidget(mask_png_group)
         mask_content_layout.addStretch(1)
+
+        # Single captioned group, same convention as the Mask tab's own
+        # groups (`_labeled_icon_group`) - no divider needed since there is
+        # only the one group here, unlike Mask's State/Visibility pair.
+        highlight_visibility_group, self._highlight_visibility_label = labeled_icon_group(
+            self, self._highlight_overlay_controls, "Selection"
+        )
+        histogram_content = QWidget(self)
+        histogram_content_layout = QHBoxLayout(histogram_content)
+        histogram_content_layout.setContentsMargins(0, 0, 0, 0)
+        histogram_content_layout.setSpacing(6)
+        histogram_content_layout.addWidget(highlight_visibility_group)
+        histogram_content_layout.addStretch(1)
 
         self._top_bar = QWidget(self)
         self._top_bar.setObjectName("imageTopBar")
@@ -558,7 +634,7 @@ class ImagePanel(QWidget):
             [
                 ("Image tools", image_tools_content),
                 ("Mask", mask_content),
-                ("Histogram", None),
+                ("Histogram", histogram_content),
                 ("ROIs", self._canvas_tools),
             ],
             self,
@@ -829,6 +905,12 @@ class ImagePanel(QWidget):
         self._selection.wavelength_changed.connect(self._on_selection_wavelength_changed)
         self._reference_frame.reference_frame_changed.connect(self._update_reference_highlight)
 
+        # The highlight overlay tints the already-displayed pixel array
+        # (`_current_display_image`, set in `_on_rendered`) - a range change
+        # never needs a new render, so this goes straight to
+        # `_update_highlight_overlay`, not `_schedule_redraw`.
+        self._highlight_range.range_changed.connect(self._on_highlight_range_changed)
+
     # -- theming --------------------------------------------------------------
 
     def refresh_theme(self) -> None:
@@ -863,9 +945,26 @@ class ImagePanel(QWidget):
             self._mask_scope_toggle.refresh_theme(get_active_theme())
         if hasattr(self, "_mask_scope_separator"):
             self._mask_scope_separator.setStyleSheet(f"color: {get_active_theme().control_border};")
-        for label_attr in ("_mask_state_label", "_mask_visibility_label"):
+        if hasattr(self, "_highlight_overlay_controls"):
+            self._highlight_overlay_controls.refresh_theme(get_active_theme())
+        if hasattr(self, "_mask_visibility_separator"):
+            self._mask_visibility_separator.setStyleSheet(f"color: {get_active_theme().control_border};")
+        if hasattr(self, "_mask_edit_separator"):
+            self._mask_edit_separator.setStyleSheet(f"color: {get_active_theme().control_border};")
+        if hasattr(self, "_mask_general_separator"):
+            self._mask_general_separator.setStyleSheet(f"color: {get_active_theme().control_border};")
+        if hasattr(self, "_mask_edit_picker"):
+            self._mask_edit_picker.refresh_theme(get_active_theme())
+        for label_attr in (
+            "_mask_general_label",
+            "_mask_state_label",
+            "_mask_visibility_label",
+            "_highlight_visibility_label",
+            "_mask_edit_label",
+            "_mask_png_label",
+        ):
             if hasattr(self, label_attr):
-                getattr(self, label_attr).setStyleSheet(_group_label_style())
+                getattr(self, label_attr).setStyleSheet(group_label_style())
         if hasattr(self, "_tool_ribbon"):
             self._tool_ribbon.refresh_theme(get_active_theme())
         if hasattr(self, "_controls_bar"):
@@ -906,6 +1005,8 @@ class ImagePanel(QWidget):
         self._image_item.clear()
         self._mask_overlay_item.hide()
         self._mask_overlay_state = None
+        self._highlight_overlay_item.hide()
+        self._current_display_image = None
         self._sample_curve.clear()
         self._reference_curve.clear()
         self._selection_curve.clear()
@@ -1208,6 +1309,8 @@ class ImagePanel(QWidget):
         cubes = self._dataset.spectral_cubes()
         if not cubes:
             self._update_mask_overlay(None, None, None, hidden=True)
+            self._current_display_image = None
+            self._highlight_overlay_item.hide()
             return
         cube_index = self._current_cube()
         wavelength_nm = self._current_wavelength()
@@ -1266,6 +1369,8 @@ class ImagePanel(QWidget):
             return
         image = np.asarray(result.image, dtype=np.float32)
         self._image_item.setImage(image, autoLevels=True)
+        self._current_display_image = image
+        self._update_highlight_overlay()
         if not self._view_range_restored:
             # Once only, ever, on this panel's first successful render - a
             # later frame navigation must never snap the view back to this
@@ -1418,6 +1523,68 @@ class ImagePanel(QWidget):
     def _on_mask_overlay_alpha_changed(self, alpha: float) -> None:
         self._mask_overlay_alpha = float(alpha)
         self._redraw_mask_overlay_from_cache()
+
+    # -- histogram highlight overlay (display-only, see histogram_highlight_overlay_controls.py) --
+
+    def _update_highlight_overlay(self) -> None:
+        """Redraw the histogram highlight-overlay tint from the cached,
+        already-displayed pixel array (`_current_display_image`, set in
+        `_on_rendered`) - synchronous GUI-thread work, same cost reasoning
+        as `_update_mask_overlay`. A pure visibility/color/alpha change
+        (`_on_highlight_overlay_*` below) and a range change
+        (`_on_highlight_range_changed`) both land here; neither needs a new
+        render, since the tint is a threshold over pixels already on
+        screen - matches the stable app's own
+        `_update_selected_intensity_overlay`."""
+        if not self._highlight_overlay_visible or self._current_display_image is None:
+            self._highlight_overlay_item.hide()
+            return
+        range_ = self._highlight_range.current_range()
+        if range_ is None:
+            self._highlight_overlay_item.hide()
+            return
+        lower, upper = range_
+        image = self._current_display_image
+        selection_mask = (image >= lower) & (image <= upper)
+        # Hide rather than tint when nothing is excluded (the whole image
+        # falls in range) as well as when nothing is included - a full-image
+        # tint carries no information, same reasoning the stable app applies
+        # against its own fixed sensor-range bounds (here, against the
+        # actually-displayed image's own range, since `HighlightRangeModule`
+        # seeds to that, not a fixed 16-bit constant - see that module's
+        # docstring).
+        if not np.any(selection_mask) or bool(np.all(selection_mask)):
+            self._highlight_overlay_item.hide()
+            return
+        overlay = np.zeros((*selection_mask.shape, 4), dtype=np.uint8)
+        overlay[selection_mask] = (
+            self._highlight_overlay_color.red(),
+            self._highlight_overlay_color.green(),
+            self._highlight_overlay_color.blue(),
+            int(round(self._highlight_overlay_alpha * 255.0)),
+        )
+        self._highlight_overlay_item.setImage(overlay, autoLevels=False)
+        self._highlight_overlay_item.show()
+
+    def _on_highlight_range_changed(self, _range: tuple[float, float] | None) -> None:
+        self._update_highlight_overlay()
+
+    def _on_highlight_overlay_visibility_changed(self, visible: bool) -> None:
+        self._highlight_overlay_visible = bool(visible)
+        self._update_highlight_overlay()
+
+    def _on_highlight_overlay_color_changed(self, color: QColor) -> None:
+        self._highlight_overlay_color = QColor(color)
+        self._update_highlight_overlay()
+
+    def _on_highlight_overlay_alpha_changed(self, alpha: float) -> None:
+        self._highlight_overlay_alpha = float(alpha)
+        self._update_highlight_overlay()
+
+    # -- mask edit tool picker (mask_edit_tool_picker.py/mask_edit_panels.py) --
+
+    def _on_mask_edit_tool_changed(self, tool: MaskEditTool) -> None:
+        self._mask_edit_stack.setCurrentIndex(self._mask_edit_panel_order.index(tool))
 
     def _update_chunk_grid(self) -> None:
         """Draw (or clear) the Export section's chunk-grid preview - lines

@@ -35,6 +35,15 @@ scope does Add/Subtract actually use" ambiguous. This widget now takes a
 `scope_module.scope()` instead of its own buttons' checked state - see
 `image_tools/mask_scope.py`'s module docstring for the full reasoning.
 
+**The apply/resolve logic itself moved out to `HistogramHighlightMaskEditor`**
+(`panels/mask_highlight_editor.py`, 2026-10-02, maintainer request: add the
+same Add/Subtract action to the Image panel's new "Edit" tool picker) - same
+"one backend, several front doors" reasoning as the scope toggle above, one
+level deeper: this widget is now just an Add/Subtract button pair plus the
+scope toggle, both driving one shared, widget-free editor object a second
+widget (`panels/image/mask_edit_panels.py`'s `HistogramSelectionEditPanel`)
+also holds. See that module's own docstring for the full extraction story.
+
 Cube-to-cube consistency for a persistent mask still relies on the
 existing "chromatic models don't vary by cube" simplifying assumption
 (`ChromaticModule`'s own docstring) - no per-cube sample-drift registration
@@ -48,17 +57,14 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING
 
-import numpy as np
-from PyQt6.QtCore import QSize
-from PyQt6.QtWidgets import QHBoxLayout, QToolButton, QWidget
-
-from lspr_ui import load_tabler_icon, transparent_icon_button_stylesheet
+from PyQt6.QtWidgets import QHBoxLayout, QWidget
 
 from ...dataset import DatasetModule
 from ...image_tools import ChromaticModule, GeometryModule, MaskModule, MaskScopeModule
-from ...image_tools.preprocess import histogram_highlight_mask_to_raw
 from ...selection import HighlightRangeModule
 from ..image.mask_scope_toggle import MaskScopeToggle
+from ..mask_edit_common import ADD_COLOR, SUBTRACT_COLOR, action_button
+from ..mask_highlight_editor import HistogramHighlightMaskEditor
 
 if TYPE_CHECKING:
     # Deferred, not a plain import: `panels.image.panel` imports
@@ -76,24 +82,6 @@ if TYPE_CHECKING:
     from ..image.panel import ImagePanel
 
 logger = logging.getLogger(__name__)
-
-_BUTTON_SIZE = 28
-_ICON_SIZE = 22
-_RENDER_SIZE = _ICON_SIZE * 2  # rendered at 2x, scaled down - crisper than a native bitmap
-_STROKE_WIDTH = 2.1
-_ADD_COLOR = "#22c55e"  # the stable app's own literal for this action
-_SUBTRACT_COLOR = "#ef4444"
-
-
-def _action_button(parent: QWidget, icon_name: str, color: str, tooltip: str) -> QToolButton:
-    button = QToolButton(parent)
-    button.setAutoRaise(True)
-    button.setFixedSize(_BUTTON_SIZE, _BUTTON_SIZE)
-    button.setIconSize(QSize(_ICON_SIZE, _ICON_SIZE))
-    button.setStyleSheet(transparent_icon_button_stylesheet())
-    button.setToolTip(tooltip)
-    button.setIcon(load_tabler_icon(icon_name, color=color, size=_RENDER_SIZE, stroke_width=_STROKE_WIDTH))
-    return button
 
 
 class MaskHighlightActions(QWidget):
@@ -114,36 +102,22 @@ class MaskHighlightActions(QWidget):
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
-        self._mask = mask
-        self._geometry = geometry
-        self._chromatic = chromatic
-        self._dataset = dataset
+        self._editor = HistogramHighlightMaskEditor(
+            mask, geometry, chromatic, dataset, highlight_range, image_panel, mask_scope
+        )
         self._highlight_range = highlight_range
-        self._mask_scope = mask_scope
-        # The last image ImagePanel actually rendered, and the exact frame
-        # it belongs to - same "read from the one panel that already has
-        # it" convention the Histogram panel uses (`image_rendered`'s own
-        # `(cube_index, wavelength_nm)` payload, not `SelectionModule`
-        # re-read fresh): `ImagePanel._current_wavelength()` snaps the
-        # selected wavelength to the nearest one the current cube actually
-        # has, so `SelectionModule.current_wavelength()` alone can disagree
-        # with what is actually on screen - real bug caught by this file's
-        # own individual-scope test, which failed when `_apply` used
-        # `self._selection.current_wavelength()` directly.
-        self._last_image: np.ndarray | None = None
-        self._last_frame: tuple[int, float] | None = None
 
         self._scope_toggle = MaskScopeToggle(mask_scope, self)
 
-        self._add_button = _action_button(
-            self, "square-rounded-plus", _ADD_COLOR, "Add the highlighted histogram pixels to the mask."
+        self._add_button = action_button(
+            self, "square-rounded-plus", ADD_COLOR, "Add the highlighted histogram pixels to the mask."
         )
-        self._add_button.clicked.connect(lambda: self._apply(subtract=False))
+        self._add_button.clicked.connect(lambda: self._editor.apply(subtract=False))
 
-        self._subtract_button = _action_button(
-            self, "square-rounded-minus", _SUBTRACT_COLOR, "Remove the highlighted histogram pixels from the mask."
+        self._subtract_button = action_button(
+            self, "square-rounded-minus", SUBTRACT_COLOR, "Remove the highlighted histogram pixels from the mask."
         )
-        self._subtract_button.clicked.connect(lambda: self._apply(subtract=True))
+        self._subtract_button.clicked.connect(lambda: self._editor.apply(subtract=True))
 
         # One row: scope toggle pair, a little extra gap, then the two
         # actions - keeps this section's height to what Transforms' own row
@@ -158,61 +132,12 @@ class MaskHighlightActions(QWidget):
         layout.addWidget(self._subtract_button)
         layout.addStretch(1)
 
-        image_panel.image_rendered.connect(self._on_image_rendered)
-        image_panel.image_cleared.connect(self._on_image_cleared)
+        image_panel.image_rendered.connect(self._refresh_enabled)
+        image_panel.image_cleared.connect(self._refresh_enabled)
         self._highlight_range.range_changed.connect(self._refresh_enabled)
         self._refresh_enabled()
 
-    def _on_image_rendered(self, image: np.ndarray, cube_index: int, wavelength_nm: float) -> None:
-        self._last_image = image
-        self._last_frame = (cube_index, wavelength_nm)
-        self._refresh_enabled()
-
-    def _on_image_cleared(self) -> None:
-        self._last_image = None
-        self._last_frame = None
-        self._refresh_enabled()
-
     def _refresh_enabled(self, *_args: object) -> None:
-        enabled = self._last_image is not None and self._highlight_range.current_range() is not None
+        enabled = self._editor.is_ready()
         self._add_button.setEnabled(enabled)
         self._subtract_button.setEnabled(enabled)
-
-    def _current_scope(self) -> str:
-        return self._mask_scope.scope().value
-
-    def _resolve_base_mask(self, target_frame: tuple[int, float], raw_shape: tuple[int, int]) -> np.ndarray:
-        """`apply_candidate`'s own docstring: the caller resolves `base_mask`
-        - typically `resolve_mask_source(target_frame)`, warped into
-        `target_frame`'s geometry via `ChromaticModule.warp_mask_between` if
-        it came from a different frame. No existing change yet means an
-        all-clear raw canvas, not an error - the common "first edit" case."""
-        resolution = self._mask.resolve_mask_source(target_frame)
-        if resolution is None:
-            return np.zeros(raw_shape, dtype=bool)
-        authored_frame, authored_mask, _scope = resolution
-        if authored_frame == target_frame:
-            return authored_mask
-        return self._chromatic.warp_mask_between(authored_mask, authored_frame, target_frame)
-
-    def _apply(self, *, subtract: bool) -> None:
-        if self._last_image is None or self._last_frame is None:
-            return
-        highlight = self._highlight_range.current_range()
-        if highlight is None:
-            return
-        raw_shape = self._dataset.raw_plane_shape()
-        if raw_shape is None:
-            return
-        min_value, max_value = highlight
-        candidate = histogram_highlight_mask_to_raw(
-            self._last_image, min_value, max_value, raw_shape, self._geometry.settings()
-        )
-        # The exact frame the candidate was built for - `self._last_frame`,
-        # not `SelectionModule` re-read fresh (see `_last_frame`'s own
-        # comment above for why those can disagree).
-        target_frame = self._last_frame
-        base_mask = self._resolve_base_mask(target_frame, raw_shape)
-        self._mask.apply_candidate(
-            base_mask, candidate, target_frame=target_frame, scope=self._current_scope(), subtract=subtract
-        )

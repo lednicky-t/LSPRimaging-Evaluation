@@ -92,10 +92,15 @@ class HistogramPlot(QWidget):
     the stable app, where log mode silently switched the Y-axis to counts
     too)."""
 
-    # Emitted only when the *user* finishes dragging the region (mirrors
-    # pyqtgraph's own `sigRegionChangeFinished` - not fired for a
+    # Emitted on every *user* drag tick, not just when the drag finishes
+    # (2026-10-02, maintainer request - "when moving histogram highlight it
+    # will automatically update, not just when it is set"; previously only
+    # `sigRegionChangeFinished` fired this, deliberately debounced to avoid
+    # "a flood of in-progress values" for a then-hypothetical future Mask/
+    # ROI-detection subscriber - see `_on_region_changed_live`'s docstring
+    # for why that reasoning no longer applies). Never fired for a
     # programmatic `set_highlight_range` call, which would otherwise create
-    # a feedback loop with whatever set it - see `set_highlight_range`).
+    # a feedback loop with whatever set it - see `set_highlight_range`.
     highlight_dragged = pyqtSignal(float, float)
     # Raw, not-yet-crossed-checked edits from the floating readout fields -
     # `HistogramPanel` resolves them against `HighlightRangeModule`'s
@@ -399,16 +404,40 @@ class HistogramPlot(QWidget):
         self._reposition_range_readout()
 
     def _on_region_changed_live(self) -> None:
-        """`sigRegionChanged` fires continuously while dragging - this only
-        keeps the readout's displayed numbers in step with the drag; the
-        shared `HighlightRangeModule` is not touched until the drag finishes
-        (`_on_region_drag_finished`), so a future Mask/ROI-detection
-        subscriber sees one final value, not a flood of in-progress ones."""
+        """`sigRegionChanged` fires continuously while dragging - keeps the
+        readout's displayed numbers in step with the drag AND, as of
+        2026-10-02, emits `highlight_dragged` on every tick (maintainer
+        request - the Image panel's histogram-highlight overlay should track
+        a drag live, not just snap into place on release).
+
+        This used to only touch the readout, deliberately waiting for
+        `_on_region_drag_finished` so "a future Mask/ROI-detection
+        subscriber sees one final value, not a flood of in-progress ones."
+        That reasoning no longer holds as the only consideration: every
+        *actual* subscriber today is cheap (`ImagePanel`'s overlay re-tints
+        already-in-memory pixels with no new render;
+        `MaskHighlightActions._refresh_enabled` just toggles button enabled-
+        state) - the same "live, straight to the module" shape this
+        codebase already uses for ROI dragging (`ImagePanel._on_drag` calls
+        `RoiToolbox.request_move` on every mouse-move tick, not just on
+        release). `HighlightRangeModule.set_range` already no-ops when the
+        range is unchanged, so this and `_on_region_drag_finished`'s own
+        emission coincide harmlessly on the final tick. If a future, genuinely
+        expensive reactive subscriber (e.g. the still-open ROI-detection-
+        settings wiring, status doc §4 item 2) needs its own debounce, that
+        belongs on *that* subscriber, not back here - see that module's own
+        docstring before adding one."""
         lo, hi = self._region.getRegion()
         self._range_readout.set_range(float(lo), float(hi))
         self._reposition_range_readout(lo, hi)  # already have lo/hi - skip the reposition's own re-fetch
+        self.highlight_dragged.emit(float(lo), float(hi))
 
     def _on_region_drag_finished(self) -> None:
+        """Kept as its own handler even though `_on_region_changed_live` now
+        emits the same signal on every tick - guarantees the committed final
+        value is reported even if a platform/pyqtgraph quirk ever drops the
+        last live tick (e.g. a release that fires `sigRegionChangeFinished`
+        without a preceding `sigRegionChanged` for that exact position)."""
         lo, hi = self._region.getRegion()
         self.highlight_dragged.emit(float(lo), float(hi))
 

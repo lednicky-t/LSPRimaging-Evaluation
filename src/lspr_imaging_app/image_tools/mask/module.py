@@ -322,6 +322,20 @@ class MaskModule(QObject):
             store[key] = MaskChange(frame=frame, scope=scope, mask=normalized.copy())
         self.mask_changed.emit(MaskComputationalChange(reason="mask_change", frame=frame, scope=scope))
 
+    @instrumented("MaskModule.clear_all_masks")
+    def clear_all_masks(self) -> None:
+        """Wipe the *entire* mask timeline (every persistent and individual
+        change, every cube/frame) - "start a new mask" (2026-10-02,
+        maintainer request: an eraser/clear action for the Image panel's new
+        "Automatic edit" group), not a per-frame `set_mask_change(frame,
+        scope, None)` removal. No-op-skipped if the timeline is already
+        empty, matching every other command here."""
+        if not self._individual_changes and not self._persistent_changes:
+            return
+        self._individual_changes = {}
+        self._persistent_changes = {}
+        self.mask_changed.emit(MaskComputationalChange(reason="cleared", frame=None, scope=None))
+
     @instrumented("MaskModule.apply_candidate")
     def apply_candidate(
         self,
@@ -373,15 +387,38 @@ class MaskModule(QObject):
         *,
         target_frame: tuple[int, float],
         scope: str,
-        subtract: bool = False,
     ) -> None:
         """Run a morphological operation (`"erode"`/`"dilate"`/`"open"`/
-        `"close"`) against `base_mask` to get a candidate, then merge it in
-        exactly like `apply_candidate` - see this module's own docstring
-        for why morphology is a candidate-then-merge operation here, not a
-        direct replacement."""
+        `"close"`) against `base_mask` and commit the result as a direct
+        replacement - **not** an `apply_candidate` OR/AND merge, unlike
+        every other tool kind.
+
+        **Corrected 2026-10-02, before this method had any real caller**
+        (found while wiring the Image panel's new "Edit" picker, which
+        exposes morphology as four direct operation buttons with no +/-
+        concept - see `panels/image/mask_edit_panels.py`). The original
+        version here routed through `apply_candidate(base_mask, candidate,
+        subtract=...)`, faithfully matching the stable app's own
+        `_finish_apply_mask_delta` (`np.logical_and(current, ~candidate) if
+        subtract else np.logical_or(current, candidate)`) - but that merge
+        is only mathematically correct for the two *growing* operations
+        (dilate/close are extensive: `candidate ⊇ base_mask` always, so
+        `OR(base_mask, candidate) == candidate` exactly). For the two
+        *shrinking* operations (erode/open are anti-extensive: `candidate ⊆
+        base_mask` always), neither merge direction gives the eroded/opened
+        mask: OR is a no-op (`candidate` already `⊆ base_mask`), and AND-NOT
+        produces the *removed* ring of pixels, not the *surviving* interior
+        - the opposite of what "erode my mask" should do. Confirmed by
+        worked example (a filled square, `radius_px=1`): AND-NOT gives back
+        only the 1px boundary ring that erosion would strip away, not the
+        shrunken interior. This was never exercised by any UI before this
+        session (verified by grep - no caller existed), so there is no
+        shipped behavior to preserve here; a plain replacement is correct
+        for all four operations uniformly and matches the new UI's own
+        design (four direct action buttons, not an add/subtract pair) -
+        `subtract` is dropped from the signature rather than kept unused."""
         candidate = raster_tools.apply_morphology_to_mask(base_mask, operation, radius_px)
-        self.apply_candidate(base_mask, candidate, target_frame=target_frame, scope=scope, subtract=subtract)
+        self.set_mask_change(target_frame, scope, candidate)
 
     @instrumented("MaskModule.paint_brush")
     def paint_brush(

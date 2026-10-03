@@ -133,12 +133,35 @@ class ImageRenderer(QObject):
         self._wake.set()
 
     def stop(self) -> None:
-        """Ask the worker thread to exit. Safe to call more than once, and
+        """Ask the worker thread to exit, and wait (bounded) for it to
+        actually finish before returning. Safe to call more than once, and
         safe to never call at all - the thread is a daemon, so it does not
         keep the process alive on its own. The panel calls this on
-        destruction so a closed window stops rendering into nothing."""
+        destruction so a closed window stops rendering into nothing.
+
+        **The bounded join was added 2026-10-02, after a real crash** -
+        this used to just set the two flags and return immediately,
+        without waiting for the thread to actually exit `_loop`. A caller
+        (a test's `tearDown`, or the real app's `aboutToQuit`) could then
+        let Qt's parent-child ownership cascade start destroying this
+        `ImageRenderer`'s owning `ImagePanel` while the background thread
+        was still mid-`_render()` - and once it finished, `self.rendered.
+        emit(result)` would fire on a QObject whose C++ side might already
+        be gone, a genuine use-after-free. Reproduced as a deterministic
+        Windows access violation in this rewrite's own test suite (not a
+        rare/probabilistic hit - every run, same test, same `_pump()` call
+        site) once enough `ImagePanel` instances were being constructed and
+        torn down across one test process for the timing window to be hit
+        reliably. The same class of bug as this app's own documented
+        PyQt6-sip crash-on-close pattern (see that memory note) - a
+        background thread not actually stopped before Qt teardown begins.
+        Bounded, not an unconditional `join()`, so a thread genuinely stuck
+        mid-`apply_preprocessing` can't hang shutdown forever - same
+        reasoning the stable app's own `closeEvent` fix for the identical
+        class of bug uses."""
         self._stopping = True
         self._wake.set()
+        self._thread.join(timeout=5.0)
 
     def _take_pending(self) -> RenderRequest | None:
         with self._lock:

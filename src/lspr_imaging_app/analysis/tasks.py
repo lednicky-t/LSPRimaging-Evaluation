@@ -309,6 +309,7 @@ def compute_cell(
         if cancel_event is not None and cancel_event.is_set():
             break
         wl_input = wavelength_inputs[wavelength_nm]
+        ignore_mask = _mask_for_compute(wl_input)
 
         t0 = time.perf_counter()
         processed = apply_preprocessing(
@@ -331,7 +332,7 @@ def compute_cell(
             mask_settings=detection_settings,
             # Processed-space, chromatically warped - see _mask_for_compute
             # and the module docstring's assumption-1 note.
-            external_mask=_mask_for_compute(wl_input),
+            external_mask=ignore_mask,
             external_mask_processed=True,
         )
         stage_seconds["preprocess"] += time.perf_counter() - t0
@@ -355,6 +356,15 @@ def compute_cell(
             # counted normally (the maintainer's explicit framing of this
             # mode; see REFERENCE_EXCLUSION_MODES).
             reference_mask = reference_mask & ~union
+        # Ignore-mask pixels must never reach the reduction. apply_preprocessing
+        # writes them as literal zeros into `processed` (that array also feeds
+        # the background estimate and the display, so it is left alone here);
+        # without this line those zeros were averaged into the sample and
+        # reference values, pulling them down. Same shape guard as
+        # apply_preprocessing itself, so the two agree on which mask applies.
+        if ignore_mask is not None and ignore_mask.shape == image_shape:
+            sample_mask = sample_mask & ~ignore_mask
+            reference_mask = reference_mask & ~ignore_mask
         stage_seconds["rasterize"] += time.perf_counter() - t0
 
         t0 = time.perf_counter()

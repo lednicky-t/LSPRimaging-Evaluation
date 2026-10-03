@@ -625,6 +625,7 @@ def build_main_window(
     )
     image_panel = ImagePanel(
         dataset, geometry, mask, chromatic, background, roi_toolbox, selection, active_tool, reference_frame,
+        highlight_range,
         mask_scope=mask_scope,
         initial_view_range=initial_view_range,
     )
@@ -663,19 +664,21 @@ def build_main_window(
         )
     except KeyError:
         initial_stage = None
+    # `geometry`/`active_tool`/`mask`/`chromatic`/`highlight_range`/
+    # `image_panel`/`mask_scope` are no longer passed here (2026-10-02) -
+    # the Workflow panel's "Transforms"/"Mask" subsections were removed
+    # (maintainer request: fully covered by the Image panel's own ribbon
+    # now), so `WorkflowPanel` no longer needs any of the modules that
+    # only backed those two - see `panels/workflow/panel.py`'s
+    # `_build_image_tools_section` docstring. All seven are still used
+    # elsewhere in this function (ImagePanel/HistogramPanel/WorkflowPanel's
+    # own remaining params, etc.), just not here.
     workflow = WorkflowPanel(
         dataset,
-        geometry,
-        active_tool,
         background,
-        mask,
-        chromatic,
         selection,
         reference_frame,
-        highlight_range,
-        image_panel,
         session_coordinator,
-        mask_scope,
         initial_stage=initial_stage,
         initial_subsections=settings.expanded_subsections,
     )

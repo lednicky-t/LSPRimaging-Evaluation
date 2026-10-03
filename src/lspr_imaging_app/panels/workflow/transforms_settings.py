@@ -48,6 +48,28 @@ Icon choices, per the maintainer's spec (2026-09-28):
   like cropping rectangle... keep it for most of the tools") overrides the
   "match the stable app" default this file otherwise follows.
 
+**Every cluster is now its own captioned group**: "Rotation" (rotate tool +
+reset + fill checkbox - "3 rotation icons"), "Flip" (H + V), "Crop" (crop
+tool + reset - "2 crop icons"), "Calibrate" (Measure). Measure was split
+out first (2026-10-02, maintainer request: "first free icons be Rotate,
+then Flip, and Crop, last icon is in Calibrate section" - Rotate/Flip/Crop
+were initially left as one plain, uncaptioned row, "free icons", since
+that request read as contrasting a *remaining* ungrouped cluster against
+Calibrate); a follow-up request the same day ("you did not make rotation
+section containing 3 rotation icons, and flip section containing flipping
+icons, and crop section containing 2 crop icons") asked for the other
+three to be captioned the same way, completing the pattern - every cluster
+now sits in its own `ribbon_group.labeled_icon_group`-wrapped group behind
+a `vertical_separator`, matching the Mask tab's own State/Visibility/
+Manual-edit/PNG captioned-group convention exactly. `ribbon_group.py`
+(`panels/`, not `panels/image/`) is where that pattern lives, shared with
+`panels/image/panel.py` - a direct import from there would have been a
+real circular import (`panel.py` imports this module), see that file's own
+docstring. `_cluster()` (this file) wraps a multi-button group's children
+in a plain row before handing it to `labeled_icon_group`, which otherwise
+takes one widget (Calibrate's own bare `_measure_button` needs no such
+wrapper).
+
 All of them are drawn smaller than the stable app's (28x28 button / 22px icon
 vs. 36x36 / 28px) so the row costs less of the Workflow panel's fixed
 width budget.
@@ -88,6 +110,7 @@ from PyQt6.QtWidgets import QCheckBox, QHBoxLayout, QToolButton, QWidget
 from lspr_ui import get_active_theme, load_tabler_icon, tabler_icon_svg, transparent_icon_button_stylesheet
 
 from ...image_tools import ActiveToolModule, GeometryModule, ImageTool
+from ..ribbon_group import labeled_icon_group, vertical_separator
 
 logger = logging.getLogger(__name__)
 
@@ -98,12 +121,19 @@ _FLIP_V_ACTIVE_COLOR = "#2dd4bf"
 _MEASURE_ACTIVE_COLOR = "#38bdf8"  # same blue as Crop's - maintainer's preferred tool color (2026-09-29, was green)
 _BUTTON_SIZE = 28
 _ROW_MARGIN = 4
-# The row's total height - `_BUTTON_SIZE` plus its own top/bottom layout
-# margin (`_ROW_MARGIN`) on each side. Exposed so `panels/image/tool_ribbon
-# .py` can size its fixed-height stack to fit this section without
-# guessing at or duplicating these two numbers (this row is embedded a
-# second time there - see this module's docstring).
-ROW_HEIGHT = _BUTTON_SIZE + 2 * _ROW_MARGIN
+# The "Calibrate" group (Measure, captioned - see module docstring) is
+# taller than a plain icon button: 28px icon row + 2px spacing + 12px
+# single-line 9px-font caption, the same 42px `ribbon_group.py`'s other
+# captioned groups land on (`panels/image/panel.py`'s
+# `_CAPTIONED_GROUP_ROW_HEIGHT`) - literal here rather than imported, same
+# "would be a real cycle" reasoning as the `ribbon_group` import itself.
+_CALIBRATE_GROUP_HEIGHT = 42
+# The row's total height - the tallest child (now the Calibrate group, not
+# a plain button) plus this row's own top/bottom layout margin
+# (`_ROW_MARGIN`) on each side. Exposed so `panels/image/tool_ribbon.py`
+# can size its fixed-height stack to fit this section without guessing at
+# or duplicating these numbers.
+ROW_HEIGHT = max(_BUTTON_SIZE, _CALIBRATE_GROUP_HEIGHT) + 2 * _ROW_MARGIN
 # Extra gap between the rotation | flip | crop | measure groups (on top of the 6px spacing).
 _GROUP_GAP = 6
 _ICON_SIZE = 22
@@ -172,6 +202,20 @@ def _icon_button(parent: QWidget, *, checkable: bool) -> QToolButton:
     return button
 
 
+def _cluster(parent: QWidget, *widgets: QWidget) -> QWidget:
+    """A plain row of widgets, with no caption of its own - the content
+    `labeled_icon_group` wraps for Rotation/Flip/Crop below, each a
+    multi-button cluster rather than the single widget `labeled_icon_group`
+    otherwise takes directly (as Calibrate's bare `_measure_button` does)."""
+    row = QWidget(parent)
+    layout = QHBoxLayout(row)
+    layout.setContentsMargins(0, 0, 0, 0)
+    layout.setSpacing(2)
+    for widget in widgets:
+        layout.addWidget(widget)
+    return row
+
+
 class TransformsSection(QWidget):
     """Rotate/crop/measure tool toggles, reset rotation/crop, rotation fill, flip H/V."""
 
@@ -227,20 +271,34 @@ class TransformsSection(QWidget):
         )
         self._measure_button.toggled.connect(self._on_measure_toggled)
 
+        # Every cluster is now a captioned group (2026-10-02, maintainer
+        # request: "rotation section containing 3 rotation icons, and flip
+        # section containing flipping icons, and crop section containing 2
+        # crop icons" - "Calibrate" already was one, from the previous
+        # 2026-10-02 session). `_cluster` wraps each cluster's buttons in a
+        # plain row before handing it to `labeled_icon_group`, since that
+        # takes one content widget, not several.
+        rotation_group, self._rotation_label = labeled_icon_group(
+            self, _cluster(self, self._rotate_button, self._reset_button, self._fill_checkbox), "Rotation"
+        )
+        flip_group, self._flip_label = labeled_icon_group(
+            self, _cluster(self, self._flip_h_button, self._flip_v_button), "Flip"
+        )
+        crop_group, self._crop_label = labeled_icon_group(
+            self, _cluster(self, self._crop_button, self._reset_crop_button), "Crop"
+        )
+        calibrate_group, self._calibrate_label = labeled_icon_group(self, self._measure_button, "Calibrate")
+
         layout = QHBoxLayout(self)
         layout.setContentsMargins(_ROW_MARGIN, _ROW_MARGIN, _ROW_MARGIN, _ROW_MARGIN)
-        layout.setSpacing(6)
-        layout.addWidget(self._rotate_button)
-        layout.addWidget(self._reset_button)
-        layout.addWidget(self._fill_checkbox)
-        layout.addSpacing(_GROUP_GAP)
-        layout.addWidget(self._flip_h_button)
-        layout.addWidget(self._flip_v_button)
-        layout.addSpacing(_GROUP_GAP)
-        layout.addWidget(self._crop_button)
-        layout.addWidget(self._reset_crop_button)
-        layout.addSpacing(_GROUP_GAP)
-        layout.addWidget(self._measure_button)
+        layout.setSpacing(_GROUP_GAP)
+        layout.addWidget(rotation_group)
+        layout.addWidget(vertical_separator(self))
+        layout.addWidget(flip_group)
+        layout.addWidget(vertical_separator(self))
+        layout.addWidget(crop_group)
+        layout.addWidget(vertical_separator(self))
+        layout.addWidget(calibrate_group)
         layout.addStretch(1)
 
         self._refresh_rotate_icon()

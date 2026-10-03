@@ -6446,3 +6446,659 @@ dark frame, and that `preview_recompute` reports the cell up to date after
 one run (the fingerprint-agreement check, not just a stored-value check).
 `test_lspri_rewrite_analysis_core.py` and `test_lspri_rewrite_analysis_
 engine.py` re-run in full alongside it.
+
+## 2026-10-02: the "Histogram" ribbon tab's overlay controls - show/hide + color + transparency for the intensity-selection tint
+
+Maintainer request: port the stable app's histogram-selection show/hide
+toggle (and add color + transparency, "similar to mask icons") into the
+Image panel's "Histogram" ribbon tab, which had been a seeded placeholder
+since `tool_ribbon.py` was built (2026-09-30 - "we will fill as we go").
+
+**What this is, precisely**: the stable app's `show_highlight_check`/
+`highlight_color_button`/`highlight_alpha_slider` (`gui/main_window.py`,
+wired in `gui/overlay_manager.py`'s `_update_selected_intensity_overlay`) -
+pixels of the *currently displayed* image whose intensity falls inside the
+Histogram panel's "Highlight" region get tinted on the canvas. In the
+rewrite, that selected `(min, max)` range already exists as its own shared
+module (`HighlightRangeModule`, built 2026-09-29 specifically so Mask/ROI
+Toolbox/Histogram could all read it without point-to-point wiring - see its
+own docstring) - this session's work was adding the one consumer that
+didn't exist yet: a visible overlay on the Image panel itself.
+
+**Design, same shape as the Mask tab's own overlay controls
+(`mask_overlay_controls.py`'s `MaskOverlayControls`)**: new
+`histogram_highlight_overlay_controls.py` / `HistogramHighlightOverlayControls`
+- a toggle + color swatch + `CompactWedgeSlider` alpha wedge, emitting three
+signals, owning no state beyond what it needs to repaint itself.
+`ImagePanel` owns the actual visible/color/alpha state
+(`_highlight_overlay_visible/_color/_alpha`, defaulting to `theme.
+highlight_color` and the stable app's own `0.42` alpha literal) and does the
+drawing - same "cosmetic state belongs to whoever draws it, not to the
+module that owns the computational range" split `MaskOverlayControls`'s
+docstring already argues for mask tint vs. `MaskModule`.
+
+**One real difference from `MaskOverlayControls`, deliberate**: the toggle
+keeps one icon shape and only recolors (green when visible, dim when not)
+rather than swapping to an "-off" icon variant the way Mask's does. This
+matches the stable app's own `_make_view_toggle_icon` exactly - it reserves
+the on/off icon-swap for "mask" and "reference_points" specifically, and
+recolors-only for "highlight" (and "roi", "reference"). Needed a new
+vendored icon either way: `chart-histogram` (Tabler's outline variant,
+fetched from `tabler/tabler-icons` on GitHub per ICONS.md's own instructions)
+replaces the stable app's bespoke hand-painted `_histogram_highlight_icon`
+SVG, since this rewrite tree only loads icons through `lspr_ui.
+load_tabler_icon()`, never a per-call-site painter - added to
+`packages/lspr_ui/src/lspr_ui/icon_assets/` (umbrella repo, not the
+submodule - `lspr_ui` is a shared package, not a submodule of its own).
+
+**Drawing mechanics - simpler than the mask overlay, not a copy of it**:
+`_update_mask_overlay` has to resolve an authored mask through geometry/
+chromatic warps before it has pixels to tint (hence its `_mask_overlay_state`
+cache of the *resolved* mask). The highlight overlay has no such resolution
+step - it thresholds the same pixel array already sitting in `_image_item`
+(cached as `_current_display_image`, set in `_on_rendered` right next to
+`self._image_item.setImage(...)`), so `_update_highlight_overlay` needs no
+state cache beyond that one array. A new `_highlight_overlay_item` (`pg.
+ImageItem`, same row-major shape as `_mask_overlay_item`) carries the tint.
+Hides when nothing is selected *or* when everything is (the stable app hides
+against its own fixed `[0, 65535]` sensor-range constants; here, against the
+actually-displayed image's own min/max, since `HighlightRangeModule` seeds
+to the real data range, not a fixed sensor constant - see that module's
+docstring) - a full-image tint carries no information either way.
+
+**`ImagePanel.__init__` gained a new required parameter**
+(`highlight_range: HighlightRangeModule`, positioned right after
+`reference_frame`) - `HighlightRangeModule` already existed and was already
+threaded through `app_rewrite.py` to `HistogramPanel`, just never to
+`ImagePanel`. Required, not defaulted to `None` with an internal fallback
+instance: a silently-constructed private module would be a real footgun (the
+whole point of this module is being the *same* instance `HistogramPanel`
+drives), so every call site needed updating rather than papering over a
+missing argument - `app_rewrite.py` (one line) plus eight test files under
+`tests/integration/` that each construct `ImagePanel` directly (two of them,
+`test_lspri_rewrite_mask_highlight_actions.py` and `test_lspri_rewrite_
+histogram_panel.py`, already had their own `self.highlight_range` instance
+to reuse; the other six needed a plain `HighlightRangeModule()` added inline,
+matching how they already inline `ReferenceFrameModule()`).
+
+**Verification**: six new tests in `test_lspri_rewrite_image_panel.py`
+(controls live in the Histogram tab's captioned group; draws the chosen
+color over the dataset's real bright patch; show/hide toggle; hides on a
+full-image range; color/alpha changes redraw with no new render - mirrors
+the mask overlay's own cosmetic-only test; a plain `HighlightRangeModule.
+set_range` call redraws with no new render, pinning the "no reference to
+HistogramPanel anywhere in ImagePanel" property `test_lspri_rewrite_
+histogram_panel.py`'s own docstring calls out as the point of this module).
+Full affected-file sweep (`test_lspri_rewrite_image_panel.py`, `_histogram_
+panel.py`, `_mask_highlight_actions.py`, `_canvas_tools_bar.py`,
+`_crop_tool.py`, `_rotate_tool.py`, `_measure_tool.py`,
+`_roi_geometry_sync.py`, `_visual_settings_restore.py`): 269/270 passed, the
+one failure being the pre-existing, already-documented `crop_size_controls.py`
+font-metric environment flake (status doc §4, pitfall 6) - confirmed
+unrelated by re-reading its assertion, not re-investigated. pyflakes-clean
+across every touched file; the rewrite-preview window (`app_rewrite.build_
+main_window`) still builds offscreen.
+
+## 2026-10-02 (same day, continued): the overlay above only updated on drag-finish - made it live, mid-drag
+
+Maintainer follow-up, immediately after the above landed: "can the histogram
+highlight overlay be live, thus when moving histogram highlight it will
+automatically update, not just when it is set." Correct observation - the
+overlay (`ImagePanel._update_highlight_overlay`) was already wired to
+`HighlightRangeModule.range_changed`, so it was never a problem on the Image
+panel's side. The staleness was one hop further back: `HistogramPlot`'s
+region widget only pushed into `HighlightRangeModule.set_range` on
+`sigRegionChangeFinished` (drag release), by a **deliberate 2026-09-29
+design choice** (`_on_region_changed_live`'s old docstring: "the shared
+`HighlightRangeModule` is not touched until the drag finishes... so a future
+Mask/ROI-detection subscriber sees one final value, not a flood of
+in-progress ones") - reasoned around hypothetical future expensive
+subscribers, not any that exist today.
+
+**Re-examined that reasoning against the actual current subscribers**
+before overriding it: `ImagePanel`'s overlay re-tints already-in-memory
+pixels with no new render (cheap); `MaskHighlightActions._refresh_enabled`
+just toggles button enabled-state (cheap). Neither is the "flood of
+in-progress expensive work" the original debounce was guarding against -
+and this codebase's own dominant drag pattern is already "live, straight to
+the module" (`ImagePanel._on_drag` calls `RoiToolbox.request_move` on every
+mouse-move tick, no debounce). The 2026-09-29 choice was the outlier, not
+the norm, once there was an actual cheap reactive consumer to weigh it
+against.
+
+**Fix**: `HistogramPlot._on_region_changed_live` (`panels/histogram/
+plot.py`) now also emits `highlight_dragged` on every `sigRegionChanged`
+tick, not just once from `_on_region_drag_finished` on release - both
+handlers emit the same signal; `HighlightRangeModule.set_range`'s existing
+no-op-if-unchanged guard makes the final tick and the drag-finished
+emission coincide harmlessly, so `_on_region_drag_finished` stays as a
+belt-and-suspenders guarantee rather than being deleted. Docstrings on
+`highlight_dragged`, both handler methods, and the test that pinned the old
+"must NOT commit early" behavior
+(`test_lspri_rewrite_histogram_panel.py::test_readout_stays_live_while_
+dragging_without_committing_early`, renamed to `..._both_stay_live_while_
+dragging`) were all updated to state the new behavior and why, rather than
+leaving a stale rationale next to changed code.
+
+**Verification**: the renamed test now asserts `HighlightRangeModule.
+current_range()` reflects the dragged-to value immediately (previously
+asserted it did not) - a real behavior-reversal test, not just a rename.
+Reran `test_lspri_rewrite_histogram_panel.py` + `test_lspri_rewrite_
+image_panel.py` + `test_lspri_rewrite_mask_highlight_actions.py` (the three
+files touching `HighlightRangeModule` either as a producer or a reactive
+consumer) in full: 104/104 passed. pyflakes-clean.
+
+## 2026-10-02 (same day, continued again): the Mask tab's "Edit" group - a tool picker, five per-tool panels, and a real correctness bug found and fixed along the way
+
+Maintainer request, after the two sessions above: add an "Edit" group next
+to "Visibility" in the Image panel's "Mask" tab - "a dropdown menu but
+without scroll feature... a pickup menu" offering five mask-editing tool
+kinds (Histogram selection / Threshold / Local contrast / Morphology /
+Draw), each with its own small control row once picked, reorganizing the
+stable app's always-all-visible Mask section (five sections, each a row of
+its own, all shown at once) into "pick one tool, see only its controls."
+Maintainer's own framing of the interaction: "this selection is first step
+in the editing... base on selection he will get other tools like +/- icons
+to add it or remove it with maybe also some control boxes."
+
+**Scoped in two passes, not guessed at in one.** First pass: asked the
+maintainer how much to build this turn, since only Histogram selection
+(`MaskHighlightActions`) had a working Add/Subtract action - Threshold/
+Local contrast/Morphology/Draw had tuning spinboxes
+(`workflow/mask_settings.py`) but zero compute/commit wiring anywhere,
+flagged in `MaskModule`'s own docstring as genuinely larger work (two tool
+kinds reload the raw image and run `scipy` filtering, "genuinely slow",
+needing a background worker that doesn't exist yet). The maintainer's
+answer added real detail per tool (exact control layout, live-preview
+expectation, Morphology's four operations instead of a +/- pair) - more
+than "picker only" but short of "build everything," so this session
+delivered real wiring for the two tool kinds that are actually tractable
+synchronously (Histogram selection, Morphology) and real settings-only
+panels (spinboxes wired, actions visibly disabled with an explanatory
+tooltip) for the three that aren't yet (Threshold, Local contrast, Draw) -
+honest about the boundary rather than faking a working button.
+
+**New shared state, deliberately *not* promoted to `app_rewrite.py`-level
+construction**: `image_tools/mask_edit_tool.py`'s `MaskEditTool`/
+`MaskEditToolModule`, mirroring `mask_scope.py`'s exact shape - but owned
+privately by `ImagePanel` itself (constructed in `_build_ui`, not passed
+into `__init__`), since nothing else needs to read or drive it yet (the
+Workflow panel's own Mask section is untouched - the maintainer's "maybe
+the workflow panel would be removed later on" is a *maybe*, not a decision
+this session acted on). This sidesteps the 8-test-file constructor-update
+cost the `HighlightRangeModule` wiring earlier today actually paid for
+real, shared state - see that module's own docstring for exactly when to
+promote it if the Workflow panel ever needs to mirror the selection.
+
+**The picker** (`panels/image/mask_edit_tool_picker.py`, `MaskEditToolPicker`):
+a plain `QToolButton` + `QMenu(InstantPopup)` - Qt's own "no-scroll dropdown"
+for a five-item choice, not a `QComboBox`. The button face always shows the
+currently-picked tool's icon; the menu marks the current pick with a native
+`QAction.setCheckable` checkmark. Real `QAction`s, `.trigger()`-callable per
+CLAUDE.md's GUI-testability rule.
+
+**Five bespoke pictograms** (`panels/image/mask_edit_tool_icons.py`), hand-
+painted with `QPainter` onto a `QPixmap` - the same technique `lspr_ui/
+icons.py`'s own composite icons (`flow_icon`/`trash_icon`/`residual_icon`)
+already use, not `load_tabler_icon()`'s single-`currentColor` recoloring,
+since several of these need more than one color in one glyph:
+- **Histogram selection**: the vendored `chart-histogram.svg` (added in the
+  first 2026-10-02 session) with its top curve removed and a fifth bar
+  added per spec, the middle three bars colored to show "a selected range."
+- **Threshold**: the same five-bar base, but the "selection" is a red
+  horizontal threshold line with everything above it colored, not a range -
+  per spec, "put a red horizontal line... everything over mark different
+  color."
+- **Local contrast**: the maintainer left this one to design judgment - a
+  3x3 cell patch with the center cell colored inside a dashed ring,
+  standing in for "this pixel vs. its own local (Gaussian-blurred)
+  neighborhood", which is literally what `create_local_contrast_mask`/
+  `create_relative_contrast_mask` compute.
+- **Morphology**: an arbitrary rounded shape with a corner notch punched
+  out via `QPainter.CompositionMode_Clear` (a real transparent hole, not a
+  same-color-as-background rectangle), and a blue patch filling exactly
+  that notch - per spec, "arbitrary shape white, and performed closing by
+  blue color."
+- **Draw**: the already-vendored `pencil.svg` via the normal `load_tabler_
+  icon()` path - the one tool kind with an obvious stock equivalent, no
+  bespoke painting needed.
+
+Four more Tabler icons vendored for the Morphology panel's own four
+operation buttons (`arrows-minimize`/`arrows-maximize` for erode/dilate,
+`square-off`/`square` for open/close) - plain single-color icons, fetched
+the same way `chart-histogram.svg` was in the first 2026-10-02 session.
+
+**A real, previously-unexercised correctness bug found and fixed while
+wiring Morphology**: `MaskModule.apply_morphology` (built 2026-09-21, never
+exercised by any UI until this session - confirmed by grep, no caller
+existed) routed through `apply_candidate`'s OR/AND merge, faithfully
+matching the stable app's own `_finish_apply_mask_delta` (`np.logical_and(
+current, ~candidate) if subtract else np.logical_or(current, candidate)`).
+That merge is only mathematically correct for the two *growing* operations
+(dilate/close are extensive: `candidate ⊇ base_mask` always, so `OR(base,
+candidate) == candidate` exactly). For the two *shrinking* operations
+(erode/open are anti-extensive: `candidate ⊆ base_mask` always), neither
+merge direction gives the eroded/opened mask: OR is a no-op, and AND-NOT
+produces the *removed* boundary ring, not the *surviving* interior - the
+opposite of "erode my mask." Verified with a worked example (a filled 10x10
+square, `radius_px=1`): the old OR-merge left all 100 pixels unchanged
+(`np.array_equal` true); the old AND-NOT-merge produced 36 pixels (the
+removed ring); the corrected plain-replace gives exactly 64 (the correct
+8x8 interior). Since this was genuinely never shipped/exercised (not even
+by the stable app, which has the same latent issue in its own
+`_finish_apply_mask_delta` for morphology specifically - not touched here,
+out of scope), this is a pre-first-use fix, not a behavior change to
+preserve for compatibility: `apply_morphology` now calls `set_mask_change`
+directly with the operation's result, `subtract` dropped from its
+signature entirely (the new UI exposes four direct operation buttons, no
++/- pair, which independently confirms a plain replace is the right
+semantics here, not a port of the stable app's own flawed delta shape).
+Full reasoning and the worked numbers are in the method's own docstring,
+not just here.
+
+**Shared base-mask resolution factored out**: `_resolve_base_mask`
+(formerly private to `mask_highlight_actions.MaskHighlightActions`) moved to
+`panels/mask_edit_common.py`'s plain function `resolve_mask_edit_base` -
+both the Histogram-selection editor and the new Morphology panel need
+"what mask is already in effect at this frame, warped in if authored
+elsewhere" before computing anything. Alongside this, `MaskHighlightActions`
+itself was split: its apply/resolve logic moved to a new widget-free
+`panels/mask_highlight_editor.HistogramHighlightMaskEditor` (same "one
+backend, several front doors" shape `MaskScopeModule`/`MaskScopeToggle`
+already established for the scope toggle, one level deeper) - the Workflow
+panel's `MaskHighlightActions` now holds one and delegates
+(`self._editor.apply(subtract=...)`/`self._editor.is_ready()`), and the
+Image panel's new `HistogramSelectionEditPanel` holds a second instance of
+the same class. Verified behavior-preserving before building anything on
+top: all 7 pre-existing `test_lspri_rewrite_mask_highlight_actions.py`
+tests passed unchanged after the extraction, with zero test edits needed
+(every assertion goes through `self.actions._add_button`/`_scope_toggle`,
+none through the internals that moved).
+
+**The five panels** (`panels/image/mask_edit_panels.py`), swapped by a
+`QStackedWidget` driven by `MaskEditToolModule.tool_changed`:
+- `HistogramSelectionEditPanel`: +/- only (per spec - no scope toggle here,
+  the Mask tab's own "State" group already shows one, shared tab-wide).
+  Its "live preview" is the already-built Histogram highlight overlay (the
+  first 2026-10-02 session's work) - no new overlay needed, it already
+  shows exactly what Add/Subtract would act on, live, as of the second
+  2026-10-02 session's live-drag fix.
+- `ThresholdEditPanel`/`LocalContrastEditPanel`: two real tuning spinboxes
+  each (same `MaskSettings` fields `MaskSettingsSection` already owns -
+  editing either form updates the other), Add/Subtract visibly disabled
+  with a tooltip explaining why.
+- `MorphologyEditPanel`: a radius spinbox + four instant operation buttons
+  (erode/dilate/open/close), fully wired against the corrected
+  `apply_morphology`. No +/- pair and no live preview before commit - each
+  click is an instant action, matching the maintainer's own "4 icons"
+  framing rather than guessing at a candidate-preview design for an
+  operation with no continuous drag/slider driving it.
+- `DrawEditPanel`: a real brush-size spinbox (`MaskSettings.brush_size_px`,
+  the field `MaskModule.paint_brush` already consumes) + an Add/Erase mode
+  toggle that is plain, disabled, unwired local widget state - there is no
+  canvas paint gesture yet (no mouse-drag brush tool, unlike Rotate/Crop/
+  Measure's `ActiveToolModule`-driven tools). The maintainer's own "maybe
+  add pencil shape (circle/square)" idea isn't included either -
+  `raster_tools.brush_stamp_bounds`/`apply_brush_stamp` only implement a
+  circular stamp today, so a shape toggle would need a backend change too.
+
+**Explicitly still open, named rather than silently deferred** (both
+already flagged above, repeated here as the two concrete follow-up items):
+1. Threshold/Local-contrast real compute wiring - needs a background worker
+   (this codebase's established `threading.Thread` pattern, never
+   `QThreadPool`) loading the *raw* plane (not the already-displayed image -
+   unlike Histogram selection, these need the true raw-pixel-space data for
+   correct local statistics) plus a live candidate-preview overlay, a new
+   piece of UI machinery with no precedent yet (the Histogram/mask overlays
+   both tint an *already-committed or already-selected* state, not an
+   in-progress candidate).
+2. A real Draw/brush canvas tool - a new tool class alongside `rotate_line_
+   tool.py`/`crop_tool.py`/`measure_line_tool.py`, wired into `ImagePanel`'s
+   mouse-event dispatch (`_on_left_drag_event`, `_on_scene_clicked`/
+   `_on_scene_moved`). `MaskModule.paint_brush`/`raster_tools.apply_brush_
+   stamp` are already built and ready for it.
+
+**Verification**: 8 new tests in `test_lspri_rewrite_image_panel.py`
+(Edit group placement after a second divider; default tool is Histogram
+selection; picking a tool switches the stack; Histogram-selection's Add
+button masks exactly the dataset's real bright patch in raw space -
+mirrors `test_lspri_rewrite_mask_highlight_actions.py`'s own equivalent
+test, proving the extracted editor behaves identically from the Image
+panel's side; Morphology's erode button actually shrinks a mask - the
+correctness-fix regression pin, with the worked 64-pixel expectation;
+Threshold/Local-contrast Add/Subtract are disabled; three spinbox-pushes-
+settings tests for Threshold/Local-contrast/Morphology/Draw). Full affected-
+file sweep (`test_lspri_rewrite_image_panel.py`, `_mask_highlight_actions.py`,
+`_histogram_panel.py`, plus the nine-file sweep from the earlier two
+2026-10-02 sessions): 114/114 passed on the final combined run,
+pyflakes-clean across every touched/new file, rewrite-preview window still
+builds offscreen end-to-end.
+
+## 2026-10-02 (same day, continued once more): icon/color/sizing polish pass over everything built today
+
+Maintainer feedback on the "Edit" picker session above, three separate
+asks:
+
+1. **"Histogram selection" icon reused for the Histogram tab's own
+   show/hide toggle**: `histogram_selection_icon` (`mask_edit_tool_icons.py`)
+   gained an `active: bool = True` parameter - the picker's menu/button
+   usage keeps the default (always the colored "selected range" look); the
+   overlay toggle (`histogram_highlight_overlay_controls.py`) now passes
+   its own checked state, collapsing every bar to one flat muted tone when
+   hidden ("on is colored, off is all white/gray"). Replaces that toggle's
+   previous single-color `load_tabler_icon("chart-histogram", ...)` call -
+   the vendored `chart-histogram.svg` file stays (the bespoke icon still
+   draws the same 5-bar shape from scratch, not from that SVG, but nothing
+   else in the suite referenced the vendored file, and deleting a just-added
+   vendored asset over a same-day icon revision felt like unnecessary
+   churn).
+2. **Morphology's picker icon redesigned**: "not good... can you make it
+   more detailed... some arbitrary shape like crescent moon like (but more
+   roundish) and after it would be circle." Replaced the rounded-square-
+   with-a-square-notch version with a chunky crescent (a big circle with a
+   second, offset circle subtracted via `CompositionMode_Clear` - not a
+   thin sliver, the subtracted circle only covers part of the base one) and
+   a blue circle positioned over the crescent's concave bite, the two
+   together reading as "most of the way to a full circle." Keeps the
+   original spec's "performed closing by blue color" idea in a rounder,
+   more illustrative glyph. Visually reviewed before and after (rendered to
+   a PNG, read back) rather than guessed at blind - the maintainer's own
+   CLAUDE.md note against driving the live GUI app doesn't apply to a
+   static icon-rendering script with no window.
+3. **Add/Subtract icon colors unified + spinbox widths narrowed**:
+   - Every "+"/"-" mask-edit action button (`mask_highlight_actions.py`'s
+     Workflow-panel copy and `mask_edit_panels.py`'s five Image-panel
+     copies) previously hardcoded its own green/red literals
+     (`#22c55e`/`#ef4444`, the stable app's original choice) independently
+     in each file - genuinely two copies that could drift. Unified into
+     `panels/mask_edit_common.py`'s `ADD_COLOR`/`SUBTRACT_COLOR` (blue
+     `#38bdf8` / orange `#f97316` - "+  one blue, - one orange-red (red is
+     too alarming)"), imported by both files, replacing their private
+     `_ADD_COLOR`/`_SUBTRACT_COLOR` constants entirely.
+   - `mask_edit_panels.py`'s six tuning spinboxes (Threshold's two,
+     Local-contrast's two, Morphology's radius, Draw's brush size) were
+     sized by `make_compact_spinbox`'s own content-based auto-width, which
+     reserves room for each field's full *technical* range (e.g.
+     `relative_profile_sigma_px` goes to 2000, so "2000 px" worth of
+     width) even though every realistic value is 1-2 digits - "make the
+     boxes for the controls wide only as much as possible... there will be
+     just 2 digit number." New `_narrow_spinbox` helper sets an explicit
+     fixed width sized to a realistic sample string (e.g. `"99 px"`)
+     instead, which makes `make_compact_spinbox`'s own deferred auto-sizing
+     back off on its own (it only overrides a spinbox whose `minimumWidth()`
+     is still at Qt's bare default - an explicit `setFixedWidth` already
+     raises it past that threshold, so this only works called *after*
+     `make_compact_spinbox`, not before - see the helper's own docstring).
+     Measured before/after offscreen: threshold/sigma/z spinboxes now
+     62-86px wide, down from whatever the full-range reservation produced
+     (not measured directly, but visibly much wider before - e.g. the
+     sigma field's 2000px-max reservation).
+
+**Verification**: re-ran the full affected-file sweep
+(`test_lspri_rewrite_image_panel.py`, `_mask_highlight_actions.py`,
+`_histogram_panel.py`) - 114/114 passed (no test hardcoded the old colors
+or asserted specific icon pixel content, so no test edits were needed for
+any of the three changes). pyflakes-clean across every touched file,
+rewrite-preview window still builds offscreen end-to-end.
+
+## 2026-10-02 (same day, continued yet again): mask-off icon fix, "Automatic edit" (Clear/Load/Save), left-alignment fix, Transforms reorg, and Workflow panel cleanup
+
+Six more maintainer requests in one message, all against today's earlier
+"Edit" picker/overlay work:
+
+**1. `mask-off.svg` was actually broken, not just re-flipped.** The first
+2026-10-02 session's "flip the diagonal" edit changed only the diagonal
+`<path>` (`M3 3l18 18` -> `M3 21l18 -18`), leaving the square/circle paths'
+pre-built gaps - Tabler ships this icon with small deliberate breaks in its
+outline exactly where the *original* diagonal crosses it, so the crossing
+reads as clean rather than as overlapping strokes - still positioned for
+the old diagonal. Result: gaps in solid outline where nothing crosses
+anymore, and the new diagonal crossing solid outline with no gap where it
+actually needs one. **Fix**: re-fetched the unmodified Tabler source and
+wrapped all three paths in `<g transform="scale(1,-1) translate(0,-24)">` -
+a true vertical mirror at the SVG-renderer level (not hand-edited path
+coordinates, which would have risked the exact same class of mistake again)
+- which moves the diagonal to the desired `/` direction *and* carries every
+pre-built gap along with it automatically, since the whole glyph reflects
+as one consistent unit. Verified visually (rendered both `mask` and the
+fixed `mask-off` to a PNG, read it back) before and after - the earlier
+broken version was never shipped to the maintainer's own eyes this way, so
+this was a genuine correctness check, not a formality.
+
+**2. "Automatic edit" group**: Clear (eraser)/Load (download)/Save
+(upload), new `panels/image/mask_file_actions.py` (`MaskFileActions`).
+**Explicitly not a port of the stable app's `MaskController.create_new_
+mask`/`load_mask_from_file`/`save_mask_to_file`** - that logic is built
+entirely around concepts this rewrite's 2026-09-21 timeline redesign
+replaced (a single "current file mask" array, reference-image/chromatic-
+correction coupling, per-record sidecar paths) - see the new file's own
+module docstring for the full reasoning. The *pure* read/write math
+(`image_tools/mask/io.py`'s `read_mask_image`/`write_mask_image`) was
+already a verbatim port, sitting unused since 2026-09-21 ("not built yet,
+panel-layer work" per that file's own docstring) - this is the first real
+caller. Load replaces the current frame/scope's mask outright (not an
+add/subtract candidate - loading a file *is* the new mask); Save writes
+whatever `resolve_mask_source` currently resolves (an all-clear canvas if
+nothing's been authored yet, same fallback convention
+`resolve_mask_edit_base` already uses).
+
+**New `MaskModule.clear_all_masks()` command** - "clean the mask entirely
+(so basically, start new mask)" wipes the *whole* timeline (every cube,
+every wavelength, both scopes), not a per-frame removal
+(`set_mask_change(frame, scope, None)` already covered that case). Given
+**no Mask command is undo-tracked** (confirmed in that module's own
+docstring, a deliberate match to the stable app's own behavior), this is
+the one action in the whole "Edit"/"Automatic edit" area that prompts for
+confirmation (`QMessageBox.question`) before committing - a judged
+exception, not a new default, since every other command here is a single
+frame and trivially reversed by the opposite button.
+
+**Icons/colors for Load/Save copied from the stable app's own choices**
+(`download`/blue, `upload`/green - both already vendored); Clear is new
+(a freshly-vendored `eraser.svg`, muted/neutral rather than tinted, since
+it's a plain destructive action rather than an add/subtract-style one).
+
+**3. Add/Subtract icons already unified this session (previous entry) were
+left stranded without a trailing stretch** - all four mask-edit panels in
+`mask_edit_panels.py` (Histogram selection, the shared Threshold/Local-
+contrast base, Morphology, Draw) had their internal `QHBoxLayout`s end
+right after the last widget, no `addStretch(1)`. Harmless while the
+`QStackedWidget` happened to be exactly as wide as each page's own content,
+but once Morphology (the widest page: 1 spinbox + 4 operation buttons)
+became the stack's natural width, every *narrower* page (Histogram
+selection's bare 2-button row, most visibly) rendered with its icons
+drifting away from the left edge into the stack's reserved extra width -
+"align icons to the left (for example histogram ones)." Fixed by adding
+the same trailing `addStretch(1)` every other row in this ribbon already
+uses - a one-line omission in four places, not a design problem.
+
+**4. Transforms reorganized**: "first free icons be Rotate, then Flip, and
+Crop, last icon is in Calibrate section" - the row's actual Rotate/Flip/
+Crop order was already correct (unchanged); what was missing was pulling
+Measure out into its own captioned "Calibrate" group, matching the Mask
+tab's State/Visibility/Manual-edit/Automatic-edit convention instead of
+sitting in the same plain icon row as everything else. Required factoring
+`panel.py`'s private `_labeled_icon_group`/`_vertical_separator`/`_group_
+label_style` out into a new neutral module, `panels/ribbon_group.py`
+(public names, no leading underscore) - `transforms_settings.py` needed the
+identical pattern for its new Calibrate group, and a plain import from
+`panels/image/panel.py` would have been a real circular import
+(`transforms_settings.py` is itself imported *by* `panel.py`). `panel.py`
+now imports from `ribbon_group.py` too, rather than keeping its own
+now-duplicate copies. `TransformsSection.ROW_HEIGHT` grew 36px -> 50px (the
+Calibrate group's own 42px caption-height plus the row's unchanged 4px
+top/bottom margin) - `tool_ribbon.py`'s shared `_ROW_HEIGHT` computation
+picks this up automatically (`max(...)` over all three tabs' natural
+heights), so the whole Image-panel ribbon bar grows slightly taller to fit
+it, a correct and expected side effect, not a bug.
+
+**5. Removed the Workflow panel's "Transforms" and "Mask" nested
+sections** ("remove the Image tools and Mask sections from the Workflow
+panel, as they are fully in the Image panel") - both are now completely
+covered by the Image panel's own ribbon ("Image tools" tab's second
+`TransformsSection` instance; "Mask" tab's Edit/Automatic-edit groups).
+`_build_image_tools_section` (`panels/workflow/panel.py`) now only builds
+Chromatic correction (still a placeholder) and Background removal (still
+real) - its signature dropped from 10 parameters to 2
+(`parent`, `background`); `WorkflowPanel.__init__` dropped seven
+now-entirely-unused parameters (`geometry`/`active_tool`/`mask`/
+`chromatic`/`highlight_range`/`image_panel`/`mask_scope` - confirmed by
+grep that nothing else in the file read any of them), and with them the
+`TYPE_CHECKING`-guarded `ImagePanel` import and its own long comment
+explaining a circular-import risk that no longer exists (nothing in this
+file needs `ImagePanel` anymore). `app_rewrite.py`'s `WorkflowPanel(...)`
+call site updated to match - the seven dropped local variables are all
+still used elsewhere in that function (building `ImagePanel`/
+`HistogramPanel` etc.), just no longer passed here.
+
+**`mask_settings.py`/`mask_highlight_actions.py` were deliberately left in
+place, not deleted** - `MaskSettingsSection` now has no caller anywhere
+(production or test); `MaskHighlightActions` is still directly exercised by
+`test_lspri_rewrite_mask_highlight_actions.py`'s 7 tests (unaffected by
+today's refactor - still passing unchanged) even though nothing mounts it
+in the live app's UI tree anymore. The maintainer asked to remove these
+sections *from the Workflow panel*, not to delete the widget classes
+themselves, and CLAUDE.md's own file-deletion rule needs explicit
+approval first - flagged here as a `vulture` moment (CLAUDE.md: suggest,
+don't run) rather than decided unilaterally.
+
+**Test fallout, all mechanical**: `test_lspri_workflow_panel_subsection_
+restore.py` hardcoded `"IMAGE_TOOLS:Transforms"`/`"IMAGE_TOOLS:Mask"` keys
+throughout - re-targeted at the two remaining nested sections
+(`"IMAGE_TOOLS:Chromatic correction"`/`"IMAGE_TOOLS:Background removal"`),
+since the restore *mechanism* under test is generic to any nested section,
+not specific to which ones happen to still exist. `test_lspri_rewrite_
+image_panel.py`'s own `test_mask_edit_group_sits_in_the_mask_tab_after_a_
+second_divider` asserted the old "Edit" label text and 3-group-only
+layout - updated for "Manual edit" plus two new tests covering the
+"Automatic edit" group's placement/ordering and `MaskFileActions`' real
+Clear(with confirmation)/Save-then-Load round trip (through the real
+`image_tools/mask/io.py` PNG codec, `QFileDialog`/`QMessageBox` mocked at
+the two call sites, nothing else).
+
+**A real investigative finding, not just file-renaming**: `test_lspri_
+workflow_panel_width_budget.py` failed two tests (`DATASET`/`IMAGE_TOOLS`
+sections exceeding the 320px budget) when this session's full sweep first
+ran. Rather than assume today's Workflow-panel edit caused it, stashed
+every uncommitted change in the submodule (`git stash push -u`) and reran
+against the untouched baseline - **identical failures, identical pixel
+widths** (367/331/331/329px), including `DATASET`, a section untouched by
+any change today. Confirmed pre-existing and environment-dependent (same
+font-metrics-sensitivity class as the already-documented `crop_size_
+controls.py` flake - CLAUDE.md's own "Qt widget sizing verification"
+pitfall), not caused by this session's work. Stash popped back cleanly
+(`git status` file count matched before/after: 20). Not "fixed" here -
+flagging this fully belongs to whoever next touches font/DPI-sensitive
+layout code, per the existing crop_size_controls precedent.
+
+**Verification**: full combined sweep across every file touched today
+(`test_lspri_rewrite_image_panel.py`, `_mask_highlight_actions.py`,
+`_histogram_panel.py`, `test_lspri_workflow_panel_stage_restore.py`,
+`_subsection_restore.py`, `test_lspri_rewrite_measure_tool.py`,
+`_rotate_tool.py`) - 210/210 passed. pyflakes-clean across every touched
+file (including the two files whose signatures shrank -
+`workflow/panel.py`/`app_rewrite.py` - confirming no now-dead imports were
+missed). Rewrite-preview window still builds offscreen end-to-end.
+
+## 2026-10-02 (same day, continued once more): "PNG"/"General" split, book/book-2 morphology icons, a shared action_button + disabled-icon-color fix, full Transforms regrouping - and two real bugs found along the way
+
+Five more maintainer requests against the session above:
+
+**1. "General"/"PNG" replace "Automatic edit"**: the single Clear/Load/Save
+group from the previous entry was split into two - "General" (just Clear,
+now the Mask tab's own leftmost group - "put this icon in solo section
+'General' and put section the most left") and "PNG" (Load/Save). New Mask
+tab group order: General | State | Visibility | Manual edit | PNG.
+`mask_file_actions.py` rewritten: `MaskFileActions` -> `MaskClearAction` +
+`MaskPngActions`, sharing a small `_FrameTrackingWidget` base for the
+`image_rendered`/`image_cleared` bookkeeping both need - built with signal
+connection deliberately separated from `QWidget.__init__` into its own
+`_connect_frame_tracking()` call, so a subclass can construct its own
+buttons *before* wiring signals that touch them (construction-order
+fragility, not yet a real bug, caught while writing it, not after).
+
+**2. Morphology's Open/Close icons -> "book"/"book-2"** (maintainer: "copy
+the icons from the stable app (open book, closed book)") - traced to
+`main_window_icons.py`'s `_make_mask_morphology_icon`, confirming it's a
+pun on the word, not a literal morphology-math glyph. Both already
+vendored, no new icon fetch needed. Erode/dilate keep their existing
+arrow icons (not requested).
+
+**3. A shared `action_button()` + a real disabled-icon-color bug fixed**:
+"not all +/- icons are same, you change only those in histogram selection
+... all other should be changed as well... but also in future." Investigated
+before assuming a color-constant bug: every +/- usage already referenced
+the same shared `ADD_COLOR`/`SUBTRACT_COLOR` (previous session's own fix) -
+the *actual* cause was Qt's own default behavior of auto-desaturating a
+disabled `QToolButton`'s icon, and Histogram selection's +/- was the only
+pair ever actually *enabled* during this session's work, so it was the
+only one that never hit that desaturation. Fixed at the root: `mask_edit_
+common.py` gained `action_button()`, a single shared icon-button builder
+that registers the *same* full-color pixmap under both `QIcon.Mode.Normal`
+and `QIcon.Mode.Disabled`, overriding Qt's default - "disabled" still means
+non-interactive (`isEnabled()`), it just no longer means "different color."
+This replaced three near-identical private `_action_button` copies that
+had accumulated across `mask_highlight_actions.py`/`mask_edit_panels.py`/
+`mask_file_actions.py` - also directly answers "make sure some icons are
+shared or reused when appropriate." Verified by rendering an enabled vs. a
+disabled button side by side (read back as an image) before trusting it
+fixed, and pinned with a real test comparing the two `QIcon.Mode`s' pixel
+data for equality, not just "doesn't crash."
+
+**4. Full Transforms regrouping**: "you did not make rotation section
+containing 3 rotation icons, and flip section containing flipping icons,
+and crop section containing 2 crop icons" - a follow-up to the earlier
+"Calibrate" split, completing the same pattern for the other three
+clusters. New `_cluster()` helper (`transforms_settings.py`) wraps a
+multi-button group before handing it to `labeled_icon_group` (which
+otherwise takes one widget). `TransformsSection.ROW_HEIGHT` grew again,
+36px -> 50px, for the same reason the "Calibrate" split grew it the first
+time - `tool_ribbon.py`'s shared row height picks this up automatically.
+
+**5. Two real, unrelated bugs found and fixed while chasing a test
+crash** - see the next section for the full story; both are genuine
+correctness fixes to shared infrastructure, not incidental to this
+session's UI requests:
+- `packages/lspr_ui/src/lspr_ui/ui_helpers.py`'s `_apply_content_based_
+  minimum_width` had an unguarded `spinbox.minimumWidth()` call sitting
+  *before* its own try/except block, defeating the exact protection its
+  own comment claimed to provide ("widget was deleted before this
+  deferred call ran"). Fixed by widening the try/except to the whole
+  function body.
+- `panels/image/render.py`'s `ImageRenderer.stop()` used to set two flags
+  and return immediately, never waiting for its background render thread
+  to actually exit - a caller could let Qt start destroying the owning
+  `ImagePanel` while the thread was still mid-render, and a late
+  `self.rendered.emit(...)` could then fire into a QObject whose C++ side
+  was already gone. Fixed with a bounded `self._thread.join(timeout=5.0)`.
+
+**A real Windows access-violation crash was investigated at length**
+(`RewriteImagePanelTest.test_morphology_edit_panel_erode_shrinks_the_mask`,
+always inside `_load()`'s `_pump()`, nothing morphology-specific about the
+crash itself). Looked deterministic at first (3 straight full-6-file runs
+crashed at the identical spot), which led to file-combination bisection -
+that theory broke when a 2-file pairing that had *already passed clean*
+minutes earlier, as part of a larger passing run, crashed on its own later
+re-run. **Corrected conclusion: this is a probabilistic race, the same
+general class as this app's own already-documented PyQt6-sip crash-on-close
+pattern** (see the `lspri_pyqt6_sip_crash_on_close` memory note - that
+investigation measured an ~11% isolated hit rate for the same category of
+bug), not a fixed trigger tied to one file combination. The two bugs above
+are real and worth keeping regardless, but neither should be assumed to
+fully explain every occurrence of this crash - full details, what was
+tried, and why bisection was abandoned are in a new memory note
+(`lspri_rewrite_image_panel_test_crash_2026_10_02`, referenced from
+`MEMORY.md`) rather than duplicated here, since it's maintainer-facing
+process/investigation context, not application design.
+
+**Verification**: `test_lspri_rewrite_image_panel.py` alone - 77/77,
+clean, repeatedly (was crashing every time before the `render.py` fix).
+`test_lspri_rewrite_image_panel.py` + `test_lspri_rewrite_crop_tool.py` -
+131/131 (1 pre-existing unrelated font-metrics flake only).
+`test_lspri_rewrite_image_panel.py` + `test_lspri_rewrite_measure_tool.py`
+(covering this entry's new Transforms-regrouping tests) - 127/127, clean.
+pyflakes-clean across every touched file. Given the probabilistic-crash
+finding above, no claim is made that the full combined suite is crash-free
+- only that every change in this entry is independently verified correct,
+and that this session's own two infrastructure fixes are real improvements
+either way.

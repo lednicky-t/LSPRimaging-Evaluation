@@ -49,7 +49,6 @@ from __future__ import annotations
 
 import logging
 from enum import Enum, auto
-from typing import TYPE_CHECKING
 
 from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtWidgets import QFrame, QLabel, QScrollArea, QVBoxLayout, QWidget
@@ -57,8 +56,8 @@ from PyQt6.QtWidgets import QFrame, QLabel, QScrollArea, QVBoxLayout, QWidget
 from lspr_ui import get_active_theme
 
 from ...dataset import DatasetModule
-from ...image_tools import ActiveToolModule, BackgroundModule, ChromaticModule, GeometryModule, MaskModule, MaskScopeModule
-from ...selection import HighlightRangeModule, ReferenceFrameModule, SelectionModule
+from ...image_tools import BackgroundModule
+from ...selection import ReferenceFrameModule, SelectionModule
 from ...storage.session_coordinator import SessionCoordinator
 from .background_removal import BackgroundRemovalSection
 from .collapsible_section import CollapsibleSection
@@ -66,22 +65,8 @@ from .dataset_experimental_plan import ExperimentalPlanSection
 from .dataset_export import DatasetExportSection
 from .dataset_folder_row import DatasetFolderRow
 from .dataset_summary import DatasetSummarySection
-from .mask_highlight_actions import MaskHighlightActions
-from .mask_settings import MaskSettingsSection
 from .reference_frame_row import ReferenceFrameRow
 from .session_picker_row import SessionPickerRow
-from .transforms_settings import TransformsSection
-
-if TYPE_CHECKING:
-    # Deferred: `panels.image.panel` imports `workflow.transforms_settings`
-    # (above), so importing `ImagePanel` at module level here would be a
-    # real import cycle (workflow/__init__.py pulls in this whole file to
-    # get `WorkflowPanel`, which would then try to import a still-
-    # mid-import `image.panel`) - see `mask_highlight_actions.py`'s
-    # docstring for the full trace. `from __future__ import annotations`
-    # already makes every annotation in this file a string, so this
-    # class is never actually needed at runtime, only by a type checker.
-    from ..image.panel import ImagePanel
 
 logger = logging.getLogger(__name__)
 
@@ -219,44 +204,28 @@ def _build_dataset_section(
 
 def _build_image_tools_section(
     parent: QWidget,
-    geometry: GeometryModule,
-    active_tool: ActiveToolModule,
     background: BackgroundModule,
-    mask: MaskModule,
-    chromatic: ChromaticModule,
-    dataset: DatasetModule,
-    highlight_range: HighlightRangeModule,
-    image_panel: ImagePanel,
-    mask_scope: MaskScopeModule,
 ) -> tuple[CollapsibleSection, list[tuple[str, CollapsibleSection]]]:
     """Ported from the source's ``image_tools_section`` + its nested
     Transforms/Mask/Chromatic correction/Background removal children.
 
-    **Transforms is partly real** (2026-09-28, ``transforms_settings.py``):
-    the rotation / crop / flip icon row only - measure controls are not
-    built yet. The rotate tool is wired to the Image panel through
-    ``ActiveToolModule``; the crop-tool button has no canvas behavior yet
-    (see that file).
+    **Transforms and Mask removed 2026-10-02** (maintainer request: "remove
+    the Image tools and Mask sections from the Workflow panel, as they are
+    fully in the Image panel") - both are now fully covered by the Image
+    panel's own ribbon tabs ("Image tools" and "Mask", `panels/image/
+    panel.py`/`tool_ribbon.py`): Transforms by a second `TransformsSection`
+    instance there (built 2026-09-30), Mask by the "Edit" tool picker's
+    Histogram-selection/Morphology panels plus the "Automatic edit" Clear/
+    Load/Save group (both built 2026-10-02, `mask_edit_panels.py`/
+    `mask_file_actions.py`). Only Chromatic correction and Background
+    removal remain here - neither has an Image-panel-ribbon home yet.
 
-    **Background removal and Mask are real** (2026-09-24,
-    ``background_removal.py``/``mask_settings.py``). Background removal
-    was the first section to use the apply toggle for real
-    (``BackgroundModule``'s whole settings surface is one command). Mask
-    gets no apply toggle - ``MaskSettings`` has no on/off field to back one
-    (see ``mask_settings.py``'s docstring).
-
-    **Mask's histogram-highlight actions built 2026-09-30**
-    (``mask_highlight_actions.py``, maintainer request): a Persistent/
-    Individual scope toggle plus Add/Subtract-highlighted-pixels icon
-    buttons, stacked below the tuning form in the same "Mask" section body -
-    this is the "compute and commit a candidate" half ``mask_settings.py``'s
-    docstring flagged as deferred, now built for the histogram-highlight
-    tool specifically (the cheap, synchronous one - the relative/local-
-    contrast tools still need the background-worker machinery
-    ``MaskModule``'s docstring describes, not built here). Transforms/
-    Chromatic correction are still placeholders: per the design doc §3
-    icon-placement split, most of their real controls live on the Image
-    panel's own toolbar instead, which doesn't exist yet."""
+    **Background removal is real** (2026-09-24, ``background_removal.py``) -
+    the first section to use the apply toggle for real (``BackgroundModule``'s
+    whole settings surface is one command). Chromatic correction is still a
+    placeholder: per the design doc §3 icon-placement split, its real
+    controls are meant to live on the Image panel's own toolbar, not built
+    yet."""
     background_removal_content = BackgroundRemovalSection(background, parent)
     background_removal_section = CollapsibleSection(
         "Background removal",
@@ -285,20 +254,6 @@ def _build_image_tools_section(
 
     background.background_model_changed.connect(_sync_apply_toggle)
 
-    transforms_section = CollapsibleSection(
-        "Transforms", TransformsSection(geometry, active_tool, parent), expanded=True, title_color=_nested_title_color(), parent=parent
-    )
-    mask_content = QWidget(parent)
-    mask_content_layout = QVBoxLayout(mask_content)
-    mask_content_layout.setContentsMargins(0, 0, 0, 0)
-    mask_content_layout.setSpacing(0)
-    mask_content_layout.addWidget(MaskSettingsSection(mask, parent))
-    mask_content_layout.addWidget(
-        MaskHighlightActions(mask, geometry, chromatic, dataset, highlight_range, image_panel, mask_scope, parent)
-    )
-    mask_section = CollapsibleSection(
-        "Mask", mask_content, expanded=True, title_color=_nested_title_color(), parent=parent
-    )
     chromatic_section = CollapsibleSection(
         "Chromatic correction",
         _section_placeholder("Chromatic correction"),
@@ -306,12 +261,8 @@ def _build_image_tools_section(
         title_color=_nested_title_color(),
         parent=parent,
     )
-    children = _nested_children(
-        parent, transforms_section, mask_section, chromatic_section, background_removal_section
-    )
+    children = _nested_children(parent, chromatic_section, background_removal_section)
     subsections = [
-        ("Transforms", transforms_section),
-        ("Mask", mask_section),
         ("Chromatic correction", chromatic_section),
         ("Background removal", background_removal_section),
     ]
@@ -398,17 +349,10 @@ class WorkflowPanel(QWidget):
     def __init__(
         self,
         dataset: DatasetModule,
-        geometry: GeometryModule,
-        active_tool: ActiveToolModule,
         background: BackgroundModule,
-        mask: MaskModule,
-        chromatic: ChromaticModule,
         selection: SelectionModule,
         reference_frame: ReferenceFrameModule,
-        highlight_range: HighlightRangeModule,
-        image_panel: ImagePanel,
         session_coordinator: SessionCoordinator,
-        mask_scope: MaskScopeModule,
         initial_stage: WorkflowStage | None = None,
         initial_subsections: dict[str, bool] | None = None,
         parent: QWidget | None = None,
@@ -422,10 +366,7 @@ class WorkflowPanel(QWidget):
             ),
             (
                 WorkflowStage.IMAGE_TOOLS,
-                *_build_image_tools_section(
-                    self, geometry, active_tool, background, mask, chromatic, dataset, highlight_range, image_panel,
-                    mask_scope,
-                ),
+                *_build_image_tools_section(self, background),
             ),
             (WorkflowStage.ROI_SELECTION, *_build_roi_selection_section(self)),
             (WorkflowStage.ANALYSIS, *_build_analysis_section(self)),

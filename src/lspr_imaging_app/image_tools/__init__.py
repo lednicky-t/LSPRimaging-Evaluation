@@ -20,6 +20,7 @@ from .background import BackgroundModule
 from .chromatic import ChromaticModule
 from .geometry import GeometryModule
 from .mask import MaskModule
+from .mask_edit_tool import MaskEditTool, MaskEditToolModule
 from .mask_scope import MaskScope, MaskScopeModule
 
 __all__ = [
@@ -31,4 +32,6 @@ __all__ = [
     "ImageTool",
     "MaskScope",
     "MaskScopeModule",
+    "MaskEditTool",
+    "MaskEditToolModule",
 ]

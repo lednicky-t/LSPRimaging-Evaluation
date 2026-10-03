@@ -27,15 +27,18 @@ uses, so the two rows stay in sync automatically - see
 `transforms_settings.py`'s module docstring for why this needed no new
 plumbing, just a second widget instance.
 
-**"Histogram" is still a seeded placeholder** ("we will fill as we go" -
-maintainer, 2026-09-30) - no Histogram-category content exists yet. It
-renders the same "<name> - not built yet." wording `workflow/panel.py`'s
-`_section_placeholder` already uses for an unbuilt Workflow stage - same
-convention, not a new one, so an empty category here reads the same way an
-empty Workflow stage already does elsewhere in this app. Subcategories (a
-third row, or per-category sub-tabs within the bottom row) are not built -
-the maintainer's plan is to add them once a category actually has enough
-tools to need grouping within itself, not to guess at that structure now.
+**"Histogram" holds `HistogramHighlightOverlayControls`** (show/hide + color
++ transparency for the histogram intensity-selection tint, 2026-10-02 -
+maintainer request, "add the toggle to show/hide histogram selection in
+image... similar to mask icons") - added the same way the "Mask" tab's
+overlay controls were, as its own single captioned group (`panel.py`'s
+`_labeled_icon_group`). It was a seeded placeholder ("we will fill as we go"
+- maintainer, 2026-09-30) until this. `_category_placeholder` below remains
+for any future category that still has nothing to show - none do today, all
+four tabs have real content. Subcategories (a third row, or per-category
+sub-tabs within the bottom row) are not built - the maintainer's plan is to
+add them once a category actually has enough tools to need grouping within
+itself, not to guess at that structure now.
 
 **The bottom row is a fixed height** regardless of which category is
 showing (`_ROW_HEIGHT` - the tallest of `CanvasToolsBar`'s,
@@ -67,22 +70,25 @@ from ..workflow.transforms_settings import ROW_HEIGHT as _TRANSFORMS_ROW_HEIGHT
 from .canvas_tools import _BAR_MARGIN, _BUTTON_SIZE
 
 _CANVAS_TOOLS_ROW_HEIGHT = _BUTTON_SIZE + 2 * _BAR_MARGIN
-# The "Mask" tab's two icon groups (`panel.py`'s `_labeled_icon_group`,
-# 2026-10-02) each carry a small caption under their icons now - 28px icon
-# row (`MaskScopeToggle`/`MaskOverlayControls`'s own button size) + 2px
-# group spacing + 12px for one line of 9px-font caption text (measured via
+# The "Mask" and "Histogram" tabs' captioned icon groups (`ribbon_group.py`'s
+# `labeled_icon_group`, 2026-10-02) each carry a small caption under their
+# icons now - 28px icon row (`MaskScopeToggle`/`MaskOverlayControls`/
+# `HistogramHighlightOverlayControls`'s own button size) + 2px group spacing
+# + 12px for one line of 9px-font caption text (measured via
 # `QLabel.sizeHint()`, not guessed - font rendering isn't just the pixel
-# size). Kept as a literal here rather than imported from `panel.py` -
-# `panel.py` imports this module, so the reverse would be a real cycle.
-_MASK_GROUP_ROW_HEIGHT = 42
+# size). Both tabs land on the same 42px, so one constant covers both. Kept
+# as a literal here rather than imported from `panel.py` - `panel.py`
+# imports this module, so the reverse would be a real cycle.
+_CAPTIONED_GROUP_ROW_HEIGHT = 42
 # The tallest of the real categories' own natural heights - today that's
-# this "Mask" group height (42px) over the "Image tools" tab's
-# `TransformsSection` (36px: 28px buttons + 4px margins) over the "ROIs"
-# tab's `CanvasToolsBar` (26px). Shorter content (a placeholder, or
-# `CanvasToolsBar`) just sits centered in the extra room - see module
-# docstring for why one fixed height for every category, not a
-# per-category one, is the point.
-_ROW_HEIGHT = max(_CANVAS_TOOLS_ROW_HEIGHT, _TRANSFORMS_ROW_HEIGHT, _MASK_GROUP_ROW_HEIGHT)
+# the "Image tools" tab's `TransformsSection` (50px, since its own
+# "Calibrate" group - 2026-10-02 - is a captioned group too, plus
+# `TransformsSection`'s own 4px top/bottom margin) over the "Mask"/
+# "Histogram" captioned-group height (42px) over the "ROIs" tab's
+# `CanvasToolsBar` (26px). Shorter content just sits centered in the extra
+# room - see module docstring for why one fixed height for every category,
+# not a per-category one, is the point.
+_ROW_HEIGHT = max(_CANVAS_TOOLS_ROW_HEIGHT, _TRANSFORMS_ROW_HEIGHT, _CAPTIONED_GROUP_ROW_HEIGHT)
 _TAB_HEIGHT = 20
 _TAB_FONT_SIZE_PX = 11
 
