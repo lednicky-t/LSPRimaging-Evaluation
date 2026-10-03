@@ -14,10 +14,15 @@ isn't `SelectionModule` itself or an existing module).
 time: the Histogram panel's intensity-range selection, needed independently
 by Mask and ROI Toolbox - see its own docstring for why it is not
 Histogram-specific pub/sub.
+
+``AreaSelectionModule`` (2026-10-03): the rectangle/lasso area selection that
+restricts editing tools and the Histogram plot - same transient shared-state
+shape; see its own docstring.
 """
 
+from .area_selection_module import AreaSelectionMode, AreaSelectionModule
 from .highlight_range_module import HighlightRangeModule
 from .module import SelectionModule
 from .reference_frame_module import ReferenceFrameModule
 
-__all__ = ["HighlightRangeModule", "SelectionModule", "ReferenceFrameModule"]
+__all__ = ["AreaSelectionMode", "AreaSelectionModule", "HighlightRangeModule", "SelectionModule", "ReferenceFrameModule"]

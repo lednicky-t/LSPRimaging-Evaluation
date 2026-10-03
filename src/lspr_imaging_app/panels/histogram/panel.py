@@ -149,6 +149,10 @@ class HistogramPanel(QWidget):
         self._image_panel.image_rendered.connect(self._on_image_rendered)
         self._image_panel.image_cleared.connect(self._on_image_cleared)
         self._highlight_range.range_changed.connect(self._on_highlight_range_changed)
+        # Area selection (2026-10-03): the plot narrows to it, but only while
+        # the ribbon's "Histogram" tab is the one open (maintainer's spec).
+        self._image_panel.area_selection().selection_changed.connect(self._schedule_redraw)
+        self._image_panel.ribbon_category_changed.connect(self._schedule_redraw)
 
     # -- image lifecycle --------------------------------------------------------
 
@@ -174,18 +178,37 @@ class HistogramPanel(QWidget):
             return
 
         image = self._image
+        # Area selection: pixels outside it become NaN, which every count,
+        # percentage and normalisation below already drops (same as "no
+        # data" pixels) - so the whole plot narrows to the selection with no
+        # other change. The highlight range is still seeded from the *whole*
+        # frame, so selecting an area never moves the user's range.
+        region = self._selection_region(image.shape)
+        seed_values = image[np.isfinite(image)]
+        if region is not None:
+            image = np.where(region, image, np.float32(np.nan))
         finite = np.isfinite(image)
         total_pixels = int(np.count_nonzero(finite))
-        self._plot.set_excluded_text(compute.excluded_pixel_text(image))
+        excluded_text = compute.excluded_pixel_text(image[region] if region is not None else image)
+        if region is not None:
+            selection_text = f"Selection only: {int(np.count_nonzero(region)):,} px".replace(",", " ")
+            excluded_text = selection_text if excluded_text is None else f"{selection_text} | {excluded_text}"
+        self._plot.set_excluded_text(excluded_text)
         edges = compute.histogram_edges(self._bin_width)
-        self._ensure_highlight_range_seeded(image[finite])
+        self._ensure_highlight_range_seeded(seed_values)
 
-        self._plot.set_all_pixels(edges, self._scaled(compute.population_counts(image, edges), total_pixels))
+        all_counts = compute.population_counts(image, edges)
+        # Normalized mode divides every curve by this one peak (the main
+        # plot's), so sub-populations stay comparable to "All pixels".
+        reference_peak = compute.peak_count(all_counts)
+        self._plot.set_all_pixels(edges, self._scaled(all_counts, total_pixels, reference_peak))
 
         ignore_mask = self._resolve_ignore_mask()
         if ignore_mask is not None and ignore_mask.shape != image.shape:
             ignore_mask = None  # a real, if narrow, mismatch case - see _resolve_ignore_mask's caller contract
-        self._set_curve_from_mask(self._plot.set_ignore_mask, ignore_mask, edges, image, total_pixels)
+        self._set_curve_from_mask(
+            self._plot.set_ignore_mask, ignore_mask, edges, image, total_pixels, reference_peak
+        )
 
         # ROI positions are authored in processed/cropped space and rasterize
         # to exactly `image.shape` by construction (each mask is built at
@@ -199,8 +222,10 @@ class HistogramPanel(QWidget):
         # `ActiveToolModule` dependency to suppress it exactly - revisit if
         # it turns out to matter in practice.
         sample_mask, reference_mask = self._resolve_roi_masks(image.shape)
-        self._set_curve_from_mask(self._plot.set_sample, sample_mask, edges, image, total_pixels)
-        self._set_curve_from_mask(self._plot.set_reference, reference_mask, edges, image, total_pixels)
+        self._set_curve_from_mask(self._plot.set_sample, sample_mask, edges, image, total_pixels, reference_peak)
+        self._set_curve_from_mask(
+            self._plot.set_reference, reference_mask, edges, image, total_pixels, reference_peak
+        )
 
         if self._pending_y_refit:
             # A bin-size change just redrew the curves with a different
@@ -217,6 +242,13 @@ class HistogramPanel(QWidget):
             self._pending_y_refit = False
             self._plot.refit_y()
 
+    def _selection_region(self, image_shape: tuple[int, ...]) -> np.ndarray | None:
+        """The area selection's editable region at `image_shape`, or `None`
+        when there is none or the ribbon's Histogram tab is not open."""
+        if self._image_panel.active_ribbon_category() != "Histogram":
+            return None
+        return self._image_panel.area_selection().mask(image_shape)
+
     def _set_curve_from_mask(
         self,
         setter: Callable[[np.ndarray, np.ndarray], None],
@@ -224,6 +256,7 @@ class HistogramPanel(QWidget):
         edges: np.ndarray,
         image: np.ndarray,
         total_pixels: int,
+        reference_peak: float,
     ) -> None:
         """Shared shape for the three *optional*-population curves (Ignore
         mask, Sample ROI, Reference ROI - the All-pixels curve has no
@@ -237,13 +270,13 @@ class HistogramPanel(QWidget):
             setter(edges, np.zeros(edges.size - 1))
             return
         counts = compute.population_counts(image[mask], edges)
-        setter(edges, self._scaled(counts, total_pixels))
+        setter(edges, self._scaled(counts, total_pixels, reference_peak))
 
-    def _scaled(self, counts: np.ndarray, total_pixels: int) -> np.ndarray:
+    def _scaled(self, counts: np.ndarray, total_pixels: int, reference_peak: float) -> np.ndarray:
         if self._y_mode == "percent":
             return compute.as_percent(counts, total_pixels)
         if self._y_mode == "normalized":
-            return compute.as_normalized(counts)
+            return compute.as_normalized(counts, reference_peak)
         return counts
 
     def _resolve_ignore_mask(self) -> np.ndarray | None:

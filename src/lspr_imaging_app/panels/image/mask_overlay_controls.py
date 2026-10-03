@@ -43,7 +43,7 @@ _BUTTON_SIZE = 28  # matches TransformsSection's own icon buttons, same row
 _ICON_SIZE = 22
 _RENDER_SIZE = _ICON_SIZE * 2  # rendered at 2x, scaled down - crisper than a native 22px bitmap
 _STROKE_WIDTH = 2.1
-_ACTIVE_COLOR = "#22c55e"  # the stable app's literal for "overlay visible"
+_ACTIVE_COLOR = "#38bdf8"  # GuiTheme.accent_blue - same "active" blue as MaskScopeToggle
 _SWATCH_SIZE = 14
 # Narrower than `CompactWedgeSlider`'s own 24px default minimum (2026-10-02,
 # maintainer request: "make this control a bit narrow... the triangle will

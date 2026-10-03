@@ -387,8 +387,13 @@ class MaskModule(QObject):
         *,
         target_frame: tuple[int, float],
         scope: str,
+        restrict_to: np.ndarray | None = None,
     ) -> None:
-        """Run a morphological operation (`"erode"`/`"dilate"`/`"open"`/
+        """`restrict_to` (2026-10-03, area selection): a raw-space boolean mask;
+        when given, only pixels where it is ``True`` may change - everywhere
+        else keeps `base_mask`'s value.
+
+        Run a morphological operation (`"erode"`/`"dilate"`/`"open"`/
         `"close"`) against `base_mask` and commit the result as a direct
         replacement - **not** an `apply_candidate` OR/AND merge, unlike
         every other tool kind.
@@ -418,6 +423,8 @@ class MaskModule(QObject):
         design (four direct action buttons, not an add/subtract pair) -
         `subtract` is dropped from the signature rather than kept unused."""
         candidate = raster_tools.apply_morphology_to_mask(base_mask, operation, radius_px)
+        if restrict_to is not None:
+            candidate = np.where(restrict_to, candidate, np.asarray(base_mask, dtype=bool))
         self.set_mask_change(target_frame, scope, candidate)
 
     @instrumented("MaskModule.paint_brush")
@@ -430,8 +437,13 @@ class MaskModule(QObject):
         target_frame: tuple[int, float],
         scope: str,
         value: bool,
+        restrict_to: np.ndarray | None = None,
     ) -> None:
-        """Paint one circular brush stroke onto `base_mask`
+        """`restrict_to` (2026-10-03, area selection): raw-space mask; pixels
+        outside it keep `base_mask`'s value. Not called yet - there is no
+        canvas paint gesture - but the Draw tool must pass it when built.
+
+        Paint one circular brush stroke onto `base_mask`
         (`raster_tools.apply_brush_stamp`) and commit the result as a new
         mask change at `target_frame`/`scope` - `value=True` to add to the
         mask, `False` to erase from it.
@@ -445,4 +457,6 @@ class MaskModule(QObject):
         frame only) - no separate diff-dict mechanism needed, see the
         module docstring."""
         painted = raster_tools.apply_brush_stamp(base_mask, center_xy, radius_px, value=value)
+        if restrict_to is not None:
+            painted = np.where(restrict_to, painted, np.asarray(base_mask, dtype=bool))
         self.set_mask_change(target_frame, scope, painted)

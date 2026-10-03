@@ -369,6 +369,7 @@ class MorphologyEditPanel(QWidget):
         self._chromatic = chromatic
         self._dataset = dataset
         self._mask_scope = mask_scope
+        self._image_panel = image_panel
         self._syncing = False
         self._last_frame: tuple[int, float] | None = None
 
@@ -442,6 +443,7 @@ class MorphologyEditPanel(QWidget):
             self._radius_spin.value(),
             target_frame=self._last_frame,
             scope=self._mask_scope.scope().value,
+            restrict_to=self._image_panel.selection_raw_mask(raw_shape),
         )
 
 

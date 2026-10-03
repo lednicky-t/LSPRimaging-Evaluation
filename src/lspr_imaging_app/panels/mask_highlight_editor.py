@@ -61,6 +61,7 @@ class HistogramHighlightMaskEditor:
         self._dataset = dataset
         self._highlight_range = highlight_range
         self._mask_scope = mask_scope
+        self._image_panel = image_panel
         # Same "read from the one panel that already has it" convention as
         # the Histogram panel - see mask_highlight_actions.py's original
         # docstring for why `ImagePanel._current_wavelength()`'s snapped
@@ -95,8 +96,14 @@ class HistogramHighlightMaskEditor:
         if raw_shape is None:
             return
         min_value, max_value = highlight
+        image = self._last_image
+        # Area selection: pixels outside it become NaN, which the mapping
+        # below never selects - so the edit only reaches inside the selection.
+        region = self._image_panel.area_selection().mask(image.shape)
+        if region is not None:
+            image = np.where(region, image, np.float32(np.nan))
         candidate = histogram_highlight_mask_to_raw(
-            self._last_image, min_value, max_value, raw_shape, self._geometry.settings()
+            image, min_value, max_value, raw_shape, self._geometry.settings()
         )
         # The exact frame the candidate was built for - `self._last_frame`,
         # not `SelectionModule` re-read fresh (see `_last_frame`'s own

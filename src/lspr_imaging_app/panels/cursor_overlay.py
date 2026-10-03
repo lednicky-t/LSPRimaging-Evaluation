@@ -51,6 +51,7 @@ class CursorOverlay(QObject):
         value_at: Callable[[float, float], tuple[float, float, str] | None],
         theme: GuiTheme,
         on_changed: Callable[[], None] | None = None,
+        readout_sink: Callable[[str], None] | None = None,
     ) -> None:
         """`scene_view` is the `QGraphicsView` the plot lives in (a
         `pg.PlotWidget` or `pg.GraphicsLayoutWidget` - both qualify, both
@@ -63,12 +64,19 @@ class CursorOverlay(QObject):
         size changes between the small icon and (usually wider) live text,
         so the owner needs a chance to `adjustSize()`/reposition each time,
         the same "called on every update" shape stable's own `reposition()`
-        calls in `_handle_mouse_moved`/`_toggle_cursor` follow."""
+        calls in `_handle_mouse_moved`/`_toggle_cursor` follow.
+
+        `readout_sink` (2026-10-03, Image panel): when given, the live text
+        goes to `readout_sink(text)` (an empty string = hide) instead of into
+        the button, which then stays a fixed-size icon that only shows an
+        on/off tint - so the button can sit in a left-aligned ribbon group
+        without its width changing with every mouse move."""
         super().__init__(overlay_parent)
         self._scene_view = scene_view
         self._plot_item = plot_item
         self._value_at = value_at
         self._on_changed = on_changed
+        self._readout_sink = readout_sink
         self._enabled = False
 
         self._vline = pg.InfiniteLine(angle=90, movable=False)
@@ -125,7 +133,7 @@ class CursorOverlay(QObject):
         pen = pg.mkPen(theme.text_muted, width=1)
         self._vline.setPen(pen)
         self._hline.setPen(pen)
-        if not self._enabled:
+        if not self._enabled or self._readout_sink is not None:
             self._show_off_icon()
 
     def _show_off_icon(self) -> None:
@@ -135,7 +143,10 @@ class CursorOverlay(QObject):
         # merely setting an empty icon or empty text is not enough on its
         # own to switch which one the current style renders.
         self._icon_button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly)
-        icon = tint_tabler_icon(load_tabler_icon("crosshair"), QColor(self._theme.text_muted))
+        # With a readout sink the icon is the whole button, so "on" is shown
+        # by tint (accent) instead of by text replacing the icon.
+        color = self._theme.accent_blue if self._enabled and self._readout_sink is not None else self._theme.text_muted
+        icon = tint_tabler_icon(load_tabler_icon("crosshair"), QColor(color))
         self._icon_button.setIcon(icon)
 
     def toggle(self) -> None:
@@ -152,7 +163,11 @@ class CursorOverlay(QObject):
         self._icon_button.setChecked(self._enabled)
         self._vline.setVisible(self._enabled)
         self._hline.setVisible(self._enabled)
-        if self._enabled:
+        if self._readout_sink is not None:
+            self._show_off_icon()
+            if not self._enabled:
+                self._readout_sink("")
+        elif self._enabled:
             self._icon_button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
             self._icon_button.setIcon(QIcon())
             self._icon_button.setText("-")
@@ -174,6 +189,9 @@ class CursorOverlay(QObject):
         x, y, text = result
         self._vline.setPos(x)
         self._hline.setPos(y)
-        self._icon_button.setText(text)
+        if self._readout_sink is not None:
+            self._readout_sink(text)
+        else:
+            self._icon_button.setText(text)
         if self._on_changed is not None:
             self._on_changed()

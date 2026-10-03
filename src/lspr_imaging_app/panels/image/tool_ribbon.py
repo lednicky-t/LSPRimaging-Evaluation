@@ -62,6 +62,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 
+from PyQt6.QtCore import pyqtSignal
 from PyQt6.QtWidgets import QButtonGroup, QHBoxLayout, QLabel, QStackedWidget, QToolButton, QVBoxLayout, QWidget
 
 from lspr_ui import GuiTheme, get_active_theme
@@ -128,7 +129,14 @@ class ImageToolRibbon(QWidget):
     """Category tabs (top row) over a fixed-height content stack (bottom
     row). *categories* is an ordered ``(label, content)`` sequence; a
     ``None`` content gets the standard "not built yet" placeholder (see
-    `_category_placeholder`). The first category starts active."""
+    `_category_placeholder`). The first category starts active.
+
+    `category_changed` (2026-10-03) announces the newly shown tab's label, so
+    a panel elsewhere can react to which ribbon section is in focus - the
+    Histogram plot only honours the area selection while "Histogram" is the
+    shown tab (maintainer's spec)."""
+
+    category_changed = pyqtSignal(str)
 
     def __init__(self, categories: Sequence[tuple[str, QWidget | None]], parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -142,6 +150,7 @@ class ImageToolRibbon(QWidget):
         self._tab_group = QButtonGroup(self)
         self._tab_group.setExclusive(True)
         self._tab_buttons: list[QToolButton] = []
+        self._category_names = [name for name, _content in categories]
 
         tab_row = QHBoxLayout()
         tab_row.setContentsMargins(_BAR_MARGIN, 0, _BAR_MARGIN, 0)
@@ -152,7 +161,7 @@ class ImageToolRibbon(QWidget):
             button.setText(name)
             button.setCheckable(True)
             button.setFixedHeight(_TAB_HEIGHT)
-            button.clicked.connect(lambda _checked=False, i=index: self._stack.setCurrentIndex(i))
+            button.clicked.connect(lambda _checked=False, i=index: self._show_category(i))
             self._tab_group.addButton(button)
             self._tab_buttons.append(button)
             tab_row.addWidget(button)
@@ -169,6 +178,15 @@ class ImageToolRibbon(QWidget):
         layout.addWidget(self._stack)
 
         self.refresh_theme(get_active_theme())
+
+    def current_category(self) -> str:
+        return self._category_names[self._stack.currentIndex()]
+
+    def _show_category(self, index: int) -> None:
+        changed = index != self._stack.currentIndex()
+        self._stack.setCurrentIndex(index)
+        if changed:
+            self.category_changed.emit(self._category_names[index])
 
     def refresh_theme(self, theme: GuiTheme) -> None:
         """Re-applies the tab strip's QSS (checked/hover state is handled

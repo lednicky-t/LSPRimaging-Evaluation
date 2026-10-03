@@ -62,7 +62,7 @@ from .panels.workflow import WorkflowPanel, WorkflowStage
 from .panels.workflow.collapsible_section import CollapsibleSection
 from .roi import RoiToolbox
 from .roi_geometry_sync import RoiGeometrySync
-from .selection import HighlightRangeModule, ReferenceFrameModule, SelectionModule
+from .selection import AreaSelectionModule, HighlightRangeModule, ReferenceFrameModule, SelectionModule
 from .storage.app_settings import AppSettings, load_app_settings, save_app_settings
 from .storage.session import SessionState, load_session
 from .storage.session_autosave import SessionAutosave
@@ -554,6 +554,11 @@ def build_main_window(
     selection = SelectionModule()
     reference_frame = ReferenceFrameModule()
     highlight_range = HighlightRangeModule()
+    # Rectangle/lasso area selection limiting the Image panel's editing tools
+    # and the Histogram plot (transient, not persisted); lives in displayed
+    # pixel space, so it is dropped when rotate/flip/crop changes the grid.
+    area_selection = AreaSelectionModule()
+    geometry.geometry_changed.connect(lambda _change: area_selection.clear())
     analysis_settings = AnalysisSettingsModule()
     session_coordinator = SessionCoordinator()
     analysis_engine = _build_analysis_engine(
@@ -627,6 +632,7 @@ def build_main_window(
         dataset, geometry, mask, chromatic, background, roi_toolbox, selection, active_tool, reference_frame,
         highlight_range,
         mask_scope=mask_scope,
+        area_selection=area_selection,
         initial_view_range=initial_view_range,
     )
     image_panel.view_range_changed.connect(

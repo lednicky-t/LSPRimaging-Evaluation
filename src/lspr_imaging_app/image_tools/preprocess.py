@@ -123,6 +123,32 @@ def histogram_highlight_mask_to_raw(
     return raw_mask
 
 
+def area_selection_to_raw(
+    region: np.ndarray,
+    raw_shape: tuple[int, int],
+    geometry_settings: GeometrySettings,
+) -> np.ndarray:
+    """A displayed-space boolean *region* (``True`` = editable, e.g.
+    ``AreaSelectionModule.mask``) mapped into a **raw-space** mask, the space
+    mask edits are authored in (see `histogram_highlight_mask_to_raw`, which
+    does the actual coordinate mapping).
+
+    That mapping scatters each processed pixel onto its nearest raw pixel, so
+    under rotation a few raw pixels inside the region are never hit and would
+    be left as 1-pixel holes. A 3x3 binary closing fills them. Precision limit,
+    stated plainly: the region's edge in raw space is accurate to about one
+    pixel under rotation (exact with no rotation). Raw pixels the processed
+    image does not show (cropped away) are never editable."""
+    from scipy.ndimage import binary_closing
+
+    raw = histogram_highlight_mask_to_raw(
+        region.astype(np.float32), 0.5, None, raw_shape, geometry_settings
+    )
+    if not raw.any():
+        return raw
+    return binary_closing(raw, structure=np.ones((3, 3), dtype=bool))
+
+
 def apply_preprocessing(
     image: np.ndarray,
     geometry_settings: GeometrySettings,

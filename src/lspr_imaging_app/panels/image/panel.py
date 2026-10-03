@@ -111,21 +111,23 @@ from ...image_tools import (
     MaskScopeModule,
 )
 from ...image_tools.geometry.model import CropDefinition, GeometrySettings
-from ...image_tools.preprocess import resolve_external_mask
+from ...image_tools.preprocess import area_selection_to_raw, resolve_external_mask
 from ...roi import RoiToolbox
 from .no_data import format_pixel_value, no_data_overlay_rgba
 from ...roi.model import AreaRoi
 from ...roi.rasterize import effective_reference_radii, transformed_circle_points
-from ...selection import HighlightRangeModule, ReferenceFrameModule, SelectionModule
+from ...selection import AreaSelectionModule, HighlightRangeModule, ReferenceFrameModule, SelectionModule
 from ...selection.reference_frame_module import MODE_AUTO
 from ..cursor_overlay import CursorOverlay
 from ..ribbon_group import group_label_style, labeled_icon_group, vertical_separator
 from ..workflow.transforms_settings import TransformsSection
+from .area_selection_tool import AreaSelectionTool
 from .canvas_tools import _ICON_SIZE, CanvasToolsBar, style_bar_icon_button
 from .context_menu import show_tool_context_menu
 from .crop_size_controls import CropSizeControls
 from .crop_tool import CropTool
 from .data_axis_slider import DataAxisSlider
+from .general_group import AreaSelectionPicker, style_general_icon_button
 from .guided_value_spinbox import GuidedValueSpinBox
 from .histogram_highlight_overlay_controls import HistogramHighlightOverlayControls
 from .image_controls import ImageViewBox, controls_text
@@ -259,6 +261,9 @@ class ImagePanel(QWidget):
     # settings write, not a redraw, so it uses its own slower timer - see
     # `_view_range_debounce_timer`).
     view_range_changed = pyqtSignal(float, float, float, float)
+    # Label of the ribbon tab now shown ("Image tools"/"Mask"/"Histogram"/"ROIs") -
+    # lets the Histogram plot honour the area selection only while its own tab is open.
+    ribbon_category_changed = pyqtSignal(str)
 
     def __init__(
         self,
@@ -275,6 +280,7 @@ class ImagePanel(QWidget):
         parent: QWidget | None = None,
         *,
         mask_scope: MaskScopeModule,
+        area_selection: AreaSelectionModule | None = None,
         initial_view_range: tuple[tuple[float, float], tuple[float, float]] | None = None,
     ) -> None:
         super().__init__(parent)
@@ -289,6 +295,9 @@ class ImagePanel(QWidget):
         self._geometry = geometry
         self._mask = mask
         self._mask_scope = mask_scope
+        # Optional so a panel built without the app shell (tests) still works;
+        # `app_rewrite.py` passes the one shared instance.
+        self._area_selection = area_selection if area_selection is not None else AreaSelectionModule(self)
         self._chromatic = chromatic
         self._background = background
         self._roi_toolbox = roi_toolbox
@@ -454,6 +463,17 @@ class ImagePanel(QWidget):
         self._measure_controls.setVisible(False)
         self._measure_controls.apply_requested.connect(self._on_measure_apply_requested)
         self._plot.vb.sigTransformChanged.connect(self._reposition_measure_controls)
+
+        # Area selection (2026-10-03): drag gesture + marching-ants outline.
+        # The state is `AreaSelectionModule`'s; this only draws/forwards.
+        self._area_tool = AreaSelectionTool(self._plot, self._area_selection, parent=self)
+
+        # Cursor readout text lives on the canvas, top-left (maintainer,
+        # 2026-10-03) - the toggle itself sits in the "General" group.
+        self._cursor_readout = QLabel(self._view.viewport())
+        self._cursor_readout.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        self._cursor_readout.move(6, 6)
+        self._cursor_readout.hide()
 
         # Top toolbar (2026-09-30, flipped from a vertical strip along the
         # canvas's left edge to a horizontal bar across its top - maintainer
@@ -648,6 +668,19 @@ class ImagePanel(QWidget):
             ],
             self,
         )
+        self._tool_ribbon.category_changed.connect(self.ribbon_category_changed)
+        # "General" - always visible, left of the tabs (2026-10-03). Filled
+        # with the cursor toggle and the area-selection picker just below,
+        # once the cursor overlay exists.
+        self._general_row = QWidget(self)
+        general_row_layout = QHBoxLayout(self._general_row)
+        general_row_layout.setContentsMargins(0, 0, 0, 0)
+        general_row_layout.setSpacing(2)
+        self._area_picker = AreaSelectionPicker(self._area_selection, self._active_tool, self._general_row)
+        general_group, self._general_label = labeled_icon_group(self, self._general_row, "General")
+        self._general_separator = vertical_separator(self)
+        top_bar_layout.addWidget(general_group, 0, Qt.AlignmentFlag.AlignBottom)
+        top_bar_layout.addWidget(self._general_separator)
         top_bar_layout.addWidget(self._tool_ribbon)
         top_bar_layout.addStretch(1)
 
@@ -666,6 +699,7 @@ class ImagePanel(QWidget):
             overlay_parent=self._top_bar,
             value_at=self._cursor_value_at,
             theme=get_active_theme(),
+            readout_sink=self._set_cursor_readout,
         )
         # Restyled to match Select/Add ROI (2026-09-30, maintainer request -
         # "make cursor and i icon same as other icons in the bar... this
@@ -676,8 +710,12 @@ class ImagePanel(QWidget):
         # shared look. `fixed_width=False` - unlike a plain toggle, this
         # button must still grow to show live text ("(38, 30) = 123.4")
         # while enabled; only the height and icon size need to match.
-        style_bar_icon_button(self._cursor_overlay.icon_label, fixed_width=False)
-        top_bar_layout.addWidget(self._cursor_overlay.icon_label)
+        # Now a fixed-size ribbon icon in "General" (2026-10-03): its live
+        # text goes to the canvas corner, so the button never changes width.
+        style_general_icon_button(self._cursor_overlay.icon_label)
+        self._cursor_overlay.icon_label.setParent(self._general_row)
+        general_row_layout.addWidget(self._cursor_overlay.icon_label)
+        general_row_layout.addWidget(self._area_picker)
 
         # A permanent "i" icon (2026-09-29, replacing a text row that only
         # appeared while a tool with canvas behavior was active): hovering
@@ -976,10 +1014,51 @@ class ImagePanel(QWidget):
                 getattr(self, label_attr).setStyleSheet(group_label_style())
         if hasattr(self, "_tool_ribbon"):
             self._tool_ribbon.refresh_theme(get_active_theme())
+        if hasattr(self, "_area_picker"):
+            self._area_picker.refresh_theme(get_active_theme())
+        if hasattr(self, "_general_separator"):
+            self._general_separator.setStyleSheet(f"color: {get_active_theme().control_border};")
+        if hasattr(self, "_general_label"):
+            self._general_label.setStyleSheet(group_label_style())
+        if hasattr(self, "_cursor_readout"):
+            self._style_cursor_readout()
         if hasattr(self, "_controls_bar"):
             self._refresh_controls_bar_theme()
         if hasattr(self, "_top_bar"):
             self._refresh_top_bar_theme()
+
+    def _style_cursor_readout(self) -> None:
+        theme = get_active_theme()
+        self._cursor_readout.setStyleSheet(
+            f"color: {theme.text_primary}; background: rgba(0, 0, 0, 140); padding: 1px 4px; border-radius: 2px;"
+        )
+
+    def _set_cursor_readout(self, text: str) -> None:
+        """Sink for `CursorOverlay`: shows *text* in the canvas's top-left
+        corner, hides the label for an empty string."""
+        self._style_cursor_readout()
+        self._cursor_readout.setText(text)
+        self._cursor_readout.adjustSize()
+        self._cursor_readout.setVisible(bool(text))
+        self._cursor_readout.raise_()
+
+    def area_selection(self) -> AreaSelectionModule:
+        """The shared area selection - editors read it from here so each
+        front door needs no extra constructor argument."""
+        return self._area_selection
+
+    def selection_raw_mask(self, raw_shape: tuple[int, int]) -> np.ndarray | None:
+        """The area selection as a raw-space editable mask (the space mask
+        edits are authored in), or `None` when nothing is selected."""
+        if self._last_image_shape is None:
+            return None
+        region = self._area_selection.mask(self._last_image_shape)
+        if region is None:
+            return None
+        return area_selection_to_raw(region, raw_shape, self._geometry.settings())
+
+    def active_ribbon_category(self) -> str:
+        return self._tool_ribbon.current_category()
 
     def _refresh_controls_bar_theme(self) -> None:
         """No border (2026-09-30, maintainer request - reverses the subtle
@@ -1023,6 +1102,7 @@ class ImagePanel(QWidget):
         self._chunk_grid_curve.clear()
         self._crop_outline_curve.clear()
         self._last_image_shape = None
+        self._area_tool.set_image_shape(None)
         self._refresh_navigation_ranges()
         self._set_frame_status("No dataset loaded.")
         self.image_cleared.emit()
@@ -1403,6 +1483,7 @@ class ImagePanel(QWidget):
         self.image_rendered.emit(image, result.request.cube_index, result.request.wavelength_nm)
         self._set_frame_status(f"Cube {result.request.cube_index}, {result.request.wavelength_nm:.0f} nm")
         self._last_image_shape = result.image.shape[:2]
+        self._area_tool.set_image_shape(self._last_image_shape)
         # The crop tool's clamp bound - correct the instant Crop is active
         # (the frame it renders is the *uncropped* one, `_PREVIEW_TOOLS`),
         # briefly stale (the smaller, cropped shape) right as the tool is
@@ -1645,6 +1726,10 @@ class ImagePanel(QWidget):
         self._measure_tool.set_active(tool is ImageTool.MEASURE)
         self._reposition_measure_controls()
         self._view.viewport().unsetCursor()  # drop any resize/move cursor left over from Crop
+        if tool is ImageTool.SELECT_AREA:
+            self._view.viewport().setCursor(Qt.CursorShape.CrossCursor)
+        else:
+            self._area_tool.cancel_gesture()
         self._tool_status = ""
         self.tool_status_changed.emit("")  # drop a stale status from the tool just switched away from
         self._refresh_tool_info(tool)
@@ -1738,7 +1823,7 @@ class ImagePanel(QWidget):
                 p = self._plot.vb.mapSceneToView(scene_pos)
                 self._rotate_tool.on_left_click(float(p.x()), float(p.y()))
             elif button == Qt.MouseButton.RightButton:
-                self._show_rotate_context_menu()
+                self._show_rotate_context_menu(scene_pos)
             return
         if self._active_tool.active() is ImageTool.MEASURE:
             if not self._in_view(scene_pos):
@@ -1747,7 +1832,7 @@ class ImagePanel(QWidget):
                 p = self._plot.vb.mapSceneToView(scene_pos)
                 self._measure_tool.on_left_click(float(p.x()), float(p.y()))
             elif button == Qt.MouseButton.RightButton:
-                self._show_measure_context_menu()
+                self._show_measure_context_menu(scene_pos)
             return
         if self._active_tool.active() is ImageTool.CROP:
             # A plain (non-drag) left-click has nothing to do - dragging is
@@ -1756,16 +1841,25 @@ class ImagePanel(QWidget):
             # `sigMouseClicked` at all (pyqtgraph routes it as a drag
             # event once the mouse has moved past its click threshold).
             if button == Qt.MouseButton.RightButton and self._in_view(scene_pos):
-                self._show_crop_context_menu()
+                self._show_crop_context_menu(scene_pos)
+            return
+        if self._active_tool.active() is ImageTool.SELECT_AREA:
+            # The drag draws (`_on_select_area_drag_event`); only the menu is a click.
+            if button == Qt.MouseButton.RightButton and self._in_view(scene_pos):
+                self._show_select_area_context_menu(scene_pos)
             return
         if self._active_tool.active() is ImageTool.ADD_ROI:
             if not self._in_view(scene_pos):
                 return
             if button == Qt.MouseButton.LeftButton:
                 p = self._plot.vb.mapSceneToView(scene_pos)
-                self._roi_toolbox.add_roi(float(p.x()), float(p.y()))
+                if self._in_selection(float(p.x()), float(p.y())):
+                    self._roi_toolbox.add_roi(float(p.x()), float(p.y()))
             elif button == Qt.MouseButton.RightButton:
-                self._show_add_roi_context_menu()
+                self._show_add_roi_context_menu(scene_pos)
+            return
+        if button == Qt.MouseButton.RightButton and self._point_in_selection(scene_pos):
+            self._context_menu([], scene_pos)  # plain Invert/Deselect menu
             return
         if button != Qt.MouseButton.LeftButton:
             return  # not a select gesture
@@ -1784,7 +1878,7 @@ class ImagePanel(QWidget):
         else:
             self._selection.set_roi_selection({roi_id})
 
-    def _show_rotate_context_menu(self) -> None:
+    def _show_rotate_context_menu(self, scene_pos: object) -> None:
         """Right-click while Rotate is active: a menu with a single "Cancel
         rotation" action, always enabled (2026-09-29, maintainer's spec) -
         it exits Rotate mode entirely, the same as clicking the Workflow
@@ -1795,20 +1889,20 @@ class ImagePanel(QWidget):
         being enabled is also what keeps the menu from ever having nothing
         clickable in it - see `context_menu.py`'s docstring for why that
         matters."""
-        if show_tool_context_menu(self, [("Cancel rotation", True)]) == "Cancel rotation":
+        if self._context_menu([("Cancel rotation", True)], scene_pos) == "Cancel rotation":
             self._active_tool.set_active(ImageTool.ROTATE, False)
 
-    def _show_measure_context_menu(self) -> None:
+    def _show_measure_context_menu(self, scene_pos: object) -> None:
         """Right-click while Measure is active: a menu with a single
         "Cancel measurement" action, always enabled - same shape and
         reasoning as `_show_rotate_context_menu` (exits Measure mode
         entirely, the same as clicking the Workflow panel's Measure button
         again; always-enabled is what keeps the menu from ever having
         nothing clickable in it, see `context_menu.py`)."""
-        if show_tool_context_menu(self, [("Cancel measurement", True)]) == "Cancel measurement":
+        if self._context_menu([("Cancel measurement", True)], scene_pos) == "Cancel measurement":
             self._active_tool.set_active(ImageTool.MEASURE, False)
 
-    def _show_crop_context_menu(self) -> None:
+    def _show_crop_context_menu(self, scene_pos: object) -> None:
         """Right-click while Crop is active: "Apply crop" (enabled only
         with something pending, `CropTool.has_pending_changes`) and
         "Cancel crop", always enabled - like Rotate's menu, it exits Crop
@@ -1818,21 +1912,57 @@ class ImagePanel(QWidget):
         clickable is what keeps this menu from ever having nothing
         clickable in it, even with "Apply" grayed out - see
         `context_menu.py`'s docstring."""
-        chosen = show_tool_context_menu(self, [("Apply crop", self._crop_tool.has_pending_changes()), ("Cancel crop", True)])
+        chosen = self._context_menu(
+            [("Apply crop", self._crop_tool.has_pending_changes()), ("Cancel crop", True)], scene_pos
+        )
         if chosen == "Apply crop":
             self._on_crop_apply_requested()
         elif chosen == "Cancel crop":
             self._active_tool.set_active(ImageTool.CROP, False)
 
-    def _show_add_roi_context_menu(self) -> None:
+    def _show_add_roi_context_menu(self, scene_pos: object) -> None:
         """Right-click while Add ROI is active: a menu with a single "Exit
         tool" action, always enabled - same shape as Rotate/Measure's own
         "Cancel ..." menus (`_show_rotate_context_menu`/`_show_measure_
         context_menu`), just not labeled "Cancel" since there is no
         in-progress point to drop - each click here is already a complete,
         independent action."""
-        if show_tool_context_menu(self, [("Exit tool", True)]) == "Exit tool":
+        if self._context_menu([("Exit tool", True)], scene_pos) == "Exit tool":
             self._active_tool.set_active(ImageTool.ADD_ROI, False)
+
+    def _show_select_area_context_menu(self, scene_pos: object) -> None:
+        """Right-click while a selection tool is armed: "Exit tool" (leaves the
+        draw tool, keeps the selection), plus Invert/Deselect inside it."""
+        if self._context_menu([("Exit tool", True)], scene_pos) == "Exit tool":
+            self._active_tool.set_active(ImageTool.SELECT_AREA, False)
+
+    def _point_in_selection(self, scene_pos: object) -> bool:
+        """True when a selection exists and the scene point lies inside the
+        *editable* region (inside the shape, or outside it once inverted)."""
+        if not self._area_selection.has_selection() or self._last_image_shape is None or not self._in_view(scene_pos):
+            return False
+        point = self._plot.vb.mapSceneToView(scene_pos)
+        return self._area_selection.contains(float(point.x()), float(point.y()), self._last_image_shape)
+
+    def _context_menu(self, actions: list[tuple[str, bool]], scene_pos: object) -> str | None:
+        """`show_tool_context_menu` plus, when the click is inside the
+        selection, "Invert selection" and "Deselect" (handled here). Returns
+        the chosen *tool* action, or `None` if nothing or a selection entry was
+        chosen. Selection entries are always enabled, so the menu never opens
+        with nothing clickable (see `context_menu.py`)."""
+        entries = list(actions)
+        if self._point_in_selection(scene_pos):
+            entries += [("Invert selection", True), ("Deselect", True)]
+        if not entries:
+            return None
+        chosen = show_tool_context_menu(self, entries)
+        if chosen == "Invert selection":
+            self._area_selection.invert()
+            return None
+        if chosen == "Deselect":
+            self._area_selection.clear()
+            return None
+        return chosen
 
     def _on_left_drag_event(self, ev: object) -> bool:
         """`ImageViewBox`'s single left-drag handler slot - dispatches to
@@ -1840,7 +1970,28 @@ class ImagePanel(QWidget):
         decline (return `False`) unless *they* are the active tool, so at
         most one of them ever claims a given drag, and neither has any
         effect on plain ROI dragging."""
-        return self._on_crop_drag_event(ev) or self._on_measure_drag_event(ev)
+        return self._on_crop_drag_event(ev) or self._on_measure_drag_event(ev) or self._on_select_area_drag_event(ev)
+
+    def _on_select_area_drag_event(self, ev: object) -> bool:
+        """Draws the rectangle/lasso while a selection tool is armed."""
+        if self._active_tool.active() is not ImageTool.SELECT_AREA:
+            return False
+        point = self._plot.vb.mapSceneToView(ev.scenePos())
+        x, y = float(point.x()), float(point.y())
+        if ev.isStart():
+            return self._area_tool.begin_gesture(x, y)
+        if ev.isFinish():
+            self._area_tool.end_gesture()
+            return True
+        self._area_tool.update_gesture(x, y)
+        return True
+
+    def _in_selection(self, x: float, y: float) -> bool:
+        """Whether display point (x, y) may be edited under the current area
+        selection (always True with none)."""
+        if self._last_image_shape is None:
+            return not self._area_selection.has_selection()
+        return self._area_selection.contains(x, y, self._last_image_shape)
 
     def _on_crop_drag_event(self, ev: object) -> bool:
         if self._active_tool.active() is not ImageTool.CROP:
@@ -2049,6 +2200,8 @@ class ImagePanel(QWidget):
     def _on_drag(self, roi_id: int, x: float, y: float) -> None:
         """Forwards a drag gesture to the owning module - never mutates ROI
         state directly."""
+        if not self._in_selection(x, y):
+            return  # the area selection also limits where an ROI may be moved
         self._roi_toolbox.request_move(roi_id, x, y)
 
     # -- teardown -----------------------------------------------------------

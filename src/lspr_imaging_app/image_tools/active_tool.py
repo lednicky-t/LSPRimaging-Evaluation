@@ -45,6 +45,7 @@ class ImageTool(enum.Enum):
     CROP = "crop"
     MEASURE = "measure"
     ADD_ROI = "add_roi"
+    SELECT_AREA = "select_area"  # drag out the rectangle/lasso set by AreaSelectionModule.mode()
 
 
 class ActiveToolModule(QObject):

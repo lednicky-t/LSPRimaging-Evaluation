@@ -76,19 +76,25 @@ def as_percent(counts: np.ndarray, total_pixel_count: int) -> np.ndarray:
     return counts / float(total_pixel_count) * 100.0
 
 
-def as_normalized(counts: np.ndarray) -> np.ndarray:
-    """`counts` divided by its own peak, so the tallest bin reads as `1.0`
-    (maintainer's spec, 2026-09-30: "normalization would be towards highest
-    value"). Deliberately per-curve, not shared across curves the way
-    `as_percent`'s `total_pixel_count` is - this mode exists to compare
-    *shape* (where each population's peak sits, how wide it is) rather than
-    relative population size, so each curve gets its own independent peak.
-    An empty/all-zero curve (e.g. no ROI drawn yet) has no peak to divide
-    by and stays at zero rather than dividing by zero."""
-    peak = float(np.max(counts)) if counts.size else 0.0
-    if peak <= 0.0:
+def peak_count(counts: np.ndarray) -> float:
+    """Tallest bin of `counts`, or 0.0 for an empty array."""
+    return float(np.max(counts)) if counts.size else 0.0
+
+
+def as_normalized(counts: np.ndarray, reference_peak: float) -> np.ndarray:
+    """`counts` divided by `reference_peak`, the tallest bin of the "All
+    pixels" curve (maintainer's spec, 2026-09-30: "normalization would be
+    towards highest value"; revised 2026-10-03: every curve is normalized
+    towards the main plot - all pixels - not to its own peak). The All-pixels
+    curve therefore peaks at exactly `1.0`, and every other population reads
+    as a fraction of that, so relative population size stays visible (same
+    as `as_percent`'s shared `total_pixel_count`). A sub-population can never
+    exceed 1.0, since its counts are a subset of the all-pixels counts.
+    A zero `reference_peak` (no finite pixels) returns zeros rather than
+    dividing by zero."""
+    if reference_peak <= 0.0:
         return np.zeros_like(counts)
-    return counts / peak
+    return counts / reference_peak
 
 
 def estimate_roi_intensity_range(
