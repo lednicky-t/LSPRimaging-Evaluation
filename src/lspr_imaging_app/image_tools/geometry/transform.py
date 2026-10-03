@@ -1,10 +1,13 @@
 """Pure spatial-transform math (crop/rotate/flip) - ports the geometry-only
 functions out of ``processing/preprocess.py`` (sketch §10's ``preprocess.py``
-note), verbatim apart from retyping ``settings: PreprocessingSettings`` to
-``settings: GeometrySettings`` - every function here only ever reads
-``image_tools_enabled``/``rotation_angle_deg``/``rotation_fill_dark``/
-``flip_horizontal``/``flip_vertical``/``crop``, all of which carry over
-unchanged (see ``model.py``'s docstring).
+note), retyped to ``settings: GeometrySettings`` - every function here only
+ever reads ``image_tools_enabled``/``rotation_angle_deg``/``flip_horizontal``/
+``flip_vertical``/``crop`` (see ``model.py``'s docstring).
+
+**Rotation-created pixels are NaN** (2026-10-03, TASK_rotation_fill_handling):
+they have no measurement behind them, so they have no value. There is no
+dark (0) fill and no edge-stretch. Validity of any pixel is
+``np.isfinite(image)``; no geometric "fill mask" exists any more.
 
 No Qt import allowed in this file (AGENTS.md testing rule).
 """
@@ -16,8 +19,6 @@ from scipy import ndimage
 
 from .model import GeometrySettings
 
-_CV2_SUPPORTED_DTYPES = (np.uint8, np.uint16, np.int16, np.float32, np.float64)
-
 
 def apply_spatial_preprocessing(
     image: np.ndarray,
@@ -25,13 +26,18 @@ def apply_spatial_preprocessing(
     *,
     skip_crop: bool = False,
 ) -> np.ndarray:
-    # Pixels added by rotation (the corners outside the original image) have no
-    # real measurement behind them. "nearest" stretches the nearest edge pixel
-    # into that area (no scientific meaning, but visually seamless); the
-    # rotation_fill_dark toggle instead fills it with 0 so it's clearly marked
-    # as "not data".
-    fill_mode = "constant" if bool(settings.rotation_fill_dark) else "nearest"
-    return _apply_spatial_transform(image, settings, order=1, mode=fill_mode, cval=0.0, skip_crop=skip_crop)
+    """Rotate -> flip -> crop. Pixels the rotation creates (the corners
+    outside the original image) have no measurement behind them and are
+    written as NaN, never as a number. Integer input is converted to float32
+    first (exact for 16-bit data) because NaN needs a float array; with no
+    rotation nothing is created, so the dtype is left alone."""
+    if _rotation_active(settings) and not np.issubdtype(image.dtype, np.floating):
+        image = image.astype(np.float32)
+    return _apply_spatial_transform(image, settings, order=1, mode="constant", cval=np.nan, skip_crop=skip_crop)
+
+
+def _rotation_active(settings: GeometrySettings) -> bool:
+    return bool(getattr(settings, "image_tools_enabled", True)) and abs(float(settings.rotation_angle_deg)) > 1e-9
 
 
 def apply_spatial_mask(
@@ -42,31 +48,6 @@ def apply_spatial_mask(
         return None
     transformed = _apply_spatial_transform(mask.astype(np.float32, copy=False), settings, order=0, mode="constant", cval=0.0)
     return transformed >= 0.5
-
-
-def rotation_fill_pixel_mask(
-    raw_shape: tuple[int, int],
-    settings: GeometrySettings,
-    *,
-    skip_crop: bool = False,
-) -> np.ndarray | None:
-    """Boolean mask, in the same processed-image space apply_spatial_preprocessing
-    returns, marking pixels rotation padding synthesized - no source
-    measurement behind them at all, independent of whether rotation_fill_dark
-    shows that padding as black (constant fill) or as a stretched copy of the
-    nearest edge pixel ("nearest" fill, see apply_spatial_preprocessing):
-    either way it isn't real data.
-
-    Returns None when no rotation is active - flip and crop alone never add
-    pixels the source image didn't have, so there's nothing to mark.
-    """
-    if not bool(getattr(settings, "image_tools_enabled", True)):
-        return None
-    if abs(float(settings.rotation_angle_deg)) <= 1e-9:
-        return None
-    valid_source = np.ones(raw_shape, dtype=np.float32)
-    transformed = _apply_spatial_transform(valid_source, settings, order=0, mode="constant", cval=0.0, skip_crop=skip_crop)
-    return transformed < 0.5
 
 
 def spatial_coordinate_maps(
@@ -282,13 +263,13 @@ def raw_bounding_box_for_processed_box(
     raw_x0 = int(np.floor(raw_corners[:, 1].min()))
     raw_x1 = int(np.ceil(raw_corners[:, 1].max())) + 1
 
-    # Clamp to a valid, non-empty, in-bounds box. A box near a rotated
-    # canvas's edge-stretch-filled corner can have its true (unclamped) raw
-    # extent fall entirely outside the raw image — clamping x0/x1 (or y0/y1)
+    # Clamp to a valid, non-empty, in-bounds box. A box inside a rotated
+    # canvas's NaN corner can have its true (unclamped) raw extent fall
+    # entirely outside the raw image - clamping x0/x1 (or y0/y1)
     # independently to [0, dim] could then invert (x0 > x1). Clamping x0 into
     # a valid index first, then x1 to be at least x0+1, guarantees a valid
-    # box that still contains the correct nearest-edge pixel for "nearest"
-    # fill mode, instead of an empty/inverted slice.
+    # box instead of an empty/inverted slice (the resample then yields NaN
+    # for every pixel that really lies outside the raw image).
     raw_height, raw_width = int(in_shape[0]), int(in_shape[1])
     raw_y0 = min(max(raw_y0, 0), raw_height - 1)
     raw_x0 = min(max(raw_x0, 0), raw_width - 1)
@@ -307,9 +288,8 @@ def resample_raw_patch_to_processed_box(
     """Resample a raw-space patch (already read via a chunk-aware partial
     read, at `raw_patch_origin_xy` within the full raw image) directly into
     the final PROCESSED-space `box`, applying rotation/flip. Mirrors
-    apply_spatial_preprocessing_export's interpolation (same fill-mode
-    handling, including its cv2 fast path for the nearest/edge-stretch case)
-    but scoped to a small box instead of the whole plane, and reading from an
+    apply_spatial_preprocessing_export's interpolation (rotation-created
+    pixels are NaN, including in its cv2 fast path) but scoped to a small box instead of the whole plane, and reading from an
     already-cropped-to-the-needed-region raw patch instead of the full raw
     array.
 
@@ -329,19 +309,19 @@ def resample_raw_patch_to_processed_box(
     # own local coords are raw_coord - (raw_y0, raw_x0), i.e. a plain
     # subtraction from the offset term, not a matrix-multiplied one.
     local_offset = offset - np.array([float(raw_y0), float(raw_x0)])
-    fill_mode = "constant" if bool(settings.rotation_fill_dark) else "nearest"
-    if fill_mode == "nearest":
-        cv2_result = _cv2_affine(raw_patch, matrix, local_offset, out_shape)
-        if cv2_result is not None:
-            return cv2_result
+    if _rotation_active(settings) and not np.issubdtype(raw_patch.dtype, np.floating):
+        raw_patch = raw_patch.astype(np.float32)
+    cv2_result = _cv2_affine(raw_patch, matrix, local_offset, out_shape)
+    if cv2_result is not None:
+        return cv2_result
     return ndimage.affine_transform(
         raw_patch,
         matrix,
         local_offset,
         output_shape=out_shape,
         order=1,
-        mode=fill_mode,
-        cval=0.0,
+        mode="constant",
+        cval=np.nan,
         prefilter=False,
     )
 
@@ -355,13 +335,14 @@ def apply_spatial_preprocessing_export(
     of materializing the full ndimage.rotate(reshape=True) canvas and slicing
     it down afterward. When the configured crop is much smaller than the full
     spectral_cube_index, this avoids interpolating pixels that would just be discarded.
-    Produces the same output as apply_spatial_preprocessing (same fill mode,
-    same crop clamping) — only the amount of work differs.
+    Produces the same output as apply_spatial_preprocessing (rotation-created
+    pixels are NaN, same crop clamping) - only the amount of work differs.
+    The result is float32 whenever a rotation is active (NaN needs a float
+    array); a caller storing it must not cast it to an integer dtype.
     """
     if not bool(getattr(settings, "image_tools_enabled", True)):
         return image
 
-    fill_mode = "constant" if bool(settings.rotation_fill_dark) else "nearest"
     angle = float(settings.rotation_angle_deg)
     if abs(angle) <= 1e-9 or min(image.shape[:2]) <= 4:
         # No rotation: flip + crop are cheap exact array ops already, no
@@ -370,26 +351,21 @@ def apply_spatial_preprocessing_export(
         # affine_transform mishandles boundary fill for combined rotate+flip
         # matrices at that extreme (verified empirically), while the two-step
         # rotate-then-flip path scipy normally uses does not hit that quirk.
-        return _apply_spatial_transform(image, settings, order=1, mode=fill_mode, cval=0.0)
+        return apply_spatial_preprocessing(image, settings)
 
+    if not np.issubdtype(image.dtype, np.floating):
+        image = image.astype(np.float32)
     matrix, offset, out_shape = _combined_export_transform(image.shape[:2], settings)
     if out_shape[0] <= 0 or out_shape[1] <= 0:
         return np.zeros(out_shape, dtype=image.dtype)
 
     # OpenCV's warpAffine is ~15-30x faster than scipy's generic interpolation
-    # loop (SIMD C++ vs a generic spline routine), but it disagrees with scipy
-    # on which pixels count as "outside the source image" near a rotated
-    # boundary. With edge-stretch fill ("nearest") that boundary ambiguity is
-    # invisible (<1 intensity count either way). With constant/cval fill
-    # (rotation_fill_dark=True) it is not: it flips ~2.6% of pixels between a
-    # real value and the fill value (verified empirically) — unacceptable for
-    # a feature whose whole purpose is marking "not real data" precisely. So
-    # OpenCV is only used for the nearest-mode case; constant-fill keeps using
-    # the scipy path above, which is exact.
-    if fill_mode == "nearest":
-        cv2_result = _cv2_affine(image, matrix, offset, out_shape)
-        if cv2_result is not None:
-            return cv2_result
+    # loop. With a NaN border it marks exactly the same pixels as outside the
+    # source as scipy does (verified 2026-10-03 at 3/15/33 deg: identical NaN
+    # sets, finite values within 0.04 counts), so the fast path is safe here.
+    cv2_result = _cv2_affine(image, matrix, offset, out_shape)
+    if cv2_result is not None:
+        return cv2_result
 
     return ndimage.affine_transform(
         image,
@@ -397,8 +373,8 @@ def apply_spatial_preprocessing_export(
         offset,
         output_shape=out_shape,
         order=1,
-        mode=fill_mode,
-        cval=0.0,
+        mode="constant",
+        cval=np.nan,
         prefilter=False,
     )
 
@@ -410,16 +386,16 @@ def _cv2_affine(
     out_shape: tuple[int, int],
 ) -> np.ndarray | None:
     """Apply the same output[y,x] = image[matrix @ [y,x] + offset] mapping as
-    ndimage.affine_transform, via cv2.warpAffine, for the nearest/edge-stretch
-    fill case only (see caller). Returns None if cv2 is unavailable so the
-    caller can fall back to the scipy path.
+    ndimage.affine_transform, via cv2.warpAffine, with NaN outside the
+    source image. `image` must be float32/float64. Returns None if cv2 is
+    unavailable so the caller can fall back to the scipy path.
     """
     try:
         import cv2
     except ImportError:
         return None
 
-    src = image if image.dtype in _CV2_SUPPORTED_DTYPES else image.astype(np.float32, copy=False)
+    src = image if image.dtype in (np.float32, np.float64) else image.astype(np.float32)
     src = np.ascontiguousarray(src)
 
     out_h, out_w = out_shape
@@ -435,9 +411,10 @@ def _cv2_affine(
         cv2_matrix,
         (out_w, out_h),
         flags=cv2.INTER_LINEAR | cv2.WARP_INVERSE_MAP,
-        borderMode=cv2.BORDER_REPLICATE,
+        borderMode=cv2.BORDER_CONSTANT,
+        borderValue=float("nan"),
     )
-    return result if result.dtype == image.dtype else result.astype(image.dtype, copy=False)
+    return result
 
 
 def _apply_spatial_transform(

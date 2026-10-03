@@ -39,7 +39,6 @@ def flatten_background(
     rois: list[AreaRoi] | None = None,
     mask_settings: AreaRoiDetectionSettings | None = None,
     external_mask: np.ndarray | None = None,
-    rotation_fill_mask: np.ndarray | None = None,
     region: tuple[int, int, int, int] | None = None,
     exclusion_dilation_px: int = 0,
 ) -> np.ndarray:
@@ -81,12 +80,11 @@ def flatten_background(
             rois=rois,
             mask_settings=mask_settings,
             external_mask=external_mask,
-            rotation_fill_mask=rotation_fill_mask,
             exclusion_dilation_px=dilation_px,
         )
         valid_mask = ~_combined_exclusion_mask(
             image_f32, rois=rois, mask_settings=mask_settings, external_mask=external_mask,
-            rotation_fill_mask=rotation_fill_mask, dilation_px=dilation_px,
+            dilation_px=dilation_px,
         )
         baseline = float(np.median(background_full[valid_mask])) if np.any(valid_mask) else float(np.median(background_full))
         if region is None:
@@ -104,7 +102,6 @@ def flatten_background(
         rois=rois,
         mask_settings=mask_settings,
         external_mask=external_mask,
-        rotation_fill_mask=rotation_fill_mask,
         region=region,
         exclusion_dilation_px=dilation_px,
     )
@@ -115,7 +112,6 @@ def flatten_background(
         rois=rois,
         mask_settings=mask_settings,
         external_mask=external_mask,
-        rotation_fill_mask=rotation_fill_mask,
         exclusion_dilation_px=dilation_px,
     )
     x0, y0, x1, y1 = region
@@ -130,7 +126,6 @@ def estimate_background_profile(
     rois: list[AreaRoi] | None = None,
     mask_settings: AreaRoiDetectionSettings | None = None,
     external_mask: np.ndarray | None = None,
-    rotation_fill_mask: np.ndarray | None = None,
     region: tuple[int, int, int, int] | None = None,
     exclusion_dilation_px: int = 0,
 ) -> np.ndarray:
@@ -148,19 +143,18 @@ def estimate_background_profile(
         rois=rois,
         mask_settings=mask_settings,
         external_mask=external_mask,
-        rotation_fill_mask=rotation_fill_mask,
         dilation_px=exclusion_dilation_px,
     )
     valid_mask = ~exclusion_mask
     weights = valid_mask.astype(np.float32, copy=False)
     binning_factor = max(int(binning), 1)
     if binning_factor > 1:
-        binned_weighted = _bin_array_mean(image_f32 * weights, binning_factor)
+        binned_weighted = _bin_array_mean(np.where(valid_mask, image_f32, 0.0), binning_factor)
         binned_weights = _bin_array_mean(weights, binning_factor)
         binned_sigma = max(sigma / float(binning_factor), 1.0)
         numerator_small = ndimage.gaussian_filter(binned_weighted, sigma=binned_sigma, mode="nearest")
         denominator_small = ndimage.gaussian_filter(binned_weights, sigma=binned_sigma, mode="nearest")
-        fallback = float(np.median(image_f32[valid_mask])) if np.any(valid_mask) else float(np.median(image_f32))
+        fallback = _fallback_level(image_f32, valid_mask)
         background_small = np.full_like(numerator_small, fallback)
         np.divide(numerator_small, denominator_small, out=background_small, where=denominator_small > 1e-6)
         if region is not None:
@@ -168,10 +162,10 @@ def estimate_background_profile(
         background = _resize_to_shape(background_small, image_f32.shape[:2])
         return background.astype(np.float32, copy=False)
 
-    numerator = ndimage.gaussian_filter(image_f32 * weights, sigma=sigma, mode="nearest")
+    numerator = ndimage.gaussian_filter(np.where(valid_mask, image_f32, 0.0).astype(np.float32, copy=False), sigma=sigma, mode="nearest")
     denominator = ndimage.gaussian_filter(weights, sigma=sigma, mode="nearest")
 
-    fallback = float(np.median(image_f32[valid_mask])) if np.any(valid_mask) else float(np.median(image_f32))
+    fallback = _fallback_level(image_f32, valid_mask)
     background = np.full_like(image_f32, fallback)
     np.divide(numerator, denominator, out=background, where=denominator > 1e-6)
     if region is not None:
@@ -188,7 +182,6 @@ def _background_baseline(
     rois: list[AreaRoi] | None = None,
     mask_settings: AreaRoiDetectionSettings | None = None,
     external_mask: np.ndarray | None = None,
-    rotation_fill_mask: np.ndarray | None = None,
     exclusion_dilation_px: int = 0,
 ) -> float:
     """The scalar re-centering value flatten_background adds back after
@@ -208,7 +201,6 @@ def _background_baseline(
         rois=rois,
         mask_settings=mask_settings,
         external_mask=external_mask,
-        rotation_fill_mask=rotation_fill_mask,
         dilation_px=exclusion_dilation_px,
     )
     valid_mask = ~exclusion_mask
@@ -220,25 +212,34 @@ def _background_baseline(
             rois=rois,
             mask_settings=mask_settings,
             external_mask=external_mask,
-            rotation_fill_mask=rotation_fill_mask,
             exclusion_dilation_px=exclusion_dilation_px,
         )
         return float(np.median(background[valid_mask])) if np.any(valid_mask) else float(np.median(background))
 
     weights = valid_mask.astype(np.float32, copy=False)
     sigma = max(float(sigma_px), 1.0)
-    binned_weighted = _bin_array_mean(image_f32 * weights, binning_factor)
+    binned_weighted = _bin_array_mean(np.where(valid_mask, image_f32, 0.0), binning_factor)
     binned_weights = _bin_array_mean(weights, binning_factor)
     binned_sigma = max(sigma / float(binning_factor), 1.0)
     numerator_small = ndimage.gaussian_filter(binned_weighted, sigma=binned_sigma, mode="nearest")
     denominator_small = ndimage.gaussian_filter(binned_weights, sigma=binned_sigma, mode="nearest")
-    fallback = float(np.median(image_f32[valid_mask])) if np.any(valid_mask) else float(np.median(image_f32))
+    fallback = _fallback_level(image_f32, valid_mask)
     background_small = np.full_like(numerator_small, fallback)
     np.divide(numerator_small, denominator_small, out=background_small, where=denominator_small > 1e-6)
     binned_valid_mask = binned_weights > 0.5
     if np.any(binned_valid_mask):
         return float(np.median(background_small[binned_valid_mask]))
     return float(np.median(background_small))
+
+
+def _fallback_level(image_f32: np.ndarray, valid_mask: np.ndarray) -> float:
+    """Scalar stand-in used where a pixel's neighbourhood has no usable
+    weight: the median of the valid pixels, else of any finite pixel, else NaN
+    (nothing measured at all - the result is then NaN everywhere, never 0)."""
+    if np.any(valid_mask):
+        return float(np.median(image_f32[valid_mask]))
+    finite = image_f32[np.isfinite(image_f32)]
+    return float(np.median(finite)) if finite.size else float("nan")
 
 
 def _bin_array_mean(array: np.ndarray, factor: int) -> np.ndarray:
@@ -361,7 +362,6 @@ def _combined_exclusion_mask(
     rois: list[AreaRoi] | None = None,
     mask_settings: AreaRoiDetectionSettings | None = None,
     external_mask: np.ndarray | None = None,
-    rotation_fill_mask: np.ndarray | None = None,
     dilation_px: int = 0,
 ) -> np.ndarray:
     exclusion_mask = _roi_exclusion_mask(image.shape[:2], rois)
@@ -371,11 +371,10 @@ def _combined_exclusion_mask(
             mask_settings,
             external_mask=external_mask,
         )
-    # Rotation-fill pixels are folded in unconditionally, independent of
-    # mask_settings/external_mask above - see the comment on the
-    # flatten_background call site in apply_preprocessing for why.
-    if rotation_fill_mask is not None and rotation_fill_mask.shape == exclusion_mask.shape:
-        exclusion_mask = exclusion_mask | rotation_fill_mask
+    # Pixels with no measurement (NaN - e.g. created by rotation) are always
+    # excluded, independent of the toggles above: they carry no value, so
+    # they can neither pull on the local average nor be averaged into it.
+    exclusion_mask = exclusion_mask | ~np.isfinite(image)
     dilation = max(int(dilation_px), 0)
     if dilation > 0 and np.any(exclusion_mask):
         exclusion_mask = ndimage.binary_dilation(exclusion_mask, iterations=dilation)

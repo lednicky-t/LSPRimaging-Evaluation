@@ -56,11 +56,11 @@ analysis path (`gui/mask_controller.py`'s `external_mask_for_record`, and
   (the same space `rasterize_sample`/`rasterize_reference` rasterize ROIs
   into, off `processed.shape`). So a mask authored at a *different* frame
   cannot be warped while still in raw space, which is what the original
-  `resolve_mask`/`external_mask_processed=False` wiring would have done.
+  `resolve_mask` raw-space wiring would have done.
   It has to be transformed into processed space first and warped there -
   exactly the order the old app uses
   (`apply_spatial_mask(...)` → `warp_boolean_mask_affine(...)` →
-  `external_mask_processed=True`).
+  handed to `apply_preprocessing` as its processed-space `external_mask`).
 
 Getting that order wrong wouldn't crash - it would silently misalign the
 ignore mask against the image it is meant to exclude from, by whatever
@@ -99,7 +99,7 @@ from __future__ import annotations
 
 import logging
 import time
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 
 import numpy as np
@@ -170,16 +170,123 @@ class WavelengthComputeInput:
     `roi/rasterize.py` already follows."""
 
 
+COVERAGE_FLAG_OK = ""
+COVERAGE_FLAG_INSUFFICIENT = "insufficient_coverage"
+COVERAGE_FLAG_TOO_FEW_PIXELS = "insufficient_pixels"
+
+
+@dataclass(frozen=True)
+class CoverageThresholds:
+    """How much of an aperture must have a value (be finite) for a cell to be
+    computed. Below a threshold the cell's sample and reference are NaN with
+    the reason flag `"insufficient_coverage"` - never a number made from a
+    fraction of the aperture. **Part of the `SettingsSnapshot` fingerprint**:
+    changing a threshold recomputes the cells.
+
+    **Currently not used to decide which ROI is valid** (maintainer decision
+    2026-10-03): every default is 0.0, so a ROI that overlaps NaN pixels is
+    still computed from its valid pixels, exactly like pixels under an ignore
+    mask. A cell becomes NaN only when no valid pixel is left. The valid
+    fractions are recorded for every cell regardless, so a threshold can be
+    switched on (or applied when filtering results) later without recomputing
+    the pixels. `min_reference_sector_fraction` is the lowest valid fraction
+    among the 4 angular sectors of the reference ring."""
+
+    min_sample_valid_fraction: float = 0.0
+    min_reference_valid_fraction: float = 0.0
+    min_reference_sector_fraction: float = 0.0
+
+    def as_dict(self) -> dict:
+        return asdict(self)
+
+
+DEFAULT_COVERAGE_THRESHOLDS = CoverageThresholds()
+
+
+@dataclass(frozen=True)
+class WavelengthCoverage:
+    """How much of one wavelength's sample aperture and reference ring had a
+    value, and why a cell was flagged (empty `flag` = fine). "Nominal" is the
+    aperture after reference/sample exclusion and the ignore mask (user
+    choices) but before the validity (finite) test; apertures cut off by the
+    canvas edge are not counted as nominal (see ROI warnings, Phase 6).
+    `reference_min_sector_fraction` is the lowest valid fraction among 4
+    angular sectors of the ring - a one-sided ring biases a plane-fit/mean
+    background under an illumination gradient."""
+
+    n_sample_nominal: int
+    n_sample_valid: int
+    sample_valid_fraction: float
+    n_reference_nominal: int
+    n_reference_valid: int
+    reference_valid_fraction: float
+    reference_min_sector_fraction: float
+    flag: str = COVERAGE_FLAG_OK
+
+
 @dataclass(frozen=True)
 class CellResult:
     """One (ROI, cube) cell's computed result - the raw reduced
     sample/reference pair per wavelength (see module docstring for why not
-    a formula-applied value), plus its provenance."""
+    a formula-applied value), plus its provenance. A wavelength whose
+    aperture was too incomplete has NaN values and a flag in `coverage`
+    (`None` for results stored before coverage was recorded)."""
 
     wavelengths_nm: tuple[float, ...]
     sample_values: tuple[float, ...]
     reference_values: tuple[float, ...]
     provenance: ProvenanceRecord
+    coverage: tuple[WavelengthCoverage, ...] | None = None
+
+
+def _min_sector_fraction(nominal: np.ndarray, valid: np.ndarray) -> float:
+    """Lowest valid fraction over the 4 angular sectors (quadrants, 90 deg
+    each, around the ring's own centre) of the nominal reference mask; sectors
+    with no nominal pixel are skipped. 1.0 when the ring is empty."""
+    ys, xs = np.nonzero(nominal)
+    if ys.size == 0:
+        return 1.0
+    cy = (float(ys.min()) + float(ys.max())) / 2.0
+    cx = (float(xs.min()) + float(xs.max())) / 2.0
+    angle = np.arctan2(ys - cy, xs - cx)  # (-pi, pi]
+    sector = np.minimum(((angle + np.pi) / (np.pi / 2.0)).astype(np.int64), 3)
+    is_valid = valid[ys, xs]
+    fractions = []
+    for index in range(4):
+        in_sector = sector == index
+        count = int(np.count_nonzero(in_sector))
+        if count:
+            fractions.append(float(np.count_nonzero(is_valid & in_sector)) / count)
+    return min(fractions) if fractions else 1.0
+
+
+def _coverage(
+    sample_nominal: np.ndarray,
+    sample_valid: np.ndarray,
+    reference_nominal: np.ndarray,
+    reference_valid: np.ndarray,
+    thresholds: CoverageThresholds,
+) -> WavelengthCoverage:
+    n_sample_nominal = int(np.count_nonzero(sample_nominal))
+    n_sample_valid = int(np.count_nonzero(sample_valid))
+    n_reference_nominal = int(np.count_nonzero(reference_nominal))
+    n_reference_valid = int(np.count_nonzero(reference_valid))
+    sample_fraction = n_sample_valid / n_sample_nominal if n_sample_nominal else 0.0
+    reference_fraction = n_reference_valid / n_reference_nominal if n_reference_nominal else 0.0
+    sector_fraction = _min_sector_fraction(reference_nominal, reference_valid)
+    insufficient = (
+        n_sample_valid == 0
+        or n_reference_valid == 0
+        or sample_fraction < thresholds.min_sample_valid_fraction
+        or reference_fraction < thresholds.min_reference_valid_fraction
+        or sector_fraction < thresholds.min_reference_sector_fraction
+    )
+    return WavelengthCoverage(
+        n_sample_nominal=n_sample_nominal, n_sample_valid=n_sample_valid, sample_valid_fraction=sample_fraction,
+        n_reference_nominal=n_reference_nominal, n_reference_valid=n_reference_valid,
+        reference_valid_fraction=reference_fraction, reference_min_sector_fraction=sector_fraction,
+        flag=COVERAGE_FLAG_INSUFFICIENT if insufficient else COVERAGE_FLAG_OK,
+    )
 
 
 def _mask_for_compute(wl_input: WavelengthComputeInput) -> np.ndarray | None:
@@ -243,6 +350,7 @@ def compute_cell(
     reference_exclusion_mode: str = DEFAULT_REFERENCE_EXCLUSION_MODE,
     sample_exclusion_cache: dict[tuple[int, float], np.ndarray] | None = None,
     cancel_event=None,
+    coverage_thresholds: CoverageThresholds = DEFAULT_COVERAGE_THRESHOLDS,
 ) -> CellResult | None:
     """Compute one (ROI, cube) cell's reduced spectrum (raw sample/
     reference pair per wavelength) plus the provenance record describing
@@ -302,6 +410,7 @@ def compute_cell(
     sample_values: dict[float, float] = {}
     reference_values: dict[float, float] = {}
     snapshots: dict[float, SettingsSnapshot] = {}
+    coverages: dict[float, WavelengthCoverage] = {}
     stage_seconds = {"preprocess": 0.0, "rasterize": 0.0, "reduce": 0.0}
     cell_started = time.perf_counter()
 
@@ -333,7 +442,6 @@ def compute_cell(
             # Processed-space, chromatically warped - see _mask_for_compute
             # and the module docstring's assumption-1 note.
             external_mask=ignore_mask,
-            external_mask_processed=True,
         )
         stage_seconds["preprocess"] += time.perf_counter() - t0
 
@@ -356,27 +464,41 @@ def compute_cell(
             # counted normally (the maintainer's explicit framing of this
             # mode; see REFERENCE_EXCLUSION_MODES).
             reference_mask = reference_mask & ~union
-        # Ignore-mask pixels must never reach the reduction. apply_preprocessing
-        # writes them as literal zeros into `processed` (that array also feeds
-        # the background estimate and the display, so it is left alone here);
-        # without this line those zeros were averaged into the sample and
-        # reference values, pulling them down. Same shape guard as
-        # apply_preprocessing itself, so the two agree on which mask applies.
+        # The ignore mask is a selection, not a data edit: `processed` still
+        # holds the real values under it, so those pixels are dropped here
+        # (same shape guard as apply_preprocessing's background exclusion, so
+        # the two agree on which mask applies).
         if ignore_mask is not None and ignore_mask.shape == image_shape:
             sample_mask = sample_mask & ~ignore_mask
             reference_mask = reference_mask & ~ignore_mask
+        # Validity comes from the image itself: a pixel without a value
+        # (NaN, e.g. created by rotation) never enters a reduction. This also
+        # follows anything else that moves pixels, with no geometric mask to
+        # keep in sync.
+        valid = np.isfinite(processed)
+        sample_valid = sample_mask & valid
+        reference_valid = reference_mask & valid
+        coverage = _coverage(sample_mask, sample_valid, reference_mask, reference_valid, coverage_thresholds)
         stage_seconds["rasterize"] += time.perf_counter() - t0
 
         t0 = time.perf_counter()
-        sample_pixels = processed[sample_mask]
-        reference_pixels = processed[reference_mask]
-        ref_yy, ref_xx = np.nonzero(reference_mask)
-        sample_value, reference_value = reduce_sample_and_reference(
-            sample_pixels, reference_pixels, reduction_method,
-            trimmed_mean_fraction=trimmed_mean_fraction,
-            reference_xx=ref_xx.astype(np.float64), reference_yy=ref_yy.astype(np.float64),
-            sample_x=float(roi.center_x), sample_y=float(roi.center_y),
-        )
+        if coverage.flag == COVERAGE_FLAG_INSUFFICIENT:
+            sample_value = reference_value = float("nan")
+        else:
+            sample_pixels = processed[sample_valid]
+            reference_pixels = processed[reference_valid]
+            ref_yy, ref_xx = np.nonzero(reference_valid)
+            sample_value, reference_value = reduce_sample_and_reference(
+                sample_pixels, reference_pixels, reduction_method,
+                trimmed_mean_fraction=trimmed_mean_fraction,
+                reference_xx=ref_xx.astype(np.float64), reference_yy=ref_yy.astype(np.float64),
+                sample_x=float(roi.center_x), sample_y=float(roi.center_y),
+            )
+            if not (np.isfinite(sample_value) and np.isfinite(reference_value)):
+                # E.g. a plane fit with too few reference pixels.
+                coverage = replace(coverage, flag=COVERAGE_FLAG_TOO_FEW_PIXELS)
+                sample_value = reference_value = float("nan")
+        coverages[wavelength_nm] = coverage
         sample_values[wavelength_nm] = sample_value
         reference_values[wavelength_nm] = reference_value
         stage_seconds["reduce"] += time.perf_counter() - t0
@@ -425,6 +547,7 @@ def compute_cell(
             background_exclusion=background_exclusion_digest(
                 all_rois, wl_input.background_settings, detection_settings
             ),
+            coverage_thresholds=coverage_thresholds.as_dict(),
         )
 
     if not sample_values:
@@ -448,4 +571,5 @@ def compute_cell(
         sample_values=tuple(sample_values[wl] for wl in computed_wavelengths),
         reference_values=tuple(reference_values[wl] for wl in computed_wavelengths),
         provenance=provenance,
+        coverage=tuple(coverages[wl] for wl in computed_wavelengths),
     )

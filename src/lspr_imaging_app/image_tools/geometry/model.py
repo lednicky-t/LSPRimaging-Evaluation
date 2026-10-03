@@ -26,7 +26,7 @@ class GeometryComputationalChange:
     (that file's own docstring: "each should define its own analogous
     pair, colocated in its own module file")."""
 
-    reason: str  # "image_tools_enabled" | "rotation" | "rotation_fill" | "flip" | "crop"
+    reason: str  # "image_tools_enabled" | "rotation" | "flip" | "crop"
 
 
 @dataclass(frozen=True)
@@ -57,7 +57,6 @@ class CropDefinition:
 class GeometrySettings:
     image_tools_enabled: bool = True
     rotation_angle_deg: float = 0.0
-    rotation_fill_dark: bool = False
     flip_horizontal: bool = False
     flip_vertical: bool = False
     crop: CropDefinition = field(default_factory=CropDefinition)

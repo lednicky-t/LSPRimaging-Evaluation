@@ -13,18 +13,18 @@ def ignored_pixel_mask(
     image: np.ndarray,
     settings: AreaRoiDetectionSettings,
     external_mask: np.ndarray | None = None,
-    rotation_fill_mask: np.ndarray | None = None,
 ) -> np.ndarray:
-    """`external_mask` (the user's painted/histogram/relative/local-contrast
-    mask) only counts when `ignore_marked_pixels` is on - that's an explicit,
-    tested behavior (see TestDetectRoisIgnoreMask). `rotation_fill_mask` is
-    different: it marks pixels the rotate/flip/crop tool synthesized (no
-    source measurement behind them at all, see
-    preprocess.rotation_fill_pixel_mask), so it's always excluded regardless
-    of that toggle - there's no scenario where counting them is correct.
+    """Pixels detection and the background estimate must not use.
+
+    Pixels with no value (non-finite, e.g. NaN created by rotation) are
+    always excluded, regardless of `ignore_marked_pixels` - there is no
+    scenario where counting them is correct. `external_mask` (the user's
+    painted/histogram/relative/local-contrast ignore mask) is a selection
+    only and counts when `ignore_marked_pixels` is on - an explicit, tested
+    behavior (see TestDetectRoisIgnoreMask). Neither changes `image`.
     """
     image_shape = image.shape[:2]
-    combined_mask = _normalized_external_mask(image_shape, rotation_fill_mask)
+    combined_mask = ~np.isfinite(image) if image.ndim == 2 else np.zeros(image_shape, dtype=bool)
     if image.size == 0:
         return combined_mask
     if settings.ignore_marked_pixels:
@@ -49,7 +49,6 @@ def detect_rois(
     settings: AreaRoiDetectionSettings,
     external_mask: np.ndarray | None = None,
     progress_callback=None,
-    rotation_fill_mask: np.ndarray | None = None,
 ) -> list[AreaRoi]:
     if image.size == 0:
         return []
@@ -60,7 +59,7 @@ def detect_rois(
 
     report_progress(5, "ROI detection: preparing mask...")
     image_f32 = image.astype(np.float32, copy=False)
-    valid_mask = ~ignored_pixel_mask(image_f32, settings, external_mask=external_mask, rotation_fill_mask=rotation_fill_mask)
+    valid_mask = ~ignored_pixel_mask(image_f32, settings, external_mask=external_mask)
     if not np.any(valid_mask):
         report_progress(100, "ROI detection: no valid pixels.")
         return []
@@ -81,8 +80,11 @@ def detect_rois(
     if intensity_min > intensity_max:
         intensity_min, intensity_max = intensity_max, intensity_min
 
+    # A particle whose disc reaches pixels with no value (the data edge left
+    # by a rotation) is not a feature: the edge itself must never be detected.
+    near_invalid = _near_invalid_mask(image_f32, radius)
     candidate_mask = (filtered >= intensity_min) & (filtered <= intensity_max)
-    candidate_mask &= valid_mask & (filter_support > 0.05)
+    candidate_mask &= valid_mask & ~near_invalid & (filter_support > 0.05)
 
     neighborhood = max(int(settings.array_spacing_px if int(settings.array_spacing_px) > 0 else settings.sample_radius_px * 2), 3)
     searchable = np.where(candidate_mask, search_image, -np.inf)
@@ -173,6 +175,7 @@ def detect_rois(
             mode=settings.mode,
         )
 
+    accepted = [roi for roi in accepted if not _roi_touches_invalid(roi, near_invalid)]
     for index, roi in enumerate(accepted, start=1):
         roi.area_roi_id = index
     report_progress(100, f"ROI detection: detected {len(accepted)} ROIs.")
@@ -184,7 +187,6 @@ def refresh_roi_metrics(
     settings: AreaRoiDetectionSettings,
     rois: list[AreaRoi],
     external_mask: np.ndarray | None = None,
-    rotation_fill_mask: np.ndarray | None = None,
 ) -> list[AreaRoi]:
     """Recompute each ROI's contrast score at its current position and
     radius, without moving it.
@@ -198,7 +200,7 @@ def refresh_roi_metrics(
     if image.size == 0 or not rois:
         return rois
     image_f32 = image.astype(np.float32, copy=False)
-    valid_mask = ~ignored_pixel_mask(image_f32, settings, external_mask=external_mask, rotation_fill_mask=rotation_fill_mask)
+    valid_mask = ~ignored_pixel_mask(image_f32, settings, external_mask=external_mask)
     if not np.any(valid_mask):
         return rois
     sigma = max(float(settings.sample_radius_px) / 2.5, 1.0)
@@ -219,9 +221,26 @@ def refresh_roi_metrics(
     ]
 
 
+def _near_invalid_mask(image: np.ndarray, radius: float) -> np.ndarray:
+    """True within `radius` px of any non-finite pixel (and on them)."""
+    invalid = ~np.isfinite(image)
+    if not invalid.any():
+        return invalid
+    return ndimage.distance_transform_edt(~invalid) <= max(float(radius), 1.0)
+
+
+def _roi_touches_invalid(roi: AreaRoi, near_invalid: np.ndarray) -> bool:
+    y, x = int(round(roi.center_y)), int(round(roi.center_x))
+    if not (0 <= y < near_invalid.shape[0] and 0 <= x < near_invalid.shape[1]):
+        return True
+    return bool(near_invalid[y, x])
+
+
 def _masked_gaussian_filter(image: np.ndarray, valid_mask: np.ndarray, sigma: float) -> tuple[np.ndarray, np.ndarray]:
     weights = valid_mask.astype(np.float32, copy=False)
-    numerator = ndimage.gaussian_filter(image * weights, sigma=sigma, mode="nearest")
+    # np.where, not `image * weights`: NaN * 0 is NaN, which the filter would
+    # spread over every neighbour.
+    numerator = ndimage.gaussian_filter(np.where(valid_mask, image, 0.0).astype(np.float32, copy=False), sigma=sigma, mode="nearest")
     denominator = ndimage.gaussian_filter(weights, sigma=sigma, mode="nearest")
     fallback = float(np.mean(image[valid_mask])) if np.any(valid_mask) else 0.0
     filtered = np.full_like(numerator, fallback)

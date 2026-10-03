@@ -681,6 +681,7 @@ def build_main_window(
         session_coordinator,
         initial_stage=initial_stage,
         initial_subsections=settings.expanded_subsections,
+        geometry=geometry,
     )
     # Immediate persist-on-change, same pattern as theme/auto_apply above -
     # switching the open stage is a deliberate, occasional click, not a

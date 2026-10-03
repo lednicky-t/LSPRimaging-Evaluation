@@ -56,6 +56,17 @@ def population_counts(values: np.ndarray, edges: np.ndarray) -> np.ndarray:
     return counts.astype(np.float64)
 
 
+def excluded_pixel_text(image: np.ndarray) -> str | None:
+    """"12 345 px no data, 10.4%" for the pixels of `image` without a value
+    (NaN), or `None` when there are none. Those pixels are left out of every
+    count, percentage and normalisation in this panel."""
+    total = int(image.size)
+    excluded = total - int(np.count_nonzero(np.isfinite(image)))
+    if excluded == 0 or total == 0:
+        return None
+    return f"{excluded:,} px no data, {excluded / total * 100.0:.1f}%".replace(",", " ")
+
+
 def as_percent(counts: np.ndarray, total_pixel_count: int) -> np.ndarray:
     """`counts` as a percentage of `total_pixel_count` (the "All pixels"
     population's own total, shared by every curve so they stay comparable to

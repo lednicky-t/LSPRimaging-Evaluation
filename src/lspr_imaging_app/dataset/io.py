@@ -43,12 +43,10 @@ from lspr_io import is_imaging_measurement_file, read_imaging_acquisition_metada
 # not-yet-relocated old code here is safe scaffolding, not a shim. Each of
 # these becomes a real dependency on a sibling new module once that module
 # is actually built: exclusions/is_excluded -> image_tools/mask,
-# PreprocessingSettings -> image_tools/geometry, apply_spatial_preprocessing
-# -> image_tools/preprocess.py, the storage/workspace.py sidecar helpers ->
+# the storage/workspace.py sidecar helpers ->
 # storage/session.py, image_naming/legacy_metadata have no assigned new home
 # yet (not named in sketch §10 - flag this when revisiting).
 from lspr_imaging_app.domain.exclusions import ImageExclusionRule, is_excluded
-from lspr_imaging_app.domain.models import PreprocessingSettings
 from lspr_imaging_app.io.image_naming import IMAGE_PATTERN
 from lspr_imaging_app.io.legacy_metadata import find_and_import_legacy_metadata, find_legacy_metadata_files
 from lspr_imaging_app.io.metadata_import import import_metadata_files
@@ -58,9 +56,19 @@ from lspr_imaging_app.storage.workspace import (
     load_acquisition_metadata_sidecar,
     save_acquisition_metadata_sidecar,
 )
-from lspr_imaging_app.processing.preprocess import apply_spatial_preprocessing
+from lspr_imaging_app.image_tools.geometry.model import GeometrySettings
+from lspr_imaging_app.image_tools.geometry.transform import apply_spatial_preprocessing
 
-from .model import ImageDataset, ImageKey, ImageRecord
+from .model import ImageDataset, ImageKey, ImageRecord, compact_dataset_image_timings
+from .ome_metadata import (
+    build_axes,
+    build_omero_channels,
+    build_scale,
+    PLANE_TIMES_ARRAY,
+    display_window,
+    plane_times_s,
+    valid_pixel_size,
+)
 
 
 OME_ZARR_META_FILENAME = ".zattrs"
@@ -801,7 +809,7 @@ def _format_seconds(seconds: float) -> str:
 
 def probe_ome_zarr_export_shape(
     dataset: ImageDataset,
-    preprocessing: PreprocessingSettings | None,
+    preprocessing: GeometrySettings | None,
 ) -> tuple[int, int, np.dtype]:
     """Determine the (height, width, dtype) an OME-Zarr export of this dataset
     would produce, without running the full export. Used both by the exporter
@@ -878,7 +886,6 @@ class OmeZarrExportSummary:
     dtype_str: str
     image_tools_applied: bool
     rotation_angle_deg: float = 0.0
-    rotation_fill_dark: bool = False
     flip_horizontal: bool = False
     flip_vertical: bool = False
     crop: tuple[int, int, int, int] | None = None
@@ -909,7 +916,7 @@ class OmeZarrExportSummary:
 
 def describe_new_ome_zarr_export(
     dataset: ImageDataset,
-    preprocessing: PreprocessingSettings | None,
+    preprocessing: GeometrySettings | None,
     *,
     chunk_size_px: int,
     compression_enabled: bool,
@@ -919,13 +926,11 @@ def describe_new_ome_zarr_export(
     apply_image_tools = preprocessing is not None and bool(getattr(preprocessing, "image_tools_enabled", False))
     crop_tuple = None
     rotation_angle_deg = 0.0
-    rotation_fill_dark = False
     flip_horizontal = False
     flip_vertical = False
     pixel_size_um = None
     if apply_image_tools and preprocessing is not None:
         rotation_angle_deg = float(preprocessing.rotation_angle_deg)
-        rotation_fill_dark = bool(preprocessing.rotation_fill_dark)
         flip_horizontal = bool(preprocessing.flip_horizontal)
         flip_vertical = bool(preprocessing.flip_vertical)
         crop = preprocessing.crop
@@ -944,7 +949,6 @@ def describe_new_ome_zarr_export(
         dtype_str=str(target_dtype),
         image_tools_applied=apply_image_tools,
         rotation_angle_deg=rotation_angle_deg,
-        rotation_fill_dark=rotation_fill_dark,
         flip_horizontal=flip_horizontal,
         flip_vertical=flip_vertical,
         crop=crop_tuple,
@@ -987,7 +991,6 @@ def read_existing_ome_zarr_summary(destination: Path) -> OmeZarrExportSummary | 
             dtype_str=str(lspr_attrs.get("dtype", "")),
             image_tools_applied=bool(lspr_attrs.get("image_tools_applied", False)),
             rotation_angle_deg=float(image_tools.get("rotation_angle_deg", 0.0)),
-            rotation_fill_dark=bool(image_tools.get("rotation_fill_dark", False)),
             flip_horizontal=bool(image_tools.get("flip_horizontal", False)),
             flip_vertical=bool(image_tools.get("flip_vertical", False)),
             crop=(int(crop["x"]), int(crop["y"]), int(crop["width"]), int(crop["height"])) if crop else None,
@@ -1288,13 +1291,14 @@ def export_ome_zarr_dataset(
     chunk_size_px: int = 64,
     compression_enabled: bool = True,
     shard_mode: str = "per_image",
-    preprocessing: PreprocessingSettings | None = None,
+    preprocessing: GeometrySettings | None = None,
     progress_callback: Callable[[int, str], None] | None = None,
     cancel_event: threading.Event | None = None,
     excluded_rules: list[ImageExclusionRule] | None = None,
     skip_excluded: bool = False,
     adaptive_workers_enabled: bool = True,
     adaptive_batch_mb: int = 1024,
+    pixel_size_um: tuple[float, float] | None = None,
 ) -> Path:
     """Export `dataset` to `destination` as OME-Zarr - see
     `_export_ome_zarr_dataset_to_path` for what actually writes it.
@@ -1325,6 +1329,7 @@ def export_ome_zarr_dataset(
         skip_excluded=skip_excluded,
         adaptive_workers_enabled=adaptive_workers_enabled,
         adaptive_batch_mb=adaptive_batch_mb,
+        pixel_size_um=pixel_size_um,
     )
     if not normalized_destination.exists():
         return _export_ome_zarr_dataset_to_path(dataset, destination, **kwargs)
@@ -1375,13 +1380,14 @@ def _export_ome_zarr_dataset_to_path(
     chunk_size_px: int = 64,
     compression_enabled: bool = True,
     shard_mode: str = "per_image",
-    preprocessing: PreprocessingSettings | None = None,
+    preprocessing: GeometrySettings | None = None,
     progress_callback: Callable[[int, str], None] | None = None,
     cancel_event: threading.Event | None = None,
     excluded_rules: list[ImageExclusionRule] | None = None,
     skip_excluded: bool = False,
     adaptive_workers_enabled: bool = True,
     adaptive_batch_mb: int = 1024,
+    pixel_size_um: tuple[float, float] | None = None,
 ) -> Path:
     """Export `dataset` (a TIFF stack or another OME-Zarr dataset) as a new
     OME-Zarr v3 dataset at `destination`, using zarr's sharding codec (Zarr
@@ -1641,25 +1647,25 @@ def _export_ome_zarr_dataset_to_path(
     if cancel_event is not None and cancel_event.is_set():
         raise RuntimeError("OME-Zarr export cancelled.")
 
-    # Embed real physical pixel size (um/px) in the OME-NGFF metadata when the
-    # source calibration is available and the export is in the same processed
-    # coordinate space the calibration was measured in (i.e. image tools applied).
-    write_pixel_size = (
-        apply_image_tools
-        and preprocessing is not None
-        and bool(getattr(preprocessing, "calibration_enabled", False))
-    )
-    scale_y = float(preprocessing.microns_per_pixel_y) if write_pixel_size else 1.0
-    scale_x = float(preprocessing.microns_per_pixel_x) if write_pixel_size else 1.0
-    axes_units = {"y": "micrometer", "x": "micrometer"} if write_pixel_size else None
+    # Physical pixel size (um/px, x then y) for the y/x axes. `pixel_size_um` is
+    # the calibration passed by the caller and is valid for the raw pixels
+    # (rotation/flip/crop never change the scale). The older rule - read it
+    # from `preprocessing` only when image tools were baked in - stays as a
+    # fallback for callers that still pass settings.
+    if pixel_size_um is not None:
+        pixel_size = valid_pixel_size(*pixel_size_um)
+    elif apply_image_tools and preprocessing is not None and bool(getattr(preprocessing, "calibration_enabled", False)):
+        pixel_size = valid_pixel_size(float(preprocessing.microns_per_pixel_x), float(preprocessing.microns_per_pixel_y))
+    else:
+        pixel_size = None
 
     write_multiscales_metadata(
         group,
-        datasets=[{"path": OME_ZARR_ARRAY_DIRNAME, "coordinateTransformations": [{"type": "scale", "scale": [1, 1, scale_y, scale_x]}]}],
-        axes=["t", "wavelength", "y", "x"],
+        datasets=[{"path": OME_ZARR_ARRAY_DIRNAME, "coordinateTransformations": [{"type": "scale", "scale": build_scale(pixel_size)}]}],
+        axes=build_axes(pixel_size),
         name="LSPR image stack",
-        axes_units=axes_units,
     )
+    _write_omero_channels(group, record_map, spectral_cubes, wavelengths, target_dtype)
     lspr_attrs: dict = {
         "spectral_cube_indices": [int(value) for value in spectral_cubes],
         "wavelengths_nm": [float(value) for value in wavelengths],
@@ -1674,7 +1680,6 @@ def _export_ome_zarr_dataset_to_path(
         crop = preprocessing.crop
         lspr_attrs["image_tools"] = {
             "rotation_angle_deg": float(preprocessing.rotation_angle_deg),
-            "rotation_fill_dark": bool(preprocessing.rotation_fill_dark),
             "flip_horizontal": bool(preprocessing.flip_horizontal),
             "flip_vertical": bool(preprocessing.flip_vertical),
             "crop": (
@@ -1683,8 +1688,17 @@ def _export_ome_zarr_dataset_to_path(
                 else None
             ),
         }
-    if write_pixel_size:
-        lspr_attrs["pixel_size_um"] = {"x": scale_x, "y": scale_y}
+    plane_times = _write_plane_times(group, dataset, spectral_cubes, wavelengths)
+    if plane_times is not None:
+        lspr_attrs["plane_times"] = {
+            "array": PLANE_TIMES_ARRAY,
+            "unit": "second",
+            "axes": ["cube_index", "wavelength"],
+            "origin_unix_ms": plane_times,
+            "missing": "NaN",
+        }
+    if pixel_size is not None:
+        lspr_attrs["pixel_size_um"] = {"x": pixel_size[0], "y": pixel_size[1]}
     group.attrs[OME_ZARR_LSPR_KEY] = lspr_attrs
 
     # Mirror any loaded acquisition metadata (camera/illumination settings,
@@ -1698,6 +1712,47 @@ def _export_ome_zarr_dataset_to_path(
 
     _export_experimental_data(dataset, destination)
     return destination
+
+
+def _write_plane_times(group, dataset: ImageDataset, spectral_cubes, wavelengths) -> int | None:
+    """Store when each (cube, wavelength) plane was acquired as a small float64
+    array `plane_times_s` (seconds from the earliest plane; NaN = no recorded
+    time) next to the image in the same group. Returns the origin in unix ms,
+    or `None` (nothing written) when the dataset has no acquisition timing."""
+    compact = compact_dataset_image_timings(dataset)
+    result = plane_times_s(compact.per_frame_ms, [int(c) for c in spectral_cubes], [float(w) for w in wavelengths])
+    if result is None:
+        return None
+    times, origin_ms = result
+    array = group.create_array(PLANE_TIMES_ARRAY, shape=times.shape, dtype=np.float64, fill_value=float("nan"))
+    array[:] = times
+    return int(origin_ms)
+
+
+def _write_omero_channels(group, record_map, spectral_cubes, wavelengths, target_dtype) -> None:
+    """Add the omero `channels` block (one per wavelength: label, colour,
+    display window) to the group's `ome` attributes. The window is measured
+    from the first spectral cube's plane at each wavelength (every 4th pixel -
+    cheap, and a display hint only). Any failure to read a plane falls back to
+    the dtype's full range for that channel: this block is a viewer
+    convenience and must never fail an export whose pixels are already
+    written."""
+    windows: list[dict[str, float]] = []
+    for wavelength in wavelengths:
+        plane = np.array([])
+        for cube in spectral_cubes:
+            record = record_map.get((cube, wavelength))
+            if record is None:
+                continue
+            try:
+                plane = _load_image_array_native(str(record.path))[::4, ::4]
+            except Exception:  # noqa: BLE001 - see docstring
+                _LOGGER.warning("Could not read %s for the OME-Zarr display window", record.path, exc_info=True)
+            break
+        windows.append(display_window(plane, target_dtype))
+    ome = dict(group.attrs.get("ome", {}))
+    ome["omero"] = {"channels": build_omero_channels([float(w) for w in wavelengths], windows)}
+    group.attrs["ome"] = ome
 
 
 def _export_experimental_data(dataset: ImageDataset, destination: Path) -> None:

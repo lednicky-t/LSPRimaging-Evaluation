@@ -78,7 +78,13 @@ from .provenance import (
     sample_exclusion_digest,
 )
 from .store import read_all_cells, write_cell
-from .tasks import CellResult, WavelengthComputeInput, compute_cell
+from .tasks import (
+    DEFAULT_COVERAGE_THRESHOLDS,
+    CellResult,
+    CoverageThresholds,
+    WavelengthComputeInput,
+    compute_cell,
+)
 from .worker import AnalysisWorker
 
 MaskResolution = tuple[tuple[int, float], np.ndarray, str]  # (authored_frame, mask_array, scope)
@@ -138,6 +144,7 @@ class AnalysisEngine(QObject):
         reference_exclusion_mode: Callable[[], str] = lambda: DEFAULT_REFERENCE_EXCLUSION_MODE,
         storage_root: Path | None = None,
         trimmed_mean_fraction: float = DEFAULT_TRIMMED_MEAN_FRACTION,
+        coverage_thresholds: Callable[[], CoverageThresholds] = lambda: DEFAULT_COVERAGE_THRESHOLDS,
         parent: QObject | None = None,
     ) -> None:
         """Every callable parameter is a narrow read from a real module,
@@ -226,6 +233,7 @@ class AnalysisEngine(QObject):
         self._reference_exclusion_mode = reference_exclusion_mode
         self._metric_settings = metric_settings
         self._trimmed_mean_fraction = trimmed_mean_fraction
+        self._coverage_thresholds = coverage_thresholds
 
         self._worker = AnalysisWorker()
         # A second worker, not the one above: `run_analysis` holds that one
@@ -486,6 +494,7 @@ class AnalysisEngine(QObject):
         reduction_method = self._reduction_method()
         naming = self._naming()
         exclusion_mode = self._reference_exclusion_mode()
+        coverage_thresholds = self._coverage_thresholds()
         all_rois = self._rois()
         # Must match what compute_cell records, or every cell would look
         # stale the moment it's compared against its own stored fingerprint.
@@ -543,6 +552,7 @@ class AnalysisEngine(QObject):
                     background=asdict(background), reduction_method=reduction_method,
                     reference_exclusion_mode=exclusion_mode, sample_exclusion=exclusion_digest,
                     background_exclusion=background_digest,
+                    coverage_thresholds=coverage_thresholds.as_dict(),
                 )
             cube_settings[cube_index] = wavelength_settings
         roi_geometries = {roi.area_roi_id: roi_geometry_fingerprint_fields(roi) for roi in all_rois}
@@ -600,6 +610,7 @@ class AnalysisEngine(QObject):
         default_inner, default_outer = self._default_reference_radii()
         cancel_event = self._worker.cancel_event
         exclusion_mode = self._reference_exclusion_mode()
+        coverage_thresholds = self._coverage_thresholds()
         all_rois = tuple(rois_by_id.values())
         # Read once here, on the GUI thread, not per cell from the worker:
         # the modules are only ever touched from the GUI thread (the same
@@ -640,6 +651,7 @@ class AnalysisEngine(QObject):
                         naming=naming, all_rois=all_rois, detection_settings=detection,
                         reference_exclusion_mode=exclusion_mode,
                         sample_exclusion_cache=sample_exclusion_cache, cancel_event=cancel_event,
+                        coverage_thresholds=coverage_thresholds,
                     )
                     if result is not None:
                         self._results[(roi_id, cube_index)] = result

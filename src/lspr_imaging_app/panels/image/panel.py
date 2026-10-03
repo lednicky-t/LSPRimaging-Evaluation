@@ -113,6 +113,7 @@ from ...image_tools import (
 from ...image_tools.geometry.model import CropDefinition, GeometrySettings
 from ...image_tools.preprocess import resolve_external_mask
 from ...roi import RoiToolbox
+from .no_data import format_pixel_value, no_data_overlay_rgba
 from ...roi.model import AreaRoi
 from ...roi.rasterize import effective_reference_radii, transformed_circle_points
 from ...selection import HighlightRangeModule, ReferenceFrameModule, SelectionModule
@@ -383,6 +384,14 @@ class ImagePanel(QWidget):
         self._plot.hideAxis("left")
         self._plot.hideAxis("bottom")
         self._plot.setMenuEnabled(False)
+
+        # Pixels without a value (NaN, e.g. rotation corners) are transparent
+        # in `_image_item`; this checker sits underneath so they read as
+        # "no data" and never as black or a colormap colour.
+        self._no_data_item = pg.ImageItem(axisOrder="row-major")
+        self._no_data_item.setZValue(-1)
+        self._no_data_item.hide()
+        self._plot.addItem(self._no_data_item)
 
         self._image_item = pg.ImageItem(axisOrder="row-major")
         self._plot.addItem(self._image_item)
@@ -1003,6 +1012,7 @@ class ImagePanel(QWidget):
         and panel holding dataset-derived state to reset itself (see its
         module docstring) - this is the first subscriber to actually do so."""
         self._image_item.clear()
+        self._no_data_item.hide()
         self._mask_overlay_item.hide()
         self._mask_overlay_state = None
         self._highlight_overlay_item.hide()
@@ -1366,9 +1376,16 @@ class ImagePanel(QWidget):
             # subtitle (see `frame_status_changed`'s docstring).
             self._on_tool_status(f"Cannot show this frame: {result.error}")
             self._image_item.clear()
+            self._no_data_item.hide()
             return
         image = np.asarray(result.image, dtype=np.float32)
         self._image_item.setImage(image, autoLevels=True)
+        checker = no_data_overlay_rgba(image)
+        if checker is None:
+            self._no_data_item.hide()
+        else:
+            self._no_data_item.setImage(checker, autoLevels=False)
+            self._no_data_item.show()
         self._current_display_image = image
         self._update_highlight_overlay()
         if not self._view_range_restored:
@@ -1553,7 +1570,9 @@ class ImagePanel(QWidget):
         # actually-displayed image's own range, since `HighlightRangeModule`
         # seeds to that, not a fixed 16-bit constant - see that module's
         # docstring).
-        if not np.any(selection_mask) or bool(np.all(selection_mask)):
+        # Pixels without a value (NaN) are never selected and do not count as
+        # "excluded" either: "everything in range" is judged on finite pixels.
+        if not np.any(selection_mask) or bool(np.all(selection_mask[np.isfinite(image)])):
             self._highlight_overlay_item.hide()
             return
         overlay = np.zeros((*selection_mask.shape, 4), dtype=np.uint8)
@@ -2006,8 +2025,7 @@ class ImagePanel(QWidget):
         height, width = image.shape[:2]
         if not (0 <= row < height and 0 <= col < width):
             return None
-        value = float(image[row, col])
-        return col + 0.5, row + 0.5, f"({col}, {row}) = {value:.1f}"
+        return col + 0.5, row + 0.5, f"({col}, {row}) = {format_pixel_value(float(image[row, col]))}"
 
     def roi_at(self, x: float, y: float) -> int | None:
         """The ROI whose sample aperture contains display-space point

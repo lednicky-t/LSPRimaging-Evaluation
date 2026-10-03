@@ -123,6 +123,8 @@ class HistogramPlot(QWidget):
         self._plot_widget = pg.PlotWidget(parent=self)
         self._plot_widget.setMinimumHeight(100)
         self._plot_item = self._plot_widget.getPlotItem()
+        self._excluded_text: str | None = None
+        self._title_color = "#999999"
         self._plot_item.showGrid(x=False, y=True, alpha=0.15)
         self._plot_item.setLabel("bottom", "Intensity (DN)")
         self._plot_item.setXRange(compute.DEFAULT_INTENSITY_MIN, compute.DEFAULT_INTENSITY_MAX, padding=0.0)
@@ -297,6 +299,8 @@ class HistogramPlot(QWidget):
         self._range_readout.refresh_theme(theme)
         self._cursor_overlay.refresh_theme(theme)
         self._apply_curve_pens()
+        self._title_color = theme.text_muted
+        self.set_excluded_text(self._excluded_text)
 
     # -- data -------------------------------------------------------------------
 
@@ -312,9 +316,19 @@ class HistogramPlot(QWidget):
     def set_ignore_mask(self, edges: np.ndarray, values: np.ndarray) -> None:
         self._ignore_mask_curve.setData(edges, values)
 
+    def set_excluded_text(self, text: str | None) -> None:
+        """One line above the plot saying how many pixels the histogram left
+        out because they have no value (NaN). `None`/empty hides it."""
+        self._excluded_text = text or None
+        if self._excluded_text:
+            self._plot_item.setTitle(self._excluded_text, color=self._title_color, size="8pt")
+        else:
+            self._plot_item.setTitle(None)
+
     def clear(self) -> None:
         for curve in (self._all_pixels_curve, self._sample_curve, self._reference_curve, self._ignore_mask_curve):
             curve.clear()
+        self.set_excluded_text(None)
         self.set_highlight_range(None)
 
     # -- axis mode --------------------------------------------------------------

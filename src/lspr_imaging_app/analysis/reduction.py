@@ -50,6 +50,17 @@ from __future__ import annotations
 
 import numpy as np
 
+def require_finite(values: np.ndarray, what: str = "pixels") -> None:
+    """Raise if any value is NaN/inf. Pixels without a value (e.g. created by
+    rotation) must be removed by the caller with an explicit validity mask
+    *before* any reduction: a NaN arriving here means a step was missed, and
+    silently averaging around it (`nanmean`) would hide that. An empty array
+    is not an error - the reductions return NaN for it."""
+    array = np.asarray(values)
+    if array.size and not np.isfinite(array).all():
+        raise ValueError(f"non-finite {what} reached a reduction; remove invalid pixels with the validity mask first")
+
+
 REDUCTION_METHODS: tuple[str, ...] = ("mean", "median", "trimmed_mean", "plane_fit")
 
 # Not user-adjustable (no GUI control) - a continuously-variable Trim %
@@ -62,12 +73,21 @@ DEFAULT_TRIMMED_MEAN_FRACTION: float = 0.10
 
 
 def reduce_mean(pixels: np.ndarray) -> float:
-    """Plain pixel average - the original, still-default behavior."""
+    """Plain pixel average - the original, still-default behavior. NaN for no
+    pixels at all; raises on non-finite input (see `require_finite`)."""
+    pixels = np.asarray(pixels)
+    require_finite(pixels)
+    if pixels.size == 0:
+        return float("nan")
     return float(np.mean(pixels))
 
 
 def reduce_median(pixels: np.ndarray) -> float:
     """Median pixel value - robust to a single hot/dead pixel or cosmic-ray hit."""
+    pixels = np.asarray(pixels)
+    require_finite(pixels)
+    if pixels.size == 0:
+        return float("nan")
     return float(np.median(pixels))
 
 
@@ -88,6 +108,7 @@ def reduce_trimmed_mean(pixels: np.ndarray, trim_fraction: float = 0.10) -> floa
     trimmed_mean, not plane_fit, was unexpectedly the dominant cost there.
     """
     pixels = np.asarray(pixels, dtype=np.float64).ravel()
+    require_finite(pixels)
     fraction = min(max(float(trim_fraction), 0.0), 0.45)
     if pixels.size == 0 or fraction <= 0.0:
         return reduce_mean(pixels)
@@ -111,16 +132,23 @@ def reduce_plane_fit_reference(
     gradient between the sample and reference apertures - useful when they
     sit in different rows/columns under uneven illumination.
 
-    Falls back to reduce_mean(reference_pixels) when there aren't enough
-    points to fit a plane (fewer than 4) or the reference points are
-    coordinate-degenerate (e.g. exactly collinear, giving a singular design
-    matrix) - a plane fit needs spread in both axes to be well-posed, and a
-    degenerate reference region shouldn't crash the whole computation.
+    Returns NaN when there aren't enough points to fit a plane (fewer than
+    4 - e.g. most of the ring has no valid pixels); the caller flags that
+    cell. Falls back to reduce_mean(reference_pixels) when the reference
+    points are coordinate-degenerate (e.g. exactly collinear, giving a
+    singular design matrix) - a plane fit needs spread in both axes to be
+    well-posed, and a degenerate reference region shouldn't crash the whole
+    computation.
     """
     values = np.asarray(reference_pixels, dtype=np.float64).ravel()
     xx = np.asarray(reference_xx, dtype=np.float64).ravel()
     yy = np.asarray(reference_yy, dtype=np.float64).ravel()
-    if values.size < 4 or xx.size != values.size or yy.size != values.size:
+    require_finite(values, "reference pixels")
+    require_finite(xx, "reference x coordinates")
+    require_finite(yy, "reference y coordinates")
+    if values.size < 4:
+        return float("nan")
+    if xx.size != values.size or yy.size != values.size:
         return reduce_mean(values)
     design = np.column_stack([xx, yy, np.ones_like(xx)])
     try:
@@ -231,6 +259,8 @@ def weighted_mean(values: np.ndarray, weights: np.ndarray) -> float:
     weights is definitionally the arithmetic mean."""
     values = np.asarray(values, dtype=np.float64).ravel()
     weights = np.asarray(weights, dtype=np.float64).ravel()
+    require_finite(values)
+    require_finite(weights, "weights")
     total_weight = float(np.sum(weights))
     if total_weight <= 0.0:
         return reduce_mean(values)
@@ -255,6 +285,8 @@ def weighted_median(values: np.ndarray, weights: np.ndarray) -> float:
     `weighted_mean`."""
     values = np.asarray(values, dtype=np.float64).ravel()
     weights = np.asarray(weights, dtype=np.float64).ravel()
+    require_finite(values)
+    require_finite(weights, "weights")
     total_weight = float(np.sum(weights))
     if total_weight <= 0.0:
         return reduce_mean(values)
@@ -288,6 +320,8 @@ def weighted_trimmed_mean(values: np.ndarray, weights: np.ndarray, trim_fraction
     than discarding it."""
     values = np.asarray(values, dtype=np.float64).ravel()
     weights = np.asarray(weights, dtype=np.float64).ravel()
+    require_finite(values)
+    require_finite(weights, "weights")
     fraction = min(max(float(trim_fraction), 0.0), 0.45)
     if values.size == 0 or fraction <= 0.0:
         return weighted_mean(values, weights)
@@ -331,16 +365,22 @@ def weighted_plane_fit(
     (one badly-off pixel weighted to 0.1%) pulls the fitted value back
     much closer to the true underlying plane than the unweighted fit does.
 
-    Falls back to `weighted_mean(reference_pixels, weights)` for the same
-    degenerate cases `reduce_plane_fit_reference` falls back to
-    `reduce_mean` for (fewer than 4 points, coordinate-degenerate fit,
-    non-finite result) - preserves weighting in the fallback rather than
+    Returns NaN for fewer than 4 points, like `reduce_plane_fit_reference`,
+    and falls back to `weighted_mean(reference_pixels, weights)` for the
+    other degenerate cases it falls back to `reduce_mean` for
+    (coordinate-degenerate fit, non-finite result) - preserves weighting in the fallback rather than
     discarding it, same reasoning as `weighted_trimmed_mean`."""
     values = np.asarray(reference_pixels, dtype=np.float64).ravel()
     xx = np.asarray(reference_xx, dtype=np.float64).ravel()
     yy = np.asarray(reference_yy, dtype=np.float64).ravel()
     w = np.asarray(weights, dtype=np.float64).ravel()
-    if values.size < 4 or xx.size != values.size or yy.size != values.size or w.size != values.size:
+    require_finite(values, "reference pixels")
+    require_finite(xx, "reference x coordinates")
+    require_finite(yy, "reference y coordinates")
+    require_finite(w, "weights")
+    if values.size < 4:
+        return float("nan")
+    if xx.size != values.size or yy.size != values.size or w.size != values.size:
         return weighted_mean(values, w if w.size == values.size else np.ones_like(values))
     sqrt_weights = np.sqrt(np.clip(w, 0.0, None))
     design = np.column_stack([xx, yy, np.ones_like(xx)]) * sqrt_weights[:, None]

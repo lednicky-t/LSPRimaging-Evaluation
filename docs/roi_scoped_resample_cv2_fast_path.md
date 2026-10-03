@@ -1,3 +1,5 @@
+> **2026-10-03 update:** `rotation_fill_dark` and edge-stretch fill no longer exist. Rotation-created pixels are NaN and the cv2 path now uses `BORDER_CONSTANT` with a NaN border (same NaN pixels as SciPy, finite values within 0.04 counts). The text below describes the removed behaviour.
+
 # ROI-scoped resample: cv2 fast path, and exactly what it changes about the data
 
 2026-09-06. One of three fixes found during a "Start analysis is way too slow"

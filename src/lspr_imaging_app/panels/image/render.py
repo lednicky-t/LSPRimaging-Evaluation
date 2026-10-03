@@ -216,7 +216,6 @@ class ImageRenderer(QObject):
                 external_mask=resolve_external_mask(
                     request.authored_mask, request.geometry, request.mask_warp_affine
                 ),
-                external_mask_processed=True,
             )
         except Exception as exc:  # noqa: BLE001 - a render must never kill the thread
             logger.exception("Image render failed for cube=%s wl=%s", request.cube_index, request.wavelength_nm)

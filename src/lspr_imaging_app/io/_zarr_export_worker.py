@@ -167,7 +167,18 @@ def write_shard(spec: ShardWriteSpec) -> ShardWriteResult:
         plane = np.asarray(_load_image(record_path), dtype=dtype)
 
         if spec.apply_image_tools and spec.preprocessing is not None:
-            from lspr_imaging_app.processing.preprocess import apply_spatial_preprocessing_export
+            # The rewrite's export passes a GeometrySettings: rotation-created
+            # pixels are NaN and the target dtype is float32 (decided by
+            # dataset.io.probe_ome_zarr_export_shape). The stable app still
+            # passes its own PreprocessingSettings and keeps its own transform.
+            # (Duck-typed: only the stable settings class has `rotation_fill_dark`.
+            # Importing the rewrite transform pulls in the image_tools package,
+            # which imports Qt - acceptable here, but not worth doing for the
+            # stable path.)
+            if not hasattr(spec.preprocessing, "rotation_fill_dark"):
+                from lspr_imaging_app.image_tools.geometry.transform import apply_spatial_preprocessing_export
+            else:
+                from lspr_imaging_app.processing.preprocess import apply_spatial_preprocessing_export
             plane = np.asarray(apply_spatial_preprocessing_export(plane, spec.preprocessing), dtype=dtype)
 
         # Pad to exact shard dimensions so every tile is a full inner_chunk

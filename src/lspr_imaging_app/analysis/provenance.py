@@ -467,6 +467,11 @@ class SettingsSnapshot:
     estimate excluded, `None` when it excluded nothing. Unlike every other
     field this one is *omitted* from `as_json()` when `None` rather than
     written as `null`; see that function's docstring for why."""
+    coverage_thresholds: dict | None = None
+    """`CoverageThresholds.as_dict()` - the minimum valid-pixel fractions
+    below which a cell is NaN instead of a number made from part of its
+    aperture. A real input of the result (2026-10-03), so it is in the
+    fingerprint. Omitted from `as_json()` only when `None`."""
 
     def as_json(self) -> dict:
         payload = {
@@ -494,6 +499,8 @@ class SettingsSnapshot:
         # change cannot affect. See `background_exclusion_digest`.
         if self.background_exclusion is not None:
             payload["background_exclusion"] = self.background_exclusion
+        if self.coverage_thresholds is not None:
+            payload["coverage_thresholds"] = self.coverage_thresholds
         return payload
 
 

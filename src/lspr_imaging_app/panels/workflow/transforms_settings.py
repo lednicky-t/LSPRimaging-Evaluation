@@ -2,9 +2,9 @@
 crop / measure icons.
 
 The stable app's Transforms controls (rotate tool, reset rotation,
-rotation-fill color, crop tool, reset crop, flip H/V, measure tool -
+crop tool, reset crop, flip H/V, measure tool -
 `gui/main_window.py`'s `rotate_action`/`reset_rotation_action`/
-`rotation_fill_dark_button`/`crop_action`/`reset_crop_action`/
+`crop_action`/`reset_crop_action`/
 `flip_*_action`/`measure_action`), all eight in one row, in four groups:
 rotation | flip | crop | measure (maintainer's ordering, 2026-09-29 - flip
 moved between rotation and crop, and Measure folded back into this same
@@ -22,18 +22,9 @@ Icon choices, per the maintainer's spec (2026-09-28):
   stable app uses Qt's stock `SP_BrowserReload` icon here, which reads as
   "reload page", not "undo the rotation"; the slash is the usual
   "off/none" convention (tabler's own `*-off` icons do the same).
-- **Rotation fill**: a plain, unlabeled `QCheckBox` (changed 2026-09-30,
-  maintainer report - the icon-toggle version used the same amber `#fbbf24`
-  the Rotate tool button uses for "tool is active", so a filled amber square
-  next to an active amber rotate icon read as ambiguous - unclear whether
-  the color meant "dark fill is on" or "the rotate tool is on". A
-  checkbox's own checked state needs no color convention to read correctly
-  - same fix already applied to "Ignore ROI"/"Ignore mask" in
-  `background_removal.py` for the same reason, see that file's module
-  docstring. No visible text label - a `QCheckBox("Dark fill", ...)` read
-  clearly but pushed the row 20px past the Workflow panel's 320px width
-  budget; the tooltip carries the explanation instead, same as every other
-  button in this icon-only row.
+- **Rotation fill**: there is no such control. Pixels created by rotation
+  have no measurement behind them and are always NaN (removed 2026-10-03,
+  TASK_rotation_fill_handling); the former dark/edge-stretch checkbox is gone.
 - **Crop tool**: same vendored tabler `crop` glyph as the stable app, sky
   blue `#38bdf8` when active (the source's literal).
 - **Reset crop**: the crop glyph with the same diagonal slash as reset
@@ -49,7 +40,7 @@ Icon choices, per the maintainer's spec (2026-09-28):
   "match the stable app" default this file otherwise follows.
 
 **Every cluster is now its own captioned group**: "Rotation" (rotate tool +
-reset + fill checkbox - "3 rotation icons"), "Flip" (H + V), "Crop" (crop
+reset - "2 rotation icons"), "Flip" (H + V), "Crop" (crop
 tool + reset - "2 crop icons"), "Calibrate" (Measure). Measure was split
 out first (2026-10-02, maintainer request: "first free icons be Rotate,
 then Flip, and Crop, last icon is in Calibrate section" - Rotate/Flip/Crop
@@ -94,7 +85,7 @@ switching one on switches the other off, and the buttons re-sync when the
 active tool changes from elsewhere (e.g. a dataset being closed). Both tools
 are real: rotate (`panels/image/rotate_line_tool.py`) and, since 2026-09-29,
 crop (`panels/image/crop_tool.py` - a click-drag rectangle, not the old
-app's `pg.RectROI`). Reset rotation, fill, reset crop and flip are real too -
+app's `pg.RectROI`). Reset rotation, reset crop and flip are real too -
 they call `GeometryModule` directly.
 """
 
@@ -105,7 +96,7 @@ import logging
 from PyQt6.QtCore import QByteArray, QRectF, QSize, Qt
 from PyQt6.QtGui import QIcon, QPainter, QPixmap
 from PyQt6.QtSvg import QSvgRenderer
-from PyQt6.QtWidgets import QCheckBox, QHBoxLayout, QToolButton, QWidget
+from PyQt6.QtWidgets import QHBoxLayout, QToolButton, QWidget
 
 from lspr_ui import get_active_theme, load_tabler_icon, tabler_icon_svg, transparent_icon_button_stylesheet
 
@@ -217,7 +208,7 @@ def _cluster(parent: QWidget, *widgets: QWidget) -> QWidget:
 
 
 class TransformsSection(QWidget):
-    """Rotate/crop/measure tool toggles, reset rotation/crop, rotation fill, flip H/V."""
+    """Rotate/crop/measure tool toggles, reset rotation/crop, flip H/V."""
 
     def __init__(self, geometry: GeometryModule, active_tool: ActiveToolModule, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -233,20 +224,6 @@ class TransformsSection(QWidget):
         self._reset_button = _icon_button(self, checkable=False)
         self._reset_button.setToolTip("Reset image rotation to 0 degrees.")
         self._reset_button.clicked.connect(self._on_reset_clicked)
-
-        # A plain checkbox, not an icon toggle (2026-09-30, maintainer
-        # report - see module docstring's "Rotation fill" entry for why the
-        # old amber-square icon was ambiguous). No text label - a first pass
-        # with `QCheckBox("Dark fill", ...)` read clearly but pushed this
-        # row's `minimumSizeHint()` 20px past the Workflow panel's 320px
-        # width budget (`test_lspri_workflow_panel_width_budget.py`); the
-        # tooltip carries the same explanation every other button in this
-        # icon-only row already relies on instead. `clicked`, not `toggled` -
-        # same reasoning as the tool buttons below: `_refresh_from_settings`
-        # calls `setChecked()` on session restore/undo, which must not
-        # re-trigger `_on_fill_clicked`.
-        self._fill_checkbox = QCheckBox(self)
-        self._fill_checkbox.clicked.connect(self._on_fill_clicked)
 
         self._crop_button = _icon_button(self, checkable=True)
         self._crop_button.setToolTip("Crop tool. Drag a box on the image to crop it.")
@@ -279,7 +256,7 @@ class TransformsSection(QWidget):
         # plain row before handing it to `labeled_icon_group`, since that
         # takes one content widget, not several.
         rotation_group, self._rotation_label = labeled_icon_group(
-            self, _cluster(self, self._rotate_button, self._reset_button, self._fill_checkbox), "Rotation"
+            self, _cluster(self, self._rotate_button, self._reset_button), "Rotation"
         )
         flip_group, self._flip_label = labeled_icon_group(
             self, _cluster(self, self._flip_h_button, self._flip_v_button), "Flip"
@@ -316,9 +293,6 @@ class TransformsSection(QWidget):
     def _on_reset_clicked(self) -> None:
         self._geometry_module.set_rotation(0.0)
 
-    def _on_fill_clicked(self, checked: bool) -> None:
-        self._geometry_module.set_rotation_fill_dark(checked)
-
     def _on_crop_toggled(self, checked: bool) -> None:
         self._refresh_crop_icon()
         self._active_tool.set_active(ImageTool.CROP, checked)
@@ -353,7 +327,7 @@ class TransformsSection(QWidget):
         self._measure_button.setIcon(_measure_icon(color))
 
     def _refresh_from_settings(self, _change: object = None) -> None:
-        """Re-sync the reset/fill buttons from the module - covers undo/
+        """Re-sync the reset buttons from the module - covers undo/
         redo and session restore, not just this widget's own clicks."""
         settings = self._geometry_module.settings()
         theme = get_active_theme()
@@ -363,20 +337,6 @@ class TransformsSection(QWidget):
         at_zero = settings.rotation_angle_deg == 0.0
         self._reset_button.setEnabled(not at_zero)
         self._reset_button.setIcon(_reset_rotation_icon(theme.text_dim if at_zero else theme.text_primary))
-
-        dark = bool(settings.rotation_fill_dark)
-        self._fill_checkbox.setChecked(dark)
-        if dark:
-            tooltip = (
-                "Rotation fill: dark (0). New corner pixels created by rotation are set to 0 intensity "
-                "instead of copying the nearest edge pixel. Uncheck for edge-stretch fill."
-            )
-        else:
-            tooltip = (
-                "Rotation fill: edge-stretch. New corner pixels created by rotation copy the nearest "
-                "edge pixel. Check for dark (0 intensity) fill."
-            )
-        self._fill_checkbox.setToolTip(tooltip)
 
         # Same idea as reset rotation: nothing to reset without a crop.
         has_crop = bool(settings.crop.enabled)

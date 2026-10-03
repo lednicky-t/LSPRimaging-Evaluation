@@ -7102,3 +7102,44 @@ finding above, no claim is made that the full combined suite is crash-free
 - only that every change in this entry is independently verified correct,
 and that this session's own two infrastructure fixes are real improvements
 either way.
+
+
+---
+
+## 2026-10-03: rotation-created pixels are NaN; the fill option is gone; the ignore mask no longer edits data (TASK_rotation_fill_handling, Phases 0-4)
+
+**What changed (rewrite only; the stable app keeps its own copies untouched):**
+
+- Rotation writes `NaN` into every pixel it creates (`mode="constant", cval=nan`; integer input becomes float32 first, exact for 16-bit). No dark (0) fill, no edge-stretch. `GeometrySettings.rotation_fill_dark`, `GeometryModule.set_rotation_fill_dark`, the `rotation_fill` change reason, the Rotation-group checkbox, `rotation_fill_pixel_mask` and every `rotation_fill_mask` parameter are deleted. Validity of a pixel is `np.isfinite(image)` everywhere.
+- **Ignore mask never edits pixels.** `apply_preprocessing` no longer writes 0 under the mask (neither raw-space nor processed-space; the `mask_state` and `external_mask_processed` parameters are gone). The mask is a selection each consumer applies: background estimate (only with the exclude-mask toggle, as before), analysis (as before), detection. Consequence to know: the Image panel and the Histogram "All pixels" curve now show the real values under the mask instead of 0 (the mask has its own overlay and curve).
+- **Consumers made NaN-safe:** background flattening (`np.where` instead of `image * weights`, because `nan * 0 = nan` spread NaN over the whole image through the Gaussian; NaN stays NaN in the output); ROI detection (non-finite pixels always ignored, particles whose disc reaches NaN rejected, so the data edge is never a feature); landmark registration image (normalized convolution; feature map is 0 on and within 3 px of NaN); mask-creation tools (NaN never marked, filters normalized); histogram (finite-only counts already; now shows "N px no data, p%"); Image panel (NaN transparent, grey checker underneath; levels from finite pixels, verified with pyqtgraph 0.14; readout says "no data"; highlight overlay judged on finite pixels).
+- **Analysis (F1 fixed):** `compute_cell` takes `valid = isfinite(processed)` and intersects it with the sample and reference masks. Reductions raise on non-finite input (`require_finite`), return NaN for zero pixels, and the plane fit returns NaN below 4 pixels. Per wavelength it records `n_*_nominal/valid`, valid fractions and the lowest of 4 reference-ring sector fractions (`WavelengthCoverage`), and a flag (`insufficient_coverage`, `insufficient_pixels`). `CoverageThresholds` (**provisional**: sample 0.9, reference 0.5, sector gate off) is in the `SettingsSnapshot` fingerprint. Store schema 1.0 -> 1.1: additive `coverage` and `coverage_flags` datasets; 1.0 files read back with `coverage=None`.
+- Downstream `formula_values` already propagates NaN and `_windowed`/`statistics.py` already drop non-finite values and report `n_valid`; not changed.
+
+**Old files:** sessions containing `geometry.rotation_fill_dark` load (unknown keys are dropped by `_decode_settings`). The removed field and the new thresholds change every settings fingerprint, so stored analysis cells recompute once.
+
+**Verified:** SciPy NaN set == the old geometric fill mask exactly at 3/15/33 deg (13 914 / 63 050 / 114 732 px); OpenCV with a NaN border gives the same NaN set as SciPy, finite values within 0.04 counts. Tests: `tests/unit/test_lspri_rewrite_rotation_fill_phase0.py`, `tests/unit/test_lspri_rewrite_nan_handling.py`.
+
+**Not done / open:** Phase 5 (before/after on real data; needs the maintainer's datasets) and therefore final threshold values; Phase 6 (off-canvas / low-coverage ROI warnings); Phase 7 (image export proposal). OME-Zarr export: the rewrite's export panel passes no preprocessing, so it writes raw pixels and is unaffected; `rotation_fill_dark` was removed from its summary and metadata. The shared export worker still serves the stable app's rotation path.
+
+
+**Follow-up, same day (maintainer decisions):** (1) Coverage thresholds stay as a setting in the fingerprint but all default to 0.0, i.e. they do not decide which ROI is valid; a ROI overlapping NaN is computed from its valid pixels (like an ignore mask) and is NaN only when no valid pixel remains. Valid fractions are still stored per cell. Phase 5 (real-data comparison) and Phase 6 (ROI warnings) are dropped by the maintainer. (2) OME-Zarr export, option 1: `dataset/io.py` now takes the rewrite's `GeometrySettings` and `image_tools.geometry.transform`; with a rotation the exported array is **float32 with NaN** corners (uint16 cannot hold NaN; uint16 -> float32 is exact), without a rotation (flip/crop only) it stays uint16. The shared export worker picks the rewrite transform when the settings object has no `rotation_fill_dark` (stable app unchanged). The Export section of the Workflow panel does **not** pass geometry yet (no UI for it); only the backend is done. Test: `tests/integration/test_lspri_rewrite_ome_zarr_rotated_export.py`.
+
+
+## 2026-10-03 (later): OME-Zarr export is a plain format change plus standard metadata (no baked rotation/crop)
+
+Maintainer decision after measuring: baking rotation into the export needs float32 (NaN), about **2x** the file size (synthetic 1280x1024 planes: 10.5 MB uint16 vs ~21.5 MB float32, lz4+bitshuffle gains nothing on noisy sensor data either way). So the Export section stays a plain TIFF-stack -> OME-Zarr conversion; the earlier GeometrySettings/NaN backend in `dataset/io.py` is dormant (nothing passes geometry) but tested.
+
+Added (metadata only, all in the root `zarr.json`; editable later without touching a pixel shard - verified by hashing the shards before/after an `r+` attribute edit):
+- Typed axes: `t` = time (cube index), `wavelength` = channel, `y`/`x` = space with `micrometer` unit when a pixel size is known. Our reader never used axis names (it uses the `lspr` block and the array shape).
+- `omero.channels`, one per wavelength: label ("550 nm"), approximate colour (white outside 380-780 nm), display window (min/max = dtype range; start/end = 0.5-99.5 percentiles of the first cube's plane, every 4th pixel). A read failure falls back to the full range and never fails the export.
+- Pixel size (`scale` of y/x and `lspr.pixel_size_um`) whenever a calibration is on: `export_ome_zarr_dataset(..., pixel_size_um=(x, y))`, filled by the Export section from `GeometryModule` (threaded through `WorkflowPanel(geometry=...)`). Rotation/flip/crop do not change the scale, so it is valid for raw pixels.
+- Pure builders in `dataset/ome_metadata.py`; tests `tests/unit/test_lspri_rewrite_ome_metadata.py`, `tests/integration/test_lspri_rewrite_ome_zarr_export_metadata.py`.
+
+Not done (discussed, deferred): processing parameters / ignore mask as provenance inside the zarr, per-image acquisition arrays mapped to OME time fields.
+
+
+**Correction, same day (maintainer):** the first OME-Zarr axis is `t` (type `time`, unit second) **only when every exported cube has an acquisition time and the cubes are evenly spaced** (all gaps within 5% of the mean; the axis scale is the mean gap). Otherwise it is an untyped `cube_index` axis (no time claimed). Exact per-cube start times (seconds from the first cube; a cube's time = its earliest frame) and the origin (unix ms) are written to the `lspr` block whenever they exist (`cube_start_times_s`, `cube_time_origin_unix_ms`), also for irregular runs, because an NGFF time axis can only describe a regular grid.
+
+
+**Second correction, same day (maintainer, supersedes the previous one):** no OME-Zarr `time` axis at all. A cube is acquired wavelength by wavelength, so time belongs to each (cube, wavelength) plane; even an irregular time axis gives every plane in a cube the same time, and an average step in `scale` looks like physics but is wrong for each plane that deviates. The first axis is an untyped `cube_index` with scale 1 (and `wavelength` is the `channel` axis). Ground truth is a small float64 array `plane_times_s` of shape (cube, wavelength) next to the image in the same group (seconds from the earliest plane; NaN where a plane has no recorded time; no array when the dataset has no timing), documented in `lspr.plane_times` (`array`, `unit`, `axes`, `origin_unix_ms`, `missing`). The 5% regularity rule and `cube_start_times_s` were removed. Analysis note: kinetics/time-series plots should use these real per-plane times, not the cube index. Not done: OME-XML `Plane/DeltaT/ExposureTime` (`OME/METADATA.ome.xml`, readable by Bio-Formats/Fiji) and the NGFF 0.6 coordinate-transforms form - both can be added on top later; `plane_times_s` stays the source of truth.

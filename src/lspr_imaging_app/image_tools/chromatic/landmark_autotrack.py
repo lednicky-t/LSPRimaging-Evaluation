@@ -61,6 +61,19 @@ from ...roi.detection import _masked_gaussian_filter, _refine_roi_center, detect
 from ...roi.model import AreaRoi, AreaRoiDetectionSettings
 
 
+def _normalized_gaussian(image: np.ndarray, valid: np.ndarray, sigma: float) -> np.ndarray:
+    """Gaussian smoothing that uses valid pixels only (normalized
+    convolution): invalid pixels carry no weight and NaN cannot spread.
+    Pixels with no valid neighbourhood come out NaN, never 0."""
+    values = np.where(valid, image, 0.0).astype(np.float32, copy=False)
+    weights = valid.astype(np.float32)
+    numerator = ndimage.gaussian_filter(values, sigma=sigma, mode="nearest")
+    denominator = ndimage.gaussian_filter(weights, sigma=sigma, mode="nearest")
+    out = np.full(image.shape, np.nan, dtype=np.float32)
+    np.divide(numerator, denominator, out=out, where=denominator > 1e-3)
+    return out
+
+
 def prepare_registration_image(image: np.ndarray) -> np.ndarray:
     """Turn a raw wavelength image into a registration-friendly feature map.
 
@@ -69,23 +82,43 @@ def prepare_registration_image(image: np.ndarray) -> np.ndarray:
     gradient magnitude so registration matches on *edges/texture* rather than
     absolute intensity -- intensity itself varies a lot between wavelengths
     even at the same physical spot, but edge structure doesn't.
+
+    Pixels without a value (NaN, e.g. rotation corners) are never used: the
+    filters are normalized over valid pixels, and the feature map is
+    **zero (neutral, "no feature") on invalid pixels and within a few pixels
+    of them**, so the data edge itself is never seen as an edge. The map is
+    a derived feature map for matching, not measurement data.
     """
     image_f32 = image.astype(np.float32, copy=False)
-    smooth = ndimage.gaussian_filter(image_f32, sigma=1.2, mode="nearest")
-    background = ndimage.gaussian_filter(image_f32, sigma=18.0, mode="nearest")
+    valid = np.isfinite(image_f32)
+    if not valid.any():
+        return np.zeros(image_f32.shape, dtype=np.float32)
+    smooth = _normalized_gaussian(image_f32, valid, 1.2)
+    background = _normalized_gaussian(image_f32, valid, 18.0)
     band = smooth - background
-    band -= float(np.median(band))
-    scale = float(np.percentile(np.abs(band), 95.0))
+    # Normalized convolution extrapolates past the data edge; the band is
+    # only meaningful where the image itself had a value.
+    band_valid = valid & np.isfinite(band)
+    if not band_valid.any():
+        return np.zeros(image_f32.shape, dtype=np.float32)
+    band -= float(np.median(band[band_valid]))
+    scale = float(np.percentile(np.abs(band[band_valid]), 95.0))
     if scale > 1e-6:
         band /= scale
+    band = np.where(band_valid, band, 0.0).astype(np.float32, copy=False)
     gx = ndimage.sobel(band, axis=1, mode="nearest")
     gy = ndimage.sobel(band, axis=0, mode="nearest")
     gradient = np.hypot(gx, gy)
-    gradient -= float(np.mean(gradient))
-    gradient_scale = float(np.std(gradient))
+    # The Sobel footprint and the Gaussians reach a few pixels past the data
+    # edge: blank that margin so the edge is not a feature.
+    usable = ~ndimage.binary_dilation(~band_valid, iterations=3) if not band_valid.all() else band_valid
+    if not usable.any():
+        return np.zeros(image_f32.shape, dtype=np.float32)
+    gradient -= float(np.mean(gradient[usable]))
+    gradient_scale = float(np.std(gradient[usable]))
     if gradient_scale > 1e-6:
         gradient /= gradient_scale
-    return gradient.astype(np.float32, copy=False)
+    return np.where(usable, gradient, 0.0).astype(np.float32, copy=False)
 
 
 def detect_regional_landmarks(

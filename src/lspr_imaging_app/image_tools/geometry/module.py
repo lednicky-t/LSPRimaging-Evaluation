@@ -168,28 +168,6 @@ class GeometryModule(QObject):
         apply()
         undo_manager.push(FunctionCommand("Adjust rotation", undo_fn=revert, redo_fn=apply))
 
-    @instrumented("GeometryModule.set_rotation_fill_dark")
-    def set_rotation_fill_dark(self, dark: bool) -> None:
-        """True = new corner pixels created by rotation are filled with 0
-        intensity ("not real data"); False = edge-stretch (copy the
-        nearest source pixel) - see `transform.py`'s
-        `apply_spatial_preprocessing` docstring for why this matters."""
-        dark = bool(dark)
-        if dark == self._settings.rotation_fill_dark:
-            return
-        old = self._settings.rotation_fill_dark
-
-        def apply() -> None:
-            self._settings.rotation_fill_dark = dark
-            self.geometry_changed.emit(GeometryComputationalChange(reason="rotation_fill"))
-
-        def revert() -> None:
-            self._settings.rotation_fill_dark = old
-            self.geometry_changed.emit(GeometryComputationalChange(reason="rotation_fill"))
-
-        apply()
-        label = "Rotation fill set to dark (0)" if dark else "Rotation fill set to edge-stretch"
-        undo_manager.push(FunctionCommand(label, undo_fn=revert, redo_fn=apply))
 
     @instrumented("GeometryModule.set_flip")
     def set_flip(self, horizontal: bool, vertical: bool) -> None:

@@ -84,6 +84,7 @@ from ...dataset.io import (
     sanitize_ome_zarr_export_name,
 )
 from ...dataset.model import ImageDataset
+from ...image_tools import GeometryModule
 from ..dock_container import _render_tabler_icon
 from .eliding_label import ElidingLabel
 from .form_rows import stacked_field
@@ -97,9 +98,14 @@ class DatasetExportSection(QWidget):
     """Chunk size/Shard/estimates/Compression/Skip-excluded settings, then
     an Export button underneath all of them."""
 
-    def __init__(self, dataset: DatasetModule, parent: QWidget | None = None) -> None:
+    def __init__(
+        self, dataset: DatasetModule, parent: QWidget | None = None, geometry: GeometryModule | None = None
+    ) -> None:
         super().__init__(parent)
         self._dataset_module = dataset
+        # Read only for the calibration (um/px) written into the export's
+        # metadata; the export never applies rotation/flip/crop to the pixels.
+        self._geometry = geometry
         # Probed once per dataset load (_on_dataset_loaded) from one real
         # plane, not re-probed on every chunk-size edit - see that
         # method's own comment.
@@ -297,12 +303,21 @@ class DatasetExportSection(QWidget):
                 compression_enabled=self._compression_check.isChecked(),
                 shard_mode=self._shard_combo.currentData(),
                 skip_excluded=self._skip_excluded_check.isChecked(),
+                pixel_size_um=self._calibrated_pixel_size_um(),
             )
         except RuntimeError as exc:
             self._status_label.setText(str(exc))
             return
         self._set_exporting(True)
         self._status_label.setText("Starting export...")
+
+    def _calibrated_pixel_size_um(self) -> tuple[float, float] | None:
+        """(x, y) um/px when a calibration is switched on, else None. Valid for
+        the raw pixels: rotation, flip and crop never change the scale."""
+        if self._geometry is None or not self._geometry.can_display_micrometers():
+            return None
+        settings = self._geometry.settings()
+        return float(settings.microns_per_pixel_x), float(settings.microns_per_pixel_y)
 
     def _build_export_folder_name(self, home: Path | None) -> str:
         default_name = home.name if home is not None else "export"

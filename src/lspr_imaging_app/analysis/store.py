@@ -43,10 +43,37 @@ import numpy as np
 
 from ..version_rewrite import APP_VERSION, REWRITE_APP_NAME
 from .provenance import ProvenanceRecord
-from .tasks import CellResult
+from .tasks import CellResult, WavelengthCoverage
 
 STORE_SCHEMA_NAME = "lspri_rewrite_analysis_store"
-STORE_SCHEMA_VERSION = "1.0"
+STORE_SCHEMA_VERSION = "1.1"  # 1.1 (2026-10-03): + per-cell coverage/flags datasets; 1.0 files read fine (coverage = None)
+
+
+_COVERAGE_COLUMNS = [
+    "n_sample_nominal", "n_sample_valid", "sample_valid_fraction",
+    "n_reference_nominal", "n_reference_valid", "reference_valid_fraction",
+    "reference_min_sector_fraction",
+]
+
+
+def _coverage_row(coverage: WavelengthCoverage) -> list[float]:
+    return [float(getattr(coverage, name)) for name in _COVERAGE_COLUMNS]
+
+
+def _read_coverage(group: h5py.Group) -> tuple[WavelengthCoverage, ...] | None:
+    """`None` for a cell written before coverage was recorded (store 1.0)."""
+    if "coverage" not in group or "coverage_flags" not in group:
+        return None
+    rows = group["coverage"][()]
+    flags = [v.decode("utf-8") if isinstance(v, bytes) else str(v) for v in group["coverage_flags"][()]]
+    return tuple(
+        WavelengthCoverage(
+            n_sample_nominal=int(row[0]), n_sample_valid=int(row[1]), sample_valid_fraction=float(row[2]),
+            n_reference_nominal=int(row[3]), n_reference_valid=int(row[4]), reference_valid_fraction=float(row[5]),
+            reference_min_sector_fraction=float(row[6]), flag=flag,
+        )
+        for row, flag in zip(rows, flags)
+    )
 
 
 def _cell_group_path(roi_id: int, cube_index: int) -> str:
@@ -83,6 +110,19 @@ def write_cell(h5_path: Path, roi_id: int, cube_index: int, result: CellResult) 
         group.create_dataset("wavelengths_nm", data=np.asarray(result.wavelengths_nm, dtype=np.float64))
         group.create_dataset("sample_values", data=np.asarray(result.sample_values, dtype=np.float64))
         group.create_dataset("reference_values", data=np.asarray(result.reference_values, dtype=np.float64))
+        if result.coverage is not None:
+            # One row per wavelength: n_sample_nominal, n_sample_valid,
+            # sample_valid_fraction, n_reference_nominal, n_reference_valid,
+            # reference_valid_fraction, reference_min_sector_fraction.
+            group.create_dataset(
+                "coverage",
+                data=np.asarray([_coverage_row(c) for c in result.coverage], dtype=np.float64).reshape(-1, len(_COVERAGE_COLUMNS)),
+            )
+            group["coverage"].attrs["columns"] = json.dumps(_COVERAGE_COLUMNS)
+            group.create_dataset(
+                "coverage_flags",
+                data=np.asarray([c.flag for c in result.coverage], dtype=h5py.string_dtype(encoding="utf-8")),
+            )
         group.attrs["roi_geometry_json"] = json.dumps(result.provenance.roi_geometry)
         group.attrs["reduction_method"] = result.provenance.reduction_method
         group.attrs["per_wavelength_settings_json"] = json.dumps(list(result.provenance.per_wavelength_settings))
@@ -123,5 +163,6 @@ def read_all_cells(h5_path: Path) -> dict[tuple[int, int], CellResult]:
                     sample_values=tuple(float(v) for v in group["sample_values"][()]),
                     reference_values=tuple(float(v) for v in group["reference_values"][()]),
                     provenance=provenance,
+                    coverage=_read_coverage(group),
                 )
     return results

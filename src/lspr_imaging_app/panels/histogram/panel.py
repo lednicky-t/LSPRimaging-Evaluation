@@ -176,6 +176,7 @@ class HistogramPanel(QWidget):
         image = self._image
         finite = np.isfinite(image)
         total_pixels = int(np.count_nonzero(finite))
+        self._plot.set_excluded_text(compute.excluded_pixel_text(image))
         edges = compute.histogram_edges(self._bin_width)
         self._ensure_highlight_range_seeded(image[finite])
 

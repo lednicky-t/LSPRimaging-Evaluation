@@ -46,9 +46,8 @@ logger = logging.getLogger(__name__)
 # The only `GeometryComputationalChange.reason` values that actually move a
 # pixel's meaning (see that dataclass's own docstring for the full list).
 # "image_tools_enabled" toggles whether geometry is applied at all, without
-# changing any of rotation_angle_deg/flip_*/crop; "rotation_fill" only
-# changes what color a synthesized corner pixel gets. Neither moves an
-# existing ROI. "session_restored" is excluded separately (see
+# changing any of rotation_angle_deg/flip_*/crop, so it moves no existing
+# ROI. "session_restored" is excluded separately (see
 # `_on_geometry_changed`) - it is not one of the reasons a live edit uses,
 # but `GeometryModule.restore_settings` does emit it.
 _REMAPPED_REASONS = frozenset({"rotation", "flip", "crop"})

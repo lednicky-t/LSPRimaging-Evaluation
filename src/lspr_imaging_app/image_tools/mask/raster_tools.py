@@ -60,7 +60,22 @@ def create_histogram_mask(
         mask &= image >= min_value
     if max_value is not None:
         mask &= image <= max_value
-    return ~mask  # Invert so True means masked (excluded)
+    # True means masked (excluded). A pixel without a value (NaN) is not
+    # outside any range - it has no value to judge - so it is never marked.
+    return ~mask & np.isfinite(image)
+
+
+def _normalized_gaussian(image: np.ndarray, valid: np.ndarray, sigma: float) -> np.ndarray:
+    """Gaussian smoothing over valid pixels only (normalized convolution), so
+    a NaN pixel neither spreads nor pulls on its neighbours. Pixels with no
+    valid neighbourhood come out NaN. (Kept local: Mask and Chromatic are
+    independent modules, see CLAUDE.md.)"""
+    values = np.where(valid, image, 0.0).astype(np.float32, copy=False)
+    numerator = ndimage.gaussian_filter(values, sigma=sigma, mode="nearest")
+    denominator = ndimage.gaussian_filter(valid.astype(np.float32), sigma=sigma, mode="nearest")
+    out = np.full(image.shape, np.nan, dtype=np.float32)
+    np.divide(numerator, denominator, out=out, where=denominator > 1e-3)
+    return out
 
 
 def create_relative_contrast_mask(
@@ -75,11 +90,14 @@ def create_relative_contrast_mask(
     image's overall intensity level, unlike a fixed absolute threshold."""
     sigma = max(float(sigma_px), 1.0)
     image_f32 = image.astype(np.float32, copy=False)
-    profile = ndimage.gaussian_filter(image_f32, sigma=sigma, mode="nearest")
+    valid = np.isfinite(image_f32)
+    profile = _normalized_gaussian(image_f32, valid, sigma)
     fraction = max(float(threshold_fraction), 0.0)
     safe_profile = np.maximum(profile, 1e-6)
     relative_delta = (image_f32 - safe_profile) / safe_profile
-    return np.abs(relative_delta) >= fraction
+    # NaN compares False, so pixels without a value are never marked.
+    with np.errstate(invalid="ignore"):
+        return np.abs(relative_delta) >= fraction
 
 
 def create_local_contrast_mask(
@@ -94,13 +112,15 @@ def create_local_contrast_mask(
     background than `create_relative_contrast_mask`'s plain ratio."""
     sigma = max(float(sigma_px), 1.0)
     image_f32 = image.astype(np.float32, copy=False)
-    local_mean = ndimage.gaussian_filter(image_f32, sigma=sigma, mode="nearest")
-    local_sq_mean = ndimage.gaussian_filter(image_f32 * image_f32, sigma=sigma, mode="nearest")
+    valid = np.isfinite(image_f32)
+    local_mean = _normalized_gaussian(image_f32, valid, sigma)
+    local_sq_mean = _normalized_gaussian(image_f32 * image_f32, valid, sigma)
     local_var = np.maximum(local_sq_mean - local_mean * local_mean, 0.0)
     local_std = np.sqrt(local_var)
     threshold = max(float(z_threshold), 0.1)
-    z_score = np.abs(image_f32 - local_mean) / np.maximum(local_std, 1e-6)
-    return z_score >= threshold
+    with np.errstate(invalid="ignore"):
+        z_score = np.abs(image_f32 - local_mean) / np.maximum(local_std, 1e-6)
+        return z_score >= threshold
 
 
 def apply_morphology_to_mask(mask: np.ndarray, operation: str, radius_px: int) -> np.ndarray:
