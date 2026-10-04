@@ -63,6 +63,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 
 from PyQt6.QtCore import Qt, pyqtSignal
+from PyQt6.QtGui import QColor
 from PyQt6.QtWidgets import (
     QButtonGroup,
     QFrame,
@@ -114,7 +115,25 @@ def _category_placeholder(name: str) -> QWidget:
     return label
 
 
-def _tab_button_stylesheet(theme: GuiTheme) -> str:
+def _tab_button_stylesheet(theme: GuiTheme, applied: bool = False) -> str:
+    if applied:
+        # A tab whose feature is currently *applied* (e.g. the chromatic
+        # correction is on): a green fill, visible whether or not the tab is
+        # open (2026-10-04, maintainer request).
+        green = QColor(theme.accent_green)
+        fill = f"rgba({green.red()}, {green.green()}, {green.blue()}, 0.30)"
+        return f"""
+        QToolButton {{
+            color: {theme.text_primary};
+            background: {fill};
+            border: none;
+            border-bottom: 2px solid {theme.accent_green};
+            padding: 2px 8px 0px 8px;
+            font-size: {_TAB_FONT_SIZE_PX}px;
+        }}
+        QToolButton:hover {{ background: rgba({green.red()}, {green.green()}, {green.blue()}, 0.42); }}
+        QToolButton:checked {{ background: rgba({green.red()}, {green.green()}, {green.blue()}, 0.42); }}
+    """
     return f"""
         QToolButton {{
             color: {theme.text_muted};
@@ -155,6 +174,9 @@ class ImageToolRibbon(QWidget):
     ) -> None:
         super().__init__(parent)
         self._pinned_separator: QFrame | None = None
+        self._applied: set[str] = set()
+        self._tooltips: dict[str, str] = {}
+        self._theme = get_active_theme()
         if not categories:
             raise ValueError("ImageToolRibbon needs at least one category")
         self.setObjectName("imageToolRibbon")
@@ -212,6 +234,30 @@ class ImageToolRibbon(QWidget):
 
         self.refresh_theme(get_active_theme())
 
+    def set_tab_tooltip(self, label: str, text: str) -> None:
+        """Full-text tooltip for a tab whose label is kept short."""
+        self._tooltips[label] = text
+        self._refresh_tab(label)
+
+    def set_tab_applied(self, label: str, applied: bool) -> None:
+        """Turn a tab green (its feature is applied) or back to normal."""
+        if applied:
+            self._applied.add(label)
+        else:
+            self._applied.discard(label)
+        self._refresh_tab(label)
+
+    def _refresh_tab(self, label: str) -> None:
+        if label not in self._category_names:
+            return
+        button = self._tab_buttons[self._category_names.index(label)]
+        applied = label in self._applied
+        button.setStyleSheet(_tab_button_stylesheet(self._theme, applied))
+        tip = self._tooltips.get(label, "")
+        if applied:
+            tip = f"{tip} - applied" if tip else f"{label} - applied"
+        button.setToolTip(tip)
+
     def current_category(self) -> str:
         return self._category_names[self._stack.currentIndex()]
 
@@ -228,8 +274,8 @@ class ImageToolRibbon(QWidget):
         whoever owns them (`panel.py` themes `CanvasToolsBar` directly
         through its own `_canvas_tools` reference); this method only
         touches the tabs themselves."""
-        stylesheet = _tab_button_stylesheet(theme)
-        for button in self._tab_buttons:
-            button.setStyleSheet(stylesheet)
+        self._theme = theme
+        for name in self._category_names:
+            self._refresh_tab(name)
         if self._pinned_separator is not None:
             self._pinned_separator.setStyleSheet(f"color: {theme.control_border};")

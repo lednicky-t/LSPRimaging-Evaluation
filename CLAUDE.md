@@ -47,6 +47,11 @@ These come from real incidents. Violating any of them will likely reproduce a bu
 - Each module is a `QObject` with typed `pyqtSignal`s. No string-keyed event bus.
 - Every change is one of two types. `CosmeticChange`: redraw only (color, label, grouping, display mode); never triggers recompute. `ComputationalChange`: the value may now be wrong (geometry, mask, chromatic, background, reduction method); the recompute planner reacts to it.
 - Public mutating methods use the shared `@instrumented` helper (timing and DEBUG logging to the session log).
+- **Heavy work reports progress and can be cancelled.** Anything that may take more than ~1 s on realistic data (reading cubes, detection, tracking, fitting, analysis, export) must:
+  - be a pure function (no Qt) taking `progress: Callable[[float, str], None] | None` (overall fraction 0..1 plus a short message) and `cancelled: Callable[[], bool] | None`; check cancellation at every progress call and stop with a `Cancelled` exception;
+  - report per unit of work (image, step, ROI), never per pixel, and split the 0..1 range into stages weighted by *measured* stage times (reference implementation: `tools/chromatic_landmark_lab.py`, `StageProgress`);
+  - be wrapped by its owning module, which re-emits progress as a typed signal; panels only display it (progress bar or busy indicator, plus a Cancel button) and never compute.
+  - Target shape for the app-wide loading indicator: one `task_progress(task_id, label, fraction, message)` signal, so a single indicator can show every running task. `analysis_progress(float)` and `export_progress(int, str)` are older ad-hoc shapes; migrate them when touched. No indicator or shared helper exists yet, so create it together with the first feature that needs it (Chromatic).
 - Each display panel has its own ~100 ms redraw-coalescing timer. Reacting to every event immediately is not the same as reacting promptly.
 
 ## Analysis rules

@@ -41,6 +41,8 @@ from .analysis.provenance import FrameNamingScheme
 from .dataset import DatasetModule
 from .gui.app_theme import LSPRI_BRIGHT_THEME, LSPRI_DARK_THEME, apply_app_theme
 from .gui.windows_titlebar import apply_windows_titlebar_color
+from .image_tools.chromatic.auto_task import ChromaticAutoDetect
+from .panels.image.chromatic_tab import ChromaticUiValues
 from .image_tools import (
     ActiveToolModule,
     BackgroundModule,
@@ -633,7 +635,28 @@ def build_main_window(
         highlight_range,
         mask_scope=mask_scope,
         area_selection=area_selection,
+        chromatic_auto=ChromaticAutoDetect(chromatic),
+        initial_chromatic_view=(settings.chromatic_show_landmarks, settings.chromatic_landmarks_all_wavelengths),
+        initial_chromatic_values=ChromaticUiValues(
+            landmark_count=settings.chromatic_landmark_count,
+            stride=settings.chromatic_stride,
+            border_percent=settings.chromatic_border_percent,
+            max_step_px=settings.chromatic_max_step_px,
+            feature_diameter_px=settings.chromatic_feature_diameter_px,
+        ),
         initial_view_range=initial_view_range,
+    )
+    image_panel.chromatic_settings_applied.connect(
+        lambda values: _persist(
+            chromatic_landmark_count=values.landmark_count,
+            chromatic_stride=values.stride,
+            chromatic_border_percent=values.border_percent,
+            chromatic_max_step_px=values.max_step_px,
+            chromatic_feature_diameter_px=values.feature_diameter_px,
+        )
+    )
+    image_panel.chromatic_view_changed.connect(
+        lambda show, every: _persist(chromatic_show_landmarks=bool(show), chromatic_landmarks_all_wavelengths=bool(every))
     )
     image_panel.view_range_changed.connect(
         lambda x_min, x_max, y_min, y_max: _persist(

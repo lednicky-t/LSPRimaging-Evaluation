@@ -66,6 +66,13 @@ module was explicitly built matching the *ungated* one. Whether
 question for whoever wires up a caller that needs "no correction, ever,
 while the toggle is off" - not decided here.
 
+**Resolved 2026-10-04:** the Chromatic Corrections tab added an "Apply
+correction" switch (`set_correction_enabled`), so `affine_for()` (and
+`affine_between()`/`warp_mask()`, which use it) now return the identity
+while the correction is off. `fitted_affine_for()` is the ungated query, for
+displaying the fit. A successful automatic run (`apply_automatic_result`)
+turns the correction on.
+
 **Landmark commands built 2026-09-21** - `add_landmark()`/
 `remove_landmark()`/`clear_landmarks()` replace the `add_landmark` scaffold
 stub, ported from `gui/chromatic_controller.py`'s `upsert_current_landmark`/
@@ -180,10 +187,22 @@ class ChromaticModule(QObject):
     def affine_for(self, image_key: tuple[int, float]) -> np.ndarray:
         """Return ``image_key``'s affine matrix, or the identity matrix if
         no model has been fitted for it yet - e.g. the reference wavelength,
-        which by definition needs no correction. Doesn't gate on
-        ``settings().chromatic_correction_enabled`` - see module docstring
-        for why that's a deliberate, still-open decision, not an
-        oversight."""
+        which by definition needs no correction - **or if the correction is
+        switched off** (``settings().chromatic_correction_enabled`` False).
+        Gated since 2026-10-04, when the Chromatic Corrections tab added the
+        "Apply correction" toggle: the open question in the module docstring
+        is resolved in favour of the gated behaviour, so the toggle really
+        turns the correction off for every consumer (ROI display, analysis,
+        masks) at once. ``affine_between`` inherits it."""
+        if not self._settings.chromatic_correction_enabled:
+            return affine.identity_affine_matrix()
+        return self.fitted_affine_for(image_key)
+
+    def fitted_affine_for(self, image_key: tuple[int, float]) -> np.ndarray:
+        """The fitted model's matrix whether or not the correction is
+        switched on (identity if none was fitted). For display of the fit
+        itself (landmark overlay); anything that *applies* the correction
+        must use `affine_for`."""
         cube_index, wavelength_nm = int(image_key[0]), float(image_key[1])
         model = self._models.get((cube_index, wavelength_nm))
         if model is None:
@@ -349,6 +368,102 @@ class ChromaticModule(QObject):
 
         apply()
         undo_manager.push(FunctionCommand("Chromatic landmarks", undo_fn=revert, redo_fn=apply))
+
+    @instrumented("ChromaticModule.replace_landmarks")
+    def replace_landmarks(self, observations: list[ChromaticLandmarkObservation]) -> None:
+        """Replace the whole landmark set in one step (automatic detection
+        produces hundreds of observations at once; `add_landmark` per point
+        would be hundreds of undo entries and signals). Clears every fitted
+        model and disables the correction, like every landmark edit. One
+        undo entry ("Chromatic landmarks"), one signal."""
+        new_landmarks = {
+            (int(o.landmark_id), int(o.spectral_cube_index), float(o.wavelength_nm)): replace(
+                o,
+                landmark_id=int(o.landmark_id),
+                spectral_cube_index=int(o.spectral_cube_index),
+                wavelength_nm=float(o.wavelength_nm),
+            )
+            for o in observations
+        }
+        old_landmarks = dict(self._landmarks)
+        old_models, old_correction_enabled = self._model_snapshot()
+
+        def apply() -> None:
+            self._landmarks = dict(new_landmarks)
+            self._clear_models()
+            self.chromatic_model_changed.emit(ChromaticModelChange(reason="landmarks_changed"))
+
+        def revert() -> None:
+            self._landmarks = dict(old_landmarks)
+            self._restore_models(old_models, old_correction_enabled)
+            self.chromatic_model_changed.emit(ChromaticModelChange(reason="landmarks_changed"))
+
+        apply()
+        undo_manager.push(FunctionCommand("Chromatic landmarks", undo_fn=revert, redo_fn=apply))
+
+    @instrumented("ChromaticModule.set_correction_enabled")
+    def set_correction_enabled(self, enabled: bool) -> None:
+        """Turn the chromatic correction on or off (``affine_for`` and
+        everything built on it then returns the identity when off). A
+        no-op if unchanged; undo-tracked ("Chromatic correction on/off")."""
+        enabled = bool(enabled)
+        old = self._settings.chromatic_correction_enabled
+        if enabled == old:
+            return
+
+        def apply() -> None:
+            self._settings.chromatic_correction_enabled = enabled
+            self.chromatic_model_changed.emit(ChromaticModelChange(reason="correction_toggled"))
+
+        def revert() -> None:
+            self._settings.chromatic_correction_enabled = old
+            self.chromatic_model_changed.emit(ChromaticModelChange(reason="correction_toggled"))
+
+        apply()
+        undo_manager.push(FunctionCommand("Chromatic correction on/off", undo_fn=revert, redo_fn=apply))
+
+    @instrumented("ChromaticModule.apply_automatic_result")
+    def apply_automatic_result(
+        self,
+        *,
+        sample_image_count: int,
+        reference_key: tuple[int, float],
+        observations: list[ChromaticLandmarkObservation],
+        image_keys: list[tuple[int, float]],
+    ) -> None:
+        """Install an automatic detection result in one step: start a fresh
+        workflow (settings + wipe), set the landmarks, fit every model, and
+        turn the correction on. All-or-nothing: if the fit raises
+        (`ValueError`, e.g. incomplete landmarks) the previous landmarks,
+        models and settings are restored and nothing is left on the undo
+        stack. One undo entry ("Automatic chromatic correction") on success.
+
+        Takes already-resolved values like every command here; the
+        landmark ids must be `1..N` (that is what `refit` expects), present
+        at every wavelength `sample_wavelengths_for_cube` names."""
+        feature_count = len({int(o.landmark_id) for o in observations})
+        saved_settings = replace(self._settings, chromatic_grid_bounds=replace(self._settings.chromatic_grid_bounds))
+        saved_landmarks = dict(self._landmarks)
+        saved_models = dict(self._models)
+        undo_manager.begin_batch("Automatic chromatic correction")
+        try:
+            self.start_workflow(
+                sample_image_count=sample_image_count,
+                feature_count=feature_count,
+                reference_spectral_cube_index=int(reference_key[0]),
+                reference_wavelength_nm=float(reference_key[1]),
+            )
+            self.replace_landmarks(observations)
+            self.refit(image_keys, reference_key)
+            self.set_correction_enabled(True)
+        except Exception:
+            undo_manager.cancel_batch()
+            self._settings = saved_settings
+            self._landmarks = saved_landmarks
+            self._models = saved_models
+            self.chromatic_model_changed.emit(ChromaticModelChange(reason="refit"))
+            raise
+        undo_manager.end_batch()
 
     @instrumented("ChromaticModule.remove_landmark")
     def remove_landmark(self, landmark_id: int, image_key: tuple[int, float]) -> None:

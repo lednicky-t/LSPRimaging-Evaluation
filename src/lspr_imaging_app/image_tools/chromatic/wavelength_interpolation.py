@@ -55,6 +55,10 @@ def sampled_wavelengths(wavelengths_nm: list[float], sample_count: int) -> list[
     if not wavelengths_nm:
         return []
     maximum = len(wavelengths_nm)
+    if int(sample_count) >= maximum:
+        # "Every wavelength" means every wavelength: the odd-count rule below
+        # would otherwise drop one when the list length is even.
+        return [float(w) for w in wavelengths_nm]
     minimum = 1 if maximum == 1 else min(3, maximum)
     count = min(normalized_odd_count(sample_count, minimum, maximum), maximum)
     if count % 2 == 0:

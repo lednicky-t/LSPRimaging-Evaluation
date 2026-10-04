@@ -122,7 +122,11 @@ from ...selection.reference_frame_module import MODE_AUTO
 from ..cursor_overlay import CursorOverlay
 from ..ribbon_group import group_label_style, labeled_icon_group, vertical_separator
 from ..workflow.transforms_settings import TransformsSection
+from ...image_tools.chromatic.affine import identity_affine_matrix, invert_affine_matrix
+from ...image_tools.chromatic.auto_task import ChromaticAutoDetect
+from ...wavelength_color import wavelength_to_rgb
 from .area_selection_tool import AreaSelectionTool
+from .chromatic_tab import ChromaticCorrectionTab, ChromaticUiValues
 from .canvas_tools import _ICON_SIZE, CanvasToolsBar, style_bar_icon_button
 from .context_menu import show_tool_context_menu
 from .crop_size_controls import CropSizeControls
@@ -186,6 +190,7 @@ def _slider_axis_title_style(color: str) -> str:
     return f"color: {color}; font-size: 11px; font-weight: 600;"
 
 
+CHROMATIC_TAB = "Chromatic"  # ribbon tab label (full name "Chromatic Corrections" is its tooltip)
 _PREVIEW_TOOLS = frozenset({ImageTool.ROTATE, ImageTool.CROP})
 """Tools that work on the *uncropped* image: while one is active the image is
 rendered without its crop, the crop is drawn as an outline, and the ROI
@@ -265,6 +270,10 @@ class ImagePanel(QWidget):
     # Label of the ribbon tab now shown ("Image tools"/"Mask"/"Histogram"/"ROIs") -
     # lets the Histogram plot honour the area selection only while its own tab is open.
     ribbon_category_changed = pyqtSignal(str)
+    # The Chromatic tab's popover values, after a run that used them succeeded (app settings persist them).
+    chromatic_settings_applied = pyqtSignal(object)  # ChromaticUiValues
+    # The landmark overlay's two view toggles (shown, every wavelength) - remembered by the app settings.
+    chromatic_view_changed = pyqtSignal(bool, bool)
     # Intensity under the Image cursor (2026-10-03), or None once the cursor
     # is switched off / the pixel has no value. The Histogram marks it as a
     # tick on its x axis. Display only - carries no state anyone must keep.
@@ -286,6 +295,9 @@ class ImagePanel(QWidget):
         *,
         mask_scope: MaskScopeModule,
         area_selection: AreaSelectionModule | None = None,
+        chromatic_auto: ChromaticAutoDetect | None = None,
+        initial_chromatic_values: ChromaticUiValues | None = None,
+        initial_chromatic_view: tuple[bool, bool] = (True, False),
         initial_view_range: tuple[tuple[float, float], tuple[float, float]] | None = None,
     ) -> None:
         super().__init__(parent)
@@ -304,6 +316,12 @@ class ImagePanel(QWidget):
         # `app_rewrite.py` passes the one shared instance.
         self._area_selection = area_selection if area_selection is not None else AreaSelectionModule(self)
         self._chromatic = chromatic
+        # Optional like `area_selection`: tests build the panel without the app shell.
+        self._chromatic_auto = chromatic_auto if chromatic_auto is not None else ChromaticAutoDetect(chromatic, self)
+        self._initial_chromatic_values = initial_chromatic_values
+        self._initial_chromatic_view = initial_chromatic_view
+        self._landmark_overlay_visible = bool(initial_chromatic_view[0])
+        self._landmark_all_wavelengths = bool(initial_chromatic_view[1])  # False = current wavelength only
         self._background = background
         self._roi_toolbox = roi_toolbox
         self._selection = selection
@@ -362,6 +380,7 @@ class ImagePanel(QWidget):
         app = QApplication.instance()
         if app is not None:
             app.aboutToQuit.connect(self._renderer.stop)
+            app.aboutToQuit.connect(self._chromatic_auto.shutdown)
 
         self._redraw_timer = QTimer(self)
         self._redraw_timer.setSingleShot(True)
@@ -439,6 +458,17 @@ class ImagePanel(QWidget):
         self._reference_curve = self._add_curve(_DEFAULT_REFERENCE_COLOR, width=1.0)
         self._selection_curve = self._add_curve(_SELECTED_COLOR, width=2.5)
         self._chunk_grid_curve = self._add_curve(_CHUNK_GRID_COLOR, width=1.0, dashed=True)
+        # Chromatic landmark overlay (2026-10-04): crosses = *estimated* (tracked
+        # on the image) positions, dots = *fitted* positions (what the correction
+        # model says), lines connect them, each in its wavelength's own colour
+        # (`wavelength_color.py`). Symbol sizes are screen pixels; styling is
+        # set per draw (`_draw_landmarks`).
+        self._landmark_line_item = pg.PlotDataItem(connect="finite")
+        self._plot.addItem(self._landmark_line_item)
+        self._landmark_observed_item = pg.ScatterPlotItem(pxMode=True)
+        self._landmark_fitted_item = pg.ScatterPlotItem(pxMode=True)
+        self._plot.addItem(self._landmark_observed_item)
+        self._plot.addItem(self._landmark_fitted_item)
         # Drawn only while a preview tool is active (see `_draw_overlays`).
         self._crop_outline_curve = self._add_curve(_CROP_OUTLINE_COLOR, width=1.5, dashed=True)
 
@@ -676,17 +706,37 @@ class ImagePanel(QWidget):
         general_row_layout.setContentsMargins(0, 0, 0, 0)
         general_row_layout.setSpacing(2)
         self._area_picker = AreaSelectionPicker(self._area_selection, self._active_tool, self._general_row)
+        self._chromatic_tab = ChromaticCorrectionTab(
+            self._chromatic,
+            self._chromatic_auto,
+            self._dataset,
+            self._geometry,
+            self._resolve_reference_frame,
+            self._image_aspect,
+            self,
+            initial_values=self._initial_chromatic_values,
+            initial_show_landmarks=self._initial_chromatic_view[0],
+            initial_all_wavelengths=self._initial_chromatic_view[1],
+        )
+        self._chromatic_tab.show_landmarks_changed.connect(self._on_show_landmarks_changed)
+        self._chromatic_tab.landmark_scope_changed.connect(self._on_landmark_scope_changed)
+        self._chromatic_tab.settings_applied.connect(self.chromatic_settings_applied)
         self._tool_ribbon = ImageToolRibbon(
             [
                 ("Image tools", image_tools_content),
                 ("Mask", mask_content),
                 ("Histogram", histogram_content),
                 ("ROIs", self._canvas_tools),
+                # Empty on purpose (2026-10-03): filled directly here, not in
+                # the Workflow panel (maintainer's plan for chromatic correction).
+                (CHROMATIC_TAB, self._chromatic_tab),
             ],
             self,
             pinned=self._general_row,
         )
         self._tool_ribbon.category_changed.connect(self.ribbon_category_changed)
+        # Short tab label, full name in the tooltip; the tab is green while the correction is applied.
+        self._tool_ribbon.set_tab_tooltip(CHROMATIC_TAB, "Chromatic Corrections")
         top_bar_layout.addWidget(self._tool_ribbon)
         top_bar_layout.addStretch(1)
 
@@ -935,6 +985,8 @@ class ImagePanel(QWidget):
         self._mask.cosmetic_changed.connect(self._schedule_redraw)
         self._background.background_model_changed.connect(self._schedule_redraw)
         self._chromatic.chromatic_model_changed.connect(self._schedule_redraw)
+        self._chromatic.chromatic_model_changed.connect(self._update_chromatic_tab_state)
+        self._update_chromatic_tab_state()
 
         # ROI/selection changes only move the overlay, never the pixels - but
         # they still go through the same path. Splitting "redraw overlay only"
@@ -1517,6 +1569,7 @@ class ImagePanel(QWidget):
 
     def _draw_overlays(self) -> None:
         self._draw_crop_outline()
+        self._draw_landmarks()
         if self._active_tool.active() in _PREVIEW_TOOLS:
             # ROI positions are in cropped/processed space; over the
             # uncropped preview they would be drawn in the wrong place.
@@ -1558,6 +1611,145 @@ class ImagePanel(QWidget):
         self._sample_curve.setData(sample_x, sample_y)
         self._reference_curve.setData(reference_x, reference_y)
         self._selection_curve.setData(selection_x, selection_y)
+
+    def _update_chromatic_tab_state(self, *_args: object) -> None:
+        """Green "Chromatic" tab while a fitted correction is switched on, so
+        it is visible even when another tab is open."""
+        settings = self._chromatic.settings()
+        applied = bool(settings.chromatic_correction_enabled and self._chromatic.models())
+        self._tool_ribbon.set_tab_applied(CHROMATIC_TAB, applied)
+
+    def _image_aspect(self) -> float:
+        """Width / height of the processed image, for shaping the landmark grid."""
+        if self._last_image_shape is not None:
+            height, width = self._last_image_shape
+            return float(width) / max(float(height), 1.0)
+        raw = self._dataset.raw_plane_shape()
+        return float(raw[1]) / max(float(raw[0]), 1.0) if raw else 1.5
+
+    def _on_show_landmarks_changed(self, visible: bool) -> None:
+        self._landmark_overlay_visible = bool(visible)
+        self._schedule_redraw()
+        self.chromatic_view_changed.emit(self._landmark_overlay_visible, self._landmark_all_wavelengths)
+
+    def _on_landmark_scope_changed(self, all_wavelengths: bool) -> None:
+        self._landmark_all_wavelengths = bool(all_wavelengths)
+        self._schedule_redraw()
+        self.chromatic_view_changed.emit(self._landmark_overlay_visible, self._landmark_all_wavelengths)
+
+    def _draw_landmarks(self) -> None:
+        """Chromatic landmarks (display only), each wavelength in its own colour.
+
+        Positions are in processed image space, like ROIs. *Estimated* =
+        tracked on the image, only at the wavelengths that were tracked
+        (crosses). *Fitted* = reference positions pushed through the fitted
+        model, at every wavelength (dots), whether or not the correction is
+        switched on.
+
+        Current-wavelength mode: a dot per landmark, a cross where it was
+        estimated, and a short line joining each cross to its dot (the misfit,
+        so a landmark that does not agree with the fit is plain to see).
+        All-wavelengths mode: a small dot per landmark per wavelength of the
+        reference cube joined by a line per landmark (the fitted shift path),
+        plus a cross at every estimated position.
+
+        **While the correction is switched on, every position is shown
+        corrected**: pushed through the inverse of that wavelength's model, i.e.
+        expressed in the reference frame. Each landmark's dots then fall exactly
+        on one point and its crosses scatter around that point by the fit error,
+        so the overlay is a direct check of the correction. Switched off, the
+        raw positions are shown (the chromatic shift itself)."""
+        self._landmark_observed_item.clear()
+        self._landmark_fitted_item.clear()
+        self._landmark_line_item.clear()
+        if not self._landmark_overlay_visible or self._active_tool.active() in _PREVIEW_TOOLS:
+            return
+        reference = self._chromatic.settings()
+        if reference.reference_wavelength_nm is None:
+            return
+        reference_cube = int(reference.reference_spectral_cube_index)
+        reference_marks = self._chromatic.landmarks_for_image((reference_cube, float(reference.reference_wavelength_nm)))
+        if not reference_marks:
+            return
+        base = np.array([[mark.x_px, mark.y_px] for mark in reference_marks], dtype=np.float64)
+        ids = [mark.landmark_id for mark in reference_marks]
+
+        corrected = bool(reference.chromatic_correction_enabled)
+
+        def correction_for(wavelength_nm: float) -> np.ndarray:
+            """Matrix taking this wavelength's raw positions into what is shown."""
+            if not corrected:
+                return identity_affine_matrix()
+            return invert_affine_matrix(self._chromatic.fitted_affine_for((reference_cube, float(wavelength_nm))))
+
+        def shown(points: np.ndarray, wavelength_nm: float) -> np.ndarray:
+            matrix = correction_for(wavelength_nm)
+            return points @ matrix[:, :2].T + matrix[:, 2]
+
+        def fitted_at(wavelength_nm: float) -> np.ndarray:
+            matrix = self._chromatic.fitted_affine_for((reference_cube, float(wavelength_nm)))
+            return shown(base @ matrix[:, :2].T + matrix[:, 2], wavelength_nm)
+
+        def estimated_at(wavelength_nm: float) -> dict[int, tuple[float, float]]:
+            marks = self._chromatic.landmarks_for_image((reference_cube, float(wavelength_nm)))
+            if not marks:
+                return {}
+            moved = shown(np.array([[mark.x_px, mark.y_px] for mark in marks], dtype=np.float64), wavelength_nm)
+            return {mark.landmark_id: (float(x), float(y)) for mark, (x, y) in zip(marks, moved)}
+
+        if self._landmark_all_wavelengths:
+            wavelengths = sorted(w for w in self._dataset.wavelengths_for_cube(reference_cube) if w > 0.0)
+            dot_x, dot_y, dot_brushes = [], [], []
+            cross_x, cross_y, cross_pens = [], [], []
+            path = {landmark_id: ([], []) for landmark_id in ids}
+            for wavelength in wavelengths:
+                color = QColor(*wavelength_to_rgb(wavelength))
+                estimated = estimated_at(wavelength)
+                fitted = fitted_at(wavelength)
+                for index, landmark_id in enumerate(ids):
+                    dot_x.append(fitted[index, 0])
+                    dot_y.append(fitted[index, 1])
+                    dot_brushes.append(pg.mkBrush(color))
+                    path[landmark_id][0].append(fitted[index, 0])
+                    path[landmark_id][1].append(fitted[index, 1])
+                    if landmark_id in estimated:
+                        cross_x.append(estimated[landmark_id][0])
+                        cross_y.append(estimated[landmark_id][1])
+                        cross_pens.append(pg.mkPen(color, width=1.5))
+            line_x, line_y = [], []
+            for xs, ys in path.values():
+                line_x += xs + [np.nan]
+                line_y += ys + [np.nan]
+            self._landmark_line_item.setData(line_x, line_y, pen=pg.mkPen(QColor(255, 255, 255, 110), width=1))
+            self._landmark_fitted_item.setData(dot_x, dot_y, symbol="o", size=5, pen=pg.mkPen(None), brush=dot_brushes)
+            if cross_x:
+                self._landmark_observed_item.setData(cross_x, cross_y, symbol="+", size=10, pen=cross_pens, brush=pg.mkBrush(None))
+            return
+
+        wavelength = float(self._current_wavelength())
+        color = QColor(*wavelength_to_rgb(wavelength))
+        fitted = fitted_at(wavelength)
+        self._landmark_fitted_item.setData(
+            fitted[:, 0], fitted[:, 1], symbol="o", size=7, pen=pg.mkPen(None), brush=pg.mkBrush(color)
+        )
+        if int(self._current_cube()) != reference_cube:
+            return
+        estimated = estimated_at(wavelength)
+        if not estimated:
+            return
+        cross_x, cross_y, line_x, line_y = [], [], [], []
+        for index, landmark_id in enumerate(ids):
+            if landmark_id not in estimated:
+                continue
+            ex, ey = estimated[landmark_id]
+            cross_x.append(ex)
+            cross_y.append(ey)
+            line_x += [ex, fitted[index, 0], np.nan]
+            line_y += [ey, fitted[index, 1], np.nan]
+        self._landmark_line_item.setData(line_x, line_y, pen=pg.mkPen(color, width=1.5))
+        self._landmark_observed_item.setData(
+            cross_x, cross_y, symbol="+", size=14, pen=pg.mkPen(color, width=2), brush=pg.mkBrush(None)
+        )
 
     def _draw_crop_outline(self) -> None:
         """The existing crop as a dashed rectangle over the uncropped

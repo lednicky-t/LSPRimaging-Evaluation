@@ -106,6 +106,16 @@ class AppSettings:
     image_view_x_max: float | None = None
     image_view_y_min: float | None = None
     image_view_y_max: float | None = None
+    # Chromatic tab popover values, saved when a run that used them succeeded
+    # (`ChromaticUiValues`; defaults = the "Default" preset).
+    chromatic_landmark_count: int = 15
+    chromatic_stride: int = 3
+    chromatic_border_percent: float = 5.0
+    chromatic_max_step_px: float = 5.0
+    chromatic_feature_diameter_px: float | None = None
+    # Chromatic tab "View" toggles (remembered immediately, they are not run values).
+    chromatic_show_landmarks: bool = True
+    chromatic_landmarks_all_wavelengths: bool = False
 
 
 def _decode(payload: dict) -> AppSettings:
