@@ -7,7 +7,12 @@ reports progress and can be cancelled"):
 
 - `task_progress(task_id, label, fraction, message)` is the app-wide progress
   shape - one signal a future shared loading indicator can listen to for any
-  task. The Chromatic tab consumes it today.
+  task. The Chromatic tab and `panels/task_indicator.TaskIndicator` consume it.
+- `task_finished(task_id, outcome, message)` closes that shape: emitted once
+  per run, after success, failure or cancel alike (`outcome` is "completed",
+  "failed" or "cancelled"; `message` is a one-line result for the indicator
+  and the log). It is emitted just before the specific `completed`/`failed`/
+  `cancelled` signal.
 - A **plain `threading.Thread`**, never `QThreadPool`: planes are read
   through `DatasetModule.load_plane` (an OME-Zarr read) and the zarr rule
   forbids pool workers there.
@@ -64,6 +69,7 @@ class ChromaticAutoDetect(QObject):
     failed = pyqtSignal(str)  # readable message
     cancelled = pyqtSignal()
     running_changed = pyqtSignal(bool)
+    task_finished = pyqtSignal(str, str, str)  # task_id, outcome, message; once per run
 
     # Internal: thread -> GUI thread hand-off (result or error, never both).
     _finished = pyqtSignal(object, object)
@@ -163,22 +169,34 @@ class ChromaticAutoDetect(QObject):
         if thread is not None:
             thread.join(timeout=1.0)
         self.running_changed.emit(False)
+
+        def fail(message: str) -> None:
+            self.task_finished.emit(TASK_ID, "failed", message)
+            self.failed.emit(message)
+
         if isinstance(error, Cancelled):
+            self.task_finished.emit(TASK_ID, "cancelled", "")
             self.cancelled.emit()
             return
         if isinstance(error, AutoLandmarkError):
-            self.failed.emit(str(error))
+            fail(str(error))
             return
         if error is not None:
             logger.error("Automatic chromatic landmark detection crashed", exc_info=error)
-            self.failed.emit(f"Unexpected error: {error}")
+            fail(f"Unexpected error: {error}")
             return
         assert isinstance(result, AutoLandmarkResult) and pending is not None
         try:
             self._apply(result, pending)
         except ValueError as exc:
-            self.failed.emit(str(exc))
+            fail(str(exc))
             return
+        self.task_finished.emit(
+            TASK_ID,
+            "completed",
+            f"{result.kept_count}/{result.requested_count} landmarks kept, "
+            f"{len(result.wavelengths_nm)}/{pending['total_wavelengths']} wavelengths tracked",
+        )
         self.completed.emit(
             AutoDetectSummary(
                 kept_count=result.kept_count,

@@ -51,8 +51,12 @@ These come from real incidents. Violating any of them will likely reproduce a bu
   - be a pure function (no Qt) taking `progress: Callable[[float, str], None] | None` (overall fraction 0..1 plus a short message) and `cancelled: Callable[[], bool] | None`; check cancellation at every progress call and stop with a `Cancelled` exception;
   - report per unit of work (image, step, ROI), never per pixel, and split the 0..1 range into stages weighted by *measured* stage times (reference implementation: `tools/chromatic_landmark_lab.py`, `StageProgress`);
   - be wrapped by its owning module, which re-emits progress as a typed signal; panels only display it (progress bar or busy indicator, plus a Cancel button) and never compute.
-  - Target shape for the app-wide loading indicator: one `task_progress(task_id, label, fraction, message)` signal, so a single indicator can show every running task. `analysis_progress(float)` and `export_progress(int, str)` are older ad-hoc shapes; migrate them when touched. No indicator or shared helper exists yet, so create it together with the first feature that needs it (Chromatic).
+  - App-wide indicator: `panels/task_indicator.py` `TaskIndicator`, a permanent status-bar row (spinner, progress bar, start time, elapsed/ETA, Cancel; keeps the last result until dismissed; History popup; every finished run is logged). A task joins it by emitting `task_progress(task_id, label, fraction, message)` (fraction < 0 = unknown) and `task_finished(task_id, outcome, message)` (always, once per run; outcome `completed`/`failed`/`cancelled`), then three connects in `app_rewrite.py` (report, finish, cancel). Reference: `ChromaticAutoDetect`. `analysis_progress(float)` and `export_progress(int, str)` are older ad-hoc shapes; migrate them when touched.
 - Each display panel has its own ~100 ms redraw-coalescing timer. Reacting to every event immediately is not the same as reacting promptly.
+
+## Remembering UI state
+
+Every user-changeable control is remembered across restarts unless the maintainer says otherwise (stated 2026-10-05). For a checkbox, checkable button, spin box or combo box, add one line: `ui_state.bind("area/name", widget)` (`panels/ui_state.py`; the store is passed in as an optional `ui_state` argument, or `restore_ui_state(store)` on a panel). For state outside a widget use `store.get`/`store.set`. Values live in `AppSettings.ui_state`, written after a short pause. State that only means something for one dataset (highlight range, manual reference frame) is saved together with the dataset folder and restored only for that dataset. Armed canvas tools and the area-selection mode are deliberately not restored (see `docs/rewrite_build_log_2026-09.md`, 2026-10-05).
 
 ## Analysis rules
 

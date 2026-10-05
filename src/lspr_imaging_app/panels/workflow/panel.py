@@ -59,6 +59,7 @@ from ...dataset import DatasetModule
 from ...image_tools import BackgroundModule, GeometryModule
 from ...selection import ReferenceFrameModule, SelectionModule
 from ...storage.session_coordinator import SessionCoordinator
+from ..ui_state import UiStateStore
 from .background_removal import BackgroundRemovalSection
 from .collapsible_section import CollapsibleSection
 from .dataset_experimental_plan import ExperimentalPlanSection
@@ -126,6 +127,7 @@ def _build_dataset_section(
     reference_frame: ReferenceFrameModule,
     session_coordinator: SessionCoordinator,
     geometry: GeometryModule | None = None,
+    ui_state: UiStateStore | None = None,
 ) -> tuple[CollapsibleSection, list[tuple[str, CollapsibleSection]]]:
     """Ported from the source's ``dataset_section`` + its top row (folder
     field + browse/explorer icons, *outside* the nested sections) + its
@@ -171,7 +173,7 @@ def _build_dataset_section(
         parent=parent,
     )
     export_section = CollapsibleSection(
-        "Export", DatasetExportSection(dataset, parent, geometry=geometry), expanded=False, title_color=_nested_title_color(), parent=parent
+        "Export", DatasetExportSection(dataset, parent, geometry=geometry, ui_state=ui_state), expanded=False, title_color=_nested_title_color(), parent=parent
     )
     children = _nested_children(parent, experimental_plan_section, summary_section, export_section)
     subsections = [
@@ -358,13 +360,14 @@ class WorkflowPanel(QWidget):
         initial_subsections: dict[str, bool] | None = None,
         parent: QWidget | None = None,
         geometry: GeometryModule | None = None,
+        ui_state: UiStateStore | None = None,
     ) -> None:
         super().__init__(parent)
         # Order fixes the on-screen stacking order.
         built = [
             (
                 WorkflowStage.DATASET,
-                *_build_dataset_section(self, dataset, selection, reference_frame, session_coordinator, geometry),
+                *_build_dataset_section(self, dataset, selection, reference_frame, session_coordinator, geometry, ui_state),
             ),
             (
                 WorkflowStage.IMAGE_TOOLS,

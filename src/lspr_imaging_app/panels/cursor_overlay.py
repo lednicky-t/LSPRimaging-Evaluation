@@ -30,7 +30,7 @@ from __future__ import annotations
 from collections.abc import Callable
 
 import pyqtgraph as pg
-from PyQt6.QtCore import QObject, QSize, Qt
+from PyQt6.QtCore import QObject, QSize, Qt, pyqtSignal
 from PyQt6.QtGui import QColor, QIcon
 from PyQt6.QtWidgets import QToolButton, QWidget
 
@@ -41,6 +41,8 @@ _TOOLTIP = "Cursor readout under the mouse pointer. Click to show/hide."
 
 class CursorOverlay(QObject):
     """Toggleable crosshair + value readout for one pyqtgraph plot."""
+
+    toggled = pyqtSignal(bool)  # the new on/off state, after every toggle
 
     def __init__(
         self,
@@ -175,6 +177,11 @@ class CursorOverlay(QObject):
             self._show_off_icon()
         if self._on_changed is not None:
             self._on_changed()
+        self.toggled.emit(self._enabled)
+
+    def set_enabled(self, enabled: bool) -> None:
+        if bool(enabled) != self._enabled:
+            self.toggle()
 
     def _on_mouse_moved(self, event: tuple) -> None:
         if not self._enabled:

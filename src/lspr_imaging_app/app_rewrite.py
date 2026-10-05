@@ -30,9 +30,9 @@ import sys
 from collections.abc import Callable
 from pathlib import Path
 
-from PyQt6.QtCore import Qt, QByteArray
+from PyQt6.QtCore import QTimer, Qt, QByteArray
 from PyQt6.QtGui import QActionGroup
-from PyQt6.QtWidgets import QApplication, QLabel, QMainWindow, QMenu, QStatusBar, QWidget
+from PyQt6.QtWidgets import QApplication, QMainWindow, QMenu, QStatusBar
 
 from lspr_ui import app_icon, set_active_theme
 
@@ -41,7 +41,8 @@ from .analysis.provenance import FrameNamingScheme
 from .dataset import DatasetModule
 from .gui.app_theme import LSPRI_BRIGHT_THEME, LSPRI_DARK_THEME, apply_app_theme
 from .gui.windows_titlebar import apply_windows_titlebar_color
-from .image_tools.chromatic.auto_task import ChromaticAutoDetect
+from .image_tools.mask_scope import MaskScope
+from .image_tools.chromatic.auto_task import TASK_ID as CHROMATIC_TASK_ID, ChromaticAutoDetect
 from .panels.image.chromatic_tab import ChromaticUiValues
 from .image_tools import (
     ActiveToolModule,
@@ -55,11 +56,14 @@ from .panels.dock_container import PanelContainer
 from .panels.fixed_width_separator_guard import FixedWidthSeparatorGuard
 from .panels.histogram import HistogramPanel
 from .panels.image import ImagePanel
+from .panels.image.overlay_style import OverlayStyle
 from .panels.layout_presets import wire_view_menu
 from .panels.panel_visibility import ensure_floating_panels_on_screen, wire_panel_visibility_menu
 from .panels.roi_table import RoiTablePanel
 from .panels.sensorgram import SensorgramPanel
 from .panels.spectra import SpectraPanel
+from .panels.task_indicator import TaskIndicator
+from .panels.ui_state import UiStateStore
 from .panels.workflow import WorkflowPanel, WorkflowStage
 from .panels.workflow.collapsible_section import CollapsibleSection
 from .roi import RoiToolbox
@@ -108,20 +112,6 @@ logger = logging.getLogger(__name__)
 # topology a saved blob describes (including tab groups) regardless of
 # what setDockOptions currently allows *creating* interactively.
 _DOCK_LAYOUT_STATE_VERSION = 3
-
-
-def _not_functional_reminder() -> QWidget:
-    """A permanent status-bar widget, not a central banner - the window's
-    central area is dock widgets now (see ``build_main_window``), so there's
-    no fixed-position banner slot left to eat screen space. Permanent (added
-    via ``QStatusBar.addPermanentWidget``) so ``WorkflowPanel``'s transient
-    stage-status messages (left side of the bar) never cover it."""
-    label = QLabel(
-        "Scaffold preview - every panel is real code wired to real modules, "
-        "but every module method still raises NotImplementedError until it's actually built."
-    )
-    label.setStyleSheet("padding: 0 8px; font-weight: 600;")
-    return label
 
 
 def _build_menu_bar(window: QMainWindow) -> tuple[QMenu, QMenu]:
@@ -537,6 +527,9 @@ def build_main_window(
     if _app_for_theme is not None:
         apply_app_theme(_app_for_theme, theme_obj)
 
+    # Small UI choices (toggles, picks, Export options...) - panels/ui_state.py.
+    ui_state = UiStateStore(settings.ui_state, on_changed=lambda values: _persist(ui_state=values))
+
     dataset = DatasetModule()
     geometry = GeometryModule()
     # Transient UI mode (which canvas tool is on) - not undoable/persisted; see its docstring.
@@ -594,8 +587,48 @@ def build_main_window(
 
     # A manual reference frame must never silently outlive the dataset it
     # was captured against - see ReferenceFrameModule.reset's docstring.
-    dataset.dataset_loaded.connect(lambda _ds: reference_frame.reset())
-    dataset.dataset_cleared.connect(reference_frame.reset)
+    # The user's own choice is remembered per dataset (`ui_state`): put back
+    # when the *same* dataset is opened again. `_reference_guard` keeps the
+    # reset below from being saved as if the user had chosen "Auto".
+    _reference_guard = [False]
+
+    def _reset_reference_frame() -> None:
+        _reference_guard[0] = True
+        try:
+            reference_frame.reset()
+        finally:
+            _reference_guard[0] = False
+
+    def _on_dataset_loaded_reference(ds) -> None:
+        _reset_reference_frame()
+        saved = ui_state.get("reference_frame")
+        if (
+            isinstance(saved, dict)
+            and saved.get("dataset") == str(ds.home)
+            and saved.get("mode") == "manual"
+            and saved.get("cube") is not None
+            and saved.get("wavelength") is not None
+        ):
+            _reference_guard[0] = True
+            try:
+                reference_frame.set_manual_frame(int(saved["cube"]), float(saved["wavelength"]))
+            finally:
+                _reference_guard[0] = False
+
+    def _on_reference_frame_changed() -> None:
+        if _reference_guard[0] or not settings.last_dataset_folder:
+            return
+        frame = reference_frame.manual_frame()
+        ui_state.set("reference_frame", {
+            "dataset": settings.last_dataset_folder,
+            "mode": reference_frame.mode(),
+            "cube": frame[0] if frame else None,
+            "wavelength": frame[1] if frame else None,
+        })
+
+    dataset.dataset_loaded.connect(_on_dataset_loaded_reference)
+    dataset.dataset_cleared.connect(_reset_reference_frame)
+    reference_frame.reference_frame_changed.connect(_on_reference_frame_changed)
 
     # A Highlight range selected against one dataset's intensity scale is
     # meaningless for whatever gets opened next - same reasoning as the
@@ -630,12 +663,36 @@ def build_main_window(
         ((_saved_view_range[0], _saved_view_range[1]), (_saved_view_range[2], _saved_view_range[3]))
         if None not in _saved_view_range else None
     )
+    chromatic_auto = ChromaticAutoDetect(chromatic)
+
+    # Sliders (overlay opacity) and drags (highlight range) fire many times a
+    # second; the settings file is written at most once per pause instead.
+    _pending_changes: dict[str, object] = {}
+    _persist_timer = QTimer()
+    _persist_timer.setSingleShot(True)
+    _persist_timer.setInterval(400)
+
+    def _flush_pending() -> None:
+        if _pending_changes:
+            changes = dict(_pending_changes)
+            _pending_changes.clear()
+            _persist(**changes)
+
+    _persist_timer.timeout.connect(_flush_pending)
+
+    def _persist_soon(**changes: object) -> None:
+        _pending_changes.update(changes)
+        _persist_timer.start()
+
+    def _overlay_style(visible: bool, color: str | None, alpha: float, default_color: str) -> OverlayStyle:
+        return OverlayStyle(visible, color or default_color, alpha)
+
     image_panel = ImagePanel(
         dataset, geometry, mask, chromatic, background, roi_toolbox, selection, active_tool, reference_frame,
         highlight_range,
         mask_scope=mask_scope,
         area_selection=area_selection,
-        chromatic_auto=ChromaticAutoDetect(chromatic),
+        chromatic_auto=chromatic_auto,
         initial_chromatic_view=(settings.chromatic_show_landmarks, settings.chromatic_landmarks_all_wavelengths),
         initial_chromatic_values=ChromaticUiValues(
             landmark_count=settings.chromatic_landmark_count,
@@ -645,7 +702,50 @@ def build_main_window(
             feature_diameter_px=settings.chromatic_feature_diameter_px,
         ),
         initial_view_range=initial_view_range,
+        initial_mask_overlay=_overlay_style(
+            settings.mask_overlay_visible, settings.mask_overlay_color, settings.mask_overlay_alpha, theme_obj.mask_color
+        ),
+        initial_highlight_overlay=_overlay_style(
+            settings.highlight_overlay_visible, settings.highlight_overlay_color,
+            settings.highlight_overlay_alpha, theme_obj.highlight_color,
+        ),
+        initial_ribbon_category=settings.image_ribbon_category,
     )
+    image_panel.ribbon_category_changed.connect(lambda label: _persist(image_ribbon_category=label))
+
+    def _on_overlay_style_changed(kind: str, style: OverlayStyle) -> None:
+        _persist_soon(**{
+            f"{kind}_overlay_visible": style.visible,
+            f"{kind}_overlay_color": style.color,
+            f"{kind}_overlay_alpha": style.alpha,
+        })
+
+    image_panel.overlay_style_changed.connect(_on_overlay_style_changed)
+
+    # Highlight range: remembered per dataset (an intensity range from one
+    # dataset means nothing on another). `dataset_cleared` wipes the module's
+    # range on every load, so the saved one is put back when the same dataset
+    # finishes loading - before the Histogram would seed the full frame range.
+    def _restore_highlight_range(ds) -> None:
+        if (
+            settings.highlight_range_dataset == str(ds.home)
+            and settings.highlight_range_min is not None
+            and settings.highlight_range_max is not None
+            and highlight_range.current_range() is None
+        ):
+            highlight_range.set_range(settings.highlight_range_min, settings.highlight_range_max)
+
+    def _on_highlight_range_changed(range_: object) -> None:
+        if range_ is None:  # cleared by a dataset load, not a user choice: keep what was saved
+            return
+        lo, hi = range_  # type: ignore[misc]
+        _persist_soon(
+            highlight_range_min=float(lo), highlight_range_max=float(hi),
+            highlight_range_dataset=settings.last_dataset_folder,
+        )
+
+    dataset.dataset_loaded.connect(_restore_highlight_range)
+    highlight_range.range_changed.connect(_on_highlight_range_changed)
     image_panel.chromatic_settings_applied.connect(
         lambda values: _persist(
             chromatic_landmark_count=values.landmark_count,
@@ -678,6 +778,13 @@ def build_main_window(
             histogram_line_width_px=float(line_width_px),
         )
     )
+    image_panel.restore_ui_state(ui_state)
+    histogram_panel.restore_ui_state(ui_state)
+    try:
+        mask_scope.set_scope(MaskScope(ui_state.get("mask/scope")))
+    except ValueError:  # nothing saved yet
+        pass
+    mask_scope.scope_changed.connect(lambda scope: ui_state.set("mask/scope", scope.value))
     roi_table_panel = RoiTablePanel(roi_toolbox)
     spectra_panel = SpectraPanel(analysis_engine, roi_toolbox, selection)
     sensorgram_panel = SensorgramPanel(analysis_engine, roi_toolbox, dataset, selection)
@@ -711,6 +818,7 @@ def build_main_window(
         initial_stage=initial_stage,
         initial_subsections=settings.expanded_subsections,
         geometry=geometry,
+        ui_state=ui_state,
     )
     # Immediate persist-on-change, same pattern as theme/auto_apply above -
     # switching the open stage is a deliberate, occasional click, not a
@@ -747,7 +855,16 @@ def build_main_window(
 
     status_bar = QStatusBar(window)
     window.setStatusBar(status_bar)
-    status_bar.addPermanentWidget(_not_functional_reminder())
+    # App-wide task indicator (spinner, progress, elapsed/ETA, Cancel). Every
+    # heavy task joins it with the same three connects below: its
+    # `task_progress` -> report, its `task_finished` -> finish, and the
+    # indicator's `cancel_requested` -> that task's own cancel.
+    task_indicator = TaskIndicator(status_bar)
+    status_bar.addPermanentWidget(task_indicator, 1)  # stretch: takes the free width, text clips instead of overlapping
+    chromatic_auto.task_progress.connect(task_indicator.report)
+    chromatic_auto.task_finished.connect(task_indicator.finish)
+    _cancel_by_task = {CHROMATIC_TASK_ID: chromatic_auto.cancel}
+    task_indicator.cancel_requested.connect(lambda task_id: _cancel_by_task[task_id]())
     # WorkflowPanel.set_status() (state/performance text, no hover-hints -
     # design doc §2) shows as a transient message on the bar's left side;
     # the reminder above is permanent, on the right, so neither covers the
@@ -966,6 +1083,8 @@ def build_main_window(
         app.aboutToQuit.connect(session_autosave.flush)
 
         def _persist_on_quit() -> None:
+            _flush_pending()
+            ui_state.flush()
             # Window geometry/state and layout-preset blobs only make sense
             # to capture here, at quit - unlike theme/last-dataset/auto-apply
             # above, there is no single "the user just changed this" moment

@@ -261,6 +261,17 @@ class ImageToolRibbon(QWidget):
     def current_category(self) -> str:
         return self._category_names[self._stack.currentIndex()]
 
+    def set_category(self, label: str) -> bool:
+        """Show the tab named `label` (restoring the last session's tab).
+        An unknown label (a renamed or removed tab) changes nothing and
+        returns False."""
+        if label not in self._category_names:
+            return False
+        index = self._category_names.index(label)
+        self._tab_buttons[index].setChecked(True)
+        self._show_category(index)
+        return True
+
     def _show_category(self, index: int) -> None:
         changed = index != self._stack.currentIndex()
         self._stack.setCurrentIndex(index)

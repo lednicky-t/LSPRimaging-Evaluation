@@ -149,8 +149,10 @@ from .mask_overlay_controls import MaskOverlayControls
 from .mask_scope_toggle import MaskScopeToggle
 from .measure_controls import MeasureCalibrationControls
 from .measure_line_tool import MeasureLineTool
+from .overlay_style import OverlayStyle
 from .render import ImageRenderer, RenderRequest, RenderResult
 from .rotate_line_tool import RotateLineTool
+from ..ui_state import UiStateStore
 from .tool_ribbon import ImageToolRibbon
 
 logger = logging.getLogger(__name__)
@@ -272,6 +274,8 @@ class ImagePanel(QWidget):
     ribbon_category_changed = pyqtSignal(str)
     # The Chromatic tab's popover values, after a run that used them succeeded (app settings persist them).
     chromatic_settings_applied = pyqtSignal(object)  # ChromaticUiValues
+    # A tint overlay's look changed ("mask" or "highlight", new `OverlayStyle`); app settings persist it.
+    overlay_style_changed = pyqtSignal(str, object)
     # The landmark overlay's two view toggles (shown, every wavelength) - remembered by the app settings.
     chromatic_view_changed = pyqtSignal(bool, bool)
     # Intensity under the Image cursor (2026-10-03), or None once the cursor
@@ -299,8 +303,12 @@ class ImagePanel(QWidget):
         initial_chromatic_values: ChromaticUiValues | None = None,
         initial_chromatic_view: tuple[bool, bool] = (True, False),
         initial_view_range: tuple[tuple[float, float], tuple[float, float]] | None = None,
+        initial_mask_overlay: OverlayStyle | None = None,
+        initial_highlight_overlay: OverlayStyle | None = None,
+        initial_ribbon_category: str | None = None,
     ) -> None:
         super().__init__(parent)
+        self._initial_ribbon_category = initial_ribbon_category
         # Applied once, the first time a real image lands (`_on_rendered`) -
         # not here, since no plane exists yet to set a view against. `None`
         # (first launch, or a settings file with no saved range yet) just
@@ -339,6 +347,10 @@ class ImagePanel(QWidget):
         self._mask_overlay_visible = True
         self._mask_overlay_color = QColor(get_active_theme().mask_color)
         self._mask_overlay_alpha = 0.5
+        if initial_mask_overlay is not None:
+            self._mask_overlay_visible = bool(initial_mask_overlay.visible)
+            self._mask_overlay_color = QColor(initial_mask_overlay.color)
+            self._mask_overlay_alpha = float(initial_mask_overlay.alpha)
         self._mask_overlay_state: tuple[np.ndarray | None, GeometrySettings | None, np.ndarray | None, bool] | None = None
 
         # Histogram highlight-overlay display state (cosmetic only - see
@@ -351,6 +363,10 @@ class ImagePanel(QWidget):
         self._highlight_overlay_visible = True
         self._highlight_overlay_color = QColor(get_active_theme().highlight_color)
         self._highlight_overlay_alpha = 0.42  # the stable app's own literal (`_highlight_alpha`)
+        if initial_highlight_overlay is not None:
+            self._highlight_overlay_visible = bool(initial_highlight_overlay.visible)
+            self._highlight_overlay_color = QColor(initial_highlight_overlay.color)
+            self._highlight_overlay_alpha = float(initial_highlight_overlay.alpha)
         self._current_display_image: np.ndarray | None = None
         # Mirrors the last `frame_status_changed` emission (same "cached
         # alongside the signal" shape as `_tool_status` above) - lets a test
@@ -399,6 +415,18 @@ class ImagePanel(QWidget):
         # emits later, so the dock title bar's subtitle never sits blank
         # while genuinely nothing is loaded.
         self._set_frame_status("No dataset loaded.")
+
+    def restore_ui_state(self, store: UiStateStore) -> None:
+        """Put the cursor readout toggle and the Mask edit tool pick back as
+        last left, and keep saving them (see `panels/ui_state.py`). Called
+        once by the app shell after construction."""
+        self._cursor_overlay.set_enabled(store.get("image/cursor_readout") is True)
+        self._cursor_overlay.toggled.connect(lambda on: store.set("image/cursor_readout", bool(on)))
+        try:
+            self._mask_edit_tool.set_tool(MaskEditTool(store.get("image/mask_edit_tool")))
+        except ValueError:  # nothing saved yet, or a tool that no longer exists
+            pass
+        self._mask_edit_tool.tool_changed.connect(lambda tool: store.set("image/mask_edit_tool", tool.value))
 
     # -- construction -------------------------------------------------------
 
@@ -734,6 +762,8 @@ class ImagePanel(QWidget):
             self,
             pinned=self._general_row,
         )
+        if self._initial_ribbon_category:
+            self._tool_ribbon.set_category(self._initial_ribbon_category)  # before the connect: restoring is not a user change
         self._tool_ribbon.category_changed.connect(self.ribbon_category_changed)
         # Short tab label, full name in the tooltip; the tab is green while the correction is applied.
         self._tool_ribbon.set_tab_tooltip(CHROMATIC_TAB, "Chromatic Corrections")
@@ -1806,17 +1836,29 @@ class ImagePanel(QWidget):
             authored_mask, geometry, warp_affine, hidden = self._mask_overlay_state
             self._update_mask_overlay(authored_mask, geometry, warp_affine, hidden=hidden)
 
+    def _emit_overlay_style(self, kind: str) -> None:
+        if kind == "mask":
+            style = OverlayStyle(self._mask_overlay_visible, self._mask_overlay_color.name(), self._mask_overlay_alpha)
+        else:
+            style = OverlayStyle(
+                self._highlight_overlay_visible, self._highlight_overlay_color.name(), self._highlight_overlay_alpha
+            )
+        self.overlay_style_changed.emit(kind, style)
+
     def _on_mask_overlay_visibility_changed(self, visible: bool) -> None:
         self._mask_overlay_visible = bool(visible)
         self._redraw_mask_overlay_from_cache()
+        self._emit_overlay_style("mask")
 
     def _on_mask_overlay_color_changed(self, color: QColor) -> None:
         self._mask_overlay_color = QColor(color)
         self._redraw_mask_overlay_from_cache()
+        self._emit_overlay_style("mask")
 
     def _on_mask_overlay_alpha_changed(self, alpha: float) -> None:
         self._mask_overlay_alpha = float(alpha)
         self._redraw_mask_overlay_from_cache()
+        self._emit_overlay_style("mask")
 
     # -- histogram highlight overlay (display-only, see histogram_highlight_overlay_controls.py) --
 
@@ -1868,14 +1910,17 @@ class ImagePanel(QWidget):
     def _on_highlight_overlay_visibility_changed(self, visible: bool) -> None:
         self._highlight_overlay_visible = bool(visible)
         self._update_highlight_overlay()
+        self._emit_overlay_style("highlight")
 
     def _on_highlight_overlay_color_changed(self, color: QColor) -> None:
         self._highlight_overlay_color = QColor(color)
         self._update_highlight_overlay()
+        self._emit_overlay_style("highlight")
 
     def _on_highlight_overlay_alpha_changed(self, alpha: float) -> None:
         self._highlight_overlay_alpha = float(alpha)
         self._update_highlight_overlay()
+        self._emit_overlay_style("highlight")
 
     # -- mask edit tool picker (mask_edit_tool_picker.py/mask_edit_panels.py) --
 

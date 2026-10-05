@@ -116,6 +116,26 @@ class AppSettings:
     # Chromatic tab "View" toggles (remembered immediately, they are not run values).
     chromatic_show_landmarks: bool = True
     chromatic_landmarks_all_wavelengths: bool = False
+    # Image panel: which ribbon tab was open (its label, e.g. "Histogram"; an
+    # unknown label just leaves the first tab open) and how the two tint
+    # overlays look (`panels/image/overlay_style.py`: shown/hidden, "#rrggbb",
+    # opacity 0..1). Defaults mirror `ImagePanel`'s own.
+    image_ribbon_category: str | None = None
+    mask_overlay_visible: bool = True
+    mask_overlay_color: str | None = None  # None = the theme's mask color
+    mask_overlay_alpha: float = 0.5
+    highlight_overlay_visible: bool = True
+    highlight_overlay_color: str | None = None  # None = the theme's highlight color
+    highlight_overlay_alpha: float = 0.42
+    # Histogram highlight range [min, max] (intensity units). Only meaningful
+    # for the dataset it was set on, so it is stored with that dataset's
+    # folder and restored only when the same dataset is opened again.
+    highlight_range_min: float | None = None
+    highlight_range_max: float | None = None
+    highlight_range_dataset: str | None = None
+    # Everything else a user can change in a control (Export options, toggles,
+    # picks...), as "area/name" -> JSON value; see `panels/ui_state.py`.
+    ui_state: dict[str, object] = field(default_factory=dict)
 
 
 def _decode(payload: dict) -> AppSettings:
@@ -125,6 +145,8 @@ def _decode(payload: dict) -> AppSettings:
         kwargs.pop("layout_presets", None)
     if not isinstance(kwargs.get("expanded_subsections"), dict):
         kwargs.pop("expanded_subsections", None)
+    if not isinstance(kwargs.get("ui_state"), dict):
+        kwargs.pop("ui_state", None)
     try:
         return replace(AppSettings(), **kwargs)
     except (TypeError, ValueError):

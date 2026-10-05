@@ -348,6 +348,9 @@ class HistogramPlot(QWidget):
     def set_y_label(self, text: str) -> None:
         self._plot_item.setLabel("left", text)
 
+    def cursor_overlay(self) -> CursorOverlay:
+        return self._cursor_overlay
+
     def set_log_y(self, enabled: bool) -> None:
         """Pyqtgraph's own log-mode transforms whatever data is already on
         the curves for display - callers keep passing linear counts/percent

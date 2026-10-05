@@ -86,6 +86,7 @@ from ...dataset.io import (
 from ...dataset.model import ImageDataset
 from ...image_tools import GeometryModule
 from ..dock_container import _render_tabler_icon
+from ..ui_state import UiStateStore
 from .eliding_label import ElidingLabel
 from .form_rows import stacked_field
 
@@ -99,7 +100,11 @@ class DatasetExportSection(QWidget):
     an Export button underneath all of them."""
 
     def __init__(
-        self, dataset: DatasetModule, parent: QWidget | None = None, geometry: GeometryModule | None = None
+        self,
+        dataset: DatasetModule,
+        parent: QWidget | None = None,
+        geometry: GeometryModule | None = None,
+        ui_state: UiStateStore | None = None,
     ) -> None:
         super().__init__(parent)
         self._dataset_module = dataset
@@ -225,6 +230,13 @@ class DatasetExportSection(QWidget):
         self._dataset_module.export_progress.connect(self._on_export_progress)
         self._dataset_module.export_finished.connect(self._on_export_finished)
         self._dataset_module.export_failed.connect(self._on_export_failed)
+
+        if ui_state is not None:  # remembered across restarts (panels/ui_state.py); chunk size before the grid toggle
+            ui_state.bind("export/chunk_size", self._chunk_spin)
+            ui_state.bind("export/chunk_grid_preview", self._chunk_grid_button)
+            ui_state.bind("export/shard", self._shard_combo)
+            ui_state.bind("export/compression", self._compression_check)
+            ui_state.bind("export/skip_excluded", self._skip_excluded_check)
 
     # -- dataset-driven state ---------------------------------------------------
 
