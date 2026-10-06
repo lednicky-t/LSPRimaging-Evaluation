@@ -153,7 +153,7 @@ from .overlay_style import OverlayStyle
 from .render import ImageRenderer, RenderRequest, RenderResult
 from .rotate_line_tool import RotateLineTool
 from ..ui_state import UiStateStore
-from .tool_ribbon import ImageToolRibbon
+from .tool_ribbon import VIEW_TAB, ImageToolRibbon
 
 logger = logging.getLogger(__name__)
 
@@ -586,9 +586,24 @@ class ImagePanel(QWidget):
             alpha=self._mask_overlay_alpha,
             parent=self,
         )
-        self._mask_overlay_controls.visibility_changed.connect(self._on_mask_overlay_visibility_changed)
-        self._mask_overlay_controls.color_changed.connect(self._on_mask_overlay_color_changed)
-        self._mask_overlay_controls.alpha_changed.connect(self._on_mask_overlay_alpha_changed)
+        # Second copy for the "View" tab (2026-10-06, maintainer request -
+        # View collects every display option in one place). Same handlers,
+        # and each copy mirrors the other so they never disagree.
+        self._view_mask_overlay_controls = MaskOverlayControls(
+            visible=self._mask_overlay_visible,
+            color=self._mask_overlay_color,
+            alpha=self._mask_overlay_alpha,
+            parent=self,
+        )
+        for controls, other in (
+            (self._mask_overlay_controls, self._view_mask_overlay_controls),
+            (self._view_mask_overlay_controls, self._mask_overlay_controls),
+        ):
+            controls.visibility_changed.connect(self._on_mask_overlay_visibility_changed)
+            controls.color_changed.connect(self._on_mask_overlay_color_changed)
+            controls.alpha_changed.connect(self._on_mask_overlay_alpha_changed)
+            for signal in (controls.visibility_changed, controls.color_changed, controls.alpha_changed):
+                signal.connect(lambda _value, c=controls, o=other: o.sync_from(c))
         self._mask_scope_separator = vertical_separator(self)
 
         # Histogram highlight-overlay show/hide + color + transparency
@@ -708,18 +723,24 @@ class ImagePanel(QWidget):
         mask_content_layout.addWidget(mask_png_group)
         mask_content_layout.addStretch(1)
 
-        # Single captioned group, same convention as the Mask tab's own
-        # groups (`_labeled_icon_group`) - no divider needed since there is
-        # only the one group here, unlike Mask's State/Visibility pair.
+        # "View" tab (2026-10-06, maintainer request - the old "Histogram"
+        # tab renamed and moved second; a one-stop place for display
+        # options): a "Histogram" group (the highlight-overlay controls)
+        # and a "Mask" group (a mirrored copy of the Mask tab's Visibility
+        # icons).
         highlight_visibility_group, self._highlight_visibility_label = labeled_icon_group(
-            self, self._highlight_overlay_controls, "Selection"
+            self, self._highlight_overlay_controls, "Histogram"
         )
-        histogram_content = QWidget(self)
-        histogram_content_layout = QHBoxLayout(histogram_content)
-        histogram_content_layout.setContentsMargins(0, 0, 0, 0)
-        histogram_content_layout.setSpacing(6)
-        histogram_content_layout.addWidget(highlight_visibility_group)
-        histogram_content_layout.addStretch(1)
+        view_mask_group, self._view_mask_label = labeled_icon_group(self, self._view_mask_overlay_controls, "Mask")
+        self._view_separator = vertical_separator(self)
+        view_content = QWidget(self)
+        view_content_layout = QHBoxLayout(view_content)
+        view_content_layout.setContentsMargins(0, 0, 0, 0)
+        view_content_layout.setSpacing(6)
+        view_content_layout.addWidget(highlight_visibility_group)
+        view_content_layout.addWidget(self._view_separator)
+        view_content_layout.addWidget(view_mask_group)
+        view_content_layout.addStretch(1)
 
         self._top_bar = QWidget(self)
         self._top_bar.setObjectName("imageTopBar")
@@ -751,9 +772,9 @@ class ImagePanel(QWidget):
         self._chromatic_tab.settings_applied.connect(self.chromatic_settings_applied)
         self._tool_ribbon = ImageToolRibbon(
             [
+                (VIEW_TAB, view_content),
                 ("Image tools", image_tools_content),
                 ("Mask", mask_content),
-                ("Histogram", histogram_content),
                 ("ROIs", self._canvas_tools),
                 # Empty on purpose (2026-10-03): filled directly here, not in
                 # the Workflow panel (maintainer's plan for chromatic correction).
@@ -763,7 +784,9 @@ class ImagePanel(QWidget):
             pinned=self._general_row,
         )
         if self._initial_ribbon_category:
-            self._tool_ribbon.set_category(self._initial_ribbon_category)  # before the connect: restoring is not a user change
+            # "Histogram" was this tab's name before 2026-10-06 (settings saved then still say so).
+            restored = VIEW_TAB if self._initial_ribbon_category == "Histogram" else self._initial_ribbon_category
+            self._tool_ribbon.set_category(restored)  # before the connect: restoring is not a user change
         self._tool_ribbon.category_changed.connect(self.ribbon_category_changed)
         # Short tab label, full name in the tooltip; the tab is green while the correction is applied.
         self._tool_ribbon.set_tab_tooltip(CHROMATIC_TAB, "Chromatic Corrections")
@@ -1076,6 +1099,10 @@ class ImagePanel(QWidget):
             self._canvas_tools.refresh_theme(get_active_theme())
         if hasattr(self, "_mask_overlay_controls"):
             self._mask_overlay_controls.refresh_theme(get_active_theme())
+        if hasattr(self, "_view_mask_overlay_controls"):
+            self._view_mask_overlay_controls.refresh_theme(get_active_theme())
+        if hasattr(self, "_view_separator"):
+            self._view_separator.setStyleSheet(f"color: {get_active_theme().control_border};")
         if hasattr(self, "_mask_scope_toggle"):
             self._mask_scope_toggle.refresh_theme(get_active_theme())
         if hasattr(self, "_mask_scope_separator"):
@@ -1095,6 +1122,7 @@ class ImagePanel(QWidget):
             "_mask_state_label",
             "_mask_visibility_label",
             "_highlight_visibility_label",
+            "_view_mask_label",
             "_mask_edit_label",
             "_mask_png_label",
         ):

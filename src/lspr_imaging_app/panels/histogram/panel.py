@@ -54,6 +54,7 @@ from ...roi import RoiToolbox
 from ...roi.rasterize import rasterize_reference, rasterize_sample
 from ...selection import HighlightRangeModule
 from ..image.panel import ImagePanel
+from ..image.tool_ribbon import VIEW_TAB
 from ..ui_state import UiStateStore
 from . import compute
 from .plot import DEFAULT_LINE_WIDTH, HistogramPlot
@@ -158,7 +159,7 @@ class HistogramPanel(QWidget):
         self._image_panel.image_cleared.connect(self._on_image_cleared)
         self._highlight_range.range_changed.connect(self._on_highlight_range_changed)
         # Area selection (2026-10-03): the plot narrows to it, but only while
-        # the ribbon's "Histogram" tab is the one open (maintainer's spec).
+        # the ribbon's "View" tab is the one open (maintainer's spec).
         self._image_panel.area_selection().selection_changed.connect(self._schedule_redraw)
         self._image_panel.ribbon_category_changed.connect(self._schedule_redraw)
         self._image_panel.cursor_value_changed.connect(self._plot.set_value_tick)
@@ -254,7 +255,7 @@ class HistogramPanel(QWidget):
     def _selection_region(self, image_shape: tuple[int, ...]) -> np.ndarray | None:
         """The area selection's editable region at `image_shape`, or `None`
         when there is none or the ribbon's Histogram tab is not open."""
-        if self._image_panel.active_ribbon_category() != "Histogram":
+        if self._image_panel.active_ribbon_category() != VIEW_TAB:
             return None
         return self._image_panel.area_selection().mask(image_shape)
 

@@ -100,6 +100,7 @@ _CAPTIONED_GROUP_ROW_HEIGHT = 42
 # room - see module docstring for why one fixed height for every category,
 # not a per-category one, is the point.
 _ROW_HEIGHT = max(_CANVAS_TOOLS_ROW_HEIGHT, _TRANSFORMS_ROW_HEIGHT, _CAPTIONED_GROUP_ROW_HEIGHT)
+VIEW_TAB = "View"  # the display-options tab (was "Histogram" until 2026-10-06); the Histogram plot keys off it
 _TAB_HEIGHT = 20
 _TAB_FONT_SIZE_PX = 11
 

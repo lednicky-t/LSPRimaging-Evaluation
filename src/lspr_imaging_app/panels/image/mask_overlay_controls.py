@@ -100,6 +100,20 @@ class MaskOverlayControls(QWidget):
         self._refresh_toggle_icon()
         self._refresh_swatch()
 
+    def sync_from(self, other: MaskOverlayControls) -> None:
+        """Mirror another instance's state without emitting any signal -
+        used when the same controls appear on two ribbon tabs (Mask and
+        View) and a change on one must show on the other."""
+        self._toggle_button.blockSignals(True)
+        self._toggle_button.setChecked(other._toggle_button.isChecked())
+        self._toggle_button.blockSignals(False)
+        self._alpha_slider.blockSignals(True)
+        self._alpha_slider.setValue(other._alpha_slider.value())
+        self._alpha_slider.blockSignals(False)
+        self._color = QColor(other._color)
+        self._refresh_toggle_icon()
+        self._refresh_swatch()
+
     def _on_toggled(self, checked: bool) -> None:
         self._refresh_toggle_icon()
         self.visibility_changed.emit(bool(checked))
