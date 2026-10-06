@@ -195,6 +195,8 @@ def _wire_theme_menu(
         if app is not None:
             apply_app_theme(app, theme)
         image_panel.refresh_theme()
+        for table in window.findChildren(RoiTablePanel):
+            table.refresh_theme()
         for dock in window.findChildren(PanelContainer):
             dock.refresh_theme()
         for section in window.findChildren(CollapsibleSection):
@@ -798,7 +800,8 @@ def build_main_window(
     except ValueError:  # nothing saved yet
         pass
     mask_scope.scope_changed.connect(lambda scope: ui_state.set("mask/scope", scope.value))
-    roi_table_panel = RoiTablePanel(roi_toolbox)
+    roi_table_panel = RoiTablePanel(roi_toolbox, selection, geometry, analysis_engine)
+    roi_table_panel.restore_ui_state(ui_state)
     spectra_panel = SpectraPanel(analysis_engine, roi_toolbox, selection)
     sensorgram_panel = SensorgramPanel(analysis_engine, roi_toolbox, dataset, selection)
     # `WorkflowStage[...]` raises KeyError/TypeError for anything that isn't
@@ -883,6 +886,7 @@ def build_main_window(
     # other.
     workflow.status_requested.connect(status_bar.showMessage)
     roi_geometry_sync.status_changed.connect(status_bar.showMessage)
+    roi_table_panel.status_message.connect(status_bar.showMessage)
     # A canvas tool's live status (e.g. the rotate tool's angle readout
     # while placing point 2) - 2026-09-29, replacing an always-in-layout
     # text row under the Image panel with a permanent info icon there for

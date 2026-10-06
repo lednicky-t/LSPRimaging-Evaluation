@@ -1,44 +1,717 @@
 """``RoiTablePanel`` (sketch §7 "ROI Toolbox" front doors, §10).
 
-Calls ``RoiToolbox``'s command API for anything naturally tabular - rename,
-recolor, reorder (the "#" column and Move Up/Down), bulk multi-select
-operations - so the user doesn't have to leave the panel they're already
-looking at (Image or Sensorgram) just to rename a group. Holds no ROI/group
-state or logic of its own - a thin renderer of ``rois()``/``groups()``.
+The ROI/Group table: every ROI with its number, name, position and diameters,
+organised under collapsible group headers (or as one flat list). It is a thin
+renderer over `RoiToolbox` (it holds no ROI or group state; every edit is a
+toolbox command, so Ctrl+Z undoes it like any other) and it drives the shared
+`SelectionModule`, so selecting rows here selects the same ROIs on the image.
+
+**What the table does**
+- Rows: ``#`` (the ROI's place in the list; reordering changes these), name,
+  x, y, sample diameter, reference-ring inner/outer diameter. Lengths show in
+  px or µm following the Geometry display unit. A ring diameter the ROI takes
+  from the shared default is grey italic.
+- Click a header to sort ascending/descending. Sorting only changes the view;
+  to *reorder* ROIs (change their numbers) sort by ``#`` ascending first.
+- Edit a cell with a double-click or F2. With several ROIs selected, editing
+  a position or diameter of one of them sets it on all of them (one undo step).
+- A group header selects its members; double-click renames, the chevron
+  collapses. Double-click a colour chip to change a ROI's colour (or recolour
+  the group).
+- Right-click for group / ungroup / colour / shift / reset diameters / move /
+  delete. Delete removes the selected ROIs, or, if only a group header is
+  selected, the group (its ROIs stay).
+
+**Reordering and deleting renumber ROIs**, which a running analysis cannot
+follow, so they are refused until it finishes (`AnalysisEngine.is_running`).
+
+Bad input (a size below the minimum, a ring with inner >= outer, an empty
+group name) is refused by the toolbox before anything changes, and shown here
+in the footer; it is never silently corrected.
 """
 
 from __future__ import annotations
 
-from PyQt6.QtCore import QTimer
-from PyQt6.QtWidgets import QWidget
+from collections.abc import Callable
 
+from PyQt6.QtCore import QItemSelection, QItemSelectionModel, QModelIndex, QPoint, QSize, Qt, QTimer, pyqtSignal
+from PyQt6.QtGui import QColor
+from PyQt6.QtWidgets import (
+    QAbstractItemView,
+    QColorDialog,
+    QHBoxLayout,
+    QHeaderView,
+    QInputDialog,
+    QLabel,
+    QMenu,
+    QStackedWidget,
+    QToolButton,
+    QVBoxLayout,
+    QWidget,
+)
+
+from lspr_ui import get_active_theme, load_tabler_icon
+
+from ...analysis.engine import AnalysisEngine
+from ...image_tools import GeometryModule
 from ...roi import RoiToolbox
+from ...selection import SelectionModule
+from ..ui_state import UiStateStore
+from .delegate import RoiTableDelegate
+from .dialogs import ShiftDialog
+from .model import RoiTreeModel
+from .rows import (
+    COLUMN_COUNT,
+    COLUMN_ID,
+    COLUMN_NAME,
+    COLUMN_RING_IN,
+    COLUMN_RING_OUT,
+    COLUMN_SAMPLE,
+    COLUMN_X,
+    COLUMN_Y,
+    PIXELS,
+    LengthUnit,
+    from_display,
+    micrometers,
+    movement_scope,
+    parse_length,
+    step_target_index,
+)
+from .view import RoiTreeView
 
 _REDRAW_COALESCE_MS = 100  # sketch §8
+_NOTICE_MS = 8000
+_ERROR_NOTICE_MS = 15000
+_UNGROUPED_KEY = "__ungrouped__"
+_ICON_SIZE = 18
+_BUTTON_SIZE = 28
+
+
+def _group_key(group_id: str | None) -> str:
+    return _UNGROUPED_KEY if group_id is None else group_id
+
+
+def _message(exc: Exception) -> str:
+    return str(exc.args[0]) if isinstance(exc, KeyError) and exc.args else str(exc)
 
 
 class RoiTablePanel(QWidget):
-    """Tabular ROI/group view and editor - a thin renderer over
-    ``RoiToolbox``'s command API."""
+    status_message = pyqtSignal(str)
+    """A one-line result for the app's status bar (also shown in the footer)."""
 
-    def __init__(self, roi_toolbox: RoiToolbox, parent: QWidget | None = None) -> None:
+    def __init__(
+        self,
+        roi_toolbox: RoiToolbox,
+        selection: SelectionModule,
+        geometry: GeometryModule,
+        analysis_engine: AnalysisEngine,
+        parent: QWidget | None = None,
+    ) -> None:
         super().__init__(parent)
-        self._roi_toolbox = roi_toolbox
+        self._toolbox = roi_toolbox
+        self._selection = selection
+        self._geometry = geometry
+        self._engine = analysis_engine
+        self._collapsed: set[str] = set()
+        self._syncing = False  # the view and SelectionModule are being brought into line
+        self._restoring_view = False
+        self._store: UiStateStore | None = None
 
         self._redraw_timer = QTimer(self)
         self._redraw_timer.setSingleShot(True)
         self._redraw_timer.setInterval(_REDRAW_COALESCE_MS)
-        self._redraw_timer.timeout.connect(self._redraw)
+        self._redraw_timer.timeout.connect(self.refresh_now)
+        self._notice_timer = QTimer(self)
+        self._notice_timer.setSingleShot(True)
+        self._notice_timer.timeout.connect(self._update_footer)
 
-    def _schedule_redraw(self) -> None:
+        self._build_ui()
+        self._connect()
+        self._apply_theme()
+        self.refresh_now()
+
+    # -- remembered state ---------------------------------------------------------
+
+    def restore_ui_state(self, store: UiStateStore) -> None:
+        """Put the flat/grouped choice, sort, collapsed groups and column widths
+        back as last left, and keep saving them (see `panels/ui_state.py`).
+        Called once by the app shell."""
+        self._store = store
+        store.bind("roi_table/flat", self._flat_button)
+        saved_sort = store.get("roi_table/sort")
+        if (
+            isinstance(saved_sort, list) and len(saved_sort) == 2
+            and isinstance(saved_sort[0], int) and not isinstance(saved_sort[0], bool)
+            and 0 <= saved_sort[0] < COLUMN_COUNT and isinstance(saved_sort[1], bool)
+        ):
+            self._rebuild(lambda: self._model.set_sort(saved_sort[0], saved_sort[1]))
+        collapsed = store.get("roi_table/collapsed")
+        if isinstance(collapsed, list) and all(isinstance(item, str) for item in collapsed):
+            self._collapsed = set(collapsed)
+            self._rebuild(lambda: None)
+        widths = store.get("roi_table/column_widths")
+        if isinstance(widths, list) and len(widths) == COLUMN_COUNT and all(isinstance(w, int) and w > 0 for w in widths):
+            for column, width in enumerate(widths):
+                if column != COLUMN_NAME:
+                    self._tree.setColumnWidth(column, width)
+
+    # -- construction -----------------------------------------------------------------
+
+    def _build_ui(self) -> None:
+        self._model = RoiTreeModel(self)
+        self._tree = RoiTreeView(self)
+        self._tree.setModel(self._model)
+        self._tree.setItemDelegate(RoiTableDelegate(self._tree))
+        self._tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self._tree.apply_default_column_widths()
+        self._tree.header().setSectionResizeMode(COLUMN_NAME, QHeaderView.ResizeMode.Stretch)
+
+        self._hint = QLabel("No ROIs yet.\nAdd them on the Image panel, or run detection.", self)
+        self._hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._hint.setWordWrap(True)
+        self._stack = QStackedWidget(self)
+        self._stack.addWidget(self._tree)
+        self._stack.addWidget(self._hint)
+
+        self._group_button = self._tool_button("plus", self._group_selected_or_new)
+        self._ungroup_button = self._tool_button("link-off", self._ungroup_selected)
+        self._color_button = self._tool_button("droplet", self._color_selected)
+        self._up_button = self._tool_button("arrow-up", lambda: self._move_selected(-1))
+        self._down_button = self._tool_button("arrow-down", lambda: self._move_selected(1))
+        self._delete_button = self._tool_button("trash", self._delete_selected)
+        self._flat_button = self._tool_button("list", None, checkable=True)
+        self._flat_button.setToolTip("Show one flat list instead of grouping the ROIs under their groups.")
+        self._unit_label = QLabel("px", self)
+        self._unit_label.setToolTip("Unit of x, y and the diameters. Change it with the Geometry display unit.")
+
+        toolbar = QHBoxLayout()
+        toolbar.setContentsMargins(6, 4, 6, 4)
+        toolbar.setSpacing(2)
+        for button in (self._group_button, self._ungroup_button, self._color_button):
+            toolbar.addWidget(button)
+        toolbar.addSpacing(8)
+        for button in (self._up_button, self._down_button):
+            toolbar.addWidget(button)
+        toolbar.addSpacing(8)
+        toolbar.addWidget(self._delete_button)
+        toolbar.addStretch(1)
+        toolbar.addWidget(self._flat_button)
+        toolbar.addSpacing(6)
+        toolbar.addWidget(self._unit_label)
+
+        self._footer = QLabel(self)
+        self._footer.setContentsMargins(8, 3, 8, 4)
+        self._footer.setWordWrap(False)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+        layout.addLayout(toolbar)
+        layout.addWidget(self._stack, 1)
+        layout.addWidget(self._footer)
+
+    def _tool_button(self, icon_name: str, handler: Callable[[], None] | None, *, checkable: bool = False) -> QToolButton:
+        button = QToolButton(self)
+        button.setProperty("icon_name", icon_name)
+        button.setCheckable(checkable)
+        button.setAutoRaise(True)
+        button.setFixedSize(_BUTTON_SIZE, _BUTTON_SIZE)
+        button.setIconSize(QSize(_ICON_SIZE, _ICON_SIZE))
+        button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        if handler is not None:
+            button.clicked.connect(lambda _checked=False: handler())
+        return button
+
+    def _connect(self) -> None:
+        self._toolbox.geometry_changed.connect(self._schedule_refresh)
+        self._toolbox.cosmetic_changed.connect(self._schedule_refresh)
+        self._geometry.cosmetic_changed.connect(self._schedule_refresh)  # display unit, calibration
+        self._selection.roi_selection_changed.connect(self._on_selection_changed_elsewhere)
+        self._model.cell_edited.connect(self._on_cell_edited)
+        self._tree.selectionModel().selectionChanged.connect(self._on_view_selection_changed)
+        self._tree.expanded.connect(lambda index: self._on_expansion_changed(index, True))
+        self._tree.collapsed.connect(lambda index: self._on_expansion_changed(index, False))
+        self._tree.header().sectionClicked.connect(self._on_header_clicked)
+        self._tree.header().sectionResized.connect(self._on_section_resized)
+        self._tree.delete_requested.connect(self._delete_selected)
+        self._tree.move_requested.connect(self._move_selected)
+        self._tree.chip_double_clicked.connect(self._on_chip_double_clicked)
+        self._tree.customContextMenuRequested.connect(self._show_context_menu)
+        self._flat_button.toggled.connect(self._on_flat_toggled)
+
+    # -- theme ----------------------------------------------------------------------------
+
+    def refresh_theme(self) -> None:
+        """Called when the user switches theme (the app shell's theme menu)."""
+        self._apply_theme()
+
+    def _apply_theme(self) -> None:
+        theme = get_active_theme()
+        self._tree.setStyleSheet(
+            f"QTreeView {{ background: {theme.window_bg}; border: none; outline: none; }}"
+            f"QHeaderView::section {{ background: {theme.toolbar_bg}; color: {theme.text_muted}; border: none; "
+            f"border-bottom: 1px solid {theme.toolbar_border}; padding: 4px 6px; font-weight: 600; }}"
+        )
+        self._hint.setStyleSheet(f"color: {theme.text_dim}; background: {theme.window_bg}; padding: 24px;")
+        self._unit_label.setStyleSheet(f"color: {theme.text_dim}; padding: 0 2px;")
+        hover, pressed, checked = theme.control_bg_hover, theme.control_bg_pressed, theme.primary_action_bg
+        button_style = (
+            f"QToolButton {{ background: transparent; border: 1px solid transparent; border-radius: 5px; }}"
+            f"QToolButton:hover {{ background: {hover}; }}"
+            f"QToolButton:pressed {{ background: {pressed}; }}"
+            f"QToolButton:checked {{ background: {checked}; border: 1px solid {theme.primary_action_border}; }}"
+        )
+        for button in self.findChildren(QToolButton):
+            button.setStyleSheet(button_style)
+            name = button.property("icon_name")
+            if name:
+                button.setIcon(load_tabler_icon(str(name), color=theme.text_secondary, size=_ICON_SIZE))
+        self._update_footer()
+        self._tree.viewport().update()
+
+    # -- refresh --------------------------------------------------------------------------
+
+    def _schedule_refresh(self, *_args: object) -> None:
         self._redraw_timer.start()
 
-    def _redraw(self) -> None:
-        """Not yet implemented - scaffolding only."""
-        raise NotImplementedError
+    def refresh_now(self) -> None:
+        """Rebuild the table from the toolbox now (normally done ~100 ms after
+        the last change, so a burst of edits rebuilds once)."""
+        self._redraw_timer.stop()
+        self._rebuild(
+            lambda: self._model.set_content(
+                self._toolbox.rois(), self._toolbox.groups(), self._toolbox.detection_settings(), self._unit()
+            )
+        )
 
-    def _on_rename_group(self, group_id: str, name: str) -> None:
-        self._roi_toolbox.rename_group(group_id, name)
+    def _unit(self) -> LengthUnit:
+        if self._geometry.settings().display_units == "um" and self._geometry.can_display_micrometers():
+            return micrometers(self._geometry.microns_per_pixel_scalar())
+        return PIXELS
 
-    def _on_move_group(self, group_id: str, new_index: int) -> None:
-        self._roi_toolbox.reorder_group(group_id, new_index)
+    def _rebuild(self, change: Callable[[], None]) -> None:
+        """Apply ``change`` to the model, then put back what a model reset
+        throws away: group expansion, scroll position, selection."""
+        bar = self._tree.verticalScrollBar()
+        scroll = bar.value()
+        change()
+        self._unit_label.setText(self._model.unit().label)
+        self._restoring_view = True
+        try:
+            self._tree.expandAll()
+            for header in self._model.group_headers():
+                self._tree.setFirstColumnSpanned(header.row(), QModelIndex(), True)
+                if _group_key(self._model.group_id(header)) in self._collapsed:
+                    self._tree.collapse(header)
+        finally:
+            self._restoring_view = False
+        self._stack.setCurrentIndex(0 if self._model.rows() else 1)
+        column, descending = self._model.sort_state()
+        self._tree.header().setSortIndicator(
+            column, Qt.SortOrder.DescendingOrder if descending else Qt.SortOrder.AscendingOrder
+        )
+        bar.setValue(scroll)
+        ids = self._selection.selected_roi_ids()
+        self._model.set_selected_ids(ids)
+        self._apply_selection_to_view(ids, reveal=True)
+        self._update_toolbar_state()
+        self._update_footer()
+
+    # -- selection ------------------------------------------------------------------------
+
+    def _view_selection(self) -> tuple[list[int], list[QModelIndex]]:
+        """``(ROI ids selected as rows, group headers selected)``."""
+        rois: list[int] = []
+        headers: list[QModelIndex] = []
+        for index in self._tree.selectionModel().selectedRows(0):
+            if self._model.is_group(index):
+                headers.append(index)
+            else:
+                roi_id = self._model.roi_id(index)
+                if roi_id is not None:
+                    rois.append(roi_id)
+        return rois, headers
+
+    def _on_view_selection_changed(self, *_args: object) -> None:
+        if self._syncing:
+            return
+        rois, headers = self._view_selection()
+        ids = set(rois)
+        for header in headers:
+            ids.update(self._model.member_ids(header))
+        self._syncing = True
+        try:
+            self._selection.set_roi_selection(ids)
+        finally:
+            self._syncing = False
+        self._model.set_selected_ids(self._selection.selected_roi_ids())
+        self._update_toolbar_state()
+        self._update_footer()
+
+    def _on_selection_changed_elsewhere(self, ids: object) -> None:
+        """The shared selection changed (a click on the image, a delete that
+        renumbered...). When the change came from this table the view already
+        shows it."""
+        self._model.set_selected_ids(ids)  # type: ignore[arg-type]
+        if not self._syncing:
+            self._apply_selection_to_view(ids, reveal=True)  # type: ignore[arg-type]
+        self._update_toolbar_state()
+        self._update_footer()
+
+    def _apply_selection_to_view(self, roi_ids: object, *, reveal: bool) -> None:
+        indexes = self._model.roi_indexes(roi_ids)  # type: ignore[arg-type]
+        selection = QItemSelection()
+        for index in indexes:
+            selection.select(index, index)
+        self._syncing = True
+        try:
+            self._tree.selectionModel().select(
+                selection,
+                QItemSelectionModel.SelectionFlag.ClearAndSelect | QItemSelectionModel.SelectionFlag.Rows,
+            )
+        finally:
+            self._syncing = False
+        if reveal and indexes:
+            first = min(indexes, key=lambda index: self._model.roi_id(index) or 0)
+            if self._model.parent(first).isValid() and not self._tree.isExpanded(self._model.parent(first)):
+                self._tree.expand(self._model.parent(first))
+            self._tree.scrollTo(first, QAbstractItemView.ScrollHint.EnsureVisible)
+
+    def _selected_ids(self) -> list[int]:
+        return sorted(self._selection.selected_roi_ids())
+
+    # -- expansion, sorting, widths, flat/grouped ------------------------------------------
+
+    def _on_expansion_changed(self, index: QModelIndex, expanded: bool) -> None:
+        if self._restoring_view or not self._model.is_group(index):
+            return
+        key = _group_key(self._model.group_id(index))
+        (self._collapsed.discard if expanded else self._collapsed.add)(key)
+        if self._store is not None:
+            self._store.set("roi_table/collapsed", sorted(self._collapsed))
+
+    def _on_header_clicked(self, column: int) -> None:
+        current, descending = self._model.sort_state()
+        new = (column, not descending) if column == current else (column, False)
+        self._rebuild(lambda: self._model.set_sort(*new))
+        if self._store is not None:
+            self._store.set("roi_table/sort", [new[0], new[1]])
+
+    def _on_section_resized(self, column: int, _old: int, _new: int) -> None:
+        if self._store is not None:
+            header = self._tree.header()
+            self._store.set("roi_table/column_widths", [header.sectionSize(c) for c in range(COLUMN_COUNT)])
+
+    def _on_flat_toggled(self, flat: bool) -> None:
+        self._rebuild(lambda: self._model.set_flat(flat))
+
+    # -- notices ---------------------------------------------------------------------------
+
+    def _show_notice(self, text: str, *, error: bool = False) -> None:
+        theme = get_active_theme()
+        self._footer.setText(text)
+        self._footer.setStyleSheet(f"color: {theme.accent_red if error else theme.text_secondary};")
+        self._footer.setToolTip(text)
+        self._notice_timer.start(_ERROR_NOTICE_MS if error else _NOTICE_MS)
+        self.status_message.emit(text)
+
+    def _update_footer(self) -> None:
+        theme = get_active_theme()
+        self._notice_timer.stop()
+        total = len(self._model.rows())
+        chosen = len(self._selection.selected_roi_ids())
+        text = "No ROIs" if total == 0 else f"{total} ROI{'' if total == 1 else 's'}"
+        if chosen:
+            text += f"  ·  {chosen} selected"
+        self._footer.setText(text)
+        self._footer.setToolTip("")
+        self._footer.setStyleSheet(f"color: {theme.text_muted};")
+
+    def _guarded(self, action: str, command: Callable[[], None]) -> bool:
+        """Run a toolbox command; show a refusal (bad value, stale id) in the
+        footer instead of letting it vanish. Returns whether it ran."""
+        try:
+            command()
+        except (ValueError, KeyError) as exc:
+            self._show_notice(f"{action}: {_message(exc)}", error=True)
+            return False
+        return True
+
+    def _renumbering_allowed(self) -> bool:
+        if self._engine.is_running():
+            self._show_notice("Wait for the analysis to finish before reordering or deleting ROIs.", error=True)
+            return False
+        return True
+
+    # -- toolbar state ----------------------------------------------------------------------
+
+    def _update_toolbar_state(self) -> None:
+        ids = self._selected_ids()
+        _rois, headers = self._view_selection()
+        rows = self._model.rows()
+        in_group = any(row.group_id is not None for row in rows if row.roi_id in set(ids))
+        scope = movement_scope(ids, rows, grouped=self._model.is_grouped_view()) if ids else None
+        sorted_by_number = self._model.sort_state() == (COLUMN_ID, False)
+        movable = scope is not None and sorted_by_number
+
+        self._group_button.setToolTip(
+            f"Group the {len(ids)} selected ROI{'' if len(ids) == 1 else 's'} (each gets its own tint of the group colour)"
+            if ids else "New empty group"
+        )
+        self._ungroup_button.setEnabled(in_group)
+        self._ungroup_button.setToolTip("Take the selected ROIs out of their groups.")
+        self._color_button.setEnabled(bool(ids) or bool(headers))
+        self._color_button.setToolTip(
+            "Recolour the group (every member gets a new tint)." if headers and not _rois else "Set the colour of the selected ROIs."
+        )
+        for button, word, step in ((self._up_button, "up", -1), (self._down_button, "down", 1)):
+            button.setEnabled(movable)
+            if not sorted_by_number:
+                button.setToolTip("Sort by # (ascending) to reorder ROIs.")
+            elif ids and scope is None:
+                button.setToolTip("Select ROIs from a single group to reorder them.")
+            else:
+                button.setToolTip(f"Move the selected ROIs {word} one place (Alt+{'Up' if step < 0 else 'Down'}).")
+        self._delete_button.setEnabled(bool(ids) or bool(headers))
+        self._delete_button.setToolTip(
+            "Delete the selected group, keeping its ROIs (Delete)." if headers and not _rois else "Delete the selected ROIs (Delete)."
+        )
+
+    # -- editing a cell -----------------------------------------------------------------------
+
+    def _edit_targets(self, roi_id: int) -> list[int]:
+        """The ROI edited, or, if it is part of a multi-ROI selection, the
+        whole selection (so one edit sets a diameter on all of them)."""
+        selected = self._selected_ids()
+        return selected if roi_id in selected and len(selected) > 1 else [roi_id]
+
+    def _on_cell_edited(self, kind: str, key: object, column: int, text: str) -> None:
+        if kind == "group":
+            self._guarded("Rename group", lambda: self._toolbox.rename_group(str(key), text))
+            return
+        roi_id = int(key)  # type: ignore[arg-type]
+        if column == COLUMN_NAME:
+            self._guarded("Rename ROI", lambda: self._toolbox.set_roi_label(roi_id, text))
+            return
+        targets = self._edit_targets(roi_id)
+        unit = self._model.unit()
+        try:
+            value = parse_length(text, unit)
+        except ValueError as exc:
+            self._show_notice(str(exc), error=True)
+            return
+        noun = f"{len(targets)} ROIs" if len(targets) > 1 else f"ROI {roi_id}"
+        if column in (COLUMN_X, COLUMN_Y):
+            axis = "x" if column == COLUMN_X else "y"
+            if self._guarded(f"Set {axis}", lambda: self._toolbox.place_rois(targets, **{axis: value})) and len(targets) > 1:
+                self._show_notice(f"Set {axis} of {noun} to {text.strip()} {unit.label}.")
+            return
+        field = {
+            COLUMN_SAMPLE: "sample_diameter_px",
+            COLUMN_RING_IN: "reference_inner_diameter_px",
+            COLUMN_RING_OUT: "reference_outer_diameter_px",
+        }.get(column)
+        if field is None:
+            return
+        if self._guarded("Set diameter", lambda: self._toolbox.resize_rois(targets, **{field: value})) and len(targets) > 1:
+            self._show_notice(f"Set the diameter of {noun}.")
+
+    # -- commands ------------------------------------------------------------------------------
+
+    def _choose_color(self, initial_hex: str, title: str) -> str | None:
+        color = QColorDialog.getColor(QColor(initial_hex), self, title)
+        return color.name() if color.isValid() else None
+
+    def _group_selected_or_new(self) -> None:
+        ids = self._selected_ids()
+        default = f"Group {len(self._toolbox.groups()) + 1}"
+        name, accepted = QInputDialog.getText(
+            self, "Group ROIs" if ids else "New group", "Group name", text=default
+        )
+        if not accepted:
+            return
+        if ids:
+            self._guarded("Group ROIs", lambda: self._toolbox.group_rois(ids, name))
+        else:
+            self._guarded("New group", lambda: self._toolbox.create_group(name))
+
+    def _add_selected_to_group(self, group_id: str) -> None:
+        ids = self._selected_ids()
+        if ids:
+            self._guarded("Add to group", lambda: self._toolbox.add_rois_to_group(ids, group_id))
+
+    def _ungroup_selected(self) -> None:
+        ids = self._selected_ids()
+        if ids:
+            self._guarded("Ungroup", lambda: self._toolbox.remove_rois_from_groups(ids))
+
+    def _color_selected(self) -> None:
+        rois, headers = self._view_selection()
+        if headers and not rois:
+            real = [self._model.group_id(header) for header in headers if self._model.group_id(header) is not None]
+            if len(real) == 1:
+                self._recolor_group(real[0])
+                return
+        ids = self._selected_ids()
+        if not ids:
+            return
+        first = self._model.row_for(ids[0])
+        color = self._choose_color(first.color_hex if first else "#f59e0b", "Choose ROI color")
+        if color is not None:
+            self._guarded("Set color", lambda: self._toolbox.set_roi_colors(ids, color))
+
+    def _clear_color_selected(self) -> None:
+        ids = self._selected_ids()
+        if ids:
+            self._guarded("Clear color", lambda: self._toolbox.set_roi_colors(ids, None))
+
+    def _recolor_group(self, group_id: str) -> None:
+        group = next((g for g in self._toolbox.groups() if g.group_id == group_id), None)
+        if group is None:
+            return
+        color = self._choose_color(group.sample_color_hex, "Choose group color")
+        if color is not None:
+            self._guarded("Recolor group", lambda: self._toolbox.recolor_group(group_id, color))
+
+    def _on_chip_double_clicked(self, index: QModelIndex) -> None:
+        if self._model.is_group(index):
+            group_id = self._model.group_id(index)
+            if group_id is not None:
+                self._recolor_group(group_id)
+            return
+        roi_id = self._model.roi_id(index)
+        if roi_id is None:
+            return
+        targets = self._edit_targets(roi_id)
+        row = self._model.row_for(roi_id)
+        color = self._choose_color(row.color_hex if row else "#f59e0b", "Choose ROI color")
+        if color is not None:
+            self._guarded("Set color", lambda: self._toolbox.set_roi_colors(targets, color))
+
+    def _reset_diameters_selected(self) -> None:
+        ids = self._selected_ids()
+        if ids:
+            self._guarded("Reset diameters", lambda: self._toolbox.reset_roi_diameters(ids))
+
+    def _shift_selected(self) -> None:
+        ids = self._selected_ids()
+        if not ids:
+            return
+        unit = self._model.unit()
+        dialog = ShiftDialog(len(ids), unit.label, self)
+        if dialog.exec() != dialog.DialogCode.Accepted:
+            return
+        dx, dy = dialog.shift()
+        self._guarded("Shift", lambda: self._toolbox.translate_rois(ids, from_display(dx, unit), from_display(dy, unit)))
+
+    def _reorder(self, target_for: Callable[[tuple[int, ...], list[int]], int]) -> None:
+        if not self._renumbering_allowed():
+            return
+        if self._model.sort_state() != (COLUMN_ID, False):
+            self._show_notice("Sort by # (ascending) to reorder ROIs.", error=True)
+            return
+        ids = self._selected_ids()
+        if not ids:
+            return
+        scope = movement_scope(ids, self._model.rows(), grouped=self._model.is_grouped_view())
+        if scope is None:
+            self._show_notice("Select ROIs from a single group to reorder them.", error=True)
+            return
+        target = target_for(scope, ids)
+        self._guarded("Reorder", lambda: self._toolbox.move_in_order(ids, target, scope_ids=scope))
+
+    def _move_selected(self, direction: int) -> None:
+        self._reorder(lambda scope, ids: step_target_index(scope, ids, direction))
+
+    def _move_to_edge(self, *, top: bool) -> None:
+        self._reorder(lambda scope, ids: 0 if top else len(scope))
+
+    def _delete_selected(self) -> None:
+        rois, headers = self._view_selection()
+        if rois or not headers:
+            ids = self._selected_ids()
+            if ids and self._renumbering_allowed():
+                self._guarded("Delete", lambda: self._toolbox.delete_rois(tuple(ids)))
+            return
+        # Only group headers are selected: delete the group, keep its ROIs.
+        group_ids = [gid for gid in (self._model.group_id(header) for header in headers) if gid is not None]
+        for group_id in group_ids:
+            self._guarded("Delete group", lambda gid=group_id: self._toolbox.delete_group(gid))
+
+    def _move_group(self, group_id: str, direction: int) -> None:
+        order = [group.group_id for group in self._toolbox.groups()]
+        if group_id in order:
+            self._guarded("Move group", lambda: self._toolbox.reorder_group(group_id, order.index(group_id) + direction))
+
+    # -- context menu ---------------------------------------------------------------------------
+
+    def _show_context_menu(self, pos: QPoint) -> None:
+        index = self._tree.indexAt(pos)
+        menu = QMenu(self)
+        if not index.isValid():
+            menu.addAction("New empty group…", self._group_selected_or_new_empty)
+        elif self._model.is_group(index):
+            self._fill_group_menu(menu, index)
+        else:
+            roi_id = self._model.roi_id(index)
+            if roi_id is not None and roi_id not in self._selection.selected_roi_ids():
+                self._selection.set_roi_selection({roi_id})
+            self._fill_roi_menu(menu)
+        if not menu.isEmpty():
+            menu.exec(self._tree.viewport().mapToGlobal(pos))
+
+    def _group_selected_or_new_empty(self) -> None:
+        name, accepted = QInputDialog.getText(
+            self, "New group", "Group name", text=f"Group {len(self._toolbox.groups()) + 1}"
+        )
+        if accepted:
+            self._guarded("New group", lambda: self._toolbox.create_group(name))
+
+    def _fill_roi_menu(self, menu: QMenu) -> None:
+        ids = self._selected_ids()
+        noun = "ROI" if len(ids) == 1 else f"{len(ids)} ROIs"
+        menu.addAction(f"Group {noun}…", self._group_selected_or_new)
+        groups = self._toolbox.groups()
+        if groups:
+            submenu = menu.addMenu("Add to group")
+            for group in groups:
+                submenu.addAction(group.name, lambda gid=group.group_id: self._add_selected_to_group(gid))
+        in_group = any(row.group_id is not None for row in self._model.rows() if row.roi_id in set(ids))
+        menu.addAction("Remove from group", self._ungroup_selected).setEnabled(in_group)
+        menu.addSeparator()
+        menu.addAction("Set color…", self._color_selected)
+        menu.addAction("Clear color", self._clear_color_selected)
+        menu.addAction("Reset diameters to default", self._reset_diameters_selected)
+        menu.addAction("Shift position…", self._shift_selected)
+        menu.addSeparator()
+        movable = (
+            self._model.sort_state() == (COLUMN_ID, False)
+            and movement_scope(ids, self._model.rows(), grouped=self._model.is_grouped_view()) is not None
+        )
+        for text, handler in (
+            ("Move to top", lambda: self._move_to_edge(top=True)),
+            ("Move up", lambda: self._move_selected(-1)),
+            ("Move down", lambda: self._move_selected(1)),
+            ("Move to bottom", lambda: self._move_to_edge(top=False)),
+        ):
+            menu.addAction(text, handler).setEnabled(movable)
+        menu.addSeparator()
+        menu.addAction(f"Delete {noun}", self._delete_selected)
+
+    def _fill_group_menu(self, menu: QMenu, index: QModelIndex) -> None:
+        group_id = self._model.group_id(index)
+        members = self._model.member_ids(index)
+        menu.addAction("Select members", lambda: self._selection.set_roi_selection(set(members))).setEnabled(bool(members))
+        if group_id is None:
+            return  # "Ungrouped" is not a real group: nothing else applies
+        order = [group.group_id for group in self._toolbox.groups()]
+        position = order.index(group_id) if group_id in order else 0
+        menu.addAction("Rename…", lambda: self._tree.edit(index))
+        menu.addAction("Set color…", lambda: self._recolor_group(group_id))
+        menu.addSeparator()
+        menu.addAction("Move group up", lambda: self._move_group(group_id, -1)).setEnabled(position > 0)
+        menu.addAction("Move group down", lambda: self._move_group(group_id, 1)).setEnabled(position < len(order) - 1)
+        menu.addSeparator()
+        menu.addAction(
+            "Delete group (keeps its ROIs)", lambda: self._guarded("Delete group", lambda: self._toolbox.delete_group(group_id))
+        )
