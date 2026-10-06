@@ -5,7 +5,7 @@ A horizontal strip of icon buttons docked to the top edge of the Image
 panel's canvas, on the left side of `panel.py`'s shared top bar (the
 cursor-readout and "i" info icons live in the rest of that bar, not here -
 see `panel.py`'s `_build_ui`) - deliberately separate from the Workflow
-panel's Transforms row (`panels/workflow/transforms_settings.py`), per the
+panel's Transforms row (`panels/image/transforms_settings.py`), per the
 maintainer's own distinction: Rotate/Crop/Flip/Measure resample the actual
 pixel grid (AGENTS.md's non-negotiable invariant on that), while the tools
 that belong here are the "soft" ones - visualization/inspection and ROI

@@ -56,7 +56,7 @@ from PyQt6.QtWidgets import QFrame, QLabel, QScrollArea, QVBoxLayout, QWidget
 from lspr_ui import get_active_theme
 
 from ...dataset import DatasetModule
-from ...image_tools import BackgroundModule, GeometryModule
+from ...image_tools import GeometryModule
 from ...selection import ReferenceFrameModule, SelectionModule
 from ...storage.session_coordinator import SessionCoordinator
 from ..ui_state import UiStateStore
@@ -204,28 +204,6 @@ def _build_dataset_section(
     return top_section, subsections
 
 
-def _build_image_tools_section(
-    parent: QWidget,
-    background: BackgroundModule,
-) -> tuple[CollapsibleSection, list[tuple[str, CollapsibleSection]]]:
-    """Image tools stage: nothing left to show here (2026-10-06).
-
-    Transforms and Mask left on 2026-10-02, Chromatic correction on
-    2026-10-06 and the last one, Background removal, the same day (maintainer
-    request: its form and apply toggle moved to the Image panel's
-    "Background" ribbon tab, `panels/image/background_tab.py`, together with
-    a new show-background toggle). The stage itself stays so the saved
-    stage/layout-preset mapping keeps working; it just points at the ribbon.
-    `background` is no longer used - kept in the signature so callers did not
-    have to change."""
-    del background
-    note = QLabel("Image tools live in the Image panel's ribbon tabs.", parent)
-    note.setWordWrap(True)
-    note.setStyleSheet(f"color: {get_active_theme().text_muted}; padding: 4px 2px;")
-    top_section = CollapsibleSection("Image tools:", note, expanded=False, parent=parent)
-    return top_section, []
-
-
 def _build_roi_selection_section(parent: QWidget) -> tuple[CollapsibleSection, list[tuple[str, CollapsibleSection]]]:
     """Ported from the source's ``roi_editor_section`` - just "Circles"
     today, since Rectangles/Freehand were removed dead placeholders (see
@@ -305,7 +283,6 @@ class WorkflowPanel(QWidget):
     def __init__(
         self,
         dataset: DatasetModule,
-        background: BackgroundModule,
         selection: SelectionModule,
         reference_frame: ReferenceFrameModule,
         session_coordinator: SessionCoordinator,
@@ -322,10 +299,6 @@ class WorkflowPanel(QWidget):
                 WorkflowStage.DATASET,
                 *_build_dataset_section(self, dataset, selection, reference_frame, session_coordinator, geometry, ui_state),
             ),
-            (
-                WorkflowStage.IMAGE_TOOLS,
-                *_build_image_tools_section(self, background),
-            ),
             (WorkflowStage.ROI_SELECTION, *_build_roi_selection_section(self)),
             (WorkflowStage.ANALYSIS, *_build_analysis_section(self)),
             (WorkflowStage.OUTPUTS, *_build_outputs_section(self)),
@@ -338,6 +311,12 @@ class WorkflowPanel(QWidget):
             for stage, _section, subsections in built
             for title, section in subsections
         ]
+
+        # A saved stage with no section any more (e.g. "IMAGE_TOOLS", removed
+        # from this panel 2026-10-06) is ignored: seeding it would collapse
+        # every section, so the hardcoded defaults apply instead.
+        if initial_stage is not None and all(stage is not initial_stage for stage, _s in self._sections):
+            initial_stage = None
 
         if initial_stage is not None:
             # Restores the stage the user last had open (2026-09-28 settings

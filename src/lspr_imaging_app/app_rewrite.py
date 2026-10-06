@@ -813,7 +813,6 @@ def build_main_window(
     # own remaining params, etc.), just not here.
     workflow = WorkflowPanel(
         dataset,
-        background,
         selection,
         reference_frame,
         session_coordinator,

@@ -77,7 +77,6 @@ from __future__ import annotations
 
 import itertools
 import logging
-import statistics
 from dataclasses import replace
 
 import numpy as np
@@ -121,10 +120,10 @@ from ...selection import AreaSelectionModule, HighlightRangeModule, ReferenceFra
 from ...selection.reference_frame_module import MODE_AUTO
 from ..cursor_overlay import CursorOverlay
 from ..ribbon_group import group_label_style, labeled_icon_group, vertical_separator
-from ..workflow.transforms_settings import TransformsSection
-from ...image_tools.chromatic.affine import identity_affine_matrix, invert_affine_matrix
+from .landmark_overlay import draw_landmarks
+from .slider_ticks import cube_slider_major_ticks, wavelength_slider_major_ticks
+from .transforms_settings import TransformsSection
 from ...image_tools.chromatic.auto_task import ChromaticAutoDetect
-from ...wavelength_color import wavelength_to_rgb
 from .area_selection_tool import AreaSelectionTool
 from .background_tab import BACKGROUND_INFO_HTML, BackgroundTab
 from .chromatic_tab import ChromaticCorrectionTab, ChromaticUiValues
@@ -151,6 +150,7 @@ from .mask_scope_toggle import MaskScopeToggle
 from .measure_controls import MeasureCalibrationControls
 from .measure_line_tool import MeasureLineTool
 from .overlay_style import OverlayStyle
+from .overlay_tint import OverlayTint
 from .render import ImageRenderer, RenderRequest, RenderResult
 from .rotate_line_tool import RotateLineTool
 from ..ui_state import UiStateStore
@@ -369,13 +369,7 @@ class ImagePanel(QWidget):
         # resolved (authored_mask, geometry, warp_affine, hidden) tuple so a
         # pure visibility/color/alpha change can redraw the tint without
         # re-resolving the mask or touching the async pixel-render pipeline.
-        self._mask_overlay_visible = True
-        self._mask_overlay_color = QColor(get_active_theme().mask_color)
-        self._mask_overlay_alpha = 0.5
-        if initial_mask_overlay is not None:
-            self._mask_overlay_visible = bool(initial_mask_overlay.visible)
-            self._mask_overlay_color = QColor(initial_mask_overlay.color)
-            self._mask_overlay_alpha = float(initial_mask_overlay.alpha)
+        self._mask_tint = OverlayTint(QColor(get_active_theme().mask_color), 0.5, initial_mask_overlay)
         self._mask_overlay_state: tuple[np.ndarray | None, GeometrySettings | None, np.ndarray | None, bool] | None = None
 
         # Histogram highlight-overlay display state (cosmetic only - see
@@ -385,13 +379,10 @@ class ImagePanel(QWidget):
         # already-displayed pixel array thresholded against
         # `HighlightRangeModule.current_range()` - so `_current_display_image`
         # caches that array instead of a resolved-mask tuple.
-        self._highlight_overlay_visible = True
-        self._highlight_overlay_color = QColor(get_active_theme().highlight_color)
-        self._highlight_overlay_alpha = 0.42  # the stable app's own literal (`_highlight_alpha`)
-        if initial_highlight_overlay is not None:
-            self._highlight_overlay_visible = bool(initial_highlight_overlay.visible)
-            self._highlight_overlay_color = QColor(initial_highlight_overlay.color)
-            self._highlight_overlay_alpha = float(initial_highlight_overlay.alpha)
+        # 0.42 = the stable app's own literal (`_highlight_alpha`).
+        self._highlight_tint = OverlayTint(
+            QColor(get_active_theme().highlight_color), 0.42, initial_highlight_overlay
+        )
         self._current_display_image: np.ndarray | None = None
         # Mirrors the last `frame_status_changed` emission (same "cached
         # alongside the signal" shape as `_tool_status` above) - lets a test
@@ -456,6 +447,13 @@ class ImagePanel(QWidget):
     # -- construction -------------------------------------------------------
 
     def _build_ui(self) -> None:
+        self._build_canvas()
+        self._build_toolbar_and_layout()
+
+    def _build_canvas(self) -> None:
+        """The pyqtgraph canvas: view, plot, image/overlay items, canvas tools and
+        the cursor readout. Only creates `self._*` attributes, so the toolbar and
+        layout code in `_build_toolbar_and_layout` can rely on them."""
         # Parent passed at construction, never set later via a layout that is
         # not itself attached yet - see CLAUDE.md's phantom-top-level-window
         # pitfall, which cost ~6 rounds of screen-recording analysis to find
@@ -491,16 +489,12 @@ class ImagePanel(QWidget):
         # `_image_item` - no transpose needed, unlike the stable app's
         # `ignore_mask_item` (col-major `pg.ImageItem`, hence its transpose
         # in `overlay_manager._update_ignore_mask_overlay`).
-        self._mask_overlay_item = pg.ImageItem(axisOrder="row-major")
-        self._mask_overlay_item.hide()
-        self._plot.addItem(self._mask_overlay_item)
+        self._mask_tint.attach(self._plot)
 
         # Histogram highlight-overlay tint (2026-10-02) - same row-major
-        # shape as `_mask_overlay_item` just above, a separate item so the
+        # shape as `_mask_tint.item` just above, a separate item so the
         # two tints can be shown/hidden/recolored independently.
-        self._highlight_overlay_item = pg.ImageItem(axisOrder="row-major")
-        self._highlight_overlay_item.hide()
-        self._plot.addItem(self._highlight_overlay_item)
+        self._highlight_tint.attach(self._plot)
 
         # Three curve items for the whole overlay rather than per-ROI items:
         # with NaN separators between ROIs, one PlotDataItem draws any number
@@ -567,6 +561,7 @@ class ImagePanel(QWidget):
         self._cursor_readout.move(6, 6)
         self._cursor_readout.hide()
 
+    def _build_toolbar_and_layout(self) -> None:
         # Top toolbar (2026-09-30, flipped from a vertical strip along the
         # canvas's left edge to a horizontal bar across its top - maintainer
         # request, "since frames are usually landscapes" - a left rail
@@ -606,18 +601,18 @@ class ImagePanel(QWidget):
         # mask_overlay_controls.py's module docstring for why this state
         # lives on the panel rather than on `MaskModule`.
         self._mask_overlay_controls = MaskOverlayControls(
-            visible=self._mask_overlay_visible,
-            color=self._mask_overlay_color,
-            alpha=self._mask_overlay_alpha,
+            visible=self._mask_tint.visible,
+            color=self._mask_tint.color,
+            alpha=self._mask_tint.alpha,
             parent=self,
         )
         # Second copy for the "View" tab (2026-10-06, maintainer request -
         # View collects every display option in one place). Same handlers,
         # and each copy mirrors the other so they never disagree.
         self._view_mask_overlay_controls = MaskOverlayControls(
-            visible=self._mask_overlay_visible,
-            color=self._mask_overlay_color,
-            alpha=self._mask_overlay_alpha,
+            visible=self._mask_tint.visible,
+            color=self._mask_tint.color,
+            alpha=self._mask_tint.alpha,
             parent=self,
         )
         for controls, other in (
@@ -639,9 +634,9 @@ class ImagePanel(QWidget):
         # "Histogram" ribbon tab, previously a seeded placeholder (see
         # tool_ribbon.py's module docstring).
         self._highlight_overlay_controls = HistogramHighlightOverlayControls(
-            visible=self._highlight_overlay_visible,
-            color=self._highlight_overlay_color,
-            alpha=self._highlight_overlay_alpha,
+            visible=self._highlight_tint.visible,
+            color=self._highlight_tint.color,
+            alpha=self._highlight_tint.alpha,
             parent=self,
         )
         self._highlight_overlay_controls.visibility_changed.connect(self._on_highlight_overlay_visibility_changed)
@@ -1241,9 +1236,9 @@ class ImagePanel(QWidget):
         module docstring) - this is the first subscriber to actually do so."""
         self._image_item.clear()
         self._no_data_item.hide()
-        self._mask_overlay_item.hide()
+        self._mask_tint.item.hide()
         self._mask_overlay_state = None
-        self._highlight_overlay_item.hide()
+        self._highlight_tint.item.hide()
         self._current_display_image = None
         self._sample_curve.clear()
         self._reference_curve.clear()
@@ -1445,87 +1440,15 @@ class ImagePanel(QWidget):
 
     # -- slider tick labels ---------------------------------------------------
 
-    def _wavelength_slider_major_ticks(self, values: tuple[float, ...]) -> dict[int, str]:
-        """Indices to label on the wavelength axis slider: evenly spaced by
-        array index (same shape as `_cube_slider_major_ticks` below), each
-        labeled with the *real* wavelength value at that index - never a
-        rounded "nice" boundary number.
-
-        **Real bug, fixed 2026-09-30** (maintainer report: clicked where the
-        slider said "400", landed on 470 nm). The first-pass port of the
-        stable app's `MainWindow._wavelength_slider_major_ticks` labeled
-        each tick with the nearest round 100 nm boundary (`"400"`,
-        `"500"`, ...) but positioned it at whichever *real* value happened
-        to be closest to that boundary - for a dense, roughly-uniform grid
-        the two are close enough not to notice, but this rewrite's
-        wavelength set is per-cube (`DatasetModule.wavelengths_for_cube`)
-        and can be genuinely irregular or gappy for a given cube (a cube
-        can be short a wavelength another cube has), so "closest real value
-        to 400" can legitimately be 470 - a label that is simply wrong
-        about what clicking it selects, not just imprecise. Labeling with
-        the real value at each shown index (rounded for display, matching
-        the stable app's own tick text width) makes the label always
-        exactly true, the same "no such thing as a mismatch" fix the cube
-        slider already got for free by not trying to hit round numbers in
-        the first place.
-
-        **Always labels both sides of a large gap** (added alongside
-        `DataAxisSlider._large_gap_boundaries`, which draws the scale-break
-        glyph there - see that widget's module docstring for the full
-        story of a same-day, now-reverted attempt to handle this with a
-        synthetic "0" tick instead): the routine "every Nth index" rule
-        below has no reason to land exactly on a gap's own edges, but a
-        break glyph with an unlabeled tick on one side would read as
-        "0 // <blank>" instead of "0 // 470". This mirrors the widget's own
-        gap-detection as an independent copy, not a cross-class import -
-        the widget reads pixel-rendering values, this reads the values
-        about to be handed to it; same math, different callers.
-
-        The gap this most commonly marks, for this slider specifically, is
-        a real one, not an artifact: `DatasetModule.wavelengths_for_cube`'s
-        docstring (`dataset/module.py`) has the confirmed domain fact and
-        code pointers - `0.0`, when present, is the dataset's dark/
-        background frame (LED off), a real image but not a spectral sample
-        point, which is exactly why it sits far in value from the first
-        real wavelength."""
-        count = len(values)
-        if count < 2:
-            return {}
-        interval = self._nice_count_interval(count)
-        majors = {index: f"{values[index]:.0f}" for index in range(0, count, interval)}
-        if count >= 3:
-            gaps = [values[i + 1] - values[i] for i in range(count - 1)]
-            positive_gaps = [gap for gap in gaps if gap > 0]
-            typical_gap = statistics.median(positive_gaps) if positive_gaps else 0.0
-            if typical_gap > 0:
-                for i, gap in enumerate(gaps):
-                    if gap > typical_gap * DataAxisSlider._GAP_BREAK_RATIO:
-                        majors[i] = f"{values[i]:.0f}"
-                        majors[i + 1] = f"{values[i + 1]:.0f}"
-        return majors
-
-    def _cube_slider_major_ticks(self, values: tuple[int, ...]) -> dict[int, str]:
-        """Indices to label on the cube axis slider: the raw cube index at a
-        "nice" interval. Ported from the stable app's
-        `MainWindow._cube_slider_major_ticks` - **scoped down**: the
-        source's Cube/Time toggle (labeling by elapsed acquisition time
-        instead of raw index) is not ported, since the elapsed-seconds
-        mapping it reuses lives in the stable app's `AnalysisController`,
-        which has no equivalent on this branch yet. See the rewrite status
-        doc's gap list."""
-        count = len(values)
-        if count < 2:
-            return {}
-        interval = self._nice_count_interval(count)
-        return {index: str(values[index]) for index in range(0, count, interval)}
+    @staticmethod
+    def _wavelength_slider_major_ticks(values: tuple[float, ...]) -> dict[int, str]:
+        """See `slider_ticks.wavelength_slider_major_ticks`."""
+        return wavelength_slider_major_ticks(values)
 
     @staticmethod
-    def _nice_count_interval(count: int, target_ticks: int = 8) -> int:
-        candidates = (1, 2, 5, 10, 20, 25, 50, 100, 200, 500, 1000)
-        for candidate in candidates:
-            if count / candidate <= target_ticks:
-                return candidate
-        return candidates[-1]
+    def _cube_slider_major_ticks(values: tuple[int, ...]) -> dict[int, str]:
+        """See `slider_ticks.cube_slider_major_ticks`."""
+        return cube_slider_major_ticks(values)
 
     # -- rendering ----------------------------------------------------------
 
@@ -1549,7 +1472,7 @@ class ImagePanel(QWidget):
         if not cubes:
             self._update_mask_overlay(None, None, None, hidden=True)
             self._current_display_image = None
-            self._highlight_overlay_item.hide()
+            self._highlight_tint.item.hide()
             return
         cube_index = self._current_cube()
         wavelength_nm = self._current_wavelength()
@@ -1663,7 +1586,7 @@ class ImagePanel(QWidget):
         else:
             self._image_item.setImage(estimate, autoLevels=True)
         self._no_data_item.hide()
-        self._highlight_overlay_item.hide()
+        self._highlight_tint.item.hide()
         finite = estimate[np.isfinite(estimate)]
         spread = f", range {finite.min():.0f}-{finite.max():.0f}" if finite.size else ""
         self._set_frame_status(
@@ -1768,117 +1691,22 @@ class ImagePanel(QWidget):
         self.chromatic_view_changed.emit(self._landmark_overlay_visible, self._landmark_all_wavelengths)
 
     def _draw_landmarks(self) -> None:
-        """Chromatic landmarks (display only), each wavelength in its own colour.
-
-        Positions are in processed image space, like ROIs. *Estimated* =
-        tracked on the image, only at the wavelengths that were tracked
-        (crosses). *Fitted* = reference positions pushed through the fitted
-        model, at every wavelength (dots), whether or not the correction is
-        switched on.
-
-        Current-wavelength mode: a dot per landmark, a cross where it was
-        estimated, and a short line joining each cross to its dot (the misfit,
-        so a landmark that does not agree with the fit is plain to see).
-        All-wavelengths mode: a small dot per landmark per wavelength of the
-        reference cube joined by a line per landmark (the fitted shift path),
-        plus a cross at every estimated position.
-
-        **While the correction is switched on, every position is shown
-        corrected**: pushed through the inverse of that wavelength's model, i.e.
-        expressed in the reference frame. Each landmark's dots then fall exactly
-        on one point and its crosses scatter around that point by the fit error,
-        so the overlay is a direct check of the correction. Switched off, the
-        raw positions are shown (the chromatic shift itself)."""
+        """Chromatic landmarks (display only); drawing rules in
+        `landmark_overlay.draw_landmarks`."""
         self._landmark_observed_item.clear()
         self._landmark_fitted_item.clear()
         self._landmark_line_item.clear()
         if not self._landmark_overlay_visible or self._active_tool.active() in _PREVIEW_TOOLS:
             return
-        reference = self._chromatic.settings()
-        if reference.reference_wavelength_nm is None:
-            return
-        reference_cube = int(reference.reference_spectral_cube_index)
-        reference_marks = self._chromatic.landmarks_for_image((reference_cube, float(reference.reference_wavelength_nm)))
-        if not reference_marks:
-            return
-        base = np.array([[mark.x_px, mark.y_px] for mark in reference_marks], dtype=np.float64)
-        ids = [mark.landmark_id for mark in reference_marks]
-
-        corrected = bool(reference.chromatic_correction_enabled)
-
-        def correction_for(wavelength_nm: float) -> np.ndarray:
-            """Matrix taking this wavelength's raw positions into what is shown."""
-            if not corrected:
-                return identity_affine_matrix()
-            return invert_affine_matrix(self._chromatic.fitted_affine_for((reference_cube, float(wavelength_nm))))
-
-        def shown(points: np.ndarray, wavelength_nm: float) -> np.ndarray:
-            matrix = correction_for(wavelength_nm)
-            return points @ matrix[:, :2].T + matrix[:, 2]
-
-        def fitted_at(wavelength_nm: float) -> np.ndarray:
-            matrix = self._chromatic.fitted_affine_for((reference_cube, float(wavelength_nm)))
-            return shown(base @ matrix[:, :2].T + matrix[:, 2], wavelength_nm)
-
-        def estimated_at(wavelength_nm: float) -> dict[int, tuple[float, float]]:
-            marks = self._chromatic.landmarks_for_image((reference_cube, float(wavelength_nm)))
-            if not marks:
-                return {}
-            moved = shown(np.array([[mark.x_px, mark.y_px] for mark in marks], dtype=np.float64), wavelength_nm)
-            return {mark.landmark_id: (float(x), float(y)) for mark, (x, y) in zip(marks, moved)}
-
-        if self._landmark_all_wavelengths:
-            wavelengths = sorted(w for w in self._dataset.wavelengths_for_cube(reference_cube) if w > 0.0)
-            dot_x, dot_y, dot_brushes = [], [], []
-            cross_x, cross_y, cross_pens = [], [], []
-            path = {landmark_id: ([], []) for landmark_id in ids}
-            for wavelength in wavelengths:
-                color = QColor(*wavelength_to_rgb(wavelength))
-                estimated = estimated_at(wavelength)
-                fitted = fitted_at(wavelength)
-                for index, landmark_id in enumerate(ids):
-                    dot_x.append(fitted[index, 0])
-                    dot_y.append(fitted[index, 1])
-                    dot_brushes.append(pg.mkBrush(color))
-                    path[landmark_id][0].append(fitted[index, 0])
-                    path[landmark_id][1].append(fitted[index, 1])
-                    if landmark_id in estimated:
-                        cross_x.append(estimated[landmark_id][0])
-                        cross_y.append(estimated[landmark_id][1])
-                        cross_pens.append(pg.mkPen(color, width=1.5))
-            line_x, line_y = [], []
-            for xs, ys in path.values():
-                line_x += xs + [np.nan]
-                line_y += ys + [np.nan]
-            self._landmark_line_item.setData(line_x, line_y, pen=pg.mkPen(QColor(255, 255, 255, 110), width=1))
-            self._landmark_fitted_item.setData(dot_x, dot_y, symbol="o", size=5, pen=pg.mkPen(None), brush=dot_brushes)
-            if cross_x:
-                self._landmark_observed_item.setData(cross_x, cross_y, symbol="+", size=10, pen=cross_pens, brush=pg.mkBrush(None))
-            return
-
-        wavelength = float(self._current_wavelength())
-        color = QColor(*wavelength_to_rgb(wavelength))
-        fitted = fitted_at(wavelength)
-        self._landmark_fitted_item.setData(
-            fitted[:, 0], fitted[:, 1], symbol="o", size=7, pen=pg.mkPen(None), brush=pg.mkBrush(color)
-        )
-        if int(self._current_cube()) != reference_cube:
-            return
-        estimated = estimated_at(wavelength)
-        if not estimated:
-            return
-        cross_x, cross_y, line_x, line_y = [], [], [], []
-        for index, landmark_id in enumerate(ids):
-            if landmark_id not in estimated:
-                continue
-            ex, ey = estimated[landmark_id]
-            cross_x.append(ex)
-            cross_y.append(ey)
-            line_x += [ex, fitted[index, 0], np.nan]
-            line_y += [ey, fitted[index, 1], np.nan]
-        self._landmark_line_item.setData(line_x, line_y, pen=pg.mkPen(color, width=1.5))
-        self._landmark_observed_item.setData(
-            cross_x, cross_y, symbol="+", size=14, pen=pg.mkPen(color, width=2), brush=pg.mkBrush(None)
+        draw_landmarks(
+            self._chromatic,
+            self._dataset,
+            self._landmark_observed_item,
+            self._landmark_fitted_item,
+            self._landmark_line_item,
+            current_cube=self._current_cube(),
+            current_wavelength=self._current_wavelength(),
+            all_wavelengths=self._landmark_all_wavelengths,
         )
 
     def _draw_crop_outline(self) -> None:
@@ -1914,22 +1742,14 @@ class ImagePanel(QWidget):
         pixel-render pipeline at all - none of those three controls change
         what is *computed*, only how the already-resolved mask is drawn."""
         self._mask_overlay_state = (authored_mask, geometry, warp_affine, hidden)
-        if hidden or not self._mask_overlay_visible or authored_mask is None or geometry is None:
-            self._mask_overlay_item.hide()
+        if hidden or not self._mask_tint.visible or authored_mask is None or geometry is None:
+            self._mask_tint.item.hide()
             return
         mask = resolve_external_mask(authored_mask, geometry, warp_affine)
         if mask is None or not np.any(mask):
-            self._mask_overlay_item.hide()
+            self._mask_tint.item.hide()
             return
-        overlay = np.zeros((*mask.shape, 4), dtype=np.uint8)
-        overlay[mask] = (
-            self._mask_overlay_color.red(),
-            self._mask_overlay_color.green(),
-            self._mask_overlay_color.blue(),
-            int(round(self._mask_overlay_alpha * 255.0)),
-        )
-        self._mask_overlay_item.setImage(overlay, autoLevels=False)
-        self._mask_overlay_item.show()
+        self._mask_tint.paint(mask)
 
     def _redraw_mask_overlay_from_cache(self) -> None:
         if self._mask_overlay_state is not None:
@@ -1937,26 +1757,21 @@ class ImagePanel(QWidget):
             self._update_mask_overlay(authored_mask, geometry, warp_affine, hidden=hidden)
 
     def _emit_overlay_style(self, kind: str) -> None:
-        if kind == "mask":
-            style = OverlayStyle(self._mask_overlay_visible, self._mask_overlay_color.name(), self._mask_overlay_alpha)
-        else:
-            style = OverlayStyle(
-                self._highlight_overlay_visible, self._highlight_overlay_color.name(), self._highlight_overlay_alpha
-            )
-        self.overlay_style_changed.emit(kind, style)
+        tint = self._mask_tint if kind == "mask" else self._highlight_tint
+        self.overlay_style_changed.emit(kind, tint.style())
 
     def _on_mask_overlay_visibility_changed(self, visible: bool) -> None:
-        self._mask_overlay_visible = bool(visible)
+        self._mask_tint.visible = bool(visible)
         self._redraw_mask_overlay_from_cache()
         self._emit_overlay_style("mask")
 
     def _on_mask_overlay_color_changed(self, color: QColor) -> None:
-        self._mask_overlay_color = QColor(color)
+        self._mask_tint.color = QColor(color)
         self._redraw_mask_overlay_from_cache()
         self._emit_overlay_style("mask")
 
     def _on_mask_overlay_alpha_changed(self, alpha: float) -> None:
-        self._mask_overlay_alpha = float(alpha)
+        self._mask_tint.alpha = float(alpha)
         self._redraw_mask_overlay_from_cache()
         self._emit_overlay_style("mask")
 
@@ -1972,12 +1787,12 @@ class ImagePanel(QWidget):
         render, since the tint is a threshold over pixels already on
         screen - matches the stable app's own
         `_update_selected_intensity_overlay`."""
-        if not self._highlight_overlay_visible or self._current_display_image is None or self._show_background:
-            self._highlight_overlay_item.hide()
+        if not self._highlight_tint.visible or self._current_display_image is None or self._show_background:
+            self._highlight_tint.item.hide()
             return
         range_ = self._highlight_range.current_range()
         if range_ is None:
-            self._highlight_overlay_item.hide()
+            self._highlight_tint.item.hide()
             return
         lower, upper = range_
         image = self._current_display_image
@@ -1992,33 +1807,25 @@ class ImagePanel(QWidget):
         # Pixels without a value (NaN) are never selected and do not count as
         # "excluded" either: "everything in range" is judged on finite pixels.
         if not np.any(selection_mask) or bool(np.all(selection_mask[np.isfinite(image)])):
-            self._highlight_overlay_item.hide()
+            self._highlight_tint.item.hide()
             return
-        overlay = np.zeros((*selection_mask.shape, 4), dtype=np.uint8)
-        overlay[selection_mask] = (
-            self._highlight_overlay_color.red(),
-            self._highlight_overlay_color.green(),
-            self._highlight_overlay_color.blue(),
-            int(round(self._highlight_overlay_alpha * 255.0)),
-        )
-        self._highlight_overlay_item.setImage(overlay, autoLevels=False)
-        self._highlight_overlay_item.show()
+        self._highlight_tint.paint(selection_mask)
 
     def _on_highlight_range_changed(self, _range: tuple[float, float] | None) -> None:
         self._update_highlight_overlay()
 
     def _on_highlight_overlay_visibility_changed(self, visible: bool) -> None:
-        self._highlight_overlay_visible = bool(visible)
+        self._highlight_tint.visible = bool(visible)
         self._update_highlight_overlay()
         self._emit_overlay_style("highlight")
 
     def _on_highlight_overlay_color_changed(self, color: QColor) -> None:
-        self._highlight_overlay_color = QColor(color)
+        self._highlight_tint.color = QColor(color)
         self._update_highlight_overlay()
         self._emit_overlay_style("highlight")
 
     def _on_highlight_overlay_alpha_changed(self, alpha: float) -> None:
-        self._highlight_overlay_alpha = float(alpha)
+        self._highlight_tint.alpha = float(alpha)
         self._update_highlight_overlay()
         self._emit_overlay_style("highlight")
 

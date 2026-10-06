@@ -77,7 +77,7 @@ from PyQt6.QtWidgets import (
 
 from lspr_ui import GuiTheme, get_active_theme
 
-from ..workflow.transforms_settings import ROW_HEIGHT as _TRANSFORMS_ROW_HEIGHT
+from .transforms_settings import ROW_HEIGHT as _TRANSFORMS_ROW_HEIGHT
 from .canvas_tools import _BAR_MARGIN, _BUTTON_SIZE
 
 _CANVAS_TOOLS_ROW_HEIGHT = _BUTTON_SIZE + 2 * _BAR_MARGIN

@@ -5,7 +5,7 @@ under a row of icons.
 Factored out of `panels/image/panel.py` (2026-10-02, where this pattern was
 first built for the "Mask" tab's State/Visibility/Manual edit/Automatic
 edit groups) into this neutral, `panels/`-level home when
-`workflow/transforms_settings.py` needed the identical pattern for its own
+`image/transforms_settings.py` needed the identical pattern for its own
 new "Calibrate" group (Measure, split out from the rest of the Transforms
 row - see that module's docstring) - a plain top-level import from
 `panels/image/panel.py` would have been a real circular import
