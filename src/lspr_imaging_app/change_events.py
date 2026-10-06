@@ -29,7 +29,9 @@ class RoiCosmeticChange:
     # "session_restored" carries an empty `roi_ids` and means every ROI was
     # replaced at once by a session load - a subscriber that narrows work by
     # roi_id must treat it as "no narrowing possible".
-    reason: str  # "recolor" | "relabel" | "regroup" | "session_restored" - for logging only
+    # "renumbered" lists the ROIs whose number changed (a reorder): the ROIs
+    # themselves are unchanged, so nothing is recomputed.
+    reason: str  # "recolor" | "relabel" | "regroup" | "renumbered" | "session_restored" - for logging only
 
 
 @dataclass(frozen=True)

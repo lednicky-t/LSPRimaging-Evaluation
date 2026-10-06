@@ -85,7 +85,19 @@ The old app's spatial array-reordering feature
 (`_reorder_rois_by_position`/`_order_rois_as_array`/`_group_rois_by_column` -
 renumbering ROIs into row/column order) is not ported here either - it's a
 separate, UI-heavy feature distinct from `reorder_group` (which this module
-does implement, for *group* display order). Geometry-type switching
+does implement, for *group* display order).
+
+**Bulk commands for the ROI/Group table (2026-10-06)**: a ROI's id is its
+place in the list, so `reorder_rois`/`move_in_order` permute the ids (one undo
+step; `roi_ids_renumbered` carries the full old->new map, which is how
+selection and stored analysis results follow their ROI). Groups: `group_rois`,
+`add_rois_to_group`, `remove_rois_from_groups`, `delete_group`. A group has a
+base colour and each member a stored tint of it (`roi/palette.py`);
+`set_roi_colors` sets one by hand. Geometry: `translate_rois`, `place_rois`,
+`resize_rois`, `reset_roi_diameters` (bad sizes raise `ValueError` before
+anything changes). Undo of a grouping change restores fields onto the *same*
+group objects (`_snapshot`/`_restore`), never copies, so older undo steps that
+hold a group stay valid. Geometry-type switching
 (circle/annulus <-> mask, with mask-drawing) isn't built - no mask-editing
 UI exists yet in the rewrite to drive it.
 """
@@ -95,8 +107,9 @@ from __future__ import annotations
 import copy
 import itertools
 import logging
-from collections.abc import Callable
-from dataclasses import dataclass, replace
+import math
+from collections.abc import Callable, Collection, Sequence
+from dataclasses import dataclass, fields, replace
 
 import numpy as np
 from PyQt6.QtCore import QObject, pyqtSignal
@@ -106,8 +119,31 @@ from ..diagnostics import instrumented
 from ..image_tools.chromatic.affine import apply_affine_to_points
 from ..undo import FunctionCommand, undo_manager
 from .model import AreaRoi, AreaRoiDetectionSettings, AreaRoiGroup, RoiArrayGroup, RoiMask
+from .ordering import move_block, renumbering
+from .palette import first_free_tint_index, next_group_color, normalize_hex, tint_color
 
 logger = logging.getLogger(__name__)
+
+MIN_SAMPLE_DIAMETER_PX = 2.0
+"""Smallest sample diameter a ROI may be given (the stable app's dialogs used
+the same floor)."""
+
+DEFAULT_REFERENCE_COLOR_HEX = "#38bdf8"
+
+
+def _snapshot(obj: object) -> tuple[object, object]:
+    """``(obj, a deep copy of it)``. Undo restores the copy's field values
+    onto ``obj`` itself (`_restore`) rather than swapping in a copy, so every
+    other closure on the undo stack that holds ``obj`` keeps pointing at the
+    live object."""
+    return obj, copy.deepcopy(obj)
+
+
+def _restore(snapshot: tuple[object, object]) -> None:
+    obj, saved = snapshot
+    for field in fields(obj):
+        setattr(obj, field.name, copy.deepcopy(getattr(saved, field.name)))
+
 
 _CIRCLE_GEOMETRY_TYPES = ("circle", "annulus")
 """Geometry types whose only remapped field is the ROI center - radius/
@@ -378,24 +414,150 @@ class RoiToolbox(QObject):
         undo_manager.push(FunctionCommand("Add ROI", undo_fn=revert, redo_fn=apply))
         return roi_id
 
-    @instrumented("RoiToolbox.move_roi")
-    def move_roi(self, roi_id: int, x: float, y: float) -> None:
-        roi = self._rois[roi_id]
-        old_x, old_y = roi.center_x, roi.center_y
-        new_x, new_y = float(x), float(y)
-        if old_x == new_x and old_y == new_y:
+    # -- multi-ROI helpers ----------------------------------------------
+
+    def _require_rois(self, roi_ids: Collection[int]) -> list[AreaRoi]:
+        """The ROI objects for ``roi_ids``, in ascending id order. `KeyError`
+        naming any id that does not exist - a stale id is a caller bug, not
+        something to skip silently."""
+        ids = sorted({int(roi_id) for roi_id in roi_ids})
+        missing = [roi_id for roi_id in ids if roi_id not in self._rois]
+        if missing:
+            raise KeyError(f"no ROI with id {missing}")
+        return [self._rois[roi_id] for roi_id in ids]
+
+    # -- command API (§7): geometry of one or many ROIs --------------------
+    #
+    # Every bulk command is one undo step and one signal, however many ROIs
+    # it touches, and validates every ROI before changing any (it either
+    # applies to all or raises). Undo/redo closures hold the ROI *objects*,
+    # not ids, so they stay correct whatever renumbering happened around them.
+
+    def _set_positions(self, positions: dict[int, tuple[float, float]], label: str) -> None:
+        rois = self._require_rois(positions)
+        moves: list[tuple[AreaRoi, tuple[float, float], tuple[float, float]]] = []
+        for roi in rois:
+            x, y = float(positions[roi.area_roi_id][0]), float(positions[roi.area_roi_id][1])
+            if not (math.isfinite(x) and math.isfinite(y)):
+                raise ValueError(f"ROI {roi.area_roi_id}: position must be finite, got ({x}, {y})")
+            if (roi.center_x, roi.center_y) != (x, y):
+                moves.append((roi, (roi.center_x, roi.center_y), (x, y)))
+        if not moves:
             return
 
-        def apply() -> None:
-            roi.center_x, roi.center_y = new_x, new_y
-            self.geometry_changed.emit(RoiComputationalChange(roi_ids=(roi_id,), reason="moved"))
+        def write(pairs: list[tuple[AreaRoi, tuple[float, float]]]) -> None:
+            for roi, (x, y) in pairs:
+                roi.center_x, roi.center_y = x, y
+            ids = tuple(sorted(roi.area_roi_id for roi, _ in pairs))
+            self.geometry_changed.emit(RoiComputationalChange(roi_ids=ids, reason="moved"))
 
-        def revert() -> None:
-            roi.center_x, roi.center_y = old_x, old_y
-            self.geometry_changed.emit(RoiComputationalChange(roi_ids=(roi_id,), reason="moved"))
+        new_pairs = [(roi, new) for roi, _old, new in moves]
+        old_pairs = [(roi, old) for roi, old, _new in moves]
+        write(new_pairs)
+        undo_manager.push(FunctionCommand(label, undo_fn=lambda: write(old_pairs), redo_fn=lambda: write(new_pairs)))
 
-        apply()
-        undo_manager.push(FunctionCommand("Move ROI", undo_fn=revert, redo_fn=apply))
+    @instrumented("RoiToolbox.move_roi")
+    def move_roi(self, roi_id: int, x: float, y: float) -> None:
+        self._set_positions({roi_id: (x, y)}, "Move ROI")
+
+    @instrumented("RoiToolbox.translate_rois")
+    def translate_rois(self, roi_ids: Collection[int], dx: float, dy: float) -> None:
+        """Shift every ROI in ``roi_ids`` by (dx, dy) pixels: the multi-select
+        position edit that keeps the ROIs' arrangement."""
+        rois = self._require_rois(roi_ids)
+        self._set_positions(
+            {roi.area_roi_id: (roi.center_x + float(dx), roi.center_y + float(dy)) for roi in rois}, "Move ROIs"
+        )
+
+    @instrumented("RoiToolbox.place_rois")
+    def place_rois(self, roi_ids: Collection[int], *, x: float | None = None, y: float | None = None) -> None:
+        """Set the x and/or y of every ROI in ``roi_ids`` to one value
+        (``None`` leaves that coordinate alone). Typically one coordinate, to
+        line up a row or a column; giving both stacks the ROIs on one point."""
+        if x is None and y is None:
+            return
+        rois = self._require_rois(roi_ids)
+        self._set_positions(
+            {
+                roi.area_roi_id: (roi.center_x if x is None else float(x), roi.center_y if y is None else float(y))
+                for roi in rois
+            },
+            "Align ROIs",
+        )
+
+    def _set_diameters(
+        self,
+        targets: list[tuple[AreaRoi, tuple[float, float | None, float | None]]],
+        label: str,
+    ) -> None:
+        changes = []
+        for roi, new in targets:
+            old = (roi.sample_diameter_px, roi.reference_inner_diameter_px, roi.reference_outer_diameter_px)
+            if old != new:
+                changes.append((roi, old, new))
+        if not changes:
+            return
+
+        def write(pairs: list[tuple[AreaRoi, tuple[float, float | None, float | None]]]) -> None:
+            for roi, (sample, inner, outer) in pairs:
+                roi.sample_diameter_px, roi.reference_inner_diameter_px, roi.reference_outer_diameter_px = (
+                    sample, inner, outer,
+                )
+            ids = tuple(sorted(roi.area_roi_id for roi, _ in pairs))
+            self.geometry_changed.emit(RoiComputationalChange(roi_ids=ids, reason="resized"))
+
+        new_pairs = [(roi, new) for roi, _old, new in changes]
+        old_pairs = [(roi, old) for roi, old, _new in changes]
+        write(new_pairs)
+        undo_manager.push(FunctionCommand(label, undo_fn=lambda: write(old_pairs), redo_fn=lambda: write(new_pairs)))
+
+    @instrumented("RoiToolbox.resize_rois")
+    def resize_rois(
+        self,
+        roi_ids: Collection[int],
+        *,
+        sample_diameter_px: float | None = None,
+        reference_inner_diameter_px: float | None = None,
+        reference_outer_diameter_px: float | None = None,
+    ) -> None:
+        """Set one or more of the sample / reference-ring diameters on every
+        ROI in ``roi_ids``; a field left ``None`` is unchanged. A no-op (no
+        undo entry) if nothing differs.
+
+        Raises ``ValueError``, before changing anything, if the sample
+        diameter is below `MIN_SAMPLE_DIAMETER_PX` or not finite, or if a
+        ROI's reference ring would not satisfy ``0 <= inner < outer``. The
+        ring is checked against the diameters the ROI will actually use, so a
+        ROI that still inherits the default outer diameter is checked against
+        that default."""
+        rois = self._require_rois(roi_ids)
+        defaults = self._detection_settings
+        for value, name in (
+            (sample_diameter_px, "sample diameter"),
+            (reference_inner_diameter_px, "reference inner diameter"),
+            (reference_outer_diameter_px, "reference outer diameter"),
+        ):
+            if value is not None and not math.isfinite(float(value)):
+                raise ValueError(f"{name} must be a finite number, got {value!r}")
+        if sample_diameter_px is not None and float(sample_diameter_px) < MIN_SAMPLE_DIAMETER_PX:
+            raise ValueError(f"sample diameter must be at least {MIN_SAMPLE_DIAMETER_PX:g} px, got {float(sample_diameter_px):g}")
+        targets: list[tuple[AreaRoi, tuple[float, float | None, float | None]]] = []
+        for roi in rois:
+            new = (
+                roi.sample_diameter_px if sample_diameter_px is None else float(sample_diameter_px),
+                roi.reference_inner_diameter_px if reference_inner_diameter_px is None else float(reference_inner_diameter_px),
+                roi.reference_outer_diameter_px if reference_outer_diameter_px is None else float(reference_outer_diameter_px),
+            )
+            if reference_inner_diameter_px is not None or reference_outer_diameter_px is not None:
+                inner = new[1] if new[1] is not None else defaults.reference_inner_diameter_px
+                outer = new[2] if new[2] is not None else defaults.reference_outer_diameter_px
+                if not 0.0 <= inner < outer:
+                    raise ValueError(
+                        f"ROI {roi.area_roi_id}: the reference ring needs 0 <= inner < outer "
+                        f"(inner {inner:g} px, outer {outer:g} px)"
+                    )
+            targets.append((roi, new))
+        self._set_diameters(targets, "Resize ROI" if len(targets) == 1 else "Resize ROIs")
 
     @instrumented("RoiToolbox.resize_roi")
     def resize_roi(
@@ -406,29 +568,36 @@ class RoiToolbox(QObject):
         reference_inner_diameter_px: float | None = None,
         reference_outer_diameter_px: float | None = None,
     ) -> None:
-        """Set one or more of an ROI's sample / reference diameters.
-        Any field left `None` is unchanged. A no-op (no undo entry pushed)
-        if every given value already matches."""
-        roi = self._rois[roi_id]
-        old = (roi.sample_diameter_px, roi.reference_inner_diameter_px, roi.reference_outer_diameter_px)
-        new = (
-            float(sample_diameter_px) if sample_diameter_px is not None else roi.sample_diameter_px,
-            float(reference_inner_diameter_px) if reference_inner_diameter_px is not None else roi.reference_inner_diameter_px,
-            float(reference_outer_diameter_px) if reference_outer_diameter_px is not None else roi.reference_outer_diameter_px,
+        """One-ROI form of `resize_rois`."""
+        self.resize_rois(
+            (roi_id,),
+            sample_diameter_px=sample_diameter_px,
+            reference_inner_diameter_px=reference_inner_diameter_px,
+            reference_outer_diameter_px=reference_outer_diameter_px,
         )
-        if old == new:
-            return
 
-        def apply() -> None:
-            roi.sample_diameter_px, roi.reference_inner_diameter_px, roi.reference_outer_diameter_px = new
-            self.geometry_changed.emit(RoiComputationalChange(roi_ids=(roi_id,), reason="resized"))
+    @instrumented("RoiToolbox.reset_roi_diameters")
+    def reset_roi_diameters(self, roi_ids: Collection[int], *, sample: bool = True, reference: bool = True) -> None:
+        """Put the chosen diameters back to the shared defaults.
 
-        def revert() -> None:
-            roi.sample_diameter_px, roi.reference_inner_diameter_px, roi.reference_outer_diameter_px = old
-            self.geometry_changed.emit(RoiComputationalChange(roi_ids=(roi_id,), reason="resized"))
-
-        apply()
-        undo_manager.push(FunctionCommand("Resize ROI", undo_fn=revert, redo_fn=apply))
+        ``sample``: the sample diameter becomes the detection settings'
+        sample diameter. ``reference``: the ROI's own inner/outer overrides
+        are removed (``None``), so it follows the shared reference diameters
+        again, including when those change later."""
+        rois = self._require_rois(roi_ids)
+        defaults = self._detection_settings
+        targets = [
+            (
+                roi,
+                (
+                    float(defaults.sample_diameter_px) if sample else roi.sample_diameter_px,
+                    None if reference else roi.reference_inner_diameter_px,
+                    None if reference else roi.reference_outer_diameter_px,
+                ),
+            )
+            for roi in rois
+        ]
+        self._set_diameters(targets, "Reset ROI diameters")
 
     @instrumented("RoiToolbox.delete_roi")
     def delete_roi(self, roi_id: int) -> None:
@@ -467,8 +636,8 @@ class RoiToolbox(QObject):
         if not ids_to_delete:
             return
         removed_rois = {roi_id: self._rois[roi_id] for roi_id in ids_to_delete}
-        groups_before = copy.deepcopy(self._groups)
-        arrays_before = copy.deepcopy(self._array_groups)
+        groups_before = [_snapshot(group) for group in self._groups.values()]
+        arrays_before = [_snapshot(array) for array in self._array_groups.values()]
         original_max_id = max(self._rois) if self._rois else 0
         next_counter_before_delete = original_max_id + 1
 
@@ -506,8 +675,12 @@ class RoiToolbox(QObject):
                 restored[old_id] = roi
             restored.update(removed_rois)
             self._rois = restored
-            self._groups = copy.deepcopy(groups_before)
-            self._array_groups = copy.deepcopy(arrays_before)
+            for snapshot in groups_before:
+                _restore(snapshot)
+            for snapshot in arrays_before:
+                _restore(snapshot)
+            self._groups = {snapshot[0].group_id: snapshot[0] for snapshot in groups_before}
+            self._array_groups = {snapshot[0].array_id: snapshot[0] for snapshot in arrays_before}
             self._roi_id_counter = itertools.count(next_counter_before_delete)
             self.roi_ids_renumbered.emit(dict(reverse_id_map))
             self.geometry_changed.emit(RoiComputationalChange(roi_ids=tuple(sorted(removed_rois)), reason="added"))
@@ -563,6 +736,84 @@ class RoiToolbox(QObject):
         apply()
         undo_manager.push(FunctionCommand("Detect ROIs", undo_fn=revert, redo_fn=apply))
         return list(new_rois.keys())
+
+    # -- command API (§7): ROI order ---------------------------------------
+    #
+    # A ROI's id is its place in the list, so reordering is a permutation of
+    # the ids. Nothing is recomputed: the ROIs themselves are unchanged, and
+    # stored analysis results follow them through `roi_ids_renumbered` (see
+    # `AnalysisEngine.remap_roi_ids`). **Callers should not reorder while an
+    # analysis run is in flight** (`AnalysisEngine.is_running()`); the engine
+    # cancels the run if they do.
+
+    def _renumber(self, id_map: dict[int, int], label: str) -> None:
+        """Apply ``id_map`` (``{old_id: new_id}``, a permutation covering
+        **every** current ROI) as one undo step. Group and array membership
+        follow their ROIs. Emits `roi_ids_renumbered` with the full map (the
+        contract documented on that signal) and a cosmetic change for the ROIs
+        whose number changed."""
+        if set(id_map) != set(self._rois) or set(id_map.values()) != set(self._rois):
+            raise ValueError("a renumbering must be a permutation of the current ROI ids")
+        if all(old == new for old, new in id_map.items()):
+            return
+        reverse = {new: old for old, new in id_map.items()}
+
+        def apply(mapping: dict[int, int]) -> None:
+            by_current_id = dict(self._rois)
+            renumbered: dict[int, AreaRoi] = {}
+            for old, new in mapping.items():
+                roi = by_current_id[old]
+                roi.area_roi_id = new
+                renumbered[new] = roi
+            self._rois = dict(sorted(renumbered.items()))
+            for group in self._groups.values():
+                group.area_roi_ids = sorted(mapping[roi_id] for roi_id in group.area_roi_ids)
+            for array in self._array_groups.values():
+                array.member_area_roi_ids = [mapping[roi_id] for roi_id in array.member_area_roi_ids]
+            changed = tuple(sorted(new for old, new in mapping.items() if old != new))
+            self.roi_ids_renumbered.emit(dict(mapping))
+            self.cosmetic_changed.emit(RoiCosmeticChange(roi_ids=changed, reason="renumbered"))
+
+        apply(id_map)
+        undo_manager.push(FunctionCommand(label, undo_fn=lambda: apply(reverse), redo_fn=lambda: apply(id_map)))
+
+    @instrumented("RoiToolbox.reorder_rois")
+    def reorder_rois(self, new_order: Sequence[int]) -> None:
+        """Put the ROIs in ``new_order`` - every current id, once each, in
+        the order they should now appear. The ROI at position j takes the
+        j-th smallest id (1, 2, 3, ... when ids are contiguous)."""
+        order = [int(roi_id) for roi_id in new_order]
+        slots = sorted(self._rois)
+        if sorted(order) != slots:
+            raise ValueError("new_order must list every ROI id exactly once")
+        self._renumber(renumbering(order, slots), "Reorder ROIs")
+
+    @instrumented("RoiToolbox.move_in_order")
+    def move_in_order(
+        self, roi_ids: Collection[int], target_index: int, *, scope_ids: Collection[int] | None = None
+    ) -> None:
+        """Move the ROIs in ``roi_ids`` (as a block, keeping their relative
+        order) so the block starts at ``target_index``; see
+        `ordering.move_block` for how the index counts.
+
+        ``scope_ids`` is the list the user is looking at: omitted, all ROIs;
+        for a group's members, only those. Only the id numbers those ROIs
+        already hold are shuffled among themselves, so moving a ROI within
+        its group never changes the numbers of ROIs in other groups. Moving
+        one place up is ``target_index = position - 1``, down is
+        ``position + 1``, where position is the ROI's index in the scope list
+        sorted by id."""
+        slots = sorted(self._rois) if scope_ids is None else sorted({int(roi_id) for roi_id in scope_ids})
+        unknown = [roi_id for roi_id in slots if roi_id not in self._rois]
+        if unknown:
+            raise KeyError(f"no ROI with id {unknown}")
+        moved = sorted({int(roi_id) for roi_id in roi_ids})
+        outside = [roi_id for roi_id in moved if roi_id not in slots]
+        if outside:
+            raise ValueError(f"ROI ids {outside} are not in the list being reordered")
+        new_scope_order = move_block(slots, moved, target_index)
+        placement = renumbering(new_scope_order, slots)
+        self._renumber({roi_id: placement.get(roi_id, roi_id) for roi_id in sorted(self._rois)}, "Move ROIs")
 
     @instrumented("RoiToolbox.remap_all")
     def remap_all(
@@ -687,59 +938,260 @@ class RoiToolbox(QObject):
 
     # -- command API (§7): groups -----------------------------------------
 
+    # -- command API (§7): groups and colours -------------------------------
+    #
+    # A group has a base colour; a ROI that joins it is given a tint of that
+    # colour, stored on the ROI (`roi/palette.py`). Every command here is one
+    # undo step. Undo/redo restore the groups' fields onto the *same* group
+    # objects (never copies), so older undo entries that hold a group object
+    # stay valid when a later one is undone or redone.
+
+    def _require_group(self, group_id: str) -> AreaRoiGroup:
+        try:
+            return self._groups[group_id]
+        except KeyError:
+            raise KeyError(f"no group with id {group_id!r}") from None
+
+    def _capture_grouping(self, rois: Sequence[AreaRoi]) -> tuple:
+        groups = [_snapshot(group) for group in self._groups.values()]
+        return groups, [(roi, roi.sample_color_hex) for roi in rois]
+
+    def _restore_grouping(self, state: tuple) -> None:
+        groups, colors = state
+        for snapshot in groups:
+            _restore(snapshot)
+        self._groups = {snapshot[0].group_id: snapshot[0] for snapshot in groups}
+        for roi, color in colors:
+            roi.sample_color_hex = color
+
+    def _grouping_command(self, label: str, rois: Sequence[AreaRoi], reason: str, mutate: Callable[[], None]) -> None:
+        """Run ``mutate`` and record the change to the groups, and to the
+        stored colour of ``rois``, as one undo step. Nothing is recorded if
+        it changed nothing."""
+        before = self._capture_grouping(rois)
+        mutate()
+        after = self._capture_grouping(rois)
+        if [saved for _obj, saved in before[0]] == [saved for _obj, saved in after[0]] and before[1] == after[1]:
+            return
+
+        def emit() -> None:
+            ids = tuple(sorted(roi.area_roi_id for roi in rois))
+            self.cosmetic_changed.emit(RoiCosmeticChange(roi_ids=ids, reason=reason))
+
+        def undo() -> None:
+            self._restore_grouping(before)
+            emit()
+
+        def redo() -> None:
+            self._restore_grouping(after)
+            emit()
+
+        emit()
+        undo_manager.push(FunctionCommand(label, undo_fn=undo, redo_fn=redo))
+
+    def _join_group(self, group: AreaRoiGroup, rois: Sequence[AreaRoi]) -> None:
+        """Move ``rois`` into ``group`` (out of whatever group they were in),
+        giving each newcomer the first tint of the group's colour that no
+        member shows yet. A group emptied by the move is removed; a group that
+        was empty to begin with (created on purpose) is left alone."""
+        members = set(group.area_roi_ids)
+        joining = [roi for roi in rois if roi.area_roi_id not in members]
+        if not joining:
+            return
+        joining_ids = {roi.area_roi_id for roi in joining}
+        for other in list(self._groups.values()):
+            if other is group or not (joining_ids & set(other.area_roi_ids)):
+                continue
+            other.area_roi_ids = [roi_id for roi_id in other.area_roi_ids if roi_id not in joining_ids]
+            if not other.area_roi_ids:
+                del self._groups[other.group_id]
+        used = [self._rois[roi_id].sample_color_hex for roi_id in group.area_roi_ids]
+        group.area_roi_ids = sorted(members | joining_ids)
+        for roi in joining:
+            roi.sample_color_hex = tint_color(group.sample_color_hex, first_free_tint_index(group.sample_color_hex, used))
+            used.append(roi.sample_color_hex)
+
+    def _new_group(self, name: str, sample_color_hex: str | None, reference_color_hex: str) -> AreaRoiGroup:
+        name = name.strip()
+        if not name:
+            raise ValueError("a group needs a name")
+        base = next_group_color(g.sample_color_hex for g in self._groups.values()) if sample_color_hex is None else normalize_hex(sample_color_hex)
+        group = AreaRoiGroup(
+            group_id=f"group_{next(self._group_id_counter)}",
+            name=name,
+            sample_color_hex=base,
+            reference_color_hex=normalize_hex(reference_color_hex),
+        )
+        self._groups[group.group_id] = group
+        return group
+
     @instrumented("RoiToolbox.create_group")
-    def create_group(self, name: str, *, sample_color_hex: str = "#f59e0b", reference_color_hex: str = "#38bdf8") -> str:
-        group_id = f"group_{next(self._group_id_counter)}"
-        group = AreaRoiGroup(group_id=group_id, name=name, sample_color_hex=sample_color_hex, reference_color_hex=reference_color_hex)
+    def create_group(
+        self,
+        name: str,
+        *,
+        sample_color_hex: str | None = None,
+        reference_color_hex: str = DEFAULT_REFERENCE_COLOR_HEX,
+    ) -> str:
+        """A new, empty group. ``sample_color_hex`` is its base colour;
+        omitted, the next unused colour of `palette.GROUP_BASE_COLORS`."""
+        created: list[str] = []
+        self._grouping_command(
+            "Create group", [], "regroup",
+            lambda: created.append(self._new_group(name, sample_color_hex, reference_color_hex).group_id),
+        )
+        return created[0]
 
-        def apply() -> None:
-            self._groups[group_id] = group
-            self.cosmetic_changed.emit(RoiCosmeticChange(roi_ids=(), reason="regroup"))
+    @instrumented("RoiToolbox.group_rois")
+    def group_rois(
+        self,
+        roi_ids: Collection[int],
+        name: str,
+        *,
+        sample_color_hex: str | None = None,
+        reference_color_hex: str = DEFAULT_REFERENCE_COLOR_HEX,
+    ) -> str:
+        """A new group holding ``roi_ids`` (taken out of any group they were
+        in), each with its own tint: "group the selection" in one undo step."""
+        rois = self._require_rois(roi_ids)
+        created: list[str] = []
 
-        def revert() -> None:
-            self._groups.pop(group_id, None)
-            self.cosmetic_changed.emit(RoiCosmeticChange(roi_ids=(), reason="regroup"))
+        def mutate() -> None:
+            group = self._new_group(name, sample_color_hex, reference_color_hex)
+            created.append(group.group_id)
+            self._join_group(group, rois)
 
-        apply()
-        undo_manager.push(FunctionCommand("Create group", undo_fn=revert, redo_fn=apply))
-        return group_id
+        self._grouping_command("Group ROIs", rois, "regroup", mutate)
+        return created[0]
+
+    @instrumented("RoiToolbox.add_rois_to_group")
+    def add_rois_to_group(self, roi_ids: Collection[int], group_id: str) -> None:
+        """Enforces "at most one group per ROI": each ROI leaves its current
+        group (which is removed if that empties it) and takes the next free
+        tint of ``group_id``'s colour. ROIs already in the group are left as
+        they are."""
+        group = self._require_group(group_id)
+        rois = self._require_rois(roi_ids)
+        self._grouping_command("Add ROIs to group", rois, "regroup", lambda: self._join_group(group, rois))
+
+    @instrumented("RoiToolbox.add_to_group")
+    def add_to_group(self, roi_id: int, group_id: str) -> None:
+        """One-ROI form of `add_rois_to_group`."""
+        self.add_rois_to_group((roi_id,), group_id)
+
+    @instrumented("RoiToolbox.remove_rois_from_groups")
+    def remove_rois_from_groups(self, roi_ids: Collection[int], *, group_id: str | None = None) -> None:
+        """Take ``roi_ids`` out of their groups ("ungroup"), or, with
+        ``group_id``, only out of that group. A group this empties is removed.
+        A ROI that leaves a group loses its stored tint (back to the default
+        colour)."""
+        if group_id is not None:
+            self._require_group(group_id)
+        rois = self._require_rois(roi_ids)
+
+        def mutate() -> None:
+            ids = {roi.area_roi_id for roi in rois}
+            ungrouped: set[int] = set()
+            for group in list(self._groups.values()):
+                if group_id is not None and group.group_id != group_id:
+                    continue
+                leaving = ids & set(group.area_roi_ids)
+                if not leaving:
+                    continue
+                ungrouped |= leaving
+                group.area_roi_ids = [roi_id for roi_id in group.area_roi_ids if roi_id not in leaving]
+                if not group.area_roi_ids:
+                    del self._groups[group.group_id]
+            for roi in rois:
+                if roi.area_roi_id in ungrouped:
+                    roi.sample_color_hex = None
+
+        self._grouping_command("Ungroup ROIs", rois, "regroup", mutate)
+
+    @instrumented("RoiToolbox.remove_from_group")
+    def remove_from_group(self, roi_id: int, group_id: str) -> None:
+        """One-ROI form of `remove_rois_from_groups`, for one group."""
+        self.remove_rois_from_groups((roi_id,), group_id=group_id)
+
+    @instrumented("RoiToolbox.delete_group")
+    def delete_group(self, group_id: str) -> None:
+        """Remove a group; its ROIs become ungrouped (and lose their tint).
+        The ROIs themselves are not deleted."""
+        group = self._require_group(group_id)
+        members = self._require_rois(group.area_roi_ids)
+
+        def mutate() -> None:
+            del self._groups[group_id]
+            for roi in members:
+                roi.sample_color_hex = None
+
+        self._grouping_command("Delete group", members, "regroup", mutate)
 
     @instrumented("RoiToolbox.rename_group")
     def rename_group(self, group_id: str, name: str) -> None:
-        group = self._groups[group_id]
-        old_name = group.name
-        if old_name == name:
-            return
-
-        def apply() -> None:
-            group.name = name
-            self.cosmetic_changed.emit(RoiCosmeticChange(roi_ids=tuple(group.area_roi_ids), reason="relabel"))
-
-        def revert() -> None:
-            group.name = old_name
-            self.cosmetic_changed.emit(RoiCosmeticChange(roi_ids=tuple(group.area_roi_ids), reason="relabel"))
-
-        apply()
-        undo_manager.push(FunctionCommand("Rename group", undo_fn=revert, redo_fn=apply))
+        group = self._require_group(group_id)
+        name = name.strip()
+        if not name:
+            raise ValueError("a group needs a name")
+        members = self._require_rois(group.area_roi_ids)
+        self._grouping_command("Rename group", members, "relabel", lambda: setattr(group, "name", name))
 
     @instrumented("RoiToolbox.recolor_group")
-    def recolor_group(self, group_id: str, sample_color_hex: str, reference_color_hex: str | None = None) -> None:
-        group = self._groups[group_id]
-        old = (group.sample_color_hex, group.reference_color_hex)
-        new = (sample_color_hex, reference_color_hex if reference_color_hex is not None else group.reference_color_hex)
+    def recolor_group(
+        self,
+        group_id: str,
+        sample_color_hex: str,
+        reference_color_hex: str | None = None,
+        *,
+        repaint_members: bool = True,
+    ) -> None:
+        """Change the group's base colour. With ``repaint_members`` (the
+        default) every member is given a fresh tint of the new colour, in
+        order of id, **replacing any colour set on a member by hand**; without
+        it only the group's own colour changes."""
+        group = self._require_group(group_id)
+        base = normalize_hex(sample_color_hex)
+        reference = None if reference_color_hex is None else normalize_hex(reference_color_hex)
+        members = self._require_rois(group.area_roi_ids)
+
+        def mutate() -> None:
+            group.sample_color_hex = base
+            if reference is not None:
+                group.reference_color_hex = reference
+            if repaint_members:
+                for index, roi in enumerate(members):
+                    roi.sample_color_hex = tint_color(base, index)
+
+        self._grouping_command("Recolor group", members, "recolor", mutate)
+
+    @instrumented("RoiToolbox.set_roi_colors")
+    def set_roi_colors(self, roi_ids: Collection[int], sample_color_hex: str | None) -> None:
+        """Give every ROI in ``roi_ids`` this colour by hand, or, with
+        ``None``, remove its stored colour (the default colour is used). Stays
+        until the ROI joins a group or its group is recolored."""
+        rois = self._require_rois(roi_ids)
+        color = None if sample_color_hex is None else normalize_hex(sample_color_hex)
+
+        def mutate() -> None:
+            for roi in rois:
+                roi.sample_color_hex = color
+
+        self._grouping_command("Set ROI color" if len(rois) == 1 else "Set ROI colors", rois, "recolor", mutate)
+
+    @instrumented("RoiToolbox.set_roi_label")
+    def set_roi_label(self, roi_id: int, label: str | None) -> None:
+        """The ROI's user-facing name; empty or ``None`` removes it."""
+        (roi,) = self._require_rois((roi_id,))
+        old, new = roi.label, ((label or "").strip() or None)
         if old == new:
             return
 
-        def apply() -> None:
-            group.sample_color_hex, group.reference_color_hex = new
-            self.cosmetic_changed.emit(RoiCosmeticChange(roi_ids=tuple(group.area_roi_ids), reason="recolor"))
+        def write(value: str | None) -> None:
+            roi.label = value
+            self.cosmetic_changed.emit(RoiCosmeticChange(roi_ids=(roi.area_roi_id,), reason="relabel"))
 
-        def revert() -> None:
-            group.sample_color_hex, group.reference_color_hex = old
-            self.cosmetic_changed.emit(RoiCosmeticChange(roi_ids=tuple(group.area_roi_ids), reason="recolor"))
-
-        apply()
-        undo_manager.push(FunctionCommand("Recolor group", undo_fn=revert, redo_fn=apply))
+        write(new)
+        undo_manager.push(FunctionCommand("Rename ROI", undo_fn=lambda: write(old), redo_fn=lambda: write(new)))
 
     @instrumented("RoiToolbox.reorder_group")
     def reorder_group(self, group_id: str, new_index: int) -> None:
@@ -757,67 +1209,14 @@ class RoiToolbox(QObject):
         if order == old_order:
             return
 
-        def apply() -> None:
-            self._groups = {gid: self._groups[gid] for gid in order}
+        def write(ids: list[str]) -> None:
+            self._groups = {gid: self._groups[gid] for gid in ids}
             self.cosmetic_changed.emit(RoiCosmeticChange(roi_ids=(), reason="regroup"))
 
-        def revert() -> None:
-            self._groups = {gid: self._groups[gid] for gid in old_order}
-            self.cosmetic_changed.emit(RoiCosmeticChange(roi_ids=(), reason="regroup"))
-
-        apply()
-        undo_manager.push(FunctionCommand("Reorder group", undo_fn=revert, redo_fn=apply))
-
-    @instrumented("RoiToolbox.add_to_group")
-    def add_to_group(self, roi_id: int, group_id: str) -> None:
-        """Enforces "at most one group per ROI": removes `roi_id` from
-        whichever other group it currently belongs to (if any) before
-        adding it to `group_id`."""
-        if roi_id not in self._rois or group_id not in self._groups:
-            return
-        previous_group = self.group_for_roi(roi_id)
-        if previous_group is not None and previous_group.group_id == group_id:
-            return
-        target_group = self._groups[group_id]
-
-        def apply() -> None:
-            if previous_group is not None:
-                previous_group.area_roi_ids = [rid for rid in previous_group.area_roi_ids if rid != roi_id]
-            if roi_id not in target_group.area_roi_ids:
-                target_group.area_roi_ids = sorted(set(target_group.area_roi_ids) | {roi_id})
-            self.cosmetic_changed.emit(RoiCosmeticChange(roi_ids=(roi_id,), reason="regroup"))
-
-        def revert() -> None:
-            target_group.area_roi_ids = [rid for rid in target_group.area_roi_ids if rid != roi_id]
-            if previous_group is not None:
-                previous_group.area_roi_ids = sorted(set(previous_group.area_roi_ids) | {roi_id})
-            self.cosmetic_changed.emit(RoiCosmeticChange(roi_ids=(roi_id,), reason="regroup"))
-
-        apply()
-        undo_manager.push(FunctionCommand("Add ROI to group", undo_fn=revert, redo_fn=apply))
-
-    @instrumented("RoiToolbox.remove_from_group")
-    def remove_from_group(self, roi_id: int, group_id: str) -> None:
-        """Removes `roi_id` from `group_id`; prunes the group entirely if
-        that empties it (matching the old app's `_ungroup_selected_rois`)."""
-        group = self._groups.get(group_id)
-        if group is None or roi_id not in group.area_roi_ids:
-            return
-        old_ids = list(group.area_roi_ids)
-
-        def apply() -> None:
-            group.area_roi_ids = [rid for rid in group.area_roi_ids if rid != roi_id]
-            if not group.area_roi_ids:
-                self._groups.pop(group_id, None)
-            self.cosmetic_changed.emit(RoiCosmeticChange(roi_ids=(roi_id,), reason="regroup"))
-
-        def revert() -> None:
-            group.area_roi_ids = old_ids
-            self._groups[group_id] = group
-            self.cosmetic_changed.emit(RoiCosmeticChange(roi_ids=(roi_id,), reason="regroup"))
-
-        apply()
-        undo_manager.push(FunctionCommand("Remove ROI from group", undo_fn=revert, redo_fn=apply))
+        write(order)
+        undo_manager.push(
+            FunctionCommand("Reorder group", undo_fn=lambda: write(old_order), redo_fn=lambda: write(order))
+        )
 
     # -- request methods (other modules/panels ask; this module decides) ---
 
