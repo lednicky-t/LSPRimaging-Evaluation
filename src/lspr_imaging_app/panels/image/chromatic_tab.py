@@ -6,7 +6,7 @@ whether it worked, and switch it on or off.
 
 Layout (one ribbon row, captioned icon groups like the Mask tab):
 
-    [Run] [gear]  |  [eye] [stack]  |  [wand] [trash]  |  status text
+    [Run] [gear]  |  [flag-point] [stack]  |  [wand] [trash]  |  status text
      Detect            View                Correction            progress bar (only while running)
 
 - **Run** finds landmarks on the reference frame and follows them through
@@ -19,7 +19,7 @@ Layout (one ribbon row, captioned icon groups like the Mask tab):
   one static correction is used. Editing a value by hand deselects both
   presets. The values are saved (app settings) when a run succeeds, i.e.
   when they were actually applied.
-- **View group:** show/hide the landmark overlay (eye), and choose whether
+- **View group:** show/hide the landmark overlay (point with a gold flag), and choose whether
   it shows the current wavelength only or every wavelength at once (stack).
   Each wavelength has its own colour (`wavelength_color.py`). With the
   correction switched on the landmarks are shown corrected, so each one's
@@ -44,7 +44,8 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 
-from PyQt6.QtCore import Qt, pyqtSignal
+from PyQt6.QtCore import QPointF, Qt, pyqtSignal
+from PyQt6.QtGui import QColor, QIcon, QPainter, QPen, QPixmap, QPolygonF
 from PyQt6.QtWidgets import (
     QButtonGroup,
     QCheckBox,
@@ -102,6 +103,37 @@ class ChromaticUiValues:
     border_percent: float = 5.0
     max_step_px: float = 5.0
     feature_diameter_px: float | None = None  # None = measure from the image
+
+
+def _landmarks_icon(shown: bool, on_color: str, flag_color: str, off_color: str) -> QIcon:
+    """Landmark visibility icon: a golf-style flag on a pole standing in a flat ellipse (the green). Shown: blue
+    green and pole, gold flag. Hidden: all muted, crossed out (slash from top
+    right to bottom left, as the other off-state icons)."""
+    size = _RENDER_SIZE
+    pixmap = QPixmap(size, size)
+    pixmap.fill(Qt.GlobalColor.transparent)
+    painter = QPainter(pixmap)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+    body = QColor(on_color if shown else off_color)
+    flag = QColor(flag_color if shown else off_color)
+    x = size * 0.42
+    pen = QPen(body, _STROKE_WIDTH * 1.2)
+    pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+    painter.setPen(pen)
+    painter.drawLine(QPointF(x, size * 0.78), QPointF(x, size * 0.12))  # pole
+    painter.setPen(Qt.PenStyle.NoPen)
+    painter.setBrush(flag)
+    painter.drawPolygon(QPolygonF([QPointF(x, size * 0.12), QPointF(size * 0.88, size * 0.28), QPointF(x, size * 0.46)]))
+    painter.setBrush(body)
+    painter.drawEllipse(QPointF(x, size * 0.78), size * 0.34, size * 0.11)  # the green
+    if not shown:
+        pen = QPen(body, _STROKE_WIDTH * 1.4)
+        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        painter.setPen(pen)
+        edge = size * 0.1
+        painter.drawLine(QPointF(size - edge, edge), QPointF(edge, size - edge))
+    painter.end()
+    return QIcon(pixmap)
 
 
 class _SegmentedSwitch(QWidget):
@@ -378,6 +410,7 @@ class ChromaticCorrectionTab(QWidget):
     show_landmarks_changed = pyqtSignal(bool)
     landmark_scope_changed = pyqtSignal(bool)  # True = all wavelengths, False = current wavelength only
     settings_applied = pyqtSignal(object)  # ChromaticUiValues, after a successful run
+    view_buttons_refreshed = pyqtSignal()  # the View-group buttons changed icon/tooltip/enabled (mirrored on the View tab)
 
     def __init__(
         self,
@@ -596,14 +629,7 @@ class ChromaticCorrectionTab(QWidget):
         self._apply_button.setEnabled(has_model)
         self._clear_button.setEnabled(has_model or bool(self._chromatic.landmarks()))
         show = self._show_button.isChecked()
-        self._show_button.setIcon(
-            load_tabler_icon(
-                "eye" if show else "eye-off",
-                color=theme.accent_blue if show else theme.text_muted,
-                size=_RENDER_SIZE,
-                stroke_width=_STROKE_WIDTH,
-            )
-        )
+        self._show_button.setIcon(_landmarks_icon(show, theme.accent_blue, theme.accent_gold, theme.text_muted))
         self._show_button.setToolTip(
             "Landmarks shown on the image (click to hide). With the correction on they are shown corrected: "
             "each landmark's wavelengths should fall on one point"
@@ -644,6 +670,7 @@ class ChromaticCorrectionTab(QWidget):
             load_tabler_icon("trash", color=theme.text_muted, size=_RENDER_SIZE, stroke_width=_STROKE_WIDTH)
         )
         self._clear_button.setToolTip("Clear the landmarks and the correction")
+        self.view_buttons_refreshed.emit()
 
     def _on_clear(self) -> None:
         self._chromatic.clear_landmarks()

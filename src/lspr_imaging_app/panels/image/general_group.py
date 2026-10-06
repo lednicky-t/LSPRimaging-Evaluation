@@ -52,6 +52,32 @@ def style_general_icon_button(button: QToolButton) -> None:
     button.setStyleSheet(transparent_icon_button_stylesheet())
 
 
+def mirror_icon_button(source: QToolButton, parent: QWidget) -> QToolButton:
+    """A second button that follows *source* (checked state, icon, tooltip,
+    enabled) and forwards its clicks to it, so the same control can sit on
+    two ribbon tabs. Call the returned button's `sync()` after *source*
+    changes its look (icon/tooltip/enabled are not signals)."""
+    mirror = QToolButton(parent)
+    mirror.setCheckable(source.isCheckable())
+
+    def sync() -> None:
+        style_general_icon_button(mirror)
+        blocked = mirror.blockSignals(True)
+        try:
+            mirror.setChecked(source.isChecked())
+        finally:
+            mirror.blockSignals(blocked)
+        mirror.setIcon(source.icon())
+        mirror.setToolTip(source.toolTip())
+        mirror.setEnabled(source.isEnabled())
+
+    mirror.clicked.connect(lambda _checked=False: source.click())
+    source.toggled.connect(lambda _checked: sync())
+    mirror.sync = sync  # type: ignore[attr-defined]
+    sync()
+    return mirror
+
+
 class AreaSelectionPicker(QToolButton):
     """All / Rectangle / Lasso picker for `AreaSelectionModule`."""
 

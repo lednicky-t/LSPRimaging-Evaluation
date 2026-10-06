@@ -124,6 +124,7 @@ class BackgroundTab(QWidget):
     state at startup is not mistaken for a user change."""
 
     show_background_changed = pyqtSignal(bool)
+    view_buttons_refreshed = pyqtSignal()  # the View button changed icon/state (mirrored on the View tab)
 
     def __init__(
         self,
@@ -228,6 +229,9 @@ class BackgroundTab(QWidget):
             self._show_button.blockSignals(blocked)
         self._refresh_icons()
 
+    def view_button(self) -> QToolButton:
+        return self._show_button
+
     def is_background_applied(self) -> bool:
         return self._apply_button.isChecked()
 
@@ -264,6 +268,7 @@ class BackgroundTab(QWidget):
                 load_tabler_icon(on_name if checked else off_name, color=on_color if checked else dim,
                                  size=_RENDER_SIZE, stroke_width=_STROKE_WIDTH)
             )
+        self.view_buttons_refreshed.emit()
 
     def _sync_from_settings(self, settings: BackgroundSettings) -> None:
         self._syncing = True

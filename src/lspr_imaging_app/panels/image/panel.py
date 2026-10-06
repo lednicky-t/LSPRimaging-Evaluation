@@ -132,7 +132,7 @@ from .context_menu import show_tool_context_menu
 from .crop_size_controls import CropSizeControls
 from .crop_tool import CropTool
 from .data_axis_slider import DataAxisSlider
-from .general_group import AreaSelectionPicker, style_general_icon_button
+from .general_group import AreaSelectionPicker, mirror_icon_button, style_general_icon_button
 from .guided_value_spinbox import GuidedValueSpinBox
 from .histogram_highlight_overlay_controls import HistogramHighlightOverlayControls
 from .image_controls import ImageViewBox, controls_text
@@ -154,6 +154,8 @@ from .overlay_tint import OverlayTint
 from .render import ImageRenderer, RenderRequest, RenderResult
 from .rotate_line_tool import RotateLineTool
 from ..ui_state import UiStateStore
+from .scale_bar_controls import ScaleBarControls
+from .scale_bar_overlay import ScaleBarItem
 from .tool_ribbon import VIEW_TAB, ImageToolRibbon
 
 logger = logging.getLogger(__name__)
@@ -443,6 +445,17 @@ class ImagePanel(QWidget):
         except ValueError:  # nothing saved yet, or a tool that no longer exists
             pass
         self._mask_edit_tool.tool_changed.connect(lambda tool: store.set("image/mask_edit_tool", tool.value))
+        saved_color = QColor(str(store.get("image/scale_bar_color") or ""))
+        if saved_color.isValid():
+            self._scale_bar_item.set_color(saved_color)
+            self._scale_bar_controls.set_color(saved_color)
+        self._scale_bar_color_store = store
+
+    def _on_scale_bar_color_changed(self, color: QColor) -> None:
+        self._scale_bar_item.set_color(color)
+        store = getattr(self, "_scale_bar_color_store", None)
+        if store is not None:
+            store.set("image/scale_bar_color", color.name())
 
     # -- construction -------------------------------------------------------
 
@@ -516,6 +529,11 @@ class ImagePanel(QWidget):
         self._landmark_fitted_item = pg.ScatterPlotItem(pxMode=True)
         self._plot.addItem(self._landmark_observed_item)
         self._plot.addItem(self._landmark_fitted_item)
+        # Scale bar (2026-10-06): a screen-space child of the ViewBox, see
+        # `scale_bar_overlay.py`; laid out by `_draw_scale_bar`.
+        self._scale_bar_item = ScaleBarItem(self._plot.vb)
+        self._plot.vb.sigRangeChanged.connect(self._draw_scale_bar)
+        self._plot.vb.sigResized.connect(self._draw_scale_bar)
         # Drawn only while a preview tool is active (see `_draw_overlays`).
         self._crop_outline_curve = self._add_curve(_CROP_OUTLINE_COLOR, width=1.5, dashed=True)
 
@@ -761,6 +779,7 @@ class ImagePanel(QWidget):
         view_content_layout.addWidget(self._view_separator)
         view_content_layout.addWidget(view_mask_group)
         view_content_layout.addStretch(1)
+        self._view_content_layout = view_content_layout
 
         self._top_bar = QWidget(self)
         self._top_bar.setObjectName("imageTopBar")
@@ -794,6 +813,49 @@ class ImagePanel(QWidget):
             self._background, show_background=self._show_background, parent=self
         )
         self._background_tab.show_background_changed.connect(self._on_show_background_changed)
+        # View tab "Chromatic" and "Background" groups: mirrored copies of the
+        # Chromatic tab's View buttons (landmarks on/off, scope) and the
+        # Background tab's View button (maintainer request 2026-10-06).
+        chromatic_mirror_row = QWidget(self)
+        chromatic_mirror_layout = QHBoxLayout(chromatic_mirror_row)
+        chromatic_mirror_layout.setContentsMargins(0, 0, 0, 0)
+        chromatic_mirror_layout.setSpacing(2)
+        chromatic_mirrors = [
+            mirror_icon_button(button, chromatic_mirror_row)
+            for button in (self._chromatic_tab.show_button(), self._chromatic_tab.scope_button())
+        ]
+        for mirror in chromatic_mirrors:
+            chromatic_mirror_layout.addWidget(mirror)
+        background_mirror = mirror_icon_button(self._background_tab.view_button(), self)
+        self._view_mirrors = [*chromatic_mirrors, background_mirror]
+        self._chromatic_tab.view_buttons_refreshed.connect(lambda: [m.sync() for m in chromatic_mirrors])
+        self._background_tab.view_buttons_refreshed.connect(background_mirror.sync)
+        self._scale_bar_controls = ScaleBarControls(self._geometry, self._scale_bar_item.color(), self)
+        self._scale_bar_controls.color_changed.connect(self._on_scale_bar_color_changed)
+        view_scale_bar_group, self._view_scale_bar_label = labeled_icon_group(
+            self, self._scale_bar_controls, "Scale bar"
+        )
+        view_chromatic_group, self._view_chromatic_label = labeled_icon_group(
+            self, chromatic_mirror_row, "Chromatic"
+        )
+        view_background_group, self._view_background_label = labeled_icon_group(
+            self, background_mirror, "Background"
+        )
+        self._view_separator_2 = vertical_separator(self)
+        self._view_separator_3 = vertical_separator(self)
+        self._view_separator_4 = vertical_separator(self)
+        stretch_index = self._view_content_layout.count() - 1
+        for offset, widget in enumerate(
+            (
+                self._view_separator_2,
+                view_chromatic_group,
+                self._view_separator_3,
+                view_background_group,
+                self._view_separator_4,
+                view_scale_bar_group,
+            )
+        ):
+            self._view_content_layout.insertWidget(stretch_index + offset, widget)
         self._tool_ribbon = ImageToolRibbon(
             [
                 (VIEW_TAB, view_content),
@@ -1129,8 +1191,9 @@ class ImagePanel(QWidget):
             self._mask_overlay_controls.refresh_theme(get_active_theme())
         if hasattr(self, "_view_mask_overlay_controls"):
             self._view_mask_overlay_controls.refresh_theme(get_active_theme())
-        if hasattr(self, "_view_separator"):
-            self._view_separator.setStyleSheet(f"color: {get_active_theme().control_border};")
+        for name in ("_view_separator", "_view_separator_2", "_view_separator_3", "_view_separator_4"):
+            if hasattr(self, name):
+                getattr(self, name).setStyleSheet(f"color: {get_active_theme().control_border};")
         if hasattr(self, "_mask_scope_toggle"):
             self._mask_scope_toggle.refresh_theme(get_active_theme())
         if hasattr(self, "_mask_scope_separator"):
@@ -1151,6 +1214,9 @@ class ImagePanel(QWidget):
             "_mask_visibility_label",
             "_highlight_visibility_label",
             "_view_mask_label",
+            "_view_chromatic_label",
+            "_view_background_label",
+            "_view_scale_bar_label",
             "_mask_edit_label",
             "_mask_png_label",
         ):
@@ -1614,6 +1680,7 @@ class ImagePanel(QWidget):
     def _draw_overlays(self) -> None:
         self._draw_crop_outline()
         self._draw_landmarks()
+        self._draw_scale_bar()
         if self._active_tool.active() in _PREVIEW_TOOLS:
             # ROI positions are in cropped/processed space; over the
             # uncropped preview they would be drawn in the wrong place.
@@ -1689,6 +1756,17 @@ class ImagePanel(QWidget):
         self._landmark_all_wavelengths = bool(all_wavelengths)
         self._schedule_redraw()
         self.chromatic_view_changed.emit(self._landmark_overlay_visible, self._landmark_all_wavelengths)
+
+    def _draw_scale_bar(self, *_args: object) -> None:
+        """Lay the scale bar out for the current view and units (display only)."""
+        settings = self._geometry.settings()
+        um_per_px = (
+            self._geometry.microns_per_pixel_scalar()
+            if settings.display_units == "um" and self._geometry.can_display_micrometers()
+            else None
+        )
+        shown = bool(settings.scale_bar_visible) and self._active_tool.active() not in _PREVIEW_TOOLS
+        self._scale_bar_item.update_view(shown, um_per_px)
 
     def _draw_landmarks(self) -> None:
         """Chromatic landmarks (display only); drawing rules in
