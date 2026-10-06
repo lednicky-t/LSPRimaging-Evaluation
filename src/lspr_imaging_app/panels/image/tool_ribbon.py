@@ -127,12 +127,15 @@ def _tab_button_stylesheet(theme: GuiTheme, applied: bool = False) -> str:
             color: {theme.text_primary};
             background: {fill};
             border: none;
-            border-bottom: 2px solid {theme.accent_green};
+            border-bottom: 2px solid transparent;
             padding: 2px 8px 0px 8px;
             font-size: {_TAB_FONT_SIZE_PX}px;
         }}
         QToolButton:hover {{ background: rgba({green.red()}, {green.green()}, {green.blue()}, 0.42); }}
-        QToolButton:checked {{ background: rgba({green.red()}, {green.green()}, {green.blue()}, 0.42); }}
+        QToolButton:checked {{
+            background: rgba({green.red()}, {green.green()}, {green.blue()}, 0.42);
+            border-bottom: 2px solid {theme.accent_blue};
+        }}
     """
     return f"""
         QToolButton {{
@@ -174,6 +177,7 @@ class ImageToolRibbon(QWidget):
     ) -> None:
         super().__init__(parent)
         self._pinned_separator: QFrame | None = None
+        self._pinned_caption: QToolButton | None = None
         self._applied: set[str] = set()
         self._tooltips: dict[str, str] = {}
         self._theme = get_active_theme()
@@ -218,12 +222,20 @@ class ImageToolRibbon(QWidget):
         outer.setContentsMargins(0, 0, 0, 0)
         outer.setSpacing(6)
         if pinned is not None:
-            # Always-visible leading tab (2026-10-03): no caption; its
-            # content sits on the content row, under a blank tab-strip slot.
+            # Always-visible leading tab (2026-10-03): its content sits on the
+            # content row, under a "General" caption in the tab-strip slot
+            # (a plain label, not a switchable tab, since it is never hidden).
             pinned_column = QVBoxLayout()
             pinned_column.setContentsMargins(_BAR_MARGIN, 0, 0, 0)
             pinned_column.setSpacing(1)
-            pinned_column.addSpacing(_TAB_HEIGHT)
+            # A QToolButton (not a QLabel) so its underline is drawn exactly
+            # like the other tabs' (curved ends); made inert so it never reacts.
+            self._pinned_caption = QToolButton(self)
+            self._pinned_caption.setText("General")
+            self._pinned_caption.setFixedHeight(_TAB_HEIGHT)
+            self._pinned_caption.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+            self._pinned_caption.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+            pinned_column.addWidget(self._pinned_caption)
             pinned_column.addWidget(pinned, 0, Qt.AlignmentFlag.AlignTop)
             pinned_column.addStretch(1)
             outer.addLayout(pinned_column)
@@ -289,4 +301,9 @@ class ImageToolRibbon(QWidget):
         for name in self._category_names:
             self._refresh_tab(name)
         if self._pinned_separator is not None:
+            self._pinned_caption.setStyleSheet(
+                _tab_button_stylesheet(theme).replace("2px solid transparent", f"2px solid {theme.control_border}")
+                + f"QToolButton {{ color: {theme.text_primary}; }}"
+                + "QToolButton:hover {{ background: transparent; }}"
+            )
             self._pinned_separator.setStyleSheet(f"color: {theme.control_border};")

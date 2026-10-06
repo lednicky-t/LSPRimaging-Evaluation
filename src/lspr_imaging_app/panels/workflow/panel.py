@@ -257,18 +257,10 @@ def _build_image_tools_section(
 
     background.background_model_changed.connect(_sync_apply_toggle)
 
-    chromatic_section = CollapsibleSection(
-        "Chromatic correction",
-        _section_placeholder("Chromatic correction"),
-        expanded=False,
-        title_color=_nested_title_color(),
-        parent=parent,
-    )
-    children = _nested_children(parent, chromatic_section, background_removal_section)
-    subsections = [
-        ("Chromatic correction", chromatic_section),
-        ("Background removal", background_removal_section),
-    ]
+    # Chromatic correction's section was removed 2026-10-06 (maintainer
+    # request): its controls live in the Image panel's "Chromatic" ribbon tab.
+    children = _nested_children(parent, background_removal_section)
+    subsections = [("Background removal", background_removal_section)]
     top_section = CollapsibleSection("Image tools:", children, expanded=False, parent=parent)
     return top_section, subsections
 

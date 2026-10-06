@@ -475,24 +475,17 @@ class ChromaticCorrectionTab(QWidget):
 
         self._separator = QFrame(self)
         self._separator.setFrameShape(QFrame.Shape.VLine)
-        layout.addWidget(self._separator)
+        self._separator.setVisible(False)  # trailing divider no longer needed
 
-        status_column = QVBoxLayout()
-        status_column.setContentsMargins(0, 0, 0, 0)
-        status_column.setSpacing(3)
+        # The status text and progress bar are no longer shown in the ribbon: the
+        # app-wide TaskIndicator in the status bar reports the same information.
+        # The widgets stay (hidden) so status_text() and the state logic keep working.
         self._status = _StatusLabel(self)
+        self._status.setVisible(False)
         self._progress = QProgressBar(self)
         self._progress.setRange(0, 1000)
-        self._progress.setTextVisible(False)
-        self._progress.setFixedHeight(6)
-        self._progress.setMinimumWidth(_STATUS_MIN_WIDTH_PX)
-        self._progress.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
         self._progress.setVisible(False)
-        status_column.addStretch(1)
-        status_column.addWidget(self._status)
-        status_column.addWidget(self._progress)
-        status_column.addStretch(1)
-        layout.addLayout(status_column, 1)
+        layout.addStretch(1)
 
         self._popover.changed.connect(self._refresh_spread_hint)
 
@@ -669,7 +662,6 @@ class ChromaticCorrectionTab(QWidget):
         self._set_status(message)
 
     def _on_running_changed(self, running: bool) -> None:
-        self._progress.setVisible(running)
         self._progress.setValue(0)
         if not running:
             self._busy_text = None
