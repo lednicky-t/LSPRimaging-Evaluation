@@ -95,6 +95,18 @@ class AnalysisWorker:
             self.last_error = exc
             logger.exception("Analysis task failed")
 
+    def join(self, timeout: float | None = None) -> bool:
+        """Wait for the in-flight task to end. Returns `True` once nothing is
+        running, `False` if `timeout` seconds passed first. Only for a caller
+        that must not proceed while the task could still write (it blocks the
+        calling thread); a normal caller reacts to the task's own completion
+        signal instead."""
+        thread = self._thread
+        if thread is None:
+            return True
+        thread.join(timeout)
+        return not thread.is_alive()
+
     def cancel(self) -> None:
         """Signals cooperative cancellation - sets `cancel_event`, nothing
         more. Does not block/join, does not kill the thread; the running

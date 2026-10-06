@@ -49,6 +49,8 @@ restart now genuinely recovers prior results instead of starting empty.
 
 from __future__ import annotations
 
+import logging
+import threading
 from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -77,7 +79,7 @@ from .provenance import (
     roi_geometry_fingerprint_fields,
     sample_exclusion_digest,
 )
-from .store import read_all_cells, write_cell
+from .store import read_all_cells, remap_cell_roi_ids, write_cell
 from .tasks import (
     DEFAULT_COVERAGE_THRESHOLDS,
     CellResult,
@@ -87,7 +89,12 @@ from .tasks import (
 )
 from .worker import AnalysisWorker
 
+logger = logging.getLogger(__name__)
+
 MaskResolution = tuple[tuple[int, float], np.ndarray, str]  # (authored_frame, mask_array, scope)
+
+_RENUMBER_JOIN_TIMEOUT_SECONDS = 60.0
+"""How long `remap_roi_ids` waits for a cancelled run to stop; see there."""
 
 
 def _unwired(name: str) -> Callable[..., object]:
@@ -244,6 +251,11 @@ class AnalysisEngine(QObject):
         self._metric_cache: dict[tuple[int, int], tuple[tuple, float | None]] = {}
         self._store = InMemoryProvenanceStore()
         self._results: dict[tuple[int, int], CellResult] = {}
+        # Bumped whenever ROI ids are renumbered (`remap_roi_ids`). A derived
+        # value computed on the other worker thread across a renumber was
+        # computed against the old ids and must not be cached or shown.
+        self._id_epoch = 0
+        self._state_lock = threading.Lock()
         self._selected_roi_ids: tuple[int, ...] = ()
         self._storage_root: Path | None = None
         self.set_storage_root(storage_root)
@@ -321,6 +333,78 @@ class AnalysisEngine(QObject):
                 self._store.record(roi_id, cube_index, result.provenance)
         self.store_updated.emit()
 
+    # -- following ROI renumbering ------------------------------------------
+
+    def is_running(self) -> bool:
+        """Whether an analysis run is in flight. A panel offering a command
+        that renumbers ROIs (reorder, delete) should disable it while this is
+        true: `remap_roi_ids` would have to cancel the run."""
+        return self._worker.is_running()
+
+    @instrumented("AnalysisEngine.remap_roi_ids")
+    def remap_roi_ids(self, id_map: dict[int, int]) -> None:
+        """Make stored results follow their ROIs when ROI ids are
+        renumbered - connected to `RoiToolbox.roi_ids_renumbered`.
+
+        ``id_map`` is ``{old_id: new_id}`` and covers **every ROI that still
+        exists**: an old id absent from it is a ROI that is gone (deleted, or
+        replaced by a fresh detection), and its results are dropped. An empty
+        map therefore means "no old ROI survives".
+
+        Results are filed under the ROI's id (in memory and as
+        ``/cells/roi_<id>`` in ``data.h5``). Without this, after deleting
+        ROI 3 the survivor that became ROI 3 would be shown the deleted ROI's
+        spectrum. A result's validity check ignores the id (see
+        `roi_geometry_fingerprint_fields`), so a result that follows its ROI
+        stays valid and nothing recomputes.
+
+        **A run in flight is cancelled and waited for first**, because its
+        worker writes cells under the old ids. A cancelled run stops between
+        cells, so the wait is short. If it has not stopped after
+        `_RENUMBER_JOIN_TIMEOUT_SECONDS`, every result held in memory is
+        dropped instead of risking wrong attribution (the file is left alone,
+        and the error is logged). Callers should avoid renumbering during a
+        run (`is_running`); this is the backstop.
+
+        Emits `store_updated` so panels redraw and ask again; a
+        `request_metric_traces` still running across the renumber discards its
+        answer rather than emitting it under the old numbering."""
+        id_map = {int(old): int(new) for old, new in id_map.items()}
+        if len(set(id_map.values())) != len(id_map):
+            logger.error("remap_roi_ids: two ROI ids map to one target (%s); dropping every stored result", id_map)
+            id_map = {}
+        touch_file = True
+        if self._worker.is_running():
+            logger.warning("ROI ids were renumbered during an analysis run; cancelling the run")
+            self._worker.cancel()
+            if not self._worker.join(_RENUMBER_JOIN_TIMEOUT_SECONDS):
+                logger.error(
+                    "Analysis run did not stop within %.0f s after a ROI renumber; dropping the in-memory results "
+                    "rather than showing them under the wrong ROI (data.h5 was not touched)",
+                    _RENUMBER_JOIN_TIMEOUT_SECONDS,
+                )
+                id_map, touch_file = {}, False
+        if not any(old not in id_map or id_map[old] != old for old, _cube in self._results):
+            return  # nothing stored is affected
+        with self._state_lock:
+            self._id_epoch += 1
+            self._results = {
+                (id_map[roi_id], cube_index): result
+                for (roi_id, cube_index), result in self._results.items()
+                if roi_id in id_map
+            }
+            self._store.remap_roi_ids(id_map)
+            self._metric_cache = {
+                (id_map[roi_id], cube_index): cached
+                for (roi_id, cube_index), cached in self._metric_cache.items()
+                if roi_id in id_map
+            }
+        try:
+            if touch_file and self._storage_root is not None:
+                remap_cell_roi_ids(self._data_h5_path, id_map)
+        finally:
+            self.store_updated.emit()
+
     # -- query interface ------------------------------------------------
 
     def get_spectrum(self, roi_id: int, cube_index: int) -> CellResult | None:
@@ -395,6 +479,7 @@ class AnalysisEngine(QObject):
         if cached is not None and cached[0] == fingerprint:
             return cached[1]
 
+        epoch = self._id_epoch
         spectrum = self.formula_spectrum(roi_id, cube_index)
         if spectrum is None:
             return None
@@ -403,7 +488,11 @@ class AnalysisEngine(QObject):
             spectrum, metric.fit_method, metric.metric_key,
             poly_order=metric.poly_order, wl_min=metric.fit_wl_min, wl_max=metric.fit_wl_max,
         )
-        self._metric_cache[(roi_id, cube_index)] = (fingerprint, wavelength)
+        # Not cached if ROI ids were renumbered meanwhile (this can run on the
+        # derived worker thread): the value belongs to the old numbering.
+        with self._state_lock:
+            if epoch == self._id_epoch:
+                self._metric_cache[(roi_id, cube_index)] = (fingerprint, wavelength)
         return wavelength
 
     def metric_trace(self, roi_id: int, cube_indices: tuple[int, ...] | None = None) -> np.ndarray:
@@ -446,7 +535,11 @@ class AnalysisEngine(QObject):
             return
 
         def run() -> None:
-            self.metric_traces_ready.emit({roi_id: self.metric_trace(roi_id) for roi_id in roi_ids})
+            epoch = self._id_epoch
+            traces = {roi_id: self.metric_trace(roi_id) for roi_id in roi_ids}
+            if epoch != self._id_epoch:
+                return  # ROI ids were renumbered meanwhile; `store_updated` already told panels to ask again
+            self.metric_traces_ready.emit(traces)
 
         self._derived_worker.submit(run)
 

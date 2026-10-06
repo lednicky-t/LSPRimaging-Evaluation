@@ -128,6 +128,54 @@ def write_cell(h5_path: Path, roi_id: int, cube_index: int, result: CellResult) 
         group.attrs["per_wavelength_settings_json"] = json.dumps(list(result.provenance.per_wavelength_settings))
 
 
+def _roi_group_id(key: str) -> int | None:
+    """`"roi_7"` -> 7. `None` for anything else, including the temporary
+    `"roi_tmp_..."` names `remap_cell_roi_ids` uses mid-rename."""
+    if not key.startswith("roi_"):
+        return None
+    try:
+        return int(key[len("roi_"):])
+    except ValueError:
+        return None
+
+
+def remap_cell_roi_ids(h5_path: Path, id_map: dict[int, int]) -> None:
+    """Re-file every stored cell under its ROI's new id: ``/cells/roi_<old>``
+    becomes ``/cells/roi_<new>``. A stored ROI id absent from ``id_map`` no
+    longer exists, so its cells are deleted.
+
+    Used when ROI ids are renumbered (a delete closes the gap, or the user
+    reorders). Results are keyed by the id, so without this a result would
+    stay filed under a number that now belongs to a different ROI.
+
+    HDF5 ``move`` renames a group's link and copies no data, so this costs
+    the same however many cells there are. A permutation can contain a cycle
+    (1->2 and 2->1), so every group that changes id is first moved to a
+    temporary name, then to its final one. ``id_map`` must not send two ids to
+    the same target; that would merge two ROIs' cells.
+
+    A crash between the two steps leaves ``roi_tmp_*`` groups behind. The
+    reader skips them, so the worst case is a few cells shown as "not
+    analyzed" and recomputed, never a cell shown under the wrong ROI."""
+    if len(set(id_map.values())) != len(id_map):
+        raise ValueError("id_map sends two ROI ids to the same target")
+    if not h5_path.exists():
+        return
+    with h5py.File(h5_path, "a") as handle:
+        cells = handle.get("cells")
+        if cells is None:
+            return
+        stored = {roi_id: key for key in list(cells) if (roi_id := _roi_group_id(key)) is not None}
+        for roi_id, key in stored.items():
+            if roi_id not in id_map:
+                del cells[key]
+        moving = {old: new for old, new in id_map.items() if old != new and old in stored}
+        for old in moving:
+            cells.move(f"roi_{old}", f"roi_tmp_{old}")
+        for old, new in moving.items():
+            cells.move(f"roi_tmp_{old}", f"roi_{new}")
+
+
 def read_all_cells(h5_path: Path) -> dict[tuple[int, int], CellResult]:
     """Bulk-load every stored cell from `h5_path` - empty dict if the file
     doesn't exist yet (a fresh dataset, not an error). The only reader this
@@ -141,9 +189,9 @@ def read_all_cells(h5_path: Path) -> dict[tuple[int, int], CellResult]:
         if cells_group is None:
             return results
         for roi_key in cells_group:
-            if not roi_key.startswith("roi_"):
+            roi_id = _roi_group_id(roi_key)
+            if roi_id is None:
                 continue
-            roi_id = int(roi_key[len("roi_"):])
             roi_group = cells_group[roi_key]
             for cube_key in roi_group:
                 if not cube_key.startswith("cube_"):

@@ -38,9 +38,12 @@ precisely so those modules *can* subscribe and remap their own state
 without this module reaching into theirs (AGENTS.md's "no module reads or
 writes another module's internals" rule). **`SelectionModule` now
 subscribes** (`selection/module.py`'s `remap_roi_ids()`, wired in
-`app_rewrite.build_main_window()`) - built 2026-09-20. `analysis/tasks.py`
-is still not built and will need its own handler for per-ROI provenance
-when it lands.
+`app_rewrite.build_main_window()`) - built 2026-09-20. **`AnalysisEngine`
+subscribes too** (`remap_roi_ids()`, 2026-10-06): stored results are keyed by
+roi_id, so they must follow their ROI to its new number or the survivor
+would show the deleted ROI's spectrum. The signal's map covers every ROI that
+survives; an id absent from it is dropped (empty map = a fresh detection, no
+old ROI survives).
 
 **Undo/redo**: every mutating command below pushes one
 `undo.FunctionCommand` to the shared `undo.undo_manager` (see that module's
@@ -201,11 +204,13 @@ class RoiToolbox(QObject):
 
     geometry_changed = pyqtSignal(RoiComputationalChange)
     cosmetic_changed = pyqtSignal(RoiCosmeticChange)
-    # {old_id: new_id} for every ROI renumbered by a delete - see module
-    # docstring, "Cross-module consequence". Not itself a Cosmetic/
-    # Computational change (it doesn't mean anything was recomputed or needs
-    # redrawing on its own) - a separate, narrower signal for "if you hold a
-    # roi_id, it may now be wrong".
+    # {old_id: new_id} for **every ROI that still exists** after a delete or a
+    # fresh detection - see module docstring, "Cross-module consequence". An
+    # old id absent from the map is a ROI that is gone, so a subscriber drops
+    # whatever it holds for it; an empty map means no old ROI survives. Not
+    # itself a Cosmetic/Computational change (it doesn't mean anything was
+    # recomputed or needs redrawing on its own) - a separate, narrower signal
+    # for "if you hold a roi_id, it may now be wrong".
     roi_ids_renumbered = pyqtSignal(dict)
 
     def __init__(self, parent: QObject | None = None) -> None:
@@ -488,8 +493,9 @@ class RoiToolbox(QObject):
                 array_id: array for array_id, array in self._array_groups.items() if array.member_area_roi_ids
             }
             self._roi_id_counter = itertools.count(next_counter_after_delete)
-            if id_map:
-                self.roi_ids_renumbered.emit(dict(id_map))
+            # Always emitted, even when no ROI survives (empty map): a
+            # subscriber drops what it holds for every id absent from the map.
+            self.roi_ids_renumbered.emit(dict(id_map))
             self.geometry_changed.emit(RoiComputationalChange(roi_ids=tuple(sorted(ids_to_delete)), reason="deleted"))
 
         def revert() -> None:
@@ -503,8 +509,7 @@ class RoiToolbox(QObject):
             self._groups = copy.deepcopy(groups_before)
             self._array_groups = copy.deepcopy(arrays_before)
             self._roi_id_counter = itertools.count(next_counter_before_delete)
-            if reverse_id_map:
-                self.roi_ids_renumbered.emit(dict(reverse_id_map))
+            self.roi_ids_renumbered.emit(dict(reverse_id_map))
             self.geometry_changed.emit(RoiComputationalChange(roi_ids=tuple(sorted(removed_rois)), reason="added"))
 
         apply()
@@ -523,6 +528,12 @@ class RoiToolbox(QObject):
         ready` callback already enforced. `detected_rois` already carries
         contiguous 1..N ids (`roi.detection.detect_rois()`'s own contract),
         so no renumbering is needed here the way `delete_rois` needs it.
+
+        Emits `roi_ids_renumbered` with an **empty map**, in `apply()` and in
+        `revert()`: every previous ROI is gone and the new ones merely reuse
+        the numbers 1..N. Without it, results stored for the old ROI 1 would
+        be shown for the new ROI 1. (Selection is cleared by the same signal,
+        which is right: the old selection means nothing now.)
         """
         old_rois = dict(self._rois)
         old_groups = dict(self._groups)
@@ -538,6 +549,7 @@ class RoiToolbox(QObject):
             self._groups = {}
             self._array_groups = dict(new_arrays)
             self._roi_id_counter = itertools.count(new_next_counter)
+            self.roi_ids_renumbered.emit({})
             self.geometry_changed.emit(RoiComputationalChange(roi_ids=affected_ids, reason="detected"))
 
         def revert() -> None:
@@ -545,6 +557,7 @@ class RoiToolbox(QObject):
             self._groups = dict(old_groups)
             self._array_groups = dict(old_arrays)
             self._roi_id_counter = itertools.count(old_next_counter)
+            self.roi_ids_renumbered.emit({})
             self.geometry_changed.emit(RoiComputationalChange(roi_ids=affected_ids, reason="detected"))
 
         apply()

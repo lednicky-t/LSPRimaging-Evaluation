@@ -335,9 +335,24 @@ biased reference value for any two ROIs close enough that one's sample
 circle falls inside the other's reference ring."""
 
 
+def _geometry_sort_key(roi: AreaRoi) -> tuple:
+    """Order ROIs by where and how big they are, never by id - see
+    `sample_exclusion_digest`."""
+    return (float(roi.center_x), float(roi.center_y), float(roi.sample_diameter_px), str(roi.sample_geometry_type))
+
+
 def sample_exclusion_digest(rois: list[AreaRoi] | tuple[AreaRoi, ...]) -> list:
-    """Every ROI's *sample*-side geometry, sorted by id - the fingerprint
-    input that makes `"exclude_all_sample_rois"` mode safe to cache.
+    """Every ROI's *sample*-side geometry - the fingerprint input that
+    makes `"exclude_all_sample_rois"` mode safe to cache.
+
+    **Independent of ROI numbering** (2026-10-06): ids are left out and the
+    entries are sorted by geometry, so renumbering or reordering the same
+    ROIs gives the same digest. The exclusion depends on which circles exist,
+    not on what they are called; with ids in it, a pure reorder marked every
+    stored cell stale. Two ROIs with an identical centre, diameter and shape
+    but different masks keep their relative input order, so reordering those
+    two can still change the digest - a needless recompute, never a wrong
+    result.
 
     Needed because in that mode, moving ROI X genuinely changes ROI Y's
     reference-ring pixel set (X's sample circle carves into it), so Y's
@@ -354,9 +369,8 @@ def sample_exclusion_digest(rois: list[AreaRoi] | tuple[AreaRoi, ...]) -> list:
     hundred KB and well over a GB at realistic ROI/cube counts.
     """
     digest: list = []
-    for roi in sorted(rois, key=lambda item: int(item.area_roi_id)):
+    for roi in sorted(rois, key=_geometry_sort_key):
         digest.append({
-            "area_roi_id": int(roi.area_roi_id),
             "center_x": float(roi.center_x),
             "center_y": float(roi.center_y),
             "sample_diameter_px": float(roi.sample_diameter_px),
@@ -390,7 +404,9 @@ def background_exclusion_digest(
       exclusion on, moving ROI X changes the background estimate under ROI
       Y, so Y's stored value must be invalidated when X moves. Exactly the
       invalidation problem `sample_exclusion_digest` exists for on the
-      reference-ring side, and the same answer. Only the three fields
+      reference-ring side, and the same answer - including being
+      independent of ROI numbering (ids left out, sorted by geometry).
+      Only the three fields
       `background/estimate.py`'s `_roi_exclusion_mask` actually reads:
       it works off `sample_diameter_px` directly and never consults
       a sample mask, so recording that would
@@ -413,12 +429,11 @@ def background_exclusion_digest(
     if background_settings.flatten_background_exclude_area_rois and rois:
         digest["rois"] = [
             {
-                "area_roi_id": int(roi.area_roi_id),
                 "center_x": float(roi.center_x),
                 "center_y": float(roi.center_y),
                 "sample_diameter_px": float(roi.sample_diameter_px),
             }
-            for roi in sorted(rois, key=lambda item: int(item.area_roi_id))
+            for roi in sorted(rois, key=_geometry_sort_key)
         ]
     if background_settings.flatten_background_exclude_mask and detection_settings is not None:
         digest["ignore_marked_pixels"] = bool(detection_settings.ignore_marked_pixels)
@@ -656,3 +671,13 @@ class InMemoryProvenanceStore:
 
     def record(self, roi_id: int, cube_index: int, fingerprint: ProvenanceRecord) -> None:
         self._fingerprints[(roi_id, cube_index)] = fingerprint
+
+    def remap_roi_ids(self, id_map: dict[int, int]) -> None:
+        """Re-file every fingerprint under its ROI's new id; an id absent
+        from ``id_map`` no longer exists and is dropped. Mirrors
+        `store.remap_cell_roi_ids` for the file."""
+        self._fingerprints = {
+            (id_map[roi_id], cube_index): fingerprint
+            for (roi_id, cube_index), fingerprint in self._fingerprints.items()
+            if roi_id in id_map
+        }

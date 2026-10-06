@@ -271,6 +271,17 @@ def _build_analysis_engine(
     )
 
 
+def _connect_roi_renumbering(
+    roi_toolbox: RoiToolbox, selection: SelectionModule, analysis_engine: AnalysisEngine
+) -> None:
+    """Everything that holds a ROI id follows ``RoiToolbox.roi_ids_renumbered``
+    (a delete closing the gap, a fresh detection). Neither module holds a
+    toolbox reference of its own, so this is the one place that connects
+    them. Kept as a function so a test can wire exactly what the app wires."""
+    roi_toolbox.roi_ids_renumbered.connect(selection.remap_roi_ids)
+    roi_toolbox.roi_ids_renumbered.connect(analysis_engine.remap_roi_ids)
+
+
 def capture_session(
     geometry: GeometryModule,
     mask: MaskModule,
@@ -566,7 +577,7 @@ def build_main_window(
     # remap_roi_ids(), so a delete-driven ROI renumber never leaves a stale
     # selected id behind (see roi/toolbox.py's module docstring, "Cross-
     # module consequence", and selection/module.py).
-    roi_toolbox.roi_ids_renumbered.connect(selection.remap_roi_ids)
+    _connect_roi_renumbering(roi_toolbox, selection, analysis_engine)
 
     # Which session-scoped folder the analysis store and the session
     # autosave both point at is now `SessionCoordinator`'s job, not a plain
