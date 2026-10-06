@@ -251,9 +251,9 @@ def _build_analysis_engine(
         # _mask_for_compute).
         resolve_mask=lambda cube_index, wavelength_nm: mask.resolve_mask_source((cube_index, wavelength_nm)),
         reduction_method=lambda: roi_toolbox.detection_settings().reduction_method,
-        default_reference_radii=lambda: (
-            roi_toolbox.detection_settings().reference_inner_radius_px,
-            roi_toolbox.detection_settings().reference_outer_radius_px,
+        default_reference_diameters=lambda: (
+            roi_toolbox.detection_settings().reference_inner_diameter_px,
+            roi_toolbox.detection_settings().reference_outer_diameter_px,
         ),
         # The whole object, for apply_preprocessing's `mask_settings` - what
         # makes `flatten_background_exclude_mask` actually exclude the ignore

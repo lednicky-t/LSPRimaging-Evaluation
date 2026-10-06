@@ -114,8 +114,7 @@ from ...image_tools.geometry.model import CropDefinition, GeometrySettings
 from ...image_tools.preprocess import area_selection_to_raw, resolve_external_mask
 from ...roi import RoiToolbox
 from .no_data import format_pixel_value, no_data_overlay_rgba
-from ...roi.model import AreaRoi
-from ...roi.rasterize import effective_reference_radii, transformed_circle_points
+from ...roi.rasterize import effective_reference_diameters, transformed_circle_points
 from ...selection import AreaSelectionModule, HighlightRangeModule, ReferenceFrameModule, SelectionModule
 from ...selection.reference_frame_module import MODE_AUTO
 from ..cursor_overlay import CursorOverlay
@@ -1708,15 +1707,15 @@ class ImagePanel(QWidget):
 
         for roi in rois:
             center = self._roi_toolbox.display_position(roi.area_roi_id, frame, affine)
-            xs, ys = transformed_circle_points(center, self._sample_radius(roi), affine, theta)
+            xs, ys = transformed_circle_points(center, roi.sample_diameter_px, affine, theta)
             target = (selection_x, selection_y) if roi.area_roi_id in selected else (sample_x, sample_y)
             _append_polyline(target[0], target[1], xs, ys)
 
-            inner, outer = effective_reference_radii(
-                roi, detection.reference_inner_radius_px, detection.reference_outer_radius_px
+            inner, outer = effective_reference_diameters(
+                roi, detection.reference_inner_diameter_px, detection.reference_outer_diameter_px
             )
-            for radius in (inner, outer):
-                rx, ry = transformed_circle_points(center, radius, affine, theta)
+            for diameter in (inner, outer):
+                rx, ry = transformed_circle_points(center, diameter, affine, theta)
                 _append_polyline(reference_x, reference_y, rx, ry)
 
         self._sample_curve.setData(sample_x, sample_y)
@@ -1935,14 +1934,6 @@ class ImagePanel(QWidget):
             _append_polyline(xs, ys, np.array([0.0, float(width)]), np.array([y, y]))
             y += chunk_px
         self._chunk_grid_curve.setData(xs, ys)
-
-    @staticmethod
-    def _sample_radius(roi: AreaRoi) -> float:
-        """An ROI's own sample-diameter override wins over its radius field,
-        matching `roi/rasterize.py`'s own resolution order."""
-        if roi.sample_diameter_px is not None:
-            return float(roi.sample_diameter_px) / 2.0
-        return float(roi.sample_radius_px)
 
     # -- interaction --------------------------------------------------------
 
@@ -2429,7 +2420,7 @@ class ImagePanel(QWidget):
         for roi in self._roi_toolbox.rois():
             cx, cy = self._roi_toolbox.display_position(roi.area_roi_id, frame, affine)
             distance = float(np.hypot(x - cx, y - cy))
-            if distance <= self._sample_radius(roi) and (best is None or distance < best[0]):
+            if distance <= float(roi.sample_diameter_px) / 2.0 and (best is None or distance < best[0]):
                 best = (distance, roi.area_roi_id)
         return None if best is None else best[1]
 

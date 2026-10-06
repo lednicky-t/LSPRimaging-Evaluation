@@ -199,7 +199,7 @@ def transform_rois_affine(
     for index, roi in enumerate(rois):
         target_x = float(target_points[index, 0])
         target_y = float(target_points[index, 1])
-        # Shallow copy, not deepcopy: only center_x/center_y/sample_radius_px
+        # Shallow copy, not deepcopy: only center_x/center_y/sample_diameter_px
         # get reassigned below (rebinding a scalar attribute on the copy
         # never touches the original), and every caller of this function's
         # result (ROI overlay rendering, rois_for_preprocessing's exclusion
@@ -213,7 +213,7 @@ def transform_rois_affine(
         transformed_roi = copy(roi)
         transformed_roi.center_x = target_x
         transformed_roi.center_y = target_y
-        transformed_roi.sample_radius_px = max(float(roi.sample_radius_px) * scale, 1.0)
+        transformed_roi.sample_diameter_px = max(float(roi.sample_diameter_px) * scale, 2.0)
         if max_x is not None and max_y is not None:
             transformed_roi.center_x = float(np.clip(transformed_roi.center_x, 0.0, max_x))
             transformed_roi.center_y = float(np.clip(transformed_roi.center_y, 0.0, max_y))

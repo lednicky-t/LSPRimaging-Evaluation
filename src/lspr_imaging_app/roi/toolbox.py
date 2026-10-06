@@ -232,7 +232,7 @@ class RoiToolbox(QObject):
         `image_tools/background/estimate.py`, `image_tools/preprocess.py`,
         `image_tools/chromatic/landmark_autotrack.py`), so there was no
         module to read it from when the engine needed
-        `reference_inner/outer_radius_px` (its default reference-ring radii
+        `reference_inner/outer_diameter_px` (its default reference-ring radii
         for ROIs that don't override them) and `reduction_method`. Put here
         because this is the ROI stage's state owner and the dataclass is
         ROI-stage settings throughout.
@@ -349,7 +349,7 @@ class RoiToolbox(QObject):
         undo_manager.push(FunctionCommand("Detection settings", undo_fn=revert, redo_fn=apply))
 
     @instrumented("RoiToolbox.add_roi")
-    def add_roi(self, x: float, y: float, *, sample_radius_px: float = 10.0) -> int:
+    def add_roi(self, x: float, y: float, *, sample_diameter_px: float = 20.0) -> int:
         """Manually place one ROI at (x, y) - the click-to-add tool. Not in
         the original scaffold's stub list (a real gap: there was no command
         for the old app's `_add_roi_at`, the single most basic way to
@@ -359,7 +359,7 @@ class RoiToolbox(QObject):
         promise), so no special undo bookkeeping beyond add/remove is
         needed."""
         roi_id = next(self._roi_id_counter)
-        roi = AreaRoi(area_roi_id=roi_id, center_x=float(x), center_y=float(y), sample_radius_px=float(sample_radius_px))
+        roi = AreaRoi(area_roi_id=roi_id, center_x=float(x), center_y=float(y), sample_diameter_px=float(sample_diameter_px))
 
         def apply() -> None:
             self._rois[roi_id] = roi
@@ -397,17 +397,17 @@ class RoiToolbox(QObject):
         self,
         roi_id: int,
         *,
-        sample_radius_px: float | None = None,
+        sample_diameter_px: float | None = None,
         reference_inner_diameter_px: float | None = None,
         reference_outer_diameter_px: float | None = None,
     ) -> None:
-        """Set one or more of an ROI's sample radius / reference diameters.
+        """Set one or more of an ROI's sample / reference diameters.
         Any field left `None` is unchanged. A no-op (no undo entry pushed)
         if every given value already matches."""
         roi = self._rois[roi_id]
-        old = (roi.sample_radius_px, roi.reference_inner_diameter_px, roi.reference_outer_diameter_px)
+        old = (roi.sample_diameter_px, roi.reference_inner_diameter_px, roi.reference_outer_diameter_px)
         new = (
-            float(sample_radius_px) if sample_radius_px is not None else roi.sample_radius_px,
+            float(sample_diameter_px) if sample_diameter_px is not None else roi.sample_diameter_px,
             float(reference_inner_diameter_px) if reference_inner_diameter_px is not None else roi.reference_inner_diameter_px,
             float(reference_outer_diameter_px) if reference_outer_diameter_px is not None else roi.reference_outer_diameter_px,
         )
@@ -415,11 +415,11 @@ class RoiToolbox(QObject):
             return
 
         def apply() -> None:
-            roi.sample_radius_px, roi.reference_inner_diameter_px, roi.reference_outer_diameter_px = new
+            roi.sample_diameter_px, roi.reference_inner_diameter_px, roi.reference_outer_diameter_px = new
             self.geometry_changed.emit(RoiComputationalChange(roi_ids=(roi_id,), reason="resized"))
 
         def revert() -> None:
-            roi.sample_radius_px, roi.reference_inner_diameter_px, roi.reference_outer_diameter_px = old
+            roi.sample_diameter_px, roi.reference_inner_diameter_px, roi.reference_outer_diameter_px = old
             self.geometry_changed.emit(RoiComputationalChange(roi_ids=(roi_id,), reason="resized"))
 
         apply()

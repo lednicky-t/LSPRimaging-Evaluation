@@ -106,7 +106,7 @@ class MaskSettings:
     morphology_radius_px: int = 2
 
     # Drawing settings
-    brush_size_px: int = 12
+    brush_size_px: int = 12  # brush diameter (passed to paint_brush as `diameter_px`)
 
     # New mask system state
     histogram_enabled: bool = False

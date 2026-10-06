@@ -187,7 +187,8 @@ def _roi_exclusion_mask(
         return exclusion_mask
 
     for roi in rois:
-        exclusion_radius = max(float(roi.sample_radius_px) * 1.35, float(roi.sample_radius_px) + 2.0)
+        sample_radius = float(roi.sample_diameter_px) / 2.0
+        exclusion_radius = max(sample_radius * 1.35, sample_radius + 2.0)
         radius_ceil = int(np.ceil(exclusion_radius))
         x0 = max(int(np.floor(roi.center_x)) - radius_ceil, 0)
         x1 = min(int(np.floor(roi.center_x)) + radius_ceil + 1, image_shape[1])

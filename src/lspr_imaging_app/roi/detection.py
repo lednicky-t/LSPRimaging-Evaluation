@@ -64,7 +64,7 @@ def detect_rois(
         report_progress(100, "ROI detection: no valid pixels.")
         return []
 
-    radius = float(settings.sample_radius_px)
+    radius = float(settings.sample_diameter_px) / 2.0
     sigma = max(radius / 2.5, 1.0)
     report_progress(12, "ROI detection: smoothing image...")
     filtered, filter_support = _masked_gaussian_filter(image_f32, valid_mask, sigma=sigma)
@@ -86,7 +86,7 @@ def detect_rois(
     candidate_mask = (filtered >= intensity_min) & (filtered <= intensity_max)
     candidate_mask &= valid_mask & ~near_invalid & (filter_support > 0.05)
 
-    neighborhood = max(int(settings.array_spacing_px if int(settings.array_spacing_px) > 0 else settings.sample_radius_px * 2), 3)
+    neighborhood = max(int(settings.array_spacing_px if int(settings.array_spacing_px) > 0 else settings.sample_diameter_px), 3)
     searchable = np.where(candidate_mask, search_image, -np.inf)
     local_max = searchable == ndimage.maximum_filter(searchable, size=neighborhood, mode="nearest")
     candidates = np.argwhere(local_max & candidate_mask)
@@ -119,7 +119,7 @@ def detect_rois(
     scored.sort(reverse=True)
 
     accepted: list[AreaRoi] = []
-    min_distance = float(settings.array_spacing_px if int(settings.array_spacing_px) > 0 else settings.sample_radius_px * 2)
+    min_distance = float(settings.array_spacing_px if int(settings.array_spacing_px) > 0 else settings.sample_diameter_px)
     image_height, image_width = image.shape[:2]
     total_scored = max(len(scored), 1)
     for index, (score, x, y) in enumerate(scored, start=1):
@@ -136,9 +136,8 @@ def detect_rois(
                 area_roi_id=len(accepted) + 1,
                 center_x=x,
                 center_y=y,
-                sample_radius_px=radius,
-                score=score,
                 sample_diameter_px=float(radius * 2.0),
+                score=score,
             )
         )
         expected_count = max(int(settings.array_rows), 0) * max(int(settings.array_cols), 0)
@@ -203,7 +202,7 @@ def refresh_roi_metrics(
     valid_mask = ~ignored_pixel_mask(image_f32, settings, external_mask=external_mask)
     if not np.any(valid_mask):
         return rois
-    sigma = max(float(settings.sample_radius_px) / 2.5, 1.0)
+    sigma = max(float(settings.sample_diameter_px) / 2.0 / 2.5, 1.0)
     filtered, _ = _masked_gaussian_filter(image_f32, valid_mask, sigma=sigma)
     return [
         replace(
@@ -213,7 +212,7 @@ def refresh_roi_metrics(
                 valid_mask=valid_mask,
                 center_x=float(roi.center_x),
                 center_y=float(roi.center_y),
-                radius=float(roi.sample_radius_px),
+                radius=float(roi.sample_diameter_px) / 2.0,
                 mode=settings.mode,
             ),
         )
@@ -275,11 +274,10 @@ def _refine_detected_roi(
         area_roi_id=roi.area_roi_id,
         center_x=refined_x,
         center_y=refined_y,
-        sample_radius_px=roi.sample_radius_px,
+        sample_diameter_px=roi.sample_diameter_px,
         score=max(roi.score, refined_score),
         sample_color_hex=roi.sample_color_hex,
         reference_color_hex=roi.reference_color_hex,
-        sample_diameter_px=roi.sample_diameter_px,
         reference_inner_diameter_px=roi.reference_inner_diameter_px,
         reference_outer_diameter_px=roi.reference_outer_diameter_px,
         support_mean_radius_px=roi.support_mean_radius_px,
@@ -441,9 +439,8 @@ def _fit_grid_array(
                     area_roi_id=0,
                     center_x=refined_x if found_signal else grid_x,
                     center_y=refined_y if found_signal else grid_y,
-                    sample_radius_px=radius,
-                    score=refined_score,
                     sample_diameter_px=float(radius * 2.0),
+                    score=refined_score,
                     inferred=not found_signal,
                 )
             )

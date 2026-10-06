@@ -343,13 +343,14 @@ def _blit(out: np.ndarray, roi_mask: RoiMask, *, offset_x: int, offset_y: int) -
 
 def transformed_circle_points(
     center_xy: tuple[float, float],
-    radius_px: float,
+    diameter_px: float,
     affine_matrix: np.ndarray,
     theta: np.ndarray,
 ) -> tuple[np.ndarray, np.ndarray]:
     center_x, center_y = float(center_xy[0]), float(center_xy[1])
-    xs = center_x + float(radius_px) * np.cos(theta)
-    ys = center_y + float(radius_px) * np.sin(theta)
+    radius = float(diameter_px) / 2.0
+    xs = center_x + radius * np.cos(theta)
+    ys = center_y + radius * np.sin(theta)
     points = np.column_stack((xs, ys)).astype(np.float64, copy=False)
     transformed = apply_affine_to_points(points, affine_matrix)
     return transformed[:, 0], transformed[:, 1]
@@ -358,10 +359,10 @@ def transformed_circle_points(
 def transformed_disk_mask(
     image_shape: tuple[int, int],
     center_xy: tuple[float, float],
-    radius_px: float,
+    diameter_px: float,
     affine_matrix: np.ndarray,
 ) -> np.ndarray:
-    return transformed_annulus_mask(image_shape, center_xy, 0.0, radius_px, affine_matrix)
+    return transformed_annulus_mask(image_shape, center_xy, 0.0, diameter_px, affine_matrix)
 
 
 def _annulus_mask_in_box(
@@ -414,13 +415,13 @@ def annulus_reach_box(
 def transformed_annulus_mask(
     image_shape: tuple[int, int],
     center_xy: tuple[float, float],
-    inner_radius_px: float,
-    outer_radius_px: float,
+    inner_diameter_px: float,
+    outer_diameter_px: float,
     affine_matrix: np.ndarray,
 ) -> np.ndarray:
     image_height, image_width = image_shape[:2]
-    inner_radius = max(float(inner_radius_px), 0.0)
-    outer_radius = max(float(outer_radius_px), inner_radius)
+    inner_radius = max(float(inner_diameter_px), 0.0) / 2.0
+    outer_radius = max(float(outer_diameter_px) / 2.0, inner_radius)
     if outer_radius <= 0.0:
         return np.zeros((image_height, image_width), dtype=bool)
 
@@ -442,8 +443,8 @@ def transformed_annulus_mask_for_patch(
     patch_origin_xy: tuple[int, int],
     patch_shape: tuple[int, int],
     center_xy: tuple[float, float],
-    inner_radius_px: float,
-    outer_radius_px: float,
+    inner_diameter_px: float,
+    outer_diameter_px: float,
     affine_matrix: np.ndarray,
 ) -> np.ndarray:
     """Same geometry as transformed_annulus_mask, but scoped to a patch that's
@@ -466,8 +467,8 @@ def transformed_annulus_mask_for_patch(
     per ROI regardless of patch size closes that gap.
     """
     patch_h, patch_w = patch_shape[:2]
-    inner_radius = max(float(inner_radius_px), 0.0)
-    outer_radius = max(float(outer_radius_px), inner_radius)
+    inner_radius = max(float(inner_diameter_px), 0.0) / 2.0
+    outer_radius = max(float(outer_diameter_px) / 2.0, inner_radius)
     mask = np.zeros((patch_h, patch_w), dtype=bool)
     if outer_radius <= 0.0:
         return mask
@@ -491,10 +492,10 @@ def transformed_disk_mask_for_patch(
     patch_origin_xy: tuple[int, int],
     patch_shape: tuple[int, int],
     center_xy: tuple[float, float],
-    radius_px: float,
+    diameter_px: float,
     affine_matrix: np.ndarray,
 ) -> np.ndarray:
-    return transformed_annulus_mask_for_patch(patch_origin_xy, patch_shape, center_xy, 0.0, radius_px, affine_matrix)
+    return transformed_annulus_mask_for_patch(patch_origin_xy, patch_shape, center_xy, 0.0, diameter_px, affine_matrix)
 
 
 # -- per-ROI, per-side dispatcher: routes "circle"/"annulus"/"mask" ---------
@@ -503,37 +504,37 @@ def transformed_disk_mask_for_patch(
 # multi-ROI OR-accumulation - that stays analysis/tasks.py's job).
 
 
-def effective_reference_radii(
+def effective_reference_diameters(
     roi: AreaRoi,
-    default_inner_radius_px: float,
-    default_outer_radius_px: float,
+    default_inner_diameter_px: float,
+    default_outer_diameter_px: float,
 ) -> tuple[float, float]:
-    """Reference-ring radii to use for one ROI.
+    """Reference-ring (inner, outer) diameters to use for one ROI.
 
     Each ROI may carry its own reference_inner_diameter_px/outer_diameter_px
     (set via the ROI table or the "Edit reference ROI region" dialog) to
     override the shared area_roi_settings default for that ROI only. Falls
     back to the shared default when the ROI has no override.
 
-    Public as of 2026-09-23 (was ``_effective_reference_radii``): the Image
+    Public as of 2026-09-23 (was ``_effective_reference_diameters``): the Image
     panel draws the reference ring it is about to measure, so it needs the
     same radii this module rasterizes with. Re-deriving the override rule in
     the panel would mean the drawn ring and the measured ring could disagree
     - which is exactly the class of silent error overlays exist to rule out.
     """
-    inner_radius = (
-        float(roi.reference_inner_diameter_px) / 2.0
+    inner = (
+        float(roi.reference_inner_diameter_px)
         if roi.reference_inner_diameter_px is not None
-        else float(default_inner_radius_px)
+        else float(default_inner_diameter_px)
     )
-    outer_radius = (
-        float(roi.reference_outer_diameter_px) / 2.0
+    outer = (
+        float(roi.reference_outer_diameter_px)
         if roi.reference_outer_diameter_px is not None
-        else float(default_outer_radius_px)
+        else float(default_outer_diameter_px)
     )
-    inner_radius = max(inner_radius, 0.0)
-    outer_radius = max(outer_radius, inner_radius)
-    return inner_radius, outer_radius
+    inner = max(inner, 0.0)
+    outer = max(outer, inner)
+    return inner, outer
 
 
 def rasterize_sample(
@@ -554,7 +555,7 @@ def rasterize_sample(
         expanded = expand_mask(roi.sample_mask, image_shape)
         return warp_boolean_mask_affine(expanded, affine_matrix, output_shape=image_shape)
     return transformed_disk_mask(
-        image_shape, (float(roi.center_x), float(roi.center_y)), float(roi.sample_radius_px), affine_matrix
+        image_shape, (float(roi.center_x), float(roi.center_y)), float(roi.sample_diameter_px), affine_matrix
     )
 
 
@@ -572,7 +573,7 @@ def rasterize_sample_for_patch(
     if roi.sample_geometry_type == "mask" and roi.sample_mask is not None:
         return expand_mask_to_patch_warped(roi.sample_mask, patch_origin_xy, patch_shape, affine_matrix)
     return transformed_disk_mask_for_patch(
-        patch_origin_xy, patch_shape, (float(roi.center_x), float(roi.center_y)), float(roi.sample_radius_px), affine_matrix
+        patch_origin_xy, patch_shape, (float(roi.center_x), float(roi.center_y)), float(roi.sample_diameter_px), affine_matrix
     )
 
 
@@ -581,8 +582,8 @@ def rasterize_reference(
     image_shape: tuple[int, int],
     affine_matrix: np.ndarray,
     *,
-    default_inner_radius_px: float = 0.0,
-    default_outer_radius_px: float = 0.0,
+    default_inner_diameter_px: float = 0.0,
+    default_outer_diameter_px: float = 0.0,
 ) -> np.ndarray:
     """One ROI's reference-region mask, full-image-sized. Empty when
     `reference_geometry_type == "none"` (some ROIs have no reference
@@ -594,11 +595,11 @@ def rasterize_reference(
         return warp_boolean_mask_affine(expanded, affine_matrix, output_shape=image_shape)
     if roi.reference_geometry_type == "none":
         return np.zeros((image_height, image_width), dtype=bool)
-    inner_radius, outer_radius = effective_reference_radii(roi, default_inner_radius_px, default_outer_radius_px)
-    if outer_radius <= 0.0:
+    inner_diameter, outer_diameter = effective_reference_diameters(roi, default_inner_diameter_px, default_outer_diameter_px)
+    if outer_diameter <= 0.0:
         return np.zeros((image_height, image_width), dtype=bool)
     return transformed_annulus_mask(
-        image_shape, (float(roi.center_x), float(roi.center_y)), inner_radius, outer_radius, affine_matrix
+        image_shape, (float(roi.center_x), float(roi.center_y)), inner_diameter, outer_diameter, affine_matrix
     )
 
 
@@ -608,8 +609,8 @@ def rasterize_reference_for_patch(
     patch_shape: tuple[int, int],
     affine_matrix: np.ndarray,
     *,
-    default_inner_radius_px: float = 0.0,
-    default_outer_radius_px: float = 0.0,
+    default_inner_diameter_px: float = 0.0,
+    default_outer_diameter_px: float = 0.0,
 ) -> np.ndarray:
     """Same as `rasterize_reference`, scoped to a patch. Mask geometry is
     affine-warped here too - see `rasterize_sample_for_patch`."""
@@ -618,11 +619,11 @@ def rasterize_reference_for_patch(
         return expand_mask_to_patch_warped(roi.reference_mask, patch_origin_xy, patch_shape, affine_matrix)
     if roi.reference_geometry_type == "none":
         return np.zeros((patch_h, patch_w), dtype=bool)
-    inner_radius, outer_radius = effective_reference_radii(roi, default_inner_radius_px, default_outer_radius_px)
-    if outer_radius <= 0.0:
+    inner_diameter, outer_diameter = effective_reference_diameters(roi, default_inner_diameter_px, default_outer_diameter_px)
+    if outer_diameter <= 0.0:
         return np.zeros((patch_h, patch_w), dtype=bool)
     return transformed_annulus_mask_for_patch(
-        patch_origin_xy, patch_shape, (float(roi.center_x), float(roi.center_y)), inner_radius, outer_radius, affine_matrix
+        patch_origin_xy, patch_shape, (float(roi.center_x), float(roi.center_y)), inner_diameter, outer_diameter, affine_matrix
     )
 
 
@@ -746,8 +747,8 @@ def rasterize_fractional(
     affine_matrix: np.ndarray,
     supersample_factor: int = 8,
     *,
-    default_inner_radius_px: float = 0.0,
-    default_outer_radius_px: float = 0.0,
+    default_inner_diameter_px: float = 0.0,
+    default_outer_diameter_px: float = 0.0,
 ) -> np.ndarray:
     """§6a fractional pixel weighting: one ROI's sample- or reference-region
     coverage, full-image-sized, with values in `[0, 1]` instead of
@@ -788,9 +789,10 @@ def rasterize_fractional(
     else:
         center_xy = (float(roi.center_x), float(roi.center_y))
         if side == "sample":
-            inner_radius, outer_radius = 0.0, float(roi.sample_radius_px)
+            inner_radius, outer_radius = 0.0, float(roi.sample_diameter_px) / 2.0
         else:
-            inner_radius, outer_radius = effective_reference_radii(roi, default_inner_radius_px, default_outer_radius_px)
+            inner_diameter, outer_diameter = effective_reference_diameters(roi, default_inner_diameter_px, default_outer_diameter_px)
+            inner_radius, outer_radius = inner_diameter / 2.0, outer_diameter / 2.0
         if outer_radius <= 0.0:
             return np.zeros((image_height, image_width), dtype=np.float32)
         transformed_center, reach = annulus_reach_box(center_xy, outer_radius, affine_matrix)

@@ -344,7 +344,7 @@ def sample_exclusion_digest(rois: list[AreaRoi] | tuple[AreaRoi, ...]) -> list:
     stored value must be invalidated when X moves - otherwise a reopened
     session shows a stale, biased reference value with nothing to indicate
     it. Only the *sample* side matters: reference rings overlapping each
-    other are counted normally in this mode, so reference radii are not an
+    other are counted normally in this mode, so reference diameters are not an
     input to the exclusion.
 
     Lives in `SettingsSnapshot` (not `ProvenanceRecord`) on purpose: the
@@ -359,8 +359,7 @@ def sample_exclusion_digest(rois: list[AreaRoi] | tuple[AreaRoi, ...]) -> list:
             "area_roi_id": int(roi.area_roi_id),
             "center_x": float(roi.center_x),
             "center_y": float(roi.center_y),
-            "sample_radius_px": float(roi.sample_radius_px),
-            "sample_diameter_px": roi.sample_diameter_px,
+            "sample_diameter_px": float(roi.sample_diameter_px),
             "sample_geometry_type": roi.sample_geometry_type,
             "sample_mask": None if roi.sample_mask is None else {
                 "x0": roi.sample_mask.x0, "y0": roi.sample_mask.y0, "mask": roi.sample_mask.mask.tolist(),
@@ -393,8 +392,8 @@ def background_exclusion_digest(
       invalidation problem `sample_exclusion_digest` exists for on the
       reference-ring side, and the same answer. Only the three fields
       `background/estimate.py`'s `_roi_exclusion_mask` actually reads:
-      it works off `sample_radius_px` directly and never consults
-      `sample_diameter_px` or a sample mask, so recording those would
+      it works off `sample_diameter_px` directly and never consults
+      a sample mask, so recording that would
       invalidate cells on edits the background estimate cannot see.
     - ``"ignore_marked_pixels"`` - the one `AreaRoiDetectionSettings` field
       that reaches the background estimate (`roi/detection.py`'s
@@ -417,7 +416,7 @@ def background_exclusion_digest(
                 "area_roi_id": int(roi.area_roi_id),
                 "center_x": float(roi.center_x),
                 "center_y": float(roi.center_y),
-                "sample_radius_px": float(roi.sample_radius_px),
+                "sample_diameter_px": float(roi.sample_diameter_px),
             }
             for roi in sorted(rois, key=lambda item: int(item.area_roi_id))
         ]
@@ -548,12 +547,11 @@ def roi_geometry_fingerprint_fields(roi: AreaRoi) -> dict:
     return {
         "center_x": float(roi.center_x),
         "center_y": float(roi.center_y),
-        "sample_radius_px": float(roi.sample_radius_px),
+        "sample_diameter_px": float(roi.sample_diameter_px),
         "sample_geometry_type": roi.sample_geometry_type,
         "sample_mask": None if roi.sample_mask is None else {
             "x0": roi.sample_mask.x0, "y0": roi.sample_mask.y0, "mask": roi.sample_mask.mask.tolist(),
         },
-        "sample_diameter_px": roi.sample_diameter_px,
         "reference_geometry_type": roi.reference_geometry_type,
         "reference_mask": None if roi.reference_mask is None else {
             "x0": roi.reference_mask.x0, "y0": roi.reference_mask.y0, "mask": roi.reference_mask.mask.tolist(),

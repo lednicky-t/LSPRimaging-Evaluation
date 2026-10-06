@@ -256,7 +256,7 @@ def _decode_area_rois(raw: object) -> list[AreaRoi]:
             kwargs["area_roi_id"] = int(entry["area_roi_id"])
             kwargs["center_x"] = float(entry["center_x"])
             kwargs["center_y"] = float(entry["center_y"])
-            kwargs["sample_radius_px"] = float(entry.get("sample_radius_px", 10.0))
+            kwargs["sample_diameter_px"] = float(entry.get("sample_diameter_px", 20.0))
             kwargs["sample_mask"] = _decode_roi_mask(entry.get("sample_mask"))
             kwargs["reference_mask"] = _decode_roi_mask(entry.get("reference_mask"))
             kwargs["per_wavelength"] = _decode_per_wavelength(entry.get("per_wavelength"))

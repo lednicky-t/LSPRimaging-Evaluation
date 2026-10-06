@@ -37,10 +37,9 @@ class AreaRoi:
     area_roi_id: int
     center_x: float
     center_y: float
-    sample_radius_px: float
+    sample_diameter_px: float
     sample_color_hex: str | None = None
     reference_color_hex: str | None = None
-    sample_diameter_px: float | None = None
     reference_inner_diameter_px: float | None = None
     reference_outer_diameter_px: float | None = None
     score: float = 0.0
@@ -114,9 +113,9 @@ class AreaRoiDetectionSettings:
     mask_relative_threshold_fraction: float = 0.18
     mask_local_contrast_sigma_px: float = 8.0
     mask_local_contrast_z_threshold: float = 3.0
-    sample_radius_px: float = 10.0
-    reference_inner_radius_px: float = 14.0
-    reference_outer_radius_px: float = 18.0
+    sample_diameter_px: float = 20.0
+    reference_inner_diameter_px: float = 28.0
+    reference_outer_diameter_px: float = 36.0
     ignore_marked_pixels: bool = False
     ignored_intensity_value: float | None = None
     ignored_intensity_min_value: float | None = None

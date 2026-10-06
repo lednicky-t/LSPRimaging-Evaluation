@@ -432,7 +432,7 @@ class MaskModule(QObject):
         self,
         base_mask: np.ndarray,
         center_xy: tuple[float, float],
-        radius_px: float,
+        diameter_px: float,
         *,
         target_frame: tuple[int, float],
         scope: str,
@@ -456,7 +456,7 @@ class MaskModule(QObject):
         old sparse-diff case's replacement (a touch-up for this exact
         frame only) - no separate diff-dict mechanism needed, see the
         module docstring."""
-        painted = raster_tools.apply_brush_stamp(base_mask, center_xy, radius_px, value=value)
+        painted = raster_tools.apply_brush_stamp(base_mask, center_xy, diameter_px, value=value)
         if restrict_to is not None:
             painted = np.where(restrict_to, painted, np.asarray(base_mask, dtype=bool))
         self.set_mask_change(target_frame, scope, painted)

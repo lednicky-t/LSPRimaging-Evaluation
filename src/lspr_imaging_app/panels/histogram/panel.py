@@ -316,8 +316,8 @@ class HistogramPanel(QWidget):
                 roi,
                 shape_2d,
                 affine,
-                default_inner_radius_px=detection.reference_inner_radius_px,
-                default_outer_radius_px=detection.reference_outer_radius_px,
+                default_inner_diameter_px=detection.reference_inner_diameter_px,
+                default_outer_diameter_px=detection.reference_outer_diameter_px,
             )
         return sample, reference
 

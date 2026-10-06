@@ -143,7 +143,7 @@ def apply_morphology_to_mask(mask: np.ndarray, operation: str, radius_px: int) -
 def brush_stamp_bounds(
     canvas_shape: tuple[int, int],
     center_xy: tuple[float, float],
-    radius_px: float,
+    diameter_px: float,
 ) -> tuple[int, int, int, int, np.ndarray] | None:
     """The circular brush footprint for one stroke point, clamped to
     `canvas_shape`. Returns `(x0, x1, y0, y1, local_mask)` - `local_mask`
@@ -169,7 +169,7 @@ def brush_stamp_bounds(
     """
     height, width = canvas_shape[:2]
     center_x, center_y = float(center_xy[0]), float(center_xy[1])
-    radius = max(float(radius_px), 0.5)
+    radius = max(float(diameter_px) / 2.0, 0.5)
     x0 = max(int(np.floor(center_x - radius)), 0)
     x1 = min(int(np.ceil(center_x + radius)) + 1, width)
     y0 = max(int(np.floor(center_y - radius)), 0)
@@ -184,7 +184,7 @@ def brush_stamp_bounds(
 def apply_brush_stamp(
     canvas: np.ndarray,
     center_xy: tuple[float, float],
-    radius_px: float,
+    diameter_px: float,
     *,
     value: bool,
 ) -> np.ndarray:
@@ -194,7 +194,7 @@ def apply_brush_stamp(
     when the caller needs to route the covered pixels somewhere other than
     a direct array write (see its docstring)."""
     result = canvas.copy()
-    bounds = brush_stamp_bounds(canvas.shape, center_xy, radius_px)
+    bounds = brush_stamp_bounds(canvas.shape, center_xy, diameter_px)
     if bounds is None:
         return result
     x0, x1, y0, y1, local_mask = bounds

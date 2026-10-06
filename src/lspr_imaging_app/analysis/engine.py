@@ -138,7 +138,7 @@ class AnalysisEngine(QObject):
         chromatic_affine_between: Callable[[tuple[int, float], tuple[int, float]], np.ndarray] | None = None,
         resolve_mask: Callable[[int, float], MaskResolution | None] | None = None,
         reduction_method: Callable[[], str] | None = None,
-        default_reference_radii: Callable[[], tuple[float, float]] | None = None,
+        default_reference_diameters: Callable[[], tuple[float, float]] | None = None,
         detection_settings: Callable[[], AreaRoiDetectionSettings] | None = None,
         metric_settings: Callable[[], MetricSettings] = MetricSettings,
         reference_exclusion_mode: Callable[[], str] = lambda: DEFAULT_REFERENCE_EXCLUSION_MODE,
@@ -173,10 +173,10 @@ class AnalysisEngine(QObject):
           engine never warps it and never calls into Chromatic or Mask
           itself, matching the module boundary rule every other module
           already follows.
-        - ``reduction_method`` / ``default_reference_radii`` /
+        - ``reduction_method`` / ``default_reference_diameters`` /
           ``detection_settings`` - all three read
           ``RoiToolbox.detection_settings()``: the first two pull one field
-          each (`reduction_method`, and `reference_inner/outer_radius_px`
+          each (`reduction_method`, and `reference_inner/outer_diameter_px`
           for ROIs that don't override them), while the third hands the
           whole object to `compute_cell` for `apply_preprocessing`'s
           `mask_settings` (added 2026-09-23 with the background-exclusion
@@ -228,7 +228,7 @@ class AnalysisEngine(QObject):
         self._chromatic_affine_between = chromatic_affine_between
         self._resolve_mask = resolve_mask or _unwired("resolve_mask")
         self._reduction_method = reduction_method or _unwired("reduction_method")
-        self._default_reference_radii = default_reference_radii or _unwired("default_reference_radii")
+        self._default_reference_diameters = default_reference_diameters or _unwired("default_reference_diameters")
         self._detection_settings = detection_settings or _unwired("detection_settings")
         self._reference_exclusion_mode = reference_exclusion_mode
         self._metric_settings = metric_settings
@@ -607,7 +607,7 @@ class AnalysisEngine(QObject):
         )
         naming = self._naming()
         reduction_method = current_inputs.reduction_method
-        default_inner, default_outer = self._default_reference_radii()
+        default_inner, default_outer = self._default_reference_diameters()
         cancel_event = self._worker.cancel_event
         exclusion_mode = self._reference_exclusion_mode()
         coverage_thresholds = self._coverage_thresholds()
@@ -646,7 +646,7 @@ class AnalysisEngine(QObject):
                     result = compute_cell(
                         roi, cube_index, wavelength_inputs,
                         reduction_method=reduction_method, trimmed_mean_fraction=self._trimmed_mean_fraction,
-                        default_reference_inner_radius_px=default_inner, default_reference_outer_radius_px=default_outer,
+                        default_reference_inner_diameter_px=default_inner, default_reference_outer_diameter_px=default_outer,
                         masks_dir=self._masks_dir, chromatic_dir=self._chromatic_dir, settings_dir=self._settings_dir,
                         naming=naming, all_rois=all_rois, detection_settings=detection,
                         reference_exclusion_mode=exclusion_mode,
