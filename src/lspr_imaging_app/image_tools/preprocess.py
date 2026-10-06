@@ -26,7 +26,7 @@ import time
 import numpy as np
 
 from ..roi.model import AreaRoi, AreaRoiDetectionSettings
-from .background.estimate import flatten_background
+from .background.estimate import estimate_background_profile, flatten_background
 from .background.model import BackgroundSettings
 from .chromatic.warp import warp_boolean_mask_affine
 from .geometry.model import GeometrySettings
@@ -147,6 +147,37 @@ def area_selection_to_raw(
     if not raw.any():
         return raw
     return binary_closing(raw, structure=np.ones((3, 3), dtype=bool))
+
+
+def estimate_background_image(
+    image: np.ndarray,
+    geometry_settings: GeometrySettings,
+    background_settings: BackgroundSettings,
+    rois: list[AreaRoi] | None = None,
+    mask_settings: AreaRoiDetectionSettings | None = None,
+    external_mask: np.ndarray | None = None,
+) -> np.ndarray:
+    """The smooth background estimate itself (what `apply_preprocessing`
+    subtracts), for display: same rotate/flip/crop, same exclusion gating,
+    same `estimate_background_profile` call as the flatten path - so the
+    picture shows exactly the surface that would be removed. Works whether or
+    not flattening is switched on (the sigma/bin/exclusion settings are all
+    that matter), matching the stable app's "Profile" view."""
+    processed = apply_spatial_preprocessing(image, geometry_settings)
+    processed_exclusion_mask = None
+    if external_mask is not None:
+        candidate = np.asarray(external_mask, dtype=bool)
+        if candidate.shape == processed.shape[:2]:
+            processed_exclusion_mask = candidate
+    return estimate_background_profile(
+        processed,
+        sigma_px=float(background_settings.flatten_background_sigma_px),
+        binning=max(int(background_settings.flatten_background_binning), 1),
+        rois=rois if background_settings.flatten_background_exclude_area_rois else None,
+        mask_settings=mask_settings if background_settings.flatten_background_exclude_mask else None,
+        external_mask=processed_exclusion_mask if background_settings.flatten_background_exclude_mask else None,
+        exclusion_dilation_px=int(background_settings.flatten_background_exclusion_dilation_px),
+    )
 
 
 def apply_preprocessing(

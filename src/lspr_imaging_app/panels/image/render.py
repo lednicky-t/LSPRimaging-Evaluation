@@ -40,7 +40,7 @@ from PyQt6.QtCore import QObject, pyqtSignal
 
 from ...image_tools.background.model import BackgroundSettings
 from ...image_tools.geometry.model import GeometrySettings
-from ...image_tools.preprocess import apply_preprocessing, resolve_external_mask
+from ...image_tools.preprocess import apply_preprocessing, estimate_background_image, resolve_external_mask
 from ...roi.model import AreaRoi, AreaRoiDetectionSettings
 
 logger = logging.getLogger(__name__)
@@ -88,6 +88,9 @@ class RenderRequest:
     isn't the newest it asked for - belt and braces next to the worker's own
     drop-the-stale-one logic, since a request can be superseded *after* the
     worker has already started on it."""
+    show_background: bool = False
+    """Render the background *estimate* for this frame instead of the
+    processed image (the Background tab's "show background" toggle)."""
 
 
 @dataclass(frozen=True)
@@ -199,8 +202,9 @@ class ImageRenderer(QObject):
         load_seconds = time.perf_counter() - started
 
         processed_started = time.perf_counter()
+        build = estimate_background_image if request.show_background else apply_preprocessing
         try:
-            processed = apply_preprocessing(
+            processed = build(
                 raw,
                 request.geometry,
                 request.background,

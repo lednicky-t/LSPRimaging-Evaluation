@@ -60,7 +60,6 @@ from ...image_tools import BackgroundModule, GeometryModule
 from ...selection import ReferenceFrameModule, SelectionModule
 from ...storage.session_coordinator import SessionCoordinator
 from ..ui_state import UiStateStore
-from .background_removal import BackgroundRemovalSection
 from .collapsible_section import CollapsibleSection
 from .dataset_experimental_plan import ExperimentalPlanSection
 from .dataset_export import DatasetExportSection
@@ -209,60 +208,22 @@ def _build_image_tools_section(
     parent: QWidget,
     background: BackgroundModule,
 ) -> tuple[CollapsibleSection, list[tuple[str, CollapsibleSection]]]:
-    """Ported from the source's ``image_tools_section`` + its nested
-    Transforms/Mask/Chromatic correction/Background removal children.
+    """Image tools stage: nothing left to show here (2026-10-06).
 
-    **Transforms and Mask removed 2026-10-02** (maintainer request: "remove
-    the Image tools and Mask sections from the Workflow panel, as they are
-    fully in the Image panel") - both are now fully covered by the Image
-    panel's own ribbon tabs ("Image tools" and "Mask", `panels/image/
-    panel.py`/`tool_ribbon.py`): Transforms by a second `TransformsSection`
-    instance there (built 2026-09-30), Mask by the "Edit" tool picker's
-    Histogram-selection/Morphology panels plus the "Automatic edit" Clear/
-    Load/Save group (both built 2026-10-02, `mask_edit_panels.py`/
-    `mask_file_actions.py`). Only Chromatic correction and Background
-    removal remain here - neither has an Image-panel-ribbon home yet.
-
-    **Background removal is real** (2026-09-24, ``background_removal.py``) -
-    the first section to use the apply toggle for real (``BackgroundModule``'s
-    whole settings surface is one command). Chromatic correction is still a
-    placeholder: per the design doc §3 icon-placement split, its real
-    controls are meant to live on the Image panel's own toolbar, not built
-    yet."""
-    background_removal_content = BackgroundRemovalSection(background, parent)
-    background_removal_section = CollapsibleSection(
-        "Background removal",
-        background_removal_content,
-        expanded=True,
-        applied=background.settings().flatten_background_enabled,
-        apply_tooltip="Apply or skip background removal from the processing pipeline.",
-        title_color=_nested_title_color(),
-        parent=parent,
-    )
-    # Two-way: the header's apply toggle drives the module (a click always
-    # pushes every current form value, not just `enabled` - matches
-    # BackgroundModule's one-call settings API); an external settings
-    # change (e.g. session restore) syncs the header back, signals blocked
-    # so that sync doesn't re-trigger a push right back at the module -
-    # same "set_applied via blockSignals" pattern the source's own
-    # `_set_section_applied` uses (`gui/main_window.py:5233`).
-    background_removal_section.apply_changed.connect(background_removal_content.set_enabled)
-
-    def _sync_apply_toggle(_change: object) -> None:
-        blocked = background_removal_section.blockSignals(True)
-        try:
-            background_removal_section.set_applied(background.settings().flatten_background_enabled)
-        finally:
-            background_removal_section.blockSignals(blocked)
-
-    background.background_model_changed.connect(_sync_apply_toggle)
-
-    # Chromatic correction's section was removed 2026-10-06 (maintainer
-    # request): its controls live in the Image panel's "Chromatic" ribbon tab.
-    children = _nested_children(parent, background_removal_section)
-    subsections = [("Background removal", background_removal_section)]
-    top_section = CollapsibleSection("Image tools:", children, expanded=False, parent=parent)
-    return top_section, subsections
+    Transforms and Mask left on 2026-10-02, Chromatic correction on
+    2026-10-06 and the last one, Background removal, the same day (maintainer
+    request: its form and apply toggle moved to the Image panel's
+    "Background" ribbon tab, `panels/image/background_tab.py`, together with
+    a new show-background toggle). The stage itself stays so the saved
+    stage/layout-preset mapping keeps working; it just points at the ribbon.
+    `background` is no longer used - kept in the signature so callers did not
+    have to change."""
+    del background
+    note = QLabel("Image tools live in the Image panel's ribbon tabs.", parent)
+    note.setWordWrap(True)
+    note.setStyleSheet(f"color: {get_active_theme().text_muted}; padding: 4px 2px;")
+    top_section = CollapsibleSection("Image tools:", note, expanded=False, parent=parent)
+    return top_section, []
 
 
 def _build_roi_selection_section(parent: QWidget) -> tuple[CollapsibleSection, list[tuple[str, CollapsibleSection]]]:

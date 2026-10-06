@@ -126,6 +126,7 @@ from ...image_tools.chromatic.affine import identity_affine_matrix, invert_affin
 from ...image_tools.chromatic.auto_task import ChromaticAutoDetect
 from ...wavelength_color import wavelength_to_rgb
 from .area_selection_tool import AreaSelectionTool
+from .background_tab import BACKGROUND_INFO_HTML, BackgroundTab
 from .chromatic_tab import ChromaticCorrectionTab, ChromaticUiValues
 from .canvas_tools import _ICON_SIZE, CanvasToolsBar, style_bar_icon_button
 from .context_menu import show_tool_context_menu
@@ -193,6 +194,25 @@ def _slider_axis_title_style(color: str) -> str:
 
 
 CHROMATIC_TAB = "Chromatic"  # ribbon tab label (full name "Chromatic Corrections" is its tooltip)
+BACKGROUND_TAB = "Background"  # ribbon tab label; green while background removal is applied
+# The "i" icon's text per ribbon tab ("Image tools" and "ROIs" show the active tool's canvas controls instead).
+_TAB_INFO: dict[str, str] = {
+    VIEW_TAB: (
+        "View: display options only - show/hide, colour and transparency of the histogram-selection tint "
+        "and of the mask tint. Nothing here changes data or results."
+    ),
+    "Mask": (
+        "Mask: pixels to ignore (kept out of the background estimate and ROI sampling). "
+        "State: edit scope (persistent / individual). Visibility: tint on/off, colour, transparency. "
+        "Manual edit: histogram selection, threshold, local contrast, morphology, draw. PNG: load/save the mask."
+    ),
+    CHROMATIC_TAB: (
+        "Chromatic correction: Run finds landmarks on the reference frame and follows them through the "
+        "wavelengths (gear: settings). Eye/stack: show landmarks for one or all wavelengths. "
+        "Wand: switch the correction on/off. Trash: clear landmarks and correction."
+    ),
+    BACKGROUND_TAB: BACKGROUND_INFO_HTML,
+}
 _PREVIEW_TOOLS = frozenset({ImageTool.ROTATE, ImageTool.CROP})
 """Tools that work on the *uncropped* image: while one is active the image is
 rendered without its crop, the crop is drawn as an outline, and the ROI
@@ -278,6 +298,8 @@ class ImagePanel(QWidget):
     overlay_style_changed = pyqtSignal(str, object)
     # The landmark overlay's two view toggles (shown, every wavelength) - remembered by the app settings.
     chromatic_view_changed = pyqtSignal(bool, bool)
+    # The Background tab's "show the estimate instead of the image" toggle; app settings remember it.
+    background_view_changed = pyqtSignal(bool)
     # Intensity under the Image cursor (2026-10-03), or None once the cursor
     # is switched off / the pixel has no value. The Histogram marks it as a
     # tick on its x axis. Display only - carries no state anyone must keep.
@@ -306,8 +328,11 @@ class ImagePanel(QWidget):
         initial_mask_overlay: OverlayStyle | None = None,
         initial_highlight_overlay: OverlayStyle | None = None,
         initial_ribbon_category: str | None = None,
+        initial_show_background: bool = False,
     ) -> None:
         super().__init__(parent)
+        self._show_background = bool(initial_show_background)
+        self._last_data_range: tuple[float, float] | None = None  # display levels reused for the background view
         self._initial_ribbon_category = initial_ribbon_category
         # Applied once, the first time a real image lands (`_on_rendered`) -
         # not here, since no plane exists yet to set a view against. `None`
@@ -770,6 +795,10 @@ class ImagePanel(QWidget):
         self._chromatic_tab.show_landmarks_changed.connect(self._on_show_landmarks_changed)
         self._chromatic_tab.landmark_scope_changed.connect(self._on_landmark_scope_changed)
         self._chromatic_tab.settings_applied.connect(self.chromatic_settings_applied)
+        self._background_tab = BackgroundTab(
+            self._background, show_background=self._show_background, parent=self
+        )
+        self._background_tab.show_background_changed.connect(self._on_show_background_changed)
         self._tool_ribbon = ImageToolRibbon(
             [
                 (VIEW_TAB, view_content),
@@ -779,6 +808,7 @@ class ImagePanel(QWidget):
                 # Empty on purpose (2026-10-03): filled directly here, not in
                 # the Workflow panel (maintainer's plan for chromatic correction).
                 (CHROMATIC_TAB, self._chromatic_tab),
+                (BACKGROUND_TAB, self._background_tab),
             ],
             self,
             pinned=self._general_row,
@@ -788,6 +818,7 @@ class ImagePanel(QWidget):
             restored = VIEW_TAB if self._initial_ribbon_category == "Histogram" else self._initial_ribbon_category
             self._tool_ribbon.set_category(restored)  # before the connect: restoring is not a user change
         self._tool_ribbon.category_changed.connect(self.ribbon_category_changed)
+        self._tool_ribbon.category_changed.connect(lambda _label: self._refresh_tool_info(self._active_tool.active()))
         # Short tab label, full name in the tooltip; the tab is green while the correction is applied.
         self._tool_ribbon.set_tab_tooltip(CHROMATIC_TAB, "Chromatic Corrections")
         top_bar_layout.addWidget(self._tool_ribbon)
@@ -1040,6 +1071,8 @@ class ImagePanel(QWidget):
         self._chromatic.chromatic_model_changed.connect(self._schedule_redraw)
         self._chromatic.chromatic_model_changed.connect(self._update_chromatic_tab_state)
         self._update_chromatic_tab_state()
+        self._background.background_model_changed.connect(self._update_background_tab_state)
+        self._update_background_tab_state()
 
         # ROI/selection changes only move the overlay, never the pixels - but
         # they still go through the same path. Splitting "redraw overlay only"
@@ -1132,6 +1165,8 @@ class ImagePanel(QWidget):
             self._tool_ribbon.refresh_theme(get_active_theme())
         if hasattr(self, "_area_picker"):
             self._area_picker.refresh_theme(get_active_theme())
+        if hasattr(self, "_background_tab"):
+            self._background_tab.refresh_theme(get_active_theme())
         if hasattr(self, "_cursor_readout"):
             self._style_cursor_readout()
         if hasattr(self, "_controls_bar"):
@@ -1556,6 +1591,7 @@ class ImagePanel(QWidget):
                 rois=tuple(self._roi_toolbox.rois()),
                 detection=self._roi_toolbox.detection_settings(),
                 serial=self._latest_serial,
+                show_background=self._show_background,
             )
         )
 
@@ -1573,15 +1609,21 @@ class ImagePanel(QWidget):
             self._no_data_item.hide()
             return
         image = np.asarray(result.image, dtype=np.float32)
-        self._image_item.setImage(image, autoLevels=True)
-        checker = no_data_overlay_rgba(image)
-        if checker is None:
-            self._no_data_item.hide()
+        showing_estimate = result.request.show_background
+        if showing_estimate:
+            self._show_background_estimate(image, result.request)
         else:
-            self._no_data_item.setImage(checker, autoLevels=False)
-            self._no_data_item.show()
-        self._current_display_image = image
-        self._update_highlight_overlay()
+            self._image_item.setImage(image, autoLevels=True)
+            finite = image[np.isfinite(image)]
+            self._last_data_range = (float(finite.min()), float(finite.max())) if finite.size else None
+            checker = no_data_overlay_rgba(image)
+            if checker is None:
+                self._no_data_item.hide()
+            else:
+                self._no_data_item.setImage(checker, autoLevels=False)
+                self._no_data_item.show()
+            self._current_display_image = image
+            self._update_highlight_overlay()
         if not self._view_range_restored:
             # Once only, ever, on this panel's first successful render - a
             # later frame navigation must never snap the view back to this
@@ -1594,8 +1636,10 @@ class ImagePanel(QWidget):
             if self._initial_view_range is not None:
                 x_range, y_range = self._initial_view_range
                 self._plot.vb.setRange(xRange=x_range, yRange=y_range, padding=0.0)
-        self.image_rendered.emit(image, result.request.cube_index, result.request.wavelength_nm)
-        self._set_frame_status(f"Cube {result.request.cube_index}, {result.request.wavelength_nm:.0f} nm")
+        if not showing_estimate:
+            # The estimate is not data: the Histogram etc. keep the real frame.
+            self.image_rendered.emit(image, result.request.cube_index, result.request.wavelength_nm)
+            self._set_frame_status(f"Cube {result.request.cube_index}, {result.request.wavelength_nm:.0f} nm")
         self._last_image_shape = result.image.shape[:2]
         self._area_tool.set_image_shape(self._last_image_shape)
         # The crop tool's clamp bound - correct the instant Crop is active
@@ -1606,6 +1650,25 @@ class ImagePanel(QWidget):
         # active-tool change).
         self._crop_tool.set_frame_size(result.image.shape[1], result.image.shape[0])
         self._update_chunk_grid()
+
+    def _show_background_estimate(self, estimate: np.ndarray, request: RenderRequest) -> None:
+        """Display the background estimate in place of the image. Only the
+        picture changes: `_current_display_image` (the cursor readout, the
+        Histogram, the highlight tint) keeps describing the real data, and
+        the levels follow the data's own range when known - an auto-stretched
+        near-flat background would look far more uneven than it is."""
+        levels = self._last_data_range
+        if levels is not None and levels[1] > levels[0]:
+            self._image_item.setImage(estimate, autoLevels=False, levels=levels)
+        else:
+            self._image_item.setImage(estimate, autoLevels=True)
+        self._no_data_item.hide()
+        self._highlight_overlay_item.hide()
+        finite = estimate[np.isfinite(estimate)]
+        spread = f", range {finite.min():.0f}-{finite.max():.0f}" if finite.size else ""
+        self._set_frame_status(
+            f"Cube {request.cube_index}, {request.wavelength_nm:.0f} nm - background estimate{spread}"
+        )
 
     # -- viewport persistence -------------------------------------------------
 
@@ -1676,6 +1739,15 @@ class ImagePanel(QWidget):
         settings = self._chromatic.settings()
         applied = bool(settings.chromatic_correction_enabled and self._chromatic.models())
         self._tool_ribbon.set_tab_applied(CHROMATIC_TAB, applied)
+
+    def _update_background_tab_state(self, *_args: object) -> None:
+        """Green "Background" tab while background removal is applied."""
+        self._tool_ribbon.set_tab_applied(BACKGROUND_TAB, self._background.settings().flatten_background_enabled)
+
+    def _on_show_background_changed(self, shown: bool) -> None:
+        self._show_background = bool(shown)
+        self._schedule_redraw()
+        self.background_view_changed.emit(self._show_background)
 
     def _image_aspect(self) -> float:
         """Width / height of the processed image, for shaping the landmark grid."""
@@ -1900,7 +1972,7 @@ class ImagePanel(QWidget):
         render, since the tint is a threshold over pixels already on
         screen - matches the stable app's own
         `_update_selected_intensity_overlay`."""
-        if not self._highlight_overlay_visible or self._current_display_image is None:
+        if not self._highlight_overlay_visible or self._current_display_image is None or self._show_background:
             self._highlight_overlay_item.hide()
             return
         range_ = self._highlight_range.current_range()
@@ -2016,8 +2088,16 @@ class ImagePanel(QWidget):
         self._frame_status = text
         self.frame_status_changed.emit(text)
 
+    def _info_text(self, tool: ImageTool | None) -> str:
+        """The info icon's tooltip for the open ribbon tab (2026-10-06): the
+        canvas controls of the active tool on the tool tabs ("Image tools",
+        "ROIs"), a short explanation of the tab on the others."""
+        category = self._tool_ribbon.current_category() if hasattr(self, "_tool_ribbon") else None
+        return _TAB_INFO.get(category) or controls_text(tool)
+
     def _refresh_tool_info(self, tool: ImageTool | None) -> None:
-        """Point the info icon's tooltip at *tool*'s controls. Always shows
+        """Point the info icon's tooltip at the open tab's help (see
+        `_info_text`; on the tool tabs, *tool*'s controls). Always shows
         something - every real tool has its own row in `image_controls.py`'s
         `_TOOL_CONTROLS` now; only no tool at all falls back to its
         plain-image row (left-click selects, plus the always-available
@@ -2030,7 +2110,7 @@ class ImagePanel(QWidget):
         theme = get_active_theme()
         render_size = _ICON_SIZE * 2
         self._tool_info.setIcon(load_tabler_icon("info-circle", color=theme.text_muted, size=render_size))
-        self._tool_info.setToolTip(controls_text(tool))
+        self._tool_info.setToolTip(self._info_text(tool))
 
     def _in_view(self, scene_pos: object) -> bool:
         return bool(self._plot.vb.sceneBoundingRect().contains(scene_pos))

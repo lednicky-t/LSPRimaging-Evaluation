@@ -127,6 +127,8 @@ class AppSettings:
     highlight_overlay_visible: bool = True
     highlight_overlay_color: str | None = None  # None = the theme's highlight color
     highlight_overlay_alpha: float = 0.42
+    # Background tab: show the estimated background instead of the image.
+    show_background: bool = False
     # Histogram highlight range [min, max] (intensity units). Only meaningful
     # for the dataset it was set on, so it is stored with that dataset's
     # folder and restored only when the same dataset is opened again.

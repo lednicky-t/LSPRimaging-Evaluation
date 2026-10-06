@@ -41,15 +41,6 @@ Background field read from its widget and written in one call, one
 `_push_undo_point("Image processing")` for the whole group), not
 per-field live-editing the way Geometry's crop/rotate/flip toolbar buttons
 are. Matched that shape - one command, one undo entry, same label.
-
-**`local_reference_normalization_enabled` is included but currently
-inert** - grepped the whole app for any reader of this field besides the
-GUI checkbox and session persistence; there isn't one. This isn't a gap
-introduced by the rewrite - the old app persists and displays the toggle
-but nothing in `processing/`/`gui/analysis_tasks.py` actually branches on
-it today either. Owned here as real, persisted state regardless (that's
-this module's job independent of whether anything reads it yet), flagged
-so a future session doesn't assume it's wired to something.
 """
 
 from __future__ import annotations
@@ -101,7 +92,6 @@ class BackgroundModule(QObject):
         exclude_area_rois: bool,
         exclude_mask: bool,
         exclusion_dilation_px: int,
-        local_reference_normalization_enabled: bool,
     ) -> None:
         """Set every background-flatten field at once - matching the old
         app's own "Apply" grouping (see module docstring). A no-op (no
@@ -114,7 +104,6 @@ class BackgroundModule(QObject):
             flatten_background_exclude_area_rois=bool(exclude_area_rois),
             flatten_background_exclude_mask=bool(exclude_mask),
             flatten_background_exclusion_dilation_px=max(int(exclusion_dilation_px), 0),
-            local_reference_normalization_enabled=bool(local_reference_normalization_enabled),
         )
         old = replace(self._settings)
         if old == new:

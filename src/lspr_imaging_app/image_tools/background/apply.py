@@ -33,9 +33,21 @@ import numpy as np
 
 
 def apply_background(image: np.ndarray, background: np.ndarray, baseline: float) -> np.ndarray:
-    """Subtract `background` from `image` and re-add the scalar `baseline`,
-    clipping to the valid 16-bit intensity range. `image` and `background`
-    must already be the same shape — the caller is responsible for aligning
+    """Divide `image` by `background` and re-scale to the scalar `baseline`
+    (the "typical white" level), clipping to the valid 16-bit range:
+    ``image / background * baseline``.
+
+    Illumination inhomogeneity is a *gain* (it multiplies the signal), so
+    dividing recovers what a homogeneous illumination would have shown - for
+    a dark sample as well as for the white substrate - which is what an
+    absorbance (sample / reference) needs. Where the background is not
+    positive there is no valid white level, so the result is NaN (never an
+    invented number). The earlier ``image - background + baseline`` was
+    removed 2026-10-06: it is only right for an additive offset (that is the
+    dark frame's job) and measured worse than no removal for a reference near
+    the sample (`docs/background_method_study_2026-10-06.md`).
+
+    `image` and `background` must already be the same shape — the caller is responsible for aligning
     them (e.g. estimate.py's region-scoped callers slice both to the same
     ROI region before calling this, to avoid ever materializing a full-image
     background array they don't need). All the expensive per-pixel work
@@ -44,5 +56,7 @@ def apply_background(image: np.ndarray, background: np.ndarray, baseline: float)
     """
     image_f32 = image.astype(np.float32, copy=False)
     background_f32 = background.astype(np.float32, copy=False)
-    flattened = image_f32 - background_f32 + float(baseline)
+    flattened = np.full(image_f32.shape, np.nan, dtype=np.float32)
+    np.divide(image_f32, background_f32, out=flattened, where=background_f32 > 0.0)
+    flattened *= np.float32(baseline)
     return np.clip(flattened, 0.0, 65535.0)

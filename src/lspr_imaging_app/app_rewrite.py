@@ -710,7 +710,9 @@ def build_main_window(
             settings.highlight_overlay_alpha, theme_obj.highlight_color,
         ),
         initial_ribbon_category=settings.image_ribbon_category,
+        initial_show_background=settings.show_background,
     )
+    image_panel.background_view_changed.connect(lambda shown: _persist(show_background=bool(shown)))
     image_panel.ribbon_category_changed.connect(lambda label: _persist(image_ribbon_category=label))
 
     def _on_overlay_style_changed(kind: str, style: OverlayStyle) -> None:
