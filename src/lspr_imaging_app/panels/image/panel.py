@@ -77,6 +77,7 @@ from __future__ import annotations
 
 import itertools
 import logging
+from collections.abc import Callable
 from dataclasses import replace
 
 import numpy as np
@@ -125,7 +126,7 @@ from ...image_tools.chromatic_auto_task import ChromaticAutoDetect
 from .area_selection_tool import AreaSelectionTool
 from .background_tab import BACKGROUND_INFO_HTML, BackgroundTab
 from .chromatic_tab import ChromaticCorrectionTab, ChromaticUiValues
-from .canvas_tools import _ICON_SIZE, CanvasToolsBar, style_bar_icon_button
+from .canvas_tools import _ICON_SIZE, style_bar_icon_button
 from .crop_size_controls import CropSizeControls
 from .crop_tool import CropTool
 from .data_axis_slider import DataAxisSlider
@@ -151,6 +152,7 @@ from .measure_line_tool import MeasureLineTool
 from .overlay_style import OverlayStyle
 from .overlay_tint import OverlayTint
 from .render import ImageRenderer, RenderRequest, RenderResult
+from .roi_gestures import RoiGestures
 from .roi_overlay import RoiOverlay, add_curve
 from .roi_overlay_controls import RoiOverlayControls
 from .rotate_line_tool import RotateLineTool
@@ -165,7 +167,7 @@ from ...storage.ui_state_keys import (
 from ..ui_state import UiStateStore
 from .scale_bar_controls import ScaleBarControls
 from .scale_bar_overlay import ScaleBarItem
-from .tool_ribbon import VIEW_TAB, ImageToolRibbon
+from .tool_ribbon import ROI_TAB, VIEW_TAB, ImageToolRibbon
 
 logger = logging.getLogger(__name__)
 
@@ -315,9 +317,12 @@ class ImagePanel(QWidget):
         initial_highlight_overlay: OverlayStyle | None = None,
         initial_ribbon_category: str | None = None,
         initial_show_background: bool = False,
+        analysis_running: Callable[[], bool] | None = None,
     ) -> None:
         super().__init__(parent)
         self._show_background = bool(initial_show_background)
+        # Whether an analysis run is in flight (the ROI menu's Delete waits for it); tests omit it.
+        self._analysis_running = analysis_running or (lambda: False)
         self._last_data_range: tuple[float, float] | None = None  # display levels reused for the background view
         self._initial_ribbon_category = initial_ribbon_category
         # Applied once, the first time a real image lands (`_on_rendered`) -
@@ -547,6 +552,7 @@ class ImagePanel(QWidget):
         # is the first tool to claim them - declines (returns False) unless
         # it is the active tool, so every other case is untouched.
         self._plot.vb.set_left_drag_handler(self._on_left_drag_event)
+        self._plot.vb.set_right_drag_handler(self._on_right_drag_event)  # moves the selected ROIs (ROIs tab)
         self._plot.vb.sigTransformChanged.connect(self._reposition_crop_controls)
 
         # A real QWidget (QSpinBox/QToolButton need actual input, unlike a
@@ -647,6 +653,15 @@ class ImagePanel(QWidget):
             rotate_tool=self._rotate_tool, crop_tool=self._crop_tool, measure_tool=self._measure_tool,
             area_tool=self._area_tool,
             image_shape=lambda: self._last_image_shape, roi_at=self.roi_at, apply_crop=self._on_crop_apply_requested,
+            roi_gestures=RoiGestures(
+                self._plot, self._roi_toolbox, self._selection,
+                rois_in_rect=self.rois_in_rect, display_linear=self._display_linear,
+                redraw_overlay=self._draw_roi_overlay, parent=self,
+            ),
+            roi_tab_active=lambda: self._tool_ribbon.current_category() == ROI_TAB,
+            to_reference=self._display_to_reference,
+            analysis_running=self._analysis_running,
+            notify=self._on_tool_status,
         )
         scene.sigMouseClicked.connect(self._on_scene_clicked)
         scene.sigMouseMoved.connect(self._on_scene_moved)
@@ -912,7 +927,6 @@ class ImagePanel(QWidget):
         return view_content
 
     def _build_roi_tab(self) -> QWidget:
-        self._canvas_tools = CanvasToolsBar(self._roi_toolbox, self._active_tool, self)
         self._roi_sample_controls = RoiOverlayControls(
             "sample", visible=self._roi_overlay.sample.visible, color=QColor(self._roi_overlay.sample.color),
             alpha=self._roi_overlay.sample.alpha, parent=self,
@@ -935,15 +949,12 @@ class ImagePanel(QWidget):
         roi_sample_group, self._roi_sample_label = labeled_icon_group(self, self._roi_sample_controls, "Sample")
         roi_reference_group, self._roi_reference_label = labeled_icon_group(self, self._roi_reference_controls, "Reference")
         roi_labels_group, self._roi_labels_caption = labeled_icon_group(self, self._roi_labels_button, "Labels")
-        self._roi_separator = vertical_separator(self)
         self._roi_separator_2 = vertical_separator(self)
         self._roi_separator_3 = vertical_separator(self)
         roi_content = QWidget(self)
         roi_content_layout = QHBoxLayout(roi_content)
         roi_content_layout.setContentsMargins(0, 0, 0, 0)
         roi_content_layout.setSpacing(6)
-        roi_content_layout.addWidget(self._canvas_tools)
-        roi_content_layout.addWidget(self._roi_separator)
         roi_content_layout.addWidget(roi_sample_group)
         roi_content_layout.addWidget(self._roi_separator_2)
         roi_content_layout.addWidget(roi_reference_group)
@@ -974,7 +985,7 @@ class ImagePanel(QWidget):
                 (VIEW_TAB, view_content),
                 ("Image tools", image_tools_content),
                 ("Mask", mask_content),
-                ("ROIs", roi_content),
+                (ROI_TAB, roi_content),
                 # Empty on purpose (2026-10-03): filled directly here, not in
                 # the Workflow panel (maintainer's plan for chromatic correction).
                 (CHROMATIC_TAB, self._chromatic_tab),
@@ -1254,8 +1265,6 @@ class ImagePanel(QWidget):
             self._measure_controls.refresh_theme(get_active_theme())
         if hasattr(self, "_cursor_overlay"):
             self._cursor_overlay.refresh_theme(get_active_theme())
-        if hasattr(self, "_canvas_tools"):
-            self._canvas_tools.refresh_theme(get_active_theme())
         if hasattr(self, "_mask_overlay_controls"):
             self._mask_overlay_controls.refresh_theme(get_active_theme())
         if hasattr(self, "_view_mask_overlay_controls"):
@@ -1268,7 +1277,7 @@ class ImagePanel(QWidget):
             self._refresh_roi_labels_icon()
         for name in (
             "_view_separator", "_view_separator_2", "_view_separator_3", "_view_separator_4",
-            "_roi_separator", "_roi_separator_2", "_roi_separator_3",
+            "_roi_separator_2", "_roi_separator_3",
         ):
             if hasattr(self, name):
                 getattr(self, name).setStyleSheet(f"color: {get_active_theme().control_border};")
@@ -2125,6 +2134,9 @@ class ImagePanel(QWidget):
     def _on_left_drag_event(self, ev: object) -> bool:
         return self._interaction.on_left_drag(ev)
 
+    def _on_right_drag_event(self, ev: object) -> bool:
+        return self._interaction.on_right_drag(ev)
+
     def _on_crop_drag_event(self, ev: object) -> bool:
         return self._interaction.on_crop_drag(ev)
 
@@ -2306,6 +2318,35 @@ class ImagePanel(QWidget):
         distances = np.where(distances <= radii, distances, np.inf)
         nearest = int(np.argmin(distances))  # first of equal distances wins, as before
         return rois[nearest].area_roi_id if np.isfinite(distances[nearest]) else None
+
+    def rois_in_rect(self, x0: float, y0: float, x1: float, y1: float) -> set[int]:
+        """Ids of the ROIs whose display-space *centre* lies in the rectangle
+        (the rubber-band select). Public for the same reason as `roi_at`."""
+        rois = self._roi_toolbox.rois()
+        if not rois:
+            return set()
+        frame = (self._current_cube(), self._current_wavelength())
+        centers = self._roi_toolbox.display_positions(frame, self._chromatic.affine_for(frame))
+        inside = (centers[:, 0] >= x0) & (centers[:, 0] <= x1) & (centers[:, 1] >= y0) & (centers[:, 1] <= y1)
+        return {roi.area_roi_id for roi, hit in zip(rois, inside, strict=True) if hit}
+
+    def _current_affine(self) -> np.ndarray:
+        frame = (self._current_cube(), self._current_wavelength())
+        return np.asarray(self._chromatic.affine_for(frame), dtype=np.float64)
+
+    def _display_linear(self) -> np.ndarray:
+        """The linear (2x2) part of the shown frame's affine: how a drag in display space maps to the stored ROI centres."""
+        return self._current_affine()[:2, :2]
+
+    def _display_to_reference(self, x: float, y: float) -> tuple[float, float]:
+        """Display-space point -> reference-frame point (what `RoiToolbox` stores), by inverting the affine."""
+        matrix = self._current_affine()
+        linear, shift = matrix[:2, :2], matrix[:2, 2]
+        try:
+            reference = np.linalg.solve(linear, np.array([x, y]) - shift)
+        except np.linalg.LinAlgError:
+            return x, y
+        return float(reference[0]), float(reference[1])
 
     def _on_drag(self, roi_id: int, x: float, y: float) -> None:
         """Forwards a drag gesture to the owning module - never mutates ROI

@@ -798,6 +798,7 @@ def _build_image_panel(m: _Modules, ui_state: UiStateStore, theme_obj) -> ImageP
         mask_scope=m.mask_scope,
         area_selection=m.area_selection,
         chromatic_auto=m.chromatic_auto,
+        analysis_running=m.analysis_engine.is_running,
         initial_chromatic_view=(read(ui_state, CHROMATIC_SHOW_LANDMARKS), read(ui_state, CHROMATIC_ALL_WAVELENGTHS)),
         initial_chromatic_values=ChromaticUiValues(
             landmark_count=read(ui_state, CHROMATIC_LANDMARK_COUNT),

@@ -45,7 +45,12 @@ _ALWAYS: tuple[Control, ...] = (
 )
 
 _TOOL_CONTROLS: dict[ImageTool | None, tuple[Control, ...]] = {
-    None: (Control("Left-click", "select the ROI under the cursor (Ctrl/Shift adds to the selection)"),),
+    None: (
+        Control("Left-click", "select the ROI under the cursor (Ctrl/Shift adds to the selection)"),
+        Control("Left-drag (ROIs tab)", "draw a rectangle that selects the ROIs whose centre is inside (Ctrl/Shift adds)"),
+        Control("Right-drag (ROIs tab)", "move the selected ROIs"),
+        Control("Right-click (ROIs tab)", "menu: add ROI here, group, add to group, ungroup, delete, deselect"),
+    ),
     ImageTool.ROTATE: (
         Control("Left-click", "place point 1, then point 2 - the image rotates so the two points are level"),
         Control("Right-click", "menu with Cancel rotation - exits Rotate mode (Esc only cancels point 1)"),
@@ -97,6 +102,7 @@ class ImageViewBox(pg.ViewBox):
     def __init__(self, *args: object, **kwargs: object) -> None:
         super().__init__(*args, **kwargs)
         self._left_drag_handler: Callable[[object], bool] | None = None
+        self._right_drag_handler: Callable[[object], bool] | None = None
 
     def set_left_drag_handler(self, handler: Callable[[object], bool] | None) -> None:
         """*handler* gets every left-button drag event first and returns
@@ -106,7 +112,16 @@ class ImageViewBox(pg.ViewBox):
         this class needing to know which tool, if any, is on."""
         self._left_drag_handler = handler
 
+    def set_right_drag_handler(self, handler: Callable[[object], bool] | None) -> None:
+        """Same contract as `set_left_drag_handler`, for the right button
+        (moving ROIs). Unclaimed right-drags are ignored, so the view never zooms."""
+        self._right_drag_handler = handler
+
     def mouseDragEvent(self, ev, axis=None):  # noqa: N802 - Qt/pyqtgraph naming
+        if ev.button() == Qt.MouseButton.RightButton and self._right_drag_handler is not None:
+            if self._right_drag_handler(ev):
+                ev.accept()
+                return
         if ev.button() == Qt.MouseButton.LeftButton and self._left_drag_handler is not None:
             if self._left_drag_handler(ev):
                 ev.accept()
@@ -114,4 +129,9 @@ class ImageViewBox(pg.ViewBox):
         if ev.button() != Qt.MouseButton.MiddleButton:
             ev.ignore()
             return
+        # Grab-hand while the middle button pans; item cursors beat the view's.
+        if ev.isStart():
+            self.setCursor(Qt.CursorShape.ClosedHandCursor)
+        elif ev.isFinish():
+            self.unsetCursor()
         super().mouseDragEvent(ev, axis)

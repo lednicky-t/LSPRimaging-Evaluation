@@ -20,7 +20,7 @@ from typing import Any, Protocol
 
 import pyqtgraph as pg
 from PyQt6.QtCore import Qt
-from PyQt6.QtWidgets import QGraphicsView, QWidget
+from PyQt6.QtWidgets import QGraphicsView, QInputDialog, QWidget
 
 from ...image_tools import ActiveToolModule, ImageTool
 from ...roi import RoiToolbox
@@ -29,6 +29,8 @@ from .area_selection_tool import AreaSelectionTool
 from .context_menu import show_tool_context_menu
 from .crop_tool import CropTool
 from .measure_line_tool import MeasureLineTool
+from .roi_context_menu import ADD_ROI, ADD_TO_GROUP, DELETE, DESELECT, GROUP, UNGROUP, show_roi_context_menu
+from .roi_gestures import RoiGestures
 from .rotate_line_tool import RotateLineTool
 
 _CURSOR_FOR_CROP_HANDLE: dict[str | None, Qt.CursorShape] = {
@@ -69,6 +71,11 @@ class CanvasInteraction:
         image_shape: Callable[[], tuple[int, ...] | None],
         roi_at: Callable[[float, float], int | None],
         apply_crop: Callable[[], None],
+        roi_gestures: RoiGestures,
+        roi_tab_active: Callable[[], bool],
+        to_reference: Callable[[float, float], tuple[float, float]],
+        analysis_running: Callable[[], bool],
+        notify: Callable[[str], None],
     ) -> None:
         self._plot = plot
         self._view = view
@@ -84,6 +91,11 @@ class CanvasInteraction:
         self._image_shape = image_shape
         self._roi_at = roi_at
         self._apply_crop = apply_crop
+        self._roi_gestures = roi_gestures
+        self._roi_tab_active = roi_tab_active
+        self._to_reference = to_reference
+        self._analysis_running = analysis_running
+        self._notify = notify
 
     def handle_key(self, key: int, modifiers: Qt.KeyboardModifier) -> bool:
         """Arrow keys / Esc for the active tool; `True` when a tool used the key."""
@@ -200,7 +212,12 @@ class CanvasInteraction:
             self._show_add_roi_context_menu(scene_pos)
 
     def _click_select(self, event: object, scene_pos: object, button: object) -> None:
-        """No tool active: select the ROI under the cursor."""
+        """No tool active: select the ROI under the cursor. On the ROIs tab a
+        right click opens the ROI menu instead."""
+        if button == Qt.MouseButton.RightButton and self._roi_tab_active():
+            if self._in_view(scene_pos):
+                self._show_roi_menu(scene_pos)
+            return
         if button == Qt.MouseButton.RightButton and self._point_in_selection(scene_pos):
             self._context_menu([], scene_pos)  # plain Invert/Deselect menu
             return
@@ -220,6 +237,53 @@ class CanvasInteraction:
             self._selection.set_roi_selection(current)
         else:
             self._selection.set_roi_selection({roi_id})
+
+    def _show_roi_menu(self, scene_pos: object) -> None:
+        """Right click on the ROIs tab: add a ROI here, group / ungroup / delete
+        the selection. A click on an unselected ROI selects it first, so the
+        menu always acts on what the cursor is on."""
+        point = self._plot.vb.mapSceneToView(scene_pos)
+        x, y = float(point.x()), float(point.y())
+        roi_id = self._roi_at(x, y)
+        if roi_id is not None and roi_id not in self._selection.selected_roi_ids():
+            self._selection.set_roi_selection({roi_id})
+        ids = tuple(sorted(self._selection.selected_roi_ids()))
+        toolbox = self._roi_toolbox
+        choice = show_roi_context_menu(
+            self._menu_parent,
+            selected_count=len(ids),
+            groups=[(group.group_id, group.name) for group in toolbox.groups()],
+            any_selected_grouped=any(toolbox.group_for_roi(selected) is not None for selected in ids),
+            can_add=self.in_selection(x, y),
+            can_delete=not self._analysis_running(),
+        )
+        if choice is None:
+            return
+        if choice.action == ADD_ROI:
+            self._guarded("Add ROI", lambda: self._selection.set_roi_selection({toolbox.add_roi(*self._to_reference(x, y))}))
+        elif choice.action == GROUP:
+            default = f"Group {len(toolbox.groups()) + 1}"
+            name, accepted = QInputDialog.getText(self._menu_parent, "Group ROIs", "Group name", text=default)
+            if accepted and name.strip():
+                self._guarded("Group ROIs", lambda: toolbox.group_rois(ids, name.strip()))
+        elif choice.action == ADD_TO_GROUP and choice.group_id is not None:
+            self._guarded("Add to group", lambda: toolbox.add_rois_to_group(ids, choice.group_id))
+        elif choice.action == UNGROUP:
+            self._guarded("Ungroup", lambda: toolbox.remove_rois_from_groups(ids))
+        elif choice.action == DELETE:
+            if self._analysis_running():  # deleting renumbers ROIs, which an analysis run cannot survive
+                self._notify("Wait for the analysis to finish before deleting ROIs.")
+            else:
+                self._guarded("Delete ROIs", lambda: toolbox.delete_rois(ids))
+        elif choice.action == DESELECT:
+            self._selection.set_roi_selection(set())
+
+    def _guarded(self, action: str, command: Callable[[], None]) -> None:
+        """Run a toolbox command; a refusal (bad value, stale id) goes to the status bar, not nowhere."""
+        try:
+            command()
+        except (ValueError, KeyError) as exc:
+            self._notify(f"{action}: {exc}")
 
     def _show_rotate_context_menu(self, scene_pos: object) -> None:
         """Right-click while Rotate is active: a menu with a single "Cancel
@@ -314,7 +378,47 @@ class CanvasInteraction:
         decline (return `False`) unless *they* are the active tool, so at
         most one of them ever claims a given drag, and neither has any
         effect on plain ROI dragging."""
-        return self.on_crop_drag(ev) or self.on_measure_drag(ev) or self._on_select_area_drag(ev)
+        return (
+            self.on_crop_drag(ev)
+            or self.on_measure_drag(ev)
+            or self._on_select_area_drag(ev)
+            or self._on_marquee_drag(ev)
+        )
+
+    def _roi_gestures_enabled(self) -> bool:
+        return self._active_tool.active() is None and self._roi_tab_active()
+
+    def _on_marquee_drag(self, ev: Any) -> bool:
+        """ROIs tab, no tool armed: left-drag draws the selection rectangle."""
+        if not self._roi_gestures_enabled():
+            return False
+        point = self._plot.vb.mapSceneToView(ev.scenePos())
+        x, y = float(point.x()), float(point.y())
+        if ev.isStart():
+            return self._in_view(ev.scenePos()) and self._roi_gestures.begin_marquee(x, y)
+        if ev.isFinish():
+            additive = bool(ev.modifiers() & (Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.ShiftModifier))
+            self._roi_gestures.end_marquee(x, y, additive=additive)
+            return True
+        self._roi_gestures.update_marquee(x, y)
+        return True
+
+    def on_right_drag(self, ev: Any) -> bool:
+        """`ImageViewBox`'s right-drag slot: ROIs tab, no tool armed, moves the
+        selected ROIs live (one undo step per drag)."""
+        if not self._roi_gestures_enabled():
+            return False
+        point = self._plot.vb.mapSceneToView(ev.scenePos())
+        x, y = float(point.x()), float(point.y())
+        if ev.isStart():
+            if not self._in_view(ev.scenePos()):
+                return False
+            return self._roi_gestures.begin_move(self._roi_at(x, y), x, y)
+        if ev.isFinish():
+            self._roi_gestures.end_move()
+            return True
+        self._roi_gestures.update_move(x, y)
+        return True
 
     def _on_select_area_drag(self, ev: Any) -> bool:
         """Draws the rectangle/lasso while a selection tool is armed."""

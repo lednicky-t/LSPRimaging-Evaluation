@@ -23,7 +23,8 @@ from dataclasses import dataclass
 import numpy as np
 import pyqtgraph as pg
 from PyQt6.QtCore import Qt
-from PyQt6.QtGui import QColor
+from PyQt6.QtGui import QBrush, QColor, QPainterPath
+from PyQt6.QtWidgets import QGraphicsPathItem
 
 from ...roi.model import AreaRoi
 from ...roi.overlay_geometry import circle_outlines
@@ -41,8 +42,13 @@ DEFAULT_REFERENCE_COLOR = "#38bdf8"
 SAMPLE_WIDTH = 1.5
 REFERENCE_WIDTH = 1.0
 SELECTED_COLOR = "#f8fafc"
+SELECTED_WIDTH = 3.5
 MAX_IDLE_SAMPLE_CURVES = 24
 """How many emptied per-colour sample curves are kept for reuse."""
+SAMPLE_FILL_FACTOR = 0.3
+"""Opacity of a sample circle's fill relative to its outline's (so the
+Transparency control fades both together, and the image stays readable under
+the fill)."""
 
 
 @dataclass
@@ -59,6 +65,62 @@ def add_curve(plot: pg.PlotItem, color_hex: str, *, width: float, dashed: bool =
     curve = pg.PlotDataItem(pen=pen, connect="finite")
     plot.addItem(curve)
     return curve
+
+
+def add_fill(plot: pg.PlotItem, below: pg.PlotDataItem) -> QGraphicsPathItem:
+    """An empty filled-polygon item, stacked under the outline curve ``below``.
+    (A `PlotDataItem` can only fill down to a baseline, not inside a closed
+    shape, so the fill is a plain path item.)"""
+    item = QGraphicsPathItem()
+    item.setPen(pg.mkPen(None))
+    plot.addItem(item)
+    item.stackBefore(below)
+    return item
+
+
+def set_fill_outlines(item: QGraphicsPathItem, xs: np.ndarray, ys: np.ndarray, shape_points: int) -> None:
+    """Fill the shapes in ``xs``/``ys`` (the arrays the outline curve gets):
+    ``shape_points`` vertices each, one NaN between shapes. One `QPolygonF` per
+    shape, filled straight from the array - pyqtgraph's `arrayToQPath` splits
+    the arrays in Python and took ~17 ms per call at 800 ROIs, which made a
+    ROI drag choppy."""
+    path = QPainterPath()
+    path.setFillRule(Qt.FillRule.WindingFill)
+    if len(xs):
+        stride = shape_points + 1
+        shapes_x = np.append(xs, np.nan).reshape(-1, stride)[:, :shape_points]
+        shapes_y = np.append(ys, np.nan).reshape(-1, stride)[:, :shape_points]
+        for row_x, row_y in zip(shapes_x, shapes_y, strict=True):
+            polygon = pg.functions.create_qpolygonf(shape_points)
+            vertices = pg.functions.ndarray_from_qpolygonf(polygon)
+            vertices[:, 0] = row_x
+            vertices[:, 1] = row_y
+            path.addPolygon(polygon)  # an open polygon fills as if closed
+    item.setPath(path)
+
+
+def annulus_outlines(xs: np.ndarray, ys: np.ndarray, count: int, n_points: int) -> tuple[np.ndarray, np.ndarray]:
+    """Turn the reference outlines (``count`` inner circles, then ``count`` outer
+    ones, NaN-separated) into one ring per ROI: the outer circle, then the inner
+    circle walked backwards, as a single subpath. Filled with Qt's winding rule,
+    the inner opening stays empty and neighbouring rings overlap without
+    punching holes in each other."""
+    if count == 0:
+        return np.empty(0), np.empty(0)
+    stride = n_points + 1
+
+    def circles(values: np.ndarray) -> np.ndarray:
+        return np.append(values, np.nan).reshape(2 * count, stride)[:, :n_points]
+
+    out = []
+    for values in (xs, ys):
+        c = circles(values)
+        inner, outer = c[:count], c[count:]
+        ring = np.full((count, 2 * n_points + 1), np.nan)  # last slot: separator
+        ring[:, :n_points] = outer
+        ring[:, n_points : 2 * n_points] = inner[:, ::-1]
+        out.append(ring.ravel()[:-1])
+    return out[0], out[1]
 
 
 def roi_overlay_color(color_hex: str | None, default: str) -> str:
@@ -81,7 +143,15 @@ class RoiOverlay:
         # their own. See `_set_sample_curves`.
         self.sample_curves: dict[str, pg.PlotDataItem] = {DEFAULT_SAMPLE_COLOR: self.sample_curve}
         self.reference_curve = add_curve(plot, DEFAULT_REFERENCE_COLOR, width=REFERENCE_WIDTH)
-        self.selection_curve = add_curve(plot, SELECTED_COLOR, width=2.5)
+        # The translucent fill inside each sample circle, one item per colour, parallel to `sample_curves`.
+        self.sample_fills: dict[str, QGraphicsPathItem] = {
+            DEFAULT_SAMPLE_COLOR: add_fill(plot, self.sample_curve)
+        }
+        self._style_fill(self.sample_fills[DEFAULT_SAMPLE_COLOR], DEFAULT_SAMPLE_COLOR, self.sample.alpha)
+        self.reference_fill = add_fill(plot, self.reference_curve)
+        self.reference_fill.setPath(QPainterPath())
+        self._style_fill(self.reference_fill, DEFAULT_REFERENCE_COLOR, self.reference.alpha)
+        self.selection_curve = add_curve(plot, SELECTED_COLOR, width=SELECTED_WIDTH)
         self.label_item: RoiLabelItem | None = None
 
     def attach_labels(self) -> None:
@@ -104,9 +174,13 @@ class RoiOverlay:
         for color, curve in self.sample_curves.items():
             self._style_curve(curve, color, self.sample.alpha, SAMPLE_WIDTH)
             curve.setVisible(self.sample.visible)
+            self._style_fill(self.sample_fills[color], color, self.sample.alpha)
+            self.sample_fills[color].setVisible(self.sample.visible)
         self.selection_curve.setVisible(self.sample.visible)
         self._style_curve(self.reference_curve, self.reference.color, self.reference.alpha, REFERENCE_WIDTH)
         self.reference_curve.setVisible(self.reference.visible)
+        self._style_fill(self.reference_fill, self.reference.color, self.reference.alpha)
+        self.reference_fill.setVisible(self.reference.visible)
 
     @staticmethod
     def _style_curve(curve: pg.PlotDataItem, color_hex: str, alpha: float, width: float) -> None:
@@ -114,11 +188,18 @@ class RoiOverlay:
         color.setAlphaF(max(0.0, min(1.0, float(alpha))))
         curve.setPen(pg.mkPen(color, width=width))
 
+    @staticmethod
+    def _style_fill(item: QGraphicsPathItem, color_hex: str, alpha: float) -> None:
+        color = QColor(color_hex)
+        color.setAlphaF(max(0.0, min(1.0, float(alpha))) * SAMPLE_FILL_FACTOR)
+        item.setBrush(QBrush(color))
+
     # -- drawing -------------------------------------------------------------------
 
     def clear(self) -> None:
         self._set_sample_curves({})
         self.reference_curve.clear()
+        set_fill_outlines(self.reference_fill, np.empty(0), np.empty(0), 0)
         self.selection_curve.clear()
         if self.label_item is not None:
             self.label_item.set_labels([])
@@ -148,8 +229,6 @@ class RoiOverlay:
         resolved: dict[str | None, str] = {}
         indices_by_color: dict[str, list[int]] = {}
         for index, roi in enumerate(rois):
-            if is_selected[index]:
-                continue  # drawn in the highlight colour below, whatever its own
             key = roi.sample_color_hex
             if key not in resolved:
                 resolved[key] = roi_overlay_color(key, self.sample.color)
@@ -172,7 +251,7 @@ class RoiOverlay:
             affine_matrix,
             n_points=CIRCLE_POINTS,
         )
-        # Selected ROIs are all drawn in the highlight colour, whatever their own, so the selection reads at a glance.
+        # A selected ROI keeps its own colour and fill; the white border drawn on top of it marks the selection.
         selection_x, selection_y = circle_outlines(
             centers[is_selected], sample_diameters[is_selected], affine_matrix, n_points=CIRCLE_POINTS
         )
@@ -185,6 +264,8 @@ class RoiOverlay:
 
         self._set_sample_curves(by_color)
         self.reference_curve.setData(reference_x, reference_y)
+        ring_x, ring_y = annulus_outlines(reference_x, reference_y, len(rois), CIRCLE_POINTS)
+        set_fill_outlines(self.reference_fill, ring_x, ring_y, 2 * CIRCLE_POINTS)
         self.selection_curve.setData(selection_x, selection_y)
         if self.label_item is not None:
             self.label_item.set_labels(labels)
@@ -200,12 +281,15 @@ class RoiOverlay:
         cannot pile up items. The default-colour curve is never removed."""
         for color, (xs, ys) in by_color.items():
             self._sample_curve_for(color).setData(xs, ys)
+            set_fill_outlines(self.sample_fills[color], xs, ys, CIRCLE_POINTS)
         idle = [color for color in self.sample_curves if color not in by_color]
         for color in idle:
             self.sample_curves[color].clear()
+            set_fill_outlines(self.sample_fills[color], np.empty(0), np.empty(0), 0)
         removable = [color for color in idle if color != DEFAULT_SAMPLE_COLOR]  # oldest first
         for color in removable[: max(0, len(removable) - MAX_IDLE_SAMPLE_CURVES)]:
             self._plot.removeItem(self.sample_curves.pop(color))
+            self._plot.removeItem(self.sample_fills.pop(color))
 
     def _sample_curve_for(self, color_hex: str) -> pg.PlotDataItem:
         curve = self.sample_curves.get(color_hex)
@@ -217,4 +301,8 @@ class RoiOverlay:
             # reference rings and the selection highlight, whenever it was made.
             curve.stackBefore(self.reference_curve)
             self.sample_curves[color_hex] = curve
+            fill = add_fill(self._plot, curve)
+            self._style_fill(fill, color_hex, self.sample.alpha)
+            fill.setVisible(self.sample.visible)
+            self.sample_fills[color_hex] = fill
         return curve
