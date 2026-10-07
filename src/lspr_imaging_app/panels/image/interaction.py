@@ -16,9 +16,11 @@ view, the modules, the four tools, and three small callbacks (`image_shape`,
 from __future__ import annotations
 
 from collections.abc import Callable
+from typing import Any, Protocol
 
+import pyqtgraph as pg
 from PyQt6.QtCore import Qt
-from PyQt6.QtWidgets import QWidget
+from PyQt6.QtWidgets import QGraphicsView, QWidget
 
 from ...image_tools import ActiveToolModule, ImageTool
 from ...roi import RoiToolbox
@@ -45,12 +47,16 @@ separate handle graphics (see crop_tool.py's docstring), so the cursor
 shape is the only hint that an edge/corner/interior is grabbable."""
 
 
+class _ClickTool(Protocol):
+    def on_left_click(self, x: float, y: float) -> None: ...
+
+
 class CanvasInteraction:
     def __init__(
         self,
         *,
-        plot: object,
-        view: object,
+        plot: pg.PlotItem,
+        view: QGraphicsView,
         menu_parent: QWidget,
         active_tool: ActiveToolModule,
         roi_toolbox: RoiToolbox,
@@ -60,7 +66,7 @@ class CanvasInteraction:
         crop_tool: CropTool,
         measure_tool: MeasureLineTool,
         area_tool: AreaSelectionTool,
-        image_shape: Callable[[], tuple[int, int] | None],
+        image_shape: Callable[[], tuple[int, ...] | None],
         roi_at: Callable[[float, float], int | None],
         apply_crop: Callable[[], None],
     ) -> None:
@@ -79,7 +85,7 @@ class CanvasInteraction:
         self._roi_at = roi_at
         self._apply_crop = apply_crop
 
-    def handle_key(self, key: int, modifiers: object) -> bool:
+    def handle_key(self, key: int, modifiers: Qt.KeyboardModifier) -> bool:
         """Arrow keys / Esc for the active tool; `True` when a tool used the key."""
         return (
             self._rotate_tool.handle_key(key, modifiers)
@@ -90,33 +96,41 @@ class CanvasInteraction:
     def _in_view(self, scene_pos: object) -> bool:
         return bool(self._plot.vb.sceneBoundingRect().contains(scene_pos))
 
-    def on_scene_moved(self, scene_pos: object) -> None:
-        # Cheap early-out: this fires on every mouse move over the scene.
-        if self._active_tool.active() is ImageTool.CROP and self._in_view(scene_pos):
-            point = self._plot.vb.mapSceneToView(scene_pos)
-            handle = self._crop_tool.hover_handle(float(point.x()), float(point.y()))
-            cursor = _CURSOR_FOR_CROP_HANDLE.get(handle)
-            if cursor is None:
-                self._view.viewport().unsetCursor()
-            else:
-                self._view.viewport().setCursor(cursor)
-        if self._active_tool.active() is ImageTool.MEASURE and self._in_view(scene_pos):
-            point = self._plot.vb.mapSceneToView(scene_pos)
-            handle = self._measure_tool.hover_handle(float(point.x()), float(point.y()))
-            if handle is None:
-                self._view.viewport().unsetCursor()
-            else:
-                # Same "move" cursor as dragging Crop's interior - both mean
-                # "drag this to reposition it".
-                self._view.viewport().setCursor(Qt.CursorShape.SizeAllCursor)
-        if self._rotate_tool.first_point() is not None and self._in_view(scene_pos):
-            point = self._plot.vb.mapSceneToView(scene_pos)
-            self._rotate_tool.on_mouse_moved(float(point.x()), float(point.y()))
-        if self._measure_tool.first_point() is not None and self._in_view(scene_pos):
-            point = self._plot.vb.mapSceneToView(scene_pos)
-            self._measure_tool.on_mouse_moved(float(point.x()), float(point.y()))
+    def _set_view_cursor(self, shape: Qt.CursorShape | None) -> None:
+        """Set the canvas cursor, or drop any custom one (`None`)."""
+        viewport = self._view.viewport()
+        if viewport is None:
+            return
+        if shape is None:
+            viewport.unsetCursor()
+        else:
+            viewport.setCursor(shape)
 
-    def on_scene_clicked(self, event: object) -> None:
+    def on_scene_moved(self, scene_pos: object) -> None:
+        tool = self._active_tool.active()
+        rotate_pending = self._rotate_tool.first_point() is not None
+        measure_pending = self._measure_tool.first_point() is not None
+        # Cheap early-out: this fires on every mouse move over the scene, and with no tool
+        # needing the pointer there is nothing to look up.
+        if not (tool in (ImageTool.CROP, ImageTool.MEASURE) or rotate_pending or measure_pending):
+            return
+        if not self._in_view(scene_pos):
+            return
+        point = self._plot.vb.mapSceneToView(scene_pos)
+        x, y = float(point.x()), float(point.y())
+        if tool is ImageTool.CROP:
+            self._set_view_cursor(_CURSOR_FOR_CROP_HANDLE.get(self._crop_tool.hover_handle(x, y)))
+        elif tool is ImageTool.MEASURE:
+            # Same "move" cursor as dragging Crop's interior - both mean
+            # "drag this to reposition it".
+            handle = self._measure_tool.hover_handle(x, y)
+            self._set_view_cursor(None if handle is None else Qt.CursorShape.SizeAllCursor)
+        if rotate_pending:
+            self._rotate_tool.on_mouse_moved(x, y)
+        if measure_pending:
+            self._measure_tool.on_mouse_moved(x, y)
+
+    def on_scene_clicked(self, event: Any) -> None:
         """Route a click: to the active tool, or - with no tool active -
         select the ROI under the cursor (clear the selection when the click
         lands on empty image). Ctrl/Shift toggles instead of replacing,
@@ -134,7 +148,8 @@ class CanvasInteraction:
             ImageTool.SELECT_AREA: self._click_select_area,
             ImageTool.ADD_ROI: self._click_add_roi,
         }
-        handler = handlers.get(self._active_tool.active())
+        tool = self._active_tool.active()
+        handler = handlers.get(tool) if tool is not None else None
         if handler is not None:
             handler(scene_pos, button)
         else:
@@ -142,7 +157,9 @@ class CanvasInteraction:
 
     # -- one handler per tool (split from one 72-line method, 2026-10-07) ---------------
 
-    def _click_point_tool(self, tool: object, show_menu: Callable[[object], None], scene_pos: object, button: object) -> None:
+    def _click_point_tool(
+        self, tool: _ClickTool, show_menu: Callable[[object], None], scene_pos: object, button: object
+    ) -> None:
         """Rotate and Measure: a left click places a point, a right click opens the tool's menu."""
         if not self._in_view(scene_pos):
             return
@@ -265,10 +282,11 @@ class CanvasInteraction:
     def _point_in_selection(self, scene_pos: object) -> bool:
         """True when a selection exists and the scene point lies inside the
         *editable* region (inside the shape, or outside it once inverted)."""
-        if not self._area_selection.has_selection() or self._image_shape() is None or not self._in_view(scene_pos):
+        shape = self._image_shape()
+        if not self._area_selection.has_selection() or shape is None or not self._in_view(scene_pos):
             return False
         point = self._plot.vb.mapSceneToView(scene_pos)
-        return self._area_selection.contains(float(point.x()), float(point.y()), self._image_shape())
+        return self._area_selection.contains(float(point.x()), float(point.y()), shape)
 
     def _context_menu(self, actions: list[tuple[str, bool]], scene_pos: object) -> str | None:
         """`show_tool_context_menu` plus, when the click is inside the
@@ -290,7 +308,7 @@ class CanvasInteraction:
             return None
         return chosen
 
-    def on_left_drag(self, ev: object) -> bool:
+    def on_left_drag(self, ev: Any) -> bool:
         """`ImageViewBox`'s single left-drag handler slot (the panel installs `on_left_drag`) - dispatches to
         whichever tool (if any) claims the drag. Crop and Measure each
         decline (return `False`) unless *they* are the active tool, so at
@@ -298,7 +316,7 @@ class CanvasInteraction:
         effect on plain ROI dragging."""
         return self.on_crop_drag(ev) or self.on_measure_drag(ev) or self._on_select_area_drag(ev)
 
-    def _on_select_area_drag(self, ev: object) -> bool:
+    def _on_select_area_drag(self, ev: Any) -> bool:
         """Draws the rectangle/lasso while a selection tool is armed."""
         if self._active_tool.active() is not ImageTool.SELECT_AREA:
             return False
@@ -315,11 +333,12 @@ class CanvasInteraction:
     def in_selection(self, x: float, y: float) -> bool:
         """Whether display point (x, y) may be edited under the current area
         selection (always True with none)."""
-        if self._image_shape() is None:
+        shape = self._image_shape()
+        if shape is None:
             return not self._area_selection.has_selection()
-        return self._area_selection.contains(x, y, self._image_shape())
+        return self._area_selection.contains(x, y, shape)
 
-    def on_crop_drag(self, ev: object) -> bool:
+    def on_crop_drag(self, ev: Any) -> bool:
         if self._active_tool.active() is not ImageTool.CROP:
             return False
         scene_pos = ev.scenePos()
@@ -335,7 +354,7 @@ class CanvasInteraction:
         self._crop_tool.update_gesture(x, y)
         return True
 
-    def on_measure_drag(self, ev: object) -> bool:
+    def on_measure_drag(self, ev: Any) -> bool:
         """Drags an already-placed point (maintainer's request, 2026-09-29
         - added after the click-twice-only version shipped). A drag that
         doesn't start on an existing point is left unclaimed - a *new* pair

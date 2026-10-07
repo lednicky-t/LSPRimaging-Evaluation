@@ -30,7 +30,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Protocol, TypeGuard
 
 
 class _Getter(Protocol):
@@ -61,7 +61,9 @@ def read(store: _Getter, key: UiKey) -> object:
     value = store.get(key.key)
     if value is None or not key.valid(value):
         return key.default
-    return float(value) if key.kind is float and isinstance(value, int) else value  # type: ignore[arg-type]
+    if key.kind is float and isinstance(value, int):
+        return float(value)
+    return value
 
 
 # -- Histogram panel ---------------------------------------------------------------
@@ -142,19 +144,30 @@ nothing on another dataset, so it carries the dataset folder it was set on
 (replaced `highlight_range_min/max/dataset`)."""
 
 
-def _number(value: object) -> bool:
+def _number(value: object) -> TypeGuard[int | float]:
     return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
+def _numbers(value: object, count: int) -> list[float] | None:
+    """`value` as exactly `count` numbers, or `None`."""
+    if not isinstance(value, (list, tuple)) or len(value) != count:
+        return None
+    numbers: list[float] = []
+    for item in value:
+        if not _number(item):
+            return None
+        numbers.append(float(item))
+    return numbers
 
 
 def read_view_range(store: _Getter) -> tuple[tuple[float, float], tuple[float, float]] | None:
     value = store.get(IMAGE_VIEW_RANGE)
-    try:
-        (x_min, x_max), (y_min, y_max) = value  # type: ignore[misc]
-    except (TypeError, ValueError):
+    if not isinstance(value, (list, tuple)) or len(value) != 2:
         return None
-    if not all(_number(n) for n in (x_min, x_max, y_min, y_max)):
+    x_range, y_range = _numbers(value[0], 2), _numbers(value[1], 2)
+    if x_range is None or y_range is None:
         return None
-    return (float(x_min), float(x_max)), (float(y_min), float(y_max))
+    return (x_range[0], x_range[1]), (y_range[0], y_range[1])
 
 
 def read_highlight_range(store: _Getter) -> tuple[str, float, float] | None:
@@ -182,9 +195,12 @@ def migrate_legacy_fields(payload: Mapping[str, object], ui_state: dict[str, obj
             changed = True
 
     if IMAGE_VIEW_RANGE not in ui_state:
-        parts = [payload.get(name) for name in ("image_view_x_min", "image_view_x_max", "image_view_y_min", "image_view_y_max")]
-        if all(_number(part) for part in parts):
-            ui_state[IMAGE_VIEW_RANGE] = [[float(parts[0]), float(parts[1])], [float(parts[2]), float(parts[3])]]
+        parts = _numbers(
+            [payload.get(name) for name in ("image_view_x_min", "image_view_x_max", "image_view_y_min", "image_view_y_max")],
+            4,
+        )
+        if parts is not None:
+            ui_state[IMAGE_VIEW_RANGE] = [[parts[0], parts[1]], [parts[2], parts[3]]]
             changed = True
 
     if HIGHLIGHT_RANGE not in ui_state:
