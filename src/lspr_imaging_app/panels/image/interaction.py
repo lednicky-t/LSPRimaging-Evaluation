@@ -127,48 +127,63 @@ class CanvasInteraction:
         except AttributeError:  # pragma: no cover - defensive against pyqtgraph versions
             return
         button = getattr(event, "button", lambda: Qt.MouseButton.LeftButton)()
-        if self._active_tool.active() is ImageTool.ROTATE:
-            if not self._in_view(scene_pos):
-                return
-            if button == Qt.MouseButton.LeftButton:
-                p = self._plot.vb.mapSceneToView(scene_pos)
-                self._rotate_tool.on_left_click(float(p.x()), float(p.y()))
-            elif button == Qt.MouseButton.RightButton:
-                self._show_rotate_context_menu(scene_pos)
+        handlers = {
+            ImageTool.ROTATE: self._click_rotate,
+            ImageTool.MEASURE: self._click_measure,
+            ImageTool.CROP: self._click_crop,
+            ImageTool.SELECT_AREA: self._click_select_area,
+            ImageTool.ADD_ROI: self._click_add_roi,
+        }
+        handler = handlers.get(self._active_tool.active())
+        if handler is not None:
+            handler(scene_pos, button)
+        else:
+            self._click_select(event, scene_pos, button)
+
+    # -- one handler per tool (split from one 72-line method, 2026-10-07) ---------------
+
+    def _click_point_tool(self, tool: object, show_menu: Callable[[object], None], scene_pos: object, button: object) -> None:
+        """Rotate and Measure: a left click places a point, a right click opens the tool's menu."""
+        if not self._in_view(scene_pos):
             return
-        if self._active_tool.active() is ImageTool.MEASURE:
-            if not self._in_view(scene_pos):
-                return
-            if button == Qt.MouseButton.LeftButton:
-                p = self._plot.vb.mapSceneToView(scene_pos)
-                self._measure_tool.on_left_click(float(p.x()), float(p.y()))
-            elif button == Qt.MouseButton.RightButton:
-                self._show_measure_context_menu(scene_pos)
+        if button == Qt.MouseButton.LeftButton:
+            p = self._plot.vb.mapSceneToView(scene_pos)
+            tool.on_left_click(float(p.x()), float(p.y()))
+        elif button == Qt.MouseButton.RightButton:
+            show_menu(scene_pos)
+
+    def _click_rotate(self, scene_pos: object, button: object) -> None:
+        self._click_point_tool(self._rotate_tool, self._show_rotate_context_menu, scene_pos, button)
+
+    def _click_measure(self, scene_pos: object, button: object) -> None:
+        self._click_point_tool(self._measure_tool, self._show_measure_context_menu, scene_pos, button)
+
+    def _click_crop(self, scene_pos: object, button: object) -> None:
+        # A plain (non-drag) left-click has nothing to do - dragging is
+        # handled separately, by ImageViewBox's left-drag handler
+        # (`on_crop_drag`), since a real drag never reaches
+        # `sigMouseClicked` at all (pyqtgraph routes it as a drag
+        # event once the mouse has moved past its click threshold).
+        if button == Qt.MouseButton.RightButton and self._in_view(scene_pos):
+            self._show_crop_context_menu(scene_pos)
+
+    def _click_select_area(self, scene_pos: object, button: object) -> None:
+        # The drag draws (`_on_select_area_drag`); only the menu is a click.
+        if button == Qt.MouseButton.RightButton and self._in_view(scene_pos):
+            self._show_select_area_context_menu(scene_pos)
+
+    def _click_add_roi(self, scene_pos: object, button: object) -> None:
+        if not self._in_view(scene_pos):
             return
-        if self._active_tool.active() is ImageTool.CROP:
-            # A plain (non-drag) left-click has nothing to do - dragging is
-            # handled separately, by ImageViewBox's left-drag handler
-            # (`on_crop_drag`), since a real drag never reaches
-            # `sigMouseClicked` at all (pyqtgraph routes it as a drag
-            # event once the mouse has moved past its click threshold).
-            if button == Qt.MouseButton.RightButton and self._in_view(scene_pos):
-                self._show_crop_context_menu(scene_pos)
-            return
-        if self._active_tool.active() is ImageTool.SELECT_AREA:
-            # The drag draws (`_on_select_area_drag`); only the menu is a click.
-            if button == Qt.MouseButton.RightButton and self._in_view(scene_pos):
-                self._show_select_area_context_menu(scene_pos)
-            return
-        if self._active_tool.active() is ImageTool.ADD_ROI:
-            if not self._in_view(scene_pos):
-                return
-            if button == Qt.MouseButton.LeftButton:
-                p = self._plot.vb.mapSceneToView(scene_pos)
-                if self.in_selection(float(p.x()), float(p.y())):
-                    self._roi_toolbox.add_roi(float(p.x()), float(p.y()))
-            elif button == Qt.MouseButton.RightButton:
-                self._show_add_roi_context_menu(scene_pos)
-            return
+        if button == Qt.MouseButton.LeftButton:
+            p = self._plot.vb.mapSceneToView(scene_pos)
+            if self.in_selection(float(p.x()), float(p.y())):
+                self._roi_toolbox.add_roi(float(p.x()), float(p.y()))
+        elif button == Qt.MouseButton.RightButton:
+            self._show_add_roi_context_menu(scene_pos)
+
+    def _click_select(self, event: object, scene_pos: object, button: object) -> None:
+        """No tool active: select the ROI under the cursor."""
         if button == Qt.MouseButton.RightButton and self._point_in_selection(scene_pos):
             self._context_menu([], scene_pos)  # plain Invert/Deselect menu
             return
