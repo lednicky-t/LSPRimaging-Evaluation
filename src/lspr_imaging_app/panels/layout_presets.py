@@ -158,7 +158,7 @@ class LayoutPresetManager:
         """Restore previously-saved preset blobs (2026-09-26) - call once at
         startup, before any preset is applied. A real setter rather than
         reaching into `_custom_blobs` from outside: this class owns that
-        dict, matching AGENTS.md's "no module reaches into another's
+        dict, matching CLAUDE.md's "no module reaches into another's
         internals" rule even though this particular class is chrome, not a
         domain module."""
         self._custom_blobs = dict(blobs)

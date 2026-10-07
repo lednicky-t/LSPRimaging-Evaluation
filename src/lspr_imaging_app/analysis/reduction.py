@@ -11,7 +11,7 @@ numbers. Nothing on `rewrite` imported `roi/reduction.py` yet at the time
 of the move (checked: `roi/toolbox.py` never referenced it), so this was a
 zero-fixup file move, not a rewire.
 
-No Qt import allowed in this file (AGENTS.md testing rule). AGENTS.md
+No Qt import allowed in this file (CLAUDE.md testing rule). CLAUDE.md
 non-negotiable invariants: never pool pixels across ROIs before computing
 sample/reference ratios; always average already-fitted per-ROI values,
 never average raw spectra and fit once.
@@ -36,7 +36,7 @@ pixel weighting), real implementations now, not `NotImplementedError`
 stubs. Each has its own docstring explaining its specific design choice
 and the empirical verification behind it (matching the unweighted
 counterpart exactly, or to float noise, in the degenerate equal-weights
-case - AGENTS.md's testing rule) - `weighted_plane_fit`'s signature was
+case - CLAUDE.md's testing rule) - `weighted_plane_fit`'s signature was
 also corrected in the process (the scaffold's `(values, weights)`
 placeholder couldn't have actually fit a plane; real callers need pixel
 coordinates too). Consumed by `roi/rasterize.py`'s `rasterize_fractional`
@@ -278,7 +278,7 @@ def weighted_median(values: np.ndarray, weights: np.ndarray) -> float:
     `np.median`'s "average the two middle values" convention for
     even-length arrays - a naive weighted-median formula (e.g. "smallest
     value where cumulative weight >= half the total") does *not* have this
-    property for even n, which would have silently broken the AGENTS.md
+    property for even n, which would have silently broken the CLAUDE.md
     degenerate-case parity rule.
 
     Falls back to `reduce_mean` if every weight is zero, same as

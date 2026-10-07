@@ -1,5 +1,5 @@
 """One shared undo/redo stack for every module (2026-09-20 design - not in
-the original sketch/AGENTS.md, added when RoiToolbox's command methods
+the original sketch/CLAUDE.md, added when RoiToolbox's command methods
 needed it and there was nowhere for it to live).
 
 **Design decision, not a guess**: the maintainer explicitly asked for a
@@ -10,7 +10,7 @@ process-wide instance every module imports directly and calls into, rather
 than a constructor-injected dependency threaded through every module's
 ``__init__``. Same reasoning applies here: undo/redo, like diagnostics, is
 infrastructure, not domain state - it doesn't belong to any one module, and
-AGENTS.md's "no module reaches into another's internals" boundary is about
+CLAUDE.md's "no module reaches into another's internals" boundary is about
 *domain* state ownership (ROIs, masks, chromatic models), not this kind of
 shared utility.
 
@@ -43,7 +43,7 @@ so a pair of closures there is simpler than a family of dataclasses that
 would need back-references into that same private state anyway. Only
 :class:`RoiToolbox` uses this today; Geometry/Mask/Chromatic/Background
 adopt the identical pattern once their own command methods are built past
-the `NotImplementedError` stub stage (AGENTS.md should be updated to
+the `NotImplementedError` stub stage (CLAUDE.md should be updated to
 document this once a second module actually does).
 """
 

@@ -46,7 +46,7 @@ image before exporting. The on/off state and chunk size live on
 `DatasetModule.chunk_grid_preview` (set via `set_chunk_grid_preview`), not
 here - this section and `panels/image/panel.py`'s `ImagePanel` are sibling
 panels with no direct reference to each other, so the state has to live on
-a module both already depend on (AGENTS.md's module-boundary rule: a panel
+a module both already depend on (CLAUDE.md's module-boundary rule: a panel
 only ever reads another panel's data through a shared module, never
 directly). Shard's combo values are unchanged (`per_image`/
 `per_spectral_cube`); only their on-screen labels became "WL frame"/"Cube"

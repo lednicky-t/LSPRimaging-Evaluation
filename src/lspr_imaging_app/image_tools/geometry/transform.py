@@ -9,7 +9,7 @@ they have no measurement behind them, so they have no value. There is no
 dark (0) fill and no edge-stretch. Validity of any pixel is
 ``np.isfinite(image)``; no geometric "fill mask" exists any more.
 
-No Qt import allowed in this file (AGENTS.md testing rule).
+No Qt import allowed in this file (CLAUDE.md testing rule).
 """
 
 from __future__ import annotations

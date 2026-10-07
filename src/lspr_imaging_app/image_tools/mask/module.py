@@ -72,7 +72,7 @@ the individual/persistent model). `apply_candidate`/`apply_morphology`/
 parameter instead of reading a single implicit mask - there's no longer
 one canonical "the" mask to read, and `MaskModule` alone can't resolve the
 CC-correct starting canvas for a given frame without reaching into
-`ChromaticModule` (forbidden - AGENTS.md's module-boundary rule). The
+`ChromaticModule` (forbidden - CLAUDE.md's module-boundary rule). The
 caller resolves the base first (`resolve_mask_source` + `ChromaticModule.
 warp_mask_between` if the source frame differs from the target), the same
 "commands take already-resolved values" convention `RoiToolbox.detect_rois`
@@ -154,7 +154,7 @@ class MaskModule(QObject):
         from the queried `frame`, the caller must warp it themselves
         (`ChromaticModule.warp_mask_between(mask, returned_frame, frame)`)
         before using it. This module holds no `ChromaticModule` reference
-        and never calls into it (AGENTS.md module-boundary rule) - the
+        and never calls into it (CLAUDE.md module-boundary rule) - the
         same one-directional pattern `roi/rasterize.py` already uses,
         taking `affine_matrix` as a plain parameter rather than reaching
         into Chromatic itself.

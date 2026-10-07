@@ -2,7 +2,7 @@
 
 Owns current cube/wavelength and selected ROI ids. Does not itself trigger
 analysis recompute - selecting/deselecting ROIs never implicitly triggers
-computation (AGENTS.md, analysis store rules).
+computation (CLAUDE.md, analysis store rules).
 
 **Command methods built 2026-09-20**, replacing the scaffold stubs - the
 first real consumer of `RoiToolbox.roi_ids_renumbered` (see that module's
@@ -18,7 +18,7 @@ panels don't redraw for a reselect of the same state.
 **`remap_roi_ids()`**: subscribed to `RoiToolbox.roi_ids_renumbered` in
 `app_rewrite.build_main_window()` (this module has no reference to
 `RoiToolbox` itself - it only exposes a public method for another module's
-signal to drive, per AGENTS.md's "no module reaches into another's
+signal to drive, per CLAUDE.md's "no module reaches into another's
 internals" rule). Drops any selected id that was deleted (absent from the
 map) and rewrites survivors to their new id, so a delete-driven renumber in
 `RoiToolbox` never leaves this module's selection silently stale.

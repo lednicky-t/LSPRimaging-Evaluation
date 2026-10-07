@@ -22,7 +22,7 @@ other module, so the panel is its rightful owner.
 
 Uses `lspr_ui.CompactWedgeSlider` (the shared copy, not the stable app's
 own local `gui/widgets.py` one - the rewrite tree never imports from the
-old `gui` package, see AGENTS.md's module-boundary rule) for the
+old `gui` package, see CLAUDE.md's module-boundary rule) for the
 transparency control, and the vendored `mask`/`mask-off` Tabler icons for
 the toggle, matching the stable app's own icon choice
 (`MainWindowIcons._make_view_toggle_icon`, kind="mask"). `mask-off`'s

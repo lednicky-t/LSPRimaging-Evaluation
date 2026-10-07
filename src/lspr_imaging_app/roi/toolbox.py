@@ -35,7 +35,7 @@ selection; the future analysis store's per-ROI provenance, keyed by
 roi_id) goes stale unless it also remaps. `delete_rois()` emits
 `roi_ids_renumbered` (an `{old_id: new_id}` dict, for survivors only)
 precisely so those modules *can* subscribe and remap their own state
-without this module reaching into theirs (AGENTS.md's "no module reads or
+without this module reaching into theirs (CLAUDE.md's "no module reads or
 writes another module's internals" rule). **`SelectionModule` now
 subscribes** (`selection/module.py`'s `remap_roi_ids()`, wired in
 `app_rewrite.build_main_window()`) - built 2026-09-20. **`AnalysisEngine`
@@ -55,13 +55,13 @@ the same signal a fresh call would, and panels/other modules actually learn
 about a state change that happened via Ctrl+Z, not just a direct call.
 Selection is deliberately **not** undoable, matching the old app (selecting/
 deselecting was never wrapped in `_push_undo_point` there either) and
-AGENTS.md's "selection changes must never implicitly trigger computation"
+CLAUDE.md's "selection changes must never implicitly trigger computation"
 spirit - undo history is for state that affects results, not where the
 cursor/selection happens to be.
 
 **Selection ownership fixed, not duplicated**: the original scaffold stub
 had both a `set_selection`/`selection_changed` pair here *and* on
-`SelectionModule` - AGENTS.md is explicit that `selection/` is "the one
+`SelectionModule` - CLAUDE.md is explicit that `selection/` is "the one
 intentionally shared piece of state (current cube/wavelength/ROI
 selection)". Removed the duplicate here; selection lives only on
 `SelectionModule`, and callers that need both ROI mutation and selection
@@ -236,7 +236,7 @@ def _remap_roi_shape(
 class RoiToolbox(QObject):
     """Owns ROI/group state; exposes a query interface plus the full
     command API. No other module or panel may hold its own copy of ROI or
-    group state (AGENTS.md, "What NOT to do without checking in again first")."""
+    group state (CLAUDE.md, "What NOT to do without checking in again first")."""
 
     geometry_changed = pyqtSignal(RoiComputationalChange)
     cosmetic_changed = pyqtSignal(RoiCosmeticChange)
@@ -712,7 +712,7 @@ class RoiToolbox(QObject):
         """Replace every current ROI/group/array with a fresh detection
         result. Takes already-detected ROIs rather than running detection
         itself (`roi.detection.detect_rois()`, a potentially-slow call that
-        must run off the GUI thread per AGENTS.md's non-negotiable
+        must run off the GUI thread per CLAUDE.md's non-negotiable
         invariants) - the caller is responsible for running detection on a
         worker and only calling this once a result exists, the same
         threading boundary the old app's async worker + `_on_detect_rois_

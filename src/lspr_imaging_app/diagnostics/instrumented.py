@@ -2,7 +2,7 @@
 
 Every rewritten module's public mutating methods go through this so
 performance visibility is built in from the first commit rather than
-retrofitted after a slowdown report (AGENTS.md, "Communication" section;
+retrofitted after a slowdown report (CLAUDE.md, "Communication" section;
 docs/rewrite_architecture_sketch_2026-09.md §3, "Built-in diagnosability,
 for free"). This one is fully implemented (not a stub) - it's small,
 self-contained infrastructure with no dependency on any other new module,

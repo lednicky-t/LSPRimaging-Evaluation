@@ -3,7 +3,7 @@
 One backend, several front-door UI surfaces - not several independent
 implementations of ROI/group logic. Follows ``docs/roi_system_roadmap.md``'s
 ``Pair`` vocabulary and geometry-type dispatcher; adopt that roadmap, don't
-re-derive a new ROI model (AGENTS.md, "Module boundaries").
+re-derive a new ROI model (CLAUDE.md, "Module boundaries").
 """
 
 from .toolbox import RoiToolbox

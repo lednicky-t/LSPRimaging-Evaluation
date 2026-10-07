@@ -4,7 +4,7 @@ weighting, built 2026-09-22) - a coverage-weighted variant of the same
 dispatch via one shared supersample-and-downsample engine, not a per-shape
 rewrite.
 
-No Qt import allowed in this file (AGENTS.md testing rule). AGENTS.md
+No Qt import allowed in this file (CLAUDE.md testing rule). CLAUDE.md
 non-negotiable invariant: cache per-ROI analysis masks at that ROI's own
 small bounding box, never full-image-plane size (full-size caching measured
 8-14GB RAM at realistic ROI counts) - every function here that returns a
@@ -25,7 +25,7 @@ Chromatic and into this module, so every geometry type an ``AreaRoi`` can
 have - circle, annulus, or mask - rasterizes through one place. These
 functions take an ``affine_matrix`` as a plain parameter (obtained by the
 caller from ``ChromaticModule.affine_for()``, the module's only public
-surface per AGENTS.md's "Module boundaries") - this module never imports or
+surface per CLAUDE.md's "Module boundaries") - this module never imports or
 calls into Chromatic itself, keeping the boundary one-directional.
 
 ``rasterize_sample``/``rasterize_reference`` (and their ``_for_patch``
@@ -54,7 +54,7 @@ branch is now warped too (2026-09-21)** - turned out not to be the
 "trivial, same pattern" fix it looked like from the outside. Naively
 warping the full expanded mask and *then* cropping to the patch would have
 materialized a full-image-sized intermediate array inside the one code
-path that exists specifically to avoid that (AGENTS.md's non-negotiable
+path that exists specifically to avoid that (CLAUDE.md's non-negotiable
 invariant: "cache per-ROI analysis masks at that ROI's own small bounding
 box, never full-image-plane size - full-size caching measured 8-14GB RAM
 at realistic ROI counts"). Built instead: `_mask_reach_box` (the
@@ -228,7 +228,7 @@ def expand_mask_to_patch_warped(
     `affine_matrix` first (see `rasterize_sample`'s mask-geometry warp) -
     the patch-scoped counterpart, bounded by `_mask_reach_box` so only the
     region the warped mask can actually reach is ever touched, never the
-    full patch/image regardless of patch size (AGENTS.md's non-negotiable
+    full patch/image regardless of patch size (CLAUDE.md's non-negotiable
     invariant - see this module's own docstring for why "warp then crop"
     was rejected instead)."""
     patch_h, patch_w = patch_shape[:2]
@@ -692,7 +692,7 @@ def union_roi_masks(
 
 # -- §6a fractional pixel weighting (built 2026-09-22) ----------------------
 # One shared engine (_reach_box_coverage) for every geometry type, per
-# AGENTS.md's "don't reach for shape-specific exact-intersection formulas" -
+# CLAUDE.md's "don't reach for shape-specific exact-intersection formulas" -
 # only the `point_test` callable plugged into it differs per geometry.
 
 
@@ -825,7 +825,7 @@ def rasterize_fractional(
     type instead of a per-shape rewrite.
 
     Reach-box-bounded internally (never supersamples beyond where the shape
-    can possibly reach, AGENTS.md's non-negotiable invariant) even though
+    can possibly reach, CLAUDE.md's non-negotiable invariant) even though
     the *returned* array is full-`image_shape`-sized - matching
     `transformed_annulus_mask`'s own full-size-output-but-bounded-cost
     pattern, not a new cost profile. A patch-scoped (`_for_patch`) variant,

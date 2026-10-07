@@ -13,7 +13,7 @@ lives in `AreaRoiDetectionSettings` next to `reduction_method`, where the
 old app put it, and moving it would be a second change riding along with
 this one. Noted as the one split seam in an otherwise clean separation.
 
-No Qt import allowed in this file (AGENTS.md testing rule) - the QObject
+No Qt import allowed in this file (CLAUDE.md testing rule) - the QObject
 that owns these lives in `settings_module.py`.
 """
 

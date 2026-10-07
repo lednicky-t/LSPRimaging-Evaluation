@@ -15,7 +15,7 @@ shape nothing in the app actually calls. The real, widely-used function is
 ``apply_preprocessing`` with the signature below (see e.g.
 ``gui/analysis_tasks.py``, ``gui/main_window.py`` on ``develop``/``main``).
 
-No Qt import allowed in this file (AGENTS.md testing rule).
+No Qt import allowed in this file (CLAUDE.md testing rule).
 """
 
 from __future__ import annotations
@@ -98,7 +98,7 @@ def histogram_highlight_mask_to_raw(
     processed space here would silently double-transform it the next time
     geometry changes. Lives here rather than in `mask/raster_tools.py`
     (pure Mask-only math) because it needs `GeometryModule`'s spatial
-    transform - AGENTS.md's module-boundary rule keeps Mask and Geometry
+    transform - CLAUDE.md's module-boundary rule keeps Mask and Geometry
     each independent, so cross-module math lands here instead, the same
     reason `resolve_external_mask` above does."""
     if min_value is None and max_value is None:

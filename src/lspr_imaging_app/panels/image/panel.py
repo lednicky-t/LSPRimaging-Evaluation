@@ -248,7 +248,7 @@ shape is the only hint that an edge/corner/interior is grabbable."""
 
 class ImagePanel(QWidget):
     """Renders the current processed image with ROI overlays. Owns no
-    computation and no ROI/group state (AGENTS.md)."""
+    computation and no ROI/group state (CLAUDE.md)."""
 
     # A tool's *live* status while a gesture is in progress (angle readout
     # etc.) - relayed to the app's status bar (app_rewrite.py), the same
@@ -1241,7 +1241,7 @@ class ImagePanel(QWidget):
         # they still go through the same path. Splitting "redraw overlay only"
         # out is a real optimization once there is a dataset big enough to
         # measure it against; guessing at it now would be the premature kind
-        # AGENTS.md's performance rules warn about.
+        # CLAUDE.md's performance rules warn about.
         self._roi_toolbox.geometry_changed.connect(self._schedule_redraw)
         self._roi_toolbox.cosmetic_changed.connect(self._schedule_redraw)
         self._selection.cube_changed.connect(self._schedule_redraw)
@@ -2659,7 +2659,7 @@ class ImagePanel(QWidget):
         """The ROI whose sample aperture contains display-space point
         (x, y), or `None`. Public because it is the one piece of this
         panel's hit-testing worth driving directly from a test - clicking by
-        screen coordinate is exactly what AGENTS.md's testability rule says
+        screen coordinate is exactly what CLAUDE.md's testability rule says
         to avoid needing.
 
         Nearest-center wins when apertures overlap, so a small ROI sitting

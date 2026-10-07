@@ -4,7 +4,7 @@ console script, ``src/main_rewrite.py``).
 **Not the real app.** This exists so the maintainer can open a real window
 and watch the rewrite's module/panel skeleton take shape while it's being
 built, alongside the still-fully-functional stable app (``app.py`` /
-``lspri-evaluation``) - see AGENTS.md and
+``lspri-evaluation``) - see CLAUDE.md and
 ``docs/rewrite_architecture_sketch_2026-09.md``. Every panel currently
 shows an empty placeholder: the modules behind them
 (:mod:`lspr_imaging_app.dataset`, :mod:`lspr_imaging_app.image_tools`,

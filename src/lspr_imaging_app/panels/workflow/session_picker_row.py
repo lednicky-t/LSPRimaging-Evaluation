@@ -2,7 +2,7 @@
 dataset, or start a new one (2026-09-26).
 
 **Create + switch only** - this pass's deliberate scope cut (see
-`AGENTS.md`'s "Sessions" section): no rename, duplicate, or delete control
+`CLAUDE.md`'s "Sessions" section): no rename, duplicate, or delete control
 here yet, even though `storage/session_index.py`'s format already has
 somewhere for a rename to land later.
 

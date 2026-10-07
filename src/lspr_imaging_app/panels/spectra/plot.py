@@ -14,7 +14,7 @@ from PyQt6.QtWidgets import QWidget
 
 class SpectraPlot(QWidget):
     """Owns its own fit-curve display and range tools. Never computes a fit
-    for "live preview" on the GUI thread (AGENTS.md non-negotiable
+    for "live preview" on the GUI thread (CLAUDE.md non-negotiable
     invariant) - reads already-computed values only."""
 
     def set_spectrum(self, roi_id: int, wavelengths: np.ndarray, values: np.ndarray) -> None:

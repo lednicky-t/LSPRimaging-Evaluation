@@ -1,7 +1,7 @@
 """Pure per-cell compute (sketch §10: "ports analysis_tasks.py largely
 as-is").
 
-No Qt import allowed in this file (AGENTS.md testing rule). AGENTS.md
+No Qt import allowed in this file (CLAUDE.md testing rule). CLAUDE.md
 non-negotiable invariants: never pool pixels across ROIs before computing
 sample/reference ratios; always average already-fitted per-ROI values,
 never average raw spectra and fit once.
@@ -23,7 +23,7 @@ multi-ROI run, chunk-aware zarr reads, prefetch concurrency). Those
 optimizations belong in a *different* layer - batching/caching around
 repeated `compute_cell` calls, in `worker.py`/`engine.py` or a future
 optimization pass - once there's a real dataset to measure against
-(AGENTS.md's Performance Work rules: verify with real data, don't guess).
+(CLAUDE.md's Performance Work rules: verify with real data, don't guess).
 
 **Stores raw reduced (sample, reference) pairs, not a formula-applied
 value** - a real correction to this file's own stub, which returned a bare
@@ -402,7 +402,7 @@ def compute_cell(
     Stage timing (raster/reduce split - preprocessing is folded into
     "preprocess" since `apply_preprocessing` doesn't expose finer splits
     without its own `log_stage_timing` wiring) is aggregated across every
-    wavelength and logged **once per cell**, not per wavelength (AGENTS.md
+    wavelength and logged **once per cell**, not per wavelength (CLAUDE.md
     Performance Work rule - logging in the inner loop becomes the
     bottleneck otherwise).
     """

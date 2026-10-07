@@ -9,7 +9,7 @@ in `mask/module.py`'s own docstring (both are UI/orchestration concerns,
 not something this pure-math/IO layer should own). A future panel command
 calls these two functions with an already-chosen path.
 
-No Qt import allowed in this file (AGENTS.md testing rule).
+No Qt import allowed in this file (CLAUDE.md testing rule).
 """
 
 from __future__ import annotations

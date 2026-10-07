@@ -3,7 +3,7 @@ scheme (sketch §5 "The analysis store: one file, per-cell provenance", full
 detail in `docs/analysis_provenance_store_design_2026-09.md`). New code,
 not a port.
 
-No Qt import allowed in this file (AGENTS.md testing rule) - every function
+No Qt import allowed in this file (CLAUDE.md testing rule) - every function
 here takes plain, already-resolved values (settings dataclasses, arrays,
 plain dicts), never a live QObject module reference. Gathering those values
 *from* the real modules (`GeometryModule.settings()`,

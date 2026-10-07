@@ -521,7 +521,7 @@ class AnalysisEngine(QObject):
         """Compute `metric_trace` for each of `roi_ids` off the GUI thread,
         then emit `metric_traces_ready` with `{roi_id: trace}`.
 
-        This is the entry point a panel uses. AGENTS.md forbids fitting on
+        This is the entry point a panel uses. CLAUDE.md forbids fitting on
         the GUI thread, and the arithmetic backs that up: 160 ROIs x 300
         cubes is 48,000 fits, ~48 s with a gaussian - a freeze, not a
         stutter. Once warm the cache answers instantly, so the cost is paid
@@ -674,10 +674,10 @@ class AnalysisEngine(QObject):
     def run_analysis(self, scope: AnalysisScope = AnalysisScope.ALL_ROIS) -> None:
         """Plan and dispatch recompute for ``scope``. The only method in
         this module (or anywhere else) allowed to trigger real computation
-        (AGENTS.md, "What NOT to do without checking in again first").
+        (CLAUDE.md, "What NOT to do without checking in again first").
 
         Dispatches via `AnalysisWorker` (a real background thread, never
-        `QThreadPool` - AGENTS.md's zarr rule), so this returns immediately;
+        `QThreadPool` - CLAUDE.md's zarr rule), so this returns immediately;
         results arrive via `store_updated`/`analysis_complete`, emitted
         from the worker thread (safe - Qt queues a cross-thread `.emit()`
         automatically, see `worker.py`'s module docstring). Progress is

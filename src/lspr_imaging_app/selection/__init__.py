@@ -2,7 +2,7 @@
 
 The one genuinely cross-cutting piece of shared state (current spectral
 cube/wavelength, current ROI selection) - an intentional, acknowledged
-exception to "nothing is shared" (AGENTS.md, "Module boundaries"), not
+exception to "nothing is shared" (CLAUDE.md, "Module boundaries"), not
 license to add more shared state elsewhere.
 
 ``ReferenceFrameModule`` (2026-09-25) lives in this package too - not part

@@ -18,10 +18,10 @@ memory; it never re-reads a pixel and never invalidates a stored cell
 
 **Never call this from the GUI thread for a whole dataset.** One gaussian
 fit is ~1 ms, so a 160-ROI x 300-cube trace is ~48 s of pure fitting.
-`engine.py` runs it on the analysis worker and caches the result; AGENTS.md
+`engine.py` runs it on the analysis worker and caches the result; CLAUDE.md
 forbids a "live preview" fit on the GUI thread outright.
 
-No Qt import allowed in this file (AGENTS.md testing rule).
+No Qt import allowed in this file (CLAUDE.md testing rule).
 """
 
 from __future__ import annotations

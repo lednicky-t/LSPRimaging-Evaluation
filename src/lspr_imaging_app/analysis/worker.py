@@ -1,7 +1,7 @@
 """Background dispatch for analysis compute (sketch §10: "ports
 FunctionWorker, never QThreadPool near zarr").
 
-AGENTS.md non-negotiable invariant: never let a ``QThreadPool`` worker
+CLAUDE.md non-negotiable invariant: never let a ``QThreadPool`` worker
 touch, even indirectly via a blocking wait, an OME-Zarr read - root-caused
 to a native ``STATUS_HEAP_CORRUPTION`` crash. Use plain ``threading.Thread``
 (or a small pool built on it) for anything dataset/zarr-adjacent; the one

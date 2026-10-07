@@ -41,7 +41,7 @@ reasoning:
    find out is an expensive right one.
 2. **The write is synchronous, on the GUI thread.** The old app dispatches
    it to a worker after finding it froze the UI for a beat. That may well
-   need doing here too - but it needs a real measurement first (AGENTS.md's
+   need doing here too - but it needs a real measurement first (CLAUDE.md's
    performance rules), and doing it safely means serializing concurrent
    saves to one file, which is more machinery than an unmeasured problem
    justifies. `capture()` already returns a defensive copy of every

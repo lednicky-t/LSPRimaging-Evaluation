@@ -2,7 +2,7 @@
 
 Owns landmarks + fitted model. Exposes ``affine_for()``/``warp_mask()``/
 ``affine_between()``/``warp_mask_between()`` as its **only** public surface
-- ROI/Mask code must never reach into this module's internals (AGENTS.md,
+- ROI/Mask code must never reach into this module's internals (CLAUDE.md,
 "Module boundaries"; sketch §7). Emits ``chromatic_model_changed``
 (:class:`~.model.ChromaticModelChange`).
 

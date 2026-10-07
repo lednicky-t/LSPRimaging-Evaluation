@@ -26,7 +26,7 @@ docstring) and *after* one (both are meant to be forward-warped through
 for the ignore mask, flagged as a real, scoped future task for `RoiMask` in
 `roi/rasterize.py`'s own docstring).
 
-No Qt import allowed in this file (AGENTS.md testing rule).
+No Qt import allowed in this file (CLAUDE.md testing rule).
 """
 
 from __future__ import annotations

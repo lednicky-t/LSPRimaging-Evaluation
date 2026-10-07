@@ -11,7 +11,7 @@ a same-named but unrelated `reference_mode`/`reference_wavelength_nm`
 `SelectionModule` (current cube/wavelength being *viewed*) nor
 `DatasetModule` claims "which frame is the reference" as their concern.
 
-**Deliberately narrow, per AGENTS.md's module-boundary rule ("no module
+**Deliberately narrow, per CLAUDE.md's module-boundary rule ("no module
 reaches into another's internals")**: this module does not hold a
 `SelectionModule` reference and cannot resolve "auto" mode's frame by
 itself. It only owns `mode` and the manual snapshot; the caller (the

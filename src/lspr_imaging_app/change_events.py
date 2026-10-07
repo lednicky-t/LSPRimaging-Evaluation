@@ -1,6 +1,6 @@
 """Shared cosmetic/computational change-event vocabulary.
 
-AGENTS.md ("Communication: typed signals, cosmetic vs. computational") and
+CLAUDE.md ("Communication: typed signals, cosmetic vs. computational") and
 docs/rewrite_architecture_sketch_2026-09.md §3 require every module's
 mutating signals to distinguish "redraw only" changes from "analysis-store
 may now be stale" changes as a *type*, not a naming convention.

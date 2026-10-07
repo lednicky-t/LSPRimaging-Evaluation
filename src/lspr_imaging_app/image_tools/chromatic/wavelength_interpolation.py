@@ -7,7 +7,7 @@ Ported from the old app's `gui/analysis_tasks.py` (`_estimate_chromatic_
 models_task`'s `mode == "landmark_radial"` branch, its only live branch -
 see the rewrite build log's chromatic-fitting file-split entry) and
 `_sampled_wavelengths`/`_normalized_odd_count`, kept as pure functions with
-no Qt/worker/dataset dependency (AGENTS.md testing rule) - `ChromaticModule.
+no Qt/worker/dataset dependency (CLAUDE.md testing rule) - `ChromaticModule.
 refit()` supplies already-resolved landmarks/wavelengths and owns the
 undo/signal/model-storage side of things.
 

@@ -18,7 +18,7 @@ stable app's export format is explicitly not a goal right now.
 
 **Avoids concurrent HDF5 access by construction, not locking**: `compute_cell`
 runs on `AnalysisWorker`'s background thread (never `QThreadPool` -
-AGENTS.md's zarr rule), and only one `AnalysisWorker` task is ever in
+CLAUDE.md's zarr rule), and only one `AnalysisWorker` task is ever in
 flight. `write_cell` is only ever called from that same thread, sequentially
 (one cell at a time, never interleaved with another writer). Reads never
 touch the file directly at query time - `AnalysisEngine` loads everything
@@ -28,7 +28,7 @@ that in-memory copy, same as it already did before this file existed. This
 sidesteps HDF5's lack of safe concurrent cross-thread read/write entirely,
 rather than adding locking to work around it.
 
-No Qt import allowed in this file (AGENTS.md testing rule) - h5py file I/O
+No Qt import allowed in this file (CLAUDE.md testing rule) - h5py file I/O
 is not a Qt dependency.
 """
 

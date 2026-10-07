@@ -8,7 +8,7 @@ background flattening when enabled). Doing it in a paint/signal handler
 freezes the window, which is what CLAUDE.md's "long ... image processing
 must run off the main thread" rule exists to prevent.
 
-**Never use ``QThreadPool``.** AGENTS.md's zarr rule: a ``QThreadPool``
+**Never use ``QThreadPool``.** CLAUDE.md's zarr rule: a ``QThreadPool``
 worker touching an OME-Zarr read - even indirectly, via a blocking wait -
 was root-caused to a native ``STATUS_HEAP_CORRUPTION`` crash. This is a
 plain ``threading.Thread``, same choice ``analysis/worker.py`` makes and
@@ -225,7 +225,7 @@ class ImageRenderer(QObject):
             logger.exception("Image render failed for cube=%s wl=%s", request.cube_index, request.wavelength_nm)
             return RenderResult(request=request, image=None, error=str(exc))
 
-        # One line per rendered frame, DEBUG only (AGENTS.md performance rule:
+        # One line per rendered frame, DEBUG only (CLAUDE.md performance rule:
         # instrument at write time, aggregate, never log inside an inner loop).
         logger.debug(
             "ImageRenderer cube=%s wl=%s: load=%.3fs preprocess=%.3fs shape=%s",

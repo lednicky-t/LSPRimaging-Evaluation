@@ -3,7 +3,7 @@
 
 A pure function, no Qt/GUI dependency (same spirit as today's
 ``gui/analysis_tasks.py``, which has zero ``window.*`` references) -
-independently testable. AGENTS.md testing rule: needs a deterministic unit
+independently testable. CLAUDE.md testing rule: needs a deterministic unit
 test per locality rule below.
 
 Locality rules to encode (sketch §6):

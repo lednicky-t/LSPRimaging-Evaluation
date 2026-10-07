@@ -3,7 +3,7 @@
 Owns the current :class:`~lspr_imaging_app.dataset.model.ImageDataset` and
 acquisition metadata. Emits ``dataset_loaded``/``dataset_cleared``; exposes a
 read-only query interface. No other module may read dataset state any other
-way (AGENTS.md, "Module boundaries").
+way (CLAUDE.md, "Module boundaries").
 
 **Built 2026-09-21** - the state-owner itself, the one piece of the Dataset
 stage left unbuilt after the 2026-09-20 `dataset/io.py`/`model.py` port

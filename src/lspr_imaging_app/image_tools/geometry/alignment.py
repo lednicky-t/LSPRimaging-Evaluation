@@ -4,7 +4,7 @@ The user clicks two points that *should* lie on a horizontal line in the
 displayed image (a row of features, a channel edge...). This module turns
 those two points into the rotation change that makes them horizontal.
 
-No Qt import allowed in this file (AGENTS.md testing rule).
+No Qt import allowed in this file (CLAUDE.md testing rule).
 
 **Conventions, verified against the real transform** (not assumed - see
 ``tests/unit/test_lspri_rewrite_rotation_alignment.py``, which builds a line

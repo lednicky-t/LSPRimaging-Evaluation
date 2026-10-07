@@ -22,7 +22,7 @@ wavelength and fit the metric once on the averaged spectrum. For a
 nonlinear fit, "average then fit" and "fit then average" are not the same
 number.
 
-No Qt import allowed in this file (AGENTS.md testing rule).
+No Qt import allowed in this file (CLAUDE.md testing rule).
 """
 
 from __future__ import annotations

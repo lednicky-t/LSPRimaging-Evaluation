@@ -16,7 +16,7 @@ import the other would add the reverse edge, turning that one-directional
 relationship into a two-way one between the packages. Living here instead,
 it imports both `roi` and `image_tools`/`dataset` freely, and neither of
 them imports it back - the same reasoning that keeps `GeometryModule`
-itself with zero knowledge that `RoiToolbox` exists (AGENTS.md's module-
+itself with zero knowledge that `RoiToolbox` exists (CLAUDE.md's module-
 boundary rule; see `RoiToolbox.remap_all`'s own docstring for the matching
 half of this).
 

@@ -14,13 +14,13 @@ Owning the value here instead follows the precedent `SelectionModule`
 already set (current cube/wavelength/ROI-selection) and `ReferenceFrameModule`
 extended (2026-09-25): a piece of state that is legitimately needed by
 several independent modules gets its own small, explicit owner in this
-package - an acknowledged exception to AGENTS.md's "nothing is shared" rule,
+package - an acknowledged exception to CLAUDE.md's "nothing is shared" rule,
 not a license to keep adding more shared state elsewhere. `HistogramPanel`
 only ever calls `set_range`/`clear_range` (a command call, the same shape
 `RoiToolbox.request_move` already uses); every consumer subscribes to
 `range_changed` directly and needs no reference to `HistogramPanel` at all.
 
-Deliberately narrow, per AGENTS.md's module-boundary rule ("no module
+Deliberately narrow, per CLAUDE.md's module-boundary rule ("no module
 reaches into another's internals"): holds only the `(min, max)` pair itself,
 no reference to any other module - matching `ReferenceFrameModule`'s own
 "commands take already-resolved values" convention.

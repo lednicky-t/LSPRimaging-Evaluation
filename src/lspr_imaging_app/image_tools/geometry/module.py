@@ -2,7 +2,7 @@
 
 Owns ``GeometrySettings`` (split out of the old app's ``PreprocessingSettings``
 - see ``model.py``'s docstring). Emits ``geometry_changed`` (a computational
-change - AGENTS.md non-negotiable invariant: rotation/flip/crop are not
+change - CLAUDE.md non-negotiable invariant: rotation/flip/crop are not
 display-only, they resample the actual pixel grid every downstream
 calculation reads).
 

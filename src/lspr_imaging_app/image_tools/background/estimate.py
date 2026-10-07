@@ -18,7 +18,7 @@ app's ``image_tools.mask.MaskSettings``. Confusing, but that's the existing
 naming in the source this was ported from; preserved as-is rather than
 renamed during the port to keep the diff verbatim.
 
-No Qt import allowed in this file (AGENTS.md testing rule).
+No Qt import allowed in this file (CLAUDE.md testing rule).
 """
 
 from __future__ import annotations

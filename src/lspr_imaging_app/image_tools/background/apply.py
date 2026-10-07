@@ -24,7 +24,7 @@ caller just got from ``estimate_background_profile``) and applies it — the
 "model" is just that array plus the scalar baseline, passed straight
 through, not stored.
 
-No Qt import allowed in this file (AGENTS.md testing rule).
+No Qt import allowed in this file (CLAUDE.md testing rule).
 """
 
 from __future__ import annotations

@@ -2,7 +2,7 @@
 
 Reads Analysis Engine + ROI Toolbox (for coloring/selection) + Selection.
 Owns its own fit-curve display and range tools via :class:`SpectraPlot`.
-Never computes a fit for "live preview" on the GUI thread (AGENTS.md
+Never computes a fit for "live preview" on the GUI thread (CLAUDE.md
 non-negotiable invariant).
 """
 

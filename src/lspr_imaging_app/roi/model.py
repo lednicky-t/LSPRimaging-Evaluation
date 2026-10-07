@@ -3,7 +3,7 @@
 Ported near-verbatim from ``domain/models.py`` on ``develop``/``main`` -
 ``RoiMask``, ``AreaRoi``, ``AreaRoiGroup``, ``RoiArrayGroup``,
 ``AreaRoiDetectionSettings`` (the ROI Toolbox's own owned state and
-detection settings, per AGENTS.md's "Module boundaries"). No logic changed.
+detection settings, per CLAUDE.md's "Module boundaries"). No logic changed.
 
 TODO: adopt ``docs/roi_system_roadmap.md``'s ``Pair`` vocabulary
 (sample/reference linkage) and geometry-type dispatcher here rather than

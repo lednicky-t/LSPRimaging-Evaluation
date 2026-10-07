@@ -7,7 +7,7 @@ cursor-readout and "i" info icons live in the rest of that bar, not here -
 see `panel.py`'s `_build_ui`) - deliberately separate from the Workflow
 panel's Transforms row (`panels/image/transforms_settings.py`), per the
 maintainer's own distinction: Rotate/Crop/Flip/Measure resample the actual
-pixel grid (AGENTS.md's non-negotiable invariant on that), while the tools
+pixel grid (CLAUDE.md's non-negotiable invariant on that), while the tools
 that belong here are the "soft" ones - visualization/inspection and ROI
 manipulation - that never touch pixel data. Pan and zoom need no tool or
 icon at all (`image_controls.py`: middle-drag pans, wheel zooms, always).
