@@ -51,14 +51,17 @@ def from_display(value: float, unit: LengthUnit) -> float:
 
 
 def format_length(px: float, unit: LengthUnit) -> str:
-    """What a cell shows: one decimal, in ``unit``."""
-    return f"{to_display(px, unit):.1f}"
+    """What a cell shows: one decimal for px, none for µm (the stored value is always px)."""
+    return f"{to_display(px, unit):.1f}" if unit.um_per_px is None else f"{to_display(px, unit):.0f}"
 
 
 def edit_text(px: float, unit: LengthUnit) -> str:
-    """What the cell editor starts with: three decimals, trailing zeros
-    dropped, so editing does not round away precision the cell displays."""
-    text = f"{to_display(px, unit):.3f}".rstrip("0").rstrip(".")
+    """What the cell editor starts with: the same precision the cell shows
+    (one decimal for px, none for µm), trailing zeros dropped."""
+    digits = 1 if unit.um_per_px is None else 0
+    text = f"{to_display(px, unit):.{digits}f}"
+    if digits:
+        text = text.rstrip("0").rstrip(".")
     return "0" if text in ("", "-0") else text
 
 
@@ -77,7 +80,10 @@ def parse_length(text: str, unit: LengthUnit) -> float:
 
 STEP_PX = 0.5
 STEP_PX_LARGE = 5.0
-"""How far one Up/Down (or Ctrl+wheel) step moves a diameter; Shift takes the large one."""
+STEP_UM = 1.0
+STEP_UM_LARGE = 10.0
+"""How far one Up/Down (or Ctrl+wheel) step moves a diameter; Shift takes the large one.
+In µm (no decimals shown) the step is a whole µm instead."""
 
 
 def step_text(text: str, direction: int, large: bool, unit: LengthUnit) -> str | None:
@@ -87,7 +93,11 @@ def step_text(text: str, direction: int, large: bool, unit: LengthUnit) -> str |
         px = parse_length(text, unit)
     except ValueError:
         return None
-    return edit_text(max(0.0, px + direction * (STEP_PX_LARGE if large else STEP_PX)), unit)
+    if unit.um_per_px is None:
+        step_px = STEP_PX_LARGE if large else STEP_PX
+    else:  # µm shows no decimals, so a step must be a whole µm to be visible
+        step_px = (STEP_UM_LARGE if large else STEP_UM) / unit.um_per_px
+    return edit_text(max(0.0, px + direction * step_px), unit)
 
 
 # -- rows --------------------------------------------------------------------

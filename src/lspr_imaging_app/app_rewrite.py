@@ -72,6 +72,7 @@ from .roi_geometry_sync import RoiGeometrySync
 from .selection import AreaSelectionModule, HighlightRangeModule, ReferenceFrameModule, SelectionModule
 from .storage.app_settings import AppSettings, load_app_settings, save_app_settings
 from .storage.ui_state_keys import (
+    ROI_ROUND_POSITIONS,
     CHROMATIC_ALL_WAVELENGTHS,
     CHROMATIC_BORDER_PERCENT,
     CHROMATIC_FEATURE_DIAMETER,
@@ -1313,10 +1314,41 @@ def build_main_window(
     reopen_action.setChecked(settings.auto_reopen_last_dataset)
     reopen_action.toggled.connect(lambda checked: writer.persist(auto_reopen_last_dataset=bool(checked)))
 
+    _wire_roi_fill_opacity_menu(options_menu, image_panel)
+    round_action = options_menu.addAction("Round ROI Positions to 0.1 px")
+    round_action.setCheckable(True)
+    m.roi_toolbox.round_positions = read(ui_state, ROI_ROUND_POSITIONS) is not False
+    round_action.setChecked(m.roi_toolbox.round_positions)
+
+    def _on_round_positions(checked: bool) -> None:
+        m.roi_toolbox.round_positions = bool(checked)
+        ui_state.set(ROI_ROUND_POSITIONS.key, bool(checked))
+
+    round_action.toggled.connect(_on_round_positions)
+
     _wire_quit_persistence(window, m, writer, ui_state, layout_preset_manager)
     _auto_reopen_last_dataset(m.dataset, settings)
     apply_windows_titlebar_color(window, theme_obj)
     return window
+
+
+_ROI_FILL_OPACITY_CHOICES = (0.1, 0.2, 0.3, 0.5, 0.75, 1.0)
+
+
+def _wire_roi_fill_opacity_menu(options_menu, image_panel: ImagePanel) -> None:
+    """Options -> "ROI Fill Maximum Opacity": how opaque a ROI fill is when its
+    Transparency slider (Image ribbon, ROIs tab) is at 100 %. The slider then
+    runs 0 to this value. Saved by the panel (`ui_state`)."""
+    submenu = options_menu.addMenu("ROI Fill Maximum Opacity")
+    group = QActionGroup(submenu)
+    group.setExclusive(True)
+    current = image_panel.roi_fill_max_opacity
+    for choice in _ROI_FILL_OPACITY_CHOICES:
+        action = submenu.addAction(f"{round(choice * 100)} %")
+        action.setCheckable(True)
+        action.setChecked(abs(choice - current) < 1e-6)
+        group.addAction(action)
+        action.triggered.connect(lambda _checked=False, value=choice: image_panel.set_roi_fill_max_opacity(value))
 
 
 def main() -> None:

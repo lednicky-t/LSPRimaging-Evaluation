@@ -45,10 +45,9 @@ SELECTED_COLOR = "#f8fafc"
 SELECTED_WIDTH = 3.5
 MAX_IDLE_SAMPLE_CURVES = 24
 """How many emptied per-colour sample curves are kept for reuse."""
-SAMPLE_FILL_FACTOR = 0.3
-"""Opacity of a sample circle's fill relative to its outline's (so the
-Transparency control fades both together, and the image stays readable under
-the fill)."""
+DEFAULT_FILL_MAX_OPACITY = 1.0
+"""Opacity of a ROI fill when its Transparency slider is at 100 %. The slider
+scales between 0 and this value; the maximum is an Options-menu preference."""
 
 
 @dataclass
@@ -137,6 +136,7 @@ class RoiOverlay:
         self.sample = RoiCircleStyle(True, DEFAULT_SAMPLE_COLOR, 1.0)
         self.reference = RoiCircleStyle(True, DEFAULT_REFERENCE_COLOR, 1.0)
         self.labels_visible = False
+        self.fill_max_opacity = DEFAULT_FILL_MAX_OPACITY
         self.sample_curve = add_curve(plot, DEFAULT_SAMPLE_COLOR, width=SAMPLE_WIDTH)
         # One curve per distinct ROI colour (a group's members each have their
         # own tint); `sample_curve` stays the one for ROIs with no colour of
@@ -188,10 +188,9 @@ class RoiOverlay:
         color.setAlphaF(max(0.0, min(1.0, float(alpha))))
         curve.setPen(pg.mkPen(color, width=width))
 
-    @staticmethod
-    def _style_fill(item: QGraphicsPathItem, color_hex: str, alpha: float) -> None:
+    def _style_fill(self, item: QGraphicsPathItem, color_hex: str, alpha: float) -> None:
         color = QColor(color_hex)
-        color.setAlphaF(max(0.0, min(1.0, float(alpha))) * SAMPLE_FILL_FACTOR)
+        color.setAlphaF(max(0.0, min(1.0, float(alpha))) * max(0.0, min(1.0, self.fill_max_opacity)))
         item.setBrush(QBrush(color))
 
     # -- drawing -------------------------------------------------------------------

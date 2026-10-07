@@ -159,6 +159,7 @@ from .rotate_line_tool import RotateLineTool
 from ...storage.ui_state_keys import (
     IMAGE_CURSOR_READOUT,
     IMAGE_MASK_EDIT_TOOL,
+    IMAGE_ROI_FILL_MAX_OPACITY,
     IMAGE_ROI_LABELS,
     IMAGE_SCALE_BAR_COLOR,
     ROI_OVERLAY_KEYS,
@@ -454,6 +455,8 @@ class ImagePanel(QWidget):
         labels = store.get(IMAGE_ROI_LABELS.key)
         if isinstance(labels, bool):
             self._roi_overlay.labels_visible = labels
+        self._roi_overlay.fill_max_opacity = float(read(store, IMAGE_ROI_FILL_MAX_OPACITY))
+        self._apply_roi_overlay_style()
         self._sync_roi_overlay_controls()
         self._roi_overlay_store = store  # only now: restoring must not save what it just read
 
@@ -1813,6 +1816,18 @@ class ImagePanel(QWidget):
         self._apply_roi_overlay_style()
         if self._roi_overlay_store is not None:
             self._roi_overlay_store.set(ROI_OVERLAY_KEYS[kind][field].key, value)
+
+    @property
+    def roi_fill_max_opacity(self) -> float:
+        """Opacity (0..1) of the ROI fills when their Transparency slider is at 100 %."""
+        return self._roi_overlay.fill_max_opacity
+
+    def set_roi_fill_max_opacity(self, value: float) -> None:
+        """Options menu: set how opaque the ROI fills get at slider 100 % (remembered)."""
+        self._roi_overlay.fill_max_opacity = max(0.0, min(1.0, float(value)))
+        self._apply_roi_overlay_style()
+        if self._roi_overlay_store is not None:
+            self._roi_overlay_store.set(IMAGE_ROI_FILL_MAX_OPACITY.key, self._roi_overlay.fill_max_opacity)
 
     def _on_roi_labels_toggled(self, shown: bool) -> None:
         self._roi_overlay.labels_visible = bool(shown)

@@ -151,6 +151,10 @@ diameter fields are invariant under this app's transform pipeline (rotate,
 flip, crop - never a scale change), so there is nothing else to do for them."""
 
 
+POSITION_DECIMALS = 1
+"""ROI centres are stored to 0.1 px when `RoiToolbox.round_positions` is on."""
+
+
 @dataclass(frozen=True)
 class RoiRemapReport:
     """What one `RoiToolbox.remap_all` call actually did - enough for a
@@ -257,6 +261,13 @@ class RoiToolbox(QObject):
         self._detection_settings = AreaRoiDetectionSettings()
         self._roi_id_counter = itertools.count(1)
         self._group_id_counter = itertools.count(1)
+        self.round_positions = True
+        """Options preference: store ROI centres rounded to `POSITION_DECIMALS`
+        decimals (0.1 px). Applies to positions set from now on, not to ROIs
+        already stored."""
+
+    def _rounded(self, value: float) -> float:
+        return round(float(value), POSITION_DECIMALS) if self.round_positions else float(value)
 
     # -- query interface ------------------------------------------------
 
@@ -418,7 +429,7 @@ class RoiToolbox(QObject):
         promise), so no special undo bookkeeping beyond add/remove is
         needed."""
         roi_id = next(self._roi_id_counter)
-        roi = AreaRoi(area_roi_id=roi_id, center_x=float(x), center_y=float(y), sample_diameter_px=float(sample_diameter_px))
+        roi = AreaRoi(area_roi_id=roi_id, center_x=self._rounded(x), center_y=self._rounded(y), sample_diameter_px=float(sample_diameter_px))
 
         def apply() -> None:
             self._rois[roi_id] = roi
@@ -458,6 +469,7 @@ class RoiToolbox(QObject):
             x, y = float(positions[roi.area_roi_id][0]), float(positions[roi.area_roi_id][1])
             if not (math.isfinite(x) and math.isfinite(y)):
                 raise ValueError(f"ROI {roi.area_roi_id}: position must be finite, got ({x}, {y})")
+            x, y = self._rounded(x), self._rounded(y)
             if (roi.center_x, roi.center_y) != (x, y):
                 moves.append((roi, (roi.center_x, roi.center_y), (x, y)))
         if not moves:
@@ -730,6 +742,8 @@ class RoiToolbox(QObject):
         old_groups = dict(self._groups)
         old_arrays = dict(self._array_groups)
         old_next_counter = (max(old_rois) + 1) if old_rois else 1
+        for roi in detected_rois:
+            roi.center_x, roi.center_y = self._rounded(roi.center_x), self._rounded(roi.center_y)
         new_rois = {roi.area_roi_id: roi for roi in detected_rois}
         new_arrays = {array.array_id: array for array in array_groups}
         new_next_counter = (max(new_rois) + 1) if new_rois else 1
