@@ -128,7 +128,6 @@ from .area_selection_tool import AreaSelectionTool
 from .background_tab import BACKGROUND_INFO_HTML, BackgroundTab
 from .chromatic_tab import ChromaticCorrectionTab, ChromaticUiValues
 from .canvas_tools import _ICON_SIZE, CanvasToolsBar, style_bar_icon_button
-from .context_menu import show_tool_context_menu
 from .crop_size_controls import CropSizeControls
 from .crop_tool import CropTool
 from .data_axis_slider import DataAxisSlider
@@ -137,6 +136,7 @@ from .general_group import AreaSelectionPicker, mirror_icon_button, style_genera
 from .guided_value_spinbox import GuidedValueSpinBox
 from .histogram_highlight_overlay_controls import HistogramHighlightOverlayControls
 from .image_controls import ImageViewBox, controls_text
+from .interaction import CanvasInteraction
 from .mask_edit_panels import (
     DrawEditPanel,
     HistogramSelectionEditPanel,
@@ -237,22 +237,6 @@ overlay (cropped-space coordinates) is hidden. See the module docstring.
 Crop joined 2026-09-29: the whole point of the tool is choosing a new crop
 from the full available frame, not just the region an old crop already
 kept."""
-
-_CURSOR_FOR_CROP_HANDLE: dict[str | None, Qt.CursorShape] = {
-    "n": Qt.CursorShape.SizeVerCursor,
-    "s": Qt.CursorShape.SizeVerCursor,
-    "e": Qt.CursorShape.SizeHorCursor,
-    "w": Qt.CursorShape.SizeHorCursor,
-    "ne": Qt.CursorShape.SizeBDiagCursor,
-    "sw": Qt.CursorShape.SizeBDiagCursor,
-    "nw": Qt.CursorShape.SizeFDiagCursor,
-    "se": Qt.CursorShape.SizeFDiagCursor,
-    "move": Qt.CursorShape.SizeAllCursor,
-}
-"""Cursor feedback for `CropTool.hover_handle`'s result - the tool draws no
-separate handle graphics (see crop_tool.py's docstring), so the cursor
-shape is the only hint that an edge/corner/interior is grabbable."""
-
 
 class ImagePanel(QWidget):
     """Renders the current processed image with ROI overlays. Owns no
@@ -689,6 +673,14 @@ class ImagePanel(QWidget):
         layout.addWidget(self._controls_bar)
 
         scene = self._image_item.scene()
+        self._interaction = CanvasInteraction(
+            plot=self._plot, view=self._view, menu_parent=self,
+            active_tool=self._active_tool, roi_toolbox=self._roi_toolbox, selection=self._selection,
+            area_selection=self._area_selection,
+            rotate_tool=self._rotate_tool, crop_tool=self._crop_tool, measure_tool=self._measure_tool,
+            area_tool=self._area_tool,
+            image_shape=lambda: self._last_image_shape, roi_at=self.roi_at, apply_crop=self._on_crop_apply_requested,
+        )
         scene.sigMouseClicked.connect(self._on_scene_clicked)
         scene.sigMouseMoved.connect(self._on_scene_moved)
         # Arrow keys/Esc for the active tool. An event filter on the view
@@ -2247,272 +2239,34 @@ class ImagePanel(QWidget):
         self._tool_info.setIcon(load_tabler_icon("info-circle", color=theme.text_muted, size=render_size))
         self._tool_info.setToolTip(self._info_text(tool))
 
-    def _in_view(self, scene_pos: object) -> bool:
-        return bool(self._plot.vb.sceneBoundingRect().contains(scene_pos))
-
-    def _on_scene_moved(self, scene_pos: object) -> None:
-        # Cheap early-out: this fires on every mouse move over the scene.
-        if self._active_tool.active() is ImageTool.CROP and self._in_view(scene_pos):
-            point = self._plot.vb.mapSceneToView(scene_pos)
-            handle = self._crop_tool.hover_handle(float(point.x()), float(point.y()))
-            cursor = _CURSOR_FOR_CROP_HANDLE.get(handle)
-            if cursor is None:
-                self._view.viewport().unsetCursor()
-            else:
-                self._view.viewport().setCursor(cursor)
-        if self._active_tool.active() is ImageTool.MEASURE and self._in_view(scene_pos):
-            point = self._plot.vb.mapSceneToView(scene_pos)
-            handle = self._measure_tool.hover_handle(float(point.x()), float(point.y()))
-            if handle is None:
-                self._view.viewport().unsetCursor()
-            else:
-                # Same "move" cursor as dragging Crop's interior - both mean
-                # "drag this to reposition it".
-                self._view.viewport().setCursor(Qt.CursorShape.SizeAllCursor)
-        if self._rotate_tool.first_point() is not None and self._in_view(scene_pos):
-            point = self._plot.vb.mapSceneToView(scene_pos)
-            self._rotate_tool.on_mouse_moved(float(point.x()), float(point.y()))
-        if self._measure_tool.first_point() is not None and self._in_view(scene_pos):
-            point = self._plot.vb.mapSceneToView(scene_pos)
-            self._measure_tool.on_mouse_moved(float(point.x()), float(point.y()))
-
     def eventFilter(self, watched: QObject, event: QEvent) -> bool:  # noqa: N802 - Qt naming
         if watched is self._view and event.type() == QEvent.Type.KeyPress:
-            if self._rotate_tool.handle_key(event.key(), event.modifiers()):
-                event.accept()
-                return True
-            if self._crop_tool.handle_key(event.key()):
-                event.accept()
-                return True
-            if self._measure_tool.handle_key(event.key()):
+            if self._interaction.handle_key(event.key(), event.modifiers()):
                 event.accept()
                 return True
         return super().eventFilter(watched, event)
 
+    # -- canvas interaction: routed by `CanvasInteraction` (interaction.py) ---------------
+
     def _on_scene_clicked(self, event: object) -> None:
-        """Route a click: to the active tool, or - with no tool active -
-        select the ROI under the cursor (clear the selection when the click
-        lands on empty image). Ctrl/Shift toggles instead of replacing,
-        matching the platform convention for multi-select lists. Only the
-        left button selects; the middle button is for panning."""
-        try:
-            scene_pos = event.scenePos()
-        except AttributeError:  # pragma: no cover - defensive against pyqtgraph versions
-            return
-        button = getattr(event, "button", lambda: Qt.MouseButton.LeftButton)()
-        if self._active_tool.active() is ImageTool.ROTATE:
-            if not self._in_view(scene_pos):
-                return
-            if button == Qt.MouseButton.LeftButton:
-                p = self._plot.vb.mapSceneToView(scene_pos)
-                self._rotate_tool.on_left_click(float(p.x()), float(p.y()))
-            elif button == Qt.MouseButton.RightButton:
-                self._show_rotate_context_menu(scene_pos)
-            return
-        if self._active_tool.active() is ImageTool.MEASURE:
-            if not self._in_view(scene_pos):
-                return
-            if button == Qt.MouseButton.LeftButton:
-                p = self._plot.vb.mapSceneToView(scene_pos)
-                self._measure_tool.on_left_click(float(p.x()), float(p.y()))
-            elif button == Qt.MouseButton.RightButton:
-                self._show_measure_context_menu(scene_pos)
-            return
-        if self._active_tool.active() is ImageTool.CROP:
-            # A plain (non-drag) left-click has nothing to do - dragging is
-            # handled separately, by ImageViewBox's left-drag handler
-            # (`_on_crop_drag_event`), since a real drag never reaches
-            # `sigMouseClicked` at all (pyqtgraph routes it as a drag
-            # event once the mouse has moved past its click threshold).
-            if button == Qt.MouseButton.RightButton and self._in_view(scene_pos):
-                self._show_crop_context_menu(scene_pos)
-            return
-        if self._active_tool.active() is ImageTool.SELECT_AREA:
-            # The drag draws (`_on_select_area_drag_event`); only the menu is a click.
-            if button == Qt.MouseButton.RightButton and self._in_view(scene_pos):
-                self._show_select_area_context_menu(scene_pos)
-            return
-        if self._active_tool.active() is ImageTool.ADD_ROI:
-            if not self._in_view(scene_pos):
-                return
-            if button == Qt.MouseButton.LeftButton:
-                p = self._plot.vb.mapSceneToView(scene_pos)
-                if self._in_selection(float(p.x()), float(p.y())):
-                    self._roi_toolbox.add_roi(float(p.x()), float(p.y()))
-            elif button == Qt.MouseButton.RightButton:
-                self._show_add_roi_context_menu(scene_pos)
-            return
-        if button == Qt.MouseButton.RightButton and self._point_in_selection(scene_pos):
-            self._context_menu([], scene_pos)  # plain Invert/Deselect menu
-            return
-        if button != Qt.MouseButton.LeftButton:
-            return  # not a select gesture
-        point = self._plot.vb.mapSceneToView(scene_pos)
-        roi_id = self.roi_at(float(point.x()), float(point.y()))
-        modifiers = getattr(event, "modifiers", lambda: Qt.KeyboardModifier.NoModifier)()
-        additive = bool(modifiers & (Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.ShiftModifier))
+        self._interaction.on_scene_clicked(event)
 
-        current = set(self._selection.selected_roi_ids())
-        if roi_id is None:
-            self._selection.set_roi_selection(current if additive else set())
-            return
-        if additive:
-            current.symmetric_difference_update({roi_id})
-            self._selection.set_roi_selection(current)
-        else:
-            self._selection.set_roi_selection({roi_id})
-
-    def _show_rotate_context_menu(self, scene_pos: object) -> None:
-        """Right-click while Rotate is active: a menu with a single "Cancel
-        rotation" action, always enabled (2026-09-29, maintainer's spec) -
-        it exits Rotate mode entirely, the same as clicking the Workflow
-        panel's Rotate button again (`ActiveToolModule.set_active(ROTATE,
-        False)` already drops any in-progress point 1 as a side effect of
-        deactivating - `RotateLineTool.set_active`'s own `_clear_first_
-        point()` call - so there is nothing extra to do first). Always
-        being enabled is also what keeps the menu from ever having nothing
-        clickable in it - see `context_menu.py`'s docstring for why that
-        matters."""
-        if self._context_menu([("Cancel rotation", True)], scene_pos) == "Cancel rotation":
-            self._active_tool.set_active(ImageTool.ROTATE, False)
-
-    def _show_measure_context_menu(self, scene_pos: object) -> None:
-        """Right-click while Measure is active: a menu with a single
-        "Cancel measurement" action, always enabled - same shape and
-        reasoning as `_show_rotate_context_menu` (exits Measure mode
-        entirely, the same as clicking the Workflow panel's Measure button
-        again; always-enabled is what keeps the menu from ever having
-        nothing clickable in it, see `context_menu.py`)."""
-        if self._context_menu([("Cancel measurement", True)], scene_pos) == "Cancel measurement":
-            self._active_tool.set_active(ImageTool.MEASURE, False)
-
-    def _show_crop_context_menu(self, scene_pos: object) -> None:
-        """Right-click while Crop is active: "Apply crop" (enabled only
-        with something pending, `CropTool.has_pending_changes`) and
-        "Cancel crop", always enabled - like Rotate's menu, it exits Crop
-        mode entirely (`ActiveToolModule.set_active(CROP, False)`), the
-        same as clicking the Workflow panel's Crop button again, dropping
-        any not-yet-applied edit along the way. "Cancel" always being
-        clickable is what keeps this menu from ever having nothing
-        clickable in it, even with "Apply" grayed out - see
-        `context_menu.py`'s docstring."""
-        chosen = self._context_menu(
-            [("Apply crop", self._crop_tool.has_pending_changes()), ("Cancel crop", True)], scene_pos
-        )
-        if chosen == "Apply crop":
-            self._on_crop_apply_requested()
-        elif chosen == "Cancel crop":
-            self._active_tool.set_active(ImageTool.CROP, False)
-
-    def _show_add_roi_context_menu(self, scene_pos: object) -> None:
-        """Right-click while Add ROI is active: a menu with a single "Exit
-        tool" action, always enabled - same shape as Rotate/Measure's own
-        "Cancel ..." menus (`_show_rotate_context_menu`/`_show_measure_
-        context_menu`), just not labeled "Cancel" since there is no
-        in-progress point to drop - each click here is already a complete,
-        independent action."""
-        if self._context_menu([("Exit tool", True)], scene_pos) == "Exit tool":
-            self._active_tool.set_active(ImageTool.ADD_ROI, False)
-
-    def _show_select_area_context_menu(self, scene_pos: object) -> None:
-        """Right-click while a selection tool is armed: "Exit tool" (leaves the
-        draw tool, keeps the selection), plus Invert/Deselect inside it."""
-        if self._context_menu([("Exit tool", True)], scene_pos) == "Exit tool":
-            self._active_tool.set_active(ImageTool.SELECT_AREA, False)
-
-    def _point_in_selection(self, scene_pos: object) -> bool:
-        """True when a selection exists and the scene point lies inside the
-        *editable* region (inside the shape, or outside it once inverted)."""
-        if not self._area_selection.has_selection() or self._last_image_shape is None or not self._in_view(scene_pos):
-            return False
-        point = self._plot.vb.mapSceneToView(scene_pos)
-        return self._area_selection.contains(float(point.x()), float(point.y()), self._last_image_shape)
-
-    def _context_menu(self, actions: list[tuple[str, bool]], scene_pos: object) -> str | None:
-        """`show_tool_context_menu` plus, when the click is inside the
-        selection, "Invert selection" and "Deselect" (handled here). Returns
-        the chosen *tool* action, or `None` if nothing or a selection entry was
-        chosen. Selection entries are always enabled, so the menu never opens
-        with nothing clickable (see `context_menu.py`)."""
-        entries = list(actions)
-        if self._point_in_selection(scene_pos):
-            entries += [("Invert selection", True), ("Deselect", True)]
-        if not entries:
-            return None
-        chosen = show_tool_context_menu(self, entries)
-        if chosen == "Invert selection":
-            self._area_selection.invert()
-            return None
-        if chosen == "Deselect":
-            self._area_selection.clear()
-            return None
-        return chosen
+    def _on_scene_moved(self, scene_pos: object) -> None:
+        self._interaction.on_scene_moved(scene_pos)
 
     def _on_left_drag_event(self, ev: object) -> bool:
-        """`ImageViewBox`'s single left-drag handler slot - dispatches to
-        whichever tool (if any) claims the drag. Crop and Measure each
-        decline (return `False`) unless *they* are the active tool, so at
-        most one of them ever claims a given drag, and neither has any
-        effect on plain ROI dragging."""
-        return self._on_crop_drag_event(ev) or self._on_measure_drag_event(ev) or self._on_select_area_drag_event(ev)
+        return self._interaction.on_left_drag(ev)
 
-    def _on_select_area_drag_event(self, ev: object) -> bool:
-        """Draws the rectangle/lasso while a selection tool is armed."""
-        if self._active_tool.active() is not ImageTool.SELECT_AREA:
-            return False
-        point = self._plot.vb.mapSceneToView(ev.scenePos())
-        x, y = float(point.x()), float(point.y())
-        if ev.isStart():
-            return self._area_tool.begin_gesture(x, y)
-        if ev.isFinish():
-            self._area_tool.end_gesture()
-            return True
-        self._area_tool.update_gesture(x, y)
-        return True
+    def _on_crop_drag_event(self, ev: object) -> bool:
+        return self._interaction.on_crop_drag(ev)
+
+    def _on_measure_drag_event(self, ev: object) -> bool:
+        return self._interaction.on_measure_drag(ev)
 
     def _in_selection(self, x: float, y: float) -> bool:
         """Whether display point (x, y) may be edited under the current area
         selection (always True with none)."""
-        if self._last_image_shape is None:
-            return not self._area_selection.has_selection()
-        return self._area_selection.contains(x, y, self._last_image_shape)
-
-    def _on_crop_drag_event(self, ev: object) -> bool:
-        if self._active_tool.active() is not ImageTool.CROP:
-            return False
-        scene_pos = ev.scenePos()
-        point = self._plot.vb.mapSceneToView(scene_pos)
-        x, y = float(point.x()), float(point.y())
-        if ev.isStart():
-            if not self._in_view(scene_pos):
-                return False
-            return self._crop_tool.begin_gesture(x, y)
-        if ev.isFinish():
-            self._crop_tool.end_gesture()
-            return True
-        self._crop_tool.update_gesture(x, y)
-        return True
-
-    def _on_measure_drag_event(self, ev: object) -> bool:
-        """Drags an already-placed point (maintainer's request, 2026-09-29
-        - added after the click-twice-only version shipped). A drag that
-        doesn't start on an existing point is left unclaimed - a *new* pair
-        is placed by ordinary clicks (`on_left_click`), not by dragging
-        empty space."""
-        if self._active_tool.active() is not ImageTool.MEASURE:
-            return False
-        scene_pos = ev.scenePos()
-        point = self._plot.vb.mapSceneToView(scene_pos)
-        x, y = float(point.x()), float(point.y())
-        if ev.isStart():
-            if not self._in_view(scene_pos):
-                return False
-            return self._measure_tool.begin_gesture(x, y)
-        if ev.isFinish():
-            self._measure_tool.end_gesture()
-            return True
-        self._measure_tool.update_gesture(x, y)
-        return True
+        return self._interaction.in_selection(x, y)
 
     def _on_crop_apply_requested(self) -> None:
         """Apply and exit crop mode (maintainer's spec, 2026-09-29): a
