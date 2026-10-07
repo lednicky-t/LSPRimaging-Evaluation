@@ -6,7 +6,8 @@ This file is the authoritative LSPRi rule set. Root rules still apply, except wh
 
 ## Read first
 
-- `docs/rewrite_status_and_plan_2026-09-30.md`: current status and plan.
+- `docs/whole_app_audit_2026-10-07.md`: where the rewrite stands (section 2b), known issues, and the decisions still open. Supersedes the 2026-09-30 status doc below, which is out of date.
+- `docs/rewrite_status_and_plan_2026-09-30.md`: the original stage-by-stage plan (history; its "what is built" claims are stale).
 - `docs/rewrite_build_log_2026-09.md` is 436 KB. Search it by date or keyword. **Never read it in full.**
 
 ## Status and scope: the rewrite exception
