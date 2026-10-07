@@ -55,6 +55,7 @@ from ...roi import RoiToolbox
 from ...selection import HighlightRangeModule
 from ..image.panel import ImagePanel
 from ..image.tool_ribbon import VIEW_TAB
+from ...storage.ui_state_keys import HISTOGRAM_CURSOR_READOUT, read
 from ..ui_state import UiStateStore
 from . import compute
 from .plot import DEFAULT_LINE_WIDTH, HistogramPlot
@@ -158,8 +159,8 @@ class HistogramPanel(QWidget):
         """Put the plot's cursor readout toggle back as last left and keep
         saving it (see `panels/ui_state.py`). Called once by the app shell."""
         overlay = self._plot.cursor_overlay()
-        overlay.set_enabled(store.get("histogram/cursor_readout") is True)
-        overlay.toggled.connect(lambda on: store.set("histogram/cursor_readout", bool(on)))
+        overlay.set_enabled(read(store, HISTOGRAM_CURSOR_READOUT) is True)
+        overlay.toggled.connect(lambda on: store.set(HISTOGRAM_CURSOR_READOUT.key, bool(on)))
 
     # -- construction ---------------------------------------------------------
 

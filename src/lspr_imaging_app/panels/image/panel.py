@@ -156,6 +156,14 @@ from .render import ImageRenderer, RenderRequest, RenderResult
 from .roi_label_overlay import RoiLabelItem, label_text
 from .roi_overlay_controls import RoiOverlayControls
 from .rotate_line_tool import RotateLineTool
+from ...storage.ui_state_keys import (
+    IMAGE_CURSOR_READOUT,
+    IMAGE_MASK_EDIT_TOOL,
+    IMAGE_ROI_LABELS,
+    IMAGE_SCALE_BAR_COLOR,
+    ROI_OVERLAY_KEYS,
+    read,
+)
 from ..ui_state import UiStateStore
 from .scale_bar_controls import ScaleBarControls
 from .scale_bar_overlay import ScaleBarItem
@@ -445,29 +453,30 @@ class ImagePanel(QWidget):
         """Put the cursor readout toggle and the Mask edit tool pick back as
         last left, and keep saving them (see `panels/ui_state.py`). Called
         once by the app shell after construction."""
-        self._cursor_overlay.set_enabled(store.get("image/cursor_readout") is True)
-        self._cursor_overlay.toggled.connect(lambda on: store.set("image/cursor_readout", bool(on)))
+        self._cursor_overlay.set_enabled(read(store, IMAGE_CURSOR_READOUT) is True)
+        self._cursor_overlay.toggled.connect(lambda on: store.set(IMAGE_CURSOR_READOUT.key, bool(on)))
         try:
-            self._mask_edit_tool.set_tool(MaskEditTool(store.get("image/mask_edit_tool")))
+            self._mask_edit_tool.set_tool(MaskEditTool(store.get(IMAGE_MASK_EDIT_TOOL.key)))
         except ValueError:  # nothing saved yet, or a tool that no longer exists
             pass
-        self._mask_edit_tool.tool_changed.connect(lambda tool: store.set("image/mask_edit_tool", tool.value))
-        saved_color = QColor(str(store.get("image/scale_bar_color") or ""))
+        self._mask_edit_tool.tool_changed.connect(lambda tool: store.set(IMAGE_MASK_EDIT_TOOL.key, tool.value))
+        saved_color = QColor(str(store.get(IMAGE_SCALE_BAR_COLOR.key) or ""))
         if saved_color.isValid():
             self._scale_bar_item.set_color(saved_color)
             self._scale_bar_controls.set_color(saved_color)
         self._scale_bar_color_store = store
         for kind in ("sample", "reference"):
-            visible = store.get(f"image/roi_{kind}_visible")
+            keys = ROI_OVERLAY_KEYS[kind]
+            visible = store.get(keys["visible"].key)
             if isinstance(visible, bool):
                 setattr(self, f"_roi_{kind}_visible", visible)
-            color = QColor(str(store.get(f"image/roi_{kind}_color") or ""))
+            color = QColor(str(store.get(keys["color"].key) or ""))
             if color.isValid():
                 setattr(self, f"_roi_{kind}_color", color.name())
-            alpha = store.get(f"image/roi_{kind}_alpha")
+            alpha = store.get(keys["alpha"].key)
             if isinstance(alpha, (int, float)) and not isinstance(alpha, bool) and 0.0 <= alpha <= 1.0:
                 setattr(self, f"_roi_{kind}_alpha", float(alpha))
-        labels = store.get("image/roi_labels")
+        labels = store.get(IMAGE_ROI_LABELS.key)
         if isinstance(labels, bool):
             self._roi_labels_visible = labels
         self._sync_roi_overlay_controls()
@@ -477,7 +486,7 @@ class ImagePanel(QWidget):
         self._scale_bar_item.set_color(color)
         store = getattr(self, "_scale_bar_color_store", None)
         if store is not None:
-            store.set("image/scale_bar_color", color.name())
+            store.set(IMAGE_SCALE_BAR_COLOR.key, color.name())
 
     # -- construction -------------------------------------------------------
 
@@ -1905,7 +1914,7 @@ class ImagePanel(QWidget):
         setattr(self, f"_roi_{kind}_{field}", value)
         self._apply_roi_overlay_style()
         if self._roi_overlay_store is not None:
-            self._roi_overlay_store.set(f"image/roi_{kind}_{field}", value)
+            self._roi_overlay_store.set(ROI_OVERLAY_KEYS[kind][field].key, value)
 
     def _on_roi_labels_toggled(self, shown: bool) -> None:
         self._roi_labels_visible = bool(shown)
@@ -1913,7 +1922,7 @@ class ImagePanel(QWidget):
         if self._last_image_shape is not None:
             self._draw_roi_overlay()
         if self._roi_overlay_store is not None:
-            self._roi_overlay_store.set("image/roi_labels", bool(shown))
+            self._roi_overlay_store.set(IMAGE_ROI_LABELS.key, bool(shown))
 
     def _refresh_roi_labels_icon(self) -> None:
         theme = get_active_theme()

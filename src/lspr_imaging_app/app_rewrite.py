@@ -87,7 +87,9 @@ from .storage.ui_state_keys import (
     IMAGE_RIBBON_CATEGORY,
     IMAGE_SHOW_BACKGROUND,
     IMAGE_VIEW_RANGE,
+    MASK_SCOPE,
     OVERLAY_KEYS,
+    REFERENCE_FRAME,
     read,
     read_highlight_range,
     read_view_range,
@@ -729,7 +731,7 @@ class _ReferenceFramePersistence:
 
     def _on_dataset_loaded(self, ds) -> None:
         self._reset()
-        saved = self._ui_state.get("reference_frame")
+        saved = self._ui_state.get(REFERENCE_FRAME)
         if (
             isinstance(saved, dict)
             and saved.get("dataset") == str(ds.home)
@@ -747,7 +749,7 @@ class _ReferenceFramePersistence:
         if self._internal_change or not self._settings.last_dataset_folder:
             return
         frame = self._reference_frame.manual_frame()
-        self._ui_state.set("reference_frame", {
+        self._ui_state.set(REFERENCE_FRAME, {
             "dataset": self._settings.last_dataset_folder,
             "mode": self._reference_frame.mode(),
             "cube": frame[0] if frame else None,
@@ -1229,10 +1231,10 @@ def build_main_window(
     image_panel.restore_ui_state(ui_state)
     histogram_panel.restore_ui_state(ui_state)
     try:
-        m.mask_scope.set_scope(MaskScope(ui_state.get("mask/scope")))
+        m.mask_scope.set_scope(MaskScope(ui_state.get(MASK_SCOPE.key)))
     except ValueError:  # nothing saved yet
         pass
-    m.mask_scope.scope_changed.connect(lambda scope: ui_state.set("mask/scope", scope.value))
+    m.mask_scope.scope_changed.connect(lambda scope: ui_state.set(MASK_SCOPE.key, scope.value))
     roi_table_panel = RoiTablePanel(m.roi_toolbox, m.selection, m.geometry, m.analysis_engine)
     roi_table_panel.restore_ui_state(ui_state)
     spectra_panel = SpectraPanel(m.analysis_engine, m.roi_toolbox, m.selection)

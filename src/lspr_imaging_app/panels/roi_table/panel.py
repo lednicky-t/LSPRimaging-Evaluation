@@ -60,6 +60,7 @@ from ...analysis.engine import AnalysisEngine
 from ...image_tools import GeometryModule
 from ...roi import RoiToolbox
 from ...selection import SelectionModule
+from ...storage.ui_state_keys import ROI_TABLE_COLLAPSED, ROI_TABLE_COLUMN_WIDTHS, ROI_TABLE_SORT
 from ..image.general_group import ICON_SIZE, style_general_icon_button
 from ..ui_state import UiStateStore
 from ..unit_toggle import UnitToggle
@@ -144,18 +145,18 @@ class RoiTablePanel(QWidget):
         Called once by the app shell."""
         self._store = store
         store.bind("roi_table/flat", self._flat_button)
-        saved_sort = store.get("roi_table/sort")
+        saved_sort = store.get(ROI_TABLE_SORT)
         if (
             isinstance(saved_sort, list) and len(saved_sort) == 2
             and isinstance(saved_sort[0], int) and not isinstance(saved_sort[0], bool)
             and 0 <= saved_sort[0] < COLUMN_COUNT and isinstance(saved_sort[1], bool)
         ):
             self._rebuild(lambda: self._model.set_sort(saved_sort[0], saved_sort[1]))
-        collapsed = store.get("roi_table/collapsed")
+        collapsed = store.get(ROI_TABLE_COLLAPSED)
         if isinstance(collapsed, list) and all(isinstance(item, str) for item in collapsed):
             self._collapsed = set(collapsed)
             self._rebuild(lambda: None)
-        widths = store.get("roi_table/column_widths")
+        widths = store.get(ROI_TABLE_COLUMN_WIDTHS)
         if isinstance(widths, list) and len(widths) == COLUMN_COUNT and all(isinstance(w, int) and w > 0 for w in widths):
             for column, width in enumerate(widths):
                 if column != COLUMN_NAME:
@@ -398,19 +399,19 @@ class RoiTablePanel(QWidget):
         key = _group_key(self._model.group_id(index))
         (self._collapsed.discard if expanded else self._collapsed.add)(key)
         if self._store is not None:
-            self._store.set("roi_table/collapsed", sorted(self._collapsed))
+            self._store.set(ROI_TABLE_COLLAPSED, sorted(self._collapsed))
 
     def _on_header_clicked(self, column: int) -> None:
         current, descending = self._model.sort_state()
         new = (column, not descending) if column == current else (column, False)
         self._rebuild(lambda: self._model.set_sort(*new))
         if self._store is not None:
-            self._store.set("roi_table/sort", [new[0], new[1]])
+            self._store.set(ROI_TABLE_SORT, [new[0], new[1]])
 
     def _on_section_resized(self, column: int, _old: int, _new: int) -> None:
         if self._store is not None:
             header = self._tree.header()
-            self._store.set("roi_table/column_widths", [header.sectionSize(c) for c in range(COLUMN_COUNT)])
+            self._store.set(ROI_TABLE_COLUMN_WIDTHS, [header.sectionSize(c) for c in range(COLUMN_COUNT)])
 
     def _on_flat_toggled(self, flat: bool) -> None:
         self._rebuild(lambda: self._model.set_flat(flat))

@@ -1,6 +1,8 @@
-"""The UI-state values that `app_rewrite.py` wires to panels, as one table
-(2026-10-07), and the one-time migration from the `AppSettings` fields they
-replaced.
+"""Every UI-state value that is wired by hand (not a widget `bind`) as one
+table (2026-10-07), and the one-time migration from the `AppSettings` fields
+some of them replaced. A widget's own `ui_state.bind("area/name", widget)` key
+stays next to the widget (that is the one-line convention); everything else is
+named here, so no key is a string literal in two places.
 
 Why: `AppSettings` had grown to 37 hand-wired fields (a field, a constructor
 argument and a signal per value), the shape the 2026-09-30 status doc warned
@@ -91,6 +93,27 @@ CHROMATIC_FEATURE_DIAMETER = UiKey("chromatic/feature_diameter_px", None, float,
 CHROMATIC_SHOW_LANDMARKS = UiKey("chromatic/show_landmarks", True, bool, "chromatic_show_landmarks")
 CHROMATIC_ALL_WAVELENGTHS = UiKey("chromatic/all_wavelengths", False, bool, "chromatic_landmarks_all_wavelengths")
 
+# -- Keys with no retired field behind them (panels read and write these through `restore_ui_state`) ----
+HISTOGRAM_CURSOR_READOUT = UiKey("histogram/cursor_readout", False, bool)
+IMAGE_CURSOR_READOUT = UiKey("image/cursor_readout", False, bool)
+IMAGE_MASK_EDIT_TOOL = UiKey("image/mask_edit_tool", None, str)  # a `MaskEditTool` value
+IMAGE_SCALE_BAR_COLOR = UiKey("image/scale_bar_color", None, str)
+IMAGE_ROI_LABELS = UiKey("image/roi_labels", False, bool)
+ROI_OVERLAY_KEYS = {
+    kind: {
+        "visible": UiKey(f"image/roi_{kind}_visible", True, bool),
+        "color": UiKey(f"image/roi_{kind}_color", None, str),  # None = the panel's own default colour
+        "alpha": UiKey(f"image/roi_{kind}_alpha", 1.0, float),
+    }
+    for kind in ("sample", "reference")
+}
+MASK_SCOPE = UiKey("mask/scope", None, str)  # a `MaskScope` value
+HAND_WIRED_KEYS: tuple[UiKey, ...] = (
+    HISTOGRAM_CURSOR_READOUT, IMAGE_CURSOR_READOUT, IMAGE_MASK_EDIT_TOOL, IMAGE_SCALE_BAR_COLOR, IMAGE_ROI_LABELS,
+    *(key for keys_for_kind in ROI_OVERLAY_KEYS.values() for key in keys_for_kind.values()),
+    MASK_SCOPE,
+)
+
 ALL_KEYS: tuple[UiKey, ...] = (
     HISTOGRAM_Y_MODE, HISTOGRAM_LOG_Y, HISTOGRAM_BIN_WIDTH, HISTOGRAM_LINE_WIDTH,
     IMAGE_RIBBON_CATEGORY, IMAGE_SHOW_BACKGROUND,
@@ -101,6 +124,14 @@ ALL_KEYS: tuple[UiKey, ...] = (
 )
 
 # -- Composite values (several parts that only make sense together) ------------------------------
+REFERENCE_FRAME = "reference_frame"
+"""``{"dataset": str, "mode": "auto" | "manual", "cube": int | None, "wavelength": float | None}``,
+kept per dataset like the highlight range."""
+
+ROI_TABLE_SORT = "roi_table/sort"  # [column, descending]
+ROI_TABLE_COLLAPSED = "roi_table/collapsed"  # sorted group ids
+ROI_TABLE_COLUMN_WIDTHS = "roi_table/column_widths"  # one width per column
+
 IMAGE_VIEW_RANGE = "image/view_range"
 """``[[x_min, x_max], [y_min, y_max]]`` in image pixels; replaced the four
 `image_view_*` fields. Applied only when all four numbers are present."""
