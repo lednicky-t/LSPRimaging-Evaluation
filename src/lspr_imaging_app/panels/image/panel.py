@@ -634,7 +634,60 @@ class ImagePanel(QWidget):
         # itself (`_reposition_cursor_overlay`/`_reposition_tool_info`, both
         # removed with an earlier change); now they're ordinary widgets in a
         # real `QHBoxLayout`, so Qt repositions them on any resize for free.
-        self._canvas_tools = CanvasToolsBar(self._roi_toolbox, self._active_tool, self)
+        #
+        # Split by ribbon tab on 2026-10-07 (one 554-line method before; no behaviour
+        # change). Each `_build_*_tab` returns the page the ribbon shows, in the order the
+        # tabs depend on each other: the View tab mirrors buttons of the Mask, Chromatic and
+        # Background tabs, so those are built first.
+        image_tools_content = self._build_image_tools_tab()
+        mask_content = self._build_mask_tab()
+        self._build_chromatic_and_background_tabs()
+        view_content = self._build_view_tab()
+        roi_content = self._build_roi_tab()
+        self._build_top_bar(view_content, image_tools_content, mask_content, roi_content)
+        self._build_navigation_bar()
+
+        # Canvas column: top bar (Select/Add ROI + cursor/info icons, both
+        # built above), then the pyqtgraph view itself.
+        canvas_column = QVBoxLayout()
+        canvas_column.setContentsMargins(0, 0, 0, 0)
+        canvas_column.setSpacing(0)
+        canvas_column.addWidget(self._top_bar)
+        canvas_column.addWidget(self._view, 1)
+
+        # Navigation now sits below the canvas (2026-09-30, maintainer
+        # request) - `_refresh_controls_bar_theme` draws its border on
+        # whichever edge actually touches the canvas, so moving this bar
+        # means flipping that edge too (border-top now, was border-bottom).
+        #
+        # Zero margins/spacing (2026-09-30, real bug found via headless
+        # geometry probe, maintainer report of "wide borders around the
+        # image area, biggest from the top") - every *other* layout in this
+        # method explicitly zeroes its margins; this one, the outermost, was
+        # the one left at Qt's style-default ~11px on all four sides. That
+        # is invisible as a distinct line (this panel's own background and
+        # the canvas's are the same `toolbar_bg`), but it reads as extra
+        # dark space padding out the canvas, the toolbar strip, and the
+        # nav bar equally - worst at the top because it stacked on top of
+        # the dock's own title bar, which the other three sides have
+        # nothing equivalent to. (A 10px left/right margin was briefly
+        # added here too, then moved to just the nav bar's own `controls`
+        # layout above - the canvas/toolbar were meant to stay flush.)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+        layout.addLayout(canvas_column, 1)
+        layout.addWidget(self._controls_bar)
+
+        scene = self._image_item.scene()
+        scene.sigMouseClicked.connect(self._on_scene_clicked)
+        scene.sigMouseMoved.connect(self._on_scene_moved)
+        # Arrow keys/Esc for the active tool. An event filter on the view
+        # (not `keyPressEvent` here) because the graphics view would
+        # otherwise consume arrow keys itself to scroll.
+        self._view.installEventFilter(self)
+
+    def _build_image_tools_tab(self) -> QWidget:
         # A second `TransformsSection` instance (2026-09-30, maintainer
         # request - "duplicate transform tools and put them in image tools
         # of image panel"), wired to the same `GeometryModule`/
@@ -643,6 +696,15 @@ class ImagePanel(QWidget):
         # door onto the same backend, not a copy that can drift out of sync.
         self._transforms_section = TransformsSection(self._geometry, self._active_tool, self)
 
+        image_tools_content = QWidget(self)
+        image_tools_content_layout = QHBoxLayout(image_tools_content)
+        image_tools_content_layout.setContentsMargins(0, 0, 0, 0)
+        image_tools_content_layout.setSpacing(6)
+        image_tools_content_layout.addWidget(self._transforms_section)
+        image_tools_content_layout.addStretch(1)
+        return image_tools_content
+
+    def _build_mask_tab(self) -> QWidget:
         # Persistent/Individual mask-edit scope toggle (2026-10-02,
         # maintainer request - copy these icons into the Image panel's own
         # "Mask" tab too). Reads/drives the same `MaskScopeModule` the
@@ -683,23 +745,6 @@ class ImagePanel(QWidget):
             for signal in (controls.visibility_changed, controls.color_changed, controls.alpha_changed):
                 signal.connect(lambda _value, c=controls, o=other: o.sync_from(c))
         self._mask_scope_separator = vertical_separator(self)
-
-        # Histogram highlight-overlay show/hide + color + transparency
-        # (2026-10-02, maintainer request - "add the toggle to show/hide
-        # histogram selection in image... add color selection and
-        # transparency control (similar to mask icons)"), ported from the
-        # stable app the same way `MaskOverlayControls` was. Fills the
-        # "Histogram" ribbon tab, previously a seeded placeholder (see
-        # tool_ribbon.py's module docstring).
-        self._highlight_overlay_controls = HistogramHighlightOverlayControls(
-            visible=self._highlight_tint.visible,
-            color=self._highlight_tint.color,
-            alpha=self._highlight_tint.alpha,
-            parent=self,
-        )
-        self._highlight_overlay_controls.visibility_changed.connect(self._on_highlight_overlay_visibility_changed)
-        self._highlight_overlay_controls.color_changed.connect(self._on_highlight_overlay_color_changed)
-        self._highlight_overlay_controls.alpha_changed.connect(self._on_highlight_overlay_alpha_changed)
 
         # Mask "Edit" group (2026-10-02, maintainer request - "next to the
         # visibility section in Mask, add Edit section... a pickup menu"
@@ -748,13 +793,6 @@ class ImagePanel(QWidget):
         self._mask_png_actions = MaskPngActions(self._mask, self._dataset, self._mask_scope, self, self)
         self._mask_edit_separator = vertical_separator(self)
 
-        image_tools_content = QWidget(self)
-        image_tools_content_layout = QHBoxLayout(image_tools_content)
-        image_tools_content_layout.setContentsMargins(0, 0, 0, 0)
-        image_tools_content_layout.setSpacing(6)
-        image_tools_content_layout.addWidget(self._transforms_section)
-        image_tools_content_layout.addStretch(1)
-
         # Scope toggle on the left, a vertical divider, then the overlay
         # display controls (maintainer request, 2026-10-02: "put them on the
         # left side and separate from rest by | line"), each group captioned
@@ -800,6 +838,46 @@ class ImagePanel(QWidget):
         mask_content_layout.addWidget(self._mask_edit_separator)
         mask_content_layout.addWidget(mask_png_group)
         mask_content_layout.addStretch(1)
+        return mask_content
+
+    def _build_chromatic_and_background_tabs(self) -> None:
+        self._chromatic_tab = ChromaticCorrectionTab(
+            self._chromatic,
+            self._chromatic_auto,
+            self._dataset,
+            self._geometry,
+            self._resolve_reference_frame,
+            self._image_aspect,
+            self,
+            initial_values=self._initial_chromatic_values,
+            initial_show_landmarks=self._initial_chromatic_view[0],
+            initial_all_wavelengths=self._initial_chromatic_view[1],
+        )
+        self._chromatic_tab.show_landmarks_changed.connect(self._on_show_landmarks_changed)
+        self._chromatic_tab.landmark_scope_changed.connect(self._on_landmark_scope_changed)
+        self._chromatic_tab.settings_applied.connect(self.chromatic_settings_applied)
+        self._background_tab = BackgroundTab(
+            self._background, show_background=self._show_background, parent=self
+        )
+        self._background_tab.show_background_changed.connect(self._on_show_background_changed)
+
+    def _build_view_tab(self) -> QWidget:
+        # Histogram highlight-overlay show/hide + color + transparency
+        # (2026-10-02, maintainer request - "add the toggle to show/hide
+        # histogram selection in image... add color selection and
+        # transparency control (similar to mask icons)"), ported from the
+        # stable app the same way `MaskOverlayControls` was. Fills the
+        # "Histogram" ribbon tab, previously a seeded placeholder (see
+        # tool_ribbon.py's module docstring).
+        self._highlight_overlay_controls = HistogramHighlightOverlayControls(
+            visible=self._highlight_tint.visible,
+            color=self._highlight_tint.color,
+            alpha=self._highlight_tint.alpha,
+            parent=self,
+        )
+        self._highlight_overlay_controls.visibility_changed.connect(self._on_highlight_overlay_visibility_changed)
+        self._highlight_overlay_controls.color_changed.connect(self._on_highlight_overlay_color_changed)
+        self._highlight_overlay_controls.alpha_changed.connect(self._on_highlight_overlay_alpha_changed)
 
         # "View" tab (2026-10-06, maintainer request - the old "Histogram"
         # tab renamed and moved second; a one-stop place for display
@@ -820,39 +898,6 @@ class ImagePanel(QWidget):
         view_content_layout.addWidget(view_mask_group)
         view_content_layout.addStretch(1)
         self._view_content_layout = view_content_layout
-
-        self._top_bar = QWidget(self)
-        self._top_bar.setObjectName("imageTopBar")
-        top_bar_layout = QHBoxLayout(self._top_bar)
-        top_bar_layout.setContentsMargins(4, 2, 6, 2)
-        top_bar_layout.setSpacing(6)
-        # Always-visible leading tab, no caption (2026-10-03). Filled with
-        # the cursor toggle and the area-selection picker just below, once
-        # the cursor overlay exists.
-        self._general_row = QWidget(self)
-        general_row_layout = QHBoxLayout(self._general_row)
-        general_row_layout.setContentsMargins(0, 0, 0, 0)
-        general_row_layout.setSpacing(2)
-        self._area_picker = AreaSelectionPicker(self._area_selection, self._active_tool, self._general_row)
-        self._chromatic_tab = ChromaticCorrectionTab(
-            self._chromatic,
-            self._chromatic_auto,
-            self._dataset,
-            self._geometry,
-            self._resolve_reference_frame,
-            self._image_aspect,
-            self,
-            initial_values=self._initial_chromatic_values,
-            initial_show_landmarks=self._initial_chromatic_view[0],
-            initial_all_wavelengths=self._initial_chromatic_view[1],
-        )
-        self._chromatic_tab.show_landmarks_changed.connect(self._on_show_landmarks_changed)
-        self._chromatic_tab.landmark_scope_changed.connect(self._on_landmark_scope_changed)
-        self._chromatic_tab.settings_applied.connect(self.chromatic_settings_applied)
-        self._background_tab = BackgroundTab(
-            self._background, show_background=self._show_background, parent=self
-        )
-        self._background_tab.show_background_changed.connect(self._on_show_background_changed)
         # View tab "Chromatic" and "Background" groups: mirrored copies of the
         # Chromatic tab's View buttons (landmarks on/off, scope) and the
         # Background tab's View button (maintainer request 2026-10-06).
@@ -896,6 +941,10 @@ class ImagePanel(QWidget):
             )
         ):
             self._view_content_layout.insertWidget(stretch_index + offset, widget)
+        return view_content
+
+    def _build_roi_tab(self) -> QWidget:
+        self._canvas_tools = CanvasToolsBar(self._roi_toolbox, self._active_tool, self)
         self._roi_sample_controls = RoiOverlayControls(
             "sample", visible=self._roi_sample_visible, color=QColor(self._roi_sample_color),
             alpha=self._roi_sample_alpha, parent=self,
@@ -933,6 +982,25 @@ class ImagePanel(QWidget):
         roi_content_layout.addWidget(self._roi_separator_3)
         roi_content_layout.addWidget(roi_labels_group)
         roi_content_layout.addStretch(1)
+        return roi_content
+
+    def _build_top_bar(
+        self, view_content: QWidget, image_tools_content: QWidget, mask_content: QWidget, roi_content: QWidget
+    ) -> None:
+        self._top_bar = QWidget(self)
+        self._top_bar.setObjectName("imageTopBar")
+        top_bar_layout = QHBoxLayout(self._top_bar)
+        top_bar_layout.setContentsMargins(4, 2, 6, 2)
+        top_bar_layout.setSpacing(6)
+        # Always-visible leading tab, no caption (2026-10-03). Filled with
+        # the cursor toggle and the area-selection picker just below, once
+        # the cursor overlay exists.
+        self._general_row = QWidget(self)
+        general_row_layout = QHBoxLayout(self._general_row)
+        general_row_layout.setContentsMargins(0, 0, 0, 0)
+        general_row_layout.setSpacing(2)
+        self._area_picker = AreaSelectionPicker(self._area_selection, self._active_tool, self._general_row)
+
         self._tool_ribbon = ImageToolRibbon(
             [
                 (VIEW_TAB, view_content),
@@ -1015,6 +1083,7 @@ class ImagePanel(QWidget):
 
         self._refresh_top_bar_theme()
 
+    def _build_navigation_bar(self) -> None:
         # Cube and Wavelength navigation - ported from the stable app's
         # tick/axis-style redesign (docs/image_area_slider_redesign.md):
         # each axis gets its own full-width row (title -> slider -> spin ->
@@ -1133,46 +1202,6 @@ class ImagePanel(QWidget):
         self._controls_bar.setObjectName("imageNavigationBar")
         self._controls_bar.setLayout(controls)
         self._refresh_controls_bar_theme()
-
-        # Canvas column: top bar (Select/Add ROI + cursor/info icons, both
-        # built above), then the pyqtgraph view itself.
-        canvas_column = QVBoxLayout()
-        canvas_column.setContentsMargins(0, 0, 0, 0)
-        canvas_column.setSpacing(0)
-        canvas_column.addWidget(self._top_bar)
-        canvas_column.addWidget(self._view, 1)
-
-        # Navigation now sits below the canvas (2026-09-30, maintainer
-        # request) - `_refresh_controls_bar_theme` draws its border on
-        # whichever edge actually touches the canvas, so moving this bar
-        # means flipping that edge too (border-top now, was border-bottom).
-        #
-        # Zero margins/spacing (2026-09-30, real bug found via headless
-        # geometry probe, maintainer report of "wide borders around the
-        # image area, biggest from the top") - every *other* layout in this
-        # method explicitly zeroes its margins; this one, the outermost, was
-        # the one left at Qt's style-default ~11px on all four sides. That
-        # is invisible as a distinct line (this panel's own background and
-        # the canvas's are the same `toolbar_bg`), but it reads as extra
-        # dark space padding out the canvas, the toolbar strip, and the
-        # nav bar equally - worst at the top because it stacked on top of
-        # the dock's own title bar, which the other three sides have
-        # nothing equivalent to. (A 10px left/right margin was briefly
-        # added here too, then moved to just the nav bar's own `controls`
-        # layout above - the canvas/toolbar were meant to stay flush.)
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(0)
-        layout.addLayout(canvas_column, 1)
-        layout.addWidget(self._controls_bar)
-
-        scene = self._image_item.scene()
-        scene.sigMouseClicked.connect(self._on_scene_clicked)
-        scene.sigMouseMoved.connect(self._on_scene_moved)
-        # Arrow keys/Esc for the active tool. An event filter on the view
-        # (not `keyPressEvent` here) because the graphics view would
-        # otherwise consume arrow keys itself to scroll.
-        self._view.installEventFilter(self)
 
     def _add_curve(self, color_hex: str, *, width: float, dashed: bool = False) -> pg.PlotDataItem:
         pen = pg.mkPen(QColor(color_hex), width=width)
