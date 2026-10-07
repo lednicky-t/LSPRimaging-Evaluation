@@ -77,6 +77,7 @@ from ..image_tools.chromatic.affine import apply_affine_to_points, invert_affine
 from ..image_tools.chromatic.warp import warp_boolean_mask_affine
 from ..image_tools.geometry.model import GeometrySettings
 from ..image_tools.geometry.transform import combined_geometry_affine_xy
+from ..progress import Cancelled
 from .model import AreaRoi, RoiMask
 
 # -- arbitrary-mask geometry: crop/expand between stored and working form ---
@@ -651,6 +652,7 @@ def union_roi_masks(
     *,
     default_inner_diameter_px: float = 0.0,
     default_outer_diameter_px: float = 0.0,
+    cancelled: Callable[[], bool] | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
     """``(sample, reference)``: the union of every ROI's sample region and of
     every ROI's reference region, each a full-image bool plane.
@@ -661,11 +663,16 @@ def union_roi_masks(
     ORs two full planes per ROI (4 MB each at 2048 x 2048), which measured
     4.2 s for 1000 ROIs on the GUI thread (Histogram panel, 2026-10-07).
     Mask-geometry ROIs keep the full-plane path: they are rare and their
-    reach box is the stored mask's, not a circle's."""
+    reach box is the stored mask's, not a circle's.
+
+    `cancelled` is checked once per ROI; when it returns true this raises
+    `progress.Cancelled` (CLAUDE.md: heavy work can be cancelled)."""
     image_height, image_width = image_shape[:2]
     sample = np.zeros((image_height, image_width), dtype=bool)
     reference = np.zeros((image_height, image_width), dtype=bool)
     for roi in rois:
+        if cancelled is not None and cancelled():
+            raise Cancelled()
         if roi.sample_geometry_type == "mask" and roi.sample_mask is not None:
             sample |= rasterize_sample(roi, image_shape, affine_matrix)
         else:

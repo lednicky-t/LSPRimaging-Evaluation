@@ -43,24 +43,37 @@ here.
 from __future__ import annotations
 
 from collections.abc import Callable
+from dataclasses import dataclass
 
 import numpy as np
 from PyQt6.QtCore import QTimer, pyqtSignal
-from PyQt6.QtWidgets import QVBoxLayout, QWidget
+from PyQt6.QtWidgets import QApplication, QVBoxLayout, QWidget
 
 from ...image_tools import ChromaticModule, GeometryModule, MaskModule
 from ...image_tools.preprocess import resolve_external_mask
 from ...roi import RoiToolbox
-from ...roi.rasterize import union_roi_masks
 from ...selection import HighlightRangeModule
 from ..image.panel import ImagePanel
 from ..image.tool_ribbon import VIEW_TAB
 from ..ui_state import UiStateStore
 from . import compute
 from .plot import DEFAULT_LINE_WIDTH, HistogramPlot
+from .roi_masks import RoiMaskProvider
 from .settings_dialog import Y_MODES, HistogramPlotSettingsDialog
 
 _REDRAW_COALESCE_MS = 100  # sketch §8 - matches every other display panel
+
+
+@dataclass(frozen=True)
+class _CurveContext:
+    """What one redraw computed for the curves, so the ROI curves can be drawn
+    later when their masks arrive from the background."""
+
+    key: object
+    edges: np.ndarray
+    image: np.ndarray
+    total_pixels: int
+    reference_peak: float
 
 
 class HistogramPanel(QWidget):
@@ -106,6 +119,11 @@ class HistogramPanel(QWidget):
 
         self._image: np.ndarray | None = None
         self._frame: tuple[int, float] | None = None
+        # The ROI curves need the union of every ROI's masks: cached, and built in the
+        # background for many ROIs (roi_masks.py). `_curve_context` is what the redraw
+        # computed for the curves, kept so the ROI curves can be drawn later, when the masks arrive.
+        self._roi_masks = RoiMaskProvider(self)
+        self._curve_context: _CurveContext | None = None
         self._bin_width = float(initial_bin_width)
         self._y_mode = initial_y_mode if initial_y_mode in Y_MODES else "percent"
         self._log_y = bool(initial_log_y)
@@ -132,6 +150,9 @@ class HistogramPanel(QWidget):
 
         self._connect_modules()
         self._update_y_label()
+        app = QApplication.instance()
+        if app is not None:
+            app.aboutToQuit.connect(self._roi_masks.stop)  # a worker must not outlive the Qt objects it emits into
 
     def restore_ui_state(self, store: UiStateStore) -> None:
         """Put the plot's cursor readout toggle back as last left and keep
@@ -163,6 +184,8 @@ class HistogramPanel(QWidget):
         self._image_panel.area_selection().selection_changed.connect(self._schedule_redraw)
         self._image_panel.ribbon_category_changed.connect(self._schedule_redraw)
         self._image_panel.cursor_value_changed.connect(self._plot.set_value_tick)
+        self._roi_toolbox.geometry_changed.connect(lambda _change: self._roi_masks.invalidate())
+        self._roi_masks.ready.connect(self._on_roi_masks_ready)
 
     # -- image lifecycle --------------------------------------------------------
 
@@ -174,6 +197,7 @@ class HistogramPanel(QWidget):
     def _on_image_cleared(self) -> None:
         self._image = None
         self._frame = None
+        self._curve_context = None
         self._plot.clear()
 
     # -- redraw -----------------------------------------------------------------
@@ -231,11 +255,10 @@ class HistogramPanel(QWidget):
         # transient cosmetic gap for now rather than adding an
         # `ActiveToolModule` dependency to suppress it exactly - revisit if
         # it turns out to matter in practice.
-        sample_mask, reference_mask = self._resolve_roi_masks(image.shape)
-        self._set_curve_from_mask(self._plot.set_sample, sample_mask, edges, image, total_pixels, reference_peak)
-        self._set_curve_from_mask(
-            self._plot.set_reference, reference_mask, edges, image, total_pixels, reference_peak
-        )
+        key, roi_masks = self._request_roi_masks(image.shape)
+        self._curve_context = _CurveContext(key, edges, image, total_pixels, reference_peak)
+        if roi_masks is not None:  # `None`: still being built in the background; `_on_roi_masks_ready` draws them
+            self._apply_roi_curves(self._curve_context, roi_masks)
 
         if self._pending_y_refit:
             # A bin-size change just redrew the curves with a different
@@ -300,23 +323,45 @@ class HistogramPanel(QWidget):
             warp_affine = self._chromatic.affine_between(authored_frame, self._frame)
         return resolve_external_mask(authored_mask, self._geometry.settings(), warp_affine)
 
-    def _resolve_roi_masks(self, image_shape: tuple[int, ...]) -> tuple[np.ndarray | None, np.ndarray | None]:
+    def _request_roi_masks(
+        self, image_shape: tuple[int, ...]
+    ) -> tuple[object, tuple[np.ndarray | None, np.ndarray | None] | None]:
+        """``(key, masks)``: `masks` is the (sample, reference) pair, ``(None, None)``
+        when there are no ROIs, or `None` while a large union is still being built."""
         assert self._frame is not None
         rois = self._roi_toolbox.rois()
         if not rois:
-            return None, None
-        shape_2d = image_shape[:2]
+            return None, (None, None)
         affine = self._chromatic.affine_for(self._frame)
         detection = self._roi_toolbox.detection_settings()
-        # One call, each ROI rasterized inside its own reach box only: the
-        # per-ROI full-plane form cost 4.2 s for 1000 ROIs on this thread.
-        return union_roi_masks(
+        return self._roi_masks.request(
             rois,
-            shape_2d,
+            image_shape[:2],
             affine,
-            default_inner_diameter_px=detection.reference_inner_diameter_px,
-            default_outer_diameter_px=detection.reference_outer_diameter_px,
+            detection.reference_inner_diameter_px,
+            detection.reference_outer_diameter_px,
         )
+
+    def _apply_roi_curves(
+        self, context: "_CurveContext", masks: tuple[np.ndarray | None, np.ndarray | None]
+    ) -> None:
+        sample_mask, reference_mask = masks
+        args = (context.edges, context.image, context.total_pixels, context.reference_peak)
+        self._set_curve_from_mask(self._plot.set_sample, sample_mask, *args)
+        self._set_curve_from_mask(self._plot.set_reference, reference_mask, *args)
+
+    def _on_roi_masks_ready(self, key: object) -> None:
+        """The background union for `key` finished: draw the two ROI curves
+        against what the last redraw computed, if that redraw is still current."""
+        context = self._curve_context
+        masks = self._roi_masks.cached(key)
+        if context is None or context.key != key or masks is None:
+            return
+        self._apply_roi_curves(context, masks)
+
+    def closeEvent(self, event) -> None:  # noqa: N802 - Qt naming
+        self._roi_masks.stop()
+        super().closeEvent(event)
 
     # -- axis controls ------------------------------------------------------
 
