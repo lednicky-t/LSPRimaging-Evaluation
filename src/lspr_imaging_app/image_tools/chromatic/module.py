@@ -238,6 +238,7 @@ class ChromaticModule(QObject):
 
     # -- session restore ------------------------------------------------
 
+    @instrumented("ChromaticModule.restore_state")
     def restore_state(
         self,
         settings: ChromaticSettings,

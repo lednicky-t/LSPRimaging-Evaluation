@@ -73,6 +73,7 @@ class BackgroundModule(QObject):
 
     # -- session restore ------------------------------------------------
 
+    @instrumented("BackgroundModule.restore_settings")
     def restore_settings(self, settings: BackgroundSettings) -> None:
         """Replace this module's whole state as a session load, not a user
         edit - not undo-tracked, but does emit, for the same reasons

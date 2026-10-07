@@ -33,14 +33,14 @@ from dataclasses import dataclass
 import numpy as np
 from PyQt6.QtCore import QObject, pyqtSignal
 
-from ...progress import Cancelled
-from ..background.model import BackgroundSettings
-from ..geometry.model import GeometrySettings
-from ..preprocess import apply_preprocessing
-from . import wavelength_interpolation
-from .auto_landmarks import AutoLandmarkError, AutoLandmarkParams, AutoLandmarkResult, detect_and_track
-from .model import ChromaticLandmarkObservation
-from .module import ChromaticModule
+from ..progress import Cancelled
+from .background.model import BackgroundSettings
+from .chromatic import wavelength_interpolation
+from .chromatic.auto_landmarks import AutoLandmarkError, AutoLandmarkParams, AutoLandmarkResult, detect_and_track
+from .chromatic.model import ChromaticLandmarkObservation
+from .chromatic.module import ChromaticModule
+from .geometry.model import GeometrySettings
+from .preprocess import apply_preprocessing
 
 logger = logging.getLogger(__name__)
 

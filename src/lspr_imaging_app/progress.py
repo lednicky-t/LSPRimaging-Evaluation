@@ -12,7 +12,7 @@ so a stage cannot forget to be cancellable: every report is a checkpoint.
 
 The Qt side (a module re-emitting this as a typed signal, a panel showing it)
 lives with the feature that owns the task - see
-`image_tools/chromatic/auto_task.py` for the first one.
+`image_tools/chromatic_auto_task.py` for the first one.
 """
 
 from __future__ import annotations

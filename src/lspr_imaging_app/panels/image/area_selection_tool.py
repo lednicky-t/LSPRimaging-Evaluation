@@ -159,12 +159,6 @@ class AreaSelectionTool(QObject):
 
     # -- gesture --------------------------------------------------------------
 
-    def _clamped(self, x: float, y: float) -> tuple[float, float]:
-        if self._image_shape is None:
-            return x, y
-        height, width = self._image_shape
-        return min(max(x, 0.0), float(width)), min(max(y, 0.0), float(height))
-
     def begin_gesture(self, x: float, y: float) -> bool:
         """Starts a drag at view point ``(x, y)``, which may be outside the
         image. Declines (``False``) only when there is no image at all."""

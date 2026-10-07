@@ -344,6 +344,7 @@ class RoiToolbox(QObject):
 
     # -- session restore ------------------------------------------------
 
+    @instrumented("RoiToolbox.restore_state")
     def restore_state(
         self,
         detection_settings: AreaRoiDetectionSettings,

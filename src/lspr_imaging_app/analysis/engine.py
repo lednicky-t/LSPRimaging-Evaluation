@@ -54,6 +54,7 @@ import threading
 from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 from PyQt6.QtCore import QObject, pyqtSignal
@@ -97,13 +98,13 @@ _RENUMBER_JOIN_TIMEOUT_SECONDS = 60.0
 """How long `remap_roi_ids` waits for a cancelled run to stop; see there."""
 
 
-def _unwired(name: str) -> Callable[..., object]:
+def _unwired(name: str) -> Callable[..., Any]:
     """A placeholder for a constructor callable that wasn't supplied -
     raises only if actually *called*, matching every other module's
     "constructs fine, action methods raise" scaffold contract (see
     `__init__`'s own docstring)."""
 
-    def _raise(*_args: object, **_kwargs: object) -> object:
+    def _raise(*_args: object, **_kwargs: object) -> Any:
         raise NotImplementedError(f"AnalysisEngine.{name} was not supplied at construction")
 
     return _raise

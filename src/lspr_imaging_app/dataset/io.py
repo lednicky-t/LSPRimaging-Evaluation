@@ -611,6 +611,9 @@ def _ome_zarr_fast_read_metadata(root_str: str) -> dict | None:
             "image_width": int(width),
         }
     except Exception:
+        # Falls back to the standard reader, but not invisibly: a recurring
+        # failure here is a silent loss of the fast path.
+        _LOGGER.debug("OME-Zarr fast-read metadata unavailable; using the standard reader.", exc_info=True)
         return None
 
 
@@ -709,6 +712,7 @@ def _fast_read_zarr_plane(meta: dict, spectral_cube_pos: int, wavelength_pos: in
                         tile = np.frombuffer(raw, dtype=dtype).reshape(ich, icw)
                         plane[cy * ich:(cy + 1) * ich, cx * icw:(cx + 1) * icw] = tile
     except Exception:
+        _LOGGER.debug("OME-Zarr fast plane read failed; using the standard reader.", exc_info=True)
         return None
 
     return np.array(plane[:image_height, :image_width], dtype=dtype, copy=True)

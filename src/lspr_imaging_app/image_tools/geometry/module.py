@@ -92,6 +92,7 @@ class GeometryModule(QObject):
 
     # -- session restore ------------------------------------------------
 
+    @instrumented("GeometryModule.restore_settings")
     def restore_settings(self, settings: GeometrySettings) -> None:
         """Replace this module's whole state, as a *session load* rather
         than a user edit (added 2026-09-23 for `storage/session.py`).

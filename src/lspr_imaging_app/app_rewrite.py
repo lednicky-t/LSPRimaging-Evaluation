@@ -42,7 +42,7 @@ from .dataset import DatasetModule
 from .gui.app_theme import LSPRI_BRIGHT_THEME, LSPRI_DARK_THEME, apply_app_theme
 from .gui.windows_titlebar import apply_windows_titlebar_color
 from .image_tools.mask_scope import MaskScope
-from .image_tools.chromatic.auto_task import TASK_ID as CHROMATIC_TASK_ID, ChromaticAutoDetect
+from .image_tools.chromatic_auto_task import TASK_ID as CHROMATIC_TASK_ID, ChromaticAutoDetect
 from .panels.image.chromatic_tab import ChromaticUiValues
 from .image_tools import (
     ActiveToolModule,

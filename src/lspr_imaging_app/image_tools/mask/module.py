@@ -188,6 +188,7 @@ class MaskModule(QObject):
 
     # -- session restore ------------------------------------------------
 
+    @instrumented("MaskModule.restore_state")
     def restore_state(self, settings: MaskSettings, changes: tuple[MaskChange, ...]) -> None:
         """Replace the settings *and* the whole change timeline as a
         session load - not undo-tracked, but emits, for the reasons

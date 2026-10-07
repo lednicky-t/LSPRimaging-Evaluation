@@ -123,7 +123,7 @@ from ..ribbon_group import group_label_style, labeled_icon_group, vertical_separ
 from .landmark_overlay import draw_landmarks
 from .slider_ticks import cube_slider_major_ticks, wavelength_slider_major_ticks
 from .transforms_settings import TransformsSection
-from ...image_tools.chromatic.auto_task import ChromaticAutoDetect
+from ...image_tools.chromatic_auto_task import ChromaticAutoDetect
 from .area_selection_tool import AreaSelectionTool
 from .background_tab import BACKGROUND_INFO_HTML, BackgroundTab
 from .chromatic_tab import ChromaticCorrectionTab, ChromaticUiValues

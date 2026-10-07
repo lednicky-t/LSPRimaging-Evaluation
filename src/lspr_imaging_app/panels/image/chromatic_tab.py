@@ -71,7 +71,7 @@ from ...dataset import DatasetModule
 from ...dataset.model import is_dark_frame_wavelength
 from ...image_tools import ChromaticModule
 from ...image_tools.chromatic.auto_landmarks import grid_for_count, sample_count_for_stride, snap_landmark_count
-from ...image_tools.chromatic.auto_task import TASK_ID, AutoDetectSummary, ChromaticAutoDetect
+from ...image_tools.chromatic_auto_task import TASK_ID, AutoDetectSummary, ChromaticAutoDetect
 from ...image_tools.geometry import GeometryModule
 from ..ribbon_group import group_label_style, labeled_icon_group, vertical_separator
 from .general_group import ICON_SIZE, style_general_icon_button
