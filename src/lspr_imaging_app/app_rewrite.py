@@ -28,6 +28,7 @@ import logging
 import sys
 
 from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 
 from PyQt6.QtCore import QTimer, Qt, QByteArray
@@ -504,45 +505,67 @@ def _wire_session_coordinator(
     coordinator.active_session_changed.connect(restore)
 
 
-def build_main_window(
-    initial_settings: AppSettings | None = None,
-    on_settings_changed: Callable[[AppSettings], None] | None = None,
-) -> QMainWindow:
-    """Construct every rewrite module and wire the panels to them, per the
-    module boundaries in AGENTS.md / sketch §7. No module reaches into
-    another's internals here - this function only connects the public,
-    already-defined constructor seams.
+@dataclass(frozen=True)
+class _Modules:
+    """Every rewrite module `build_main_window` constructs, in one place, so the
+    functions below take one argument instead of a dozen (2026-10-07: the
+    single 630-line function was split by what it wires)."""
 
-    **`initial_settings`/`on_settings_changed` (2026-09-26)** - the app-level
-    settings layer (`storage/app_settings.py`): last dataset, theme, window
-    geometry, layout presets. Injected the same way `AnalysisEngine`/
-    `SessionAutosave` take callables instead of reading global state
-    directly - `main()` is the only real caller that passes a loaded
-    `AppSettings` and a callback that actually writes to disk; every
-    existing test that calls `build_main_window()` with no arguments keeps
-    doing zero settings-file I/O and no auto-reopen (`AppSettings()`'s
-    defaults have `last_dataset_folder=None`, so the auto-reopen guard
-    below is always a no-op without a real settings file behind it)."""
-    settings = initial_settings if initial_settings is not None else AppSettings()
+    dataset: DatasetModule
+    geometry: GeometryModule
+    active_tool: ActiveToolModule
+    mask: MaskModule
+    mask_scope: MaskScopeModule
+    chromatic: ChromaticModule
+    background: BackgroundModule
+    roi_toolbox: RoiToolbox
+    roi_geometry_sync: RoiGeometrySync
+    selection: SelectionModule
+    reference_frame: ReferenceFrameModule
+    highlight_range: HighlightRangeModule
+    area_selection: AreaSelectionModule
+    analysis_settings: AnalysisSettingsModule
+    session_coordinator: SessionCoordinator
+    analysis_engine: AnalysisEngine
+    session_autosave: SessionAutosave
+    chromatic_auto: ChromaticAutoDetect
 
-    def _persist(**changes: object) -> None:
+
+class _SettingsWriter:
+    """The one write path into `AppSettings`: `persist` writes now, `persist_soon`
+    batches. Sliders (overlay opacity) and drags (highlight range) fire many
+    times a second; the settings file is written at most once per pause."""
+
+    _PAUSE_MS = 400
+
+    def __init__(self, settings: AppSettings, on_settings_changed: Callable[[AppSettings], None] | None) -> None:
+        self.settings = settings
+        self._on_settings_changed = on_settings_changed
+        self._pending: dict[str, object] = {}
+        self._timer = QTimer()
+        self._timer.setSingleShot(True)
+        self._timer.setInterval(self._PAUSE_MS)
+        self._timer.timeout.connect(lambda: self.flush_pending())
+
+    def persist(self, **changes: object) -> None:
         for key, value in changes.items():
-            setattr(settings, key, value)
-        if on_settings_changed is not None:
-            on_settings_changed(settings)
+            setattr(self.settings, key, value)
+        if self._on_settings_changed is not None:
+            self._on_settings_changed(self.settings)
 
-    # Applied before any panel is constructed - several read `get_active_
-    # theme()` at construction time (e.g. `DatasetFolderRow`), so the right
-    # theme has to already be active, not just switched on afterward.
-    theme_obj = LSPRI_BRIGHT_THEME if settings.theme == "bright" else LSPRI_DARK_THEME
-    set_active_theme(theme_obj)
-    _app_for_theme = QApplication.instance()
-    if _app_for_theme is not None:
-        apply_app_theme(_app_for_theme, theme_obj)
+    def persist_soon(self, **changes: object) -> None:
+        self._pending.update(changes)
+        self._timer.start()
 
-    # Small UI choices (toggles, picks, Export options...) - panels/ui_state.py.
-    ui_state = UiStateStore(settings.ui_state, on_changed=lambda values: _persist(ui_state=values))
+    def flush_pending(self) -> None:
+        if self._pending:
+            changes = dict(self._pending)
+            self._pending.clear()
+            self.persist(**changes)
 
+
+def _build_modules() -> _Modules:
+    """Construct every module and connect them to each other (no panels yet)."""
     dataset = DatasetModule()
     geometry = GeometryModule()
     # Transient UI mode (which canvas tool is on) - not undoable/persisted; see its docstring.
@@ -573,7 +596,7 @@ def build_main_window(
         dataset, geometry, mask, chromatic, background, roi_toolbox, analysis_settings
     )
 
-    # SelectionModule holds no RoiToolbox reference of its own (AGENTS.md,
+    # SelectionModule holds no RoiToolbox reference of its own (CLAUDE.md,
     # "no module reaches into another's internals") - this is the one place
     # that connects RoiToolbox's roi_ids_renumbered signal to Selection's
     # remap_roi_ids(), so a delete-driven ROI renumber never leaves a stale
@@ -582,8 +605,8 @@ def build_main_window(
     _connect_roi_renumbering(roi_toolbox, selection, analysis_engine)
 
     # Which session-scoped folder the analysis store and the session
-    # autosave both point at is now `SessionCoordinator`'s job, not a plain
-    # `ds.home` read here (2026-09-26 - see AGENTS.md's "Sessions" section
+    # autosave both point at is `SessionCoordinator`'s job, not a plain
+    # `ds.home` read here (2026-09-26 - see CLAUDE.md's "Sessions" section
     # and `storage/session_index.py`). `home`, not `folder`: it is the
     # folder derived data is allowed to be written into, so a session never
     # lands inside a raw TIFF/OME-Zarr folder it doesn't own (see
@@ -598,62 +621,6 @@ def build_main_window(
     dataset.dataset_loaded.connect(lambda ds: session_coordinator.bind_dataset(ds.home))
     dataset.dataset_cleared.connect(session_coordinator.unbind)
 
-    # A manual reference frame must never silently outlive the dataset it
-    # was captured against - see ReferenceFrameModule.reset's docstring.
-    # The user's own choice is remembered per dataset (`ui_state`): put back
-    # when the *same* dataset is opened again. `_reference_guard` keeps the
-    # reset below from being saved as if the user had chosen "Auto".
-    _reference_guard = [False]
-
-    def _reset_reference_frame() -> None:
-        _reference_guard[0] = True
-        try:
-            reference_frame.reset()
-        finally:
-            _reference_guard[0] = False
-
-    def _on_dataset_loaded_reference(ds) -> None:
-        _reset_reference_frame()
-        saved = ui_state.get("reference_frame")
-        if (
-            isinstance(saved, dict)
-            and saved.get("dataset") == str(ds.home)
-            and saved.get("mode") == "manual"
-            and saved.get("cube") is not None
-            and saved.get("wavelength") is not None
-        ):
-            _reference_guard[0] = True
-            try:
-                reference_frame.set_manual_frame(int(saved["cube"]), float(saved["wavelength"]))
-            finally:
-                _reference_guard[0] = False
-
-    def _on_reference_frame_changed() -> None:
-        if _reference_guard[0] or not settings.last_dataset_folder:
-            return
-        frame = reference_frame.manual_frame()
-        ui_state.set("reference_frame", {
-            "dataset": settings.last_dataset_folder,
-            "mode": reference_frame.mode(),
-            "cube": frame[0] if frame else None,
-            "wavelength": frame[1] if frame else None,
-        })
-
-    dataset.dataset_loaded.connect(_on_dataset_loaded_reference)
-    dataset.dataset_cleared.connect(_reset_reference_frame)
-    reference_frame.reference_frame_changed.connect(_on_reference_frame_changed)
-
-    # A Highlight range selected against one dataset's intensity scale is
-    # meaningless for whatever gets opened next - same reasoning as the
-    # reference-frame reset just above.
-    dataset.dataset_cleared.connect(highlight_range.clear_range)
-
-    # Remembers the last-opened dataset for the next launch's auto-reopen
-    # (see the end of this function) - a dataset open is already a
-    # deliberate, infrequent action, so this writes immediately rather than
-    # going through the session autosave's debounce.
-    dataset.dataset_loaded.connect(lambda ds: _persist(last_dataset_folder=str(ds.home)))
-
     # AnalysisScope.SELECTED_ROIS means "whatever is selected right now".
     # Setting it never triggers computation (sketch §7) - it only decides
     # what the *next* explicitly-requested run covers.
@@ -662,50 +629,129 @@ def build_main_window(
     selection.roi_selection_changed.connect(
         lambda roi_ids: analysis_engine.set_selected_rois(tuple(sorted(roi_ids)))
     )
+    return _Modules(
+        dataset=dataset, geometry=geometry, active_tool=active_tool, mask=mask, mask_scope=mask_scope,
+        chromatic=chromatic, background=background, roi_toolbox=roi_toolbox,
+        roi_geometry_sync=roi_geometry_sync, selection=selection, reference_frame=reference_frame,
+        highlight_range=highlight_range, area_selection=area_selection, analysis_settings=analysis_settings,
+        session_coordinator=session_coordinator, analysis_engine=analysis_engine,
+        session_autosave=session_autosave, chromatic_auto=ChromaticAutoDetect(chromatic),
+    )
 
+
+class _ReferenceFramePersistence:
+    """A manual reference frame must never silently outlive the dataset it was
+    captured against - see `ReferenceFrameModule.reset`'s docstring. The user's
+    own choice is remembered per dataset (`ui_state`): put back when the *same*
+    dataset is opened again. While this class resets or restores the module it
+    ignores the module's own change signal, so a reset is never saved as if the
+    user had chosen "Auto"."""
+
+    def __init__(self, dataset: DatasetModule, reference_frame: ReferenceFrameModule, ui_state: UiStateStore,
+                 settings: AppSettings) -> None:
+        self._reference_frame = reference_frame
+        self._ui_state = ui_state
+        self._settings = settings
+        self._internal_change = False
+        # Closures, not bound methods: PyQt holds a bound method of a plain
+        # (non-QObject) instance only weakly, and nothing else keeps this
+        # object alive - the connections would silently vanish.
+        dataset.dataset_loaded.connect(lambda ds: self._on_dataset_loaded(ds))
+        dataset.dataset_cleared.connect(lambda: self._reset())
+        reference_frame.reference_frame_changed.connect(lambda: self._on_changed())
+
+    def _reset(self) -> None:
+        self._internal_change = True
+        try:
+            self._reference_frame.reset()
+        finally:
+            self._internal_change = False
+
+    def _on_dataset_loaded(self, ds) -> None:
+        self._reset()
+        saved = self._ui_state.get("reference_frame")
+        if (
+            isinstance(saved, dict)
+            and saved.get("dataset") == str(ds.home)
+            and saved.get("mode") == "manual"
+            and saved.get("cube") is not None
+            and saved.get("wavelength") is not None
+        ):
+            self._internal_change = True
+            try:
+                self._reference_frame.set_manual_frame(int(saved["cube"]), float(saved["wavelength"]))
+            finally:
+                self._internal_change = False
+
+    def _on_changed(self) -> None:
+        if self._internal_change or not self._settings.last_dataset_folder:
+            return
+        frame = self._reference_frame.manual_frame()
+        self._ui_state.set("reference_frame", {
+            "dataset": self._settings.last_dataset_folder,
+            "mode": self._reference_frame.mode(),
+            "cube": frame[0] if frame else None,
+            "wavelength": frame[1] if frame else None,
+        })
+
+
+def _wire_highlight_range_persistence(m: _Modules, writer: _SettingsWriter) -> None:
+    """Highlight range: remembered per dataset (an intensity range from one
+    dataset means nothing on another). `dataset_cleared` wipes the module's
+    range on every load, so the saved one is put back when the same dataset
+    finishes loading - before the Histogram would seed the full frame range."""
+    settings = writer.settings
+    highlight_range = m.highlight_range
+
+    def _restore_highlight_range(ds) -> None:
+        if (
+            settings.highlight_range_dataset == str(ds.home)
+            and settings.highlight_range_min is not None
+            and settings.highlight_range_max is not None
+            and highlight_range.current_range() is None
+        ):
+            highlight_range.set_range(settings.highlight_range_min, settings.highlight_range_max)
+
+    def _on_highlight_range_changed(range_: object) -> None:
+        if range_ is None:  # cleared by a dataset load, not a user choice: keep what was saved
+            return
+        lo, hi = range_  # type: ignore[misc]
+        writer.persist_soon(
+            highlight_range_min=float(lo), highlight_range_max=float(hi),
+            highlight_range_dataset=settings.last_dataset_folder,
+        )
+
+    m.dataset.dataset_loaded.connect(_restore_highlight_range)
+    highlight_range.range_changed.connect(_on_highlight_range_changed)
+
+
+def _overlay_style(visible: bool, color: str | None, alpha: float, default_color: str) -> OverlayStyle:
+    return OverlayStyle(visible, color or default_color, alpha)
+
+
+def _build_image_panel(m: _Modules, writer: _SettingsWriter, theme_obj) -> ImagePanel:
+    """The Image panel, seeded from `AppSettings` and reporting every
+    user-changeable display option back through `writer`."""
+    settings = writer.settings
     # `None` unless all four were actually saved together (first-ever launch,
     # or an older settings file from before this field existed, both leave
     # them at the dataclass default of `None`) - see `ImagePanel.__init__`'s
     # own docstring for why a missing saved range just means "let pyqtgraph's
     # default auto-range fit the first image", not an error.
-    _saved_view_range = (
+    saved_view_range = (
         settings.image_view_x_min, settings.image_view_x_max,
         settings.image_view_y_min, settings.image_view_y_max,
     )
     initial_view_range = (
-        ((_saved_view_range[0], _saved_view_range[1]), (_saved_view_range[2], _saved_view_range[3]))
-        if None not in _saved_view_range else None
+        ((saved_view_range[0], saved_view_range[1]), (saved_view_range[2], saved_view_range[3]))
+        if None not in saved_view_range else None
     )
-    chromatic_auto = ChromaticAutoDetect(chromatic)
-
-    # Sliders (overlay opacity) and drags (highlight range) fire many times a
-    # second; the settings file is written at most once per pause instead.
-    _pending_changes: dict[str, object] = {}
-    _persist_timer = QTimer()
-    _persist_timer.setSingleShot(True)
-    _persist_timer.setInterval(400)
-
-    def _flush_pending() -> None:
-        if _pending_changes:
-            changes = dict(_pending_changes)
-            _pending_changes.clear()
-            _persist(**changes)
-
-    _persist_timer.timeout.connect(_flush_pending)
-
-    def _persist_soon(**changes: object) -> None:
-        _pending_changes.update(changes)
-        _persist_timer.start()
-
-    def _overlay_style(visible: bool, color: str | None, alpha: float, default_color: str) -> OverlayStyle:
-        return OverlayStyle(visible, color or default_color, alpha)
-
     image_panel = ImagePanel(
-        dataset, geometry, mask, chromatic, background, roi_toolbox, selection, active_tool, reference_frame,
-        highlight_range,
-        mask_scope=mask_scope,
-        area_selection=area_selection,
-        chromatic_auto=chromatic_auto,
+        m.dataset, m.geometry, m.mask, m.chromatic, m.background, m.roi_toolbox, m.selection, m.active_tool,
+        m.reference_frame, m.highlight_range,
+        mask_scope=m.mask_scope,
+        area_selection=m.area_selection,
+        chromatic_auto=m.chromatic_auto,
         initial_chromatic_view=(settings.chromatic_show_landmarks, settings.chromatic_landmarks_all_wavelengths),
         initial_chromatic_values=ChromaticUiValues(
             landmark_count=settings.chromatic_landmark_count,
@@ -725,44 +771,19 @@ def build_main_window(
         initial_ribbon_category=settings.image_ribbon_category,
         initial_show_background=settings.show_background,
     )
-    image_panel.background_view_changed.connect(lambda shown: _persist(show_background=bool(shown)))
-    image_panel.ribbon_category_changed.connect(lambda label: _persist(image_ribbon_category=label))
+    image_panel.background_view_changed.connect(lambda shown: writer.persist(show_background=bool(shown)))
+    image_panel.ribbon_category_changed.connect(lambda label: writer.persist(image_ribbon_category=label))
 
     def _on_overlay_style_changed(kind: str, style: OverlayStyle) -> None:
-        _persist_soon(**{
+        writer.persist_soon(**{
             f"{kind}_overlay_visible": style.visible,
             f"{kind}_overlay_color": style.color,
             f"{kind}_overlay_alpha": style.alpha,
         })
 
     image_panel.overlay_style_changed.connect(_on_overlay_style_changed)
-
-    # Highlight range: remembered per dataset (an intensity range from one
-    # dataset means nothing on another). `dataset_cleared` wipes the module's
-    # range on every load, so the saved one is put back when the same dataset
-    # finishes loading - before the Histogram would seed the full frame range.
-    def _restore_highlight_range(ds) -> None:
-        if (
-            settings.highlight_range_dataset == str(ds.home)
-            and settings.highlight_range_min is not None
-            and settings.highlight_range_max is not None
-            and highlight_range.current_range() is None
-        ):
-            highlight_range.set_range(settings.highlight_range_min, settings.highlight_range_max)
-
-    def _on_highlight_range_changed(range_: object) -> None:
-        if range_ is None:  # cleared by a dataset load, not a user choice: keep what was saved
-            return
-        lo, hi = range_  # type: ignore[misc]
-        _persist_soon(
-            highlight_range_min=float(lo), highlight_range_max=float(hi),
-            highlight_range_dataset=settings.last_dataset_folder,
-        )
-
-    dataset.dataset_loaded.connect(_restore_highlight_range)
-    highlight_range.range_changed.connect(_on_highlight_range_changed)
     image_panel.chromatic_settings_applied.connect(
-        lambda values: _persist(
+        lambda values: writer.persist(
             chromatic_landmark_count=values.landmark_count,
             chromatic_stride=values.stride,
             chromatic_border_percent=values.border_percent,
@@ -771,39 +792,40 @@ def build_main_window(
         )
     )
     image_panel.chromatic_view_changed.connect(
-        lambda show, every: _persist(chromatic_show_landmarks=bool(show), chromatic_landmarks_all_wavelengths=bool(every))
+        lambda show, every: writer.persist(
+            chromatic_show_landmarks=bool(show), chromatic_landmarks_all_wavelengths=bool(every)
+        )
     )
     image_panel.view_range_changed.connect(
-        lambda x_min, x_max, y_min, y_max: _persist(
+        lambda x_min, x_max, y_min, y_max: writer.persist(
             image_view_x_min=x_min, image_view_x_max=x_max, image_view_y_min=y_min, image_view_y_max=y_max,
         )
     )
+    return image_panel
+
+
+def _build_histogram_panel(m: _Modules, image_panel: ImagePanel, writer: _SettingsWriter) -> HistogramPanel:
+    settings = writer.settings
     histogram_panel = HistogramPanel(
-        image_panel, geometry, mask, chromatic, roi_toolbox, highlight_range,
+        image_panel, m.geometry, m.mask, m.chromatic, m.roi_toolbox, m.highlight_range,
         initial_y_mode=settings.histogram_y_mode,
         initial_log_y=settings.histogram_log_y,
         initial_bin_width=settings.histogram_bin_width_px,
         initial_line_width=settings.histogram_line_width_px,
     )
     histogram_panel.display_settings_changed.connect(
-        lambda y_mode, log_y, bin_width_px, line_width_px: _persist(
+        lambda y_mode, log_y, bin_width_px, line_width_px: writer.persist(
             histogram_y_mode=y_mode,
             histogram_log_y=log_y,
             histogram_bin_width_px=float(bin_width_px),
             histogram_line_width_px=float(line_width_px),
         )
     )
-    image_panel.restore_ui_state(ui_state)
-    histogram_panel.restore_ui_state(ui_state)
-    try:
-        mask_scope.set_scope(MaskScope(ui_state.get("mask/scope")))
-    except ValueError:  # nothing saved yet
-        pass
-    mask_scope.scope_changed.connect(lambda scope: ui_state.set("mask/scope", scope.value))
-    roi_table_panel = RoiTablePanel(roi_toolbox, selection, geometry, analysis_engine)
-    roi_table_panel.restore_ui_state(ui_state)
-    spectra_panel = SpectraPanel(analysis_engine, roi_toolbox, selection)
-    sensorgram_panel = SensorgramPanel(analysis_engine, roi_toolbox, dataset, selection)
+    return histogram_panel
+
+
+def _build_workflow_panel(m: _Modules, writer: _SettingsWriter, ui_state: UiStateStore) -> WorkflowPanel:
+    settings = writer.settings
     # `WorkflowStage[...]` raises KeyError/TypeError for anything that isn't
     # a live member name - a settings file from a build with different stage
     # names, hand-edited JSON, or simply no saved value yet (`None`) all fall
@@ -816,58 +838,43 @@ def build_main_window(
         )
     except KeyError:
         initial_stage = None
-    # `geometry`/`active_tool`/`mask`/`chromatic`/`highlight_range`/
-    # `image_panel`/`mask_scope` are no longer passed here (2026-10-02) -
-    # the Workflow panel's "Transforms"/"Mask" subsections were removed
-    # (maintainer request: fully covered by the Image panel's own ribbon
-    # now), so `WorkflowPanel` no longer needs any of the modules that
-    # only backed those two - see `panels/workflow/panel.py`'s
-    # `_build_image_tools_section` docstring. All seven are still used
-    # elsewhere in this function (ImagePanel/HistogramPanel/WorkflowPanel's
-    # own remaining params, etc.), just not here.
+    # The Workflow panel's "Transforms"/"Mask" subsections were removed
+    # (2026-10-02, maintainer request: fully covered by the Image panel's own
+    # ribbon now), so `WorkflowPanel` no longer needs the modules that only
+    # backed those two - see `panels/workflow/panel.py`'s
+    # `_build_image_tools_section` docstring.
     workflow = WorkflowPanel(
-        dataset,
-        selection,
-        reference_frame,
-        session_coordinator,
+        m.dataset,
+        m.selection,
+        m.reference_frame,
+        m.session_coordinator,
         initial_stage=initial_stage,
         initial_subsections=settings.expanded_subsections,
-        geometry=geometry,
+        geometry=m.geometry,
         ui_state=ui_state,
     )
-    # Immediate persist-on-change, same pattern as theme/auto_apply above -
-    # switching the open stage is a deliberate, occasional click, not a
-    # continuous drag (unlike window geometry, which is batched to quit
-    # instead - see `_persist_on_quit` below).
-    workflow.stage_changed.connect(lambda stage: _persist(active_workflow_stage=stage.name))
+    # Immediate persist-on-change, same pattern as theme/auto_apply - switching
+    # the open stage is a deliberate, occasional click, not a continuous drag
+    # (unlike window geometry, which is batched to quit instead - see
+    # `_wire_quit_persistence`).
+    workflow.stage_changed.connect(lambda stage: writer.persist(active_workflow_stage=stage.name))
 
     def _persist_subsection(key: str, expanded: bool) -> None:
         updated = dict(settings.expanded_subsections)
         updated[key] = expanded
-        _persist(expanded_subsections=updated)
+        writer.persist(expanded_subsections=updated)
 
     workflow.subsection_expanded_changed.connect(_persist_subsection)
+    return workflow
 
-    window = QMainWindow()
-    window.setWindowTitle(rewrite_version_string())
-    window.resize(1400, 900)
-    # Qt's default dock options include AllowTabbedDocks, which is what let
-    # a plain drag of one panel's title bar onto another's create a tab
-    # group interactively - the exact behavior the maintainer asked to
-    # remove (2026-09-27), not just the one `tabifyDockWidget` call this
-    # function used to make in code. AnimatedDocks/AllowNestedDocks are
-    # Qt's other two defaults, kept so ordinary dragging and the nested
-    # Image/Histogram/ROI-table split tree built below still work; leaving
-    # AllowTabbedDocks out means dropping a panel onto another's center now
-    # simply isn't offered as a target - only the split zones are.
-    window.setDockOptions(QMainWindow.DockOption.AnimatedDocks | QMainWindow.DockOption.AllowNestedDocks)
-    view_menu, options_menu = _build_menu_bar(window)
-    _wire_theme_menu(
-        view_menu, window, image_panel,
-        initial_theme=settings.theme,
-        on_theme_changed=lambda name: _persist(theme=name),
-    )
 
+def _build_status_bar(
+    window: QMainWindow,
+    m: _Modules,
+    workflow: WorkflowPanel,
+    image_panel: ImagePanel,
+    roi_table_panel: RoiTablePanel,
+) -> None:
     status_bar = QStatusBar(window)
     window.setStatusBar(status_bar)
     # App-wide task indicator (spinner, progress, elapsed/ETA, Cancel). Every
@@ -876,20 +883,20 @@ def build_main_window(
     # indicator's `cancel_requested` -> that task's own cancel.
     task_indicator = TaskIndicator(status_bar)
     status_bar.addPermanentWidget(task_indicator, 1)  # stretch: takes the free width, text clips instead of overlapping
-    chromatic_auto.task_progress.connect(task_indicator.report)
-    chromatic_auto.task_finished.connect(task_indicator.finish)
-    _cancel_by_task = {CHROMATIC_TASK_ID: chromatic_auto.cancel}
-    task_indicator.cancel_requested.connect(lambda task_id: _cancel_by_task[task_id]())
+    m.chromatic_auto.task_progress.connect(task_indicator.report)
+    m.chromatic_auto.task_finished.connect(task_indicator.finish)
+    cancel_by_task = {CHROMATIC_TASK_ID: m.chromatic_auto.cancel}
+    task_indicator.cancel_requested.connect(lambda task_id: cancel_by_task[task_id]())
     # WorkflowPanel.set_status() (state/performance text, no hover-hints -
     # design doc §2) shows as a transient message on the bar's left side;
     # the reminder above is permanent, on the right, so neither covers the
     # other.
     workflow.status_requested.connect(status_bar.showMessage)
-    roi_geometry_sync.status_changed.connect(status_bar.showMessage)
+    m.roi_geometry_sync.status_changed.connect(status_bar.showMessage)
     roi_table_panel.status_message.connect(status_bar.showMessage)
     # A failed session write must reach the user, not only the log (30 s: long enough to be seen,
     # and it is shown again on every failed retry).
-    session_autosave.save_failed.connect(lambda message: status_bar.showMessage(message, 30000))
+    m.session_autosave.save_failed.connect(lambda message: status_bar.showMessage(message, 30000))
     # A canvas tool's live status (e.g. the rotate tool's angle readout
     # while placing point 2) - 2026-09-29, replacing an always-in-layout
     # text row under the Image panel with a permanent info icon there for
@@ -897,21 +904,30 @@ def build_main_window(
     # the same bar every other panel's transient status already uses.
     image_panel.tool_status_changed.connect(status_bar.showMessage)
 
-    # Each panel dock-wrapped via the shared PanelContainer (undock/float/
-    # maximize/close - see panels/dock_container.py), matching how the
-    # stable app already docks every panel. This default arrangement is
-    # just a starting point, not a preset: named, user-editable presets
-    # (design doc §5) replace it once built - for now the user can drag
-    # the *display* panels anywhere via PanelContainer's own controls.
-    # Closing a panel (its title bar's close button) currently has no way
-    # back short of restarting - a View-menu "show panel" toggle is design
-    # doc §5/§6 territory, not yet built.
-    # Workflow gets collapsible=True and a real fixed_width (design doc §4):
-    # unlike the five display panels, it's a tool panel (settings ordered by
-    # workflow stage), not a data view - not draggable down to a width that
-    # clips its own controls. 340px matches the stable app's own
-    # workflow_panel minimum width (layout_builder.py:1744), reused here
-    # rather than inventing a new number.
+
+def _build_dock_layout(
+    window: QMainWindow,
+    workflow: WorkflowPanel,
+    image_panel: ImagePanel,
+    histogram_panel: HistogramPanel,
+    roi_table_panel: RoiTablePanel,
+    spectra_panel: SpectraPanel,
+    sensorgram_panel: SensorgramPanel,
+) -> dict[str, PanelContainer]:
+    """Dock-wrap every panel and build the default arrangement. Returns the
+    docks by their panel name (the order is the View menu's Ctrl+1..6 order).
+
+    Each panel is dock-wrapped via the shared PanelContainer (undock/float/
+    maximize/close - see panels/dock_container.py), matching how the stable
+    app already docks every panel. This default arrangement is just a
+    starting point, not a preset: named, user-editable presets (design doc
+    §5) are applied on top of it.
+    Workflow gets collapsible=True and a real fixed_width (design doc §4):
+    unlike the five display panels, it's a tool panel (settings ordered by
+    workflow stage), not a data view - not draggable down to a width that
+    clips its own controls. 340px matches the stable app's own
+    workflow_panel minimum width (layout_builder.py:1744), reused here
+    rather than inventing a new number."""
     workflow_dock = PanelContainer("Workflow", workflow, window, collapsible=True, fixed_width=340)
     image_dock = PanelContainer("Image", image_panel, window)
     histogram_dock = PanelContainer("Histogram", histogram_panel, window)
@@ -919,13 +935,13 @@ def build_main_window(
     spectra_dock = PanelContainer("Spectra", spectra_panel, window)
     sensorgram_dock = PanelContainer("Sensorgram", sensorgram_panel, window)
 
-    # "Cube X, wl nm" now shown centered in the Image dock's own title bar
+    # "Cube X, wl nm" shown centered in the Image dock's own title bar
     # (2026-09-30, maintainer request) rather than in a row under the
     # canvas - see `ImagePanel.frame_status_changed`'s docstring for why
     # render errors are deliberately not routed here too. Seeded once
     # explicitly: `image_panel` already emitted its initial "No dataset
-    # loaded." during its own construction above, before this connection
-    # existed to hear it.
+    # loaded." during its own construction, before this connection existed
+    # to hear it.
     image_panel.frame_status_changed.connect(image_dock.set_subtitle)
     image_dock.set_subtitle("No dataset loaded.")
 
@@ -1010,16 +1026,11 @@ def build_main_window(
     window._workflow_separator_guard = FixedWidthSeparatorGuard(window, workflow_dock, window)
     window.installEventFilter(window._workflow_separator_guard)
 
-    # View -> Panels: Show/Hide all + one checkable, Ctrl+1..6-shortcut
-    # toggleViewAction() per dock (panels/panel_visibility.py) - the
-    # recovery path a closed-and-lost panel had no way back from before
-    # this (found 2026-09-27: undocking Workflow, then losing it, had no
-    # fix short of restarting). Order here fixes each panel's shortcut -
-    # matches the stable app's own Ctrl+1..5 assignment (Workflow/Image/
-    # Histogram/Spectra/Sensorgram) so existing muscle memory carries over,
-    # plus Ctrl+6 for ROI / Groups (unbound in the stable app, no reason to
-    # leave the same gap here).
-    panel_docks = {
+    # Order here fixes each panel's View -> Panels shortcut: it matches the
+    # stable app's own Ctrl+1..5 assignment (Workflow/Image/Histogram/
+    # Spectra/Sensorgram) so existing muscle memory carries over, plus
+    # Ctrl+6 for ROI / Groups (unbound in the stable app).
+    return {
         "Workflow": workflow_dock,
         "Image": image_dock,
         "Histogram": histogram_dock,
@@ -1027,36 +1038,14 @@ def build_main_window(
         "Sensorgram": sensorgram_dock,
         "ROI / Groups": roi_table_dock,
     }
-    wire_panel_visibility_menu(view_menu, panel_docks)
 
-    # Named panel presets (design doc §5). A never-customized preset is
-    # still not applied here at startup - every dock stays visible until the
-    # user explicitly picks one, or the auto-apply toggle (now itself
-    # persisted, see below) reacts to a stage change. Forcing a preset at
-    # launch while that toggle happens to be off would contradict "manual
-    # application always available, auto-apply is opt-in" (§5). A preset
-    # slot that *was* customized and saved does get its real geometry back,
-    # but only via the raw `window.restoreState()` call below (the most
-    # recent on-screen arrangement, whichever preset produced it) - not by
-    # re-`apply()`-ing the preset itself, which would restore that slot's
-    # own blob from whenever it was last explicitly saved, possibly older.
-    layout_preset_manager = wire_view_menu(
-        view_menu,
-        options_menu,
-        window,
-        workflow,
-        workflow_dock,
-        {
-            "Image": image_dock,
-            "Histogram": histogram_dock,
-            "ROI / Groups": roi_table_dock,
-            "Spectra": spectra_dock,
-            "Sensorgram": sensorgram_dock,
-        },
-        initial_auto_apply=settings.auto_apply_preset_on_stage_change,
-        on_auto_apply_changed=lambda checked: _persist(auto_apply_preset_on_stage_change=bool(checked)),
-        state_version=_DOCK_LAYOUT_STATE_VERSION,
-    )
+
+def _restore_window_state(
+    window: QMainWindow,
+    settings: AppSettings,
+    panel_docks: dict[str, PanelContainer],
+    layout_preset_manager,
+) -> None:
     if settings.layout_presets:
         layout_preset_manager.load_custom_blobs({
             name: QByteArray(base64.b64decode(blob))
@@ -1081,64 +1070,206 @@ def build_main_window(
     # it" report this module fixes (panels/panel_visibility.py).
     ensure_floating_panels_on_screen(panel_docks, window)
 
-    # "Reopen Last Dataset on Launch" (2026-09-26) - stands in for a real
-    # Preferences dialog exactly like the auto-apply-preset toggle above
-    # (neither has one yet).
-    reopen_action = options_menu.addAction("Reopen Last Dataset on Launch")
-    reopen_action.setCheckable(True)
-    reopen_action.setChecked(settings.auto_reopen_last_dataset)
-    reopen_action.toggled.connect(lambda checked: _persist(auto_reopen_last_dataset=bool(checked)))
 
+def _wire_quit_persistence(
+    window: QMainWindow,
+    m: _Modules,
+    writer: _SettingsWriter,
+    ui_state: UiStateStore,
+    layout_preset_manager,
+) -> None:
     # Parented now that there is a window to own it, so it dies with the
     # window rather than living on as an orphan QObject holding a timer.
-    session_autosave.setParent(window)
+    m.session_autosave.setParent(window)
     # On the application, not on `closeEvent`: the same reasoning ImagePanel
     # documents for its render thread - `closeEvent` reaches only top-level
     # windows, and `aboutToQuit` is where a normal quit actually arrives.
     # Unsaved edits inside the debounce window would otherwise be lost every
     # time the app is closed within 2.5 s of the last edit.
     app = QApplication.instance()
-    if app is not None:
-        app.aboutToQuit.connect(session_autosave.flush)
+    if app is None:
+        return
+    app.aboutToQuit.connect(m.session_autosave.flush)
 
-        def _persist_on_quit() -> None:
-            _flush_pending()
-            ui_state.flush()
-            # Window geometry/state and layout-preset blobs only make sense
-            # to capture here, at quit - unlike theme/last-dataset/auto-apply
-            # above, there is no single "the user just changed this" moment
-            # to write on; every dock drag would otherwise mean a write.
-            _persist(
-                main_window_geometry=base64.b64encode(bytes(window.saveGeometry())).decode("ascii"),
-                main_window_state=base64.b64encode(
-                    bytes(window.saveState(_DOCK_LAYOUT_STATE_VERSION))
-                ).decode("ascii"),
-                layout_presets={
-                    name: base64.b64encode(bytes(blob)).decode("ascii")
-                    for name, blob in layout_preset_manager.custom_blobs().items()
-                },
-                active_layout_preset=layout_preset_manager.current(),
-            )
+    def _persist_on_quit() -> None:
+        writer.flush_pending()
+        ui_state.flush()
+        # Window geometry/state and layout-preset blobs only make sense
+        # to capture here, at quit - unlike theme/last-dataset/auto-apply
+        # above, there is no single "the user just changed this" moment
+        # to write on; every dock drag would otherwise mean a write.
+        writer.persist(
+            main_window_geometry=base64.b64encode(bytes(window.saveGeometry())).decode("ascii"),
+            main_window_state=base64.b64encode(
+                bytes(window.saveState(_DOCK_LAYOUT_STATE_VERSION))
+            ).decode("ascii"),
+            layout_presets={
+                name: base64.b64encode(bytes(blob)).decode("ascii")
+                for name, blob in layout_preset_manager.custom_blobs().items()
+            },
+            active_layout_preset=layout_preset_manager.current(),
+        )
 
-        app.aboutToQuit.connect(_persist_on_quit)
+    app.aboutToQuit.connect(_persist_on_quit)
 
-    # Auto-reopen the last dataset (2026-09-26, on by default - see the
-    # "Reopen Last Dataset on Launch" toggle above). Safe on a fresh/test
-    # `AppSettings()` (no `on_settings_changed` given): `last_dataset_folder`
-    # is `None` until a real settings file has actually recorded one, so
-    # this is a no-op for every existing zero-argument caller.
-    if settings.auto_reopen_last_dataset and settings.last_dataset_folder:
-        last_folder = Path(settings.last_dataset_folder)
-        if last_folder.is_dir():
-            try:
-                dataset.load_dataset_from_folder(last_folder)
-            except RuntimeError:
-                logger.exception("Could not auto-reopen the last dataset at %s", last_folder)
-        else:
-            logger.info("Last dataset folder %s no longer exists - skipping auto-reopen", last_folder)
 
+def _auto_reopen_last_dataset(dataset: DatasetModule, settings: AppSettings) -> None:
+    """Auto-reopen the last dataset (2026-09-26, on by default - see the
+    "Reopen Last Dataset on Launch" toggle). Safe on a fresh/test
+    `AppSettings()` (no `on_settings_changed` given): `last_dataset_folder`
+    is `None` until a real settings file has actually recorded one, so
+    this is a no-op for every existing zero-argument caller."""
+    if not (settings.auto_reopen_last_dataset and settings.last_dataset_folder):
+        return
+    last_folder = Path(settings.last_dataset_folder)
+    if last_folder.is_dir():
+        try:
+            dataset.load_dataset_from_folder(last_folder)
+        except RuntimeError:
+            logger.exception("Could not auto-reopen the last dataset at %s", last_folder)
+    else:
+        logger.info("Last dataset folder %s no longer exists - skipping auto-reopen", last_folder)
+
+
+def build_main_window(
+    initial_settings: AppSettings | None = None,
+    on_settings_changed: Callable[[AppSettings], None] | None = None,
+) -> QMainWindow:
+    """Construct every rewrite module and wire the panels to them, per the
+    module boundaries in CLAUDE.md / sketch §7. No module reaches into
+    another's internals here - this function only connects the public,
+    already-defined constructor seams. It is a sequence of named steps; each
+    step lives in its own function above (split from one 630-line function,
+    2026-10-07, with no behaviour change).
+
+    **`initial_settings`/`on_settings_changed` (2026-09-26)** - the app-level
+    settings layer (`storage/app_settings.py`): last dataset, theme, window
+    geometry, layout presets. Injected the same way `AnalysisEngine`/
+    `SessionAutosave` take callables instead of reading global state
+    directly - `main()` is the only real caller that passes a loaded
+    `AppSettings` and a callback that actually writes to disk; every
+    existing test that calls `build_main_window()` with no arguments keeps
+    doing zero settings-file I/O and no auto-reopen (`AppSettings()`'s
+    defaults have `last_dataset_folder=None`, so the auto-reopen guard
+    is always a no-op without a real settings file behind it)."""
+    settings = initial_settings if initial_settings is not None else AppSettings()
+    writer = _SettingsWriter(settings, on_settings_changed)
+
+    # Applied before any panel is constructed - several read `get_active_
+    # theme()` at construction time (e.g. `DatasetFolderRow`), so the right
+    # theme has to already be active, not just switched on afterward.
+    theme_obj = LSPRI_BRIGHT_THEME if settings.theme == "bright" else LSPRI_DARK_THEME
+    set_active_theme(theme_obj)
+    app_for_theme = QApplication.instance()
+    if app_for_theme is not None:
+        apply_app_theme(app_for_theme, theme_obj)
+
+    # Small UI choices (toggles, picks, Export options...) - panels/ui_state.py.
+    ui_state = UiStateStore(settings.ui_state, on_changed=lambda values: writer.persist(ui_state=values))
+
+    m = _build_modules()
+    _ReferenceFramePersistence(m.dataset, m.reference_frame, ui_state, settings)
+    # A Highlight range selected against one dataset's intensity scale is
+    # meaningless for whatever gets opened next - same reasoning as the
+    # reference-frame reset just above.
+    m.dataset.dataset_cleared.connect(m.highlight_range.clear_range)
+    # Remembers the last-opened dataset for the next launch's auto-reopen
+    # (see the end of this function) - a dataset open is already a
+    # deliberate, infrequent action, so this writes immediately rather than
+    # going through the session autosave's debounce. Connected *before* the
+    # highlight-range restore below, which records `last_dataset_folder`
+    # alongside the range it puts back.
+    m.dataset.dataset_loaded.connect(lambda ds: writer.persist(last_dataset_folder=str(ds.home)))
+
+    image_panel = _build_image_panel(m, writer, theme_obj)
+    _wire_highlight_range_persistence(m, writer)
+    histogram_panel = _build_histogram_panel(m, image_panel, writer)
+    image_panel.restore_ui_state(ui_state)
+    histogram_panel.restore_ui_state(ui_state)
+    try:
+        m.mask_scope.set_scope(MaskScope(ui_state.get("mask/scope")))
+    except ValueError:  # nothing saved yet
+        pass
+    m.mask_scope.scope_changed.connect(lambda scope: ui_state.set("mask/scope", scope.value))
+    roi_table_panel = RoiTablePanel(m.roi_toolbox, m.selection, m.geometry, m.analysis_engine)
+    roi_table_panel.restore_ui_state(ui_state)
+    spectra_panel = SpectraPanel(m.analysis_engine, m.roi_toolbox, m.selection)
+    sensorgram_panel = SensorgramPanel(m.analysis_engine, m.roi_toolbox, m.dataset, m.selection)
+    workflow = _build_workflow_panel(m, writer, ui_state)
+
+    window = QMainWindow()
+    window.setWindowTitle(rewrite_version_string())
+    window.resize(1400, 900)
+    # Qt's default dock options include AllowTabbedDocks, which is what let
+    # a plain drag of one panel's title bar onto another's create a tab
+    # group interactively - the exact behavior the maintainer asked to
+    # remove (2026-09-27), not just the one `tabifyDockWidget` call this
+    # function used to make in code. AnimatedDocks/AllowNestedDocks are
+    # Qt's other two defaults, kept so ordinary dragging and the nested
+    # Image/Histogram/ROI-table split tree built below still work; leaving
+    # AllowTabbedDocks out means dropping a panel onto another's center now
+    # simply isn't offered as a target - only the split zones are.
+    window.setDockOptions(QMainWindow.DockOption.AnimatedDocks | QMainWindow.DockOption.AllowNestedDocks)
+    view_menu, options_menu = _build_menu_bar(window)
+    _wire_theme_menu(
+        view_menu, window, image_panel,
+        initial_theme=settings.theme,
+        on_theme_changed=lambda name: writer.persist(theme=name),
+    )
+    _build_status_bar(window, m, workflow, image_panel, roi_table_panel)
+    panel_docks = _build_dock_layout(
+        window, workflow, image_panel, histogram_panel, roi_table_panel, spectra_panel, sensorgram_panel
+    )
+
+    # View -> Panels: Show/Hide all + one checkable, Ctrl+1..6-shortcut
+    # toggleViewAction() per dock (panels/panel_visibility.py) - the
+    # recovery path a closed-and-lost panel had no way back from before
+    # this (found 2026-09-27: undocking Workflow, then losing it, had no
+    # fix short of restarting).
+    wire_panel_visibility_menu(view_menu, panel_docks)
+
+    # Named panel presets (design doc §5). A never-customized preset is
+    # still not applied here at startup - every dock stays visible until the
+    # user explicitly picks one, or the auto-apply toggle (now itself
+    # persisted, see below) reacts to a stage change. Forcing a preset at
+    # launch while that toggle happens to be off would contradict "manual
+    # application always available, auto-apply is opt-in" (§5). A preset
+    # slot that *was* customized and saved does get its real geometry back,
+    # but only via the raw `window.restoreState()` call in
+    # `_restore_window_state` (the most recent on-screen arrangement,
+    # whichever preset produced it) - not by re-`apply()`-ing the preset
+    # itself, which would restore that slot's own blob from whenever it was
+    # last explicitly saved, possibly older.
+    layout_preset_manager = wire_view_menu(
+        view_menu,
+        options_menu,
+        window,
+        workflow,
+        panel_docks["Workflow"],
+        {
+            "Image": panel_docks["Image"],
+            "Histogram": panel_docks["Histogram"],
+            "ROI / Groups": panel_docks["ROI / Groups"],
+            "Spectra": panel_docks["Spectra"],
+            "Sensorgram": panel_docks["Sensorgram"],
+        },
+        initial_auto_apply=settings.auto_apply_preset_on_stage_change,
+        on_auto_apply_changed=lambda checked: writer.persist(auto_apply_preset_on_stage_change=bool(checked)),
+        state_version=_DOCK_LAYOUT_STATE_VERSION,
+    )
+    _restore_window_state(window, settings, panel_docks, layout_preset_manager)
+
+    # "Reopen Last Dataset on Launch" (2026-09-26) - stands in for a real
+    # Preferences dialog exactly like the auto-apply-preset toggle above
+    # (neither has one yet).
+    reopen_action = options_menu.addAction("Reopen Last Dataset on Launch")
+    reopen_action.setCheckable(True)
+    reopen_action.setChecked(settings.auto_reopen_last_dataset)
+    reopen_action.toggled.connect(lambda checked: writer.persist(auto_reopen_last_dataset=bool(checked)))
+
+    _wire_quit_persistence(window, m, writer, ui_state, layout_preset_manager)
+    _auto_reopen_last_dataset(m.dataset, settings)
     apply_windows_titlebar_color(window, theme_obj)
-
     return window
 
 
