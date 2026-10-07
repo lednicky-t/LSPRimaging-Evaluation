@@ -37,11 +37,14 @@ from pathlib import Path
 from platformdirs import user_config_dir
 
 from .session import write_json_file
+from .ui_state_keys import migrate_legacy_fields
 
 logger = logging.getLogger(__name__)
 
 APP_SETTINGS_SCHEMA_NAME = "lspri_rewrite_app_settings"
-APP_SETTINGS_SCHEMA_VERSION = "1.0"
+APP_SETTINGS_SCHEMA_VERSION = "1.1"
+# 1.1 (2026-10-07): 26 per-panel fields moved into `ui_state` (see `ui_state_keys.py`);
+# a 1.0 file is migrated on load, additive for older readers (unknown keys are ignored).
 
 _SETTINGS_FILENAME = "lspri_eva_rewrite_settings.json"
 
@@ -84,59 +87,11 @@ class AppSettings:
     # falls back to that section's own hardcoded `expanded=` default, the
     # same graceful-degradation `active_workflow_stage` already relies on.
     expanded_subsections: dict[str, bool] = field(default_factory=dict)
-    # Histogram panel's settings-dialog controls (`panels/histogram/panel.py`)
-    # - a visual/display preference, not dataset-derived, so it belongs here
-    # rather than in the per-dataset session file. Defaults mirror
-    # `compute.DEFAULT_BIN_WIDTH` / `plot.DEFAULT_LINE_WIDTH`; kept as plain
-    # literals rather than imported so this file stays free of any `panels/`
-    # (Qt-heavy) dependency. `histogram_y_mode` replaced the earlier
-    # `histogram_percent_mode: bool` (2026-09-30, adding the "Normalized
-    # (peak = 1)" mode - `settings_dialog.Y_MODES` - needs a third state a
-    # bool can't hold); an old settings file with the retired bool field
-    # just falls back to this field's "percent" default, the same graceful
-    # degradation `expanded_subsections` already relies on for stale keys.
-    histogram_y_mode: str = "percent"
-    histogram_log_y: bool = False
-    histogram_bin_width_px: float = 512.0
-    histogram_line_width_px: float = 1.5
-    # Last Image panel viewport (pan/zoom), in image pixel coordinates -
-    # `ImagePanel(initial_view_range=...)`. All four are `None` together
-    # (never applied) until the panel reports a real range at least once.
-    image_view_x_min: float | None = None
-    image_view_x_max: float | None = None
-    image_view_y_min: float | None = None
-    image_view_y_max: float | None = None
-    # Chromatic tab popover values, saved when a run that used them succeeded
-    # (`ChromaticUiValues`; defaults = the "Default" preset).
-    chromatic_landmark_count: int = 15
-    chromatic_stride: int = 3
-    chromatic_border_percent: float = 5.0
-    chromatic_max_step_px: float = 5.0
-    chromatic_feature_diameter_px: float | None = None
-    # Chromatic tab "View" toggles (remembered immediately, they are not run values).
-    chromatic_show_landmarks: bool = True
-    chromatic_landmarks_all_wavelengths: bool = False
-    # Image panel: which ribbon tab was open (its label, e.g. "Histogram"; an
-    # unknown label just leaves the first tab open) and how the two tint
-    # overlays look (`panels/image/overlay_style.py`: shown/hidden, "#rrggbb",
-    # opacity 0..1). Defaults mirror `ImagePanel`'s own.
-    image_ribbon_category: str | None = None
-    mask_overlay_visible: bool = True
-    mask_overlay_color: str | None = None  # None = the theme's mask color
-    mask_overlay_alpha: float = 0.5
-    highlight_overlay_visible: bool = True
-    highlight_overlay_color: str | None = None  # None = the theme's highlight color
-    highlight_overlay_alpha: float = 0.42
-    # Background tab: show the estimated background instead of the image.
-    show_background: bool = False
-    # Histogram highlight range [min, max] (intensity units). Only meaningful
-    # for the dataset it was set on, so it is stored with that dataset's
-    # folder and restored only when the same dataset is opened again.
-    highlight_range_min: float | None = None
-    highlight_range_max: float | None = None
-    highlight_range_dataset: str | None = None
-    # Everything else a user can change in a control (Export options, toggles,
-    # picks...), as "area/name" -> JSON value; see `panels/ui_state.py`.
+    # Everything a user can change in a control (Export options, toggles, picks,
+    # the Histogram's display options, the Image panel's view and overlays, the
+    # Chromatic tab's values, the highlight range...), as "area/name" -> JSON
+    # value; see `panels/ui_state.py`. The keys wired by hand, their defaults and
+    # the retired fields they replaced are one table: `storage/ui_state_keys.py`.
     ui_state: dict[str, object] = field(default_factory=dict)
 
 
@@ -149,6 +104,10 @@ def _decode(payload: dict) -> AppSettings:
         kwargs.pop("expanded_subsections", None)
     if not isinstance(kwargs.get("ui_state"), dict):
         kwargs.pop("ui_state", None)
+    # Settings written before 2026-10-07 keep per-panel values as top-level fields.
+    ui_state = dict(kwargs.get("ui_state", {}))
+    if migrate_legacy_fields(payload, ui_state):
+        kwargs["ui_state"] = ui_state
     try:
         return replace(AppSettings(), **kwargs)
     except (TypeError, ValueError):

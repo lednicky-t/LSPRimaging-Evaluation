@@ -31,7 +31,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
-from PyQt6.QtCore import QTimer, Qt, QByteArray
+from PyQt6.QtCore import Qt, QByteArray
 from PyQt6.QtGui import QAction, QActionGroup, QKeySequence
 from PyQt6.QtWidgets import QApplication, QMainWindow, QMenu, QStatusBar
 
@@ -71,6 +71,27 @@ from .roi import RoiToolbox
 from .roi_geometry_sync import RoiGeometrySync
 from .selection import AreaSelectionModule, HighlightRangeModule, ReferenceFrameModule, SelectionModule
 from .storage.app_settings import AppSettings, load_app_settings, save_app_settings
+from .storage.ui_state_keys import (
+    CHROMATIC_ALL_WAVELENGTHS,
+    CHROMATIC_BORDER_PERCENT,
+    CHROMATIC_FEATURE_DIAMETER,
+    CHROMATIC_LANDMARK_COUNT,
+    CHROMATIC_MAX_STEP,
+    CHROMATIC_SHOW_LANDMARKS,
+    CHROMATIC_STRIDE,
+    HIGHLIGHT_RANGE,
+    HISTOGRAM_BIN_WIDTH,
+    HISTOGRAM_LINE_WIDTH,
+    HISTOGRAM_LOG_Y,
+    HISTOGRAM_Y_MODE,
+    IMAGE_RIBBON_CATEGORY,
+    IMAGE_SHOW_BACKGROUND,
+    IMAGE_VIEW_RANGE,
+    OVERLAY_KEYS,
+    read,
+    read_highlight_range,
+    read_view_range,
+)
 from .storage.session import SessionState, load_session
 from .storage.session_autosave import SessionAutosave
 from .storage.session_coordinator import SessionCoordinator
@@ -587,36 +608,20 @@ class _Modules:
 
 
 class _SettingsWriter:
-    """The one write path into `AppSettings`: `persist` writes now, `persist_soon`
-    batches. Sliders (overlay opacity) and drags (highlight range) fire many
-    times a second; the settings file is written at most once per pause."""
-
-    _PAUSE_MS = 400
+    """The one write path into `AppSettings` for app-level state (last
+    dataset, theme, window and dock layout, open Workflow section). Everything
+    a panel's controls change goes through the `UiStateStore` instead
+    (`panels/ui_state.py`), which batches its own writes."""
 
     def __init__(self, settings: AppSettings, on_settings_changed: Callable[[AppSettings], None] | None) -> None:
         self.settings = settings
         self._on_settings_changed = on_settings_changed
-        self._pending: dict[str, object] = {}
-        self._timer = QTimer()
-        self._timer.setSingleShot(True)
-        self._timer.setInterval(self._PAUSE_MS)
-        self._timer.timeout.connect(lambda: self.flush_pending())
 
     def persist(self, **changes: object) -> None:
         for key, value in changes.items():
             setattr(self.settings, key, value)
         if self._on_settings_changed is not None:
             self._on_settings_changed(self.settings)
-
-    def persist_soon(self, **changes: object) -> None:
-        self._pending.update(changes)
-        self._timer.start()
-
-    def flush_pending(self) -> None:
-        if self._pending:
-            changes = dict(self._pending)
-            self._pending.clear()
-            self.persist(**changes)
 
 
 def _build_modules() -> _Modules:
@@ -750,30 +755,26 @@ class _ReferenceFramePersistence:
         })
 
 
-def _wire_highlight_range_persistence(m: _Modules, writer: _SettingsWriter) -> None:
+def _wire_highlight_range_persistence(m: _Modules, ui_state: UiStateStore, settings: AppSettings) -> None:
     """Highlight range: remembered per dataset (an intensity range from one
-    dataset means nothing on another). `dataset_cleared` wipes the module's
-    range on every load, so the saved one is put back when the same dataset
-    finishes loading - before the Histogram would seed the full frame range."""
-    settings = writer.settings
+    dataset means nothing on another), so the saved value carries the folder
+    it was set on. `dataset_cleared` wipes the module's range on every load, so
+    the saved one is put back when the same dataset finishes loading - before
+    the Histogram would seed the full frame range."""
     highlight_range = m.highlight_range
 
     def _restore_highlight_range(ds) -> None:
-        if (
-            settings.highlight_range_dataset == str(ds.home)
-            and settings.highlight_range_min is not None
-            and settings.highlight_range_max is not None
-            and highlight_range.current_range() is None
-        ):
-            highlight_range.set_range(settings.highlight_range_min, settings.highlight_range_max)
+        saved = read_highlight_range(ui_state)
+        if saved is not None and saved[0] == str(ds.home) and highlight_range.current_range() is None:
+            highlight_range.set_range(saved[1], saved[2])
 
     def _on_highlight_range_changed(range_: object) -> None:
         if range_ is None:  # cleared by a dataset load, not a user choice: keep what was saved
             return
         lo, hi = range_  # type: ignore[misc]
-        writer.persist_soon(
-            highlight_range_min=float(lo), highlight_range_max=float(hi),
-            highlight_range_dataset=settings.last_dataset_folder,
+        ui_state.set(
+            HIGHLIGHT_RANGE,
+            {"dataset": settings.last_dataset_folder, "min": float(lo), "max": float(hi)},
         )
 
     m.dataset.dataset_loaded.connect(_restore_highlight_range)
@@ -784,98 +785,85 @@ def _overlay_style(visible: bool, color: str | None, alpha: float, default_color
     return OverlayStyle(visible, color or default_color, alpha)
 
 
-def _build_image_panel(m: _Modules, writer: _SettingsWriter, theme_obj) -> ImagePanel:
-    """The Image panel, seeded from `AppSettings` and reporting every
-    user-changeable display option back through `writer`."""
-    settings = writer.settings
-    # `None` unless all four were actually saved together (first-ever launch,
-    # or an older settings file from before this field existed, both leave
-    # them at the dataclass default of `None`) - see `ImagePanel.__init__`'s
-    # own docstring for why a missing saved range just means "let pyqtgraph's
-    # default auto-range fit the first image", not an error.
-    saved_view_range = (
-        settings.image_view_x_min, settings.image_view_x_max,
-        settings.image_view_y_min, settings.image_view_y_max,
-    )
-    initial_view_range = (
-        ((saved_view_range[0], saved_view_range[1]), (saved_view_range[2], saved_view_range[3]))
-        if None not in saved_view_range else None
-    )
+def _build_image_panel(m: _Modules, ui_state: UiStateStore, theme_obj) -> ImagePanel:
+    """The Image panel, seeded from the saved UI state and reporting every
+    user-changeable display option back to it (keys: `storage/ui_state_keys.py`)."""
+    mask_visible, mask_color, mask_alpha = (read(ui_state, key) for key in OVERLAY_KEYS["mask"])
+    highlight_visible, highlight_color, highlight_alpha = (read(ui_state, key) for key in OVERLAY_KEYS["highlight"])
     image_panel = ImagePanel(
         m.dataset, m.geometry, m.mask, m.chromatic, m.background, m.roi_toolbox, m.selection, m.active_tool,
         m.reference_frame, m.highlight_range,
         mask_scope=m.mask_scope,
         area_selection=m.area_selection,
         chromatic_auto=m.chromatic_auto,
-        initial_chromatic_view=(settings.chromatic_show_landmarks, settings.chromatic_landmarks_all_wavelengths),
+        initial_chromatic_view=(read(ui_state, CHROMATIC_SHOW_LANDMARKS), read(ui_state, CHROMATIC_ALL_WAVELENGTHS)),
         initial_chromatic_values=ChromaticUiValues(
-            landmark_count=settings.chromatic_landmark_count,
-            stride=settings.chromatic_stride,
-            border_percent=settings.chromatic_border_percent,
-            max_step_px=settings.chromatic_max_step_px,
-            feature_diameter_px=settings.chromatic_feature_diameter_px,
+            landmark_count=read(ui_state, CHROMATIC_LANDMARK_COUNT),
+            stride=read(ui_state, CHROMATIC_STRIDE),
+            border_percent=read(ui_state, CHROMATIC_BORDER_PERCENT),
+            max_step_px=read(ui_state, CHROMATIC_MAX_STEP),
+            feature_diameter_px=read(ui_state, CHROMATIC_FEATURE_DIAMETER),
         ),
-        initial_view_range=initial_view_range,
-        initial_mask_overlay=_overlay_style(
-            settings.mask_overlay_visible, settings.mask_overlay_color, settings.mask_overlay_alpha, theme_obj.mask_color
-        ),
+        # `None` unless all four numbers were saved together (first launch, or a
+        # partial/hand-edited value): `ImagePanel` then lets pyqtgraph auto-range
+        # fit the first image, which is not an error.
+        initial_view_range=read_view_range(ui_state),
+        initial_mask_overlay=_overlay_style(mask_visible, mask_color, mask_alpha, theme_obj.mask_color),
         initial_highlight_overlay=_overlay_style(
-            settings.highlight_overlay_visible, settings.highlight_overlay_color,
-            settings.highlight_overlay_alpha, theme_obj.highlight_color,
+            highlight_visible, highlight_color, highlight_alpha, theme_obj.highlight_color
         ),
-        initial_ribbon_category=settings.image_ribbon_category,
-        initial_show_background=settings.show_background,
+        initial_ribbon_category=read(ui_state, IMAGE_RIBBON_CATEGORY),
+        initial_show_background=read(ui_state, IMAGE_SHOW_BACKGROUND),
     )
-    image_panel.background_view_changed.connect(lambda shown: writer.persist(show_background=bool(shown)))
-    image_panel.ribbon_category_changed.connect(lambda label: writer.persist(image_ribbon_category=label))
+    image_panel.background_view_changed.connect(lambda shown: ui_state.set(IMAGE_SHOW_BACKGROUND.key, bool(shown)))
+    image_panel.ribbon_category_changed.connect(lambda label: ui_state.set(IMAGE_RIBBON_CATEGORY.key, label))
 
     def _on_overlay_style_changed(kind: str, style: OverlayStyle) -> None:
-        writer.persist_soon(**{
-            f"{kind}_overlay_visible": style.visible,
-            f"{kind}_overlay_color": style.color,
-            f"{kind}_overlay_alpha": style.alpha,
-        })
+        visible_key, color_key, alpha_key = OVERLAY_KEYS[kind]
+        ui_state.set(visible_key.key, style.visible)
+        ui_state.set(color_key.key, style.color)
+        ui_state.set(alpha_key.key, style.alpha)
 
     image_panel.overlay_style_changed.connect(_on_overlay_style_changed)
-    image_panel.chromatic_settings_applied.connect(
-        lambda values: writer.persist(
-            chromatic_landmark_count=values.landmark_count,
-            chromatic_stride=values.stride,
-            chromatic_border_percent=values.border_percent,
-            chromatic_max_step_px=values.max_step_px,
-            chromatic_feature_diameter_px=values.feature_diameter_px,
-        )
-    )
-    image_panel.chromatic_view_changed.connect(
-        lambda show, every: writer.persist(
-            chromatic_show_landmarks=bool(show), chromatic_landmarks_all_wavelengths=bool(every)
-        )
-    )
+
+    def _on_chromatic_settings_applied(values) -> None:
+        ui_state.set(CHROMATIC_LANDMARK_COUNT.key, values.landmark_count)
+        ui_state.set(CHROMATIC_STRIDE.key, values.stride)
+        ui_state.set(CHROMATIC_BORDER_PERCENT.key, values.border_percent)
+        ui_state.set(CHROMATIC_MAX_STEP.key, values.max_step_px)
+        ui_state.set(CHROMATIC_FEATURE_DIAMETER.key, values.feature_diameter_px)
+
+    image_panel.chromatic_settings_applied.connect(_on_chromatic_settings_applied)
+
+    def _on_chromatic_view_changed(show: bool, every: bool) -> None:
+        ui_state.set(CHROMATIC_SHOW_LANDMARKS.key, bool(show))
+        ui_state.set(CHROMATIC_ALL_WAVELENGTHS.key, bool(every))
+
+    image_panel.chromatic_view_changed.connect(_on_chromatic_view_changed)
     image_panel.view_range_changed.connect(
-        lambda x_min, x_max, y_min, y_max: writer.persist(
-            image_view_x_min=x_min, image_view_x_max=x_max, image_view_y_min=y_min, image_view_y_max=y_max,
+        lambda x_min, x_max, y_min, y_max: ui_state.set(
+            IMAGE_VIEW_RANGE, [[float(x_min), float(x_max)], [float(y_min), float(y_max)]]
         )
     )
     return image_panel
 
 
-def _build_histogram_panel(m: _Modules, image_panel: ImagePanel, writer: _SettingsWriter) -> HistogramPanel:
-    settings = writer.settings
+def _build_histogram_panel(m: _Modules, image_panel: ImagePanel, ui_state: UiStateStore) -> HistogramPanel:
     histogram_panel = HistogramPanel(
         image_panel, m.geometry, m.mask, m.chromatic, m.roi_toolbox, m.highlight_range,
-        initial_y_mode=settings.histogram_y_mode,
-        initial_log_y=settings.histogram_log_y,
-        initial_bin_width=settings.histogram_bin_width_px,
-        initial_line_width=settings.histogram_line_width_px,
+        initial_y_mode=read(ui_state, HISTOGRAM_Y_MODE),
+        initial_log_y=read(ui_state, HISTOGRAM_LOG_Y),
+        initial_bin_width=read(ui_state, HISTOGRAM_BIN_WIDTH),
+        initial_line_width=read(ui_state, HISTOGRAM_LINE_WIDTH),
     )
-    histogram_panel.display_settings_changed.connect(
-        lambda y_mode, log_y, bin_width_px, line_width_px: writer.persist(
-            histogram_y_mode=y_mode,
-            histogram_log_y=log_y,
-            histogram_bin_width_px=float(bin_width_px),
-            histogram_line_width_px=float(line_width_px),
-        )
-    )
+
+    def _on_display_settings_changed(y_mode: str, log_y: bool, bin_width_px: float, line_width_px: float) -> None:
+        ui_state.set(HISTOGRAM_Y_MODE.key, y_mode)
+        ui_state.set(HISTOGRAM_LOG_Y.key, bool(log_y))
+        ui_state.set(HISTOGRAM_BIN_WIDTH.key, float(bin_width_px))
+        ui_state.set(HISTOGRAM_LINE_WIDTH.key, float(line_width_px))
+
+    histogram_panel.display_settings_changed.connect(_on_display_settings_changed)
     return histogram_panel
 
 
@@ -1147,7 +1135,6 @@ def _wire_quit_persistence(
     app.aboutToQuit.connect(m.session_autosave.flush)
 
     def _persist_on_quit() -> None:
-        writer.flush_pending()
         ui_state.flush()
         # Window geometry/state and layout-preset blobs only make sense
         # to capture here, at quit - unlike theme/last-dataset/auto-apply
@@ -1236,9 +1223,9 @@ def build_main_window(
     # alongside the range it puts back.
     m.dataset.dataset_loaded.connect(lambda ds: writer.persist(last_dataset_folder=str(ds.home)))
 
-    image_panel = _build_image_panel(m, writer, theme_obj)
-    _wire_highlight_range_persistence(m, writer)
-    histogram_panel = _build_histogram_panel(m, image_panel, writer)
+    image_panel = _build_image_panel(m, ui_state, theme_obj)
+    _wire_highlight_range_persistence(m, ui_state, settings)
+    histogram_panel = _build_histogram_panel(m, image_panel, ui_state)
     image_panel.restore_ui_state(ui_state)
     histogram_panel.restore_ui_state(ui_state)
     try:
