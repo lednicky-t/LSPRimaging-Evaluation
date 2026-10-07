@@ -156,14 +156,30 @@ Commits are local to the `rewrite` branch of `apps/LSPRi/eva`; nothing is pushed
 
 ## 7. Test baseline and results
 
-Per file, each in its own process, offscreen, 127 LSPRi test files.
+Per file, each in its own process, offscreen.
 
-- **Before** (commit `aae8fdb`, plus the audit's first edits while it ran): 1550 passed, 6 failed in 5 files (F14).
-  The 6 failures reproduce on the untouched commit.
-- **After**: see the execution log below (filled in when the final run finished).
-- New tests: `test_lspri_rewrite_roi_overlay_geometry.py` (8), `test_lspri_rewrite_union_roi_masks.py` (5), plus
-  cases added to the Image panel (1), ROI table (2) and session autosave (2) files.
+- **Before** (commit `aae8fdb`, 127 files): 1550 passed, 6 failed in 5 files (F14). The 6 failures reproduce on the
+  untouched commit.
+- **After** (129 files): **1574 passed, 0 failed, 0 errors** (1550 + 6 fixed + 18 new = 1574, so every test that
+  passed before still passes). New tests: `test_lspri_rewrite_roi_overlay_geometry.py` (8),
+  `test_lspri_rewrite_union_roi_masks.py` (5), plus cases added to the Image panel (1), ROI table (2) and session
+  autosave (2) files.
+- Tools after: `ruff` clean; `import-linter` scratch contract 4 of 5 kept (was 3 of 5; the fifth is D3); functions over
+  50 statements 24 -> 23 (the two largest, 228 and 195, are gone; the biggest left is the verbatim `dataset/io.py`
+  export copy); mypy 289 -> 238 errors; `radon mi`: `roi/toolbox.py` slipped from A to B (18.1, two small additions),
+  `panels/image/panel.py` is still C.
 
 ## 8. Execution log
 
-(Filled in at the end of the session.)
+| Batch | Commit (apps/LSPRi/eva, `rewrite`) | Verified by |
+|-------|-----------------------------------|-------------|
+| B1-B3 overlay, histogram masks, ROI table | `e945a56` | overlay and union unit tests, ROI table (81), Image + Histogram panel (126) |
+| B4 autosave failure | `3d3a468` | session autosave (17) |
+| B7-B8 move, typing, logging | `8bbea4c` | analysis engine, area selection, chromatic tab/auto, session, visual settings restore |
+| B5 `build_main_window` split | `153b25e` | ui_state, visual settings restore, 3 workflow panel files, autosave |
+| B6 `ImagePanel` builder split | `a24d5c5` | 12 Image-panel-related files (only the 3 old failures, then fixed in B10) |
+| B9 `AGENTS.md` -> `CLAUDE.md` | `8baa8ee` | AST comparison: only docstrings/comments changed |
+| Audit doc, CLAUDE.md pointer, build log | `1ba8fb6` | - |
+| B10 six old failing tests; new tests | umbrella commit (tests are in the umbrella repo) | final per-file run above |
+
+Found while measuring but not changed (D7): the Histogram ROI-mask union still costs about 0.9 ms per ROI per redraw.
