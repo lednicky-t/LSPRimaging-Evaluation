@@ -11,9 +11,11 @@ did not accept.)
 
 from __future__ import annotations
 
+import json
 from collections.abc import Collection, Sequence
+from dataclasses import dataclass
 
-from PyQt6.QtCore import QAbstractItemModel, QModelIndex, Qt, pyqtSignal
+from PyQt6.QtCore import QAbstractItemModel, QMimeData, QModelIndex, Qt, pyqtSignal
 
 from ...roi.model import AreaRoi, AreaRoiDetectionSettings, AreaRoiGroup
 from .rows import (
@@ -54,6 +56,23 @@ ALL_SELECTED_ROLE = Qt.ItemDataRole.UserRole + 7
 DEPTH_ROLE = Qt.ItemDataRole.UserRole + 8
 MASK_ROLE = Qt.ItemDataRole.UserRole + 9
 
+MIME_TYPE = "application/x-lspr-roi-ids"
+"""Dragged ROIs: a JSON list of ROI ids."""
+
+
+@dataclass(frozen=True)
+class DropTarget:
+    """Where dragged ROIs were dropped.
+
+    ``"header"``: on a group header (``group_id`` is the group; ``None`` is
+    the "Ungrouped" header). ``"section"``: between the rows of a group's list
+    (``position`` is the row they were dropped before). ``"flat"``: between
+    rows of the flat list (``position`` as for a section)."""
+
+    kind: str
+    group_id: str | None = None
+    position: int = 0
+
 _NUMERIC_COLUMNS = (COLUMN_X, COLUMN_Y, COLUMN_SAMPLE, COLUMN_RING_IN, COLUMN_RING_OUT)
 _HEADER_TIPS = {
     COLUMN_ID: "Position in the list. Reordering changes these numbers.",
@@ -82,6 +101,10 @@ class RoiTreeModel(QAbstractItemModel):
     cell_edited = pyqtSignal(str, object, int, str)
     """``(kind, key, column, text)``: ``kind`` is ``"roi"`` (``key`` the ROI
     id) or ``"group"`` (``key`` the group id)."""
+    roi_dropped = pyqtSignal(object, object)
+    """``(roi ids, DropTarget)``. Like an edit, a drop is only reported: the
+    model returns ``False`` from `dropMimeData` so Qt never removes the source
+    rows itself, and the new arrangement comes back through `set_content`."""
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -277,9 +300,11 @@ class RoiTreeModel(QAbstractItemModel):
         node = index.internalPointer()
         flags = Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable
         if node.kind == "group":
+            flags |= Qt.ItemFlag.ItemIsDropEnabled  # drop ROIs on a header to put them in that group
             if index.column() == 0 and node.section.group.group_id is not None:
                 flags |= Qt.ItemFlag.ItemIsEditable
             return flags
+        flags |= Qt.ItemFlag.ItemIsDragEnabled  # ROI rows are not drop targets: a drop lands between rows
         column = index.column()
         if column in EDITABLE_COLUMNS and not (node.row.is_mask and column in DIAMETER_COLUMNS):
             flags |= Qt.ItemFlag.ItemIsEditable
@@ -368,6 +393,56 @@ class RoiTreeModel(QAbstractItemModel):
         if column == COLUMN_SAMPLE and row.is_mask:
             return "This ROI is drawn as a mask, so it has no diameter."
         return None
+
+    # -- drag and drop ------------------------------------------------------------------
+
+    def supportedDragActions(self) -> Qt.DropAction:  # type: ignore[override]
+        return Qt.DropAction.MoveAction
+
+    def supportedDropActions(self) -> Qt.DropAction:  # type: ignore[override]
+        return Qt.DropAction.MoveAction
+
+    def mimeTypes(self) -> list[str]:  # type: ignore[override]
+        return [MIME_TYPE]
+
+    def mimeData(self, indexes: Sequence[QModelIndex]) -> QMimeData:  # type: ignore[override]
+        ids = sorted({roi_id for index in indexes if (roi_id := self.roi_id(index)) is not None})
+        data = QMimeData()
+        data.setData(MIME_TYPE, json.dumps(ids).encode("utf-8"))
+        return data
+
+    def drop_target(self, row: int, parent: QModelIndex) -> DropTarget | None:
+        """What a drop at (``row``, ``parent``) means, or ``None`` if nothing
+        can be dropped there. Qt reports a drop *on* an item as ``row == -1``
+        with the item as ``parent``, and a drop *between* rows as the row index
+        under the parent those rows share."""
+        if parent.isValid():
+            node = parent.internalPointer()
+            if node.kind != "group":
+                return None
+            group_id = node.section.group.group_id
+            if row < 0:
+                return DropTarget("header", group_id)
+            return DropTarget("section", group_id, min(row, len(node.children)))
+        if self._grouped:
+            return None  # between two group headers: groups are not reordered by dragging ROIs
+        count = len(self._root.children)
+        return DropTarget("flat", None, count if row < 0 else min(row, count))
+
+    def canDropMimeData(self, data, action, row: int, column: int, parent: QModelIndex) -> bool:  # type: ignore[override]
+        return data.hasFormat(MIME_TYPE) and action == Qt.DropAction.MoveAction and self.drop_target(row, parent) is not None
+
+    def dropMimeData(self, data, action, row: int, column: int, parent: QModelIndex) -> bool:  # type: ignore[override]
+        if not self.canDropMimeData(data, action, row, column, parent):
+            return False
+        try:
+            ids = [int(roi_id) for roi_id in json.loads(bytes(data.data(MIME_TYPE)).decode("utf-8"))]
+        except (ValueError, TypeError):
+            return False
+        target = self.drop_target(row, parent)
+        if ids and target is not None:
+            self.roi_dropped.emit(ids, target)
+        return False  # see `roi_dropped`
 
     def setData(self, index: QModelIndex, value, role: int = Qt.ItemDataRole.EditRole) -> bool:  # type: ignore[override]
         if role != Qt.ItemDataRole.EditRole or not index.isValid():

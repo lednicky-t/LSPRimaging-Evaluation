@@ -9,7 +9,8 @@ toolbox command, so Ctrl+Z undoes it like any other) and it drives the shared
 **What the table does**
 - Rows: ``#`` (the ROI's place in the list; reordering changes these), name,
   x, y, sample diameter, reference-ring inner/outer diameter. Lengths show in
-  px or µm following the Geometry display unit. A ring diameter the ROI takes
+  px or µm following the Geometry display unit; the px/µm toggle in the toolbar
+  changes that unit (the same setting as the Image ribbon's View tab). A ring diameter the ROI takes
   from the shared default is grey italic.
 - Click a header to sort ascending/descending. Sorting only changes the view;
   to *reorder* ROIs (change their numbers) sort by ``#`` ascending first.
@@ -18,6 +19,9 @@ toolbox command, so Ctrl+Z undoes it like any other) and it drives the shared
 - A group header selects its members; double-click renames, the chevron
   collapses. Double-click a colour chip to change a ROI's colour (or recolour
   the group).
+- Drag ROIs by their rows: between rows of a list to reorder them (the same
+  rule as the buttons: sorted by ``#`` ascending), onto a group header to put
+  them in that group, onto "Ungrouped" to take them out of their groups.
 - Right-click for group / ungroup / colour / shift / reset diameters / move /
   delete. Delete removes the selected ROIs, or, if only a group header is
   selected, the group (its ROIs stay).
@@ -34,7 +38,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
-from PyQt6.QtCore import QItemSelection, QItemSelectionModel, QModelIndex, QPoint, QSize, Qt, QTimer, pyqtSignal
+from PyQt6.QtCore import QItemSelection, QItemSelectionModel, QModelIndex, QPoint, Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import QColor
 from PyQt6.QtWidgets import (
     QAbstractItemView,
@@ -56,10 +60,12 @@ from ...analysis.engine import AnalysisEngine
 from ...image_tools import GeometryModule
 from ...roi import RoiToolbox
 from ...selection import SelectionModule
+from ..image.general_group import ICON_SIZE, style_general_icon_button
 from ..ui_state import UiStateStore
+from ..unit_toggle import UnitToggle
 from .delegate import RoiTableDelegate
 from .dialogs import ShiftDialog
-from .model import RoiTreeModel
+from .model import DropTarget, RoiTreeModel
 from .rows import (
     COLUMN_COUNT,
     COLUMN_ID,
@@ -83,8 +89,8 @@ _REDRAW_COALESCE_MS = 100  # sketch §8
 _NOTICE_MS = 8000
 _ERROR_NOTICE_MS = 15000
 _UNGROUPED_KEY = "__ungrouped__"
-_ICON_SIZE = 18
-_BUTTON_SIZE = 28
+_RENDER_SIZE = ICON_SIZE * 2  # icons are drawn at twice the size and scaled down, as the ribbon does
+_STROKE_WIDTH = 2.1
 
 
 def _group_key(group_id: str | None) -> str:
@@ -181,8 +187,7 @@ class RoiTablePanel(QWidget):
         self._delete_button = self._tool_button("trash", self._delete_selected)
         self._flat_button = self._tool_button("list", None, checkable=True)
         self._flat_button.setToolTip("Show one flat list instead of grouping the ROIs under their groups.")
-        self._unit_label = QLabel("px", self)
-        self._unit_label.setToolTip("Unit of x, y and the diameters. Change it with the Geometry display unit.")
+        self._unit_toggle = UnitToggle(self._geometry, self)  # px <-> µm for x, y and the diameters
 
         toolbar = QHBoxLayout()
         toolbar.setContentsMargins(6, 4, 6, 4)
@@ -197,7 +202,7 @@ class RoiTablePanel(QWidget):
         toolbar.addStretch(1)
         toolbar.addWidget(self._flat_button)
         toolbar.addSpacing(6)
-        toolbar.addWidget(self._unit_label)
+        toolbar.addWidget(self._unit_toggle)
 
         self._footer = QLabel(self)
         self._footer.setContentsMargins(8, 3, 8, 4)
@@ -214,10 +219,8 @@ class RoiTablePanel(QWidget):
         button = QToolButton(self)
         button.setProperty("icon_name", icon_name)
         button.setCheckable(checkable)
-        button.setAutoRaise(True)
-        button.setFixedSize(_BUTTON_SIZE, _BUTTON_SIZE)
-        button.setIconSize(QSize(_ICON_SIZE, _ICON_SIZE))
         button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        style_general_icon_button(button)
         if handler is not None:
             button.clicked.connect(lambda _checked=False: handler())
         return button
@@ -228,6 +231,7 @@ class RoiTablePanel(QWidget):
         self._geometry.cosmetic_changed.connect(self._schedule_refresh)  # display unit, calibration
         self._selection.roi_selection_changed.connect(self._on_selection_changed_elsewhere)
         self._model.cell_edited.connect(self._on_cell_edited)
+        self._model.roi_dropped.connect(self._on_roi_dropped)
         self._tree.selectionModel().selectionChanged.connect(self._on_view_selection_changed)
         self._tree.expanded.connect(lambda index: self._on_expansion_changed(index, True))
         self._tree.collapsed.connect(lambda index: self._on_expansion_changed(index, False))
@@ -238,6 +242,7 @@ class RoiTablePanel(QWidget):
         self._tree.chip_double_clicked.connect(self._on_chip_double_clicked)
         self._tree.customContextMenuRequested.connect(self._show_context_menu)
         self._flat_button.toggled.connect(self._on_flat_toggled)
+        self._flat_button.toggled.connect(lambda _on: self._style_tool_button(self._flat_button, "list"))
 
     # -- theme ----------------------------------------------------------------------------
 
@@ -253,21 +258,27 @@ class RoiTablePanel(QWidget):
             f"border-bottom: 1px solid {theme.toolbar_border}; padding: 4px 6px; font-weight: 600; }}"
         )
         self._hint.setStyleSheet(f"color: {theme.text_dim}; background: {theme.window_bg}; padding: 24px;")
-        self._unit_label.setStyleSheet(f"color: {theme.text_dim}; padding: 0 2px;")
-        hover, pressed, checked = theme.control_bg_hover, theme.control_bg_pressed, theme.primary_action_bg
-        button_style = (
-            f"QToolButton {{ background: transparent; border: 1px solid transparent; border-radius: 5px; }}"
-            f"QToolButton:hover {{ background: {hover}; }}"
-            f"QToolButton:pressed {{ background: {pressed}; }}"
-            f"QToolButton:checked {{ background: {checked}; border: 1px solid {theme.primary_action_border}; }}"
-        )
         for button in self.findChildren(QToolButton):
-            button.setStyleSheet(button_style)
             name = button.property("icon_name")
-            if name:
-                button.setIcon(load_tabler_icon(str(name), color=theme.text_secondary, size=_ICON_SIZE))
+            if name:  # the unit toggle is not one of these: it styles itself (`UnitToggle.refresh_theme`)
+                self._style_tool_button(button, str(name))
+        self._unit_toggle.refresh_theme()
         self._update_footer()
         self._tree.viewport().update()
+
+    def _style_tool_button(self, button: QToolButton, icon_name: str) -> None:
+        """The Image ribbon's icon-button look: its stylesheet (`padding: 0`
+        matters: without it the app-wide style shrinks the icon to a few
+        pixels), its sizes, its icon rendering. A toggle that is on is drawn in
+        the accent colour, as the ribbon's toggles are."""
+        theme = get_active_theme()
+        style_general_icon_button(button)
+        on = button.isCheckable() and button.isChecked()
+        button.setIcon(
+            load_tabler_icon(
+                icon_name, color=theme.accent_blue if on else theme.text_secondary, size=_RENDER_SIZE, stroke_width=_STROKE_WIDTH
+            )
+        )
 
     # -- refresh --------------------------------------------------------------------------
 
@@ -295,7 +306,6 @@ class RoiTablePanel(QWidget):
         bar = self._tree.verticalScrollBar()
         scroll = bar.value()
         change()
-        self._unit_label.setText(self._model.unit().label)
         self._restoring_view = True
         try:
             self._tree.expandAll()
@@ -637,6 +647,43 @@ class RoiTablePanel(QWidget):
         group_ids = [gid for gid in (self._model.group_id(header) for header in headers) if gid is not None]
         for group_id in group_ids:
             self._guarded("Delete group", lambda gid=group_id: self._toolbox.delete_group(gid))
+
+    def _scope_for_drop(self, target: DropTarget) -> tuple[int, ...]:
+        """The ROIs in the list a drop was aimed at, ascending by number: all
+        of them for the flat list, else that group's (or "Ungrouped"'s)."""
+        rows = self._model.rows()
+        if target.kind == "flat":
+            return tuple(sorted(row.roi_id for row in rows))
+        return tuple(sorted(row.roi_id for row in rows if row.group_id == target.group_id))
+
+    def _on_roi_dropped(self, ids: object, target: DropTarget) -> None:
+        """ROIs were dragged and dropped. Onto a group header they join that
+        group (onto "Ungrouped" they leave their groups). Between the rows of a
+        list they are moved there, when they all come from that same list;
+        otherwise (some come from another group) the drop puts them in the
+        group whose list it landed in."""
+        moved = sorted({int(roi_id) for roi_id in ids})  # type: ignore[union-attr]
+        if target.kind != "flat":
+            scope = self._scope_for_drop(target)
+            if target.kind == "header" or any(roi_id not in scope for roi_id in moved):
+                self._put_in_group(moved, target.group_id)
+                return
+        else:
+            scope = self._scope_for_drop(target)
+        if not self._renumbering_allowed():
+            return
+        if self._model.sort_state() != (COLUMN_ID, False):
+            self._show_notice("Sort by # (ascending) to reorder ROIs by dragging.", error=True)
+            return
+        before = sum(1 for roi_id in scope[: target.position] if roi_id in set(moved))
+        index = target.position - before
+        self._guarded("Reorder", lambda: self._toolbox.move_in_order(moved, index, scope_ids=scope))
+
+    def _put_in_group(self, roi_ids: list[int], group_id: str | None) -> None:
+        if group_id is None:
+            self._guarded("Ungroup", lambda: self._toolbox.remove_rois_from_groups(roi_ids))
+        else:
+            self._guarded("Add to group", lambda: self._toolbox.add_rois_to_group(roi_ids, group_id))
 
     def _move_group(self, group_id: str, direction: int) -> None:
         order = [group.group_id for group in self._toolbox.groups()]

@@ -61,6 +61,13 @@ class RoiTreeView(QTreeView):
             QAbstractItemView.EditTrigger.DoubleClicked | QAbstractItemView.EditTrigger.EditKeyPressed
         )
         self.setMouseTracking(True)
+        # Drag ROIs to reorder them or onto a group header (see model.drop_target).
+        self.setDragEnabled(True)
+        self.setAcceptDrops(True)
+        self.setDropIndicatorShown(True)
+        self.setDragDropMode(QAbstractItemView.DragDropMode.DragDrop)
+        self.setDefaultDropAction(Qt.DropAction.MoveAction)
+        self.setAutoExpandDelay(500)  # hovering over a collapsed group while dragging opens it
         self.setFrameShape(QTreeView.Shape.NoFrame)
         self.setHorizontalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
         self.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
