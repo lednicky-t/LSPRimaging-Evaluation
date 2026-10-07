@@ -114,7 +114,8 @@ from ...image_tools.geometry.model import CropDefinition, GeometrySettings
 from ...image_tools.preprocess import area_selection_to_raw, resolve_external_mask
 from ...roi import RoiToolbox
 from .no_data import format_pixel_value, no_data_overlay_rgba
-from ...roi.rasterize import effective_reference_diameters, transformed_circle_points
+from ...roi.overlay_geometry import circle_outlines
+from ...roi.rasterize import effective_reference_diameters
 from ...selection import AreaSelectionModule, HighlightRangeModule, ReferenceFrameModule, SelectionModule
 from ...selection.reference_frame_module import MODE_AUTO
 from ..cursor_overlay import CursorOverlay
@@ -1787,32 +1788,56 @@ class ImagePanel(QWidget):
         affine = self._chromatic.affine_for(frame)
         detection = self._roi_toolbox.detection_settings()
         selected = self._selection.selected_roi_ids()
-        theta = np.linspace(0.0, 2.0 * np.pi, _CIRCLE_POINTS, endpoint=True)
 
-        by_color: dict[str, tuple[list[float], list[float]]] = {}
-        reference_x, reference_y = [], []
-        selection_x, selection_y = [], []
+        # Everything below is vectorized over the ROIs (roi/overlay_geometry.py):
+        # the old per-ROI loop cost ~0.27 ms per ROI per redraw. The circles
+        # are drawn around each ROI's *display* centre, bent by the affine's
+        # linear part only - the translation is already in the centre.
+        centers = self._roi_toolbox.display_positions(frame, affine)
+        sample_diameters = np.fromiter((roi.sample_diameter_px for roi in rois), dtype=np.float64, count=len(rois))
+        is_selected = np.fromiter((roi.area_roi_id in selected for roi in rois), dtype=bool, count=len(rois))
+
+        # One curve per colour. Checking a colour string builds a QColor, so
+        # each distinct string is resolved once, not once per ROI.
+        resolved: dict[str | None, str] = {}
+        indices_by_color: dict[str, list[int]] = {}
+        for index, roi in enumerate(rois):
+            if is_selected[index]:
+                continue  # drawn in the highlight colour below, whatever its own
+            key = roi.sample_color_hex
+            if key not in resolved:
+                resolved[key] = _roi_overlay_color(key, self._roi_sample_color)
+            indices_by_color.setdefault(resolved[key], []).append(index)
+        by_color = {
+            color: circle_outlines(centers[indices], sample_diameters[indices], affine, n_points=_CIRCLE_POINTS)
+            for color, indices in indices_by_color.items()
+        }
+
+        ring_diameters = np.asarray(
+            [
+                effective_reference_diameters(
+                    roi, detection.reference_inner_diameter_px, detection.reference_outer_diameter_px
+                )
+                for roi in rois
+            ],
+            dtype=np.float64,
+        )  # (N, 2): inner, outer
+        reference_x, reference_y = circle_outlines(
+            np.vstack((centers, centers)),
+            np.concatenate((ring_diameters[:, 0], ring_diameters[:, 1])),
+            affine,
+            n_points=_CIRCLE_POINTS,
+        )
+        # Selected ROIs are all drawn in the highlight colour, whatever their own, so the selection reads at a glance.
+        selection_x, selection_y = circle_outlines(
+            centers[is_selected], sample_diameters[is_selected], affine, n_points=_CIRCLE_POINTS
+        )
         labels: list[tuple[float, float, float, str]] = []
-
-        for roi in rois:
-            center = self._roi_toolbox.display_position(roi.area_roi_id, frame, affine)
-            if self._roi_labels_visible:
-                labels.append((center[0], center[1], float(roi.sample_diameter_px) / 2.0, label_text(roi.area_roi_id, roi.label)))
-            xs, ys = transformed_circle_points(center, roi.sample_diameter_px, affine, theta)
-            if roi.area_roi_id in selected:
-                # Selected ROIs are all drawn in the highlight colour, whatever
-                # their own, so the selection reads at a glance.
-                _append_polyline(selection_x, selection_y, xs, ys)
-            else:
-                curve_x, curve_y = by_color.setdefault(_roi_overlay_color(roi.sample_color_hex, self._roi_sample_color), ([], []))
-                _append_polyline(curve_x, curve_y, xs, ys)
-
-            inner, outer = effective_reference_diameters(
-                roi, detection.reference_inner_diameter_px, detection.reference_outer_diameter_px
-            )
-            for diameter in (inner, outer):
-                rx, ry = transformed_circle_points(center, diameter, affine, theta)
-                _append_polyline(reference_x, reference_y, rx, ry)
+        if self._roi_labels_visible:
+            labels = [
+                (float(cx), float(cy), float(roi.sample_diameter_px) / 2.0, label_text(roi.area_roi_id, roi.label))
+                for roi, (cx, cy) in zip(rois, centers, strict=True)
+            ]
 
         self._set_sample_curves(by_color)
         self._reference_curve.setData(reference_x, reference_y)
@@ -1888,7 +1913,7 @@ class ImagePanel(QWidget):
         self._refresh_roi_labels_icon()
         self._apply_roi_overlay_style()
 
-    def _set_sample_curves(self, by_color: dict[str, tuple[list[float], list[float]]]) -> None:
+    def _set_sample_curves(self, by_color: dict[str, tuple[np.ndarray, np.ndarray]]) -> None:
         """Draw each colour's circles on that colour's curve (one
         `PlotDataItem` per colour, circles joined by NaN separators, the same
         trick the single curve used). A curve is created the first time a
@@ -2612,13 +2637,15 @@ class ImagePanel(QWidget):
         inside a large one stays reachable."""
         frame = (self._current_cube(), self._current_wavelength())
         affine = self._chromatic.affine_for(frame)
-        best: tuple[float, int] | None = None
-        for roi in self._roi_toolbox.rois():
-            cx, cy = self._roi_toolbox.display_position(roi.area_roi_id, frame, affine)
-            distance = float(np.hypot(x - cx, y - cy))
-            if distance <= float(roi.sample_diameter_px) / 2.0 and (best is None or distance < best[0]):
-                best = (distance, roi.area_roi_id)
-        return None if best is None else best[1]
+        rois = self._roi_toolbox.rois()
+        if not rois:
+            return None
+        centers = self._roi_toolbox.display_positions(frame, affine)
+        distances = np.hypot(x - centers[:, 0], y - centers[:, 1])
+        radii = np.fromiter((roi.sample_diameter_px for roi in rois), dtype=np.float64, count=len(rois)) / 2.0
+        distances = np.where(distances <= radii, distances, np.inf)
+        nearest = int(np.argmin(distances))  # first of equal distances wins, as before
+        return rois[nearest].area_roi_id if np.isfinite(distances[nearest]) else None
 
     def _on_drag(self, roi_id: int, x: float, y: float) -> None:
         """Forwards a drag gesture to the owning module - never mutates ROI

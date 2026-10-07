@@ -325,6 +325,23 @@ class RoiToolbox(QObject):
         transformed = apply_affine_to_points(point, affine_matrix)
         return float(transformed[0, 0]), float(transformed[0, 1])
 
+    def display_positions(self, image_key: tuple[int, float], affine_matrix: np.ndarray) -> np.ndarray:
+        """``display_position`` for every ROI at once: an (N, 2) array in
+        `rois()` order. One affine multiplication for all centres instead of
+        one per ROI (the Image panel and hit-testing call this on every
+        redraw); a manual per-wavelength nudge still wins for its ROI."""
+        rois = tuple(self._rois.values())
+        if not rois:
+            return np.empty((0, 2), dtype=np.float64)
+        centers = np.asarray([(roi.center_x, roi.center_y) for roi in rois], dtype=np.float64)
+        positions = apply_affine_to_points(centers, affine_matrix)
+        for index, roi in enumerate(rois):
+            if roi.per_wavelength:
+                nudge = roi.per_wavelength.get(image_key)
+                if nudge is not None:
+                    positions[index] = (float(nudge[0]), float(nudge[1]))
+        return positions
+
     # -- session restore ------------------------------------------------
 
     def restore_state(

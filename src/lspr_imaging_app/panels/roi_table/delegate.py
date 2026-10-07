@@ -51,9 +51,16 @@ def group_row_height(font_metrics) -> int:
 
 class RoiTableDelegate(QStyledItemDelegate):
     def sizeHint(self, option: QStyleOptionViewItem, index: QModelIndex) -> QSize:  # type: ignore[override]
+        # Only the height matters: the header sizes every column itself (stretch /
+        # interactive, never "resize to contents"), and Qt takes a row's height as
+        # the largest over its columns - so column 0 alone decides it. Not asking
+        # the base class (which formats every cell's text again) nor the other
+        # columns made `expandAll()` on 1500 ROIs 1.3 s -> 0.2 s (2026-10-07).
+        if index.column() != 0:
+            return QSize(0, 0)
         metrics = option.fontMetrics
         height = group_row_height(metrics) if index.data(KIND_ROLE) == "group" else row_height(metrics)
-        return QSize(super().sizeHint(option, index).width(), height)
+        return QSize(0, height)
 
     # -- painting -----------------------------------------------------------------
 

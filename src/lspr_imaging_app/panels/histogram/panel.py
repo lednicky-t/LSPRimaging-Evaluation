@@ -51,7 +51,7 @@ from PyQt6.QtWidgets import QVBoxLayout, QWidget
 from ...image_tools import ChromaticModule, GeometryModule, MaskModule
 from ...image_tools.preprocess import resolve_external_mask
 from ...roi import RoiToolbox
-from ...roi.rasterize import rasterize_reference, rasterize_sample
+from ...roi.rasterize import union_roi_masks
 from ...selection import HighlightRangeModule
 from ..image.panel import ImagePanel
 from ..image.tool_ribbon import VIEW_TAB
@@ -308,18 +308,15 @@ class HistogramPanel(QWidget):
         shape_2d = image_shape[:2]
         affine = self._chromatic.affine_for(self._frame)
         detection = self._roi_toolbox.detection_settings()
-        sample = np.zeros(shape_2d, dtype=bool)
-        reference = np.zeros(shape_2d, dtype=bool)
-        for roi in rois:
-            sample |= rasterize_sample(roi, shape_2d, affine)
-            reference |= rasterize_reference(
-                roi,
-                shape_2d,
-                affine,
-                default_inner_diameter_px=detection.reference_inner_diameter_px,
-                default_outer_diameter_px=detection.reference_outer_diameter_px,
-            )
-        return sample, reference
+        # One call, each ROI rasterized inside its own reach box only: the
+        # per-ROI full-plane form cost 4.2 s for 1000 ROIs on this thread.
+        return union_roi_masks(
+            rois,
+            shape_2d,
+            affine,
+            default_inner_diameter_px=detection.reference_inner_diameter_px,
+            default_outer_diameter_px=detection.reference_outer_diameter_px,
+        )
 
     # -- axis controls ------------------------------------------------------
 

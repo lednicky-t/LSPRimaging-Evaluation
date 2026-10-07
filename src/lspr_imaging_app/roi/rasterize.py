@@ -68,7 +68,7 @@ small array - the full source/target canvases are never materialized.
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 
 import numpy as np
 from scipy import ndimage
@@ -412,6 +412,34 @@ def annulus_reach_box(
     return transformed_center, reach
 
 
+def _annulus_in_plane_box(
+    image_shape: tuple[int, int],
+    center_xy: tuple[float, float],
+    inner_diameter_px: float,
+    outer_diameter_px: float,
+    affine_matrix: np.ndarray,
+) -> tuple[int, int, int, int, np.ndarray] | None:
+    """The annulus (or disk, inner = 0) mask inside its own reach box only:
+    ``(x0, y0, x1, y1, local_mask)`` with the box clipped to the image, or
+    `None` when the shape is empty or entirely outside the image. Shared by
+    `transformed_annulus_mask` (which embeds it into a full plane) and
+    `union_roi_masks` (which ORs it straight into a shared plane)."""
+    image_height, image_width = image_shape[:2]
+    inner_radius = max(float(inner_diameter_px), 0.0) / 2.0
+    outer_radius = max(float(outer_diameter_px) / 2.0, inner_radius)
+    if outer_radius <= 0.0:
+        return None
+
+    transformed_center, reach = annulus_reach_box(center_xy, outer_radius, affine_matrix)
+    x0 = max(int(np.floor(transformed_center[0] - reach)), 0)
+    x1 = min(int(np.ceil(transformed_center[0] + reach)) + 1, image_width)
+    y0 = max(int(np.floor(transformed_center[1] - reach)), 0)
+    y1 = min(int(np.ceil(transformed_center[1] + reach)) + 1, image_height)
+    if x0 >= x1 or y0 >= y1:
+        return None
+    return x0, y0, x1, y1, _annulus_mask_in_box(x0, y0, x1, y1, center_xy, inner_radius, outer_radius, affine_matrix)
+
+
 def transformed_annulus_mask(
     image_shape: tuple[int, int],
     center_xy: tuple[float, float],
@@ -420,22 +448,11 @@ def transformed_annulus_mask(
     affine_matrix: np.ndarray,
 ) -> np.ndarray:
     image_height, image_width = image_shape[:2]
-    inner_radius = max(float(inner_diameter_px), 0.0) / 2.0
-    outer_radius = max(float(outer_diameter_px) / 2.0, inner_radius)
-    if outer_radius <= 0.0:
-        return np.zeros((image_height, image_width), dtype=bool)
-
-    transformed_center, reach = annulus_reach_box(center_xy, outer_radius, affine_matrix)
-    x0 = max(int(np.floor(transformed_center[0] - reach)), 0)
-    x1 = min(int(np.ceil(transformed_center[0] + reach)) + 1, image_width)
-    y0 = max(int(np.floor(transformed_center[1] - reach)), 0)
-    y1 = min(int(np.ceil(transformed_center[1] + reach)) + 1, image_height)
-    if x0 >= x1 or y0 >= y1:
-        return np.zeros((image_height, image_width), dtype=bool)
-
-    mask_local = _annulus_mask_in_box(x0, y0, x1, y1, center_xy, inner_radius, outer_radius, affine_matrix)
     mask = np.zeros((image_height, image_width), dtype=bool)
-    mask[y0:y1, x0:x1] = mask_local
+    placed = _annulus_in_plane_box(image_shape, center_xy, inner_diameter_px, outer_diameter_px, affine_matrix)
+    if placed is not None:
+        x0, y0, x1, y1, mask_local = placed
+        mask[y0:y1, x0:x1] = mask_local
     return mask
 
 
@@ -625,6 +642,52 @@ def rasterize_reference_for_patch(
     return transformed_annulus_mask_for_patch(
         patch_origin_xy, patch_shape, (float(roi.center_x), float(roi.center_y)), inner_diameter, outer_diameter, affine_matrix
     )
+
+
+def union_roi_masks(
+    rois: Sequence[AreaRoi],
+    image_shape: tuple[int, int],
+    affine_matrix: np.ndarray,
+    *,
+    default_inner_diameter_px: float = 0.0,
+    default_outer_diameter_px: float = 0.0,
+) -> tuple[np.ndarray, np.ndarray]:
+    """``(sample, reference)``: the union of every ROI's sample region and of
+    every ROI's reference region, each a full-image bool plane.
+
+    Gives exactly what OR-ing `rasterize_sample` / `rasterize_reference` over
+    `rois` gives, but a circle or ring is rasterized only inside its own reach
+    box and ORed into the shared plane. The one-at-a-time form allocates and
+    ORs two full planes per ROI (4 MB each at 2048 x 2048), which measured
+    4.2 s for 1000 ROIs on the GUI thread (Histogram panel, 2026-10-07).
+    Mask-geometry ROIs keep the full-plane path: they are rare and their
+    reach box is the stored mask's, not a circle's."""
+    image_height, image_width = image_shape[:2]
+    sample = np.zeros((image_height, image_width), dtype=bool)
+    reference = np.zeros((image_height, image_width), dtype=bool)
+    for roi in rois:
+        if roi.sample_geometry_type == "mask" and roi.sample_mask is not None:
+            sample |= rasterize_sample(roi, image_shape, affine_matrix)
+        else:
+            placed = _annulus_in_plane_box(
+                image_shape, (float(roi.center_x), float(roi.center_y)), 0.0, float(roi.sample_diameter_px), affine_matrix
+            )
+            if placed is not None:
+                x0, y0, x1, y1, local = placed
+                sample[y0:y1, x0:x1] |= local
+
+        if roi.reference_geometry_type == "mask" and roi.reference_mask is not None:
+            reference |= rasterize_reference(roi, image_shape, affine_matrix)
+        elif roi.reference_geometry_type != "none":
+            inner, outer = effective_reference_diameters(roi, default_inner_diameter_px, default_outer_diameter_px)
+            if outer > 0.0:
+                placed = _annulus_in_plane_box(
+                    image_shape, (float(roi.center_x), float(roi.center_y)), inner, outer, affine_matrix
+                )
+                if placed is not None:
+                    x0, y0, x1, y1, local = placed
+                    reference[y0:y1, x0:x1] |= local
+    return sample, reference
 
 
 # -- §6a fractional pixel weighting (built 2026-09-22) ----------------------
