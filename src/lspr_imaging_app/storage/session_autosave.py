@@ -56,7 +56,7 @@ from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from pathlib import Path
 
-from PyQt6.QtCore import QObject, QTimer
+from PyQt6.QtCore import QObject, QTimer, pyqtSignal
 
 from ..analysis.provenance import FrameNamingScheme
 from .session import SessionState, save_session
@@ -75,7 +75,13 @@ class SessionAutosave(QObject):
     same convention `AnalysisEngine` and `ImageRenderer` follow: this class
     then holds no module state of its own and a test can drive it with two
     plain functions.
+
+    `save_failed(message)` is emitted whenever a write fails (disk full, locked
+    file, permissions) so the app can tell the user: a failure that only
+    reaches the log leaves them believing their ROIs and masks are on disk.
     """
+
+    save_failed = pyqtSignal(str)
 
     def __init__(
         self,
@@ -150,13 +156,14 @@ class SessionAutosave(QObject):
             return
         try:
             self._save(self._root, self._capture(), self._naming())
-        except Exception:
+        except Exception as exc:
             # A failed session write must not take the application down, and
-            # must not be silent either - the same treatment every other
-            # background failure in this app gets. `_dirty` stays set, so
+            # must not be silent either - it is logged *and* reported to the
+            # user through `save_failed`. `_dirty` stays set, so
             # the next edit or the quit flush tries again rather than
             # treating a failed write as a completed one.
             logger.exception("Session autosave failed for %s", self._root)
+            self.save_failed.emit(f"Session not saved: {exc} - will retry on the next change and when the app closes.")
             return
         self._dirty = False
         logger.debug("Session autosaved to %s", self._root)

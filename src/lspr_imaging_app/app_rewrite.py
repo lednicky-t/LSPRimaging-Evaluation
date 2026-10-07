@@ -887,6 +887,9 @@ def build_main_window(
     workflow.status_requested.connect(status_bar.showMessage)
     roi_geometry_sync.status_changed.connect(status_bar.showMessage)
     roi_table_panel.status_message.connect(status_bar.showMessage)
+    # A failed session write must reach the user, not only the log (30 s: long enough to be seen,
+    # and it is shown again on every failed retry).
+    session_autosave.save_failed.connect(lambda message: status_bar.showMessage(message, 30000))
     # A canvas tool's live status (e.g. the rotate tool's angle readout
     # while placing point 2) - 2026-09-29, replacing an always-in-layout
     # text row under the Image panel with a permanent info icon there for
