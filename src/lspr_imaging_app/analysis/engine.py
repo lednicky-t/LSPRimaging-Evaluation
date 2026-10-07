@@ -6,22 +6,14 @@ user action - ``run_analysis(scope)`` is the *only* entry point that
 triggers real computation. Selecting/deselecting ROIs or navigating between
 panels never implicitly triggers computation.
 
-**Built against injected callables, not live module references (2026-09-22)
-- a deliberate, flagged gap, not a design preference**: gathering real
-per-wavelength compute input needs pixel data, but `DatasetModule`
-(`dataset/module.py`) only exposes 4 narrow query methods - none of them
-actually load pixels (`dataset_load_plane` needs the full `ImageDataset`,
-which `DatasetModule` deliberately never exposes, per its own "no other
-module may read dataset state any other way" rule). `DatasetModule` needs a
-5th method (e.g. `load_plane(cube_index, wavelength_nm) -> np.ndarray`)
-before this engine can be wired to the real module - not guessed at here.
-Building against injected callables instead keeps this file's own
-orchestration logic real, complete, and unit-testable today (with fake
-callables standing in for the not-yet-wired real modules) rather than
-leaving the whole class NotImplementedError pending that one method. Once
-`DatasetModule.load_plane` (and equivalent real accessors for the other
-callables) exist, wiring this up is a small change at construction time -
-nothing about the logic below needs to change.
+**Built against injected callables, not live module references.** The engine
+is the one component that reads from every other module; taking each read as a
+narrow callable (gathered in `app_rewrite._build_analysis_engine`) keeps the full
+list of what analysis depends on in one place, keeps it from becoming a god
+object holding eleven module references, and lets a test supply plain fakes
+with no Qt modules. **All eleven reads are required** (2026-10-07): they used
+to default to an "unwired" raiser left over from the scaffold phase, which let
+a half-wired engine construct and made every attribute's type `object`.
 
 **The query layer (layers 2-3) was added 2026-09-23** - `formula_spectrum`/
 `get_fit`/`get_metric`/`metric_trace` below, over `query.py`'s pure
@@ -54,7 +46,6 @@ import threading
 from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any
 
 import numpy as np
 from PyQt6.QtCore import QObject, pyqtSignal
@@ -98,18 +89,6 @@ _RENUMBER_JOIN_TIMEOUT_SECONDS = 60.0
 """How long `remap_roi_ids` waits for a cancelled run to stop; see there."""
 
 
-def _unwired(name: str) -> Callable[..., Any]:
-    """A placeholder for a constructor callable that wasn't supplied -
-    raises only if actually *called*, matching every other module's
-    "constructs fine, action methods raise" scaffold contract (see
-    `__init__`'s own docstring)."""
-
-    def _raise(*_args: object, **_kwargs: object) -> Any:
-        raise NotImplementedError(f"AnalysisEngine.{name} was not supplied at construction")
-
-    return _raise
-
-
 @dataclass(frozen=True)
 class AnalysisStatus:
     """What's actually in the store, for the proposed "what's actually in
@@ -136,18 +115,18 @@ class AnalysisEngine(QObject):
     def __init__(
         self,
         *,
-        load_plane: Callable[[int, float], np.ndarray] | None = None,
-        rois: Callable[[], tuple[AreaRoi, ...]] | None = None,
-        cube_indices: Callable[[], tuple[int, ...]] | None = None,
-        wavelengths_for_cube: Callable[[int], tuple[float, ...]] | None = None,
-        geometry_settings: Callable[[], GeometrySettings] | None = None,
-        background_settings: Callable[[], BackgroundSettings] | None = None,
-        chromatic_affine: Callable[[int, float], np.ndarray] | None = None,
+        load_plane: Callable[[int, float], np.ndarray],
+        rois: Callable[[], tuple[AreaRoi, ...]],
+        cube_indices: Callable[[], tuple[int, ...]],
+        wavelengths_for_cube: Callable[[int], tuple[float, ...]],
+        geometry_settings: Callable[[], GeometrySettings],
+        background_settings: Callable[[], BackgroundSettings],
+        chromatic_affine: Callable[[int, float], np.ndarray],
         chromatic_affine_between: Callable[[tuple[int, float], tuple[int, float]], np.ndarray] | None = None,
-        resolve_mask: Callable[[int, float], MaskResolution | None] | None = None,
-        reduction_method: Callable[[], str] | None = None,
-        default_reference_diameters: Callable[[], tuple[float, float]] | None = None,
-        detection_settings: Callable[[], AreaRoiDetectionSettings] | None = None,
+        resolve_mask: Callable[[int, float], MaskResolution | None],
+        reduction_method: Callable[[], str],
+        default_reference_diameters: Callable[[], tuple[float, float]],
+        detection_settings: Callable[[], AreaRoiDetectionSettings],
         metric_settings: Callable[[], MetricSettings] = MetricSettings,
         reference_exclusion_mode: Callable[[], str] = lambda: DEFAULT_REFERENCE_EXCLUSION_MODE,
         storage_root: Path | None = None,
@@ -201,18 +180,13 @@ class AnalysisEngine(QObject):
         loaded. See that method for why this can't just be a constructor
         argument in practice.
 
-        **Every callable defaults to `None`, in which case calling it
-        raises `NotImplementedError`** - matches this scaffold's
-        established contract (every other module in `app_rewrite.py`
-        constructs without error; only their *action* methods raise until
-        actually wired). `AnalysisEngine()` with no arguments constructs
-        fine; `run_analysis()`/`preview_recompute()` raise until real
-        callables are supplied.
+        **Every callable above is required.** `chromatic_affine_between` is the
+        one optional read (omitted, masks are used as authored).
 
         ``metric_settings`` - ``AnalysisSettingsModule.metric_settings()``,
         the fit/metric half of the query layer (`query.py`). Like
         ``reference_exclusion_mode`` below it gets a real default rather
-        than an `_unwired` raiser, because an engine with no settings
+        than a required argument, because an engine with no settings
         module attached should still answer `get_metric` using the
         documented defaults instead of raising - these settings can never
         make a stored cell wrong, only re-derive it differently. The
@@ -220,24 +194,24 @@ class AnalysisEngine(QObject):
         where the old app already keeps it.
 
         ``reference_exclusion_mode`` is the one exception to that rule -
-        it gets a real default rather than an `_unwired` raiser, because
-        unlike the others it isn't module state that has to be read from
-        somewhere: it's a plain analysis setting. See
+        it gets a real default rather than a required argument, because
+        unlike the reads above it isn't module state that has to be read
+        from somewhere: it's a plain analysis setting. See
         `provenance.REFERENCE_EXCLUSION_MODES` for what the modes mean.
         """
         super().__init__(parent)
-        self._load_plane = load_plane or _unwired("load_plane")
-        self._rois = rois or _unwired("rois")
-        self._cube_indices = cube_indices or _unwired("cube_indices")
-        self._wavelengths_for_cube = wavelengths_for_cube or _unwired("wavelengths_for_cube")
-        self._geometry_settings = geometry_settings or _unwired("geometry_settings")
-        self._background_settings = background_settings or _unwired("background_settings")
-        self._chromatic_affine = chromatic_affine or _unwired("chromatic_affine")
+        self._load_plane = load_plane
+        self._rois = rois
+        self._cube_indices = cube_indices
+        self._wavelengths_for_cube = wavelengths_for_cube
+        self._geometry_settings = geometry_settings
+        self._background_settings = background_settings
+        self._chromatic_affine = chromatic_affine
         self._chromatic_affine_between = chromatic_affine_between
-        self._resolve_mask = resolve_mask or _unwired("resolve_mask")
-        self._reduction_method = reduction_method or _unwired("reduction_method")
-        self._default_reference_diameters = default_reference_diameters or _unwired("default_reference_diameters")
-        self._detection_settings = detection_settings or _unwired("detection_settings")
+        self._resolve_mask = resolve_mask
+        self._reduction_method = reduction_method
+        self._default_reference_diameters = default_reference_diameters
+        self._detection_settings = detection_settings
         self._reference_exclusion_mode = reference_exclusion_mode
         self._metric_settings = metric_settings
         self._trimmed_mean_fraction = trimmed_mean_fraction
@@ -269,10 +243,8 @@ class AnalysisEngine(QObject):
 
         Falls back to a relative `analysis/` when no storage root is set.
         No real run ever reaches that fallback (`run_analysis` refuses
-        without a root, see below), but keeping the path properties total
-        means a scaffold-only `AnalysisEngine()` still constructs and can be
-        inspected without raising - the contract every other module in
-        `app_rewrite.py` follows."""
+        without a root, see below); it only keeps the path properties total,
+        so an engine with no dataset loaded can still be inspected."""
         if self._storage_root is None:
             return Path("analysis")
         return self._storage_root / "analysis"

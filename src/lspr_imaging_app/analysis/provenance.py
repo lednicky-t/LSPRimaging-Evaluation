@@ -19,8 +19,10 @@ every ROI's coordinates are already defined against.
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Protocol
 
 import numpy as np
 
@@ -86,7 +88,7 @@ class FrameNamingScheme:
 # -- versioning + dedup: sequential per-group counters, no hashing -----------
 
 
-def next_version(existing: dict[int, object], candidate: object, *, equal) -> tuple[int, bool]:
+def next_version(existing: Mapping[int, object], candidate: object, *, equal) -> tuple[int, bool]:
     """Core dedup/versioning rule shared by every provenance-input kind
     (mask/background/chromatic/settings-snapshot): `existing` maps already-
     assigned version numbers (1-based) to their stored content for this same
@@ -625,14 +627,15 @@ def compute_fingerprint(
     )
 
 
-class ProvenanceStore:
-    """Documents the read-only interface :func:`~lspr_imaging_app.analysis.
+class ProvenanceStore(Protocol):
+    """The read-only interface :func:`~lspr_imaging_app.analysis.
     planner.plan_recompute` needs for its ``stored`` argument -
     ``fingerprint_for(roi_id, cube_index) -> ProvenanceRecord | None``.
-    Not an ABC/Protocol (nothing enforces it at runtime - `plan_recompute`
-    works with any duck-typed object that has the method, verified by its
-    own tests using a hand-written fake with no inheritance from this
-    class), just a documented shape.
+    A `typing.Protocol` (2026-10-07; it was a plain class with a raising
+    method, which made the type checker reject the real store): enforced by
+    type checkers only, nothing at runtime - `plan_recompute` works with any
+    duck-typed object that has the method, verified by its own tests using a
+    hand-written fake with no inheritance from this class.
 
     **Superseded by a different design (2026-09-22), not "blocked" -
     no separate `data.h5`-reading implementation of this class was ever
@@ -647,8 +650,7 @@ class ProvenanceStore:
     stand-in.
     """
 
-    def fingerprint_for(self, roi_id: int, cube_index: int) -> ProvenanceRecord | None:
-        raise NotImplementedError("not implemented and not planned - see class docstring")
+    def fingerprint_for(self, roi_id: int, cube_index: int) -> ProvenanceRecord | None: ...
 
 
 class InMemoryProvenanceStore:

@@ -14,6 +14,13 @@ This file is the authoritative LSPRi rule set. Root rules still apply, except wh
 
 LSPRi is being rebuilt from scratch on the `rewrite` branch. This is an approved exception to the root "do not rewrite the architecture" rule. Scope is LSPRi Evaluation only: no hardware control, and no shared infrastructure for a future acquisition app. Evidence: `docs/rewrite_feature_inventory_2026-09.md`. Structure and event design: `docs/rewrite_architecture_sketch_2026-09.md`. Read it before any structural decision this file does not cover.
 
+### Where the rewrite stands (2026-10-07; detail and open decisions: `docs/whole_app_audit_2026-10-07.md`)
+
+- **Built, with UI**: Dataset (Workflow panel); Image panel (ribbon tabs View, Image tools, Mask, ROIs, Chromatic, Background; ROI overlays, area selection, cursor readout, scale bar); Histogram panel; ROI / Group table; task indicator; sessions with autosave; layout presets; remembered UI state; Edit -> Undo / Redo.
+- **Backend built, no UI calls it yet**: `AnalysisEngine.run_analysis` (so the app cannot compute a result), `RoiToolbox.detect_rois` (ROIs are added by hand), fractional pixel weighting, `analysis/statistics.py`.
+- **Scaffold only** (`NotImplementedError`): Spectra and Sensorgram panels. Both need analysis results, so the Run controls come first.
+- **Tests**: run one pytest process per test file (all files in one process stalls); offscreen Qt on Windows has no fonts, so a test that measures text width calls `tests/_qt_fonts.py` `load_system_fonts()`.
+
 ## Which generation to edit
 
 **GUI work targets the new generation:** `src/lspr_imaging_app/panels/`, `roi/`, `analysis/`, `undo/`, `selection/`, `storage/session*`, started from `src/main_rewrite.py` (`app_rewrite.py`). Edit the old `gui/` package only if the maintainer asks.
