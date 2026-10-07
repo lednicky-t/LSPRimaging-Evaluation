@@ -73,6 +73,7 @@ Every user-changeable control is remembered across restarts unless the maintaine
 - Each mutating command pushes one `undo.FunctionCommand` (label plus `undo()`/`redo()` closures over its own module's state). Not a deep clone of module state.
 - `begin_batch(label)` / `end_batch()` merge a burst (one mouse drag) into one entry.
 - **Selection is never undoable.**
+- **Reachable from the UI** (2026-10-07): Edit -> Undo / Redo, Ctrl+Z and Ctrl+Y / Ctrl+Shift+Z, application-wide (`app_rewrite.py` `_wire_edit_menu`). Refused while an analysis runs (undoing a ROI delete or reorder renumbers ids and the engine would wait for the run on the GUI thread); `UndoManager` does nothing while a gesture batch is open.
 - Wired: `RoiToolbox`, `GeometryModule`, `ChromaticModule`, `BackgroundModule`.
 - **`MaskModule` is deliberately not wired.** The old app never undo-tracked masks either. Check in before wiring it. See `image_tools/mask/module.py`.
 

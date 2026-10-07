@@ -159,6 +159,7 @@ class UndoManager(QObject):
         if self._active_batch is not None:
             raise RuntimeError(f"Undo batch '{self._active_batch.label}' is already open.")
         self._active_batch = _BatchCommand(label=label)
+        self.changed.emit()  # can_undo/can_redo are False while a gesture is open
 
     def end_batch(self) -> None:
         """Close the current batch and push it as one undo-stack entry - a
@@ -170,25 +171,28 @@ class UndoManager(QObject):
             raise RuntimeError("end_batch() called with no open batch.")
         self._active_batch = None
         if batch.commands:
-            self.push(batch)
+            self.push(batch)  # emits `changed`
+        else:
+            self.changed.emit()
 
     def cancel_batch(self) -> None:
         """Discard the current batch without pushing it - e.g. an
         Escape-cancelled drag."""
         self._active_batch = None
+        self.changed.emit()
 
     # -- undo/redo ---------------------------------------------------------
 
     def undo(self) -> None:
-        if not self._undo_stack:
-            return
+        if not self._undo_stack or self._active_batch is not None:
+            return  # nothing to undo, or a gesture (drag) is still in progress: undoing now would split it
         command = self._undo_stack.pop()
         command.undo()
         self._redo_stack.append(command)
         self.changed.emit()
 
     def redo(self) -> None:
-        if not self._redo_stack:
+        if not self._redo_stack or self._active_batch is not None:
             return
         command = self._redo_stack.pop()
         command.redo()
@@ -199,11 +203,11 @@ class UndoManager(QObject):
 
     @property
     def can_undo(self) -> bool:
-        return bool(self._undo_stack)
+        return bool(self._undo_stack) and self._active_batch is None
 
     @property
     def can_redo(self) -> bool:
-        return bool(self._redo_stack)
+        return bool(self._redo_stack) and self._active_batch is None
 
     @property
     def undo_label(self) -> str | None:

@@ -32,7 +32,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from PyQt6.QtCore import QTimer, Qt, QByteArray
-from PyQt6.QtGui import QActionGroup
+from PyQt6.QtGui import QAction, QActionGroup, QKeySequence
 from PyQt6.QtWidgets import QApplication, QMainWindow, QMenu, QStatusBar
 
 from lspr_ui import app_icon, set_active_theme
@@ -74,7 +74,7 @@ from .storage.app_settings import AppSettings, load_app_settings, save_app_setti
 from .storage.session import SessionState, load_session
 from .storage.session_autosave import SessionAutosave
 from .storage.session_coordinator import SessionCoordinator
-from .undo import undo_manager
+from .undo import UndoManager, undo_manager
 from .version_rewrite import rewrite_version_string
 
 logger = logging.getLogger(__name__)
@@ -115,28 +115,83 @@ logger = logging.getLogger(__name__)
 _DOCK_LAYOUT_STATE_VERSION = 3
 
 
-def _build_menu_bar(window: QMainWindow) -> tuple[QMenu, QMenu]:
+def _build_menu_bar(window: QMainWindow) -> tuple[QMenu, QMenu, QMenu]:
     """Standard File/Edit/View/Options/Help menus
-    (``docs/rewrite_gui_shell_design_2026-09.md`` §2). Only File->Exit is
-    real so far - View gets theme switching and layout presets (below),
-    Options gets the presets' auto-apply toggle (below - standing in for a
-    not-yet-built Preferences dialog), Edit gets undo/redo
-    (``undo.undo_manager`` already exists and has nothing wired to it yet),
-    Help is an empty placeholder. Adding them now, even empty, keeps the
-    menu *bar* itself - not just its contents - something later work fills
-    in rather than builds from scratch.
+    (``docs/rewrite_gui_shell_design_2026-09.md`` §2). File->Exit is real;
+    View gets theme switching and layout presets, Options gets the presets'
+    auto-apply toggle (standing in for a not-yet-built Preferences dialog),
+    Edit gets undo/redo (`_wire_edit_menu`), Help is an empty placeholder.
 
-    Returns (View menu, Options menu) so the caller can add the theme/
-    preset actions once the panels those actions need to act on actually
-    exist."""
+    Returns (Edit menu, View menu, Options menu) so the caller can add the
+    actions once the things they act on exist."""
     menu_bar = window.menuBar()
     file_menu = menu_bar.addMenu("&File")
     file_menu.addAction("E&xit", window.close)
-    menu_bar.addMenu("&Edit")
+    edit_menu = menu_bar.addMenu("&Edit")
     view_menu = menu_bar.addMenu("&View")
     options_menu = menu_bar.addMenu("&Options")
     menu_bar.addMenu("&Help")
-    return view_menu, options_menu
+    return edit_menu, view_menu, options_menu
+
+
+def _wire_edit_menu(
+    edit_menu: QMenu,
+    window: QMainWindow,
+    analysis_engine: AnalysisEngine,
+    *,
+    manager: UndoManager = undo_manager,
+) -> tuple[QAction, QAction]:
+    """Edit -> Undo / Redo, Ctrl+Z and Ctrl+Y / Ctrl+Shift+Z (whichever the
+    platform defines for Redo, plus Ctrl+Shift+Z). Every command already
+    pushes onto the shared `undo_manager`; this is the first thing that can
+    pop it.
+
+    - The labels follow the stack ("Undo Move ROI") and the actions are
+      disabled when there is nothing to do (the key then reaches whatever
+      has focus - a text field keeps its own Ctrl+Z, which Qt gives the
+      focused editor first).
+    - **Refused while an analysis runs**: undoing a ROI delete or reorder
+      renumbers ROI ids, and the engine then waits for the running analysis
+      to stop (`AnalysisEngine.remap_roi_ids`) - on the GUI thread. The
+      status bar says why nothing happened.
+    - Application-wide shortcut, so it also works from a floating (undocked)
+      panel, which is a separate top-level window.
+    - Selection is never undoable (`CLAUDE.md`), so Ctrl+Z after clicking a
+      ROI undoes the last real edit, not the click."""
+    undo_action = QAction("Undo", window)
+    redo_action = QAction("Redo", window)
+    redo_keys = QKeySequence.keyBindings(QKeySequence.StandardKey.Redo)
+    if QKeySequence("Ctrl+Shift+Z") not in redo_keys:
+        redo_keys.append(QKeySequence("Ctrl+Shift+Z"))
+    undo_action.setShortcuts(QKeySequence.keyBindings(QKeySequence.StandardKey.Undo))
+    redo_action.setShortcuts(redo_keys)
+    for action in (undo_action, redo_action):
+        action.setShortcutContext(Qt.ShortcutContext.ApplicationShortcut)
+    edit_menu.addAction(undo_action)
+    edit_menu.addAction(redo_action)
+
+    def refresh() -> None:
+        running = analysis_engine.is_running()
+        undo_action.setEnabled(manager.can_undo and not running)
+        redo_action.setEnabled(manager.can_redo and not running)
+        undo_action.setText(f"Undo {manager.undo_label}" if manager.undo_label else "Undo")
+        redo_action.setText(f"Redo {manager.redo_label}" if manager.redo_label else "Redo")
+
+    def run(verb: str) -> None:
+        if analysis_engine.is_running():
+            window.statusBar().showMessage(f"{verb} is not available while an analysis is running.", 5000)
+            return
+        label = manager.undo_label if verb == "Undo" else manager.redo_label
+        (manager.undo if verb == "Undo" else manager.redo)()
+        if label:
+            window.statusBar().showMessage(f"{'Undid' if verb == 'Undo' else 'Redid'}: {label}", 3000)
+
+    undo_action.triggered.connect(lambda: run("Undo"))
+    redo_action.triggered.connect(lambda: run("Redo"))
+    manager.changed.connect(refresh)
+    edit_menu.aboutToShow.connect(refresh)  # a running analysis changes no undo state, so the menu re-checks on opening
+    refresh()
+    return undo_action, redo_action
 
 
 def _wire_theme_menu(
@@ -1210,13 +1265,14 @@ def build_main_window(
     # AllowTabbedDocks out means dropping a panel onto another's center now
     # simply isn't offered as a target - only the split zones are.
     window.setDockOptions(QMainWindow.DockOption.AnimatedDocks | QMainWindow.DockOption.AllowNestedDocks)
-    view_menu, options_menu = _build_menu_bar(window)
+    edit_menu, view_menu, options_menu = _build_menu_bar(window)
     _wire_theme_menu(
         view_menu, window, image_panel,
         initial_theme=settings.theme,
         on_theme_changed=lambda name: writer.persist(theme=name),
     )
     _build_status_bar(window, m, workflow, image_panel, roi_table_panel)
+    _wire_edit_menu(edit_menu, window, m.analysis_engine)
     panel_docks = _build_dock_layout(
         window, workflow, image_panel, histogram_panel, roi_table_panel, spectra_panel, sensorgram_panel
     )
