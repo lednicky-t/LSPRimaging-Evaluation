@@ -11,11 +11,15 @@ toolbox command, so Ctrl+Z undoes it like any other) and it drives the shared
   x, y, sample diameter, reference-ring inner/outer diameter. Lengths show in
   px or µm following the Geometry display unit; the px/µm toggle in the toolbar
   changes that unit (the same setting as the Image ribbon's View tab). A ring diameter the ROI takes
-  from the shared default is grey italic.
+  from the shared default is dimmed.
 - Click a header to sort ascending/descending. Sorting only changes the view;
   to *reorder* ROIs (change their numbers) sort by ``#`` ascending first.
 - Edit a cell with a double-click or F2. With several ROIs selected, editing
   a position or diameter of one of them sets it on all of them (one undo step).
+  Excel-style on the current cell: Ctrl+C copies its value, Ctrl+V pastes it into
+  that column of every selected ROI, Ctrl+D copies the topmost selected row's value
+  down the selection. In a diameter editor Up/Down step the value by 0.5 px (Shift:
+  5 px); Ctrl+wheel over a diameter cell steps and applies it.
 - A group header selects its members; double-click renames, the chevron
   collapses. Double-click a colour chip to change a ROI's colour (or recolour
   the group).
@@ -42,6 +46,7 @@ from PyQt6.QtCore import QItemSelection, QItemSelectionModel, QModelIndex, QPoin
 from PyQt6.QtGui import QColor
 from PyQt6.QtWidgets import (
     QAbstractItemView,
+    QApplication,
     QColorDialog,
     QHBoxLayout,
     QHeaderView,
@@ -76,6 +81,8 @@ from .rows import (
     COLUMN_SAMPLE,
     COLUMN_X,
     COLUMN_Y,
+    DIAMETER_COLUMNS,
+    EDITABLE_COLUMNS,
     PIXELS,
     LengthUnit,
     from_display,
@@ -83,12 +90,14 @@ from .rows import (
     movement_scope,
     parse_length,
     step_target_index,
+    step_text,
 )
 from .view import RoiTreeView
 
 _REDRAW_COALESCE_MS = 100  # sketch §8
 _NOTICE_MS = 8000
 _ERROR_NOTICE_MS = 15000
+NUMERIC_COLUMNS = (COLUMN_X, COLUMN_Y, *DIAMETER_COLUMNS)
 _UNGROUPED_KEY = "__ungrouped__"
 _RENDER_SIZE = ICON_SIZE * 2  # icons are drawn at twice the size and scaled down, as the ribbon does
 _STROKE_WIDTH = 2.1
@@ -240,6 +249,10 @@ class RoiTablePanel(QWidget):
         self._tree.header().sectionResized.connect(self._on_section_resized)
         self._tree.delete_requested.connect(self._delete_selected)
         self._tree.move_requested.connect(self._move_selected)
+        self._tree.copy_requested.connect(self._copy_cell)
+        self._tree.paste_requested.connect(self._paste_cells)
+        self._tree.fill_down_requested.connect(self._fill_down)
+        self._tree.step_requested.connect(self._step_cell)
         self._tree.chip_double_clicked.connect(self._on_chip_double_clicked)
         self._tree.customContextMenuRequested.connect(self._show_context_menu)
         self._flat_button.toggled.connect(self._on_flat_toggled)
@@ -504,14 +517,18 @@ class RoiTablePanel(QWidget):
         if column == COLUMN_NAME:
             self._guarded("Rename ROI", lambda: self._toolbox.set_roi_label(roi_id, text))
             return
-        targets = self._edit_targets(roi_id)
+        self._set_numeric_cells(self._edit_targets(roi_id), column, text)
+
+    def _set_numeric_cells(self, targets: list[int], column: int, text: str) -> None:
+        """Set one x / y / diameter column to ``text`` (in the display unit) on every
+        ROI in ``targets``: the one path for an edit, a paste, a fill down and a step."""
         unit = self._model.unit()
         try:
             value = parse_length(text, unit)
         except ValueError as exc:
             self._show_notice(str(exc), error=True)
             return
-        noun = f"{len(targets)} ROIs" if len(targets) > 1 else f"ROI {roi_id}"
+        noun = f"{len(targets)} ROIs" if len(targets) > 1 else f"ROI {targets[0]}"
         if column in (COLUMN_X, COLUMN_Y):
             axis = "x" if column == COLUMN_X else "y"
             if self._guarded(f"Set {axis}", lambda: self._toolbox.place_rois(targets, **{axis: value})) and len(targets) > 1:
@@ -524,8 +541,66 @@ class RoiTablePanel(QWidget):
         }.get(column)
         if field is None:
             return
+        targets = [i for i in targets if self._toolbox.roi_by_id(i).sample_geometry_type != "mask"]  # masks have no diameter
+        if not targets:
+            self._show_notice("Mask ROIs have no diameter.")
+            return
         if self._guarded("Set diameter", lambda: self._toolbox.resize_rois(targets, **{field: value})) and len(targets) > 1:
             self._show_notice(f"Set the diameter of {noun}.")
+
+    # -- Excel-style copy / paste / fill down / step (on the current cell) ---------------------
+
+    def _current_roi_cell(self) -> tuple[QModelIndex, int] | None:
+        index = self._tree.currentIndex()
+        roi_id = self._model.roi_id(index) if index.isValid() else None
+        return None if roi_id is None else (index, roi_id)
+
+    def _copy_cell(self) -> None:
+        cell = self._current_roi_cell()
+        if cell is None or cell[0].column() not in EDITABLE_COLUMNS:
+            return
+        text = str(cell[0].data(Qt.ItemDataRole.EditRole) or "")
+        if text:
+            QApplication.clipboard().setText(text)
+            self._show_notice(f"Copied {text}.")
+
+    def _paste_cells(self) -> None:
+        """The clipboard's first value goes into the current column of every selected ROI
+        (of the current row alone with none selected)."""
+        cell = self._current_roi_cell()
+        if cell is None:
+            return
+        index, roi_id = cell
+        if index.column() not in NUMERIC_COLUMNS:
+            self._show_notice("Paste works on the x, y and diameter columns.")
+            return
+        lines = QApplication.clipboard().text().strip().splitlines()
+        text = lines[0].split("\t")[0] if lines else ""
+        self._set_numeric_cells(self._selected_ids() or [roi_id], index.column(), text)
+
+    def _fill_down(self) -> None:
+        """The topmost selected row's value in the current column goes to the other selected rows."""
+        cell = self._current_roi_cell()
+        if cell is None or cell[0].column() not in NUMERIC_COLUMNS:
+            self._show_notice("Fill down works on the x, y and diameter columns.")
+            return
+        column = cell[0].column()
+        rows = [r for r in self._tree.selectionModel().selectedRows() if self._model.roi_id(r) is not None]
+        if len(rows) < 2:
+            self._show_notice("Select two or more ROIs to fill down.")
+            return
+        rows.sort(key=lambda r: self._tree.visualRect(r).top())
+        text = str(rows[0].siblingAtColumn(column).data(Qt.ItemDataRole.EditRole) or "")
+        self._set_numeric_cells([self._model.roi_id(r) for r in rows[1:]], column, text)  # type: ignore[misc]
+
+    def _step_cell(self, index: QModelIndex, direction: int, large: bool) -> None:
+        """Ctrl+wheel over a diameter cell: one step, on every selected ROI if the row is selected."""
+        roi_id = self._model.roi_id(index)
+        if roi_id is None or index.column() not in DIAMETER_COLUMNS:
+            return
+        stepped = step_text(str(index.data(Qt.ItemDataRole.EditRole) or ""), direction, large, self._model.unit())
+        if stepped is not None:
+            self._on_cell_edited("roi", roi_id, index.column(), stepped)
 
     # -- commands ------------------------------------------------------------------------------
 

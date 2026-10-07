@@ -29,7 +29,7 @@ from .model import (
     KIND_ROLE,
     MASK_ROLE,
 )
-from .rows import COLUMN_ID
+from .rows import COLUMN_COUNT, COLUMN_ID, DIAMETER_COLUMNS, step_text
 
 STRIP_WIDTH = 3
 """Left edge of every ROI row, left clear for a status strip (analysis state)
@@ -39,6 +39,8 @@ CHIP_SIZE = 10
 CHEVRON_ZONE = 28
 """Width, from the left edge, of the part of a group header that toggles it."""
 _CELL_PAD = 6
+_ROW_LINE_ALPHA = 90
+_COLUMN_LINE_ALPHA = 55
 
 
 def row_height(font_metrics) -> int:
@@ -47,6 +49,25 @@ def row_height(font_metrics) -> int:
 
 def group_row_height(font_metrics) -> int:
     return font_metrics.height() + 14
+
+
+class _StepLineEdit(QLineEdit):
+    """The cell editor. In a diameter cell, Up / Down step the value (Shift: the
+    large step); Enter then applies it, to every selected ROI like any edit."""
+
+    def __init__(self, parent: QWidget, unit) -> None:
+        super().__init__(parent)
+        self._unit = unit  # None: this cell does not step
+
+    def keyPressEvent(self, event) -> None:  # type: ignore[override]
+        if self._unit is not None and event.key() in (Qt.Key.Key_Up, Qt.Key.Key_Down):
+            large = bool(event.modifiers() & Qt.KeyboardModifier.ShiftModifier)
+            stepped = step_text(self.text(), 1 if event.key() == Qt.Key.Key_Up else -1, large, self._unit)
+            if stepped is not None:
+                self.setText(stepped)
+            event.accept()
+            return
+        super().keyPressEvent(event)
 
 
 class RoiTableDelegate(QStyledItemDelegate):
@@ -99,13 +120,13 @@ class RoiTableDelegate(QStyledItemDelegate):
         theme = get_active_theme()
         rect = option.rect
         self._paint_row_background(painter, option, index, theme)
+        self._paint_cell_borders(painter, rect, index.column(), theme)
         column = index.column()
         font = QFont(option.font)
         color = QColor(theme.text_primary)
         text = str(index.data(Qt.ItemDataRole.DisplayRole) or "")
         if index.data(INHERITED_ROLE) or (index.data(MASK_ROLE) and text == "mask"):
-            font.setItalic(True)
-            color = QColor(theme.text_dim)
+            color = QColor(theme.text_dim)  # dim, not italic: italics read as "different kind of value"
         alignment = index.data(Qt.ItemDataRole.TextAlignmentRole)
         alignment = Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter if alignment is None else Qt.AlignmentFlag(alignment)
         if column == COLUMN_ID:
@@ -117,6 +138,21 @@ class RoiTableDelegate(QStyledItemDelegate):
         painter.setFont(font)
         painter.setPen(color)
         painter.drawText(text_rect, int(alignment), option.fontMetrics.elidedText(text, Qt.TextElideMode.ElideRight, text_rect.width()))
+
+    @staticmethod
+    def _paint_cell_borders(painter: QPainter, rect: QRect, column: int, theme) -> None:
+        """Hairlines under the row and between the value columns: faint enough
+        to guide the eye along a row and down a column, never a heavy grid."""
+        line = QColor(theme.toolbar_border)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)
+        line.setAlpha(_ROW_LINE_ALPHA)
+        painter.setPen(QPen(line, 1))
+        painter.drawLine(rect.bottomLeft(), rect.bottomRight())
+        if column != COLUMN_COUNT - 1:
+            line.setAlpha(_COLUMN_LINE_ALPHA)
+            painter.setPen(QPen(line, 1))
+            painter.drawLine(rect.topRight(), rect.bottomRight())
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
 
     @staticmethod
     def _paint_dot(painter: QPainter, rect: QRectF, color_hex: str | None, theme) -> None:
@@ -183,7 +219,9 @@ class RoiTableDelegate(QStyledItemDelegate):
     # -- editing --------------------------------------------------------------------
 
     def createEditor(self, parent: QWidget, option: QStyleOptionViewItem, index: QModelIndex) -> QWidget:  # type: ignore[override]
-        editor = QLineEdit(parent)
+        steps = index.data(KIND_ROLE) != "group" and index.column() in DIAMETER_COLUMNS
+        unit = getattr(index.model(), "unit", None)
+        editor = _StepLineEdit(parent, unit() if steps and callable(unit) else None)
         theme = get_active_theme()
         editor.setStyleSheet(
             f"QLineEdit {{ background: {theme.control_bg}; color: {theme.text_primary}; "

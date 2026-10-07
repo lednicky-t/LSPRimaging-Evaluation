@@ -15,11 +15,12 @@ view, the modules, the four tools, and three small callbacks (`image_shape`,
 
 from __future__ import annotations
 
+import math
 from collections.abc import Callable
 from typing import Any, Protocol
 
 import pyqtgraph as pg
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import QPointF, Qt
 from PyQt6.QtWidgets import QGraphicsView, QInputDialog, QWidget
 
 from ...image_tools import ActiveToolModule, ImageTool
@@ -47,6 +48,11 @@ _CURSOR_FOR_CROP_HANDLE: dict[str | None, Qt.CursorShape] = {
 """Cursor feedback for `CropTool.hover_handle`'s result - the tool draws no
 separate handle graphics (see crop_tool.py's docstring), so the cursor
 shape is the only hint that an edge/corner/interior is grabbable."""
+
+
+_NO_CURSOR_YET = object()
+"""`_roi_cursor` before the ROI hover has set anything: distinct from `None`
+(= "default cursor"), so the first hover always sets the cursor explicitly."""
 
 
 class _ClickTool(Protocol):
@@ -96,6 +102,7 @@ class CanvasInteraction:
         self._to_reference = to_reference
         self._analysis_running = analysis_running
         self._notify = notify
+        self._roi_cursor: Qt.CursorShape | None | object = _NO_CURSOR_YET  # what the ROI hover last set
 
     def handle_key(self, key: int, modifiers: Qt.KeyboardModifier) -> bool:
         """Arrow keys / Esc for the active tool; `True` when a tool used the key."""
@@ -119,6 +126,12 @@ class CanvasInteraction:
             viewport.setCursor(shape)
 
     def on_scene_moved(self, scene_pos: object) -> None:
+        if self._roi_gestures_enabled():
+            self._update_roi_hover_cursor(scene_pos)
+            return
+        if self._roi_cursor is not _NO_CURSOR_YET:  # left the ROI gestures: drop the cursor they set
+            self._roi_cursor = _NO_CURSOR_YET
+            self._set_view_cursor(None)
         tool = self._active_tool.active()
         rotate_pending = self._rotate_tool.first_point() is not None
         measure_pending = self._measure_tool.first_point() is not None
@@ -382,43 +395,69 @@ class CanvasInteraction:
             self.on_crop_drag(ev)
             or self.on_measure_drag(ev)
             or self._on_select_area_drag(ev)
-            or self._on_marquee_drag(ev)
+            or self._on_roi_drag(ev)
         )
 
     def _roi_gestures_enabled(self) -> bool:
         return self._active_tool.active() is None and self._roi_tab_active()
 
-    def _on_marquee_drag(self, ev: Any) -> bool:
-        """ROIs tab, no tool armed: left-drag draws the selection rectangle."""
+    def _on_roi_drag(self, ev: Any) -> bool:
+        """ROIs tab, no tool armed: left-drag resizes (from a selected ROI's border),
+        moves (from inside a selected ROI) or draws the selection rectangle."""
         if not self._roi_gestures_enabled():
             return False
         point = self._plot.vb.mapSceneToView(ev.scenePos())
         x, y = float(point.x()), float(point.y())
+        modifiers = ev.modifiers()
+        additive = bool(modifiers & (Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.ShiftModifier))
         if ev.isStart():
-            return self._in_view(ev.scenePos()) and self._roi_gestures.begin_marquee(x, y)
-        if ev.isFinish():
-            additive = bool(ev.modifiers() & (Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.ShiftModifier))
-            self._roi_gestures.end_marquee(x, y, additive=additive)
+            # pyqtgraph only reports a drag once the mouse has moved a few pixels, so
+            # `scenePos()` is already past where the button went down: hit-test and
+            # anchor at the press point, then apply the movement so far.
+            down = ev.buttonDownScenePos()
+            if not self._in_view(down):
+                return False
+            down_point = self._plot.vb.mapSceneToView(down)
+            if not self._roi_gestures.begin(float(down_point.x()), float(down_point.y()), additive=additive):
+                return False
+            self._roi_gestures.update(x, y)
             return True
-        self._roi_gestures.update_marquee(x, y)
+        if ev.isFinish():
+            self._roi_gestures.end(x, y, additive=additive)
+            return True
+        self._roi_gestures.update(x, y)
         return True
 
-    def on_right_drag(self, ev: Any) -> bool:
-        """`ImageViewBox`'s right-drag slot: ROIs tab, no tool armed, moves the
-        selected ROIs live (one undo step per drag)."""
-        if not self._roi_gestures_enabled():
-            return False
-        point = self._plot.vb.mapSceneToView(ev.scenePos())
-        x, y = float(point.x()), float(point.y())
-        if ev.isStart():
-            if not self._in_view(ev.scenePos()):
-                return False
-            return self._roi_gestures.begin_move(self._roi_at(x, y), x, y)
-        if ev.isFinish():
-            self._roi_gestures.end_move()
-            return True
-        self._roi_gestures.update_move(x, y)
-        return True
+    def _update_roi_hover_cursor(self, scene_pos: object) -> None:
+        """Show what a press here would do: a resize arrow on a selected ROI's
+        border (pointing along the radius), a move cursor inside a selected ROI."""
+        if self._roi_gestures.busy:
+            return  # keep the cursor the drag started with
+        shape: Qt.CursorShape | None = None
+        if self._in_view(scene_pos):
+            point = self._plot.vb.mapSceneToView(scene_pos)
+            x, y = float(point.x()), float(point.y())
+            hit = self._roi_gestures.hit(x, y)
+            if hit is not None and hit.zone == "body":
+                shape = Qt.CursorShape.SizeAllCursor
+            elif hit is not None:
+                shape = self._resize_cursor(hit.center, x, y)
+        if shape != self._roi_cursor:
+            self._roi_cursor = shape
+            self._set_view_cursor(shape)
+
+    def _resize_cursor(self, center: tuple[float, float], x: float, y: float) -> Qt.CursorShape:
+        """The two-headed arrow closest to the radius direction *on screen* (the
+        view may be flipped, so the angle is taken between scene points)."""
+        a = self._plot.vb.mapViewToScene(QPointF(center[0], center[1]))
+        b = self._plot.vb.mapViewToScene(QPointF(x, y))
+        sector = round(math.atan2(b.y() - a.y(), b.x() - a.x()) / (math.pi / 4)) % 4
+        return (
+            Qt.CursorShape.SizeHorCursor,
+            Qt.CursorShape.SizeFDiagCursor,  # towards the lower right
+            Qt.CursorShape.SizeVerCursor,
+            Qt.CursorShape.SizeBDiagCursor,  # towards the lower left
+        )[sector]
 
     def _on_select_area_drag(self, ev: Any) -> bool:
         """Draws the rectangle/lasso while a selection tool is armed."""

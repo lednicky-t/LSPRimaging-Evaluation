@@ -75,6 +75,21 @@ def parse_length(text: str, unit: LengthUnit) -> float:
     return from_display(value, unit)
 
 
+STEP_PX = 0.5
+STEP_PX_LARGE = 5.0
+"""How far one Up/Down (or Ctrl+wheel) step moves a diameter; Shift takes the large one."""
+
+
+def step_text(text: str, direction: int, large: bool, unit: LengthUnit) -> str | None:
+    """``text`` (a length in ``unit``) moved one step up (+1) or down (-1), as
+    editor text, never below zero; ``None`` if ``text`` is not a number."""
+    try:
+        px = parse_length(text, unit)
+    except ValueError:
+        return None
+    return edit_text(max(0.0, px + direction * (STEP_PX_LARGE if large else STEP_PX)), unit)
+
+
 # -- rows --------------------------------------------------------------------
 
 

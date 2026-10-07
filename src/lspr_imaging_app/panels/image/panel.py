@@ -152,7 +152,7 @@ from .measure_line_tool import MeasureLineTool
 from .overlay_style import OverlayStyle
 from .overlay_tint import OverlayTint
 from .render import ImageRenderer, RenderRequest, RenderResult
-from .roi_gestures import RoiGestures
+from .roi_gestures import RoiGestures, SelectedApertures
 from .roi_overlay import RoiOverlay, add_curve
 from .roi_overlay_controls import RoiOverlayControls
 from .rotate_line_tool import RotateLineTool
@@ -552,7 +552,6 @@ class ImagePanel(QWidget):
         # is the first tool to claim them - declines (returns False) unless
         # it is the active tool, so every other case is untouched.
         self._plot.vb.set_left_drag_handler(self._on_left_drag_event)
-        self._plot.vb.set_right_drag_handler(self._on_right_drag_event)  # moves the selected ROIs (ROIs tab)
         self._plot.vb.sigTransformChanged.connect(self._reposition_crop_controls)
 
         # A real QWidget (QSpinBox/QToolButton need actual input, unlike a
@@ -655,8 +654,9 @@ class ImagePanel(QWidget):
             image_shape=lambda: self._last_image_shape, roi_at=self.roi_at, apply_crop=self._on_crop_apply_requested,
             roi_gestures=RoiGestures(
                 self._plot, self._roi_toolbox, self._selection,
-                rois_in_rect=self.rois_in_rect, display_linear=self._display_linear,
-                redraw_overlay=self._draw_roi_overlay, parent=self,
+                rois_in_rect=self.rois_in_rect, selected_apertures=self._selected_apertures,
+                view_pixel_size=lambda: float(self._plot.vb.viewPixelSize()[0]),
+                display_linear=self._display_linear, redraw_overlay=self._draw_roi_overlay, parent=self,
             ),
             roi_tab_active=lambda: self._tool_ribbon.current_category() == ROI_TAB,
             to_reference=self._display_to_reference,
@@ -2134,8 +2134,6 @@ class ImagePanel(QWidget):
     def _on_left_drag_event(self, ev: object) -> bool:
         return self._interaction.on_left_drag(ev)
 
-    def _on_right_drag_event(self, ev: object) -> bool:
-        return self._interaction.on_right_drag(ev)
 
     def _on_crop_drag_event(self, ev: object) -> bool:
         return self._interaction.on_crop_drag(ev)
@@ -2329,6 +2327,25 @@ class ImagePanel(QWidget):
         centers = self._roi_toolbox.display_positions(frame, self._chromatic.affine_for(frame))
         inside = (centers[:, 0] >= x0) & (centers[:, 0] <= x1) & (centers[:, 1] >= y0) & (centers[:, 1] <= y1)
         return {roi.area_roi_id for roi, hit in zip(rois, inside, strict=True) if hit}
+
+    def _selected_apertures(self) -> SelectedApertures | None:
+        """The selected ROIs' display centres and diameters, for the border/inside hit test; `None` with no selection."""
+        selected = self._selection.selected_roi_ids()
+        rois = self._roi_toolbox.rois()
+        if not selected or not rois:
+            return None
+        keep = np.fromiter((roi.area_roi_id in selected for roi in rois), dtype=bool, count=len(rois))
+        if not keep.any():
+            return None
+        frame = (self._current_cube(), self._current_wavelength())
+        centers = self._roi_toolbox.display_positions(frame, self._chromatic.affine_for(frame))[keep]
+        chosen = [roi for roi, hit in zip(rois, keep, strict=True) if hit]
+        return SelectedApertures(
+            ids=np.array([roi.area_roi_id for roi in chosen], dtype=np.int64),
+            centers=centers,
+            diameters=np.array([roi.sample_diameter_px for roi in chosen], dtype=np.float64),
+            resizable=np.array([roi.sample_geometry_type != "mask" for roi in chosen], dtype=bool),
+        )
 
     def _current_affine(self) -> np.ndarray:
         frame = (self._current_cube(), self._current_wavelength())

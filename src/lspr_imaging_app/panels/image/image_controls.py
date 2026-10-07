@@ -102,7 +102,6 @@ class ImageViewBox(pg.ViewBox):
     def __init__(self, *args: object, **kwargs: object) -> None:
         super().__init__(*args, **kwargs)
         self._left_drag_handler: Callable[[object], bool] | None = None
-        self._right_drag_handler: Callable[[object], bool] | None = None
 
     def set_left_drag_handler(self, handler: Callable[[object], bool] | None) -> None:
         """*handler* gets every left-button drag event first and returns
@@ -112,16 +111,7 @@ class ImageViewBox(pg.ViewBox):
         this class needing to know which tool, if any, is on."""
         self._left_drag_handler = handler
 
-    def set_right_drag_handler(self, handler: Callable[[object], bool] | None) -> None:
-        """Same contract as `set_left_drag_handler`, for the right button
-        (moving ROIs). Unclaimed right-drags are ignored, so the view never zooms."""
-        self._right_drag_handler = handler
-
     def mouseDragEvent(self, ev, axis=None):  # noqa: N802 - Qt/pyqtgraph naming
-        if ev.button() == Qt.MouseButton.RightButton and self._right_drag_handler is not None:
-            if self._right_drag_handler(ev):
-                ev.accept()
-                return
         if ev.button() == Qt.MouseButton.LeftButton and self._left_drag_handler is not None:
             if self._left_drag_handler(ev):
                 ev.accept()

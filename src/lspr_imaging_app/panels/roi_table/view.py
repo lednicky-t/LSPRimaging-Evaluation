@@ -9,7 +9,7 @@ renames. Keyboard: Delete asks to delete, Alt+Up / Alt+Down ask to move.
 from __future__ import annotations
 
 from PyQt6.QtCore import QModelIndex, QRect, Qt, pyqtSignal
-from PyQt6.QtGui import QFontMetrics, QKeyEvent, QMouseEvent, QPainter
+from PyQt6.QtGui import QFontMetrics, QKeyEvent, QKeySequence, QMouseEvent, QPainter, QWheelEvent
 from PyQt6.QtWidgets import QAbstractItemView, QHeaderView, QTreeView, QWidget
 
 from .delegate import CHEVRON_ZONE, CHIP_SIZE, GROUP_INDENT, STRIP_WIDTH
@@ -44,6 +44,12 @@ class RoiTreeView(QTreeView):
     chip_double_clicked = pyqtSignal(QModelIndex)
     """A double-click on a colour chip (a ROI's dot or a group's chip): change
     the colour instead of editing the row."""
+    copy_requested = pyqtSignal()
+    paste_requested = pyqtSignal()
+    fill_down_requested = pyqtSignal()
+    """Ctrl+C / Ctrl+V / Ctrl+D on the current cell (the panel decides what they do)."""
+    step_requested = pyqtSignal(QModelIndex, int, bool)
+    """Ctrl+wheel over a cell: index, direction (+1 / -1), large step."""
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -133,6 +139,17 @@ class RoiTreeView(QTreeView):
         start = left + STRIP_WIDTH + 5 + (GROUP_INDENT if index.data(DEPTH_ROLE) else 0)
         return start - 3 <= x <= start + CHIP_SIZE + 3
 
+    def wheelEvent(self, event: QWheelEvent) -> None:  # type: ignore[override]
+        """Ctrl + wheel over a cell steps its value (a plain wheel still scrolls)."""
+        if event.modifiers() & Qt.KeyboardModifier.ControlModifier and event.angleDelta().y():
+            index = self.indexAt(event.position().toPoint())
+            if index.isValid():
+                large = bool(event.modifiers() & Qt.KeyboardModifier.ShiftModifier)
+                self.step_requested.emit(index, 1 if event.angleDelta().y() > 0 else -1, large)
+                event.accept()
+                return
+        super().wheelEvent(event)
+
     def drawBranches(self, painter: QPainter, rect: QRect, index: QModelIndex) -> None:  # type: ignore[override]
         """Nothing: the chevron is painted by the delegate."""
 
@@ -140,6 +157,18 @@ class RoiTreeView(QTreeView):
 
     def keyPressEvent(self, event: QKeyEvent) -> None:  # type: ignore[override]
         if self.state() != QAbstractItemView.State.EditingState:
+            if event.matches(QKeySequence.StandardKey.Copy):
+                self.copy_requested.emit()
+                event.accept()
+                return
+            if event.matches(QKeySequence.StandardKey.Paste):
+                self.paste_requested.emit()
+                event.accept()
+                return
+            if event.key() == Qt.Key.Key_D and event.modifiers() == Qt.KeyboardModifier.ControlModifier:
+                self.fill_down_requested.emit()
+                event.accept()
+                return
             if event.key() in (Qt.Key.Key_Delete, Qt.Key.Key_Backspace):
                 self.delete_requested.emit()
                 event.accept()
