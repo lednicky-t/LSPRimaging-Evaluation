@@ -40,6 +40,12 @@ sub-tabs within the bottom row) are not built - the maintainer's plan is to
 add them once a category actually has enough tools to need grouping within
 itself, not to guess at that structure now.
 
+**"ROIs" holds the canvas tools plus how the ROI circles are drawn**
+(2026-10-07, maintainer request): `RoiOverlayControls` twice (show/hide, colour
+and transparency for the sample circles, and the same for the reference
+rings) and a toggle for the ROI labels, each a captioned group beside the
+Select / Add tools. Display-only; `ImagePanel` owns the values.
+
 **The bottom row is a fixed height** regardless of which category is
 showing (`_ROW_HEIGHT` - the tallest of `CanvasToolsBar`'s,
 `TransformsSection`'s, and the "Mask" tab's captioned-icon-groups' own

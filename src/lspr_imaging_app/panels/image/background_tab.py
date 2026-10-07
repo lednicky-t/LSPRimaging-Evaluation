@@ -30,8 +30,8 @@ section this replaces. Display/UI only - no estimation happens here.
 
 from __future__ import annotations
 
-from PyQt6.QtCore import QPointF, QRectF, QSize, Qt, QVariantAnimation, pyqtSignal
-from PyQt6.QtGui import QColor, QIcon, QPainter, QPen, QPixmap
+from PyQt6.QtCore import QSize, QVariantAnimation, pyqtSignal
+from PyQt6.QtGui import QColor, QIcon
 from PyQt6.QtWidgets import (
     QComboBox,
     QFrame,
@@ -47,6 +47,7 @@ from ...image_tools import BackgroundModule
 from ...image_tools.background.model import BackgroundComputationalChange, BackgroundSettings, max_binning_for_sigma
 from ..ribbon_group import labeled_icon_group, vertical_separator
 from .general_group import ICON_SIZE, style_general_icon_button
+from .roi_icons import spot_icon
 
 _RENDER_SIZE = ICON_SIZE * 2
 _STROKE_WIDTH = 2.1
@@ -96,26 +97,10 @@ def _match_field_height(widget: QWidget, class_name: str) -> None:
 
 
 def _roi_icon(excluded: bool, dim: str) -> QIcon:
-    """Sample-ROI exclusion icon: a filled circle, pink when the ROI areas are
-    excluded; grey with a slash (top right to bottom left) when they are not."""
-    size = _RENDER_SIZE
-    pixmap = QPixmap(size, size)
-    pixmap.fill(Qt.GlobalColor.transparent)
-    painter = QPainter(pixmap)
-    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-    color = QColor(_ROI_COLOR if excluded else dim)
-    painter.setPen(Qt.PenStyle.NoPen)
-    painter.setBrush(color)
-    margin = size * 0.17
-    painter.drawEllipse(QRectF(margin, margin, size - 2 * margin, size - 2 * margin))
-    if not excluded:
-        pen = QPen(color, _STROKE_WIDTH * 1.4)
-        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
-        painter.setPen(pen)
-        edge = size * 0.12
-        painter.drawLine(QPointF(size - edge, edge), QPointF(edge, size - edge))
-    painter.end()
-    return QIcon(pixmap)
+    """Sample-ROI exclusion icon: a filled circle, red when the ROI areas are
+    excluded; grey with a slash (top right to bottom left) when they are not.
+    The drawing is shared with the ROI tab's visibility toggle (`roi_icons.py`)."""
+    return spot_icon(excluded, dim, _ROI_COLOR)
 
 
 class BackgroundTab(QWidget):

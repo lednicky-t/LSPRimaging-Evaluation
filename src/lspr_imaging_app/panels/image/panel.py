@@ -131,6 +131,7 @@ from .context_menu import show_tool_context_menu
 from .crop_size_controls import CropSizeControls
 from .crop_tool import CropTool
 from .data_axis_slider import DataAxisSlider
+from .general_group import ICON_SIZE as _RIBBON_ICON_SIZE
 from .general_group import AreaSelectionPicker, mirror_icon_button, style_general_icon_button
 from .guided_value_spinbox import GuidedValueSpinBox
 from .histogram_highlight_overlay_controls import HistogramHighlightOverlayControls
@@ -151,6 +152,8 @@ from .measure_line_tool import MeasureLineTool
 from .overlay_style import OverlayStyle
 from .overlay_tint import OverlayTint
 from .render import ImageRenderer, RenderRequest, RenderResult
+from .roi_label_overlay import RoiLabelItem, label_text
+from .roi_overlay_controls import RoiOverlayControls
 from .rotate_line_tool import RotateLineTool
 from ..ui_state import UiStateStore
 from .scale_bar_controls import ScaleBarControls
@@ -173,7 +176,11 @@ paid far more often than the image's."""
 
 _DEFAULT_SAMPLE_COLOR = "#f59e0b"
 _DEFAULT_REFERENCE_COLOR = "#38bdf8"
+_SAMPLE_WIDTH = 1.5
+_REFERENCE_WIDTH = 1.0
 _SELECTED_COLOR = "#f8fafc"
+_MAX_IDLE_SAMPLE_CURVES = 24
+"""How many emptied per-colour sample curves are kept for reuse."""
 _CHUNK_GRID_COLOR = "#a3a3a3"
 _CROP_OUTLINE_COLOR = "#38bdf8"  # the crop button's active blue
 
@@ -449,6 +456,21 @@ class ImagePanel(QWidget):
             self._scale_bar_item.set_color(saved_color)
             self._scale_bar_controls.set_color(saved_color)
         self._scale_bar_color_store = store
+        for kind in ("sample", "reference"):
+            visible = store.get(f"image/roi_{kind}_visible")
+            if isinstance(visible, bool):
+                setattr(self, f"_roi_{kind}_visible", visible)
+            color = QColor(str(store.get(f"image/roi_{kind}_color") or ""))
+            if color.isValid():
+                setattr(self, f"_roi_{kind}_color", color.name())
+            alpha = store.get(f"image/roi_{kind}_alpha")
+            if isinstance(alpha, (int, float)) and not isinstance(alpha, bool) and 0.0 <= alpha <= 1.0:
+                setattr(self, f"_roi_{kind}_alpha", float(alpha))
+        labels = store.get("image/roi_labels")
+        if isinstance(labels, bool):
+            self._roi_labels_visible = labels
+        self._sync_roi_overlay_controls()
+        self._roi_overlay_store = store  # only now: restoring must not save what it just read
 
     def _on_scale_bar_color_changed(self, color: QColor) -> None:
         self._scale_bar_item.set_color(color)
@@ -513,8 +535,22 @@ class ImagePanel(QWidget):
         # of disjoint circles, so adding an ROI costs array append, not a new
         # QGraphicsItem. Matters because the overlay is rebuilt on every
         # selection change.
-        self._sample_curve = self._add_curve(_DEFAULT_SAMPLE_COLOR, width=1.5)
-        self._reference_curve = self._add_curve(_DEFAULT_REFERENCE_COLOR, width=1.0)
+        self._sample_curve = self._add_curve(_DEFAULT_SAMPLE_COLOR, width=_SAMPLE_WIDTH)
+        # One curve per distinct ROI colour (a group's members each have their
+        # own tint); `_sample_curve` stays the one for ROIs with no colour of
+        # their own. See `_set_sample_curves`.
+        self._sample_curves: dict[str, pg.PlotDataItem] = {_DEFAULT_SAMPLE_COLOR: self._sample_curve}
+        self._reference_curve = self._add_curve(_DEFAULT_REFERENCE_COLOR, width=_REFERENCE_WIDTH)
+        # How the ROI circles are drawn (the "ROIs" ribbon tab; see `roi_overlay_controls.py`).
+        # Display-only: this panel owns the values, no other module does.
+        self._roi_sample_visible = True
+        self._roi_sample_color = _DEFAULT_SAMPLE_COLOR  # for ROIs with no colour of their own
+        self._roi_sample_alpha = 1.0
+        self._roi_reference_visible = True
+        self._roi_reference_color = _DEFAULT_REFERENCE_COLOR
+        self._roi_reference_alpha = 1.0
+        self._roi_labels_visible = False
+        self._roi_overlay_store: UiStateStore | None = None
         self._selection_curve = self._add_curve(_SELECTED_COLOR, width=2.5)
         self._chunk_grid_curve = self._add_curve(_CHUNK_GRID_COLOR, width=1.0, dashed=True)
         # Chromatic landmark overlay (2026-10-04): crosses = *estimated* (tracked
@@ -533,6 +569,10 @@ class ImagePanel(QWidget):
         self._scale_bar_item = ScaleBarItem(self._plot.vb)
         self._plot.vb.sigRangeChanged.connect(self._draw_scale_bar)
         self._plot.vb.sigResized.connect(self._draw_scale_bar)
+        # ROI labels (the ROIs tab's toggle): the same kind of item, see `roi_label_overlay.py`.
+        self._roi_label_item = RoiLabelItem(self._plot.vb)
+        self._plot.vb.sigRangeChanged.connect(lambda *_args: self._roi_label_item.update())
+        self._plot.vb.sigResized.connect(lambda *_args: self._roi_label_item.update())
         # Drawn only while a preview tool is active (see `_draw_overlays`).
         self._crop_outline_curve = self._add_curve(_CROP_OUTLINE_COLOR, width=1.5, dashed=True)
 
@@ -855,12 +895,49 @@ class ImagePanel(QWidget):
             )
         ):
             self._view_content_layout.insertWidget(stretch_index + offset, widget)
+        self._roi_sample_controls = RoiOverlayControls(
+            "sample", visible=self._roi_sample_visible, color=QColor(self._roi_sample_color),
+            alpha=self._roi_sample_alpha, parent=self,
+        )
+        self._roi_reference_controls = RoiOverlayControls(
+            "reference", visible=self._roi_reference_visible, color=QColor(self._roi_reference_color),
+            alpha=self._roi_reference_alpha, parent=self,
+        )
+        for kind, controls in (("sample", self._roi_sample_controls), ("reference", self._roi_reference_controls)):
+            controls.visibility_changed.connect(lambda shown, k=kind: self._on_roi_overlay_changed(k, "visible", bool(shown)))
+            controls.color_changed.connect(lambda color, k=kind: self._on_roi_overlay_changed(k, "color", color.name()))
+            controls.alpha_changed.connect(lambda alpha, k=kind: self._on_roi_overlay_changed(k, "alpha", float(alpha)))
+        self._roi_labels_button = QToolButton(self)
+        self._roi_labels_button.setCheckable(True)
+        self._roi_labels_button.setChecked(self._roi_labels_visible)
+        self._roi_labels_button.setToolTip("Show or hide the ROI labels: each ROI's number, and its name if it has one.")
+        style_general_icon_button(self._roi_labels_button)
+        self._roi_labels_button.toggled.connect(self._on_roi_labels_toggled)
+        self._refresh_roi_labels_icon()
+        roi_sample_group, self._roi_sample_label = labeled_icon_group(self, self._roi_sample_controls, "Sample")
+        roi_reference_group, self._roi_reference_label = labeled_icon_group(self, self._roi_reference_controls, "Reference")
+        roi_labels_group, self._roi_labels_caption = labeled_icon_group(self, self._roi_labels_button, "Labels")
+        self._roi_separator = vertical_separator(self)
+        self._roi_separator_2 = vertical_separator(self)
+        self._roi_separator_3 = vertical_separator(self)
+        roi_content = QWidget(self)
+        roi_content_layout = QHBoxLayout(roi_content)
+        roi_content_layout.setContentsMargins(0, 0, 0, 0)
+        roi_content_layout.setSpacing(6)
+        roi_content_layout.addWidget(self._canvas_tools)
+        roi_content_layout.addWidget(self._roi_separator)
+        roi_content_layout.addWidget(roi_sample_group)
+        roi_content_layout.addWidget(self._roi_separator_2)
+        roi_content_layout.addWidget(roi_reference_group)
+        roi_content_layout.addWidget(self._roi_separator_3)
+        roi_content_layout.addWidget(roi_labels_group)
+        roi_content_layout.addStretch(1)
         self._tool_ribbon = ImageToolRibbon(
             [
                 (VIEW_TAB, view_content),
                 ("Image tools", image_tools_content),
                 ("Mask", mask_content),
-                ("ROIs", self._canvas_tools),
+                ("ROIs", roi_content),
                 # Empty on purpose (2026-10-03): filled directly here, not in
                 # the Workflow panel (maintainer's plan for chromatic correction).
                 (CHROMATIC_TAB, self._chromatic_tab),
@@ -1190,7 +1267,16 @@ class ImagePanel(QWidget):
             self._mask_overlay_controls.refresh_theme(get_active_theme())
         if hasattr(self, "_view_mask_overlay_controls"):
             self._view_mask_overlay_controls.refresh_theme(get_active_theme())
-        for name in ("_view_separator", "_view_separator_2", "_view_separator_3", "_view_separator_4"):
+        for name in ("_roi_sample_controls", "_roi_reference_controls"):
+            if hasattr(self, name):
+                getattr(self, name).refresh_theme(get_active_theme())
+        if hasattr(self, "_roi_labels_button"):
+            style_general_icon_button(self._roi_labels_button)
+            self._refresh_roi_labels_icon()
+        for name in (
+            "_view_separator", "_view_separator_2", "_view_separator_3", "_view_separator_4",
+            "_roi_separator", "_roi_separator_2", "_roi_separator_3",
+        ):
             if hasattr(self, name):
                 getattr(self, name).setStyleSheet(f"color: {get_active_theme().control_border};")
         if hasattr(self, "_mask_scope_toggle"):
@@ -1218,6 +1304,9 @@ class ImagePanel(QWidget):
             "_view_scale_bar_label",
             "_mask_edit_label",
             "_mask_png_label",
+            "_roi_sample_label",
+            "_roi_reference_label",
+            "_roi_labels_caption",
         ):
             if hasattr(self, label_attr):
                 getattr(self, label_attr).setStyleSheet(group_label_style())
@@ -1305,9 +1394,7 @@ class ImagePanel(QWidget):
         self._mask_overlay_state = None
         self._highlight_tint.item.hide()
         self._current_display_image = None
-        self._sample_curve.clear()
-        self._reference_curve.clear()
-        self._selection_curve.clear()
+        self._clear_roi_curves()
         self._chunk_grid_curve.clear()
         self._crop_outline_curve.clear()
         self._last_image_shape = None
@@ -1680,19 +1767,20 @@ class ImagePanel(QWidget):
         self._draw_crop_outline()
         self._draw_landmarks()
         self._draw_scale_bar()
+        self._draw_roi_overlay()
+
+    def _draw_roi_overlay(self) -> None:
+        """The ROI circles, reference rings and labels. Also called alone when
+        a ROI display option changes, so that needs no new image render."""
         if self._active_tool.active() in _PREVIEW_TOOLS:
             # ROI positions are in cropped/processed space; over the
             # uncropped preview they would be drawn in the wrong place.
-            self._sample_curve.clear()
-            self._reference_curve.clear()
-            self._selection_curve.clear()
+            self._clear_roi_curves()
             return
 
         rois = self._roi_toolbox.rois()
         if not rois:
-            self._sample_curve.clear()
-            self._reference_curve.clear()
-            self._selection_curve.clear()
+            self._clear_roi_curves()
             return
 
         frame = (self._current_cube(), self._current_wavelength())
@@ -1701,15 +1789,23 @@ class ImagePanel(QWidget):
         selected = self._selection.selected_roi_ids()
         theta = np.linspace(0.0, 2.0 * np.pi, _CIRCLE_POINTS, endpoint=True)
 
-        sample_x, sample_y = [], []
+        by_color: dict[str, tuple[list[float], list[float]]] = {}
         reference_x, reference_y = [], []
         selection_x, selection_y = [], []
+        labels: list[tuple[float, float, float, str]] = []
 
         for roi in rois:
             center = self._roi_toolbox.display_position(roi.area_roi_id, frame, affine)
+            if self._roi_labels_visible:
+                labels.append((center[0], center[1], float(roi.sample_diameter_px) / 2.0, label_text(roi.area_roi_id, roi.label)))
             xs, ys = transformed_circle_points(center, roi.sample_diameter_px, affine, theta)
-            target = (selection_x, selection_y) if roi.area_roi_id in selected else (sample_x, sample_y)
-            _append_polyline(target[0], target[1], xs, ys)
+            if roi.area_roi_id in selected:
+                # Selected ROIs are all drawn in the highlight colour, whatever
+                # their own, so the selection reads at a glance.
+                _append_polyline(selection_x, selection_y, xs, ys)
+            else:
+                curve_x, curve_y = by_color.setdefault(_roi_overlay_color(roi.sample_color_hex, self._roi_sample_color), ([], []))
+                _append_polyline(curve_x, curve_y, xs, ys)
 
             inner, outer = effective_reference_diameters(
                 roi, detection.reference_inner_diameter_px, detection.reference_outer_diameter_px
@@ -1718,9 +1814,109 @@ class ImagePanel(QWidget):
                 rx, ry = transformed_circle_points(center, diameter, affine, theta)
                 _append_polyline(reference_x, reference_y, rx, ry)
 
-        self._sample_curve.setData(sample_x, sample_y)
+        self._set_sample_curves(by_color)
         self._reference_curve.setData(reference_x, reference_y)
         self._selection_curve.setData(selection_x, selection_y)
+        self._roi_label_item.set_labels(labels)
+
+    def _clear_roi_curves(self) -> None:
+        self._set_sample_curves({})
+        self._reference_curve.clear()
+        self._selection_curve.clear()
+        self._roi_label_item.set_labels([])
+
+    def _style_roi_curve(self, curve: pg.PlotDataItem, color_hex: str, alpha: float, width: float) -> None:
+        color = QColor(color_hex)
+        color.setAlphaF(max(0.0, min(1.0, float(alpha))))
+        curve.setPen(pg.mkPen(color, width=width))
+
+    def _apply_roi_overlay_style(self) -> None:
+        """Put the ROI display options on the curves: colour with its
+        transparency, and shown or hidden. A hidden sample overlay hides the
+        selection highlight too (they are the same circles). The default
+        colour decides which curve a colourless ROI is on, so the circles are
+        redrawn as well."""
+        for color, curve in self._sample_curves.items():
+            self._style_roi_curve(curve, color, self._roi_sample_alpha, _SAMPLE_WIDTH)
+            curve.setVisible(self._roi_sample_visible)
+        self._selection_curve.setVisible(self._roi_sample_visible)
+        self._style_roi_curve(self._reference_curve, self._roi_reference_color, self._roi_reference_alpha, _REFERENCE_WIDTH)
+        self._reference_curve.setVisible(self._roi_reference_visible)
+        if self._last_image_shape is not None:
+            self._draw_roi_overlay()
+
+    def _on_roi_overlay_changed(self, kind: str, field: str, value: object) -> None:
+        """A ROI display control changed: ``kind`` is "sample" or "reference",
+        ``field`` "visible", "color" (a ``#rrggbb`` string) or "alpha"."""
+        setattr(self, f"_roi_{kind}_{field}", value)
+        self._apply_roi_overlay_style()
+        if self._roi_overlay_store is not None:
+            self._roi_overlay_store.set(f"image/roi_{kind}_{field}", value)
+
+    def _on_roi_labels_toggled(self, shown: bool) -> None:
+        self._roi_labels_visible = bool(shown)
+        self._refresh_roi_labels_icon()
+        if self._last_image_shape is not None:
+            self._draw_roi_overlay()
+        if self._roi_overlay_store is not None:
+            self._roi_overlay_store.set("image/roi_labels", bool(shown))
+
+    def _refresh_roi_labels_icon(self) -> None:
+        theme = get_active_theme()
+        on = self._roi_labels_button.isChecked()
+        self._roi_labels_button.setIcon(
+            load_tabler_icon(
+                "label-important" if on else "label-off",
+                color=theme.accent_blue if on else theme.text_dim,
+                size=_RIBBON_ICON_SIZE * 2,
+                stroke_width=2.1,
+            )
+        )
+
+    def _sync_roi_overlay_controls(self) -> None:
+        """Show the panel's ROI display options on the ribbon controls (after
+        a restore) without those controls reporting them back."""
+        self._roi_sample_controls.set_state(
+            visible=self._roi_sample_visible, color=QColor(self._roi_sample_color), alpha=self._roi_sample_alpha
+        )
+        self._roi_reference_controls.set_state(
+            visible=self._roi_reference_visible, color=QColor(self._roi_reference_color), alpha=self._roi_reference_alpha
+        )
+        blocked = self._roi_labels_button.blockSignals(True)
+        self._roi_labels_button.setChecked(self._roi_labels_visible)
+        self._roi_labels_button.blockSignals(blocked)
+        self._refresh_roi_labels_icon()
+        self._apply_roi_overlay_style()
+
+    def _set_sample_curves(self, by_color: dict[str, tuple[list[float], list[float]]]) -> None:
+        """Draw each colour's circles on that colour's curve (one
+        `PlotDataItem` per colour, circles joined by NaN separators, the same
+        trick the single curve used). A curve is created the first time a
+        colour appears and reused after, because making and removing graphics
+        items is the expensive part of a redraw. Curves whose colour is no
+        longer in use are emptied, and the oldest idle ones removed beyond
+        `_MAX_IDLE_SAMPLE_CURVES`, so recolouring a large group over and over
+        cannot pile up items. The default-colour curve is never removed."""
+        for color, (xs, ys) in by_color.items():
+            self._sample_curve_for(color).setData(xs, ys)
+        idle = [color for color in self._sample_curves if color not in by_color]
+        for color in idle:
+            self._sample_curves[color].clear()
+        removable = [color for color in idle if color != _DEFAULT_SAMPLE_COLOR]  # oldest first
+        for color in removable[: max(0, len(removable) - _MAX_IDLE_SAMPLE_CURVES)]:
+            self._plot.removeItem(self._sample_curves.pop(color))
+
+    def _sample_curve_for(self, color_hex: str) -> pg.PlotDataItem:
+        curve = self._sample_curves.get(color_hex)
+        if curve is None:
+            curve = self._add_curve(color_hex, width=_SAMPLE_WIDTH)
+            self._style_roi_curve(curve, color_hex, self._roi_sample_alpha, _SAMPLE_WIDTH)
+            curve.setVisible(self._roi_sample_visible)
+            # Drawn where the single sample curve used to be: under the
+            # reference rings and the selection highlight, whenever it was made.
+            curve.stackBefore(self._reference_curve)
+            self._sample_curves[color_hex] = curve
+        return curve
 
     def _update_chromatic_tab_state(self, *_args: object) -> None:
         """Green "Chromatic" tab while a fitted correction is switched on, so
@@ -2461,6 +2657,14 @@ class _blocked:
 
     def __exit__(self, *_exc: object) -> None:
         self._widget.blockSignals(self._previous)
+
+
+def _roi_overlay_color(color_hex: str | None, default: str) -> str:
+    """The colour a ROI's sample circle is drawn in: its own stored colour, or
+    ``default`` for a ROI with none (or one that is not a valid colour)."""
+    if color_hex and QColor(color_hex).isValid():
+        return color_hex.lower()
+    return default
 
 
 def _append_polyline(xs: list[float], ys: list[float], new_x: np.ndarray, new_y: np.ndarray) -> None:
