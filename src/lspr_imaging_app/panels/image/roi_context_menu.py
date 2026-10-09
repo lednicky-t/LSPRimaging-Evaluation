@@ -20,6 +20,8 @@ ADD_TO_GROUP = "add_to_group"
 UNGROUP = "ungroup"
 DELETE = "delete"
 DESELECT = "deselect"
+APPLY_ALL_CUBES = "apply_all_cubes"
+REMOVE_CUBE_EDIT = "remove_cube_edit"
 
 
 @dataclass(frozen=True)
@@ -36,6 +38,8 @@ def show_roi_context_menu(
     any_selected_grouped: bool,
     can_add: bool,
     can_delete: bool,
+    can_apply_all_cubes: bool = False,
+    can_remove_cube_edit: bool = False,
 ) -> RoiMenuChoice | None:
     """Pop the menu at the cursor. ``groups`` is ``(group_id, name)`` pairs.
     Returns the choice, or `None` if dismissed."""
@@ -52,6 +56,13 @@ def show_roi_context_menu(
     ungroup = menu.addAction("Ungroup")
     ungroup.setEnabled(any_selected_grouped)
     menu.addSeparator()
+    apply_all = menu.addAction("Apply to all cubes")
+    apply_all.setToolTip("Make the geometry shown on this cube the geometry of every cube (drops the per-cube edits).")
+    apply_all.setEnabled(can_apply_all_cubes)
+    remove_edit = menu.addAction("Remove this cube's edit")
+    remove_edit.setToolTip("Forget the edit made on this cube: it follows the earlier edit (or the original geometry) again.")
+    remove_edit.setEnabled(can_remove_cube_edit)
+    menu.addSeparator()
     delete = menu.addAction(f"Delete {selected_count} ROI{plural}" if selected_count else "Delete selected ROIs")
     delete.setEnabled(selected_count > 0 and can_delete)
     deselect = menu.addAction("Deselect")
@@ -62,7 +73,7 @@ def show_roi_context_menu(
         return None
     if chosen in group_actions:
         return RoiMenuChoice(ADD_TO_GROUP, group_actions[chosen])
-    for action, name in ((add, ADD_ROI), (group, GROUP), (ungroup, UNGROUP), (delete, DELETE), (deselect, DESELECT)):
+    for action, name in ((add, ADD_ROI), (group, GROUP), (ungroup, UNGROUP), (apply_all, APPLY_ALL_CUBES), (remove_edit, REMOVE_CUBE_EDIT), (delete, DELETE), (deselect, DESELECT)):
         if chosen is action:
             return RoiMenuChoice(name)
     return None

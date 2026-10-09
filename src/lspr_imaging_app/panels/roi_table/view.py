@@ -8,9 +8,13 @@ renames. Keyboard: Delete asks to delete, Alt+Up / Alt+Down ask to move.
 
 from __future__ import annotations
 
+import math
+
 from PyQt6.QtCore import QModelIndex, QRect, Qt, pyqtSignal
-from PyQt6.QtGui import QFontMetrics, QKeyEvent, QKeySequence, QMouseEvent, QPainter, QWheelEvent
-from PyQt6.QtWidgets import QAbstractItemView, QHeaderView, QTreeView, QWidget
+from PyQt6.QtGui import QColor, QFont, QFontMetrics, QIcon, QKeyEvent, QKeySequence, QMouseEvent, QPainter, QWheelEvent
+from PyQt6.QtWidgets import QAbstractItemView, QHeaderView, QStyle, QStyleOptionHeader, QTreeView, QWidget
+
+from lspr_ui import get_active_theme
 
 from .delegate import CHEVRON_ZONE, CHIP_SIZE, GROUP_INDENT, STRIP_WIDTH
 from .model import DEPTH_ROLE, KIND_ROLE
@@ -20,19 +24,86 @@ _SORT_INDICATOR_ROOM = 22
 _CELL_PADDING = 16
 
 
+_SUBSCRIPT_SCALE = 0.8  # subscript size relative to the header font (not a true ratio: smaller was unreadable)
+_SUBSCRIPT_DROP = 0.25  # how far the subscript sits below the baseline, as a fraction of the font height
+
+
+def _split_title(title: str) -> tuple[str, str]:
+    """``"D_s"`` -> ``("D", "s")``; a title without an underscore -> ``(title, "")``."""
+    base, _, sub = title.partition("_")
+    return base, sub
+
+
+def _subscript_font(font: QFont) -> QFont:
+    small = QFont(font)
+    small.setPointSizeF(font.pointSizeF() * _SUBSCRIPT_SCALE) if font.pointSizeF() > 0 else small.setPixelSize(
+        max(1, round(font.pixelSize() * _SUBSCRIPT_SCALE))
+    )
+    return small
+
+
+def title_width(metrics: QFontMetrics, title: str) -> int:
+    """Width of a header title as `SubscriptHeader` paints it (the subscript
+    width is scaled from the normal font's, so a pixel or so of slack)."""
+    base, sub = _split_title(title)
+    return metrics.horizontalAdvance(base) + math.ceil(metrics.horizontalAdvance(sub) * _SUBSCRIPT_SCALE)
+
+
+class SubscriptHeader(QHeaderView):
+    """Header that draws ``X_y`` titles with a real, readable subscript (Unicode
+    subscript letters are far too small). Every other title is drawn as usual."""
+
+    def paintSection(self, painter: QPainter, rect: QRect, logicalIndex: int) -> None:  # type: ignore[override]
+        title = self.model().headerData(logicalIndex, self.orientation(), Qt.ItemDataRole.DisplayRole) if self.model() else None
+        if not isinstance(title, str) or "_" not in title:
+            super().paintSection(painter, rect, logicalIndex)
+            return
+        # Let the style draw the background and sort arrow, with the text left out.
+        option = QStyleOptionHeader()
+        self.initStyleOption(option)
+        option.rect = rect
+        option.section = logicalIndex
+        option.text = ""
+        option.icon = QIcon()
+        if self.isSortIndicatorShown() and self.sortIndicatorSection() == logicalIndex:
+            order = self.sortIndicatorOrder()
+            option.sortIndicator = (
+                QStyleOptionHeader.SortIndicator.SortDown if order == Qt.SortOrder.DescendingOrder
+                else QStyleOptionHeader.SortIndicator.SortUp
+            )
+        else:
+            option.sortIndicator = QStyleOptionHeader.SortIndicator.None_
+        self.style().drawControl(QStyle.ControlElement.CE_Header, option, painter, self)
+        base, sub = _split_title(title)
+        font = self.font()
+        small = _subscript_font(font)
+        metrics = QFontMetrics(font)
+        total = metrics.horizontalAdvance(base) + QFontMetrics(small).horizontalAdvance(sub)
+        text_area = rect.adjusted(0, 0, -_SORT_INDICATOR_ROOM // 2, 0)  # keep clear of the sort arrow
+        x = text_area.left() + max(0, (text_area.width() - total) // 2)
+        baseline = rect.top() + (rect.height() + metrics.ascent() - metrics.descent()) // 2
+        painter.save()
+        painter.setPen(QColor(get_active_theme().text_muted))  # the colour panel.py's header stylesheet gives the other titles
+        painter.setFont(font)
+        painter.drawText(x, baseline, base)
+        painter.setFont(small)
+        painter.drawText(x + metrics.horizontalAdvance(base), baseline + round(metrics.height() * _SUBSCRIPT_DROP), sub)
+        painter.restore()
+
+
 def suggested_column_widths(metrics: QFontMetrics) -> list[int]:
     """Default column widths: the worst-case text each column must hold, plus
     padding (and room for the sort arrow on the header). Measured, not
     guessed, so figures are not clipped in the user's font."""
     advance = metrics.horizontalAdvance
     number = advance("9999.9") + _CELL_PADDING
-    diameter = max(advance("999.9") + _CELL_PADDING, advance("Ring out") + _SORT_INDICATOR_ROOM)
+    diameter = max(advance("999.9") + _CELL_PADDING, title_width(metrics, COLUMN_TITLES[COLUMN_RING_OUT]) + _SORT_INDICATOR_ROOM)
     widths = [0] * COLUMN_COUNT
     widths[COLUMN_ID] = STRIP_WIDTH + 5 + GROUP_INDENT + CHIP_SIZE + 7 + advance("9999") + 10
     widths[COLUMN_NAME] = advance("Name 99") + _CELL_PADDING
     widths[COLUMN_X] = widths[COLUMN_Y] = max(number, advance(COLUMN_TITLES[COLUMN_X]) + _SORT_INDICATOR_ROOM)
-    widths[COLUMN_SAMPLE] = max(diameter, advance("Sample") + _SORT_INDICATOR_ROOM)
-    widths[COLUMN_RING_IN] = max(diameter, advance("Ring in") + _SORT_INDICATOR_ROOM)
+    widths[COLUMN_SAMPLE] = max(diameter, title_width(metrics, COLUMN_TITLES[COLUMN_SAMPLE]) + _SORT_INDICATOR_ROOM)
+    widths[COLUMN_RING_IN] = max(diameter, title_width(metrics, COLUMN_TITLES[COLUMN_RING_IN]) + _SORT_INDICATOR_ROOM)
     widths[COLUMN_RING_OUT] = diameter
     return widths
 
@@ -53,6 +124,7 @@ class RoiTreeView(QTreeView):
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
+        self.setHeader(SubscriptHeader(Qt.Orientation.Horizontal, self))
         self.setIndentation(0)
         self.setRootIsDecorated(False)
         self.setExpandsOnDoubleClick(False)

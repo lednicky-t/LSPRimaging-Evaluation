@@ -112,11 +112,37 @@ ROI_OVERLAY_KEYS = {
 IMAGE_ROI_FILL_MAX_OPACITY = UiKey("image/roi_fill_max_opacity", 1.0, float)  # Options menu; 1.0 = fill fully opaque at slider 100 %
 ROI_ROUND_POSITIONS = UiKey("roi/round_positions", True, bool)  # Options menu: store ROI positions to 0.1 px
 MASK_SCOPE = UiKey("mask/scope", None, str)  # a `MaskScope` value
+ROI_SCOPE = UiKey("roi/scope", None, str)  # "persistent" | "individual"; None = persistent
+ARRAY_KEYS = {  # ROIs tab, "Array" group (panels/image/array_controls.py); lengths are stored in pixels
+    "mode": UiKey("array/mode", "auto", str),
+    "rows": UiKey("array/rows", 0, int),
+    "cols": UiKey("array/cols", 0, int),
+    "diameter": UiKey("array/diameter_px", 0.0, float),
+    "pitch_x": UiKey("array/pitch_x_px", 0.0, float),
+    "pitch_y": UiKey("array/pitch_y_px", 0.0, float),
+    "rotation": UiKey("array/rotation_deg", 0.0, float),
+    "anchor_x": UiKey("array/anchor_x_px", 0.0, float),
+    "anchor_y": UiKey("array/anchor_y_px", 0.0, float),
+    "snap": UiKey("array/snap_to_image", False, bool),
+    "bright": UiKey("array/bright_spots", False, bool),
+    "edge_model": UiKey("array/edge_model", "plateau_fraction", str),
+    "edge_fraction": UiKey("array/edge_fraction_percent", 15.0, float),
+    "edge_sigma": UiKey("array/edge_sigma_k", 3.0, float),
+    "size_mode": UiKey("array/size_mode", "uniform", str),
+    "inner_mode": UiKey("array/ring_inner_mode", "measured", str),
+    "ring_fraction": UiKey("array/ring_background_percent", 5.0, float),
+    "ring_margin": UiKey("array/ring_margin_px", 0.0, float),
+    "inner_ratio": UiKey("array/ring_inner_ratio", 1.4, float),
+    "thickness_mode": UiKey("array/ring_thickness_mode", "equal_area", str),
+    "thickness": UiKey("array/ring_width_px", 6.0, float),
+    "outer_ratio": UiKey("array/ring_outer_ratio", 1.25, float),
+    "ring_size_mode": UiKey("array/ring_size_mode", "uniform", str),
+}
 HAND_WIRED_KEYS: tuple[UiKey, ...] = (
     HISTOGRAM_CURSOR_READOUT, IMAGE_CURSOR_READOUT, IMAGE_MASK_EDIT_TOOL, IMAGE_SCALE_BAR_COLOR, IMAGE_ROI_LABELS,
     IMAGE_ROI_FILL_MAX_OPACITY,
     *(key for keys_for_kind in ROI_OVERLAY_KEYS.values() for key in keys_for_kind.values()),
-    ROI_ROUND_POSITIONS, MASK_SCOPE,
+    ROI_ROUND_POSITIONS, MASK_SCOPE, ROI_SCOPE, *ARRAY_KEYS.values(),
 )
 
 ALL_KEYS: tuple[UiKey, ...] = (

@@ -18,6 +18,7 @@ from dataclasses import dataclass
 from PyQt6.QtCore import QAbstractItemModel, QMimeData, QModelIndex, Qt, pyqtSignal
 
 from ...roi.model import AreaRoi, AreaRoiDetectionSettings, AreaRoiGroup
+from ...roi.palette import DEFAULT_ROI_COLOR_HEX
 from .rows import (
     COLUMN_COUNT,
     COLUMN_ID,
@@ -118,6 +119,7 @@ class RoiTreeModel(QAbstractItemModel):
         self._rois: tuple[AreaRoi, ...] = ()
         self._groups: tuple[AreaRoiGroup, ...] = ()
         self._defaults = AreaRoiDetectionSettings()
+        self._default_color_hex = DEFAULT_ROI_COLOR_HEX
         self._selected: frozenset[int] = frozenset()
         self._grouped = False
 
@@ -129,8 +131,11 @@ class RoiTreeModel(QAbstractItemModel):
         groups: Sequence[AreaRoiGroup],
         defaults: AreaRoiDetectionSettings,
         unit: LengthUnit,
+        default_color_hex: str | None = None,
     ) -> None:
         self._rois, self._groups, self._defaults, self._unit = tuple(rois), tuple(groups), defaults, unit
+        if default_color_hex:
+            self._default_color_hex = default_color_hex
         self._rebuild()
 
     def set_sort(self, column: int, descending: bool) -> None:
@@ -159,7 +164,7 @@ class RoiTreeModel(QAbstractItemModel):
         return list(self._rows)
 
     def _rebuild(self) -> None:
-        self._rows = build_roi_rows(self._rois, self._groups, self._defaults)
+        self._rows = build_roi_rows(self._rois, self._groups, self._defaults, self._default_color_hex)
         self._grouped = bool(self._groups) and not self._flat
         root = _Node("root", None)
         if self._grouped:

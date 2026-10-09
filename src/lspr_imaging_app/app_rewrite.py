@@ -44,6 +44,7 @@ from .gui.app_theme import LSPRI_BRIGHT_THEME, LSPRI_DARK_THEME, apply_app_theme
 from .gui.windows_titlebar import apply_windows_titlebar_color
 from .image_tools.mask_scope import MaskScope
 from .image_tools.chromatic_auto_task import TASK_ID as CHROMATIC_TASK_ID, ChromaticAutoDetect
+from .roi.array_task import TASK_ID as ARRAY_TASK_ID
 from .panels.image.chromatic_tab import ChromaticUiValues
 from .image_tools import (
     ActiveToolModule,
@@ -324,6 +325,8 @@ def _build_analysis_engine(
         cube_indices=dataset.spectral_cubes,
         wavelengths_for_cube=dataset.wavelengths_for_cube,
         rois=roi_toolbox.rois,
+        rois_at=roi_toolbox.rois_at,
+        has_timeline=roi_toolbox.has_timeline,
         geometry_settings=geometry.settings,
         background_settings=background.settings,
         chromatic_affine=lambda cube_index, wavelength_nm: chromatic.affine_for((cube_index, wavelength_nm)),
@@ -932,7 +935,9 @@ def _build_status_bar(
     status_bar.addPermanentWidget(task_indicator, 1)  # stretch: takes the free width, text clips instead of overlapping
     m.chromatic_auto.task_progress.connect(task_indicator.report)
     m.chromatic_auto.task_finished.connect(task_indicator.finish)
-    cancel_by_task = {CHROMATIC_TASK_ID: m.chromatic_auto.cancel}
+    image_panel.array_action.task_progress.connect(task_indicator.report)
+    image_panel.array_action.task_finished.connect(task_indicator.finish)
+    cancel_by_task = {CHROMATIC_TASK_ID: m.chromatic_auto.cancel, ARRAY_TASK_ID: image_panel.array_action.cancel}
     task_indicator.cancel_requested.connect(lambda task_id: cancel_by_task[task_id]())
     # WorkflowPanel.set_status() (state/performance text, no hover-hints -
     # design doc §2) shows as a transient message on the bar's left side;
@@ -1237,7 +1242,9 @@ def build_main_window(
     except ValueError:  # nothing saved yet
         pass
     m.mask_scope.scope_changed.connect(lambda scope: ui_state.set(MASK_SCOPE.key, scope.value))
-    roi_table_panel = RoiTablePanel(m.roi_toolbox, m.selection, m.geometry, m.analysis_engine)
+    roi_table_panel = RoiTablePanel(m.roi_toolbox, m.selection, m.geometry, m.analysis_engine, edit_target=image_panel.edit_target,
+        display_style=image_panel.roi_display,
+    )
     roi_table_panel.restore_ui_state(ui_state)
     spectra_panel = SpectraPanel(m.analysis_engine, m.roi_toolbox, m.selection)
     sensorgram_panel = SensorgramPanel(m.analysis_engine, m.roi_toolbox, m.dataset, m.selection)

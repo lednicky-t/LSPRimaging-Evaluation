@@ -118,7 +118,20 @@ from ..change_events import RoiComputationalChange, RoiCosmeticChange
 from ..diagnostics import instrumented
 from ..image_tools.chromatic.affine import apply_affine_to_points
 from ..undo import FunctionCommand, undo_manager
-from .model import AreaRoi, AreaRoiDetectionSettings, AreaRoiGroup, RoiArrayGroup, RoiMask
+from .model import (
+    GEOMETRY_SCOPES,
+    SCOPE_PERSISTENT,
+    AreaRoi,
+    AreaRoiDetectionSettings,
+    AreaRoiGroup,
+    RoiArrayGroup,
+    RoiGeometry,
+    RoiMask,
+    RoiTimeline,
+    base_geometry,
+    geometry_at,
+    resolved_at,
+)
 from .ordering import move_block, renumbering
 from .palette import first_free_tint_index, next_group_color, normalize_hex, tint_color
 
@@ -332,7 +345,8 @@ class RoiToolbox(QObject):
             nudge = roi.per_wavelength.get(image_key)
             if nudge is not None:
                 return float(nudge[0]), float(nudge[1])
-        point = np.asarray([[roi.center_x, roi.center_y]], dtype=np.float64)
+        g = geometry_at(roi, image_key[0])  # the geometry valid on this cube
+        point = np.asarray([[g.center_x, g.center_y]], dtype=np.float64)
         transformed = apply_affine_to_points(point, affine_matrix)
         return float(transformed[0, 0]), float(transformed[0, 1])
 
@@ -344,7 +358,10 @@ class RoiToolbox(QObject):
         rois = tuple(self._rois.values())
         if not rois:
             return np.empty((0, 2), dtype=np.float64)
-        centers = np.asarray([(roi.center_x, roi.center_y) for roi in rois], dtype=np.float64)
+        cube = image_key[0]
+        centers = np.asarray(
+            [(g.center_x, g.center_y) for g in (geometry_at(roi, cube) for roi in rois)], dtype=np.float64
+        )
         positions = apply_affine_to_points(centers, affine_matrix)
         for index, roi in enumerate(rois):
             if roi.per_wavelength:
@@ -462,84 +479,131 @@ class RoiToolbox(QObject):
     # applies to all or raises). Undo/redo closures hold the ROI *objects*,
     # not ids, so they stay correct whatever renumbering happened around them.
 
-    def _set_positions(self, positions: dict[int, tuple[float, float]], label: str) -> None:
+    # -- the geometry timeline (docs/roi_timeline_design_2026-10-08.md) ------------------
+    #
+    # A ROI's *geometry* (centre, sample diameter, ring diameters) may differ by cube; its identity never does.
+    # Every geometry command takes ``cube`` and ``scope``: ``cube=None`` edits the **base** geometry (valid on
+    # every cube; what every ROI had before the timeline existed); a cube with ``scope="persistent"`` writes a
+    # change valid from that cube on until a later persistent change; ``scope="individual"`` writes a change for
+    # that cube only (the Mask rule). Queries read geometry at a cube through `rois_at` / `geometry_at`.
+
+    def has_timeline(self) -> bool:
+        """True if any ROI has a geometry change (False: every ROI has one geometry for every cube)."""
+        return any(roi.timeline for roi in self._rois.values())
+
+    def timeline_cubes(self) -> tuple[int, ...]:
+        """Every cube at which any ROI has a geometry change (for a marker on the cube slider)."""
+        cubes: set[int] = set()
+        for roi in self._rois.values():
+            if roi.timeline:
+                cubes.update(roi.timeline.cubes())
+        return tuple(sorted(cubes))
+
+    def geometry_at(self, roi_id: int, cube: int | None) -> RoiGeometry:
+        """The geometry of `roi_id` on `cube` (``None``: the base geometry)."""
+        return geometry_at(self._rois[roi_id], cube)
+
+    def rois_at(self, cube: int | None) -> tuple[AreaRoi, ...]:
+        """Every ROI with the geometry valid on `cube`. With no timeline anywhere these are the stored ROIs
+        themselves; otherwise ROIs with a timeline are copies (geometry fields resolved, no timeline), so a reader
+        (drawing, analysis) never sees the timeline. Do not mutate the result."""
+        if cube is None or not self.has_timeline():
+            return self.rois()
+        return tuple(resolved_at(roi, cube) for roi in self._rois.values())
+
+    def _write_geometry(
+        self,
+        changes: list[tuple[AreaRoi, RoiGeometry]],
+        cube: int | None,
+        scope: str,
+        label: str,
+        reason: str,
+    ) -> None:
+        """Set the geometry of each ROI at (`cube`, `scope`) as one undo step; a no-op (no undo entry) if nothing
+        differs from what is already valid there."""
+        if scope not in GEOMETRY_SCOPES:
+            raise ValueError(f"scope must be one of {GEOMETRY_SCOPES}, got {scope!r}")
+        states: list[tuple[AreaRoi, tuple[RoiGeometry, RoiTimeline | None], tuple[RoiGeometry, RoiTimeline | None]]] = []
+        for roi, new in changes:
+            if geometry_at(roi, cube) == new:
+                continue
+            old_state = (base_geometry(roi), roi.timeline)
+            if cube is None:
+                new_state = (new, roi.timeline)
+            else:
+                new_state = (base_geometry(roi), (roi.timeline or RoiTimeline()).with_change(cube, scope, new))
+            states.append((roi, old_state, new_state))
+        self._write_states(states, label, reason)
+
+    def _set_positions(
+        self, positions: dict[int, tuple[float, float]], label: str, *, cube: int | None = None, scope: str = SCOPE_PERSISTENT
+    ) -> None:
         rois = self._require_rois(positions)
-        moves: list[tuple[AreaRoi, tuple[float, float], tuple[float, float]]] = []
+        changes: list[tuple[AreaRoi, RoiGeometry]] = []
         for roi in rois:
             x, y = float(positions[roi.area_roi_id][0]), float(positions[roi.area_roi_id][1])
             if not (math.isfinite(x) and math.isfinite(y)):
                 raise ValueError(f"ROI {roi.area_roi_id}: position must be finite, got ({x}, {y})")
-            x, y = self._rounded(x), self._rounded(y)
-            if (roi.center_x, roi.center_y) != (x, y):
-                moves.append((roi, (roi.center_x, roi.center_y), (x, y)))
-        if not moves:
-            return
-
-        def write(pairs: list[tuple[AreaRoi, tuple[float, float]]]) -> None:
-            for roi, (x, y) in pairs:
-                roi.center_x, roi.center_y = x, y
-            ids = tuple(sorted(roi.area_roi_id for roi, _ in pairs))
-            self.geometry_changed.emit(RoiComputationalChange(roi_ids=ids, reason="moved"))
-
-        new_pairs = [(roi, new) for roi, _old, new in moves]
-        old_pairs = [(roi, old) for roi, old, _new in moves]
-        write(new_pairs)
-        undo_manager.push(FunctionCommand(label, undo_fn=lambda: write(old_pairs), redo_fn=lambda: write(new_pairs)))
+            changes.append((roi, geometry_at(roi, cube)._replace(center_x=self._rounded(x), center_y=self._rounded(y))))
+        self._write_geometry(changes, cube, scope, label, "moved")
 
     @instrumented("RoiToolbox.move_roi")
-    def move_roi(self, roi_id: int, x: float, y: float) -> None:
-        self._set_positions({roi_id: (x, y)}, "Move ROI")
+    def move_roi(self, roi_id: int, x: float, y: float, *, cube: int | None = None, scope: str = SCOPE_PERSISTENT) -> None:
+        self._set_positions({roi_id: (x, y)}, "Move ROI", cube=cube, scope=scope)
 
     @instrumented("RoiToolbox.translate_rois")
-    def translate_rois(self, roi_ids: Collection[int], dx: float, dy: float) -> None:
+    def translate_rois(
+        self, roi_ids: Collection[int], dx: float, dy: float, *, cube: int | None = None, scope: str = SCOPE_PERSISTENT
+    ) -> None:
         """Shift every ROI in ``roi_ids`` by (dx, dy) pixels: the multi-select
         position edit that keeps the ROIs' arrangement."""
         rois = self._require_rois(roi_ids)
-        self._set_positions(
-            {roi.area_roi_id: (roi.center_x + float(dx), roi.center_y + float(dy)) for roi in rois}, "Move ROIs"
-        )
+        positions = {}
+        for roi in rois:
+            g = geometry_at(roi, cube)
+            positions[roi.area_roi_id] = (g.center_x + float(dx), g.center_y + float(dy))
+        self._set_positions(positions, "Move ROIs", cube=cube, scope=scope)
 
     @instrumented("RoiToolbox.place_rois")
-    def place_rois(self, roi_ids: Collection[int], *, x: float | None = None, y: float | None = None) -> None:
+    def place_rois(
+        self,
+        roi_ids: Collection[int],
+        *,
+        x: float | None = None,
+        y: float | None = None,
+        cube: int | None = None,
+        scope: str = SCOPE_PERSISTENT,
+    ) -> None:
         """Set the x and/or y of every ROI in ``roi_ids`` to one value
         (``None`` leaves that coordinate alone). Typically one coordinate, to
         line up a row or a column; giving both stacks the ROIs on one point."""
         if x is None and y is None:
             return
         rois = self._require_rois(roi_ids)
-        self._set_positions(
-            {
-                roi.area_roi_id: (roi.center_x if x is None else float(x), roi.center_y if y is None else float(y))
-                for roi in rois
-            },
-            "Align ROIs",
-        )
+        positions = {}
+        for roi in rois:
+            g = geometry_at(roi, cube)
+            positions[roi.area_roi_id] = (g.center_x if x is None else float(x), g.center_y if y is None else float(y))
+        self._set_positions(positions, "Align ROIs", cube=cube, scope=scope)
 
     def _set_diameters(
         self,
         targets: list[tuple[AreaRoi, tuple[float, float | None, float | None]]],
         label: str,
+        *,
+        cube: int | None = None,
+        scope: str = SCOPE_PERSISTENT,
     ) -> None:
-        changes = []
-        for roi, new in targets:
-            old = (roi.sample_diameter_px, roi.reference_inner_diameter_px, roi.reference_outer_diameter_px)
-            if old != new:
-                changes.append((roi, old, new))
-        if not changes:
-            return
-
-        def write(pairs: list[tuple[AreaRoi, tuple[float, float | None, float | None]]]) -> None:
-            for roi, (sample, inner, outer) in pairs:
-                roi.sample_diameter_px, roi.reference_inner_diameter_px, roi.reference_outer_diameter_px = (
-                    sample, inner, outer,
-                )
-            ids = tuple(sorted(roi.area_roi_id for roi, _ in pairs))
-            self.geometry_changed.emit(RoiComputationalChange(roi_ids=ids, reason="resized"))
-
-        new_pairs = [(roi, new) for roi, _old, new in changes]
-        old_pairs = [(roi, old) for roi, old, _new in changes]
-        write(new_pairs)
-        undo_manager.push(FunctionCommand(label, undo_fn=lambda: write(old_pairs), redo_fn=lambda: write(new_pairs)))
+        changes = [
+            (
+                roi,
+                geometry_at(roi, cube)._replace(
+                    sample_diameter_px=sample, reference_inner_diameter_px=inner, reference_outer_diameter_px=outer
+                ),
+            )
+            for roi, (sample, inner, outer) in targets
+        ]
+        self._write_geometry(changes, cube, scope, label, "resized")
 
     @instrumented("RoiToolbox.resize_rois")
     def resize_rois(
@@ -549,6 +613,8 @@ class RoiToolbox(QObject):
         sample_diameter_px: float | None = None,
         reference_inner_diameter_px: float | None = None,
         reference_outer_diameter_px: float | None = None,
+        cube: int | None = None,
+        scope: str = SCOPE_PERSISTENT,
     ) -> None:
         """Set one or more of the sample / reference-ring diameters on every
         ROI in ``roi_ids``; a field left ``None`` is unchanged. A no-op (no
@@ -573,10 +639,11 @@ class RoiToolbox(QObject):
             raise ValueError(f"sample diameter must be at least {MIN_SAMPLE_DIAMETER_PX:g} px, got {float(sample_diameter_px):g}")
         targets: list[tuple[AreaRoi, tuple[float, float | None, float | None]]] = []
         for roi in rois:
+            g = geometry_at(roi, cube)
             new = (
-                roi.sample_diameter_px if sample_diameter_px is None else float(sample_diameter_px),
-                roi.reference_inner_diameter_px if reference_inner_diameter_px is None else float(reference_inner_diameter_px),
-                roi.reference_outer_diameter_px if reference_outer_diameter_px is None else float(reference_outer_diameter_px),
+                g.sample_diameter_px if sample_diameter_px is None else float(sample_diameter_px),
+                g.reference_inner_diameter_px if reference_inner_diameter_px is None else float(reference_inner_diameter_px),
+                g.reference_outer_diameter_px if reference_outer_diameter_px is None else float(reference_outer_diameter_px),
             )
             if reference_inner_diameter_px is not None or reference_outer_diameter_px is not None:
                 inner = new[1] if new[1] is not None else defaults.reference_inner_diameter_px
@@ -587,7 +654,7 @@ class RoiToolbox(QObject):
                         f"(inner {inner:g} px, outer {outer:g} px)"
                     )
             targets.append((roi, new))
-        self._set_diameters(targets, "Resize ROI" if len(targets) == 1 else "Resize ROIs")
+        self._set_diameters(targets, "Resize ROI" if len(targets) == 1 else "Resize ROIs", cube=cube, scope=scope)
 
     @instrumented("RoiToolbox.resize_roi")
     def resize_roi(
@@ -597,6 +664,8 @@ class RoiToolbox(QObject):
         sample_diameter_px: float | None = None,
         reference_inner_diameter_px: float | None = None,
         reference_outer_diameter_px: float | None = None,
+        cube: int | None = None,
+        scope: str = SCOPE_PERSISTENT,
     ) -> None:
         """One-ROI form of `resize_rois`."""
         self.resize_rois(
@@ -604,10 +673,20 @@ class RoiToolbox(QObject):
             sample_diameter_px=sample_diameter_px,
             reference_inner_diameter_px=reference_inner_diameter_px,
             reference_outer_diameter_px=reference_outer_diameter_px,
+            cube=cube,
+            scope=scope,
         )
 
     @instrumented("RoiToolbox.reset_roi_diameters")
-    def reset_roi_diameters(self, roi_ids: Collection[int], *, sample: bool = True, reference: bool = True) -> None:
+    def reset_roi_diameters(
+        self,
+        roi_ids: Collection[int],
+        *,
+        sample: bool = True,
+        reference: bool = True,
+        cube: int | None = None,
+        scope: str = SCOPE_PERSISTENT,
+    ) -> None:
         """Put the chosen diameters back to the shared defaults.
 
         ``sample``: the sample diameter becomes the detection settings'
@@ -616,18 +695,62 @@ class RoiToolbox(QObject):
         again, including when those change later."""
         rois = self._require_rois(roi_ids)
         defaults = self._detection_settings
-        targets = [
-            (
-                roi,
+        targets = []
+        for roi in rois:
+            g = geometry_at(roi, cube)
+            targets.append(
                 (
-                    float(defaults.sample_diameter_px) if sample else roi.sample_diameter_px,
-                    None if reference else roi.reference_inner_diameter_px,
-                    None if reference else roi.reference_outer_diameter_px,
-                ),
+                    roi,
+                    (
+                        float(defaults.sample_diameter_px) if sample else g.sample_diameter_px,
+                        None if reference else g.reference_inner_diameter_px,
+                        None if reference else g.reference_outer_diameter_px,
+                    ),
+                )
             )
-            for roi in rois
-        ]
-        self._set_diameters(targets, "Reset ROI diameters")
+        self._set_diameters(targets, "Reset ROI diameters", cube=cube, scope=scope)
+
+    @instrumented("RoiToolbox.apply_to_all_cubes")
+    def apply_to_all_cubes(self, roi_ids: Collection[int], cube: int) -> None:
+        """Make the geometry the ROIs have on `cube` their geometry on **every** cube (the timeline is dropped):
+        today's behaviour of a ROI edit, in one step."""
+        rois = self._require_rois(roi_ids)
+        states = []
+        for roi in rois:
+            if not roi.timeline and base_geometry(roi) == geometry_at(roi, cube):
+                continue
+            states.append((roi, (base_geometry(roi), roi.timeline), (geometry_at(roi, cube), None)))
+        self._write_states(states, "Apply to all cubes", "resized")
+
+    @instrumented("RoiToolbox.remove_cube_edit")
+    def remove_cube_edit(self, roi_ids: Collection[int], cube: int) -> None:
+        """Remove the geometry changes the ROIs have *authored at* `cube` (both scopes): the cube then follows the
+        earlier changes (or the base geometry) again."""
+        rois = self._require_rois(roi_ids)
+        states = []
+        for roi in rois:
+            if roi.timeline and cube in roi.timeline.cubes():
+                states.append((roi, (base_geometry(roi), roi.timeline), (base_geometry(roi), roi.timeline.without_cube(cube))))
+        self._write_states(states, "Remove cube edit", "resized")
+
+    def _write_states(self, states: list, label: str, reason: str) -> None:
+        if not states:
+            return
+
+        def write(which: int) -> None:
+            for roi, old_state, new_state in states:
+                base, timeline = (old_state, new_state)[which]
+                roi.center_x, roi.center_y = base.center_x, base.center_y
+                roi.sample_diameter_px = base.sample_diameter_px
+                roi.reference_inner_diameter_px = base.reference_inner_diameter_px
+                roi.reference_outer_diameter_px = base.reference_outer_diameter_px
+                roi.timeline = timeline if timeline else None
+            self.geometry_changed.emit(
+                RoiComputationalChange(roi_ids=tuple(sorted(roi.area_roi_id for roi, _o, _n in states)), reason=reason)
+            )
+
+        write(1)
+        undo_manager.push(FunctionCommand(label, undo_fn=lambda: write(0), redo_fn=lambda: write(1)))
 
     @instrumented("RoiToolbox.delete_roi")
     def delete_roi(self, roi_id: int) -> None:
@@ -769,6 +892,178 @@ class RoiToolbox(QObject):
         undo_manager.push(FunctionCommand("Detect ROIs", undo_fn=revert, redo_fn=apply))
         return list(new_rois.keys())
 
+    # -- command API: arrays ------------------------------------------------
+    #
+    # The Image panel's "Array" group (docs/roi_array_section_audit_2026-10-08.md). The pixel analysis
+    # (`roi/array_pipeline.py`) runs elsewhere, off the GUI thread; these two commands only store its result,
+    # each as one undo step. All lengths are diameters in pixels, positions are reference-frame pixels.
+
+    @instrumented("RoiToolbox.place_array")
+    def place_array(
+        self,
+        centers_xy: Sequence[Sequence[float]],
+        sample_diameters_px: Sequence[float],
+        ring_inner_diameters_px: Sequence[float],
+        ring_outer_diameters_px: Sequence[float],
+        *,
+        rows: int,
+        cols: int,
+        pitch_x_px: float,
+        pitch_y_px: float,
+        rotation_deg: float = 0.0,
+        located: Sequence[bool] | None = None,
+        replace_ids: Collection[int] = (),
+        label: str = "Array",
+    ) -> list[int]:
+        """Add one array of ROIs (row-major, ``rows * cols`` of them) and its `RoiArrayGroup` recipe, replacing
+        the ROIs in ``replace_ids`` (the selection the user asked to replace; ``()`` replaces none). Returns the
+        new ROIs' ids.
+
+        Everything else keeps its relative order and is renumbered to stay contiguous (the new ROIs are
+        numbered after them), exactly as `delete_rois` does, and `roi_ids_renumbered` carries the map so stored
+        results follow the survivors and are dropped for the replaced ROIs. Groups and arrays that lose all
+        members are pruned; undo restores everything. ``located[i] = False`` marks a ROI the detector could not
+        find (it sits at its lattice position: ``inferred``).
+
+        Raises ``ValueError`` before changing anything for non-finite values, a sample diameter below
+        `MIN_SAMPLE_DIAMETER_PX`, or a ring that does not satisfy ``0 <= inner < outer``."""
+        centers = np.asarray(centers_xy, dtype=np.float64).reshape(-1, 2)
+        count = len(centers)
+        sample = np.asarray(sample_diameters_px, dtype=np.float64)
+        inner = np.asarray(ring_inner_diameters_px, dtype=np.float64)
+        outer = np.asarray(ring_outer_diameters_px, dtype=np.float64)
+        if count == 0 or not (len(sample) == len(inner) == len(outer) == count):
+            raise ValueError("an array needs at least one ROI, with one sample / inner / outer diameter each")
+        if count != int(rows) * int(cols):
+            raise ValueError(f"{count} ROIs do not make a {rows} x {cols} array")
+        if not (np.isfinite(centers).all() and np.isfinite(sample).all() and np.isfinite(inner).all() and np.isfinite(outer).all()):
+            raise ValueError("array positions and diameters must be finite numbers")
+        if (sample < MIN_SAMPLE_DIAMETER_PX).any():
+            raise ValueError(f"sample diameter must be at least {MIN_SAMPLE_DIAMETER_PX:g} px")
+        if not ((inner >= 0.0) & (inner < outer)).all():
+            raise ValueError("the reference ring needs 0 <= inner < outer for every ROI")
+        located_flags = [True] * count if located is None else [bool(v) for v in located]
+
+        replaced = {int(i) for i in replace_ids if int(i) in self._rois}
+        removed_rois = {rid: self._rois[rid] for rid in replaced}
+        groups_before = [_snapshot(group) for group in self._groups.values()]
+        arrays_before = [_snapshot(array) for array in self._array_groups.values()]
+        old_counter_value = (max(self._rois) if self._rois else 0) + 1
+
+        survivors = sorted(rid for rid in self._rois if rid not in replaced)
+        id_map = {old_id: new_id for new_id, old_id in enumerate(survivors, start=1)}
+        reverse_id_map = {new_id: old_id for old_id, new_id in id_map.items()}
+        first_new_id = len(survivors) + 1
+        array_number = 1
+        for existing in self._array_groups:
+            tail = existing.rsplit("_", 1)[-1]
+            if tail.isdigit():
+                array_number = max(array_number, int(tail) + 1)
+        array_id = f"array_{array_number}"
+        new_rois: list[AreaRoi] = []
+        for index in range(count):
+            new_rois.append(
+                AreaRoi(
+                    area_roi_id=first_new_id + index,
+                    center_x=self._rounded(centers[index, 0]),
+                    center_y=self._rounded(centers[index, 1]),
+                    sample_diameter_px=float(sample[index]),
+                    reference_inner_diameter_px=float(inner[index]),
+                    reference_outer_diameter_px=float(outer[index]),
+                    inferred=not located_flags[index],
+                    array_id=array_id,
+                    created_by="array",
+                )
+            )
+        new_ids = tuple(roi.area_roi_id for roi in new_rois)
+        first = new_rois[0]
+        recipe = RoiArrayGroup(
+            array_id=array_id,
+            label=label,
+            rows=int(rows),
+            cols=int(cols),
+            spacing_x_px=float(pitch_x_px),
+            spacing_y_px=float(pitch_y_px),
+            anchor_x_px=first.center_x,
+            anchor_y_px=first.center_y,
+            rotation_deg=float(rotation_deg),
+            member_area_roi_ids=list(new_ids),
+        )
+
+        def apply() -> None:
+            renumbered: dict[int, AreaRoi] = {}
+            for old_id, new_id in id_map.items():
+                roi = self._rois[old_id]
+                roi.area_roi_id = new_id
+                renumbered[new_id] = roi
+            for roi in new_rois:
+                renumbered[roi.area_roi_id] = roi
+            self._rois = renumbered
+            for group in self._groups.values():
+                group.area_roi_ids = sorted({id_map[rid] for rid in group.area_roi_ids if rid in id_map})
+            self._groups = {gid: group for gid, group in self._groups.items() if group.area_roi_ids}
+            for array in self._array_groups.values():
+                array.member_area_roi_ids = [id_map[rid] for rid in array.member_area_roi_ids if rid in id_map]
+            self._array_groups = {aid: array for aid, array in self._array_groups.items() if array.member_area_roi_ids}
+            self._array_groups[array_id] = recipe
+            self._roi_id_counter = itertools.count(first_new_id + count)
+            self.roi_ids_renumbered.emit(dict(id_map))
+            self.geometry_changed.emit(RoiComputationalChange(roi_ids=new_ids, reason="added"))
+
+        def revert() -> None:
+            restored: dict[int, AreaRoi] = {}
+            for new_id, roi in self._rois.items():
+                if new_id in reverse_id_map:
+                    old_id = reverse_id_map[new_id]
+                    roi.area_roi_id = old_id
+                    restored[old_id] = roi
+            restored.update(removed_rois)
+            self._rois = dict(sorted(restored.items()))  # rois() is in id order
+            for snapshot in groups_before:
+                _restore(snapshot)
+            for snapshot in arrays_before:
+                _restore(snapshot)
+            self._groups = {snapshot[0].group_id: snapshot[0] for snapshot in groups_before}
+            self._array_groups = {snapshot[0].array_id: snapshot[0] for snapshot in arrays_before}
+            self._roi_id_counter = itertools.count(old_counter_value)
+            self.roi_ids_renumbered.emit(dict(reverse_id_map))
+            self.geometry_changed.emit(RoiComputationalChange(roi_ids=new_ids, reason="deleted"))
+
+        apply()
+        undo_manager.push(FunctionCommand(label, undo_fn=revert, redo_fn=apply))
+        return list(new_ids)
+
+    @instrumented("RoiToolbox.refine_rois")
+    def refine_rois(
+        self,
+        updates: dict[int, tuple[float, float, float, float, float]],
+        *,
+        label: str = "Refine array",
+        cube: int | None = None,
+        scope: str = SCOPE_PERSISTENT,
+    ) -> None:
+        """Set position and diameters of existing ROIs in one undo step: ``{roi_id: (x, y, sample, ring_inner,
+        ring_outer)}``. Nothing is renumbered. Raises ``KeyError`` for a missing ROI and ``ValueError``, before
+        changing anything, for non-finite values, a sample diameter below `MIN_SAMPLE_DIAMETER_PX` or a ring with
+        ``0 <= inner < outer`` violated."""
+        rois = self._require_rois(updates)
+        targets: list[tuple[AreaRoi, tuple[float, float | None, float | None]]] = []
+        for roi in rois:
+            x, y, sample, inner, outer = (float(v) for v in updates[roi.area_roi_id])
+            if not all(math.isfinite(v) for v in (x, y, sample, inner, outer)):
+                raise ValueError(f"ROI {roi.area_roi_id}: refined values must be finite numbers")
+            if sample < MIN_SAMPLE_DIAMETER_PX:
+                raise ValueError(f"ROI {roi.area_roi_id}: sample diameter must be at least {MIN_SAMPLE_DIAMETER_PX:g} px")
+            if not 0.0 <= inner < outer:
+                raise ValueError(f"ROI {roi.area_roi_id}: the reference ring needs 0 <= inner < outer")
+            targets.append((roi, (sample, inner, outer)))
+        undo_manager.begin_batch(label)
+        try:
+            self._set_positions({roi.area_roi_id: tuple(updates[roi.area_roi_id][:2]) for roi in rois}, label, cube=cube, scope=scope)
+            self._set_diameters(targets, label, cube=cube, scope=scope)
+        finally:
+            undo_manager.end_batch()
+
     # -- command API (§7): ROI order ---------------------------------------
     #
     # A ROI's id is its place in the list, so reordering is a permutation of
@@ -900,8 +1195,8 @@ class RoiToolbox(QObject):
         gesture, not two - the caller (`RoiGeometrySync`, wired inside the
         same `undo_manager.begin_batch()`/`end_batch()` window as the
         geometry edit itself) relies on this being exactly one push."""
-        old_positions: dict[int, tuple[float, float, dict | None, RoiMask | None, RoiMask | None]] = {}
-        new_positions: dict[int, tuple[float, float, dict | None, RoiMask | None, RoiMask | None]] = {}
+        old_positions: dict[int, tuple] = {}
+        new_positions: dict[int, tuple] = {}
         mask_shapes_remapped = 0
         mask_shapes_lost: list[int] = []
         unsupported_shapes_skipped: list[int] = []
@@ -913,8 +1208,11 @@ class RoiToolbox(QObject):
                 None if roi.per_wavelength is None else dict(roi.per_wavelength),
                 roi.sample_mask,
                 roi.reference_mask,
+                roi.timeline,
             )
             new_center = remap_point(roi.center_x, roi.center_y)
+            # the geometry timeline keeps its own centres in the same processed space: they follow the edit too
+            new_timeline = roi.timeline.mapped(remap_point) if roi.timeline else None
             new_per_wavelength = (
                 None
                 if roi.per_wavelength is None
@@ -934,19 +1232,20 @@ class RoiToolbox(QObject):
                 roi.sample_geometry_type == "mask" and not sample_lost
             ) + (roi.reference_geometry_type == "mask" and not reference_lost)
             new_positions[roi_id] = (
-                new_center[0], new_center[1], new_per_wavelength, new_sample_mask, new_reference_mask,
+                new_center[0], new_center[1], new_per_wavelength, new_sample_mask, new_reference_mask, new_timeline,
             )
 
         if not old_positions:
             return RoiRemapReport((), 0, (), ())
 
-        def _write(values: dict[int, tuple[float, float, dict | None, RoiMask | None, RoiMask | None]]) -> None:
-            for roi_id, (x, y, per_wavelength, sample_mask, reference_mask) in values.items():
+        def _write(values: dict[int, tuple]) -> None:
+            for roi_id, (x, y, per_wavelength, sample_mask, reference_mask, timeline) in values.items():
                 roi = self._rois[roi_id]
                 roi.center_x, roi.center_y = x, y
                 roi.per_wavelength = per_wavelength
                 roi.sample_mask = sample_mask
                 roi.reference_mask = reference_mask
+                roi.timeline = timeline
 
         affected_ids = tuple(sorted(old_positions))
 

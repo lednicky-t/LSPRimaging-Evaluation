@@ -64,6 +64,8 @@ from lspr_ui import get_active_theme, load_tabler_icon
 from ...analysis.engine import AnalysisEngine
 from ...image_tools import GeometryModule
 from ...roi import RoiToolbox
+from ...roi.display_style import RoiDisplayStyle
+from ...roi.scope import RoiEditTarget
 from ...selection import SelectionModule
 from ...storage.ui_state_keys import ROI_TABLE_COLLAPSED, ROI_TABLE_COLUMN_WIDTHS, ROI_TABLE_SORT
 from ..image.general_group import ICON_SIZE, style_general_icon_button
@@ -122,9 +124,16 @@ class RoiTablePanel(QWidget):
         geometry: GeometryModule,
         analysis_engine: AnalysisEngine,
         parent: QWidget | None = None,
+        edit_target: RoiEditTarget | None = None,
+        display_style: RoiDisplayStyle | None = None,
     ) -> None:
         super().__init__(parent)
+        # The shared ROI display style: its Sample colour is the colour of a ROI with none of its own, the same
+        # object the Image overlay draws with (None: the palette default).
+        self._display_style = display_style
         self._toolbox = roi_toolbox
+        # Where a geometry edit lands (scope + cube; None = the base geometry, as before the timeline).
+        self._edit_target = edit_target
         self._selection = selection
         self._geometry = geometry
         self._engine = analysis_engine
@@ -239,6 +248,9 @@ class RoiTablePanel(QWidget):
         self._toolbox.geometry_changed.connect(self._schedule_refresh)
         self._toolbox.cosmetic_changed.connect(self._schedule_refresh)
         self._geometry.cosmetic_changed.connect(self._schedule_refresh)  # display unit, calibration
+        if self._display_style is not None:
+            self._display_style.changed.connect(self._schedule_refresh)  # the Sample colour of a ROI with none
+        self._selection.cube_changed.connect(self._schedule_refresh)  # the geometry shown is the one valid on this cube
         self._selection.roi_selection_changed.connect(self._on_selection_changed_elsewhere)
         self._model.cell_edited.connect(self._on_cell_edited)
         self._model.roi_dropped.connect(self._on_roi_dropped)
@@ -305,9 +317,16 @@ class RoiTablePanel(QWidget):
         self._redraw_timer.stop()
         self._rebuild(
             lambda: self._model.set_content(
-                self._toolbox.rois(), self._toolbox.groups(), self._toolbox.detection_settings(), self._unit()
+                self._toolbox.rois_at(self._selection.current_cube()),
+                self._toolbox.groups(),
+                self._toolbox.detection_settings(),
+                self._unit(),
+                None if self._display_style is None else self._display_style.sample.color,
             )
         )
+
+    def _edit_kwargs(self) -> dict:
+        return {} if self._edit_target is None else self._edit_target.kwargs()
 
     def _unit(self) -> LengthUnit:
         if self._geometry.settings().display_units == "um" and self._geometry.can_display_micrometers():
@@ -531,7 +550,7 @@ class RoiTablePanel(QWidget):
         noun = f"{len(targets)} ROIs" if len(targets) > 1 else f"ROI {targets[0]}"
         if column in (COLUMN_X, COLUMN_Y):
             axis = "x" if column == COLUMN_X else "y"
-            if self._guarded(f"Set {axis}", lambda: self._toolbox.place_rois(targets, **{axis: value})) and len(targets) > 1:
+            if self._guarded(f"Set {axis}", lambda: self._toolbox.place_rois(targets, **{axis: value}, **self._edit_kwargs())) and len(targets) > 1:
                 self._show_notice(f"Set {axis} of {noun} to {text.strip()} {unit.label}.")
             return
         field = {
@@ -545,7 +564,7 @@ class RoiTablePanel(QWidget):
         if not targets:
             self._show_notice("Mask ROIs have no diameter.")
             return
-        if self._guarded("Set diameter", lambda: self._toolbox.resize_rois(targets, **{field: value})) and len(targets) > 1:
+        if self._guarded("Set diameter", lambda: self._toolbox.resize_rois(targets, **{field: value}, **self._edit_kwargs())) and len(targets) > 1:
             self._show_notice(f"Set the diameter of {noun}.")
 
     # -- Excel-style copy / paste / fill down / step (on the current cell) ---------------------
@@ -677,7 +696,7 @@ class RoiTablePanel(QWidget):
     def _reset_diameters_selected(self) -> None:
         ids = self._selected_ids()
         if ids:
-            self._guarded("Reset diameters", lambda: self._toolbox.reset_roi_diameters(ids))
+            self._guarded("Reset diameters", lambda: self._toolbox.reset_roi_diameters(ids, **self._edit_kwargs()))
 
     def _shift_selected(self) -> None:
         ids = self._selected_ids()
@@ -688,7 +707,7 @@ class RoiTablePanel(QWidget):
         if dialog.exec() != dialog.DialogCode.Accepted:
             return
         dx, dy = dialog.shift()
-        self._guarded("Shift", lambda: self._toolbox.translate_rois(ids, from_display(dx, unit), from_display(dy, unit)))
+        self._guarded("Shift", lambda: self._toolbox.translate_rois(ids, from_display(dx, unit), from_display(dy, unit), **self._edit_kwargs()))
 
     def _reorder(self, target_for: Callable[[tuple[int, ...], list[int]], int]) -> None:
         if not self._renumbering_allowed():

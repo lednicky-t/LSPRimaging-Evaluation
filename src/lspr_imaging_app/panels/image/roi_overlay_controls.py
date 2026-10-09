@@ -26,10 +26,14 @@ from .general_group import style_general_icon_button
 from .roi_icons import ring_icon, spot_icon
 
 _SWATCH_SIZE = 14
+_OVERLAP_INFO = (
+    "Rings may overlap each other. A ring never counts pixels of sample disks (the analysis removes every sample disk "
+    "from every ring); sample disks are masked by your mask only."
+)
 _SLIDER_WIDTH = 18  # the same narrow, steep wedge as the Mask tab's
 
-_SAMPLE_ON_COLOR = "#f59e0b"  # the sample circles' own colour on the image
-_REFERENCE_ON_COLOR = "#38bdf8"  # the reference rings'
+_SAMPLE_ON_COLOR = "#c957e8"  # toggle icon while shown: pink-purple
+_REFERENCE_ON_COLOR = "#e6f2ff"  # toggle icon while shown: white with a slight glassy blue
 
 _SPECS: dict[str, tuple[Callable[[bool, str, str], QIcon], str, str, str, str, str]] = {
     # kind: (icon, on colour, toggle tip, colour tip, transparency tip, colour dialog title)
@@ -42,7 +46,7 @@ _SPECS: dict[str, tuple[Callable[[bool, str, str], QIcon], str, str, str, str, s
     ),
     "reference": (
         ring_icon, _REFERENCE_ON_COLOR,
-        "Show or hide the reference rings.",
+        "Show or hide the reference rings.\n" + _OVERLAP_INFO,
         "Colour of the reference rings.",
         "Reference ring transparency.",
         "Choose the reference ring colour",
@@ -98,6 +102,12 @@ class RoiOverlayControls(QWidget):
         self._color = QColor(color)
         self._refresh_toggle_icon()
         self._refresh_swatch()
+
+    def sync_from(self, other: RoiOverlayControls) -> None:
+        """Copy another instance's state without emitting anything (the same controls sit on the ROIs and View tabs)."""
+        self.set_state(
+            visible=other._toggle_button.isChecked(), color=other._color, alpha=other._alpha_slider.value() / 100.0
+        )
 
     def _on_toggled(self, checked: bool) -> None:
         self._refresh_toggle_icon()

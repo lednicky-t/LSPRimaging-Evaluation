@@ -66,7 +66,7 @@ class CurrentInputs:
 
     reduction_method: str
     cube_settings: dict[int, dict[float, SettingsSnapshot]]  # cube_index -> {wavelength_nm: SettingsSnapshot}
-    roi_geometries: dict[int, dict]  # roi_id -> this ROI's own AreaRoi geometry fields, as a plain dict
+    roi_geometries: dict  # roi_id -> this ROI's own AreaRoi geometry fields, as a plain dict; or, when ROI geometry differs by cube, (roi_id, cube_index) -> the fields valid on that cube
     settings_dir: Path
 
 
@@ -114,7 +114,9 @@ def plan_recompute(
     to_skip: list[tuple[int, int]] = []
 
     for roi_id, cube_index in cells:
-        roi_geometry = current_inputs.roi_geometries.get(roi_id)
+        roi_geometry = current_inputs.roi_geometries.get((roi_id, cube_index))
+        if roi_geometry is None:
+            roi_geometry = current_inputs.roi_geometries.get(roi_id)
         wavelength_settings = current_inputs.cube_settings.get(cube_index)
         if roi_geometry is None or wavelength_settings is None:
             # Nothing live to compare against (e.g. a stale roi_id/cube_index

@@ -92,12 +92,23 @@ from ..image_tools.chromatic.model import (
 )
 from ..image_tools.geometry.model import CropDefinition, GeometrySettings
 from ..image_tools.mask.model import MaskChange, MaskSettings
-from ..roi.model import AreaRoi, AreaRoiDetectionSettings, AreaRoiGroup, RoiArrayGroup, RoiMask
+from ..roi.model import (
+    AreaRoi,
+    AreaRoiDetectionSettings,
+    AreaRoiGroup,
+    RoiArrayGroup,
+    RoiGeometry,
+    RoiGeometryChange,
+    RoiMask,
+    RoiTimeline,
+)
 
 logger = logging.getLogger(__name__)
 
 SESSION_SCHEMA_NAME = "lspri_rewrite_session"
-SESSION_SCHEMA_VERSION = "1.1"
+SESSION_SCHEMA_VERSION = "1.2"
+# 1.2 (2026-10-08): optional per-ROI "timeline" (geometry changes by cube, docs/roi_timeline_design_2026-10-08.md).
+# 1.1: the analysis block. 1.0: first release. Older files load: a missing "timeline" means one geometry for every cube.
 """Bumped major for a breaking change, minor for an additive one - the same
 rule `docs/schemas/hdf_standard.md` sets for measurement files. `load_session`
 rejects an unknown schema name and an incompatible major version rather than
@@ -220,6 +231,53 @@ def _decode_per_wavelength(raw: object) -> dict[tuple[int, float], tuple[float, 
     return decoded or None
 
 
+def _encode_timeline(timeline: RoiTimeline | None) -> dict | None:
+    """The ROI's geometry changes by cube (schema 1.2). ``None`` when it has none, so a session without a
+    timeline looks exactly as it did before."""
+    if not timeline:
+        return None
+
+    def encode(change: RoiGeometryChange) -> dict:
+        g = change.geometry
+        return {
+            "cube": int(change.cube),
+            "x": float(g.center_x),
+            "y": float(g.center_y),
+            "sample_diameter_px": float(g.sample_diameter_px),
+            "reference_inner_diameter_px": None if g.reference_inner_diameter_px is None else float(g.reference_inner_diameter_px),
+            "reference_outer_diameter_px": None if g.reference_outer_diameter_px is None else float(g.reference_outer_diameter_px),
+        }
+
+    return {"persistent": [encode(c) for c in timeline.persistent], "individual": [encode(c) for c in timeline.individual]}
+
+
+def _decode_timeline(raw: object) -> RoiTimeline | None:
+    """Lenient, like the rest of the decoder: a malformed change is skipped (and logged); no usable change -> ``None``."""
+    if not isinstance(raw, dict):
+        return None
+
+    def decode(entries: object, scope: str) -> tuple[RoiGeometryChange, ...]:
+        out: dict[int, RoiGeometryChange] = {}
+        for entry in entries if isinstance(entries, list) else []:
+            try:
+                inner = entry.get("reference_inner_diameter_px")
+                outer = entry.get("reference_outer_diameter_px")
+                geometry = RoiGeometry(
+                    float(entry["x"]),
+                    float(entry["y"]),
+                    float(entry["sample_diameter_px"]),
+                    None if inner is None else float(inner),
+                    None if outer is None else float(outer),
+                )
+                out[int(entry["cube"])] = RoiGeometryChange(int(entry["cube"]), scope, geometry)
+            except (AttributeError, KeyError, TypeError, ValueError):
+                logger.warning("Skipping an undecodable ROI geometry change in the session file", exc_info=True)
+        return tuple(out[cube] for cube in sorted(out))
+
+    timeline = RoiTimeline(decode(raw.get("persistent"), "persistent"), decode(raw.get("individual"), "individual"))
+    return timeline if timeline else None
+
+
 def _encode_area_roi(area_roi: AreaRoi) -> dict:
     """Shallow field enumeration, **not** `asdict()` - ported from
     `storage/workspace.py` along with its measured reason.
@@ -235,6 +293,7 @@ def _encode_area_roi(area_roi: AreaRoi) -> dict:
     payload["sample_mask"] = _encode_roi_mask(area_roi.sample_mask)
     payload["reference_mask"] = _encode_roi_mask(area_roi.reference_mask)
     payload["per_wavelength"] = _encode_per_wavelength(area_roi.per_wavelength)
+    payload["timeline"] = _encode_timeline(area_roi.timeline)
     return payload
 
 
@@ -260,6 +319,7 @@ def _decode_area_rois(raw: object) -> list[AreaRoi]:
             kwargs["sample_mask"] = _decode_roi_mask(entry.get("sample_mask"))
             kwargs["reference_mask"] = _decode_roi_mask(entry.get("reference_mask"))
             kwargs["per_wavelength"] = _decode_per_wavelength(entry.get("per_wavelength"))
+            kwargs["timeline"] = _decode_timeline(entry.get("timeline"))
             decoded.append(AreaRoi(**kwargs))
         except (KeyError, TypeError, ValueError):
             logger.warning("Skipping an undecodable ROI in the session file", exc_info=True)

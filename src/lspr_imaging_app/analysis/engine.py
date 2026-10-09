@@ -117,6 +117,8 @@ class AnalysisEngine(QObject):
         *,
         load_plane: Callable[[int, float], np.ndarray],
         rois: Callable[[], tuple[AreaRoi, ...]],
+        rois_at: Callable[[int], tuple[AreaRoi, ...]] | None = None,
+        has_timeline: Callable[[], bool] = lambda: False,
         cube_indices: Callable[[], tuple[int, ...]],
         wavelengths_for_cube: Callable[[int], tuple[float, ...]],
         geometry_settings: Callable[[], GeometrySettings],
@@ -202,6 +204,10 @@ class AnalysisEngine(QObject):
         super().__init__(parent)
         self._load_plane = load_plane
         self._rois = rois
+        # ROI geometry can differ by cube (docs/roi_timeline_design_2026-10-08.md): `rois_at(cube)` gives every ROI with
+        # the geometry valid on that cube. Without it (or while no ROI has a timeline) every cube sees `rois()`.
+        self._rois_at = rois_at if rois_at is not None else (lambda _cube: self._rois())
+        self._has_timeline = has_timeline
         self._cube_indices = cube_indices
         self._wavelengths_for_cube = wavelengths_for_cube
         self._geometry_settings = geometry_settings
@@ -562,8 +568,10 @@ class AnalysisEngine(QObject):
         exclusion_mode = self._reference_exclusion_mode()
         coverage_thresholds = self._coverage_thresholds()
         all_rois = self._rois()
+        timeline = bool(self._has_timeline())
         # Must match what compute_cell records, or every cell would look
         # stale the moment it's compared against its own stored fingerprint.
+        # With a geometry timeline the digests differ by cube (computed per cube below).
         exclusion_digest = (
             sample_exclusion_digest(all_rois)
             if exclusion_mode == "exclude_all_sample_rois" and all_rois
@@ -579,8 +587,19 @@ class AnalysisEngine(QObject):
             all_rois, background, self._detection_settings()
         )
         cube_settings: dict[int, dict[float, SettingsSnapshot]] = {}
+        cube_rois: dict[int, tuple[AreaRoi, ...]] = {}
         for cube_index in self._cube_indices():
             wavelength_settings: dict[float, SettingsSnapshot] = {}
+            if timeline:
+                cube_rois[cube_index] = self._rois_at(cube_index)
+                exclusion_digest = (
+                    sample_exclusion_digest(cube_rois[cube_index])
+                    if exclusion_mode == "exclude_all_sample_rois" and cube_rois[cube_index]
+                    else None
+                )
+                background_digest = background_exclusion_digest(
+                    cube_rois[cube_index], background, self._detection_settings()
+                )
             for wavelength_nm in self._wavelengths_for_cube(cube_index):
                 # The dark/background frame (0.0 nm, when present) is real
                 # data but not a spectral sample point - excluded here, and
@@ -621,7 +640,14 @@ class AnalysisEngine(QObject):
                     coverage_thresholds=coverage_thresholds.as_dict(),
                 )
             cube_settings[cube_index] = wavelength_settings
-        roi_geometries = {roi.area_roi_id: roi_geometry_fingerprint_fields(roi) for roi in all_rois}
+        if timeline:
+            roi_geometries = {
+                (roi.area_roi_id, cube_index): roi_geometry_fingerprint_fields(roi)
+                for cube_index, rois_here in cube_rois.items()
+                for roi in rois_here
+            }
+        else:
+            roi_geometries = {roi.area_roi_id: roi_geometry_fingerprint_fields(roi) for roi in all_rois}
         return CurrentInputs(
             reduction_method=reduction_method, cube_settings=cube_settings,
             roi_geometries=roi_geometries, settings_dir=self._settings_dir,
@@ -678,6 +704,14 @@ class AnalysisEngine(QObject):
         exclusion_mode = self._reference_exclusion_mode()
         coverage_thresholds = self._coverage_thresholds()
         all_rois = tuple(rois_by_id.values())
+        # The ROIs as they are on each cube of the plan (they differ only when a geometry timeline exists). Resolved
+        # here, on the GUI thread, never from the worker.
+        rois_by_cube: dict[int, tuple[dict[int, AreaRoi], tuple[AreaRoi, ...]]] = {}
+        if self._has_timeline():
+            for _roi_id, cube_index in plan.to_recompute:
+                if cube_index not in rois_by_cube:
+                    at_cube = self._rois_at(cube_index)
+                    rois_by_cube[cube_index] = ({r.area_roi_id: r for r in at_cube}, tuple(at_cube))
         # Read once here, on the GUI thread, not per cell from the worker:
         # the modules are only ever touched from the GUI thread (the same
         # convention `panels/image/render.py`'s RenderRequest follows), and
@@ -705,7 +739,8 @@ class AnalysisEngine(QObject):
                 for completed, (roi_id, cube_index) in enumerate(plan.to_recompute, start=1):
                     if cancel_event.is_set():
                         break
-                    roi = rois_by_id.get(roi_id)
+                    by_id_here, all_rois_here = rois_by_cube.get(cube_index, (rois_by_id, all_rois))
+                    roi = by_id_here.get(roi_id)
                     if roi is None:
                         continue
                     wavelength_inputs = self._gather_wavelength_inputs(cube_index)
@@ -714,7 +749,7 @@ class AnalysisEngine(QObject):
                         reduction_method=reduction_method, trimmed_mean_fraction=self._trimmed_mean_fraction,
                         default_reference_inner_diameter_px=default_inner, default_reference_outer_diameter_px=default_outer,
                         masks_dir=self._masks_dir, chromatic_dir=self._chromatic_dir, settings_dir=self._settings_dir,
-                        naming=naming, all_rois=all_rois, detection_settings=detection,
+                        naming=naming, all_rois=all_rois_here, detection_settings=detection,
                         reference_exclusion_mode=exclusion_mode,
                         sample_exclusion_cache=sample_exclusion_cache, cancel_event=cancel_event,
                         coverage_thresholds=coverage_thresholds,

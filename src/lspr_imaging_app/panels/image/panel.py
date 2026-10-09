@@ -114,6 +114,7 @@ from ...image_tools import (
 from ...image_tools.geometry.model import CropDefinition, GeometrySettings
 from ...image_tools.preprocess import area_selection_to_raw, resolve_external_mask
 from ...roi import RoiToolbox
+from ...roi.rasterize import effective_reference_diameters
 from .no_data import format_pixel_value, no_data_overlay_rgba
 from ...selection import AreaSelectionModule, HighlightRangeModule, ReferenceFrameModule, SelectionModule
 from ...selection.reference_frame_module import MODE_AUTO
@@ -123,6 +124,9 @@ from .landmark_overlay import draw_landmarks
 from .slider_ticks import cube_slider_major_ticks, wavelength_slider_major_ticks
 from .transforms_settings import TransformsSection
 from ...image_tools.chromatic_auto_task import ChromaticAutoDetect
+from ...roi.array_task import ArrayAction
+from ...roi.display_style import RoiDisplayStyle
+from ...roi.scope import RoiEditTarget, RoiScopeModule
 from .area_selection_tool import AreaSelectionTool
 from .background_tab import BACKGROUND_INFO_HTML, BackgroundTab
 from .chromatic_tab import ChromaticCorrectionTab, ChromaticUiValues
@@ -155,6 +159,9 @@ from .render import ImageRenderer, RenderRequest, RenderResult
 from .roi_gestures import RoiGestures, SelectedApertures
 from .roi_overlay import RoiOverlay, add_curve
 from .roi_overlay_controls import RoiOverlayControls
+from .array_actions import ArrayActions
+from .roi_scope_toggle import RoiScopeToggle
+from .array_controls import ArrayControls
 from .rotate_line_tool import RotateLineTool
 from ...storage.ui_state_keys import (
     IMAGE_CURSOR_READOUT,
@@ -163,6 +170,7 @@ from ...storage.ui_state_keys import (
     IMAGE_ROI_LABELS,
     IMAGE_SCALE_BAR_COLOR,
     ROI_OVERLAY_KEYS,
+    ROI_SCOPE,
     read,
 )
 from ..ui_state import UiStateStore
@@ -319,6 +327,8 @@ class ImagePanel(QWidget):
         initial_ribbon_category: str | None = None,
         initial_show_background: bool = False,
         analysis_running: Callable[[], bool] | None = None,
+        roi_scope: RoiScopeModule | None = None,
+        roi_display: RoiDisplayStyle | None = None,
     ) -> None:
         super().__init__(parent)
         self._show_background = bool(initial_show_background)
@@ -343,6 +353,14 @@ class ImagePanel(QWidget):
         self._chromatic = chromatic
         # Optional like `area_selection`: tests build the panel without the app shell.
         self._chromatic_auto = chromatic_auto if chromatic_auto is not None else ChromaticAutoDetect(chromatic, self)
+        self._array_action = ArrayAction(self)  # ROIs tab, Array group (panels/image/array_actions.py)
+        # Persistent / Individual ROI edit scope, shared with the ROI table (optional so tests build the panel alone).
+        self._roi_scope = roi_scope if roi_scope is not None else RoiScopeModule(self)
+        # The one place the ROI display style (Sample / Reference colour, transparency, visibility) lives.
+        self._roi_display = roi_display if roi_display is not None else RoiDisplayStyle(self)
+        self._edit_target = RoiEditTarget(
+            self._roi_scope, lambda: int(self._selection.current_cube()), lambda: min(self._dataset.spectral_cubes(), default=None)
+        )
         self._initial_chromatic_values = initial_chromatic_values
         self._initial_chromatic_view = initial_chromatic_view
         self._landmark_overlay_visible = bool(initial_chromatic_view[0])
@@ -405,6 +423,7 @@ class ImagePanel(QWidget):
         if app is not None:
             app.aboutToQuit.connect(self._renderer.stop)
             app.aboutToQuit.connect(self._chromatic_auto.shutdown)
+            app.aboutToQuit.connect(self._array_action.shutdown)
 
         self._redraw_timer = QTimer(self)
         self._redraw_timer.setSingleShot(True)
@@ -458,7 +477,27 @@ class ImagePanel(QWidget):
         self._roi_overlay.fill_max_opacity = float(read(store, IMAGE_ROI_FILL_MAX_OPACITY))
         self._apply_roi_overlay_style()
         self._sync_roi_overlay_controls()
+        self._array_controls.bind_ui_state(store)
+        saved_scope = store.get(ROI_SCOPE.key)
+        if saved_scope in ("persistent", "individual"):
+            self._roi_scope.set_scope(saved_scope)
+        self._roi_scope.scope_changed.connect(lambda scope: store.set(ROI_SCOPE.key, scope))
         self._roi_overlay_store = store  # only now: restoring must not save what it just read
+
+    @property
+    def roi_display(self) -> RoiDisplayStyle:
+        """The one place the ROI display style (Sample / Reference colour, transparency, visibility) lives."""
+        return self._roi_display
+
+    @property
+    def edit_target(self) -> RoiEditTarget:
+        """Where a ROI geometry edit lands (shared with the ROI table)."""
+        return self._edit_target
+
+    @property
+    def array_action(self) -> ArrayAction:
+        """The Array tools' background action (the app shell connects it to the task indicator)."""
+        return self._array_action
 
     def _on_scale_bar_color_changed(self, color: QColor) -> None:
         self._scale_bar_item.set_color(color)
@@ -521,7 +560,7 @@ class ImagePanel(QWidget):
         # The ROI circles, reference rings, selection highlight and labels (roi_overlay.py).
         # How they are drawn is the "ROIs" ribbon tab (`roi_overlay_controls.py`); display-only:
         # this panel owns the values, no other module does.
-        self._roi_overlay = RoiOverlay(self._plot)
+        self._roi_overlay = RoiOverlay(self._plot, self._roi_display)
         self._roi_overlay_store: UiStateStore | None = None
         self._chunk_grid_curve = self._add_curve(_CHUNK_GRID_COLOR, width=1.0, dashed=True)
         # Chromatic landmark overlay (2026-10-04): crosses = *estimated* (tracked
@@ -610,8 +649,8 @@ class ImagePanel(QWidget):
         image_tools_content = self._build_image_tools_tab()
         mask_content = self._build_mask_tab()
         self._build_chromatic_and_background_tabs()
+        roi_content = self._build_roi_tab()  # before the View tab, which carries copies of its controls
         view_content = self._build_view_tab()
-        roi_content = self._build_roi_tab()
         self._build_top_bar(view_content, image_tools_content, mask_content, roi_content)
         self._build_navigation_bar()
 
@@ -659,7 +698,8 @@ class ImagePanel(QWidget):
                 self._plot, self._roi_toolbox, self._selection,
                 rois_in_rect=self.rois_in_rect, selected_apertures=self._selected_apertures,
                 view_pixel_size=lambda: float(self._plot.vb.viewPixelSize()[0]),
-                display_linear=self._display_linear, redraw_overlay=self._draw_roi_overlay, parent=self,
+                display_linear=self._display_linear, redraw_overlay=self._draw_roi_overlay,
+                edit_target=self._edit_target, parent=self,
             ),
             roi_tab_active=lambda: self._tool_ribbon.current_category() == ROI_TAB,
             to_reference=self._display_to_reference,
@@ -912,9 +952,37 @@ class ImagePanel(QWidget):
         view_background_group, self._view_background_label = labeled_icon_group(
             self, background_mirror, "Background"
         )
+        # View tab "ROIs" group: copies of the ROIs tab's Sample / Reference / Labels controls.
+        self._view_roi_sample_controls = RoiOverlayControls(
+            "sample", visible=self._roi_overlay.sample.visible, color=QColor(self._roi_overlay.sample.color),
+            alpha=self._roi_overlay.sample.alpha, parent=self,
+        )
+        self._view_roi_reference_controls = RoiOverlayControls(
+            "reference", visible=self._roi_overlay.reference.visible, color=QColor(self._roi_overlay.reference.color),
+            alpha=self._roi_overlay.reference.alpha, parent=self,
+        )
+        for kind, controls, copy in (
+            ("sample", self._roi_sample_controls, self._view_roi_sample_controls),
+            ("reference", self._roi_reference_controls, self._view_roi_reference_controls),
+        ):
+            copy.visibility_changed.connect(lambda shown, k=kind: self._on_roi_overlay_changed(k, "visible", bool(shown)))
+            copy.color_changed.connect(lambda color, k=kind: self._on_roi_overlay_changed(k, "color", color.name()))
+            copy.alpha_changed.connect(lambda alpha, k=kind: self._on_roi_overlay_changed(k, "alpha", float(alpha)))
+            for source, target in ((controls, copy), (copy, controls)):
+                for signal in (source.visibility_changed, source.color_changed, source.alpha_changed):
+                    signal.connect(lambda _value, s=source, t=target: t.sync_from(s))
+        self._view_roi_labels_button = mirror_icon_button(self._roi_labels_button, self)
+        view_roi_row = QWidget(self)
+        view_roi_layout = QHBoxLayout(view_roi_row)
+        view_roi_layout.setContentsMargins(0, 0, 0, 0)
+        view_roi_layout.setSpacing(6)
+        for widget in (self._view_roi_sample_controls, self._view_roi_reference_controls, self._view_roi_labels_button):
+            view_roi_layout.addWidget(widget)
+        view_roi_group, self._view_roi_label = labeled_icon_group(self, view_roi_row, "ROIs")
         self._view_separator_2 = vertical_separator(self)
         self._view_separator_3 = vertical_separator(self)
         self._view_separator_4 = vertical_separator(self)
+        self._view_separator_5 = vertical_separator(self)
         stretch_index = self._view_content_layout.count() - 1
         for offset, widget in enumerate(
             (
@@ -923,6 +991,8 @@ class ImagePanel(QWidget):
                 self._view_separator_3,
                 view_background_group,
                 self._view_separator_4,
+                view_roi_group,
+                self._view_separator_5,
                 view_scale_bar_group,
             )
         ):
@@ -952,8 +1022,31 @@ class ImagePanel(QWidget):
         roi_sample_group, self._roi_sample_label = labeled_icon_group(self, self._roi_sample_controls, "Sample")
         roi_reference_group, self._roi_reference_label = labeled_icon_group(self, self._roi_reference_controls, "Reference")
         roi_labels_group, self._roi_labels_caption = labeled_icon_group(self, self._roi_labels_button, "Labels")
+        self._roi_scope_toggle = RoiScopeToggle(self._roi_scope, self)
+        roi_scope_group, self._roi_scope_caption = labeled_icon_group(self, self._roi_scope_toggle, "Scope")
+        self._array_controls = ArrayControls(self._geometry, self)
+        roi_array_group, self._roi_array_caption = labeled_icon_group(self, self._array_controls, "Array")
+        self._array_actions = ArrayActions(
+            self._array_controls,
+            self._array_action,
+            toolbox=self._roi_toolbox,
+            selection=self._selection,
+            geometry=self._geometry,
+            background=self._background,
+            chromatic=self._chromatic,
+            load_plane=self._dataset.load_plane,
+            has_dataset=lambda: bool(self._dataset.spectral_cubes()),
+            resolve_reference=self._resolve_reference_frame,
+            analysis_running=self._analysis_running,
+            dialog_parent=self,
+            edit_target=self._edit_target,
+            parent=self,
+        )
+        self._array_actions.status.connect(self._on_tool_status)
         self._roi_separator_2 = vertical_separator(self)
         self._roi_separator_3 = vertical_separator(self)
+        self._roi_separator_4 = vertical_separator(self)
+        self._roi_separator_5 = vertical_separator(self)
         roi_content = QWidget(self)
         roi_content_layout = QHBoxLayout(roi_content)
         roi_content_layout.setContentsMargins(0, 0, 0, 0)
@@ -963,6 +1056,10 @@ class ImagePanel(QWidget):
         roi_content_layout.addWidget(roi_reference_group)
         roi_content_layout.addWidget(self._roi_separator_3)
         roi_content_layout.addWidget(roi_labels_group)
+        roi_content_layout.addWidget(self._roi_separator_5)
+        roi_content_layout.addWidget(roi_scope_group)
+        roi_content_layout.addWidget(self._roi_separator_4)
+        roi_content_layout.addWidget(roi_array_group)
         roi_content_layout.addStretch(1)
         return roi_content
 
@@ -1272,15 +1369,21 @@ class ImagePanel(QWidget):
             self._mask_overlay_controls.refresh_theme(get_active_theme())
         if hasattr(self, "_view_mask_overlay_controls"):
             self._view_mask_overlay_controls.refresh_theme(get_active_theme())
-        for name in ("_roi_sample_controls", "_roi_reference_controls"):
+        for name in (
+            "_roi_sample_controls", "_roi_reference_controls", "_view_roi_sample_controls", "_view_roi_reference_controls"
+        ):
             if hasattr(self, name):
                 getattr(self, name).refresh_theme(get_active_theme())
         if hasattr(self, "_roi_labels_button"):
             style_general_icon_button(self._roi_labels_button)
             self._refresh_roi_labels_icon()
+        if hasattr(self, "_array_controls"):
+            self._array_controls.refresh_theme()
+        if hasattr(self, "_roi_scope_toggle"):
+            self._roi_scope_toggle.refresh_theme(get_active_theme())
         for name in (
-            "_view_separator", "_view_separator_2", "_view_separator_3", "_view_separator_4",
-            "_roi_separator_2", "_roi_separator_3",
+            "_view_separator", "_view_separator_2", "_view_separator_3", "_view_separator_4", "_view_separator_5",
+            "_roi_separator_2", "_roi_separator_3", "_roi_separator_4", "_roi_separator_5",
         ):
             if hasattr(self, name):
                 getattr(self, name).setStyleSheet(f"color: {get_active_theme().control_border};")
@@ -1306,12 +1409,15 @@ class ImagePanel(QWidget):
             "_view_mask_label",
             "_view_chromatic_label",
             "_view_background_label",
+            "_view_roi_label",
             "_view_scale_bar_label",
             "_mask_edit_label",
             "_mask_png_label",
             "_roi_sample_label",
             "_roi_reference_label",
             "_roi_labels_caption",
+            "_roi_array_caption",
+            "_roi_scope_caption",
         ):
             if hasattr(self, label_attr):
                 getattr(self, label_attr).setStyleSheet(group_label_style())
@@ -1668,7 +1774,7 @@ class ImagePanel(QWidget):
                 # estimate's exclusion, not the overlay (see RenderRequest).
                 # `_redraw` already re-runs on every ROI edit, so this adds
                 # no re-render that wasn't happening anyway.
-                rois=tuple(self._roi_toolbox.rois()),
+                rois=tuple(self._roi_toolbox.rois_at(self._current_cube())),
                 detection=self._roi_toolbox.detection_settings(),
                 serial=self._latest_serial,
                 show_background=self._show_background,
@@ -1784,7 +1890,7 @@ class ImagePanel(QWidget):
             self._roi_overlay.clear()
             return
 
-        rois = self._roi_toolbox.rois()
+        rois = self._roi_toolbox.rois_at(self._current_cube())
         if not rois:
             self._roi_overlay.clear()
             return
@@ -1812,7 +1918,7 @@ class ImagePanel(QWidget):
     def _on_roi_overlay_changed(self, kind: str, field: str, value: object) -> None:
         """A ROI display control changed: ``kind`` is "sample" or "reference",
         ``field`` "visible", "color" (a ``#rrggbb`` string) or "alpha"."""
-        setattr(self._roi_overlay.style(kind), field, value)
+        self._roi_display.set(kind, field, value)  # the one shared style; the overlay and the ROI table both read it
         self._apply_roi_overlay_style()
         if self._roi_overlay_store is not None:
             self._roi_overlay_store.set(ROI_OVERLAY_KEYS[kind][field].key, value)
@@ -1848,6 +1954,8 @@ class ImagePanel(QWidget):
                 stroke_width=2.1,
             )
         )
+        if hasattr(self, "_view_roi_labels_button"):
+            self._view_roi_labels_button.sync()  # the View tab's copy follows the icon (theme change, restore)
 
     def _sync_roi_overlay_controls(self) -> None:
         """Show the panel's ROI display options on the ribbon controls (after
@@ -1859,6 +1967,8 @@ class ImagePanel(QWidget):
         self._roi_reference_controls.set_state(
             visible=overlay.reference.visible, color=QColor(overlay.reference.color), alpha=overlay.reference.alpha
         )
+        self._view_roi_sample_controls.sync_from(self._roi_sample_controls)
+        self._view_roi_reference_controls.sync_from(self._roi_reference_controls)
         blocked = self._roi_labels_button.blockSignals(True)
         self._roi_labels_button.setChecked(overlay.labels_visible)
         self._roi_labels_button.blockSignals(blocked)
@@ -2322,7 +2432,7 @@ class ImagePanel(QWidget):
         inside a large one stays reachable."""
         frame = (self._current_cube(), self._current_wavelength())
         affine = self._chromatic.affine_for(frame)
-        rois = self._roi_toolbox.rois()
+        rois = self._roi_toolbox.rois_at(frame[0])
         if not rois:
             return None
         centers = self._roi_toolbox.display_positions(frame, affine)
@@ -2346,7 +2456,7 @@ class ImagePanel(QWidget):
     def _selected_apertures(self) -> SelectedApertures | None:
         """The selected ROIs' display centres and diameters, for the border/inside hit test; `None` with no selection."""
         selected = self._selection.selected_roi_ids()
-        rois = self._roi_toolbox.rois()
+        rois = self._roi_toolbox.rois_at(self._current_cube())
         if not selected or not rois:
             return None
         keep = np.fromiter((roi.area_roi_id in selected for roi in rois), dtype=bool, count=len(rois))
@@ -2355,11 +2465,23 @@ class ImagePanel(QWidget):
         frame = (self._current_cube(), self._current_wavelength())
         centers = self._roi_toolbox.display_positions(frame, self._chromatic.affine_for(frame))[keep]
         chosen = [roi for roi, hit in zip(rois, keep, strict=True) if hit]
+        detection = self._roi_toolbox.detection_settings()
+        rings = np.array(
+            [
+                effective_reference_diameters(roi, detection.reference_inner_diameter_px, detection.reference_outer_diameter_px)
+                for roi in chosen
+            ],
+            dtype=np.float64,
+        ).reshape(-1, 2)
+        resizable = np.array([roi.sample_geometry_type != "mask" for roi in chosen], dtype=bool)
         return SelectedApertures(
             ids=np.array([roi.area_roi_id for roi in chosen], dtype=np.int64),
             centers=centers,
             diameters=np.array([roi.sample_diameter_px for roi in chosen], dtype=np.float64),
-            resizable=np.array([roi.sample_geometry_type != "mask" for roi in chosen], dtype=bool),
+            resizable=resizable,
+            ring_inner=rings[:, 0],
+            ring_outer=rings[:, 1],
+            ring_resizable=resizable & bool(self._roi_overlay.reference.visible) & (rings[:, 1] > rings[:, 0]),
         )
 
     def _current_affine(self) -> np.ndarray:

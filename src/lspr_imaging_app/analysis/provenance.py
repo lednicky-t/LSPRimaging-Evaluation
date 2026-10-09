@@ -582,7 +582,8 @@ def roi_geometry_fingerprint_fields(roi: AreaRoi) -> dict:
 class ProvenanceRecord:
     """The complete set of inputs that produced one (ROI, cube) cell's
     stored spectrum. `roi_geometry` and `reduction_method` don't vary across
-    a cube's wavelengths (ROI position is not time/wavelength-varying yet;
+    a cube's wavelengths (ROI geometry can differ by cube - the geometry timeline,
+    `RoiToolbox.rois_at` - but not by wavelength;
     reduction method is a session-wide choice); `per_wavelength_settings`
     can, since a mask/chromatic individual override is frame-specific -
     holds one settings-snapshot version id per wavelength actually present

@@ -18,7 +18,6 @@ geometry itself is `roi/overlay_geometry.py` (vectorized over the ROIs).
 from __future__ import annotations
 
 from collections.abc import Collection, Sequence
-from dataclasses import dataclass
 
 import numpy as np
 import pyqtgraph as pg
@@ -26,6 +25,7 @@ from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QBrush, QColor, QPainterPath
 from PyQt6.QtWidgets import QGraphicsPathItem
 
+from ...roi.display_style import DEFAULT_REFERENCE_COLOR, DEFAULT_SAMPLE_COLOR, RoiCircleStyle, RoiDisplayStyle
 from ...roi.model import AreaRoi
 from ...roi.overlay_geometry import circle_outlines
 from ...roi.rasterize import effective_reference_diameters
@@ -37,8 +37,6 @@ while keeping the whole overlay to a few thousand points for a few hundred
 ROIs - the overlay is redrawn on every selection change, so its cost is
 paid far more often than the image's."""
 
-DEFAULT_SAMPLE_COLOR = "#f59e0b"
-DEFAULT_REFERENCE_COLOR = "#38bdf8"
 SAMPLE_WIDTH = 1.5
 REFERENCE_WIDTH = 1.0
 SELECTED_COLOR = "#f8fafc"
@@ -48,13 +46,6 @@ MAX_IDLE_SAMPLE_CURVES = 24
 DEFAULT_FILL_MAX_OPACITY = 1.0
 """Opacity of a ROI fill when its Transparency slider is at 100 %. The slider
 scales between 0 and this value; the maximum is an Options-menu preference."""
-
-
-@dataclass
-class RoiCircleStyle:
-    visible: bool
-    color: str  # "#rrggbb"; for the sample circles, the colour of ROIs with none of their own
-    alpha: float  # 0..1
 
 
 def add_curve(plot: pg.PlotItem, color_hex: str, *, width: float, dashed: bool = False) -> pg.PlotDataItem:
@@ -131,10 +122,12 @@ def roi_overlay_color(color_hex: str | None, default: str) -> str:
 
 
 class RoiOverlay:
-    def __init__(self, plot: pg.PlotItem) -> None:
+    def __init__(self, plot: pg.PlotItem, display_style: RoiDisplayStyle | None = None) -> None:
         self._plot = plot
-        self.sample = RoiCircleStyle(True, DEFAULT_SAMPLE_COLOR, 1.0)
-        self.reference = RoiCircleStyle(True, DEFAULT_REFERENCE_COLOR, 1.0)
+        # The style objects are the shared `RoiDisplayStyle`'s own (one place the colours live), not copies.
+        shared = display_style if display_style is not None else RoiDisplayStyle()
+        self.sample = shared.sample
+        self.reference = shared.reference
         self.labels_visible = False
         self.fill_max_opacity = DEFAULT_FILL_MAX_OPACITY
         self.sample_curve = add_curve(plot, DEFAULT_SAMPLE_COLOR, width=SAMPLE_WIDTH)

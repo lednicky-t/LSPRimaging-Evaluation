@@ -17,7 +17,8 @@ from ...roi.palette import DEFAULT_ROI_COLOR_HEX
 
 COLUMN_ID, COLUMN_NAME, COLUMN_X, COLUMN_Y, COLUMN_SAMPLE, COLUMN_RING_IN, COLUMN_RING_OUT = range(7)
 COLUMN_COUNT = 7
-COLUMN_TITLES = ("#", "Name", "x", "y", "Sample", "Ring in", "Ring out")
+COLUMN_TITLES = ("#", "Name", "x", "y", "D_s", "d_r", "D_r")
+"""Header titles; ``X_y`` is drawn as X with a subscript y (`view.SubscriptHeader`)."""
 EDITABLE_COLUMNS = (COLUMN_NAME, COLUMN_X, COLUMN_Y, COLUMN_SAMPLE, COLUMN_RING_IN, COLUMN_RING_OUT)
 DIAMETER_COLUMNS = (COLUMN_SAMPLE, COLUMN_RING_IN, COLUMN_RING_OUT)
 
@@ -139,8 +140,12 @@ class Section:
 
 
 def build_roi_rows(
-    rois: Sequence[AreaRoi], groups: Sequence[AreaRoiGroup], defaults: AreaRoiDetectionSettings
+    rois: Sequence[AreaRoi],
+    groups: Sequence[AreaRoiGroup],
+    defaults: AreaRoiDetectionSettings,
+    default_color_hex: str = DEFAULT_ROI_COLOR_HEX,
 ) -> list[RoiRow]:
+    """``default_color_hex``: the colour of a ROI with none of its own, as the Image panel draws it (the Sample swatch)."""
     group_of = {roi_id: group.group_id for group in groups for roi_id in group.area_roi_ids}
     rows = []
     for roi in rois:
@@ -149,7 +154,7 @@ def build_roi_rows(
                 roi_id=roi.area_roi_id,
                 label=roi.label or "",
                 group_id=group_of.get(roi.area_roi_id),
-                color_hex=roi.sample_color_hex or DEFAULT_ROI_COLOR_HEX,
+                color_hex=roi.sample_color_hex or default_color_hex,
                 has_own_color=roi.sample_color_hex is not None,
                 x=roi.center_x,
                 y=roi.center_y,

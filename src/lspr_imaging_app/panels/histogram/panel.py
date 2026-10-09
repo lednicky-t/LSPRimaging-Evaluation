@@ -330,7 +330,7 @@ class HistogramPanel(QWidget):
         """``(key, masks)``: `masks` is the (sample, reference) pair, ``(None, None)``
         when there are no ROIs, or `None` while a large union is still being built."""
         assert self._frame is not None
-        rois = self._roi_toolbox.rois()
+        rois = self._roi_toolbox.rois_at(self._frame[0])
         if not rois:
             return None, (None, None)
         affine = self._chromatic.affine_for(self._frame)
