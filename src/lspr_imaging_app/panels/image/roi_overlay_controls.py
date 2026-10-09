@@ -32,20 +32,20 @@ _OVERLAP_INFO = (
 )
 _SLIDER_WIDTH = 18  # the same narrow, steep wedge as the Mask tab's
 
-_SAMPLE_ON_COLOR = "#c957e8"  # toggle icon while shown: pink-purple
-_REFERENCE_ON_COLOR = "#e6f2ff"  # toggle icon while shown: white with a slight glassy blue
+SAMPLE_ON_COLOR = "#c957e8"  # toggle icon while shown: pink-purple
+REFERENCE_ON_COLOR = "#e6f2ff"  # toggle icon while shown: white with a slight glassy blue
 
 _SPECS: dict[str, tuple[Callable[[bool, str, str], QIcon], str, str, str, str, str]] = {
     # kind: (icon, on colour, toggle tip, colour tip, transparency tip, colour dialog title)
     "sample": (
-        spot_icon, _SAMPLE_ON_COLOR,
+        spot_icon, SAMPLE_ON_COLOR,
         "Show or hide the sample ROI circles.",
         "Colour of sample ROIs that have none of their own (ROIs in a group keep their group tints).",
         "Sample ROI circle transparency.",
         "Choose the sample ROI colour",
     ),
     "reference": (
-        ring_icon, _REFERENCE_ON_COLOR,
+        ring_icon, REFERENCE_ON_COLOR,
         "Show or hide the reference rings.\n" + _OVERLAP_INFO,
         "Colour of the reference rings.",
         "Reference ring transparency.",

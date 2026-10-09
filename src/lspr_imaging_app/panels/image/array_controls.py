@@ -45,9 +45,9 @@ from ...roi.edge_size import EdgeSizeParams
 from ...roi.ring_size import RingParams
 from ...storage.ui_state_keys import ARRAY_KEYS, read
 from ..ui_state import UiStateStore
+from .array_mode_picker import ArrayModePicker
 from .general_group import ICON_SIZE, style_general_icon_button
 
-MODES = (("auto", "Auto"), ("semi", "Semi"), ("manual", "Manual"))
 _MODE_TIPS = {
     "auto": "Auto: find the array, its spacing, the disk size and the rings from the image alone.",
     "semi": "Semi: like Auto, but values typed in the settings menu (rows, columns, diameter, pitch) are checked against the result.",
@@ -283,10 +283,8 @@ class ArrayControls(QWidget):
         super().__init__(parent)
         self._running = False
         self._selected = 0
-        self._mode = QComboBox(self)
-        for key, text in MODES:
-            self._mode.addItem(text, key)
-        self._mode.currentIndexChanged.connect(self._on_mode_changed)
+        self._mode = ArrayModePicker(_MODE_TIPS, self)
+        self._mode.mode_changed.connect(self._on_mode_changed)
 
         self._run = QToolButton(self)
         style_general_icon_button(self._run)
@@ -317,7 +315,7 @@ class ArrayControls(QWidget):
     # -- state ------------------------------------------------------------------------
 
     def mode(self) -> str:
-        return str(self._mode.currentData())
+        return self._mode.mode()
 
     def popover(self) -> _Popover:
         return self._pop
@@ -379,9 +377,10 @@ class ArrayControls(QWidget):
 
     # -- buttons ----------------------------------------------------------------------
 
-    def _on_mode_changed(self) -> None:
-        mode = self.mode()
-        self._mode.setToolTip(_MODE_TIPS[mode])
+    def set_mode(self, mode: str) -> None:
+        self._mode.set_mode(mode)
+
+    def _on_mode_changed(self, *_args: object) -> None:
         self._refresh_buttons()
         self.changed.emit()
 
@@ -424,6 +423,7 @@ class ArrayControls(QWidget):
     def refresh_theme(self) -> None:
         for button in (self._run, self._refine, self._gear):
             style_general_icon_button(button)
+        self._mode.refresh_theme()
         self._refresh_buttons()
 
     # -- remembering -------------------------------------------------------------------
@@ -433,7 +433,7 @@ class ArrayControls(QWidget):
         stored in pixels whatever unit is shown."""
         p = self._pop
         spec: dict[str, tuple[Callable[[], object], Callable[[object], None]]] = {
-            "mode": (lambda: self.mode(), lambda v: self._mode.setCurrentIndex(max(self._mode.findData(v), 0))),
+            "mode": (lambda: self.mode(), lambda v: self.set_mode(str(v))),
             "rows": (p.rows.value, lambda v: p.rows.setValue(int(v))),
             "cols": (p.cols.value, lambda v: p.cols.setValue(int(v))),
             "diameter": (p.diameter.value_px, lambda v: p.diameter.set_value_px(float(v))),

@@ -147,7 +147,7 @@ def _tab_button_stylesheet(theme: GuiTheme, applied: bool = False) -> str:
     """
     return f"""
         QToolButton {{
-            color: {theme.text_muted};
+            color: {theme.text_dim};
             background: transparent;
             border: none;
             border-bottom: 2px solid transparent;

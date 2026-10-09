@@ -158,9 +158,11 @@ from .overlay_tint import OverlayTint
 from .render import ImageRenderer, RenderRequest, RenderResult
 from .roi_gestures import RoiGestures, SelectedApertures
 from .roi_overlay import RoiOverlay, add_curve
+from .roi_display_menu import RoiDisplayMenu
 from .roi_overlay_controls import RoiOverlayControls
 from .array_actions import ArrayActions
 from .roi_scope_toggle import RoiScopeToggle
+from .roi_shape_picker import RoiShapePicker
 from .array_controls import ArrayControls
 from .rotate_line_tool import RotateLineTool
 from ...storage.ui_state_keys import (
@@ -972,13 +974,11 @@ class ImagePanel(QWidget):
                 for signal in (source.visibility_changed, source.color_changed, source.alpha_changed):
                     signal.connect(lambda _value, s=source, t=target: t.sync_from(s))
         self._view_roi_labels_button = mirror_icon_button(self._roi_labels_button, self)
-        view_roi_row = QWidget(self)
-        view_roi_layout = QHBoxLayout(view_roi_row)
-        view_roi_layout.setContentsMargins(0, 0, 0, 0)
-        view_roi_layout.setSpacing(6)
-        for widget in (self._view_roi_sample_controls, self._view_roi_reference_controls, self._view_roi_labels_button):
-            view_roi_layout.addWidget(widget)
-        view_roi_group, self._view_roi_label = labeled_icon_group(self, view_roi_row, "ROIs")
+        # The same pick-up menu as on the ROIs tab, holding this tab's copies of the controls.
+        self._view_roi_display_menu = RoiDisplayMenu(
+            self._view_roi_sample_controls, self._view_roi_reference_controls, self._view_roi_labels_button, self
+        )
+        view_roi_group, self._view_roi_label = labeled_icon_group(self, self._view_roi_display_menu, "ROIs")
         self._view_separator_2 = vertical_separator(self)
         self._view_separator_3 = vertical_separator(self)
         self._view_separator_4 = vertical_separator(self)
@@ -1019,11 +1019,15 @@ class ImagePanel(QWidget):
         style_general_icon_button(self._roi_labels_button)
         self._roi_labels_button.toggled.connect(self._on_roi_labels_toggled)
         self._refresh_roi_labels_icon()
-        roi_sample_group, self._roi_sample_label = labeled_icon_group(self, self._roi_sample_controls, "Sample")
-        roi_reference_group, self._roi_reference_label = labeled_icon_group(self, self._roi_reference_controls, "Reference")
-        roi_labels_group, self._roi_labels_caption = labeled_icon_group(self, self._roi_labels_button, "Labels")
+        # One pick-up menu holds the Sample / Reference / Labels rows (roi_display_menu.py).
+        self._roi_display_menu = RoiDisplayMenu(
+            self._roi_sample_controls, self._roi_reference_controls, self._roi_labels_button, self
+        )
+        roi_display_group, self._roi_display_caption = labeled_icon_group(self, self._roi_display_menu, "Display")
         self._roi_scope_toggle = RoiScopeToggle(self._roi_scope, self)
         roi_scope_group, self._roi_scope_caption = labeled_icon_group(self, self._roi_scope_toggle, "Scope")
+        self._roi_shape_picker = RoiShapePicker(self)
+        roi_shape_group, self._roi_shape_caption = labeled_icon_group(self, self._roi_shape_picker, "Shape")
         self._array_controls = ArrayControls(self._geometry, self)
         roi_array_group, self._roi_array_caption = labeled_icon_group(self, self._array_controls, "Array")
         self._array_actions = ArrayActions(
@@ -1046,18 +1050,15 @@ class ImagePanel(QWidget):
         self._roi_separator_2 = vertical_separator(self)
         self._roi_separator_3 = vertical_separator(self)
         self._roi_separator_4 = vertical_separator(self)
-        self._roi_separator_5 = vertical_separator(self)
         roi_content = QWidget(self)
         roi_content_layout = QHBoxLayout(roi_content)
         roi_content_layout.setContentsMargins(0, 0, 0, 0)
         roi_content_layout.setSpacing(6)
-        roi_content_layout.addWidget(roi_sample_group)
+        roi_content_layout.addWidget(roi_display_group)
         roi_content_layout.addWidget(self._roi_separator_2)
-        roi_content_layout.addWidget(roi_reference_group)
-        roi_content_layout.addWidget(self._roi_separator_3)
-        roi_content_layout.addWidget(roi_labels_group)
-        roi_content_layout.addWidget(self._roi_separator_5)
         roi_content_layout.addWidget(roi_scope_group)
+        roi_content_layout.addWidget(self._roi_separator_3)
+        roi_content_layout.addWidget(roi_shape_group)
         roi_content_layout.addWidget(self._roi_separator_4)
         roi_content_layout.addWidget(roi_array_group)
         roi_content_layout.addStretch(1)
@@ -1377,13 +1378,18 @@ class ImagePanel(QWidget):
         if hasattr(self, "_roi_labels_button"):
             style_general_icon_button(self._roi_labels_button)
             self._refresh_roi_labels_icon()
+        for name in ("_roi_display_menu", "_view_roi_display_menu"):
+            if hasattr(self, name):
+                getattr(self, name).refresh_theme(get_active_theme())
+        if hasattr(self, "_roi_shape_picker"):
+            self._roi_shape_picker.refresh_theme()
         if hasattr(self, "_array_controls"):
             self._array_controls.refresh_theme()
         if hasattr(self, "_roi_scope_toggle"):
             self._roi_scope_toggle.refresh_theme(get_active_theme())
         for name in (
             "_view_separator", "_view_separator_2", "_view_separator_3", "_view_separator_4", "_view_separator_5",
-            "_roi_separator_2", "_roi_separator_3", "_roi_separator_4", "_roi_separator_5",
+            "_roi_separator_2", "_roi_separator_3", "_roi_separator_4",
         ):
             if hasattr(self, name):
                 getattr(self, name).setStyleSheet(f"color: {get_active_theme().control_border};")
@@ -1413,9 +1419,8 @@ class ImagePanel(QWidget):
             "_view_scale_bar_label",
             "_mask_edit_label",
             "_mask_png_label",
-            "_roi_sample_label",
-            "_roi_reference_label",
-            "_roi_labels_caption",
+            "_roi_display_caption",
+            "_roi_shape_caption",
             "_roi_array_caption",
             "_roi_scope_caption",
         ):

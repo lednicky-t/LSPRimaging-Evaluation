@@ -48,6 +48,25 @@ def spot_icon(on: bool, off_color: str, on_color: str) -> QIcon:
     return QIcon(pixmap)
 
 
+def display_icon(sample_color: str, reference_color: str) -> QIcon:
+    """A filled circle (the size of ``spot_icon``'s) inside a wider-gapped filled
+    ring: the face of the ROIs tab's "ROI display" menu. Always drawn "on"."""
+    pixmap, painter = _canvas()
+    centre = _RENDER_SIZE / 2.0
+    painter.setPen(Qt.PenStyle.NoPen)
+    painter.setBrush(QColor(sample_color))
+    radius = _RENDER_SIZE * 0.25  # the same circle as spot_icon
+    painter.drawEllipse(QRectF(centre - radius, centre - radius, 2 * radius, 2 * radius))
+    path = QPainterPath()
+    path.setFillRule(Qt.FillRule.OddEvenFill)
+    for radius in (_RENDER_SIZE * 0.48, _RENDER_SIZE * 0.37):  # outer, inner: a gap around the circle
+        path.addEllipse(QRectF(centre - radius, centre - radius, 2 * radius, 2 * radius))
+    painter.setBrush(QColor(reference_color))
+    painter.drawPath(path)
+    painter.end()
+    return QIcon(pixmap)
+
+
 def ring_icon(on: bool, off_color: str, on_color: str) -> QIcon:
     """A filled ring (the reference region between the inner and outer edge) in
     ``on_color``; in ``off_color`` and crossed out when off."""
