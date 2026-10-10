@@ -91,7 +91,6 @@ from PyQt6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QSpinBox,
-    QStackedWidget,
     QToolButton,
     QVBoxLayout,
     QWidget,
@@ -107,7 +106,6 @@ from ...image_tools import (
     GeometryModule,
     ImageTool,
     MaskEditTool,
-    MaskEditToolModule,
     MaskModule,
     MaskScopeModule,
 )
@@ -119,7 +117,6 @@ from .no_data import format_pixel_value, no_data_overlay_rgba
 from ...selection import AreaSelectionModule, HighlightRangeModule, ReferenceFrameModule, SelectionModule
 from ...selection.reference_frame_module import MODE_AUTO
 from ..cursor_overlay import CursorOverlay
-from ..ribbon_group import group_label_style, labeled_icon_group, vertical_separator
 from .landmark_overlay import draw_landmarks
 from .slider_ticks import cube_slider_major_ticks, wavelength_slider_major_ticks
 from .transforms_settings import TransformsSection
@@ -134,23 +131,11 @@ from .canvas_tools import _ICON_SIZE, style_bar_icon_button
 from .crop_size_controls import CropSizeControls
 from .crop_tool import CropTool
 from .data_axis_slider import DataAxisSlider
-from .general_group import ICON_SIZE as _RIBBON_ICON_SIZE
-from .general_group import AreaSelectionPicker, mirror_icon_button, style_general_icon_button
+from .general_group import AreaSelectionPicker, style_general_icon_button
 from .guided_value_spinbox import GuidedValueSpinBox
-from .histogram_highlight_overlay_controls import HistogramHighlightOverlayControls
 from .image_controls import ImageViewBox, controls_text
 from .interaction import CanvasInteraction
-from .mask_edit_panels import (
-    DrawEditPanel,
-    HistogramSelectionEditPanel,
-    LocalContrastEditPanel,
-    MorphologyEditPanel,
-    ThresholdEditPanel,
-)
-from .mask_edit_tool_picker import MaskEditToolPicker
-from .mask_file_actions import MaskClearAction, MaskPngActions
-from .mask_overlay_controls import MaskOverlayControls
-from .mask_scope_toggle import MaskScopeToggle
+from .mask_tab import MaskTab
 from .measure_controls import MeasureCalibrationControls
 from .measure_line_tool import MeasureLineTool
 from .overlay_style import OverlayStyle
@@ -158,15 +143,9 @@ from .overlay_tint import OverlayTint
 from .render import ImageRenderer, RenderRequest, RenderResult
 from .roi_gestures import RoiGestures, SelectedApertures
 from .roi_overlay import RoiOverlay, add_curve
-from .group_actions import GroupActions
-from .group_controls import GroupControls
-from .roi_display_menu import RoiDisplayMenu
-from .roi_overlay_controls import RoiOverlayControls
-from .array_actions import ArrayActions
-from .roi_scope_toggle import RoiScopeToggle
-from .roi_shape_picker import RoiShapePicker
-from .array_controls import ArrayControls
+from .roi_tab import RoiTab
 from .rotate_line_tool import RotateLineTool
+from .view_tab import ViewTab
 from ...storage.ui_state_keys import (
     IMAGE_CURSOR_READOUT,
     IMAGE_MASK_EDIT_TOOL,
@@ -178,7 +157,6 @@ from ...storage.ui_state_keys import (
     read,
 )
 from ..ui_state import UiStateStore
-from .scale_bar_controls import ScaleBarControls
 from .scale_bar_overlay import ScaleBarItem
 from .tool_ribbon import ROI_TAB, VIEW_TAB, ImageToolRibbon
 
@@ -454,14 +432,14 @@ class ImagePanel(QWidget):
         self._cursor_overlay.set_enabled(read(store, IMAGE_CURSOR_READOUT) is True)
         self._cursor_overlay.toggled.connect(lambda on: store.set(IMAGE_CURSOR_READOUT.key, bool(on)))
         try:
-            self._mask_edit_tool.set_tool(MaskEditTool(store.get(IMAGE_MASK_EDIT_TOOL.key)))
+            self._mask_tab.edit_tool.set_tool(MaskEditTool(store.get(IMAGE_MASK_EDIT_TOOL.key)))
         except ValueError:  # nothing saved yet, or a tool that no longer exists
             pass
-        self._mask_edit_tool.tool_changed.connect(lambda tool: store.set(IMAGE_MASK_EDIT_TOOL.key, tool.value))
+        self._mask_tab.edit_tool.tool_changed.connect(lambda tool: store.set(IMAGE_MASK_EDIT_TOOL.key, tool.value))
         saved_color = QColor(str(store.get(IMAGE_SCALE_BAR_COLOR.key) or ""))
         if saved_color.isValid():
             self._scale_bar_item.set_color(saved_color)
-            self._scale_bar_controls.set_color(saved_color)
+            self._view_tab.scale_bar_controls.set_color(saved_color)
         self._scale_bar_color_store = store
         for kind in ("sample", "reference"):
             keys = ROI_OVERLAY_KEYS[kind]
@@ -481,8 +459,7 @@ class ImagePanel(QWidget):
         self._roi_overlay.fill_max_opacity = float(read(store, IMAGE_ROI_FILL_MAX_OPACITY))
         self._apply_roi_overlay_style()
         self._sync_roi_overlay_controls()
-        self._array_controls.bind_ui_state(store)
-        self._group_controls.label_menu.bind_ui_state(store)
+        self._roi_tab.bind_ui_state(store)
         self._on_group_labels_changed()
         saved_scope = store.get(ROI_SCOPE.key)
         if saved_scope in ("persistent", "individual"):
@@ -737,140 +714,41 @@ class ImagePanel(QWidget):
         return image_tools_content
 
     def _build_mask_tab(self) -> QWidget:
-        # Persistent/Individual mask-edit scope toggle (2026-10-02,
-        # maintainer request - copy these icons into the Image panel's own
-        # "Mask" tab too). Reads/drives the same `MaskScopeModule` the
-        # Workflow panel's `MaskHighlightActions` uses, so the two toggles
-        # can never disagree about where a new mask edit lands - see
-        # `mask_scope_toggle.py`'s module docstring.
-        self._mask_scope_toggle = MaskScopeToggle(self._mask_scope, self)
-
-        # Mask-overlay show/hide + color + transparency (2026-09-30,
-        # maintainer request - "implement the mask overlay features" ported
-        # from the stable app). Moved into its own "Mask" ribbon tab
-        # (2026-10-01, maintainer request - keep the mask icons out of
-        # "Image tools" so that tab stays Transforms-only) - see
-        # mask_overlay_controls.py's module docstring for why this state
-        # lives on the panel rather than on `MaskModule`.
-        self._mask_overlay_controls = MaskOverlayControls(
-            visible=self._mask_tint.visible,
-            color=self._mask_tint.color,
-            alpha=self._mask_tint.alpha,
-            parent=self,
+        self._mask_tab = MaskTab(
+            self._mask, self._geometry, self._chromatic, self._dataset, self._highlight_range,
+            self._mask_scope, self._mask_tint, self, self,
         )
-        # Second copy for the "View" tab (2026-10-06, maintainer request -
-        # View collects every display option in one place). Same handlers,
-        # and each copy mirrors the other so they never disagree.
-        self._view_mask_overlay_controls = MaskOverlayControls(
-            visible=self._mask_tint.visible,
-            color=self._mask_tint.color,
-            alpha=self._mask_tint.alpha,
-            parent=self,
+        self._mask_tab.overlay_visibility_changed.connect(self._on_mask_overlay_visibility_changed)
+        self._mask_tab.overlay_color_changed.connect(self._on_mask_overlay_color_changed)
+        self._mask_tab.overlay_alpha_changed.connect(self._on_mask_overlay_alpha_changed)
+        return self._mask_tab
+
+    def _build_roi_tab(self) -> QWidget:
+        self._roi_tab = RoiTab(
+            self._roi_overlay, self._roi_scope, self._geometry, self._background, self._chromatic, self._dataset,
+            self._roi_toolbox, self._selection, self._array_action, self._edit_target,
+            self._resolve_reference_frame, self._analysis_running, self,
         )
-        for controls, other in (
-            (self._mask_overlay_controls, self._view_mask_overlay_controls),
-            (self._view_mask_overlay_controls, self._mask_overlay_controls),
-        ):
-            controls.visibility_changed.connect(self._on_mask_overlay_visibility_changed)
-            controls.color_changed.connect(self._on_mask_overlay_color_changed)
-            controls.alpha_changed.connect(self._on_mask_overlay_alpha_changed)
-            for signal in (controls.visibility_changed, controls.color_changed, controls.alpha_changed):
-                signal.connect(lambda _value, c=controls, o=other: o.sync_from(c))
-        self._mask_scope_separator = vertical_separator(self)
+        self._roi_tab.overlay_changed.connect(self._on_roi_overlay_changed)
+        self._roi_tab.labels_toggled.connect(self._on_roi_labels_toggled)
+        self._roi_tab.group_labels_changed.connect(self._on_group_labels_changed)
+        self._roi_tab.status.connect(self._on_tool_status)
+        return self._roi_tab
 
-        # Mask "Edit" group (2026-10-02, maintainer request - "next to the
-        # visibility section in Mask, add Edit section... a pickup menu"
-        # offering Histogram selection/Threshold/Local contrast/Morphology/
-        # Draw, each with its own small control row swapped in underneath).
-        # `MaskEditToolModule` is owned privately here, not threaded through
-        # `app_rewrite.py` like `MaskScopeModule`/`HighlightRangeModule` -
-        # see that module's own docstring for why nothing else needs to
-        # share it yet.
-        self._mask_edit_tool = MaskEditToolModule(self)
-        self._mask_edit_picker = MaskEditToolPicker(self._mask_edit_tool, self)
-
-        self._mask_edit_stack = QStackedWidget(self)
-        self._mask_edit_panel_order: tuple[MaskEditTool, ...] = (
-            MaskEditTool.HISTOGRAM_SELECTION,
-            MaskEditTool.THRESHOLD,
-            MaskEditTool.LOCAL_CONTRAST,
-            MaskEditTool.MORPHOLOGY,
-            MaskEditTool.DRAW,
+    def _build_view_tab(self) -> QWidget:
+        self._view_tab = ViewTab(
+            self._geometry, self._highlight_tint, self._mask_tint, self._mask_tab.overlay_controls,
+            self._chromatic_tab, self._background_tab, self._roi_tab, self._scale_bar_item.color(), self,
         )
-        self._mask_edit_stack.addWidget(
-            HistogramSelectionEditPanel(
-                self._mask, self._geometry, self._chromatic, self._dataset, self._highlight_range, self, self._mask_scope
-            )
-        )
-        self._mask_edit_stack.addWidget(ThresholdEditPanel(self._mask))
-        self._mask_edit_stack.addWidget(LocalContrastEditPanel(self._mask))
-        self._mask_edit_stack.addWidget(
-            MorphologyEditPanel(self._mask, self._chromatic, self._dataset, self, self._mask_scope)
-        )
-        self._mask_edit_stack.addWidget(DrawEditPanel(self._mask))
-        self._on_mask_edit_tool_changed(self._mask_edit_tool.tool())
-        self._mask_edit_tool.tool_changed.connect(self._on_mask_edit_tool_changed)
-
-        self._mask_visibility_separator = vertical_separator(self)
-
-        # "General" (Clear) and "PNG" (Load/Save) groups (2026-10-02,
-        # maintainer request - split from an earlier single "Automatic
-        # edit" group into these two: "these two icons [load/save] should
-        # be in 'PNG' section... put [Clear] in solo section 'General'").
-        # Neither is part of the `MaskEditToolModule` picker/stack - both
-        # are plain standalone action rows, same shape as
-        # `MaskOverlayControls`.
-        self._mask_clear_action = MaskClearAction(self._mask, self, self)
-        self._mask_general_separator = vertical_separator(self)
-        self._mask_png_actions = MaskPngActions(self._mask, self._dataset, self._mask_scope, self, self)
-        self._mask_edit_separator = vertical_separator(self)
-
-        # Scope toggle on the left, a vertical divider, then the overlay
-        # display controls (maintainer request, 2026-10-02: "put them on the
-        # left side and separate from rest by | line"), each group captioned
-        # ("State"/"Visibility") below its icons - same request, "some
-        # non-intrusive labels... smaller fonts, more darker" - see
-        # `_labeled_icon_group`'s own docstring for the style reasoning.
-        # "General" (Clear) is the Mask tab's own leftmost group (2026-10-02,
-        # maintainer request: "put section the most left").
-        mask_general_group, self._mask_general_label = labeled_icon_group(self, self._mask_clear_action, "General")
-        mask_state_group, self._mask_state_label = labeled_icon_group(self, self._mask_scope_toggle, "State")
-        mask_visibility_group, self._mask_visibility_label = labeled_icon_group(
-            self, self._mask_overlay_controls, "Visibility"
-        )
-        # "Edit" renamed "Manual edit" (2026-10-02, maintainer request) now
-        # that a sibling group ("PNG" - Load/Save) sits next to it.
-        #
-        # **The caption wraps only the picker, not the picker+stack pair**
-        # (2026-10-02, maintainer report: the label was centering under the
-        # *reserved* stack width - as wide as Morphology's own widest
-        # panel, 1 spinbox + 4 buttons - rather than under whatever's
-        # actually visible, so it visually floated away from the picker
-        # whenever a narrower panel like Histogram selection's was shown).
-        # The stack itself sits as a plain, uncaptioned sibling to the
-        # group's right (top-aligned, so its icon row lines up with every
-        # other group's icon row rather than the group's full 42px caption
-        # height) - the same "label only where it has one fixed thing to
-        # sit under" rule every other group here already follows.
-        mask_edit_group, self._mask_edit_label = labeled_icon_group(self, self._mask_edit_picker, "Manual edit")
-        mask_png_group, self._mask_png_label = labeled_icon_group(self, self._mask_png_actions, "PNG")
-
-        mask_content = QWidget(self)
-        mask_content_layout = QHBoxLayout(mask_content)
-        mask_content_layout.setContentsMargins(0, 0, 0, 0)
-        mask_content_layout.setSpacing(6)
-        mask_content_layout.addWidget(mask_general_group)
-        mask_content_layout.addWidget(self._mask_general_separator)
-        mask_content_layout.addWidget(mask_state_group)
-        mask_content_layout.addWidget(self._mask_scope_separator)
-        mask_content_layout.addWidget(mask_visibility_group)
-        mask_content_layout.addWidget(self._mask_visibility_separator)
-        mask_content_layout.addWidget(mask_edit_group)
-        mask_content_layout.addWidget(self._mask_edit_stack, 0, Qt.AlignmentFlag.AlignTop)
-        mask_content_layout.addWidget(self._mask_edit_separator)
-        mask_content_layout.addWidget(mask_png_group)
-        mask_content_layout.addStretch(1)
-        return mask_content
+        self._view_tab.highlight_visibility_changed.connect(self._on_highlight_overlay_visibility_changed)
+        self._view_tab.highlight_color_changed.connect(self._on_highlight_overlay_color_changed)
+        self._view_tab.highlight_alpha_changed.connect(self._on_highlight_overlay_alpha_changed)
+        self._view_tab.mask_visibility_changed.connect(self._on_mask_overlay_visibility_changed)
+        self._view_tab.mask_color_changed.connect(self._on_mask_overlay_color_changed)
+        self._view_tab.mask_alpha_changed.connect(self._on_mask_overlay_alpha_changed)
+        self._view_tab.roi_overlay_changed.connect(self._on_roi_overlay_changed)
+        self._view_tab.scale_bar_color_changed.connect(self._on_scale_bar_color_changed)
+        return self._view_tab
 
     def _build_chromatic_and_background_tabs(self) -> None:
         self._chromatic_tab = ChromaticCorrectionTab(
@@ -892,190 +770,6 @@ class ImagePanel(QWidget):
             self._background, show_background=self._show_background, parent=self
         )
         self._background_tab.show_background_changed.connect(self._on_show_background_changed)
-
-    def _build_view_tab(self) -> QWidget:
-        # Histogram highlight-overlay show/hide + color + transparency
-        # (2026-10-02, maintainer request - "add the toggle to show/hide
-        # histogram selection in image... add color selection and
-        # transparency control (similar to mask icons)"), ported from the
-        # stable app the same way `MaskOverlayControls` was. Fills the
-        # "Histogram" ribbon tab, previously a seeded placeholder (see
-        # tool_ribbon.py's module docstring).
-        self._highlight_overlay_controls = HistogramHighlightOverlayControls(
-            visible=self._highlight_tint.visible,
-            color=self._highlight_tint.color,
-            alpha=self._highlight_tint.alpha,
-            parent=self,
-        )
-        self._highlight_overlay_controls.visibility_changed.connect(self._on_highlight_overlay_visibility_changed)
-        self._highlight_overlay_controls.color_changed.connect(self._on_highlight_overlay_color_changed)
-        self._highlight_overlay_controls.alpha_changed.connect(self._on_highlight_overlay_alpha_changed)
-
-        # "View" tab (2026-10-06, maintainer request - the old "Histogram"
-        # tab renamed and moved second; a one-stop place for display
-        # options): a "Histogram" group (the highlight-overlay controls)
-        # and a "Mask" group (a mirrored copy of the Mask tab's Visibility
-        # icons).
-        highlight_visibility_group, self._highlight_visibility_label = labeled_icon_group(
-            self, self._highlight_overlay_controls, "Histogram"
-        )
-        view_mask_group, self._view_mask_label = labeled_icon_group(self, self._view_mask_overlay_controls, "Mask")
-        self._view_separator = vertical_separator(self)
-        view_content = QWidget(self)
-        view_content_layout = QHBoxLayout(view_content)
-        view_content_layout.setContentsMargins(0, 0, 0, 0)
-        view_content_layout.setSpacing(6)
-        view_content_layout.addWidget(highlight_visibility_group)
-        view_content_layout.addWidget(self._view_separator)
-        view_content_layout.addWidget(view_mask_group)
-        view_content_layout.addStretch(1)
-        self._view_content_layout = view_content_layout
-        # View tab "Chromatic" and "Background" groups: mirrored copies of the
-        # Chromatic tab's View buttons (landmarks on/off, scope) and the
-        # Background tab's View button (maintainer request 2026-10-06).
-        chromatic_mirror_row = QWidget(self)
-        chromatic_mirror_layout = QHBoxLayout(chromatic_mirror_row)
-        chromatic_mirror_layout.setContentsMargins(0, 0, 0, 0)
-        chromatic_mirror_layout.setSpacing(2)
-        chromatic_mirrors = [
-            mirror_icon_button(button, chromatic_mirror_row)
-            for button in (self._chromatic_tab.show_button(), self._chromatic_tab.scope_button())
-        ]
-        for mirror in chromatic_mirrors:
-            chromatic_mirror_layout.addWidget(mirror)
-        background_mirror = mirror_icon_button(self._background_tab.view_button(), self)
-        self._view_mirrors = [*chromatic_mirrors, background_mirror]
-        self._chromatic_tab.view_buttons_refreshed.connect(lambda: [m.sync() for m in chromatic_mirrors])
-        self._background_tab.view_buttons_refreshed.connect(background_mirror.sync)
-        self._scale_bar_controls = ScaleBarControls(self._geometry, self._scale_bar_item.color(), self)
-        self._scale_bar_controls.color_changed.connect(self._on_scale_bar_color_changed)
-        view_scale_bar_group, self._view_scale_bar_label = labeled_icon_group(
-            self, self._scale_bar_controls, "Scale bar"
-        )
-        view_chromatic_group, self._view_chromatic_label = labeled_icon_group(
-            self, chromatic_mirror_row, "Chromatic"
-        )
-        view_background_group, self._view_background_label = labeled_icon_group(
-            self, background_mirror, "Background"
-        )
-        # View tab "ROIs" group: copies of the ROIs tab's Sample / Reference / Labels controls.
-        self._view_roi_sample_controls = RoiOverlayControls(
-            "sample", visible=self._roi_overlay.sample.visible, color=QColor(self._roi_overlay.sample.color),
-            alpha=self._roi_overlay.sample.alpha, parent=self,
-        )
-        self._view_roi_reference_controls = RoiOverlayControls(
-            "reference", visible=self._roi_overlay.reference.visible, color=QColor(self._roi_overlay.reference.color),
-            alpha=self._roi_overlay.reference.alpha, parent=self,
-        )
-        for kind, controls, copy in (
-            ("sample", self._roi_sample_controls, self._view_roi_sample_controls),
-            ("reference", self._roi_reference_controls, self._view_roi_reference_controls),
-        ):
-            copy.visibility_changed.connect(lambda shown, k=kind: self._on_roi_overlay_changed(k, "visible", bool(shown)))
-            copy.color_changed.connect(lambda color, k=kind: self._on_roi_overlay_changed(k, "color", color.name()))
-            copy.alpha_changed.connect(lambda alpha, k=kind: self._on_roi_overlay_changed(k, "alpha", float(alpha)))
-            for source, target in ((controls, copy), (copy, controls)):
-                for signal in (source.visibility_changed, source.color_changed, source.alpha_changed):
-                    signal.connect(lambda _value, s=source, t=target: t.sync_from(s))
-        self._view_roi_labels_button = mirror_icon_button(self._roi_labels_button, self)
-        # The same pick-up menu as on the ROIs tab, holding this tab's copies of the controls.
-        self._view_roi_display_menu = RoiDisplayMenu(
-            self._view_roi_sample_controls, self._view_roi_reference_controls, self._view_roi_labels_button, self
-        )
-        view_roi_group, self._view_roi_label = labeled_icon_group(self, self._view_roi_display_menu, "ROIs")
-        self._view_separator_2 = vertical_separator(self)
-        self._view_separator_3 = vertical_separator(self)
-        self._view_separator_4 = vertical_separator(self)
-        self._view_separator_5 = vertical_separator(self)
-        stretch_index = self._view_content_layout.count() - 1
-        for offset, widget in enumerate(
-            (
-                self._view_separator_2,
-                view_chromatic_group,
-                self._view_separator_3,
-                view_background_group,
-                self._view_separator_4,
-                view_roi_group,
-                self._view_separator_5,
-                view_scale_bar_group,
-            )
-        ):
-            self._view_content_layout.insertWidget(stretch_index + offset, widget)
-        return view_content
-
-    def _build_roi_tab(self) -> QWidget:
-        self._roi_sample_controls = RoiOverlayControls(
-            "sample", visible=self._roi_overlay.sample.visible, color=QColor(self._roi_overlay.sample.color),
-            alpha=self._roi_overlay.sample.alpha, parent=self,
-        )
-        self._roi_reference_controls = RoiOverlayControls(
-            "reference", visible=self._roi_overlay.reference.visible, color=QColor(self._roi_overlay.reference.color),
-            alpha=self._roi_overlay.reference.alpha, parent=self,
-        )
-        for kind, controls in (("sample", self._roi_sample_controls), ("reference", self._roi_reference_controls)):
-            controls.visibility_changed.connect(lambda shown, k=kind: self._on_roi_overlay_changed(k, "visible", bool(shown)))
-            controls.color_changed.connect(lambda color, k=kind: self._on_roi_overlay_changed(k, "color", color.name()))
-            controls.alpha_changed.connect(lambda alpha, k=kind: self._on_roi_overlay_changed(k, "alpha", float(alpha)))
-        self._roi_labels_button = QToolButton(self)
-        self._roi_labels_button.setCheckable(True)
-        self._roi_labels_button.setChecked(self._roi_overlay.labels_visible)
-        self._roi_labels_button.setToolTip("Show or hide the ROI labels: each ROI's number, and its name if it has one.")
-        style_general_icon_button(self._roi_labels_button)
-        self._roi_labels_button.toggled.connect(self._on_roi_labels_toggled)
-        self._refresh_roi_labels_icon()
-        # One pick-up menu holds the Sample / Reference / Labels rows (roi_display_menu.py).
-        self._roi_display_menu = RoiDisplayMenu(
-            self._roi_sample_controls, self._roi_reference_controls, self._roi_labels_button, self
-        )
-        roi_display_group, self._roi_display_caption = labeled_icon_group(self, self._roi_display_menu, "Display")
-        self._roi_scope_toggle = RoiScopeToggle(self._roi_scope, self)
-        roi_scope_group, self._roi_scope_caption = labeled_icon_group(self, self._roi_scope_toggle, "Scope")
-        self._roi_shape_picker = RoiShapePicker(self)
-        roi_shape_group, self._roi_shape_caption = labeled_icon_group(self, self._roi_shape_picker, "Shape")
-        self._array_controls = ArrayControls(self._geometry, self)
-        roi_array_group, self._roi_array_caption = labeled_icon_group(self, self._array_controls, "Array")
-        self._array_actions = ArrayActions(
-            self._array_controls,
-            self._array_action,
-            toolbox=self._roi_toolbox,
-            selection=self._selection,
-            geometry=self._geometry,
-            background=self._background,
-            chromatic=self._chromatic,
-            load_plane=self._dataset.load_plane,
-            has_dataset=lambda: bool(self._dataset.spectral_cubes()),
-            resolve_reference=self._resolve_reference_frame,
-            analysis_running=self._analysis_running,
-            dialog_parent=self,
-            edit_target=self._edit_target,
-            parent=self,
-        )
-        self._array_actions.status.connect(self._on_tool_status)
-        self._group_controls = GroupControls(self)
-        roi_groups_group, self._roi_groups_caption = labeled_icon_group(self, self._group_controls, "Groups")
-        self._group_actions = GroupActions(
-            self._group_controls,
-            toolbox=self._roi_toolbox,
-            selection=self._selection,
-            analysis_running=self._analysis_running,
-            dialog_parent=self,
-            parent=self,
-        )
-        self._group_actions.status.connect(self._on_tool_status)
-        self._group_controls.label_menu.changed.connect(self._on_group_labels_changed)
-        # Sections left to right, a thin separator between neighbours (restyled on a theme switch).
-        sections = (roi_display_group, roi_scope_group, roi_shape_group, roi_array_group, roi_groups_group)
-        self._roi_separators = [vertical_separator(self) for _ in sections[1:]]
-        roi_content = QWidget(self)
-        roi_content_layout = QHBoxLayout(roi_content)
-        roi_content_layout.setContentsMargins(0, 0, 0, 0)
-        roi_content_layout.setSpacing(6)
-        roi_content_layout.addWidget(sections[0])
-        for separator, section in zip(self._roi_separators, sections[1:], strict=True):
-            roi_content_layout.addWidget(separator)
-            roi_content_layout.addWidget(section)
-        roi_content_layout.addStretch(1)
-        return roi_content
 
     def _build_top_bar(
         self, view_content: QWidget, image_tools_content: QWidget, mask_content: QWidget, roi_content: QWidget
@@ -1379,68 +1073,9 @@ class ImagePanel(QWidget):
             self._measure_controls.refresh_theme(get_active_theme())
         if hasattr(self, "_cursor_overlay"):
             self._cursor_overlay.refresh_theme(get_active_theme())
-        if hasattr(self, "_mask_overlay_controls"):
-            self._mask_overlay_controls.refresh_theme(get_active_theme())
-        if hasattr(self, "_view_mask_overlay_controls"):
-            self._view_mask_overlay_controls.refresh_theme(get_active_theme())
-        for name in (
-            "_roi_sample_controls", "_roi_reference_controls", "_view_roi_sample_controls", "_view_roi_reference_controls"
-        ):
-            if hasattr(self, name):
-                getattr(self, name).refresh_theme(get_active_theme())
-        if hasattr(self, "_roi_labels_button"):
-            style_general_icon_button(self._roi_labels_button)
-            self._refresh_roi_labels_icon()
-        for name in ("_roi_display_menu", "_view_roi_display_menu"):
-            if hasattr(self, name):
-                getattr(self, name).refresh_theme(get_active_theme())
-        if hasattr(self, "_group_controls"):
-            self._group_controls.refresh_theme()
-        if hasattr(self, "_roi_shape_picker"):
-            self._roi_shape_picker.refresh_theme()
-        if hasattr(self, "_array_controls"):
-            self._array_controls.refresh_theme()
-        if hasattr(self, "_roi_scope_toggle"):
-            self._roi_scope_toggle.refresh_theme(get_active_theme())
-        for name in ("_view_separator", "_view_separator_2", "_view_separator_3", "_view_separator_4", "_view_separator_5"):
-            if hasattr(self, name):
-                getattr(self, name).setStyleSheet(f"color: {get_active_theme().control_border};")
-        for separator in getattr(self, "_roi_separators", ()):
-            separator.setStyleSheet(f"color: {get_active_theme().control_border};")
-        if hasattr(self, "_mask_scope_toggle"):
-            self._mask_scope_toggle.refresh_theme(get_active_theme())
-        if hasattr(self, "_mask_scope_separator"):
-            self._mask_scope_separator.setStyleSheet(f"color: {get_active_theme().control_border};")
-        if hasattr(self, "_highlight_overlay_controls"):
-            self._highlight_overlay_controls.refresh_theme(get_active_theme())
-        if hasattr(self, "_mask_visibility_separator"):
-            self._mask_visibility_separator.setStyleSheet(f"color: {get_active_theme().control_border};")
-        if hasattr(self, "_mask_edit_separator"):
-            self._mask_edit_separator.setStyleSheet(f"color: {get_active_theme().control_border};")
-        if hasattr(self, "_mask_general_separator"):
-            self._mask_general_separator.setStyleSheet(f"color: {get_active_theme().control_border};")
-        if hasattr(self, "_mask_edit_picker"):
-            self._mask_edit_picker.refresh_theme(get_active_theme())
-        for label_attr in (
-            "_mask_general_label",
-            "_mask_state_label",
-            "_mask_visibility_label",
-            "_highlight_visibility_label",
-            "_view_mask_label",
-            "_view_chromatic_label",
-            "_view_background_label",
-            "_view_roi_label",
-            "_view_scale_bar_label",
-            "_mask_edit_label",
-            "_mask_png_label",
-            "_roi_display_caption",
-            "_roi_shape_caption",
-            "_roi_groups_caption",
-            "_roi_array_caption",
-            "_roi_scope_caption",
-        ):
-            if hasattr(self, label_attr):
-                getattr(self, label_attr).setStyleSheet(group_label_style())
+        for tab in ("_mask_tab", "_roi_tab", "_view_tab"):
+            if hasattr(self, tab):
+                getattr(self, tab).refresh_theme()
         if hasattr(self, "_tool_ribbon"):
             self._tool_ribbon.refresh_theme(get_active_theme())
         if hasattr(self, "_area_picker"):
@@ -1930,7 +1565,7 @@ class ImagePanel(QWidget):
 
     def _on_group_labels_changed(self) -> None:
         """The group-label menu changed: show its settings on the overlay and redraw (no image render)."""
-        self._roi_overlay.group_labels = self._group_controls.label_menu.settings()
+        self._roi_overlay.group_labels = self._roi_tab.group_label_settings()
         if self._roi_overlay.group_label_item is not None:
             self._roi_overlay.group_label_item.set_settings(self._roi_overlay.group_labels)
         if self._last_image_shape is not None:
@@ -1966,42 +1601,16 @@ class ImagePanel(QWidget):
 
     def _on_roi_labels_toggled(self, shown: bool) -> None:
         self._roi_overlay.labels_visible = bool(shown)
-        self._refresh_roi_labels_icon()
         if self._last_image_shape is not None:
             self._draw_roi_overlay()
         if self._roi_overlay_store is not None:
             self._roi_overlay_store.set(IMAGE_ROI_LABELS.key, bool(shown))
 
-    def _refresh_roi_labels_icon(self) -> None:
-        theme = get_active_theme()
-        on = self._roi_labels_button.isChecked()
-        self._roi_labels_button.setIcon(
-            load_tabler_icon(
-                "label-important" if on else "label-off",
-                color=theme.accent_blue if on else theme.text_dim,
-                size=_RIBBON_ICON_SIZE * 2,
-                stroke_width=2.1,
-            )
-        )
-        if hasattr(self, "_view_roi_labels_button"):
-            self._view_roi_labels_button.sync()  # the View tab's copy follows the icon (theme change, restore)
-
     def _sync_roi_overlay_controls(self) -> None:
         """Show the panel's ROI display options on the ribbon controls (after
         a restore) without those controls reporting them back."""
-        overlay = self._roi_overlay
-        self._roi_sample_controls.set_state(
-            visible=overlay.sample.visible, color=QColor(overlay.sample.color), alpha=overlay.sample.alpha
-        )
-        self._roi_reference_controls.set_state(
-            visible=overlay.reference.visible, color=QColor(overlay.reference.color), alpha=overlay.reference.alpha
-        )
-        self._view_roi_sample_controls.sync_from(self._roi_sample_controls)
-        self._view_roi_reference_controls.sync_from(self._roi_reference_controls)
-        blocked = self._roi_labels_button.blockSignals(True)
-        self._roi_labels_button.setChecked(overlay.labels_visible)
-        self._roi_labels_button.blockSignals(blocked)
-        self._refresh_roi_labels_icon()
+        self._roi_tab.show_style(self._roi_overlay)
+        self._view_tab.sync_roi_copies()
         self._apply_roi_overlay_style()
 
     def _update_chromatic_tab_state(self, *_args: object) -> None:
@@ -2187,11 +1796,6 @@ class ImagePanel(QWidget):
         self._highlight_tint.alpha = float(alpha)
         self._update_highlight_overlay()
         self._emit_overlay_style("highlight")
-
-    # -- mask edit tool picker (mask_edit_tool_picker.py/mask_edit_panels.py) --
-
-    def _on_mask_edit_tool_changed(self, tool: MaskEditTool) -> None:
-        self._mask_edit_stack.setCurrentIndex(self._mask_edit_panel_order.index(tool))
 
     def _update_chunk_grid(self) -> None:
         """Draw (or clear) the Export section's chunk-grid preview - lines
