@@ -37,6 +37,10 @@ _LEVELS = (0.25, 0.35, 0.45, 0.55, 0.65, 0.75, 0.85)
 """The lightness levels of one round of tints. Even spacing keeps every tint
 of a round distinguishable; the ends stay clear of near-black and near-white."""
 _HUE_STEP_PER_ROUND = 0.06
+_GREY_LEVEL_STEP_PER_ROUND = 0.02
+_GRADIENT_LIGHT_END = 0.85  # the last member of a group whose base is dark
+_GRADIENT_DARK_END = 0.22  # ... and of a group whose base is light
+_MAX_TINT_SEARCH = 2000
 
 
 def normalize_hex(color: str) -> str:
@@ -87,15 +91,37 @@ def tint_color(base_hex: str, index: int) -> str:
     else:
         level = _tint_levels(lightness)[position - 1]
     hue = (hue + round_number * _HUE_STEP_PER_ROUND) % 1.0
+    if saturation < 0.05:
+        # A grey has no hue to move, so later rounds would repeat the first round exactly: shift the lightness.
+        level = min(0.95, max(0.05, level + _GREY_LEVEL_STEP_PER_ROUND * round_number))
     r, g, b = colorsys.hls_to_rgb(hue, level, saturation)
     return "#{:02x}{:02x}{:02x}".format(round(r * 255), round(g * 255), round(b * 255))
+
+
+def gradient_tints(base_hex: str, count: int) -> list[str]:
+    """``count`` colours running smoothly from ``base_hex`` (the first) to a lighter shade of it (the last), or
+    to a darker one if the base is already light: same hue, evenly spaced lightness. For colouring the members
+    of a group in order, so the first-to-last ROI reads as a gradient of the group's colour."""
+    base = normalize_hex(base_hex)
+    if count <= 1:
+        return [base] * max(count, 0)
+    red, green, blue = (int(base[i:i + 2], 16) / 255.0 for i in (1, 3, 5))
+    hue, lightness, saturation = colorsys.rgb_to_hls(red, green, blue)
+    end = _GRADIENT_LIGHT_END if lightness < 0.55 else _GRADIENT_DARK_END
+    colours = [base]
+    for i in range(1, count):
+        level = lightness + (end - lightness) * i / (count - 1)
+        r, g, b = colorsys.hls_to_rgb(hue, level, saturation)
+        colours.append("#{:02x}{:02x}{:02x}".format(round(r * 255), round(g * 255), round(b * 255)))
+    return colours
 
 
 def first_free_tint_index(base_hex: str, used_colors: Iterable[str]) -> int:
     """The smallest tint index of ``base_hex`` that none of ``used_colors``
     already shows - what the next ROI to join the group should get."""
     used = {color.lower() for color in used_colors if color}
-    index = 0
-    while tint_color(base_hex, index) in used:
-        index += 1
-    return index
+    for index in range(_MAX_TINT_SEARCH):
+        if tint_color(base_hex, index) not in used:
+            return index
+    # Every colour tried is taken (a huge group): a repeated colour is better than a frozen app.
+    return len(used)

@@ -32,6 +32,7 @@ from ...image_tools.chromatic.affine import apply_affine_to_points
 from ...image_tools.chromatic.module import ChromaticModule
 from ...image_tools.geometry.module import GeometryModule
 from ...roi import RoiToolbox
+from ...roi.ordering import grid_band_px, order_by_grid
 from ...roi.array_task import DETECT, PLACE, REFINE, ArrayAction, ArrayOutcome
 from ...roi.scope import RoiEditTarget
 from ...selection import SelectionModule
@@ -92,6 +93,7 @@ class ArrayActions(QObject):
 
         controls.run_requested.connect(self._on_run)
         controls.refine_requested.connect(self._on_refine)
+        controls.reorder_requested.connect(self._on_reorder)
         controls.cancel_requested.connect(action.cancel)
         selection.roi_selection_changed.connect(lambda ids: controls.set_selection_count(len(ids)))
         controls.set_selection_count(len(selection.selected_roi_ids()))
@@ -119,6 +121,30 @@ class ArrayActions(QObject):
             self._fail_message("Select the ROIs to refine first.")
             return
         self._begin(REFINE)
+
+    def _on_reorder(self, direction: str) -> None:
+        """Renumber the selected ROIs (all if none selected) like an array, top-left first. Only the numbers the
+        chosen ROIs already hold are shuffled among them. Positions are the stored (reference frame) centres on
+        the current cube."""
+        if self._analysis_running():
+            self._fail_message("An analysis is running. Wait for it to finish (or cancel it) before reordering the ROIs.")
+            return
+        selected = {int(i) for i in self._selection.selected_roi_ids()}
+        cube = int(self._selection.current_cube())
+        rois = [roi for roi in self._toolbox.rois_at(cube) if not selected or roi.area_roi_id in selected]
+        if len(rois) < 2:
+            self.status.emit("Array: nothing to reorder (fewer than two ROIs).")
+            return
+        band = grid_band_px([roi.sample_diameter_px for roi in rois])
+        order = order_by_grid(
+            [roi.area_roi_id for roi in rois],
+            [(float(roi.center_x), float(roi.center_y)) for roi in rois],
+            band,
+            column_major=direction == "columns",
+        )
+        self._toolbox.reorder_subset(order)
+        scope = "the selected ROIs" if selected else "all ROIs"
+        self.status.emit(f"Array: numbered {scope} {'column by column' if direction == 'columns' else 'row by row'}, starting top-left.")
 
     def _begin(self, kind: str, *, grid: tuple[int, int, float, float] | None = None) -> None:
         if self._action.is_running():

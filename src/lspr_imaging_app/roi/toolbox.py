@@ -133,7 +133,7 @@ from .model import (
     resolved_at,
 )
 from .ordering import move_block, renumbering
-from .palette import first_free_tint_index, next_group_color, normalize_hex, tint_color
+from .palette import first_free_tint_index, gradient_tints, next_group_color, normalize_hex, tint_color
 
 logger = logging.getLogger(__name__)
 
@@ -1115,6 +1115,18 @@ class RoiToolbox(QObject):
             raise ValueError("new_order must list every ROI id exactly once")
         self._renumber(renumbering(order, slots), "Reorder ROIs")
 
+    @instrumented("RoiToolbox.reorder_subset")
+    def reorder_subset(self, new_order: Sequence[int]) -> None:
+        """Put the listed ROIs in ``new_order`` among the id numbers they already hold (the ROI first in the
+        list takes the smallest of those numbers, and so on). Every other ROI keeps its number, so reordering a
+        selection never changes the numbers of ROIs outside it. One undo step."""
+        order = [int(roi_id) for roi_id in new_order]
+        unknown = [roi_id for roi_id in order if roi_id not in self._rois]
+        if unknown or len(set(order)) != len(order):
+            raise ValueError(f"new_order must list existing ROI ids once each (bad: {unknown})")
+        placement = renumbering(order, sorted(order))
+        self._renumber({roi_id: placement.get(roi_id, roi_id) for roi_id in sorted(self._rois)}, "Reorder ROIs")
+
     @instrumented("RoiToolbox.move_in_order")
     def move_in_order(
         self, roi_ids: Collection[int], target_index: int, *, scope_ids: Collection[int] | None = None
@@ -1320,7 +1332,7 @@ class RoiToolbox(QObject):
         emit()
         undo_manager.push(FunctionCommand(label, undo_fn=undo, redo_fn=redo))
 
-    def _join_group(self, group: AreaRoiGroup, rois: Sequence[AreaRoi]) -> None:
+    def _join_group(self, group: AreaRoiGroup, rois: Sequence[AreaRoi], *, gradient: bool = False) -> None:
         """Move ``rois`` into ``group`` (out of whatever group they were in),
         giving each newcomer the first tint of the group's colour that no
         member shows yet. A group emptied by the move is removed; a group that
@@ -1338,6 +1350,11 @@ class RoiToolbox(QObject):
                 del self._groups[other.group_id]
         used = [self._rois[roi_id].sample_color_hex for roi_id in group.area_roi_ids]
         group.area_roi_ids = sorted(members | joining_ids)
+        if gradient:  # a new group: its members, in id order, run from the group's colour to a lighter shade
+            ordered = sorted(joining, key=lambda roi: roi.area_roi_id)
+            for roi, color in zip(ordered, gradient_tints(group.sample_color_hex, len(ordered))):
+                roi.sample_color_hex = color
+            return
         for roi in joining:
             roi.sample_color_hex = tint_color(group.sample_color_hex, first_free_tint_index(group.sample_color_hex, used))
             used.append(roi.sample_color_hex)
@@ -1390,10 +1407,27 @@ class RoiToolbox(QObject):
         def mutate() -> None:
             group = self._new_group(name, sample_color_hex, reference_color_hex)
             created.append(group.group_id)
-            self._join_group(group, rois)
+            self._join_group(group, rois, gradient=True)
 
         self._grouping_command("Group ROIs", rois, "regroup", mutate)
         return created[0]
+
+    @instrumented("RoiToolbox.group_rois_each")
+    def group_rois_each(self, groups: Sequence[tuple[str, Collection[int]]]) -> list[str]:
+        """One new group per ``(name, roi_ids)`` entry, in one undo step ("group an array by rows"). Each group
+        takes the next unused base colour of the palette in turn, and its members get tints of it. ROIs leave
+        any group they were in."""
+        entries = [(name, self._require_rois(roi_ids)) for name, roi_ids in groups]
+        created: list[str] = []
+
+        def mutate() -> None:
+            for name, rois in entries:
+                group = self._new_group(name, None, DEFAULT_REFERENCE_COLOR_HEX)
+                created.append(group.group_id)
+                self._join_group(group, rois, gradient=True)
+
+        self._grouping_command("Group ROIs", [roi for _name, rois in entries for roi in rois], "regroup", mutate)
+        return created
 
     @instrumented("RoiToolbox.add_rois_to_group")
     def add_rois_to_group(self, roi_ids: Collection[int], group_id: str) -> None:

@@ -26,9 +26,10 @@ from PyQt6.QtGui import QBrush, QColor, QPainterPath
 from PyQt6.QtWidgets import QGraphicsPathItem
 
 from ...roi.display_style import DEFAULT_REFERENCE_COLOR, DEFAULT_SAMPLE_COLOR, RoiCircleStyle, RoiDisplayStyle
-from ...roi.model import AreaRoi
+from ...roi.model import AreaRoi, AreaRoiGroup
 from ...roi.overlay_geometry import circle_outlines
 from ...roi.rasterize import effective_reference_diameters
+from .group_label_overlay import GroupLabelItem, GroupLabelSettings, group_label_entries
 from .roi_label_overlay import RoiLabelItem, label_text
 
 CIRCLE_POINTS = 48
@@ -146,6 +147,8 @@ class RoiOverlay:
         self._style_fill(self.reference_fill, DEFAULT_REFERENCE_COLOR, self.reference.alpha)
         self.selection_curve = add_curve(plot, SELECTED_COLOR, width=SELECTED_WIDTH)
         self.label_item: RoiLabelItem | None = None
+        self.group_label_item: GroupLabelItem | None = None
+        self.group_labels = GroupLabelSettings()
 
     def attach_labels(self) -> None:
         """Create the label item. A separate step, called where the panel used to
@@ -153,6 +156,10 @@ class RoiOverlay:
         self.label_item = RoiLabelItem(self._plot.vb)
         self._plot.vb.sigRangeChanged.connect(lambda *_args: self.label_item.update())
         self._plot.vb.sigResized.connect(lambda *_args: self.label_item.update())
+        self.group_label_item = GroupLabelItem(self._plot.vb)
+        self.group_label_item.set_settings(self.group_labels)
+        self._plot.vb.sigRangeChanged.connect(lambda *_args: self.group_label_item.update())
+        self._plot.vb.sigResized.connect(lambda *_args: self.group_label_item.update())
 
     # -- style ---------------------------------------------------------------------
 
@@ -195,6 +202,8 @@ class RoiOverlay:
         self.selection_curve.clear()
         if self.label_item is not None:
             self.label_item.set_labels([])
+        if self.group_label_item is not None:
+            self.group_label_item.set_entries([])
 
     def draw(
         self,
@@ -204,6 +213,7 @@ class RoiOverlay:
         affine_matrix: np.ndarray,
         default_inner_diameter_px: float,
         default_outer_diameter_px: float,
+        groups: Sequence[AreaRoiGroup] = (),
     ) -> None:
         """Draw every ROI's sample circle, reference rings and (if on) label.
 
@@ -261,6 +271,14 @@ class RoiOverlay:
         self.selection_curve.setData(selection_x, selection_y)
         if self.label_item is not None:
             self.label_item.set_labels(labels)
+        if self.group_label_item is not None:
+            self.group_label_item.set_entries(
+                group_label_entries(
+                    groups, rois, centers, position=self.group_labels.position, default_color=self.sample.color
+                )
+                if self.group_labels.visible
+                else []
+            )
 
     def _set_sample_curves(self, by_color: dict[str, tuple[np.ndarray, np.ndarray]]) -> None:
         """Draw each colour's circles on that colour's curve (one

@@ -46,6 +46,7 @@ from ...roi.ring_size import RingParams
 from ...storage.ui_state_keys import ARRAY_KEYS, read
 from ..ui_state import UiStateStore
 from .array_mode_picker import ArrayModePicker
+from .array_reorder_picker import ArrayReorderPicker
 from .general_group import ICON_SIZE, style_general_icon_button
 
 _MODE_TIPS = {
@@ -276,6 +277,7 @@ class _Popover(QWidget):
 class ArrayControls(QWidget):
     run_requested = pyqtSignal(str)  # the mode: "auto" | "semi" | "manual"
     refine_requested = pyqtSignal()
+    reorder_requested = pyqtSignal(str)  # "rows" | "columns"
     cancel_requested = pyqtSignal()
     changed = pyqtSignal()
 
@@ -292,6 +294,8 @@ class ArrayControls(QWidget):
         self._refine = QToolButton(self)
         style_general_icon_button(self._refine)
         self._refine.clicked.connect(self.refine_requested.emit)
+        self._reorder = ArrayReorderPicker(self)
+        self._reorder.reorder_requested.connect(self.reorder_requested.emit)
         self._gear = QToolButton(self)
         style_general_icon_button(self._gear)
         self._gear.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
@@ -307,7 +311,7 @@ class ArrayControls(QWidget):
         layout = QHBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(2)
-        for widget in (self._mode, self._run, self._refine, self._gear):
+        for widget in (self._mode, self._run, self._refine, self._reorder, self._gear):
             layout.addWidget(widget)
         self.refresh_theme()
         self._on_mode_changed()
@@ -419,11 +423,13 @@ class ArrayControls(QWidget):
         )
         self._gear.setIcon(load_tabler_icon("settings", color=theme.text_dim, size=ICON_SIZE * 2, stroke_width=2.1))
         self._mode.setEnabled(not self._running)
+        self._reorder.setEnabled(not self._running)
 
     def refresh_theme(self) -> None:
         for button in (self._run, self._refine, self._gear):
             style_general_icon_button(button)
         self._mode.refresh_theme()
+        self._reorder.refresh_theme()
         self._refresh_buttons()
 
     # -- remembering -------------------------------------------------------------------

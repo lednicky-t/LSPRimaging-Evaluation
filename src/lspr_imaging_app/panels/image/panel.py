@@ -158,6 +158,8 @@ from .overlay_tint import OverlayTint
 from .render import ImageRenderer, RenderRequest, RenderResult
 from .roi_gestures import RoiGestures, SelectedApertures
 from .roi_overlay import RoiOverlay, add_curve
+from .group_actions import GroupActions
+from .group_controls import GroupControls
 from .roi_display_menu import RoiDisplayMenu
 from .roi_overlay_controls import RoiOverlayControls
 from .array_actions import ArrayActions
@@ -480,6 +482,8 @@ class ImagePanel(QWidget):
         self._apply_roi_overlay_style()
         self._sync_roi_overlay_controls()
         self._array_controls.bind_ui_state(store)
+        self._group_controls.label_menu.bind_ui_state(store)
+        self._on_group_labels_changed()
         saved_scope = store.get(ROI_SCOPE.key)
         if saved_scope in ("persistent", "individual"):
             self._roi_scope.set_scope(saved_scope)
@@ -1047,20 +1051,29 @@ class ImagePanel(QWidget):
             parent=self,
         )
         self._array_actions.status.connect(self._on_tool_status)
-        self._roi_separator_2 = vertical_separator(self)
-        self._roi_separator_3 = vertical_separator(self)
-        self._roi_separator_4 = vertical_separator(self)
+        self._group_controls = GroupControls(self)
+        roi_groups_group, self._roi_groups_caption = labeled_icon_group(self, self._group_controls, "Groups")
+        self._group_actions = GroupActions(
+            self._group_controls,
+            toolbox=self._roi_toolbox,
+            selection=self._selection,
+            analysis_running=self._analysis_running,
+            dialog_parent=self,
+            parent=self,
+        )
+        self._group_actions.status.connect(self._on_tool_status)
+        self._group_controls.label_menu.changed.connect(self._on_group_labels_changed)
+        # Sections left to right, a thin separator between neighbours (restyled on a theme switch).
+        sections = (roi_display_group, roi_scope_group, roi_shape_group, roi_array_group, roi_groups_group)
+        self._roi_separators = [vertical_separator(self) for _ in sections[1:]]
         roi_content = QWidget(self)
         roi_content_layout = QHBoxLayout(roi_content)
         roi_content_layout.setContentsMargins(0, 0, 0, 0)
         roi_content_layout.setSpacing(6)
-        roi_content_layout.addWidget(roi_display_group)
-        roi_content_layout.addWidget(self._roi_separator_2)
-        roi_content_layout.addWidget(roi_scope_group)
-        roi_content_layout.addWidget(self._roi_separator_3)
-        roi_content_layout.addWidget(roi_shape_group)
-        roi_content_layout.addWidget(self._roi_separator_4)
-        roi_content_layout.addWidget(roi_array_group)
+        roi_content_layout.addWidget(sections[0])
+        for separator, section in zip(self._roi_separators, sections[1:], strict=True):
+            roi_content_layout.addWidget(separator)
+            roi_content_layout.addWidget(section)
         roi_content_layout.addStretch(1)
         return roi_content
 
@@ -1381,18 +1394,19 @@ class ImagePanel(QWidget):
         for name in ("_roi_display_menu", "_view_roi_display_menu"):
             if hasattr(self, name):
                 getattr(self, name).refresh_theme(get_active_theme())
+        if hasattr(self, "_group_controls"):
+            self._group_controls.refresh_theme()
         if hasattr(self, "_roi_shape_picker"):
             self._roi_shape_picker.refresh_theme()
         if hasattr(self, "_array_controls"):
             self._array_controls.refresh_theme()
         if hasattr(self, "_roi_scope_toggle"):
             self._roi_scope_toggle.refresh_theme(get_active_theme())
-        for name in (
-            "_view_separator", "_view_separator_2", "_view_separator_3", "_view_separator_4", "_view_separator_5",
-            "_roi_separator_2", "_roi_separator_3", "_roi_separator_4",
-        ):
+        for name in ("_view_separator", "_view_separator_2", "_view_separator_3", "_view_separator_4", "_view_separator_5"):
             if hasattr(self, name):
                 getattr(self, name).setStyleSheet(f"color: {get_active_theme().control_border};")
+        for separator in getattr(self, "_roi_separators", ()):
+            separator.setStyleSheet(f"color: {get_active_theme().control_border};")
         if hasattr(self, "_mask_scope_toggle"):
             self._mask_scope_toggle.refresh_theme(get_active_theme())
         if hasattr(self, "_mask_scope_separator"):
@@ -1421,6 +1435,7 @@ class ImagePanel(QWidget):
             "_mask_png_label",
             "_roi_display_caption",
             "_roi_shape_caption",
+            "_roi_groups_caption",
             "_roi_array_caption",
             "_roi_scope_caption",
         ):
@@ -1910,7 +1925,16 @@ class ImagePanel(QWidget):
             affine,
             detection.reference_inner_diameter_px,
             detection.reference_outer_diameter_px,
+            self._roi_toolbox.groups(),
         )
+
+    def _on_group_labels_changed(self) -> None:
+        """The group-label menu changed: show its settings on the overlay and redraw (no image render)."""
+        self._roi_overlay.group_labels = self._group_controls.label_menu.settings()
+        if self._roi_overlay.group_label_item is not None:
+            self._roi_overlay.group_label_item.set_settings(self._roi_overlay.group_labels)
+        if self._last_image_shape is not None:
+            self._draw_roi_overlay()
 
     def _apply_roi_overlay_style(self) -> None:
         """Put the ROI display options on the curves (`RoiOverlay.apply_style`).
