@@ -19,7 +19,8 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
-from PyQt6.QtCore import Qt, pyqtSignal
+from PyQt6.QtCore import QRect, Qt, pyqtSignal
+from PyQt6.QtGui import QIcon, QPainter, QPixmap
 from PyQt6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -69,6 +70,23 @@ OVERLAP_INFO = (
     "Reference rings may overlap each other. A ring never counts pixels of sample disks: the analysis removes "
     "every sample disk from every ring. Sample disks are masked by your mask only, never by a ring."
 )
+
+
+def _find_array_icon(dots_color: str, plus_color: str) -> QIcon:
+    """3x3 dots (an array) with a thick plus over the top-right corner: "find / add an array"."""
+    size = ICON_SIZE * 2
+    pixmap = QPixmap(size, size)
+    pixmap.fill(Qt.GlobalColor.transparent)
+    painter = QPainter(pixmap)
+    painter.drawPixmap(0, 0, load_tabler_icon("grid-dots", color=dots_color, size=size, stroke_width=2.6).pixmap(size, size))
+    outline = load_tabler_icon("plus", color="#000000", size=size, stroke_width=4.6).pixmap(size, size)  # thin black border
+    plus = load_tabler_icon("plus", color=plus_color, size=size, stroke_width=3.4).pixmap(size, size)
+    corner = size * 4 // 5
+    target = QRect(size - corner + size // 10, -size // 10, corner, corner)
+    painter.drawPixmap(target, outline)
+    painter.drawPixmap(target, plus)
+    painter.end()
+    return QIcon(pixmap)
 
 
 class LengthField(QWidget):
@@ -407,7 +425,7 @@ class ArrayControls(QWidget):
                 "Needs rows, columns, pitch and disk diameter (Array settings)."
             )
         else:
-            self._run.setIcon(load_tabler_icon("wand", color=theme.accent_blue, size=ICON_SIZE * 2, stroke_width=2.1))
+            self._run.setIcon(_find_array_icon(theme.text_primary, theme.accent_blue))
             self._run.setToolTip(
                 "Find the array in the image at the reference wavelength, measure the sample disks and reference rings, "
                 "and replace the selected ROIs with it (all ROIs stay if none are selected).\n" + OVERLAP_INFO

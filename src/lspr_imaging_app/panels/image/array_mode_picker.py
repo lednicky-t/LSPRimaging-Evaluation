@@ -79,6 +79,6 @@ class ArrayModePicker(QToolButton):
 
     def _refresh(self) -> None:
         self._actions[self._mode].setChecked(True)
-        self.setIcon(_mode_icon(self._mode, get_active_theme().accent_blue))
+        self.setIcon(_mode_icon(self._mode, get_active_theme().text_primary))
         note = "(Not finished yet.) " if self._mode in _UNFINISHED else ""
         self.setToolTip(note + self._tips[self._mode])

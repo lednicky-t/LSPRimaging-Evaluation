@@ -41,7 +41,12 @@ class GroupActions(QObject):
         self._analysis_running = analysis_running
         self._ask_name = ask_name or (lambda title, default: self._dialog_name(dialog_parent, title, default))
         self._tell = tell or (lambda title, text: QMessageBox.warning(dialog_parent, title, text))
+        self._controls = controls
         controls.create_requested.connect(self._on_create)
+        controls.ungroup_requested.connect(self._on_ungroup)
+        selection.roi_selection_changed.connect(self._refresh_mode)
+        toolbox.cosmetic_changed.connect(self._refresh_mode)  # groups made / dissolved
+        self._refresh_mode()
         controls.by_rows_requested.connect(lambda: self._on_by_lines(column_major=False))
         controls.by_columns_requested.connect(lambda: self._on_by_lines(column_major=True))
 
@@ -53,6 +58,27 @@ class GroupActions(QObject):
     def _refuse(self, message: str) -> None:
         self.status.emit(f"Groups: {message}")
         self._tell("Groups", message)
+
+    def _grouped_selection(self) -> list[int]:
+        """The selected ROIs that are in a group."""
+        selected = {int(i) for i in self._selection.selected_roi_ids()}
+        in_group = {roi_id for group in self._toolbox.groups() for roi_id in group.area_roi_ids}
+        return sorted(selected & in_group)
+
+    def _refresh_mode(self, *_args: object) -> None:
+        self._controls.set_ungroup_mode(bool(self._grouped_selection()))
+
+    def _on_ungroup(self) -> None:
+        """Take the selected ROIs out of their groups (a group left empty goes away); the ROIs stay."""
+        ids = self._grouped_selection()
+        if not ids:
+            return
+        try:
+            self._toolbox.remove_rois_from_groups(ids)
+        except (ValueError, KeyError) as error:
+            self._refuse(str(error))
+            return
+        self.status.emit(f"Groups: took {len(ids)} ROI{'' if len(ids) == 1 else 's'} out of their groups.")
 
     def _on_create(self) -> None:
         ids = tuple(sorted(self._selection.selected_roi_ids()))

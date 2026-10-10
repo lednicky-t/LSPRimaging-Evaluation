@@ -27,8 +27,8 @@ toolbox command, so Ctrl+Z undoes it like any other) and it drives the shared
   rule as the buttons: sorted by ``#`` ascending), onto a group header to put
   them in that group, onto "Ungrouped" to take them out of their groups.
 - Right-click for group / ungroup / colour / shift / reset diameters / move /
-  delete. Delete removes the selected ROIs, or, if only a group header is
-  selected, the group (its ROIs stay).
+  delete. Delete removes the selected ROIs; a selected group header counts as
+  all its ROIs. Ungroup dissolves a group and keeps its ROIs.
 
 **Reordering and deleting renumber ROIs**, which a running analysis cannot
 follow, so they are refused until it finishes (`AnalysisEngine.is_running`).
@@ -49,7 +49,6 @@ from PyQt6.QtWidgets import (
     QApplication,
     QColorDialog,
     QHBoxLayout,
-    QHeaderView,
     QInputDialog,
     QLabel,
     QMenu,
@@ -94,7 +93,7 @@ from .rows import (
     step_target_index,
     step_text,
 )
-from .view import RoiTreeView
+from .view import RoiTreeView, suggested_column_widths
 
 _REDRAW_COALESCE_MS = 100  # sketch §8
 _NOTICE_MS = 8000
@@ -176,9 +175,12 @@ class RoiTablePanel(QWidget):
             self._rebuild(lambda: None)
         widths = store.get(ROI_TABLE_COLUMN_WIDTHS)
         if isinstance(widths, list) and len(widths) == COLUMN_COUNT and all(isinstance(w, int) and w > 0 for w in widths):
+            floor = suggested_column_widths(self._tree.fontMetrics())[COLUMN_ID]  # a narrower saved ID column clips 3-digit ids
+            suggested = suggested_column_widths(self._tree.fontMetrics())
             for column, width in enumerate(widths):
-                if column != COLUMN_NAME:
-                    self._tree.setColumnWidth(column, width)
+                if column == COLUMN_NAME and width > 3 * suggested[column]:
+                    continue  # a width saved while this column stretched: keep the default
+                self._tree.setColumnWidth(column, max(width, floor) if column == COLUMN_ID else width)
 
     # -- construction -----------------------------------------------------------------
 
@@ -189,7 +191,6 @@ class RoiTablePanel(QWidget):
         self._tree.setItemDelegate(RoiTableDelegate(self._tree))
         self._tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self._tree.apply_default_column_widths()
-        self._tree.header().setSectionResizeMode(COLUMN_NAME, QHeaderView.ResizeMode.Stretch)
 
         self._hint = QLabel("No ROIs yet.\nAdd them on the Image panel, or run detection.", self)
         self._hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -198,8 +199,8 @@ class RoiTablePanel(QWidget):
         self._stack.addWidget(self._tree)
         self._stack.addWidget(self._hint)
 
-        self._group_button = self._tool_button("plus", self._group_selected_or_new)
-        self._ungroup_button = self._tool_button("link-off", self._ungroup_selected)
+        self._group_button = self._tool_button("group-rois", self._group_selected_or_new)
+        self._ungroup_button = self._tool_button("ungroup-rois", self._ungroup_selected)
         self._color_button = self._tool_button("droplet", self._color_selected)
         self._up_button = self._tool_button("arrow-up", lambda: self._move_selected(-1))
         self._down_button = self._tool_button("arrow-down", lambda: self._move_selected(1))
@@ -211,8 +212,11 @@ class RoiTablePanel(QWidget):
         toolbar = QHBoxLayout()
         toolbar.setContentsMargins(6, 4, 6, 4)
         toolbar.setSpacing(2)
-        for button in (self._group_button, self._ungroup_button, self._color_button):
-            toolbar.addWidget(button)
+        self._group_slot = QStackedWidget(self)  # one place for Group / Ungroup: whichever fits the selection
+        self._group_slot.addWidget(self._group_button)
+        self._group_slot.addWidget(self._ungroup_button)
+        toolbar.addWidget(self._group_slot)
+        toolbar.addWidget(self._color_button)
         toolbar.addSpacing(8)
         for button in (self._up_button, self._down_button):
             toolbar.addWidget(button)
@@ -356,7 +360,11 @@ class RoiTablePanel(QWidget):
         bar.setValue(scroll)
         ids = self._selection.selected_roi_ids()
         self._model.set_selected_ids(ids)
-        self._apply_selection_to_view(ids, reveal=True)
+        keep_groups, self._reselect_groups = self._reselect_groups, None
+        if keep_groups:
+            self._select_group_headers(keep_groups)  # after moving groups: keep the headers selected, nothing expands
+        else:
+            self._apply_selection_to_view(ids, reveal=True)
         self._update_toolbar_state()
         self._update_footer()
 
@@ -374,6 +382,29 @@ class RoiTablePanel(QWidget):
                 if roi_id is not None:
                     rois.append(roi_id)
         return rois, headers
+
+    _reselect_groups: list[str] | None = None
+    """Set by a group move: the next rebuild re-selects these headers instead of their members."""
+
+    def _select_group_headers(self, group_ids: list[str]) -> None:
+        selection = QItemSelection()
+        for group_id in group_ids:
+            index = self._model.group_index(group_id)
+            if index.isValid():
+                selection.select(index, index)
+        self._syncing = True
+        try:
+            self._tree.selectionModel().select(
+                selection, QItemSelectionModel.SelectionFlag.ClearAndSelect | QItemSelectionModel.SelectionFlag.Rows
+            )
+        finally:
+            self._syncing = False
+
+    def _selected_group_ids(self) -> list[str]:
+        """Real groups whose header is selected ("Ungrouped" is no group), in the groups' display order."""
+        _rois, headers = self._view_selection()
+        picked = {self._model.group_id(header) for header in headers}
+        return [group.group_id for group in self._toolbox.groups() if group.group_id in picked]
 
     def _on_view_selection_changed(self, *_args: object) -> None:
         if self._syncing:
@@ -492,22 +523,30 @@ class RoiTablePanel(QWidget):
         ids = self._selected_ids()
         _rois, headers = self._view_selection()
         rows = self._model.rows()
-        in_group = any(row.group_id is not None for row in rows if row.roi_id in set(ids))
         scope = movement_scope(ids, rows, grouped=self._model.is_grouped_view()) if ids else None
         sorted_by_number = self._model.sort_state() == (COLUMN_ID, False)
         movable = scope is not None and sorted_by_number
+        group_ids = self._selected_group_ids() if not _rois else []
+        moving_groups = bool(group_ids) and self._model.is_grouped_view()
 
         self._group_button.setToolTip(
             f"Group the {len(ids)} selected ROI{'' if len(ids) == 1 else 's'} (each gets its own tint of the group colour)"
             if ids else "New empty group"
         )
-        self._ungroup_button.setEnabled(in_group)
-        self._ungroup_button.setToolTip("Take the selected ROIs out of their groups.")
+        selected_groups = self._selected_group_ids()
+        in_group = any(row.group_id is not None for row in rows if row.roi_id in set(ids))
+        self._group_slot.setCurrentWidget(self._ungroup_button if selected_groups or in_group else self._group_button)
+        self._ungroup_button.setToolTip("Ungroup: take the selected ROIs or groups out of their groups (the ROIs stay).")
         self._color_button.setEnabled(bool(ids) or bool(headers))
         self._color_button.setToolTip(
             "Recolour the group (every member gets a new tint)." if headers and not _rois else "Set the colour of the selected ROIs."
         )
         for button, word, step in ((self._up_button, "up", -1), (self._down_button, "down", 1)):
+            if moving_groups:
+                button.setEnabled(True)
+                noun = "group" if len(group_ids) == 1 else "groups"
+                button.setToolTip(f"Move the selected {noun} {word} one place (Alt+{'Up' if step < 0 else 'Down'}).")
+                continue
             button.setEnabled(movable)
             if not sorted_by_number:
                 button.setToolTip("Sort by # (ascending) to reorder ROIs.")
@@ -517,7 +556,7 @@ class RoiTablePanel(QWidget):
                 button.setToolTip(f"Move the selected ROIs {word} one place (Alt+{'Up' if step < 0 else 'Down'}).")
         self._delete_button.setEnabled(bool(ids) or bool(headers))
         self._delete_button.setToolTip(
-            "Delete the selected group, keeping its ROIs (Delete)." if headers and not _rois else "Delete the selected ROIs (Delete)."
+            "Delete the selected groups together with all their ROIs (Delete)." if headers and not _rois else "Delete the selected ROIs (Delete)."
         )
 
     # -- editing a cell -----------------------------------------------------------------------
@@ -647,15 +686,18 @@ class RoiTablePanel(QWidget):
 
     def _ungroup_selected(self) -> None:
         ids = self._selected_ids()
+        empty = [gid for gid in self._selected_group_ids() if not any(row.group_id == gid for row in self._model.rows())]
+        if empty:  # an empty group has no ROIs to take out: it is just removed
+            self._delete_groups(empty)
         if ids:
             self._guarded("Ungroup", lambda: self._toolbox.remove_rois_from_groups(ids))
 
     def _color_selected(self) -> None:
         rois, headers = self._view_selection()
         if headers and not rois:
-            real = [self._model.group_id(header) for header in headers if self._model.group_id(header) is not None]
-            if len(real) == 1:
-                self._recolor_group(real[0])
+            real = self._selected_group_ids()
+            if real:
+                self._recolor_groups(real)
                 return
         ids = self._selected_ids()
         if not ids:
@@ -671,12 +713,18 @@ class RoiTablePanel(QWidget):
             self._guarded("Clear color", lambda: self._toolbox.set_roi_colors(ids, None))
 
     def _recolor_group(self, group_id: str) -> None:
-        group = next((g for g in self._toolbox.groups() if g.group_id == group_id), None)
-        if group is None:
+        self._recolor_groups([group_id])
+
+    def _recolor_groups(self, group_ids: list[str]) -> None:
+        """One colour for every given group (each member gets a fresh tint of it)."""
+        first = next((g for g in self._toolbox.groups() if g.group_id in group_ids), None)
+        if first is None:
             return
-        color = self._choose_color(group.sample_color_hex, "Choose group color")
+        title = "Choose group color" if len(group_ids) == 1 else "Choose color for the groups"
+        color = self._choose_color(first.sample_color_hex, title)
         if color is not None:
-            self._guarded("Recolor group", lambda: self._toolbox.recolor_group(group_id, color))
+            for group_id in group_ids:
+                self._guarded("Recolor group", lambda gid=group_id: self._toolbox.recolor_group(gid, color))
 
     def _on_chip_double_clicked(self, index: QModelIndex) -> None:
         if self._model.is_group(index):
@@ -726,22 +774,24 @@ class RoiTablePanel(QWidget):
         self._guarded("Reorder", lambda: self._toolbox.move_in_order(ids, target, scope_ids=scope))
 
     def _move_selected(self, direction: int) -> None:
+        rois, _headers = self._view_selection()
+        group_ids = self._selected_group_ids()
+        if group_ids and not rois and self._model.is_grouped_view():
+            self._move_groups(group_ids, direction)  # only group headers are selected: move the groups themselves
+            return
         self._reorder(lambda scope, ids: step_target_index(scope, ids, direction))
 
     def _move_to_edge(self, *, top: bool) -> None:
         self._reorder(lambda scope, ids: 0 if top else len(scope))
 
     def _delete_selected(self) -> None:
-        rois, headers = self._view_selection()
-        if rois or not headers:
-            ids = self._selected_ids()
-            if ids and self._renumbering_allowed():
+        """Delete the selected ROIs; a selected group header counts as all its ROIs."""
+        ids = self._selected_ids()
+        if ids:
+            if self._renumbering_allowed():
                 self._guarded("Delete", lambda: self._toolbox.delete_rois(tuple(ids)))
             return
-        # Only group headers are selected: delete the group, keep its ROIs.
-        group_ids = [gid for gid in (self._model.group_id(header) for header in headers) if gid is not None]
-        for group_id in group_ids:
-            self._guarded("Delete group", lambda gid=group_id: self._toolbox.delete_group(gid))
+        self._delete_groups(self._selected_group_ids())  # only empty groups selected: nothing but the groups to remove
 
     def _scope_for_drop(self, target: DropTarget) -> tuple[int, ...]:
         """The ROIs in the list a drop was aimed at, ascending by number: all
@@ -780,10 +830,42 @@ class RoiTablePanel(QWidget):
         else:
             self._guarded("Add to group", lambda: self._toolbox.add_rois_to_group(roi_ids, group_id))
 
-    def _move_group(self, group_id: str, direction: int) -> None:
+    def _move_groups(self, group_ids: list[str], direction: int) -> None:
+        """Move the groups one place up (-1) or down (+1). The selected groups
+        keep their order relative to each other; a block already at the end of
+        the list stays there."""
+        chosen = set(group_ids)
         order = [group.group_id for group in self._toolbox.groups()]
-        if group_id in order:
-            self._guarded("Move group", lambda: self._toolbox.reorder_group(group_id, order.index(group_id) + direction))
+        final = list(order)
+        if direction < 0:
+            for i in range(1, len(final)):
+                if final[i] in chosen and final[i - 1] not in chosen:
+                    final[i - 1], final[i] = final[i], final[i - 1]
+        else:
+            for i in range(len(final) - 2, -1, -1):
+                if final[i] in chosen and final[i + 1] not in chosen:
+                    final[i + 1], final[i] = final[i], final[i + 1]
+        self._apply_group_order(order, final)
+
+    def _move_groups_to_edge(self, group_ids: list[str], *, top: bool) -> None:
+        """Put the groups at the top / bottom of the list, keeping their order relative to each other."""
+        chosen = set(group_ids)
+        order = [group.group_id for group in self._toolbox.groups()]
+        picked = [gid for gid in order if gid in chosen]
+        others = [gid for gid in order if gid not in chosen]
+        self._apply_group_order(order, picked + others if top else others + picked)
+
+    def _apply_group_order(self, order: list[str], final: list[str]) -> None:
+        """Reach ``final`` with `reorder_group` (one undo step per group that moves)."""
+        if final == order:
+            return
+        self._reselect_groups = self._selected_group_ids()
+
+        def run() -> None:
+            for index, group_id in enumerate(final):
+                self._toolbox.reorder_group(group_id, index)
+
+        self._guarded("Move group", run)
 
     # -- context menu ---------------------------------------------------------------------------
 
@@ -842,18 +924,44 @@ class RoiTablePanel(QWidget):
 
     def _fill_group_menu(self, menu: QMenu, index: QModelIndex) -> None:
         group_id = self._model.group_id(index)
-        members = self._model.member_ids(index)
-        menu.addAction("Select members", lambda: self._selection.set_roi_selection(set(members))).setEnabled(bool(members))
+        selected = self._selected_group_ids()
+        targets = selected if group_id in selected else ([group_id] if group_id is not None else [])
+        if len(targets) > 1:
+            members = {row.roi_id for row in self._model.rows() if row.group_id in targets}
+        else:
+            members = set(self._model.member_ids(index))
+        menu.addAction("Select members", lambda: self._selection.set_roi_selection(members)).setEnabled(bool(members))
         if group_id is None:
             return  # "Ungrouped" is not a real group: nothing else applies
+        many = len(targets) > 1
         order = [group.group_id for group in self._toolbox.groups()]
-        position = order.index(group_id) if group_id in order else 0
-        menu.addAction("Rename…", lambda: self._tree.edit(index))
-        menu.addAction("Set color…", lambda: self._recolor_group(group_id))
+        positions = sorted(order.index(gid) for gid in targets if gid in order)
+        at_top = positions == list(range(len(positions)))
+        at_bottom = positions == list(range(len(order) - len(positions), len(order)))
+        menu.addAction("Rename…", lambda: self._tree.edit(index)).setEnabled(not many)
+        menu.addAction("Set color…", lambda: self._recolor_groups(targets))
         menu.addSeparator()
-        menu.addAction("Move group up", lambda: self._move_group(group_id, -1)).setEnabled(position > 0)
-        menu.addAction("Move group down", lambda: self._move_group(group_id, 1)).setEnabled(position < len(order) - 1)
+        noun = "groups" if many else "group"
+        menu.addAction(f"Move {noun} to top", lambda: self._move_groups_to_edge(targets, top=True)).setEnabled(not at_top)
+        menu.addAction(f"Move {noun} up", lambda: self._move_groups(targets, -1)).setEnabled(not at_top)
+        menu.addAction(f"Move {noun} down", lambda: self._move_groups(targets, 1)).setEnabled(not at_bottom)
+        menu.addAction(f"Move {noun} to bottom", lambda: self._move_groups_to_edge(targets, top=False)).setEnabled(not at_bottom)
         menu.addSeparator()
         menu.addAction(
-            "Delete group (keeps its ROIs)", lambda: self._guarded("Delete group", lambda: self._toolbox.delete_group(group_id))
+            "Ungroup (keeps the ROIs)", lambda: self._delete_groups(targets)
         )
+        menu.addAction("Delete groups and their ROIs" if many else "Delete group and its ROIs", self._delete_selected_groups_with_rois(targets))
+
+    def _delete_selected_groups_with_rois(self, group_ids: list[str]) -> Callable[[], None]:
+        def run() -> None:
+            ids = sorted(row.roi_id for row in self._model.rows() if row.group_id in group_ids)
+            if ids and self._renumbering_allowed():
+                self._guarded("Delete", lambda: self._toolbox.delete_rois(tuple(ids)))
+            elif not ids:
+                self._delete_groups(group_ids)
+
+        return run
+
+    def _delete_groups(self, group_ids: list[str]) -> None:
+        for group_id in group_ids:
+            self._guarded("Delete group", lambda gid=group_id: self._toolbox.delete_group(gid))

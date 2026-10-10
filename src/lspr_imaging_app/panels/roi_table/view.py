@@ -100,7 +100,7 @@ def suggested_column_widths(metrics: QFontMetrics) -> list[int]:
     diameter = max(advance("999.9") + _CELL_PADDING, title_width(metrics, COLUMN_TITLES[COLUMN_RING_OUT]) + _SORT_INDICATOR_ROOM)
     widths = [0] * COLUMN_COUNT
     widths[COLUMN_ID] = STRIP_WIDTH + 5 + GROUP_INDENT + CHIP_SIZE + 7 + advance("9999") + 10
-    widths[COLUMN_NAME] = advance("Name 99") + _CELL_PADDING
+    widths[COLUMN_NAME] = advance("Group label 99") + _CELL_PADDING
     widths[COLUMN_X] = widths[COLUMN_Y] = max(number, advance(COLUMN_TITLES[COLUMN_X]) + _SORT_INDICATOR_ROOM)
     widths[COLUMN_SAMPLE] = max(diameter, title_width(metrics, COLUMN_TITLES[COLUMN_SAMPLE]) + _SORT_INDICATOR_ROOM)
     widths[COLUMN_RING_IN] = max(diameter, title_width(metrics, COLUMN_TITLES[COLUMN_RING_IN]) + _SORT_INDICATOR_ROOM)

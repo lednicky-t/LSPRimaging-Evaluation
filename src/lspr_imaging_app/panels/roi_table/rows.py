@@ -17,9 +17,9 @@ from ...roi.palette import DEFAULT_ROI_COLOR_HEX
 
 COLUMN_ID, COLUMN_NAME, COLUMN_X, COLUMN_Y, COLUMN_SAMPLE, COLUMN_RING_IN, COLUMN_RING_OUT = range(7)
 COLUMN_COUNT = 7
-COLUMN_TITLES = ("#", "Name", "x", "y", "D_s", "d_r", "D_r")
+COLUMN_TITLES = ("#/ROIs", "Label", "x", "y", "D_s", "d_r", "D_r")
 """Header titles; ``X_y`` is drawn as X with a subscript y (`view.SubscriptHeader`)."""
-EDITABLE_COLUMNS = (COLUMN_NAME, COLUMN_X, COLUMN_Y, COLUMN_SAMPLE, COLUMN_RING_IN, COLUMN_RING_OUT)
+EDITABLE_COLUMNS = (COLUMN_X, COLUMN_Y, COLUMN_SAMPLE, COLUMN_RING_IN, COLUMN_RING_OUT)
 DIAMETER_COLUMNS = (COLUMN_SAMPLE, COLUMN_RING_IN, COLUMN_RING_OUT)
 
 
@@ -194,6 +194,7 @@ def build_sections(
     *,
     sort_column: int,
     descending: bool,
+    ungrouped_color_hex: str = DEFAULT_ROI_COLOR_HEX,
 ) -> list[Section]:
     """The grouped view: one section per group in the toolbox's group order
     (that order is the user's, never sorted by a column), then "Ungrouped"
@@ -210,7 +211,7 @@ def build_sections(
         for group in groups
     ]
     if by_group[None]:
-        sections.append(Section(GroupInfo(None, "Ungrouped", DEFAULT_ROI_COLOR_HEX), tuple(sort_rows(by_group[None], sort_column, descending))))
+        sections.append(Section(GroupInfo(None, "Ungrouped", ungrouped_color_hex), tuple(sort_rows(by_group[None], sort_column, descending))))
     return sections
 
 

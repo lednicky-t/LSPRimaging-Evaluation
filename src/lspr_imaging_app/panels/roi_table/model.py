@@ -77,7 +77,7 @@ class DropTarget:
 _NUMERIC_COLUMNS = (COLUMN_X, COLUMN_Y, COLUMN_SAMPLE, COLUMN_RING_IN, COLUMN_RING_OUT)
 _HEADER_TIPS = {
     COLUMN_ID: "Position in the list. Reordering changes these numbers.",
-    COLUMN_NAME: "Optional name for the ROI.",
+    COLUMN_NAME: "Label of a group (its name, also drawn on the image). Empty for ROIs.",
     COLUMN_X: "Centre x on the reference image.",
     COLUMN_Y: "Centre y on the reference image.",
     COLUMN_SAMPLE: "Sample diameter.",
@@ -169,7 +169,7 @@ class RoiTreeModel(QAbstractItemModel):
         root = _Node("root", None)
         if self._grouped:
             colors = {group.group_id: group.sample_color_hex for group in self._groups}
-            for section in build_sections(self._rows, self._groups, colors, sort_column=self._sort_column, descending=self._descending):
+            for section in build_sections(self._rows, self._groups, colors, sort_column=self._sort_column, descending=self._descending, ungrouped_color_hex=self._default_color_hex):
                 header = _Node("group", root, section=section)
                 header.position = len(root.children)
                 root.children.append(header)
@@ -378,7 +378,7 @@ class RoiTreeModel(QAbstractItemModel):
         if column == COLUMN_ID:
             return str(row.roi_id), str(row.roi_id)
         if column == COLUMN_NAME:
-            return row.label, row.label
+            return "", ""  # labels belong to groups; a ROI has its id
         if column in (COLUMN_X, COLUMN_Y):
             value = row.x if column == COLUMN_X else row.y
             return format_length(value, unit), edit_text(value, unit)

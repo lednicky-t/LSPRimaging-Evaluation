@@ -1,13 +1,13 @@
 """The Array group's "Reorder IDs" pick-up menu: number the ROIs by rows or by columns of the array.
 
-The icon is the stable app's (Tabler "sort-ascending-numbers"; turned 270 degrees for "by rows", as there).
+The icon is the stable app's (Tabler "sort-ascending-numbers"; for "by rows" only the arrow is turned to point right, the 0 stands above its tail and the 9 at its tip).
 Picking an entry only emits `reorder_requested`; `ArrayActions` does the work.
 """
 
 from __future__ import annotations
 
-from PyQt6.QtCore import Qt, pyqtSignal
-from PyQt6.QtGui import QAction, QIcon, QTransform
+from PyQt6.QtCore import QRectF, Qt, pyqtSignal
+from PyQt6.QtGui import QAction, QIcon, QPainter, QPixmap
 from PyQt6.QtWidgets import QMenu, QToolButton, QWidget
 
 from lspr_ui import get_active_theme, load_tabler_icon
@@ -26,8 +26,23 @@ def _icon(color: str, degrees: float) -> QIcon:
     icon = load_tabler_icon("sort-ascending-numbers", color=color, size=_RENDER_SIZE, stroke_width=2.1)
     if not degrees:
         return icon
-    pixmap = icon.pixmap(_RENDER_SIZE, _RENDER_SIZE)
-    return QIcon(pixmap.transformed(QTransform().rotate(degrees), Qt.TransformationMode.SmoothTransformation))
+    # "By rows": the arrow lies horizontally, the first digit (0) stands above its tail, the last (9) above its tip, both at the same height.
+    source = icon.pixmap(_RENDER_SIZE, _RENDER_SIZE)
+    u = _RENDER_SIZE / 24  # the Tabler icon is drawn on a 24-unit grid
+    pixmap = QPixmap(_RENDER_SIZE, _RENDER_SIZE)
+    pixmap.fill(Qt.GlobalColor.transparent)
+    painter = QPainter(pixmap)
+    painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+    painter.drawPixmap(QRectF(3 * u, 2 * u, 6 * u, 10 * u), source, QRectF(14 * u, 2 * u, 6 * u, 10 * u))  # the 0, above the tail
+    painter.drawPixmap(QRectF(14 * u, 2 * u, 6 * u, 10 * u), source, QRectF(14 * u, 12.5 * u, 6 * u, 10 * u))  # the 9, same height, above the tip
+    painter.translate(11.5 * u, 16 * u)  # the arrow (left half of the icon), turned about its own centre
+    painter.rotate(degrees)
+    painter.scale(1.2, 1.2)
+    painter.translate(-7 * u, -12 * u)
+    painter.setClipRect(QRectF(0, 0, 12 * u, _RENDER_SIZE))
+    painter.drawPixmap(0, 0, source)
+    painter.end()
+    return QIcon(pixmap)
 
 
 class ArrayReorderPicker(QToolButton):
@@ -53,4 +68,4 @@ class ArrayReorderPicker(QToolButton):
         theme = get_active_theme()
         for key, _text, degrees in _ENTRIES:
             self._actions[key].setIcon(_icon(theme.text_primary, degrees))
-        self.setIcon(_icon(theme.accent_blue, 0.0))
+        self.setIcon(_icon(theme.text_primary, 0.0))

@@ -192,23 +192,24 @@ class RoiTableDelegate(QStyledItemDelegate):
         painter.setBrush(QColor(index.data(COLOR_ROLE) or theme.text_dim))
         painter.drawRoundedRect(chip, 3, 3)
 
-        count_text = str(index.data(COUNT_ROLE) or 0)
+        count_text = str(index.data(COUNT_ROLE) or 0)  # sits where a ROI's id sits, under the "#/ROIs" title
         metrics = option.fontMetrics
-        pill_width = metrics.horizontalAdvance(count_text) + 14
-        pill = QRectF(rect.right() - pill_width - 10, cy - 9, pill_width, 18)
-        painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(QColor(theme.control_bg))
-        painter.drawRoundedRect(pill, 9, 9)
+        count_left = int(chip.right()) + 7
         painter.setPen(QColor(theme.text_muted))
-        painter.drawText(pill.toRect(), int(Qt.AlignmentFlag.AlignCenter), count_text)
+        painter.drawText(
+            QRect(count_left, rect.top(), max(0, rect.width() - count_left), rect.height()),
+            int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter),
+            count_text,
+        )
 
         font = QFont(option.font)
         font.setBold(not ungrouped)
         font.setItalic(ungrouped)
         painter.setFont(font)
         painter.setPen(QColor(theme.text_muted if ungrouped else theme.text_primary))
-        name_left = int(chip.right()) + 9
-        name_rect = QRect(name_left, rect.top(), max(0, int(pill.left()) - name_left - 8), rect.height())
+        first_column_right = rect.left() + (view.columnWidth(0) if isinstance(view, QTreeView) else 0)
+        name_left = max(int(chip.right()) + 9 + metrics.horizontalAdvance(count_text) + 7, first_column_right + 2)
+        name_rect = QRect(name_left, rect.top(), max(0, rect.right() - name_left - 8), rect.height())
         text = str(index.data(Qt.ItemDataRole.DisplayRole) or "")
         painter.drawText(
             name_rect,
