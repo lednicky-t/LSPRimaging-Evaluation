@@ -85,6 +85,7 @@ import pyqtgraph as pg
 from PyQt6.QtCore import QEvent, QObject, QPointF, QStringListModel, Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import QColor, QFontMetrics
 from PyQt6.QtWidgets import (
+    QAbstractSpinBox,
     QMenu,
     QApplication,
     QCompleter,
@@ -906,7 +907,9 @@ class ImagePanel(QWidget):
 
         self._cube_title = cube_title = QLabel(self._cube_display.axis_title(), self)
         cube_title.setStyleSheet(_slider_axis_title_style(get_active_theme().text_muted))
-        cube_row = QHBoxLayout()
+        cube_title.setToolTip("Double-click to switch between cube number and start time.")
+        cube_title.installEventFilter(self)
+        cube_row =QHBoxLayout()
         cube_row.setContentsMargins(0, 0, 0, 0)
         cube_row.setSpacing(5)
         cube_row.addWidget(cube_title)
@@ -956,23 +959,23 @@ class ImagePanel(QWidget):
         title_width = max(
             cube_title.sizeHint().width(),
             wavelength_title.sizeHint().width(),
-            *(title_metrics.horizontalAdvance(text) + 4 for text in ("Cube #", "Cube time")),
+            *(title_metrics.horizontalAdvance(text) + 4 for text in ("Cube (#)", "Cube (t)")),
         )
         cube_title.setFixedWidth(title_width)
         wavelength_title.setFixedWidth(title_width)
-        # Narrowed and sized off "00:00:00" (2026-09-30, maintainer request),
-        # not the widgets' own `sizeHint()` - a plain cube index needs far
-        # less room, but the cube field is meant to grow into an HH:MM:SS
-        # elapsed-time display later (see this panel's module docstring,
-        # "Not built here, deliberately" - no elapsed-time mapping exists on
-        # this branch yet), and re-widening every dependent layout calc when
-        # that lands would be needless churn. The wavelength field shares
-        # the same width so the two number fields line up on the right,
-        # same as the two titles above.
-        metrics = QFontMetrics(self._cube_spin.font())
-        spin_width = metrics.horizontalAdvance("00:00:00") + 28  # + spin-arrow/frame padding
-        self._cube_spin.setFixedWidth(spin_width)
-        self._wavelength_spin.setFixedWidth(spin_width)
+        # Number fields are sized to their current text (see
+        # `_fit_spin_widths`), both to the same width so they line up on the
+        # right, same as the two titles above.
+        self._fit_spin_widths()
+        self._cube_spin.valueChanged.connect(self._fit_spin_widths)
+        self._wavelength_spin.valueChanged.connect(self._fit_spin_widths)
+        # Free-standing text (2026-10-11, maintainer request): no border,
+        # background or arrow buttons. Typing, Up/Down keys and the mouse
+        # wheel still step the value.
+        for spin in (self._cube_spin, self._wavelength_spin):
+            spin.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
+            spin.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+            spin.setStyleSheet("QAbstractSpinBox { border: none; background: transparent; padding: 0px; }")
 
         for slider in (self._cube_slider, self._wavelength_slider):
             slider.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
@@ -1905,12 +1908,28 @@ class ImagePanel(QWidget):
                 "This image is not linked to experiment data (no acquisition metadata, or no timing for it).",
             )
 
+    def _fit_spin_widths(self, *_args: object) -> None:
+        """Both borderless number fields share one width, just wide enough for
+        the longer of the two current texts (never narrower than "0:00:00"), so the sliders get all the rest
+        and still end at the same x. (Changes by a character only when a
+        value gains a digit, e.g. 0:59 -> 1:00:00 or 99 -> 100.)"""
+        metrics = QFontMetrics(self._cube_spin.font())
+        width = max(
+            metrics.horizontalAdvance(self._cube_spin.text()),
+            metrics.horizontalAdvance(self._wavelength_spin.text()),
+            metrics.horizontalAdvance("0:00:00"),  # the time field must always fit H:MM:SS
+        ) + 6
+        for spin in (self._cube_spin, self._wavelength_spin):
+            if spin.width() != width:
+                spin.setFixedWidth(width)
+
     def _on_cube_display_changed(self, _mode: str) -> None:
         """The cube unit (number / start time) changed anywhere in the app."""
         self._cube_title.setText(self._cube_display.axis_title())
         cubes = self._dataset.spectral_cubes()
         self._cube_slider.set_ticks(list(cubes), self._cube_slider_major_ticks(cubes))
         self._cube_spin.refresh_display()
+        self._fit_spin_widths()
         if self._frame_key is not None:
             self._show_frame_status(*self._frame_key)
 
@@ -1923,7 +1942,7 @@ class ImagePanel(QWidget):
         menu = QMenu(slider)
         set_action = menu.addAction(_render_tabler_icon("pin", icon_color), "Set reference")
         set_action.setToolTip("Use the cube and wavelength shown now as the reference frame.")
-        find_action = menu.addAction(_render_tabler_icon("focus-2", icon_color), "Find reference")
+        find_action = menu.addAction(_render_tabler_icon("search", icon_color), "Find reference")
         find_action.setToolTip("Pick the best-contrast wavelength of this cube as the reference frame.")
         menu.addSeparator()
         time_action = menu.addAction("Show cubes as start time")
@@ -1969,6 +1988,12 @@ class ImagePanel(QWidget):
             if self._interaction.handle_key(event.key(), event.modifiers()):
                 event.accept()
                 return True
+        if watched is self._cube_title and event.type() == QEvent.Type.MouseButtonDblClick:
+            # Same toggle as the slider's right-click "Show cubes as start time".
+            if self._cube_display.time_available():
+                is_time = self._cube_display.effective_mode() == MODE_TIME
+                self._cube_display.set_mode(MODE_CUBE if is_time else MODE_TIME)
+            return True
         return super().eventFilter(watched, event)
 
     # -- canvas interaction: routed by `CanvasInteraction` (interaction.py) ---------------

@@ -77,7 +77,7 @@ class DataAxisSlider(QSlider):
     _MINOR_TICK_HEIGHT = 4.0
     _MAJOR_TICK_HEIGHT = 7.0
     _LABEL_TOP = 19.0
-    _SIDE_INSET = 6.0
+    _SIDE_INSET = 14.0  # room for half of the widest first/last tick label (e.g. "0:00") so it isn't clipped
     # Fixed, not derived from _accent_color: the handle's accent can be
     # repurposed per selection, but "this tick is cached" should mean the
     # same color regardless of whatever the handle currently shows. Matches

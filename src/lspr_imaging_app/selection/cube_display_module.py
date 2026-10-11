@@ -84,4 +84,4 @@ class CubeDisplayModule(QObject):
 
     def axis_title(self) -> str:
         """The cube slider's title: the unit follows the mode."""
-        return "Cube time" if self.effective_mode() == MODE_TIME else "Cube #"
+        return "Cube (t)" if self.effective_mode() == MODE_TIME else "Cube (#)"

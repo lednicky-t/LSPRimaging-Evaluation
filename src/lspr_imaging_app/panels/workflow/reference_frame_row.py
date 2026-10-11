@@ -133,7 +133,7 @@ class ReferenceFrameRow(QWidget):
         mode = self._reference_frame_module.mode()
         self._auto_button.setChecked(mode == MODE_AUTO)
         self._manual_button.setChecked(mode == MODE_MANUAL)
-        self._auto_button.setIcon(_render_tabler_icon("focus-2", _ACTIVE_COLOR if mode == MODE_AUTO else get_active_theme().text_primary))
+        self._auto_button.setIcon(_render_tabler_icon("search", _ACTIVE_COLOR if mode == MODE_AUTO else get_active_theme().text_primary))
         self._manual_button.setIcon(
             _render_tabler_icon("pin", _ACTIVE_COLOR if mode == MODE_MANUAL else get_active_theme().text_primary)
         )
