@@ -6,6 +6,7 @@ keeps thin wrappers so its callers and tests are unchanged."""
 from __future__ import annotations
 
 import statistics
+from collections.abc import Callable
 
 from .data_axis_slider import DataAxisSlider
 
@@ -70,20 +71,18 @@ def wavelength_slider_major_ticks(values: tuple[float, ...]) -> dict[int, str]:
     return majors
 
 
-def cube_slider_major_ticks(values: tuple[int, ...]) -> dict[int, str]:
+def cube_slider_major_ticks(values: tuple[int, ...], label_for: Callable[[int], str] | None = None) -> dict[int, str]:
     """Indices to label on the cube axis slider: the raw cube index at a
     "nice" interval. Ported from the stable app's
-    `MainWindow._cube_slider_major_ticks` - **scoped down**: the
-    source's Cube/Time toggle (labeling by elapsed acquisition time
-    instead of raw index) is not ported, since the elapsed-seconds
-    mapping it reuses lives in the stable app's `AnalysisController`,
-    which has no equivalent on this branch yet. See the rewrite status
-    doc's gap list."""
+    `MainWindow._cube_slider_major_ticks`. `label_for` (the cube display
+    unit, `CubeDisplayModule.label_for`) names each labelled cube - its raw
+    number, or its start time in Time mode; `None` = the raw number."""
     count = len(values)
     if count < 2:
         return {}
     interval = nice_count_interval(count)
-    return {index: str(values[index]) for index in range(0, count, interval)}
+    name = label_for if label_for is not None else str
+    return {index: name(values[index]) for index in range(0, count, interval)}
 
 
 def nice_count_interval(count: int, target_ticks: int = 8) -> int:

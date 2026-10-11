@@ -57,7 +57,7 @@ from lspr_ui import get_active_theme
 
 from ...dataset import DatasetModule
 from ...image_tools import GeometryModule
-from ...selection import ReferenceFrameModule, SelectionModule
+from ...selection import CubeDisplayModule, ReferenceFrameModule, SelectionModule
 from ...storage.session_coordinator import SessionCoordinator
 from ..ui_state import UiStateStore
 from .collapsible_section import CollapsibleSection
@@ -127,6 +127,7 @@ def _build_dataset_section(
     session_coordinator: SessionCoordinator,
     geometry: GeometryModule | None = None,
     ui_state: UiStateStore | None = None,
+    cube_display: CubeDisplayModule | None = None,
 ) -> tuple[CollapsibleSection, list[tuple[str, CollapsibleSection]]]:
     """Ported from the source's ``dataset_section`` + its top row (folder
     field + browse/explorer icons, *outside* the nested sections) + its
@@ -150,7 +151,7 @@ def _build_dataset_section(
       block, real OME-Zarr export)."""
     folder_row = DatasetFolderRow(dataset, parent)
     session_picker_row = SessionPickerRow(session_coordinator, parent)
-    reference_frame_row = ReferenceFrameRow(reference_frame, selection, parent)
+    reference_frame_row = ReferenceFrameRow(reference_frame, selection, parent, cube_display=cube_display)
 
     summary_content = DatasetSummarySection(dataset, parent)
     summary_section = CollapsibleSection(
@@ -162,7 +163,7 @@ def _build_dataset_section(
         parent=parent,
     )
 
-    experimental_plan_content = ExperimentalPlanSection(dataset, selection, parent)
+    experimental_plan_content = ExperimentalPlanSection(dataset, selection, parent, cube_display=cube_display)
     experimental_plan_section = CollapsibleSection(
         "Experimental plan",
         experimental_plan_content,
@@ -291,13 +292,14 @@ class WorkflowPanel(QWidget):
         parent: QWidget | None = None,
         geometry: GeometryModule | None = None,
         ui_state: UiStateStore | None = None,
+        cube_display: CubeDisplayModule | None = None,
     ) -> None:
         super().__init__(parent)
         # Order fixes the on-screen stacking order.
         built = [
             (
                 WorkflowStage.DATASET,
-                *_build_dataset_section(self, dataset, selection, reference_frame, session_coordinator, geometry, ui_state),
+                *_build_dataset_section(self, dataset, selection, reference_frame, session_coordinator, geometry, ui_state, cube_display),
             ),
             (WorkflowStage.ROI_SELECTION, *_build_roi_selection_section(self)),
             (WorkflowStage.ANALYSIS, *_build_analysis_section(self)),

@@ -70,11 +70,19 @@ from .panels.workflow import WorkflowPanel, WorkflowStage
 from .panels.workflow.collapsible_section import CollapsibleSection
 from .roi import RoiToolbox
 from .roi_geometry_sync import RoiGeometrySync
-from .selection import AreaSelectionModule, HighlightRangeModule, ReferenceFrameModule, SelectionModule
+from .selection import (
+    AreaSelectionModule,
+    CubeDisplayModule,
+    HighlightRangeModule,
+    ReferenceFrameModule,
+    SelectionModule,
+)
+from .selection.reference_auto_task import TASK_ID as REFERENCE_TASK_ID, ReferenceAutoFind
 from .storage.app_settings import AppSettings, load_app_settings, save_app_settings
 from .storage.ui_state_keys import (
     ROI_ROUND_POSITIONS,
     CHROMATIC_ALL_WAVELENGTHS,
+    CUBE_DISPLAY_MODE,
     CHROMATIC_BORDER_PERCENT,
     CHROMATIC_FEATURE_DIAMETER,
     CHROMATIC_LANDMARK_COUNT,
@@ -604,6 +612,8 @@ class _Modules:
     roi_geometry_sync: RoiGeometrySync
     selection: SelectionModule
     reference_frame: ReferenceFrameModule
+    reference_auto: ReferenceAutoFind
+    cube_display: CubeDisplayModule
     highlight_range: HighlightRangeModule
     area_selection: AreaSelectionModule
     analysis_settings: AnalysisSettingsModule
@@ -702,6 +712,8 @@ def _build_modules() -> _Modules:
         highlight_range=highlight_range, area_selection=area_selection, analysis_settings=analysis_settings,
         session_coordinator=session_coordinator, analysis_engine=analysis_engine,
         session_autosave=session_autosave, chromatic_auto=ChromaticAutoDetect(chromatic),
+        reference_auto=ReferenceAutoFind(dataset, selection, reference_frame),
+        cube_display=CubeDisplayModule(dataset),
     )
 
 
@@ -802,6 +814,7 @@ def _build_image_panel(m: _Modules, ui_state: UiStateStore, theme_obj) -> ImageP
         mask_scope=m.mask_scope,
         area_selection=m.area_selection,
         chromatic_auto=m.chromatic_auto,
+        cube_display=m.cube_display,
         analysis_running=m.analysis_engine.is_running,
         initial_chromatic_view=(read(ui_state, CHROMATIC_SHOW_LANDMARKS), read(ui_state, CHROMATIC_ALL_WAVELENGTHS)),
         initial_chromatic_values=ChromaticUiValues(
@@ -902,6 +915,7 @@ def _build_workflow_panel(m: _Modules, writer: _SettingsWriter, ui_state: UiStat
         initial_subsections=settings.expanded_subsections,
         geometry=m.geometry,
         ui_state=ui_state,
+        cube_display=m.cube_display,
     )
     # Immediate persist-on-change, same pattern as theme/auto_apply - switching
     # the open stage is a deliberate, occasional click, not a continuous drag
@@ -933,11 +947,17 @@ def _build_status_bar(
     # indicator's `cancel_requested` -> that task's own cancel.
     task_indicator = TaskIndicator(status_bar)
     status_bar.addPermanentWidget(task_indicator, 1)  # stretch: takes the free width, text clips instead of overlapping
+    m.reference_auto.task_progress.connect(task_indicator.report)
+    m.reference_auto.task_finished.connect(task_indicator.finish)
     m.chromatic_auto.task_progress.connect(task_indicator.report)
     m.chromatic_auto.task_finished.connect(task_indicator.finish)
     image_panel.array_action.task_progress.connect(task_indicator.report)
     image_panel.array_action.task_finished.connect(task_indicator.finish)
-    cancel_by_task = {CHROMATIC_TASK_ID: m.chromatic_auto.cancel, ARRAY_TASK_ID: image_panel.array_action.cancel}
+    cancel_by_task = {
+        CHROMATIC_TASK_ID: m.chromatic_auto.cancel,
+        ARRAY_TASK_ID: image_panel.array_action.cancel,
+        REFERENCE_TASK_ID: m.reference_auto.cancel,
+    }
     task_indicator.cancel_requested.connect(lambda task_id: cancel_by_task[task_id]())
     # WorkflowPanel.set_status() (state/performance text, no hover-hints -
     # design doc §2) shows as a transient message on the bar's left side;
@@ -1220,6 +1240,11 @@ def build_main_window(
 
     m = _build_modules()
     _ReferenceFramePersistence(m.dataset, m.reference_frame, ui_state, settings)
+    # The cube unit (number / start time) is one app-wide display choice, remembered across restarts.
+    saved_cube_mode = read(ui_state, CUBE_DISPLAY_MODE)
+    if saved_cube_mode in ("cube", "time"):
+        m.cube_display.set_mode(str(saved_cube_mode))
+    m.cube_display.mode_changed.connect(lambda _mode: ui_state.set(CUBE_DISPLAY_MODE.key, m.cube_display.mode()))
     # A Highlight range selected against one dataset's intensity scale is
     # meaningless for whatever gets opened next - same reasoning as the
     # reference-frame reset just above.

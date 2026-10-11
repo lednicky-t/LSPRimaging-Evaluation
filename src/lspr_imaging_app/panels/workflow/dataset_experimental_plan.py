@@ -56,7 +56,7 @@ from ...dataset import DatasetModule
 from ...dataset.io import acquisition_metadata_sidecar_path, experimental_data_dir
 from ...dataset.model import CubeIntervalStats, ImageDataset
 from ...io.metadata_import import CLASSIFICATION_UNKNOWN, classify_metadata_file, import_metadata_files
-from ...selection import SelectionModule
+from ...selection import CubeDisplayModule, SelectionModule
 from ...storage.workspace import save_acquisition_metadata_sidecar
 from ..dock_container import _render_tabler_icon
 
@@ -180,10 +180,17 @@ class ExperimentalPlanSection(QWidget):
     Amber (`theme.accent_gold`) when either ratio is short of 100%, so
     "something is missing" is visible without reading the numbers."""
 
-    def __init__(self, dataset: DatasetModule, selection: SelectionModule, parent: QWidget | None = None) -> None:
+    def __init__(
+        self,
+        dataset: DatasetModule,
+        selection: SelectionModule,
+        parent: QWidget | None = None,
+        cube_display: CubeDisplayModule | None = None,
+    ) -> None:
         super().__init__(parent)
         self._dataset_module = dataset
         self._selection_module = selection
+        self._cube_display = cube_display
         theme = get_active_theme()
 
         self.header_stats_label = QLabel("", parent)
@@ -240,6 +247,9 @@ class ExperimentalPlanSection(QWidget):
         self._dataset_module.dataset_cleared.connect(self._on_dataset_cleared)
         self._selection_module.cube_changed.connect(self._refresh_current_frame_preview)
         self._selection_module.wavelength_changed.connect(self._refresh_current_frame_preview)
+        if cube_display is not None:
+            # The cube unit (number / start time) is app-wide; re-read the label when it changes.
+            cube_display.mode_changed.connect(self._refresh_current_frame_preview)
 
     # -- summary + live preview ------------------------------------------------
 
@@ -313,13 +323,14 @@ class ExperimentalPlanSection(QWidget):
             return
         cube = self._selection_module.current_cube()
         wavelength = self._selection_module.current_wavelength()
+        cube_text = self._cube_display.label_for(cube) if self._cube_display is not None else str(cube)
         timing = metadata.timing_for(cube, wavelength)
         if timing is None:
-            self._current_frame_label.setText(f"Cube {cube}, WL {wavelength:g}: no timing recorded.")
+            self._current_frame_label.setText(f"Cube {cube_text}, WL {wavelength:g}: no timing recorded.")
             return
         comment = metadata.comment_at(timing.acquired_at_unix_ms)
         comment_text = comment if comment else "(no comment/step recorded)"
-        self._current_frame_label.setText(f"Cube {cube}, WL {wavelength:g}: {comment_text}")
+        self._current_frame_label.setText(f"Cube {cube_text}, WL {wavelength:g}: {comment_text}")
 
     # -- import/export --------------------------------------------------------
 

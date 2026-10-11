@@ -21,14 +21,11 @@ Workflow panel's reference-frame row) reads `SelectionModule.current_cube()`/
 "manual" - the same "commands take already-resolved values" convention
 `RoiToolbox.detect_rois`/`MaskModule.apply_candidate` already established.
 
-**Scoped down from the stable app's "Auto" mode, flagged rather than
-silently simplified**: the source's Auto mode picks the *best-contrast*
-wavelength in the current cube (`MainWindow._auto_reference_image_key_for_
-spectral_cube`/`_reference_contrast_score` - real pixel loading + scoring
-for every candidate wavelength). This rewrite's Auto mode is simpler: it
-always mirrors whatever `SelectionModule` says is currently being viewed,
-live - no contrast scoring, no picking. Revisit if/when a real image
-canvas exists to preview the difference against.
+**Auto = "Find reference" (2026-10-11)**: like the stable app, the best-contrast
+wavelength of the cube being viewed (`reference_scoring.best_contrast_wavelength`,
+run in the background by `reference_auto_task.ReferenceAutoFind`), cached here
+per cube. It no longer mirrors the wavelength slider. Manual = "Set reference".
+Not ported: the stable app's per-image exclusions (no such subsystem here).
 """
 
 from __future__ import annotations
@@ -52,9 +49,39 @@ class ReferenceFrameModule(QObject):
         self._mode = MODE_AUTO
         self._manual_cube: int | None = None
         self._manual_wavelength: float | None = None
+        self._auto_wavelengths: dict[int, float] = {}
 
     def mode(self) -> str:
         return self._mode
+
+    # -- "Find reference" (Auto) --------------------------------------------
+    # Auto = the best-contrast wavelength *of the cube being viewed*, found by
+    # `ReferenceAutoFind` (selection/reference_auto_task.py) and cached here
+    # per cube. It does not follow the wavelength slider (2026-10-11,
+    # maintainer request; replaces the earlier "mirror the view" Auto).
+
+    def auto_wavelength(self, cube_index: int) -> float | None:
+        """The cached best wavelength of `cube_index`, or `None` if it has
+        not been found yet."""
+        return self._auto_wavelengths.get(int(cube_index))
+
+    def set_auto_wavelength(self, cube_index: int, wavelength: float) -> None:
+        cube_index, wavelength = int(cube_index), float(wavelength)
+        if self._auto_wavelengths.get(cube_index) == wavelength:
+            return
+        self._auto_wavelengths[cube_index] = wavelength
+        self.reference_frame_changed.emit()
+
+    def resolve(self, current_cube: int | None) -> tuple[int, float] | None:
+        """The reference frame in effect while `current_cube` is viewed:
+        the manual snapshot, or (Auto) that cube's cached best wavelength.
+        `None` = none yet (Auto not computed for this cube, or no cube)."""
+        if self._mode == MODE_MANUAL:
+            return self.manual_frame()
+        if current_cube is None:
+            return None
+        wavelength = self._auto_wavelengths.get(int(current_cube))
+        return None if wavelength is None else (int(current_cube), wavelength)
 
     def manual_frame(self) -> tuple[int, float] | None:
         if self._manual_cube is None or self._manual_wavelength is None:
@@ -91,8 +118,14 @@ class ReferenceFrameModule(QObject):
         (wired in `app_rewrite.build_main_window`) so a manual reference
         can never silently point at a frame from a dataset that is no
         longer loaded."""
-        if self._mode == MODE_AUTO and self._manual_cube is None and self._manual_wavelength is None:
+        if (
+            self._mode == MODE_AUTO
+            and self._manual_cube is None
+            and self._manual_wavelength is None
+            and not self._auto_wavelengths
+        ):
             return
+        self._auto_wavelengths.clear()
         self._mode = MODE_AUTO
         self._manual_cube = None
         self._manual_wavelength = None

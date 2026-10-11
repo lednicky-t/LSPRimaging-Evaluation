@@ -22,7 +22,15 @@ shape; see its own docstring.
 
 from .area_selection_module import AreaSelectionMode, AreaSelectionModule
 from .highlight_range_module import HighlightRangeModule
+from .cube_display_module import CubeDisplayModule
 from .module import SelectionModule
 from .reference_frame_module import ReferenceFrameModule
 
-__all__ = ["AreaSelectionMode", "AreaSelectionModule", "HighlightRangeModule", "SelectionModule", "ReferenceFrameModule"]
+__all__ = [
+    "AreaSelectionMode",
+    "AreaSelectionModule",
+    "CubeDisplayModule",
+    "HighlightRangeModule",
+    "SelectionModule",
+    "ReferenceFrameModule",
+]

@@ -10,14 +10,14 @@ inside any one of them.
 
 Real icon toggle buttons this time (not free-standing labels - the source
 uses checkable `QToolButton`s here, in a `QButtonGroup`, matching
-`reference_auto_button`/`reference_manual_button` exactly): Auto = tabler
-`robot`, Manual = tabler `manual-gearbox`, both lime `#84cc16` when active
+`reference_auto_button`/`reference_manual_button` exactly): "Find reference"
+(Auto) = tabler `focus-2`, "Set reference" (Manual) = tabler `pin` (renamed and
+re-iconed 2026-10-11), both lime `#84cc16` when active
 - same literal color the source hardcodes, no `lspr_ui` theme token for it.
 
 Backed by the new `ReferenceFrameModule` + the existing `SelectionModule`
-(see `reference_frame_module.py`'s docstring for the "Auto" scope-down and
-the module-boundary reasoning for why this widget, not the module, reads
-`SelectionModule` directly).
+(see `reference_frame_module.py`'s docstring: Auto = best-contrast wavelength
+of the viewed cube, found in the background by `ReferenceAutoFind`).
 """
 
 from __future__ import annotations
@@ -29,7 +29,7 @@ from PyQt6.QtWidgets import QButtonGroup, QHBoxLayout, QLabel, QToolButton, QVBo
 
 from lspr_ui import get_active_theme, transparent_icon_button_stylesheet
 
-from ...selection import ReferenceFrameModule, SelectionModule
+from ...selection import CubeDisplayModule, ReferenceFrameModule, SelectionModule
 from ...selection.reference_frame_module import MODE_AUTO, MODE_MANUAL
 from ..dock_container import _render_tabler_icon
 
@@ -44,10 +44,12 @@ class ReferenceFrameRow(QWidget):
         reference_frame: ReferenceFrameModule,
         selection: SelectionModule,
         parent: QWidget | None = None,
+        cube_display: CubeDisplayModule | None = None,
     ) -> None:
         super().__init__(parent)
         self._reference_frame_module = reference_frame
         self._selection_module = selection
+        self._cube_display = cube_display
         theme = get_active_theme()
 
         label = QLabel("Define reference frame:", self)
@@ -59,7 +61,8 @@ class ReferenceFrameRow(QWidget):
         self._auto_button.setIconSize(QSize(18, 18))
         self._auto_button.setStyleSheet(transparent_icon_button_stylesheet())
         self._auto_button.setToolTip(
-            "Auto: the reference frame always follows whatever cube/wavelength is currently being viewed."
+            "Find reference: for the cube being viewed, pick the wavelength with the best contrast (kept until you "
+            "change cube; it does not follow the wavelength slider)."
         )
         self._auto_button.clicked.connect(lambda: self._reference_frame_module.set_mode(MODE_AUTO))
 
@@ -69,7 +72,7 @@ class ReferenceFrameRow(QWidget):
         self._manual_button.setFixedSize(24, 24)
         self._manual_button.setIconSize(QSize(18, 18))
         self._manual_button.setStyleSheet(transparent_icon_button_stylesheet())
-        self._manual_button.setToolTip("Manual: store the current spectral cube and wavelength as the reference frame.")
+        self._manual_button.setToolTip("Set reference: store the current spectral cube and wavelength as the reference frame.")
         self._manual_button.clicked.connect(self._on_manual_clicked)
 
         self._mode_group = QButtonGroup(self)
@@ -110,6 +113,9 @@ class ReferenceFrameRow(QWidget):
         self._reference_frame_module.reference_frame_changed.connect(self._refresh)
         self._selection_module.cube_changed.connect(self._on_selection_changed)
         self._selection_module.wavelength_changed.connect(self._on_selection_changed)
+        if cube_display is not None:
+            # The cube unit (number / start time) is app-wide; re-read the label when it changes.
+            cube_display.mode_changed.connect(lambda _mode: self._refresh())
         self._refresh()
 
     def _on_manual_clicked(self) -> None:
@@ -118,8 +124,8 @@ class ReferenceFrameRow(QWidget):
         )
 
     def _on_selection_changed(self, _value: object) -> None:
-        # Only matters live in Auto mode - in Manual mode the displayed
-        # frame is the stored snapshot, not the current view.
+        # Only the cube matters, and only in Auto (Find reference is per
+        # cube); Set reference shows the stored snapshot whatever is viewed.
         if self._reference_frame_module.mode() == MODE_AUTO:
             self._refresh()
 
@@ -127,20 +133,18 @@ class ReferenceFrameRow(QWidget):
         mode = self._reference_frame_module.mode()
         self._auto_button.setChecked(mode == MODE_AUTO)
         self._manual_button.setChecked(mode == MODE_MANUAL)
-        self._auto_button.setIcon(_render_tabler_icon("robot", _ACTIVE_COLOR if mode == MODE_AUTO else get_active_theme().text_primary))
+        self._auto_button.setIcon(_render_tabler_icon("focus-2", _ACTIVE_COLOR if mode == MODE_AUTO else get_active_theme().text_primary))
         self._manual_button.setIcon(
-            _render_tabler_icon("manual-gearbox", _ACTIVE_COLOR if mode == MODE_MANUAL else get_active_theme().text_primary)
+            _render_tabler_icon("pin", _ACTIVE_COLOR if mode == MODE_MANUAL else get_active_theme().text_primary)
         )
-        if mode == MODE_AUTO:
-            cube = self._selection_module.current_cube()
-            wavelength = self._selection_module.current_wavelength()
-        else:
-            frame = self._reference_frame_module.manual_frame()
-            cube, wavelength = frame if frame is not None else (None, None)
+        frame = self._reference_frame_module.resolve(self._selection_module.current_cube())
+        cube, wavelength = frame if frame is not None else (None, None)
         if cube is None:
-            self._status_label.setText("[Ref.frame: -]")
+            pending = mode == MODE_AUTO and bool(self._selection_module.current_cube() is not None)
+            self._status_label.setText("[Ref.frame: finding...]" if pending else "[Ref.frame: -]")
         else:
             # Bounded precision (2026-09-25) - `:g` on a wavelength with
             # float imprecision (e.g. 505.333333...) measured ~384px wide,
             # over budget; one decimal keeps the worst case short.
-            self._status_label.setText(f"[Ref.frame: Cube {cube}, WL {wavelength:.1f}]")
+            cube_text = self._cube_display.label_for(cube) if self._cube_display is not None else str(cube)
+            self._status_label.setText(f"[Ref.frame: Cube {cube_text}, WL {wavelength:.1f}]")

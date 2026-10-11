@@ -99,6 +99,8 @@ class DataAxisSlider(QSlider):
         self._cached_tick_indices: frozenset[int] | None = None
         self._accent_color = "#38bdf8"
         self._reference_highlight_color: str | None = None
+        self._reference_tick_index: int | None = None
+        self._reference_tick_color: str | None = None
         self.setFixedHeight(32)
 
     def set_accent_color(self, color: str) -> None:
@@ -107,6 +109,19 @@ class DataAxisSlider(QSlider):
 
     def set_reference_highlight(self, color: str | None) -> None:
         self._reference_highlight_color = color
+        self.update()
+
+    def set_reference_tick(self, index: int | None, color: str | None = None) -> None:
+        """Draws the tick at `index` (position in the `values` array last
+        passed to `set_ticks`) thicker, taller and in `color`, to mark the
+        reference frame's cube/wavelength. `None` removes the mark. Purely
+        visual - the tick stays an ordinary selectable index."""
+        if index is None or color is None:
+            index, color = None, None
+        if (index, color) == (self._reference_tick_index, self._reference_tick_color):
+            return
+        self._reference_tick_index = index
+        self._reference_tick_color = color
         self.update()
 
     def set_ticks(self, values, major_labels: dict[int, str]) -> None:
@@ -243,6 +258,14 @@ class DataAxisSlider(QSlider):
                 painter.drawLine(QPointF(x, self._TICK_TOP), QPointF(x, self._TICK_TOP + tick_height))
                 if label:
                     painter.drawText(QPointF(x - metrics.horizontalAdvance(label) / 2.0, self._LABEL_TOP + metrics.ascent()), label)
+
+            reference_index = self._reference_tick_index
+            if reference_index is not None and self._reference_tick_color and 0 <= reference_index < count:
+                x = left + width * (reference_index / float(count - 1))
+                painter.setPen(QPen(QColor(self._reference_tick_color), 2.5))
+                painter.drawLine(
+                    QPointF(x, self._TICK_TOP - 2.0), QPointF(x, self._TICK_TOP + self._MAJOR_TICK_HEIGHT)
+                )
 
         if enabled and count > 0:
             handle_x = left + width * self._value_fraction()

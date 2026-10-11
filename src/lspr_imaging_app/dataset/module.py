@@ -61,6 +61,7 @@ subscriber, not assumed correct.
 from __future__ import annotations
 
 import logging
+from datetime import datetime
 from pathlib import Path
 
 import numpy as np
@@ -297,6 +298,45 @@ class DatasetModule(QObject):
         if self._dataset is None:
             return None
         return cube_interval_stats(compact_dataset_image_timings(self._dataset))
+
+    def cube_start_seconds(self, cube_index: int) -> float | None:
+        """Seconds from the acquisition start to the cube's *first* frame -
+        the Time-mode label of a cube (ported from the stable app's
+        `AnalysisController._cube_timestamp_ms_by_cube_index` "first" rule
+        and `_sensorgram_time_anchor_ms`). t = 0 is the recorded
+        `started_at_utc` if parseable, else the earliest recorded frame.
+        `None` if there is no dataset, no timing data, or no timing for this
+        cube - the caller then falls back to the plain cube number."""
+        if self._dataset is None or self._dataset.acquisition_metadata is None:
+            return None
+        compact = compact_dataset_image_timings(self._dataset)
+        cube_ms = compact.earliest_ms_by_cube.get(int(cube_index))
+        if cube_ms is None or not compact.per_frame_ms:
+            return None
+        anchor_ms: int | None = None
+        started = self._dataset.acquisition_metadata.started_at_utc
+        if started:
+            try:
+                anchor_ms = int(datetime.fromisoformat(started.replace("Z", "+00:00")).timestamp() * 1000)
+            except ValueError:
+                anchor_ms = None
+        if anchor_ms is None:
+            anchor_ms = min(compact.per_frame_ms.values())
+        return (cube_ms - anchor_ms) / 1000.0
+
+    def frame_comment(self, cube_index: int, wavelength: float) -> tuple[bool, str | None]:
+        """`(linked, comment)` for one frame. `linked` is False when the frame
+        cannot be tied to the experiment record at all (no acquisition
+        metadata, or no timing for this frame); `comment` is then None. With
+        `linked` True, `comment` is the comment active at the frame's
+        acquisition time, or None if none was recorded yet."""
+        if self._dataset is None or self._dataset.acquisition_metadata is None:
+            return (False, None)
+        compact = compact_dataset_image_timings(self._dataset)
+        timing_ms = compact.per_frame_ms.get((int(cube_index), float(wavelength)))
+        if timing_ms is None:
+            return (False, None)
+        return (True, self._dataset.acquisition_metadata.comment_at(timing_ms))
 
     # -- commands -----------------------------------------------------------
 

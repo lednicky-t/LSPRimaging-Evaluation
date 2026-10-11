@@ -85,12 +85,12 @@ import pyqtgraph as pg
 from PyQt6.QtCore import QEvent, QObject, QPointF, QStringListModel, Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import QColor, QFontMetrics
 from PyQt6.QtWidgets import (
+    QMenu,
     QApplication,
     QCompleter,
     QGraphicsView,
     QHBoxLayout,
     QLabel,
-    QSpinBox,
     QToolButton,
     QVBoxLayout,
     QWidget,
@@ -114,8 +114,17 @@ from ...image_tools.preprocess import area_selection_to_raw, resolve_external_ma
 from ...roi import RoiToolbox
 from ...roi.rasterize import effective_reference_diameters
 from .no_data import format_pixel_value, no_data_overlay_rgba
-from ...selection import AreaSelectionModule, HighlightRangeModule, ReferenceFrameModule, SelectionModule
+from ...selection import (
+    AreaSelectionModule,
+    CubeDisplayModule,
+    HighlightRangeModule,
+    ReferenceFrameModule,
+    SelectionModule,
+)
+from ...selection.cube_display_module import MODE_CUBE, MODE_TIME
 from ...selection.reference_frame_module import MODE_AUTO
+from ..dock_container import _render_tabler_icon
+from .cube_spin_box import CubeSpinBox
 from ..cursor_overlay import CursorOverlay
 from .landmark_overlay import draw_landmarks
 from .slider_ticks import cube_slider_major_ticks, wavelength_slider_major_ticks
@@ -259,7 +268,7 @@ class ImagePanel(QWidget):
     # status-bar message, the same convention every other guarded command in
     # this panel already uses - see `_on_measure_apply_requested`), since an
     # error is not "what frame is displayed", it's "why nothing is".
-    frame_status_changed = pyqtSignal(str)
+    frame_status_changed = pyqtSignal(str, str)  # subtitle text, tooltip (the comment / why it is N/A)
 
     # The viewport's pan/zoom, as (x_min, x_max, y_min, y_max) in image pixel
     # coordinates - `app_rewrite.py`'s other half of `initial_view_range`
@@ -301,6 +310,7 @@ class ImagePanel(QWidget):
         mask_scope: MaskScopeModule,
         area_selection: AreaSelectionModule | None = None,
         chromatic_auto: ChromaticAutoDetect | None = None,
+        cube_display: CubeDisplayModule | None = None,
         initial_chromatic_values: ChromaticUiValues | None = None,
         initial_chromatic_view: tuple[bool, bool] = (True, False),
         initial_view_range: tuple[tuple[float, float], tuple[float, float]] | None = None,
@@ -326,6 +336,9 @@ class ImagePanel(QWidget):
         self._initial_view_range = initial_view_range
         self._view_range_restored = False
         self._dataset = dataset
+        # How a cube is named (number or start time); optional so tests build the panel alone.
+        self._cube_display = cube_display if cube_display is not None else CubeDisplayModule(dataset, self)
+        self._frame_key: tuple[int, float] | None = None  # the frame the dock subtitle describes
         self._geometry = geometry
         self._mask = mask
         self._mask_scope = mask_scope
@@ -881,7 +894,8 @@ class ImagePanel(QWidget):
         # panel's module docstring "Not built here, deliberately" note for
         # why (no elapsed-time mapping / no exclusions subsystem exists on
         # this branch yet).
-        self._cube_spin = QSpinBox(self)
+        self._cube_spin = CubeSpinBox(self)
+        self._cube_spin.set_label_provider(self._cube_display.label_for)
         self._cube_spin.setEnabled(False)
         self._cube_spin.valueChanged.connect(self._on_cube_spin_changed)
 
@@ -890,7 +904,7 @@ class ImagePanel(QWidget):
         self._cube_slider.set_accent_color(get_active_theme().accent_gold)
         self._cube_slider.valueChanged.connect(self._on_cube_slider_changed)
 
-        cube_title = QLabel("Cube", self)
+        self._cube_title = cube_title = QLabel(self._cube_display.axis_title(), self)
         cube_title.setStyleSheet(_slider_axis_title_style(get_active_theme().text_muted))
         cube_row = QHBoxLayout()
         cube_row.setContentsMargins(0, 0, 0, 0)
@@ -937,7 +951,13 @@ class ImagePanel(QWidget):
         # to their own text and "197"/"470.0" size to their own digits, so
         # the two sliders started at slightly different x positions and the
         # two number fields didn't line up on the right either.
-        title_width = max(cube_title.sizeHint().width(), wavelength_title.sizeHint().width())
+        # Wide enough for either unit ("Cube #" / "Cube time"), so toggling never shifts the sliders.
+        title_metrics = QFontMetrics(cube_title.font())
+        title_width = max(
+            cube_title.sizeHint().width(),
+            wavelength_title.sizeHint().width(),
+            *(title_metrics.horizontalAdvance(text) + 4 for text in ("Cube #", "Cube time")),
+        )
         cube_title.setFixedWidth(title_width)
         wavelength_title.setFixedWidth(title_width)
         # Narrowed and sized off "00:00:00" (2026-09-30, maintainer request),
@@ -953,6 +973,11 @@ class ImagePanel(QWidget):
         spin_width = metrics.horizontalAdvance("00:00:00") + 28  # + spin-arrow/frame padding
         self._cube_spin.setFixedWidth(spin_width)
         self._wavelength_spin.setFixedWidth(spin_width)
+
+        for slider in (self._cube_slider, self._wavelength_slider):
+            slider.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+            slider.customContextMenuRequested.connect(lambda pos, s=slider: self._show_slider_menu(s, pos))
+        self._cube_display.mode_changed.connect(self._on_cube_display_changed)
 
         navigation = QVBoxLayout()
         navigation.setContentsMargins(0, 0, 0, 0)
@@ -1191,6 +1216,7 @@ class ImagePanel(QWidget):
             self._cube_slider.set_ticks(list(cubes), self._cube_slider_major_ticks(cubes))
             if cubes and self._current_cube() in cubes:
                 self._cube_slider.setValue(cubes.index(self._current_cube()))
+        self._cube_spin.refresh_display()
         self._refresh_wavelength_range()
         self._update_reference_highlight()
 
@@ -1282,6 +1308,7 @@ class ImagePanel(QWidget):
         with _blocked(self._cube_slider):
             if self._current_cube() in cubes:
                 self._cube_slider.setValue(cubes.index(self._current_cube()))
+        self._cube_spin.refresh_display()
         self._refresh_wavelength_range()
         self._update_reference_highlight()
 
@@ -1325,15 +1352,10 @@ class ImagePanel(QWidget):
 
     def _resolve_reference_frame(self) -> tuple[int, float] | None:
         """Same resolution rule `panels/workflow/reference_frame_row.py`
-        uses: Auto mirrors whatever is currently being viewed live; Manual
-        reads the stored snapshot. Duplicated here rather than shared,
-        matching this codebase's "one backend, several front doors"
-        convention - `ReferenceFrameModule` deliberately holds no
-        `SelectionModule` reference (see its own docstring), so every
-        front door resolves Auto mode itself."""
-        if self._reference_frame.mode() == MODE_AUTO:
-            return (self._selection.current_cube(), self._selection.current_wavelength())
-        return self._reference_frame.manual_frame()
+        uses: Set reference = the stored snapshot; Find reference = the viewed
+        cube's best-contrast wavelength (None while it is still being found).
+        `ReferenceFrameModule.resolve` does the work; it only needs the viewed cube."""
+        return self._reference_frame.resolve(self._selection.current_cube())
 
     def _update_reference_highlight(self) -> None:
         """Highlights the slider handle (gold for cube, green for
@@ -1347,8 +1369,21 @@ class ImagePanel(QWidget):
         if reference is None:
             self._cube_slider.set_reference_highlight(None)
             self._wavelength_slider.set_reference_highlight(None)
+            self._cube_slider.set_reference_tick(None)
+            self._wavelength_slider.set_reference_tick(None)
             return
         reference_cube, reference_wavelength = reference
+        # Mark the reference's own tick on each rail (not just the handle
+        # when it happens to sit on it). The wavelength tick only exists if
+        # the *current* cube has that wavelength.
+        cubes = self._dataset.spectral_cubes()
+        cube_tick = cubes.index(int(reference_cube)) if int(reference_cube) in cubes else None
+        wavelengths = self._dataset.wavelengths_for_cube(self._current_cube())
+        wavelength_tick = next(
+            (i for i, wl in enumerate(wavelengths) if abs(float(wl) - float(reference_wavelength)) < 1e-6), None
+        )
+        self._cube_slider.set_reference_tick(cube_tick, _REFERENCE_CUBE_HIGHLIGHT)
+        self._wavelength_slider.set_reference_tick(wavelength_tick, _REFERENCE_WAVELENGTH_HIGHLIGHT)
         cube_is_reference = int(self._current_cube()) == int(reference_cube)
         wavelength_is_reference = abs(float(self._current_wavelength()) - float(reference_wavelength)) < 1e-6
         self._cube_slider.set_reference_highlight(_REFERENCE_CUBE_HIGHLIGHT if cube_is_reference else None)
@@ -1363,10 +1398,9 @@ class ImagePanel(QWidget):
         """See `slider_ticks.wavelength_slider_major_ticks`."""
         return wavelength_slider_major_ticks(values)
 
-    @staticmethod
-    def _cube_slider_major_ticks(values: tuple[int, ...]) -> dict[int, str]:
-        """See `slider_ticks.cube_slider_major_ticks`."""
-        return cube_slider_major_ticks(values)
+    def _cube_slider_major_ticks(self, values: tuple[int, ...]) -> dict[int, str]:
+        """See `slider_ticks.cube_slider_major_ticks`; labels follow the cube display unit."""
+        return cube_slider_major_ticks(values, self._cube_display.label_for)
 
     # -- rendering ----------------------------------------------------------
 
@@ -1480,7 +1514,7 @@ class ImagePanel(QWidget):
         if not showing_estimate:
             # The estimate is not data: the Histogram etc. keep the real frame.
             self.image_rendered.emit(image, result.request.cube_index, result.request.wavelength_nm)
-            self._set_frame_status(f"Cube {result.request.cube_index}, {result.request.wavelength_nm:.0f} nm")
+            self._show_frame_status(result.request.cube_index, result.request.wavelength_nm)
         self._last_image_shape = result.image.shape[:2]
         self._area_tool.set_image_shape(self._last_image_shape)
         # The crop tool's clamp bound - correct the instant Crop is active
@@ -1507,8 +1541,10 @@ class ImagePanel(QWidget):
         self._highlight_tint.item.hide()
         finite = estimate[np.isfinite(estimate)]
         spread = f", range {finite.min():.0f}-{finite.max():.0f}" if finite.size else ""
+        self._frame_key = None  # a transient estimate, not the real frame: not re-described on a unit change
         self._set_frame_status(
-            f"Cube {request.cube_index}, {request.wavelength_nm:.0f} nm - background estimate{spread}"
+            f"Cube {self._cube_display.label_for(request.cube_index)}, {request.wavelength_nm:.0f} nm"
+            f" - background estimate{spread}"
         )
 
     # -- viewport persistence -------------------------------------------------
@@ -1846,9 +1882,63 @@ class ImagePanel(QWidget):
         self._tool_status = text
         self.tool_status_changed.emit(text)
 
-    def _set_frame_status(self, text: str) -> None:
+    def _set_frame_status(self, text: str, tooltip: str = "") -> None:
         self._frame_status = text
-        self.frame_status_changed.emit(text)
+        self.frame_status_changed.emit(text, tooltip)
+
+    def _show_frame_status(self, cube_index: int, wavelength_nm: float) -> None:
+        """The dock subtitle for a real frame: "Cube X, 550 nm | <comment>".
+        The comment is the experiment-record entry active when the frame was
+        taken. "N/A" (with the reason in the tooltip) when there is none:
+        either the frame is not linked to experiment data (no acquisition
+        metadata or no timing for it), or no comment was recorded yet."""
+        self._frame_key = (int(cube_index), float(wavelength_nm))
+        linked, comment = self._dataset.frame_comment(cube_index, wavelength_nm)
+        head = f"Cube {self._cube_display.label_for(cube_index)}, {wavelength_nm:.0f} nm"
+        if comment:
+            self._set_frame_status(f"{head} | {comment}", comment)
+        elif linked:
+            self._set_frame_status(f"{head} | N/A", "No comment was recorded at the time this image was acquired.")
+        else:
+            self._set_frame_status(
+                f"{head} | N/A",
+                "This image is not linked to experiment data (no acquisition metadata, or no timing for it).",
+            )
+
+    def _on_cube_display_changed(self, _mode: str) -> None:
+        """The cube unit (number / start time) changed anywhere in the app."""
+        self._cube_title.setText(self._cube_display.axis_title())
+        cubes = self._dataset.spectral_cubes()
+        self._cube_slider.set_ticks(list(cubes), self._cube_slider_major_ticks(cubes))
+        self._cube_spin.refresh_display()
+        if self._frame_key is not None:
+            self._show_frame_status(*self._frame_key)
+
+    def _show_slider_menu(self, slider: DataAxisSlider, pos) -> None:
+        """Right-click menu of either navigation slider: Set / Find reference,
+        and the app-wide Cube number <-> start time unit."""
+        if not slider.isEnabled():
+            return
+        icon_color = get_active_theme().text_primary
+        menu = QMenu(slider)
+        set_action = menu.addAction(_render_tabler_icon("pin", icon_color), "Set reference")
+        set_action.setToolTip("Use the cube and wavelength shown now as the reference frame.")
+        find_action = menu.addAction(_render_tabler_icon("focus-2", icon_color), "Find reference")
+        find_action.setToolTip("Pick the best-contrast wavelength of this cube as the reference frame.")
+        menu.addSeparator()
+        time_action = menu.addAction("Show cubes as start time")
+        time_action.setCheckable(True)
+        time_action.setChecked(self._cube_display.effective_mode() == MODE_TIME)
+        time_action.setEnabled(self._cube_display.time_available())
+        if not self._cube_display.time_available():
+            time_action.setToolTip("Needs acquisition metadata with per-image timing.")
+        chosen = menu.exec(slider.mapToGlobal(pos))
+        if chosen is set_action:
+            self._reference_frame.set_manual_frame(self._current_cube(), self._current_wavelength())
+        elif chosen is find_action:
+            self._reference_frame.set_mode(MODE_AUTO)
+        elif chosen is time_action:
+            self._cube_display.set_mode(MODE_TIME if time_action.isChecked() else MODE_CUBE)
 
     def _info_text(self, tool: ImageTool | None) -> str:
         """The info icon's tooltip for the open ribbon tab (2026-10-06): the
