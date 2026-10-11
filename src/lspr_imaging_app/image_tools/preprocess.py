@@ -20,8 +20,11 @@ No Qt import allowed in this file (CLAUDE.md testing rule).
 
 from __future__ import annotations
 
+import hashlib
 import logging
+import threading
 import time
+from collections import OrderedDict
 
 import numpy as np
 
@@ -33,10 +36,19 @@ from .geometry.model import GeometrySettings
 from .geometry.transform import (
     apply_spatial_mask,
     apply_spatial_preprocessing,
+    geometry_cache_key,
     spatial_coordinate_maps,
 )
 
 _LOGGER = logging.getLogger(__name__)
+
+# Resolved ignore masks, newest last. One frame render resolves the same mask
+# for the mask tint (GUI thread), the renderer (worker thread) and the
+# Histogram (GUI thread); the key is the mask's *content*, so the repeats cost a
+# hash (~1 ms) instead of a rotation. Few entries: a mask is one full plane.
+_RESOLVED_MASK_CACHE_SIZE = 6
+_resolved_mask_cache: OrderedDict[tuple, np.ndarray | None] = OrderedDict()
+_resolved_mask_lock = threading.Lock()
 
 
 def resolve_external_mask(
@@ -65,14 +77,34 @@ def resolve_external_mask(
     Lives here, rather than privately inside `analysis/tasks.py` where it
     started, so the Image panel renders against exactly the mask analysis
     computes against - the two agreeing by construction rather than by two
-    call sites happening to stay in step."""
+    call sites happening to stay in step.
+
+    **Cached by content (2026-10-11)** and returned read-only: the same mask
+    is resolved up to three times per displayed frame, twice on the GUI thread
+    (~120 ms each with a rotation before the OpenCV rotation, ~7 ms after).
+    Copy before writing to the result."""
     if authored_mask is None:
         return None
-    mask = apply_spatial_mask(np.asarray(authored_mask, dtype=bool), geometry_settings)
-    if mask is None:
-        return None
-    if warp_affine is not None:
+    authored = np.ascontiguousarray(authored_mask, dtype=bool)
+    key = (
+        authored.shape,
+        hashlib.blake2b(np.packbits(authored), digest_size=16).digest(),  # 8x fewer bytes to hash
+        geometry_cache_key(geometry_settings),
+        None if warp_affine is None else np.asarray(warp_affine, dtype=np.float64).tobytes(),
+    )
+    with _resolved_mask_lock:
+        if key in _resolved_mask_cache:
+            _resolved_mask_cache.move_to_end(key)
+            return _resolved_mask_cache[key]
+    mask = apply_spatial_mask(authored, geometry_settings)
+    if mask is not None and warp_affine is not None:
         mask = warp_boolean_mask_affine(mask, warp_affine)
+    if mask is not None:
+        mask.setflags(write=False)  # shared between callers and threads: read-only
+    with _resolved_mask_lock:
+        _resolved_mask_cache[key] = mask
+        while len(_resolved_mask_cache) > _RESOLVED_MASK_CACHE_SIZE:
+            _resolved_mask_cache.popitem(last=False)
     return mask
 
 

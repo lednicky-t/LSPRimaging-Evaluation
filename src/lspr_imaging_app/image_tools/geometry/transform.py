@@ -14,10 +14,13 @@ No Qt import allowed in this file (CLAUDE.md testing rule).
 
 from __future__ import annotations
 
+from dataclasses import replace
+
+import cv2
 import numpy as np
 from scipy import ndimage
 
-from .model import GeometrySettings
+from .model import CropDefinition, GeometrySettings
 
 
 def apply_spatial_preprocessing(
@@ -30,14 +33,63 @@ def apply_spatial_preprocessing(
     outside the original image) have no measurement behind them and are
     written as NaN, never as a number. Integer input is converted to float32
     first (exact for 16-bit data) because NaN needs a float array; with no
-    rotation nothing is created, so the dtype is left alone."""
+    rotation nothing is created, so the dtype is left alone.
+
+    **Rotation runs through OpenCV (2026-10-11)**: one `cv2.warpAffine` straight
+    at the final size instead of scipy's full-canvas `ndimage.rotate` plus a
+    slice (~5 ms against ~200 ms on a 900x1300 frame). Same shape, same NaN
+    pixels; values differ by OpenCV's 1/32-pixel interpolation step (see
+    `_cv2_affine` and the 2026-10-11 build-log entry for the measurement).
+    Without rotation, flip and crop are exact array views and need no resampling."""
+    if _cv2_geometry_usable(image, settings):
+        return _warp_geometry_cv2(image, settings, skip_crop=skip_crop)
     if _rotation_active(settings) and not np.issubdtype(image.dtype, np.floating):
         image = image.astype(np.float32)
     return _apply_spatial_transform(image, settings, order=1, mode="constant", cval=np.nan, skip_crop=skip_crop)
 
 
-def _rotation_active(settings: GeometrySettings) -> bool:
-    return bool(getattr(settings, "image_tools_enabled", True)) and abs(float(settings.rotation_angle_deg)) > 1e-9
+def _cv2_geometry_usable(image: np.ndarray, settings: GeometrySettings) -> bool:
+    """True when the OpenCV path applies: a rotation is active on a plain 2-D
+    image. Near-1-px-wide/tall inputs stay on scipy (its two-step rotate-then-
+    flip is the only one verified at that extreme)."""
+    return _rotation_active(settings) and image.ndim == 2 and min(image.shape) > 4
+
+
+def geometry_cache_key(settings: GeometrySettings) -> tuple:
+    """Hashable fingerprint of exactly the fields the spatial transform reads
+    (`image_tools_enabled`, rotation, flips, crop) - for caches of anything
+    derived from them. Display-only fields (units, scale bar...) are left out
+    on purpose, so changing them does not invalidate the cache."""
+    crop = settings.crop
+    return (
+        bool(settings.image_tools_enabled),
+        float(settings.rotation_angle_deg),
+        bool(settings.flip_horizontal),
+        bool(settings.flip_vertical),
+        bool(crop.enabled),
+        int(crop.x),
+        int(crop.y),
+        int(crop.width),
+        int(crop.height),
+    )
+
+
+def _warp_geometry_cv2(
+    image: np.ndarray,
+    settings: GeometrySettings,
+    *,
+    skip_crop: bool = False,
+    nearest: bool = False,
+    border_value: float = float("nan"),
+) -> np.ndarray:
+    """Rotate + flip (+ crop) in one `cv2.warpAffine` at the output size.
+    `nearest` is for masks (no blending of 0/1); `border_value` fills pixels
+    the rotation creates (NaN for images, 0 for masks)."""
+    effective = replace(settings, crop=CropDefinition()) if skip_crop else settings
+    matrix, offset, out_shape = _combined_export_transform(image.shape[:2], effective)
+    if out_shape[0] <= 0 or out_shape[1] <= 0:
+        return np.zeros(out_shape, dtype=image.dtype)
+    return _cv2_affine(image, matrix, offset, out_shape, nearest=nearest, border_value=border_value)
 
 
 def apply_spatial_mask(
@@ -46,6 +98,10 @@ def apply_spatial_mask(
 ) -> np.ndarray | None:
     if mask is None:
         return None
+    if _cv2_geometry_usable(mask, settings):
+        # uint8 0/1 with nearest-neighbour sampling: stays an exact 0/1 mask.
+        warped = _warp_geometry_cv2(mask.astype(np.uint8, copy=False), settings, nearest=True, border_value=0.0)
+        return warped >= 1
     transformed = _apply_spatial_transform(mask.astype(np.float32, copy=False), settings, order=0, mode="constant", cval=0.0)
     return transformed >= 0.5
 
@@ -54,6 +110,21 @@ def spatial_coordinate_maps(
     image_shape: tuple[int, int],
     settings: GeometrySettings,
 ) -> tuple[np.ndarray, np.ndarray]:
+    """For every processed pixel, the raw (x, y) it was sampled from, as two
+    float32 images. With a rotation active these are evaluated straight from
+    the transform (the same affine the image itself uses), clamped to the raw
+    image like scipy's ``mode="nearest"`` - exact, and no resampling needed."""
+    probe = np.zeros(image_shape, dtype=np.uint8)
+    if _cv2_geometry_usable(probe, settings):
+        matrix, offset, out_shape = _combined_export_transform(tuple(image_shape), settings)
+        rows = np.arange(out_shape[0], dtype=np.float64)[:, None]
+        cols = np.arange(out_shape[1], dtype=np.float64)[None, :]
+        # raw (row, col) = matrix @ [row, col] + offset
+        raw_y = matrix[0, 0] * rows + matrix[0, 1] * cols + offset[0]
+        raw_x = matrix[1, 0] * rows + matrix[1, 1] * cols + offset[1]
+        y_map = np.clip(raw_y, 0.0, image_shape[0] - 1.0).astype(np.float32)
+        x_map = np.clip(raw_x, 0.0, image_shape[1] - 1.0).astype(np.float32)
+        return x_map, y_map
     yy, xx = np.indices(image_shape, dtype=np.float32)
     x_map = _apply_spatial_transform(xx, settings, order=1, mode="nearest", cval=0.0)
     y_map = _apply_spatial_transform(yy, settings, order=1, mode="nearest", cval=0.0)
@@ -68,8 +139,17 @@ def spatial_output_shape(
     # Use the exact same transform path as the real image pipeline, because
     # ndimage.rotate(..., reshape=True) can differ by 1 px from simple trig.
     probe = np.zeros((height, width), dtype=np.uint8)
+    if _cv2_geometry_usable(probe, settings):
+        # `_rotation_geometry` reproduces scipy's output size exactly (the
+        # image path above uses it too), so no probe image is resampled.
+        _matrix, _offset, out_shape = _combined_export_transform((height, width), settings)
+        return int(out_shape[0]), int(out_shape[1])
     transformed = _apply_spatial_transform(probe, settings, order=0, mode="constant", cval=0.0)
     return int(transformed.shape[0]), int(transformed.shape[1])
+
+
+def _rotation_active(settings: GeometrySettings) -> bool:
+    return bool(getattr(settings, "image_tools_enabled", True)) and abs(float(settings.rotation_angle_deg)) > 1e-9
 
 
 def _rotation_geometry(
@@ -384,37 +464,42 @@ def _cv2_affine(
     matrix: np.ndarray,
     offset: np.ndarray,
     out_shape: tuple[int, int],
+    *,
+    nearest: bool = False,
+    border_value: float = float("nan"),
 ) -> np.ndarray | None:
     """Apply the same output[y,x] = image[matrix @ [y,x] + offset] mapping as
-    ndimage.affine_transform, via cv2.warpAffine, with NaN outside the
-    source image. `image` must be float32/float64. Returns None if cv2 is
-    unavailable so the caller can fall back to the scipy path.
-    """
-    try:
-        import cv2
-    except ImportError:
-        return None
+    ndimage.affine_transform, via cv2.warpAffine, with `border_value` (NaN by
+    default) outside the source image. Float32/float64 (or, with `nearest`,
+    uint8) input; anything else is converted to float32. Returns None if cv2
+    is unavailable so the caller can fall back to the scipy path.
 
-    src = image if image.dtype in (np.float32, np.float64) else image.astype(np.float32)
+    OpenCV rounds the sub-pixel position to one of 32 steps (1/32 px) for
+    bilinear sampling, so values differ slightly from scipy's continuous
+    interpolation: measured below ~0.4 counts on real 16-bit frames, far under
+    the shot-noise floor (docs/roi_scoped_resample_cv2_fast_path.md)."""
+    if nearest and image.dtype == np.uint8:
+        src = image
+    else:
+        src = image if image.dtype in (np.float32, np.float64) else image.astype(np.float32)
     src = np.ascontiguousarray(src)
 
     out_h, out_w = out_shape
     # cv2 uses (x, y) axis order and a src<-dst matrix when WARP_INVERSE_MAP is
-    # set — a straight axis swap of our (row, col) convention matrix/offset.
+    # set - a straight axis swap of our (row, col) convention matrix/offset.
     cv2_matrix = np.array(
         [[matrix[1, 1], matrix[1, 0], offset[1]],
          [matrix[0, 1], matrix[0, 0], offset[0]]],
         dtype=np.float64,
     )
-    result = cv2.warpAffine(
+    return cv2.warpAffine(
         src,
         cv2_matrix,
         (out_w, out_h),
-        flags=cv2.INTER_LINEAR | cv2.WARP_INVERSE_MAP,
+        flags=(cv2.INTER_NEAREST if nearest else cv2.INTER_LINEAR) | cv2.WARP_INVERSE_MAP,
         borderMode=cv2.BORDER_CONSTANT,
-        borderValue=float("nan"),
+        borderValue=border_value,
     )
-    return result
 
 
 def _apply_spatial_transform(

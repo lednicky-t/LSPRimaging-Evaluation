@@ -8,6 +8,7 @@ build log for the file-split reasoning.
 
 from __future__ import annotations
 
+import cv2
 import numpy as np
 from scipy import ndimage
 
@@ -25,6 +26,20 @@ def warp_image_affine(
     if output_shape is None:
         output_shape = image.shape[:2]
     inverse_xy = invert_affine_matrix(affine_matrix)
+    if order == 0 and image.ndim == 2 and image.dtype in (np.float32, np.float64, np.uint8):
+        # OpenCV (2026-10-11): `inverse_xy` is already the output->input map in
+        # (x, y) order that WARP_INVERSE_MAP wants. Same pixel-centre convention
+        # as scipy. Nearest-neighbour only: bilinear differs from scipy at the image
+        # edge (measured), and nothing in the rewrite warps a grey-level image this way.
+        out_h, out_w = int(output_shape[0]), int(output_shape[1])
+        return cv2.warpAffine(
+            np.ascontiguousarray(image),
+            np.ascontiguousarray(inverse_xy[:2, :3], dtype=np.float64),
+            (out_w, out_h),
+            flags=(cv2.INTER_NEAREST if order == 0 else cv2.INTER_LINEAR) | cv2.WARP_INVERSE_MAP,
+            borderMode=cv2.BORDER_CONSTANT,
+            borderValue=float(cval),
+        )
     ixx, ixy = float(inverse_xy[0, 0]), float(inverse_xy[0, 1])
     iyx, iyy = float(inverse_xy[1, 0]), float(inverse_xy[1, 1])
     off_x, off_y = float(inverse_xy[0, 2]), float(inverse_xy[1, 2])

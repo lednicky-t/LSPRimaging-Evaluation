@@ -150,6 +150,7 @@ from .measure_controls import MeasureCalibrationControls
 from .measure_line_tool import MeasureLineTool
 from .overlay_style import OverlayStyle
 from .overlay_tint import OverlayTint
+from .prefetch import prefetch_order
 from .render import ImageRenderer, RenderRequest, RenderResult
 from .roi_gestures import RoiGestures, SelectedApertures
 from .roi_overlay import RoiOverlay, add_curve
@@ -398,6 +399,14 @@ class ImagePanel(QWidget):
 
         self._serial = itertools.count(1)
         self._latest_serial = 0
+        # What the landmark overlay currently shows (see `_draw_landmarks`):
+        # drawing it costs 45-160 ms in all-wavelengths mode, so it is redrawn
+        # only when this key changes. `_landmark_version` is bumped by anything
+        # that changes the landmarks themselves (chromatic model, dataset).
+        self._landmark_version = 0
+        self._landmark_drawn_key: tuple | None = None
+        # (resolved mask object, colour, alpha) last painted into the mask tint.
+        self._mask_painted: tuple[np.ndarray, int, float] | None = None
         self._drag_roi_id: int | None = None
         # (height, width) of the last successfully rendered plane - the
         # chunk-grid preview needs real pixel dimensions and only this
@@ -1036,11 +1045,13 @@ class ImagePanel(QWidget):
 
         self._active_tool.active_tool_changed.connect(self._on_active_tool_changed)
 
+        self._geometry.geometry_changed.connect(self._invalidate_landmark_overlay)
         self._geometry.geometry_changed.connect(self._schedule_redraw)
         self._geometry.cosmetic_changed.connect(self._schedule_redraw)
         self._mask.mask_changed.connect(self._schedule_redraw)
         self._mask.cosmetic_changed.connect(self._schedule_redraw)
         self._background.background_model_changed.connect(self._schedule_redraw)
+        self._chromatic.chromatic_model_changed.connect(self._invalidate_landmark_overlay)
         self._chromatic.chromatic_model_changed.connect(self._schedule_redraw)
         self._chromatic.chromatic_model_changed.connect(self._update_chromatic_tab_state)
         self._update_chromatic_tab_state()
@@ -1173,7 +1184,12 @@ class ImagePanel(QWidget):
 
     # -- dataset lifecycle --------------------------------------------------
 
+    def _invalidate_landmark_overlay(self, *_args: object) -> None:
+        self._landmark_version += 1
+
     def _on_dataset_loaded(self, _dataset: object) -> None:
+        self._renderer.clear_prefetch()
+        self._invalidate_landmark_overlay()
         self._refresh_navigation_ranges()
         self._schedule_redraw()
 
@@ -1182,6 +1198,9 @@ class ImagePanel(QWidget):
         deliberately clears only its own reference and expects every module
         and panel holding dataset-derived state to reset itself (see its
         module docstring) - this is the first subscriber to actually do so."""
+        self._renderer.clear_prefetch()
+        self._invalidate_landmark_overlay()
+        self._mask_painted = None
         self._image_item.clear()
         self._no_data_item.hide()
         self._mask_tint.item.hide()
@@ -1518,6 +1537,8 @@ class ImagePanel(QWidget):
             # The estimate is not data: the Histogram etc. keep the real frame.
             self.image_rendered.emit(image, result.request.cube_index, result.request.wavelength_nm)
             self._show_frame_status(result.request.cube_index, result.request.wavelength_nm)
+        if not showing_estimate:
+            self._request_prefetch(result.request.cube_index, result.request.wavelength_nm)
         self._last_image_shape = result.image.shape[:2]
         self._area_tool.set_image_shape(self._last_image_shape)
         # The crop tool's clamp bound - correct the instant Crop is active
@@ -1528,6 +1549,18 @@ class ImagePanel(QWidget):
         # active-tool change).
         self._crop_tool.set_frame_size(result.image.shape[1], result.image.shape[0])
         self._update_chunk_grid()
+
+    def _request_prefetch(self, cube_index: int, wavelength_nm: float) -> None:
+        """Have the render thread read the planes the user is likely to open
+        next into the plane cache (`prefetch.py`) once it is idle."""
+        self._renderer.prefetch(
+            prefetch_order(
+                cube_index,
+                wavelength_nm,
+                self._dataset.spectral_cubes(),
+                self._dataset.wavelengths_for_cube(cube_index),
+            )
+        )
 
     def _show_background_estimate(self, estimate: np.ndarray, request: RenderRequest) -> None:
         """Display the background estimate in place of the image. Only the
@@ -1700,10 +1733,20 @@ class ImagePanel(QWidget):
     def _draw_landmarks(self) -> None:
         """Chromatic landmarks (display only); drawing rules in
         `landmark_overlay.draw_landmarks`."""
+        shown = self._landmark_overlay_visible and self._active_tool.active() not in _PREVIEW_TOOLS
+        # The all-wavelengths view does not depend on the viewed frame at all,
+        # so slider moves leave it alone; the current-wavelength view depends
+        # on the frame. Anything else that changes the picture bumps
+        # `_landmark_version` (chromatic model, dataset).
+        frame = None if self._landmark_all_wavelengths else (self._current_cube(), self._current_wavelength())
+        key = (shown, self._landmark_all_wavelengths, frame, self._landmark_version)
+        if key == self._landmark_drawn_key:
+            return
+        self._landmark_drawn_key = key
         self._landmark_observed_item.clear()
         self._landmark_fitted_item.clear()
         self._landmark_line_item.clear()
-        if not self._landmark_overlay_visible or self._active_tool.active() in _PREVIEW_TOOLS:
+        if not shown:
             return
         draw_landmarks(
             self._chromatic,
@@ -1751,12 +1794,23 @@ class ImagePanel(QWidget):
         self._mask_overlay_state = (authored_mask, geometry, warp_affine, hidden)
         if hidden or not self._mask_tint.visible or authored_mask is None or geometry is None:
             self._mask_tint.item.hide()
+            self._mask_painted = None
             return
         mask = resolve_external_mask(authored_mask, geometry, warp_affine)
         if mask is None or not np.any(mask):
             self._mask_tint.item.hide()
+            self._mask_painted = None
+            return
+        # `resolve_external_mask` hands back the same object for the same
+        # inputs, so a wavelength change that resolves to the same mask does not
+        # rebuild and re-upload the tint image.
+        painted = self._mask_painted
+        style = (self._mask_tint.color.rgba(), self._mask_tint.alpha)
+        if painted is not None and painted[0] is mask and (painted[1], painted[2]) == style:
+            self._mask_tint.item.show()
             return
         self._mask_tint.paint(mask)
+        self._mask_painted = (mask, style[0], style[1])
 
     def _redraw_mask_overlay_from_cache(self) -> None:
         if self._mask_overlay_state is not None:

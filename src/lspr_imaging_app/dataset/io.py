@@ -1822,7 +1822,11 @@ def load_image_array(path_str: str) -> np.ndarray:
     return array
 
 
-@lru_cache(maxsize=96)
+# 160 planes (was 96, 2026-10-11): the Image panel reads the viewed cube's other
+# wavelengths ahead (panels/image/prefetch.py), and with 27 wavelengths per cube
+# 96 held only ~3.5 cubes. Planes are float32: ~4.7 MB each at 900x1300, so the
+# cache tops out near 750 MB at that size.
+@lru_cache(maxsize=160)
 def _load_image_array_cached(path_str: str) -> np.ndarray:
     array = _load_image_array_uncached(path_str)
     _LOGGER.debug("Image cache built | %s", Path(path_str).name)
