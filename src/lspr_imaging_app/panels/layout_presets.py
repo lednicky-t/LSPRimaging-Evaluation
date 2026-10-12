@@ -59,7 +59,7 @@ PRESET_NAMES: tuple[str, ...] = tuple(PRESET_PANELS)
 # visualization *settings*, not a panel arrangement); keeping both named
 # "Results" would have collided in the View menu.
 
-# All 5 workflow stages now map to a preset - Dataset intentionally reuses
+# Every workflow stage maps to a preset - Dataset intentionally reuses
 # Image Tools' preset (maintainer's own call: browsing/loading a dataset
 # doesn't need a different arrangement than Image Tools work does), and
 # Outputs reuses Visualization (viewing/formatting results before export is
@@ -67,7 +67,6 @@ PRESET_NAMES: tuple[str, ...] = tuple(PRESET_PANELS)
 STAGE_TO_PRESET: dict[WorkflowStage, str] = {
     WorkflowStage.DATASET: "Image Tools",
     WorkflowStage.IMAGE_TOOLS: "Image Tools",
-    WorkflowStage.ROI_SELECTION: "ROI",
     WorkflowStage.ANALYSIS: "Analysis",
     WorkflowStage.OUTPUTS: "Visualization",
 }

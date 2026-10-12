@@ -2,7 +2,7 @@
 ``docs/rewrite_gui_shell_design_2026-09.md`` §4, §4a).
 
 A thin navigation/status host - hosts the stage sections (Dataset -> Image
-tools -> ROI editor -> Analysis -> Outputs, with Spectra/Sensorgram as pure
+tools -> Analysis -> Outputs, with Spectra/Sensorgram as pure
 downstream *display* consumers, per sketch §1 - Outputs is a fifth
 *Workflow* stage, not a display panel, holding settings for how results are
 visualized/formatted before export), shows which stage is active, and
@@ -74,7 +74,6 @@ logger = logging.getLogger(__name__)
 class WorkflowStage(Enum):
     DATASET = auto()
     IMAGE_TOOLS = auto()
-    ROI_SELECTION = auto()
     ANALYSIS = auto()
     OUTPUTS = auto()
 
@@ -205,24 +204,6 @@ def _build_dataset_section(
     return top_section, subsections
 
 
-def _build_roi_selection_section(parent: QWidget) -> tuple[CollapsibleSection, list[tuple[str, CollapsibleSection]]]:
-    """Ported from the source's ``roi_editor_section`` - just "Circles"
-    today, since Rectangles/Freehand were removed dead placeholders (see
-    design doc §4a). A single-child accordion is arguably pointless on its
-    own; kept faithful to the source for now since the maintainer expects
-    this tree to be revisited once ROI Selection's real controls land."""
-    circles_section = CollapsibleSection(
-        "Circles",
-        _section_placeholder("Circle ROI detection/editing"),
-        expanded=True,
-        title_color=_nested_title_color(),
-        parent=parent,
-    )
-    children = _nested_children(parent, circles_section)
-    top_section = CollapsibleSection("ROI editor", children, expanded=False, parent=parent)
-    return top_section, [("Circles", circles_section)]
-
-
 def _build_analysis_section(parent: QWidget) -> tuple[CollapsibleSection, list[tuple[str, CollapsibleSection]]]:
     """Ported from the source's ``analysis_section`` + its nested ROI's
     math/Metric trace/Statistics children (the range/scope controls that
@@ -301,7 +282,6 @@ class WorkflowPanel(QWidget):
                 WorkflowStage.DATASET,
                 *_build_dataset_section(self, dataset, selection, reference_frame, session_coordinator, geometry, ui_state, cube_display),
             ),
-            (WorkflowStage.ROI_SELECTION, *_build_roi_selection_section(self)),
             (WorkflowStage.ANALYSIS, *_build_analysis_section(self)),
             (WorkflowStage.OUTPUTS, *_build_outputs_section(self)),
         ]

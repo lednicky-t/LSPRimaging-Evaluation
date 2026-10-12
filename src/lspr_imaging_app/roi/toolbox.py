@@ -1511,8 +1511,8 @@ class RoiToolbox(QObject):
         repaint_members: bool = True,
     ) -> None:
         """Change the group's base colour. With ``repaint_members`` (the
-        default) every member is given a fresh tint of the new colour, in
-        order of id, **replacing any colour set on a member by hand**; without
+        default) every member is given a shade of the new colour, running
+        smoothly in order of id (as when the group is created), **replacing any colour set on a member by hand**; without
         it only the group's own colour changes."""
         group = self._require_group(group_id)
         base = normalize_hex(sample_color_hex)
@@ -1524,8 +1524,9 @@ class RoiToolbox(QObject):
             if reference is not None:
                 group.reference_color_hex = reference
             if repaint_members:
-                for index, roi in enumerate(members):
-                    roi.sample_color_hex = tint_color(base, index)
+                ordered = sorted(members, key=lambda roi: roi.area_roi_id)
+                for roi, color in zip(ordered, gradient_tints(base, len(ordered))):
+                    roi.sample_color_hex = color
 
         self._grouping_command("Recolor group", members, "recolor", mutate)
 

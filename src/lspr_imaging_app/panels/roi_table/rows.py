@@ -197,21 +197,25 @@ def build_sections(
     ungrouped_color_hex: str = DEFAULT_ROI_COLOR_HEX,
 ) -> list[Section]:
     """The grouped view: one section per group in the toolbox's group order
-    (that order is the user's, never sorted by a column), then "Ungrouped"
+    (that order is the user's, never sorted by a column - except the Label
+    column, which sorts the groups by name, display only), then "Ungrouped"
     last if any ROI is in no group. Rows are sorted inside each section."""
     by_group: dict[str | None, list[RoiRow]] = {group.group_id: [] for group in groups}
     by_group[None] = []
     for row in rows:
         by_group.setdefault(row.group_id, by_group[None]).append(row)
+    by_label = sort_column == COLUMN_NAME  # ROIs have no label: this orders the groups (by name), the ROIs stay by #
+    row_column, row_descending = (COLUMN_ID, False) if by_label else (sort_column, descending)
+    ordered_groups = sorted(groups, key=lambda group: group.name.casefold(), reverse=descending) if by_label else groups
     sections = [
         Section(
             GroupInfo(group.group_id, group.name, group_colors[group.group_id]),
-            tuple(sort_rows(by_group[group.group_id], sort_column, descending)),
+            tuple(sort_rows(by_group[group.group_id], row_column, row_descending)),
         )
-        for group in groups
+        for group in ordered_groups
     ]
     if by_group[None]:
-        sections.append(Section(GroupInfo(None, "Ungrouped", ungrouped_color_hex), tuple(sort_rows(by_group[None], sort_column, descending))))
+        sections.append(Section(GroupInfo(None, "Ungrouped", ungrouped_color_hex), tuple(sort_rows(by_group[None], row_column, row_descending))))
     return sections
 
 

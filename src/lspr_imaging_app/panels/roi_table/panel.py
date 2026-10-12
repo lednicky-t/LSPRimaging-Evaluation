@@ -43,7 +43,7 @@ from __future__ import annotations
 from collections.abc import Callable
 
 from PyQt6.QtCore import QItemSelection, QItemSelectionModel, QModelIndex, QPoint, Qt, QTimer, pyqtSignal
-from PyQt6.QtGui import QColor
+from PyQt6.QtGui import QColor, QIcon, QLinearGradient, QPainter
 from PyQt6.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -303,12 +303,34 @@ class RoiTablePanel(QWidget):
         the accent colour, as the ribbon's toggles are."""
         theme = get_active_theme()
         style_general_icon_button(button)
+        if button is self._color_button:
+            button.setIcon(self._rainbow_icon(icon_name))
+            return
         on = button.isCheckable() and button.isChecked()
         button.setIcon(
             load_tabler_icon(
                 icon_name, color=theme.accent_blue if on else theme.text_secondary, size=_RENDER_SIZE, stroke_width=_STROKE_WIDTH
             )
         )
+
+    @staticmethod
+    def _rainbow_icon(icon_name: str) -> QIcon:
+        """The icon's shape, filled solid, with a rainbow gradient (it is drawn white, then the gradient is painted
+        only where the icon has pixels), so the colour button reads as "colours"."""
+        pixmap = load_tabler_icon(
+            icon_name, color="#ffffff", fill="#ffffff", size=_RENDER_SIZE, stroke_width=_STROKE_WIDTH
+        ).pixmap(
+            _RENDER_SIZE, _RENDER_SIZE
+        )
+        gradient = QLinearGradient(0, 0, pixmap.width(), pixmap.height())
+        stops = ("#ef4444", "#f97316", "#facc15", "#84cc16", "#22c55e", "#14b8a6", "#06b6d4", "#3b82f6", "#6366f1", "#a855f7", "#ec4899")
+        for i, color in enumerate(stops):
+            gradient.setColorAt(i / (len(stops) - 1), QColor(color))
+        painter = QPainter(pixmap)
+        painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceIn)
+        painter.fillRect(pixmap.rect(), gradient)
+        painter.end()
+        return QIcon(pixmap)
 
     # -- refresh --------------------------------------------------------------------------
 
@@ -337,9 +359,11 @@ class RoiTablePanel(QWidget):
             return micrometers(self._geometry.microns_per_pixel_scalar())
         return PIXELS
 
-    def _rebuild(self, change: Callable[[], None]) -> None:
+    def _rebuild(self, change: Callable[[], None], *, reveal: bool = True) -> None:
         """Apply ``change`` to the model, then put back what a model reset
-        throws away: group expansion, scroll position, selection."""
+        throws away: group expansion, scroll position, selection. With
+        ``reveal`` the selected ROIs' groups are expanded so they show; without
+        it (a re-sort) a collapsed group stays collapsed."""
         bar = self._tree.verticalScrollBar()
         scroll = bar.value()
         change()
@@ -364,7 +388,7 @@ class RoiTablePanel(QWidget):
         if keep_groups:
             self._select_group_headers(keep_groups)  # after moving groups: keep the headers selected, nothing expands
         else:
-            self._apply_selection_to_view(ids, reveal=True)
+            self._apply_selection_to_view(ids, reveal=reveal)
         self._update_toolbar_state()
         self._update_footer()
 
@@ -467,7 +491,7 @@ class RoiTablePanel(QWidget):
     def _on_header_clicked(self, column: int) -> None:
         current, descending = self._model.sort_state()
         new = (column, not descending) if column == current else (column, False)
-        self._rebuild(lambda: self._model.set_sort(*new))
+        self._rebuild(lambda: self._model.set_sort(*new), reveal=False)  # sorting must not expand collapsed groups
         if self._store is not None:
             self._store.set(ROI_TABLE_SORT, [new[0], new[1]])
 
@@ -495,6 +519,9 @@ class RoiTablePanel(QWidget):
         total = len(self._model.rows())
         chosen = len(self._selection.selected_roi_ids())
         text = "No ROIs" if total == 0 else f"{total} ROI{'' if total == 1 else 's'}"
+        group_count = len(self._toolbox.groups())
+        if group_count:
+            text += f"  ·  {group_count} group{'' if group_count == 1 else 's'}"
         if chosen:
             text += f"  ·  {chosen} selected"
         self._footer.setText(text)
@@ -834,6 +861,9 @@ class RoiTablePanel(QWidget):
         """Move the groups one place up (-1) or down (+1). The selected groups
         keep their order relative to each other; a block already at the end of
         the list stays there."""
+        if self._groups_sorted_by_label():
+            self._show_notice("Groups are sorted by label: sort by # to move them.", error=True)
+            return
         chosen = set(group_ids)
         order = [group.group_id for group in self._toolbox.groups()]
         final = list(order)
@@ -847,8 +877,21 @@ class RoiTablePanel(QWidget):
                     final[i + 1], final[i] = final[i], final[i + 1]
         self._apply_group_order(order, final)
 
+    def _groups_sorted_by_label(self) -> bool:
+        """The grouped view lists the groups by label, not in their own order (moving them would show nothing)."""
+        return self._model.is_grouped_view() and self._model.sort_state()[0] == COLUMN_NAME
+
+    def _set_groups_expanded(self, indexes: list[QModelIndex], expanded: bool) -> None:
+        """Expand or collapse these group headers; one already in that state stays as it is."""
+        for index in indexes:
+            if self._tree.isExpanded(index) != expanded:
+                self._tree.setExpanded(index, expanded)
+
     def _move_groups_to_edge(self, group_ids: list[str], *, top: bool) -> None:
         """Put the groups at the top / bottom of the list, keeping their order relative to each other."""
+        if self._groups_sorted_by_label():
+            self._show_notice("Groups are sorted by label: sort by # to move them.", error=True)
+            return
         chosen = set(group_ids)
         order = [group.group_id for group in self._toolbox.groups()]
         picked = [gid for gid in order if gid in chosen]
@@ -912,13 +955,15 @@ class RoiTablePanel(QWidget):
             self._model.sort_state() == (COLUMN_ID, False)
             and movement_scope(ids, self._model.rows(), grouped=self._model.is_grouped_view()) is not None
         )
+        move_menu = menu.addMenu("Move")
+        move_menu.setEnabled(movable)
         for text, handler in (
-            ("Move to top", lambda: self._move_to_edge(top=True)),
-            ("Move up", lambda: self._move_selected(-1)),
-            ("Move down", lambda: self._move_selected(1)),
-            ("Move to bottom", lambda: self._move_to_edge(top=False)),
+            ("To top", lambda: self._move_to_edge(top=True)),
+            ("Up", lambda: self._move_selected(-1)),
+            ("Down", lambda: self._move_selected(1)),
+            ("To bottom", lambda: self._move_to_edge(top=False)),
         ):
-            menu.addAction(text, handler).setEnabled(movable)
+            move_menu.addAction(text, handler)
         menu.addSeparator()
         menu.addAction(f"Delete {noun}", self._delete_selected)
 
@@ -926,11 +971,11 @@ class RoiTablePanel(QWidget):
         group_id = self._model.group_id(index)
         selected = self._selected_group_ids()
         targets = selected if group_id in selected else ([group_id] if group_id is not None else [])
-        if len(targets) > 1:
-            members = {row.roi_id for row in self._model.rows() if row.group_id in targets}
-        else:
-            members = set(self._model.member_ids(index))
-        menu.addAction("Select members", lambda: self._selection.set_roi_selection(members)).setEnabled(bool(members))
+        _rois, headers = self._view_selection()
+        shown = headers if any(header == index for header in headers) else [index]  # the headers this menu acts on
+        menu.addAction("Expand", lambda: self._set_groups_expanded(shown, True))
+        menu.addAction("Collapse", lambda: self._set_groups_expanded(shown, False))
+        menu.addSeparator()
         if group_id is None:
             return  # "Ungrouped" is not a real group: nothing else applies
         many = len(targets) > 1
@@ -941,11 +986,12 @@ class RoiTablePanel(QWidget):
         menu.addAction("Rename…", lambda: self._tree.edit(index)).setEnabled(not many)
         menu.addAction("Set color…", lambda: self._recolor_groups(targets))
         menu.addSeparator()
-        noun = "groups" if many else "group"
-        menu.addAction(f"Move {noun} to top", lambda: self._move_groups_to_edge(targets, top=True)).setEnabled(not at_top)
-        menu.addAction(f"Move {noun} up", lambda: self._move_groups(targets, -1)).setEnabled(not at_top)
-        menu.addAction(f"Move {noun} down", lambda: self._move_groups(targets, 1)).setEnabled(not at_bottom)
-        menu.addAction(f"Move {noun} to bottom", lambda: self._move_groups_to_edge(targets, top=False)).setEnabled(not at_bottom)
+        move_menu = menu.addMenu("Move groups" if many else "Move group")
+        move_menu.setEnabled(not self._groups_sorted_by_label())
+        move_menu.addAction("To top", lambda: self._move_groups_to_edge(targets, top=True)).setEnabled(not at_top)
+        move_menu.addAction("Up", lambda: self._move_groups(targets, -1)).setEnabled(not at_top)
+        move_menu.addAction("Down", lambda: self._move_groups(targets, 1)).setEnabled(not at_bottom)
+        move_menu.addAction("To bottom", lambda: self._move_groups_to_edge(targets, top=False)).setEnabled(not at_bottom)
         menu.addSeparator()
         menu.addAction(
             "Ungroup (keeps the ROIs)", lambda: self._delete_groups(targets)
