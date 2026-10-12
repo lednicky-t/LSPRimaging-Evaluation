@@ -322,10 +322,13 @@ class RoiTablePanel(QWidget):
         ).pixmap(
             _RENDER_SIZE, _RENDER_SIZE
         )
-        gradient = QLinearGradient(0, 0, pixmap.width(), pixmap.height())
-        stops = ("#ef4444", "#f97316", "#facc15", "#84cc16", "#22c55e", "#14b8a6", "#06b6d4", "#3b82f6", "#6366f1", "#a855f7", "#ec4899")
-        for i, color in enumerate(stops):
-            gradient.setColorAt(i / (len(stops) - 1), QColor(color))
+        # Span the gradient over the droplet itself (it covers only the middle of the icon square), so the whole
+        # spectrum shows inside the shape rather than just the middle hues.
+        w, h = pixmap.width(), pixmap.height()
+        gradient = QLinearGradient(0.32 * w, 0.12 * h, 0.68 * w, 0.88 * h)
+        steps = 12
+        for i in range(steps + 1):  # full hue circle, red -> magenta, vivid
+            gradient.setColorAt(i / steps, QColor.fromHsvF(0.85 * i / steps, 0.9, 1.0))
         painter = QPainter(pixmap)
         painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceIn)
         painter.fillRect(pixmap.rect(), gradient)

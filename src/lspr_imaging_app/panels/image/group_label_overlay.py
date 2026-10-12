@@ -44,7 +44,7 @@ _HALO_OFFSETS = ((-1, 0), (1, 0), (0, -1), (0, 1))
 @dataclass
 class GroupLabelSettings:
     visible: bool = False
-    vertical: bool = False  # text direction: vertical text reads bottom to top
+    direction: str = "horizontal"  # "horizontal" | "vertical" (reads bottom to top) | "diagonal" (45 degrees, rising)
     position: str = "first"  # the group's "first" or "last" ROI (by ROI number) carries the label
     side: str = "top"  # of that ROI: "top" | "left" | "bottom" | "right"
     box_percent: float = float(DEFAULT_BOX_PERCENT)
@@ -214,13 +214,20 @@ class GroupLabelItem(pg.GraphicsObject):
             widths = [metrics.horizontalAdvance(line) for line in lines]
             width, line_height = max(widths), metrics.height()
             height = line_height * len(lines)
-            across_w, across_h = (height, width) if settings.vertical else (width, height)
+            if settings.direction == "vertical":
+                across_w, across_h = height, width
+            elif settings.direction == "diagonal":  # bounding box of the block rotated by 45 degrees
+                across_w = across_h = (width + height) / math.sqrt(2.0)
+            else:
+                across_w, across_h = width, height
             rect = label_rect(anchor, entry.radius * pixels_per_unit, settings.side, across_w, across_h)
             painter.save()
             painter.setFont(font)
             painter.translate(rect.center())
-            if settings.vertical:
+            if settings.direction == "vertical":
                 painter.rotate(-90.0)  # reads from the bottom up
+            elif settings.direction == "diagonal":
+                painter.rotate(-45.0)  # reads from the bottom left up to the top right
             for n, (line, line_width) in enumerate(zip(lines, widths, strict=True)):  # each line centred in the block
                 origin = QPointF(-line_width / 2.0, -height / 2.0 + n * line_height + metrics.ascent())
                 painter.setPen(_HALO_COLOR)

@@ -47,8 +47,8 @@ from __future__ import annotations
 import statistics
 
 from PyQt6.QtCore import QPointF, QRectF, QSize, Qt
-from PyQt6.QtGui import QColor, QPainter, QPen
-from PyQt6.QtWidgets import QSlider, QWidget
+from PyQt6.QtGui import QColor, QContextMenuEvent, QPainter, QPen
+from PyQt6.QtWidgets import QMenu, QSlider, QWidget
 
 from lspr_ui import get_active_theme
 
@@ -123,6 +123,15 @@ class DataAxisSlider(QSlider):
         self._reference_tick_index = index
         self._reference_tick_color = color
         self.update()
+
+    def contextMenuEvent(self, event: QContextMenuEvent) -> None:  # noqa: N802 - Qt naming
+        """Right-click menu: jump the handle to the reference frame's tick (disabled when none is marked)."""
+        menu = QMenu(self)
+        go_to = menu.addAction("Go to reference")
+        reference = self._reference_tick_index
+        go_to.setEnabled(reference is not None and self.minimum() <= reference <= self.maximum())
+        if menu.exec(event.globalPos()) is go_to and reference is not None:
+            self.setValue(reference)
 
     def set_ticks(self, values, major_labels: dict[int, str]) -> None:
         """`values` is the full real-value array this slider indexes into -

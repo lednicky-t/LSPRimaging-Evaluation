@@ -76,7 +76,9 @@ class GroupLabelMenu(QToolButton):
         self.show_button.setCheckable(True)
         self.show_button.setToolTip("Show or hide the group labels (each group's name).")
         style_general_icon_button(self.show_button)
-        self.direction = _combo(panel, (("Horizontal", "horizontal"), ("Vertical", "vertical")), "Text direction (vertical text reads bottom to top).")
+        self.direction = _combo(panel, (("Horizontal", "horizontal"), ("Vertical", "vertical"), ("Diagonal (45°)", "diagonal")),
+            "Text direction (vertical and diagonal text read upwards).",
+        )
         self.position = _combo(panel, (("First ROI", "first"), ("Last ROI", "last")), "Which ROI of the group (by number) carries the label.")
         self.side = _combo(
             panel, (("Top", "top"), ("Left", "left"), ("Bottom", "bottom"), ("Right", "right")), "Side of that ROI the label sits on."
@@ -127,7 +129,7 @@ class GroupLabelMenu(QToolButton):
     def settings(self) -> GroupLabelSettings:
         return GroupLabelSettings(
             visible=self.show_button.isChecked(),
-            vertical=self.direction.currentData() == "vertical",
+            direction=str(self.direction.currentData()),
             position=str(self.position.currentData()),
             side=str(self.side.currentData()),
             box_percent=float(self.box.value()),
