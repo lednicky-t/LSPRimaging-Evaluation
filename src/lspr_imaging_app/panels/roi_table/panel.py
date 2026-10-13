@@ -1,17 +1,18 @@
 """``RoiTablePanel`` (sketch §7 "ROI Toolbox" front doors, §10).
 
 The ROI/Group table: every ROI with its number, name, position and diameters,
-organised under collapsible group headers (or as one flat list). It is a thin
+organised under collapsible group headers. It is a thin
 renderer over `RoiToolbox` (it holds no ROI or group state; every edit is a
 toolbox command, so Ctrl+Z undoes it like any other) and it drives the shared
 `SelectionModule`, so selecting rows here selects the same ROIs on the image.
 
 **What the table does**
-- Rows: ``#`` (the ROI's place in the list; reordering changes these), name,
-  x, y, sample diameter, reference-ring inner/outer diameter. Lengths show in
-  px or µm following the Geometry display unit; the px/µm toggle in the toolbar
-  changes that unit (the same setting as the Image ribbon's View tab). A ring diameter the ROI takes
-  from the shared default is dimmed.
+- Rows: ``#`` (the ROI's place in the list; reordering changes these) with a colour dot. The
+  view mode (right-click the column headers) picks what else is shown. **Simple**: the group label. **Geometry**: x, y, a
+  shape pictogram and the shape's diameters (a ring: D_s, d_r, D_r; D = outer, d = inner diameter,
+  s = sample, r = reference; a number the shape does not have is left blank). Lengths show in px or µm following the Geometry display unit; the px/µm toggle in the
+  toolbar changes that unit (the same setting as the Image ribbon's View tab). A ring diameter the
+  ROI takes from the shared default is dimmed.
 - Click a header to sort ascending/descending. Sorting only changes the view;
   to *reorder* ROIs (change their numbers) sort by ``#`` ascending first.
 - Edit a cell with a double-click or F2. With several ROIs selected, editing
@@ -43,7 +44,7 @@ from __future__ import annotations
 from collections.abc import Callable
 
 from PyQt6.QtCore import QItemSelection, QItemSelectionModel, QModelIndex, QPoint, Qt, QTimer, pyqtSignal
-from PyQt6.QtGui import QColor, QIcon, QLinearGradient, QPainter
+from PyQt6.QtGui import QAction, QActionGroup, QColor, QIcon, QLinearGradient, QPainter
 from PyQt6.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -66,7 +67,7 @@ from ...roi import RoiToolbox
 from ...roi.display_style import RoiDisplayStyle
 from ...roi.scope import RoiEditTarget
 from ...selection import SelectionModule
-from ...storage.ui_state_keys import ROI_TABLE_COLLAPSED, ROI_TABLE_COLUMN_WIDTHS, ROI_TABLE_SORT
+from ...storage.ui_state_keys import ROI_TABLE_COLLAPSED, ROI_TABLE_COLUMN_WIDTHS, ROI_TABLE_SORT, ROI_TABLE_VIEW_MODE
 from ..image.general_group import ICON_SIZE, style_general_icon_button
 from ..ui_state import UiStateStore
 from ..unit_toggle import UnitToggle
@@ -85,6 +86,11 @@ from .rows import (
     DIAMETER_COLUMNS,
     EDITABLE_COLUMNS,
     PIXELS,
+    SHAPE_FIELDS,
+    VIEW_GEOMETRY,
+    VIEW_MODE_COLUMNS,
+    VIEW_MODES,
+    VIEW_SIMPLE,
     LengthUnit,
     from_display,
     micrometers,
@@ -95,6 +101,7 @@ from .rows import (
 )
 from .view import RoiTreeView, suggested_column_widths
 
+_LEGACY_COLUMN_COUNT = 7  # a saved width list from before the Position / Shape / Shape vector columns
 _REDRAW_COALESCE_MS = 100  # sketch §8
 _NOTICE_MS = 8000
 _ERROR_NOTICE_MS = 15000
@@ -157,16 +164,18 @@ class RoiTablePanel(QWidget):
     # -- remembered state ---------------------------------------------------------
 
     def restore_ui_state(self, store: UiStateStore) -> None:
-        """Put the flat/grouped choice, sort, collapsed groups and column widths
-        back as last left, and keep saving them (see `panels/ui_state.py`).
-        Called once by the app shell."""
+        """Put the view mode, sort, collapsed groups and column widths back as
+        last left, and keep saving them (see `panels/ui_state.py`). Called once
+        by the app shell."""
         self._store = store
-        store.bind("roi_table/flat", self._flat_button)
+        saved_mode = store.get(ROI_TABLE_VIEW_MODE)
+        if saved_mode in VIEW_MODES:
+            self._apply_view_mode(str(saved_mode))
         saved_sort = store.get(ROI_TABLE_SORT)
         if (
             isinstance(saved_sort, list) and len(saved_sort) == 2
             and isinstance(saved_sort[0], int) and not isinstance(saved_sort[0], bool)
-            and 0 <= saved_sort[0] < COLUMN_COUNT and isinstance(saved_sort[1], bool)
+            and saved_sort[0] in VIEW_MODE_COLUMNS[self._view_mode] and isinstance(saved_sort[1], bool)
         ):
             self._rebuild(lambda: self._model.set_sort(saved_sort[0], saved_sort[1]))
         collapsed = store.get(ROI_TABLE_COLLAPSED)
@@ -174,13 +183,17 @@ class RoiTablePanel(QWidget):
             self._collapsed = set(collapsed)
             self._rebuild(lambda: None)
         widths = store.get(ROI_TABLE_COLUMN_WIDTHS)
-        if isinstance(widths, list) and len(widths) == COLUMN_COUNT and all(isinstance(w, int) and w > 0 for w in widths):
-            floor = suggested_column_widths(self._tree.fontMetrics())[COLUMN_ID]  # a narrower saved ID column clips 3-digit ids
+        if (
+            isinstance(widths, list) and len(widths) in (_LEGACY_COLUMN_COUNT, COLUMN_COUNT)
+            and all(isinstance(w, int) and not isinstance(w, bool) and w > 0 for w in widths)
+        ):
             suggested = suggested_column_widths(self._tree.fontMetrics())
-            for column, width in enumerate(widths):
+            floor = suggested[COLUMN_ID]  # a narrower saved ID column clips 3-digit ids
+            for column, width in enumerate(widths):  # a list of the old 7 columns leaves the three new ones at their default
                 if column == COLUMN_NAME and width > 3 * suggested[column]:
                     continue  # a width saved while this column stretched: keep the default
-                self._tree.setColumnWidth(column, max(width, floor) if column == COLUMN_ID else width)
+                self._widths[column] = max(width, floor) if column == COLUMN_ID else width
+            self._apply_widths()
 
     # -- construction -----------------------------------------------------------------
 
@@ -191,6 +204,9 @@ class RoiTablePanel(QWidget):
         self._tree.setItemDelegate(RoiTableDelegate(self._tree))
         self._tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self._tree.apply_default_column_widths()
+        self._widths = suggested_column_widths(self._tree.fontMetrics())  # what each column is set to, also while hidden
+        self._view_mode = VIEW_GEOMETRY
+        self._tree.set_view_mode(self._view_mode)  # the unit toggle (made below) follows in `_apply_view_mode`
 
         self._hint = QLabel("No ROIs yet.\nAdd them on the Image panel, or run detection.", self)
         self._hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -205,8 +221,21 @@ class RoiTablePanel(QWidget):
         self._up_button = self._tool_button("arrow-up", lambda: self._move_selected(-1))
         self._down_button = self._tool_button("arrow-down", lambda: self._move_selected(1))
         self._delete_button = self._tool_button("trash", self._delete_selected)
-        self._flat_button = self._tool_button("list", None, checkable=True)
-        self._flat_button.setToolTip("Show one flat list instead of grouping the ROIs under their groups.")
+        self._view_menu = QMenu(self)  # opened by a right-click on the column headers (`_show_header_menu`)
+        self._view_actions: dict[str, QAction] = {}
+        action_group = QActionGroup(self)
+        action_group.setExclusive(True)
+        for mode, text in ((VIEW_SIMPLE, "Simple view (ID and group label)"), (VIEW_GEOMETRY, "Geometry view (position, shape, diameters)")):
+            action = self._view_menu.addAction(text)
+            action.setCheckable(True)
+            action.setChecked(mode == self._view_mode)
+            action.triggered.connect(lambda _checked=False, m=mode: self._on_view_mode_chosen(m))
+            action_group.addAction(action)
+            self._view_actions[mode] = action
+        self._view_menu.setToolTipsVisible(True)
+        self._view_actions[VIEW_GEOMETRY].setToolTip("x, y, shape and the diameters. D = outer, d = inner diameter; s = sample, r = reference.")
+        self._view_actions[VIEW_SIMPLE].setToolTip("Only the ID and the group labels.")
+        self._tree.header().setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self._unit_toggle = UnitToggle(self._geometry, self)  # px <-> µm for x, y and the diameters
 
         toolbar = QHBoxLayout()
@@ -223,8 +252,6 @@ class RoiTablePanel(QWidget):
         toolbar.addSpacing(8)
         toolbar.addWidget(self._delete_button)
         toolbar.addStretch(1)
-        toolbar.addWidget(self._flat_button)
-        toolbar.addSpacing(6)
         toolbar.addWidget(self._unit_toggle)
 
         self._footer = QLabel(self)
@@ -263,6 +290,7 @@ class RoiTablePanel(QWidget):
         self._tree.collapsed.connect(lambda index: self._on_expansion_changed(index, False))
         self._tree.header().sectionClicked.connect(self._on_header_clicked)
         self._tree.header().sectionResized.connect(self._on_section_resized)
+        self._tree.header().customContextMenuRequested.connect(self._show_header_menu)
         self._tree.delete_requested.connect(self._delete_selected)
         self._tree.move_requested.connect(self._move_selected)
         self._tree.copy_requested.connect(self._copy_cell)
@@ -271,8 +299,6 @@ class RoiTablePanel(QWidget):
         self._tree.step_requested.connect(self._step_cell)
         self._tree.chip_double_clicked.connect(self._on_chip_double_clicked)
         self._tree.customContextMenuRequested.connect(self._show_context_menu)
-        self._flat_button.toggled.connect(self._on_flat_toggled)
-        self._flat_button.toggled.connect(lambda _on: self._style_tool_button(self._flat_button, "list"))
 
     # -- theme ----------------------------------------------------------------------------
 
@@ -498,13 +524,36 @@ class RoiTablePanel(QWidget):
         if self._store is not None:
             self._store.set(ROI_TABLE_SORT, [new[0], new[1]])
 
-    def _on_section_resized(self, column: int, _old: int, _new: int) -> None:
+    def _on_section_resized(self, column: int, _old: int, new: int) -> None:
+        if new > 0 and not self._tree.isColumnHidden(column):
+            self._widths[column] = new
         if self._store is not None:
-            header = self._tree.header()
-            self._store.set(ROI_TABLE_COLUMN_WIDTHS, [header.sectionSize(c) for c in range(COLUMN_COUNT)])
+            self._store.set(ROI_TABLE_COLUMN_WIDTHS, list(self._widths))
 
-    def _on_flat_toggled(self, flat: bool) -> None:
-        self._rebuild(lambda: self._model.set_flat(flat))
+    def _apply_widths(self) -> None:
+        for column, width in enumerate(self._widths):
+            self._tree.setColumnWidth(column, width)
+
+    def _show_header_menu(self, pos: QPoint) -> None:
+        """Right-click on the column headers: choose the table view."""
+        self._view_menu.exec(self._tree.header().mapToGlobal(pos))
+
+    def _on_view_mode_chosen(self, mode: str) -> None:
+        self._apply_view_mode(mode)
+        if self._store is not None:
+            self._store.set(ROI_TABLE_VIEW_MODE, mode)
+
+    def _apply_view_mode(self, mode: str) -> None:
+        """Show the columns of ``mode``. A sort by a column the new mode hides goes back to the ``#`` order."""
+        self._view_mode = mode
+        self._tree.set_view_mode(mode)
+        self._apply_widths()  # a column hidden at start-up never got its saved width
+        self._view_actions[mode].setChecked(True)
+        self._unit_toggle.setVisible(mode == VIEW_GEOMETRY)  # the unit only matters for the geometry columns
+        if self._model.sort_state()[0] not in VIEW_MODE_COLUMNS[mode]:
+            self._rebuild(lambda: self._model.set_sort(COLUMN_ID, False), reveal=False)
+            if self._store is not None:
+                self._store.set(ROI_TABLE_SORT, [COLUMN_ID, False])
 
     # -- notices ---------------------------------------------------------------------------
 
@@ -629,9 +678,10 @@ class RoiTablePanel(QWidget):
         }.get(column)
         if field is None:
             return
-        targets = [i for i in targets if self._toolbox.roi_by_id(i).sample_geometry_type != "mask"]  # masks have no diameter
+        shapes = {row.roi_id: row.shape for row in self._model.rows()}
+        targets = [i for i in targets if column in SHAPE_FIELDS.get(shapes.get(i, ""), ())]  # a disk has no ring, a mask no diameter
         if not targets:
-            self._show_notice("Mask ROIs have no diameter.")
+            self._show_notice("These ROIs have no such diameter (a mask has none, a disk has no reference ring).")
             return
         if self._guarded("Set diameter", lambda: self._toolbox.resize_rois(targets, **{field: value}, **self._edit_kwargs())) and len(targets) > 1:
             self._show_notice(f"Set the diameter of {noun}.")

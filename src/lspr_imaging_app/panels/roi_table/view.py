@@ -18,7 +18,19 @@ from lspr_ui import get_active_theme
 
 from .delegate import CHEVRON_ZONE, CHIP_SIZE, GROUP_INDENT, STRIP_WIDTH
 from .model import DEPTH_ROLE, KIND_ROLE
-from .rows import COLUMN_COUNT, COLUMN_ID, COLUMN_NAME, COLUMN_RING_IN, COLUMN_RING_OUT, COLUMN_SAMPLE, COLUMN_TITLES, COLUMN_X, COLUMN_Y
+from .rows import (
+    COLUMN_COUNT,
+    COLUMN_ID,
+    COLUMN_NAME,
+    COLUMN_RING_IN,
+    COLUMN_RING_OUT,
+    COLUMN_SAMPLE,
+    COLUMN_SHAPE,
+    COLUMN_TITLES,
+    COLUMN_X,
+    COLUMN_Y,
+    VIEW_MODE_COLUMNS,
+)
 
 _SORT_INDICATOR_ROOM = 22
 _CELL_PADDING = 16
@@ -105,6 +117,7 @@ def suggested_column_widths(metrics: QFontMetrics) -> list[int]:
     widths[COLUMN_SAMPLE] = max(diameter, title_width(metrics, COLUMN_TITLES[COLUMN_SAMPLE]) + _SORT_INDICATOR_ROOM)
     widths[COLUMN_RING_IN] = max(diameter, title_width(metrics, COLUMN_TITLES[COLUMN_RING_IN]) + _SORT_INDICATOR_ROOM)
     widths[COLUMN_RING_OUT] = diameter
+    widths[COLUMN_SHAPE] = max(32, advance(COLUMN_TITLES[COLUMN_SHAPE]) + _SORT_INDICATOR_ROOM)
     return widths
 
 
@@ -161,6 +174,14 @@ class RoiTreeView(QTreeView):
     def apply_default_column_widths(self) -> None:
         for column, width in enumerate(suggested_column_widths(self.fontMetrics())):
             self.setColumnWidth(column, width)
+
+    def set_view_mode(self, mode: str) -> None:
+        """Show the columns of a view mode (`rows.VIEW_MODE_COLUMNS`) and hide the others."""
+        shown = VIEW_MODE_COLUMNS[mode]
+        for column in range(COLUMN_COUNT):
+            self.setColumnHidden(column, column not in shown)
+        header = self.header()  # the shape sits between the position and the diameters on screen, wherever its column number is
+        header.moveSection(header.visualIndex(COLUMN_SHAPE), header.visualIndex(COLUMN_Y) + 1)
 
     # -- hover (the stock hover state is per cell; the row should light up) ---------
 

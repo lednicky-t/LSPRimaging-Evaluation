@@ -114,3 +114,20 @@ The table should eventually support:
 - compatibility with template-based stamping and arrays
 
 The row visuals can be extended later with pictograms or more shape-specific badges without changing the basic compact layout.
+
+
+## View modes and the Shape column (2026-10-13)
+
+The flat/grouped toggle is gone (the table is grouped whenever groups exist). A view-mode choice replaces it, in the context menu of a right-click on the column headers (no toolbar button). The px/µm toggle is shown only in Geometry:
+
+- **Simple**: `#` (colour dot), Label (group names).
+- **Geometry** (default): `#`, x, y, Shape (pictogram), D_s, d_r, D_r (D = outer, d = inner diameter, s = sample, r = reference). A number the shape does not have is blank.
+
+How it is built:
+
+- The model always has all columns (`rows.COLUMN_*`); a view mode only shows or hides them (`rows.VIEW_MODE_COLUMNS`, `RoiTreeView.set_view_mode`, which also moves Shape to sit after y). Edit, copy, paste, fill and step code is unchanged.
+- **Tried and dropped (2026-10-13): "vector" cells** (`[x, y]`, `[D_s, d_r, D_r]` drawn in one cell, one number editable at a time via a custom delegate). The app exited with an access violation (0xC0000005) while editing in it; the cause was not proven, but that editor path re-derived model indexes outside Qt's own editor handling, so separate cells were restored as the safer design. If vectors are wanted again, do it as a header/painting change over real separate columns, not as an editor over a composite cell.
+- **Shape is derived**, not stored: `rows.shape_of(sample_geometry_type, reference_geometry_type)` (circle+annulus = ring, circle+none = disk, mask = mask, anything else = other). No change to the saved format. `rows.SHAPE_FIELDS` lists the diameter columns each shape has; the others are blank and not editable.
+- Saved UI state: `roi_table/view_mode`; the sort is only restored if its column is visible in the saved mode; widths are one per column (8; a saved list of 7 is still read).
+
+Open (`TODO(shapes)` in `rows.py` and `delegate._paint_shape`): rectangle with frame, polygon and freehand do not exist yet; they fall under "other" (blank diameters, `?` pictogram). Ring-centre offsets (`Δx, Δy`) are not stored yet.

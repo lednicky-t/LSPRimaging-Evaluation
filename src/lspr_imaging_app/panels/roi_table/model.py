@@ -1,7 +1,7 @@
 """``RoiTreeModel``: the ROI/Group table's rows, as a Qt tree model.
 
-Grouped view: one top-level node per group (plus "Ungrouped"), ROIs below it.
-Flat view: every ROI top-level. It presents what `RoiToolbox` holds and owns no
+Grouped view: one top-level node per group (plus "Ungrouped"), ROIs below it;
+with no groups, every ROI is top-level. It presents what `RoiToolbox` holds and owns no
 ROI state of its own: ``set_content`` replaces everything, and an edit is not
 applied here - ``setData`` reports it through ``cell_edited`` and returns
 ``False``, the panel asks the toolbox, and the change comes back through
@@ -26,12 +26,15 @@ from .rows import (
     COLUMN_RING_IN,
     COLUMN_RING_OUT,
     COLUMN_SAMPLE,
+    COLUMN_SHAPE,
     COLUMN_TITLES,
     COLUMN_X,
     COLUMN_Y,
     DIAMETER_COLUMNS,
     EDITABLE_COLUMNS,
     PIXELS,
+    SHAPE_FIELDS,
+    SHAPE_LABELS,
     GroupInfo,
     LengthUnit,
     RoiRow,
@@ -56,6 +59,8 @@ ALL_SELECTED_ROLE = Qt.ItemDataRole.UserRole + 7
 """A group header: every member is currently selected."""
 DEPTH_ROLE = Qt.ItemDataRole.UserRole + 8
 MASK_ROLE = Qt.ItemDataRole.UserRole + 9
+SHAPE_ROLE = Qt.ItemDataRole.UserRole + 11
+"""A ROI row's shape key (``rows.SHAPE_RING`` ...)."""
 
 MIME_TYPE = "application/x-lspr-roi-ids"
 """Dragged ROIs: a JSON list of ROI ids."""
@@ -80,6 +85,7 @@ _HEADER_TIPS = {
     COLUMN_NAME: "Label of a group (its name, also drawn on the image). Empty for ROIs.",
     COLUMN_X: "Centre x on the reference image.",
     COLUMN_Y: "Centre y on the reference image.",
+    COLUMN_SHAPE: "Shape of the ROI. D = outer and d = inner diameter, s = sample and r = reference.",
     COLUMN_SAMPLE: "Sample diameter.",
     COLUMN_RING_IN: "Reference ring, inner diameter. Grey italic: taken from the shared default.",
     COLUMN_RING_OUT: "Reference ring, outer diameter. Grey italic: taken from the shared default.",
@@ -114,7 +120,6 @@ class RoiTreeModel(QAbstractItemModel):
         self._unit: LengthUnit = PIXELS
         self._sort_column = COLUMN_ID
         self._descending = False
-        self._flat = False
         self._rows: list[RoiRow] = []
         self._rois: tuple[AreaRoi, ...] = ()
         self._groups: tuple[AreaRoiGroup, ...] = ()
@@ -143,17 +148,12 @@ class RoiTreeModel(QAbstractItemModel):
             self._sort_column, self._descending = column, descending
             self._rebuild()
 
-    def set_flat(self, flat: bool) -> None:
-        if flat != self._flat:
-            self._flat = flat
-            self._rebuild()
-
     def sort_state(self) -> tuple[int, bool]:
         return self._sort_column, self._descending
 
     def is_grouped_view(self) -> bool:
-        """False in the flat view, and whenever there are no groups (a lone
-        "Ungrouped" header over every ROI would say nothing)."""
+        """False whenever there are no groups (a lone "Ungrouped" header over
+        every ROI would say nothing)."""
         return self._grouped
 
     def unit(self) -> LengthUnit:
@@ -165,7 +165,7 @@ class RoiTreeModel(QAbstractItemModel):
 
     def _rebuild(self) -> None:
         self._rows = build_roi_rows(self._rois, self._groups, self._defaults, self._default_color_hex)
-        self._grouped = bool(self._groups) and not self._flat
+        self._grouped = bool(self._groups)
         root = _Node("root", None)
         if self._grouped:
             colors = {group.group_id: group.sample_color_hex for group in self._groups}
@@ -311,8 +311,8 @@ class RoiTreeModel(QAbstractItemModel):
             return flags
         flags |= Qt.ItemFlag.ItemIsDragEnabled  # ROI rows are not drop targets: a drop lands between rows
         column = index.column()
-        if column in EDITABLE_COLUMNS and not (node.row.is_mask and column in DIAMETER_COLUMNS):
-            flags |= Qt.ItemFlag.ItemIsEditable
+        if column in EDITABLE_COLUMNS and not (column in DIAMETER_COLUMNS and column not in SHAPE_FIELDS[node.row.shape]):
+            flags |= Qt.ItemFlag.ItemIsEditable  # a mask has no diameter, a disk no ring
         return flags
 
     def data(self, index: QModelIndex, role: int = Qt.ItemDataRole.DisplayRole):
@@ -358,6 +358,8 @@ class RoiTreeModel(QAbstractItemModel):
             return row.color_hex
         if role == MASK_ROLE:
             return row.is_mask
+        if role == SHAPE_ROLE:
+            return row.shape
         if role == INHERITED_ROLE:
             return (column == COLUMN_RING_IN and row.inner_inherited) or (column == COLUMN_RING_OUT and row.outer_inherited)
         if role == Qt.ItemDataRole.TextAlignmentRole:
@@ -382,17 +384,23 @@ class RoiTreeModel(QAbstractItemModel):
         if column in (COLUMN_X, COLUMN_Y):
             value = row.x if column == COLUMN_X else row.y
             return format_length(value, unit), edit_text(value, unit)
+        if column == COLUMN_SHAPE:
+            return SHAPE_LABELS[row.shape], ""
         if row.is_mask:
             return "mask", ""
+        if column not in SHAPE_FIELDS[row.shape]:
+            return "", ""  # this shape has no such number (a disk has no reference ring)
         value = {COLUMN_SAMPLE: row.sample, COLUMN_RING_IN: row.inner, COLUMN_RING_OUT: row.outer}[column]
         return format_length(value, unit), edit_text(value, unit)
 
     def _tooltip(self, row: RoiRow, column: int) -> str | None:
         unit = self._unit.label
+        if column == COLUMN_SHAPE:
+            return SHAPE_LABELS[row.shape]
         if column in (COLUMN_X, COLUMN_Y) and row.nudge_count:
             plural = "" if row.nudge_count == 1 else "s"
             return f"Position on the reference image ({unit}). {row.nudge_count} manual per-wavelength nudge{plural}."
-        if column in (COLUMN_RING_IN, COLUMN_RING_OUT):
+        if column in (COLUMN_RING_IN, COLUMN_RING_OUT) and column in SHAPE_FIELDS[row.shape]:
             inherited = row.inner_inherited if column == COLUMN_RING_IN else row.outer_inherited
             return f"Taken from the shared default ({unit}). Edit to set this ROI's own." if inherited else f"This ROI's own value ({unit})."
         if column == COLUMN_SAMPLE and row.is_mask:

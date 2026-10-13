@@ -28,8 +28,18 @@ from .model import (
     INHERITED_ROLE,
     KIND_ROLE,
     MASK_ROLE,
+    SHAPE_ROLE,
 )
-from .rows import COLUMN_COUNT, COLUMN_ID, DIAMETER_COLUMNS, step_text
+from .rows import (
+    COLUMN_COUNT,
+    COLUMN_ID,
+    COLUMN_SHAPE,
+    DIAMETER_COLUMNS,
+    SHAPE_DISK,
+    SHAPE_MASK,
+    SHAPE_RING,
+    step_text,
+)
 
 STRIP_WIDTH = 3
 """Left edge of every ROI row, left clear for a status strip (analysis state)
@@ -122,6 +132,9 @@ class RoiTableDelegate(QStyledItemDelegate):
         self._paint_row_background(painter, option, index, theme)
         self._paint_cell_borders(painter, rect, index.column(), theme)
         column = index.column()
+        if column == COLUMN_SHAPE:
+            self._paint_shape(painter, rect, index, theme)
+            return
         font = QFont(option.font)
         color = QColor(theme.text_primary)
         text = str(index.data(Qt.ItemDataRole.DisplayRole) or "")
@@ -138,6 +151,35 @@ class RoiTableDelegate(QStyledItemDelegate):
         painter.setFont(font)
         painter.setPen(color)
         painter.drawText(text_rect, int(alignment), option.fontMetrics.elidedText(text, Qt.TextElideMode.ElideRight, text_rect.width()))
+
+    @staticmethod
+    def _paint_shape(painter: QPainter, rect: QRect, index: QModelIndex, theme) -> None:
+        """A small pictogram of the ROI's shape, in the ROI's own colour (the name is the tooltip).
+
+        TODO(shapes): rectangle with frame, polygon and freehand have no pictogram yet; they
+        fall under "other" (drawn as a question mark) until they are implemented."""
+        shape = index.data(SHAPE_ROLE)
+        fill = QColor(index.data(COLOR_ROLE) or theme.text_dim)
+        outline = QPen(QColor(theme.text_secondary), 1.3)
+        center = QPointF(rect.left() + _CELL_PAD + 8.0, rect.center().y() + 0.5)
+        painter.setPen(outline)
+        if shape == SHAPE_RING:
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.drawEllipse(center, 7.0, 7.0)
+            painter.setBrush(fill)
+            painter.drawEllipse(center, 3.2, 3.2)
+        elif shape == SHAPE_DISK:
+            painter.setBrush(fill)
+            painter.drawEllipse(center, 5.0, 5.0)
+        elif shape == SHAPE_MASK:
+            outline.setStyle(Qt.PenStyle.DashLine)
+            painter.setPen(outline)
+            painter.setBrush(fill)
+            points = [(-6, -2), (-3, -6), (2, -5), (6, -1), (4, 5), (-1, 6), (-5, 3)]
+            painter.drawPolygon(QPolygonF([QPointF(center.x() + dx, center.y() + dy) for dx, dy in points]))
+        else:
+            painter.setPen(QColor(theme.text_dim))
+            painter.drawText(QRectF(center.x() - 8, rect.top(), 16, rect.height()), int(Qt.AlignmentFlag.AlignCenter), "?")
 
     @staticmethod
     def _paint_cell_borders(painter: QPainter, rect: QRect, column: int, theme) -> None:

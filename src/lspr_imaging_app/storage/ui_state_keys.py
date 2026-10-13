@@ -162,9 +162,10 @@ REFERENCE_FRAME = "reference_frame"
 """``{"dataset": str, "mode": "auto" | "manual", "cube": int | None, "wavelength": float | None}``,
 kept per dataset like the highlight range."""
 
-ROI_TABLE_SORT = "roi_table/sort"  # [column, descending]
+ROI_TABLE_VIEW_MODE = "roi_table/view_mode"  # "simple" | "geometry"
+ROI_TABLE_SORT = "roi_table/sort"  # [column, descending]; a column of the view mode it was saved in
 ROI_TABLE_COLLAPSED = "roi_table/collapsed"  # sorted group ids
-ROI_TABLE_COLUMN_WIDTHS = "roi_table/column_widths"  # one width per column
+ROI_TABLE_COLUMN_WIDTHS = "roi_table/column_widths"  # one width per column (10; a list of the old 7 is still read)
 
 IMAGE_VIEW_RANGE = "image/view_range"
 """``[[x_min, x_max], [y_min, y_max]]`` in image pixels; replaced the four

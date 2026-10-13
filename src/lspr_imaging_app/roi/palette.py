@@ -22,11 +22,14 @@ from collections.abc import Iterable
 HEX_COLOR = re.compile(r"^#[0-9a-fA-F]{6}$")
 
 GROUP_BASE_COLORS: tuple[str, ...] = (
-    # matplotlib "tab10": the same qualitative palette the stable app uses
+    # the first ten are matplotlib "tab10": the same qualitative palette the stable app uses
     # for group colours (gui/roi_color_palettes.py), chosen for being easy to
     # tell apart from each other.
     "#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd",
     "#8c564b", "#e377c2", "#7f7f7f", "#bcbd22", "#17becf",
+    # 11-20 (2026-10-13): further hues picked to stay apart from the ten above, so up to 20 groups differ.
+    "#00897b", "#c2185b", "#fbc02d", "#303f9f", "#7cb342",
+    "#f4511e", "#5e35b1", "#455a64", "#ff8a80", "#80cbc4",
 )
 
 DEFAULT_ROI_COLOR_HEX = "#f59e0b"

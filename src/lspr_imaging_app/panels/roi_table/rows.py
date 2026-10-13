@@ -16,11 +16,57 @@ from ...roi.model import AreaRoi, AreaRoiDetectionSettings, AreaRoiGroup
 from ...roi.palette import DEFAULT_ROI_COLOR_HEX
 
 COLUMN_ID, COLUMN_NAME, COLUMN_X, COLUMN_Y, COLUMN_SAMPLE, COLUMN_RING_IN, COLUMN_RING_OUT = range(7)
-COLUMN_COUNT = 7
-COLUMN_TITLES = ("#/ROIs", "Label", "x", "y", "D_s", "d_r", "D_r")
+COLUMN_SHAPE = 7
+COLUMN_COUNT = 8
+COLUMN_TITLES = ("#/ROIs", "Label", "x", "y", "D_s", "d_r", "D_r", "Shape")
 """Header titles; ``X_y`` is drawn as X with a subscript y (`view.SubscriptHeader`)."""
 EDITABLE_COLUMNS = (COLUMN_X, COLUMN_Y, COLUMN_SAMPLE, COLUMN_RING_IN, COLUMN_RING_OUT)
 DIAMETER_COLUMNS = (COLUMN_SAMPLE, COLUMN_RING_IN, COLUMN_RING_OUT)
+VIEW_SIMPLE = "simple"
+VIEW_GEOMETRY = "geometry"
+VIEW_MODES = (VIEW_SIMPLE, VIEW_GEOMETRY)
+VIEW_MODE_COLUMNS = {
+    VIEW_SIMPLE: (COLUMN_ID, COLUMN_NAME),
+    VIEW_GEOMETRY: (COLUMN_ID, COLUMN_X, COLUMN_Y, COLUMN_SHAPE, COLUMN_SAMPLE, COLUMN_RING_IN, COLUMN_RING_OUT),
+}
+"""Which columns each view mode shows, left to right on screen is the model order; the rest are hidden."""
+
+FIELD_NAMES = {COLUMN_X: "x", COLUMN_Y: "y", COLUMN_SAMPLE: "D_s", COLUMN_RING_IN: "d_r", COLUMN_RING_OUT: "D_r"}
+"""D = outer / d = inner diameter; s = sample, r = reference."""
+
+# -- shapes ---------------------------------------------------------------------
+
+SHAPE_RING, SHAPE_DISK, SHAPE_MASK, SHAPE_OTHER = "ring", "disk", "mask", "other"
+SHAPE_LABELS = {
+    SHAPE_RING: "Circle with reference ring",
+    SHAPE_DISK: "Circle, no reference",
+    SHAPE_MASK: "Pixel mask",
+    SHAPE_OTHER: "Other shape",
+}
+SHAPE_FIELDS = {
+    SHAPE_RING: (COLUMN_SAMPLE, COLUMN_RING_IN, COLUMN_RING_OUT),
+    SHAPE_DISK: (COLUMN_SAMPLE,),
+    SHAPE_MASK: (),
+    SHAPE_OTHER: (),
+}
+"""The diameter columns each shape has, in order (a ring: D_s, d_r, D_r); the others stay blank.
+Offsets of the ring centre from the sample centre (``Δx, Δy``) are not stored yet (always 0);
+when they are, they get columns of their own, shown only when some ROI has a non-zero one.
+
+TODO(shapes): rectangle with frame, polygon and freehand are not implemented in the
+app. `shape_of` calls any other sample/reference pairing "other"; give each new shape its
+own key, label, columns and pictogram (`delegate._paint_shape`) here when it arrives."""
+
+
+def shape_of(sample_geometry_type: str, reference_geometry_type: str) -> str:
+    """The shape a ROI's two stored geometry types make together."""
+    if sample_geometry_type == "mask":
+        return SHAPE_MASK
+    if sample_geometry_type == "circle" and reference_geometry_type == "annulus":
+        return SHAPE_RING
+    if sample_geometry_type == "circle" and reference_geometry_type == "none":
+        return SHAPE_DISK
+    return SHAPE_OTHER
 
 
 # -- lengths: px or µm -------------------------------------------------------
@@ -120,6 +166,7 @@ class RoiRow:
     outer_inherited: bool
     is_mask: bool
     nudge_count: int
+    shape: str = SHAPE_RING
 
 
 @dataclass(frozen=True)
@@ -165,6 +212,7 @@ def build_roi_rows(
                 outer_inherited=roi.reference_outer_diameter_px is None,
                 is_mask=roi.sample_geometry_type == "mask",
                 nudge_count=len(roi.per_wavelength or {}),
+                shape=shape_of(roi.sample_geometry_type, roi.reference_geometry_type),
             )
         )
     return rows
@@ -180,6 +228,7 @@ _SORT_KEYS = {
     COLUMN_SAMPLE: lambda row: (row.sample, row.roi_id),
     COLUMN_RING_IN: lambda row: (row.inner, row.roi_id),
     COLUMN_RING_OUT: lambda row: (row.outer, row.roi_id),
+    COLUMN_SHAPE: lambda row: (row.shape, row.roi_id),
 }
 
 
