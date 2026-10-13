@@ -97,6 +97,17 @@ def as_normalized(counts: np.ndarray, reference_peak: float) -> np.ndarray:
     return counts / reference_peak
 
 
+def scaled_to_peak(counts: np.ndarray, target_peak: float) -> np.ndarray:
+    """`counts` rescaled so its own tallest bin equals `target_peak`. Used for
+    the selected-ROI curves, whose raw counts are far below the whole-frame
+    curves': this keeps their *shape* readable on the shared axis. An empty
+    population (peak 0) returns zeros."""
+    peak = peak_count(counts)
+    if peak <= 0.0:
+        return np.zeros_like(counts)
+    return counts * (target_peak / peak)
+
+
 def estimate_roi_intensity_range(
     values: np.ndarray,
     *,

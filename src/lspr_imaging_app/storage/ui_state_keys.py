@@ -97,6 +97,8 @@ CHROMATIC_ALL_WAVELENGTHS = UiKey("chromatic/all_wavelengths", False, bool, "chr
 
 # -- Keys with no retired field behind them (panels read and write these through `restore_ui_state`) ----
 HISTOGRAM_CURSOR_READOUT = UiKey("histogram/cursor_readout", False, bool)
+# Per-curve legend style overrides, one JSON object as text (see panels/histogram/curve_style_menu.py).
+HISTOGRAM_CURVE_STYLES = UiKey("histogram/curve_styles", "{}", str)
 IMAGE_CURSOR_READOUT = UiKey("image/cursor_readout", False, bool)
 IMAGE_MASK_EDIT_TOOL = UiKey("image/mask_edit_tool", None, str)  # a `MaskEditTool` value
 IMAGE_SCALE_BAR_COLOR = UiKey("image/scale_bar_color", None, str)
@@ -140,7 +142,7 @@ ARRAY_KEYS = {  # ROIs tab, "Array" group (panels/image/array_controls.py); leng
     "ring_size_mode": UiKey("array/ring_size_mode", "uniform", str),
 }
 HAND_WIRED_KEYS: tuple[UiKey, ...] = (
-    HISTOGRAM_CURSOR_READOUT, IMAGE_CURSOR_READOUT, IMAGE_MASK_EDIT_TOOL, IMAGE_SCALE_BAR_COLOR, IMAGE_ROI_LABELS,
+    HISTOGRAM_CURSOR_READOUT, HISTOGRAM_CURVE_STYLES, IMAGE_CURSOR_READOUT, IMAGE_MASK_EDIT_TOOL, IMAGE_SCALE_BAR_COLOR, IMAGE_ROI_LABELS,
     IMAGE_ROI_FILL_MAX_OPACITY,
     *(key for keys_for_kind in ROI_OVERLAY_KEYS.values() for key in keys_for_kind.values()),
     ROI_ROUND_POSITIONS, CUBE_DISPLAY_MODE, MASK_SCOPE, ROI_SCOPE, *ARRAY_KEYS.values(),

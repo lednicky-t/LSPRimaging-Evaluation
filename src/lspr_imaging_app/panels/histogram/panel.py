@@ -42,6 +42,7 @@ here.
 
 from __future__ import annotations
 
+import json
 from collections.abc import Callable
 from dataclasses import dataclass
 
@@ -52,10 +53,10 @@ from PyQt6.QtWidgets import QApplication, QVBoxLayout, QWidget
 from ...image_tools import ChromaticModule, GeometryModule, MaskModule
 from ...image_tools.preprocess import resolve_external_mask
 from ...roi import RoiToolbox
-from ...selection import HighlightRangeModule
+from ...selection import HighlightRangeModule, SelectionModule
 from ..image.panel import ImagePanel
 from ..image.tool_ribbon import VIEW_TAB
-from ...storage.ui_state_keys import HISTOGRAM_CURSOR_READOUT, read
+from ...storage.ui_state_keys import HISTOGRAM_CURSOR_READOUT, HISTOGRAM_CURVE_STYLES, read
 from ..ui_state import UiStateStore
 from . import compute
 from .plot import DEFAULT_LINE_WIDTH, HistogramPlot
@@ -75,6 +76,8 @@ class _CurveContext:
     image: np.ndarray
     total_pixels: int
     reference_peak: float
+    selected_key: object = None
+    all_curve_peak: float = 0.0  # tallest bin of the drawn All-pixels curve, in the current Y units
 
 
 class HistogramPanel(QWidget):
@@ -109,8 +112,10 @@ class HistogramPanel(QWidget):
         initial_log_y: bool = False,
         initial_bin_width: float = compute.DEFAULT_BIN_WIDTH,
         initial_line_width: float = DEFAULT_LINE_WIDTH,
+        selection: SelectionModule | None = None,
     ) -> None:
         super().__init__(parent)
+        self._selection = selection
         self._image_panel = image_panel
         self._geometry = geometry
         self._mask = mask
@@ -124,6 +129,8 @@ class HistogramPanel(QWidget):
         # background for many ROIs (roi_masks.py). `_curve_context` is what the redraw
         # computed for the curves, kept so the ROI curves can be drawn later, when the masks arrive.
         self._roi_masks = RoiMaskProvider(self)
+        # Same, for just the ROIs selected in the ROI table (their own cache: a different ROI subset).
+        self._selected_masks = RoiMaskProvider(self)
         self._curve_context: _CurveContext | None = None
         self._bin_width = float(initial_bin_width)
         self._y_mode = initial_y_mode if initial_y_mode in Y_MODES else "percent"
@@ -154,6 +161,7 @@ class HistogramPanel(QWidget):
         app = QApplication.instance()
         if app is not None:
             app.aboutToQuit.connect(self._roi_masks.stop)  # a worker must not outlive the Qt objects it emits into
+            app.aboutToQuit.connect(self._selected_masks.stop)
 
     def restore_ui_state(self, store: UiStateStore) -> None:
         """Put the plot's cursor readout toggle back as last left and keep
@@ -161,6 +169,13 @@ class HistogramPanel(QWidget):
         overlay = self._plot.cursor_overlay()
         overlay.set_enabled(read(store, HISTOGRAM_CURSOR_READOUT) is True)
         overlay.toggled.connect(lambda on: store.set(HISTOGRAM_CURSOR_READOUT.key, bool(on)))
+        try:
+            saved = json.loads(str(read(store, HISTOGRAM_CURVE_STYLES)))
+        except ValueError:
+            saved = {}  # a hand-edited settings file: fall back to default styles
+        if isinstance(saved, dict):
+            self._plot.set_curve_styles(saved)
+        self._plot.curve_styles_changed.connect(lambda styles: store.set(HISTOGRAM_CURVE_STYLES.key, json.dumps(styles)))
 
     # -- construction ---------------------------------------------------------
 
@@ -185,8 +200,11 @@ class HistogramPanel(QWidget):
         self._image_panel.area_selection().selection_changed.connect(self._schedule_redraw)
         self._image_panel.ribbon_category_changed.connect(self._schedule_redraw)
         self._image_panel.cursor_value_changed.connect(self._plot.set_value_tick)
-        self._roi_toolbox.geometry_changed.connect(lambda _change: self._roi_masks.invalidate())
+        self._roi_toolbox.geometry_changed.connect(self._on_roi_geometry_changed)
         self._roi_masks.ready.connect(self._on_roi_masks_ready)
+        self._selected_masks.ready.connect(self._on_selected_masks_ready)
+        if self._selection is not None:
+            self._selection.roi_selection_changed.connect(lambda _ids: self._schedule_redraw())
 
     # -- image lifecycle --------------------------------------------------------
 
@@ -236,7 +254,8 @@ class HistogramPanel(QWidget):
         # Normalized mode divides every curve by this one peak (the main
         # plot's), so sub-populations stay comparable to "All pixels".
         reference_peak = compute.peak_count(all_counts)
-        self._plot.set_all_pixels(edges, self._scaled(all_counts, total_pixels, reference_peak))
+        all_curve = self._scaled(all_counts, total_pixels, reference_peak)
+        self._plot.set_all_pixels(edges, all_curve)
 
         ignore_mask = self._resolve_ignore_mask()
         if ignore_mask is not None and ignore_mask.shape != image.shape:
@@ -257,9 +276,14 @@ class HistogramPanel(QWidget):
         # `ActiveToolModule` dependency to suppress it exactly - revisit if
         # it turns out to matter in practice.
         key, roi_masks = self._request_roi_masks(image.shape)
-        self._curve_context = _CurveContext(key, edges, image, total_pixels, reference_peak)
+        selected_key, selected_masks = self._request_selected_masks(image.shape)
+        self._curve_context = _CurveContext(
+            key, edges, image, total_pixels, reference_peak, selected_key, compute.peak_count(all_curve)
+        )
         if roi_masks is not None:  # `None`: still being built in the background; `_on_roi_masks_ready` draws them
             self._apply_roi_curves(self._curve_context, roi_masks)
+        if selected_masks is not None:  # `None`: same, drawn by `_on_selected_masks_ready`
+            self._apply_selected_curves(self._curve_context, selected_masks)
 
         if self._pending_y_refit:
             # A bin-size change just redrew the curves with a different
@@ -343,6 +367,56 @@ class HistogramPanel(QWidget):
             detection.reference_outer_diameter_px,
         )
 
+    def _request_selected_masks(
+        self, image_shape: tuple[int, ...]
+    ) -> tuple[object, tuple[np.ndarray | None, np.ndarray | None] | None]:
+        """Like `_request_roi_masks`, but for only the ROIs selected in the ROI table."""
+        assert self._frame is not None
+        if self._selection is None:
+            return None, (None, None)
+        selected = self._selection.selected_roi_ids()
+        rois = [roi for roi in self._roi_toolbox.rois_at(self._frame[0]) if roi.area_roi_id in selected]
+        if not rois:
+            return None, (None, None)
+        detection = self._roi_toolbox.detection_settings()
+        return self._selected_masks.request(
+            rois,
+            image_shape[:2],
+            self._chromatic.affine_for(self._frame),
+            detection.reference_inner_diameter_px,
+            detection.reference_outer_diameter_px,
+            variant=frozenset(roi.area_roi_id for roi in rois),
+        )
+
+    def _apply_selected_curves(
+        self, context: "_CurveContext", masks: tuple[np.ndarray | None, np.ndarray | None]
+    ) -> None:
+        """The selected ROIs' sample and reference pixels, each drawn at its own
+        scale: its tallest bin is set to the All-pixels curve's tallest bin
+        (whatever the Y mode), because their raw counts are far lower than the
+        whole frame's and would otherwise sit flat on the axis."""
+        sample_mask, reference_mask = masks
+        for setter, mask in (
+            (self._plot.set_selected_sample, sample_mask),
+            (self._plot.set_selected_reference, reference_mask),
+        ):
+            if mask is None:
+                setter(context.edges, np.zeros(context.edges.size - 1))
+                continue
+            counts = compute.population_counts(context.image[mask], context.edges)
+            setter(context.edges, compute.scaled_to_peak(counts, context.all_curve_peak))
+
+    def _on_selected_masks_ready(self, key: object) -> None:
+        context = self._curve_context
+        masks = self._selected_masks.cached(key)
+        if context is None or context.selected_key != key or masks is None:
+            return
+        self._apply_selected_curves(context, masks)
+
+    def _on_roi_geometry_changed(self, _change: object) -> None:
+        self._roi_masks.invalidate()
+        self._selected_masks.invalidate()
+
     def _apply_roi_curves(
         self, context: "_CurveContext", masks: tuple[np.ndarray | None, np.ndarray | None]
     ) -> None:
@@ -362,6 +436,7 @@ class HistogramPanel(QWidget):
 
     def closeEvent(self, event) -> None:  # noqa: N802 - Qt naming
         self._roi_masks.stop()
+        self._selected_masks.stop()
         super().closeEvent(event)
 
     # -- axis controls ------------------------------------------------------

@@ -71,6 +71,7 @@ from lspr_ui import get_active_theme, load_tabler_icon, tint_tabler_icon
 from ..cursor_overlay import CursorOverlay
 from ..image.canvas_tools import style_bar_icon_button
 from . import compute
+from .curve_style_menu import DEFAULT_FILL_ALPHA, pen_style, show_curve_style_menu
 from .highlight_range_controls import HighlightRangeReadout
 
 # Sample/Reference match `ImagePanel`'s own overlay colors exactly (image/
@@ -115,12 +116,18 @@ class HistogramPlot(QWidget):
     # owns what "switchable" means (cycling `Y_MODES`); this plot only
     # reports the gesture, same query/command split as `settings_requested`.
     y_axis_double_clicked = pyqtSignal()
+    # Per-curve style overrides (legend right-click menu), as {curve key: style dict}
+    # - see `curve_style_menu.py`. Carries the whole table so the panel can save it as one value.
+    curve_styles_changed = pyqtSignal(dict)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._log_y = False
         self._line_width = DEFAULT_LINE_WIDTH
-        self._curve_colors: dict[pg.PlotDataItem, str] = {}
+        self._curve_keys: dict[pg.PlotDataItem, str] = {}
+        self._default_colors: dict[str, str] = {}
+        self._dashed_keys: set[str] = set()
+        self._styles: dict[str, dict] = {}
 
         self._plot_widget = pg.PlotWidget(parent=self)
         self._plot_widget.setMinimumHeight(100)
@@ -182,10 +189,16 @@ class HistogramPlot(QWidget):
         self._plot_item.autoBtn.clicked.disconnect()
         self._plot_item.autoBtn.clicked.connect(self._on_auto_button_clicked)
 
-        self._all_pixels_curve = self._add_curve(get_active_theme().text_primary, "All pixels")
-        self._sample_curve = self._add_curve(_SAMPLE_COLOR, "Sample ROI")
-        self._reference_curve = self._add_curve(_REFERENCE_COLOR, "Reference ROI")
-        self._ignore_mask_curve = self._add_curve(_IGNORE_MASK_COLOR, "Ignore mask")
+        self._all_pixels_curve = self._add_curve("all", get_active_theme().text_primary, "All pixels")
+        self._sample_curve = self._add_curve("sample", _SAMPLE_COLOR, "Sample ROI")
+        self._reference_curve = self._add_curve("reference", _REFERENCE_COLOR, "Reference ROI")
+        self._ignore_mask_curve = self._add_curve("ignore", _IGNORE_MASK_COLOR, "Ignore mask")
+        # Selected ROIs only (ROI table selection): dashed, same hue as the
+        # whole-population curves, each drawn at its own scale (panel.py).
+        self._selected_sample_curve = self._add_curve("sel_sample", _SAMPLE_COLOR, "Selected sample (own scale)", dashed=True)
+        self._selected_reference_curve = self._add_curve(
+            "sel_reference", _REFERENCE_COLOR, "Selected reference (own scale)", dashed=True
+        )
 
         self._region = pg.LinearRegionItem(
             values=(0, 1), brush=pg.mkBrush(*_HIGHLIGHT_BRUSH), pen=pg.mkPen(_HIGHLIGHT_LINE, width=1)
@@ -266,12 +279,76 @@ class HistogramPlot(QWidget):
         self._reposition_settings_button()
         self._reposition_cursor_overlay()
 
-    def _add_curve(self, color_hex: str, name: str) -> pg.PlotDataItem:
-        curve = self._plot_item.plot(
-            name=name, pen=pg.mkPen(QColor(color_hex), width=self._line_width), stepMode="center"
-        )
-        self._curve_colors[curve] = color_hex
+    def _add_curve(self, key: str, color_hex: str, name: str, *, dashed: bool = False) -> pg.PlotDataItem:
+        curve = self._plot_item.plot(name=name, stepMode="center")
+        self._curve_keys[curve] = key
+        self._default_colors[key] = color_hex
+        if dashed:
+            self._dashed_keys.add(key)
+        self._apply_curve_style(curve)
+        # Right-click on this curve's legend entry opens its style popup. Left-click
+        # (show/hide the line) stays pyqtgraph's own: only the right button is intercepted.
+        sample, label = self._legend.items[-1]
+        for target in (sample, label):
+            native = getattr(target, "mouseClickEvent", None)  # the label has none of its own
+
+            def _click(event, native=native, curve=curve) -> None:
+                if event.button() == Qt.MouseButton.RightButton:
+                    event.accept()
+                    self._open_style_menu(curve, event.screenPos())
+                elif native is not None:
+                    native(event)
+
+            target.mouseClickEvent = _click
         return curve
+
+    def _default_line(self, key: str) -> str:
+        return "dash" if key in self._dashed_keys else "solid"
+
+    def _apply_curve_style(self, curve: pg.PlotDataItem) -> None:
+        key = self._curve_keys[curve]
+        style = self._styles.get(key, {})
+        color = style.get("color", self._default_colors[key])
+        pen = pg.mkPen(QColor(color), width=style.get("width", self._line_width))
+        pen.setStyle(pen_style(style.get("line", self._default_line(key))))
+        curve.setPen(pen)
+        # The fill is skipped in log mode: a bar down to 0 is not a finite log value.
+        if style.get("fill") and not self._log_y:
+            fill = QColor(color)
+            fill.setAlphaF(int(style.get("alpha", DEFAULT_FILL_ALPHA)) / 100.0)
+            curve.setFillLevel(0.0)
+            curve.setFillBrush(pg.mkBrush(fill))
+        else:
+            curve.setFillLevel(None)
+
+    def _open_style_menu(self, curve: pg.PlotDataItem, screen_pos) -> None:
+        key = self._curve_keys[curve]
+
+        def _changed(style: dict) -> None:
+            if style:
+                self._styles[key] = style
+            else:
+                self._styles.pop(key, None)
+            self._apply_curve_style(curve)
+            self._refresh_legend()
+            self.curve_styles_changed.emit(self.curve_styles())
+
+        show_curve_style_menu(
+            screen_pos.toPoint(), self, self._styles.get(key, {}), self._default_colors[key],
+            self._line_width, self._default_line(key), _changed,
+        )
+
+    def _refresh_legend(self) -> None:
+        for sample, _label in self._legend.items:
+            sample.update()
+
+    def curve_styles(self) -> dict[str, dict]:
+        return {k: dict(v) for k, v in self._styles.items()}
+
+    def set_curve_styles(self, styles: dict) -> None:
+        """Restore saved overrides; unknown curve keys and non-dict values are ignored."""
+        self._styles = {k: dict(v) for k, v in styles.items() if k in self._default_colors and isinstance(v, dict)}
+        self._apply_curve_pens()
 
     def _on_auto_button_clicked(self) -> None:
         """Replaces `PlotItem.autoBtnClicked`'s default `enableAutoRange()`
@@ -305,7 +382,7 @@ class HistogramPlot(QWidget):
         construction and again on every live theme switch."""
         theme = get_active_theme()
         self._plot_widget.setBackground(theme.toolbar_bg)
-        self._curve_colors[self._all_pixels_curve] = theme.text_primary
+        self._default_colors["all"] = theme.text_primary
         icon = tint_tabler_icon(load_tabler_icon("settings"), QColor(theme.text_muted))
         self._settings_button.setIcon(icon)
         self._range_readout.refresh_theme(theme)
@@ -325,6 +402,12 @@ class HistogramPlot(QWidget):
     def set_reference(self, edges: np.ndarray, values: np.ndarray) -> None:
         self._reference_curve.setData(edges, values)
 
+    def set_selected_sample(self, edges: np.ndarray, values: np.ndarray) -> None:
+        self._selected_sample_curve.setData(edges, values)
+
+    def set_selected_reference(self, edges: np.ndarray, values: np.ndarray) -> None:
+        self._selected_reference_curve.setData(edges, values)
+
     def set_ignore_mask(self, edges: np.ndarray, values: np.ndarray) -> None:
         self._ignore_mask_curve.setData(edges, values)
 
@@ -338,7 +421,10 @@ class HistogramPlot(QWidget):
             self._plot_item.setTitle(None)
 
     def clear(self) -> None:
-        for curve in (self._all_pixels_curve, self._sample_curve, self._reference_curve, self._ignore_mask_curve):
+        for curve in (
+            self._all_pixels_curve, self._sample_curve, self._reference_curve, self._ignore_mask_curve,
+            self._selected_sample_curve, self._selected_reference_curve,
+        ):
             curve.clear()
         self.set_excluded_text(None)
         self.set_highlight_range(None)
@@ -363,6 +449,7 @@ class HistogramPlot(QWidget):
         if enabled == self._log_y:
             return
         self._log_y = enabled
+        self._apply_curve_pens()  # fills are off in log mode
         view_box = self._plot_item.getViewBox()
         current_x_range = view_box.viewRange()[0]
         self._plot_item.setLogMode(x=False, y=enabled)
@@ -409,8 +496,9 @@ class HistogramPlot(QWidget):
         self._apply_curve_pens()
 
     def _apply_curve_pens(self) -> None:
-        for curve, color_hex in self._curve_colors.items():
-            curve.setPen(pg.mkPen(QColor(color_hex), width=self._line_width))
+        for curve in self._curve_keys:
+            self._apply_curve_style(curve)
+        self._refresh_legend()
 
     def set_value_tick(self, value: float | None) -> None:
         """Marks *value* (DN) on the x axis; `None` hides the tick."""

@@ -100,13 +100,16 @@ class RoiMaskProvider(QObject):
         affine_matrix: np.ndarray,
         default_inner_diameter_px: float,
         default_outer_diameter_px: float,
+        variant: Hashable = None,
     ) -> tuple[Hashable, RoiMasks | None]:
         """``(key, masks)``. `masks` is `None` when they are still being
-        computed in the background; `ready(key)` fires when they arrive."""
+        computed in the background; `ready(key)` fires when they arrive.
+        `variant` tells apart different ROI subsets under one generation (the
+        selected ROIs' ids), since the cache key would otherwise be identical."""
         shape = (int(image_shape[0]), int(image_shape[1]))
         affine = np.array(affine_matrix, dtype=np.float64)
         inner, outer = float(default_inner_diameter_px), float(default_outer_diameter_px)
-        key = (self._generation, shape, affine.tobytes(), inner, outer)
+        key = (self._generation, shape, affine.tobytes(), inner, outer, variant)
         self._wanted_key = key
         hit = self.cached(key)
         if hit is not None:

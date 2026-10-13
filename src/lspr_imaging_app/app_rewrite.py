@@ -875,6 +875,7 @@ def _build_histogram_panel(m: _Modules, image_panel: ImagePanel, ui_state: UiSta
         initial_log_y=read(ui_state, HISTOGRAM_LOG_Y),
         initial_bin_width=read(ui_state, HISTOGRAM_BIN_WIDTH),
         initial_line_width=read(ui_state, HISTOGRAM_LINE_WIDTH),
+        selection=m.selection,
     )
 
     def _on_display_settings_changed(y_mode: str, log_y: bool, bin_width_px: float, line_width_px: float) -> None:
