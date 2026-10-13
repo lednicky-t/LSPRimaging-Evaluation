@@ -92,6 +92,7 @@ from ..image_tools.chromatic.model import (
 )
 from ..image_tools.geometry.model import CropDefinition, GeometrySettings
 from ..image_tools.mask.model import MaskChange, MaskSettings
+from ..selection.frame_roles_state import FrameRolesState
 from ..roi.model import (
     AreaRoi,
     AreaRoiDetectionSettings,
@@ -106,7 +107,8 @@ from ..roi.model import (
 logger = logging.getLogger(__name__)
 
 SESSION_SCHEMA_NAME = "lspri_rewrite_session"
-SESSION_SCHEMA_VERSION = "1.2"
+SESSION_SCHEMA_VERSION = "1.3"
+# 1.3 (2026-10-13): optional "frames" block - frame roles (dark, ignored wavelengths/cubes, reference), selection/frame_roles_state.py.
 # 1.2 (2026-10-08): optional per-ROI "timeline" (geometry changes by cube, docs/roi_timeline_design_2026-10-08.md).
 # 1.1: the analysis block. 1.0: first release. Older files load: a missing "timeline" means one geometry for every cube.
 """Bumped major for a breaking change, minor for an additive one - the same
@@ -390,6 +392,7 @@ class SessionState:
     selected_cube: int = 0
     selected_wavelength: float = 0.0
     selected_roi_ids: tuple[int, ...] = ()
+    frame_roles: FrameRolesState = field(default_factory=FrameRolesState)
 
 
 def session_dir(root: Path) -> Path:
@@ -512,6 +515,7 @@ def save_session(root: Path, state: SessionState, naming: FrameNamingScheme) -> 
             "groups": [asdict(group) for group in state.groups],
             "arrays": [asdict(array_group) for array_group in state.arrays],
         },
+        "frames": asdict(state.frame_roles),
         "selection": {
             "cube_index": int(state.selected_cube),
             "wavelength_nm": float(state.selected_wavelength),
@@ -588,4 +592,5 @@ def load_session(root: Path) -> SessionState | None:
         selected_cube=int(selection_block.get("cube_index", 0)),
         selected_wavelength=float(selection_block.get("wavelength_nm", 0.0)),
         selected_roi_ids=tuple(int(roi_id) for roi_id in selection_block.get("selected_roi_ids", ())),
+        frame_roles=FrameRolesState.from_payload(payload.get("frames")),
     )

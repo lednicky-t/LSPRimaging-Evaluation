@@ -57,7 +57,7 @@ from lspr_ui import get_active_theme
 
 from ...dataset import DatasetModule
 from ...image_tools import GeometryModule
-from ...selection import CubeDisplayModule, ReferenceFrameModule, SelectionModule
+from ...selection import CubeDisplayModule, FrameRolesModule, ReferenceFrameModule, SelectionModule
 from ...storage.session_coordinator import SessionCoordinator
 from ..ui_state import UiStateStore
 from .collapsible_section import CollapsibleSection
@@ -65,6 +65,7 @@ from .dataset_experimental_plan import ExperimentalPlanSection
 from .dataset_export import DatasetExportSection
 from .dataset_folder_row import DatasetFolderRow
 from .dataset_summary import DatasetSummarySection
+from .frame_roles_rows import FrameRolesRows
 from .reference_frame_row import ReferenceFrameRow
 from .session_picker_row import SessionPickerRow
 
@@ -127,6 +128,7 @@ def _build_dataset_section(
     geometry: GeometryModule | None = None,
     ui_state: UiStateStore | None = None,
     cube_display: CubeDisplayModule | None = None,
+    frame_roles: FrameRolesModule | None = None,
 ) -> tuple[CollapsibleSection, list[tuple[str, CollapsibleSection]]]:
     """Ported from the source's ``dataset_section`` + its top row (folder
     field + browse/explorer icons, *outside* the nested sections) + its
@@ -151,6 +153,7 @@ def _build_dataset_section(
     folder_row = DatasetFolderRow(dataset, parent)
     session_picker_row = SessionPickerRow(session_coordinator, parent)
     reference_frame_row = ReferenceFrameRow(reference_frame, selection, parent, cube_display=cube_display)
+    frame_roles_rows = FrameRolesRows(frame_roles, selection, parent) if frame_roles is not None else None
 
     summary_content = DatasetSummarySection(dataset, parent)
     summary_section = CollapsibleSection(
@@ -188,6 +191,8 @@ def _build_dataset_section(
     dataset_inner_layout.addWidget(folder_row)
     dataset_inner_layout.addWidget(session_picker_row)
     dataset_inner_layout.addWidget(reference_frame_row)
+    if frame_roles_rows is not None:
+        dataset_inner_layout.addWidget(frame_roles_rows)
     dataset_inner_layout.addWidget(children)
 
     # Starts expanded - the accordion's fallback initial active stage when
@@ -274,13 +279,14 @@ class WorkflowPanel(QWidget):
         geometry: GeometryModule | None = None,
         ui_state: UiStateStore | None = None,
         cube_display: CubeDisplayModule | None = None,
+        frame_roles: FrameRolesModule | None = None,
     ) -> None:
         super().__init__(parent)
         # Order fixes the on-screen stacking order.
         built = [
             (
                 WorkflowStage.DATASET,
-                *_build_dataset_section(self, dataset, selection, reference_frame, session_coordinator, geometry, ui_state, cube_display),
+                *_build_dataset_section(self, dataset, selection, reference_frame, session_coordinator, geometry, ui_state, cube_display, frame_roles),
             ),
             (WorkflowStage.ANALYSIS, *_build_analysis_section(self)),
             (WorkflowStage.OUTPUTS, *_build_outputs_section(self)),

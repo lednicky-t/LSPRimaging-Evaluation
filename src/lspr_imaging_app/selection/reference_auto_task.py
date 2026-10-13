@@ -22,6 +22,7 @@ from PyQt6.QtCore import QObject, pyqtSignal
 
 from ..dataset.module import DatasetModule
 from ..progress import Cancelled
+from .frame_roles_module import FrameRolesModule
 from .module import SelectionModule
 from .reference_frame_module import MODE_AUTO, ReferenceFrameModule
 from .reference_scoring import best_contrast_wavelength
@@ -45,12 +46,14 @@ class ReferenceAutoFind(QObject):
         dataset: DatasetModule,
         selection: SelectionModule,
         reference_frame: ReferenceFrameModule,
+        frame_roles: FrameRolesModule | None = None,
         parent: QObject | None = None,
     ) -> None:
         super().__init__(parent)
         self._dataset = dataset
         self._selection = selection
         self._reference_frame = reference_frame
+        self._frame_roles = frame_roles
         self._thread: threading.Thread | None = None
         self._cancel_event = threading.Event()
         self._generation = 0  # bumped when the dataset changes, so a late result is dropped
@@ -59,6 +62,23 @@ class ReferenceAutoFind(QObject):
         selection.cube_changed.connect(lambda _cube: self._maybe_start())
         dataset.dataset_loaded.connect(lambda _ds: self._on_dataset_changed())
         dataset.dataset_cleared.connect(self._on_dataset_changed)
+        if frame_roles is not None:
+            frame_roles.roles_changed.connect(self._on_roles_changed)
+
+    def _candidate_wavelengths(self, cube_index: int) -> tuple[float, ...]:
+        """The cube's wavelengths that may be a reference: not the dark, not ignored."""
+        wavelengths = tuple(self._dataset.wavelengths_for_cube(cube_index))
+        if self._frame_roles is None:
+            return wavelengths
+        return tuple(wl for wl in wavelengths if self._frame_roles.is_spectral(cube_index, wl))
+
+    def _on_roles_changed(self) -> None:
+        # A cached best wavelength that has since become the dark or ignored is
+        # stale: forget it so it is found again among the remaining frames.
+        for cube, wavelength in self._reference_frame.auto_wavelengths().items():
+            if self._frame_roles is not None and not self._frame_roles.is_spectral(cube, wavelength):
+                self._reference_frame.discard_auto_wavelength(cube)
+        self._maybe_start()
 
     def is_running(self) -> bool:
         return self._thread is not None
@@ -69,7 +89,7 @@ class ReferenceAutoFind(QObject):
         return (
             self._reference_frame.mode() == MODE_AUTO
             and self._reference_frame.auto_wavelength(cube_index) is None
-            and bool(self._dataset.wavelengths_for_cube(cube_index))
+            and bool(self._candidate_wavelengths(cube_index))
         )
 
     def cancel(self) -> None:
@@ -94,7 +114,7 @@ class ReferenceAutoFind(QObject):
         cube = int(self._selection.current_cube())
         if cube not in cubes or self._reference_frame.auto_wavelength(cube) is not None:
             return
-        wavelengths = tuple(self._dataset.wavelengths_for_cube(cube))
+        wavelengths = self._candidate_wavelengths(cube)
         if not wavelengths:
             return
         load_plane = self._dataset.load_plane

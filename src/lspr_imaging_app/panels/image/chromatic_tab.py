@@ -424,8 +424,11 @@ class ChromaticCorrectionTab(QWidget):
         initial_values: ChromaticUiValues | None = None,
         initial_show_landmarks: bool = True,
         initial_all_wavelengths: bool = False,
+        is_spectral: Callable[[int, float], bool] | None = None,
     ) -> None:
         super().__init__(parent)
+        # Which frames may be registered: not the dark, not ignored (frame roles).
+        self._is_spectral = is_spectral or (lambda _cube, wavelength: not is_dark_frame_wavelength(wavelength))
         self._chromatic = chromatic
         self._auto = auto
         self._dataset = dataset
@@ -579,14 +582,14 @@ class ChromaticCorrectionTab(QWidget):
             self._fail("Choose a reference frame first (Workflow panel, Reference frame).")
             return
         cube, wavelength = int(reference[0]), float(reference[1])
-        if is_dark_frame_wavelength(wavelength):
-            self._fail("The reference wavelength is the dark frame (0 nm). Choose a spectral wavelength as reference.")
+        if not self._is_spectral(cube, wavelength):
+            self._fail("The reference frame is the dark background or an ignored frame. Choose a normal wavelength as reference.")
             return
         image_keys = [
             (int(c), float(w))
             for c in self._dataset.spectral_cubes()
             for w in self._dataset.wavelengths_for_cube(c)
-            if not is_dark_frame_wavelength(w)
+            if self._is_spectral(int(c), float(w))
         ]
         in_cube = sum(1 for c, _w in image_keys if c == cube)
         if in_cube < 2:

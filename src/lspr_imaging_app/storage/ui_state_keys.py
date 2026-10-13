@@ -158,9 +158,7 @@ ALL_KEYS: tuple[UiKey, ...] = (
 )
 
 # -- Composite values (several parts that only make sense together) ------------------------------
-REFERENCE_FRAME = "reference_frame"
-"""``{"dataset": str, "mode": "auto" | "manual", "cube": int | None, "wavelength": float | None}``,
-kept per dataset like the highlight range."""
+# (The reference frame is no longer here: it is saved with the other frame roles in the session, selection/frame_roles_state.py.)
 
 ROI_TABLE_VIEW_MODE = "roi_table/view_mode"  # "simple" | "geometry"
 ROI_TABLE_SORT = "roi_table/sort"  # [column, descending]; a column of the view mode it was saved in

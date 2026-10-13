@@ -23,6 +23,8 @@ shape; see its own docstring.
 from .area_selection_module import AreaSelectionMode, AreaSelectionModule
 from .highlight_range_module import HighlightRangeModule
 from .cube_display_module import CubeDisplayModule
+from .frame_roles_module import FrameRolesModule
+from .frame_roles_state import FrameRolesState
 from .module import SelectionModule
 from .reference_frame_module import ReferenceFrameModule
 
@@ -30,6 +32,8 @@ __all__ = [
     "AreaSelectionMode",
     "AreaSelectionModule",
     "CubeDisplayModule",
+    "FrameRolesModule",
+    "FrameRolesState",
     "HighlightRangeModule",
     "SelectionModule",
     "ReferenceFrameModule",

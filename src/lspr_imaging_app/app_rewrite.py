@@ -77,6 +77,7 @@ from .selection import (
     ReferenceFrameModule,
     SelectionModule,
 )
+from .selection.frame_roles_module import FrameRolesModule
 from .selection.reference_auto_task import TASK_ID as REFERENCE_TASK_ID, ReferenceAutoFind
 from .storage.app_settings import AppSettings, load_app_settings, save_app_settings
 from .storage.ui_state_keys import (
@@ -99,7 +100,6 @@ from .storage.ui_state_keys import (
     IMAGE_VIEW_RANGE,
     MASK_SCOPE,
     OVERLAY_KEYS,
-    REFERENCE_FRAME,
     read,
     read_highlight_range,
     read_view_range,
@@ -306,6 +306,7 @@ def _build_analysis_engine(
     background: BackgroundModule,
     roi_toolbox: RoiToolbox,
     analysis_settings: AnalysisSettingsModule | None = None,
+    frame_roles: FrameRolesModule | None = None,
 ) -> AnalysisEngine:
     """Gather the engine's narrow per-module reads into the callables it
     takes at construction (2026-09-23 - previously ``AnalysisEngine()`` with
@@ -352,6 +353,9 @@ def _build_analysis_engine(
         # makes `flatten_background_exclude_mask` actually exclude the ignore
         # mask from the background estimate (2026-09-23; see analysis/tasks.py).
         detection_settings=roi_toolbox.detection_settings,
+        # Which frames may be spectral points (not dark, not ignored). Without
+        # a roles module the engine keeps its own 0 nm-only default.
+        **({} if frame_roles is None else {"is_spectral": frame_roles.is_spectral}),
         # The query layer's fit/metric half. Optional, unlike the reads
         # above: without a settings module the engine answers `get_metric`
         # using MetricSettings' defaults rather than raising, because these
@@ -383,6 +387,7 @@ def capture_session(
     roi_toolbox: RoiToolbox,
     selection: SelectionModule,
     analysis_settings: AnalysisSettingsModule,
+    frame_roles: FrameRolesModule | None = None,
 ) -> SessionState:
     """Read every module's current state into a plain, Qt-free
     :class:`SessionState` (2026-09-23).
@@ -412,6 +417,7 @@ def capture_session(
         selected_cube=selection.current_cube(),
         selected_wavelength=selection.current_wavelength(),
         selected_roi_ids=tuple(sorted(selection.selected_roi_ids())),
+        **({} if frame_roles is None else {"frame_roles": frame_roles.state()}),
     )
 
 
@@ -424,6 +430,7 @@ def apply_session(
     roi_toolbox: RoiToolbox,
     selection: SelectionModule,
     analysis_settings: AnalysisSettingsModule,
+    frame_roles: FrameRolesModule | None = None,
 ) -> None:
     """Push a loaded :class:`SessionState` into every module.
 
@@ -443,6 +450,8 @@ def apply_session(
     chromatic.restore_state(state.chromatic_settings, state.chromatic_models, state.chromatic_landmarks)
     roi_toolbox.restore_state(state.detection_settings, state.rois, state.groups, state.arrays)
     analysis_settings.restore_state(state.metric_settings, state.statistics_settings)
+    if frame_roles is not None:
+        frame_roles.restore_state(state.frame_roles)
 
     selection.set_cube(state.selected_cube)
     selection.set_wavelength(state.selected_wavelength)
@@ -476,6 +485,7 @@ def _build_session_autosave(
     roi_toolbox: RoiToolbox,
     selection: SelectionModule,
     analysis_settings: AnalysisSettingsModule,
+    frame_roles: FrameRolesModule | None = None,
 ) -> SessionAutosave:
     """Build the debounce, and wire every module's own change signal to
     ``schedule()`` it (2026-09-23).
@@ -500,12 +510,12 @@ def _build_session_autosave(
     `autosave.set_root()`."""
     autosave = SessionAutosave(
         capture=lambda: capture_session(
-            geometry, mask, chromatic, background, roi_toolbox, selection, analysis_settings
+            geometry, mask, chromatic, background, roi_toolbox, selection, analysis_settings, frame_roles
         ),
         naming=lambda: _frame_naming(dataset),
     )
 
-    for signal in (
+    signals = [
         geometry.geometry_changed, geometry.cosmetic_changed,
         mask.mask_changed, mask.cosmetic_changed,
         background.background_model_changed,
@@ -518,7 +528,10 @@ def _build_session_autosave(
         # setting changes what the plot means on the next open.
         analysis_settings.settings_changed,
         selection.cube_changed, selection.wavelength_changed, selection.roi_selection_changed,
-    ):
+    ]
+    if frame_roles is not None:
+        signals.append(frame_roles.roles_changed)
+    for signal in signals:
         signal.connect(autosave.schedule)
 
     return autosave
@@ -535,6 +548,7 @@ def _wire_session_coordinator(
     roi_toolbox: RoiToolbox,
     selection: SelectionModule,
     analysis_settings: AnalysisSettingsModule,
+    frame_roles: FrameRolesModule | None = None,
 ) -> None:
     """Restore into every module whenever the *active session* changes -
     on a dataset load, an explicit session switch, or a new session's
@@ -588,7 +602,7 @@ def _wire_session_coordinator(
         with autosave.suspended():
             apply_session(
                 state or SessionState(), geometry, mask, chromatic, background,
-                roi_toolbox, selection, analysis_settings,
+                roi_toolbox, selection, analysis_settings, frame_roles,
             )
         autosave.set_root(root)
 
@@ -613,6 +627,7 @@ class _Modules:
     selection: SelectionModule
     reference_frame: ReferenceFrameModule
     reference_auto: ReferenceAutoFind
+    frame_roles: FrameRolesModule
     cube_display: CubeDisplayModule
     highlight_range: HighlightRangeModule
     area_selection: AreaSelectionModule
@@ -660,6 +675,7 @@ def _build_modules() -> _Modules:
     roi_geometry_sync = RoiGeometrySync(geometry, roi_toolbox, dataset)
     selection = SelectionModule()
     reference_frame = ReferenceFrameModule()
+    frame_roles = FrameRolesModule(dataset, reference_frame)
     highlight_range = HighlightRangeModule()
     # Rectangle/lasso area selection limiting the Image panel's editing tools
     # and the Histogram plot (transient, not persisted); lives in displayed
@@ -669,7 +685,7 @@ def _build_modules() -> _Modules:
     analysis_settings = AnalysisSettingsModule()
     session_coordinator = SessionCoordinator()
     analysis_engine = _build_analysis_engine(
-        dataset, geometry, mask, chromatic, background, roi_toolbox, analysis_settings
+        dataset, geometry, mask, chromatic, background, roi_toolbox, analysis_settings, frame_roles
     )
 
     # SelectionModule holds no RoiToolbox reference of its own (CLAUDE.md,
@@ -688,11 +704,11 @@ def _build_modules() -> _Modules:
     # lands inside a raw TIFF/OME-Zarr folder it doesn't own (see
     # ImageDataset.home).
     session_autosave = _build_session_autosave(
-        dataset, geometry, mask, chromatic, background, roi_toolbox, selection, analysis_settings
+        dataset, geometry, mask, chromatic, background, roi_toolbox, selection, analysis_settings, frame_roles
     )
     _wire_session_coordinator(
         session_coordinator, session_autosave, analysis_engine,
-        geometry, mask, chromatic, background, roi_toolbox, selection, analysis_settings,
+        geometry, mask, chromatic, background, roi_toolbox, selection, analysis_settings, frame_roles,
     )
     dataset.dataset_loaded.connect(lambda ds: session_coordinator.bind_dataset(ds.home))
     dataset.dataset_cleared.connect(session_coordinator.unbind)
@@ -712,65 +728,10 @@ def _build_modules() -> _Modules:
         highlight_range=highlight_range, area_selection=area_selection, analysis_settings=analysis_settings,
         session_coordinator=session_coordinator, analysis_engine=analysis_engine,
         session_autosave=session_autosave, chromatic_auto=ChromaticAutoDetect(chromatic),
-        reference_auto=ReferenceAutoFind(dataset, selection, reference_frame),
+        reference_auto=ReferenceAutoFind(dataset, selection, reference_frame, frame_roles),
+        frame_roles=frame_roles,
         cube_display=CubeDisplayModule(dataset),
     )
-
-
-class _ReferenceFramePersistence:
-    """A manual reference frame must never silently outlive the dataset it was
-    captured against - see `ReferenceFrameModule.reset`'s docstring. The user's
-    own choice is remembered per dataset (`ui_state`): put back when the *same*
-    dataset is opened again. While this class resets or restores the module it
-    ignores the module's own change signal, so a reset is never saved as if the
-    user had chosen "Auto"."""
-
-    def __init__(self, dataset: DatasetModule, reference_frame: ReferenceFrameModule, ui_state: UiStateStore,
-                 settings: AppSettings) -> None:
-        self._reference_frame = reference_frame
-        self._ui_state = ui_state
-        self._settings = settings
-        self._internal_change = False
-        # Closures, not bound methods: PyQt holds a bound method of a plain
-        # (non-QObject) instance only weakly, and nothing else keeps this
-        # object alive - the connections would silently vanish.
-        dataset.dataset_loaded.connect(lambda ds: self._on_dataset_loaded(ds))
-        dataset.dataset_cleared.connect(lambda: self._reset())
-        reference_frame.reference_frame_changed.connect(lambda: self._on_changed())
-
-    def _reset(self) -> None:
-        self._internal_change = True
-        try:
-            self._reference_frame.reset()
-        finally:
-            self._internal_change = False
-
-    def _on_dataset_loaded(self, ds) -> None:
-        self._reset()
-        saved = self._ui_state.get(REFERENCE_FRAME)
-        if (
-            isinstance(saved, dict)
-            and saved.get("dataset") == str(ds.home)
-            and saved.get("mode") == "manual"
-            and saved.get("cube") is not None
-            and saved.get("wavelength") is not None
-        ):
-            self._internal_change = True
-            try:
-                self._reference_frame.set_manual_frame(int(saved["cube"]), float(saved["wavelength"]))
-            finally:
-                self._internal_change = False
-
-    def _on_changed(self) -> None:
-        if self._internal_change or not self._settings.last_dataset_folder:
-            return
-        frame = self._reference_frame.manual_frame()
-        self._ui_state.set(REFERENCE_FRAME, {
-            "dataset": self._settings.last_dataset_folder,
-            "mode": self._reference_frame.mode(),
-            "cube": frame[0] if frame else None,
-            "wavelength": frame[1] if frame else None,
-        })
 
 
 def _wire_highlight_range_persistence(m: _Modules, ui_state: UiStateStore, settings: AppSettings) -> None:
@@ -816,6 +777,7 @@ def _build_image_panel(m: _Modules, ui_state: UiStateStore, theme_obj) -> ImageP
         chromatic_auto=m.chromatic_auto,
         cube_display=m.cube_display,
         analysis_running=m.analysis_engine.is_running,
+        frame_roles=m.frame_roles,
         initial_chromatic_view=(read(ui_state, CHROMATIC_SHOW_LANDMARKS), read(ui_state, CHROMATIC_ALL_WAVELENGTHS)),
         initial_chromatic_values=ChromaticUiValues(
             landmark_count=read(ui_state, CHROMATIC_LANDMARK_COUNT),
@@ -917,6 +879,7 @@ def _build_workflow_panel(m: _Modules, writer: _SettingsWriter, ui_state: UiStat
         geometry=m.geometry,
         ui_state=ui_state,
         cube_display=m.cube_display,
+        frame_roles=m.frame_roles,
     )
     # Immediate persist-on-change, same pattern as theme/auto_apply - switching
     # the open stage is a deliberate, occasional click, not a continuous drag
@@ -1240,7 +1203,6 @@ def build_main_window(
     ui_state = UiStateStore(settings.ui_state, on_changed=lambda values: writer.persist(ui_state=values))
 
     m = _build_modules()
-    _ReferenceFramePersistence(m.dataset, m.reference_frame, ui_state, settings)
     # The cube unit (number / start time) is one app-wide display choice, remembered across restarts.
     saved_cube_mode = read(ui_state, CUBE_DISPLAY_MODE)
     if saved_cube_mode in ("cube", "time"):

@@ -75,6 +75,8 @@ visible while measuring too. Mouse/keyboard rules: ``image_controls.py``.
 
 from __future__ import annotations
 
+import html
+
 import itertools
 import logging
 from collections.abc import Callable
@@ -123,6 +125,7 @@ from ...selection import (
     SelectionModule,
 )
 from ...selection.cube_display_module import MODE_CUBE, MODE_TIME
+from ...selection.frame_roles_module import ROLE_DARK, ROLE_IGNORED, FrameRolesModule
 from ...selection.reference_frame_module import MODE_AUTO
 from ..dock_container import _render_tabler_icon
 from .cube_spin_box import CubeSpinBox
@@ -323,8 +326,10 @@ class ImagePanel(QWidget):
         analysis_running: Callable[[], bool] | None = None,
         roi_scope: RoiScopeModule | None = None,
         roi_display: RoiDisplayStyle | None = None,
+        frame_roles: FrameRolesModule | None = None,
     ) -> None:
         super().__init__(parent)
+        self._frame_roles = frame_roles
         self._show_background = bool(initial_show_background)
         # Whether an analysis run is in flight (the ROI menu's Delete waits for it); tests omit it.
         self._analysis_running = analysis_running or (lambda: False)
@@ -785,6 +790,7 @@ class ImagePanel(QWidget):
             initial_values=self._initial_chromatic_values,
             initial_show_landmarks=self._initial_chromatic_view[0],
             initial_all_wavelengths=self._initial_chromatic_view[1],
+            is_spectral=None if self._frame_roles is None else self._frame_roles.is_spectral,
         )
         self._chromatic_tab.show_landmarks_changed.connect(self._on_show_landmarks_changed)
         self._chromatic_tab.landmark_scope_changed.connect(self._on_landmark_scope_changed)
@@ -1079,6 +1085,8 @@ class ImagePanel(QWidget):
         self._selection.cube_changed.connect(self._on_selection_cube_changed)
         self._selection.wavelength_changed.connect(self._on_selection_wavelength_changed)
         self._reference_frame.reference_frame_changed.connect(self._update_reference_highlight)
+        if self._frame_roles is not None:
+            self._frame_roles.roles_changed.connect(self._on_frame_roles_changed)
 
         # The highlight overlay tints the already-displayed pixel array
         # (`_current_display_image`, set in `_on_rendered`) - a range change
@@ -1953,14 +1961,33 @@ class ImagePanel(QWidget):
         linked, comment = self._dataset.frame_comment(cube_index, wavelength_nm)
         head = f"Cube {self._cube_display.label_for(cube_index)}, {wavelength_nm:.0f} nm"
         if comment:
-            self._set_frame_status(f"{head} | {comment}", comment)
+            text, tooltip = f"{head} | {comment}", comment
         elif linked:
-            self._set_frame_status(f"{head} | N/A", "No comment was recorded at the time this image was acquired.")
+            text, tooltip = f"{head} | N/A", "No comment was recorded at the time this image was acquired."
         else:
-            self._set_frame_status(
+            text, tooltip = (
                 f"{head} | N/A",
                 "This image is not linked to experiment data (no acquisition metadata, or no timing for it).",
             )
+        self._set_frame_status(self._with_role_prefix(text, cube_index, wavelength_nm), tooltip)
+
+    def _with_role_prefix(self, text: str, cube_index: int, wavelength_nm: float) -> str:
+        """A dark frame gets a yellow "Dark", an ignored one a red "Ignored", before
+        the Cube/wavelength text. Other frames: the text unchanged (plain). The dock
+        title label renders the result as rich text, so the whole line is escaped."""
+        if self._frame_roles is None:
+            return text
+        role = self._frame_roles.role_of(cube_index, wavelength_nm)
+        if role not in (ROLE_DARK, ROLE_IGNORED):
+            return text
+        theme = get_active_theme()
+        color, word = (theme.accent_gold, "Dark") if role == ROLE_DARK else (theme.accent_red, "Ignored")
+        return f'<span style="color:{color}">{word}</span> {html.escape(text)}'
+
+    def _on_frame_roles_changed(self) -> None:
+        self._update_reference_highlight()
+        if self._frame_key is not None:
+            self._show_frame_status(*self._frame_key)
 
     def _fit_spin_widths(self, *_args: object) -> None:
         """Both borderless number fields share one width, just wide enough for
@@ -1998,6 +2025,7 @@ class ImagePanel(QWidget):
         set_action.setToolTip("Use the cube and wavelength shown now as the reference frame.")
         find_action = menu.addAction(_render_tabler_icon("search", icon_color), "Find reference")
         find_action.setToolTip("Pick the best-contrast wavelength of this cube as the reference frame.")
+        role_actions = self._add_frame_role_actions(menu) if self._frame_roles is not None else {}
         menu.addSeparator()
         time_action = menu.addAction("Show cubes as start time")
         time_action.setCheckable(True)
@@ -2012,6 +2040,33 @@ class ImagePanel(QWidget):
             self._reference_frame.set_mode(MODE_AUTO)
         elif chosen is time_action:
             self._cube_display.set_mode(MODE_TIME if time_action.isChecked() else MODE_CUBE)
+        elif chosen is not None and chosen in role_actions:
+            role_actions[chosen]()
+
+    def _add_frame_role_actions(self, menu: QMenu) -> dict:
+        """Dark / ignore entries for the frame shown now (cube and wavelength of
+        the handles), as checkable actions; returns {action: what to do}."""
+        roles = self._frame_roles
+        cube, wavelength = self._current_cube(), self._current_wavelength()
+        menu.addSeparator()
+        dark_action = menu.addAction(f"Dark background: {wavelength:g} nm")
+        dark_action.setCheckable(True)
+        dark_action.setChecked(roles.dark_wavelength() == wavelength)
+        dark_action.setToolTip("Use this wavelength as the dark background (LED off). Unscaled for now.")
+        wl_action = menu.addAction(f"Ignore {wavelength:g} nm in all cubes")
+        wl_action.setCheckable(True)
+        wl_action.setChecked(wavelength in roles.ignored_wavelengths())
+        cube_label = self._cube_display.label_for(cube)
+        cube_action = menu.addAction(f"Ignore cube {cube_label}")
+        cube_action.setCheckable(True)
+        cube_action.setChecked(cube in roles.ignored_cubes())
+        for action in (dark_action, wl_action, cube_action):
+            action.setToolTip(action.toolTip() or "Ignored frames are left out of fits and analysis; the data is kept.")
+        return {
+            dark_action: lambda: roles.clear_dark() if roles.dark_wavelength() == wavelength else roles.set_dark(wavelength),
+            wl_action: lambda: roles.set_wavelength_ignored(wavelength, wavelength not in roles.ignored_wavelengths()),
+            cube_action: lambda: roles.set_cube_ignored(cube, cube not in roles.ignored_cubes()),
+        }
 
     def _info_text(self, tool: ImageTool | None) -> str:
         """The info icon's tooltip for the open ribbon tab (2026-10-06): the

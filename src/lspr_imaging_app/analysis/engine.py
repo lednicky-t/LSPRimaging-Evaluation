@@ -121,6 +121,7 @@ class AnalysisEngine(QObject):
         has_timeline: Callable[[], bool] = lambda: False,
         cube_indices: Callable[[], tuple[int, ...]],
         wavelengths_for_cube: Callable[[int], tuple[float, ...]],
+        is_spectral: Callable[[int, float], bool] = lambda _cube, wavelength_nm: not is_dark_frame_wavelength(wavelength_nm),
         geometry_settings: Callable[[], GeometrySettings],
         background_settings: Callable[[], BackgroundSettings],
         chromatic_affine: Callable[[int, float], np.ndarray],
@@ -210,6 +211,7 @@ class AnalysisEngine(QObject):
         self._has_timeline = has_timeline
         self._cube_indices = cube_indices
         self._wavelengths_for_cube = wavelengths_for_cube
+        self._is_spectral = is_spectral
         self._geometry_settings = geometry_settings
         self._background_settings = background_settings
         self._chromatic_affine = chromatic_affine
@@ -607,7 +609,7 @@ class AnalysisEngine(QObject):
                 # planning-time fingerprint and the compute-time snapshot
                 # dict this feeds always agree on which wavelengths exist.
                 # See `dataset.model.is_dark_frame_wavelength`.
-                if is_dark_frame_wavelength(wavelength_nm):
+                if not self._is_spectral(cube_index, wavelength_nm):
                     continue
                 mask_resolution = self._resolve_mask(cube_index, wavelength_nm)
                 mask_ref = None
@@ -661,6 +663,8 @@ class AnalysisEngine(QObject):
             # dark frame never gets a mask/chromatic snapshot written
             # through this pipeline (post-exclusion, nothing analyzes it),
             # so it shouldn't influence the filename precision derived here.
+            # Deliberately the fixed 0 nm rule, not the frame roles: changing a
+            # role must never change the filename scheme of stored files.
             wavelengths.extend(
                 wl for wl in self._wavelengths_for_cube(cube_index) if not is_dark_frame_wavelength(wl)
             )
@@ -789,7 +793,7 @@ class AnalysisEngine(QObject):
         background = self._background_settings()
         inputs: dict[float, WavelengthComputeInput] = {}
         for wavelength_nm in self._wavelengths_for_cube(cube_index):
-            if is_dark_frame_wavelength(wavelength_nm):
+            if not self._is_spectral(cube_index, wavelength_nm):
                 continue
             mask_resolution = self._resolve_mask(cube_index, wavelength_nm)
             resolved_mask = None
