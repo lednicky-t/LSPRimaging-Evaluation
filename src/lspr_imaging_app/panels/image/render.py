@@ -34,11 +34,14 @@ import threading
 import time
 from collections import deque
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import numpy as np
 from PyQt6.QtCore import QObject, pyqtSignal
 
+from ...applog.events import emit_timing
+from ...dataset.io import use_fast_tiff_decoder
+from .display_picture import FrameDisplay, prepare_frame_display
 from ...image_tools.background.model import BackgroundSettings
 from ...image_tools.geometry.model import GeometrySettings
 from ...image_tools.preprocess import apply_preprocessing, estimate_background_image, resolve_external_mask
@@ -92,12 +95,29 @@ class RenderRequest:
     show_background: bool = False
     """Render the background *estimate* for this frame instead of the
     processed image (the Background tab's "show background" toggle)."""
+    submitted_at: float = 0.0
+    """`time.perf_counter()` when `ImageRenderer.submit` took the request (set by
+    the renderer; diagnostics only: it splits "queue" time in the playback stats)."""
+    submitted_while_prefetching: bool = False
+    """The render thread was in the middle of a read-ahead plane read when this
+    request arrived (that read cannot be interrupted; diagnostics only)."""
+    display_levels: tuple[float, float] | None = None
+    """The fixed display range ``(black point, white point)`` from the View tab, or None = every frame at its own
+    automatic range. Display only: it changes how the frame is shown, never a pixel value."""
 
 
 @dataclass(frozen=True)
 class RenderResult:
     request: RenderRequest
     image: np.ndarray | None
+    started_at: float = 0.0  # perf_counter when the render thread began this request
+    finished_at: float = 0.0  # perf_counter when it handed the result to the GUI thread
+    load_seconds: float = 0.0  # reading the plane (disk, or the plane cache)
+    preprocess_seconds: float = 0.0  # geometry / background on the render thread
+    display: FrameDisplay | None = None
+    """The frame's value range and, for a frame with NaN pixels, its ready-made picture
+    (`display_picture.py`), worked out here so the GUI thread does not have to. None = the panel does it."""
+    display_seconds: float = 0.0
     error: str | None = None
     """A human-readable failure, for the panel to show instead of an image.
     Errors are reported rather than raised: a missing plane (a cube short a
@@ -129,12 +149,16 @@ class ImageRenderer(QObject):
         # Planes to read ahead while idle (`prefetch`), guarded by `_lock`.
         self._prefetch_queue: deque[tuple[int, float]] = deque()
         self._prefetch_not_before = 0.0
+        self._prefetching = False  # a read-ahead plane read is running right now (read by `submit`)
         self._thread = threading.Thread(target=self._loop, name="ImageRenderer", daemon=True)
         self._thread.start()
 
     def submit(self, request: RenderRequest) -> None:
         """Queue `request`, replacing any request not yet started. Returns
         immediately - the result arrives later via `rendered`."""
+        request = replace(
+            request, submitted_at=time.perf_counter(), submitted_while_prefetching=self._prefetching
+        )
         with self._lock:
             self._pending = request
         self._wake.set()
@@ -143,7 +167,7 @@ class ImageRenderer(QObject):
     """No read-ahead starts until this long after the latest `prefetch` call, so
     a slider drag (one call per rendered frame) never competes with its own renders."""
 
-    def prefetch(self, keys: Sequence[tuple[int, float]]) -> None:
+    def prefetch(self, keys: Sequence[tuple[int, float]], *, quiet_seconds: float | None = None) -> None:
         """Read these (cube, wavelength) planes into the plane cache while the
         thread has nothing to render, most wanted first; replaces any earlier
         list. Returns immediately.
@@ -155,7 +179,8 @@ class ImageRenderer(QObject):
         missing plane properly if the user ever navigates there."""
         with self._lock:
             self._prefetch_queue = deque(keys)
-            self._prefetch_not_before = time.monotonic() + self.PREFETCH_QUIET_SECONDS
+            quiet = self.PREFETCH_QUIET_SECONDS if quiet_seconds is None else quiet_seconds
+            self._prefetch_not_before = time.monotonic() + quiet
         self._wake.set()
 
     def clear_prefetch(self) -> None:
@@ -213,13 +238,17 @@ class ImageRenderer(QObject):
             if not self._prefetch_queue or time.monotonic() < self._prefetch_not_before:
                 return False
             cube_index, wavelength_nm = self._prefetch_queue.popleft()
+        self._prefetching = True
         try:
             self._load_plane(cube_index, wavelength_nm)
         except Exception as exc:  # noqa: BLE001 - read-ahead must never kill the render thread
             logger.debug("Prefetch of cube=%s wl=%s skipped: %s", cube_index, wavelength_nm, exc)
+        finally:
+            self._prefetching = False
         return True
 
     def _loop(self) -> None:
+        use_fast_tiff_decoder(True)  # this thread only: plane reads here use the native TIFF decoder (dataset/io.py)
         while not self._stopping:
             self._wake.wait(timeout=self._prefetch_wait())
             self._wake.clear()
@@ -242,6 +271,10 @@ class ImageRenderer(QObject):
 
     def _render(self, request: RenderRequest) -> RenderResult:
         started = time.perf_counter()
+        result = self._render_inner(request, started)
+        return replace(result, started_at=started, finished_at=time.perf_counter())
+
+    def _render_inner(self, request: RenderRequest, started: float) -> RenderResult:
         try:
             raw = self._load_plane(request.cube_index, request.wavelength_nm)
         except (KeyError, RuntimeError, OSError) as exc:
@@ -277,9 +310,23 @@ class ImageRenderer(QObject):
 
         # One line per rendered frame, DEBUG only (CLAUDE.md performance rule:
         # instrument at write time, aggregate, never log inside an inner loop).
-        logger.debug(
-            "ImageRenderer cube=%s wl=%s: load=%.3fs preprocess=%.3fs shape=%s",
-            request.cube_index, request.wavelength_nm,
-            load_seconds, time.perf_counter() - processed_started, processed.shape,
+        preprocess_seconds = time.perf_counter() - processed_started
+        display = None
+        display_started = time.perf_counter()
+        if not request.show_background:  # the background estimate is drawn with the data's levels instead
+            try:
+                display = prepare_frame_display(processed, request.display_levels)
+            except Exception:  # noqa: BLE001 - the panel then prepares the frame itself, as before
+                logger.exception("Preparing the display picture failed for cube=%s wl=%s", request.cube_index, request.wavelength_nm)
+        display_seconds = time.perf_counter() - display_started
+        emit_timing(
+            logger, "render.frame", (load_seconds + preprocess_seconds + display_seconds) * 1000.0,
+            cube=request.cube_index, wl=request.wavelength_nm,
+            load_ms=round(load_seconds * 1000.0, 2), prep_ms=round(preprocess_seconds * 1000.0, 2),
+            pic_ms=round(display_seconds * 1000.0, 2), prepared=bool(display is not None and display.picture is not None),
+            h=int(processed.shape[0]), w=int(processed.shape[1]),
         )
-        return RenderResult(request=request, image=processed)
+        return RenderResult(
+            request=request, image=processed, load_seconds=load_seconds, preprocess_seconds=preprocess_seconds,
+            display=display, display_seconds=display_seconds,
+        )

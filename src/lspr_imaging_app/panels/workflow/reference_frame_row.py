@@ -30,7 +30,7 @@ from PyQt6.QtWidgets import QButtonGroup, QHBoxLayout, QLabel, QToolButton, QVBo
 from lspr_ui import get_active_theme, transparent_icon_button_stylesheet
 
 from ...selection import CubeDisplayModule, ReferenceFrameModule, SelectionModule
-from ...selection.reference_frame_module import MODE_AUTO, MODE_MANUAL
+from ...selection.reference_frame_module import MODE_MANUAL
 from ..dock_container import _render_tabler_icon
 
 logger = logging.getLogger(__name__)
@@ -55,16 +55,15 @@ class ReferenceFrameRow(QWidget):
         label = QLabel("Define reference frame:", self)
 
         self._auto_button = QToolButton(self)
-        self._auto_button.setCheckable(True)
         self._auto_button.setAutoRaise(True)
         self._auto_button.setFixedSize(24, 24)
         self._auto_button.setIconSize(QSize(18, 18))
         self._auto_button.setStyleSheet(transparent_icon_button_stylesheet())
         self._auto_button.setToolTip(
-            "Find reference: for the cube being viewed, pick the wavelength with the best contrast (kept until you "
-            "change cube; it does not follow the wavelength slider)."
+            "Find reference: score every wavelength of the cube being viewed and keep the best-contrast one as the "
+            "reference frame (runs only when clicked; the result stays fixed, like Set reference)."
         )
-        self._auto_button.clicked.connect(lambda: self._reference_frame_module.set_mode(MODE_AUTO))
+        self._auto_button.clicked.connect(self._reference_frame_module.request_find)
 
         self._manual_button = QToolButton(self)
         self._manual_button.setCheckable(True)
@@ -77,7 +76,6 @@ class ReferenceFrameRow(QWidget):
 
         self._mode_group = QButtonGroup(self)
         self._mode_group.setExclusive(True)
-        self._mode_group.addButton(self._auto_button)
         self._mode_group.addButton(self._manual_button)
 
         self._status_label = QLabel("[Ref.frame: -]", self)
@@ -124,24 +122,20 @@ class ReferenceFrameRow(QWidget):
         )
 
     def _on_selection_changed(self, _value: object) -> None:
-        # Only the cube matters, and only in Auto (Find reference is per
-        # cube); Set reference shows the stored snapshot whatever is viewed.
-        if self._reference_frame_module.mode() == MODE_AUTO:
-            self._refresh()
+        # The reference is one fixed frame; nothing to redraw when the view moves.
+        return
 
     def _refresh(self) -> None:
         mode = self._reference_frame_module.mode()
-        self._auto_button.setChecked(mode == MODE_AUTO)
         self._manual_button.setChecked(mode == MODE_MANUAL)
-        self._auto_button.setIcon(_render_tabler_icon("search", _ACTIVE_COLOR if mode == MODE_AUTO else get_active_theme().text_primary))
+        self._auto_button.setIcon(_render_tabler_icon("search", get_active_theme().text_primary))
         self._manual_button.setIcon(
             _render_tabler_icon("pin", _ACTIVE_COLOR if mode == MODE_MANUAL else get_active_theme().text_primary)
         )
         frame = self._reference_frame_module.resolve(self._selection_module.current_cube())
         cube, wavelength = frame if frame is not None else (None, None)
         if cube is None:
-            pending = mode == MODE_AUTO and bool(self._selection_module.current_cube() is not None)
-            self._status_label.setText("[Ref.frame: finding...]" if pending else "[Ref.frame: -]")
+            self._status_label.setText("[Ref.frame: -]")
         else:
             # Bounded precision (2026-09-25) - `:g` on a wavelength with
             # float imprecision (e.g. 505.333333...) measured ~384px wide,

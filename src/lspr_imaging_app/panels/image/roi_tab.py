@@ -9,10 +9,11 @@ Layout (one ribbon row, captioned groups, thin separators between them):
        Display          Scope            Shape             Array              Groups
 
 Display only (CLAUDE.md "panels/"): the colours and visibility are reported
-through `overlay_changed` / `labels_toggled` and the panel applies them to the
-overlay; ROI edits go through `ArrayActions` / `GroupActions`, which call the
-`RoiToolbox` command API. The View tab carries copies of the Display controls
-(`view_tab.py`); it reads them from the public properties here.
+through `overlay_changed` / `labels_toggled`, where the labels sit through
+`label_placement_changed`, and the panel applies them to the overlay; ROI edits
+go through `ArrayActions` / `GroupActions`, which call the `RoiToolbox` command
+API. The View tab carries copies of the Display controls and of the Groups
+label menu (`view_tab.py`); it reads them from the public properties here.
 """
 
 from __future__ import annotations
@@ -39,6 +40,8 @@ from .general_group import ICON_SIZE as _RIBBON_ICON_SIZE
 from .general_group import style_general_icon_button
 from .group_actions import GroupActions
 from .group_controls import GroupControls
+from .group_label_menu import GroupLabelMenu
+from .label_placement_picker import LabelPlacementPicker
 from .roi_display_menu import RoiDisplayMenu
 from .roi_overlay import RoiOverlay
 from .roi_overlay_controls import RoiOverlayControls
@@ -50,6 +53,7 @@ class RoiTab(QWidget):
     # A Sample / Reference display control changed: (kind "sample"|"reference", field "visible"|"color"|"alpha", value).
     overlay_changed = pyqtSignal(str, str, object)
     labels_toggled = pyqtSignal(bool)
+    label_placement_changed = pyqtSignal(str)  # one of `label_placement.PLACEMENTS`
     # The labels button's icon was redrawn (toggle, theme change, restore); the View tab's copy follows it.
     labels_icon_refreshed = pyqtSignal()
     group_labels_changed = pyqtSignal()
@@ -91,8 +95,15 @@ class RoiTab(QWidget):
         style_general_icon_button(self._labels_button)
         self._labels_button.toggled.connect(self._on_labels_toggled)
         self._refresh_labels_icon()
+        self._label_placement_picker = LabelPlacementPicker(overlay.label_placement, self)
+        self._label_placement_picker.setToolTip(
+            "Where each ROI's label sits: the middle centres it on the ROI, the others put it just outside the circle."
+        )
+        self._label_placement_picker.placement_changed.connect(self.label_placement_changed)
         # One pick-up menu holds the Sample / Reference / Labels rows (roi_display_menu.py).
-        self._display_menu = RoiDisplayMenu(self._sample_controls, self._reference_controls, self._labels_button, self)
+        self._display_menu = RoiDisplayMenu(
+            self._sample_controls, self._reference_controls, self._labels_button, self._label_placement_picker, self
+        )
         display_group, self._display_caption = labeled_icon_group(self, self._display_menu, "Display")
         self._scope_toggle = RoiScopeToggle(roi_scope, self)
         scope_group, self._scope_caption = labeled_icon_group(self, self._scope_toggle, "Scope")
@@ -156,6 +167,14 @@ class RoiTab(QWidget):
     def labels_button(self) -> QToolButton:
         return self._labels_button
 
+    @property
+    def label_placement_picker(self) -> LabelPlacementPicker:
+        return self._label_placement_picker
+
+    @property
+    def group_label_menu(self) -> GroupLabelMenu:
+        return self._group_controls.label_menu
+
     def group_label_settings(self):
         """The Groups label menu's current settings (what the overlay draws)."""
         return self._group_controls.label_menu.settings()
@@ -174,11 +193,17 @@ class RoiTab(QWidget):
         blocked = self._labels_button.blockSignals(True)
         self._labels_button.setChecked(overlay.labels_visible)
         self._labels_button.blockSignals(blocked)
+        self._label_placement_picker.set_placement(overlay.label_placement, emit=False)
         self._refresh_labels_icon()
 
+    def set_label_placement(self, placement: str) -> None:
+        """Pick where the ROI labels sit, as a click on the grid would (reported through `label_placement_changed`)."""
+        self._label_placement_picker.set_placement(placement)
+
     def bind_ui_state(self, store: UiStateStore) -> None:
-        """Remember the Array and Groups-label settings (see `panels/ui_state.py`)."""
+        """Remember the Array, ROI-label place and Groups-label settings (see `panels/ui_state.py`)."""
         self._array_controls.bind_ui_state(store)
+        self._label_placement_picker.bind_ui_state(store, "image/roi_label_placement")
         self._group_controls.label_menu.bind_ui_state(store)
 
     def _on_labels_toggled(self, shown: bool) -> None:
@@ -204,6 +229,7 @@ class RoiTab(QWidget):
         self._reference_controls.refresh_theme(theme)
         style_general_icon_button(self._labels_button)
         self._refresh_labels_icon()
+        self._label_placement_picker.refresh_theme(theme)
         self._display_menu.refresh_theme(theme)
         self._group_controls.refresh_theme()
         self._shape_picker.refresh_theme()

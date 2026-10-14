@@ -6,14 +6,20 @@ ROIs), so a change on either copy shows on the other.
 
 Layout (one ribbon row, captioned groups, thin separators between them):
 
-    [histogram overlay] | [mask overlay] | [landmarks] | [background] | [ROI display menu] | [scale bar]
-        Histogram            Mask           Chromatic     Background         ROIs             Scale bar
+    [display range] | [show all, hide all] | [histogram overlay] | [mask overlay] | [landmarks] | [background] | [ROI display menu] | [group labels menu] | [scale bar]
+     Display range           All                  Histogram             Mask           Chromatic     Background         ROIs             Group labels        Scale bar
 
 Display only (CLAUDE.md "panels/"): the copies report through this tab's
 signals and the panel applies the change, exactly as for the original control.
 The Chromatic and Background buttons are mirrors (`mirror_icon_button`) of
-those tabs' own buttons; the Mask and ROI controls are second instances kept
-equal with `sync_from`.
+those tabs' own buttons; the Mask, ROI and Group-label controls are second
+instances kept equal with `sync_from`.
+
+**All** (`set_all_overlays`): Show all / Hide all switch every overlay toggle on this tab (histogram highlight,
+mask, chromatic landmarks, ROI sample / reference / labels, group labels, scale bar) through the toggles' own
+buttons, so each one reports and redraws its icon exactly as for a click. The Background view is left out: it
+swaps the whole image for the background estimate rather than drawing over it. The chromatic "all wavelengths"
+button is a mode, not a visibility, and is left alone too.
 """
 
 from __future__ import annotations
@@ -28,9 +34,13 @@ from ...image_tools import GeometryModule
 from ..ribbon_group import group_label_style, labeled_icon_group, vertical_separator
 from .background_tab import BackgroundTab
 from .chromatic_tab import ChromaticCorrectionTab
+from .display_range_controls import DisplayRangeControls
 from .general_group import mirror_icon_button
+from .group_label_menu import GroupLabelMenu
 from .histogram_highlight_overlay_controls import HistogramHighlightOverlayControls
+from .label_placement_picker import LabelPlacementPicker
 from .mask_overlay_controls import MaskOverlayControls
+from .overlay_all_controls import OverlayAllControls
 from .overlay_tint import OverlayTint
 from .roi_display_menu import RoiDisplayMenu
 from .roi_overlay_controls import RoiOverlayControls
@@ -49,6 +59,7 @@ class ViewTab(QWidget):
     # This tab's copy of the ROI display controls changed: (kind, field, value), as on the ROIs tab.
     roi_overlay_changed = pyqtSignal(str, str, object)
     scale_bar_color_changed = pyqtSignal(QColor)
+    display_range_changed = pyqtSignal(bool, float, float)  # (fixed, black point, white point), a change made by the user
 
     def __init__(
         self,
@@ -73,6 +84,19 @@ class ViewTab(QWidget):
         self._highlight_controls.alpha_changed.connect(self.highlight_alpha_changed)
         highlight_group, self._highlight_label = labeled_icon_group(self, self._highlight_controls, "Histogram")
 
+        # Display range: automatic per frame, or one fixed black / white point for every frame.
+        self._display_range_controls = DisplayRangeControls(self)
+        self._display_range_controls.changed.connect(self.display_range_changed)
+        display_range_group, self._display_range_label = labeled_icon_group(
+            self, self._display_range_controls, "Display range"
+        )
+
+        # All: Show all / Hide all, wired below once every overlay control exists (`set_all_overlays`).
+        self._all_controls = OverlayAllControls(self)
+        self._all_controls.show_all_requested.connect(lambda: self.set_all_overlays(True))
+        self._all_controls.hide_all_requested.connect(lambda: self.set_all_overlays(False))
+        all_group, self._all_label = labeled_icon_group(self, self._all_controls, "All")
+
         # Mask: a second copy of the Mask tab's Visibility icons; each copy mirrors the other.
         self._mask_controls = MaskOverlayControls(
             visible=mask_tint.visible, color=mask_tint.color, alpha=mask_tint.alpha, parent=self
@@ -86,6 +110,7 @@ class ViewTab(QWidget):
         mask_group, self._mask_label = labeled_icon_group(self, self._mask_controls, "Mask")
 
         # Chromatic and Background: mirrors of those tabs' own View buttons.
+        self._chromatic_tab = chromatic_tab
         chromatic_row = QWidget(self)
         chromatic_layout = QHBoxLayout(chromatic_row)
         chromatic_layout.setContentsMargins(0, 0, 0, 0)
@@ -108,16 +133,34 @@ class ViewTab(QWidget):
         self._roi_reference_controls = self._copy_roi_controls("reference", roi_tab.reference_controls)
         labels_mirror = mirror_icon_button(roi_tab.labels_button, self)
         roi_tab.labels_icon_refreshed.connect(labels_mirror.sync)  # follows the icon (theme change, restore)
+        # The label-place grid: a click here picks it on the ROIs tab's grid (which reports and saves it), and that grid's changes show here.
+        original_picker = roi_tab.label_placement_picker
+        self._roi_placement_copy = LabelPlacementPicker(original_picker.placement(), self)
+        self._roi_placement_copy.setToolTip(original_picker.toolTip())
+        self._roi_placement_copy.placement_changed.connect(roi_tab.set_label_placement)
+        roi_tab.label_placement_changed.connect(lambda _placement: self._roi_placement_copy.sync_from(original_picker))
         self._roi_display_menu = RoiDisplayMenu(
-            self._roi_sample_controls, self._roi_reference_controls, labels_mirror, self
+            self._roi_sample_controls, self._roi_reference_controls, labels_mirror, self._roi_placement_copy, self
         )
         roi_group, self._roi_label = labeled_icon_group(self, self._roi_display_menu, "ROIs")
+
+        # Group labels: a second copy of the ROIs tab's Groups label menu, equal to it both ways. A change made
+        # here is handed to the original as if the user had made it there (so the panel redraws and it is saved).
+        original_menu = roi_tab.group_label_menu
+        self._group_label_menu = GroupLabelMenu(self)
+        self._group_label_menu.sync_from(original_menu)
+        self._group_label_menu.changed.connect(lambda: original_menu.sync_from(self._group_label_menu, silent=False))
+        original_menu.changed.connect(lambda: self._group_label_menu.sync_from(original_menu))
+        group_labels_group, self._group_labels_label = labeled_icon_group(self, self._group_label_menu, "Group labels")
 
         self._scale_bar_controls = ScaleBarControls(geometry, scale_bar_color, self)
         self._scale_bar_controls.color_changed.connect(self.scale_bar_color_changed)
         scale_bar_group, self._scale_bar_label = labeled_icon_group(self, self._scale_bar_controls, "Scale bar")
 
-        groups = (highlight_group, mask_group, chromatic_group, background_group, roi_group, scale_bar_group)
+        groups = (
+            display_range_group, all_group, highlight_group, mask_group, chromatic_group, background_group,
+            roi_group, group_labels_group, scale_bar_group,
+        )
         self._separators = [vertical_separator(self) for _ in groups[1:]]
         layout = QHBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -148,26 +191,52 @@ class ViewTab(QWidget):
     def scale_bar_controls(self) -> ScaleBarControls:
         return self._scale_bar_controls
 
+    @property
+    def display_range_controls(self) -> DisplayRangeControls:
+        return self._display_range_controls
+
+    def set_all_overlays(self, shown: bool) -> None:
+        """Show all / Hide all: switch every overlay toggle on or off, each through its own button, so it reports
+        and redraws its icon exactly as a click does. A toggle already in the wanted state does nothing."""
+        shown = bool(shown)
+        self._highlight_controls.set_visible(shown)
+        self._mask_controls.set_visible(shown)
+        self._chromatic_tab.show_button().setChecked(shown)  # the landmarks (not the "all wavelengths" mode)
+        self._roi_sample_controls.set_visible(shown)
+        self._roi_reference_controls.set_visible(shown)
+        self._roi_tab.labels_button.setChecked(shown)
+        self._group_label_menu.show_button.setChecked(shown)
+        self._scale_bar_controls.set_visible(shown)
+
     def sync_roi_copies(self) -> None:
         """Copy the ROIs tab's controls onto this tab's copies (after the ROIs tab was set without signals)."""
         self._roi_sample_controls.sync_from(self._roi_tab.sample_controls)
         self._roi_reference_controls.sync_from(self._roi_tab.reference_controls)
+        self._roi_placement_copy.sync_from(self._roi_tab.label_placement_picker)
+        self._group_label_menu.sync_from(self._roi_tab.group_label_menu)
 
     def refresh_theme(self) -> None:
         theme = get_active_theme()
         self._highlight_controls.refresh_theme(theme)
+        self._display_range_controls.refresh_theme(theme)
+        self._all_controls.refresh_theme(theme)
         self._mask_controls.refresh_theme(theme)
         self._roi_sample_controls.refresh_theme(theme)
         self._roi_reference_controls.refresh_theme(theme)
+        self._roi_placement_copy.refresh_theme(theme)
         self._roi_display_menu.refresh_theme(theme)
+        self._group_label_menu.refresh_theme()
         for separator in self._separators:
             separator.setStyleSheet(f"color: {theme.control_border};")
         for label in (
             self._highlight_label,
+            self._display_range_label,
+            self._all_label,
             self._mask_label,
             self._chromatic_label,
             self._background_label,
             self._roi_label,
+            self._group_labels_label,
             self._scale_bar_label,
         ):
             label.setStyleSheet(group_label_style())

@@ -1,7 +1,8 @@
 """Group labels on the image: each group's name, drawn beside its first or last ROI.
 
 Like the ROI labels (`roi_label_overlay.py`) one item paints every label in screen pixels, a child of the plot's
-`ViewBox`. Differences: a label is placed *outside* its anchor ROI on a chosen side, the text may run vertically,
+`ViewBox`. Differences: a label sits at one of nine places around its anchor ROI (on it, or outside it on a side
+or corner: `label_placement.py`), the text may run vertically,
 and it is kept from running into the next group's labels by a **box**: the longest a label may be, set as a
 percent of the distance between neighbouring ROIs of its group (default 90 %, so a label about one pitch long
 just fits before the next ROI's). A name that does not fit on one line is first shrunk, down to the smallest
@@ -24,8 +25,8 @@ from PyQt6.QtCore import QPointF, QRectF
 from PyQt6.QtGui import QColor, QFont, QFontMetricsF, QPainter
 
 from ...roi.model import AreaRoi, AreaRoiGroup
+from .label_placement import DEFAULT_GROUP_PLACEMENT, placement_origin
 
-SIDES = ("top", "left", "bottom", "right")
 POSITIONS = ("first", "last")
 MIN_BOX_PERCENT = 10
 MAX_BOX_PERCENT = 300
@@ -46,7 +47,7 @@ class GroupLabelSettings:
     visible: bool = False
     direction: str = "horizontal"  # "horizontal" | "vertical" (reads bottom to top) | "diagonal" (45 degrees, rising)
     position: str = "first"  # the group's "first" or "last" ROI (by ROI number) carries the label
-    side: str = "top"  # of that ROI: "top" | "left" | "bottom" | "right"
+    side: str = DEFAULT_GROUP_PLACEMENT  # where around that ROI: one of `label_placement.PLACEMENTS` ("top", "center", "bottom-left", ...)
     box_percent: float = float(DEFAULT_BOX_PERCENT)
     min_point_size: float = float(DEFAULT_MIN_POINT_SIZE)  # the smallest text the shrinking may reach (points)
 
@@ -107,17 +108,10 @@ def group_label_entries(
 
 
 def label_rect(anchor: QPointF, radius: float, side: str, width: float, height: float, gap: float = _GAP_PX) -> QRectF:
-    """Where a ``width`` x ``height`` label goes (screen pixels, y down) on ``side`` of a circle of ``radius``
-    around ``anchor``: just outside the circle, centred on it across the other axis."""
-    if side == "top":
-        return QRectF(anchor.x() - width / 2.0, anchor.y() - radius - gap - height, width, height)
-    if side == "bottom":
-        return QRectF(anchor.x() - width / 2.0, anchor.y() + radius + gap, width, height)
-    if side == "left":
-        return QRectF(anchor.x() - radius - gap - width, anchor.y() - height / 2.0, width, height)
-    if side == "right":
-        return QRectF(anchor.x() + radius + gap, anchor.y() - height / 2.0, width, height)
-    raise ValueError(f"side must be one of {SIDES}, got {side!r}")
+    """Where a ``width`` x ``height`` label goes (screen pixels, y down) at ``side`` (a placement, see
+    `label_placement.py`) of a circle of ``radius`` around ``anchor``: just outside the circle, or centred on it."""
+    left, top = placement_origin(anchor.x(), anchor.y(), radius, side, width, height, gap)
+    return QRectF(left, top, width, height)
 
 
 def wrap_text(text: str, width_of: Callable[[str], float], box_px: float, max_lines: int = _MAX_LINES) -> list[str]:

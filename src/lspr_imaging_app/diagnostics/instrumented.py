@@ -18,6 +18,8 @@ from typing import Callable, TypeVar
 
 from PyQt6.QtCore import QObject, pyqtSignal
 
+from ..applog.events import emit_timing
+
 logger = logging.getLogger(__name__)
 
 _F = TypeVar("_F", bound=Callable[..., object])
@@ -58,7 +60,7 @@ def instrumented(label: str) -> Callable[[_F], _F]:
                 return func(*args, **kwargs)
             finally:
                 duration_ms = (time.perf_counter() - start) * 1000.0
-                logger.debug("%s | %.3fms", label, duration_ms)
+                emit_timing(logger, label, duration_ms)  # a structured DEBUG record (event = the label)
                 module_name = label.split(".", 1)[0]
                 diagnostics_hub.record(module_name, label, duration_ms, time.time())
 

@@ -25,6 +25,29 @@ DEFAULT_CIRCLE_POINTS = 48
 """Vertices per drawn circle (closed: the last point repeats the first)."""
 
 
+def circle_points(
+    display_centers_xy: np.ndarray,
+    diameters_px: np.ndarray,
+    affine_matrix: np.ndarray,
+    *,
+    n_points: int = DEFAULT_CIRCLE_POINTS,
+) -> tuple[np.ndarray, np.ndarray]:
+    """The vertices of many circles as two (N, n_points) arrays ``(xs, ys)``, one row per circle,
+    each row closed (last vertex = first). Same geometry as `circle_outlines` (which is these
+    rows joined with NaN separators), for callers that paint circles one by one."""
+    centers = np.asarray(display_centers_xy, dtype=np.float64).reshape(-1, 2)
+    radii = np.asarray(diameters_px, dtype=np.float64).reshape(-1) / 2.0
+    if centers.shape[0] == 0:
+        return np.empty((0, n_points)), np.empty((0, n_points))
+    theta = np.linspace(0.0, 2.0 * np.pi, n_points, endpoint=True)
+    unit = np.column_stack((np.cos(theta), np.sin(theta)))
+    shape = unit @ np.asarray(affine_matrix, dtype=np.float64)[:, :2].T  # the circle's shape under the affine
+    return (
+        centers[:, 0:1] + radii[:, None] * shape[None, :, 0],
+        centers[:, 1:2] + radii[:, None] * shape[None, :, 1],
+    )
+
+
 def circle_outlines(
     display_centers_xy: np.ndarray,
     diameters_px: np.ndarray,

@@ -38,6 +38,8 @@ from PyQt6.QtWidgets import QApplication, QMainWindow, QMenu, QStatusBar
 from lspr_ui import app_icon, set_active_theme
 
 from .analysis import AnalysisEngine, AnalysisSettingsModule
+from .applog import LogSystem, RingBufferHandler, configure_logging, log_event
+from .applog import current as current_log_system
 from .analysis.provenance import FrameNamingScheme
 from .dataset import DatasetModule
 from .gui.app_theme import LSPRI_BRIGHT_THEME, LSPRI_DARK_THEME, apply_app_theme
@@ -57,6 +59,7 @@ from .image_tools import (
 from .panels.dock_container import PanelContainer
 from .panels.fixed_width_separator_guard import FixedWidthSeparatorGuard
 from .panels.histogram import HistogramPanel
+from .panels.log import LogPanel
 from .panels.image import ImagePanel
 from .panels.image.overlay_style import OverlayStyle
 from .panels.layout_presets import wire_view_menu
@@ -90,6 +93,7 @@ from .storage.ui_state_keys import (
     CHROMATIC_MAX_STEP,
     CHROMATIC_SHOW_LANDMARKS,
     CHROMATIC_STRIDE,
+    DISPLAY_RANGE,
     HIGHLIGHT_RANGE,
     HISTOGRAM_BIN_WIDTH,
     HISTOGRAM_LINE_WIDTH,
@@ -101,6 +105,7 @@ from .storage.ui_state_keys import (
     MASK_SCOPE,
     OVERLAY_KEYS,
     read,
+    read_display_range,
     read_highlight_range,
     read_view_range,
 )
@@ -286,6 +291,8 @@ def _wire_theme_menu(
         image_panel.refresh_theme()
         for table in window.findChildren(RoiTablePanel):
             table.refresh_theme()
+        for log_panel in window.findChildren(LogPanel):
+            log_panel.refresh_theme()
         for dock in window.findChildren(PanelContainer):
             dock.refresh_theme()
         for section in window.findChildren(CollapsibleSection):
@@ -760,6 +767,32 @@ def _wire_highlight_range_persistence(m: _Modules, ui_state: UiStateStore, setti
     highlight_range.range_changed.connect(_on_highlight_range_changed)
 
 
+def _wire_display_range_persistence(
+    m: _Modules, ui_state: UiStateStore, settings: AppSettings, image_panel: ImagePanel
+) -> None:
+    """The Image panel's fixed display range: remembered per dataset, like the highlight range (an intensity
+    range from one dataset means nothing on another). When a dataset finishes loading the saved range is put back
+    if it was set on this same dataset; otherwise the display goes back to automatic per frame, so a range from
+    another dataset can never leave the new one looking all white or all black."""
+
+    def _restore_display_range(ds) -> None:
+        saved = read_display_range(ui_state)
+        if saved is not None and saved[0] == str(ds.home):
+            image_panel.set_display_range(saved[1], saved[2], saved[3])
+        else:
+            _fixed, low, high = image_panel.display_range()
+            image_panel.set_display_range(False, low, high)
+
+    def _on_display_range_changed(fixed: bool, low: float, high: float) -> None:
+        ui_state.set(
+            DISPLAY_RANGE,
+            {"dataset": settings.last_dataset_folder, "fixed": bool(fixed), "min": float(low), "max": float(high)},
+        )
+
+    m.dataset.dataset_loaded.connect(_restore_display_range)
+    image_panel.display_range_changed.connect(_on_display_range_changed)
+
+
 def _overlay_style(visible: bool, color: str | None, alpha: float, default_color: str) -> OverlayStyle:
     return OverlayStyle(visible, color or default_color, alpha)
 
@@ -1166,6 +1199,53 @@ def _auto_reopen_last_dataset(dataset: DatasetModule, settings: AppSettings) -> 
         logger.info("Last dataset folder %s no longer exists - skipping auto-reopen", last_folder)
 
 
+_fallback_log_ring: RingBufferHandler | None = None
+
+
+def _log_ring() -> tuple[RingBufferHandler, LogSystem | None]:
+    """The ring buffer the Log panel reads. Normally the one `main()` configured; a
+    window built without `configure_logging` (tests, embedding) gets a private ring
+    attached to the root logger once, so the panel still works (without a log file)."""
+    global _fallback_log_ring
+    system = current_log_system()
+    if system is not None:
+        return system.ring, system
+    if _fallback_log_ring is None:
+        _fallback_log_ring = RingBufferHandler()
+        logging.getLogger().addHandler(_fallback_log_ring)
+    return _fallback_log_ring, None
+
+
+def _wire_log_console(window: QMainWindow, ui_state: UiStateStore, image_panel: ImagePanel | None = None) -> PanelContainer:
+    """Help -> Log Console (Ctrl+Shift+L) and Help -> Open Log Folder (2026-10-14,
+    docs/logging_design_2026-10-14.md). The Log panel is a normal dock, created floating
+    and hidden, and deliberately not part of the workspace panels: it is not in View ->
+    Panels, Show/Hide all, or the layout presets (those take explicit dicts of docks).
+    Created before the window state is restored so its saved position comes back too."""
+    ring, system = _log_ring()
+    panel = LogPanel(ring, system, ui_state)
+    if image_panel is not None:
+        image_panel.playback_changed.connect(panel.set_busy)  # refresh slowly while Play runs
+    dock = PanelContainer("Log", panel, window)
+    dock.setObjectName("LogConsolePanel")
+    window.addDockWidget(Qt.DockWidgetArea.BottomDockWidgetArea, dock)
+    dock.setFloating(True)
+    dock.resize(1000, 460)
+    dock.hide()
+    help_menu = next((action.menu() for action in window.menuBar().actions() if action.text() == "&Help"), None)
+    if help_menu is not None:
+        toggle = dock.toggleViewAction()
+        toggle.setText("Log Console")
+        toggle.setShortcut(QKeySequence("Ctrl+Shift+L"))
+        toggle.setShortcutContext(Qt.ShortcutContext.ApplicationShortcut)
+        toggle.setToolTip("Show the application log: messages, timings and errors.")
+        help_menu.addAction(toggle)
+        folder_action = help_menu.addAction("Open Log Folder")
+        folder_action.setEnabled(system is not None)
+        folder_action.triggered.connect(panel.open_log_folder)
+    return dock
+
+
 def build_main_window(
     initial_settings: AppSettings | None = None,
     on_settings_changed: Callable[[AppSettings], None] | None = None,
@@ -1222,6 +1302,7 @@ def build_main_window(
 
     image_panel = _build_image_panel(m, ui_state, theme_obj)
     _wire_highlight_range_persistence(m, ui_state, settings)
+    _wire_display_range_persistence(m, ui_state, settings, image_panel)
     histogram_panel = _build_histogram_panel(m, image_panel, ui_state)
     image_panel.restore_ui_state(ui_state)
     histogram_panel.restore_ui_state(ui_state)
@@ -1262,6 +1343,11 @@ def build_main_window(
     panel_docks = _build_dock_layout(
         window, workflow, image_panel, histogram_panel, roi_table_panel, spectra_panel, sensorgram_panel
     )
+    log_dock = _wire_log_console(window, ui_state, image_panel)
+    # A display panel does no work while its dock is hidden (closed, behind a tab, window minimised) and
+    # catches up once when it is shown again (panels/visibility_gate.py).
+    for dock_name, hidden_aware_panel in (("Histogram", histogram_panel), ("ROI / Groups", roi_table_panel)):
+        panel_docks[dock_name].visibilityChanged.connect(hidden_aware_panel.set_panel_visible)
 
     # View -> Panels: Show/Hide all + one checkable, Ctrl+1..6-shortcut
     # toggleViewAction() per dock (panels/panel_visibility.py) - the
@@ -1300,6 +1386,7 @@ def build_main_window(
         state_version=_DOCK_LAYOUT_STATE_VERSION,
     )
     _restore_window_state(window, settings, panel_docks, layout_preset_manager)
+    ensure_floating_panels_on_screen({"Log": log_dock}, window)
 
     # "Reopen Last Dataset on Launch" (2026-09-26) - stands in for a real
     # Preferences dialog exactly like the auto-apply-preset toggle above
@@ -1347,8 +1434,14 @@ def _wire_roi_fill_opacity_menu(options_menu, image_panel: ImagePanel) -> None:
 
 
 def main() -> None:
-    logging.basicConfig(level=logging.DEBUG)
+    system = configure_logging(app_version=rewrite_version_string())
     app = QApplication(sys.argv)
+    log_event(
+        logger, "app.start", logging.INFO,
+        version=rewrite_version_string(), log_file=str(system.log_path),
+        screens=len(app.screens()), platform=sys.platform,
+    )
+    app.aboutToQuit.connect(lambda: log_event(logger, "app.quit", logging.INFO))
     app.setApplicationName("LSPR Imaging (Rewrite Preview)")
     app.setApplicationVersion(rewrite_version_string())
     app.setWindowIcon(app_icon())

@@ -189,6 +189,12 @@ class FrameRolesModule(QObject):
             ignored_wl = ignored_wl - {wavelength_nm}
         self._commit("Ignore wavelength" if ignored else "Stop ignoring wavelength", (dark, user_set, ignored_wl, ignored_cubes))
 
+    @instrumented("FrameRolesModule.clear_all_ignores")
+    def clear_all_ignores(self) -> None:
+        """Stop ignoring every wavelength and every cube (one undo step)."""
+        dark, user_set, _wl, _cubes = self._stored()
+        self._commit("Clear all ignored", (dark, user_set, frozenset(), frozenset()))
+
     @instrumented("FrameRolesModule.set_cube_ignored")
     def set_cube_ignored(self, cube_index: int, ignored: bool) -> None:
         dark, user_set, ignored_wl, ignored_cubes = self._stored()

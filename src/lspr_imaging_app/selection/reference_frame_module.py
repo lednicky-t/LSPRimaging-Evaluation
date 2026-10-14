@@ -43,6 +43,7 @@ class ReferenceFrameModule(QObject):
     """Owns the reference-frame mode and the manual snapshot."""
 
     reference_frame_changed = pyqtSignal()
+    find_requested = pyqtSignal()  # the user clicked Find reference (handled by `ReferenceAutoFind`)
 
     def __init__(self, parent: QObject | None = None) -> None:
         super().__init__(parent)
@@ -59,6 +60,11 @@ class ReferenceFrameModule(QObject):
     # `ReferenceAutoFind` (selection/reference_auto_task.py) and cached here
     # per cube. It does not follow the wavelength slider (2026-10-11,
     # maintainer request; replaces the earlier "mirror the view" Auto).
+
+    def request_find(self) -> None:
+        """The user clicked "Find reference": score the viewed cube once and store
+        the winner as the reference frame. Never called automatically."""
+        self.find_requested.emit()
 
     def auto_wavelength(self, cube_index: int) -> float | None:
         """The cached best wavelength of `cube_index`, or `None` if it has

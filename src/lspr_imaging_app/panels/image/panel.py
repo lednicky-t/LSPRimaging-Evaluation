@@ -78,6 +78,7 @@ from __future__ import annotations
 import html
 
 import itertools
+import time
 import logging
 from collections.abc import Callable
 from dataclasses import replace
@@ -97,6 +98,7 @@ from PyQt6.QtWidgets import (
     QToolButton,
     QVBoxLayout,
     QWidget,
+    QWidgetAction,
 )
 
 from lspr_ui import get_active_theme, load_tabler_icon
@@ -124,10 +126,8 @@ from ...selection import (
     ReferenceFrameModule,
     SelectionModule,
 )
-from ...selection.cube_display_module import MODE_CUBE, MODE_TIME
+from ...selection.cube_display_module import MODE_CUBE, MODE_TIME, format_elapsed_seconds
 from ...selection.frame_roles_module import ROLE_DARK, ROLE_IGNORED, FrameRolesModule
-from ...selection.reference_frame_module import MODE_AUTO
-from ..dock_container import _render_tabler_icon
 from .cube_spin_box import CubeSpinBox
 from ..cursor_overlay import CursorOverlay
 from .landmark_overlay import draw_landmarks
@@ -144,6 +144,7 @@ from .canvas_tools import _ICON_SIZE, style_bar_icon_button
 from .crop_size_controls import CropSizeControls
 from .crop_tool import CropTool
 from .data_axis_slider import DataAxisSlider
+from .frame_tools import FrameToolsState, FrameToolsWidget
 from .general_group import AreaSelectionPicker, style_general_icon_button
 from .guided_value_spinbox import GuidedValueSpinBox
 from .image_controls import ImageViewBox, controls_text
@@ -156,9 +157,10 @@ from .overlay_tint import OverlayTint
 from .prefetch import prefetch_order
 from .render import ImageRenderer, RenderRequest, RenderResult
 from .roi_gestures import RoiGestures, SelectedApertures
-from .roi_overlay import RoiOverlay, add_curve
+from .roi_overlay import SAMPLE_WIDTH, SAMPLE_WIDTH_FAST, RoiOverlay, add_curve
 from .roi_tab import RoiTab
 from .rotate_line_tool import RotateLineTool
+from .display_range_controls import FULL_16BIT_RANGE
 from .view_tab import ViewTab
 from ...storage.ui_state_keys import (
     IMAGE_CURSOR_READOUT,
@@ -168,15 +170,31 @@ from ...storage.ui_state_keys import (
     IMAGE_SCALE_BAR_COLOR,
     ROI_OVERLAY_KEYS,
     ROI_SCOPE,
+    SLIDER_RIBBON_OPEN,
+    SLIDESHOW_END,
+    SLIDESHOW_SKIP_DARK,
+    SLIDESHOW_SKIP_IGNORED,
+    SLIDESHOW_THIN_ROI_OUTLINE,
+    SLIDESHOW_CALM_HISTOGRAM,
+    SLIDESHOW_MODE,
+    SLIDESHOW_REPEAT,
+    SLIDESHOW_SPEED,
     read,
 )
 from ..ui_state import UiStateStore
 from .scale_bar_overlay import ScaleBarItem
+from ...applog.events import log_event
+from .playback_stats import PlaybackStats
+from .timed_canvas import TimedImageItem, TimedLayoutWidget
+from .slider_ribbon import SliderRibbon, SliderRibbonDrawer
+from .slideshow import END_CUBE, END_DATASET, MODE_ALL, MODE_ONE_WAVELENGTH, SPEEDS, SlideshowController, SlideshowSettings
 from .tool_ribbon import ROI_TAB, VIEW_TAB, ImageToolRibbon
 
 logger = logging.getLogger(__name__)
 
 _REDRAW_COALESCE_MS = 100  # sketch §8 - the already-validated coalescing window
+_REDRAW_COALESCE_PLAYING_MS = 0  # while Play runs each step is one event: the redraw runs right after its handlers (0 ms still merges a cube + wavelength change into one)
+_PLAY_READ_AHEAD = 3  # frames read ahead while Play runs
 # Slower than the redraw coalesce above on purpose: this debounces a settings
 # *write* (one JSON file per `AppSettings._persist` call - see
 # `app_rewrite.py`), not a redraw, so there is no reason to pay disk I/O on
@@ -255,6 +273,9 @@ class ImagePanel(QWidget):
     # would be a real correctness bug, not just a cosmetic lag. `RenderResult
     # .request` already carries the frame the array was actually requested
     # for (see `_on_rendered` below), so this only forwards it.
+    playback_changed = pyqtSignal(bool)  # the slideshow started (True) or stopped (False); other panels lighten their live updates
+    calm_histogram_changed = pyqtSignal(bool)  # Play is running with "calm histogram" on (True), or not (False)
+    display_range_changed = pyqtSignal(bool, float, float)  # the user changed the View tab's Display range: (fixed, black, white)
     image_rendered = pyqtSignal(np.ndarray, int, float)
     # Companion to `image_rendered` - the Histogram panel's other half of
     # "read Image, don't read Dataset directly" (sketch §7): without this,
@@ -334,6 +355,9 @@ class ImagePanel(QWidget):
         # Whether an analysis run is in flight (the ROI menu's Delete waits for it); tests omit it.
         self._analysis_running = analysis_running or (lambda: False)
         self._last_data_range: tuple[float, float] | None = None  # display levels reused for the background view
+        # (fixed, black point, white point): the View tab's Display range. Automatic per frame unless `fixed`;
+        # the range itself starts at the whole 16-bit scale (what the pin switches on).
+        self._display_range: tuple[bool, float, float] = (False, *FULL_16BIT_RANGE)
         self._initial_ribbon_category = initial_ribbon_category
         # Applied once, the first time a real image lands (`_on_rendered`) -
         # not here, since no plane exists yet to set a view against. `None`
@@ -404,6 +428,11 @@ class ImagePanel(QWidget):
 
         self._serial = itertools.count(1)
         self._latest_serial = 0
+        self._last_shown_serial = 0
+        self._no_data_shown: np.ndarray | None = None  # the checker currently uploaded to `_no_data_item`
+        self._calm_histogram = False
+        self._roi_revision = 0  # bumped by every ROI-toolbox change; part of the ROI overlay's "unchanged" test
+        self._roi_draw_key: tuple | None = None
         # What the landmark overlay currently shows (see `_draw_landmarks`):
         # drawing it costs 45-160 ms in all-wavelengths mode, so it is redrawn
         # only when this key changes. `_landmark_version` is bumped by anything
@@ -485,6 +514,9 @@ class ImagePanel(QWidget):
         if isinstance(labels, bool):
             self._roi_overlay.labels_visible = labels
         self._roi_overlay.fill_max_opacity = float(read(store, IMAGE_ROI_FILL_MAX_OPACITY))
+        self._restore_slideshow_settings(store)
+        self._ribbon_drawer.set_expanded(read(store, SLIDER_RIBBON_OPEN) is not False, animate=False)
+        self._ribbon_drawer.expanded_changed.connect(lambda open_: store.set(SLIDER_RIBBON_OPEN.key, bool(open_)))
         self._apply_roi_overlay_style()
         self._sync_roi_overlay_controls()
         self._roi_tab.bind_ui_state(store)
@@ -510,6 +542,31 @@ class ImagePanel(QWidget):
         """The Array tools' background action (the app shell connects it to the task indicator)."""
         return self._array_action
 
+    # -- display range (2026-10-14) -----------------------------------------------------
+
+    def display_range(self) -> tuple[bool, float, float]:
+        """``(fixed, black point, white point)``: with `fixed` every frame is shown with the same black and white
+        point (so brightness is comparable between frames), otherwise each at its own automatic range."""
+        return self._display_range
+
+    def set_display_range(self, fixed: bool, low: float, high: float) -> None:
+        """Put the Display range back (dataset load / session restore). Does not emit `display_range_changed`,
+        so restoring never saves anything."""
+        self._display_range = (bool(fixed), float(low), float(high))
+        self._view_tab.display_range_controls.set_state(*self._display_range)
+        self._schedule_redraw()
+
+    def _fixed_levels(self) -> tuple[float, float] | None:
+        fixed, low, high = self._display_range
+        return (low, high) if fixed and high > low else None
+
+    def _on_display_range_edited(self, fixed: bool, low: float, high: float) -> None:
+        self._display_range = (bool(fixed), float(low), float(high))
+        if fixed and not high > low:
+            self._on_tool_status("Display range: max must be above min - each frame is shown at its own range until it is.")
+        self.display_range_changed.emit(bool(fixed), float(low), float(high))
+        self._schedule_redraw()
+
     def _on_scale_bar_color_changed(self, color: QColor) -> None:
         self._scale_bar_item.set_color(color)
         store = getattr(self, "_scale_bar_color_store", None)
@@ -530,7 +587,7 @@ class ImagePanel(QWidget):
         # not itself attached yet - see CLAUDE.md's phantom-top-level-window
         # pitfall, which cost ~6 rounds of screen-recording analysis to find
         # the last time it was hit.
-        self._view = pg.GraphicsLayoutWidget(parent=self)
+        self._view = TimedLayoutWidget(parent=self)
         # Repaint the whole canvas on every change: the cursor crosshair's
         # InfiniteLines span the full view, and Qt's partial-update rectangles
         # left stale copies of them behind as ghost lines (2026-10-03).
@@ -553,7 +610,7 @@ class ImagePanel(QWidget):
         self._no_data_item.hide()
         self._plot.addItem(self._no_data_item)
 
-        self._image_item = pg.ImageItem(axisOrder="row-major")
+        self._image_item = TimedImageItem(axisOrder="row-major")
         self._plot.addItem(self._image_item)
 
         # Mask-overlay tint, drawn between the image and the ROI curves
@@ -759,6 +816,7 @@ class ImagePanel(QWidget):
         )
         self._roi_tab.overlay_changed.connect(self._on_roi_overlay_changed)
         self._roi_tab.labels_toggled.connect(self._on_roi_labels_toggled)
+        self._roi_tab.label_placement_changed.connect(self._on_roi_label_placement_changed)
         self._roi_tab.group_labels_changed.connect(self._on_group_labels_changed)
         self._roi_tab.status.connect(self._on_tool_status)
         return self._roi_tab
@@ -776,6 +834,7 @@ class ImagePanel(QWidget):
         self._view_tab.mask_alpha_changed.connect(self._on_mask_overlay_alpha_changed)
         self._view_tab.roi_overlay_changed.connect(self._on_roi_overlay_changed)
         self._view_tab.scale_bar_color_changed.connect(self._on_scale_bar_color_changed)
+        self._view_tab.display_range_changed.connect(self._on_display_range_edited)
         return self._view_tab
 
     def _build_chromatic_and_background_tabs(self) -> None:
@@ -1019,6 +1078,21 @@ class ImagePanel(QWidget):
         controls = QVBoxLayout()
         controls.setContentsMargins(10, 0, 10, 0)
         controls.setSpacing(4)
+        # The slider ribbon (2026-10-13): frame icon controls, Play, slideshow settings.
+        self._slider_ribbon = SliderRibbon(self)
+        self._slideshow = SlideshowController(self._dataset, self._selection, self._frame_roles, self)
+        self._slider_ribbon.play_toggled.connect(self._slideshow.toggle)
+        self._slider_ribbon.settings_changed.connect(self._slideshow.set_settings)
+        self._slider_ribbon.settings_changed.connect(self._apply_play_outline)
+        self._slideshow.playing_changed.connect(self._slider_ribbon.set_playing)
+        # Where the time goes while Play runs (status bar + one log line at the end).
+        self._playback_stats = PlaybackStats()
+        self._slideshow.playing_changed.connect(self._on_playback_changed)
+        self._slideshow.step_made.connect(lambda handlers_s: self._playback_stats.note_step(time.perf_counter(), handlers_s))
+        self._slideshow.step_made.connect(self._flush_redraw_for_step)
+        self._connect_frame_tools(self._slider_ribbon.frame_tools)
+        self._ribbon_drawer = SliderRibbonDrawer(self._slider_ribbon, self)
+        controls.addWidget(self._ribbon_drawer)
         controls.addLayout(navigation)
 
         # A real QWidget, not a bare layout - QSS `border` only applies to
@@ -1069,6 +1143,8 @@ class ImagePanel(QWidget):
         # out is a real optimization once there is a dataset big enough to
         # measure it against; guessing at it now would be the premature kind
         # CLAUDE.md's performance rules warn about.
+        self._roi_toolbox.geometry_changed.connect(self._bump_roi_revision)
+        self._roi_toolbox.cosmetic_changed.connect(self._bump_roi_revision)
         self._roi_toolbox.geometry_changed.connect(self._schedule_redraw)
         self._roi_toolbox.cosmetic_changed.connect(self._schedule_redraw)
         self._selection.cube_changed.connect(self._schedule_redraw)
@@ -1133,6 +1209,8 @@ class ImagePanel(QWidget):
             self._style_cursor_readout()
         if hasattr(self, "_controls_bar"):
             self._refresh_controls_bar_theme()
+        if hasattr(self, "_slider_ribbon"):
+            self._ribbon_drawer.refresh_theme()
         if hasattr(self, "_top_bar"):
             self._refresh_top_bar_theme()
 
@@ -1199,6 +1277,7 @@ class ImagePanel(QWidget):
         self._renderer.clear_prefetch()
         self._invalidate_landmark_overlay()
         self._refresh_navigation_ranges()
+        self._refresh_frame_tools()
         self._schedule_redraw()
 
     def _on_dataset_cleared(self) -> None:
@@ -1206,11 +1285,13 @@ class ImagePanel(QWidget):
         deliberately clears only its own reference and expects every module
         and panel holding dataset-derived state to reset itself (see its
         module docstring) - this is the first subscriber to actually do so."""
+        self._refresh_frame_tools()
         self._renderer.clear_prefetch()
         self._invalidate_landmark_overlay()
         self._mask_painted = None
         self._image_item.clear()
         self._no_data_item.hide()
+        self._no_data_shown = None
         self._mask_tint.item.hide()
         self._mask_overlay_state = None
         self._highlight_tint.item.hide()
@@ -1341,6 +1422,7 @@ class ImagePanel(QWidget):
         self._cube_spin.refresh_display()
         self._refresh_wavelength_range()
         self._update_reference_highlight()
+        self._refresh_frame_tools()
 
     def _on_selection_wavelength_changed(self, _wavelength: float) -> None:
         wavelengths = self._dataset.wavelengths_for_cube(self._current_cube())
@@ -1352,6 +1434,7 @@ class ImagePanel(QWidget):
             if wavelengths and wavelength in wavelengths:
                 self._wavelength_slider.setValue(wavelengths.index(wavelength))
         self._update_reference_highlight()
+        self._refresh_frame_tools()
 
     # -- wavelength jump field (QCompleter) ----------------------------------
 
@@ -1437,7 +1520,16 @@ class ImagePanel(QWidget):
     def _schedule_redraw(self, *_args: object) -> None:
         """Coalesce many events into one redraw ~100ms later (sketch §8).
         Takes ``*_args`` so it can be connected directly to signals carrying
-        a payload without a lambda per connection."""
+        a payload without a lambda per connection.
+
+        `start()` on a running timer restarts it (a debounce: the redraw waits for
+        quiet). While the slideshow plays, steps arrive faster than 100 ms at
+        2x and above, so the timer never ran out and no frame was drawn until Play
+        stopped (measured 2026-10-14: 4 of 52 steps drawn at 5x, 1.4 s lag). Then
+        it is a throttle instead: a running timer is left alone and `_redraw` reads
+        whatever the newest selection is when it fires."""
+        if self._redraw_timer.isActive() and hasattr(self, "_slideshow") and self._slideshow.is_playing():
+            return
         self._redraw_timer.start()
 
     def _redraw(self) -> None:
@@ -1448,7 +1540,10 @@ class ImagePanel(QWidget):
         and because they must track a drag with no perceptible lag - a
         coalesced 100ms round trip to a worker would make dragging an ROI
         feel broken."""
+        redraw_started = time.perf_counter()
         self._draw_overlays()
+        self._playback_stats.note_detail("overlays", time.perf_counter() - redraw_started)
+        mask_started = time.perf_counter()
 
         cubes = self._dataset.spectral_cubes()
         if not cubes:
@@ -1480,6 +1575,8 @@ class ImagePanel(QWidget):
             # Uncropped preview - the crop is drawn as an outline instead.
             geometry = replace(geometry, crop=CropDefinition())
 
+        self._playback_stats.note_detail("mask", time.perf_counter() - mask_started)
+        submit_started = time.perf_counter()
         self._latest_serial = next(self._serial)
         self._renderer.submit(
             RenderRequest(
@@ -1497,14 +1594,62 @@ class ImagePanel(QWidget):
                 detection=self._roi_toolbox.detection_settings(),
                 serial=self._latest_serial,
                 show_background=self._show_background,
+                display_levels=self._fixed_levels(),
             )
         )
+        self._playback_stats.note_detail("submit", time.perf_counter() - submit_started)
+        self._playback_stats.note_redraw(self._latest_serial, redraw_started, time.perf_counter())
+
+    def _flush_redraw_for_step(self, _handlers_s: float) -> None:
+        """Play made a step: send the render request now instead of 0 ms later through the redraw timer.
+        The timer only fires after Qt has handled its pending events, i.e. after painting the previous frame,
+        and the request would then wait for that paint; sent now it is rendered meanwhile."""
+        if self._slideshow.pipelined and self._redraw_timer.isActive():
+            self._redraw_timer.stop()
+            self._redraw()
+
+    def _apply_play_outline(self, *_args: object) -> None:
+        """The options that only apply while Play runs: ROI outlines 1.0 px thin (instead of 1.5 px), and the
+        Histogram updating at most once a second. Called when Play starts or stops and when an option changes."""
+        playing = self._slideshow.is_playing()
+        settings = self._slideshow.settings()
+        self._roi_overlay.set_sample_width(SAMPLE_WIDTH_FAST if playing and settings.thin_roi_outline else SAMPLE_WIDTH)
+        calm = playing and settings.calm_histogram
+        if calm != self._calm_histogram:
+            self._calm_histogram = calm
+            self.calm_histogram_changed.emit(calm)
+
+    def _on_playback_changed(self, playing: bool) -> None:
+        self._apply_play_outline()
+        self.playback_changed.emit(playing)
+        stats = self._playback_stats
+        self._redraw_timer.setInterval(_REDRAW_COALESCE_PLAYING_MS if playing else _REDRAW_COALESCE_MS)
+        if playing:
+            stats.start(time.perf_counter(), self._slideshow.interval_seconds())
+            self._view.paint_listener = lambda s: stats.note_detail("paint_view", s)
+            self._image_item.paint_listener = lambda s: stats.note_detail("paint_image", s)
+            return
+        self._view.paint_listener = None
+        self._image_item.paint_listener = None
+        if stats.active:
+            stats.stop()
+            summary = stats.summary(time.perf_counter())
+            log_event(logger, "playback.summary", logging.INFO, **stats.total_fields())
+            self._on_tool_status(summary)
 
     def _on_rendered(self, result: RenderResult) -> None:
-        if result.request.serial != self._latest_serial:
+        arrived = time.perf_counter()
+        serial = result.request.serial
+        if serial != self._latest_serial and not (
+            # While Play runs a new request goes out every few ms, so a render that takes
+            # longer is *always* superseded on arrival and nothing would ever be shown.
+            # Showing the newest result that has arrived is the right preview behaviour.
+            self._slideshow.is_playing() and serial > self._last_shown_serial
+        ):
             # Superseded while in flight - dropping it is the point (see
             # render.py's "latest request wins"), not an error.
             return
+        self._last_shown_serial = serial
         if result.error is not None or result.image is None:
             # A render error, not "what frame is displayed" - goes to the
             # status bar (`tool_status_changed`), not the dock title bar
@@ -1512,23 +1657,53 @@ class ImagePanel(QWidget):
             self._on_tool_status(f"Cannot show this frame: {result.error}")
             self._image_item.clear()
             self._no_data_item.hide()
+            if serial == self._latest_serial:
+                self._slideshow.frame_displayed()
             return
         image = np.asarray(result.image, dtype=np.float32)
+        listeners_s = 0.0
         showing_estimate = result.request.show_background
         if showing_estimate:
             self._show_background_estimate(image, result.request)
         else:
-            self._image_item.setImage(image, autoLevels=True)
-            finite = image[np.isfinite(image)]
-            self._last_data_range = (float(finite.min()), float(finite.max())) if finite.size else None
+            stage = time.perf_counter()
+            display = result.display  # worked out on the render thread (display_picture.py); None = do it here
+            fixed = result.request.display_levels  # the fixed Display range this frame was rendered with, or None
+            if display is not None and display.picture is not None:
+                self._image_item.show_prepared(image, display.picture, display.levels)
+            elif fixed is not None:
+                self._image_item.setImage(image, autoLevels=False, levels=np.asarray(fixed, dtype=np.float32))
+            else:
+                self._image_item.setImage(image, autoLevels=True)
+            if display is not None:
+                frame_levels = display.auto_levels
+            elif fixed is None and self._image_item.levels is not None:
+                frame_levels = (float(self._image_item.levels[0]), float(self._image_item.levels[1]))
+            else:
+                frame_levels = None
+            self._view_tab.display_range_controls.show_frame_levels(frame_levels)
+            self._playback_stats.note_detail("setImage", time.perf_counter() - stage)
+            stage = time.perf_counter()
+            if display is not None:
+                self._last_data_range = display.data_range
+            else:
+                finite = image[np.isfinite(image)]
+                self._last_data_range = (float(finite.min()), float(finite.max())) if finite.size else None
+            self._playback_stats.note_detail("minmax", time.perf_counter() - stage)
+            stage = time.perf_counter()
             checker = no_data_overlay_rgba(image)
             if checker is None:
                 self._no_data_item.hide()
-            else:
+                self._no_data_shown = None
+            elif checker is not self._no_data_shown:  # same mask as the last frame: nothing to upload
                 self._no_data_item.setImage(checker, autoLevels=False)
                 self._no_data_item.show()
+                self._no_data_shown = checker
+            self._playback_stats.note_detail("nodata", time.perf_counter() - stage)
             self._current_display_image = image
+            stage = time.perf_counter()
             self._update_highlight_overlay()
+            self._playback_stats.note_detail("highlight", time.perf_counter() - stage)
         if not self._view_range_restored:
             # Once only, ever, on this panel's first successful render - a
             # later frame navigation must never snap the view back to this
@@ -1543,10 +1718,17 @@ class ImagePanel(QWidget):
                 self._plot.vb.setRange(xRange=x_range, yRange=y_range, padding=0.0)
         if not showing_estimate:
             # The estimate is not data: the Histogram etc. keep the real frame.
+            listeners_started = time.perf_counter()
             self.image_rendered.emit(image, result.request.cube_index, result.request.wavelength_nm)
+            listeners_s = time.perf_counter() - listeners_started
+            self._playback_stats.note_detail("listeners", listeners_s)
+            stage = time.perf_counter()
             self._show_frame_status(result.request.cube_index, result.request.wavelength_nm)
+            self._playback_stats.note_detail("status", time.perf_counter() - stage)
         if not showing_estimate:
+            stage = time.perf_counter()
             self._request_prefetch(result.request.cube_index, result.request.wavelength_nm)
+            self._playback_stats.note_detail("prefetch_plan", time.perf_counter() - stage)
         self._last_image_shape = result.image.shape[:2]
         self._area_tool.set_image_shape(self._last_image_shape)
         # The crop tool's clamp bound - correct the instant Crop is active
@@ -1556,11 +1738,36 @@ class ImagePanel(QWidget):
         # lands ~100ms later (`_schedule_redraw` already runs on every
         # active-tool change).
         self._crop_tool.set_frame_size(result.image.shape[1], result.image.shape[0])
+        stage = time.perf_counter()
         self._update_chunk_grid()
+        self._playback_stats.note_detail("chunkgrid", time.perf_counter() - stage)
+        if self._playback_stats.active:
+            line = self._playback_stats.note_rendered(
+                result.request.serial, arrived, time.perf_counter(),
+                load_s=result.load_seconds, prep_s=result.preprocess_seconds, listeners_s=listeners_s,
+                submitted_at=result.request.submitted_at, started_at=result.started_at,
+                finished_at=result.finished_at, blocked_by_prefetch=result.request.submitted_while_prefetching,
+            )
+            if line is not None:
+                log_event(logger, "playback.window", logging.DEBUG, **self._playback_stats.last_window_fields())
+                self._on_tool_status(line)
+        if serial == self._latest_serial:
+            # Only the newest request releases the brake: an older result shown while a newer request is
+            # still in flight must not let the slideshow run further ahead. With a pipelined show this
+            # call runs the next step right here (last, so this frame's stats are complete).
+            self._slideshow.frame_displayed()
 
     def _request_prefetch(self, cube_index: int, wavelength_nm: float) -> None:
         """Have the render thread read the planes the user is likely to open
         next into the plane cache (`prefetch.py`) once it is idle."""
+        if self._slideshow.is_playing():
+            # While Play runs, read the frames it will show next, in its own order, and start at once
+            # (the usual quiet period is longer than a frame, so read-ahead never ran: every frame was
+            # a first read from disk, ~60 ms of each ~150 ms cycle on the maintainer's data).
+            upcoming = self._slideshow.upcoming_frames(_PLAY_READ_AHEAD)
+            if upcoming:
+                self._renderer.prefetch(upcoming, quiet_seconds=0.0)
+                return
         self._renderer.prefetch(
             prefetch_order(
                 cube_index,
@@ -1609,13 +1816,26 @@ class ImagePanel(QWidget):
 
     # -- overlays -----------------------------------------------------------
 
-    def _draw_overlays(self) -> None:
-        self._draw_crop_outline()
-        self._draw_landmarks()
-        self._draw_scale_bar()
-        self._draw_roi_overlay()
+    def _bump_roi_revision(self, *_args: object) -> None:
+        self._roi_revision += 1
 
-    def _draw_roi_overlay(self) -> None:
+    def _draw_overlays(self) -> None:
+        stats = self._playback_stats
+        if not stats.active:
+            self._draw_crop_outline()
+            self._draw_landmarks()
+            self._draw_scale_bar()
+            self._draw_roi_overlay(only_if_changed=True)
+            return
+        for name, draw in (
+            ("ov_crop", self._draw_crop_outline), ("ov_landmarks", self._draw_landmarks),
+            ("ov_scalebar", self._draw_scale_bar), ("ov_rois", lambda: self._draw_roi_overlay(only_if_changed=True)),
+        ):
+            started = time.perf_counter()
+            draw()
+            stats.note_detail(name, time.perf_counter() - started)
+
+    def _draw_roi_overlay(self, *, only_if_changed: bool = False) -> None:
         """The ROI circles, reference rings and labels (drawn by `RoiOverlay`).
         Also called alone when a ROI display option changes, so that needs no
         new image render."""
@@ -1623,16 +1843,30 @@ class ImagePanel(QWidget):
             # ROI positions are in cropped/processed space; over the
             # uncropped preview they would be drawn in the wrong place.
             self._roi_overlay.clear()
-            return
-
-        rois = self._roi_toolbox.rois_at(self._current_cube())
-        if not rois:
-            self._roi_overlay.clear()
+            self._roi_draw_key = None
             return
 
         frame = (self._current_cube(), self._current_wavelength())
         affine = self._chromatic.affine_for(frame)
+        # `only_if_changed` (the per-frame redraw, i.e. every wavelength step): ~40 ms of the GUI thread
+        # per frame on 100+ ROIs (measured 2026-10-14), and nothing the overlay draws changes between two
+        # wavelengths unless the ROIs, the selection, the cube or this frame's chromatic shift did. Every
+        # other caller (a style, label or group-label change) forces the redraw.
+        key = (
+            self._roi_revision, frame[0] if self._roi_toolbox.has_timeline() else None,  # geometry differs per cube only with a timeline
+            frozenset(self._selection.selected_roi_ids()),
+            np.asarray(affine, dtype=np.float64).tobytes(), self._roi_overlay.labels_visible,
+        )
+        if only_if_changed and key == self._roi_draw_key:
+            return
+        rois = self._roi_toolbox.rois_at(self._current_cube())
+        if not rois:
+            self._roi_overlay.clear()
+            self._roi_draw_key = key
+            return
+
         detection = self._roi_toolbox.detection_settings()
+        self._roi_draw_key = key
         self._roi_overlay.draw(
             rois,
             self._roi_toolbox.display_positions(frame, affine),
@@ -1685,6 +1919,40 @@ class ImagePanel(QWidget):
             self._draw_roi_overlay()
         if self._roi_overlay_store is not None:
             self._roi_overlay_store.set(IMAGE_ROI_LABELS.key, bool(shown))
+
+    def _on_roi_label_placement_changed(self, placement: str) -> None:
+        """The ROI-label place grid changed: only the label item repaints (nothing is redrawn or recomputed).
+        The grid saves its own pick (`RoiTab.bind_ui_state`)."""
+        self._roi_overlay.set_label_placement(placement)
+
+    def _restore_slideshow_settings(self, store: UiStateStore) -> None:
+        """Slideshow speed / mode / repeat / end back as last left, and keep saving them."""
+        saved = SlideshowSettings(
+            speed=read(store, SLIDESHOW_SPEED),
+            mode=read(store, SLIDESHOW_MODE),
+            repeat=read(store, SLIDESHOW_REPEAT),
+            end=read(store, SLIDESHOW_END),
+            skip_ignored=read(store, SLIDESHOW_SKIP_IGNORED),
+            skip_dark=read(store, SLIDESHOW_SKIP_DARK),
+            thin_roi_outline=read(store, SLIDESHOW_THIN_ROI_OUTLINE),
+            calm_histogram=read(store, SLIDESHOW_CALM_HISTOGRAM),
+        )
+        if saved.speed not in SPEEDS or saved.mode not in (MODE_ALL, MODE_ONE_WAVELENGTH) or saved.end not in (END_CUBE, END_DATASET):
+            saved = SlideshowSettings()  # a hand-edited settings file
+        self._slider_ribbon.set_settings(saved)
+        self._slideshow.set_settings(saved)
+
+        def save(settings: SlideshowSettings) -> None:
+            store.set(SLIDESHOW_SPEED.key, settings.speed)
+            store.set(SLIDESHOW_MODE.key, settings.mode)
+            store.set(SLIDESHOW_REPEAT.key, settings.repeat)
+            store.set(SLIDESHOW_END.key, settings.end)
+            store.set(SLIDESHOW_SKIP_IGNORED.key, settings.skip_ignored)
+            store.set(SLIDESHOW_SKIP_DARK.key, settings.skip_dark)
+            store.set(SLIDESHOW_THIN_ROI_OUTLINE.key, settings.thin_roi_outline)
+            store.set(SLIDESHOW_CALM_HISTOGRAM.key, settings.calm_histogram)
+
+        self._slider_ribbon.settings_changed.connect(save)
 
     def _sync_roi_overlay_controls(self) -> None:
         """Show the panel's ROI display options on the ribbon controls (after
@@ -1865,6 +2133,12 @@ class ImagePanel(QWidget):
             return
         lower, upper = range_
         image = self._current_display_image
+        data_range = self._last_data_range  # the displayed frame's own finite min / max, computed once in `_on_rendered`
+        if data_range is not None and (upper < data_range[0] or lower > data_range[1] or (lower <= data_range[0] and upper >= data_range[1])):
+            # Nothing in range, or every finite pixel in range: either way no tint is drawn (below). Decided from
+            # the min / max alone: building the full-image mask for it cost ~6-10 ms of every Play frame.
+            self._highlight_tint.item.hide()
+            return
         selection_mask = (image >= lower) & (image <= upper)
         # Hide rather than tint when nothing is excluded (the whole image
         # falls in range) as well as when nothing is included - a full-image
@@ -1952,14 +2226,21 @@ class ImagePanel(QWidget):
         self.frame_status_changed.emit(text, tooltip)
 
     def _show_frame_status(self, cube_index: int, wavelength_nm: float) -> None:
-        """The dock subtitle for a real frame: "Cube X, 550 nm | <comment>".
-        The comment is the experiment-record entry active when the frame was
-        taken. "N/A" (with the reason in the tooltip) when there is none:
-        either the frame is not linked to experiment data (no acquisition
-        metadata or no timing for it), or no comment was recorded yet."""
+        """The dock subtitle for a real frame: "Cube X, 550 nm | 1:23 | <comment>".
+        The middle part is this frame's own experimental time (H:MM:SS, or M:SS
+        under an hour, since the acquisition start - the same t = 0 as the
+        cube's Time label, which is only the cube's *first* frame); it is left
+        out when the frame has no timing. The comment is the experiment-record
+        entry active when the frame was taken. "N/A" (with the reason in the
+        tooltip) when there is none: either the frame is not linked to
+        experiment data (no acquisition metadata or no timing for it), or no
+        comment was recorded yet."""
         self._frame_key = (int(cube_index), float(wavelength_nm))
         linked, comment = self._dataset.frame_comment(cube_index, wavelength_nm)
         head = f"Cube {self._cube_display.label_for(cube_index)}, {wavelength_nm:.0f} nm"
+        frame_seconds = self._dataset.frame_start_seconds(cube_index, wavelength_nm)
+        if frame_seconds is not None:
+            head = f"{head} | {format_elapsed_seconds(frame_seconds)}"
         if comment:
             text, tooltip = f"{head} | {comment}", comment
         elif linked:
@@ -1986,6 +2267,7 @@ class ImagePanel(QWidget):
 
     def _on_frame_roles_changed(self) -> None:
         self._update_reference_highlight()
+        self._refresh_frame_tools()
         if self._frame_key is not None:
             self._show_frame_status(*self._frame_key)
 
@@ -2011,62 +2293,80 @@ class ImagePanel(QWidget):
         self._cube_slider.set_ticks(list(cubes), self._cube_slider_major_ticks(cubes))
         self._cube_spin.refresh_display()
         self._fit_spin_widths()
+        self._refresh_frame_tools()
         if self._frame_key is not None:
             self._show_frame_status(*self._frame_key)
 
+    def _frame_tools_state(self) -> FrameToolsState:
+        """What the frame icons show now (ribbon and right-click menu alike)."""
+        if not self._dataset.spectral_cubes():
+            return FrameToolsState(enabled=False)
+        cube, wavelength = self._current_cube(), self._current_wavelength()
+        roles = self._frame_roles
+        return FrameToolsState(
+            time_mode=self._cube_display.effective_mode() == MODE_TIME,
+            time_available=self._cube_display.time_available(),
+            wavelength_nm=wavelength,
+            cube_label=self._cube_display.label_for(cube),
+            cube_ignored=roles is not None and cube in roles.ignored_cubes(),
+            wavelength_ignored=roles is not None and wavelength in roles.ignored_wavelengths(),
+            dark_is_this_wavelength=roles is not None and roles.dark_wavelength() == wavelength,
+            has_dark=roles is not None and roles.dark_wavelength() is not None,
+            any_ignored_anywhere=roles is not None and bool(roles.ignored_cubes() or roles.ignored_wavelengths()),
+        )
+
+    def _refresh_frame_tools(self) -> None:
+        self._slider_ribbon.frame_tools.refresh(self._frame_tools_state())
+        self._slider_ribbon.set_enabled_for_dataset(bool(self._dataset.spectral_cubes()))
+
+    def _connect_frame_tools(self, tools: FrameToolsWidget) -> None:
+        """Turn the icon clicks into commands on the owning modules."""
+        roles = self._frame_roles
+        tools.unit_toggle_requested.connect(self._toggle_cube_unit)
+        tools.set_reference_requested.connect(
+            lambda: self._reference_frame.set_manual_frame(self._current_cube(), self._current_wavelength())
+        )
+        tools.find_reference_requested.connect(self._reference_frame.request_find)
+        if roles is None:
+            return
+        tools.ignore_cube_requested.connect(lambda ignore: roles.set_cube_ignored(self._current_cube(), ignore))
+        tools.ignore_wavelength_requested.connect(lambda ignore: roles.set_wavelength_ignored(self._current_wavelength(), ignore))
+        tools.clear_ignores_requested.connect(self._clear_current_ignores)
+        tools.clear_all_ignores_requested.connect(roles.clear_all_ignores)
+        tools.pick_dark_requested.connect(
+            lambda pick: roles.set_dark(self._current_wavelength()) if pick else roles.clear_dark()
+        )
+        tools.clear_dark_requested.connect(roles.clear_dark)
+
+    def _toggle_cube_unit(self) -> None:
+        if self._cube_display.time_available():
+            self._cube_display.set_mode(MODE_CUBE if self._cube_display.effective_mode() == MODE_TIME else MODE_TIME)
+
+    def _clear_current_ignores(self) -> None:
+        """Stop ignoring the cube and the wavelength shown now (two commands, so two undo steps)."""
+        roles = self._frame_roles
+        if roles is None:
+            return
+        if self._current_cube() in roles.ignored_cubes():
+            roles.set_cube_ignored(self._current_cube(), False)
+        if self._current_wavelength() in roles.ignored_wavelengths():
+            roles.set_wavelength_ignored(self._current_wavelength(), False)
+
     def _show_slider_menu(self, slider: DataAxisSlider, pos) -> None:
-        """Right-click menu of either navigation slider: Set / Find reference,
-        and the app-wide Cube number <-> start time unit."""
+        """Right-click menu of either navigation slider: the same icon controls
+        as the slider ribbon (`FrameToolsWidget`, stacked with titles). Any
+        click runs its command and closes the menu."""
         if not slider.isEnabled():
             return
-        icon_color = get_active_theme().text_primary
         menu = QMenu(slider)
-        set_action = menu.addAction(_render_tabler_icon("pin", icon_color), "Set reference")
-        set_action.setToolTip("Use the cube and wavelength shown now as the reference frame.")
-        find_action = menu.addAction(_render_tabler_icon("search", icon_color), "Find reference")
-        find_action.setToolTip("Pick the best-contrast wavelength of this cube as the reference frame.")
-        role_actions = self._add_frame_role_actions(menu) if self._frame_roles is not None else {}
-        menu.addSeparator()
-        time_action = menu.addAction("Show cubes as start time")
-        time_action.setCheckable(True)
-        time_action.setChecked(self._cube_display.effective_mode() == MODE_TIME)
-        time_action.setEnabled(self._cube_display.time_available())
-        if not self._cube_display.time_available():
-            time_action.setToolTip("Needs acquisition metadata with per-image timing.")
-        chosen = menu.exec(slider.mapToGlobal(pos))
-        if chosen is set_action:
-            self._reference_frame.set_manual_frame(self._current_cube(), self._current_wavelength())
-        elif chosen is find_action:
-            self._reference_frame.set_mode(MODE_AUTO)
-        elif chosen is time_action:
-            self._cube_display.set_mode(MODE_TIME if time_action.isChecked() else MODE_CUBE)
-        elif chosen is not None and chosen in role_actions:
-            role_actions[chosen]()
-
-    def _add_frame_role_actions(self, menu: QMenu) -> dict:
-        """Dark / ignore entries for the frame shown now (cube and wavelength of
-        the handles), as checkable actions; returns {action: what to do}."""
-        roles = self._frame_roles
-        cube, wavelength = self._current_cube(), self._current_wavelength()
-        menu.addSeparator()
-        dark_action = menu.addAction(f"Dark background: {wavelength:g} nm")
-        dark_action.setCheckable(True)
-        dark_action.setChecked(roles.dark_wavelength() == wavelength)
-        dark_action.setToolTip("Use this wavelength as the dark background (LED off). Unscaled for now.")
-        wl_action = menu.addAction(f"Ignore {wavelength:g} nm in all cubes")
-        wl_action.setCheckable(True)
-        wl_action.setChecked(wavelength in roles.ignored_wavelengths())
-        cube_label = self._cube_display.label_for(cube)
-        cube_action = menu.addAction(f"Ignore cube {cube_label}")
-        cube_action.setCheckable(True)
-        cube_action.setChecked(cube in roles.ignored_cubes())
-        for action in (dark_action, wl_action, cube_action):
-            action.setToolTip(action.toolTip() or "Ignored frames are left out of fits and analysis; the data is kept.")
-        return {
-            dark_action: lambda: roles.clear_dark() if roles.dark_wavelength() == wavelength else roles.set_dark(wavelength),
-            wl_action: lambda: roles.set_wavelength_ignored(wavelength, wavelength not in roles.ignored_wavelengths()),
-            cube_action: lambda: roles.set_cube_ignored(cube, cube not in roles.ignored_cubes()),
-        }
+        tools = FrameToolsWidget(stacked=True, parent=menu)
+        self._connect_frame_tools(tools)
+        tools.refresh(self._frame_tools_state())
+        tools.used.connect(menu.close)
+        holder = QWidgetAction(menu)
+        holder.setDefaultWidget(tools)
+        menu.addAction(holder)
+        menu.exec(slider.mapToGlobal(pos))
 
     def _info_text(self, tool: ImageTool | None) -> str:
         """The info icon's tooltip for the open ribbon tab (2026-10-06): the
@@ -2098,10 +2398,7 @@ class ImagePanel(QWidget):
                 event.accept()
                 return True
         if watched is self._cube_title and event.type() == QEvent.Type.MouseButtonDblClick:
-            # Same toggle as the slider's right-click "Show cubes as start time".
-            if self._cube_display.time_available():
-                is_time = self._cube_display.effective_mode() == MODE_TIME
-                self._cube_display.set_mode(MODE_CUBE if is_time else MODE_TIME)
+            self._toggle_cube_unit()  # same as the unit icon in the ribbon and the right-click menu
             return True
         return super().eventFilter(watched, event)
 

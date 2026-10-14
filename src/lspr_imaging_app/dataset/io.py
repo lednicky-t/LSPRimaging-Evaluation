@@ -59,6 +59,7 @@ from lspr_imaging_app.storage.workspace import (
 from lspr_imaging_app.image_tools.geometry.model import GeometrySettings
 from lspr_imaging_app.image_tools.geometry.transform import apply_spatial_preprocessing
 
+from lspr_imaging_app.applog.events import emit_timing, log_event
 from .model import ImageDataset, ImageKey, ImageRecord, compact_dataset_image_timings
 from .ome_metadata import (
     build_axes,
@@ -1818,7 +1819,7 @@ def load_image_array(path_str: str) -> np.ndarray:
     array = _load_image_array_cached(path_str)
     after_hits = _load_image_array_cached.cache_info().hits
     if after_hits > before_hits:
-        _LOGGER.debug("Image cache hit | %s", Path(path_str).name)
+        log_event(_LOGGER, "dataset.plane", logging.DEBUG, file=Path(path_str).name, source="cache")
     return array
 
 
@@ -1828,8 +1829,12 @@ def load_image_array(path_str: str) -> np.ndarray:
 # cache tops out near 750 MB at that size.
 @lru_cache(maxsize=160)
 def _load_image_array_cached(path_str: str) -> np.ndarray:
+    started = time.perf_counter()
     array = _load_image_array_uncached(path_str)
-    _LOGGER.debug("Image cache built | %s", Path(path_str).name)
+    emit_timing(
+        _LOGGER, "dataset.plane_read", (time.perf_counter() - started) * 1000.0,
+        file=Path(path_str).name, source="disk", mb=round(array.nbytes / 1e6, 2),
+    )
     try:
         array.setflags(write=False)
     except Exception:
@@ -1860,11 +1865,82 @@ def _read_ome_zarr_plane_by_path(path: Path, ome_root: Path) -> np.ndarray:
     return np.asarray(array[spectral_cube_index, wavelength_index])
 
 
+# -- fast TIFF decoding for the Image panel's render thread (2026-10-14) -----------------------------
+#
+# Measured on the maintainer's dataset (LZW, 300 strips per file): the render thread spent 83 % of a Play
+# run inside plane reads, one ~80 ms read per frame, which capped Play at ~12 frames/s. Most of that is
+# `tifffile`'s per-strip Python work, not decompression. `imagecodecs.tiff_decode` (libtiff, already a
+# dependency) decodes the whole file in ONE native call: identical pixels, 2-3x faster (43 -> 16 ms for
+# 16-bit data, 72 -> 34 ms for float32, still ~2x faster while the GUI thread is busy).
+#
+# Guards, because it is a different decoder: used only on threads that opt in (`use_fast_tiff_decoder`:
+# the render thread; analysis keeps its measured tifffile path), only for plain 2-D images (anything else,
+# or any error, falls back to tifffile), and the first FAST_TIFF_VERIFY_FILES files are also read with
+# tifffile and compared pixel by pixel: on any difference the fast path is switched off for the session.
+# `LSPR_TIFF_DECODER=tifffile` switches it off from the outside. (libtiff returns only the first page of a
+# multi-page TIFF where tifffile returns the stack: the verification catches that.)
+FAST_TIFF_VERIFY_FILES = 3
+_fast_tiff = threading.local()
+_fast_tiff_lock = threading.Lock()
+_fast_tiff_verified = 0
+_fast_tiff_disabled = os.environ.get("LSPR_TIFF_DECODER", "").strip().lower() == "tifffile"
+
+try:
+    import imagecodecs as _imagecodecs
+except Exception:  # pragma: no cover - optional acceleration path
+    _imagecodecs = None
+if _imagecodecs is None or not getattr(getattr(_imagecodecs, "TIFF", None), "available", False):
+    _imagecodecs = None
+
+
+def use_fast_tiff_decoder(enabled: bool) -> None:
+    """Opt the CALLING thread in (or out of) the fast native TIFF decoder."""
+    _fast_tiff.enabled = bool(enabled)
+
+
+def fast_tiff_decoder_active() -> bool:
+    """Whether the calling thread would use it right now (opted in, available, not switched off)."""
+    return bool(getattr(_fast_tiff, "enabled", False)) and _imagecodecs is not None and not _fast_tiff_disabled
+
+
+def _read_tiff_fast(path_str: str) -> np.ndarray | None:
+    """The image as read by the native decoder, or None when tifffile must be used instead."""
+    global _fast_tiff_verified, _fast_tiff_disabled
+    try:
+        with open(path_str, "rb") as handle:
+            array = np.asarray(_imagecodecs.tiff_decode(handle.read()))
+    except Exception:  # noqa: BLE001 - an unsupported variant must never break a read
+        return None
+    if array.ndim != 2:
+        return None
+    if _fast_tiff_verified < FAST_TIFF_VERIFY_FILES:
+        with _fast_tiff_lock:
+            if _fast_tiff_verified < FAST_TIFF_VERIFY_FILES:
+                reference = np.asarray(_tifffile_imread(path_str, maxworkers=1))
+                if reference.shape != array.shape or not np.array_equal(
+                    array.astype(np.float32), reference.astype(np.float32), equal_nan=True
+                ):
+                    _fast_tiff_disabled = True
+                    _LOGGER.warning(
+                        "The fast TIFF decoder disagrees with tifffile on %s (shape %s vs %s): switched off for this session",
+                        Path(path_str).name, array.shape, reference.shape,
+                    )
+                    return None
+                _fast_tiff_verified += 1
+                if _fast_tiff_verified == FAST_TIFF_VERIFY_FILES:
+                    log_event(_LOGGER, "dataset.tiff_decoder", logging.INFO, decoder="imagecodecs/libtiff", verified_files=_fast_tiff_verified)
+    return array
+
+
 def _load_image_array_uncached(path_str: str) -> np.ndarray:
     path = Path(path_str)
     ome_root = _ome_zarr_root(path.parent.parent if path.parent.name == OME_ZARR_ARRAY_DIRNAME else path.parent)
     if ome_root is not None and path.parent == _ome_zarr_array_dir(ome_root):
         return np.asarray(_read_ome_zarr_plane_by_path(path, ome_root), dtype=np.float32)
+    if path.suffix.lower() in {".tif", ".tiff"} and _tifffile_imread is not None and fast_tiff_decoder_active():
+        fast = _read_tiff_fast(path_str)
+        if fast is not None:
+            return np.asarray(fast, dtype=np.float32)
     if path.suffix.lower() in {".tif", ".tiff"} and _tifffile_imread is not None:
         try:
             # maxworkers=1, not os.cpu_count(): this is the per-wavelength read

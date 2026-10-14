@@ -69,6 +69,7 @@ from lspr_core import ImagingAcquisitionMetadata
 from PyQt6.QtCore import QObject, pyqtSignal
 
 from ..analysis.worker import AnalysisWorker
+from ..applog.events import log_event, timed
 from ..diagnostics import instrumented
 from ..storage.workspace import save_acquisition_metadata_sidecar
 from .io import (
@@ -86,6 +87,7 @@ from .model import (
     ImageRecord,
     compact_dataset_image_timings,
     cube_interval_stats,
+    mean_frame_interval_seconds,
     rehydrated_acquisition_metadata,
 )
 
@@ -119,6 +121,9 @@ class DatasetModule(QObject):
     def __init__(self, parent: QObject | None = None) -> None:
         super().__init__(parent)
         self._dataset: ImageDataset | None = None
+        # t = 0 of the experimental time (`_time_anchor_ms`); computed once, reset whenever the dataset or its metadata changes.
+        self._time_anchor_ms_value: int | None = None
+        self._time_anchor_known = False
         self._chunk_grid_preview_enabled = False
         self._chunk_grid_preview_chunk_px = 64
         self._worker = AnalysisWorker()
@@ -311,18 +316,51 @@ class DatasetModule(QObject):
             return None
         compact = compact_dataset_image_timings(self._dataset)
         cube_ms = compact.earliest_ms_by_cube.get(int(cube_index))
-        if cube_ms is None or not compact.per_frame_ms:
+        anchor_ms = self._time_anchor_ms()
+        if cube_ms is None or anchor_ms is None:
             return None
-        anchor_ms: int | None = None
-        started = self._dataset.acquisition_metadata.started_at_utc
-        if started:
-            try:
-                anchor_ms = int(datetime.fromisoformat(started.replace("Z", "+00:00")).timestamp() * 1000)
-            except ValueError:
-                anchor_ms = None
-        if anchor_ms is None:
-            anchor_ms = min(compact.per_frame_ms.values())
         return (cube_ms - anchor_ms) / 1000.0
+
+    def frame_start_seconds(self, cube_index: int, wavelength: float) -> float | None:
+        """Seconds from the acquisition start to *this frame* - the experimental time of one image (a cube's own
+        time, `cube_start_seconds`, is only its first frame's). Same t = 0 as the cube time. `None` when the
+        frame has no timing (or there is no dataset / acquisition metadata): the caller then shows no time."""
+        if self._dataset is None or self._dataset.acquisition_metadata is None:
+            return None
+        frame_ms = compact_dataset_image_timings(self._dataset).per_frame_ms.get((int(cube_index), float(wavelength)))
+        anchor_ms = self._time_anchor_ms()
+        if frame_ms is None or anchor_ms is None:
+            return None
+        return (frame_ms - anchor_ms) / 1000.0
+
+    def _time_anchor_ms(self) -> int | None:
+        """t = 0 of the experimental time, in unix ms: the recorded `started_at_utc` if parseable, else the
+        earliest recorded frame; `None` without any timing. Computed once (and reset by `load_dataset`,
+        `set_acquisition_metadata` and `clear_dataset`): it runs on every slideshow step, and the earliest-frame
+        fallback scans every frame."""
+        if self._time_anchor_known:
+            return self._time_anchor_ms_value
+        anchor_ms: int | None = None
+        if self._dataset is not None and self._dataset.acquisition_metadata is not None:
+            compact = compact_dataset_image_timings(self._dataset)
+            started = self._dataset.acquisition_metadata.started_at_utc
+            if started:
+                try:
+                    anchor_ms = int(datetime.fromisoformat(started.replace("Z", "+00:00")).timestamp() * 1000)
+                except ValueError:
+                    anchor_ms = None
+            if anchor_ms is None and compact.per_frame_ms:
+                anchor_ms = min(compact.per_frame_ms.values())
+        self._time_anchor_ms_value, self._time_anchor_known = anchor_ms, True
+        return anchor_ms
+
+    def mean_frame_interval_seconds(self) -> float | None:
+        """Average time between two consecutive images of one cube, in seconds
+        (what "1x" means in the Image panel's slideshow). `None` without
+        acquisition timing (math: `dataset.model.mean_frame_interval_seconds`)."""
+        if self._dataset is None or self._dataset.acquisition_metadata is None:
+            return None
+        return mean_frame_interval_seconds(compact_dataset_image_timings(self._dataset).per_frame_ms)
 
     def frame_comment(self, cube_index: int, wavelength: float) -> tuple[bool, str | None]:
         """`(linked, comment)` for one frame. `linked` is False when the frame
@@ -378,7 +416,8 @@ class DatasetModule(QObject):
 
         def task() -> None:
             try:
-                result = load_dataset(folder)
+                with timed(logger, "dataset.scan", logging.INFO, folder=folder.name):
+                    result = load_dataset(folder)
             except Exception as exc:  # noqa: BLE001 - reported via signal, not re-raised
                 self.dataset_load_failed.emit(str(exc))
                 return
@@ -449,7 +488,23 @@ class DatasetModule(QObject):
         real, deliberate user action even when the newly-scanned content
         happens to be identical to what was already loaded."""
         self._dataset = dataset
+        self._time_anchor_known = False
+        self._log_loaded(dataset)
         self.dataset_loaded.emit(dataset)
+
+    @staticmethod
+    def _log_loaded(dataset: ImageDataset) -> None:
+        """The `dataset.loaded` log event. Logging must never be able to break a load, so every
+        field is read defensively (a test double or a half-built dataset just gets fewer fields)."""
+        try:
+            log_event(
+                logger, "dataset.loaded", logging.INFO,
+                folder=Path(str(getattr(dataset, "home", ""))).name, format=getattr(dataset, "source_format", None),
+                planes=len(getattr(dataset, "records", ())), cubes=len(getattr(dataset, "spectral_cube_indices", ())),
+                wavelengths=len(getattr(dataset, "wavelengths_nm", ())),
+            )
+        except Exception:  # noqa: BLE001 - diagnostics only
+            logger.debug("dataset.loaded event could not be built", exc_info=True)
 
     @instrumented("DatasetModule.set_acquisition_metadata")
     def set_acquisition_metadata(self, metadata: ImagingAcquisitionMetadata) -> None:
@@ -475,6 +530,7 @@ class DatasetModule(QObject):
         if self._dataset is None:
             raise RuntimeError("No dataset is loaded.")
         self._dataset.acquisition_metadata = metadata
+        self._time_anchor_known = False
         try:
             save_acquisition_metadata_sidecar(acquisition_metadata_sidecar_path(self._dataset.home), metadata)
         except OSError:
@@ -491,6 +547,7 @@ class DatasetModule(QObject):
         if self._dataset is None:
             return
         self._dataset = None
+        self._time_anchor_known = False
         self.dataset_cleared.emit()
 
     # -- chunk-grid preview (Export section <-> Image panel) ----------------

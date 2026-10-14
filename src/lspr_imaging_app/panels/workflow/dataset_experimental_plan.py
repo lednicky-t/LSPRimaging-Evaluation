@@ -317,18 +317,21 @@ class ExperimentalPlanSection(QWidget):
         self.header_stats_label.setText("")
 
     def _refresh_current_frame_preview(self, *_args: object) -> None:
-        metadata = self._dataset_module.rehydrated_acquisition_metadata()
-        if metadata is None:
+        # Runs on EVERY cube / wavelength change, also while Play steps through the dataset. It used to
+        # rebuild all per-image timing objects (`rehydrated_acquisition_metadata`: 8478 pydantic models on
+        # a 314-cube dataset) and scan them for the current frame: 25 ms (up to 100 ms) per step, measured
+        # 2026-10-14. `DatasetModule.frame_comment` answers the same question from the compact timings
+        # in O(1) (it is what the Image panel's title bar uses).
+        if self._dataset_module.acquisition_metadata() is None:
             self._current_frame_label.setText("")
             return
         cube = self._selection_module.current_cube()
         wavelength = self._selection_module.current_wavelength()
         cube_text = self._cube_display.label_for(cube) if self._cube_display is not None else str(cube)
-        timing = metadata.timing_for(cube, wavelength)
-        if timing is None:
+        linked, comment = self._dataset_module.frame_comment(cube, wavelength)
+        if not linked:
             self._current_frame_label.setText(f"Cube {cube_text}, WL {wavelength:g}: no timing recorded.")
             return
-        comment = metadata.comment_at(timing.acquired_at_unix_ms)
         comment_text = comment if comment else "(no comment/step recorded)"
         self._current_frame_label.setText(f"Cube {cube_text}, WL {wavelength:g}: {comment_text}")
 

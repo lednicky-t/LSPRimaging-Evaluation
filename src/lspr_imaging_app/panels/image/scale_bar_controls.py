@@ -57,6 +57,10 @@ class ScaleBarControls(QWidget):
         self._color = QColor(color)
         self._refresh_swatch()
 
+    def set_visible(self, shown: bool) -> None:
+        """Show or hide the scale bar, exactly as a click on the toggle does (the View tab's All buttons)."""
+        self._toggle.setChecked(bool(shown))
+
     def sync(self, *_args: object) -> None:
         """Follow the geometry settings (also after a session restore)."""
         settings = self._geometry.settings()

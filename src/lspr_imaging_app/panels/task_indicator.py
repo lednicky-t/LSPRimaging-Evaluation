@@ -292,7 +292,12 @@ class TaskIndicator(QWidget):
         self._last = record
         logger.log(
             logging.WARNING if outcome == "failed" else logging.INFO,
-            "Task %s (started %s): %s", task_id, _clock(record.started_at), record.summary(),
+            "task.finished %s (started %s): %s", task_id, _clock(record.started_at), record.summary(),
+            extra={
+                "lspr_event": "task.finished",
+                "lspr_fields": {"task": task_id, "outcome": outcome, "duration_s": round(record.duration_s, 3)},
+                "lspr_dur_ms": record.duration_s * 1000.0,
+            },
         )
         self._refresh()
 

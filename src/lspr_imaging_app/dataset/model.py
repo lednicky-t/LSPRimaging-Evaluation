@@ -20,7 +20,7 @@ diffable against the stable app's `domain/models.py` original.
 from __future__ import annotations
 
 import statistics
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from lspr_core import ImagingAcquisitionMetadata, ImagingCubeTiming
@@ -114,12 +114,23 @@ class CompactImageTimings:
 
 
 @dataclass(slots=True)
+class _RecordIndex:
+    """Sorted cubes, sorted wavelengths and each cube's sorted wavelengths, built once per record list."""
+
+    key: tuple[int, int]
+    cubes: list[int]
+    wavelengths: list[float]
+    by_cube: dict[int, list[float]]
+
+
+@dataclass(slots=True)
 class ImageDataset:
     folder: Path
     records: list[ImageRecord]
     source_format: str = "image_stack"
     acquisition_metadata: ImagingAcquisitionMetadata | None = None
     compact_image_timings: CompactImageTimings | None = None
+    _index: _RecordIndex | None = field(default=None, init=False, repr=False, compare=False)
     home_folder: Path | None = None
     """The folder this dataset was loaded *from*, when that differs from
     `folder` (the actual TIFF/OME-Zarr location) - e.g. loading discovering
@@ -136,13 +147,32 @@ class ImageDataset:
         gets written into a raw TIFF/OME-Zarr folder it doesn't own."""
         return self.home_folder if self.home_folder is not None else self.folder
 
+    def _record_index(self) -> _RecordIndex:
+        """One pass over the records, cached. These three queries used to scan every record on every call;
+        with 8478 records the slideshow and the Image panel called them hundreds of times per second
+        (measured 2026-10-14: 2.2 ms per `wavelengths_for_cube` call, ~280 ms per Play step).
+        Rebuilt when the record list is replaced or changes length (records are never edited in place)."""
+        key = (id(self.records), len(self.records))
+        index = self._index
+        if index is None or index.key != key:
+            by_cube: dict[int, set[float]] = {}
+            for record in self.records:
+                by_cube.setdefault(record.key.spectral_cube_index, set()).add(record.key.wavelength_nm)
+            index = self._index = _RecordIndex(
+                key=key,
+                cubes=sorted(by_cube),
+                wavelengths=sorted({wl for wavelengths in by_cube.values() for wl in wavelengths}),
+                by_cube={cube: sorted(wavelengths) for cube, wavelengths in by_cube.items()},
+            )
+        return index
+
     @property
     def wavelengths_nm(self) -> list[float]:
-        return sorted({record.key.wavelength_nm for record in self.records})
+        return list(self._record_index().wavelengths)
 
     @property
     def spectral_cube_indices(self) -> list[int]:
-        return sorted({record.key.spectral_cube_index for record in self.records})
+        return list(self._record_index().cubes)
 
     def wavelengths_for_cube(self, spectral_cube_index: int) -> list[float]:
         """The wavelengths *this one cube* actually has records for, sorted.
@@ -156,13 +186,7 @@ class ImageDataset:
         rather than a hypothetical one: an aborted or partially-failed
         acquisition is exactly how a cube ends up short a wavelength.
         """
-        return sorted(
-            {
-                record.key.wavelength_nm
-                for record in self.records
-                if record.key.spectral_cube_index == int(spectral_cube_index)
-            }
-        )
+        return list(self._record_index().by_cube.get(int(spectral_cube_index), ()))
 
     @property
     def is_ome_zarr(self) -> bool:
@@ -265,6 +289,22 @@ class CubeIntervalStats:
     """Sample standard deviation (`statistics.stdev`, n-1) of the gaps -
     `None` when there's only one gap, since a spread needs at least two
     data points to mean anything."""
+
+
+def mean_frame_interval_seconds(per_frame_ms: "dict[tuple[int, float], int | float]") -> float | None:
+    """Average time between two consecutive images of the same cube, in
+    seconds (what "1x" means in the Image panel's slideshow); `None` when no
+    cube has two timed images. Gaps are taken inside a cube only, so the pause
+    between cubes does not inflate it."""
+    by_cube: dict[int, list[float]] = {}
+    for (cube, _wavelength), ms in per_frame_ms.items():
+        by_cube.setdefault(int(cube), []).append(float(ms))
+    gaps: list[float] = []
+    for times in by_cube.values():
+        times.sort()
+        gaps.extend(b - a for a, b in zip(times, times[1:]))
+    gaps = [gap for gap in gaps if gap > 0]
+    return (sum(gaps) / len(gaps)) / 1000.0 if gaps else None
 
 
 def cube_interval_stats(compact: CompactImageTimings) -> CubeIntervalStats | None:

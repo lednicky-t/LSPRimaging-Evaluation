@@ -70,6 +70,7 @@ from ...selection import SelectionModule
 from ...storage.ui_state_keys import ROI_TABLE_COLLAPSED, ROI_TABLE_COLUMN_WIDTHS, ROI_TABLE_SORT, ROI_TABLE_VIEW_MODE
 from ..image.general_group import ICON_SIZE, style_general_icon_button
 from ..ui_state import UiStateStore
+from ..visibility_gate import HiddenPanelGate
 from ..unit_toggle import UnitToggle
 from .delegate import RoiTableDelegate
 from .dialogs import ShiftDialog
@@ -151,7 +152,8 @@ class RoiTablePanel(QWidget):
         self._redraw_timer = QTimer(self)
         self._redraw_timer.setSingleShot(True)
         self._redraw_timer.setInterval(_REDRAW_COALESCE_MS)
-        self._redraw_timer.timeout.connect(self.refresh_now)
+        self._redraw_timer.timeout.connect(self._on_refresh_timer)
+        self._gate = HiddenPanelGate(on_shown=self._schedule_refresh)  # no rebuilding while the dock is hidden
         self._notice_timer = QTimer(self)
         self._notice_timer.setSingleShot(True)
         self._notice_timer.timeout.connect(self._update_footer)
@@ -281,7 +283,7 @@ class RoiTablePanel(QWidget):
         self._geometry.cosmetic_changed.connect(self._schedule_refresh)  # display unit, calibration
         if self._display_style is not None:
             self._display_style.changed.connect(self._schedule_refresh)  # the Sample colour of a ROI with none
-        self._selection.cube_changed.connect(self._schedule_refresh)  # the geometry shown is the one valid on this cube
+        self._selection.cube_changed.connect(self._on_cube_changed)  # the geometry shown is the one valid on this cube
         self._selection.roi_selection_changed.connect(self._on_selection_changed_elsewhere)
         self._model.cell_edited.connect(self._on_cell_edited)
         self._model.roi_dropped.connect(self._on_roi_dropped)
@@ -364,7 +366,25 @@ class RoiTablePanel(QWidget):
     # -- refresh --------------------------------------------------------------------------
 
     def _schedule_refresh(self, *_args: object) -> None:
+        if self._gate.defer():
+            return
         self._redraw_timer.start()
+
+    def _on_refresh_timer(self) -> None:
+        if self._gate.defer():  # the timer was already running when the dock was hidden
+            return
+        self.refresh_now()
+
+    def set_panel_visible(self, visible: bool) -> None:
+        """Connected to the dock's `visibilityChanged`: hidden = no table rebuilds; one catch-up when shown again."""
+        self._gate.set_visible(visible)
+
+    def _on_cube_changed(self, *_args: object) -> None:
+        # Only a ROI with a per-cube timeline looks different on another cube. Without one the rows are the
+        # same for every cube, and rebuilding all of them on each cube change cost ~12 % of the GUI thread
+        # while the slideshow stepped through cubes (measured 2026-10-14, 160 ROIs).
+        if self._toolbox.has_timeline():
+            self._schedule_refresh()
 
     def refresh_now(self) -> None:
         """Rebuild the table from the toolbox now (normally done ~100 ms after

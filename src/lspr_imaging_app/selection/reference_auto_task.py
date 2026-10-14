@@ -6,11 +6,11 @@ a **plain `threading.Thread`**, never `QThreadPool` (planes are OME-Zarr
 reads), progress through `task_progress`, one `task_finished` per run, a
 `cancel()`; everything the thread needs is snapshotted by value in `_start`.
 
-Triggers: whenever Auto is the active mode and the viewed cube has no cached
-best wavelength yet - on switching to Auto, and on every cube change. A cube
-already scored is never scored again (the cache lives in the module and is
-cleared with the dataset). One run at a time; a cube change during a run is
-picked up when it finishes.
+Trigger: only an explicit click on "Find reference" (`ReferenceFrameModule.
+request_find`). It used to run on every cube change, which replaced the
+reference while the user previewed other cubes (changed 2026-10-14, maintainer).
+The winner is stored as a fixed reference frame, the same as "Set reference".
+One run at a time.
 """
 
 from __future__ import annotations
@@ -20,11 +20,12 @@ import threading
 
 from PyQt6.QtCore import QObject, pyqtSignal
 
+from ..applog.events import log_event
 from ..dataset.module import DatasetModule
 from ..progress import Cancelled
 from .frame_roles_module import FrameRolesModule
 from .module import SelectionModule
-from .reference_frame_module import MODE_AUTO, ReferenceFrameModule
+from .reference_frame_module import ReferenceFrameModule
 from .reference_scoring import best_contrast_wavelength
 
 logger = logging.getLogger(__name__)
@@ -55,15 +56,15 @@ class ReferenceAutoFind(QObject):
         self._reference_frame = reference_frame
         self._frame_roles = frame_roles
         self._thread: threading.Thread | None = None
+        self._last_candidates: tuple[float, ...] = ()
         self._cancel_event = threading.Event()
         self._generation = 0  # bumped when the dataset changes, so a late result is dropped
         self._finished.connect(self._on_finished)
-        reference_frame.reference_frame_changed.connect(self._maybe_start)
-        selection.cube_changed.connect(lambda _cube: self._maybe_start())
+        # Only an explicit click starts a scan (2026-10-14, maintainer): it used to
+        # run on every cube change, which replaced the reference while previewing.
+        reference_frame.find_requested.connect(self._start)
         dataset.dataset_loaded.connect(lambda _ds: self._on_dataset_changed())
         dataset.dataset_cleared.connect(self._on_dataset_changed)
-        if frame_roles is not None:
-            frame_roles.roles_changed.connect(self._on_roles_changed)
 
     def _candidate_wavelengths(self, cube_index: int) -> tuple[float, ...]:
         """The cube's wavelengths that may be a reference: not the dark, not ignored."""
@@ -72,25 +73,8 @@ class ReferenceAutoFind(QObject):
             return wavelengths
         return tuple(wl for wl in wavelengths if self._frame_roles.is_spectral(cube_index, wl))
 
-    def _on_roles_changed(self) -> None:
-        # A cached best wavelength that has since become the dark or ignored is
-        # stale: forget it so it is found again among the remaining frames.
-        for cube, wavelength in self._reference_frame.auto_wavelengths().items():
-            if self._frame_roles is not None and not self._frame_roles.is_spectral(cube, wavelength):
-                self._reference_frame.discard_auto_wavelength(cube)
-        self._maybe_start()
-
     def is_running(self) -> bool:
         return self._thread is not None
-
-    def is_pending(self, cube_index: int) -> bool:
-        """Whether Auto is waiting on a best wavelength for `cube_index` (not
-        found yet, and a run is on its way) - the UI shows "finding...". """
-        return (
-            self._reference_frame.mode() == MODE_AUTO
-            and self._reference_frame.auto_wavelength(cube_index) is None
-            and bool(self._candidate_wavelengths(cube_index))
-        )
 
     def cancel(self) -> None:
         self._cancel_event.set()
@@ -105,18 +89,20 @@ class ReferenceAutoFind(QObject):
         self._generation += 1
         self._cancel_event.set()  # the running scan (if any) is for the old dataset
 
-    def _maybe_start(self) -> None:
-        if self._thread is not None or self._reference_frame.mode() != MODE_AUTO:
+    def _start(self) -> None:
+        """Score every candidate wavelength of the cube viewed now (background thread)."""
+        if self._thread is not None:
             return
         cubes = self._dataset.spectral_cubes()
         if not cubes:
             return
         cube = int(self._selection.current_cube())
-        if cube not in cubes or self._reference_frame.auto_wavelength(cube) is not None:
+        if cube not in cubes:
             return
         wavelengths = self._candidate_wavelengths(cube)
         if not wavelengths:
             return
+        self._last_candidates = wavelengths
         load_plane = self._dataset.load_plane
         generation = self._generation
         self._cancel_event.clear()
@@ -146,8 +132,6 @@ class ReferenceAutoFind(QObject):
         self.running_changed.emit(False)
         if isinstance(error, Cancelled):
             self.task_finished.emit(TASK_ID, "cancelled", "")
-            if generation != self._generation:  # cancelled only because the dataset changed
-                self._maybe_start()
             return
         if error is not None:
             logger.error("Find reference crashed", exc_info=error)
@@ -155,11 +139,11 @@ class ReferenceAutoFind(QObject):
             return
         if generation != self._generation:
             self.task_finished.emit(TASK_ID, "cancelled", "dataset changed")
-            self._maybe_start()
             return
         if best is None:
             self.task_finished.emit(TASK_ID, "failed", f"Cube {cube}: no readable image to score.")
             return
         self.task_finished.emit(TASK_ID, "completed", f"Cube {cube}: reference {float(best):.0f} nm")
-        self._reference_frame.set_auto_wavelength(cube, float(best))
-        self._maybe_start()  # the viewed cube may have changed during the run
+        log_event(logger, "reference.find", logging.INFO, cube=cube, wl=float(best), planes=len(self._last_candidates))
+        # A fixed reference, the same as Set reference: it does not change when other cubes are viewed.
+        self._reference_frame.set_manual_frame(cube, float(best))

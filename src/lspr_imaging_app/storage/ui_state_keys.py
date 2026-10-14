@@ -115,6 +115,16 @@ IMAGE_ROI_FILL_MAX_OPACITY = UiKey("image/roi_fill_max_opacity", 1.0, float)  # 
 ROI_ROUND_POSITIONS = UiKey("roi/round_positions", True, bool)  # Options menu: store ROI positions to 0.1 px
 CUBE_DISPLAY_MODE = UiKey("app/cube_display_mode", "cube", str)  # "cube" (number) | "time" (start time of the first frame)
 MASK_SCOPE = UiKey("mask/scope", None, str)  # a `MaskScope` value
+# Image panel slider ribbon, slideshow settings (panels/image/slideshow.py)
+SLIDER_RIBBON_OPEN = UiKey("image/slider_ribbon_open", True, bool)  # rolled down (True) or up
+SLIDESHOW_SPEED = UiKey("image/slideshow_speed", 1, int)  # 1, 2, 5 or 10 (x)
+SLIDESHOW_MODE = UiKey("image/slideshow_mode", "all", str)  # "all" | "one_wavelength"
+SLIDESHOW_REPEAT = UiKey("image/slideshow_repeat", False, bool)
+SLIDESHOW_SKIP_IGNORED = UiKey("image/slideshow_skip_ignored", True, bool)
+SLIDESHOW_SKIP_DARK = UiKey("image/slideshow_skip_dark", False, bool)
+SLIDESHOW_THIN_ROI_OUTLINE = UiKey("image/slideshow_thin_roi_outline", False, bool)
+SLIDESHOW_CALM_HISTOGRAM = UiKey("image/slideshow_calm_histogram", False, bool)
+SLIDESHOW_END = UiKey("image/slideshow_end", "dataset", str)  # "cube" | "dataset"
 ROI_SCOPE = UiKey("roi/scope", None, str)  # "persistent" | "individual"; None = persistent
 ARRAY_KEYS = {  # ROIs tab, "Array" group (panels/image/array_controls.py); lengths are stored in pixels
     "mode": UiKey("array/mode", "auto", str),
@@ -175,6 +185,12 @@ nothing on another dataset, so it carries the dataset folder it was set on
 (replaced `highlight_range_min/max/dataset`)."""
 
 
+DISPLAY_RANGE = "image/display_range"
+"""``{"dataset": str, "fixed": bool, "min": float, "max": float}``: the Image panel's fixed display range
+(black / white point in image values). Like the highlight range it means nothing on another dataset (other
+exposure, other camera gain), so it carries the dataset folder it was set on."""
+
+
 def _number(value: object) -> TypeGuard[int | float]:
     return isinstance(value, (int, float)) and not isinstance(value, bool)
 
@@ -210,6 +226,17 @@ def read_highlight_range(store: _Getter) -> tuple[str, float, float] | None:
     if not isinstance(dataset, str) or not _number(low) or not _number(high):
         return None
     return dataset, float(low), float(high)
+
+
+def read_display_range(store: _Getter) -> tuple[str, bool, float, float] | None:
+    """``(dataset_folder, fixed, min, max)`` or `None` when nothing valid is saved."""
+    value = store.get(DISPLAY_RANGE)
+    if not isinstance(value, dict):
+        return None
+    dataset, fixed, low, high = value.get("dataset"), value.get("fixed"), value.get("min"), value.get("max")
+    if not isinstance(dataset, str) or not isinstance(fixed, bool) or not _number(low) or not _number(high):
+        return None
+    return dataset, fixed, float(low), float(high)
 
 
 def migrate_legacy_fields(payload: Mapping[str, object], ui_state: dict[str, object]) -> bool:

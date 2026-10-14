@@ -101,6 +101,10 @@ class HistogramHighlightOverlayControls(QWidget):
         self._refresh_toggle_icon()
         self._refresh_swatch()
 
+    def set_visible(self, shown: bool) -> None:
+        """Show or hide, exactly as a click on the toggle does: the change is reported (the View tab's All buttons)."""
+        self._toggle_button.setChecked(bool(shown))
+
     def _on_toggled(self, checked: bool) -> None:
         self._refresh_toggle_icon()
         self.visibility_changed.emit(bool(checked))
