@@ -112,6 +112,7 @@ ROI_OVERLAY_KEYS = {
     for kind in ("sample", "reference")
 }
 IMAGE_ROI_FILL_MAX_OPACITY = UiKey("image/roi_fill_max_opacity", 1.0, float)  # Options menu; 1.0 = fill fully opaque at slider 100 %
+IMAGE_OVERLAY_CACHE_MB = UiKey("image/overlay_cache_mb", 256, int)  # Options menu: ROI overlay cache size in MB; 0 = off
 ROI_ROUND_POSITIONS = UiKey("roi/round_positions", True, bool)  # Options menu: store ROI positions to 0.1 px
 CUBE_DISPLAY_MODE = UiKey("app/cube_display_mode", "cube", str)  # "cube" (number) | "time" (start time of the first frame)
 MASK_SCOPE = UiKey("mask/scope", None, str)  # a `MaskScope` value
@@ -153,7 +154,7 @@ ARRAY_KEYS = {  # ROIs tab, "Array" group (panels/image/array_controls.py); leng
 }
 HAND_WIRED_KEYS: tuple[UiKey, ...] = (
     HISTOGRAM_CURSOR_READOUT, HISTOGRAM_CURVE_STYLES, IMAGE_CURSOR_READOUT, IMAGE_MASK_EDIT_TOOL, IMAGE_SCALE_BAR_COLOR, IMAGE_ROI_LABELS,
-    IMAGE_ROI_FILL_MAX_OPACITY,
+    IMAGE_ROI_FILL_MAX_OPACITY, IMAGE_OVERLAY_CACHE_MB,
     *(key for keys_for_kind in ROI_OVERLAY_KEYS.values() for key in keys_for_kind.values()),
     ROI_ROUND_POSITIONS, CUBE_DISPLAY_MODE, MASK_SCOPE, ROI_SCOPE, *ARRAY_KEYS.values(),
 )

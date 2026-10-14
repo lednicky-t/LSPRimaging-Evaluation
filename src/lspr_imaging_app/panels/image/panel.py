@@ -115,6 +115,7 @@ from ...image_tools import (
     MaskScopeModule,
 )
 from ...image_tools.geometry.model import CropDefinition, GeometrySettings
+from ...diagnostics.thread_times import thread_cpu_times
 from ...image_tools.preprocess import area_selection_to_raw, resolve_external_mask
 from ...roi import RoiToolbox
 from ...roi.rasterize import effective_reference_diameters
@@ -152,6 +153,7 @@ from .interaction import CanvasInteraction
 from .mask_tab import MaskTab
 from .measure_controls import MeasureCalibrationControls
 from .measure_line_tool import MeasureLineTool
+from .overlay_cache import environment_budget_mb
 from .overlay_style import OverlayStyle
 from .overlay_tint import OverlayTint
 from .prefetch import prefetch_order
@@ -165,6 +167,7 @@ from .view_tab import ViewTab
 from ...storage.ui_state_keys import (
     IMAGE_CURSOR_READOUT,
     IMAGE_MASK_EDIT_TOOL,
+    IMAGE_OVERLAY_CACHE_MB,
     IMAGE_ROI_FILL_MAX_OPACITY,
     IMAGE_ROI_LABELS,
     IMAGE_SCALE_BAR_COLOR,
@@ -514,6 +517,9 @@ class ImagePanel(QWidget):
         if isinstance(labels, bool):
             self._roi_overlay.labels_visible = labels
         self._roi_overlay.fill_max_opacity = float(read(store, IMAGE_ROI_FILL_MAX_OPACITY))
+        env_mb = environment_budget_mb()  # LSPR_OVERLAY_CACHE_MB, if set, wins over the saved choice for this run
+        cache_mb = env_mb if env_mb is not None else int(read(store, IMAGE_OVERLAY_CACHE_MB))
+        self._roi_overlay.layers.set_budget_bytes(int(max(cache_mb, 0) * 1024 * 1024))
         self._restore_slideshow_settings(store)
         self._ribbon_drawer.set_expanded(read(store, SLIDER_RIBBON_OPEN) is not False, animate=False)
         self._ribbon_drawer.expanded_changed.connect(lambda open_: store.set(SLIDER_RIBBON_OPEN.key, bool(open_)))
@@ -649,6 +655,7 @@ class ImagePanel(QWidget):
         self._plot.vb.sigResized.connect(self._draw_scale_bar)
         # ROI labels (the ROIs tab's toggle): the same kind of item, see `roi_label_overlay.py`.
         self._roi_overlay.attach_labels()
+        self._roi_overlay.layers.set_refresher(self._refresh_overlay_items)
         # Drawn only while a preview tool is active (see `_draw_overlays`).
         self._crop_outline_curve = self._add_curve(_CROP_OUTLINE_COLOR, width=1.5, dashed=True)
 
@@ -1539,14 +1546,16 @@ class ImagePanel(QWidget):
         synchronously, because they are a few thousand points of pure numpy
         and because they must track a drag with no perceptible lag - a
         coalesced 100ms round trip to a worker would make dragging an ROI
-        feel broken."""
-        redraw_started = time.perf_counter()
-        self._draw_overlays()
-        self._playback_stats.note_detail("overlays", time.perf_counter() - redraw_started)
-        mask_started = time.perf_counter()
+        feel broken.
 
+        **The render request goes out first, the overlays are drawn after it** (2026-10-14, testing7): while
+        Play runs the render thread is the busy one, and drawing the overlays first (~6 ms on a ROI-heavy
+        frame) made every request wait for work that does not feed it. Nothing below the submit changes what
+        the request contains."""
+        redraw_started = time.perf_counter()
         cubes = self._dataset.spectral_cubes()
         if not cubes:
+            self._draw_overlays()
             self._update_mask_overlay(None, None, None, hidden=True)
             self._current_display_image = None
             self._highlight_tint.item.hide()
@@ -1565,25 +1574,28 @@ class ImagePanel(QWidget):
 
         geometry = self._geometry.settings()
         preview_active = self._active_tool.active() in _PREVIEW_TOOLS
-        # The overlay tint must match the *displayed* geometry exactly - a
-        # preview tool shows the image uncropped (see below), a different
-        # coordinate space than `authored_mask`/`warp_affine` were resolved
-        # for, so it hides then, the same "wrong coordinate space" reasoning
-        # `_draw_overlays` already applies to the ROI overlay above.
-        self._update_mask_overlay(authored_mask, geometry, warp_affine, hidden=preview_active)
+        request_geometry = geometry
         if preview_active and geometry.crop.enabled:
             # Uncropped preview - the crop is drawn as an outline instead.
-            geometry = replace(geometry, crop=CropDefinition())
+            request_geometry = replace(geometry, crop=CropDefinition())
 
-        self._playback_stats.note_detail("mask", time.perf_counter() - mask_started)
+        background = self._background.settings()
+        if authored_mask is not None and background.flatten_background_exclude_mask and (
+            self._show_background or background.flatten_background_enabled
+        ):
+            # The render thread will need this resolved mask (background estimate with "exclude mask"): resolve it
+            # here first, as before the 2026-10-14 reorder, so it finds it in the cache instead of both threads
+            # computing the same thing at the same time.
+            resolve_external_mask(authored_mask, request_geometry, warp_affine)
+
         submit_started = time.perf_counter()
         self._latest_serial = next(self._serial)
         self._renderer.submit(
             RenderRequest(
                 cube_index=cube_index,
                 wavelength_nm=wavelength_nm,
-                geometry=geometry,
-                background=self._background.settings(),
+                geometry=request_geometry,
+                background=background,
                 authored_mask=authored_mask,
                 mask_warp_affine=warp_affine,
                 # Every ROI, not the selection - these feed the background
@@ -1597,8 +1609,50 @@ class ImagePanel(QWidget):
                 display_levels=self._fixed_levels(),
             )
         )
-        self._playback_stats.note_detail("submit", time.perf_counter() - submit_started)
-        self._playback_stats.note_redraw(self._latest_serial, redraw_started, time.perf_counter())
+        submitted = time.perf_counter()
+        self._playback_stats.note_detail("submit", submitted - submit_started)
+        # The stats' "redraw" is now only what happens before the request leaves; the overlay drawing below
+        # overlaps with the render thread's work and is reported on its own ("overlays", "mask").
+        self._playback_stats.note_redraw(self._latest_serial, redraw_started, submitted)
+
+        overlays_started = time.perf_counter()
+        self._draw_overlays()
+        self._playback_stats.note_detail("overlays", time.perf_counter() - overlays_started)
+        mask_started = time.perf_counter()
+        # The overlay tint must match the *displayed* geometry exactly - a
+        # preview tool shows the image uncropped (see above), a different
+        # coordinate space than `authored_mask`/`warp_affine` were resolved
+        # for, so it hides then, the same "wrong coordinate space" reasoning
+        # `_draw_overlays` already applies to the ROI overlay.
+        self._update_mask_overlay(authored_mask, geometry, warp_affine, hidden=preview_active)
+        self._playback_stats.note_detail("mask", time.perf_counter() - mask_started)
+
+    def _play_config_fields(self) -> dict[str, float | int | bool]:
+        """What is switched on right now, as flat log fields (``c_*``), so a log of a Play run says which
+        overlays each second of it was drawn with (testing9: the stats alone could not tell). Read once per
+        second with the Play stats window; cheap."""
+        settings = self._slideshow.settings()
+        mask_state = self._mask_overlay_state
+        return {
+            "c_target_fps": round(1.0 / max(self._slideshow.interval_seconds(), 1e-6), 1),
+            "c_speed": settings.speed,
+            "c_rois": len(self._roi_toolbox.rois_at(self._current_cube())),
+            "c_sample": bool(self._roi_overlay.sample.visible),
+            "c_reference": bool(self._roi_overlay.reference.visible),
+            "c_labels": bool(self._roi_overlay.labels_visible),
+            "c_group_labels": bool(self._roi_overlay.group_labels.visible),
+            "c_landmarks": bool(self._landmark_overlay_visible),
+            "c_mask": bool(self._mask_tint.visible and mask_state is not None and mask_state[0] is not None),
+            "c_highlight": bool(self._highlight_tint.item.isVisible()),
+            "c_background": bool(self._background.settings().flatten_background_enabled),
+            "c_bg_estimate": bool(self._show_background),
+            "c_thin": bool(settings.thin_roi_outline),
+            "c_calm": bool(settings.calm_histogram),
+            "c_ov_hits": self._roi_overlay.layers.hits,
+            "c_ov_misses": self._roi_overlay.layers.misses,
+            "c_ov_states": self._roi_overlay.layers.cached_states,
+            "c_ov_mb": round(self._roi_overlay.layers.cached_megabytes, 1),
+        }
 
     def _flush_redraw_for_step(self, _handlers_s: float) -> None:
         """Play made a step: send the render request now instead of 0 ms later through the redraw timer.
@@ -1634,7 +1688,7 @@ class ImagePanel(QWidget):
         if stats.active:
             stats.stop()
             summary = stats.summary(time.perf_counter())
-            log_event(logger, "playback.summary", logging.INFO, **stats.total_fields())
+            log_event(logger, "playback.summary", logging.INFO, **stats.total_fields(), **self._play_config_fields())
             self._on_tool_status(summary)
 
     def _on_rendered(self, result: RenderResult) -> None:
@@ -1650,6 +1704,11 @@ class ImagePanel(QWidget):
             # render.py's "latest request wins"), not an error.
             return
         self._last_shown_serial = serial
+        times = thread_cpu_times()  # (user, kernel) seconds of the GUI thread; None off Windows
+        if times is None:
+            self._playback_stats.note_gui_clock(arrived, time.thread_time())
+        else:
+            self._playback_stats.note_gui_clock(arrived, times[0] + times[1], times[1])
         if result.error is not None or result.image is None:
             # A render error, not "what frame is displayed" - goes to the
             # status bar (`tool_status_changed`), not the dock title bar
@@ -1749,7 +1808,10 @@ class ImagePanel(QWidget):
                 finished_at=result.finished_at, blocked_by_prefetch=result.request.submitted_while_prefetching,
             )
             if line is not None:
-                log_event(logger, "playback.window", logging.DEBUG, **self._playback_stats.last_window_fields())
+                log_event(
+                    logger, "playback.window", logging.DEBUG,
+                    **self._playback_stats.last_window_fields(), **self._play_config_fields(),
+                )
                 self._on_tool_status(line)
         if serial == self._latest_serial:
             # Only the newest request releases the brake: an older result shown while a newer request is
@@ -1852,21 +1914,36 @@ class ImagePanel(QWidget):
         # per frame on 100+ ROIs (measured 2026-10-14), and nothing the overlay draws changes between two
         # wavelengths unless the ROIs, the selection, the cube or this frame's chromatic shift did. Every
         # other caller (a style, label or group-label change) forces the redraw.
-        key = (
-            self._roi_revision, frame[0] if self._roi_toolbox.has_timeline() else None,  # geometry differs per cube only with a timeline
-            frozenset(self._selection.selected_roi_ids()),
-            np.asarray(affine, dtype=np.float64).tobytes(), self._roi_overlay.labels_visible,
+        # `state` = what changes from one frame to the next (the chromatic shift; the cube only with a ROI timeline);
+        # `epoch` = everything else that decides how the overlay looks. The overlay layer cache (`overlay_cache.py`)
+        # keeps one picture per state while the epoch holds: the same wavelength shows the same overlay in every cube.
+        state = (
+            self._roi_toolbox.geometry_segment(frame[0]),  # the cubes between two ROI-timeline changes look the same
+            np.asarray(affine, dtype=np.float64).tobytes(),
         )
+        epoch = (self._roi_revision, frozenset(self._selection.selected_roi_ids()), self._roi_overlay.appearance_key())
+        key = (state, epoch)
         if only_if_changed and key == self._roi_draw_key:
             return
+        layers = self._roi_overlay.layers
+        if only_if_changed:
+            if layers.begin(epoch, state):  # a picture of this very state exists: the items need not be re-drawn
+                self._roi_draw_key = key
+                return
+        else:
+            layers.invalidate()  # a setting or a gesture asked for this: start from scratch
         rois = self._roi_toolbox.rois_at(self._current_cube())
         if not rois:
             self._roi_overlay.clear()
             self._roi_draw_key = key
             return
 
-        detection = self._roi_toolbox.detection_settings()
         self._roi_draw_key = key
+        self._draw_overlay_items(rois, frame, affine, state)
+
+    def _draw_overlay_items(self, rois, frame: tuple[int, float], affine: np.ndarray, state: object) -> None:
+        """Compute and set the overlay items for `frame` (the expensive part), and tell the layer cache which state they hold."""
+        detection = self._roi_toolbox.detection_settings()
         self._roi_overlay.draw(
             rois,
             self._roi_toolbox.display_positions(frame, affine),
@@ -1876,6 +1953,23 @@ class ImagePanel(QWidget):
             detection.reference_outer_diameter_px,
             self._roi_toolbox.groups(),
         )
+        self._roi_overlay.layers.mark_drawn(state)
+
+    def _refresh_overlay_items(self) -> None:
+        """The layer cache's refresher (`OverlayLayers.set_refresher`): the view changed while the items still hold an earlier
+        wavelength's geometry (a cache hit skipped their re-draw); bring them up to date before the repaint."""
+        if self._active_tool.active() in _PREVIEW_TOOLS:
+            return
+        frame = (self._current_cube(), self._current_wavelength())
+        affine = self._chromatic.affine_for(frame)
+        rois = self._roi_toolbox.rois_at(self._current_cube())
+        if not rois:
+            return
+        state = (
+            self._roi_toolbox.geometry_segment(frame[0]),
+            np.asarray(affine, dtype=np.float64).tobytes(),
+        )
+        self._draw_overlay_items(rois, frame, affine, state)
 
     def _on_group_labels_changed(self) -> None:
         """The group-label menu changed: show its settings on the overlay and redraw (no image render)."""
@@ -1912,6 +2006,25 @@ class ImagePanel(QWidget):
         self._apply_roi_overlay_style()
         if self._roi_overlay_store is not None:
             self._roi_overlay_store.set(IMAGE_ROI_FILL_MAX_OPACITY.key, self._roi_overlay.fill_max_opacity)
+
+    @property
+    def overlay_cache_mb(self) -> int:
+        """Size of the ROI overlay cache in MB (0 = off). See `overlay_cache.py`."""
+        return int(round(self._roi_overlay.layers.budget_megabytes))
+
+    def set_overlay_cache_mb(self, megabytes: int) -> None:
+        """Options menu: how much memory the ROI overlay cache may use (0 = off; remembered). Takes effect at once: the
+        overlay is re-drawn for the frame on screen, so nothing out of date stays visible."""
+        megabytes = max(int(megabytes), 0)
+        changed = megabytes != self.overlay_cache_mb
+        self._roi_overlay.layers.set_budget_bytes(megabytes * 1024 * 1024)
+        if changed and self._last_image_shape is not None:
+            self._draw_roi_overlay()
+        if self._roi_overlay_store is not None:
+            self._roi_overlay_store.set(IMAGE_OVERLAY_CACHE_MB.key, megabytes)
+
+    def overlay_cache_status(self) -> str:
+        return self._roi_overlay.layers.status_text()
 
     def _on_roi_labels_toggled(self, shown: bool) -> None:
         self._roi_overlay.labels_visible = bool(shown)
@@ -2149,7 +2262,13 @@ class ImagePanel(QWidget):
         # docstring).
         # Pixels without a value (NaN) are never selected and do not count as
         # "excluded" either: "everything in range" is judged on finite pixels.
-        if not np.any(selection_mask) or bool(np.all(selection_mask[np.isfinite(image)])):
+        if not np.any(selection_mask):
+            self._highlight_tint.item.hide()
+            return
+        # "Every finite pixel is in range" was already decided from the frame's min / max above whenever those are
+        # known (all finite pixels lie between them), so the full-image `selection_mask[np.isfinite(image)]` test
+        # (a ~1 MP copy, 2-3 ms per Play frame) only runs for a frame without a known range.
+        if data_range is None and bool(np.all(selection_mask[np.isfinite(image)])):
             self._highlight_tint.item.hide()
             return
         self._highlight_tint.paint(selection_mask)

@@ -39,6 +39,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from .entry import SCHEMA, set_session_id
+from .gc_trace import GcTrace
 from .handlers import CONSOLE_DATE_FORMAT, CONSOLE_FORMAT, RingBufferHandler, build_file_pipeline
 
 KEEP_SESSIONS = 20
@@ -60,6 +61,8 @@ class LogSystem:
     _fault_file: Any = None
     _restore: list[Callable[[], None]] = field(default_factory=list)
     _closed: bool = False
+    gc_trace: GcTrace | None = None
+    """Where the cyclic garbage collector runs (`gc_trace.py`); the app calls `gc_trace.flush()` from a GUI timer."""
 
     @property
     def log_dir(self) -> Path:
@@ -151,14 +154,6 @@ def configure_logging(
         "schema": SCHEMA, "app": "lspr_imaging_app", "version": app_version, "session": session, "pid": os.getpid(),
         "python": platform.python_version(), "platform": platform.platform(), "started": time.time(),
     }
-    queue_handler, listener, file_handler = build_file_pipeline(log_path, header)
-    handlers: list[logging.Handler] = [ring, queue_handler]
-    system = LogSystem(
-        ring=ring, log_path=log_path, fault_path=fault_path, session_id=session, capture_level=capture_level,
-        _listener=listener, _handlers=handlers,
-    )
-    system._handlers.append(file_handler)  # closed at shutdown, but not attached to the root (the listener owns it)
-
     console_level = None
     if os.environ.get("LSPR_CONSOLE_LOG", "").strip().lower() in {"1", "true", "yes", "on"}:
         console_level = logging.DEBUG
@@ -167,12 +162,23 @@ def configure_logging(
         console_level = logging.getLevelName(name) if isinstance(logging.getLevelName(name), int) else logging.WARNING
     if console is False:
         console_level = None
+    stream: logging.Handler | None = None
     if console_level is not None:
         stream = logging.StreamHandler()
         stream.setLevel(console_level)
         stream.setFormatter(logging.Formatter(CONSOLE_FORMAT, CONSOLE_DATE_FORMAT))
-        handlers.append(stream)
-    for handler in (h for h in handlers if h is not file_handler):
+    # The console stream is run by the file pipeline's listener thread, not attached to the root logger: the GUI thread
+    # only puts the record on the queue.
+    queue_handler, listener, file_handler = build_file_pipeline(log_path, header, *([stream] if stream is not None else []))
+    handlers: list[logging.Handler] = [ring, queue_handler]
+    system = LogSystem(
+        ring=ring, log_path=log_path, fault_path=fault_path, session_id=session, capture_level=capture_level,
+        _listener=listener, _handlers=handlers,
+    )
+    system._handlers.append(file_handler)  # closed at shutdown, but not attached to the root (the listener owns it)
+    if stream is not None:
+        system._handlers.append(stream)  # likewise
+    for handler in (h for h in handlers if h is not file_handler and h is not stream):
         root.addHandler(handler)
 
     for name in NOISY_LOGGERS:
@@ -238,6 +244,10 @@ def _install_hooks(system: LogSystem) -> None:
         faulthandler.enable(file=system._fault_file, all_threads=True)
     except Exception:  # noqa: BLE001 - diagnostics must not stop the app from starting
         logging.getLogger(__name__).warning("faulthandler could not be enabled", exc_info=True)
+
+    system.gc_trace = GcTrace()
+    system.gc_trace.install()
+    system._restore.append(system.gc_trace.uninstall)
 
     try:
         from PyQt6.QtCore import QtMsgType, qInstallMessageHandler

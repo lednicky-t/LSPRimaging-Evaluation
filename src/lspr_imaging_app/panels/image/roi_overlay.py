@@ -34,6 +34,7 @@ from ...roi.overlay_geometry import circle_outlines, circle_points
 from ...roi.rasterize import effective_reference_diameters
 from .group_label_overlay import GroupLabelItem, GroupLabelSettings, group_label_entries
 from .label_placement import DEFAULT_ROI_PLACEMENT
+from .overlay_cache import OverlayLayers
 from .roi_label_overlay import RoiLabelItem, label_text
 from .sample_circles_item import SampleCirclesItem
 
@@ -130,6 +131,9 @@ def roi_overlay_color(color_hex: str | None, default: str) -> str:
 class RoiOverlay:
     def __init__(self, plot: pg.PlotItem, display_style: RoiDisplayStyle | None = None) -> None:
         self._plot = plot
+        # The two layers that hold the overlay items and keep one picture of them per overlay state
+        # (`overlay_cache.py`). Created before the items, so they sit in the stack where the items were.
+        self.layers = OverlayLayers(plot)
         # The style objects are the shared `RoiDisplayStyle`'s own (one place the colours live), not copies.
         shared = display_style if display_style is not None else RoiDisplayStyle()
         self.sample = shared.sample
@@ -151,6 +155,10 @@ class RoiOverlay:
         self.label_item: RoiLabelItem | None = None
         self.group_label_item: GroupLabelItem | None = None
         self.group_labels = GroupLabelSettings()
+        for item in (self.sample_circles, self.reference_fill, self.reference_curve, self.selection_curve):
+            self.layers.adopt_data(item)  # in the stacking order they were created in (the fill sits under its curve)
+        self._sample_drawn = False  # does the sample / reference part currently hold geometry? (a hidden part is not computed)
+        self._reference_drawn = False
 
     def attach_labels(self) -> None:
         """Create the label item. A separate step, called where the panel used to
@@ -161,15 +169,29 @@ class RoiOverlay:
         self._plot.vb.sigResized.connect(lambda *_args: self.label_item.update())
         self.group_label_item = GroupLabelItem(self._plot.vb)
         self.group_label_item.set_settings(self.group_labels)
+        self.layers.adopt_screen(self.label_item)
+        self.layers.adopt_screen(self.group_label_item)
         self._plot.vb.sigRangeChanged.connect(lambda *_args: self.group_label_item.update())
         self._plot.vb.sigResized.connect(lambda *_args: self.group_label_item.update())
 
     def set_label_placement(self, placement: str) -> None:
         """Where the ROI labels sit around their circles (one of `label_placement.PLACEMENTS`). Only the label
         item repaints; nothing is redrawn or recomputed."""
+        self.layers.invalidate()
         self.label_placement = placement
         if self.label_item is not None:
             self.label_item.set_placement(placement)
+
+    def appearance_key(self) -> tuple:
+        """Everything about *how* the overlay is drawn (not *what*: that is the ROIs, the selection and the affine): style,
+        which parts are shown, line width, label settings. Part of the "unchanged" test in the panel and of the cache epoch."""
+        group = self.group_labels
+        return (
+            self.sample.visible, self.sample.color, self.sample.alpha,
+            self.reference.visible, self.reference.color, self.reference.alpha,
+            self.labels_visible, self.label_placement, self.fill_max_opacity, self.sample_circles.width,
+            group.visible, group.angle, group.position, group.side, group.box_percent, group.min_point_size,
+        )
 
     # -- style ---------------------------------------------------------------------
 
@@ -179,12 +201,14 @@ class RoiOverlay:
 
     def set_sample_width(self, width: float) -> None:
         """The sample circles' outline width (screen px). The slideshow's fast mode lowers it while playing."""
+        self.layers.invalidate()
         self.sample_circles.set_width(width)
 
     def apply_style(self) -> None:
         """Put the style on the curves: colour with its transparency, and shown
         or hidden. A hidden sample overlay hides the selection highlight too
         (they are the same circles). Does not redraw."""
+        self.layers.invalidate()
         self.sample_circles.set_style(self.sample.alpha, self.sample.alpha * self._fill_max())
         self.sample_circles.setVisible(self.sample.visible)
         self.selection_curve.setVisible(self.sample.visible)
@@ -210,6 +234,8 @@ class RoiOverlay:
     # -- drawing -------------------------------------------------------------------
 
     def clear(self) -> None:
+        self.layers.invalidate()
+        self._sample_drawn = self._reference_drawn = False
         self.sample_circles.clear()
         self.reference_curve.clear()
         set_fill_outlines(self.reference_fill, np.empty(0), np.empty(0), 0)
@@ -238,36 +264,56 @@ class RoiOverlay:
         the centre."""
         centers = display_centers
         sample_diameters = np.fromiter((roi.sample_diameter_px for roi in rois), dtype=np.float64, count=len(rois))
-        is_selected = np.fromiter((roi.area_roi_id in selected_ids for roi in rois), dtype=bool, count=len(rois))
 
-        # One colour per ROI. Checking a colour string builds a QColor, so each
-        # distinct string is resolved once, not once per ROI.
-        resolved: dict[str | None, str] = {}
-        sample_colors: list[str] = []
-        for roi in rois:
-            key = roi.sample_color_hex
-            if key not in resolved:
-                resolved[key] = roi_overlay_color(key, self.sample.color)
-            sample_colors.append(resolved[key])
-        sample_x, sample_y = circle_points(centers, sample_diameters, affine_matrix, n_points=CIRCLE_POINTS)
+        # A part that is hidden is not computed (testing10, 2026-10-14: with every overlay switched off the overlay still
+        # re-computed all its geometry on every wavelength step, ~7 ms). Showing it again goes through `apply_style` + a
+        # forced redraw (`ImagePanel._apply_roi_overlay_style`), and the panel's "unchanged" test includes the visibility.
+        if self.sample.visible:
+            is_selected = np.fromiter((roi.area_roi_id in selected_ids for roi in rois), dtype=bool, count=len(rois))
+            # One colour per ROI. Checking a colour string builds a QColor, so each
+            # distinct string is resolved once, not once per ROI.
+            resolved: dict[str | None, str] = {}
+            sample_colors: list[str] = []
+            for roi in rois:
+                key = roi.sample_color_hex
+                if key not in resolved:
+                    resolved[key] = roi_overlay_color(key, self.sample.color)
+                sample_colors.append(resolved[key])
+            sample_x, sample_y = circle_points(centers, sample_diameters, affine_matrix, n_points=CIRCLE_POINTS)
+            self.sample_circles.set_circles(sample_x, sample_y, sample_colors)
+            # A selected ROI keeps its own colour and fill; the white border drawn on top of it marks the selection.
+            selection_x, selection_y = circle_outlines(
+                centers[is_selected], sample_diameters[is_selected], affine_matrix, n_points=CIRCLE_POINTS
+            )
+            self.selection_curve.setData(selection_x, selection_y)
+            self._sample_drawn = True
+        elif self._sample_drawn:
+            self.sample_circles.clear()
+            self.selection_curve.clear()
+            self._sample_drawn = False
 
-        ring_diameters = np.asarray(
-            [
-                effective_reference_diameters(roi, default_inner_diameter_px, default_outer_diameter_px)
-                for roi in rois
-            ],
-            dtype=np.float64,
-        )  # (N, 2): inner, outer
-        reference_x, reference_y = circle_outlines(
-            np.vstack((centers, centers)),
-            np.concatenate((ring_diameters[:, 0], ring_diameters[:, 1])),
-            affine_matrix,
-            n_points=CIRCLE_POINTS,
-        )
-        # A selected ROI keeps its own colour and fill; the white border drawn on top of it marks the selection.
-        selection_x, selection_y = circle_outlines(
-            centers[is_selected], sample_diameters[is_selected], affine_matrix, n_points=CIRCLE_POINTS
-        )
+        if self.reference.visible:
+            ring_diameters = np.asarray(
+                [
+                    effective_reference_diameters(roi, default_inner_diameter_px, default_outer_diameter_px)
+                    for roi in rois
+                ],
+                dtype=np.float64,
+            )  # (N, 2): inner, outer
+            reference_x, reference_y = circle_outlines(
+                np.vstack((centers, centers)),
+                np.concatenate((ring_diameters[:, 0], ring_diameters[:, 1])),
+                affine_matrix,
+                n_points=CIRCLE_POINTS,
+            )
+            self.reference_curve.setData(reference_x, reference_y)
+            ring_x, ring_y = annulus_outlines(reference_x, reference_y, len(rois), CIRCLE_POINTS)
+            set_fill_outlines(self.reference_fill, ring_x, ring_y, 2 * CIRCLE_POINTS)
+            self._reference_drawn = True
+        elif self._reference_drawn:
+            self.reference_curve.clear()
+            set_fill_outlines(self.reference_fill, np.empty(0), np.empty(0), 0)
+            self._reference_drawn = False
         labels: list[tuple[float, float, float, str]] = []
         if self.labels_visible:
             labels = [
@@ -275,11 +321,6 @@ class RoiOverlay:
                 for roi, (cx, cy) in zip(rois, centers, strict=True)
             ]
 
-        self.sample_circles.set_circles(sample_x, sample_y, sample_colors)
-        self.reference_curve.setData(reference_x, reference_y)
-        ring_x, ring_y = annulus_outlines(reference_x, reference_y, len(rois), CIRCLE_POINTS)
-        set_fill_outlines(self.reference_fill, ring_x, ring_y, 2 * CIRCLE_POINTS)
-        self.selection_curve.setData(selection_x, selection_y)
         if self.label_item is not None:
             self.label_item.set_labels(labels)
         if self.group_label_item is not None:

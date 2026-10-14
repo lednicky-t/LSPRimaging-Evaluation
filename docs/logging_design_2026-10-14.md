@@ -56,7 +56,7 @@ Every other line is one record:
 - Levels: **ERROR** = something failed that the user should know; **WARNING** = recovered / degraded;
   **INFO** = user-level milestones (dataset loaded, analysis started/finished, session saved, task finished, play summary);
   **DEBUG** = per-call timings and internals, aggregated per outer unit of work.
-- Event names `domain.action` (`render.frame`, `dataset.load`, `dataset.plane`, `reference.find`,
+- Event names `domain.action` (`render.frame`, `dataset.load`, `dataset.plane_read`, `reference.find`,
   `task.finished`, `playback.summary`, `ui.mark`); field names carry units (`_ms`, `_px`, `_mb`).
 - Never log inside a per-pixel / per-ROI loop; never pass an expensive call as a log argument.
 - Heavier tools stay on demand: `py-spy` (sampling) first, `cProfile` after stage timing names the stage.
@@ -93,7 +93,9 @@ is restored with the others.
 
 ## 5. What is instrumented in this change
 
-`@instrumented` (every module command), `ImageRenderer` frames, plane reads (cache vs disk, ms),
+`@instrumented` (every module command), `ImageRenderer` frames, plane reads from disk (ms; cache hits are not logged since
+2026-10-14: 3 per Play frame, 46 % of a 10 min log), `gc.summary` (one record per 5 s of garbage-collector activity:
+which threads ran it, longest pause; `applog/gc_trace.py`),
 playback windows and summary, Find reference, dataset load, task finished (TaskIndicator), app
 start / quit, plus all existing plain records. Further call sites: add `timed()` / `log_event()`
 following the conventions above; no other change is needed for them to reach the panel and the file.

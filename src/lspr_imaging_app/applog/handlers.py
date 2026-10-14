@@ -135,16 +135,20 @@ class _HeaderRotatingFileHandler(logging.handlers.RotatingFileHandler):
 
 
 def build_file_pipeline(
-    path: Path, header: dict[str, Any]
+    path: Path, header: dict[str, Any], *extra_handlers: logging.Handler
 ) -> tuple[logging.Handler, logging.handlers.QueueListener, logging.Handler]:
     """(handler to attach to the root logger, started listener, the file handler).
-    Stop the listener (`listener.stop()`) to drain the queue before exit."""
+    Stop the listener (`listener.stop()`) to drain the queue before exit.
+
+    `extra_handlers` (the console stream) are run by the same listener thread, with their own levels respected:
+    formatting a record and writing it to a pipe does not happen on the thread that logged it (testing12 profile:
+    `StreamHandler.emit` was 8 % of the GUI thread while Play ran with the console on Debug)."""
     file_handler = _HeaderRotatingFileHandler(
         path, json.dumps(header, default=repr, separators=(",", ":")), maxBytes=FILE_MAX_BYTES, backupCount=FILE_BACKUPS
     )
     file_handler.setFormatter(JsonlFormatter())
     records: queue.SimpleQueue = queue.SimpleQueue()
-    listener = logging.handlers.QueueListener(records, file_handler, respect_handler_level=False)
+    listener = logging.handlers.QueueListener(records, file_handler, *extra_handlers, respect_handler_level=True)
     listener.start()
     return _CheapQueueHandler(records), listener, file_handler
 

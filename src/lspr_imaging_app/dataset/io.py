@@ -1815,12 +1815,11 @@ def _export_experimental_data(dataset: ImageDataset, destination: Path) -> None:
 
 
 def load_image_array(path_str: str) -> np.ndarray:
-    before_hits = _load_image_array_cached.cache_info().hits
-    array = _load_image_array_cached(path_str)
-    after_hits = _load_image_array_cached.cache_info().hits
-    if after_hits > before_hits:
-        log_event(_LOGGER, "dataset.plane", logging.DEBUG, file=Path(path_str).name, source="cache")
-    return array
+    # A cache *hit* is not logged (2026-10-14, testing7): it was 46 % of all log records (about 3 per Play
+    # frame: the render read plus the read-ahead checks) and told nothing a miss does not (`dataset.plane_read`,
+    # source=disk, with its duration). The before/after `cache_info()` comparison it needed also took the cache
+    # lock twice per read and was not reliable once two threads read.
+    return _load_image_array_cached(path_str)
 
 
 # 160 planes (was 96, 2026-10-11): the Image panel reads the viewed cube's other

@@ -99,8 +99,8 @@ class RenderRequest:
     """`time.perf_counter()` when `ImageRenderer.submit` took the request (set by
     the renderer; diagnostics only: it splits "queue" time in the playback stats)."""
     submitted_while_prefetching: bool = False
-    """The render thread was in the middle of a read-ahead plane read when this
-    request arrived (that read cannot be interrupted; diagnostics only)."""
+    """The plane this request needs was being read ahead (by a reader thread) when the request arrived, so the
+    render waits for that read (diagnostics only: the Play stats' "behind a read-ahead")."""
     display_levels: tuple[float, float] | None = None
     """The fixed display range ``(black point, white point)`` from the View tab, or None = every frame at its own
     automatic range. Display only: it changes how the frame is shown, never a pixel value."""
@@ -125,42 +125,79 @@ class RenderResult:
     clicking around, not a crash."""
 
 
+def request_uses_ignore_mask(request: RenderRequest) -> bool:
+    """Whether rendering `request` reads the resolved ignore mask at all. `apply_preprocessing` /
+    `estimate_background_image` only pass it on to the background estimate, and only with the Background
+    tab's "exclude mask" toggle on (and, for the processed image, flattening on). Resolving it otherwise
+    cost the render thread ~10 ms of every frame while a mask was merely *shown* (testing8, 2026-10-14:
+    `prep_ms` 2 -> 13) for a value nothing used."""
+    background = request.background
+    return bool(
+        background.flatten_background_exclude_mask
+        and (request.show_background or background.flatten_background_enabled)
+    )
+
+
 class ImageRenderer(QObject):
-    """Renders processed frames on one background thread, newest first.
+    """Renders processed frames on one background thread, newest first, and reads planes ahead on
+    separate reader threads.
 
     Takes ``load_plane`` as a callable rather than a ``DatasetModule``
     reference, the same convention ``AnalysisEngine`` uses - it keeps this
     class testable with a plain function and makes the one thing it reads
-    from another module explicit."""
+    from another module explicit.
+
+    **Read-ahead has its own threads (2026-10-14, testing7/8).** It used to run on the render thread between
+    two renders. A plane read takes 20-40 ms and cannot be interrupted, so every render request that arrived
+    during one waited for it (`thread_ms` ~26-29 ms of a ~57 ms Play cycle, "100 % behind a read-ahead"), and one
+    thread doing read + render caps Play at ~20 frames/s. Now ``READER_THREADS`` plain threads read the planes
+    `prefetch` lists; the render thread only renders (a plane it needs is in the plane cache by then) and, if
+    the plane it needs is being read at that moment, waits for that read instead of decoding the file twice."""
 
     rendered = pyqtSignal(object)  # RenderResult
+
+    READER_THREADS = 2
+    """Parallel decoding scales to 2 threads on the maintainer's TIFFs (11.5 -> 6.6 ms per plane; 3-4 add nothing)
+    and Play needs ~15-30 planes/s."""
+    READER_IDLE_SECONDS = 3.0
+    """A reader thread that finds nothing to read for this long exits (a new one starts on the next `prefetch`):
+    no sleeping threads accumulate in an idle session or in a test process that builds many panels."""
+    READ_WAIT_SECONDS = 10.0
+    """The longest a render waits for a read-ahead of its own plane: a stuck read must not stop the display."""
 
     def __init__(
         self,
         load_plane: Callable[[int, float], np.ndarray],
         parent: QObject | None = None,
+        *,
+        readers: int | None = None,
     ) -> None:
         super().__init__(parent)
         self._load_plane = load_plane
+        self._max_readers = max(int(self.READER_THREADS if readers is None else readers), 1)
         self._lock = threading.Lock()
+        self._work = threading.Condition(self._lock)  # the readers sleep on this; same lock as the fields below
         self._pending: RenderRequest | None = None
         self._wake = threading.Event()
         self._stopping = False
-        # Planes to read ahead while idle (`prefetch`), guarded by `_lock`.
+        # Planes to read ahead (`prefetch`), the planes being read right now (one Event each, set when the read
+        # ended) and the reader threads that are alive - all guarded by `_lock`.
         self._prefetch_queue: deque[tuple[int, float]] = deque()
         self._prefetch_not_before = 0.0
-        self._prefetching = False  # a read-ahead plane read is running right now (read by `submit`)
+        self._reading: dict[tuple[int, float], threading.Event] = {}
+        self._reader_threads: list[threading.Thread] = []
         self._thread = threading.Thread(target=self._loop, name="ImageRenderer", daemon=True)
         self._thread.start()
 
     def submit(self, request: RenderRequest) -> None:
         """Queue `request`, replacing any request not yet started. Returns
         immediately - the result arrives later via `rendered`."""
-        request = replace(
-            request, submitted_at=time.perf_counter(), submitted_while_prefetching=self._prefetching
-        )
         with self._lock:
-            self._pending = request
+            self._pending = replace(
+                request,
+                submitted_at=time.perf_counter(),
+                submitted_while_prefetching=(request.cube_index, request.wavelength_nm) in self._reading,
+            )
         self._wake.set()
 
     PREFETCH_QUIET_SECONDS = 0.25
@@ -168,20 +205,28 @@ class ImageRenderer(QObject):
     a slider drag (one call per rendered frame) never competes with its own renders."""
 
     def prefetch(self, keys: Sequence[tuple[int, float]], *, quiet_seconds: float | None = None) -> None:
-        """Read these (cube, wavelength) planes into the plane cache while the
-        thread has nothing to render, most wanted first; replaces any earlier
-        list. Returns immediately.
+        """Read these (cube, wavelength) planes into the plane cache on the reader
+        threads, most wanted first; replaces any earlier list (reads already running
+        finish). Returns immediately.
 
-        Done on this thread rather than a thread of its own: it is already a
-        plain `threading.Thread` (the zarr rule), already stopped and joined on
-        shutdown, and a new render request takes over after at most the one
-        plane being read. A failed read is ignored - the renderer reports a
-        missing plane properly if the user ever navigates there."""
-        with self._lock:
+        A failed read is ignored - the renderer reports a missing plane properly if the
+        user ever navigates there. Reader threads are plain `threading.Thread`s (the
+        zarr rule: never `QThreadPool`), started on demand and stopped by `stop()`."""
+        with self._work:
+            if self._stopping:
+                return
             self._prefetch_queue = deque(keys)
             quiet = self.PREFETCH_QUIET_SECONDS if quiet_seconds is None else quiet_seconds
             self._prefetch_not_before = time.monotonic() + quiet
-        self._wake.set()
+            wanted = min(self._max_readers, len(self._prefetch_queue))
+            self._reader_threads = [t for t in self._reader_threads if t.is_alive()]
+            while len(self._reader_threads) < wanted:
+                thread = threading.Thread(
+                    target=self._reader_loop, name=f"ImageReader-{len(self._reader_threads)}", daemon=True
+                )
+                self._reader_threads.append(thread)
+                thread.start()
+            self._work.notify_all()
 
     def clear_prefetch(self) -> None:
         """Forget the read-ahead list (the dataset was cleared or replaced)."""
@@ -189,9 +234,9 @@ class ImageRenderer(QObject):
             self._prefetch_queue.clear()
 
     def stop(self) -> None:
-        """Ask the worker thread to exit, and wait (bounded) for it to
+        """Ask the worker threads to exit, and wait (bounded) for them to
         actually finish before returning. Safe to call more than once, and
-        safe to never call at all - the thread is a daemon, so it does not
+        safe to never call at all - the threads are daemons, so they do not
         keep the process alive on its own. The panel calls this on
         destruction so a closed window stops rendering into nothing.
 
@@ -214,49 +259,83 @@ class ImageRenderer(QObject):
         Bounded, not an unconditional `join()`, so a thread genuinely stuck
         mid-`apply_preprocessing` can't hang shutdown forever - same
         reasoning the stable app's own `closeEvent` fix for the identical
-        class of bug uses."""
-        self._stopping = True
+        class of bug uses. The reader threads never touch Qt (they only call
+        `load_plane`), but they are joined here too, so nothing of this
+        object is still running when it is destroyed."""
+        with self._work:
+            self._stopping = True
+            readers = list(self._reader_threads)
+            self._work.notify_all()
         self._wake.set()
         self._thread.join(timeout=5.0)
+        for reader in readers:
+            reader.join(timeout=5.0)
 
     def _take_pending(self) -> RenderRequest | None:
         with self._lock:
             request, self._pending = self._pending, None
         return request
 
-    def _prefetch_wait(self) -> float | None:
-        """How long the idle thread may sleep: until the read-ahead is due, or
-        forever when there is none."""
-        with self._lock:
-            if not self._prefetch_queue:
-                return None
-            return max(self._prefetch_not_before - time.monotonic(), 0.0)
+    def _next_read_ahead(self) -> tuple[int, float] | None:
+        """The next plane for a reader to read (marked as being read), waiting for the quiet period and for work;
+        None = this reader should exit (stopping, or idle for `READER_IDLE_SECONDS`)."""
+        with self._work:
+            idle_since = time.monotonic()
+            while True:
+                if self._stopping:
+                    return None
+                if self._prefetch_queue:
+                    idle_since = time.monotonic()
+                    delay = self._prefetch_not_before - time.monotonic()
+                    if delay > 0:
+                        self._work.wait(delay)
+                        continue
+                    key = self._prefetch_queue.popleft()
+                    if key in self._reading:  # another reader has this plane in hand
+                        continue
+                    self._reading[key] = threading.Event()
+                    return key
+                remaining = self.READER_IDLE_SECONDS - (time.monotonic() - idle_since)
+                if remaining <= 0:
+                    # Leaving is decided under the same lock `prefetch` uses to start readers, so a list added
+                    # right now either finds this thread still counted or starts a new one.
+                    self._reader_threads = [t for t in self._reader_threads if t is not threading.current_thread()]
+                    return None
+                self._work.wait(remaining)
 
-    def _prefetch_one(self) -> bool:
-        """Read the next planned plane if the quiet period is over. True if one was read."""
+    def _reader_loop(self) -> None:
+        use_fast_tiff_decoder(True)  # this thread only: plane reads here use the native TIFF decoder (dataset/io.py)
+        while True:
+            key = self._next_read_ahead()
+            if key is None:
+                return
+            try:
+                self._load_plane(*key)
+            except Exception as exc:  # noqa: BLE001 - read-ahead must never kill a reader thread
+                logger.debug("Prefetch of cube=%s wl=%s skipped: %s", key[0], key[1], exc)
+            finally:
+                with self._lock:
+                    done = self._reading.pop(key, None)
+                if done is not None:
+                    done.set()
+
+    def _load_plane_after_read_ahead(self, cube_index: int, wavelength_nm: float) -> np.ndarray:
+        """`load_plane` for a render: if a reader is reading this very plane right now, wait for it (the plane is
+        then in the cache) instead of decoding the same file a second time."""
         with self._lock:
-            if not self._prefetch_queue or time.monotonic() < self._prefetch_not_before:
-                return False
-            cube_index, wavelength_nm = self._prefetch_queue.popleft()
-        self._prefetching = True
-        try:
-            self._load_plane(cube_index, wavelength_nm)
-        except Exception as exc:  # noqa: BLE001 - read-ahead must never kill the render thread
-            logger.debug("Prefetch of cube=%s wl=%s skipped: %s", cube_index, wavelength_nm, exc)
-        finally:
-            self._prefetching = False
-        return True
+            reading = self._reading.get((cube_index, wavelength_nm))
+        if reading is not None:
+            reading.wait(timeout=self.READ_WAIT_SECONDS)
+        return self._load_plane(cube_index, wavelength_nm)
 
     def _loop(self) -> None:
         use_fast_tiff_decoder(True)  # this thread only: plane reads here use the native TIFF decoder (dataset/io.py)
         while not self._stopping:
-            self._wake.wait(timeout=self._prefetch_wait())
+            self._wake.wait()
             self._wake.clear()
             while not self._stopping:
                 request = self._take_pending()
                 if request is None:
-                    if self._prefetch_one():
-                        continue  # a new render request, if any, is taken before the next plane
                     break
                 result = self._render(request)
                 # Re-check after rendering, not just before: `stop()` is
@@ -276,7 +355,7 @@ class ImageRenderer(QObject):
 
     def _render_inner(self, request: RenderRequest, started: float) -> RenderResult:
         try:
-            raw = self._load_plane(request.cube_index, request.wavelength_nm)
+            raw = self._load_plane_after_read_ahead(request.cube_index, request.wavelength_nm)
         except (KeyError, RuntimeError, OSError) as exc:
             # KeyError: no record at this (cube, wavelength) - normal for a
             # cube short a wavelength. RuntimeError: no dataset loaded yet.
@@ -302,7 +381,7 @@ class ImageRenderer(QObject):
                 # what is measured cannot drift apart (see resolve_external_mask).
                 external_mask=resolve_external_mask(
                     request.authored_mask, request.geometry, request.mask_warp_affine
-                ),
+                ) if request_uses_ignore_mask(request) else None,
             )
         except Exception as exc:  # noqa: BLE001 - a render must never kill the thread
             logger.exception("Image render failed for cube=%s wl=%s", request.cube_index, request.wavelength_nm)

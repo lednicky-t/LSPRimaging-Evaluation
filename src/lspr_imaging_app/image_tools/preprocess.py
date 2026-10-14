@@ -50,6 +50,13 @@ _RESOLVED_MASK_CACHE_SIZE = 6
 _resolved_mask_cache: OrderedDict[tuple, np.ndarray | None] = OrderedDict()
 _resolved_mask_lock = threading.Lock()
 
+# The rotated / flipped / cropped mask *before* the chromatic warp (2026-10-14, testing8). The warp differs for
+# every wavelength, so while the slideshow plays each frame is a miss of the cache above; the spatial part of that
+# miss (~2.6 ms of ~7.5) is the same for all of them and is kept here. Two entries: the current geometry, and the
+# crop-less one a preview tool asks for.
+_SPATIAL_MASK_CACHE_SIZE = 2
+_spatial_mask_cache: OrderedDict[tuple, np.ndarray] = OrderedDict()
+
 
 def resolve_external_mask(
     authored_mask: np.ndarray | None,
@@ -86,21 +93,28 @@ def resolve_external_mask(
     if authored_mask is None:
         return None
     authored = np.ascontiguousarray(authored_mask, dtype=bool)
-    key = (
+    spatial_key = (
         authored.shape,
         hashlib.blake2b(np.packbits(authored), digest_size=16).digest(),  # 8x fewer bytes to hash
         geometry_cache_key(geometry_settings),
-        None if warp_affine is None else np.asarray(warp_affine, dtype=np.float64).tobytes(),
     )
+    key = (*spatial_key, None if warp_affine is None else np.asarray(warp_affine, dtype=np.float64).tobytes())
     with _resolved_mask_lock:
         if key in _resolved_mask_cache:
             _resolved_mask_cache.move_to_end(key)
             return _resolved_mask_cache[key]
-    mask = apply_spatial_mask(authored, geometry_settings)
-    if mask is not None and warp_affine is not None:
-        mask = warp_boolean_mask_affine(mask, warp_affine)
-    if mask is not None:
-        mask.setflags(write=False)  # shared between callers and threads: read-only
+        spatial = _spatial_mask_cache.get(spatial_key)
+        if spatial is not None:
+            _spatial_mask_cache.move_to_end(spatial_key)
+    if spatial is None:
+        spatial = apply_spatial_mask(authored, geometry_settings)
+        spatial.setflags(write=False)  # shared between callers and threads: read-only
+        with _resolved_mask_lock:
+            _spatial_mask_cache[spatial_key] = spatial
+            while len(_spatial_mask_cache) > _SPATIAL_MASK_CACHE_SIZE:
+                _spatial_mask_cache.popitem(last=False)
+    mask = spatial if warp_affine is None else warp_boolean_mask_affine(spatial, warp_affine)
+    mask.setflags(write=False)
     with _resolved_mask_lock:
         _resolved_mask_cache[key] = mask
         while len(_resolved_mask_cache) > _RESOLVED_MASK_CACHE_SIZE:

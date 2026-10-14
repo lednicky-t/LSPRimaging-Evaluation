@@ -12,7 +12,9 @@ One frame's trip, and the stage each gap measures:
 2. **wait**: from that step to the Image panel's redraw starting. This is the
    redraw coalescing timer (100 ms, restarted by every step), so it is the first
    suspect at fast speeds.
-3. **redraw**: the GUI-thread snapshot of the module state and overlay drawing.
+3. **redraw**: the GUI-thread snapshot of the module state, up to the moment the render request leaves.
+   (Until 2026-10-14 this included the overlay drawing; the overlays are now drawn right after the request
+   is sent, while the render thread works, and show up only in the `overlays` detail.)
 4. **queue**: the render thread was busy (or prefetching) when the request arrived.
 5. **load** / **prep**: reading the plane (disk, or the plane cache) / geometry,
    background flattening on the render thread.
@@ -52,12 +54,16 @@ class _Window:
     listeners_s: float = 0.0
     lag_s: float = 0.0
     stale: int = 0  # rendered but superseded by a newer request before it arrived
-    thread_s: float = 0.0  # queue part 1: request waited for the render thread to be free
+    thread_s: float = 0.0  # queue part 1: request waited for the render thread to be free (a render in progress, or the GIL)
     deliver_s: float = 0.0  # queue part 2: finished result waited for the GUI thread
-    blocked: int = 0  # requests that arrived while a read-ahead plane read was running
+    blocked: int = 0  # requests whose own plane was still being read ahead on arrival (before 2026-10-14: any read-ahead was running)
     detail: dict[str, float] = field(default_factory=dict)  # finer GUI-thread stages, seconds summed
     cycle_s: float = 0.0  # time between the starts of consecutive steps, summed
     cycles: int = 0
+    gui_wall_s: float = 0.0  # wall time between two shown frames (GUI thread), summed
+    gui_cpu_s: float = 0.0  # CPU time the GUI thread used in the same stretches (user + kernel)
+    gui_kernel_s: float = 0.0  # of which kernel time (window system / graphics driver work done for this thread)
+    gui_cycles: int = 0
 
 
 @dataclass
@@ -75,6 +81,7 @@ class PlaybackStats:
     _target_interval_s: float = 0.0
     _last_done: float = 0.0
     _last_step_start: float | None = None
+    _last_gui_clock: tuple[float, float, float] | None = None
     _last_window: _Window = field(default_factory=_Window)
     _last_window_seconds: float = 1.0
 
@@ -83,6 +90,7 @@ class PlaybackStats:
         self._pending_step_t = None
         self._pending_step_s = 0.0
         self._last_step_start = None
+        self._last_gui_clock = None
         self._in_flight.clear()
         self._window = _Window()
         self._total = _Window()
@@ -186,6 +194,22 @@ class PlaybackStats:
             return line
         return None
 
+    def note_gui_clock(self, wall: float, cpu: float, kernel: float = 0.0) -> None:
+        """Called on the GUI thread each time a frame is about to be shown, with `time.perf_counter()` and
+        `time.thread_time()` (this thread's CPU time). Between two calls the ratio says whether the GUI thread
+        was *busy* (CPU time close to wall time: it is the bottleneck) or *waiting* (for the render thread, the
+        GIL, the screen). `kernel` = the kernel part of `cpu` (0 where the platform cannot tell)."""
+        if not self.active:
+            return
+        last, self._last_gui_clock = self._last_gui_clock, (wall, cpu, kernel)
+        if last is None:
+            return
+        for window in (self._window, self._total):
+            window.gui_wall_s += wall - last[0]
+            window.gui_cpu_s += cpu - last[1]
+            window.gui_kernel_s += kernel - last[2]
+            window.gui_cycles += 1
+
     def note_detail(self, name: str, seconds: float) -> None:
         """Add *seconds* to a finer stage (overlays, setImage, paint ...). Reported per shown
         frame, so a stage that runs more than once per frame (paint) shows its full cost."""
@@ -214,6 +238,9 @@ class PlaybackStats:
             "load_ms": round(w.load_s / n * 1000, 1), "prep_ms": round(w.prep_s / n * 1000, 1),
             "gui_ms": round(w.gui_s / n * 1000, 1), "listeners_ms": round(w.listeners_s / n * 1000, 1),
             "blocked": w.blocked,
+            "gui_cpu_ms": round(w.gui_cpu_s / max(w.gui_cycles, 1) * 1000, 1),
+            "gui_kernel_ms": round(w.gui_kernel_s / max(w.gui_cycles, 1) * 1000, 1),
+            "gui_busy_pct": round(100.0 * w.gui_cpu_s / w.gui_wall_s, 0) if w.gui_wall_s > 0 else 0.0,
             "cycle_ms": round(w.cycle_s / max(w.cycles, 1) * 1000, 1),
             **{f"d_{name}_ms": round(total / n * 1000, 1) for name, total in sorted(w.detail.items())},
         }

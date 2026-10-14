@@ -499,6 +499,30 @@ class RoiToolbox(QObject):
                 cubes.update(roi.timeline.cubes())
         return tuple(sorted(cubes))
 
+    def geometry_segment(self, cube: int | None) -> tuple:
+        """A label for "which geometry do the ROIs have on `cube`": two cubes with the same label have the same geometry for
+        every ROI, so what is drawn from it (the overlay) is the same. ``()`` when no ROI has a timeline (one geometry for every
+        cube). Otherwise ``("segment", n)``: the cubes between two consecutive *persistent* changes (a persistent change is valid
+        from its cube on), or ``("single", cube)``: a cube with an *individual* change (valid on that cube only).
+
+        The Image panel's overlay cache keys on this instead of the cube number (2026-10-14, testing12: three ROIs with one
+        persistent change at cube 79 made all 314 cubes look different, and nothing the cache kept was ever used again)."""
+        if cube is None:
+            return ()
+        persistent: set[int] = set()
+        individual: set[int] = set()
+        for roi in self._rois.values():
+            timeline = roi.timeline
+            if timeline:
+                persistent.update(change.cube for change in timeline.persistent)
+                individual.update(change.cube for change in timeline.individual)
+        if not persistent and not individual:
+            return ()
+        cube = int(cube)
+        if cube in individual:
+            return ("single", cube)
+        return ("segment", sum(1 for change_cube in persistent if change_cube <= cube))
+
     def geometry_at(self, roi_id: int, cube: int | None) -> RoiGeometry:
         """The geometry of `roi_id` on `cube` (``None``: the base geometry)."""
         return geometry_at(self._rois[roi_id], cube)

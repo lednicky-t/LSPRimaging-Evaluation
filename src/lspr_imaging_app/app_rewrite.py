@@ -31,7 +31,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
-from PyQt6.QtCore import Qt, QByteArray
+from PyQt6.QtCore import Qt, QByteArray, QTimer
 from PyQt6.QtGui import QAction, QActionGroup, QKeySequence
 from PyQt6.QtWidgets import QApplication, QMainWindow, QMenu, QStatusBar
 
@@ -42,6 +42,7 @@ from .applog import LogSystem, RingBufferHandler, configure_logging, log_event
 from .applog import current as current_log_system
 from .analysis.provenance import FrameNamingScheme
 from .dataset import DatasetModule
+from .gil_tuning import apply_switch_interval
 from .gui.app_theme import LSPRI_BRIGHT_THEME, LSPRI_DARK_THEME, apply_app_theme
 from .gui.windows_titlebar import apply_windows_titlebar_color
 from .image_tools.mask_scope import MaskScope
@@ -61,6 +62,7 @@ from .panels.fixed_width_separator_guard import FixedWidthSeparatorGuard
 from .panels.histogram import HistogramPanel
 from .panels.log import LogPanel
 from .panels.image import ImagePanel
+from .panels.image.overlay_cache import BUDGET_CHOICES_MB, DEFAULT_BUDGET_MB
 from .panels.image.overlay_style import OverlayStyle
 from .panels.layout_presets import wire_view_menu
 from .panels.panel_visibility import ensure_floating_panels_on_screen, wire_panel_visibility_menu
@@ -1397,6 +1399,7 @@ def build_main_window(
     reopen_action.toggled.connect(lambda checked: writer.persist(auto_reopen_last_dataset=bool(checked)))
 
     _wire_roi_fill_opacity_menu(options_menu, image_panel)
+    _wire_overlay_cache_menu(options_menu, image_panel)
     round_action = options_menu.addAction("Round ROI Positions to 0.1 px")
     round_action.setCheckable(True)
     m.roi_toolbox.round_positions = read(ui_state, ROI_ROUND_POSITIONS) is not False
@@ -1433,8 +1436,48 @@ def _wire_roi_fill_opacity_menu(options_menu, image_panel: ImagePanel) -> None:
         action.triggered.connect(lambda _checked=False, value=choice: image_panel.set_roi_fill_max_opacity(value))
 
 
+def _wire_overlay_cache_menu(options_menu, image_panel: ImagePanel) -> None:
+    """Options -> "ROI Overlay Cache": how much memory the Image panel may use to keep a picture of the ROI overlay for each
+    wavelength, so Play does not repaint it on every frame (`panels/image/overlay_cache.py`). Off = paint directly. The first
+    line says what the cache holds right now (refreshed when the menu opens). Saved by the panel (`ui_state`)."""
+    submenu = options_menu.addMenu("ROI Overlay Cache")
+    submenu.setToolTipsVisible(True)
+    submenu.menuAction().setToolTip(
+        "Keeps a picture of the ROI overlay for every wavelength, so Play does not repaint it on each frame. "
+        "Faster with many ROIs; uses memory (about 8 MB per wavelength at a 1500 x 850 view). Off paints the overlay directly."
+    )
+    info = submenu.addAction("")
+    info.setEnabled(False)
+    submenu.addSeparator()
+    group = QActionGroup(submenu)
+    group.setExclusive(True)
+    actions: dict[int, object] = {}
+    for megabytes in BUDGET_CHOICES_MB:
+        label = "Off" if megabytes == 0 else f"{megabytes} MB"
+        if megabytes == DEFAULT_BUDGET_MB:
+            label += " (default)"
+        action = submenu.addAction(label)
+        action.setCheckable(True)
+        group.addAction(action)
+        actions[megabytes] = action
+        action.triggered.connect(lambda _checked=False, value=megabytes: image_panel.set_overlay_cache_mb(value))
+
+    def refresh() -> None:
+        info.setText(image_panel.overlay_cache_status())
+        current = image_panel.overlay_cache_mb
+        for megabytes, action in actions.items():
+            action.setChecked(megabytes == current)  # a size set by LSPR_OVERLAY_CACHE_MB that is not a choice: none checked
+
+    refresh()
+    submenu.aboutToShow.connect(refresh)
+
+
+_GC_SUMMARY_MS = 5000
+
+
 def main() -> None:
     system = configure_logging(app_version=rewrite_version_string())
+    apply_switch_interval()  # before any worker thread exists; see gil_tuning.py
     app = QApplication(sys.argv)
     log_event(
         logger, "app.start", logging.INFO,
@@ -1442,6 +1485,12 @@ def main() -> None:
         screens=len(app.screens()), platform=sys.platform,
     )
     app.aboutToQuit.connect(lambda: log_event(logger, "app.quit", logging.INFO))
+    if system.gc_trace is not None:  # one `gc.summary` DEBUG record per 5 s of garbage-collector activity (applog/gc_trace.py)
+        gc_timer = QTimer(app)
+        gc_timer.setInterval(_GC_SUMMARY_MS)
+        gc_timer.timeout.connect(system.gc_trace.flush)
+        gc_timer.start()
+        app.aboutToQuit.connect(system.gc_trace.flush)
     app.setApplicationName("LSPR Imaging (Rewrite Preview)")
     app.setApplicationVersion(rewrite_version_string())
     app.setWindowIcon(app_icon())

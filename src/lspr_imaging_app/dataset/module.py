@@ -124,6 +124,7 @@ class DatasetModule(QObject):
         # t = 0 of the experimental time (`_time_anchor_ms`); computed once, reset whenever the dataset or its metadata changes.
         self._time_anchor_ms_value: int | None = None
         self._time_anchor_known = False
+        self._mean_interval_cache: tuple[ImageDataset, object, int, float | None] | None = None
         self._chunk_grid_preview_enabled = False
         self._chunk_grid_preview_chunk_px = 64
         self._worker = AnalysisWorker()
@@ -360,7 +361,15 @@ class DatasetModule(QObject):
         acquisition timing (math: `dataset.model.mean_frame_interval_seconds`)."""
         if self._dataset is None or self._dataset.acquisition_metadata is None:
             return None
-        return mean_frame_interval_seconds(compact_dataset_image_timings(self._dataset).per_frame_ms)
+        # Once per dataset (testing10, 2026-10-14): the slideshow asks on every step, and the sum over all 8478 frames' timings
+        # was 4 % of the GUI thread while playing. The key is the dataset object, its metadata object and its record count.
+        dataset, metadata, count = self._dataset, self._dataset.acquisition_metadata, len(self._dataset.records)
+        cached = self._mean_interval_cache
+        if cached is not None and cached[0] is dataset and cached[1] is metadata and cached[2] == count:
+            return cached[3]
+        value = mean_frame_interval_seconds(compact_dataset_image_timings(dataset).per_frame_ms)
+        self._mean_interval_cache = (dataset, metadata, count, value)
+        return value
 
     def frame_comment(self, cube_index: int, wavelength: float) -> tuple[bool, str | None]:
         """`(linked, comment)` for one frame. `linked` is False when the frame
@@ -548,6 +557,7 @@ class DatasetModule(QObject):
             return
         self._dataset = None
         self._time_anchor_known = False
+        self._mean_interval_cache = None
         self.dataset_cleared.emit()
 
     # -- chunk-grid preview (Export section <-> Image panel) ----------------
