@@ -30,15 +30,19 @@ MODE_TIME = "time"
 _MODES = (MODE_CUBE, MODE_TIME)
 
 
-def format_elapsed_seconds(seconds: float) -> str:
-    """H:MM:SS (or M:SS under an hour); a negative value keeps its sign."""
+def format_elapsed_seconds(seconds: float, decimals: int = 0) -> str:
+    """H:MM:SS (or M:SS under an hour); a negative value keeps its sign. ``decimals`` adds that many
+    digits of a second (2 = tens of ms, "1:05.24"); the rounding happens on the whole value, so 59.999 s
+    reads "1:00.00", never "0:60.00"."""
     sign = "-" if seconds < 0 else ""
-    total = int(round(abs(seconds)))
-    hours, remainder = divmod(total, 3600)
+    scale = 10**decimals
+    whole, fraction = divmod(int(round(abs(seconds) * scale)), scale)
+    hours, remainder = divmod(whole, 3600)
     minutes, secs = divmod(remainder, 60)
+    tail = f".{fraction:0{decimals}d}" if decimals else ""
     if hours:
-        return f"{sign}{hours:d}:{minutes:02d}:{secs:02d}"
-    return f"{sign}{minutes:d}:{secs:02d}"
+        return f"{sign}{hours:d}:{minutes:02d}:{secs:02d}{tail}"
+    return f"{sign}{minutes:d}:{secs:02d}{tail}"
 
 
 class CubeDisplayModule(QObject):

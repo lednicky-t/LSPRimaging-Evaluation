@@ -2,7 +2,7 @@
 
 Like the ROI labels (`roi_label_overlay.py`) one item paints every label in screen pixels, a child of the plot's
 `ViewBox`. Differences: a label sits at one of nine places around its anchor ROI (on it, or outside it on a side
-or corner: `label_placement.py`), the text may run vertically,
+or corner: `label_placement.py`), the text may be turned in 45-degree steps (`GroupLabelSettings.angle`),
 and it is kept from running into the next group's labels by a **box**: the longest a label may be, set as a
 percent of the distance between neighbouring ROIs of its group (default 90 %, so a label about one pitch long
 just fits before the next ROI's). A name that does not fit on one line is first shrunk, down to the smallest
@@ -28,6 +28,9 @@ from ...roi.model import AreaRoi, AreaRoiGroup
 from .label_placement import DEFAULT_GROUP_PLACEMENT, placement_origin
 
 POSITIONS = ("first", "last")
+ANGLE_STEP_DEG = 45  # the rotate button turns the text this much each press
+# What the text direction was called before it became an angle (older saved settings still carry these names).
+LEGACY_DIRECTION_ANGLES = {"horizontal": 0, "vertical": 90, "diagonal": 45}
 MIN_BOX_PERCENT = 10
 MAX_BOX_PERCENT = 300
 DEFAULT_BOX_PERCENT = 90
@@ -45,7 +48,7 @@ _HALO_OFFSETS = ((-1, 0), (1, 0), (0, -1), (0, 1))
 @dataclass
 class GroupLabelSettings:
     visible: bool = False
-    direction: str = "horizontal"  # "horizontal" | "vertical" (reads bottom to top) | "diagonal" (45 degrees, rising)
+    angle: int = 0  # degrees counter-clockwise, a multiple of ANGLE_STEP_DEG: 0 horizontal, 45 rising, 90 reads bottom to top
     position: str = "first"  # the group's "first" or "last" ROI (by ROI number) carries the label
     side: str = DEFAULT_GROUP_PLACEMENT  # where around that ROI: one of `label_placement.PLACEMENTS` ("top", "center", "bottom-left", ...)
     box_percent: float = float(DEFAULT_BOX_PERCENT)
@@ -105,6 +108,14 @@ def group_label_entries(
             )
         )
     return entries
+
+
+def rotated_extent(width: float, height: float, angle: float) -> tuple[float, float]:
+    """The width and height of the box that just holds a ``width`` x ``height`` block turned by ``angle`` degrees
+    (what the label's place is worked out from: 90 swaps the two, 45 gives a square of side (w + h) / sqrt(2))."""
+    radians = math.radians(angle)
+    cosine, sine = abs(math.cos(radians)), abs(math.sin(radians))
+    return width * cosine + height * sine, width * sine + height * cosine
 
 
 def label_rect(anchor: QPointF, radius: float, side: str, width: float, height: float, gap: float = _GAP_PX) -> QRectF:
@@ -208,20 +219,13 @@ class GroupLabelItem(pg.GraphicsObject):
             widths = [metrics.horizontalAdvance(line) for line in lines]
             width, line_height = max(widths), metrics.height()
             height = line_height * len(lines)
-            if settings.direction == "vertical":
-                across_w, across_h = height, width
-            elif settings.direction == "diagonal":  # bounding box of the block rotated by 45 degrees
-                across_w = across_h = (width + height) / math.sqrt(2.0)
-            else:
-                across_w, across_h = width, height
+            across_w, across_h = rotated_extent(width, height, settings.angle)  # the bounding box of the turned block
             rect = label_rect(anchor, entry.radius * pixels_per_unit, settings.side, across_w, across_h)
             painter.save()
             painter.setFont(font)
             painter.translate(rect.center())
-            if settings.direction == "vertical":
-                painter.rotate(-90.0)  # reads from the bottom up
-            elif settings.direction == "diagonal":
-                painter.rotate(-45.0)  # reads from the bottom left up to the top right
+            if settings.angle:
+                painter.rotate(-float(settings.angle))  # counter-clockwise: 90 reads from the bottom up
             for n, (line, line_width) in enumerate(zip(lines, widths, strict=True)):  # each line centred in the block
                 origin = QPointF(-line_width / 2.0, -height / 2.0 + n * line_height + metrics.ascent())
                 painter.setPen(_HALO_COLOR)

@@ -1,26 +1,39 @@
 """Image panel ribbon, ROIs tab, "Groups" section: the group-label pick-up menu.
 
-One icon button (a label over three dots) that opens a small panel: show or hide the group labels, text
-direction, which ROI of the group carries the label (first or last), where around that ROI (a 3 x 3 grid:
-centred on it, or on one of eight places outside its circle), and the box size (the longest a label may be,
-as a percent of the distance between neighbouring ROIs of the group, so labels of neighbouring groups do not
-run into each other). The drawing is `group_label_overlay.py`.
+One icon button (a label over three dots) that opens a one-row strip, no captions, no drop-downs. Left to
+right, with a thin line between the parts:
+
+    [label on/off] | [1st | nth] | [3 x 3 place grid] | [label  (rotate)] | [90 %] | [6 pt]
+
+- the label toggle: show or hide the group labels;
+- 1st / nth (raised letters): which ROI of the group, by number, carries the label (first or last);
+- the 3 x 3 grid: where around that ROI (centred on it, or one of eight places outside its circle);
+- the word "label" at the current text angle, and a rotate arrow beside it that turns the text 45 degrees
+  further on every press (eight presses make a full turn);
+- the box size, a number with %: the longest a label may be, as a percent of the distance between
+  neighbouring ROIs of the group, so labels of neighbouring groups do not run into each other;
+- the smallest text size, in pt, a long name is shrunk to before it is broken into lines.
+
+Every part says what it is in its tooltip. The drawing is `group_label_overlay.py`.
 
 Holds only the controls; `ImagePanel` applies `settings()` to the overlay on every `changed`. Every control
-is remembered across restarts (`bind_ui_state`). The View tab carries a second instance, kept equal to this one
-with `sync_from` (see `view_tab.py`).
+is remembered across restarts (`bind_ui_state`, same keys and values as when the choices were drop-downs). The
+View tab carries a second instance, kept equal to this one with `sync_from` (see `view_tab.py`).
 """
 
 from __future__ import annotations
 
 from PyQt6.QtCore import QRectF, Qt, pyqtSignal
-from PyQt6.QtGui import QColor, QIcon, QPainter, QPixmap
-from PyQt6.QtWidgets import QComboBox, QGridLayout, QLabel, QMenu, QSpinBox, QToolButton, QWidget, QWidgetAction
+from PyQt6.QtGui import QColor, QFontMetrics, QIcon, QPainter, QPixmap
+from PyQt6.QtWidgets import QAbstractSpinBox, QHBoxLayout, QMenu, QSpinBox, QToolButton, QWidget, QWidgetAction
 
-from lspr_ui import get_active_theme, load_tabler_icon
+from lspr_ui import GuiTheme, get_active_theme, load_tabler_icon
 
+from ..ribbon_group import vertical_separator
 from ..ui_state import UiStateStore
+from .choice_picker import ChoicePicker
 from .general_group import ICON_SIZE, style_general_icon_button
+from .group_label_icons import ordinal_icon
 from .group_label_overlay import (
     DEFAULT_BOX_PERCENT,
     DEFAULT_MIN_POINT_SIZE,
@@ -31,11 +44,24 @@ from .group_label_overlay import (
 )
 from .label_placement import DEFAULT_GROUP_PLACEMENT
 from .label_placement_picker import LabelPlacementPicker
+from .text_angle_control import TextAngleControl
 
 _RENDER_SIZE = ICON_SIZE * 2
+# No frame, no fill (cleaner than a box in a strip of icons) and a slimmer padding than the theme's 2px 5px.
+_SPIN_STYLE = "QSpinBox { border: none; background: transparent; padding: 1px 2px; }"
+_PERCENT_EXTRA_PX = 14  # beyond the widest text of the % box: padding and the edit's own margin; the "300 %" needs the room
+_POINT_EXTRA_PX = 10  # same for the pt box
 _BOX_TIP = (
     "The longest a group label may be, as a percent of the distance between neighbouring ROIs of the group. "
     "A longer name is shrunk, then cut. Lower it if labels of neighbouring groups touch."
+)
+_MIN_SIZE_TIP = (
+    "The smallest text size you still find readable. A name too long for its box is shrunk down to this "
+    "size first, and only then broken into lines."
+)
+_POSITION_CHOICES = (
+    ("first", "Label each group at its first ROI (by ROI number)."),
+    ("last", "Label each group at its last ROI (by ROI number)."),
 )
 
 
@@ -59,12 +85,8 @@ def label_menu_icon(color: str) -> QIcon:
     return QIcon(pixmap)
 
 
-def _combo(parent: QWidget, items: tuple[tuple[str, str], ...], tip: str) -> QComboBox:
-    box = QComboBox(parent)
-    for text, data in items:
-        box.addItem(text, data)
-    box.setToolTip(tip)
-    return box
+def _ordinal_for(value: str, picked: bool, theme: GuiTheme) -> QIcon:
+    return ordinal_icon(value, theme.accent_blue if picked else theme.text_dim)
 
 
 class GroupLabelMenu(QToolButton):
@@ -80,60 +102,68 @@ class GroupLabelMenu(QToolButton):
         self.show_button.setCheckable(True)
         self.show_button.setToolTip("Show or hide the group labels (each group's name).")
         style_general_icon_button(self.show_button)
-        self.direction = _combo(panel, (("Horizontal", "horizontal"), ("Vertical", "vertical"), ("Diagonal (45°)", "diagonal")),
-            "Text direction (vertical and diagonal text read upwards).",
-        )
-        self.position = _combo(panel, (("First ROI", "first"), ("Last ROI", "last")), "Which ROI of the group (by number) carries the label.")
+        self.position = ChoicePicker(_POSITION_CHOICES, "first", _ordinal_for, parent=panel)
         self.placement = LabelPlacementPicker(DEFAULT_GROUP_PLACEMENT, panel)
         self.placement.setToolTip("Where the label sits around that ROI: the middle centres it on the ROI, the others put it just outside.")
+        self.angle = TextAngleControl(0, panel)
         self.box = QSpinBox(panel)
         self.box.setRange(MIN_BOX_PERCENT, MAX_BOX_PERCENT)
         self.box.setSingleStep(5)
         self.box.setSuffix(" %")
         self.box.setValue(DEFAULT_BOX_PERCENT)
         self.box.setToolTip(_BOX_TIP)
-
         self.min_size = QSpinBox(panel)
         self.min_size.setRange(*MIN_POINT_SIZE_RANGE)
         self.min_size.setSuffix(" pt")
         self.min_size.setValue(DEFAULT_MIN_POINT_SIZE)
-        self.min_size.setToolTip(
-            "The smallest text size you still find readable. A name too long for its box is shrunk down to this "
-            "size first, and only then broken into lines."
-        )
+        self.min_size.setToolTip(_MIN_SIZE_TIP)
 
-        grid = QGridLayout(panel)
-        grid.setContentsMargins(10, 8, 10, 8)
-        grid.setHorizontalSpacing(10)
-        grid.setVerticalSpacing(6)
-        self._captions: list[QLabel] = []
-        rows = (("Labels", self.show_button), ("Text", self.direction), ("At", self.position), ("Place", self.placement), ("Box size", self.box), ("Min text", self.min_size))
-        for row, (text, widget) in enumerate(rows):
-            caption = QLabel(text, panel)
-            caption.setToolTip(widget.toolTip())
-            self._captions.append(caption)
-            grid.addWidget(caption, row, 0)
-            grid.addWidget(widget, row, 1, alignment=Qt.AlignmentFlag.AlignLeft)  # the grid keeps its own small size
+        row = QHBoxLayout(panel)
+        row.setContentsMargins(5, 3, 5, 3)  # was 8, 6: a slimmer border round the strip
+        row.setSpacing(4)  # was 6, also either side of each thin line
+        self._separators: list[QWidget] = []
+        for index, part in enumerate((self.show_button, self.position, self.placement, self.angle, self.box, self.min_size)):
+            if index:
+                separator = vertical_separator(panel)
+                self._separators.append(separator)
+                row.addWidget(separator)
+            row.addWidget(part, 0, Qt.AlignmentFlag.AlignVCenter)
 
         self._menu = QMenu(self)
+        self._menu.setStyleSheet("QMenu { padding: 2px; }")  # the theme's 4 px, slimmer: only this menu
         action = QWidgetAction(self._menu)
         action.setDefaultWidget(panel)
         self._menu.addAction(action)
         self.setMenu(self._menu)
 
         self.show_button.toggled.connect(self._on_changed)
-        self.direction.currentIndexChanged.connect(self._on_changed)
-        self.position.currentIndexChanged.connect(self._on_changed)
+        self.position.value_changed.connect(self._on_changed)
         self.placement.placement_changed.connect(self._on_changed)
+        self.angle.angle_changed.connect(self._on_changed)
         self.box.valueChanged.connect(self._on_changed)
         self.min_size.valueChanged.connect(self._on_changed)
         self.refresh_theme()
 
+    def _fit_spin_widths(self) -> None:
+        """Both number boxes just wide enough for the widest value they can show (300 %, 14 pt), then fixed so
+        the strip does not stretch them. The theme pads every field 5 px a side (plus a border and the inner
+        edit's margin: the text starts 9 px in), which is more than half the width of three digits, so these two
+        boxes get a slim padding of their own, and no frame or fill."""
+        for spin, widest, extra in (
+            (self.box, f"{MAX_BOX_PERCENT} %", _PERCENT_EXTRA_PX),
+            (self.min_size, f"{MIN_POINT_SIZE_RANGE[1]} pt", _POINT_EXTRA_PX),
+        ):
+            spin.setStyleSheet(_SPIN_STYLE)
+            spin.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
+            spin.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            spin.ensurePolished()
+            spin.setFixedWidth(QFontMetrics(spin.font()).horizontalAdvance(widest) + extra)
+
     def settings(self) -> GroupLabelSettings:
         return GroupLabelSettings(
             visible=self.show_button.isChecked(),
-            direction=str(self.direction.currentData()),
-            position=str(self.position.currentData()),
+            angle=self.angle.angle(),
+            position=self.position.value(),
             side=self.placement.placement(),
             box_percent=float(self.box.value()),
             min_point_size=float(self.min_size.value()),
@@ -142,8 +172,9 @@ class GroupLabelMenu(QToolButton):
     def bind_ui_state(self, store: UiStateStore) -> None:
         """Put every control back as last left, then save each later change."""
         store.bind("image/group_labels/visible", self.show_button)
-        store.bind("image/group_labels/direction", self.direction)
-        store.bind("image/group_labels/position", self.position)
+        # The key held a word (horizontal / vertical / diagonal) before it became an angle; both are read.
+        self.angle.bind_ui_state(store, "image/group_labels/angle", legacy_key="image/group_labels/direction")
+        self.position.bind_ui_state(store, "image/group_labels/position")
         # The key predates the 3 x 3 grid: its old values (top, left, bottom, right) are still placements.
         self.placement.bind_ui_state(store, "image/group_labels/side")
         store.bind("image/group_labels/box_percent", self.box)
@@ -158,9 +189,10 @@ class GroupLabelMenu(QToolButton):
         try:
             if self.show_button.isChecked() != other.show_button.isChecked():
                 self.show_button.setChecked(other.show_button.isChecked())
-            for mine, theirs in ((self.direction, other.direction), (self.position, other.position)):
-                if mine.currentIndex() != theirs.currentIndex():
-                    mine.setCurrentIndex(theirs.currentIndex())
+            if self.position.value() != other.position.value():
+                self.position.set_value(other.position.value())
+            if self.angle.angle() != other.angle.angle():
+                self.angle.set_angle(other.angle.angle())
             if self.placement.placement() != other.placement.placement():
                 self.placement.set_placement(other.placement.placement())
             for spin, theirs in ((self.box, other.box), (self.min_size, other.min_size)):
@@ -178,7 +210,7 @@ class GroupLabelMenu(QToolButton):
         theme = get_active_theme()
         on = self.show_button.isChecked()
         self.setIcon(label_menu_icon(theme.accent_blue if on else theme.text_dim))
-        self.setToolTip("Group labels: show or hide, direction, position and size." + ("" if on else " (hidden)"))
+        self.setToolTip("Group labels: show or hide, which ROI, where, text angle and size." + ("" if on else " (hidden)"))
         self.show_button.setIcon(
             load_tabler_icon(
                 "label-important" if on else "label-off",
@@ -189,7 +221,13 @@ class GroupLabelMenu(QToolButton):
         )
 
     def refresh_theme(self) -> None:
+        theme = get_active_theme()
         style_general_icon_button(self)
         style_general_icon_button(self.show_button)
-        self.placement.refresh_theme(get_active_theme())
+        self.position.refresh_theme(theme)
+        self.placement.refresh_theme(theme)
+        self.angle.refresh_theme(theme)
+        for separator in self._separators:
+            separator.setStyleSheet(f"color: {theme.control_border};")
+        self._fit_spin_widths()
         self._refresh_icons()

@@ -19,7 +19,7 @@ from lspr_ui import GuiTheme, get_active_theme
 from ..ui_state import UiStateStore
 from .label_placement import PLACEMENTS
 
-_CELL_SIZE = 12
+_CELL_SIZE = 9  # was 12 (the whole grid 40 px, now 31 px)
 _SPACING = 2
 _TIPS = {
     "top-left": "Label off the top-left corner of the ROI.",

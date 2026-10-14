@@ -2226,8 +2226,8 @@ class ImagePanel(QWidget):
         self.frame_status_changed.emit(text, tooltip)
 
     def _show_frame_status(self, cube_index: int, wavelength_nm: float) -> None:
-        """The dock subtitle for a real frame: "Cube X, 550 nm | 1:23 | <comment>".
-        The middle part is this frame's own experimental time (H:MM:SS, or M:SS
+        """The dock subtitle for a real frame: "Cube X, 550 nm | 1:23.45 | <comment>".
+        The middle part is this frame's own experimental time (H:MM:SS.ss, or M:SS.ss
         under an hour, since the acquisition start - the same t = 0 as the
         cube's Time label, which is only the cube's *first* frame); it is left
         out when the frame has no timing. The comment is the experiment-record
@@ -2240,7 +2240,7 @@ class ImagePanel(QWidget):
         head = f"Cube {self._cube_display.label_for(cube_index)}, {wavelength_nm:.0f} nm"
         frame_seconds = self._dataset.frame_start_seconds(cube_index, wavelength_nm)
         if frame_seconds is not None:
-            head = f"{head} | {format_elapsed_seconds(frame_seconds)}"
+            head = f"{head} | {format_elapsed_seconds(frame_seconds, decimals=2)}"  # tens of ms: frames of a cube are close
         if comment:
             text, tooltip = f"{head} | {comment}", comment
         elif linked:
