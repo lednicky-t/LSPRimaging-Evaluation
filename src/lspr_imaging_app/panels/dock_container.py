@@ -44,6 +44,9 @@ build_main_window``); every other panel passes the defaults
 
 from __future__ import annotations
 
+import re
+from collections.abc import Sequence
+
 from PyQt6.QtCore import QByteArray, QRect, QRectF, QSize, Qt, pyqtSignal
 from PyQt6.QtGui import QColor, QFontMetrics, QIcon, QPainter, QPen, QPixmap
 from PyQt6.QtSvg import QSvgRenderer
@@ -53,6 +56,7 @@ from PyQt6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QMessageBox,
+    QSizePolicy,
     QToolButton,
     QVBoxLayout,
     QWidget,
@@ -64,6 +68,8 @@ from lspr_ui import (
     tabler_icon_svg,
     transparent_icon_button_stylesheet,
 )
+
+from .subtitle_column import SubtitleColumn
 
 # Neutral translucent grey, not a theme color (2026-09-27, VS Code style
 # pass) - matches dock_separator_stylesheet's own rgba(128,128,128,...)
@@ -85,6 +91,51 @@ _TITLE_BAR_ICON_HOVER = "rgba(128, 128, 128, 0.20)"
 # 5px.
 _CARD_GAP_PX = 3
 _CARD_RADIUS_PX = 6
+
+# The title bar's status fields (`set_subtitle_columns`, 2026-10-16): the gap between two
+# fields, and a few spare pixels on a fixed-width field so its widest text never touches the edge.
+_SUBTITLE_COLUMN_GAP_PX = 14
+_SUBTITLE_COLUMN_SLACK_PX = 3
+
+
+def _widest_text_width(label: QLabel, widest: str) -> int:
+    """Pixel width of *widest* in *label*'s font, every digit counted as the font's widest digit
+    (a proportional font may give "1" and "8" different widths; the shown text must never be wider)."""
+    label.ensurePolished()
+    metrics = label.fontMetrics()
+    digit = max("0123456789", key=metrics.horizontalAdvance)
+    return metrics.horizontalAdvance(re.sub(r"\d", digit, widest)) + _SUBTITLE_COLUMN_SLACK_PX
+
+
+class _ElidedLabel(QLabel):
+    """A label that never asks for more room than it is given: text that does not fit is cut with
+    "..." at the right (the full text stays in `full_text()`, and is the tooltip if none is set)."""
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._full = ""
+        self._tooltip = ""
+        self.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+
+    def full_text(self) -> str:
+        return self._full
+
+    def set_full_text(self, text: str, tooltip: str = "") -> None:
+        self._full = text
+        self._tooltip = tooltip
+        self._elide()
+
+    def resizeEvent(self, event) -> None:  # type: ignore[override]  # noqa: N802 - Qt naming
+        super().resizeEvent(event)
+        self._elide()
+
+    def _elide(self) -> None:
+        shown = self.fontMetrics().elidedText(self._full, Qt.TextElideMode.ElideRight, max(self.width(), 0))
+        if self.text() != shown:
+            self.setText(shown)
+        tip = self._tooltip or (self._full if shown != self._full else "")
+        if self.toolTip() != tip:
+            self.setToolTip(tip)
 
 
 def _render_tabler_icon(name: str, color: str, *, stroke_width: float = 2.2) -> QIcon:
@@ -184,6 +235,13 @@ class PanelContainer(QDockWidget):
         self._subtitle_text = ""
         self._subtitle_tooltip = ""
         self._subtitle_label: QLabel | None = None
+        # Status fields at fixed places (`set_subtitle_columns`); when set, they replace the centred text.
+        self._subtitle_columns: tuple[SubtitleColumn, ...] = ()
+        self._subtitle_centered: QWidget | None = None
+        self._subtitle_columns_host: QWidget | None = None
+        self._subtitle_column_labels: list[QLabel] = []
+        self._subtitle_column_keys: list[tuple[str, str | None, str]] = []
+        self._muted_color = ""
         self.setObjectName(f"{title.replace(' ', '')}Panel")
         self._frame_border_color: str | None = None
         self._frame_fill_color: str | None = None
@@ -363,14 +421,33 @@ class PanelContainer(QDockWidget):
         # midpoint of whatever space is left between them, rather than
         # crowding it right up against the title the way a single trailing
         # stretch would.
-        layout.addStretch(1)
-        subtitle_label = QLabel(self._subtitle_text, row)
+        centered = QWidget(row)
+        centered_layout = QHBoxLayout(centered)
+        centered_layout.setContentsMargins(0, 0, 0, 0)
+        centered_layout.setSpacing(0)
+        centered_layout.addStretch(1)
+        subtitle_label = QLabel(self._subtitle_text, centered)
         subtitle_label.setStyleSheet(f"color: {theme.text_muted}; font-weight: 400; background: transparent;")
         subtitle_label.setToolTip(self._subtitle_tooltip)
         subtitle_label.setVisible(bool(self._subtitle_text))
-        layout.addWidget(subtitle_label)
+        centered_layout.addWidget(subtitle_label)
+        centered_layout.addStretch(1)
+        layout.addWidget(centered, 1)
         self._subtitle_label = subtitle_label
-        layout.addStretch(1)
+        self._subtitle_centered = centered
+
+        # Status fields (`set_subtitle_columns`): left-aligned right after the title, each at a
+        # fixed place; the last, unsized one (the comment) takes all the room that is left.
+        columns_host = QWidget(row)
+        columns_layout = QHBoxLayout(columns_host)
+        columns_layout.setContentsMargins(_SUBTITLE_COLUMN_GAP_PX, 0, 0, 0)
+        columns_layout.setSpacing(_SUBTITLE_COLUMN_GAP_PX)
+        layout.addWidget(columns_host, 1)
+        self._subtitle_columns_host = columns_host
+        self._subtitle_column_labels = []
+        self._subtitle_column_keys = []
+        self._muted_color = theme.text_muted
+        self._apply_subtitle_columns()
 
         if self._help_text:
             help_text = self._help_text
@@ -463,6 +540,59 @@ class PanelContainer(QDockWidget):
             self._subtitle_label.setText(text)
             self._subtitle_label.setToolTip(tooltip)
             self._subtitle_label.setVisible(bool(text))
+
+    def set_subtitle_columns(self, columns: Sequence[SubtitleColumn]) -> None:
+        """Status fields after the panel title (2026-10-16, maintainer request: "fields will have
+        fixed position"): left-aligned in the order given, a column with a `widest` text has exactly
+        that width, the one without takes the rest. A field that is empty keeps its place. An empty
+        *columns* goes back to the centred `set_subtitle` text."""
+        columns = tuple(columns)
+        if columns == self._subtitle_columns:
+            return
+        self._subtitle_columns = columns
+        self._apply_subtitle_columns()
+
+    def _apply_subtitle_columns(self) -> None:
+        """Show `_subtitle_columns` in the title bar (called on every frame step during Play, so
+        only what changed is touched; the labels are made again only when the shape changes)."""
+        host = self._subtitle_columns_host
+        if host is None or self._subtitle_centered is None:
+            return
+        columns = self._subtitle_columns
+        self._subtitle_centered.setVisible(not columns)
+        host.setVisible(bool(columns))
+        if not columns:
+            return
+        layout = host.layout()
+        shape = [bool(column.widest) for column in columns]  # True = fixed width, False = takes the rest
+        if shape != [not isinstance(label, _ElidedLabel) for label in self._subtitle_column_labels]:
+            for label in self._subtitle_column_labels:
+                layout.removeWidget(label)
+                label.deleteLater()
+            self._subtitle_column_labels = []
+            self._subtitle_column_keys = []
+            for sized in shape:
+                label = QLabel(host) if sized else _ElidedLabel(host)
+                label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+                layout.addWidget(label, 0 if sized else 1)
+                self._subtitle_column_labels.append(label)
+                self._subtitle_column_keys.append(("", None, ""))
+        for index, (label, column) in enumerate(zip(self._subtitle_column_labels, columns)):
+            key = (column.widest, column.color, self._muted_color)
+            if self._subtitle_column_keys[index] != key:
+                self._subtitle_column_keys[index] = key
+                label.setStyleSheet(
+                    f"color: {column.color or self._muted_color}; font-weight: 400; background: transparent;"
+                )
+                if column.widest:
+                    label.setFixedWidth(_widest_text_width(label, column.widest))
+            if isinstance(label, _ElidedLabel):
+                label.set_full_text(column.text, column.tooltip)
+            else:
+                if label.text() != column.text:
+                    label.setText(column.text)
+                if label.toolTip() != column.tooltip:
+                    label.setToolTip(column.tooltip)
 
     def _set_collapsed(self, collapsed: bool) -> None:
         """Click-to-collapse/expand (design doc §4 - the maintainer chose

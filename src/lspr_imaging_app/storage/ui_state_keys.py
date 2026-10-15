@@ -118,6 +118,7 @@ CUBE_DISPLAY_MODE = UiKey("app/cube_display_mode", "cube", str)  # "cube" (numbe
 MASK_SCOPE = UiKey("mask/scope", None, str)  # a `MaskScope` value
 # Image panel slider ribbon, slideshow settings (panels/image/slideshow.py)
 SLIDER_RIBBON_OPEN = UiKey("image/slider_ribbon_open", True, bool)  # rolled down (True) or up
+TOP_RIBBON_OPEN = UiKey("image/top_ribbon_open", True, bool)  # the tool ribbon above the canvas: rolled down (True) or up
 SLIDESHOW_SPEED = UiKey("image/slideshow_speed", 1, int)  # 1, 2, 5 or 10 (x)
 SLIDESHOW_MODE = UiKey("image/slideshow_mode", "all", str)  # "all" | "one_wavelength"
 SLIDESHOW_REPEAT = UiKey("image/slideshow_repeat", False, bool)

@@ -13,13 +13,14 @@ hands them to `SlideshowController` (`slideshow.py`), which does the work.
 
 from __future__ import annotations
 
-from PyQt6.QtCore import QEasingCurve, QPropertyAnimation, QSize, Qt, pyqtSignal
+from PyQt6.QtCore import QSize, Qt, pyqtSignal
 from PyQt6.QtWidgets import QHBoxLayout, QMenu, QToolButton, QWidget, QWidgetAction
 
 from lspr_ui import get_active_theme, load_tabler_icon, transparent_icon_button_stylesheet
 
 from .canvas_tools import _BUTTON_SIZE, _ICON_SIZE
 from .frame_tools import FrameToolsWidget, captioned_group
+from .ribbon_drawer import RibbonDrawer
 from .slideshow import SlideshowSettings
 from .slider_colors import SliderColorControls
 from .slideshow_settings_panel import SlideshowSettingsPanel
@@ -130,82 +131,16 @@ class SliderRibbon(QWidget):
         self._settings_panel.set_settings(self._settings)
 
 
-_QWIDGETSIZE_MAX = 16777215
-_HANDLE_WIDTH = 18
-_HANDLE_HEIGHT = 14
-_ANIMATION_MS = 160
-
-
-class SliderRibbonDrawer(QWidget):
+class SliderRibbonDrawer(RibbonDrawer):
     """The slider ribbon plus a small handle on its left (2026-10-13). The ribbon
     rolls up on a double-click on its empty space; rolled up, only the handle
-    (chevron up) is left, as a thin strip above the sliders, and a click on it
-    rolls the ribbon down again. The handle is hidden while the ribbon is shown.
-    The height change is animated (`set_expanded(..., animate=False)` for tests
-    and restores)."""
-
-    expanded_changed = pyqtSignal(bool)
+    (three dots) is left, as a thin strip above the sliders, and a click on it
+    rolls the ribbon down again. The rolling is `RibbonDrawer`'s."""
 
     def __init__(self, ribbon: SliderRibbon, parent: QWidget | None = None) -> None:
-        super().__init__(parent)
-        self.ribbon = ribbon
-        ribbon.setParent(self)
-        self._expanded = True
-        self._handle = QToolButton(self)
-        self._handle.setAutoRaise(True)
-        self._handle.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        self._handle.setFixedSize(_HANDLE_WIDTH, _HANDLE_HEIGHT)
-        self._handle.setIconSize(QSize(10, 10))
-        self._handle.clicked.connect(lambda: self.set_expanded(True))
+        super().__init__(ribbon, "Show the slider ribbon.", parent)
         ribbon.roll_up_requested.connect(lambda: self.set_expanded(False))
-        self._animation = QPropertyAnimation(ribbon, b"maximumHeight", self)
-        self._animation.setDuration(_ANIMATION_MS)
-        self._animation.setEasingCurve(QEasingCurve.Type.InOutQuad)
-        self._animation.finished.connect(self._on_animation_finished)
-
-        layout = QHBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(2)
-        layout.addWidget(self._handle, 0, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignBottom)
-        layout.addWidget(ribbon, 1)
-        self.refresh_theme()
-
-    def is_expanded(self) -> bool:
-        return self._expanded
-
-    def set_expanded(self, expanded: bool, *, animate: bool = True) -> None:
-        if expanded == self._expanded:
-            return
-        self._expanded = expanded
-        self._animation.stop()
-        full = max(self.ribbon.sizeHint().height(), _HANDLE_HEIGHT)
-        if expanded:
-            self.ribbon.show()
-        if animate and self.isVisible():
-            self._animation.setStartValue(self.ribbon.height() if self.ribbon.maximumHeight() < _QWIDGETSIZE_MAX else (0 if expanded else full))
-            self._animation.setEndValue(full if expanded else 0)
-            self._animation.start()
-        else:
-            self.ribbon.setMaximumHeight(_QWIDGETSIZE_MAX if expanded else 0)
-            self.ribbon.setVisible(expanded)
-        self._refresh_handle()
-        self.expanded_changed.emit(expanded)
-
-    def _on_animation_finished(self) -> None:
-        if self._expanded:
-            self.ribbon.setMaximumHeight(_QWIDGETSIZE_MAX)  # free again, so a theme / font change can resize it
-        else:
-            self.ribbon.hide()
-
-    def _refresh_handle(self) -> None:
-        theme = get_active_theme()
-        self._handle.setIcon(
-            load_tabler_icon("dots", color=theme.text_muted, size=20, stroke_width=3.2)
-        )
-        self._handle.setToolTip("Show the slider ribbon.")
-        self._handle.setVisible(not self._expanded)
 
     def refresh_theme(self) -> None:
-        self._handle.setStyleSheet(transparent_icon_button_stylesheet(hover=get_active_theme().control_bg_hover))
-        self._refresh_handle()
+        super().refresh_theme()
         self.ribbon.refresh_theme()

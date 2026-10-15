@@ -1,5 +1,5 @@
 """``FrameToolsWidget`` - the icon controls for "what is this frame?" (2026-10-13,
-maintainer request): the cube unit (# / time), Reference (set, find), Ignore
+maintainer request): the cube unit (# / time), Reference (go to, set, find), Ignore
 (cube, wavelength, clear) and Dark background (pick, clear).
 
 One widget, two hosts, so the two can never drift apart:
@@ -81,10 +81,12 @@ class FrameToolsState:
     has_dark: bool = False
     any_ignored_anywhere: bool = False  # some cube or wavelength is ignored, not necessarily the one shown
     enabled: bool = True  # False with no dataset loaded
+    has_reference: bool = False  # a reference frame exists for the cube shown (Go to reference needs one)
 
 
 class FrameToolsWidget(QWidget):
     unit_toggle_requested = pyqtSignal()
+    go_to_reference_requested = pyqtSignal()
     set_reference_requested = pyqtSignal()
     find_reference_requested = pyqtSignal()
     ignore_cube_requested = pyqtSignal(bool)  # True = ignore, False = stop ignoring
@@ -108,6 +110,7 @@ class FrameToolsWidget(QWidget):
         self._icon_keys: dict[QToolButton, tuple[str, str]] = {}
 
         self._unit = self._button(checkable=False, with_text=True)
+        self._go_ref = self._button()
         self._set_ref = self._button()
         self._find_ref = self._button()
         self._ignore_cube = self._button(checkable=True)
@@ -118,6 +121,7 @@ class FrameToolsWidget(QWidget):
         self._dark_clear = self._button()
 
         self._unit.clicked.connect(self.unit_toggle_requested)
+        self._go_ref.clicked.connect(self.go_to_reference_requested)
         self._set_ref.clicked.connect(self.set_reference_requested)
         self._find_ref.clicked.connect(self.find_reference_requested)
         self._ignore_cube.clicked.connect(self.ignore_cube_requested)
@@ -129,7 +133,7 @@ class FrameToolsWidget(QWidget):
         for button in self._buttons():
             button.clicked.connect(self.used)
 
-        reference = (self._set_ref, self._find_ref)
+        reference = (self._go_ref, self._set_ref, self._find_ref)
         ignore = (self._ignore_cube, self._ignore_wl, self._ignore_clear, self._ignore_clear_all)
         dark = (self._dark_pick, self._dark_clear)
         if stacked:
@@ -188,6 +192,7 @@ class FrameToolsWidget(QWidget):
     def _buttons(self) -> tuple[QToolButton, ...]:
         return (
             self._unit,
+            self._go_ref,
             self._set_ref,
             self._find_ref,
             self._ignore_cube,
@@ -249,6 +254,13 @@ class FrameToolsWidget(QWidget):
             + ("" if state.time_available else f"\n{_TIME_NEEDS_METADATA}")
         )
 
+        self._icon(self._go_ref, "current-location", plain)
+        self._tip(self._go_ref,
+            "Go to reference: move the cube and wavelength sliders to the reference frame."
+            if state.has_reference else
+            "Go to reference: there is no reference frame yet. Set one, or use Find reference."
+        )
+        self._go_ref.setEnabled(state.enabled and state.has_reference)
         self._icon(self._set_ref, "pin", plain)
         self._tip(self._set_ref, "Set reference: use the cube and wavelength shown now as the reference frame.")
         self._icon(self._find_ref, "search", plain)

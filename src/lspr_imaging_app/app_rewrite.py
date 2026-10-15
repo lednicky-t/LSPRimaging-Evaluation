@@ -1006,15 +1006,17 @@ def _build_dock_layout(
     spectra_dock = PanelContainer("Spectra", spectra_panel, window)
     sensorgram_dock = PanelContainer("Sensorgram", sensorgram_panel, window)
 
-    # "Cube X, wl nm" shown centered in the Image dock's own title bar
-    # (2026-09-30, maintainer request) rather than in a row under the
-    # canvas - see `ImagePanel.frame_status_changed`'s docstring for why
-    # render errors are deliberately not routed here too. Seeded once
-    # explicitly: `image_panel` already emitted its initial "No dataset
-    # loaded." during its own construction, before this connection existed
-    # to hear it.
-    image_panel.frame_status_changed.connect(image_dock.set_subtitle)
-    image_dock.set_subtitle("No dataset loaded.")
+    # The frame status ("Cube X", "550 nm", time, comment) shown in the Image
+    # dock's own title bar (2026-09-30, maintainer request) rather than in a
+    # row under the canvas - see `ImagePanel.frame_status_changed`'s docstring
+    # for why render errors are deliberately not routed here too. Since
+    # 2026-10-16 as left-aligned fields at fixed places (`frame_columns_changed`
+    # -> `set_subtitle_columns`), so a role word or a comment appearing never
+    # shifts the others. Seeded once explicitly: `image_panel` already emitted
+    # its initial "No dataset loaded." during its own construction, before
+    # this connection existed to hear it.
+    image_panel.frame_columns_changed.connect(image_dock.set_subtitle_columns)
+    image_dock.set_subtitle_columns(image_panel.frame_columns())
 
     # Workflow is added to LeftDockWidgetArea *alone* - every other panel
     # goes into RightDockWidgetArea/BottomDockWidgetArea instead of being

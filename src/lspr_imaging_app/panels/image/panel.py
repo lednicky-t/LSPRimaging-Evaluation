@@ -131,6 +131,7 @@ from ...selection.cube_display_module import MODE_CUBE, MODE_TIME, format_elapse
 from ...selection.frame_roles_module import ROLE_DARK, ROLE_IGNORED, ROLE_REFERENCE, FrameRolesModule
 from .cube_spin_box import CubeSpinBox
 from ..cursor_overlay import CursorOverlay
+from ..subtitle_column import SubtitleColumn
 from .landmark_overlay import draw_landmarks
 from .slider_ticks import cube_slider_major_ticks, wavelength_slider_major_ticks
 from .transforms_settings import TransformsSection
@@ -175,6 +176,7 @@ from ...storage.ui_state_keys import (
     ROI_SCOPE,
     SLIDER_COLOR_KEYS,
     SLIDER_RIBBON_OPEN,
+    TOP_RIBBON_OPEN,
     SLIDESHOW_END,
     SLIDESHOW_SKIP_DARK,
     SLIDESHOW_SKIP_IGNORED,
@@ -191,6 +193,7 @@ from .slider_colors import SliderColors
 from ...applog.events import log_event
 from .playback_stats import PlaybackStats
 from .timed_canvas import TimedImageItem, TimedLayoutWidget
+from .ribbon_drawer import RibbonDrawer
 from .slider_ribbon import SliderRibbon, SliderRibbonDrawer
 from .slideshow import END_CUBE, END_DATASET, MODE_ALL, MODE_ONE_WAVELENGTH, SPEEDS, SlideshowController, SlideshowSettings
 from .tool_ribbon import ROI_TAB, VIEW_TAB, ImageToolRibbon
@@ -221,6 +224,10 @@ def _slider_axis_title_style(color: str) -> str:
     return f"color: {color}; font-size: 11px; font-weight: 600;"
 
 
+# The frame-role word of the dock subtitle: role -> (slider colour role, word), in the colour of its slider tick.
+_ROLE_WORDS = {ROLE_DARK: ("dark", "Dark background"), ROLE_REFERENCE: ("reference", "Reference"), ROLE_IGNORED: ("ignored", "Ignored")}
+_WIDEST_ROLE_WORD = max((word for _color, word in _ROLE_WORDS.values()), key=len)
+_WIDEST_FRAME_TIME = "00:00:00.00"  # H:MM:SS.ss with a two-digit hour (the dock measures every digit as the widest)
 CHROMATIC_TAB = "Chromatic"  # ribbon tab label (full name "Chromatic Corrections" is its tooltip)
 BACKGROUND_TAB = "Background"  # ribbon tab label; green while background removal is applied
 # The "i" icon's text per ribbon tab ("Image tools" and "ROIs" show the active tool's canvas controls instead).
@@ -288,14 +295,19 @@ class ImagePanel(QWidget):
     # What frame is on screen ("Cube 0, 550 nm") - the old bottom status
     # row's replacement (2026-09-30, maintainer request: that row, plus its
     # trailing "- WxH px" resolution text, is gone; this is shown instead as
-    # the dock title bar's centered subtitle, via `app_rewrite.py` wiring
-    # this straight to `PanelContainer.set_subtitle`). Render *errors*
+    # the dock title bar's subtitle - since 2026-10-16 as fixed-place fields,
+    # see `frame_columns_changed`). Render *errors*
     # ("Cannot show this frame: ...") deliberately do not go through this
     # signal - they go through `tool_status_changed` instead (a transient
     # status-bar message, the same convention every other guarded command in
     # this panel already uses - see `_on_measure_apply_requested`), since an
     # error is not "what frame is displayed", it's "why nothing is".
     frame_status_changed = pyqtSignal(str, str)  # subtitle text, tooltip (the comment / why it is N/A)
+    # The same status as fixed-place fields (2026-10-16, maintainer request: the dock title bar's
+    # fields must not shift when a frame role or a comment appears): a tuple of `SubtitleColumn`
+    # - frame role, cube, wavelength, time, comment. `app_rewrite.py` wires it to
+    # `PanelContainer.set_subtitle_columns`; `frame_status_changed` stays the one-line text.
+    frame_columns_changed = pyqtSignal(object)
 
     # The viewport's pan/zoom, as (x_min, x_max, y_min, y_max) in image pixel
     # coordinates - `app_rewrite.py`'s other half of `initial_view_range`
@@ -426,6 +438,10 @@ class ImagePanel(QWidget):
         # (or any other direct caller) read the current frame-status text
         # without needing a dock title bar in the loop to observe it.
         self._frame_status = ""
+        self._frame_columns: tuple[SubtitleColumn, ...] = ()  # the same, as the dock's fixed-place fields
+        # The widest cube and wavelength texts of the loaded dataset (sizes of two dock fields);
+        # None = look them up on next use (dataset loaded / cleared, cube unit changed).
+        self._frame_widest: tuple[str, str] | None = None
 
         self._serial = itertools.count(1)
         self._latest_serial = 0
@@ -522,6 +538,8 @@ class ImagePanel(QWidget):
         self._restore_slider_colors(store)
         self._ribbon_drawer.set_expanded(read(store, SLIDER_RIBBON_OPEN) is not False, animate=False)
         self._ribbon_drawer.expanded_changed.connect(lambda open_: store.set(SLIDER_RIBBON_OPEN.key, bool(open_)))
+        self._top_drawer.set_expanded(read(store, TOP_RIBBON_OPEN) is not False, animate=False)
+        self._top_drawer.expanded_changed.connect(lambda open_: store.set(TOP_RIBBON_OPEN.key, bool(open_)))
         self._apply_roi_overlay_style()
         self._sync_roi_overlay_controls()
         self._roi_tab.bind_ui_state(store)
@@ -904,7 +922,14 @@ class ImagePanel(QWidget):
         self._tool_ribbon.category_changed.connect(lambda _label: self._refresh_tool_info(self._active_tool.active()))
         # Short tab label, full name in the tooltip; the tab is green while the correction is applied.
         self._tool_ribbon.set_tab_tooltip(CHROMATIC_TAB, "Chromatic Corrections")
-        top_bar_layout.addWidget(self._tool_ribbon)
+        # The ribbon rolls up on a double-click on the bar's empty space (`eventFilter`), leaving
+        # a thin strip with a "..." handle, like the slider ribbon (2026-10-16). The "i" icon rolls
+        # up with it (see below).
+        self._top_drawer = RibbonDrawer(
+            self._tool_ribbon, "Show the tool ribbon.", self._top_bar, handle_alignment=Qt.AlignmentFlag.AlignTop
+        )
+        self._top_bar.installEventFilter(self)
+        top_bar_layout.addWidget(self._top_drawer)
         top_bar_layout.addStretch(1)
 
         # Cursor-crosshair toggle (maintainer's request, 2026-09-29 - "copy
@@ -961,6 +986,7 @@ class ImagePanel(QWidget):
         style_bar_icon_button(self._tool_info)
         self._refresh_tool_info(None)
         top_bar_layout.addWidget(self._tool_info)
+        self._top_drawer.expanded_changed.connect(self._tool_info.setVisible)  # rolled up: only the handle is left
 
         self._refresh_top_bar_theme()
 
@@ -1210,6 +1236,8 @@ class ImagePanel(QWidget):
                 getattr(self, tab).refresh_theme()
         if hasattr(self, "_tool_ribbon"):
             self._tool_ribbon.refresh_theme(get_active_theme())
+        if hasattr(self, "_top_drawer"):
+            self._top_drawer.refresh_theme()
         if hasattr(self, "_area_picker"):
             self._area_picker.refresh_theme(get_active_theme())
         if hasattr(self, "_background_tab"):
@@ -1284,6 +1312,7 @@ class ImagePanel(QWidget):
         self._landmark_version += 1
 
     def _on_dataset_loaded(self, _dataset: object) -> None:
+        self._frame_widest = None
         self._renderer.clear_prefetch()
         self._invalidate_landmark_overlay()
         self._refresh_navigation_ranges()
@@ -1295,6 +1324,7 @@ class ImagePanel(QWidget):
         deliberately clears only its own reference and expects every module
         and panel holding dataset-derived state to reset itself (see its
         module docstring) - this is the first subscriber to actually do so."""
+        self._frame_widest = None
         self._refresh_frame_tools()
         self._renderer.clear_prefetch()
         self._invalidate_landmark_overlay()
@@ -1919,9 +1949,13 @@ class ImagePanel(QWidget):
         finite = estimate[np.isfinite(estimate)]
         spread = f", range {finite.min():.0f}-{finite.max():.0f}" if finite.size else ""
         self._frame_key = None  # a transient estimate, not the real frame: not re-described on a unit change
+        cube_text = f"Cube {self._cube_display.label_for(request.cube_index)}"
+        wavelength_text = f"{request.wavelength_nm:.0f} nm"
         self._set_frame_status(
-            f"Cube {self._cube_display.label_for(request.cube_index)}, {request.wavelength_nm:.0f} nm"
-            f" - background estimate{spread}"
+            f"{cube_text}, {wavelength_text} - background estimate{spread}",
+            columns=self._frame_fields(
+                cube=cube_text, wavelength=wavelength_text, comment=f"Background estimate{spread}"
+            ),
         )
 
     # -- viewport persistence -------------------------------------------------
@@ -2404,9 +2438,55 @@ class ImagePanel(QWidget):
         self._tool_status = text
         self.tool_status_changed.emit(text)
 
-    def _set_frame_status(self, text: str, tooltip: str = "") -> None:
+    def _set_frame_status(
+        self, text: str, tooltip: str = "", columns: tuple[SubtitleColumn, ...] | None = None
+    ) -> None:
+        """Publish the frame status as one line (`frame_status_changed`) and as the dock's fixed-place
+        fields (`frame_columns_changed`). A message with no frame in it ("No dataset loaded.") has no
+        *columns*: it is shown in the comment field, the one that has room."""
         self._frame_status = text
+        self._frame_columns = columns if columns is not None else self._frame_fields(comment=text, tooltip=tooltip)
         self.frame_status_changed.emit(text, tooltip)
+        self.frame_columns_changed.emit(self._frame_columns)
+
+    def frame_columns(self) -> tuple[SubtitleColumn, ...]:
+        """The dock fields of the last frame status (to seed a dock that connected after the panel was built)."""
+        return self._frame_columns
+
+    def _frame_fields(
+        self,
+        *,
+        role: tuple[str, str] | None = None,
+        cube: str = "",
+        wavelength: str = "",
+        time: str = "",
+        comment: str = "",
+        tooltip: str = "",
+    ) -> tuple[SubtitleColumn, ...]:
+        """The dock fields, left to right: frame role (word, colour), cube, wavelength, the frame's
+        own time, comment. Every field but the comment has the width of the widest thing it can
+        show, so an empty one keeps its place and the ones after it never move."""
+        widest_cube, widest_wavelength = self._widest_frame_texts()
+        return (
+            SubtitleColumn(role[0] if role else "", _WIDEST_ROLE_WORD, role[1] if role else None),
+            SubtitleColumn(cube, widest_cube),
+            SubtitleColumn(wavelength, widest_wavelength),
+            SubtitleColumn(time, _WIDEST_FRAME_TIME),
+            SubtitleColumn(comment, tooltip=tooltip),
+        )
+
+    def _widest_frame_texts(self) -> tuple[str, str]:
+        """The longest "Cube X" and "NNN nm" of the loaded dataset (the highest cube and wavelength: the
+        most digits; the last cube has the longest start time). Looked up once per dataset / cube unit,
+        not per frame, since the status is rebuilt on every Play step."""
+        if self._frame_widest is None:
+            cubes = self._dataset.spectral_cubes()
+            wavelengths = self._dataset.wavelengths()
+            self._frame_widest = (
+                f"Cube {self._cube_display.label_for(cubes[-1])}" if cubes else "Cube 0",
+                f"{max(wavelengths):.0f} nm" if wavelengths else "0 nm",
+            )
+        return self._frame_widest
 
     def _show_frame_status(self, cube_index: int, wavelength_nm: float) -> None:
         """The dock subtitle for a real frame: "Cube X, 550 nm | 1:23.45 | <comment>".
@@ -2420,10 +2500,13 @@ class ImagePanel(QWidget):
         comment was recorded yet."""
         self._frame_key = (int(cube_index), float(wavelength_nm))
         linked, comment = self._dataset.frame_comment(cube_index, wavelength_nm)
-        head = f"Cube {self._cube_display.label_for(cube_index)}, {wavelength_nm:.0f} nm"
+        cube_text = f"Cube {self._cube_display.label_for(cube_index)}"
+        wavelength_text = f"{wavelength_nm:.0f} nm"
+        head = f"{cube_text}, {wavelength_text}"
         frame_seconds = self._dataset.frame_start_seconds(cube_index, wavelength_nm)
-        if frame_seconds is not None:
-            head = f"{head} | {format_elapsed_seconds(frame_seconds, decimals=2)}"  # tens of ms: frames of a cube are close
+        time_text = "" if frame_seconds is None else format_elapsed_seconds(frame_seconds, decimals=2)  # tens of ms: frames of a cube are close
+        if time_text:
+            head = f"{head} | {time_text}"
         if comment:
             text, tooltip = f"{head} | {comment}", comment
         elif linked:
@@ -2433,22 +2516,34 @@ class ImagePanel(QWidget):
                 f"{head} | N/A",
                 "This image is not linked to experiment data (no acquisition metadata, or no timing for it).",
             )
-        self._set_frame_status(self._with_role_prefix(text, cube_index, wavelength_nm), tooltip)
+        role = self._role_word(cube_index, wavelength_nm)
+        self._set_frame_status(
+            self._with_role_prefix(text, cube_index, wavelength_nm),
+            tooltip,
+            self._frame_fields(
+                role=role, cube=cube_text, wavelength=wavelength_text, time=time_text,
+                comment=comment or "N/A", tooltip=tooltip,
+            ),
+        )
+
+    def _role_word(self, cube_index: int, wavelength_nm: float) -> tuple[str, str] | None:
+        """("Dark background" | "Reference" | "Ignored", its slider colour) for such a frame
+        (`slider_colors.py`: the colour of its tick); None for any other frame."""
+        if self._frame_roles is None:
+            return None
+        shown = _ROLE_WORDS.get(self._frame_roles.role_of(cube_index, wavelength_nm))
+        if shown is None:
+            return None
+        color_role, word = shown
+        return word, self._slider_colors.color(color_role)
 
     def _with_role_prefix(self, text: str, cube_index: int, wavelength_nm: float) -> str:
-        """A dark frame gets "Dark background", the reference frame "Reference", an
-        ignored one "Ignored", before the Cube/wavelength text, each in its slider
-        colour (`slider_colors.py`, the same as its tick). Other frames: the text
-        unchanged (plain). The dock title label renders the result as rich text, so
-        the whole line is escaped."""
-        if self._frame_roles is None:
+        """The one-line status: the role word, in its colour, before the Cube/wavelength text; other
+        frames: the text unchanged (plain). A rich-text line, so the whole text is escaped."""
+        role = self._role_word(cube_index, wavelength_nm)
+        if role is None:
             return text
-        role = self._frame_roles.role_of(cube_index, wavelength_nm)
-        shown = {ROLE_DARK: ("dark", "Dark background"), ROLE_REFERENCE: ("reference", "Reference"), ROLE_IGNORED: ("ignored", "Ignored")}
-        if role not in shown:
-            return text
-        color_role, word = shown[role]
-        return f'<span style="color:{self._slider_colors.color(color_role)}">{word}</span> {html.escape(text)}'
+        return f'<span style="color:{role[1]}">{role[0]}</span> {html.escape(text)}'
 
     def _refresh_frame_status(self) -> None:
         """Show the viewed frame's dock subtitle again (a role or a slider colour changed)."""
@@ -2457,6 +2552,7 @@ class ImagePanel(QWidget):
 
     def _on_reference_frame_changed(self) -> None:
         self._update_slider_marks()
+        self._refresh_frame_tools()  # Go to reference is enabled only while a reference exists
         self._refresh_frame_status()
 
     def _on_frame_roles_changed(self) -> None:
@@ -2481,6 +2577,7 @@ class ImagePanel(QWidget):
 
     def _on_cube_display_changed(self, _mode: str) -> None:
         """The cube unit (number / start time) changed anywhere in the app."""
+        self._frame_widest = None  # "Cube 314" and "Cube 1:23:45" are not equally wide
         self._cube_title.setText(self._cube_display.axis_title())
         cubes = self._dataset.spectral_cubes()
         self._cube_slider.set_ticks(list(cubes), self._cube_slider_major_ticks(cubes))
@@ -2506,6 +2603,7 @@ class ImagePanel(QWidget):
             dark_is_this_wavelength=roles is not None and roles.dark_wavelength() == wavelength,
             has_dark=roles is not None and roles.dark_wavelength() is not None,
             any_ignored_anywhere=roles is not None and bool(roles.ignored_cubes() or roles.ignored_wavelengths()),
+            has_reference=self._resolve_reference_frame() is not None,
         )
 
     def _refresh_frame_tools(self) -> None:
@@ -2516,6 +2614,7 @@ class ImagePanel(QWidget):
         """Turn the icon clicks into commands on the owning modules."""
         roles = self._frame_roles
         tools.unit_toggle_requested.connect(self._toggle_cube_unit)
+        tools.go_to_reference_requested.connect(self._go_to_reference)
         tools.set_reference_requested.connect(
             lambda: self._reference_frame.set_manual_frame(self._current_cube(), self._current_wavelength())
         )
@@ -2530,6 +2629,14 @@ class ImagePanel(QWidget):
             lambda pick: roles.set_dark(self._current_wavelength()) if pick else roles.clear_dark()
         )
         tools.clear_dark_requested.connect(roles.clear_dark)
+
+    def _go_to_reference(self) -> None:
+        """Move both sliders to the reference frame (nothing while there is none)."""
+        frame = self._resolve_reference_frame()
+        if frame is None:
+            return
+        self._selection.set_cube(frame[0])
+        self._selection.set_wavelength(frame[1])
 
     def _toggle_cube_unit(self) -> None:
         if self._cube_display.time_available():
@@ -2590,6 +2697,13 @@ class ImagePanel(QWidget):
             if self._interaction.handle_key(event.key(), event.modifiers()):
                 event.accept()
                 return True
+        if watched is self._top_bar:  # sees every event of the bar, also while the panel is still being built
+            if event.type() == QEvent.Type.MouseButtonDblClick and event.button() == Qt.MouseButton.LeftButton:
+                # Buttons and fields take their own double-clicks; one that reaches the bar (or the
+                # ribbon, a group caption) landed on empty space.
+                self._top_drawer.set_expanded(False)
+                return True
+            return super().eventFilter(watched, event)
         if watched is self._cube_title and event.type() == QEvent.Type.MouseButtonDblClick:
             self._toggle_cube_unit()  # same as the unit icon in the ribbon and the right-click menu
             return True
