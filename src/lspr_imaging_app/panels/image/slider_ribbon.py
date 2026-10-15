@@ -60,7 +60,7 @@ class SliderRibbon(QWidget):
         layout.setSpacing(2)
         layout.addWidget(self.frame_tools)
         layout.addWidget(self.frame_tools._separator())
-        layout.addWidget(captioned_group(self, "Preview", (self._play, self._settings_button)))
+        layout.addWidget(captioned_group(self, "Slideshow", (self._play, self._settings_button)))
         layout.addStretch(1)
         self.refresh_theme()
 
@@ -100,7 +100,8 @@ class SliderRibbon(QWidget):
     def _refresh_play(self) -> None:
         theme = get_active_theme()
         name = "player-pause" if self._playing else "player-play"
-        self._play.setIcon(load_tabler_icon(name, color=theme.text_primary, size=_ICON_SIZE * 2))
+        color = theme.accent_gold if self._playing else theme.accent_green  # pause = yellow, play = green
+        self._play.setIcon(load_tabler_icon(name, color=color, size=_ICON_SIZE * 2))
         self._play.setToolTip("Pause the slideshow." if self._playing else "Play: step through the images one by one.")
 
     def refresh_theme(self) -> None:

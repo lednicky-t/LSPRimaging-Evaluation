@@ -2,8 +2,9 @@
 maintainer request: previewed images do not update fast enough, find the bottleneck).
 
 Pure (no Qt): the panel feeds it timestamps from five points of one frame's trip
-and it turns them into a one-line summary for the status bar, plus a final
-summary when the show stops.
+and it turns them into a short status-bar line (frames per second, once a second, plus a
+final average when the show stops) and, for the log, every stage below as an event field
+(`total_fields()` / `last_window_fields()`).
 
 One frame's trip, and the stage each gap measures:
 
@@ -187,7 +188,7 @@ class PlaybackStats:
             window.queue_s += parts["queue"]
             window.lag_s += parts["lag"]
         if done - self._window_start >= 1.0:
-            line = self._format(self._window, done - self._window_start, prefix="Play")
+            line = self._format(self._window, done - self._window_start)
             self._last_window, self._last_window_seconds = self._window, done - self._window_start
             self._window = _Window()
             self._window_start = done
@@ -249,34 +250,13 @@ class PlaybackStats:
 
     def summary(self, now: float) -> str:
         """The whole run, for when the show stops."""
-        return self._format(self._total, max(now - self._run_start, 1e-9), prefix="Play finished")
+        return self._format(self._total, max(now - self._run_start, 1e-9), finished=True)
 
-    @staticmethod
-    def _detail_text(w: _Window, n: int) -> str:
-        """' | detail (ms per frame): paint_view 120, overlays 41, ...' - the biggest first."""
-        if not w.detail:
-            return ""
-        parts = sorted(w.detail.items(), key=lambda item: item[1], reverse=True)[:9]
-        return " | per frame: " + ", ".join(f"{name} {total / n * 1000:.0f}" for name, total in parts)
-
-    def _format(self, w: _Window, seconds: float, *, prefix: str) -> str:
+    def _format(self, w: _Window, seconds: float, *, finished: bool = False) -> str:
+        """The status-bar line: only the frame rate, next to the one the speed setting asks for
+        (2026-10-15: the stage breakdown that used to fill the bar is in the log: `total_fields()`)."""
         if w.shown == 0:
-            return f"{prefix}: no frame was shown ({w.steps} steps)"
-        n = w.shown
-
-        def ms(total: float) -> str:
-            return f"{total / n * 1000:.0f}"
-
-        merged = max(w.steps - w.shown, 0)
+            return "Slideshow: no frame was shown"
         target = f"{1.0 / self._target_interval_s:.1f}" if self._target_interval_s > 0 else "?"
-        return (
-            f"{prefix}: shown {w.shown / seconds:.1f}/s of {target}/s asked"
-            f" | skipped {merged} of {w.steps} steps"
-            f" | lag {ms(w.lag_s)} ms = wait {ms(w.wait_s)} + redraw {ms(w.redraw_s)} + queue {ms(w.queue_s)}"
-            f"({ms(w.thread_s)} thread + {ms(w.deliver_s)} deliver, {w.blocked * 100 // n}% behind a read-ahead)"
-            f" + load {ms(w.load_s)} + prep {ms(w.prep_s)} + gui {ms(w.gui_s)} (of which listeners {ms(w.listeners_s)})"
-            f" | step handlers {w.step_s / max(w.steps, 1) * 1000:.0f} ms"
-            f" | cycle {w.cycle_s / max(w.cycles, 1) * 1000:.0f} ms (lag {ms(w.lag_s)} + other"
-            f" {max(w.cycle_s / max(w.cycles, 1) - w.lag_s / n, 0.0) * 1000:.0f})"
-            + self._detail_text(w, n)
-        )
+        fps = f"{w.shown / seconds:.1f} of {target} fps"
+        return f"Slideshow finished: {fps} on average" if finished else f"Slideshow: {fps}"
