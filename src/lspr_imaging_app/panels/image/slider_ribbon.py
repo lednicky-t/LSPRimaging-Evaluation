@@ -3,7 +3,9 @@
 
 Left to right: the frame icon controls (`FrameToolsWidget`, inline: unit,
 Reference, Ignore, Dark background), Play / Pause, and a settings pop-out for
-the slideshow (speed, what to step through, repeat, where the end is).
+the slideshow (speed, what to step through, repeat, where the end is), and the
+"Slider colors" section (Mask, ROI). The colour swatches of Reference, Ignore and
+Dark background sit inside those groups (`slider_colors.py`).
 
 Display only: Play/Pause and every settings change leave as a signal; the panel
 hands them to `SlideshowController` (`slideshow.py`), which does the work.
@@ -19,6 +21,7 @@ from lspr_ui import get_active_theme, load_tabler_icon, transparent_icon_button_
 from .canvas_tools import _BUTTON_SIZE, _ICON_SIZE
 from .frame_tools import FrameToolsWidget, captioned_group
 from .slideshow import SlideshowSettings
+from .slider_colors import SliderColorControls
 from .slideshow_settings_panel import SlideshowSettingsPanel
 
 
@@ -31,7 +34,12 @@ class SliderRibbon(QWidget):
         super().__init__(parent)
         self._settings = SlideshowSettings()
         self._playing = False
-        self.frame_tools = FrameToolsWidget(stacked=False, parent=self)
+        self.slider_colors = SliderColorControls(self)
+        self.frame_tools = FrameToolsWidget(
+            stacked=False,
+            parent=self,
+            color_swatches={role: self.slider_colors.swatch(role) for role in ("reference", "ignored", "dark")},
+        )
 
         self._play = QToolButton(self)
         self._play.setAutoRaise(True)
@@ -61,6 +69,10 @@ class SliderRibbon(QWidget):
         layout.addWidget(self.frame_tools)
         layout.addWidget(self.frame_tools._separator())
         layout.addWidget(captioned_group(self, "Slideshow", (self._play, self._settings_button)))
+        layout.addWidget(self.frame_tools._separator())
+        layout.addWidget(
+            captioned_group(self, "Slider colors", (self.slider_colors.swatch("mask"), self.slider_colors.swatch("roi")))
+        )
         layout.addStretch(1)
         self.refresh_theme()
 
@@ -114,6 +126,7 @@ class SliderRibbon(QWidget):
         self._settings_button.setIcon(load_tabler_icon("settings", color=theme.text_primary, size=_ICON_SIZE * 2))
         self._refresh_play()
         self.frame_tools.refresh_theme()
+        self.slider_colors.refresh()
         self._settings_panel.set_settings(self._settings)
 
 

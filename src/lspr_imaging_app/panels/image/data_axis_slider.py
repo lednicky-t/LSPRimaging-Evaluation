@@ -101,6 +101,10 @@ class DataAxisSlider(QSlider):
         self._reference_highlight_color: str | None = None
         self._reference_tick_index: int | None = None
         self._reference_tick_color: str | None = None
+        self._dark_tick_index: int | None = None
+        self._dark_tick_color: str | None = None
+        self._ignored_tick_indices: frozenset[int] = frozenset()
+        self._ignored_tick_color: str | None = None
         self.setFixedHeight(32)
 
     def set_accent_color(self, color: str) -> None:
@@ -122,6 +126,29 @@ class DataAxisSlider(QSlider):
             return
         self._reference_tick_index = index
         self._reference_tick_color = color
+        self.update()
+
+    def set_dark_tick(self, index: int | None, color: str | None = None) -> None:
+        """Marks the dark background's tick the way `set_reference_tick` marks the
+        reference's (same thick, tall tick, its own `color`). `None` removes it."""
+        if index is None or color is None:
+            index, color = None, None
+        if (index, color) == (self._dark_tick_index, self._dark_tick_color):
+            return
+        self._dark_tick_index = index
+        self._dark_tick_color = color
+        self.update()
+
+    def set_ignored_ticks(self, indices: frozenset[int], color: str | None = None) -> None:
+        """Marks every tick in `indices` (positions in the `values` array last passed to
+        `set_ticks`) as an ignored frame: thick, tall and in `color`, like the reference's.
+        Empty `indices` (or no `color`) removes the marks."""
+        if not indices or color is None:
+            indices, color = frozenset(), None
+        if (indices, color) == (self._ignored_tick_indices, self._ignored_tick_color):
+            return
+        self._ignored_tick_indices = frozenset(indices)
+        self._ignored_tick_color = color
         self.update()
 
     def contextMenuEvent(self, event: QContextMenuEvent) -> None:  # noqa: N802 - Qt naming
@@ -268,13 +295,24 @@ class DataAxisSlider(QSlider):
                 if label:
                     painter.drawText(QPointF(x - metrics.horizontalAdvance(label) / 2.0, self._LABEL_TOP + metrics.ascent()), label)
 
-            reference_index = self._reference_tick_index
-            if reference_index is not None and self._reference_tick_color and 0 <= reference_index < count:
-                x = left + width * (reference_index / float(count - 1))
-                painter.setPen(QPen(QColor(self._reference_tick_color), 2.5))
-                painter.drawLine(
-                    QPointF(x, self._TICK_TOP - 2.0), QPointF(x, self._TICK_TOP + self._MAJOR_TICK_HEIGHT)
-                )
+            mark_top = self._TICK_TOP - 2.0
+            mark_bottom = self._TICK_TOP + self._MAJOR_TICK_HEIGHT
+            for mark_index, mark_colors in self._mark_colors(count).items():
+                x = left + width * (mark_index / float(count - 1))
+                if len(mark_colors) == 1:
+                    painter.setPen(QPen(QColor(mark_colors[0]), 2.5))
+                    painter.drawLine(QPointF(x, mark_top), QPointF(x, mark_bottom))
+                    continue
+                # Two or more marks on one tick (e.g. the reference is also an ignored frame):
+                # the tick is split into stacked segments, one colour each, so none hides another.
+                segment = (mark_bottom - mark_top) / len(mark_colors)
+                for n, mark_color in enumerate(mark_colors):
+                    pen = QPen(QColor(mark_color), 2.5)
+                    pen.setCapStyle(Qt.PenCapStyle.FlatCap)
+                    painter.setPen(pen)
+                    painter.drawLine(
+                        QPointF(x, mark_top + n * segment), QPointF(x, mark_top + (n + 1) * segment)
+                    )
 
         if enabled and count > 0:
             handle_x = left + width * self._value_fraction()
@@ -284,6 +322,21 @@ class DataAxisSlider(QSlider):
             painter.drawEllipse(QPointF(handle_x, self._TRACK_TOP + self._TRACK_HEIGHT / 2.0), 5.0, 5.0)
 
         painter.end()
+
+    def _mark_colors(self, count: int) -> dict[int, list[str]]:
+        """Colours of the marked ticks, by index (top to bottom: ignored, dark, reference)."""
+        colors: dict[int, list[str]] = {}
+        if self._ignored_tick_color:
+            for index in self._ignored_tick_indices:
+                if 0 <= index < count:
+                    colors.setdefault(index, []).append(self._ignored_tick_color)
+        for index, color in (
+            (self._dark_tick_index, self._dark_tick_color),
+            (self._reference_tick_index, self._reference_tick_color),
+        ):
+            if index is not None and color and 0 <= index < count:
+                colors.setdefault(index, []).append(color)
+        return colors
 
     def _paint_gap_break(self, painter: QPainter, mid_x: float, rail_border: str) -> None:
         """A scale-break glyph (two short parallel diagonal strokes crossing

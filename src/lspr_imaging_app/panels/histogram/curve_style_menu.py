@@ -18,15 +18,12 @@ from PyQt6.QtWidgets import (
     QCheckBox, QHBoxLayout, QLabel, QMenu, QSlider, QToolButton, QVBoxLayout, QWidget, QWidgetAction,
 )
 
+from ..hue_slider import color_for_hue, hue_of, make_hue_slider
+
 LINE_STYLES = ("solid", "dash", "dot")
 LINE_WIDTHS = (1.0, 2.0, 3.5)
 DEFAULT_FILL_ALPHA = 30  # percent
 _PEN_STYLES = {"solid": Qt.PenStyle.SolidLine, "dash": Qt.PenStyle.DashLine, "dot": Qt.PenStyle.DotLine}
-_HUE_GRADIENT = (
-    "qlineargradient(x1:0,y1:0,x2:1,y2:0,stop:0 #f00,stop:0.17 #ff0,stop:0.33 #0f0,"
-    "stop:0.5 #0ff,stop:0.67 #00f,stop:0.83 #f0f,stop:1 #f00)"
-)
-
 
 def pen_style(name: str | None) -> Qt.PenStyle:
     return _PEN_STYLES.get(name or "solid", Qt.PenStyle.SolidLine)
@@ -60,16 +57,7 @@ class CurveStyleEditor(QWidget):
         self._default_line = default_line
         ink = self.palette().color(self.foregroundRole())
 
-        self._hue = QSlider(Qt.Orientation.Horizontal, self)
-        self._hue.setRange(0, 359)
-        self._hue.setFixedWidth(120)
-        self._hue.setToolTip("Colour (hue)")
-        self._hue.setStyleSheet(
-            f"QSlider::groove:horizontal {{ height: 8px; border-radius: 4px; background: {_HUE_GRADIENT}; }}"
-            "QSlider::handle:horizontal { width: 8px; margin: -3px 0; border-radius: 4px;"
-            " background: white; border: 1px solid #555; }"
-        )
-        self._hue.setValue(QColor(self._style.get("color", default_color)).hue() % 360)
+        self._hue = make_hue_slider(self, self._style.get("color", default_color))
         self._hue.valueChanged.connect(self._on_hue)
         reset = QToolButton(self)
         reset.setText("Reset")
@@ -137,7 +125,7 @@ class CurveStyleEditor(QWidget):
         self.changed.emit(dict(self._style))
 
     def _on_hue(self, hue: int) -> None:
-        self._style["color"] = QColor.fromHsv(hue, 200, 240).name()
+        self._style["color"] = color_for_hue(hue)
         self._emit()
 
     def _on_width(self, width: float) -> None:
@@ -160,7 +148,7 @@ class CurveStyleEditor(QWidget):
     def _reset(self) -> None:
         self._style = {}
         self._hue.blockSignals(True)
-        self._hue.setValue(QColor(self._default_color).hue() % 360)
+        self._hue.setValue(hue_of(self._default_color))
         self._hue.blockSignals(False)
         self._emit()
 

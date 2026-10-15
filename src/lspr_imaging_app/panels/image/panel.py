@@ -128,7 +128,7 @@ from ...selection import (
     SelectionModule,
 )
 from ...selection.cube_display_module import MODE_CUBE, MODE_TIME, format_elapsed_seconds
-from ...selection.frame_roles_module import ROLE_DARK, ROLE_IGNORED, FrameRolesModule
+from ...selection.frame_roles_module import ROLE_DARK, ROLE_IGNORED, ROLE_REFERENCE, FrameRolesModule
 from .cube_spin_box import CubeSpinBox
 from ..cursor_overlay import CursorOverlay
 from .landmark_overlay import draw_landmarks
@@ -173,6 +173,7 @@ from ...storage.ui_state_keys import (
     IMAGE_SCALE_BAR_COLOR,
     ROI_OVERLAY_KEYS,
     ROI_SCOPE,
+    SLIDER_COLOR_KEYS,
     SLIDER_RIBBON_OPEN,
     SLIDESHOW_END,
     SLIDESHOW_SKIP_DARK,
@@ -186,6 +187,7 @@ from ...storage.ui_state_keys import (
 )
 from ..ui_state import UiStateStore
 from .scale_bar_overlay import ScaleBarItem
+from .slider_colors import SliderColors
 from ...applog.events import log_event
 from .playback_stats import PlaybackStats
 from .timed_canvas import TimedImageItem, TimedLayoutWidget
@@ -207,12 +209,8 @@ _CHUNK_GRID_COLOR = "#a3a3a3"
 _CROP_OUTLINE_COLOR = "#38bdf8"  # the crop button's active blue
 
 # Cube/Wavelength navigation rows (ported from the stable app's
-# docs/image_area_slider_redesign.md). The reference-highlight colors are
-# the stable app's own hardcoded literals, not lspr_ui theme tokens - same
-# convention `reference_frame_row.py`'s `_ACTIVE_COLOR` already uses for the
-# same feature's Auto/Manual buttons.
-_REFERENCE_CUBE_HIGHLIGHT = "#facc15"
-_REFERENCE_WAVELENGTH_HIGHLIGHT = "#84cc16"
+# docs/image_area_slider_redesign.md). The colours of the slider marks (reference,
+# dark, ...) are the user's pick or the theme's: `slider_colors.py`.
 
 
 def _slider_axis_title_style(color: str) -> str:
@@ -521,6 +519,7 @@ class ImagePanel(QWidget):
         cache_mb = env_mb if env_mb is not None else int(read(store, IMAGE_OVERLAY_CACHE_MB))
         self._roi_overlay.layers.set_budget_bytes(int(max(cache_mb, 0) * 1024 * 1024))
         self._restore_slideshow_settings(store)
+        self._restore_slider_colors(store)
         self._ribbon_drawer.set_expanded(read(store, SLIDER_RIBBON_OPEN) is not False, animate=False)
         self._ribbon_drawer.expanded_changed.connect(lambda open_: store.set(SLIDER_RIBBON_OPEN.key, bool(open_)))
         self._apply_roi_overlay_style()
@@ -1085,8 +1084,11 @@ class ImagePanel(QWidget):
         controls = QVBoxLayout()
         controls.setContentsMargins(10, 0, 10, 0)
         controls.setSpacing(4)
-        # The slider ribbon (2026-10-13): frame icon controls, Play, slideshow settings.
+        # The slider ribbon (2026-10-13): frame icon controls, Play, slideshow settings, slider colours.
+        self._slider_colors = SliderColors()
         self._slider_ribbon = SliderRibbon(self)
+        self._slider_ribbon.slider_colors.set_colors(self._slider_colors)
+        self._slider_ribbon.slider_colors.color_changed.connect(self._on_slider_color_changed)
         self._slideshow = SlideshowController(self._dataset, self._selection, self._frame_roles, self)
         self._slider_ribbon.play_toggled.connect(self._slideshow.toggle)
         self._slider_ribbon.settings_changed.connect(self._slideshow.set_settings)
@@ -1167,7 +1169,7 @@ class ImagePanel(QWidget):
         # widgets, not just the canvas.
         self._selection.cube_changed.connect(self._on_selection_cube_changed)
         self._selection.wavelength_changed.connect(self._on_selection_wavelength_changed)
-        self._reference_frame.reference_frame_changed.connect(self._update_reference_highlight)
+        self._reference_frame.reference_frame_changed.connect(self._on_reference_frame_changed)
         if self._frame_roles is not None:
             self._frame_roles.roles_changed.connect(self._on_frame_roles_changed)
 
@@ -1218,6 +1220,7 @@ class ImagePanel(QWidget):
             self._refresh_controls_bar_theme()
         if hasattr(self, "_slider_ribbon"):
             self._ribbon_drawer.refresh_theme()
+            self._update_all_slider_marks()  # a default colour follows the theme
         if hasattr(self, "_top_bar"):
             self._refresh_top_bar_theme()
 
@@ -1336,7 +1339,7 @@ class ImagePanel(QWidget):
                 self._cube_slider.setValue(cubes.index(self._current_cube()))
         self._cube_spin.refresh_display()
         self._refresh_wavelength_range()
-        self._update_reference_highlight()
+        self._update_all_slider_marks()
 
     def _refresh_wavelength_range(self) -> None:
         """Re-fetches the *current cube's* wavelength set, not the dataset's
@@ -1428,7 +1431,7 @@ class ImagePanel(QWidget):
                 self._cube_slider.setValue(cubes.index(self._current_cube()))
         self._cube_spin.refresh_display()
         self._refresh_wavelength_range()
-        self._update_reference_highlight()
+        self._update_slider_marks()
         self._refresh_frame_tools()
 
     def _on_selection_wavelength_changed(self, _wavelength: float) -> None:
@@ -1440,7 +1443,7 @@ class ImagePanel(QWidget):
         with _blocked(self._wavelength_slider):
             if wavelengths and wavelength in wavelengths:
                 self._wavelength_slider.setValue(wavelengths.index(wavelength))
-        self._update_reference_highlight()
+        self._update_slider_marks()
         self._refresh_frame_tools()
 
     # -- wavelength jump field (QCompleter) ----------------------------------
@@ -1477,9 +1480,71 @@ class ImagePanel(QWidget):
         `ReferenceFrameModule.resolve` does the work; it only needs the viewed cube."""
         return self._reference_frame.resolve(self._selection.current_cube())
 
+    def _update_slider_marks(self) -> None:
+        """What the sliders mark besides the handle (colours: `slider_colors.py`):
+        the reference frame, the dark background and the ignored wavelengths.
+        Run on every cube / wavelength step, so it only looks at the viewed
+        cube's own wavelengths. The ignored *cubes* are marked by
+        `_update_ignored_cube_ticks`, which only runs when they or the cube
+        list change."""
+        self._update_reference_highlight()
+        self._update_wavelength_role_ticks()
+
+    def _update_all_slider_marks(self) -> None:
+        """Every mark, after a change that is not a step (roles, colours, theme, a new dataset)."""
+        self._update_slider_marks()
+        self._update_ignored_cube_ticks()
+
+    def _update_wavelength_role_ticks(self) -> None:
+        """The wavelength slider's dark and ignored ticks. The dark is a wavelength,
+        not a cube, so it is marked only where the viewed cube has that wavelength,
+        and the cube slider has no dark tick. An ignored wavelength is ignored in
+        every cube, so its ticks are red on this slider whichever cube is viewed."""
+        roles = self._frame_roles
+        dark = roles.dark_wavelength() if roles is not None else None
+        ignored = frozenset(float(wl) for wl in roles.ignored_wavelengths()) if roles is not None else frozenset()
+        dark_index = None
+        ignored_indices: frozenset[int] = frozenset()
+        if (dark is not None or ignored) and self._dataset.spectral_cubes():
+            wavelengths = self._dataset.wavelengths_for_cube(self._current_cube())
+            if dark is not None:
+                dark_index = next((i for i, wl in enumerate(wavelengths) if abs(float(wl) - float(dark)) < 1e-6), None)
+            ignored_indices = frozenset(i for i, wl in enumerate(wavelengths) if float(wl) in ignored)
+        colors = self._slider_colors
+        self._wavelength_slider.set_dark_tick(dark_index, colors.color("dark") if dark_index is not None else None)
+        self._wavelength_slider.set_ignored_ticks(ignored_indices, colors.color("ignored"))
+
+    def _update_ignored_cube_ticks(self) -> None:
+        """The cube slider's ticks of the ignored cubes (ignoring a cube drops every
+        frame of that time point)."""
+        roles = self._frame_roles
+        cubes = self._dataset.spectral_cubes()
+        ignored = roles.ignored_cubes() if roles is not None else ()
+        indices = frozenset(cubes.index(cube) for cube in ignored if cube in cubes)
+        self._cube_slider.set_ignored_ticks(indices, self._slider_colors.color("ignored"))
+
+    def _on_slider_color_changed(self, role: str, color: str | None) -> None:
+        """A swatch in the ribbon was picked (or reset): keep it, show it on the swatch and the sliders."""
+        self._slider_colors.set(role, color)
+        self._slider_ribbon.slider_colors.refresh()
+        self._update_all_slider_marks()
+        self._refresh_frame_status()  # the dock subtitle's Dark / Reference / Ignored word has the same colour
+
+    def _restore_slider_colors(self, store: UiStateStore) -> None:
+        """The slider colours back as last left, and keep saving them."""
+        for role, key in SLIDER_COLOR_KEYS.items():
+            saved = read(store, key)
+            self._slider_colors.set(role, saved if isinstance(saved, str) else None)
+        self._slider_ribbon.slider_colors.refresh()
+        self._update_all_slider_marks()
+        self._refresh_frame_status()
+        self._slider_ribbon.slider_colors.color_changed.connect(
+            lambda role, color: store.set(SLIDER_COLOR_KEYS[role].key, color)
+        )
+
     def _update_reference_highlight(self) -> None:
-        """Highlights the slider handle (gold for cube, green for
-        wavelength) whenever the currently-displayed cube/wavelength is the
+        """Highlights the slider handle (in the reference colour) whenever the
+        currently-displayed cube/wavelength is the
         reference - ported from the stable app's
         `_update_reference_navigation_styles` (spin-box background recolor
         omitted: this panel's spin boxes are plain `QSpinBox`/
@@ -1502,14 +1567,13 @@ class ImagePanel(QWidget):
         wavelength_tick = next(
             (i for i, wl in enumerate(wavelengths) if abs(float(wl) - float(reference_wavelength)) < 1e-6), None
         )
-        self._cube_slider.set_reference_tick(cube_tick, _REFERENCE_CUBE_HIGHLIGHT)
-        self._wavelength_slider.set_reference_tick(wavelength_tick, _REFERENCE_WAVELENGTH_HIGHLIGHT)
+        color = self._slider_colors.color("reference")
+        self._cube_slider.set_reference_tick(cube_tick, color)
+        self._wavelength_slider.set_reference_tick(wavelength_tick, color)
         cube_is_reference = int(self._current_cube()) == int(reference_cube)
         wavelength_is_reference = abs(float(self._current_wavelength()) - float(reference_wavelength)) < 1e-6
-        self._cube_slider.set_reference_highlight(_REFERENCE_CUBE_HIGHLIGHT if cube_is_reference else None)
-        self._wavelength_slider.set_reference_highlight(
-            _REFERENCE_WAVELENGTH_HIGHLIGHT if wavelength_is_reference else None
-        )
+        self._cube_slider.set_reference_highlight(color if cube_is_reference else None)
+        self._wavelength_slider.set_reference_highlight(color if wavelength_is_reference else None)
 
     # -- slider tick labels ---------------------------------------------------
 
@@ -2372,23 +2436,33 @@ class ImagePanel(QWidget):
         self._set_frame_status(self._with_role_prefix(text, cube_index, wavelength_nm), tooltip)
 
     def _with_role_prefix(self, text: str, cube_index: int, wavelength_nm: float) -> str:
-        """A dark frame gets a yellow "Dark", an ignored one a red "Ignored", before
-        the Cube/wavelength text. Other frames: the text unchanged (plain). The dock
-        title label renders the result as rich text, so the whole line is escaped."""
+        """A dark frame gets "Dark background", the reference frame "Reference", an
+        ignored one "Ignored", before the Cube/wavelength text, each in its slider
+        colour (`slider_colors.py`, the same as its tick). Other frames: the text
+        unchanged (plain). The dock title label renders the result as rich text, so
+        the whole line is escaped."""
         if self._frame_roles is None:
             return text
         role = self._frame_roles.role_of(cube_index, wavelength_nm)
-        if role not in (ROLE_DARK, ROLE_IGNORED):
+        shown = {ROLE_DARK: ("dark", "Dark background"), ROLE_REFERENCE: ("reference", "Reference"), ROLE_IGNORED: ("ignored", "Ignored")}
+        if role not in shown:
             return text
-        theme = get_active_theme()
-        color, word = (theme.accent_gold, "Dark") if role == ROLE_DARK else (theme.accent_red, "Ignored")
-        return f'<span style="color:{color}">{word}</span> {html.escape(text)}'
+        color_role, word = shown[role]
+        return f'<span style="color:{self._slider_colors.color(color_role)}">{word}</span> {html.escape(text)}'
 
-    def _on_frame_roles_changed(self) -> None:
-        self._update_reference_highlight()
-        self._refresh_frame_tools()
+    def _refresh_frame_status(self) -> None:
+        """Show the viewed frame's dock subtitle again (a role or a slider colour changed)."""
         if self._frame_key is not None:
             self._show_frame_status(*self._frame_key)
+
+    def _on_reference_frame_changed(self) -> None:
+        self._update_slider_marks()
+        self._refresh_frame_status()
+
+    def _on_frame_roles_changed(self) -> None:
+        self._update_all_slider_marks()
+        self._refresh_frame_tools()
+        self._refresh_frame_status()
 
     def _fit_spin_widths(self, *_args: object) -> None:
         """Both borderless number fields share one width, just wide enough for

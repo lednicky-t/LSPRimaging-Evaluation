@@ -95,7 +95,11 @@ class FrameToolsWidget(QWidget):
     clear_dark_requested = pyqtSignal()
     used = pyqtSignal()  # after any click; the menu host closes itself on it
 
-    def __init__(self, *, stacked: bool, parent: QWidget | None = None) -> None:
+    def __init__(
+        self, *, stacked: bool, parent: QWidget | None = None, color_swatches: dict[str, QWidget] | None = None
+    ) -> None:
+        """`color_swatches` ("reference", "ignored", "dark" -> a colour swatch, `slider_colors.py`)
+        are shown at the end of their group in the inline (ribbon) layout; the stacked (menu) one has none."""
         super().__init__(parent)
         self._stacked = stacked
         self._state = FrameToolsState(enabled=False)
@@ -148,10 +152,14 @@ class FrameToolsWidget(QWidget):
             row_layout.setContentsMargins(0, 0, 0, 0)
             row_layout.setSpacing(2)
             self._unit.hide()  # the ribbon has no unit toggle (it stays in the right-click menu)
-            for index, (caption, group) in enumerate((("Reference", reference), ("Ignore", ignore), ("Dark", dark))):
+            swatches = color_swatches or {}
+            for index, (caption, group, role) in enumerate(
+                (("Reference", reference, "reference"), ("Ignore", ignore, "ignored"), ("Dark", dark, "dark"))
+            ):
                 if index:
                     row_layout.addWidget(self._separator())
-                row_layout.addWidget(captioned_group(self, caption, group))
+                swatch = swatches.get(role)
+                row_layout.addWidget(captioned_group(self, caption, group + ((swatch,) if swatch is not None else ())))
         self.refresh(self._state)
 
     # -- building ---------------------------------------------------------------
