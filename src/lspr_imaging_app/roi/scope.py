@@ -61,9 +61,20 @@ class RoiEditTarget:
         return int(self._current_cube())
 
     def kwargs(self) -> dict:
-        """Keyword arguments for the `RoiToolbox` geometry commands (``cube`` / ``scope``); empty = edit the base."""
+        """Keyword arguments for the `RoiToolbox` geometry commands (``cube`` / ``scope``); empty = edit the base.
+
+        Raises ``ValueError`` (a sentence for the user) for an Individual edit on the first cube: it always holds the
+        start layout, a persistent point, so "this cube only" would make it two kinds at once (maintainer, 2026-10-16).
+        Callers that already guard toolbox commands (table, Array, menu) show it as they show any refusal; a mouse
+        gesture checks before it starts."""
         cube = self.cube()
         first = self._first_cube()
-        if self._scope.scope() == SCOPE_PERSISTENT and (first is None or cube <= int(first)):
+        scope = self._scope.scope()
+        if scope == SCOPE_PERSISTENT and (first is None or cube <= int(first)):
             return {}
-        return {"cube": cube, "scope": self._scope.scope()}
+        if scope == SCOPE_INDIVIDUAL and first is not None and cube <= int(first):
+            raise ValueError(
+                f"Cube {cube} is the first cube: it holds the start layout, so it cannot take an individual change. "
+                "Switch the scope to Persistent to edit it."
+            )
+        return {"cube": cube, "scope": scope}

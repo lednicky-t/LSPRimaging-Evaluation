@@ -4,6 +4,13 @@ What the Cube and λ sliders in the Image area's bottom toolbar are built from n
 and why, after the tick/axis-style redesign. Written so a future session doesn't
 need to re-trace this from scratch.
 
+> **Update 2026-10-16 (new generation, `panels/image/`):** the sliders can be zoomed. `DataAxisSlider` (now in
+> `panels/image/data_axis_slider.py`) draws and hit-tests through an `AxisWindow` (which stretch of the axis is on
+> screen); Ctrl + wheel zooms, middle drag / Shift + wheel / side wheel pan, middle double-click resets; the Cube slider
+> and the ROI row under it share one window; the caller re-labels the ticks for the visible stretch
+> (`slider_ticks.major_indices`). Record: `roi_layout_row_2026-10-16.md`. The text below describes the original redesign
+> in the old `gui/` package.
+
 ## Widget: `DataAxisSlider` (`gui/widgets.py`)
 
 A `QSlider` subclass, not a bare `QWidget`. Deliberately, so that every existing

@@ -5,13 +5,30 @@ keeps thin wrappers so its callers and tests are unchanged."""
 
 from __future__ import annotations
 
+import math
 import statistics
 from collections.abc import Callable
 
 from .data_axis_slider import DataAxisSlider
 
 
-def wavelength_slider_major_ticks(values: tuple[float, ...]) -> dict[int, str]:
+def major_indices(count: int, view: tuple[float, float] | None = None) -> range:
+    """The tick indices that may carry a label. Whole axis (``view`` None or covering everything): every `interval`-th index
+    from the first, with the interval chosen for `count` ticks. Zoomed (``view`` = ``(lo, hi)``, see `AxisWindow`): the
+    interval is chosen for the ticks on screen, and the labelled indices are still multiples of it, so a label does not
+    move while the window is panned (it only appears and disappears at the edges)."""
+    if count < 2:
+        return range(0)
+    if view is None or (view[0] <= 1e-9 and view[1] >= count - 1.0 - 1e-9):
+        return range(0, count, nice_count_interval(count))
+    first, last = max(math.ceil(view[0] - 1e-9), 0), min(math.floor(view[1] + 1e-9), count - 1)
+    if last < first:
+        return range(0)
+    interval = nice_count_interval(last - first + 1)
+    return range(-(-first // interval) * interval, last + 1, interval)
+
+
+def wavelength_slider_major_ticks(values: tuple[float, ...], view: tuple[float, float] | None = None) -> dict[int, str]:
     """Indices to label on the wavelength axis slider: evenly spaced by
     array index (same shape as `cube_slider_major_ticks` below), each
     labeled with the *real* wavelength value at that index - never a
@@ -57,8 +74,7 @@ def wavelength_slider_major_ticks(values: tuple[float, ...]) -> dict[int, str]:
     count = len(values)
     if count < 2:
         return {}
-    interval = nice_count_interval(count)
-    majors = {index: f"{values[index]:.0f}" for index in range(0, count, interval)}
+    majors = {index: f"{values[index]:.0f}" for index in major_indices(count, view)}
     if count >= 3:
         gaps = [values[i + 1] - values[i] for i in range(count - 1)]
         positive_gaps = [gap for gap in gaps if gap > 0]
@@ -71,18 +87,20 @@ def wavelength_slider_major_ticks(values: tuple[float, ...]) -> dict[int, str]:
     return majors
 
 
-def cube_slider_major_ticks(values: tuple[int, ...], label_for: Callable[[int], str] | None = None) -> dict[int, str]:
+def cube_slider_major_ticks(
+    values: tuple[int, ...], label_for: Callable[[int], str] | None = None, view: tuple[float, float] | None = None
+) -> dict[int, str]:
     """Indices to label on the cube axis slider: the raw cube index at a
     "nice" interval. Ported from the stable app's
     `MainWindow._cube_slider_major_ticks`. `label_for` (the cube display
     unit, `CubeDisplayModule.label_for`) names each labelled cube - its raw
-    number, or its start time in Time mode; `None` = the raw number."""
+    number, or its start time in Time mode; `None` = the raw number. `view`:
+    the stretch of the axis on screen when it is zoomed (`major_indices`)."""
     count = len(values)
     if count < 2:
         return {}
-    interval = nice_count_interval(count)
     name = label_for if label_for is not None else str
-    return {index: name(values[index]) for index in range(0, count, interval)}
+    return {index: name(values[index]) for index in major_indices(count, view)}
 
 
 def nice_count_interval(count: int, target_ticks: int = 8) -> int:

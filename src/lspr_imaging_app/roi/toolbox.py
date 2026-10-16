@@ -120,10 +120,12 @@ from ..image_tools.chromatic.affine import apply_affine_to_points
 from ..undo import FunctionCommand, undo_manager
 from .model import (
     GEOMETRY_SCOPES,
+    SCOPE_INDIVIDUAL,
     SCOPE_PERSISTENT,
     AreaRoi,
     AreaRoiDetectionSettings,
     AreaRoiGroup,
+    LayoutPoint,
     RoiArrayGroup,
     RoiGeometry,
     RoiMask,
@@ -499,6 +501,83 @@ class RoiToolbox(QObject):
                 cubes.update(roi.timeline.cubes())
         return tuple(sorted(cubes))
 
+    # -- the layout timeline (2026-10-16): all ROIs together ---------------------------------------
+    #
+    # The *layout* is the set of every ROI's geometry. Storage stays per ROI (so a change recomputes only the cells of
+    # the ROIs it touched), but a cube is one kind of point for the whole layout: persistent (from this cube on) or
+    # individual (this cube only), never both. `_write_geometry` enforces it; the Image panel's ROI row reads it here.
+
+    def layout_point_kind(self, cube: int) -> str | None:
+        """``"persistent"`` / ``"individual"`` if any ROI has a change authored at `cube`, else ``None``."""
+        individual = False
+        for roi in self._rois.values():
+            timeline = roi.timeline
+            if not timeline:
+                continue
+            if timeline.has_persistent_at(cube):
+                return SCOPE_PERSISTENT
+            individual = individual or timeline.has_individual_at(cube)
+        return SCOPE_INDIVIDUAL if individual else None
+
+    def layout_points(self, roi_ids: Collection[int] | None = None) -> dict[int, LayoutPoint]:
+        """Every cube where the layout changes, ascending: its kind and the ROIs with a change authored there (only
+        `roi_ids` when given). The start layout (the ROIs' base geometry, valid from the first cube) is not listed: it is
+        no timeline entry."""
+        wanted = None if roi_ids is None else {int(i) for i in roi_ids}
+        persistent: dict[int, list[int]] = {}
+        individual: dict[int, list[int]] = {}
+        for roi_id, roi in self._rois.items():
+            if not roi.timeline or (wanted is not None and roi_id not in wanted):
+                continue
+            for change in roi.timeline.persistent:
+                persistent.setdefault(change.cube, []).append(roi_id)
+            for change in roi.timeline.individual:
+                individual.setdefault(change.cube, []).append(roi_id)
+        points = {cube: LayoutPoint(SCOPE_INDIVIDUAL, tuple(sorted(ids))) for cube, ids in individual.items()}
+        points.update({cube: LayoutPoint(SCOPE_PERSISTENT, tuple(sorted(ids))) for cube, ids in persistent.items()})
+        return dict(sorted(points.items()))
+
+    def _change_layout_point(self, change: Callable[[RoiTimeline], RoiTimeline], label: str) -> None:
+        """Rewrite the timeline of every ROI with `change` as one undo step (ROIs it leaves as they were are not touched)."""
+        states = []
+        for roi in self._rois.values():
+            if roi.timeline:
+                changed = change(roi.timeline)
+                if changed != roi.timeline:
+                    states.append((roi, (base_geometry(roi), roi.timeline), (base_geometry(roi), changed)))
+        self._write_states(states, label, "resized")
+
+    @instrumented("RoiToolbox.delete_layout_point")
+    def delete_layout_point(self, cube: int) -> None:
+        """Take away the whole layout change at `cube`: every ROI's change authored there, whatever its kind. The cube then
+        follows the earlier layout again. (The start layout, valid from the first cube, is no change and cannot be deleted.)"""
+        self._change_layout_point(lambda timeline: timeline.without_cube(int(cube)), "Delete layout change")
+
+    @instrumented("RoiToolbox.make_layout_point_individual")
+    def make_layout_point_individual(self, cube: int) -> None:
+        """A persistent layout change at `cube` becomes individual (this cube only) for every ROI that has one there: the
+        cubes after it go back to the layout before. Nothing happens at a cube that is not a persistent point."""
+        self._change_layout_point(lambda timeline: timeline.persistent_made_individual(int(cube)), "Make layout change individual")
+
+    @instrumented("RoiToolbox.make_layout_point_persistent")
+    def make_layout_point_persistent(self, cube: int) -> None:
+        """An individual layout change at `cube` becomes persistent (from this cube on, until the next persistent change) for
+        every ROI that has one there. Nothing happens at a cube that is not an individual point."""
+        self._change_layout_point(lambda timeline: timeline.individual_made_persistent(int(cube)), "Make layout change persistent")
+
+    def edit_refusal(self, cube: int | None, scope: str) -> str | None:
+        """Why a geometry edit at (`cube`, `scope`) would be refused, as a sentence for the user, or ``None``.
+
+        An Individual edit on a cube that already starts a persistent layout: the cube would be both kinds at once, and
+        "this cube only" cannot be told apart from the layout that holds from here on. (The first cube is the same case,
+        but the toolbox does not know which cube is first: `RoiEditTarget.kwargs` refuses that one.)"""
+        if cube is not None and scope == SCOPE_INDIVIDUAL and self.layout_point_kind(cube) == SCOPE_PERSISTENT:
+            return (
+                f"Cube {int(cube)} starts a persistent layout, so it cannot take an individual change. "
+                "Edit it as Persistent, or remove its change first."
+            )
+        return None
+
     def geometry_segment(self, cube: int | None) -> tuple:
         """A label for "which geometry do the ROIs have on `cube`": two cubes with the same label have the same geometry for
         every ROI, so what is drawn from it (the overlay) is the same. ``()`` when no ROI has a timeline (one geometry for every
@@ -544,9 +623,18 @@ class RoiToolbox(QObject):
         reason: str,
     ) -> None:
         """Set the geometry of each ROI at (`cube`, `scope`) as one undo step; a no-op (no undo entry) if nothing
-        differs from what is already valid there."""
+        differs from what is already valid there.
+
+        The layout rule (maintainer, 2026-10-16): a cube is one kind of point for all ROIs together.
+        - Individual on a cube that starts a persistent layout: refused (``ValueError``, `edit_refusal`).
+        - Persistent on a cube with individual points: the individual changes of **every** ROI there become persistent
+          too (same geometry, now valid from this cube on), in the same undo step. A ROI nobody edited can therefore
+          have its later cubes change: the layout at this cube is what carries on."""
         if scope not in GEOMETRY_SCOPES:
             raise ValueError(f"scope must be one of {GEOMETRY_SCOPES}, got {scope!r}")
+        refusal = self.edit_refusal(cube, scope)
+        if refusal is not None:
+            raise ValueError(refusal)
         states: list[tuple[AreaRoi, tuple[RoiGeometry, RoiTimeline | None], tuple[RoiGeometry, RoiTimeline | None]]] = []
         for roi, new in changes:
             if geometry_at(roi, cube) == new:
@@ -555,8 +643,19 @@ class RoiToolbox(QObject):
             if cube is None:
                 new_state = (new, roi.timeline)
             else:
-                new_state = (base_geometry(roi), (roi.timeline or RoiTimeline()).with_change(cube, scope, new))
+                timeline = roi.timeline or RoiTimeline()
+                if scope == SCOPE_PERSISTENT:
+                    timeline = timeline.without_individual_at(cube)  # one kind per cube: this ROI's nudge here is replaced
+                new_state = (base_geometry(roi), timeline.with_change(cube, scope, new))
             states.append((roi, old_state, new_state))
+        if states and cube is not None and scope == SCOPE_PERSISTENT and self.layout_point_kind(cube) == SCOPE_INDIVIDUAL:
+            edited = {roi.area_roi_id for roi, _old, _new in states}
+            for roi in self._rois.values():
+                if roi.area_roi_id in edited or not roi.timeline or not roi.timeline.has_individual_at(cube):
+                    continue
+                states.append(
+                    (roi, (base_geometry(roi), roi.timeline), (base_geometry(roi), roi.timeline.individual_made_persistent(cube)))
+                )
         self._write_states(states, label, reason)
 
     def _set_positions(

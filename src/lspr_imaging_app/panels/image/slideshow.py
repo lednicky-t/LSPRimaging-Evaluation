@@ -26,13 +26,23 @@ Settings (``SlideshowSettings``):
 
 Ignored frames and dark frames can each be left out (``skip_ignored``, default on;
 ``skip_dark``, default off: the dark frame is a real image).
+
+**ROI states** (``MODE_ROI_STATES``, 2026-10-16): step through the cubes that carry a mark on the ROI row (the start
+layout at the first cube and every change of the ROI layout), staying on the wavelength shown now like the one-wavelength
+mode. The controller is handed those cubes (``state_cubes``) and the pure functions treat them as the cube list; the
+current cube need not be one of them (a step goes to the next state after it / the last one before it).
+
+**Manual steps** (``SlideshowController.step``, the Previous / Next buttons and the wheel over the ROI row): one frame
+back or forward in the order of the chosen mode, with the same skip rules; never wrapping and ignoring End, since the
+user is the one deciding where to stop. They do not touch the Playing / Paused state.
 """
 
 from __future__ import annotations
 
 import time
+from bisect import bisect_left, bisect_right
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from PyQt6.QtCore import QObject, Qt, QTimer, pyqtSignal
 
@@ -42,6 +52,7 @@ from ...selection.frame_roles_module import ROLE_DARK, ROLE_IGNORED, FrameRolesM
 
 MODE_ALL = "all"
 MODE_ONE_WAVELENGTH = "one_wavelength"
+MODE_ROI_STATES = "roi_states"
 END_CUBE = "cube"
 END_DATASET = "dataset"
 SPEEDS = (1, 2, 5, 10)
@@ -78,9 +89,27 @@ def _wavelengths_of(
 ) -> Sequence[float]:
     """The wavelengths the show visits inside *cube*, ascending (one-wavelength mode: only the current one, if the cube has it)."""
     wavelengths = wavelengths_by_cube.get(cube, ())
-    if settings.mode == MODE_ONE_WAVELENGTH:
+    if settings.mode in (MODE_ONE_WAVELENGTH, MODE_ROI_STATES):
         return (current[1],) if current[1] in wavelengths else ()
     return wavelengths
+
+
+def _state_frame(
+    state_cubes: Sequence[int],
+    wavelengths_by_cube: Mapping[int, Sequence[float]],
+    current: Frame,
+    is_skipped: Callable[[int, float], bool],
+    *,
+    forward: bool,
+) -> Frame | None:
+    """The ROI-states mode's neighbour of *current*: the first state cube after its cube (``forward``) or the last one
+    before it, on the wavelength shown now. A state cube without that wavelength, or where the frame is skipped, is passed over."""
+    ordered = sorted(set(state_cubes))
+    candidates = ordered[bisect_right(ordered, current[0]):] if forward else ordered[:bisect_left(ordered, current[0])][::-1]
+    for cube in candidates:
+        if current[1] in wavelengths_by_cube.get(cube, ()) and not is_skipped(cube, current[1]):
+            return (cube, current[1])
+    return None
 
 
 def first_frame(
@@ -92,6 +121,8 @@ def first_frame(
 ) -> Frame | None:
     """Where the show starts (and restarts, with Repeat): the first frame of its range that is not skipped.
     Searches lazily: it stops at the first match."""
+    if settings.mode == MODE_ROI_STATES:  # `cubes` are the state cubes
+        return _state_frame(cubes, wavelengths_by_cube, (min(cubes, default=0) - 1, current[1]), is_skipped, forward=True)
     for cube in _range_cubes(cubes, current, settings):
         for wavelength in _wavelengths_of(cube, wavelengths_by_cube, current, settings):
             if not is_skipped(cube, wavelength):
@@ -115,6 +146,13 @@ def next_frame(
     **Lazy** (2026-10-14): it starts at the current cube and stops at the first frame that is not
     skipped. The first version built every frame of the dataset (8478 on the maintainer's data) and
     sorted them on every step, which on top of slow dataset queries cost ~280 ms per Play step."""
+    if settings.mode == MODE_ROI_STATES:  # `cubes` are the state cubes
+        frame = _state_frame(cubes, wavelengths_by_cube, current, is_skipped, forward=True)
+        if frame is None and settings.repeat:
+            first = first_frame(cubes, wavelengths_by_cube, current, settings, is_skipped)
+            if first is not None and first != current:
+                return first
+        return frame
     in_range = _range_cubes(cubes, current, settings)
     try:
         start = list(in_range).index(current[0]) if len(in_range) != 1 else 0
@@ -133,6 +171,29 @@ def next_frame(
         first = first_frame(cubes, wavelengths_by_cube, current, settings, is_skipped)
         if first is not None and first != current:
             return first
+    return None
+
+
+def previous_frame(
+    cubes: Sequence[int],
+    wavelengths_by_cube: Mapping[int, Sequence[float]],
+    current: Frame,
+    settings: SlideshowSettings,
+    is_skipped: Callable[[int, float], bool] = lambda _c, _w: False,
+) -> Frame | None:
+    """The frame before *current* in the order of ``settings.mode``, or ``None`` at the start. The mirror of `next_frame`
+    for a manual step back: it never wraps (Repeat is not looked at) and does not stop at the End setting. *cubes* are
+    ascending (as `DatasetModule.spectral_cubes` gives them); in the ROI-states mode they are the state cubes."""
+    if settings.mode == MODE_ROI_STATES:
+        return _state_frame(cubes, wavelengths_by_cube, current, is_skipped, forward=False)
+    ordered = list(cubes)
+    for position in range(bisect_right(ordered, current[0]) - 1, -1, -1):
+        cube = ordered[position]
+        for wavelength in tuple(_wavelengths_of(cube, wavelengths_by_cube, current, settings))[::-1]:
+            if cube == current[0] and wavelength >= current[1]:
+                continue
+            if not is_skipped(cube, wavelength):
+                return (cube, wavelength)
     return None
 
 
@@ -156,11 +217,16 @@ class SlideshowController(QObject):
         selection: SelectionModule,
         frame_roles: FrameRolesModule | None,
         parent: QObject | None = None,
+        *,
+        state_cubes: Callable[[], Sequence[int]] | None = None,
     ) -> None:
+        """``state_cubes()``: the cubes the ROI-states mode steps through (the marks of the ROI row), ascending.
+        Without it that mode has nothing to visit."""
         super().__init__(parent)
         self._dataset = dataset
         self._selection = selection
         self._roles = frame_roles
+        self._state_cubes = state_cubes
         self._settings = SlideshowSettings()
         self._playing = False
         self._awaiting_since: float | None = None  # a step was made and its image is not on screen yet
@@ -193,8 +259,12 @@ class SlideshowController(QObject):
 
     # -- commands -----------------------------------------------------------------
 
-    def _frame_data(self) -> tuple[tuple[int, ...], dict[int, tuple[float, ...]], Frame]:
-        cubes = self._dataset.spectral_cubes()
+    def _frame_data(self, mode: str | None = None) -> tuple[Sequence[int], dict[int, tuple[float, ...]], Frame]:
+        """The cubes to step through (in the ROI-states mode: the state cubes), each cube's wavelengths, the current frame."""
+        if (mode or self._settings.mode) == MODE_ROI_STATES:
+            cubes = tuple(self._state_cubes()) if self._state_cubes is not None else ()
+        else:
+            cubes = self._dataset.spectral_cubes()
         return cubes, _LazyWavelengths(self._dataset), (
             int(self._selection.current_cube()), float(self._selection.current_wavelength())
         )
@@ -232,6 +302,19 @@ class SlideshowController(QObject):
 
     def toggle(self) -> None:
         self.stop() if self._playing else self.play()
+
+    def step(self, direction: int, mode: str | None = None) -> bool:
+        """One manual step: the frame after (``direction > 0``) or before the one shown, in the order of `mode` (default:
+        the show's own). Returns whether the selection moved; at an end it does not (manual steps never wrap and ignore
+        the End setting). The Playing / Paused state is left alone: a step while playing just moves the show on from there."""
+        settings = replace(self._settings, mode=mode or self._settings.mode, repeat=False, end=END_DATASET)
+        cubes, by_cube, current = self._frame_data(settings.mode)
+        find = next_frame if direction > 0 else previous_frame
+        frame = find(cubes, by_cube, current, settings, self._is_skipped)
+        if frame is None or frame == current:
+            return False
+        self._show(frame)
+        return True
 
     def _show(self, frame: Frame) -> None:
         cube, wavelength = frame

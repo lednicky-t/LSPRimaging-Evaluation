@@ -35,11 +35,12 @@ from dataclasses import dataclass
 
 import numpy as np
 import pyqtgraph as pg
-from PyQt6.QtCore import QObject, QRectF, Qt
+from PyQt6.QtCore import QObject, QRectF, Qt, pyqtSignal
 from PyQt6.QtGui import QBrush, QColor, QPen
 from PyQt6.QtWidgets import QGraphicsRectItem
 
 from ...roi import RoiToolbox
+from ...roi.model import SCOPE_PERSISTENT
 from ...roi.scope import RoiEditTarget
 from ...roi.rasterize import effective_reference_diameters
 from ...roi.toolbox import MIN_SAMPLE_DIAMETER_PX
@@ -129,6 +130,8 @@ def hit_test(
 
 
 class RoiGestures(QObject):
+    refused = pyqtSignal(str)  # a drag that cannot edit here (the scope does not fit the cube); the reason, for the status bar
+
     def __init__(
         self,
         plot: pg.PlotItem,
@@ -215,11 +218,22 @@ class RoiGestures(QObject):
 
     def _begin_edit(self, hit: RoiHit, x: float, y: float) -> bool:
         try:
+            edit_kwargs = {} if self._edit_target is None else self._edit_target.kwargs()
+            refusal = self._toolbox.edit_refusal(edit_kwargs.get("cube"), edit_kwargs.get("scope", SCOPE_PERSISTENT))
+            if refusal is not None:
+                raise ValueError(refusal)
+        except ValueError as exc:
+            # Checked here, once, because a refusal in the middle of a drag would surface from inside a mouse-move handler.
+            # The drag is still claimed (it started on a ROI), it just does nothing.
+            self.refused.emit(str(exc))
+            self._mode = "refused"
+            return True
+        try:
             self._inverse = np.linalg.inv(np.asarray(self._display_linear(), dtype=np.float64)[:2, :2])
         except np.linalg.LinAlgError:
             return False  # a degenerate affine cannot be dragged through
         selected = self._selection.selected_roi_ids()
-        self._edit_kwargs = {} if self._edit_target is None else self._edit_target.kwargs()
+        self._edit_kwargs = edit_kwargs
         self._edit_cube = None if self._edit_target is None else self._edit_target.cube()
         if hit.zone in ("edge", "ring_inner", "ring_outer"):
             apertures = self._selected_apertures()

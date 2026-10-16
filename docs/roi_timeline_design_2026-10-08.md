@@ -107,8 +107,10 @@ Decisions: individual granularity **by cube** (the other wavelengths follow thro
 - Old results stay valid: with no timeline the geometry dict hashed per cell is the same as before, so nothing recomputes.
 - Undo of an edit restores the previous timeline in one step (a drag is one step).
 
+**Update 2026-10-16** (`roi_layout_row_2026-10-16.md`): the cube-slider marker is built as a ROI row under the Cube slider; a cube is now one kind of point for the whole layout (individual refused on a persistent point and on the first cube; a persistent edit turns the individual points there persistent); "Apply to all cubes" is out of the canvas menu (the backend command stays).
+
 **Not built**
-- A marker on the cube slider and in the table for "this cube has its own geometry" (the right-click entries are enabled only when it does).
+- A marker in the table for "this cube has its own geometry" (the right-click entry is enabled only when it does). (The cube-slider marker is built, see the update above.)
 - Phase 5: track a drifting stage across cubes (Refine on each cube writing individual changes).
 - Measured cost of 314 cubes x 150 ROIs of changes (session write, undo snapshot size): not measured yet.
 - The Image panel's per-cube ROI **labels** and the Spectra / Sensorgram panels read only identity (id, colour), so they need no change.

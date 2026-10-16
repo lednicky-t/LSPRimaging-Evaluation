@@ -1,5 +1,5 @@
 """Slider colours (2026-10-15, maintainer request): the colour of each kind of mark on
-the Cube / Wavelength sliders - Dark background, Reference frame, Ignored, Mask, ROI -
+the Cube / Wavelength sliders - Dark background, Reference frame, Ignored, Mask -
 and the swatches where the user changes them.
 
 ``SliderColors`` is the state (one optional override per role; ``None`` = the theme's
@@ -7,13 +7,14 @@ colour, so a theme switch still recolours what was never changed). A ``ColorSwat
 the display: one coloured button; a click opens a popup with the hue-only slider the
 Histogram's curve popup uses (`panels/hue_slider.py`) and a Reset button. A swatch holds
 no state of its own: a pick leaves as a signal, the panel stores it and pushes the result
-back through `refresh()`. ``SliderColorControls`` makes the five swatches and is what the
+back through `refresh()`. ``SliderColorControls`` makes the four swatches and is what the
 panel talks to; the ribbon puts each swatch next to the icons it belongs to (Reference,
-Ignore, Dark background), and Mask and ROI in a "Slider colors" section.
+Ignore, Dark background), and Mask in a "Slider colors" section.
 
-Dark, Reference and Ignored colour ticks on the sliders today. Mask and ROI are stored and
-remembered already, but nothing draws with them yet: their marks come with the
-timeline rows planned under the sliders.
+Dark, Reference and Ignored colour ticks on the sliders. Mask is stored and remembered, but
+nothing draws with it yet: its marks come with a Mask row of the same kind. The ROI row's marks
+(`roi_layout_strip.py`) have no colour control: they are always the theme's blue (2026-10-16,
+maintainer: the row is a slider of its own, so its colour needs no picker).
 """
 
 from __future__ import annotations
@@ -27,7 +28,7 @@ from lspr_ui import get_active_theme, transparent_icon_button_stylesheet
 from ..hue_slider import color_for_hue, hue_of, make_hue_slider
 from .canvas_tools import _BUTTON_SIZE
 
-ROLES = ("dark", "reference", "ignored", "mask", "roi")
+ROLES = ("dark", "reference", "ignored", "mask")
 
 
 def default_color(role: str) -> str:
@@ -38,7 +39,6 @@ def default_color(role: str) -> str:
         "reference": theme.accent_green,
         "ignored": theme.accent_red,
         "mask": theme.accent_red,
-        "roi": theme.accent_blue,
     }[role]
 
 
@@ -70,7 +70,6 @@ _ROLE_TEXT = {
     "reference": ("Reference", "the reference frame tick (both sliders)"),
     "ignored": ("Ignored", "the ignored cube / wavelength ticks"),
     "mask": ("Mask", "mask marks"),
-    "roi": ("ROI", "ROI-change marks"),
 }
 _SWATCH_SIZE = 16
 _swatch_cache: dict[tuple[str, str], QIcon] = {}

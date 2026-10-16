@@ -14,6 +14,7 @@ roadmap's redesign.
 
 from __future__ import annotations
 
+from bisect import bisect_left
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from typing import NamedTuple
@@ -62,6 +63,24 @@ class RoiGeometryChange:
     geometry: RoiGeometry
 
 
+class LayoutPoint(NamedTuple):
+    """One point on the *layout* timeline: a cube where the layout (all ROIs together) changes.
+
+    The layout has one kind per cube, whichever ROIs changed there (`RoiToolbox._write_geometry` keeps it so):
+    ``"persistent"`` = from this cube on, until the next persistent point; ``"individual"`` = this cube only."""
+
+    kind: str
+    roi_ids: tuple[int, ...]  # the ROIs with a change authored here, ascending
+
+
+def _change_at(changes: tuple[RoiGeometryChange, ...], cube: int) -> RoiGeometryChange | None:
+    """The change authored at `cube` in a tuple sorted by cube (at most one per cube)."""
+    index = bisect_left(changes, int(cube), key=lambda change: change.cube)
+    if index < len(changes) and changes[index].cube == int(cube):
+        return changes[index]
+    return None
+
+
 @dataclass(frozen=True, slots=True)
 class RoiTimeline:
     """The geometry changes of one ROI, immutable (an edit builds a new timeline, so undo just puts the old one back).
@@ -107,6 +126,36 @@ class RoiTimeline:
         return RoiTimeline(
             tuple(c for c in self.persistent if c.cube != cube), tuple(c for c in self.individual if c.cube != cube)
         )
+
+    def has_persistent_at(self, cube: int) -> bool:
+        return _change_at(self.persistent, cube) is not None
+
+    def has_individual_at(self, cube: int) -> bool:
+        return _change_at(self.individual, cube) is not None
+
+    def without_individual_at(self, cube: int) -> RoiTimeline:
+        """A new timeline without the individual change at `cube` (``self`` when there is none)."""
+        if not self.has_individual_at(cube):
+            return self
+        return replace(self, individual=tuple(c for c in self.individual if c.cube != cube))
+
+    def persistent_made_individual(self, cube: int) -> RoiTimeline:
+        """A new timeline where the persistent change at `cube`, if any, is an individual change at `cube`: the same
+        geometry, now valid on this cube only (the cubes after it go back to the earlier change or the base geometry).
+        ``self`` when there is no persistent change there."""
+        change = _change_at(self.persistent, cube)
+        if change is None:
+            return self
+        without = replace(self, persistent=tuple(c for c in self.persistent if c.cube != cube))
+        return without.with_change(cube, SCOPE_INDIVIDUAL, change.geometry)
+
+    def individual_made_persistent(self, cube: int) -> RoiTimeline:
+        """A new timeline where the individual change at `cube`, if any, is a persistent change at `cube`: the same
+        geometry, now valid from this cube on (``self`` when there is no individual change there)."""
+        change = _change_at(self.individual, cube)
+        if change is None:
+            return self
+        return self.without_individual_at(cube).with_change(cube, SCOPE_PERSISTENT, change.geometry)
 
     def mapped(self, remap_point: Callable[[float, float], tuple[float, float]]) -> RoiTimeline:
         """The same changes with every centre passed through `remap_point` (rotate / flip / crop follow)."""

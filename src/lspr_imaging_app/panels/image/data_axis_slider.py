@@ -44,13 +44,186 @@ assuming where the axis "should" start avoids both failure modes.
 
 from __future__ import annotations
 
+import math
 import statistics
 
-from PyQt6.QtCore import QPointF, QRectF, QSize, Qt
-from PyQt6.QtGui import QColor, QContextMenuEvent, QPainter, QPen
-from PyQt6.QtWidgets import QMenu, QSlider, QWidget
+from PyQt6.QtCore import QObject, QPointF, QRectF, QSize, Qt, pyqtSignal
+from PyQt6.QtGui import QColor, QContextMenuEvent, QPainter, QPen, QPolygonF
+from PyQt6.QtWidgets import QAbstractSlider, QMenu, QSlider, QWidget
 
 from lspr_ui import get_active_theme
+
+# Room for half of the widest first/last tick label (e.g. "0:00") so it isn't clipped.
+SIDE_INSET = 14.0
+
+
+def axis_track(widget_width: float) -> tuple[float, float]:
+    """``(left, width)`` of the axis a data slider draws its ticks along, for a widget `widget_width` pixels wide."""
+    return SIDE_INSET, max(float(widget_width) - 2.0 * SIDE_INSET, 1.0)
+
+
+def axis_x(index: float, count: int, widget_width: float, view: tuple[float, float] | None = None) -> float:
+    """The x pixel of tick `index` of `count` on an axis of a widget `widget_width` wide: ticks are spaced by index.
+    `view` = ``(lo, hi)``, the stretch of indices on screen (default: all of them, ``(0, count - 1)``); see `AxisWindow`.
+
+    The one place this position is worked out for anything drawn on the Cube axis (the slider and the ROI row), so a
+    mark and the tick above it can never drift apart, zoomed or not."""
+    left, width = axis_track(widget_width)
+    if count < 2:
+        return left
+    lo, hi = view if view is not None else (0.0, count - 1.0)
+    if hi <= lo:
+        return left
+    return left + width * ((index - lo) / (hi - lo))
+
+
+def axis_index(x: float, count: int, widget_width: float, view: tuple[float, float] | None = None) -> int:
+    """The tick index nearest to the x pixel `x` (clamped to the axis and the ticks); the inverse of `axis_x`."""
+    left, width = axis_track(widget_width)
+    if count < 2:
+        return 0
+    lo, hi = view if view is not None else (0.0, count - 1.0)
+    fraction = min(max((x - left) / width, 0.0), 1.0)
+    return min(max(round(lo + fraction * (hi - lo)), 0), count - 1)
+
+
+class AxisWindow(QObject):
+    """Which stretch of a data axis is on screen (2026-10-16, maintainer request: zoom for the sliders).
+
+    Positions are float tick *indices*: the full axis is ``(0, count - 1)``. Everything drawn on an axis maps an index to a
+    pixel through `axis_x(..., window.view_for(count))`, so the Cube slider and the ROI row under it share **one** window and
+    always agree; the wavelength slider has its own. Pure state plus the gestures that change it, no painting:
+
+    - **Ctrl + wheel** zooms around the pointer (a touchpad pinch sends the same); **Shift + wheel** and a **side wheel**
+      (horizontal scroll) pan; **middle-button drag** pans (`start_pan` / `drag_pan` / `end_pan`); `reset()` (the widgets
+      call it on a middle-button double click) shows everything again.
+    - The deepest zoom shows about `MIN_VISIBLE_TICKS` ticks. A new tick count (another dataset) resets to the full axis.
+    - `ensure_visible(index)` pages the window when the value it follows (the cube shown, also while Play runs) leaves it.
+    """
+
+    changed = pyqtSignal()
+
+    MIN_VISIBLE_TICKS = 5
+    ZOOM_PER_NOTCH = 1.25
+    PAN_PER_NOTCH = 0.10  # of the visible span
+    PAGE_MARGIN = 0.10  # a value that left the window comes back this far (of the span) from the edge it crossed
+
+    def __init__(self, parent: QObject | None = None) -> None:
+        super().__init__(parent)
+        self._count = 0
+        self._lo = 0.0
+        self._hi = 0.0
+        self._pan_start: tuple[float, float, float] | None = None  # (x, lo, span) when a pan drag began
+
+    # -- state ------------------------------------------------------------------------------------
+
+    def count(self) -> int:
+        return self._count
+
+    def view(self) -> tuple[float, float]:
+        return self._lo, self._hi
+
+    def view_for(self, count: int) -> tuple[float, float]:
+        """The window, or the full axis when it was made for a different tick count."""
+        return (self._lo, self._hi) if count == self._count else (0.0, max(count - 1.0, 0.0))
+
+    def is_zoomed(self) -> bool:
+        return self._count >= 2 and (self._lo > 1e-9 or self._hi < self._count - 1.0 - 1e-9)
+
+    def set_count(self, count: int) -> None:
+        """The axis has `count` ticks. A different count (another dataset) resets to the full axis."""
+        count = max(int(count), 0)
+        if count != self._count:
+            self._count = count
+            self._lo, self._hi = 0.0, max(count - 1.0, 0.0)
+            self._pan_start = None
+            self.changed.emit()
+
+    def _set_view(self, lo: float, hi: float) -> None:
+        full = max(self._count - 1.0, 0.0)
+        if full <= 0.0:
+            return
+        span = min(max(hi - lo, min(self.MIN_VISIBLE_TICKS - 1.0, full)), full)
+        lo = min(max(lo, 0.0), full - span)
+        if abs(lo - self._lo) > 1e-9 or abs(lo + span - self._hi) > 1e-9:
+            self._lo, self._hi = lo, lo + span
+            self.changed.emit()
+
+    # -- changing it --------------------------------------------------------------------------------
+
+    def reset(self) -> None:
+        self._set_view(0.0, max(self._count - 1.0, 0.0))
+
+    def zoom(self, factor: float, anchor_fraction: float = 0.5) -> None:
+        """Zoom in by `factor` (> 1 in, < 1 out) keeping the tick under `anchor_fraction` (0 = left edge, 1 = right) put."""
+        span = self._hi - self._lo
+        if self._count < 2 or span <= 0.0 or factor <= 0.0:
+            return
+        anchor_fraction = min(max(anchor_fraction, 0.0), 1.0)
+        new_span = span / factor
+        anchor = self._lo + anchor_fraction * span
+        self._set_view(anchor - anchor_fraction * new_span, anchor + (1.0 - anchor_fraction) * new_span)
+
+    def pan(self, delta_ticks: float) -> None:
+        self._set_view(self._lo + delta_ticks, self._hi + delta_ticks)
+
+    def ensure_visible(self, index: float) -> None:
+        """Page the window so that tick `index` is on screen (nothing happens if it already is, or the axis is not zoomed)."""
+        if not self.is_zoomed() or self._lo <= index <= self._hi:
+            return
+        span = self._hi - self._lo
+        lo = index - self.PAGE_MARGIN * span if index > self._hi else index - (1.0 - self.PAGE_MARGIN) * span
+        self._set_view(lo, lo + span)
+
+    # -- gestures -------------------------------------------------------------------------------------
+
+    def handle_wheel(self, event, widget_width: float) -> bool:
+        """Use a wheel event if it is a zoom / pan gesture, and say whether it was. A plain vertical wheel is not one: the
+        widget keeps it (the slider steps, the ROI row hops between marks)."""
+        if self._count < 2:
+            return False
+        modifiers = event.modifiers()
+        angle = event.angleDelta()
+        notches_y, notches_x = angle.y() / 120.0, angle.x() / 120.0
+        span = self._hi - self._lo
+        if modifiers == Qt.KeyboardModifier.ControlModifier:
+            notches = notches_y or notches_x
+            if not notches:
+                return False
+            left, width = axis_track(widget_width)
+            self.zoom(self.ZOOM_PER_NOTCH ** notches, (event.position().x() - left) / width)
+            return True
+        if modifiers == Qt.KeyboardModifier.ShiftModifier:
+            if notches_y:  # wheel up = towards the first cube, like scrolling up a page
+                self.pan(-notches_y * self.PAN_PER_NOTCH * span)
+                return True
+            if notches_x:
+                self.pan(notches_x * self.PAN_PER_NOTCH * span)
+                return True
+            return False
+        if modifiers == Qt.KeyboardModifier.NoModifier and notches_x and not notches_y:  # a side wheel: right = later cubes
+            self.pan(notches_x * self.PAN_PER_NOTCH * span)
+            return True
+        return False
+
+    def start_pan(self, x: float) -> None:
+        self._pan_start = (x, self._lo, self._hi - self._lo)
+
+    def is_panning(self) -> bool:
+        return self._pan_start is not None
+
+    def drag_pan(self, x: float, widget_width: float) -> bool:
+        """The pointer is at `x` during a pan drag: the axis follows it like a sheet of paper. Returns whether a pan is on."""
+        if self._pan_start is None:
+            return False
+        start_x, start_lo, span = self._pan_start
+        _left, width = axis_track(widget_width)
+        shift = -(x - start_x) / width * span
+        self._set_view(start_lo + shift, start_lo + shift + span)
+        return True
+
+    def end_pan(self) -> None:
+        self._pan_start = None
 
 
 class DataAxisSlider(QSlider):
@@ -67,8 +240,13 @@ class DataAxisSlider(QSlider):
     clicking a plot axis) rather than paging one step at a time - the
     default QSlider page-step click behavior doesn't fit a thin, tick-
     labeled track the way it fits a fat native handle. Keyboard arrow
-    stepping and any wheel-event handling installed via eventFilter
-    elsewhere are untouched since neither is overridden here.
+    stepping and a plain wheel are untouched (QSlider's own).
+
+    **Zoom** (2026-10-16): the ticks are drawn through an `AxisWindow` (see there for the gestures): only the stretch of
+    indices in the window is on screen, the rest is off to the sides (small triangles at the rail ends say so). The window
+    follows the slider's own value, so the handle never leaves the screen (also while Play runs), and the caller re-labels the
+    ticks for the visible stretch when the window changes (`axis_window().changed` -> `set_ticks`). `set_window` replaces it, so
+    the ROI row under the Cube slider can share the Cube slider's.
     """
 
     _TRACK_TOP = 6.0
@@ -77,7 +255,7 @@ class DataAxisSlider(QSlider):
     _MINOR_TICK_HEIGHT = 4.0
     _MAJOR_TICK_HEIGHT = 7.0
     _LABEL_TOP = 19.0
-    _SIDE_INSET = 14.0  # room for half of the widest first/last tick label (e.g. "0:00") so it isn't clipped
+    _SIDE_INSET = SIDE_INSET
     # Fixed, not derived from _accent_color: the handle's accent can be
     # repurposed per selection, but "this tick is cached" should mean the
     # same color regardless of whatever the handle currently shows. Matches
@@ -105,7 +283,30 @@ class DataAxisSlider(QSlider):
         self._dark_tick_color: str | None = None
         self._ignored_tick_indices: frozenset[int] = frozenset()
         self._ignored_tick_color: str | None = None
+        self._window = AxisWindow(self)
+        self._window.changed.connect(self.update)
         self.setFixedHeight(32)
+
+    # -- zoom ------------------------------------------------------------------------------------------
+
+    def axis_window(self) -> AxisWindow:
+        return self._window
+
+    def set_window(self, window: AxisWindow) -> None:
+        """Draw through `window` from now on (another widget's, to share one zoom)."""
+        if window is self._window:
+            return
+        self._window.changed.disconnect(self.update)
+        self._window = window
+        window.changed.connect(self.update)
+        window.set_count(len(self._tick_values))
+        self.update()
+
+    def sliderChange(self, change) -> None:  # noqa: N802 - Qt naming
+        super().sliderChange(change)
+        window = getattr(self, "_window", None)  # Qt can call this while the base class is still being constructed
+        if window is not None and change == QAbstractSlider.SliderChange.SliderValueChange:  # also when signals are blocked
+            window.ensure_visible(self.value() - self.minimum())
 
     def set_accent_color(self, color: str) -> None:
         self._accent_color = color
@@ -177,6 +378,7 @@ class DataAxisSlider(QSlider):
             self._cached_tick_indices = None
         self._tick_values = new_tick_values
         self._major_labels = dict(major_labels)
+        self._window.set_count(len(new_tick_values))  # another tick count (another dataset): the full axis again
         self.update()
 
     def set_tick_cache_state(self, cached_indices: frozenset[int] | None) -> None:
@@ -199,8 +401,8 @@ class DataAxisSlider(QSlider):
         return QSize(base.width(), 32)
 
     def _track_rect(self) -> QRectF:
-        width = max(self.width() - 2.0 * self._SIDE_INSET, 1.0)
-        return QRectF(self._SIDE_INSET, 0.0, width, self._LABEL_TOP)
+        left, width = axis_track(self.width())
+        return QRectF(left, 0.0, width, self._LABEL_TOP)
 
     def _large_gap_boundaries(self) -> list[int]:
         """Indices `i` such that the gap between `_tick_values[i]` and
@@ -255,20 +457,37 @@ class DataAxisSlider(QSlider):
         metrics = painter.fontMetrics()
 
         count = len(self._tick_values)
+        view = self._window.view_for(count)
+        lo, hi = view
+        right = left + width
+
+        def x_of(index: float) -> float:
+            return axis_x(index, count, self.width(), view)
+
         if count > 1 and enabled:
-            gap_boundaries = self._large_gap_boundaries()
-            for boundary in gap_boundaries:
-                x_left = left + width * (boundary / float(count - 1))
-                x_right = left + width * ((boundary + 1) / float(count - 1))
-                self._paint_gap_break(painter, (x_left + x_right) / 2.0, rail_border)
+            if self._window.is_zoomed():  # more axis off to a side: a small triangle at that end of the rail
+                painter.setPen(Qt.PenStyle.NoPen)
+                painter.setBrush(QColor(theme.text_dim))
+                rail_y = self._TRACK_TOP + self._TRACK_HEIGHT / 2.0
+                if lo > 1e-9:
+                    painter.drawPolygon(QPolygonF([QPointF(left - 4.0, rail_y), QPointF(left - 9.0, rail_y - 3.5), QPointF(left - 9.0, rail_y + 3.5)]))
+                if hi < count - 1.0 - 1e-9:
+                    painter.drawPolygon(QPolygonF([QPointF(right + 4.0, rail_y), QPointF(right + 9.0, rail_y - 3.5), QPointF(right + 9.0, rail_y + 3.5)]))
+
+            for boundary in self._large_gap_boundaries():
+                mid_x = (x_of(boundary) + x_of(boundary + 1)) / 2.0
+                if left <= mid_x <= right:
+                    self._paint_gap_break(painter, mid_x, rail_border)
 
             minor_color = QColor(theme.control_border)
             major_color = QColor(theme.text_dim)
             cached_color = QColor(self._CACHED_TICK_COLOR)
             cached_tick_indices = self._cached_tick_indices
             last_label_right: float | None = None
-            for index in range(count):
-                x = left + width * (index / float(count - 1))
+            for index in range(max(math.floor(lo), 0), min(math.ceil(hi), count - 1) + 1):  # only what is on screen
+                x = x_of(index)
+                if x < left - 0.5 or x > right + 0.5:
+                    continue
                 label = self._major_labels.get(index)
                 if label:
                     # Two majors can land close together in pixel space even
@@ -298,7 +517,9 @@ class DataAxisSlider(QSlider):
             mark_top = self._TICK_TOP - 2.0
             mark_bottom = self._TICK_TOP + self._MAJOR_TICK_HEIGHT
             for mark_index, mark_colors in self._mark_colors(count).items():
-                x = left + width * (mark_index / float(count - 1))
+                x = x_of(mark_index)
+                if x < left - 0.5 or x > right + 0.5:
+                    continue
                 if len(mark_colors) == 1:
                     painter.setPen(QPen(QColor(mark_colors[0]), 2.5))
                     painter.drawLine(QPointF(x, mark_top), QPointF(x, mark_bottom))
@@ -314,8 +535,9 @@ class DataAxisSlider(QSlider):
                         QPointF(x, mark_top + n * segment), QPointF(x, mark_top + (n + 1) * segment)
                     )
 
-        if enabled and count > 0:
-            handle_x = left + width * self._value_fraction()
+        handle_index = self._value_fraction() * max(count - 1.0, 0.0)
+        if enabled and count > 0 and lo - 0.5 <= handle_index <= hi + 0.5:  # off screen only after a pan
+            handle_x = x_of(handle_index) if count > 1 else left
             handle_color = QColor(self._reference_highlight_color or self._accent_color)
             painter.setPen(QPen(handle_color, 2.0))
             painter.setBrush(QColor(theme.window_bg))
@@ -361,13 +583,17 @@ class DataAxisSlider(QSlider):
         track = self._track_rect()
         if track.width() <= 0:
             return self.minimum()
-        fraction = (x - track.left()) / track.width()
-        fraction = min(max(fraction, 0.0), 1.0)
-        return self.minimum() + round(fraction * span)
+        count = span + 1
+        return self.minimum() + axis_index(x, count, self.width(), self._window.view_for(count))
 
     def mousePressEvent(self, event) -> None:  # type: ignore[override]
         if event.button() == Qt.MouseButton.LeftButton and self.isEnabled():
             self.setValue(self._index_from_x(event.position().x()))
+            event.accept()
+            return
+        if event.button() == Qt.MouseButton.MiddleButton and self.isEnabled():  # a drag with it pans the zoomed axis
+            self._window.start_pan(event.position().x())
+            self.setCursor(Qt.CursorShape.ClosedHandCursor)
             event.accept()
             return
         super().mousePressEvent(event)
@@ -377,4 +603,28 @@ class DataAxisSlider(QSlider):
             self.setValue(self._index_from_x(event.position().x()))
             event.accept()
             return
+        if event.buttons() & Qt.MouseButton.MiddleButton and self._window.drag_pan(event.position().x(), self.width()):
+            event.accept()
+            return
         super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event) -> None:  # type: ignore[override]
+        if event.button() == Qt.MouseButton.MiddleButton and self._window.is_panning():
+            self._window.end_pan()
+            self.unsetCursor()
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
+
+    def mouseDoubleClickEvent(self, event) -> None:  # type: ignore[override]
+        if event.button() == Qt.MouseButton.MiddleButton and self.isEnabled():  # show the whole axis again
+            self._window.reset()
+            event.accept()
+            return
+        super().mouseDoubleClickEvent(event)
+
+    def wheelEvent(self, event) -> None:  # type: ignore[override]
+        if self.isEnabled() and self._window.handle_wheel(event, self.width()):  # Ctrl: zoom, Shift / side wheel: pan
+            event.accept()
+            return
+        super().wheelEvent(event)  # a plain wheel steps the value, as a QSlider does

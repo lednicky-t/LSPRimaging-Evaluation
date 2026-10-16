@@ -33,7 +33,6 @@ from .measure_line_tool import MeasureLineTool
 from .roi_context_menu import (
     ADD_ROI,
     ADD_TO_GROUP,
-    APPLY_ALL_CUBES,
     DELETE,
     DESELECT,
     GROUP,
@@ -279,7 +278,6 @@ class CanvasInteraction:
             any_selected_grouped=any(toolbox.group_for_roi(selected) is not None for selected in ids),
             can_add=self.in_selection(x, y),
             can_delete=not self._analysis_running(),
-            can_apply_all_cubes=any(toolbox.roi_by_id(i).timeline for i in ids),
             can_remove_cube_edit=any(
                 toolbox.roi_by_id(i).timeline and int(self._selection.current_cube()) in toolbox.roi_by_id(i).timeline.cubes() for i in ids
             ),
@@ -302,8 +300,6 @@ class CanvasInteraction:
                 self._notify("Wait for the analysis to finish before deleting ROIs.")
             else:
                 self._guarded("Delete ROIs", lambda: toolbox.delete_rois(ids))
-        elif choice.action == APPLY_ALL_CUBES:
-            self._guarded("Apply to all cubes", lambda: toolbox.apply_to_all_cubes(ids, int(self._selection.current_cube())))
         elif choice.action == REMOVE_CUBE_EDIT:
             self._guarded("Remove cube edit", lambda: toolbox.remove_cube_edit(ids, int(self._selection.current_cube())))
         elif choice.action == DESELECT:

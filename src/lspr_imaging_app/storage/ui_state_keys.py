@@ -120,7 +120,7 @@ MASK_SCOPE = UiKey("mask/scope", None, str)  # a `MaskScope` value
 SLIDER_RIBBON_OPEN = UiKey("image/slider_ribbon_open", True, bool)  # rolled down (True) or up
 TOP_RIBBON_OPEN = UiKey("image/top_ribbon_open", True, bool)  # the tool ribbon above the canvas: rolled down (True) or up
 SLIDESHOW_SPEED = UiKey("image/slideshow_speed", 1, int)  # 1, 2, 5 or 10 (x)
-SLIDESHOW_MODE = UiKey("image/slideshow_mode", "all", str)  # "all" | "one_wavelength"
+SLIDESHOW_MODE = UiKey("image/slideshow_mode", "all", str)  # "all" | "one_wavelength" | "roi_states"
 SLIDESHOW_REPEAT = UiKey("image/slideshow_repeat", False, bool)
 SLIDESHOW_SKIP_IGNORED = UiKey("image/slideshow_skip_ignored", True, bool)
 SLIDESHOW_SKIP_DARK = UiKey("image/slideshow_skip_dark", False, bool)
@@ -128,8 +128,11 @@ SLIDESHOW_THIN_ROI_OUTLINE = UiKey("image/slideshow_thin_roi_outline", False, bo
 SLIDESHOW_CALM_HISTOGRAM = UiKey("image/slideshow_calm_histogram", False, bool)
 SLIDESHOW_END = UiKey("image/slideshow_end", "dataset", str)  # "cube" | "dataset"
 # Colour of each mark on the Cube / Wavelength sliders (panels/image/slider_colors.py); None = the theme's colour
-SLIDER_COLOR_KEYS = {role: UiKey(f"image/slider_color_{role}", None, str) for role in ("dark", "reference", "ignored", "mask", "roi")}
+SLIDER_COLOR_KEYS = {role: UiKey(f"image/slider_color_{role}", None, str) for role in ("dark", "reference", "ignored", "mask")}
 ROI_SCOPE = UiKey("roi/scope", None, str)  # "persistent" | "individual"; None = persistent
+# The ROI row under the Cube slider (panels/image/roi_layout_strip.py): shown, and counting only the selected ROIs
+ROI_ROW_VISIBLE = UiKey("image/roi_row_visible", True, bool)
+ROI_ROW_SELECTED_ONLY = UiKey("image/roi_row_selected_only", False, bool)
 ARRAY_KEYS = {  # ROIs tab, "Array" group (panels/image/array_controls.py); lengths are stored in pixels
     "mode": UiKey("array/mode", "auto", str),
     "rows": UiKey("array/rows", 0, int),
@@ -159,7 +162,8 @@ HAND_WIRED_KEYS: tuple[UiKey, ...] = (
     HISTOGRAM_CURSOR_READOUT, HISTOGRAM_CURVE_STYLES, IMAGE_CURSOR_READOUT, IMAGE_MASK_EDIT_TOOL, IMAGE_SCALE_BAR_COLOR, IMAGE_ROI_LABELS,
     IMAGE_ROI_FILL_MAX_OPACITY, IMAGE_OVERLAY_CACHE_MB,
     *(key for keys_for_kind in ROI_OVERLAY_KEYS.values() for key in keys_for_kind.values()),
-    ROI_ROUND_POSITIONS, CUBE_DISPLAY_MODE, MASK_SCOPE, ROI_SCOPE, *ARRAY_KEYS.values(), *SLIDER_COLOR_KEYS.values(),
+    ROI_ROUND_POSITIONS, CUBE_DISPLAY_MODE, MASK_SCOPE, ROI_SCOPE, ROI_ROW_VISIBLE, ROI_ROW_SELECTED_ONLY,
+    *ARRAY_KEYS.values(), *SLIDER_COLOR_KEYS.values(),
 )
 
 ALL_KEYS: tuple[UiKey, ...] = (
