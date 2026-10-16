@@ -5,13 +5,15 @@ Left to right: the frame icon controls (`FrameToolsWidget`, inline: unit,
 Reference, Ignore, Dark background), Previous / Play-Pause / Next, and a settings
 pop-out for the slideshow (speed, what to step through, repeat, where the end is;
 Previous and Next step through the same thing), the "ROIs"
-section (show the ROI row under the Cube slider, only the selected ROIs; the row's
-marks are always the theme's blue) and the "Slider colors" section (Mask). The colour
-swatches of Reference, Ignore and Dark background sit inside their groups (`slider_colors.py`).
+section (show the ROIs row under the Cube slider, only the selected ROIs; the row's
+marks are always the theme's blue) and the "Mask" section (show the two Mask rows, under the
+Cube and the wavelength slider; their marks are a fixed orange). The colour swatches of
+Reference, Ignore and Dark background sit inside their groups (`slider_colors.py`); the rows
+under the sliders have no colour control.
 
-Display only: Play/Pause, the ROI toggles and every settings change leave as a
-signal; the panel hands them to `SlideshowController` (`slideshow.py`) or the ROI
-row (`roi_layout_strip.py`), which do the work.
+Display only: Play/Pause, the ROI and Mask toggles and every settings change leave as a
+signal; the panel hands them to `SlideshowController` (`slideshow.py`) or the rows
+(`timeline_strip.py`, `mask_rows.py`), which do the work.
 """
 
 from __future__ import annotations
@@ -24,7 +26,8 @@ from lspr_ui import get_active_theme, load_tabler_icon, transparent_icon_button_
 from .canvas_tools import _BUTTON_SIZE, _ICON_SIZE
 from .frame_tools import FrameToolsWidget, captioned_group
 from .ribbon_drawer import RibbonDrawer
-from .slideshow import MODE_ALL, MODE_ONE_WAVELENGTH, MODE_ROI_STATES, SlideshowSettings
+from .mask_rows import MASK_COLOR
+from .slideshow import MODE_ALL, MODE_MASK_STATES, MODE_ONE_WAVELENGTH, MODE_ROI_STATES, SlideshowSettings
 from .slider_colors import SliderColorControls
 from .slideshow_settings_panel import SlideshowSettingsPanel
 
@@ -34,7 +37,8 @@ class SliderRibbon(QWidget):
     step_requested = pyqtSignal(int)  # -1 = Previous, +1 = Next (one step in the chosen "step through" order)
     roll_up_requested = pyqtSignal()  # double-click on empty space in the ribbon
     settings_changed = pyqtSignal(object)  # a SlideshowSettings
-    roi_row_toggled = pyqtSignal(bool)  # show / hide the ROI row under the Cube slider (a click, not a programmatic set)
+    mask_rows_toggled = pyqtSignal(bool)  # show / hide the two Mask rows (a click, not a programmatic set)
+    roi_row_toggled = pyqtSignal(bool)  # show / hide the ROIs row under the Cube slider (a click, not a programmatic set)
     roi_selected_only_toggled = pyqtSignal(bool)  # the ROI row counts only the selected ROIs
 
     def __init__(self, parent: QWidget | None = None) -> None:
@@ -83,8 +87,14 @@ class SliderRibbon(QWidget):
         self._settings_panel.changed.connect(self._on_panel_changed)
 
         self.roi_row_button = self._make_toggle(
-            "Show the ROI row under the Cube slider: a mark wherever the ROI layout changes."
+            "Show the ROIs row under the Cube slider: a mark wherever the ROI layout changes."
         )
+        self.mask_rows_button = self._make_toggle(
+            "Show the Mask rows under the Cube and the wavelength slider: a mark wherever a mask was drawn "
+            "(> persistent, a line individual, a filled > both)."
+        )
+        self.mask_rows_button.clicked.connect(self.mask_rows_toggled)
+        self.mask_rows_button.clicked.connect(self._refresh_roi_icons)
         self.roi_selected_button = self._make_toggle(
             "Only selected ROIs: the ROI row marks (and counts) only the changes of the ROIs selected now."
         )
@@ -104,7 +114,7 @@ class SliderRibbon(QWidget):
             captioned_group(self, "ROIs", (self.roi_row_button, self.roi_selected_button))
         )
         layout.addWidget(self.frame_tools._separator())
-        layout.addWidget(captioned_group(self, "Slider colors", (self.slider_colors.swatch("mask"),)))
+        layout.addWidget(captioned_group(self, "Mask", (self.mask_rows_button,)))
         layout.addStretch(1)
         self.refresh_theme()
 
@@ -135,8 +145,17 @@ class SliderRibbon(QWidget):
             button.setChecked(bool(checked))
         self._refresh_roi_icons()
 
+    def set_mask_rows(self, shown: bool) -> None:
+        """Show the Mask toggle's state without announcing it (restoring what was saved)."""
+        self.mask_rows_button.setChecked(bool(shown))
+        self._refresh_roi_icons()
+
     def _refresh_roi_icons(self) -> None:
         theme = get_active_theme()
+        masks = self.mask_rows_button.isChecked()
+        self.mask_rows_button.setIcon(
+            load_tabler_icon("mask" if masks else "mask-off", color=MASK_COLOR if masks else theme.text_primary, size=_ICON_SIZE * 2)
+        )
         shown = self.roi_row_button.isChecked()
         self.roi_row_button.setIcon(
             load_tabler_icon("eye" if shown else "eye-off", color=theme.accent_blue if shown else theme.text_primary, size=_ICON_SIZE * 2)
@@ -167,7 +186,8 @@ class SliderRibbon(QWidget):
         what = {
             MODE_ALL: "frame (every wavelength of every cube)",
             MODE_ONE_WAVELENGTH: "cube (on the wavelength shown now)",
-            MODE_ROI_STATES: "ROI layout change (a mark of the ROI row, on the wavelength shown now)",
+            MODE_ROI_STATES: "ROI layout change (a mark of the ROIs row, on the wavelength shown now)",
+            MODE_MASK_STATES: "mask change (a mark of the Mask row, on the wavelength shown now)",
         }.get(self._settings.mode, "frame")
         self._previous.setToolTip(f"Previous {what}. Hold to keep stepping. What it steps through is set in the settings next to it.")
         self._next.setToolTip(f"Next {what}. Hold to keep stepping. What it steps through is set in the settings next to it.")
@@ -198,7 +218,7 @@ class SliderRibbon(QWidget):
             )
         self._previous.setIcon(load_tabler_icon("player-skip-back", color=theme.text_primary, size=_ICON_SIZE * 2))
         self._next.setIcon(load_tabler_icon("player-skip-forward", color=theme.text_primary, size=_ICON_SIZE * 2))
-        for button in (self.roi_row_button, self.roi_selected_button):
+        for button in (self.roi_row_button, self.roi_selected_button, self.mask_rows_button):
             button.setStyleSheet(transparent_icon_button_stylesheet(hover=theme.control_bg_hover))
         self._refresh_roi_icons()
         self._settings_button.setIcon(load_tabler_icon("settings", color=theme.text_primary, size=_ICON_SIZE * 2))

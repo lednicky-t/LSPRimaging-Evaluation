@@ -173,6 +173,7 @@ from ...storage.ui_state_keys import (
     IMAGE_ROI_FILL_MAX_OPACITY,
     IMAGE_ROI_LABELS,
     IMAGE_SCALE_BAR_COLOR,
+    MASK_ROWS_VISIBLE,
     ROI_OVERLAY_KEYS,
     ROI_ROW_SELECTED_ONLY,
     ROI_ROW_VISIBLE,
@@ -193,7 +194,8 @@ from ...storage.ui_state_keys import (
 from ..ui_state import UiStateStore
 from .scale_bar_overlay import ScaleBarItem
 from . import roi_layout_menu
-from .roi_layout_strip import RoiLayoutStrip, StripMark
+from .mask_rows import MaskRows
+from .timeline_strip import TimelineStrip, StripMark
 from .slider_colors import SliderColors
 from ...applog.events import log_event
 from .playback_stats import PlaybackStats
@@ -204,6 +206,7 @@ from .slideshow import (
     END_CUBE,
     END_DATASET,
     MODE_ALL,
+    MODE_MASK_STATES,
     MODE_ONE_WAVELENGTH,
     MODE_ROI_STATES,
     SPEEDS,
@@ -556,6 +559,10 @@ class ImagePanel(QWidget):
         self._set_roi_row(read(store, ROI_ROW_VISIBLE) is not False, read(store, ROI_ROW_SELECTED_ONLY) is True)
         self._slider_ribbon.roi_row_toggled.connect(lambda on: store.set(ROI_ROW_VISIBLE.key, bool(on)))
         self._slider_ribbon.roi_selected_only_toggled.connect(lambda on: store.set(ROI_ROW_SELECTED_ONLY.key, bool(on)))
+        mask_rows_shown = read(store, MASK_ROWS_VISIBLE) is not False
+        self._slider_ribbon.set_mask_rows(mask_rows_shown)
+        self._mask_rows.set_shown(mask_rows_shown)
+        self._slider_ribbon.mask_rows_toggled.connect(lambda on: store.set(MASK_ROWS_VISIBLE.key, bool(on)))
         self._restore_slider_colors(store)
         self._ribbon_drawer.set_expanded(read(store, SLIDER_RIBBON_OPEN) is not False, animate=False)
         self._ribbon_drawer.expanded_changed.connect(lambda open_: store.set(SLIDER_RIBBON_OPEN.key, bool(open_)))
@@ -1079,15 +1086,15 @@ class ImagePanel(QWidget):
         wavelength_row.addWidget(self._wavelength_spin)
 
         # The ROI row (2026-10-16): a thin strip under the Cube slider, on the Cube axis, with a mark wherever the
-        # ROI layout changes (`roi_layout_strip.py`). Its title and right-hand spacer take the width of the other two
+        # ROI layout changes (`timeline_strip.py`). Its title and right-hand spacer take the width of the other two
         # rows' (below, `_fit_spin_widths`), so the strip's ticks line up with the Cube slider's.
-        self._roi_strip = RoiLayoutStrip(self)
+        self._roi_strip = TimelineStrip(self)
         self._roi_strip.index_requested.connect(self._cube_slider.setValue)
         # One zoom window for the Cube slider and the ROI row (their marks must stay under their ticks); λ has its own.
         self._roi_strip.set_window(self._cube_slider.axis_window())
         self._cube_slider.axis_window().changed.connect(self._refresh_cube_slider_labels)
         self._wavelength_slider.axis_window().changed.connect(self._refresh_wavelength_slider_labels)
-        roi_title = QLabel("ROI", self)
+        roi_title = QLabel("ROIs", self)
         roi_title.setStyleSheet(_slider_axis_title_style(get_active_theme().text_muted))
         roi_title.setToolTip(
             "ROI layout. A mark wherever the ROIs change (position or size): > holds from that cube on, "
@@ -1110,6 +1117,18 @@ class ImagePanel(QWidget):
         self._roi_marks_timer.setInterval(_REDRAW_COALESCE_MS)
         self._roi_marks_timer.timeout.connect(self._update_roi_marks)
 
+        # The two Mask rows (2026-10-16): one under the Cube slider, one under the wavelength slider (`mask_rows.py`).
+        # Each shares its slider's zoom window; titles and right-hand spacers are sized with the other rows' below.
+        self._mask_rows = MaskRows(
+            self, self._mask, self._dataset, self._selection, self._cube_display.label_for,
+            cube_window=self._cube_slider.axis_window(),
+            wavelength_window=self._wavelength_slider.axis_window(),
+            title_style=_slider_axis_title_style(get_active_theme().text_muted),
+            status=self._on_tool_status,
+        )
+        self._mask_rows.cube_strip.index_requested.connect(self._cube_slider.setValue)
+        self._mask_rows.wavelength_strip.index_requested.connect(self._wavelength_slider.setValue)
+
         # Both rows' titles and number fields share one width each (2026-09-
         # 30, maintainer request) - without this, "Cube" and "λ (nm)" size
         # to their own text and "197"/"470.0" size to their own digits, so
@@ -1125,6 +1144,8 @@ class ImagePanel(QWidget):
         cube_title.setFixedWidth(title_width)
         wavelength_title.setFixedWidth(title_width)
         roi_title.setFixedWidth(title_width)
+        for title in self._mask_rows.titles:
+            title.setFixedWidth(title_width)
         # Number fields are sized to their current text (see
         # `_fit_spin_widths`), both to the same width so they line up on the
         # right, same as the two titles above.
@@ -1149,7 +1170,9 @@ class ImagePanel(QWidget):
         navigation.setSpacing(4)
         navigation.addLayout(cube_row)
         navigation.addWidget(self._roi_row)
+        navigation.addWidget(self._mask_rows.cube_row)
         navigation.addLayout(wavelength_row)
+        navigation.addWidget(self._mask_rows.wavelength_row)
 
         # No status row here anymore (2026-09-30, maintainer request) - the
         # "Cube X, wl nm" text it used to show now lives in the dock title
@@ -1173,7 +1196,7 @@ class ImagePanel(QWidget):
         self._slider_ribbon.slider_colors.set_colors(self._slider_colors)
         self._slider_ribbon.slider_colors.color_changed.connect(self._on_slider_color_changed)
         self._slideshow = SlideshowController(
-            self._dataset, self._selection, self._frame_roles, self, state_cubes=self._roi_state_cubes
+            self._dataset, self._selection, self._frame_roles, self, state_cubes=self._state_cubes_for_mode
         )
         self._slider_ribbon.set_roi_row(True, False)  # the defaults; `restore_ui_state` puts back what was saved
         self._slider_ribbon.roi_row_toggled.connect(self._on_roi_row_toggled)
@@ -1183,6 +1206,9 @@ class ImagePanel(QWidget):
         # The wheel over the ROI row always hops between its marks, whatever Play / Previous / Next step through.
         self._roi_strip.step_requested.connect(lambda direction: self._slideshow.step(direction, MODE_ROI_STATES))
         self._roi_strip.mark_menu_requested.connect(self._on_roi_mark_menu)
+        self._mask_rows.cube_strip.step_requested.connect(lambda direction: self._slideshow.step(direction, MODE_MASK_STATES))
+        self._slider_ribbon.set_mask_rows(True)  # the default; `restore_ui_state` puts back what was saved
+        self._slider_ribbon.mask_rows_toggled.connect(self._mask_rows.set_shown)
         self._slider_ribbon.settings_changed.connect(self._slideshow.set_settings)
         self._slider_ribbon.settings_changed.connect(self._apply_play_outline)
         self._slideshow.playing_changed.connect(self._slider_ribbon.set_playing)
@@ -1440,6 +1466,7 @@ class ImagePanel(QWidget):
             if cubes and self._current_cube() in cubes:
                 self._cube_slider.setValue(cubes.index(self._current_cube()))
         self._roi_strip.set_axis_count(len(cubes))
+        self._mask_rows.refresh_cube_row()
         self._roi_states_key = None  # another dataset: the ROI states are looked up again
         self._cube_spin.refresh_display()
         self._refresh_wavelength_range()
@@ -1481,6 +1508,7 @@ class ImagePanel(QWidget):
             )
             if wavelengths and wavelength in wavelengths:
                 self._wavelength_slider.setValue(wavelengths.index(wavelength))
+        self._mask_rows.update_wavelength_row(wavelengths, wavelength)
         self._refresh_wavelength_completer_model(wavelengths)
 
     def _current_cube(self) -> int:
@@ -1536,7 +1564,9 @@ class ImagePanel(QWidget):
         with _blocked(self._cube_slider):
             if self._current_cube() in cubes:
                 self._cube_slider.setValue(cubes.index(self._current_cube()))
-        self._roi_strip.set_cursor(cubes.index(self._current_cube()) if self._current_cube() in cubes else None)
+        cursor = cubes.index(self._current_cube()) if self._current_cube() in cubes else None
+        self._roi_strip.set_cursor(cursor)
+        self._mask_rows.set_cube_cursor(cursor)
         self._cube_spin.refresh_display()
         self._refresh_wavelength_range()
         self._update_slider_marks()
@@ -1551,6 +1581,7 @@ class ImagePanel(QWidget):
         with _blocked(self._wavelength_slider):
             if wavelengths and wavelength in wavelengths:
                 self._wavelength_slider.setValue(wavelengths.index(wavelength))
+        self._mask_rows.set_wavelength_cursor(wavelength)
         self._update_slider_marks()
         self._refresh_frame_tools()
 
@@ -1604,7 +1635,7 @@ class ImagePanel(QWidget):
         self._update_ignored_cube_ticks()
         self._update_roi_marks()
 
-    # -- the ROI row (roi_layout_strip.py) ------------------------------------------------------------
+    # -- the ROI row (timeline_strip.py) ------------------------------------------------------------
 
     def _on_roi_row_toggled(self, shown: bool) -> None:
         self._roi_row.setVisible(bool(shown))
@@ -1675,6 +1706,10 @@ class ImagePanel(QWidget):
                 self._on_tool_status(f"{phrase} is now a persistent change ({what}); its layout carries on to the cubes after it.")
         except (ValueError, KeyError) as exc:
             self._on_tool_status(f"ROI row: {exc}")
+
+    def _state_cubes_for_mode(self, mode: str) -> tuple[int, ...]:
+        """The cubes a "states" slideshow mode steps through: the marks of the ROIs row or of the Mask row under the Cube slider."""
+        return self._mask_rows.state_cubes() if mode == MODE_MASK_STATES else self._roi_state_cubes()
 
     def _roi_state_cubes(self) -> tuple[int, ...]:
         """The cubes the ROI row marks, ascending: the first cube (the start layout) and every cube where the layout
@@ -2370,7 +2405,7 @@ class ImagePanel(QWidget):
         )
         if (
             saved.speed not in SPEEDS
-            or saved.mode not in (MODE_ALL, MODE_ONE_WAVELENGTH, MODE_ROI_STATES)
+            or saved.mode not in (MODE_ALL, MODE_ONE_WAVELENGTH, MODE_ROI_STATES, MODE_MASK_STATES)
             or saved.end not in (END_CUBE, END_DATASET)
         ):
             saved = SlideshowSettings()  # a hand-edited settings file
@@ -2798,8 +2833,9 @@ class ImagePanel(QWidget):
         for spin in (self._cube_spin, self._wavelength_spin):
             if spin.width() != width:
                 spin.setFixedWidth(width)
-        if self._roi_row_spacer.width() != width:
-            self._roi_row_spacer.setFixedWidth(width)  # the ROI row ends where the Cube slider ends
+        for spacer in (self._roi_row_spacer, *self._mask_rows.spacers):
+            if spacer.width() != width:
+                spacer.setFixedWidth(width)  # the rows under the sliders end where the sliders end
 
     def _on_cube_display_changed(self, _mode: str) -> None:
         """The cube unit (number / start time) changed anywhere in the app."""

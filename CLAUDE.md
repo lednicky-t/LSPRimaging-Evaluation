@@ -96,7 +96,7 @@ Every user-changeable control is remembered across restarts unless the maintaine
 - **Selection is never undoable.**
 - **Reachable from the UI** (2026-10-07): Edit -> Undo / Redo, Ctrl+Z and Ctrl+Y / Ctrl+Shift+Z, application-wide (`app_rewrite.py` `_wire_edit_menu`). Refused while an analysis runs (undoing a ROI delete or reorder renumbers ids and the engine would wait for the run on the GUI thread); `UndoManager` does nothing while a gesture batch is open.
 - Wired: `RoiToolbox`, `GeometryModule`, `ChromaticModule`, `BackgroundModule`.
-- **`MaskModule` is deliberately not wired.** The old app never undo-tracked masks either. Check in before wiring it. See `image_tools/mask/module.py`.
+- **`MaskModule` is wired only for the Mask rows' commands** (delete / make individual / make persistent a mask, maintainer OK 2026-10-16): painting, loading and clearing masks are still not undoable, so each row command carries a version token and its undo is skipped, with a message, if the mask changed after it (`image_tools/mask/module.py` docstring). Check in before wiring anything more.
 
 ## Sessions
 
@@ -125,7 +125,7 @@ A **dataset** is raw images plus acquisition metadata, never written to. A **ses
 - Don't design shared infrastructure for a future acquisition app.
 - Don't make a new session copy a prior session's settings or ROIs. New sessions start blank (maintainer decision, 2026-09-26).
 - Don't build session rename, duplicate, or delete, or an importer for the stable app's pre-existing `analysis/roi_table.json`, `measurement_backup.h5`, or `processing_profile.json`.
-- Don't wire `MaskModule` to undo.
+- Don't wire more of `MaskModule` to undo than the Mask rows' commands without checking in (painting needs batching and a memory decision: 200 entries x full-image arrays).
 
 ## References
 

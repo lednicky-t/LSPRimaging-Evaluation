@@ -58,11 +58,22 @@ the sketch** (matching this build log's established working method -
    status - but porting the real coordinate-map algorithm is future work,
    not assumed done here.
 
-**Not wired through `undo_manager`** - confirmed by grep: `mask_controller.py`
+**Mostly not wired through `undo_manager`** - confirmed by grep: `mask_controller.py`
 never calls `_push_undo_point` anywhere, for any mask action (load, save,
 create, apply-delta, brush paint). Every command below matches that
 exactly, the same rigor `SelectionModule`/parts of `GeometryModule` already
 applied to actions the old app itself never undo-tracked.
+
+**The one exception (2026-10-16, maintainer OK): the Mask rows' commands**
+(`delete_persistent_mask`, `delete_individual_masks`, `make_mask_individual`,
+`make_mask_persistent`, the right-click menu of the mark rows under the sliders) *are* undoable,
+because deleting a hand-drawn mask by a click on a tiny mark must be recoverable. Painting,
+loading and clearing still are not, so an undo entry could meet a timeline that changed
+after it. Each entry therefore carries a **version token**: every write that is not an
+undoable row command takes a fresh token (`_touch`), a row command remembers the token
+before and after it, and its undo / redo is applied only while the timeline still has the
+token that command left (undo) or found (redo). Otherwise nothing is touched and
+`undo_skipped` says why - a newer stroke is never overwritten by an old undo.
 
 **Timeline redesign, 2026-09-21**: `set_file_mask`/`raw_mask` (one global
 array) are replaced by `set_mask_change`/`resolve_mask_source` (a frame-
@@ -97,16 +108,22 @@ All flagged rather than guessed at.
 
 from __future__ import annotations
 
+import itertools
+import logging
+from collections.abc import Iterable
 from dataclasses import replace
 
 import numpy as np
 from PyQt6.QtCore import QObject, pyqtSignal
 
 from ...diagnostics import instrumented
+from ...undo import FunctionCommand, undo_manager
 from . import raster_tools
 from .model import MaskChange, MaskComputationalChange, MaskCosmeticChange, MaskSettings
 
 _SCOPES = ("individual", "persistent")
+
+logger = logging.getLogger(__name__)
 
 
 class MaskModule(QObject):
@@ -115,12 +132,22 @@ class MaskModule(QObject):
 
     mask_changed = pyqtSignal(MaskComputationalChange)
     cosmetic_changed = pyqtSignal(MaskCosmeticChange)
+    undo_skipped = pyqtSignal(str)  # an undo / redo of a row command was not applied (see the module docstring); the reason
 
     def __init__(self, parent: QObject | None = None) -> None:
         super().__init__(parent)
         self._settings = MaskSettings()
         self._individual_changes: dict[tuple[int, float], MaskChange] = {}
         self._persistent_changes: dict[int, MaskChange] = {}
+        self._tokens = itertools.count(1)
+        self._version = 0  # which state the timeline is in; see `_touch` and the module docstring
+        self._individual_index: dict[int, tuple[float, ...]] | None = None  # individual wavelengths by cube, built on demand
+
+    def _touch(self) -> None:
+        """The timeline was changed by something that is not an undoable row command: a fresh version token (so older
+        undo entries of row commands know the timeline moved on), and the per-cube index of individual masks is stale."""
+        self._version = next(self._tokens)
+        self._individual_index = None
 
     # -- query interface ------------------------------------------------
 
@@ -186,6 +213,115 @@ class MaskModule(QObject):
         individual = [self._individual_changes[frame] for frame in sorted(self._individual_changes)]
         return tuple(persistent + individual)
 
+    # -- what the Mask rows under the sliders show (2026-10-16) -----------------------
+
+    def persistent_points(self) -> dict[int, float]:
+        """Every cube with a persistent mask change of its own, ascending, with the wavelength it was authored at (the change
+        applies to the whole cube and to every cube after it, until the next persistent change)."""
+        return {cube: self._persistent_changes[cube].frame[1] for cube in sorted(self._persistent_changes)}
+
+    def _individual_by_cube(self) -> dict[int, tuple[float, ...]]:
+        if self._individual_index is None:
+            grouped: dict[int, list[float]] = {}
+            for cube, wavelength in self._individual_changes:
+                grouped.setdefault(cube, []).append(wavelength)
+            self._individual_index = {cube: tuple(sorted(wavelengths)) for cube, wavelengths in sorted(grouped.items())}
+        return self._individual_index
+
+    def individual_cubes(self) -> dict[int, tuple[float, ...]]:
+        """Every cube with at least one individual mask change, ascending, with the wavelengths (ascending) that have one."""
+        return dict(self._individual_by_cube())
+
+    def individual_wavelengths(self, cube: int) -> tuple[float, ...]:
+        """The wavelengths of `cube` that have an individual mask change of their own. O(1) after a change (an index by cube is
+        built on first use), because the wavelength row asks it on every cube step."""
+        return self._individual_by_cube().get(int(cube), ())
+
+    def has_mask_changes(self) -> bool:
+        return bool(self._persistent_changes or self._individual_changes)
+
+    # -- undoable commands of the Mask rows ------------------------------------------------
+
+    def _row_command(self, label: str, edits: list[tuple[str, object, MaskChange | None, MaskChange | None]]) -> None:
+        """Apply `edits` ``(scope, key, before, after)`` as one undoable step (nothing if there are none). The undo / redo
+        are applied only while the timeline is in the state this command left / found (version token, see the module
+        docstring); otherwise `undo_skipped` explains and nothing changes. Mask arrays are shared between the entries, never
+        modified in place (the module's convention: `set_mask_change` stores copies)."""
+        if not edits:
+            return
+        before_token, after_token = self._version, next(self._tokens)
+
+        def write(which: int) -> None:  # 0 = back to `before`, 1 = to `after`
+            for scope, key, before, after in edits:
+                store = self._individual_changes if scope == "individual" else self._persistent_changes
+                target = (before, after)[which]
+                if target is None:
+                    store.pop(key, None)
+                else:
+                    store[key] = target
+            self._individual_index = None
+            self._version = (before_token, after_token)[which]
+            for scope, key, before, after in edits:
+                frame = (before if before is not None else after).frame
+                self.mask_changed.emit(MaskComputationalChange(reason="mask_change", frame=frame, scope=scope))
+
+        def guarded(which: int) -> None:
+            if self._version != (after_token, before_token)[which]:
+                what = "undone" if which == 0 else "redone"
+                logger.info("mask row command %r not %s: the mask changed after it", label, what)
+                self.undo_skipped.emit(f"'{label}' was not {what}: the mask was changed after it.")
+                return
+            write(which)
+
+        write(1)
+        undo_manager.push(FunctionCommand(label, undo_fn=lambda: guarded(0), redo_fn=lambda: guarded(1)))
+
+    @instrumented("MaskModule.delete_persistent_mask")
+    def delete_persistent_mask(self, cube: int) -> None:
+        """Delete the persistent mask change of `cube` (undoable). The cube then follows the persistent change before it, if any."""
+        change = self._persistent_changes.get(int(cube))
+        self._row_command("Delete mask", [] if change is None else [("persistent", int(cube), change, None)])
+
+    @instrumented("MaskModule.delete_individual_masks")
+    def delete_individual_masks(self, frames: Iterable[tuple[int, float]]) -> None:
+        """Delete the individual mask changes of these frames (undoable); frames without one are skipped."""
+        edits = []
+        for cube, wavelength in frames:
+            key = (int(cube), float(wavelength))
+            change = self._individual_changes.get(key)
+            if change is not None:
+                edits.append(("individual", key, change, None))
+        self._row_command("Delete mask" if len(edits) == 1 else "Delete masks", edits)
+
+    @instrumented("MaskModule.make_mask_individual")
+    def make_mask_individual(self, cube: int) -> None:
+        """Turn the persistent mask change of `cube` into an individual one at the frame it was drawn at (undoable): the mask
+        then applies to that frame only, and the cubes after it go back to the persistent change before this one (or to no mask).
+        Raises ``ValueError`` if that frame already has an individual mask of its own."""
+        change = self._persistent_changes.get(int(cube))
+        if change is None:
+            return
+        if change.frame in self._individual_changes:
+            raise ValueError(f"{change.frame[1]:g} nm of cube {int(cube)} already has an individual mask; delete it first.")
+        moved = MaskChange(frame=change.frame, scope="individual", mask=change.mask)
+        self._row_command(
+            "Make mask individual", [("persistent", int(cube), change, None), ("individual", change.frame, None, moved)]
+        )
+
+    @instrumented("MaskModule.make_mask_persistent")
+    def make_mask_persistent(self, frame: tuple[int, float]) -> None:
+        """Turn the individual mask change of `frame` into the persistent one of its cube (undoable): it then applies to the whole
+        cube and to every cube after it, until the next persistent change. Raises ``ValueError`` if the cube already has a
+        persistent mask change of its own (it would be overwritten)."""
+        key = (int(frame[0]), float(frame[1]))
+        change = self._individual_changes.get(key)
+        if change is None:
+            return
+        if key[0] in self._persistent_changes:
+            raise ValueError(f"Cube {key[0]} already has its own persistent mask; delete it first.")
+        moved = MaskChange(frame=key, scope="persistent", mask=change.mask)
+        self._row_command("Make mask persistent", [("individual", key, change, None), ("persistent", key[0], None, moved)])
+
     # -- session restore ------------------------------------------------
 
     @instrumented("MaskModule.restore_state")
@@ -209,6 +345,7 @@ class MaskModule(QObject):
                 self._persistent_changes[change.frame[0]] = change
             else:
                 raise ValueError(f"scope must be one of {_SCOPES}, got {change.scope!r}")
+        self._touch()
         self.mask_changed.emit(MaskComputationalChange(reason="session_restored", frame=None, scope=None))
 
     # -- commands -----------------------------------------------------------
@@ -321,6 +458,7 @@ class MaskModule(QObject):
             store.pop(key, None)
         else:
             store[key] = MaskChange(frame=frame, scope=scope, mask=normalized.copy())
+        self._touch()
         self.mask_changed.emit(MaskComputationalChange(reason="mask_change", frame=frame, scope=scope))
 
     @instrumented("MaskModule.clear_all_masks")
@@ -335,6 +473,7 @@ class MaskModule(QObject):
             return
         self._individual_changes = {}
         self._persistent_changes = {}
+        self._touch()
         self.mask_changed.emit(MaskComputationalChange(reason="cleared", frame=None, scope=None))
 
     @instrumented("MaskModule.apply_candidate")

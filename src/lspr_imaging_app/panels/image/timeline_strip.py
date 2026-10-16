@@ -1,24 +1,28 @@
-"""``RoiLayoutStrip`` - the ROI row under the Cube slider (2026-10-16, maintainer request).
+"""``TimelineStrip`` - a thin row of marks under a slider (2026-10-16, maintainer request). Used for the ROIs row (the ROI
+*layout*, all ROIs together) and the two Mask rows (under the Cube slider and under the wavelength slider). Named
+`RoiLayoutStrip` until the Mask rows came.
 
-A thin timeline of the ROI *layout* (all ROIs together). It has the cube slider's axis: the same x position for every
-cube (`data_axis_slider.axis_x`, one formula for both), so a mark sits right under the cube tick it belongs to. A mark is
-a cube where the layout changes:
+It has the slider's axis: the same x position for every tick (`data_axis_slider.axis_x`, one formula for both), so a mark sits
+right under the tick it belongs to. A mark is a tick where something changes:
 
-- ``>`` (persistent): the layout holds from this cube on, until the next persistent mark. The first cube always has one
-  (the start layout).
-- a plain thin line (individual): this cube only.
+- ``>`` (persistent): it holds from this tick on, until the next persistent mark. (ROIs: the first cube always has one, the
+  start layout.)
+- a plain thin line (individual): this tick only.
+- a **filled** ``>`` (mixed, the Mask row under the Cube slider): the cube has a persistent mask *and* individual masks of
+  some of its wavelengths.
 
-Both are a few pixels wide on purpose (hundreds of cubes share the row). The mark that governs the cube shown now is
-drawn at full strength, the others softer, and a hairline shows the cube shown now.
+All are a few pixels wide on purpose (hundreds of ticks share the row). The mark that governs the tick shown now is
+drawn at full strength, the others softer, and a hairline shows the tick shown now.
 
 Display only: marks, colour, axis and cursor are handed in; a click or drag on the row leaves as `index_requested`
 (the panel moves the Cube slider), and the mouse wheel as `step_requested` (+1 = the next mark, -1 = the previous one;
 one per wheel notch, wheel up = next, like the sliders), and a right click on a mark as `mark_menu_requested` (the
-menu itself: `roi_layout_menu.py`).
+menu itself: `roi_layout_menu.py` / `mask_rows.py`).
 
-**Zoom** (2026-10-16): the row draws through an `AxisWindow`, the Cube slider's own (`set_window`), so it always shows
-the same stretch of cubes as the slider above it, and Ctrl + wheel, Shift + wheel, a side wheel, a middle-button drag and a
-middle double-click work here exactly as on the slider (the window does the work). Which marks exist, and the text of each tooltip, is the panel's call (`RoiToolbox.layout_points`).
+**Zoom** (2026-10-16): the row draws through an `AxisWindow`, its slider's own (`set_window`), so it always shows the same
+stretch as the slider above it, and Ctrl + wheel, Shift + wheel, a side wheel, a middle-button drag and a middle
+double-click work here exactly as on the slider (the window does the work). Which marks exist, and the text of each tooltip,
+is the owner's call (`RoiToolbox.layout_points` for ROIs, `MaskModule` for the Mask rows).
 """
 
 from __future__ import annotations
@@ -27,7 +31,7 @@ from collections.abc import Sequence
 from typing import NamedTuple
 
 from PyQt6.QtCore import QEvent, QPointF, QSize, Qt, pyqtSignal
-from PyQt6.QtGui import QColor, QPainter, QPen
+from PyQt6.QtGui import QColor, QPainter, QPen, QPolygonF
 from PyQt6.QtWidgets import QSizePolicy, QToolTip, QWidget
 
 from lspr_ui import get_active_theme
@@ -45,15 +49,19 @@ _WHEEL_NOTCH = 120  # Qt: one notch of a wheel mouse is 120 eighths of a degree
 _MAX_WHEEL_STEPS = 5  # a free-spinning wheel can deliver a lot at once
 
 
+KIND_MIXED = "mixed"  # persistent and individual together (Mask row under the Cube slider)
+
+
 class StripMark(NamedTuple):
-    index: int  # tick position on the cube axis
-    kind: str  # "persistent" | "individual"
+    index: int  # tick position on the axis
+    kind: str  # "persistent" | "individual" | "mixed"
     tip: str  # the tooltip, e.g. "Cube 79 - persistent: 3 ROIs changed"
 
 
 def governing_mark(marks: Sequence[StripMark], cursor: int | None) -> int | None:
-    """The index (into `marks`, sorted by tick index) of the mark that decides the layout at tick `cursor`: an individual
-    mark exactly there, else the latest persistent mark at or before it. ``None`` when there is none."""
+    """The index (into `marks`, sorted by tick index) of the mark that decides what holds at tick `cursor`: a mark of its own
+    exactly there (individual or mixed), else the latest persistent-or-mixed mark at or before it (a persistent change holds
+    from its tick on). ``None`` when there is none."""
     if cursor is None:
         return None
     best: int | None = None
@@ -62,12 +70,12 @@ def governing_mark(marks: Sequence[StripMark], cursor: int | None) -> int | None
             break
         if mark.index == cursor and mark.kind != SCOPE_PERSISTENT:
             return position
-        if mark.kind == SCOPE_PERSISTENT:
+        if mark.kind in (SCOPE_PERSISTENT, KIND_MIXED):
             best = position
     return best
 
 
-class RoiLayoutStrip(QWidget):
+class TimelineStrip(QWidget):
     index_requested = pyqtSignal(int)  # the tick the user clicked or dragged to
     step_requested = pyqtSignal(int)  # +1 / -1: the wheel asks for the next / previous mark
     mark_menu_requested = pyqtSignal(object, object)  # a right click on a mark: the StripMark and the global QPoint
@@ -171,10 +179,13 @@ class RoiLayoutStrip(QWidget):
             pen.setCapStyle(Qt.PenCapStyle.FlatCap)
             pen.setJoinStyle(Qt.PenJoinStyle.MiterJoin)
             painter.setPen(pen)
-            if mark.kind == SCOPE_PERSISTENT:
-                painter.drawPolyline(
-                    [QPointF(x, _MARK_TOP), QPointF(x + _CHEVRON_WIDTH, mid), QPointF(x, _MARK_BOTTOM)]
-                )
+            corners = [QPointF(x, _MARK_TOP), QPointF(x + _CHEVRON_WIDTH, mid), QPointF(x, _MARK_BOTTOM)]
+            if mark.kind == KIND_MIXED:  # a filled ">" : persistent and individual together
+                painter.setBrush(color)
+                painter.drawPolygon(QPolygonF(corners))
+                painter.setBrush(Qt.BrushStyle.NoBrush)
+            elif mark.kind == SCOPE_PERSISTENT:
+                painter.drawPolyline(corners)
             else:
                 painter.drawLine(QPointF(x, _MARK_TOP), QPointF(x, _MARK_BOTTOM))
 
