@@ -103,6 +103,8 @@ Every user-changeable control is remembered across restarts unless the maintaine
 
 A **dataset** is raw images plus acquisition metadata, never written to. A **session** is one independently reproducible working copy of everything derived from it (ROI table, masks, settings, `analysis/data.h5`). `storage/session_coordinator.py` knows the active session; `app_rewrite.py` wires it to the modules. Full history: the design record's Sessions section.
 
+**Autosave never writes on the GUI thread** (2026-10-17, maintainer rule: saving has no business there). Two steps: the GUI thread reads the modules and `prepare_session` copies them into plain data (several module queries return *live* mutable objects, so this must not move to the worker); one plain `threading.Thread` runs `SessionWriter.write` (PNGs + JSON; it remembers masks already on disk, so an unchanged save is ~20 ms). `flush()` waits until the data is on disk; `set_root()` does not, so code that reads a session folder back calls `autosave.wait_until_written(root)` first. A new field in the session must go through `prepare_session`, never be read from a live module by the writer. Record: `docs/session_autosave_blocking_analysis_2026-10-17.md`.
+
 ## Testing rules
 
 - Pure-computation files must import and test with **zero Qt, GUI, or dataset dependency**: `analysis/tasks.py`, `analysis/provenance.py`, `analysis/planner.py`, `analysis/reduction.py`, `roi/rasterize.py`, `roi/detection.py`. A test of one of these that needs a `QApplication` means something is wired wrong.

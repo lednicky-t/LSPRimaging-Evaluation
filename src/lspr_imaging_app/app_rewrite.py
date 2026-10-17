@@ -411,9 +411,12 @@ def capture_session(
     here leaves ``storage/session.py`` a pure data layer that a test can
     drive with dataclasses and no Qt at all.
 
-    Every query below already returns a defensive copy, so the captured
-    state cannot be mutated out from under the caller by continued use of
-    the app while it is being written."""
+    **Not every query below returns a copy** (corrected 2026-10-17): the
+    `settings()` queries do, but `rois()`, `groups()`, `array_groups()`,
+    `models()` and `landmarks()` return the live, mutable objects. The result is
+    therefore only safe to hand to another thread after
+    `storage.session.prepare_session` has copied it, which the autosave does on
+    the GUI thread before its writer runs."""
     return SessionState(
         geometry=geometry.settings(),
         background=background.settings(),
@@ -494,6 +497,26 @@ def _frame_naming(dataset: DatasetModule) -> FrameNamingScheme:
     return FrameNamingScheme.for_dataset(cube_indices, wavelengths)
 
 
+def _cached_frame_naming(dataset: DatasetModule) -> Callable[[], FrameNamingScheme]:
+    """`_frame_naming`, worked out once per loaded dataset instead of on every save (2026-10-17): it walks every cube
+    (16 ms for 314 cubes), and the autosave asks for it on the GUI thread each time it saves. The scheme depends only on the
+    cubes and wavelengths, which cannot change while a dataset stays loaded; loading or clearing one forgets it."""
+    cache: list[FrameNamingScheme | None] = [None]
+
+    def forget(*_args: object) -> None:
+        cache[0] = None
+
+    dataset.dataset_loaded.connect(forget)
+    dataset.dataset_cleared.connect(forget)
+
+    def naming() -> FrameNamingScheme:
+        if cache[0] is None:
+            cache[0] = _frame_naming(dataset)
+        return cache[0]
+
+    return naming
+
+
 def _build_session_autosave(
     dataset: DatasetModule,
     geometry: GeometryModule,
@@ -532,7 +555,7 @@ def _build_session_autosave(
             geometry, mask, chromatic, background, roi_toolbox, selection, analysis_settings, frame_roles,
             transient_events,
         ),
-        naming=lambda: _frame_naming(dataset),
+        naming=_cached_frame_naming(dataset),
     )
 
     signals = [
@@ -598,6 +621,10 @@ def _wire_session_coordinator(
             analysis_engine.set_storage_root(None)
             return
         analysis_engine.set_storage_root(root)
+        # The flush above is written in the background (2026-10-17). Reading `root` back before a write *to that same
+        # root* has landed (reloading the session just edited) would restore the previous save; for any other root this
+        # returns at once.
+        autosave.wait_until_written(root)
         try:
             state = load_session(root)
         except Exception:

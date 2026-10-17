@@ -250,6 +250,22 @@ def persist_mask_snapshot(
     this once a cell is genuinely being computed), not something this
     function enforces itself.
     """
+    return persist_mask_snapshot_with_status(
+        masks_dir, mask_8bit, cube_index=cube_index, wavelength_nm=wavelength_nm, tag=tag, naming=naming,
+    )[0]
+
+
+def persist_mask_snapshot_with_status(
+    masks_dir: Path,
+    mask_8bit: np.ndarray,
+    *,
+    cube_index: int,
+    wavelength_nm: float,
+    tag: str,
+    naming: FrameNamingScheme,
+) -> tuple[MaskSnapshotRef, bool]:
+    """`persist_mask_snapshot`, also saying whether a file was written (``True``) or an identical one was already on disk
+    (``False``). The session writer counts these for its log line (2026-10-17)."""
     ref, is_new = resolve_mask_snapshot_ref(
         masks_dir, mask_8bit, cube_index=cube_index, wavelength_nm=wavelength_nm, tag=tag, naming=naming,
     )
@@ -258,7 +274,7 @@ def persist_mask_snapshot(
 
         masks_dir.mkdir(parents=True, exist_ok=True)
         cv2.imwrite(str(masks_dir / ref.filename(naming)), np.asarray(mask_8bit, dtype=np.uint8))
-    return ref
+    return ref, is_new
 
 
 def _existing_chromatic_versions(chromatic_dir: Path, cube_index: int, wavelength_nm: float, naming: FrameNamingScheme) -> dict[int, dict]:

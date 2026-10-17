@@ -56,6 +56,18 @@ quietly destroy current session state.
 the modules is responsible for reading state out of them and applying it
 back (`app_rewrite.capture_session`/`apply_session`).
 
+**Saving is two steps so that it can run off the GUI thread** (2026-10-17;
+`docs/session_autosave_blocking_analysis_2026-10-17.md`):
+
+1. `prepare_session(state, naming)` turns the captured state into a plain JSON-ready dict. Cheap, pure CPU, and it **copies**:
+   several module queries (`rois()`, `groups()`, `models()`, ...) hand out the live mutable objects, so the autosave runs
+   this on the GUI thread, and afterwards nothing the writer reads can be changed by an edit.
+2. `SessionWriter.write(root, prepared)` does all the file work (mask PNGs, the JSON) and may run on any one thread. A
+   writer remembers which masks it has already put on disk, so saving an unchanged session no longer decodes, scans and
+   re-reads every mask PNG (5 ms per mask: 3.7 s for 405 masks, which froze the window on every cube scroll).
+
+`save_session` is the two steps in a row with a fresh writer, for callers (and tests) that want one plain call.
+
 **Not persisted, because nothing in the rewrite owns them yet**: the old
 profile's `statistics_settings` (no counterpart exists at all) and
 `image_exclusions` (`ImageExclusionRule` is referenced only inside
@@ -80,9 +92,10 @@ from ..analysis.provenance import (
     FrameNamingScheme,
     MaskSnapshotRef,
     mask_scope_tag,
-    persist_mask_snapshot,
+    persist_mask_snapshot_with_status,
 )
 from ..analysis.settings import MetricSettings, StatisticsSettings
+from ..applog import timed
 from ..image_tools.background.model import BackgroundSettings
 from ..image_tools.chromatic.model import (
     ChromaticLandmarkObservation,
@@ -139,8 +152,8 @@ _MASK_SETTINGS_SKIP_FIELDS = ("histogram_mask", "figure_mask")
 # -- atomic JSON write (ported verbatim from storage/workspace.py) ----------
 
 
-def write_json_file(path: Path, payload: dict) -> None:
-    """Write `payload` to `path` as JSON, atomically.
+def write_json_file(path: Path, payload: dict) -> int:
+    """Write `payload` to `path` as JSON, atomically. Returns the number of characters written.
 
     Ported from `storage/workspace.py`. This backs a session autosave that
     can fire frequently during normal use: writing to a temp file in the
@@ -160,6 +173,7 @@ def write_json_file(path: Path, payload: dict) -> None:
         except OSError:
             pass
         raise
+    return len(data)
 
 
 # -- ROI encoding (ported from storage/workspace.py) ------------------------
@@ -420,31 +434,110 @@ def _encode_mask_settings(settings: MaskSettings) -> dict:
     }
 
 
-def _encode_mask_changes(root: Path, changes: tuple[MaskChange, ...], naming: FrameNamingScheme) -> list[dict]:
-    """Write each change's pixels as a versioned PNG and record only the
-    reference in the JSON.
+@dataclass(frozen=True)
+class PreparedSession:
+    """A session ready to be written: everything is plain data nobody else can change any more (2026-10-17).
 
-    Re-saving a mask whose content is unchanged reuses its existing version
-    and writes nothing - `persist_mask_snapshot`'s dedup, reused rather
-    than reimplemented. That dedup is scoped to one (frame, scope) group,
-    since the frame is part of the filename, so this writes one file per
-    change rather than one per distinct image."""
-    encoded: list[dict] = []
-    for change in changes:
-        cube_index, wavelength_nm = change.frame
-        mask_8bit = np.asarray(change.mask, dtype=bool).astype(np.uint8) * 255
-        ref = persist_mask_snapshot(
-            _masks_dir(root), mask_8bit,
-            cube_index=int(cube_index), wavelength_nm=float(wavelength_nm),
-            tag=mask_scope_tag(change.scope), naming=naming,
-        )
-        encoded.append({
-            "cube_index": int(cube_index),
-            "wavelength_nm": float(wavelength_nm),
-            "scope": str(change.scope),
-            "version": int(ref.version),
-        })
-    return encoded
+    ``payload`` is the JSON-ready dict **except** ``payload["mask"]["changes"]``, which the writer fills in because the
+    version numbers depend on what is already on disk. ``mask_changes`` are immutable (`MaskChange` keeps compressed pixels).
+    Do not modify ``payload`` after `prepare_session` returned it."""
+
+    payload: dict
+    mask_changes: tuple[MaskChange, ...]
+    naming: FrameNamingScheme
+
+
+@dataclass
+class MaskWriteStats:
+    """What one `SessionWriter.write` did with the mask changes (for the log line)."""
+
+    masks: int = 0
+    reused: int = 0  # already saved by this writer and the file is still there: nothing read, nothing written
+    verified: int = 0  # not known to this writer: the file on disk was read back and matched
+    written: int = 0  # a PNG was written (a new mask, or a changed one: a new version)
+
+
+class SessionWriter:
+    """Writes `PreparedSession`s to disk. **Use from one thread at a time** (the autosave's worker); not thread-safe on its own.
+
+    Remembers which `MaskChange` it has put on disk (as which file version) for the root it wrote last. Saving the session
+    again then costs one directory listing plus the JSON, however many masks there are: a mask the writer knows, whose file is
+    still listed, is neither decoded nor read back. Anything else takes the full path through
+    `persist_mask_snapshot_with_status` (look at what is on disk, write only if no identical version exists), which is also
+    what a freshly made writer does for every mask, so the files are the same as before this cache existed.
+
+    The remembered set is exactly the last saved timeline, so a mask removed from the session is not kept alive, and a change
+    of root or of the frame-naming scheme starts it again from nothing. Not guarded against someone replacing a session PNG
+    with different pixels behind the app's back (a missing file is noticed, a swapped one is not)."""
+
+    def __init__(self) -> None:
+        self._root: Path | None = None
+        self._naming: FrameNamingScheme | None = None
+        self._known: dict[MaskChange, int] = {}  # mask change -> version of its file in <root>/session/masks
+        self.last_stats = MaskWriteStats()
+
+    def write(self, root: Path, prepared: PreparedSession) -> Path:
+        """Write `prepared` under ``root/session/``, returning the JSON's path."""
+        root = Path(root)
+        with timed(logger, "session.write", root=root.name) as t:
+            encoded, stats = self._encode_mask_changes(root, prepared.mask_changes, prepared.naming)
+            self.last_stats = stats
+            mask_block = {**prepared.payload["mask"], "changes": encoded}
+            payload = {**prepared.payload, "mask": mask_block}  # same key order as `prepared.payload`
+            path = session_path(root)
+            characters = write_json_file(path, payload)
+            t.set(
+                masks=stats.masks, reused=stats.reused, verified=stats.verified, written=stats.written,
+                json_kb=round(characters / 1024.0, 1),
+            )
+        return path
+
+    def _encode_mask_changes(
+        self, root: Path, changes: tuple[MaskChange, ...], naming: FrameNamingScheme
+    ) -> tuple[list[dict], MaskWriteStats]:
+        """Write each change's pixels as a versioned PNG and record only the
+        reference in the JSON.
+
+        Re-saving a mask whose content is unchanged reuses its existing version
+        and writes nothing. That dedup is scoped to one (frame, scope) group,
+        since the frame is part of the filename, so this writes one file per
+        change rather than one per distinct image."""
+        if root != self._root or naming != self._naming:
+            self._root, self._naming, self._known = root, naming, {}
+        masks_dir = _masks_dir(root)
+        try:
+            with os.scandir(masks_dir) as entries:
+                present = {entry.name for entry in entries}
+        except FileNotFoundError:
+            present = set()
+        stats = MaskWriteStats(masks=len(changes))
+        known: dict[MaskChange, int] = {}
+        encoded: list[dict] = []
+        for change in changes:
+            cube_index, wavelength_nm = int(change.frame[0]), float(change.frame[1])
+            tag = mask_scope_tag(change.scope)
+            version = self._known.get(change)
+            if version is not None and MaskSnapshotRef(cube_index, wavelength_nm, tag, version).filename(naming) in present:
+                stats.reused += 1
+            else:
+                mask_8bit = np.asarray(change.mask, dtype=bool).astype(np.uint8) * 255
+                ref, is_new = persist_mask_snapshot_with_status(
+                    masks_dir, mask_8bit, cube_index=cube_index, wavelength_nm=wavelength_nm, tag=tag, naming=naming,
+                )
+                version = int(ref.version)
+                if is_new:
+                    stats.written += 1
+                else:
+                    stats.verified += 1
+            known[change] = version
+            encoded.append({
+                "cube_index": cube_index,
+                "wavelength_nm": wavelength_nm,
+                "scope": str(change.scope),
+                "version": version,
+            })
+        self._known = known
+        return encoded, stats
 
 
 def _decode_mask_changes(root: Path, raw: object, naming: FrameNamingScheme) -> tuple[MaskChange, ...]:
@@ -484,14 +577,13 @@ def _decode_mask_changes(root: Path, raw: object, naming: FrameNamingScheme) -> 
     return tuple(decoded)
 
 
-def save_session(root: Path, state: SessionState, naming: FrameNamingScheme) -> Path:
-    """Write `state` under `root/session/`, returning the JSON's path.
+def prepare_session(state: SessionState, naming: FrameNamingScheme) -> PreparedSession:
+    """Turn `state` into a `PreparedSession`: plain data, copied, ready to be written from any thread. No file is touched.
 
     `naming` is the dataset's frame-tag scheme (`FrameNamingScheme.
     for_dataset`), passed in rather than derived here because only the
     caller knows the dataset - and it must be the *same* scheme on save and
     load, or a mask's filename won't be found again."""
-    root = Path(root)
     payload = {
         "schema_name": SESSION_SCHEMA_NAME,
         "schema_version": SESSION_SCHEMA_VERSION,
@@ -500,7 +592,7 @@ def save_session(root: Path, state: SessionState, naming: FrameNamingScheme) -> 
         "background": asdict(state.background),
         "mask": {
             "settings": _encode_mask_settings(state.mask_settings),
-            "changes": _encode_mask_changes(root, state.mask_changes, naming),
+            "changes": [],  # filled in by `SessionWriter.write`
         },
         "chromatic": {
             "settings": asdict(state.chromatic_settings),
@@ -528,9 +620,13 @@ def save_session(root: Path, state: SessionState, naming: FrameNamingScheme) -> 
             "selected_roi_ids": sorted(int(roi_id) for roi_id in state.selected_roi_ids),
         },
     }
-    path = session_path(root)
-    write_json_file(path, payload)
-    return path
+    return PreparedSession(payload=payload, mask_changes=tuple(state.mask_changes), naming=naming)
+
+
+def save_session(root: Path, state: SessionState, naming: FrameNamingScheme) -> Path:
+    """Write `state` under `root/session/`, returning the JSON's path: `prepare_session` and a fresh `SessionWriter`, in one
+    call and on the calling thread. The autosave does the two steps separately (prepare on the GUI thread, write on its worker)."""
+    return SessionWriter().write(root, prepare_session(state, naming))
 
 
 def load_session(root: Path) -> SessionState | None:
