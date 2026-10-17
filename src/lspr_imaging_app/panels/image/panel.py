@@ -1238,6 +1238,9 @@ class ImagePanel(QWidget):
         self._roi_strip.step_requested.connect(lambda direction: self._slideshow.step(direction, MODE_ROI_STATES))
         self._roi_strip.mark_menu_requested.connect(self._on_roi_mark_menu)
         self._mask_rows.cube_strip.step_requested.connect(lambda direction: self._slideshow.step(direction, MODE_MASK_STATES))
+        # The wheel turned on past the last / first wavelength goes on into the next / previous cube, as Play does in its
+        # "all wavelengths" order (first wavelength of the next cube / last of the previous), whatever mode Play is set to.
+        self._wavelength_slider.edge_step_requested.connect(lambda direction: self._slideshow.step(direction, MODE_ALL))
         self._slider_ribbon.set_mask_rows(True)  # the default; `restore_ui_state` puts back what was saved
         self._slider_ribbon.mask_rows_toggled.connect(self._mask_rows.set_shown)
         self._slider_ribbon.settings_changed.connect(self._slideshow.set_settings)

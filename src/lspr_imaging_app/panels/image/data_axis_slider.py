@@ -240,7 +240,9 @@ class DataAxisSlider(QSlider):
     clicking a plot axis) rather than paging one step at a time - the
     default QSlider page-step click behavior doesn't fit a thin, tick-
     labeled track the way it fits a fat native handle. Keyboard arrow
-    stepping and a plain wheel are untouched (QSlider's own).
+    stepping and a plain wheel are untouched (QSlider's own), except at the ends: a plain wheel turned on *past* the last
+    (up) or first (down) tick emits `edge_step_requested` (+1 / -1) instead of doing nothing. The slider does not know what
+    lies beyond its ends; the owner decides (the Image panel makes it the next / previous cube for the wavelength slider).
 
     **Zoom** (2026-10-16): the ticks are drawn through an `AxisWindow` (see there for the gestures): only the stretch of
     indices in the window is on screen, the rest is off to the sides (small triangles at the rail ends say so). The window
@@ -269,9 +271,13 @@ class DataAxisSlider(QSlider):
     # so this applies equally (and harmlessly) to the cube slider if its
     # own values ever have an outlier gap.
     _GAP_BREAK_RATIO = 4.0
+    _WHEEL_NOTCH = 120  # Qt: one notch of a wheel mouse is 120 eighths of a degree
+
+    edge_step_requested = pyqtSignal(int)  # +1 / -1: the wheel was turned on past the last / first tick
 
     def __init__(self, orientation: Qt.Orientation = Qt.Orientation.Horizontal, parent: QWidget | None = None) -> None:
         super().__init__(orientation, parent)
+        self._edge_wheel = 0  # wheel angle units turned against an end of the slider, not yet worth a step (touchpads)
         self._tick_values: list[float] = []
         self._major_labels: dict[int, str] = {}
         self._cached_tick_indices: frozenset[int] | None = None
@@ -627,4 +633,28 @@ class DataAxisSlider(QSlider):
         if self.isEnabled() and self._window.handle_wheel(event, self.width()):  # Ctrl: zoom, Shift / side wheel: pan
             event.accept()
             return
+        if self.isEnabled() and self._wheel_past_an_end(event):
+            event.accept()
+            return
         super().wheelEvent(event)  # a plain wheel steps the value, as a QSlider does
+
+    def _wheel_past_an_end(self, event) -> bool:
+        """A plain wheel turned against the end it is already at: collect it, and once it adds up to one notch ask the owner
+        to go on past that end (`edge_step_requested`). Returns whether the event was used. A wheel that merely *reaches*
+        an end is left to QSlider, so a fast spin stops on the last tick and only the next notch crosses (no overshoot).
+        One request per notch, the rest of a burst is dropped: after the owner moves on, the slider is at its other end."""
+        delta = event.angleDelta().y()
+        if event.modifiers() != Qt.KeyboardModifier.NoModifier or not delta:
+            return False
+        direction = 1 if delta > 0 else -1  # up = higher value, as QSlider's own wheel
+        at_end = self.value() >= self.maximum() if direction > 0 else self.value() <= self.minimum()
+        if not at_end:
+            self._edge_wheel = 0
+            return False
+        if self._edge_wheel * direction < 0:  # turned the other way since: start counting again
+            self._edge_wheel = 0
+        self._edge_wheel += delta
+        if abs(self._edge_wheel) >= self._WHEEL_NOTCH:
+            self._edge_wheel = 0
+            self.edge_step_requested.emit(direction)
+        return True
