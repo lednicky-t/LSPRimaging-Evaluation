@@ -12,7 +12,9 @@ state of the histogram-mask-candidate selection (see
 
 from __future__ import annotations
 
+import zlib
 from dataclasses import dataclass
+from functools import lru_cache
 
 import numpy as np
 
@@ -37,9 +39,13 @@ class MaskComputationalChange:
     reasoning that justified `RoiToolbox.roi_ids_renumbered` before
     anything subscribed to it."""
 
-    reason: str  # "mask_change" | "session_restored" | "cleared"
+    reason: str  # "mask_change" | "session_restored" | "cleared" | "mask_batch"
     frame: tuple[int, float] | None
     scope: str | None  # "individual" | "persistent"
+    frames: tuple[tuple[int, float], ...] | None = None
+    """`"mask_batch"` only (2026-10-17, `MaskModule.set_mask_changes`: the Auto mask step writes hundreds of masks as one
+    step): the frames whose masks changed. `frame` and `scope` are then `None` ("every frame may have changed") for a subscriber
+    that does not know `frames`; one that does may narrow its work to them."""
     """`None` on both means *every* frame may have changed - emitted by
     `MaskModule.restore_state` (replaces the whole timeline at once, added
     2026-09-23 for session loading) and `MaskModule.clear_all_masks`
@@ -63,7 +69,14 @@ class MaskCosmeticChange:
     reason: str  # "tool_settings" | "histogram_highlight"
 
 
-@dataclass(slots=True)
+@lru_cache(maxsize=32)
+def _decode_mask(packed: bytes, height: int, width: int) -> np.ndarray:
+    bits = np.unpackbits(np.frombuffer(zlib.decompress(packed), dtype=np.uint8), count=height * width)
+    plane = bits.astype(bool).reshape((height, width))
+    plane.setflags(write=False)  # shared between every caller that asks for the same mask: nobody modifies it in place
+    return plane
+
+
 class MaskChange:
     """One committed ignore-mask edit, timeline-tagged (2026-09-21 mask/ROI
     design conversation - see the rewrite build log's matching entry for
@@ -77,17 +90,63 @@ class MaskChange:
     reference frame just to store it.
 
     `scope` is `"individual"` (applies to this exact `frame` only) or
-    `"persistent"` (applies to `frame`'s whole cube, and every cube after,
+    `"persistent"` (applies to `frame`'s whole cube, and every cube after it,
     until a later persistent change supersedes it - cube granularity only,
     no per-wavelength splitting of persistence). Persistent changes are
     stored as full replacements, not diffs, so each one can be verified
     independently and a lost/corrupted change can't silently corrupt every
     mask downstream of it.
+
+    **The pixels are kept compressed** (2026-10-17): a full-plane boolean mask is 1.2 MB at 900 x 1300, and the Auto mask step
+    makes hundreds of them (the test dataset has 35 particle passages of ~7 frames), so the mask is stored as zlib-compressed
+    packed bits (a few KB) and decoded on access. `.mask` is the full boolean array as before - **read-only**, shared through a
+    small cache; copy it before changing it. Constructing a `MaskChange` copies the pixels, so the caller's array is never
+    shared. Equal pixels at the same frame and scope compare equal, which is what `set_mask_change`'s no-op check uses.
     """
 
-    frame: tuple[int, float]
-    scope: str
-    mask: np.ndarray
+    __slots__ = ("frame", "scope", "shape", "_packed")
+
+    def __init__(self, frame: tuple[int, float], scope: str, mask: np.ndarray) -> None:
+        plane = np.asarray(mask, dtype=bool)
+        if plane.ndim != 2:
+            raise ValueError(f"a mask must be 2-D, got shape {plane.shape}")
+        self.frame = (int(frame[0]), float(frame[1]))
+        self.scope = scope
+        self.shape = (int(plane.shape[0]), int(plane.shape[1]))
+        self._packed = zlib.compress(np.packbits(plane.ravel(order="C")).tobytes(), 1)  # level 1: ~1 ms, within a few % of level 9
+
+    @property
+    def mask(self) -> np.ndarray:
+        return _decode_mask(self._packed, self.shape[0], self.shape[1])
+
+    @property
+    def stored_bytes(self) -> int:
+        """What this change holds in memory (the compressed pixels)."""
+        return len(self._packed)
+
+    def moved(self, frame: tuple[int, float], scope: str) -> MaskChange:
+        """The same pixels at another frame / scope, without decoding them (a persistent mask made individual and back)."""
+        other = object.__new__(MaskChange)
+        other.frame = (int(frame[0]), float(frame[1]))
+        other.scope = scope
+        other.shape = self.shape
+        other._packed = self._packed
+        return other
+
+    def __eq__(self, other: object) -> bool:
+        return (
+            isinstance(other, MaskChange)
+            and self.frame == other.frame
+            and self.scope == other.scope
+            and self.shape == other.shape
+            and self._packed == other._packed
+        )
+
+    def __hash__(self) -> int:
+        return hash((self.frame, self.scope, self.shape, self._packed))
+
+    def __repr__(self) -> str:
+        return f"MaskChange(frame={self.frame}, scope={self.scope!r}, shape={self.shape}, stored_bytes={len(self._packed)})"
 
 
 @dataclass(slots=True)

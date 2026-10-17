@@ -43,6 +43,9 @@ _HEIGHT = 14
 _MARK_TOP = 2.0
 _MARK_BOTTOM = 12.0
 _CHEVRON_WIDTH = 4.0
+_EVENT_TOP = 0.5  # the scan's pointers sit in the upper half of the row, mask marks use the rest
+_EVENT_BOTTOM = 6.5
+_DISMISSED_ALPHA = 70
 _HIT_PX = 5.0  # how close (pixels) the pointer must be to a mark for its tooltip
 _SOFT_ALPHA = 150
 _WHEEL_NOTCH = 120  # Qt: one notch of a wheel mouse is 120 eighths of a degree
@@ -50,6 +53,8 @@ _MAX_WHEEL_STEPS = 5  # a free-spinning wheel can deliver a lot at once
 
 
 KIND_MIXED = "mixed"  # persistent and individual together (Mask row under the Cube slider)
+KIND_EVENT = "event"  # a pointer from the transient scan (not a mask change): a short tick in the upper half of the row
+KIND_EVENT_DISMISSED = "event_dismissed"  # the same, but the user dismissed it: drawn faintly
 
 
 class StripMark(NamedTuple):
@@ -79,6 +84,7 @@ class TimelineStrip(QWidget):
     index_requested = pyqtSignal(int)  # the tick the user clicked or dragged to
     step_requested = pyqtSignal(int)  # +1 / -1: the wheel asks for the next / previous mark
     mark_menu_requested = pyqtSignal(object, object)  # a right click on a mark: the StripMark and the global QPoint
+    event_menu_requested = pyqtSignal(object, object)  # a right click on an event pointer (upper half of the row): mark and QPoint
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -87,8 +93,10 @@ class TimelineStrip(QWidget):
         self._window = AxisWindow(self)
         self._window.changed.connect(self.update)
         self._marks: tuple[StripMark, ...] = ()
+        self._event_marks: tuple[StripMark, ...] = ()  # the scan's pointers: drawn above the marks, never part of "what holds here"
         self._cursor: int | None = None
         self._color = "#38bdf8"
+        self._event_color = "#f472b6"
         self.setFixedHeight(_HEIGHT)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
 
@@ -119,6 +127,22 @@ class TimelineStrip(QWidget):
             self._marks = ordered
             self.update()
 
+    def set_event_marks(self, marks: Sequence[StripMark]) -> None:
+        """The transient scan's pointers (`KIND_EVENT` / `KIND_EVENT_DISMISSED`). A separate list on purpose: a pointer can sit on
+        a tick that also has a mask mark, and it is not a change of anything, so `governing_mark` never sees it."""
+        ordered = tuple(sorted(marks, key=lambda mark: mark.index))
+        if ordered != self._event_marks:
+            self._event_marks = ordered
+            self.update()
+
+    def event_marks(self) -> tuple[StripMark, ...]:
+        return self._event_marks
+
+    def set_event_color(self, color: str) -> None:
+        if color != self._event_color:
+            self._event_color = color
+            self.update()
+
     def set_cursor(self, index: int | None) -> None:
         if index != self._cursor:
             self._cursor = index
@@ -138,6 +162,18 @@ class TimelineStrip(QWidget):
         best_distance = _HIT_PX + 1.0
         view = self._view()
         for mark in self._marks:
+            mark_x = axis_x(mark.index, self._count, self.width(), view)
+            distance = abs(mark_x - x)
+            if self._on_screen(mark_x) and distance <= _HIT_PX and distance < best_distance:
+                best, best_distance = mark, distance
+        return best
+
+    def event_near(self, x: float) -> StripMark | None:
+        """The event pointer within a few pixels of the x pixel `x`, the nearest one if several."""
+        best: StripMark | None = None
+        best_distance = _HIT_PX + 1.0
+        view = self._view()
+        for mark in self._event_marks:
             mark_x = axis_x(mark.index, self._count, self.width(), view)
             distance = abs(mark_x - x)
             if self._on_screen(mark_x) and distance <= _HIT_PX and distance < best_distance:
@@ -189,6 +225,18 @@ class TimelineStrip(QWidget):
             else:
                 painter.drawLine(QPointF(x, _MARK_TOP), QPointF(x, _MARK_BOTTOM))
 
+        for mark in self._event_marks:  # the scan's pointers: a short tick in the upper half, over whatever mask mark is there
+            x = axis_x(mark.index, self._count, self.width(), view)
+            if not self._on_screen(x):
+                continue
+            color = QColor(self._event_color)
+            if mark.kind == KIND_EVENT_DISMISSED:
+                color.setAlpha(_DISMISSED_ALPHA)
+            pen = QPen(color, 2.0)
+            pen.setCapStyle(Qt.PenCapStyle.FlatCap)
+            painter.setPen(pen)
+            painter.drawLine(QPointF(x, _EVENT_TOP), QPointF(x, _EVENT_BOTTOM))
+
         if self._cursor is not None and 0 <= self._cursor < self._count:
             x = axis_x(self._cursor, self._count, self.width(), view)
             if left - 0.5 <= x <= left + width + 0.5:
@@ -237,6 +285,12 @@ class TimelineStrip(QWidget):
 
     def contextMenuEvent(self, event) -> None:  # type: ignore[override]
         mark = self.mark_near(event.pos().x()) if self.isEnabled() else None
+        pointer = self.event_near(event.pos().x()) if self.isEnabled() else None
+        upper = event.pos().y() < (_MARK_TOP + _MARK_BOTTOM) / 2.0
+        if pointer is not None and (mark is None or upper):  # the pointers are the upper half of the row
+            self.event_menu_requested.emit(pointer, event.globalPos())
+            event.accept()
+            return
         if mark is None:
             event.ignore()  # nothing under the pointer: no menu
             return
@@ -261,10 +315,12 @@ class TimelineStrip(QWidget):
     def event(self, event) -> bool:  # type: ignore[override]
         if event.type() == QEvent.Type.ToolTip:
             mark = self.mark_near(event.pos().x())
-            if mark is None:
+            pointer = self.event_near(event.pos().x())
+            tips = [m.tip for m in (pointer, mark) if m is not None]  # the scan's pointer first: it is on top
+            if not tips:
                 QToolTip.hideText()
                 event.ignore()
             else:
-                QToolTip.showText(event.globalPos(), mark.tip, self)
+                QToolTip.showText(event.globalPos(), "\n".join(tips), self)
             return True
         return super().event(event)

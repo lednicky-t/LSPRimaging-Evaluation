@@ -75,6 +75,11 @@ before and after it, and its undo / redo is applied only while the timeline stil
 token that command left (undo) or found (redo). Otherwise nothing is touched and
 `undo_skipped` says why - a newer stroke is never overwritten by an old undo.
 
+**The Auto mask batch (2026-10-17, maintainer OK)**: `set_mask_changes` writes many masks at once - the masks the Auto mask step makes
+from the scan's particle pointers, one individual mask per frame - as ONE undoable step with ONE `mask_changed` emission
+(`reason="mask_batch"`, the frames in `frames`). It uses the same version-token guard as the row commands, so its undo is skipped, with a
+message, if the timeline changed after it. Masks are stored compressed (`MaskChange`), so the undo entry of a batch of hundreds is a few KB.
+
 **Timeline redesign, 2026-09-21**: `set_file_mask`/`raw_mask` (one global
 array) are replaced by `set_mask_change`/`resolve_mask_source` (a frame-
 and-scope-tagged timeline - see `MaskChange`'s docstring in `model.py` for
@@ -242,7 +247,9 @@ class MaskModule(QObject):
 
     # -- undoable commands of the Mask rows ------------------------------------------------
 
-    def _row_command(self, label: str, edits: list[tuple[str, object, MaskChange | None, MaskChange | None]]) -> None:
+    def _row_command(
+        self, label: str, edits: list[tuple[str, object, MaskChange | None, MaskChange | None]], *, batch: bool = False
+    ) -> None:
         """Apply `edits` ``(scope, key, before, after)`` as one undoable step (nothing if there are none). The undo / redo
         are applied only while the timeline is in the state this command left / found (version token, see the module
         docstring); otherwise `undo_skipped` explains and nothing changes. Mask arrays are shared between the entries, never
@@ -261,6 +268,10 @@ class MaskModule(QObject):
                     store[key] = target
             self._individual_index = None
             self._version = (before_token, after_token)[which]
+            if batch:  # one emission for the whole step, naming the frames (a signal per mask would start hundreds of redraws)
+                frames = tuple((before if before is not None else after).frame for _scope, _key, before, after in edits)
+                self.mask_changed.emit(MaskComputationalChange(reason="mask_batch", frame=None, scope=None, frames=frames))
+                return
             for scope, key, before, after in edits:
                 frame = (before if before is not None else after).frame
                 self.mask_changed.emit(MaskComputationalChange(reason="mask_change", frame=frame, scope=scope))
@@ -275,6 +286,29 @@ class MaskModule(QObject):
 
         write(1)
         undo_manager.push(FunctionCommand(label, undo_fn=lambda: guarded(0), redo_fn=lambda: guarded(1)))
+
+    @instrumented("MaskModule.set_mask_changes")
+    def set_mask_changes(
+        self, items: Iterable[tuple[tuple[int, float], str, np.ndarray | MaskChange]], label: str = "Auto mask"
+    ) -> int:
+        """Write many mask changes at once, ``(frame, scope, mask)`` each, as one undoable step (one `mask_changed`, reason
+        ``"mask_batch"``). Items that equal what is stored already are skipped, a frame given twice keeps its last mask. Returns how
+        many masks were written (0 = nothing changed, nothing is emitted or pushed). The caller resolves what each mask is made
+        of (for the Auto mask step: the contour merged onto the mask in effect, `ChromaticModule.warp_mask_between` already
+        applied): like `apply_candidate`, this module does not reach into other modules. A mask may also be handed over as an
+        already built `MaskChange` (the Auto mask task compresses each mask as it goes, so the commit itself is instant)."""
+        pending: dict[tuple[str, object], list[MaskChange | None]] = {}
+        for frame, scope, mask in items:
+            if scope not in _SCOPES:
+                raise ValueError(f"scope must be one of {_SCOPES}, got {scope!r}")
+            frame = (int(frame[0]), float(frame[1]))
+            key: object = frame if scope == "individual" else frame[0]
+            store = self._individual_changes if scope == "individual" else self._persistent_changes
+            entry = pending.setdefault((scope, key), [store.get(key), None])
+            entry[1] = mask.moved(frame, scope) if isinstance(mask, MaskChange) else MaskChange(frame=frame, scope=scope, mask=mask)
+        edits = [(scope, key, before, after) for (scope, key), (before, after) in pending.items() if before != after]
+        self._row_command(label, edits, batch=True)
+        return len(edits)
 
     @instrumented("MaskModule.delete_persistent_mask")
     def delete_persistent_mask(self, cube: int) -> None:
@@ -303,7 +337,7 @@ class MaskModule(QObject):
             return
         if change.frame in self._individual_changes:
             raise ValueError(f"{change.frame[1]:g} nm of cube {int(cube)} already has an individual mask; delete it first.")
-        moved = MaskChange(frame=change.frame, scope="individual", mask=change.mask)
+        moved = change.moved(change.frame, "individual")
         self._row_command(
             "Make mask individual", [("persistent", int(cube), change, None), ("individual", change.frame, None, moved)]
         )
@@ -319,7 +353,7 @@ class MaskModule(QObject):
             return
         if key[0] in self._persistent_changes:
             raise ValueError(f"Cube {key[0]} already has its own persistent mask; delete it first.")
-        moved = MaskChange(frame=key, scope="persistent", mask=change.mask)
+        moved = change.moved(key, "persistent")
         self._row_command("Make mask persistent", [("individual", key, change, None), ("persistent", key[0], None, moved)])
 
     # -- session restore ------------------------------------------------
@@ -443,21 +477,15 @@ class MaskModule(QObject):
         store: dict = self._individual_changes if scope == "individual" else self._persistent_changes
         key: object = frame if scope == "individual" else frame[0]
 
-        normalized = None if mask is None else np.asarray(mask, dtype=bool)
         existing = store.get(key)
-        same = (existing is None and normalized is None) or (
-            existing is not None
-            and normalized is not None
-            and existing.mask.shape == normalized.shape
-            and np.array_equal(existing.mask, normalized)
-        )
-        if same:
+        incoming = None if mask is None else MaskChange(frame=frame, scope=scope, mask=mask)  # copies, and compresses
+        if existing == incoming:  # both absent, or the same pixels at the same frame and scope
             return
 
-        if normalized is None:
+        if incoming is None:
             store.pop(key, None)
         else:
-            store[key] = MaskChange(frame=frame, scope=scope, mask=normalized.copy())
+            store[key] = incoming
         self._touch()
         self.mask_changed.emit(MaskComputationalChange(reason="mask_change", frame=frame, scope=scope))
 

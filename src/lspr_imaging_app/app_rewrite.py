@@ -47,6 +47,10 @@ from .gui.app_theme import LSPRI_BRIGHT_THEME, LSPRI_DARK_THEME, apply_app_theme
 from .gui.windows_titlebar import apply_windows_titlebar_color
 from .image_tools.mask_scope import MaskScope
 from .image_tools.chromatic_auto_task import TASK_ID as CHROMATIC_TASK_ID, ChromaticAutoDetect
+from .image_tools.mask.transient_events import TransientEventsModule
+from .image_tools.mask_auto_task import TASK_ID as AUTO_MASK_TASK_ID
+from .image_tools.mask_export_task import TASK_ID as MASK_EXPORT_TASK_ID
+from .image_tools.mask_scan_task import TASK_ID as SCAN_TASK_ID, TransientScanTask
 from .roi.array_task import TASK_ID as ARRAY_TASK_ID
 from .panels.image.chromatic_tab import ChromaticUiValues
 from .image_tools import (
@@ -397,6 +401,7 @@ def capture_session(
     selection: SelectionModule,
     analysis_settings: AnalysisSettingsModule,
     frame_roles: FrameRolesModule | None = None,
+    transient_events: TransientEventsModule | None = None,
 ) -> SessionState:
     """Read every module's current state into a plain, Qt-free
     :class:`SessionState` (2026-09-23).
@@ -427,6 +432,7 @@ def capture_session(
         selected_wavelength=selection.current_wavelength(),
         selected_roi_ids=tuple(sorted(selection.selected_roi_ids())),
         **({} if frame_roles is None else {"frame_roles": frame_roles.state()}),
+        **({} if transient_events is None else {"transient_events": transient_events.state()}),
     )
 
 
@@ -440,6 +446,7 @@ def apply_session(
     selection: SelectionModule,
     analysis_settings: AnalysisSettingsModule,
     frame_roles: FrameRolesModule | None = None,
+    transient_events: TransientEventsModule | None = None,
 ) -> None:
     """Push a loaded :class:`SessionState` into every module.
 
@@ -461,6 +468,8 @@ def apply_session(
     analysis_settings.restore_state(state.metric_settings, state.statistics_settings)
     if frame_roles is not None:
         frame_roles.restore_state(state.frame_roles)
+    if transient_events is not None:
+        transient_events.restore_state(state.transient_events)
 
     selection.set_cube(state.selected_cube)
     selection.set_wavelength(state.selected_wavelength)
@@ -495,6 +504,7 @@ def _build_session_autosave(
     selection: SelectionModule,
     analysis_settings: AnalysisSettingsModule,
     frame_roles: FrameRolesModule | None = None,
+    transient_events: TransientEventsModule | None = None,
 ) -> SessionAutosave:
     """Build the debounce, and wire every module's own change signal to
     ``schedule()`` it (2026-09-23).
@@ -519,7 +529,8 @@ def _build_session_autosave(
     `autosave.set_root()`."""
     autosave = SessionAutosave(
         capture=lambda: capture_session(
-            geometry, mask, chromatic, background, roi_toolbox, selection, analysis_settings, frame_roles
+            geometry, mask, chromatic, background, roi_toolbox, selection, analysis_settings, frame_roles,
+            transient_events,
         ),
         naming=lambda: _frame_naming(dataset),
     )
@@ -540,6 +551,8 @@ def _build_session_autosave(
     ]
     if frame_roles is not None:
         signals.append(frame_roles.roles_changed)
+    if transient_events is not None:
+        signals.append(transient_events.events_changed)  # cosmetic for the analysis, but part of the session
     for signal in signals:
         signal.connect(autosave.schedule)
 
@@ -558,6 +571,7 @@ def _wire_session_coordinator(
     selection: SelectionModule,
     analysis_settings: AnalysisSettingsModule,
     frame_roles: FrameRolesModule | None = None,
+    transient_events: TransientEventsModule | None = None,
 ) -> None:
     """Restore into every module whenever the *active session* changes -
     on a dataset load, an explicit session switch, or a new session's
@@ -611,7 +625,7 @@ def _wire_session_coordinator(
         with autosave.suspended():
             apply_session(
                 state or SessionState(), geometry, mask, chromatic, background,
-                roi_toolbox, selection, analysis_settings, frame_roles,
+                roi_toolbox, selection, analysis_settings, frame_roles, transient_events,
             )
         autosave.set_root(root)
 
@@ -645,6 +659,8 @@ class _Modules:
     analysis_engine: AnalysisEngine
     session_autosave: SessionAutosave
     chromatic_auto: ChromaticAutoDetect
+    transient_events: TransientEventsModule
+    transient_scan: TransientScanTask
 
 
 class _SettingsWriter:
@@ -686,6 +702,8 @@ def _build_modules() -> _Modules:
     reference_frame = ReferenceFrameModule()
     frame_roles = FrameRolesModule(dataset, reference_frame)
     highlight_range = HighlightRangeModule()
+    # The pointers a Mask-tab scan finds (cosmetic: never a mask, never a recompute); part of the session.
+    transient_events = TransientEventsModule()
     # Rectangle/lasso area selection limiting the Image panel's editing tools
     # and the Histogram plot (transient, not persisted); lives in displayed
     # pixel space, so it is dropped when rotate/flip/crop changes the grid.
@@ -713,11 +731,13 @@ def _build_modules() -> _Modules:
     # lands inside a raw TIFF/OME-Zarr folder it doesn't own (see
     # ImageDataset.home).
     session_autosave = _build_session_autosave(
-        dataset, geometry, mask, chromatic, background, roi_toolbox, selection, analysis_settings, frame_roles
+        dataset, geometry, mask, chromatic, background, roi_toolbox, selection, analysis_settings, frame_roles,
+        transient_events,
     )
     _wire_session_coordinator(
         session_coordinator, session_autosave, analysis_engine,
         geometry, mask, chromatic, background, roi_toolbox, selection, analysis_settings, frame_roles,
+        transient_events,
     )
     dataset.dataset_loaded.connect(lambda ds: session_coordinator.bind_dataset(ds.home))
     dataset.dataset_cleared.connect(session_coordinator.unbind)
@@ -737,6 +757,7 @@ def _build_modules() -> _Modules:
         highlight_range=highlight_range, area_selection=area_selection, analysis_settings=analysis_settings,
         session_coordinator=session_coordinator, analysis_engine=analysis_engine,
         session_autosave=session_autosave, chromatic_auto=ChromaticAutoDetect(chromatic),
+        transient_events=transient_events, transient_scan=TransientScanTask(transient_events),
         reference_auto=ReferenceAutoFind(dataset, selection, reference_frame, frame_roles),
         frame_roles=frame_roles,
         cube_display=CubeDisplayModule(dataset),
@@ -810,6 +831,8 @@ def _build_image_panel(m: _Modules, ui_state: UiStateStore, theme_obj) -> ImageP
         mask_scope=m.mask_scope,
         area_selection=m.area_selection,
         chromatic_auto=m.chromatic_auto,
+        transient_events=m.transient_events,
+        transient_scan=m.transient_scan,
         cube_display=m.cube_display,
         analysis_running=m.analysis_engine.is_running,
         frame_roles=m.frame_roles,
@@ -950,10 +973,19 @@ def _build_status_bar(
     m.reference_auto.task_finished.connect(task_indicator.finish)
     m.chromatic_auto.task_progress.connect(task_indicator.report)
     m.chromatic_auto.task_finished.connect(task_indicator.finish)
+    m.transient_scan.task_progress.connect(task_indicator.report)
+    m.transient_scan.task_finished.connect(task_indicator.finish)
+    image_panel.mask_export.task_progress.connect(task_indicator.report)
+    image_panel.mask_export.task_finished.connect(task_indicator.finish)
+    image_panel.mask_auto.task_progress.connect(task_indicator.report)
+    image_panel.mask_auto.task_finished.connect(task_indicator.finish)
     image_panel.array_action.task_progress.connect(task_indicator.report)
     image_panel.array_action.task_finished.connect(task_indicator.finish)
     cancel_by_task = {
         CHROMATIC_TASK_ID: m.chromatic_auto.cancel,
+        SCAN_TASK_ID: m.transient_scan.cancel,
+        AUTO_MASK_TASK_ID: image_panel.mask_auto.cancel,
+        MASK_EXPORT_TASK_ID: image_panel.mask_export.cancel,
         ARRAY_TASK_ID: image_panel.array_action.cancel,
         REFERENCE_TASK_ID: m.reference_auto.cancel,
     }

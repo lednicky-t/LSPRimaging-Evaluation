@@ -1822,6 +1822,13 @@ def load_image_array(path_str: str) -> np.ndarray:
     return _load_image_array_cached(path_str)
 
 
+def load_image_array_uncached(path_str: str) -> np.ndarray:
+    """The same plane as `load_image_array`, but not remembered (2026-10-16): a scan that reads thousands of planes once each
+    (the Mask tab's transient scan) would push the planes the user is looking at out of the 160-plane cache below. The array is
+    the caller's own, writable."""
+    return _load_image_array_uncached(path_str)
+
+
 # 160 planes (was 96, 2026-10-11): the Image panel reads the viewed cube's other
 # wavelengths ahead (panels/image/prefetch.py), and with 27 wavelengths per cube
 # 96 held only ~3.5 cubes. Planes are float32: ~4.7 MB each at 900x1300, so the

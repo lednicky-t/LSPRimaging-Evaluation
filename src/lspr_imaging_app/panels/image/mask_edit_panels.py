@@ -75,7 +75,14 @@ from ...dataset import DatasetModule
 from ...image_tools import ChromaticModule, GeometryModule, MaskModule, MaskScopeModule
 from ...image_tools.mask.model import MaskSettings
 from ...selection import HighlightRangeModule
-from ..mask_edit_common import ADD_COLOR, SUBTRACT_COLOR, action_button, disabled_safe_icon, resolve_mask_edit_base
+from ..mask_edit_common import (
+    ADD_COLOR,
+    ICON_SIZE,
+    SUBTRACT_COLOR,
+    action_button,
+    disabled_safe_icon,
+    resolve_mask_edit_base,
+)
 from ..mask_highlight_editor import HistogramHighlightMaskEditor
 
 if TYPE_CHECKING:
@@ -97,13 +104,54 @@ def _narrow_spinbox(spinbox: QAbstractSpinBox, sample_text: str) -> None:
     this, `make_compact_spinbox`'s own deferred auto-sizing reserves room
     for the *technical* max (e.g. `relative_profile_sigma_px`'s range goes
     to 2000, so "2000 px" worth of width) even though every realistic value
-    here is 1-2 digits. Setting an explicit fixed width makes that deferred
-    auto-sizing back off on its own (`_apply_content_based_minimum_width`
-    only overrides a spinbox whose `minimumWidth()` is still at Qt's bare
-    frame default - `setFixedWidth` already raises it past that threshold),
-    so this must run after `make_compact_spinbox`, not before."""
-    metrics = QFontMetrics(spinbox.font())
-    spinbox.setFixedWidth(metrics.horizontalAdvance(sample_text) + 14)
+    here is 1-2 digits. This must run after `make_compact_spinbox`, not
+    before.
+
+    **A bare `setFixedWidth` did not hold** (found 2026-10-16, measured
+    offscreen: the boxes were 56 px wide around 34 px of text). The theme's
+    `QSpinBox { min-width: 0px }` rule makes Qt reset `minimumWidth()` to 0
+    every time the widget is polished, which defeats the "already past the
+    threshold" back-off in `_apply_content_based_minimum_width`, so the
+    deferred auto-sizing then set the minimum to the width of "2000 px" /
+    "500.0 %" anyway. The width is therefore also written into the box's own
+    `min-width`/`max-width` style rules, which beat the theme's rule, so the
+    minimum survives every polish. `ensurePolished()` comes first so the text
+    is measured in the font the box is drawn with (Segoe UI 9 pt from the
+    theme), not the application default it has before its style sheet applies.
+
+    Also drops the field's frame (2026-10-16, maintainer request: "number
+    controls... without field frame so it is more compact"): no border or
+    background, 2 px side padding instead of the theme's 5 px. The width is
+    the text plus 10 px: 4 px padding, 4 px that `QLineEdit` keeps free
+    inside itself, 2 px spare. The local stylesheet wins over the app-wide one
+    for conflicts and leaves the theme's text colour and font alone."""
+    spinbox.setStyleSheet("QAbstractSpinBox { border: none; background: transparent; padding: 2px 2px; }")
+    spinbox.ensurePolished()
+    width = QFontMetrics(spinbox.font()).horizontalAdvance(sample_text) + 10
+    spinbox.setStyleSheet(
+        "QAbstractSpinBox { border: none; background: transparent; padding: 2px 2px; "
+        f"min-width: {width}px; max-width: {width}px; }}"
+    )
+    spinbox.setFixedWidth(width)
+
+
+_PAIR_BUTTON_WIDTH = ICON_SIZE + 2  # 1 px of air each side of the 22 px icon (the lone-icon buttons are 28 wide)
+
+
+def _add_icon_pair(layout: QHBoxLayout, first: QToolButton, second: QToolButton) -> None:
+    """Adds a +/- (or +/erase) icon pair to `layout` as one tight unit:
+    narrower buttons and no gap between them (2026-10-16, maintainer
+    request: "reduce distance between icons plus and minus"). Centre to
+    centre the pair went from 30 px (28 px buttons + 2 px layout spacing)
+    to 24 px. A nested layout keeps the row's own spacing for everything
+    else."""
+    pair = QHBoxLayout()
+    pair.setContentsMargins(0, 0, 0, 0)
+    pair.setSpacing(0)
+    for button in (first, second):
+        button.setFixedWidth(_PAIR_BUTTON_WIDTH)
+        pair.addWidget(button)
+    layout.addLayout(pair)
 
 
 def _push_tool_settings(mask: MaskModule, **overrides: object) -> None:
@@ -163,8 +211,7 @@ class HistogramSelectionEditPanel(QWidget):
         layout = QHBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(2)
-        layout.addWidget(self._add_button)
-        layout.addWidget(self._subtract_button)
+        _add_icon_pair(layout, self._add_button, self._subtract_button)
         layout.addStretch(1)
 
         image_panel.image_rendered.connect(self._refresh_enabled)
@@ -208,8 +255,7 @@ class _TwoSpinToolSettingsPanel(QWidget):
         layout.addWidget(self._spin_a)
         layout.addWidget(self._spin_b)
         layout.addSpacing(4)
-        layout.addWidget(self._add_button)
-        layout.addWidget(self._subtract_button)
+        _add_icon_pair(layout, self._add_button, self._subtract_button)
         layout.addStretch(1)
 
         self._sync_from_settings(mask.settings())
@@ -500,8 +546,7 @@ class DrawEditPanel(QWidget):
         layout.setSpacing(2)
         layout.addWidget(self._size_spin)
         layout.addSpacing(4)
-        layout.addWidget(self._add_mode_button)
-        layout.addWidget(self._erase_mode_button)
+        _add_icon_pair(layout, self._add_mode_button, self._erase_mode_button)
         layout.addStretch(1)
 
         self._sync_from_settings(mask.settings())

@@ -27,7 +27,7 @@ from .canvas_tools import _BUTTON_SIZE, _ICON_SIZE
 from .frame_tools import FrameToolsWidget, captioned_group
 from .ribbon_drawer import RibbonDrawer
 from .mask_rows import MASK_COLOR
-from .slideshow import MODE_ALL, MODE_MASK_STATES, MODE_ONE_WAVELENGTH, MODE_ROI_STATES, SlideshowSettings
+from .slideshow import MODE_ALL, MODE_EVENTS, MODE_MASK_STATES, MODE_ONE_WAVELENGTH, MODE_ROI_STATES, SlideshowSettings
 from .slider_colors import SliderColorControls
 from .slideshow_settings_panel import SlideshowSettingsPanel
 
@@ -188,6 +188,7 @@ class SliderRibbon(QWidget):
             MODE_ONE_WAVELENGTH: "cube (on the wavelength shown now)",
             MODE_ROI_STATES: "ROI layout change (a mark of the ROIs row, on the wavelength shown now)",
             MODE_MASK_STATES: "mask change (a mark of the Mask row, on the wavelength shown now)",
+            MODE_EVENTS: "scan pointer (a pink tick of the Mask row, on the wavelength shown now)",
         }.get(self._settings.mode, "frame")
         self._previous.setToolTip(f"Previous {what}. Hold to keep stepping. What it steps through is set in the settings next to it.")
         self._next.setToolTip(f"Next {what}. Hold to keep stepping. What it steps through is set in the settings next to it.")

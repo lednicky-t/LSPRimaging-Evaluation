@@ -17,6 +17,7 @@ LSPRi is being rebuilt from scratch on the `rewrite` branch. This is an approved
 ### Where the rewrite stands (2026-10-07; detail and open decisions: `docs/whole_app_audit_2026-10-07.md`)
 
 - **Built, with UI**: Dataset (Workflow panel); Image panel (ribbon tabs View, Image tools, Mask, ROIs, Chromatic, Background; ROI overlays, area selection, cursor readout, scale bar); Histogram panel; ROI / Group table; task indicator; sessions with autosave; layout presets; remembered UI state; Edit -> Undo / Redo.
+- **Mask-tab Scan and Auto mask (2026-10-17)**: *Scan* finds dark, sharp objects that crossed the field (particles, hairs, bubbles) and marks those frames with pink pointers on both Mask rows; `TransientEventsModule` holds the list (cosmetic, never a mask, saved in the session, schema 1.4). *Auto mask* is the separate step that turns the standing particle pointers into individual masks (contour grown by N px, merged with the mask in effect, one undo step; `mask_auto_task.py`, also from a pointer's right-click menu). The PNG group also has *Export all masks* (one named PNG per mask + `masks_index.csv`). Read `docs/auto_transient_scan_and_mask_plan_2026-10-16.md` (sections 9-11) and `docs/auto_transient_mask_exploration_2026-10-16.md`; command line: `tools/scan_transients.py`.
 - **Backend built, no UI calls it yet**: `AnalysisEngine.run_analysis` (so the app cannot compute a result), `RoiToolbox.detect_rois` (ROIs are added by hand), fractional pixel weighting, `analysis/statistics.py`.
 - **Scaffold only** (`NotImplementedError`): Spectra and Sensorgram panels. Both need analysis results, so the Run controls come first.
 - **Tests**: run one pytest process per test file (all files in one process stalls); offscreen Qt on Windows has no fonts, so a test that measures text width calls `tests/_qt_fonts.py` `load_system_fonts()`.
@@ -96,7 +97,7 @@ Every user-changeable control is remembered across restarts unless the maintaine
 - **Selection is never undoable.**
 - **Reachable from the UI** (2026-10-07): Edit -> Undo / Redo, Ctrl+Z and Ctrl+Y / Ctrl+Shift+Z, application-wide (`app_rewrite.py` `_wire_edit_menu`). Refused while an analysis runs (undoing a ROI delete or reorder renumbers ids and the engine would wait for the run on the GUI thread); `UndoManager` does nothing while a gesture batch is open.
 - Wired: `RoiToolbox`, `GeometryModule`, `ChromaticModule`, `BackgroundModule`.
-- **`MaskModule` is wired only for the Mask rows' commands** (delete / make individual / make persistent a mask, maintainer OK 2026-10-16): painting, loading and clearing masks are still not undoable, so each row command carries a version token and its undo is skipped, with a message, if the mask changed after it (`image_tools/mask/module.py` docstring). Check in before wiring anything more.
+- **`MaskModule` is wired only for the Mask rows' commands** (delete / make individual / make persistent a mask, maintainer OK 2026-10-16) **and the Auto mask batch** (`set_mask_changes`: all the masks made from the scan's pointers are one undo step, maintainer OK 2026-10-17): painting, loading and clearing masks are still not undoable, so each of these commands carries a version token and its undo is skipped, with a message, if the mask changed after it (`image_tools/mask/module.py` docstring). Masks are stored compressed (`MaskChange`, a few KB each; `.mask` is read-only), which is what makes a batch of hundreds cheap to undo. Check in before wiring anything more.
 
 ## Sessions
 
@@ -125,7 +126,7 @@ A **dataset** is raw images plus acquisition metadata, never written to. A **ses
 - Don't design shared infrastructure for a future acquisition app.
 - Don't make a new session copy a prior session's settings or ROIs. New sessions start blank (maintainer decision, 2026-09-26).
 - Don't build session rename, duplicate, or delete, or an importer for the stable app's pre-existing `analysis/roi_table.json`, `measurement_backup.h5`, or `processing_profile.json`.
-- Don't wire more of `MaskModule` to undo than the Mask rows' commands without checking in (painting needs batching and a memory decision: 200 entries x full-image arrays).
+- Don't wire more of `MaskModule` to undo than the Mask rows' commands and the Auto mask batch without checking in (painting needs stroke batching).
 
 ## References
 

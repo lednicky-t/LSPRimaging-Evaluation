@@ -55,7 +55,10 @@ from PyQt6.QtWidgets import QFileDialog, QHBoxLayout, QMessageBox, QWidget
 
 from ...dataset import DatasetModule
 from ...image_tools import MaskModule, MaskScopeModule
+from ...analysis.provenance import FrameNamingScheme
+from ...image_tools.mask.export import INDEX_FILE_NAME, planned_files
 from ...image_tools.mask.io import read_mask_image, write_mask_image
+from ...image_tools.mask_export_task import MaskExportTask
 from ..mask_edit_common import action_button
 
 if TYPE_CHECKING:
@@ -143,7 +146,12 @@ class MaskClearAction(_FrameTrackingWidget):
 
 
 class MaskPngActions(_FrameTrackingWidget):
-    """"PNG" group - Load (download) / Save (upload)."""
+    """"PNG" group - Load (download) / Save (upload) / Export all (archive).
+
+    **Export all** (2026-10-17, maintainer request): every mask of the timeline - persistent and individual - as one PNG per mask,
+    named per frame (``mask_cube061_wl620_individual.png``) in a folder you choose, plus ``masks_index.csv`` (what each file is and what
+    it applies to). Written off the GUI thread (`MaskExportTask`, progress and Cancel in the status bar); a folder that already holds
+    files of those names asks before replacing them."""
 
     def __init__(
         self,
@@ -152,12 +160,15 @@ class MaskPngActions(_FrameTrackingWidget):
         mask_scope: MaskScopeModule,
         image_panel: ImagePanel,
         parent: QWidget | None = None,
+        *,
+        export_task: MaskExportTask | None = None,
     ) -> None:
         super().__init__(parent)
         self._mask = mask
         self._dataset = dataset
         self._mask_scope = mask_scope
         self._image_panel = image_panel
+        self._export_task = export_task if export_task is not None else MaskExportTask(self)
 
         self._load_button = action_button(self, "download", _LOAD_COLOR, "Load a mask image into the current frame/scope.")
         self._load_button.clicked.connect(self._on_load)
@@ -165,12 +176,27 @@ class MaskPngActions(_FrameTrackingWidget):
         self._save_button = action_button(self, "upload", _SAVE_COLOR, "Save the current frame's mask as an image.")
         self._save_button.clicked.connect(self._on_save)
 
+        self._export_button = action_button(
+            self, "archive", _SAVE_COLOR,
+            "Export every mask of the timeline (persistent and individual) as PNG files named per frame, into a folder you choose, "
+            "with an index of what each one is.",
+        )
+        self._export_button.clicked.connect(self._on_export)
+
         layout = QHBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(2)
         layout.addWidget(self._load_button)
         layout.addWidget(self._save_button)
+        layout.addWidget(self._export_button)
 
+        self._export_task.completed.connect(self._on_export_completed)
+        self._export_task.failed.connect(lambda message: self._image_panel.tool_status_changed.emit(message))
+        self._export_task.cancelled.connect(
+            lambda: self._image_panel.tool_status_changed.emit("Export cancelled; the files written so far are in the folder.")
+        )
+        self._export_task.running_changed.connect(lambda _running: self._refresh_enabled())
+        mask.mask_changed.connect(lambda _change: self._refresh_enabled())
         self._connect_frame_tracking(image_panel)
         self._refresh_enabled()
 
@@ -178,6 +204,35 @@ class MaskPngActions(_FrameTrackingWidget):
         enabled = self._last_frame is not None
         self._load_button.setEnabled(enabled)
         self._save_button.setEnabled(enabled)
+        self._export_button.setEnabled(self._mask.has_mask_changes() and not self._export_task.is_running())
+
+    def _on_export(self) -> None:
+        changes = self._mask.mask_changes()
+        if not changes:
+            return
+        naming = FrameNamingScheme.for_dataset(list(self._dataset.spectral_cubes()), list(self._dataset.wavelengths()))
+        start = self._starting_directory()
+        folder = QFileDialog.getExistingDirectory(self, "Export all masks to a folder", str(start))
+        if not folder:
+            return
+        target = Path(folder)
+        clashes = [name for name in [*planned_files(changes, naming), INDEX_FILE_NAME] if (target / name).exists()]
+        if clashes:
+            choice = QMessageBox.question(
+                self,
+                "Replace files?",
+                f"{len(clashes)} files of these names are already in this folder (for example {clashes[0]}). Replace them?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if choice != QMessageBox.StandardButton.Yes:
+                return
+        self._export_task.start(changes, target, naming)
+
+    def _on_export_completed(self, result) -> None:
+        self._image_panel.tool_status_changed.emit(
+            f"Exported {result.written} masks (one PNG per mask, named per frame) and {INDEX_FILE_NAME} to {result.folder}."
+        )
 
     def _starting_directory(self) -> Path:
         home = self._dataset.dataset_home()

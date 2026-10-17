@@ -78,6 +78,7 @@ from __future__ import annotations
 import html
 
 import itertools
+import math
 import time
 import logging
 from collections.abc import Callable
@@ -136,6 +137,10 @@ from .landmark_overlay import draw_landmarks
 from .slider_ticks import cube_slider_major_ticks, wavelength_slider_major_ticks
 from .transforms_settings import TransformsSection
 from ...image_tools.chromatic_auto_task import ChromaticAutoDetect
+from ...image_tools.mask.transient_events import TransientEventsModule
+from ...image_tools.mask_auto_task import MaskAutoTask
+from ...image_tools.mask_export_task import MaskExportTask
+from ...image_tools.mask_scan_task import TransientScanTask
 from ...roi.array_task import ArrayAction
 from ...roi.display_style import RoiDisplayStyle
 from ...roi.model import SCOPE_PERSISTENT
@@ -206,6 +211,7 @@ from .slideshow import (
     END_CUBE,
     END_DATASET,
     MODE_ALL,
+    MODE_EVENTS,
     MODE_MASK_STATES,
     MODE_ONE_WAVELENGTH,
     MODE_ROI_STATES,
@@ -370,6 +376,8 @@ class ImagePanel(QWidget):
         mask_scope: MaskScopeModule,
         area_selection: AreaSelectionModule | None = None,
         chromatic_auto: ChromaticAutoDetect | None = None,
+        transient_events: TransientEventsModule | None = None,
+        transient_scan: TransientScanTask | None = None,
         cube_display: CubeDisplayModule | None = None,
         initial_chromatic_values: ChromaticUiValues | None = None,
         initial_chromatic_view: tuple[bool, bool] = (True, False),
@@ -413,6 +421,11 @@ class ImagePanel(QWidget):
         self._chromatic = chromatic
         # Optional like `area_selection`: tests build the panel without the app shell.
         self._chromatic_auto = chromatic_auto if chromatic_auto is not None else ChromaticAutoDetect(chromatic, self)
+        # The pointers of the Mask-tab scan and the task that makes them; optional like the ones above (tests build the panel alone).
+        self._transient_events = transient_events if transient_events is not None else TransientEventsModule(self)
+        self._transient_scan = transient_scan if transient_scan is not None else TransientScanTask(self._transient_events, self)
+        self._mask_auto = MaskAutoTask(self._mask, self)  # Mask tab, Auto mask group (pointers -> masks, one undo step)
+        self._mask_export = MaskExportTask(self)  # Mask tab, PNG group: export every mask
         self._array_action = ArrayAction(self)  # ROIs tab, Array group (panels/image/array_actions.py)
         # Persistent / Individual ROI edit scope, shared with the ROI table (optional so tests build the panel alone).
         self._roi_scope = roi_scope if roi_scope is not None else RoiScopeModule(self)
@@ -500,6 +513,8 @@ class ImagePanel(QWidget):
         if app is not None:
             app.aboutToQuit.connect(self._renderer.stop)
             app.aboutToQuit.connect(self._chromatic_auto.shutdown)
+            app.aboutToQuit.connect(self._transient_scan.shutdown)
+            app.aboutToQuit.connect(self._mask_export.shutdown)
             app.aboutToQuit.connect(self._array_action.shutdown)
 
         self._redraw_timer = QTimer(self)
@@ -571,6 +586,8 @@ class ImagePanel(QWidget):
         self._apply_roi_overlay_style()
         self._sync_roi_overlay_controls()
         self._roi_tab.bind_ui_state(store)
+        self._mask_tab.scan_controls.bind_ui_state(store)
+        self._mask_tab.auto_controls.bind_ui_state(store)
         self._on_group_labels_changed()
         saved_scope = store.get(ROI_SCOPE.key)
         if saved_scope in ("persistent", "individual"):
@@ -587,6 +604,16 @@ class ImagePanel(QWidget):
     def edit_target(self) -> RoiEditTarget:
         """Where a ROI geometry edit lands (shared with the ROI table)."""
         return self._edit_target
+
+    @property
+    def mask_export(self) -> MaskExportTask:
+        """The export-all-masks task (the app shell connects it to the task indicator)."""
+        return self._mask_export
+
+    @property
+    def mask_auto(self) -> MaskAutoTask:
+        """The Auto mask task (the app shell connects it to the task indicator)."""
+        return self._mask_auto
 
     @property
     def array_action(self) -> ArrayAction:
@@ -856,6 +883,8 @@ class ImagePanel(QWidget):
         self._mask_tab = MaskTab(
             self._mask, self._geometry, self._chromatic, self._dataset, self._highlight_range,
             self._mask_scope, self._mask_tint, self, self,
+            events=self._transient_events, scan=self._transient_scan, auto=self._mask_auto, export=self._mask_export,
+            status=self._on_tool_status, visible_cubes=self._visible_cube_range,
         )
         self._mask_tab.overlay_visibility_changed.connect(self._on_mask_overlay_visibility_changed)
         self._mask_tab.overlay_color_changed.connect(self._on_mask_overlay_color_changed)
@@ -1125,6 +1154,8 @@ class ImagePanel(QWidget):
             wavelength_window=self._wavelength_slider.axis_window(),
             title_style=_slider_axis_title_style(get_active_theme().text_muted),
             status=self._on_tool_status,
+            events=self._transient_events,
+            auto_mask=lambda records: self._mask_tab.auto_controls.start(records),
         )
         self._mask_rows.cube_strip.index_requested.connect(self._cube_slider.setValue)
         self._mask_rows.wavelength_strip.index_requested.connect(self._wavelength_slider.setValue)
@@ -1707,8 +1738,22 @@ class ImagePanel(QWidget):
         except (ValueError, KeyError) as exc:
             self._on_tool_status(f"ROI row: {exc}")
 
+    def _visible_cube_range(self) -> tuple[int, int] | None:
+        """The first and last cube number in view on the Cube slider, or ``None`` when it shows every cube (what the Scan group's
+        "only the cubes in view" switch scans)."""
+        cubes = self._dataset.spectral_cubes()
+        window = self._cube_slider.axis_window()
+        if len(cubes) < 2 or not window.is_zoomed():
+            return None
+        low, high = window.view_for(len(cubes))
+        first, last = max(math.ceil(low - 1e-9), 0), min(math.floor(high + 1e-9), len(cubes) - 1)
+        return (cubes[first], cubes[last]) if first <= last else None
+
     def _state_cubes_for_mode(self, mode: str) -> tuple[int, ...]:
-        """The cubes a "states" slideshow mode steps through: the marks of the ROIs row or of the Mask row under the Cube slider."""
+        """The cubes a "states" slideshow mode steps through: the marks of the ROIs row or of the Mask row under the Cube slider,
+        or the cubes with a scan pointer."""
+        if mode == MODE_EVENTS:
+            return self._mask_rows.event_state_cubes()
         return self._mask_rows.state_cubes() if mode == MODE_MASK_STATES else self._roi_state_cubes()
 
     def _roi_state_cubes(self) -> tuple[int, ...]:
@@ -2405,7 +2450,7 @@ class ImagePanel(QWidget):
         )
         if (
             saved.speed not in SPEEDS
-            or saved.mode not in (MODE_ALL, MODE_ONE_WAVELENGTH, MODE_ROI_STATES, MODE_MASK_STATES)
+            or saved.mode not in (MODE_ALL, MODE_ONE_WAVELENGTH, MODE_ROI_STATES, MODE_MASK_STATES, MODE_EVENTS)
             or saved.end not in (END_CUBE, END_DATASET)
         ):
             saved = SlideshowSettings()  # a hand-edited settings file

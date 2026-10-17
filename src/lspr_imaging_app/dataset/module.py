@@ -79,6 +79,7 @@ from .io import (
     export_ome_zarr_dataset,
     load_dataset,
     load_image_array,
+    load_image_array_uncached,
     load_image_shape,
 )
 from .model import (
@@ -168,6 +169,13 @@ class DatasetModule(QObject):
         genuinely needs to mutate the result must copy it first."""
         record = self.current_image(cube_index, wavelength)
         return load_image_array(str(record.path))
+
+    def load_plane_uncached(self, cube_index: int, wavelength: float) -> np.ndarray:
+        """`load_plane`, but the plane is not kept in the shared read cache and the array is the caller's own (2026-10-16).
+        For a task that reads thousands of planes once each (the Mask tab's transient scan): going through the cache would
+        evict the frames the Image panel is showing. Safe to call from a worker thread."""
+        record = self.current_image(cube_index, wavelength)
+        return load_image_array_uncached(str(record.path))
 
     def raw_plane_shape(self) -> tuple[int, int] | None:
         """The raw (height, width) every frame in the loaded dataset shares -

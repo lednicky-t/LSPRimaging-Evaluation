@@ -33,6 +33,7 @@ from .slideshow import (
     END_CUBE,
     END_DATASET,
     MODE_ALL,
+    MODE_EVENTS,
     MODE_MASK_STATES,
     MODE_ONE_WAVELENGTH,
     MODE_ROI_STATES,
@@ -90,7 +91,12 @@ class SlideshowSettingsPanel(QWidget):
             "Step through the cubes with a mark on the Mask row (a mask of their own) on the wavelength shown now.",
         )
         self._mode_mask.setIconSize(QSize(_ICON_SIZE * 2, _ICON_SIZE))
-        self._end_cube = self._button(True, "End of the show = the last frame of the cube it is in.")
+        self._mode_events = self._button(
+            True,
+            "Step through the cubes with a pointer of the Mask scan (something dark that crossed the field) on the wavelength shown now.",
+        )
+        self._mode_events.setIconSize(QSize(_ICON_SIZE * 2, _ICON_SIZE))
+        self._end_cube =self._button(True, "End of the show = the last frame of the cube it is in.")
         self._end_dataset = self._button(True, "End of the show = the last frame of the dataset.")
         self._repeat = self._button(True, "Repeat: start again at the beginning instead of stopping.")
         self._skip_ignored = self._button(True, "Skip ignored frames: leave them out of the show.")
@@ -106,7 +112,7 @@ class SlideshowSettingsPanel(QWidget):
             "(about 5x faster to paint; the normal width returns when Play stops).",
         )
         for group, buttons in (
-            (QButtonGroup(self), (self._mode_one, self._mode_all, self._mode_roi, self._mode_mask)),
+            (QButtonGroup(self), (self._mode_one, self._mode_all, self._mode_roi, self._mode_mask, self._mode_events)),
             (QButtonGroup(self), (self._end_cube, self._end_dataset)),
         ):
             group.setExclusive(True)
@@ -116,6 +122,7 @@ class SlideshowSettingsPanel(QWidget):
         self._mode_all.clicked.connect(lambda: self._change(mode=MODE_ALL))
         self._mode_roi.clicked.connect(lambda: self._change(mode=MODE_ROI_STATES))
         self._mode_mask.clicked.connect(lambda: self._change(mode=MODE_MASK_STATES))
+        self._mode_events.clicked.connect(lambda: self._change(mode=MODE_EVENTS))
         self._end_cube.clicked.connect(lambda: self._change(end=END_CUBE))
         self._end_dataset.clicked.connect(lambda: self._change(end=END_DATASET))
         self._repeat.clicked.connect(lambda checked: self._change(repeat=bool(checked)))
@@ -138,7 +145,7 @@ class SlideshowSettingsPanel(QWidget):
         grid.addLayout(speed_row, 0, 1)
         for row, (title, buttons) in enumerate(
             (
-                ("Show", (self._mode_one, self._mode_all, self._mode_roi, self._mode_mask)),
+                ("Show", (self._mode_one, self._mode_all, self._mode_roi, self._mode_mask, self._mode_events)),
                 ("End", (self._end_cube, self._end_dataset)),
                 ("Skip", (self._skip_ignored, self._skip_dark)),
                 ("Faster", (self._thin_outline, self._calm_histogram)),
@@ -169,7 +176,8 @@ class SlideshowSettingsPanel(QWidget):
 
     def _all_widgets(self) -> tuple[QWidget, ...]:
         return (
-            self._speed, self._mode_one, self._mode_all, self._mode_roi, self._mode_mask, self._end_cube, self._end_dataset,
+            self._speed, self._mode_one, self._mode_all, self._mode_roi, self._mode_mask, self._mode_events, self._end_cube,
+            self._end_dataset,
             self._repeat, self._skip_ignored, self._skip_dark, self._thin_outline, self._calm_histogram,
         )
 
@@ -197,6 +205,8 @@ class SlideshowSettingsPanel(QWidget):
         self._mode_roi.setChecked(states)
         masks = settings.mode == MODE_MASK_STATES
         self._mode_mask.setChecked(masks)
+        pointers = settings.mode == MODE_EVENTS
+        self._mode_events.setChecked(pointers)
         self._end_cube.setChecked(settings.end == END_CUBE)
         self._end_dataset.setChecked(settings.end == END_DATASET)
         self._repeat.setChecked(settings.repeat)
@@ -214,6 +224,7 @@ class SlideshowSettingsPanel(QWidget):
         self._mode_all.setIcon(_cube_lambda_icon(colour(every)))
         self._mode_roi.setIcon(_pair_icon("cube", "chevron-right", colour(states)))
         self._mode_mask.setIcon(_pair_icon("cube", "mask", colour(masks)))
+        self._mode_events.setIcon(_pair_icon("cube", "alert-triangle", colour(pointers)))
         end_applies = every
         self._end_cube.setIcon(load_tabler_icon("cube", color=colour(settings.end == END_CUBE and end_applies), size=_RENDER))
         self._end_dataset.setIcon(load_tabler_icon("stack-3", color=colour(settings.end == END_DATASET and end_applies), size=_RENDER))
@@ -235,7 +246,7 @@ class SlideshowSettingsPanel(QWidget):
             load_tabler_icon("chart-histogram", color=theme.accent_blue if settings.calm_histogram else plain, size=_RENDER)
         )
         for button in (
-            self._mode_one, self._mode_all, self._mode_roi, self._mode_mask, self._end_cube, self._end_dataset, self._repeat,
-            self._skip_ignored, self._skip_dark, self._thin_outline, self._calm_histogram,
+            self._mode_one, self._mode_all, self._mode_roi, self._mode_mask, self._mode_events, self._end_cube, self._end_dataset,
+            self._repeat, self._skip_ignored, self._skip_dark, self._thin_outline, self._calm_histogram,
         ):
             button.setStyleSheet(transparent_icon_button_stylesheet(hover=theme.control_bg_hover))

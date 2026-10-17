@@ -28,6 +28,7 @@ Ignored frames and dark frames can each be left out (``skip_ignored``, default o
 ``skip_dark``, default off: the dark frame is a real image).
 
 **Mask states** (``MODE_MASK_STATES``, 2026-10-16) work the same way over the marks of the Mask row under the Cube slider.
+**Events** (``MODE_EVENTS``, 2026-10-17): the same over the cubes with a pointer of the Mask-tab scan that is not dismissed.
 
 **ROI states** (``MODE_ROI_STATES``, 2026-10-16): step through the cubes that carry a mark on the ROI row (the start
 layout at the first cube and every change of the ROI layout), staying on the wavelength shown now like the one-wavelength
@@ -56,7 +57,8 @@ MODE_ALL = "all"
 MODE_ONE_WAVELENGTH = "one_wavelength"
 MODE_ROI_STATES = "roi_states"
 MODE_MASK_STATES = "mask_states"  # same stepping, over the cubes with a mark on the Mask row
-STATE_MODES = (MODE_ROI_STATES, MODE_MASK_STATES)  # modes whose cubes are handed in by the owner of the marks
+MODE_EVENTS = "events"  # same stepping, over the cubes with a pointer of the Mask-tab scan (not a mask change)
+STATE_MODES = (MODE_ROI_STATES, MODE_MASK_STATES, MODE_EVENTS)  # modes whose cubes are handed in by the owner of the marks
 END_CUBE = "cube"
 END_DATASET = "dataset"
 SPEEDS = (1, 2, 5, 10)
