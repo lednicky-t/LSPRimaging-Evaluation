@@ -122,6 +122,7 @@ class MaskRows(QObject):
         self.cube_strip.mark_menu_requested.connect(self._on_cube_menu)
         self.wavelength_strip.mark_menu_requested.connect(self._on_wavelength_menu)
         self.wavelength_strip.step_requested.connect(self._hop_wavelength)
+        self.wavelength_strip.wheel_without_marks = True  # a cube with no mask here still has other cubes to go to
         if events is not None:
             events.events_changed.connect(self._schedule)
             self.cube_strip.event_menu_requested.connect(self._on_cube_event_menu)
@@ -317,7 +318,9 @@ class MaskRows(QObject):
     # -- the wheel over the wavelength row ---------------------------------------------------------------
 
     def _hop_wavelength(self, direction: int) -> None:
-        """The wheel: the next (+1) / previous (-1) wavelength of this cube that has an individual mask."""
+        """The wheel: the next (+1) / previous (-1) wavelength of this cube that has an individual mask. Past the last (first)
+        one it goes on into the nearest later (earlier) cube that has a marked frame (`_marked_wavelengths`), to its first
+        (last) marked wavelength - the wheel over the wavelength slider does the same with cubes (2026-10-17)."""
         indices = [mark.index for mark in self.wavelength_strip.marks()]
         if self._wavelength not in self._wavelengths:
             return
@@ -327,6 +330,30 @@ class MaskRows(QObject):
         target = (min(later) if later else None) if direction > 0 else (max(earlier) if earlier else None)
         if target is not None:
             self._selection.set_wavelength(self._wavelengths[target])
+        else:
+            self._hop_to_other_cube(direction)
+
+    def _marked_wavelengths(self, cube: int) -> list[float]:
+        """The wavelengths of `cube`, ascending, that carry an individual mask or a standing scan pointer (not a dismissed one)."""
+        found = set(self._mask.individual_wavelengths(cube))
+        if self._events is not None:
+            found |= {record.event.frame[1] for record in self._events.records_in_cube(cube) if not record.dismissed}
+        known = self._dataset.wavelengths_for_cube(cube)
+        return sorted(wavelength for wavelength in found if wavelength in known)
+
+    def _hop_to_other_cube(self, direction: int) -> None:
+        cube = int(self._selection.current_cube())
+        candidates = set(self._mask.individual_cubes())
+        if self._events is not None:
+            candidates |= set(self._events.active_event_cubes())
+        known = set(self._dataset.spectral_cubes())
+        ahead = sorted(c for c in candidates & known if (c > cube if direction > 0 else c < cube))
+        for other in ahead if direction > 0 else reversed(ahead):
+            wavelengths = self._marked_wavelengths(other)
+            if wavelengths:
+                self._selection.set_cube(other)
+                self._selection.set_wavelength(wavelengths[0] if direction > 0 else wavelengths[-1])
+                return
 
     # -- right click on a scan pointer ---------------------------------------------------------------------
 
