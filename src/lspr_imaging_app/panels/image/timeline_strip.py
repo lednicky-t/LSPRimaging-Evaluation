@@ -89,6 +89,7 @@ class TimelineStrip(QWidget):
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._wheel_remainder = 0  # angle units not yet worth a step (a touchpad sends many small ones)
+        self.wheel_without_marks = False  # True: the wheel is a step request even when this row has no mark (its owner looks further)
         self._count = 0
         self._window = AxisWindow(self)
         self._window.changed.connect(self.update)
@@ -106,6 +107,7 @@ class TimelineStrip(QWidget):
         """Draw through `window` (the Cube slider's) from now on."""
         if window is self._window:
             return
+        self._window.release(self)
         self._window.changed.disconnect(self.update)
         self._window = window
         window.changed.connect(self.update)
@@ -248,6 +250,7 @@ class TimelineStrip(QWidget):
 
     def mousePressEvent(self, event) -> None:  # type: ignore[override]
         if event.button() == Qt.MouseButton.LeftButton and self.isEnabled() and self._count > 0:
+            self._window.hold(self)  # the axis stands still under the pointer until the button is up (a drag scrubs)
             self.index_requested.emit(axis_index(event.position().x(), self._count, self.width(), self._view()))
             event.accept()
             return
@@ -269,12 +272,18 @@ class TimelineStrip(QWidget):
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event) -> None:  # type: ignore[override]
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._window.release(self)  # centres on the value now
         if event.button() == Qt.MouseButton.MiddleButton and self._window.is_panning():
             self._window.end_pan()
             self.unsetCursor()
             event.accept()
             return
         super().mouseReleaseEvent(event)
+
+    def hideEvent(self, event) -> None:  # type: ignore[override]
+        self._window.release(self)  # never leave the axis held by a widget that can no longer see its mouse release
+        super().hideEvent(event)
 
     def mouseDoubleClickEvent(self, event) -> None:  # type: ignore[override]
         if event.button() == Qt.MouseButton.MiddleButton and self.isEnabled():
@@ -301,7 +310,7 @@ class TimelineStrip(QWidget):
         if self.isEnabled() and self._window.handle_wheel(event, self.width()):  # Ctrl: zoom, Shift / side wheel: pan
             event.accept()
             return
-        if event.modifiers() != Qt.KeyboardModifier.NoModifier or not self.isEnabled() or not self._marks:
+        if event.modifiers() != Qt.KeyboardModifier.NoModifier or not self.isEnabled() or not (self._marks or self.wheel_without_marks):
             event.ignore()
             return
         self._wheel_remainder += event.angleDelta().y()

@@ -98,7 +98,13 @@ class AxisWindow(QObject):
       (horizontal scroll) pan; **middle-button drag** pans (`start_pan` / `drag_pan` / `end_pan`); `reset()` (the widgets
       call it on a middle-button double click) shows everything again.
     - The deepest zoom shows about `MIN_VISIBLE_TICKS` ticks. A new tick count (another dataset) resets to the full axis.
-    - `ensure_visible(index)` pages the window when the value it follows (the cube shown, also while Play runs) leaves it.
+    - **The value stays in the middle, the axis moves** (2026-10-17, maintainer request: like the rails seen from a train).
+      `follow(index)` - called by the slider whenever its value changes (a click, the wheel, the keys, Play) - slides the window
+      so that tick `index` is in the middle, keeping the zoom. Near the first / last tick the window cannot go further (there is
+      nothing beyond them), so there the handle leaves the middle and runs to the end of the rail. While a pointer is held on a
+      widget that shares the window (`hold` / `release`: a drag on the slider or on a row under it) or a middle-button pan is on,
+      the window stands still, otherwise the tick under the pointer would slide away and the value would run off; on `release`
+      it centres on the value. `ensure_visible(index)` is the older, gentler rule (page only when the tick left the screen).
     """
 
     changed = pyqtSignal()
@@ -114,6 +120,8 @@ class AxisWindow(QObject):
         self._lo = 0.0
         self._hi = 0.0
         self._pan_start: tuple[float, float, float] | None = None  # (x, lo, span) when a pan drag began
+        self._followed: float | None = None  # the tick `follow` was last told about (centred on when a hold ends)
+        self._holders: set[object] = set()  # widgets with a mouse button down on this axis: the window stands still
 
     # -- state ------------------------------------------------------------------------------------
 
@@ -137,6 +145,7 @@ class AxisWindow(QObject):
             self._count = count
             self._lo, self._hi = 0.0, max(count - 1.0, 0.0)
             self._pan_start = None
+            self._followed = None
             self.changed.emit()
 
     def _set_view(self, lo: float, hi: float) -> None:
@@ -166,6 +175,32 @@ class AxisWindow(QObject):
 
     def pan(self, delta_ticks: float) -> None:
         self._set_view(self._lo + delta_ticks, self._hi + delta_ticks)
+
+    def center_on(self, index: float) -> None:
+        """Slide the window, keeping its zoom, so that tick `index` is in the middle - as far as the axis allows (the window
+        never shows anything before the first or after the last tick). Nothing happens on the whole axis."""
+        if not self.is_zoomed():
+            return
+        half = (self._hi - self._lo) / 2.0
+        self._set_view(index - half, index + half)
+
+    def follow(self, index: float) -> None:
+        """The value this axis follows is now at tick `index`: keep it in the middle (`center_on`), unless a pointer is held
+        on the axis or a pan is on - then only note it, and `release` centres on it later."""
+        self._followed = float(index)
+        if self._holders or self._pan_start is not None:
+            return
+        self.center_on(index)
+
+    def hold(self, owner: object) -> None:
+        """A mouse button went down on `owner` (the slider or a row sharing this window): stop following until `release`."""
+        self._holders.add(owner)
+
+    def release(self, owner: object) -> None:
+        """`owner`'s mouse button went up (or the widget was hidden). When nobody holds the axis any more, centre on the value."""
+        self._holders.discard(owner)
+        if not self._holders and self._followed is not None and self._pan_start is None:
+            self.center_on(self._followed)
 
     def ensure_visible(self, index: float) -> None:
         """Page the window so that tick `index` is on screen (nothing happens if it already is, or the axis is not zoomed)."""
@@ -240,13 +275,15 @@ class DataAxisSlider(QSlider):
     clicking a plot axis) rather than paging one step at a time - the
     default QSlider page-step click behavior doesn't fit a thin, tick-
     labeled track the way it fits a fat native handle. Keyboard arrow
-    stepping and a plain wheel are untouched (QSlider's own), except at the ends: a plain wheel turned on *past* the last
+    stepping and a plain wheel are QSlider's own, except at the ends: a plain wheel turned on *past* the last
     (up) or first (down) tick emits `edge_step_requested` (+1 / -1) instead of doing nothing. The slider does not know what
     lies beyond its ends; the owner decides (the Image panel makes it the next / previous cube for the wavelength slider).
 
     **Zoom** (2026-10-16): the ticks are drawn through an `AxisWindow` (see there for the gestures): only the stretch of
     indices in the window is on screen, the rest is off to the sides (small triangles at the rail ends say so). The window
-    follows the slider's own value, so the handle never leaves the screen (also while Play runs), and the caller re-labels the
+    follows the slider's own value and keeps the handle **in the middle** (2026-10-17): when the value changes, also while
+    Play runs, the ticks slide past it (`AxisWindow.follow`); only near the ends of the axis does the handle leave the middle.
+    A left-button press on the slider holds the window still until the button is up. The caller re-labels the
     ticks for the visible stretch when the window changes (`axis_window().changed` -> `set_ticks`). `set_window` replaces it, so
     the ROI row under the Cube slider can share the Cube slider's.
     """
@@ -302,6 +339,7 @@ class DataAxisSlider(QSlider):
         """Draw through `window` from now on (another widget's, to share one zoom)."""
         if window is self._window:
             return
+        self._window.release(self)
         self._window.changed.disconnect(self.update)
         self._window = window
         window.changed.connect(self.update)
@@ -312,7 +350,7 @@ class DataAxisSlider(QSlider):
         super().sliderChange(change)
         window = getattr(self, "_window", None)  # Qt can call this while the base class is still being constructed
         if window is not None and change == QAbstractSlider.SliderChange.SliderValueChange:  # also when signals are blocked
-            window.ensure_visible(self.value() - self.minimum())
+            window.follow(self.value() - self.minimum())  # zoomed: the handle stays in the middle, the ticks slide past
 
     def set_accent_color(self, color: str) -> None:
         self._accent_color = color
@@ -594,6 +632,7 @@ class DataAxisSlider(QSlider):
 
     def mousePressEvent(self, event) -> None:  # type: ignore[override]
         if event.button() == Qt.MouseButton.LeftButton and self.isEnabled():
+            self._window.hold(self)  # the axis stands still under the pointer until the button is up
             self.setValue(self._index_from_x(event.position().x()))
             event.accept()
             return
@@ -615,12 +654,18 @@ class DataAxisSlider(QSlider):
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event) -> None:  # type: ignore[override]
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._window.release(self)  # centres on the value now
         if event.button() == Qt.MouseButton.MiddleButton and self._window.is_panning():
             self._window.end_pan()
             self.unsetCursor()
             event.accept()
             return
         super().mouseReleaseEvent(event)
+
+    def hideEvent(self, event) -> None:  # type: ignore[override]
+        self._window.release(self)  # never leave the axis held by a widget that can no longer see its mouse release
+        super().hideEvent(event)
 
     def mouseDoubleClickEvent(self, event) -> None:  # type: ignore[override]
         if event.button() == Qt.MouseButton.MiddleButton and self.isEnabled():  # show the whole axis again
