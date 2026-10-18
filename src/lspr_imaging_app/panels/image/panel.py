@@ -1190,6 +1190,9 @@ class ImagePanel(QWidget):
         # background or arrow buttons. Typing, Up/Down keys and the mouse
         # wheel still step the value.
         for spin in (self._cube_spin, self._wavelength_spin):
+            # Their font can change after the width was measured above (an app stylesheet naming another font reaches
+            # a field when it gets its own stylesheet below; a theme switch later): `eventFilter` re-fits then.
+            spin.installEventFilter(self)
             spin.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
             spin.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
             spin.setStyleSheet("QAbstractSpinBox { border: none; background: transparent; padding: 0px; }")
@@ -3032,6 +3035,8 @@ class ImagePanel(QWidget):
         if watched is self._cube_title and event.type() == QEvent.Type.MouseButtonDblClick:
             self._toggle_cube_unit()  # same as the unit icon in the ribbon and the right-click menu
             return True
+        if event.type() == QEvent.Type.FontChange and (watched is self._cube_spin or watched is self._wavelength_spin):
+            self._fit_spin_widths()  # same text in another font is another width
         return super().eventFilter(watched, event)
 
     # -- canvas interaction: routed by `CanvasInteraction` (interaction.py) ---------------
