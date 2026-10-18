@@ -199,6 +199,7 @@ from ...storage.ui_state_keys import (
 from ..ui_state import UiStateStore
 from .scale_bar_overlay import ScaleBarItem
 from . import roi_layout_menu
+from .mark_colors import cube_color, roi_color, wavelength_color
 from .mask_rows import MaskRows
 from .timeline_strip import TimelineStrip, StripMark
 from .slider_colors import SliderColors
@@ -1069,7 +1070,7 @@ class ImagePanel(QWidget):
 
         self._cube_slider = DataAxisSlider(Qt.Orientation.Horizontal, self)
         self._cube_slider.setEnabled(False)
-        self._cube_slider.set_accent_color(get_active_theme().accent_gold)
+        self._cube_slider.set_accent_color(cube_color())
         self._cube_slider.valueChanged.connect(self._on_cube_slider_changed)
 
         self._cube_title = cube_title = QLabel(self._cube_display.axis_title(), self)
@@ -1103,7 +1104,7 @@ class ImagePanel(QWidget):
 
         self._wavelength_slider = DataAxisSlider(Qt.Orientation.Horizontal, self)
         self._wavelength_slider.setEnabled(False)
-        self._wavelength_slider.set_accent_color(get_active_theme().accent_blue)
+        self._wavelength_slider.set_accent_color(wavelength_color())
         self._wavelength_slider.valueChanged.connect(self._on_wavelength_slider_changed)
 
         wavelength_title = QLabel("λ (nm)", self)
@@ -1235,8 +1236,7 @@ class ImagePanel(QWidget):
         self._slider_ribbon.roi_row_toggled.connect(self._on_roi_row_toggled)
         self._slider_ribbon.roi_selected_only_toggled.connect(self._on_roi_selected_only_toggled)
         self._slider_ribbon.play_toggled.connect(self._slideshow.toggle)
-        self._slider_ribbon.step_requested.connect(lambda direction: self._slideshow.step(direction))
-        # The wheel over the ROI row always hops between its marks, whatever Play / Previous / Next step through.
+        # The wheel over the ROI row always hops between its marks, whatever Play steps through.
         self._roi_strip.step_requested.connect(lambda direction: self._slideshow.step(direction, MODE_ROI_STATES))
         self._roi_strip.mark_menu_requested.connect(self._on_roi_mark_menu)
         # The wheel over the Mask row under the Cube slider hops between ALL its marks, masks and standing scan pointers.
@@ -1799,7 +1799,7 @@ class ImagePanel(QWidget):
         if self._roi_row.isHidden():
             return
         strip = self._roi_strip
-        strip.set_color(get_active_theme().accent_blue)  # no colour control for the row (maintainer); follows the theme
+        strip.set_color(roi_color())  # no colour control for the row (maintainer); follows the theme
         cubes = self._dataset.spectral_cubes()
         strip.setEnabled(bool(cubes))
         strip.set_axis_count(len(cubes))

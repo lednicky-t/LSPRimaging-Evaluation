@@ -2,9 +2,10 @@
 (2026-10-13, maintainer request; also called the dataset preview ribbon).
 
 Left to right: the frame icon controls (`FrameToolsWidget`, inline: unit,
-Reference, Ignore, Dark background), Previous / Play-Pause / Next, and a settings
-pop-out for the slideshow (speed, what to step through, repeat, where the end is;
-Previous and Next step through the same thing), the "ROIs"
+Reference, Ignore, Dark background), Play-Pause, the mode menu (what the show steps through: cubes,
+wavelengths, ROI changes, Mask changes, scan pointers; the wheel at a slider's end steps through the same thing), the
+speed as text (1x ... 10x; both in `slideshow_ribbon_controls.py`), a settings pop-out for the rest of the slideshow
+(end, skip, faster, repeat), the "ROIs"
 section (show the ROIs row under the Cube slider, only the selected ROIs; the row's
 marks are always the theme's blue) and the "Mask" section (show the two Mask rows, under the
 Cube and the wavelength slider; their marks are a fixed orange). The colour swatches of
@@ -18,6 +19,8 @@ signal; the panel hands them to `SlideshowController` (`slideshow.py`) or the ro
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 from PyQt6.QtCore import QSize, Qt, pyqtSignal
 from PyQt6.QtWidgets import QHBoxLayout, QMenu, QToolButton, QWidget, QWidgetAction
 
@@ -27,14 +30,14 @@ from .canvas_tools import _BUTTON_SIZE, _ICON_SIZE
 from .frame_tools import FrameToolsWidget, captioned_group
 from .ribbon_drawer import RibbonDrawer
 from .mask_rows import MASK_COLOR
-from .slideshow import MODE_ALL, MODE_EVENTS, MODE_MASK_STATES, MODE_ONE_WAVELENGTH, MODE_ROI_STATES, SlideshowSettings
+from .slideshow import SlideshowSettings
+from .slideshow_ribbon_controls import SlideshowModeButton, SlideshowSpeedButton
 from .slider_colors import SliderColorControls
 from .slideshow_settings_panel import SlideshowSettingsPanel
 
 
 class SliderRibbon(QWidget):
     play_toggled = pyqtSignal()
-    step_requested = pyqtSignal(int)  # -1 = Previous, +1 = Next (one step in the chosen "step through" order)
     roll_up_requested = pyqtSignal()  # double-click on empty space in the ribbon
     settings_changed = pyqtSignal(object)  # a SlideshowSettings
     mask_rows_toggled = pyqtSignal(bool)  # show / hide the two Mask rows (a click, not a programmatic set)
@@ -59,17 +62,12 @@ class SliderRibbon(QWidget):
         self._play.setFixedSize(_BUTTON_SIZE, _BUTTON_SIZE)
         self._play.clicked.connect(self.play_toggled)
 
-        self._previous = QToolButton(self)
-        self._next = QToolButton(self)
-        for button, direction in ((self._previous, -1), (self._next, +1)):
-            button.setAutoRaise(True)
-            button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-            button.setIconSize(QSize(_ICON_SIZE, _ICON_SIZE))
-            button.setFixedSize(_BUTTON_SIZE, _BUTTON_SIZE)
-            button.setAutoRepeat(True)  # hold to keep stepping
-            button.setAutoRepeatDelay(400)
-            button.setAutoRepeatInterval(120)
-            button.clicked.connect(lambda _checked=False, d=direction: self.step_requested.emit(d))
+        self._mode_button = SlideshowModeButton(self)
+        self._mode_button.mode_chosen.connect(lambda mode: self._choose(mode=mode))
+        self._speed_button = SlideshowSpeedButton(self)
+        self._speed_button.speed_chosen.connect(lambda speed: self._choose(speed=speed))
+        self._mode_button.set_mode(self._settings.mode)
+        self._speed_button.set_speed(self._settings.speed)
 
         self._settings_button = QToolButton(self)
         self._settings_button.setAutoRaise(True)
@@ -77,7 +75,7 @@ class SliderRibbon(QWidget):
         self._settings_button.setIconSize(QSize(_ICON_SIZE, _ICON_SIZE))
         self._settings_button.setFixedSize(_BUTTON_SIZE, _BUTTON_SIZE)
         self._settings_button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
-        self._settings_button.setToolTip("Slideshow settings: speed, what to step through, repeat.")
+        self._settings_button.setToolTip("Slideshow settings: where the show ends, what to skip, faster drawing, repeat.")
         self._menu = QMenu(self._settings_button)
         self._settings_panel = SlideshowSettingsPanel(self._menu)
         holder = QWidgetAction(self._menu)
@@ -108,7 +106,7 @@ class SliderRibbon(QWidget):
         layout.setSpacing(2)
         layout.addWidget(self.frame_tools)
         layout.addWidget(self.frame_tools._separator())
-        layout.addWidget(captioned_group(self, "Slideshow", (self._previous, self._play, self._next, self._settings_button)))
+        layout.addWidget(captioned_group(self, "Slideshow", (self._play, self._mode_button, self._speed_button, self._settings_button)))
         layout.addWidget(self.frame_tools._separator())
         layout.addWidget(
             captioned_group(self, "ROIs", (self.roi_row_button, self.roi_selected_button))
@@ -169,29 +167,25 @@ class SliderRibbon(QWidget):
 
     def _on_panel_changed(self, settings: SlideshowSettings) -> None:
         self._settings = settings
-        self._refresh_step_tips()
         self.settings_changed.emit(settings)
+
+    def _choose(self, **fields: object) -> None:
+        """A pick on the mode menu or the speed text: change those fields, tell the pop-out (it works on its own copy of the
+        settings) and announce the result."""
+        new = replace(self._settings, **fields)
+        if new != self._settings:
+            self.set_settings(new, emit=True)
 
     def settings(self) -> SlideshowSettings:
         return self._settings
 
     def set_settings(self, settings: SlideshowSettings, *, emit: bool = False) -> None:
         self._settings = settings
+        self._mode_button.set_mode(settings.mode)
+        self._speed_button.set_speed(settings.speed)
         self._settings_panel.set_settings(settings)
-        self._refresh_step_tips()
         if emit:
             self.settings_changed.emit(settings)
-
-    def _refresh_step_tips(self) -> None:
-        what = {
-            MODE_ALL: "frame (every wavelength of every cube)",
-            MODE_ONE_WAVELENGTH: "cube (on the wavelength shown now)",
-            MODE_ROI_STATES: "ROI layout change (a mark of the ROIs row, on the wavelength shown now)",
-            MODE_MASK_STATES: "mask change (a mark of the Mask row, on the wavelength shown now)",
-            MODE_EVENTS: "scan pointer (a pink tick of the Mask row, on the wavelength shown now)",
-        }.get(self._settings.mode, "frame")
-        self._previous.setToolTip(f"Previous {what}. Hold to keep stepping. What it steps through is set in the settings next to it.")
-        self._next.setToolTip(f"Next {what}. Hold to keep stepping. What it steps through is set in the settings next to it.")
 
     # -- play button --------------------------------------------------------------
 
@@ -200,8 +194,7 @@ class SliderRibbon(QWidget):
         self._refresh_play()
 
     def set_enabled_for_dataset(self, enabled: bool) -> None:
-        for button in (self._previous, self._play, self._next):
-            button.setEnabled(enabled)
+        self._play.setEnabled(enabled)
 
     def _refresh_play(self) -> None:
         theme = get_active_theme()
@@ -212,19 +205,18 @@ class SliderRibbon(QWidget):
 
     def refresh_theme(self) -> None:
         theme = get_active_theme()
-        for button in (self._play, self._settings_button, self._previous, self._next):
+        for button in (self._play, self._settings_button):
             button.setStyleSheet(
                 transparent_icon_button_stylesheet(hover=theme.control_bg_hover)
                 + "QToolButton::menu-indicator { image: none; width: 0px; }"
             )
-        self._previous.setIcon(load_tabler_icon("player-skip-back", color=theme.text_primary, size=_ICON_SIZE * 2))
-        self._next.setIcon(load_tabler_icon("player-skip-forward", color=theme.text_primary, size=_ICON_SIZE * 2))
         for button in (self.roi_row_button, self.roi_selected_button, self.mask_rows_button):
             button.setStyleSheet(transparent_icon_button_stylesheet(hover=theme.control_bg_hover))
         self._refresh_roi_icons()
         self._settings_button.setIcon(load_tabler_icon("settings", color=theme.text_primary, size=_ICON_SIZE * 2))
         self._refresh_play()
-        self._refresh_step_tips()
+        self._mode_button.refresh_theme()
+        self._speed_button.refresh_theme()
         self.frame_tools.refresh_theme()
         self.slider_colors.refresh()
         self._settings_panel.set_settings(self._settings)

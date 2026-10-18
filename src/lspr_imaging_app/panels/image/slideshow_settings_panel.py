@@ -2,14 +2,12 @@
 pop-out (2026-10-14, maintainer request): icons and one slider instead of a
 text menu.
 
-- **Speed**: a four-tick slider (1x, 2x, 5x, 10x) with a small "Nx" readout.
-- **Show**: four exclusive icons, a cube (stay on one wavelength, step through
-  the cubes), a cube + lambda (every wavelength of every cube), a cube + `>`
-  (stay on one wavelength, step through the ROIs row's marks) and a cube + mask
-  (the same over the Mask row's marks; both 2026-10-16). Prev / Next next to Play
-  follow the same choice.
+Speed and the mode (what the show steps through) used to be here; since 2026-10-18 they sit next to Play on the ribbon
+(`slideshow_ribbon_controls.py`). The Prev / Next buttons were removed the same day. This pop-out still shows the current
+mode, because the End row only applies to the wavelengths mode.
+
 - **End**: two exclusive icons, a cube (the show stays in its cube) and a stack
-  (the whole dataset). Greyed out in the one-wavelength mode, where the end is
+  (the whole dataset). Greyed out unless the mode is "every wavelength", where the end is
   always the last cube.
 - **Skip**: two toggles, ignored frames (eye-off) and the dark background frame (moon).
 - **Repeat**: a repeat-arrows toggle.
@@ -23,41 +21,14 @@ from __future__ import annotations
 from dataclasses import replace
 
 from PyQt6.QtCore import QSize, Qt, pyqtSignal
-from PyQt6.QtGui import QIcon, QPainter, QPixmap
-from PyQt6.QtWidgets import QButtonGroup, QGridLayout, QHBoxLayout, QLabel, QSlider, QToolButton, QWidget
+from PyQt6.QtWidgets import QButtonGroup, QGridLayout, QHBoxLayout, QLabel, QToolButton, QWidget
 
 from lspr_ui import get_active_theme, load_tabler_icon, transparent_icon_button_stylesheet
 
 from .canvas_tools import _BUTTON_SIZE, _ICON_SIZE
-from .slideshow import (
-    END_CUBE,
-    END_DATASET,
-    MODE_ALL,
-    MODE_EVENTS,
-    MODE_MASK_STATES,
-    MODE_ONE_WAVELENGTH,
-    MODE_ROI_STATES,
-    SPEEDS,
-    SlideshowSettings,
-)
+from .slideshow import END_CUBE, END_DATASET, MODE_ALL, SlideshowSettings
 
 _RENDER = _ICON_SIZE * 2
-
-
-def _pair_icon(first: str, second: str, color: str) -> QIcon:
-    """Two icons side by side."""
-    pixmap = QPixmap(_RENDER * 2, _RENDER)
-    pixmap.fill(Qt.GlobalColor.transparent)
-    painter = QPainter(pixmap)
-    for slot, name in enumerate((first, second)):
-        painter.drawPixmap(slot * _RENDER, 0, load_tabler_icon(name, color=color, size=_RENDER).pixmap(_RENDER, _RENDER))
-    painter.end()
-    return QIcon(pixmap)
-
-
-def _cube_lambda_icon(color: str) -> QIcon:
-    """A cube and a lambda side by side (every wavelength of each cube)."""
-    return _pair_icon("cube", "lambda", color)
 
 
 class SlideshowSettingsPanel(QWidget):
@@ -67,35 +38,6 @@ class SlideshowSettingsPanel(QWidget):
         super().__init__(parent)
         self._settings = SlideshowSettings()
 
-        self._speed = QSlider(Qt.Orientation.Horizontal, self)
-        self._speed.setRange(0, len(SPEEDS) - 1)
-        self._speed.setPageStep(1)
-        self._speed.setTickPosition(QSlider.TickPosition.TicksBelow)
-        self._speed.setTickInterval(1)
-        self._speed.setFixedWidth(84)
-        self._speed.setToolTip("Speed. 1x is the average time between two wavelengths in the experiment data, or 0.5 s without it.")
-        self._speed.valueChanged.connect(lambda index: self._change(speed=SPEEDS[index]))
-        self._speed_label = QLabel(self)
-        self._speed_label.setMinimumWidth(self._speed_label.fontMetrics().horizontalAdvance("10x") + 4)
-
-        self._mode_one = self._button(True, "Step through the cubes on the wavelength shown now.")
-        self._mode_all = self._button(True, "Step through every wavelength of a cube, then the next cube.")
-        self._mode_all.setIconSize(QSize(_ICON_SIZE * 2, _ICON_SIZE))
-        self._mode_roi = self._button(
-            True,
-            "Step through the ROI row's marks (where the ROI layout changes) on the wavelength shown now.",
-        )
-        self._mode_roi.setIconSize(QSize(_ICON_SIZE * 2, _ICON_SIZE))
-        self._mode_mask = self._button(
-            True,
-            "Step through the cubes with a mark on the Mask row (a mask of their own) on the wavelength shown now.",
-        )
-        self._mode_mask.setIconSize(QSize(_ICON_SIZE * 2, _ICON_SIZE))
-        self._mode_events = self._button(
-            True,
-            "Step through the cubes with a pointer of the Mask scan (something dark that crossed the field) on the wavelength shown now.",
-        )
-        self._mode_events.setIconSize(QSize(_ICON_SIZE * 2, _ICON_SIZE))
         self._end_cube =self._button(True, "End of the show = the last frame of the cube it is in.")
         self._end_dataset = self._button(True, "End of the show = the last frame of the dataset.")
         self._repeat = self._button(True, "Repeat: start again at the beginning instead of stopping.")
@@ -111,18 +53,10 @@ class SlideshowSettingsPanel(QWidget):
             "Fast ROI outlines: draw the ROI circles 1.0 px thin instead of 1.5 px while playing "
             "(about 5x faster to paint; the normal width returns when Play stops).",
         )
-        for group, buttons in (
-            (QButtonGroup(self), (self._mode_one, self._mode_all, self._mode_roi, self._mode_mask, self._mode_events)),
-            (QButtonGroup(self), (self._end_cube, self._end_dataset)),
-        ):
-            group.setExclusive(True)
-            for button in buttons:
-                group.addButton(button)
-        self._mode_one.clicked.connect(lambda: self._change(mode=MODE_ONE_WAVELENGTH))
-        self._mode_all.clicked.connect(lambda: self._change(mode=MODE_ALL))
-        self._mode_roi.clicked.connect(lambda: self._change(mode=MODE_ROI_STATES))
-        self._mode_mask.clicked.connect(lambda: self._change(mode=MODE_MASK_STATES))
-        self._mode_events.clicked.connect(lambda: self._change(mode=MODE_EVENTS))
+        end_group = QButtonGroup(self)
+        end_group.setExclusive(True)
+        for button in (self._end_cube, self._end_dataset):
+            end_group.addButton(button)
         self._end_cube.clicked.connect(lambda: self._change(end=END_CUBE))
         self._end_dataset.clicked.connect(lambda: self._change(end=END_DATASET))
         self._repeat.clicked.connect(lambda checked: self._change(repeat=bool(checked)))
@@ -135,23 +69,13 @@ class SlideshowSettingsPanel(QWidget):
         grid.setContentsMargins(8, 6, 8, 6)
         grid.setHorizontalSpacing(10)
         grid.setVerticalSpacing(4)
-        speed_row = QHBoxLayout()
-        speed_row.setContentsMargins(0, 0, 0, 0)
-        speed_row.setSpacing(6)
-        speed_row.addWidget(self._speed)
-        speed_row.addWidget(self._speed_label)
-        speed_row.addStretch(1)
-        grid.addWidget(QLabel("Speed", self), 0, 0)
-        grid.addLayout(speed_row, 0, 1)
         for row, (title, buttons) in enumerate(
             (
-                ("Show", (self._mode_one, self._mode_all, self._mode_roi, self._mode_mask, self._mode_events)),
                 ("End", (self._end_cube, self._end_dataset)),
                 ("Skip", (self._skip_ignored, self._skip_dark)),
                 ("Faster", (self._thin_outline, self._calm_histogram)),
                 ("Repeat", (self._repeat,)),
-            ),
-            start=1,
+            )
         ):
             grid.addWidget(QLabel(title, self), row, 0)
             holder = QHBoxLayout()
@@ -176,8 +100,7 @@ class SlideshowSettingsPanel(QWidget):
 
     def _all_widgets(self) -> tuple[QWidget, ...]:
         return (
-            self._speed, self._mode_one, self._mode_all, self._mode_roi, self._mode_mask, self._mode_events, self._end_cube,
-            self._end_dataset,
+            self._end_cube, self._end_dataset,
             self._repeat, self._skip_ignored, self._skip_dark, self._thin_outline, self._calm_histogram,
         )
 
@@ -197,16 +120,7 @@ class SlideshowSettingsPanel(QWidget):
         plain, accent = theme.text_primary, theme.accent_blue
         for widget in self._all_widgets():
             widget.blockSignals(True)
-        self._speed.setValue(SPEEDS.index(settings.speed) if settings.speed in SPEEDS else 0)
-        self._speed_label.setText(f"{settings.speed}x")
-        one, every, states = (settings.mode == MODE_ONE_WAVELENGTH, settings.mode == MODE_ALL, settings.mode == MODE_ROI_STATES)
-        self._mode_one.setChecked(one)
-        self._mode_all.setChecked(every)
-        self._mode_roi.setChecked(states)
-        masks = settings.mode == MODE_MASK_STATES
-        self._mode_mask.setChecked(masks)
-        pointers = settings.mode == MODE_EVENTS
-        self._mode_events.setChecked(pointers)
+        every = settings.mode == MODE_ALL
         self._end_cube.setChecked(settings.end == END_CUBE)
         self._end_dataset.setChecked(settings.end == END_DATASET)
         self._repeat.setChecked(settings.repeat)
@@ -220,11 +134,6 @@ class SlideshowSettingsPanel(QWidget):
         def colour(active: bool) -> str:
             return accent if active else plain
 
-        self._mode_one.setIcon(load_tabler_icon("cube", color=colour(one), size=_RENDER))
-        self._mode_all.setIcon(_cube_lambda_icon(colour(every)))
-        self._mode_roi.setIcon(_pair_icon("cube", "chevron-right", colour(states)))
-        self._mode_mask.setIcon(_pair_icon("cube", "mask", colour(masks)))
-        self._mode_events.setIcon(_pair_icon("cube", "alert-triangle", colour(pointers)))
         end_applies = every
         self._end_cube.setIcon(load_tabler_icon("cube", color=colour(settings.end == END_CUBE and end_applies), size=_RENDER))
         self._end_dataset.setIcon(load_tabler_icon("stack-3", color=colour(settings.end == END_DATASET and end_applies), size=_RENDER))
@@ -232,11 +141,11 @@ class SlideshowSettingsPanel(QWidget):
             button.setEnabled(end_applies)
         self._end_cube.setToolTip(
             "End of the show = the last frame of the cube it is in."
-            if end_applies else "Only with every wavelength shown: the other modes end at the last cube (or the last ROI mark)."
+            if end_applies else "Only in the wavelengths mode (the λ next to Play): the other modes end at the last cube (or the last mark)."
         )
         self._end_dataset.setToolTip(
             "End of the show = the last frame of the dataset."
-            if end_applies else "Only with every wavelength shown: the other modes end at the last cube (or the last ROI mark)."
+            if end_applies else "Only in the wavelengths mode (the λ next to Play): the other modes end at the last cube (or the last mark)."
         )
         self._repeat.setIcon(load_tabler_icon("repeat", color=colour(settings.repeat), size=_RENDER))
         self._skip_ignored.setIcon(load_tabler_icon("eye-off", color=theme.accent_red if settings.skip_ignored else plain, size=_RENDER))
@@ -246,7 +155,7 @@ class SlideshowSettingsPanel(QWidget):
             load_tabler_icon("chart-histogram", color=theme.accent_blue if settings.calm_histogram else plain, size=_RENDER)
         )
         for button in (
-            self._mode_one, self._mode_all, self._mode_roi, self._mode_mask, self._mode_events, self._end_cube, self._end_dataset,
+            self._end_cube, self._end_dataset,
             self._repeat, self._skip_ignored, self._skip_dark, self._thin_outline, self._calm_histogram,
         ):
             button.setStyleSheet(transparent_icon_button_stylesheet(hover=theme.control_bg_hover))
