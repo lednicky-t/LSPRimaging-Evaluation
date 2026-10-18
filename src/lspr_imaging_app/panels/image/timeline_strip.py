@@ -89,13 +89,13 @@ class TimelineStrip(QWidget):
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._wheel_remainder = 0  # angle units not yet worth a step (a touchpad sends many small ones)
-        self.wheel_without_marks = False  # True: the wheel is a step request even when this row has no mark (its owner looks further)
         self._count = 0
         self._window = AxisWindow(self)
         self._window.changed.connect(self.update)
         self._marks: tuple[StripMark, ...] = ()
         self._event_marks: tuple[StripMark, ...] = ()  # the scan's pointers: drawn above the marks, never part of "what holds here"
         self._cursor: int | None = None
+        self.hop_possible: bool | None = None  # the owner's say on whether the wheel has anywhere to go (a mark in another cube counts); None = look at this row
         self._color = "#38bdf8"
         self._event_color = "#f472b6"
         self.setFixedHeight(_HEIGHT)
@@ -157,6 +157,14 @@ class TimelineStrip(QWidget):
 
     def marks(self) -> tuple[StripMark, ...]:
         return self._marks
+
+    def has_marks_to_hop_to(self) -> bool:
+        """Whether the wheel has anywhere to go from this row: what the owner says (`hop_possible`: the wavelength Mask row can go on
+        into another cube), else a mark of the row or a scan pointer that is not dismissed (a dismissed one is drawn faintly and is not
+        a place to go). A row with nowhere to go leaves the wheel to whoever is underneath."""
+        if self.hop_possible is not None:
+            return self.hop_possible
+        return bool(self._marks) or any(mark.kind == KIND_EVENT for mark in self._event_marks)
 
     def mark_near(self, x: float) -> StripMark | None:
         """The mark within a few pixels of the x pixel `x`, the nearest one if several."""
@@ -310,7 +318,7 @@ class TimelineStrip(QWidget):
         if self.isEnabled() and self._window.handle_wheel(event, self.width()):  # Ctrl: zoom, Shift / side wheel: pan
             event.accept()
             return
-        if event.modifiers() != Qt.KeyboardModifier.NoModifier or not self.isEnabled() or not (self._marks or self.wheel_without_marks):
+        if event.modifiers() != Qt.KeyboardModifier.NoModifier or not self.isEnabled() or not self.has_marks_to_hop_to():
             event.ignore()
             return
         self._wheel_remainder += event.angleDelta().y()

@@ -215,6 +215,7 @@ from .slideshow import (
     MODE_MASK_STATES,
     MODE_ONE_WAVELENGTH,
     MODE_ROI_STATES,
+    MODE_ROW_MARKS,
     SPEEDS,
     SlideshowController,
     SlideshowSettings,
@@ -515,6 +516,7 @@ class ImagePanel(QWidget):
             app.aboutToQuit.connect(self._chromatic_auto.shutdown)
             app.aboutToQuit.connect(self._transient_scan.shutdown)
             app.aboutToQuit.connect(self._mask_export.shutdown)
+            app.aboutToQuit.connect(self._mask_auto.shutdown)
             app.aboutToQuit.connect(self._array_action.shutdown)
 
         self._redraw_timer = QTimer(self)
@@ -1237,7 +1239,8 @@ class ImagePanel(QWidget):
         # The wheel over the ROI row always hops between its marks, whatever Play / Previous / Next step through.
         self._roi_strip.step_requested.connect(lambda direction: self._slideshow.step(direction, MODE_ROI_STATES))
         self._roi_strip.mark_menu_requested.connect(self._on_roi_mark_menu)
-        self._mask_rows.cube_strip.step_requested.connect(lambda direction: self._slideshow.step(direction, MODE_MASK_STATES))
+        # The wheel over the Mask row under the Cube slider hops between ALL its marks, masks and standing scan pointers.
+        self._mask_rows.cube_strip.step_requested.connect(lambda direction: self._slideshow.step(direction, MODE_ROW_MARKS))
         # The wheel turned on past the last / first wavelength goes on into the next / previous cube, as Play does in its
         # "all wavelengths" order (first wavelength of the next cube / last of the previous), whatever mode Play is set to.
         self._wavelength_slider.edge_step_requested.connect(lambda direction: self._slideshow.step(direction, MODE_ALL))
@@ -1442,7 +1445,15 @@ class ImagePanel(QWidget):
     def _invalidate_landmark_overlay(self, *_args: object) -> None:
         self._landmark_version += 1
 
+    def _stop_dataset_bound_tasks(self) -> None:
+        """A scan reads frames of the dataset and Auto mask makes masks for its frames: when the dataset is loaded or cleared under
+        them they stop, and nothing they had is kept (the scan reads through the dataset module as it is at each read, so it would
+        otherwise go on into the new dataset and install its result in the new session)."""
+        self._transient_scan.invalidate()
+        self._mask_auto.invalidate()
+
     def _on_dataset_loaded(self, _dataset: object) -> None:
+        self._stop_dataset_bound_tasks()
         self._frame_widest = None
         self._renderer.clear_prefetch()
         self._invalidate_landmark_overlay()
@@ -1455,6 +1466,7 @@ class ImagePanel(QWidget):
         deliberately clears only its own reference and expects every module
         and panel holding dataset-derived state to reset itself (see its
         module docstring) - this is the first subscriber to actually do so."""
+        self._stop_dataset_bound_tasks()
         self._frame_widest = None
         self._refresh_frame_tools()
         self._renderer.clear_prefetch()
@@ -1757,6 +1769,8 @@ class ImagePanel(QWidget):
         or the cubes with a scan pointer."""
         if mode == MODE_EVENTS:
             return self._mask_rows.event_state_cubes()
+        if mode == MODE_ROW_MARKS:
+            return self._mask_rows.marked_cubes()
         return self._mask_rows.state_cubes() if mode == MODE_MASK_STATES else self._roi_state_cubes()
 
     def _roi_state_cubes(self) -> tuple[int, ...]:

@@ -40,7 +40,7 @@ import numpy as np
 
 KIND_PARTICLE = "particle"  # compact, area <= `max_particle_area_px`: the kind the Auto mask step masks
 KIND_GLOBAL = "global"  # larger (a liquid front, a bubble edge, a soft shadow): a pointer only
-KIND_ARTEFACT = "artefact"  # did not move between frames, or sits alone on the image border: not a passage, never masked
+KIND_ARTEFACT = "artefact"  # sits on the image border and does not go anywhere (cube 0 has some in every corner): never masked
 
 
 @dataclass(frozen=True)
@@ -162,14 +162,31 @@ def valid_area(reference: np.ndarray, params: DetectionParams, factor: int) -> n
     return cv2.erode(inside, np.ones((5, 5), np.uint8)).astype(bool)
 
 
-def ratio_image(frame: np.ndarray, reference: np.ndarray, valid: np.ndarray) -> tuple[np.ndarray, float]:
-    """`frame / reference` divided by its median over `valid`; returns the ratio image and the gain that was divided out."""
-    ratio = frame / np.maximum(reference, 1.0)
-    sample = ratio[::2, ::2][valid[::2, ::2]]
+def _gain_of(sample: np.ndarray) -> float:
     gain = float(np.median(sample)) if sample.size >= 64 else 1.0
     if not np.isfinite(gain) or gain <= 0.0:
         gain = 1.0
+    return gain
+
+
+def ratio_gain(frame: np.ndarray, reference: np.ndarray, valid: np.ndarray) -> float:
+    """The gain `ratio_image` divides out, worked out from the 1-in-2 grid only: the ratio is taken pixel by pixel, so the same
+    numbers come out of a quarter of the arithmetic (identical, not approximately: `test_lspri_scan_audit_fixes`)."""
+    ratio = frame[::2, ::2] / np.maximum(reference[::2, ::2], 1.0)
+    return _gain_of(ratio[valid[::2, ::2]])
+
+
+def ratio_image(frame: np.ndarray, reference: np.ndarray, valid: np.ndarray) -> tuple[np.ndarray, float]:
+    """`frame / reference` divided by its median over `valid`; returns the ratio image and the gain that was divided out."""
+    ratio = frame / np.maximum(reference, 1.0)
+    gain = _gain_of(ratio[::2, ::2][valid[::2, ::2]])
     return ratio / gain, gain
+
+
+def _blur_reach(sigma: float) -> int:
+    """How many pixels around a pixel `cv2.GaussianBlur(image, (0, 0), sigma)` looks at, plus one: half of the kernel size OpenCV
+    picks for a float image (round(8 * sigma + 1), made odd)."""
+    return (int(round(sigma * 8.0 + 1.0)) | 1) // 2 + 1
 
 
 def robust_sigma(depth_in_valid: np.ndarray) -> float:
@@ -242,6 +259,27 @@ def classify(candidate: Candidate, params: DetectionParams) -> str:
     return KIND_PARTICLE if candidate.area_px <= params.max_particle_area_px else KIND_GLOBAL
 
 
+def depth_window(
+    frame: np.ndarray, reference: np.ndarray, gain: float, smooth_px: float, window: tuple[int, int, int, int]
+) -> np.ndarray:
+    """The depth image (1 - ratio / gain, blurred by `smooth_px`) inside `window` = (x0, y0, x1, y1), worked out from the window
+    alone (2026-10-17: doing the whole frame took 15 of the 26 ms per hit frame, and only a few windows are ever looked at). The
+    window is read `_blur_reach` pixels wider than asked, so the blur sees the same neighbours as it would in the whole frame and
+    the same numbers come out, to within one float32 rounding step (about 1e-7 on a depth of order 1: OpenCV's vector code adds
+    the terms in a slightly different order at a different position in the row; measured 2026-10-17, 0.6 % of the pixels of a
+    window differ by that step, the thresholds are 0.05 and above, and the events of 40 random frames came out identical);
+    at the image border the window stops where the image does, as the whole-frame blur does."""
+    height, width = frame.shape
+    x0, y0, x1, y1 = window
+    reach = _blur_reach(smooth_px) if smooth_px > 0 else 0
+    px0, py0, px1, py1 = max(x0 - reach, 0), max(y0 - reach, 0), min(x1 + reach, width), min(y1 + reach, height)
+    ratio = frame[py0:py1, px0:px1] / np.maximum(reference[py0:py1, px0:px1], 1.0)
+    ratio = ratio / gain
+    if smooth_px > 0:
+        ratio = cv2.GaussianBlur(ratio, (0, 0), smooth_px)
+    return (1.0 - ratio)[y0 - py0 : y1 - py0, x0 - px0 : x1 - px0]
+
+
 # -- stage 2 --------------------------------------------------------------------------------------------------------
 
 
@@ -263,10 +301,8 @@ def contour_objects(
     reference_binned = bin_frame(reference, factor)
     valid_binned = valid_area(reference_binned, params, factor)
     valid = cv2.resize(valid_binned.astype(np.uint8), (width, height), interpolation=cv2.INTER_NEAREST).astype(bool)
-    ratio, _gain = ratio_image(frame, reference, valid)
-    if params.contour_smooth_px > 0:
-        ratio = cv2.GaussianBlur(ratio, (0, 0), params.contour_smooth_px)
-    depth = 1.0 - ratio
+    gain = ratio_gain(frame, reference, valid)
+    smooth = params.contour_smooth_px
     core_threshold = max(params.sigma_factor * screen.sigma, 0.05)
 
     claimed = np.zeros((height, width), dtype=bool)
@@ -276,7 +312,7 @@ def contour_objects(
         margin = params.window_margin_px
         x0, y0 = max(bx0 - margin, 0), max(by0 - margin, 0)
         x1, y1 = min(bx1 + margin, width), min(by1 + margin, height)
-        window = depth[y0:y1, x0:x1]
+        window = depth_window(frame, reference, gain, smooth, (x0, y0, x1, y1))
         window_valid = valid[y0:y1, x0:x1]
         core = ((window >= core_threshold) & window_valid).astype(np.uint8)
         count, core_labels, core_stats, _ = cv2.connectedComponentsWithStats(core, connectivity=8)
@@ -342,10 +378,18 @@ class LinkParams:
     stationary_px: float = 20.0  # moved less than this between consecutive frames (with a similar size): did not move
     min_step_px: float = 60.0  # the slowest passage seen moved ~100 px per frame
     max_step_px: float = 450.0  # the fastest ~260
-    min_stationary_run: int = 3  # frames in a row at one place before it counts as an artefact (a lone coincidence in a dense stream does not)
-    border_px: float = 12.0  # an unlinked object this close to the image border is an artefact (cube 0 has some in every corner)
+    min_stationary_run: int = 3  # frames in a row at one place before it counts as a particle at rest (a lone coincidence in a dense stream does not)
+    border_px: float = 12.0  # an object this close to the image border that goes nowhere is an artefact (cube 0 has some in every corner)
     max_gap: int = 2  # gap filling bridges at most this many missing frames between two pieces of one passage
     gap_direction_cos: float = 0.7  # a bridged piece must move within about 45 degrees of the passage it joins
+
+
+def is_resting(event: TransientEvent, link: LinkParams | None = None) -> bool:
+    """Whether `event` belongs to a particle at rest: a passage whose frame-to-frame displacement is below the speed of any
+    flowing particle (`min_step_px`). Needs no extra stored field: a moving link is by construction at least `min_step_px`, a
+    resting one under `stationary_px`."""
+    link = link or LinkParams()
+    return event.passage_id is not None and event.step_px is not None and event.step_px < link.min_step_px
 
 
 def link_passages(
@@ -355,10 +399,20 @@ def link_passages(
     image_shape: tuple[int, int] | None = None,
 ) -> list[TransientEvent]:
     """Give events of consecutive frames (in acquisition order, which runs across a cube boundary) a shared `passage_id` and
-    a `step_px` when they moved like one flowing particle, and re-label as `KIND_ARTEFACT` what stayed at one place for
-    `min_stationary_run` frames, or sits alone on the image border (`image_shape` = height, width). Objects of two
-    consecutive frames are paired one to one, nearest first. Only for the tooltip and for telling artefacts from particles:
-    nothing in the detection needs it. Other kinds pass through unchanged."""
+    a `step_px`: when they moved like one flowing particle (`step_px` = the largest jump, at least `min_step_px`), or when they
+    stayed at one place for `min_stationary_run` frames or more (a particle that arrived and **rests**: still a `KIND_PARTICLE`,
+    masked like any other; `step_px` = the largest shift between two frames, a few pixels; `is_resting`).
+
+    Only what goes nowhere *on the image border* is re-labelled `KIND_ARTEFACT` (`image_shape` = height, width): a run of
+    frames at one place with a member within `border_px` of the border, or a lone object there that is not part of a moving
+    passage. That is what the corners and edges of cube 0 and the top edge of cubes 175-185 of the test dataset are (356 of
+    the 374 that the first version of this rule called artefacts on the 8164-frame scan, image 900 x 1300). The other 18 were
+    stationary objects away from the border: a 60 px speck resting in cube 0 and stationary pieces in the soft shadow of cubes
+    229-230; they are particles at rest now. Without `image_shape` the border is unknown and nothing is called an artefact
+    because of it.
+
+    Objects of two consecutive frames are paired one to one, nearest first. Only for the tooltip and for telling artefacts
+    from particles: nothing in the detection needs it. Other kinds pass through unchanged."""
     link = link or LinkParams()
     position = {frame: i for i, frame in enumerate(frame_order)}
     particles = [e for e in events if e.kind == KIND_PARTICLE and e.frame in position]
@@ -369,6 +423,7 @@ def link_passages(
     moving = _UnionFind(len(particles))
     still = _UnionFind(len(particles))
     step: dict[int, float] = {}
+    still_step: dict[int, float] = {}
     linked: set[int] = set()
     for pos, here in by_position.items():
         after = by_position.get(pos + 1, [])
@@ -385,6 +440,8 @@ def link_passages(
             similar = min(particles[i].area_px, particles[j].area_px) >= 0.5 * max(particles[i].area_px, particles[j].area_px)
             if distance < link.stationary_px and similar:
                 still.join(i, j)
+                still_step[i] = max(still_step.get(i, 0.0), distance)
+                still_step[j] = max(still_step.get(j, 0.0), distance)
             elif link.min_step_px <= distance <= link.max_step_px:
                 moving.join(i, j)
                 linked.update((i, j))
@@ -395,22 +452,31 @@ def link_passages(
             used_here.add(i)
             used_after.add(j)
 
-    artefact: set[int] = set()
     still_sizes = still.sizes()
+    on_border = (
+        {i for i in range(len(particles)) if _touches_border(particles[i], image_shape, link.border_px)} if image_shape is not None else set()
+    )
+    border_runs = {still.find(i) for i in on_border}  # a resting run with a member on the border is the border's, whole
+    artefact: set[int] = set()
+    resting: set[int] = set()
     for i in range(len(particles)):
-        if still_sizes[still.find(i)] >= link.min_stationary_run:
-            artefact.add(i)
-        elif image_shape is not None and i not in linked and _touches_border(particles[i], image_shape, link.border_px):
+        run = still.find(i)
+        if still_sizes[run] >= link.min_stationary_run:
+            (artefact if run in border_runs else resting).add(i)
+        elif i in on_border and i not in linked:
             artefact.add(i)
 
     moving_sizes = moving.sizes()
-    passage_numbers: dict[int, int] = {}
+    passage_numbers: dict[tuple[str, int], int] = {}
     relabelled: dict[int, TransientEvent] = {}
     for i, event in enumerate(particles):
         if i in artefact:
             relabelled[i] = replace(event, kind=KIND_ARTEFACT)
+        elif i in resting:  # a particle at rest wins over a moving link it may also have (the frame where it stopped)
+            number = passage_numbers.setdefault(("rest", still.find(i)), len(passage_numbers) + 1)
+            relabelled[i] = replace(event, passage_id=number, step_px=still_step.get(i, 0.0))
         elif moving_sizes[moving.find(i)] > 1:
-            number = passage_numbers.setdefault(moving.find(i), len(passage_numbers) + 1)
+            number = passage_numbers.setdefault(("move", moving.find(i)), len(passage_numbers) + 1)
             relabelled[i] = replace(event, passage_id=number, step_px=step.get(i))
     result: list[TransientEvent] = []
     seen = 0

@@ -8,7 +8,11 @@ asks for ("Heavy work reports progress and can be cancelled"). It copies the sha
 - A **plain `threading.Thread`**, never `QThreadPool`: planes are read through `DatasetModule.load_plane_uncached`, which can be an
   OME-Zarr read, and the zarr rule forbids pool workers there. The scan's own reader threads are plain threads too.
 - Cross-thread `emit()` is queued onto the receiver's thread by Qt, so the result is installed (and every slot runs) on the GUI
-  thread.
+  thread. Progress is throttled to ~20 reports a second (`progress.throttled`): a scan reports once per frame.
+- **The result belongs to the dataset and session the scan was started in** (2026-10-17, audit A1). The worker reads planes through
+  the dataset module *as it is when each read happens*, so a dataset opened mid-scan would be read from and the result installed
+  into the wrong session. `invalidate()` (called when the dataset is loaded or cleared, and when a session is restored) cancels the
+  run and makes sure a result that still arrives is dropped.
 
 Everything the thread needs is handed in by value in `start()` (the frame index, the plane loader, the settings); the thread
 never reads a module.
@@ -24,9 +28,9 @@ from dataclasses import dataclass
 import numpy as np
 from PyQt6.QtCore import QObject, pyqtSignal
 
-from ..progress import Cancelled
+from ..progress import Cancelled, throttled
 from .mask.transient_detection import KIND_ARTEFACT, KIND_GLOBAL, KIND_PARTICLE
-from .mask.transient_events import TransientEventsModule
+from .mask.transient_events import EventsChange, TransientEventsModule
 from .mask.transient_scan import ScanParams, ScanResult, scan_transients
 
 logger = logging.getLogger(__name__)
@@ -66,7 +70,10 @@ class TransientScanTask(QObject):
         self._events = events
         self._thread: threading.Thread | None = None
         self._cancel_event = threading.Event()
+        self._generation = 0  # bumped by `invalidate`; a run whose number is not the current one has lost its place
+        self._run_generation = 0
         self._finished.connect(self._on_finished)
+        events.events_changed.connect(self._on_events_changed)
 
     def is_running(self) -> bool:
         return self._thread is not None
@@ -86,7 +93,19 @@ class TransientScanTask(QObject):
             self.failed.emit("There is no dataset to scan.")
             return
         index = {int(c): tuple(float(w) for w in ws) for c, ws in frame_index.items()}  # a snapshot: the thread owns it now
+        first, last = params.cube_range if params.cube_range is not None else (None, None)
+        usable = [c for c, ws in index.items() if (first is None or c >= first) and (last is None or c <= last) and any(w > 0 for w in ws)]
+        if len(usable) < 2:
+            # Every frame is compared with the same wavelength in a neighbouring cube; with one cube nothing can be compared and
+            # the scan would end with a clean-looking "0 particles".
+            where = "the chosen range holds" if params.cube_range is not None else "the dataset has"
+            self.failed.emit(
+                "A scan compares each frame with the same wavelength in a neighbouring cube, so it needs at least two cubes; "
+                f"{where} {len(usable)}."
+            )
+            return
         self._cancel_event.clear()
+        self._run_generation = self._generation
 
         def work() -> None:
             result: ScanResult | None = None
@@ -96,7 +115,7 @@ class TransientScanTask(QObject):
                     index,
                     load_plane,
                     params,
-                    progress=lambda fraction, message: self.task_progress.emit(TASK_ID, TASK_LABEL, fraction, message),
+                    progress=throttled(lambda fraction, message: self.task_progress.emit(TASK_ID, TASK_LABEL, fraction, message)),
                     cancelled=self._cancel_event.is_set,
                     worker_init=worker_init,
                 )
@@ -111,6 +130,18 @@ class TransientScanTask(QObject):
     def cancel(self) -> None:
         self._cancel_event.set()
 
+    def invalidate(self) -> None:
+        """The dataset or the session changed under the scan: whatever it finds no longer belongs here. Cancels a running scan and
+        makes sure that a result which still arrives (it may finish before it notices) is dropped, not installed."""
+        self._generation += 1
+        if self._thread is not None:
+            logger.info("The transient scan is stopped: the dataset or the session changed")
+            self._cancel_event.set()
+
+    def _on_events_changed(self, change: object) -> None:
+        if isinstance(change, EventsChange) and change.reason == "session_restored":
+            self.invalidate()
+
     def shutdown(self) -> None:
         """Application is quitting: stop the thread and wait briefly, so it never emits into a widget Qt is tearing down."""
         self._cancel_event.set()
@@ -124,6 +155,10 @@ class TransientScanTask(QObject):
             thread.join(timeout=1.0)
         self.running_changed.emit(False)
 
+        if self._run_generation != self._generation:  # the dataset or session changed: drop it, whatever it ended in
+            self.task_finished.emit(TASK_ID, "cancelled", "stopped: the dataset or the session changed")
+            self.cancelled.emit()
+            return
         if isinstance(error, Cancelled):
             self.task_finished.emit(TASK_ID, "cancelled", "")
             self.cancelled.emit()
@@ -150,7 +185,8 @@ class TransientScanTask(QObject):
         )
         text = (
             f"{summary.particles} particles in {summary.passages} passages, {summary.globals_} global, "
-            f"{summary.artefacts} artefacts; {summary.seconds:.0f} s"
+            f"{summary.artefacts} artefacts; {summary.frames_screened} of {summary.frames_in_range} frames compared; "
+            f"{summary.seconds:.0f} s"
         )
         if summary.unreadable_frames:
             text += f"; {summary.unreadable_frames} frames could not be read"

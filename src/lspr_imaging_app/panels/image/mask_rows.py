@@ -9,7 +9,12 @@ the wavelength slider. Like the ROIs row (`timeline_strip.py`), each is a thin r
 
 The data is `MaskModule`'s (`persistent_points`, `individual_cubes`, `individual_wavelengths`); this class only shows it, runs the
 right-click menu (go to / make individual / make persistent / delete, all undoable: `MaskModule`'s row commands) and the wheel
-over the wavelength row (the wheel over the Cube row steps through the slideshow's "Mask states" mode, wired by the panel).
+over the wavelength row (the wheel over the Cube row steps through the slideshow's row-marks mode, wired by the panel).
+**The wheel over either row hops between that row's marks, masks and standing scan pointers alike** (2026-10-18), by the app's one
+rule for sets: scroll inside the set; when the scroll leaves it, go to the next / previous available set and land on its lowest /
+highest element. The Cube row hops between `marked_cubes()` (on the wavelength shown now; the marked cubes are the one set). The
+wavelength row hops between the marked wavelengths of the cube shown and, past the last (first), goes on into the nearest later
+(earlier) cube that has one, to its first (last) marked wavelength. A row with nowhere to go leaves the wheel alone.
 There is no selection filter: there is only one ignore mask.
 
 **The scan's pointers** (2026-10-17, `TransientEventsModule`): both rows also show where the Mask-tab scan found something (a
@@ -33,7 +38,7 @@ from PyQt6.QtWidgets import QHBoxLayout, QLabel, QWidget
 
 from ...dataset import DatasetModule
 from ...image_tools import MaskModule
-from ...image_tools.mask.transient_detection import KIND_ARTEFACT, KIND_GLOBAL, KIND_PARTICLE
+from ...image_tools.mask.transient_detection import KIND_ARTEFACT, KIND_GLOBAL, KIND_PARTICLE, is_resting
 from ...image_tools.mask.transient_events import TransientEventsModule
 from ...image_tools.mask.transient_events_state import EventRecord
 from ...image_tools.mask.transient_masks import group_by_frame, maskable
@@ -122,7 +127,6 @@ class MaskRows(QObject):
         self.cube_strip.mark_menu_requested.connect(self._on_cube_menu)
         self.wavelength_strip.mark_menu_requested.connect(self._on_wavelength_menu)
         self.wavelength_strip.step_requested.connect(self._hop_wavelength)
-        self.wavelength_strip.wheel_without_marks = True  # a cube with no mask here still has other cubes to go to
         if events is not None:
             events.events_changed.connect(self._schedule)
             self.cube_strip.event_menu_requested.connect(self._on_cube_event_menu)
@@ -204,6 +208,10 @@ class MaskRows(QObject):
         strip.set_marks(marks)
         strip.set_event_marks(self._cube_event_marks(position))
         strip.set_cursor(position.get(int(self._selection.current_cube())))
+        # A flag, not a callable into this object: a cube with no mark of its own still has other cubes to go to, so the wavelength
+        # row takes the wheel whenever some cube has a marked wavelength. (A bound method on the strip would make a reference cycle
+        # with the strip's owner; the flag is as fresh as the marks, which are rebuilt on every mask / pointer change.)
+        self.wavelength_strip.hop_possible = bool(self._cubes_with_marked_wavelengths())
 
     def _cube_event_marks(self, position: dict[int, int]) -> list[StripMark]:
         if self._events is None:
@@ -232,9 +240,13 @@ class MaskRows(QObject):
         lines = [head]
         for members in list(passages.values())[:_LISTED]:
             wavelengths = sorted({r.event.frame[1] for r in members})
+            span = f"{wavelengths[0]:g}-{wavelengths[-1]:g} nm ({len(wavelengths)} frames"
+            if all(is_resting(r.event) for r in members):  # arrived and stayed: masked like any other particle
+                lines.append(f"  particle at rest {span})")
+                continue
             steps = [r.event.step_px for r in members if r.event.step_px]
             speed = f", ~{sum(steps) / len(steps):.0f} px per frame" if steps else ""
-            lines.append(f"  particle passage {wavelengths[0]:g}-{wavelengths[-1]:g} nm ({len(wavelengths)} frames{speed})")
+            lines.append(f"  particle passage {span}{speed})")
         if len(passages) > _LISTED:
             lines.append("  ...")
         return "\n".join(lines)
@@ -295,7 +307,10 @@ class MaskRows(QObject):
             event = record.event
             bits = [f"{event.kind}, {event.area_px} px"]
             if event.passage_id is not None:
-                bits.append(f"passage {event.passage_id}" + (f", ~{event.step_px:.0f} px per frame" if event.step_px else ""))
+                if is_resting(event):
+                    bits.append(f"at rest (passage {event.passage_id})")
+                else:
+                    bits.append(f"passage {event.passage_id}" + (f", ~{event.step_px:.0f} px per frame" if event.step_px else ""))
             if event.inferred:
                 bits.append("found by gap filling")
             if record.dismissed:
@@ -315,23 +330,16 @@ class MaskRows(QObject):
         known = set(self._dataset.spectral_cubes())
         return tuple(sorted((set(self._mask.persistent_points()) | set(self._mask.individual_cubes())) & known))
 
-    # -- the wheel over the wavelength row ---------------------------------------------------------------
+    def marked_cubes(self) -> tuple[int, ...]:
+        """Every cube the Cube row marks, ascending: a mask mark (persistent or individual) or a pink pointer that is not dismissed.
+        What the wheel over the Cube row hops between (2026-10-18, maintainer: "hop between marks, masks and pointers")."""
+        known = set(self._dataset.spectral_cubes())
+        marked = set(self._mask.persistent_points()) | set(self._mask.individual_cubes())
+        if self._events is not None:
+            marked |= set(self._events.active_event_cubes())
+        return tuple(sorted(marked & known))
 
-    def _hop_wavelength(self, direction: int) -> None:
-        """The wheel: the next (+1) / previous (-1) wavelength of this cube that has an individual mask. Past the last (first)
-        one it goes on into the nearest later (earlier) cube that has a marked frame (`_marked_wavelengths`), to its first
-        (last) marked wavelength - the wheel over the wavelength slider does the same with cubes (2026-10-17)."""
-        indices = [mark.index for mark in self.wavelength_strip.marks()]
-        if self._wavelength not in self._wavelengths:
-            return
-        current = self._wavelengths.index(self._wavelength)
-        later = [index for index in indices if index > current]
-        earlier = [index for index in indices if index < current]
-        target = (min(later) if later else None) if direction > 0 else (max(earlier) if earlier else None)
-        if target is not None:
-            self._selection.set_wavelength(self._wavelengths[target])
-        else:
-            self._hop_to_other_cube(direction)
+    # -- the wheel over the wavelength row ---------------------------------------------------------------
 
     def _marked_wavelengths(self, cube: int) -> list[float]:
         """The wavelengths of `cube`, ascending, that carry an individual mask or a standing scan pointer (not a dismissed one)."""
@@ -341,14 +349,28 @@ class MaskRows(QObject):
         known = self._dataset.wavelengths_for_cube(cube)
         return sorted(wavelength for wavelength in found if wavelength in known)
 
-    def _hop_to_other_cube(self, direction: int) -> None:
-        cube = int(self._selection.current_cube())
+    def _cubes_with_marked_wavelengths(self) -> set[int]:
         candidates = set(self._mask.individual_cubes())
         if self._events is not None:
             candidates |= set(self._events.active_event_cubes())
-        known = set(self._dataset.spectral_cubes())
-        ahead = sorted(c for c in candidates & known if (c > cube if direction > 0 else c < cube))
-        for other in ahead if direction > 0 else reversed(ahead):
+        return candidates & set(self._dataset.spectral_cubes())
+
+    def _hop_wavelength(self, direction: int) -> None:
+        """The wheel over the wavelength row, by the one rule every set in this app follows (2026-10-18, maintainer): scroll inside the
+        set; when the scroll leaves it, go to the next (+1) / previous (-1) available set and land on its lowest (+1) / highest (-1)
+        element. Here a set is a cube and its elements are its marked wavelengths, a mask or a scan pointer that is not dismissed.
+        So: the next marked wavelength of the cube shown; past the last (first) one, the first (last) marked wavelength of the nearest
+        later (earlier) cube that has one; nothing beyond the last such cube. The wheel over the wavelength slider does the same with
+        every wavelength (`edge_step_requested`), the one over the Cube row with the marked cubes."""
+        cube = int(self._selection.current_cube())
+        current = float(self._selection.current_wavelength())
+        here = self._marked_wavelengths(cube)
+        ahead = [wavelength for wavelength in here if (wavelength > current if direction > 0 else wavelength < current)]
+        if ahead:
+            self._selection.set_wavelength(min(ahead) if direction > 0 else max(ahead))
+            return
+        others = sorted(c for c in self._cubes_with_marked_wavelengths() if (c > cube if direction > 0 else c < cube))
+        for other in others if direction > 0 else reversed(others):
             wavelengths = self._marked_wavelengths(other)
             if wavelengths:
                 self._selection.set_cube(other)

@@ -7,8 +7,9 @@ app. Method and measurements: docs/auto_transient_mask_exploration_2026-10-16.md
     python tools/scan_transients.py "D:/data/run/images" --stride 3
     python tools/scan_transients.py "D:/data/run/images" --cubes 55:70 --stride 1 --csv events.csv
 
-An event is one object in one frame. `particle` = compact, `global` = large (a pointer only), `artefact` = it did not move
-between consecutive frames, or sits alone on the image border. Particles seen in consecutive frames share a passage number and a speed.
+An event is one object in one frame. `particle` = compact, `global` = large (a pointer only), `artefact` = it sits on the image
+border and goes nowhere. Particles seen in consecutive frames share a passage number and a speed; one that arrived and stays
+at one place is a particle at rest (still masked).
 """
 
 from __future__ import annotations
@@ -29,6 +30,7 @@ from lspr_imaging_app.image_tools.mask.transient_detection import (  # noqa: E40
     KIND_PARTICLE,
     KIND_ARTEFACT,
     DetectionParams,
+    is_resting,
 )
 from lspr_imaging_app.image_tools.mask.transient_scan import ScanParams, scan_transients  # noqa: E402
 
@@ -100,12 +102,16 @@ def main() -> int:
         steps = [e.step_px for e in events if e.step_px]
         areas = [e.area_px for e in events]
         first, last = events[0].frame, events[-1].frame
-        print(
-            f"  #{number:<3d} cube {first[0]} {first[1]:g} nm -> cube {last[0]} {last[1]:g} nm  {len({e.frame for e in events}):2d} frames  "
-            f"area {min(areas)}-{max(areas)} px  step {min(steps):.0f}-{max(steps):.0f} px/frame"
-            if steps
-            else f"  #{number:<3d} cube {first[0]} {first[1]:g} nm  {len({e.frame for e in events})} frames"
+        span = (
+            f"cube {first[0]} {first[1]:g} nm -> cube {last[0]} {last[1]:g} nm  {len({e.frame for e in events}):2d} frames  "
+            f"area {min(areas)}-{max(areas)} px"
         )
+        if all(is_resting(e) for e in events):  # arrived and stays: a particle at rest, masked like any other
+            print(f"  #{number:<3d} {span}  AT REST at ({events[0].centroid_xy[0]:.0f}, {events[0].centroid_xy[1]:.0f})")
+        elif steps:
+            print(f"  #{number:<3d} {span}  step {min(steps):.0f}-{max(steps):.0f} px/frame")
+        else:
+            print(f"  #{number:<3d} cube {first[0]} {first[1]:g} nm  {len({e.frame for e in events})} frames")
     singles = [e for e in result.events if e.kind == KIND_PARTICLE and e.passage_id is None]
     print(f"\nParticle-sized objects that were not linked to a neighbouring frame: {len(singles)}")
     for e in singles[:30]:

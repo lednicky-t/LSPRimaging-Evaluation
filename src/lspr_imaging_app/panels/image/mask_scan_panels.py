@@ -42,6 +42,7 @@ from lspr_ui import make_compact_spinbox
 
 from ...dataset import DatasetModule
 from ...dataset import io as dataset_io
+from ...thread_priority import lower_current_thread_priority
 from ...image_tools import ChromaticModule, MaskModule
 from ...image_tools.mask.transient_detection import DetectionParams
 from ...image_tools.mask.transient_events import TransientEventsModule
@@ -50,7 +51,7 @@ from ...image_tools.mask.transient_masks import group_by_frame, maskable
 from ...image_tools.mask.transient_scan import ScanParams
 from ...image_tools.mask_auto_task import AutoMaskSummary, MaskAutoTask
 from ...image_tools.mask_scan_task import ScanSummary, TransientScanTask
-from ..mask_edit_common import action_button, disabled_safe_icon, resolve_mask_edit_base
+from ..mask_edit_common import action_button, disabled_safe_icon, plan_mask_edit_base
 from .mask_edit_panels import _narrow_spinbox
 from .mask_rows import EVENT_COLOR, MASK_COLOR
 
@@ -233,7 +234,7 @@ class MaskScanControls(QWidget):
             frame_index,
             self._dataset.load_plane_uncached,
             params,
-            worker_init=lambda: dataset_io.use_fast_tiff_decoder(True),
+            worker_init=_scan_worker_init,
         )
         where = "" if params.cube_range is None else f" in cubes {params.cube_range[0]}-{params.cube_range[1]}"
         self._status(f"Scanning{where} for dark objects that crossed the field... (progress and Cancel in the status bar)")
@@ -246,8 +247,16 @@ class MaskScanControls(QWidget):
     def _on_completed(self, summary: ScanSummary) -> None:
         self._status(
             f"Scan done: {summary.particles} particles in {summary.passages} passages, {summary.globals_} global events, "
-            f"{summary.artefacts} artefacts ({summary.seconds:.0f} s). Pink ticks on the Mask rows mark them; nothing was masked."
+            f"{summary.artefacts} artefacts ({summary.frames_screened} of {summary.frames_in_range} frames compared, "
+            f"{summary.seconds:.0f} s). Pink ticks on the Mask rows mark them; nothing was masked."
         )
+
+
+def _scan_worker_init() -> None:
+    """Runs once in every worker thread of the scan: the fast TIFF decoder, and below-normal priority so the window keeps its turn
+    for a core while twelve threads read and screen frames (`thread_priority.py`)."""
+    dataset_io.use_fast_tiff_decoder(True)
+    lower_current_thread_priority()
 
 
 _DEFAULT_DILATE_PX = 3
@@ -343,7 +352,7 @@ class MaskAutoControls(QWidget):
         chosen = list(self._events.records() if records is None else records)
         self._task.start(
             chosen, raw_shape, self.dilate_px(),
-            lambda frame: resolve_mask_edit_base(self._mask, self._chromatic, frame, raw_shape),
+            lambda frame: plan_mask_edit_base(self._mask, self._chromatic, frame),
         )
 
     def _on_completed(self, summary: AutoMaskSummary) -> None:

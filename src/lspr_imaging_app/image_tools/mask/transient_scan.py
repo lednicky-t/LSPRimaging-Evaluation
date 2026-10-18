@@ -95,8 +95,9 @@ def scan_transients(
 ) -> ScanResult:
     """Scan the frames of `frame_index` (cube -> wavelengths; a wavelength <= 0 is a dark frame and is never scanned).
 
-    `load_plane` is called from `params.workers` threads at once; `worker_init` runs once in each of them (the app opts the
-    thread into the fast TIFF decoder there). Raises `progress.Cancelled` when `cancelled()` turns true."""
+    `load_plane` is called from `params.workers` threads at once; `worker_init` runs once in each thread of both pools, the
+    reading one and the screening one (the app opts the thread into the fast TIFF decoder and lowers its priority there, so the
+    window keeps its turn). Raises `progress.Cancelled` when `cancelled()` turns true."""
     params = params or ScanParams()
     det = params.detection
     stride = max(int(params.stride), 1)
@@ -143,9 +144,12 @@ def scan_transients(
             failed.append(frame)
             return None
 
+    compared: list[int] = []  # one entry per frame that was really compared with a reference (list.append is atomic)
+
     def screen(own: Binned | None, reference: Binned | None) -> FrameScreen | None:
         if own is None or reference is None:
             return None
+        compared.append(1)
         found = screen_frame(own[0], reference[0], det, own[1])
         return found if found.weak_hit else None  # a weak hit makes no event, but its neighbours are looked at too
 
@@ -156,7 +160,7 @@ def scan_transients(
     with timed(logger, "mask.transient_scan", frames=len(order), stride=stride, cubes=len(cubes)) as timing:
         # Two pools of plain threads: one reads (decoding is the floor), one screens (cv2 / numpy release the GIL). Screening on the
         # scan's own thread measured 3.4 ms a frame, as much as the reading itself (2026-10-17).
-        with ThreadPoolExecutor(workers, initializer=worker_init) as pool, ThreadPoolExecutor(workers) as compute:
+        with ThreadPoolExecutor(workers, initializer=worker_init) as pool, ThreadPoolExecutor(workers, initializer=worker_init) as compute:
             # -- 1. screen the checked frames, one wavelength at a time -----------------------------------------------
             stage_started = time.perf_counter()
             total = sum(len(cubes_with[w]) for w in checked)
@@ -272,13 +276,13 @@ def scan_transients(
                     linked = link_passages(events, order, params.link, shape)
             stage_seconds["fill"] = time.perf_counter() - stage_started
             report("fill", 1.0, "done")
-            timing.set(screened=len(screened), hits=len(hits), events=len(events), filled=filled, failed=len(failed))
+            timing.set(screened=len(screened), compared=len(compared), hits=len(hits), events=len(events), filled=filled, failed=len(failed))
 
     linked.sort(key=lambda e: (position.get(e.frame, 0), -e.area_px))
     return ScanResult(
         events=linked,
         frames_in_range=len(order),
-        frames_screened=len(screened),
+        frames_screened=len(compared),  # compared with a reference frame, not merely looked at (a lone cube has none to compare with)
         frames_hit=sum(1 for s in hits.values() if s.candidates),
         failed_frames=sorted(set(failed)),
         seconds=time.perf_counter() - started,

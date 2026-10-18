@@ -194,14 +194,21 @@ class MaskModule(QObject):
         An individual change at exactly `frame` wins over persistent
         (matches the maintainer's "analysis will always look at latest
         persistent change (or individual change for given frame)")."""
+        change = self.resolve_mask_change(frame)
+        if change is None:
+            return None
+        return change.frame, change.mask, change.scope
+
+    def resolve_mask_change(self, frame: tuple[int, float]) -> MaskChange | None:
+        """The stored `MaskChange` that applies at `frame` (the rule of `resolve_mask_source`, which decodes it), still compressed:
+        a caller that makes many masks (Auto mask) takes the lookup here on the GUI thread, a few microseconds a frame, and decodes
+        the pixels later on its own thread. `MaskChange` is immutable, so it can be handed to another thread as it is."""
         if frame in self._individual_changes:
-            change = self._individual_changes[frame]
-            return change.frame, change.mask, change.scope
+            return self._individual_changes[frame]
         candidate_cubes = [cube for cube in self._persistent_changes if cube <= frame[0]]
         if not candidate_cubes:
             return None
-        change = self._persistent_changes[max(candidate_cubes)]
-        return change.frame, change.mask, change.scope
+        return self._persistent_changes[max(candidate_cubes)]
 
     def mask_changes(self) -> tuple[MaskChange, ...]:
         """The whole timeline, persistent changes first then individual

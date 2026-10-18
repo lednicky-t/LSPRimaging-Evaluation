@@ -42,6 +42,7 @@ from PyQt6.QtWidgets import QToolButton, QWidget
 from lspr_ui import load_tabler_icon, transparent_icon_button_stylesheet
 
 from ..image_tools import ChromaticModule, MaskModule
+from ..image_tools.mask.transient_masks import BaseMask
 
 ADD_COLOR = "#38bdf8"  # GuiTheme.accent_blue
 # Tailwind's "orange-500", not a GuiTheme token - chosen specifically to read
@@ -121,3 +122,19 @@ def resolve_mask_edit_base(
     if authored_frame == target_frame:
         return authored_mask
     return chromatic.warp_mask_between(authored_mask, authored_frame, target_frame)
+
+
+def plan_mask_edit_base(mask: MaskModule, chromatic: ChromaticModule, target_frame: tuple[int, float]) -> BaseMask | None:
+    """`resolve_mask_edit_base` without the pixel work (2026-10-17): the stored mask in effect at `target_frame`, still compressed,
+    and the matrix that carries it into that frame's geometry (``None`` when it was authored there, or the matrix is the identity,
+    which warps to the same picture). ``None`` when no mask is in effect yet. The two module lookups are what has to happen on
+    the GUI thread; `transient_masks.materialize_base` does the decoding and warping wherever the caller likes (Auto mask: a
+    worker thread)."""
+    change = mask.resolve_mask_change(target_frame)
+    if change is None:
+        return None
+    if change.frame == target_frame:
+        return BaseMask(change, None)
+    matrix = np.asarray(chromatic.affine_between(change.frame, target_frame), dtype=np.float64)
+    identity = np.eye(matrix.shape[0], matrix.shape[1])
+    return BaseMask(change, None if np.array_equal(matrix, identity) else matrix)

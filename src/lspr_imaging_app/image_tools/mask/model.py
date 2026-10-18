@@ -69,10 +69,14 @@ class MaskCosmeticChange:
     reason: str  # "tool_settings" | "histogram_highlight"
 
 
+def _decode_plane(packed: bytes, height: int, width: int) -> np.ndarray:
+    bits = np.unpackbits(np.frombuffer(zlib.decompress(packed), dtype=np.uint8), count=height * width)
+    return bits.astype(bool).reshape((height, width))
+
+
 @lru_cache(maxsize=32)
 def _decode_mask(packed: bytes, height: int, width: int) -> np.ndarray:
-    bits = np.unpackbits(np.frombuffer(zlib.decompress(packed), dtype=np.uint8), count=height * width)
-    plane = bits.astype(bool).reshape((height, width))
+    plane = _decode_plane(packed, height, width)
     plane.setflags(write=False)  # shared between every caller that asks for the same mask: nobody modifies it in place
     return plane
 
@@ -118,6 +122,12 @@ class MaskChange:
     @property
     def mask(self) -> np.ndarray:
         return _decode_mask(self._packed, self.shape[0], self.shape[1])
+
+    def plane_uncached(self) -> np.ndarray:
+        """The same pixels as `.mask`, decoded afresh: a writable array that is the caller's own and does not go through the
+        shared 32-entry cache. For callers that decode hundreds of masks in one go (Auto mask, the session writer, the PNG
+        export): through the cache they would push out the masks the Image panel is showing (1.75 ms each to decode again)."""
+        return _decode_plane(self._packed, self.shape[0], self.shape[1])
 
     @property
     def stored_bytes(self) -> int:

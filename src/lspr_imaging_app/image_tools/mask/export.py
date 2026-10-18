@@ -17,6 +17,7 @@ folder uses.
 from __future__ import annotations
 
 import csv
+import os
 import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
@@ -48,6 +49,18 @@ def planned_files(changes: Sequence[MaskChange], naming: FrameNamingScheme) -> l
     return [mask_file_name(change, naming) for change in changes]
 
 
+def existing_clashes(folder: Path, names: Sequence[str]) -> list[str]:
+    """Those of `names` that already exist in `folder`, in the order given. One directory listing, not one `stat` per file: on a
+    network or cloud-synced folder with hundreds of files the second form can stall the window (the caller runs on the GUI
+    thread). A folder that does not exist yet holds nothing. Names are compared as the file system does (`normcase`)."""
+    try:
+        with os.scandir(folder) as entries:
+            present = {os.path.normcase(entry.name) for entry in entries}
+    except (FileNotFoundError, NotADirectoryError):
+        return []
+    return [name for name in names if os.path.normcase(name) in present]
+
+
 def export_masks(
     changes: Sequence[MaskChange],
     folder: Path,
@@ -67,7 +80,7 @@ def export_masks(
     for index, change in enumerate(changes):
         name = mask_file_name(change, naming)
         report("write", index / total, f"{name} ({index + 1}/{len(changes)})")
-        plane = change.mask
+        plane = change.plane_uncached()  # hundreds of masks: not through the shared decode cache the Image panel uses
         write_mask_image(plane, folder / name)
         names.append(name)
         applies = (

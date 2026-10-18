@@ -56,7 +56,7 @@ from PyQt6.QtWidgets import QFileDialog, QHBoxLayout, QMessageBox, QWidget
 from ...dataset import DatasetModule
 from ...image_tools import MaskModule, MaskScopeModule
 from ...analysis.provenance import FrameNamingScheme
-from ...image_tools.mask.export import INDEX_FILE_NAME, planned_files
+from ...image_tools.mask.export import INDEX_FILE_NAME, existing_clashes, planned_files
 from ...image_tools.mask.io import read_mask_image, write_mask_image
 from ...image_tools.mask_export_task import MaskExportTask
 from ..mask_edit_common import action_button
@@ -216,7 +216,7 @@ class MaskPngActions(_FrameTrackingWidget):
         if not folder:
             return
         target = Path(folder)
-        clashes = [name for name in [*planned_files(changes, naming), INDEX_FILE_NAME] if (target / name).exists()]
+        clashes = existing_clashes(target, [*planned_files(changes, naming), INDEX_FILE_NAME])
         if clashes:
             choice = QMessageBox.question(
                 self,

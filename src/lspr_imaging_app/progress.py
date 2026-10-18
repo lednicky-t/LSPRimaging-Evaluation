@@ -17,10 +17,28 @@ lives with the feature that owns the task - see
 
 from __future__ import annotations
 
+import time
 from collections.abc import Callable, Mapping
 
 ProgressCallback = Callable[[float, str], None]
 """``callback(overall_fraction_0_to_1, short_message)``."""
+
+
+def throttled(callback: ProgressCallback, min_interval_s: float = 0.05) -> ProgressCallback:
+    """`callback` that forwards at most one report per `min_interval_s` (2026-10-17). A scan reports once per frame, about 110
+    times a second; when the callback emits a Qt signal each report is a queued event the GUI thread must handle (the status
+    bar rebuilds its text every time), for a bar nobody can read faster than ~20 times a second. A report that completes the
+    whole bar (fraction 1.0) always goes through, so the end is never lost. Call it from one thread only (the task's own).
+    Cancellation is **not** affected: `StageProgress` checks it before the callback is reached."""
+    last = [float("-inf")]
+
+    def forward(fraction: float, message: str) -> None:
+        now = time.monotonic()
+        if fraction >= 1.0 or now - last[0] >= min_interval_s:
+            last[0] = now
+            callback(fraction, message)
+
+    return forward
 
 
 class Cancelled(Exception):

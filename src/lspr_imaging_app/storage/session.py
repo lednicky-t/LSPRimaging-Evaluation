@@ -439,12 +439,15 @@ class PreparedSession:
     """A session ready to be written: everything is plain data nobody else can change any more (2026-10-17).
 
     ``payload`` is the JSON-ready dict **except** ``payload["mask"]["changes"]``, which the writer fills in because the
-    version numbers depend on what is already on disk. ``mask_changes`` are immutable (`MaskChange` keeps compressed pixels).
+    version numbers depend on what is already on disk, and ``payload["transient_events"]``, which the writer encodes from
+    ``transient_events`` (an immutable list of up to hundreds of events with their contours: 4 ms of work that does not
+    belong on the GUI thread, 2026-10-17). ``mask_changes`` are immutable (`MaskChange` keeps compressed pixels).
     Do not modify ``payload`` after `prepare_session` returned it."""
 
     payload: dict
     mask_changes: tuple[MaskChange, ...]
     naming: FrameNamingScheme
+    transient_events: TransientEventsState = field(default_factory=TransientEventsState)
 
 
 @dataclass
@@ -483,7 +486,12 @@ class SessionWriter:
             encoded, stats = self._encode_mask_changes(root, prepared.mask_changes, prepared.naming)
             self.last_stats = stats
             mask_block = {**prepared.payload["mask"], "changes": encoded}
-            payload = {**prepared.payload, "mask": mask_block}  # same key order as `prepared.payload`
+            # same key order as `prepared.payload`
+            payload = {
+                **prepared.payload,
+                "mask": mask_block,
+                "transient_events": transient_events_to_payload(prepared.transient_events),
+            }
             path = session_path(root)
             characters = write_json_file(path, payload)
             t.set(
@@ -520,7 +528,7 @@ class SessionWriter:
             if version is not None and MaskSnapshotRef(cube_index, wavelength_nm, tag, version).filename(naming) in present:
                 stats.reused += 1
             else:
-                mask_8bit = np.asarray(change.mask, dtype=bool).astype(np.uint8) * 255
+                mask_8bit = change.plane_uncached().astype(np.uint8) * 255  # not through the GUI's shared decode cache
                 ref, is_new = persist_mask_snapshot_with_status(
                     masks_dir, mask_8bit, cube_index=cube_index, wavelength_nm=wavelength_nm, tag=tag, naming=naming,
                 )
@@ -613,14 +621,16 @@ def prepare_session(state: SessionState, naming: FrameNamingScheme) -> PreparedS
             "arrays": [asdict(array_group) for array_group in state.arrays],
         },
         "frames": asdict(state.frame_roles),
-        "transient_events": transient_events_to_payload(state.transient_events),
+        "transient_events": None,  # filled in by `SessionWriter.write` from `PreparedSession.transient_events`
         "selection": {
             "cube_index": int(state.selected_cube),
             "wavelength_nm": float(state.selected_wavelength),
             "selected_roi_ids": sorted(int(roi_id) for roi_id in state.selected_roi_ids),
         },
     }
-    return PreparedSession(payload=payload, mask_changes=tuple(state.mask_changes), naming=naming)
+    return PreparedSession(
+        payload=payload, mask_changes=tuple(state.mask_changes), naming=naming, transient_events=state.transient_events
+    )
 
 
 def save_session(root: Path, state: SessionState, naming: FrameNamingScheme) -> Path:
