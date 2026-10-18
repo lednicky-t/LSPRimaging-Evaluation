@@ -25,9 +25,12 @@ saved with the other UI state); ``LSPR_OVERLAY_CACHE_MB`` overrides the saved va
 cache smaller than the cycle gets *no* hits at all (measured: 11 of 27 pictures with LRU = 0 hits and slower than no
 cache). A full budget therefore gives a partial hit rate, not a loss.
 
-**Not pixel-identical to direct painting** in the last bit: anti-aliased edges are blended into a transparent layer first
-and composited afterwards (`tests/integration/test_lspri_rewrite_overlay_layer_cache.py` measures the difference). Cached
-pictures sit on the device pixel grid like any Qt item cache.
+**Not pixel-identical to direct painting**: anti-aliased edges are blended into a transparent layer first and composited
+afterwards (`tests/integration/test_lspri_rewrite_overlay_layer_cache.py` measures the difference). Cached pictures sit on
+the device pixel grid like any Qt item cache. Measured 2026-10-18 with the app theme and real fonts: circles, rings and the
+ROI labels come out identical (0/255); the **group label text** has about 23 % less ink (looks lighter) and sits about 1 px
+to the left and 0.6 px higher. Accepted by the maintainer as cosmetic. If it ever matters: draw the group labels outside
+the cached layer (they then repaint every frame, which gives back part of the saving above).
 """
 
 from __future__ import annotations
