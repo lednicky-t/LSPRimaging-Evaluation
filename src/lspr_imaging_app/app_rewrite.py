@@ -65,10 +65,11 @@ from .panels.dock_container import PanelContainer
 from .panels.histogram import HistogramPanel
 from .panels.log import LogPanel
 from .panels.image import ImagePanel
-from .panels.image.overlay_cache import BUDGET_CHOICES_MB, DEFAULT_BUDGET_MB
+from .panels.image.overlay_cache import environment_budget_mb
 from .panels.image.overlay_style import OverlayStyle
-from .panels.layout_presets import wire_view_menu
+from .panels.layout_presets import LayoutPresetManager, wire_view_menu
 from .panels.panel_visibility import ensure_floating_panels_on_screen, wire_panel_visibility_menu
+from .panels.preferences_dialog import Preferences, PreferencesDialog
 from .panels.roi_table import RoiTablePanel
 from .panels.sensorgram import SensorgramPanel
 from .panels.spectra import SpectraPanel
@@ -89,7 +90,6 @@ from .selection.frame_roles_module import FrameRolesModule
 from .selection.reference_auto_task import TASK_ID as REFERENCE_TASK_ID, ReferenceAutoFind
 from .storage.app_settings import AppSettings, load_app_settings, save_app_settings
 from .storage.ui_state_keys import (
-    ROI_ROUND_POSITIONS,
     CHROMATIC_ALL_WAVELENGTHS,
     CUBE_DISPLAY_MODE,
     CHROMATIC_BORDER_PERCENT,
@@ -175,23 +175,23 @@ _WORKFLOW_MIN_WIDTH_PX = 240
 _ROI_TABLE_START_WIDTH_PX = 300
 
 
-def _build_menu_bar(window: QMainWindow) -> tuple[QMenu, QMenu, QMenu]:
-    """Standard File/Edit/View/Options/Help menus
+def _build_menu_bar(window: QMainWindow) -> tuple[QMenu, QMenu]:
+    """Standard File/Edit/View/Help menus
     (``docs/rewrite_gui_shell_design_2026-09.md`` §2). File->Exit is real;
-    View gets theme switching and layout presets, Options gets the presets'
-    auto-apply toggle (standing in for a not-yet-built Preferences dialog),
-    Edit gets undo/redo (`_wire_edit_menu`), Help is an empty placeholder.
+    View gets the panel toggles, layout presets and theme switching, Edit gets
+    undo/redo (`_wire_edit_menu`) and Preferences (`_wire_preferences`), Help
+    holds the Log Console. (The Options menu was replaced by Edit ->
+    Preferences on 2026-10-19.)
 
-    Returns (Edit menu, View menu, Options menu) so the caller can add the
-    actions once the things they act on exist."""
+    Returns (Edit menu, View menu) so the caller can add the actions once the
+    things they act on exist."""
     menu_bar = window.menuBar()
     file_menu = menu_bar.addMenu("&File")
     file_menu.addAction("E&xit", window.close)
     edit_menu = menu_bar.addMenu("&Edit")
     view_menu = menu_bar.addMenu("&View")
-    options_menu = menu_bar.addMenu("&Options")
     menu_bar.addMenu("&Help")
-    return edit_menu, view_menu, options_menu
+    return edit_menu, view_menu
 
 
 def _wire_edit_menu(
@@ -291,6 +291,7 @@ def _wire_theme_menu(
        (2026-09-24, design doc §4a) - same reason as #2: baked-in
        stylesheets, not QSS.
     """
+    view_menu.addSeparator()
     theme_menu = view_menu.addMenu("Theme")
     group = QActionGroup(window)
     group.setExclusive(True)
@@ -1061,7 +1062,8 @@ def _build_dock_layout(
     sensorgram_panel: SensorgramPanel,
 ) -> dict[str, PanelContainer]:
     """Dock-wrap every panel and build the default arrangement. Returns the
-    docks by their panel name (the order is the View menu's Ctrl+1..6 order).
+    docks by their panel name (the order is the View menu's order and its
+    Ctrl+1..6 order).
 
     Each panel is dock-wrapped via the shared PanelContainer (undock/float/
     maximize/close - see panels/dock_container.py), matching how the stable
@@ -1174,17 +1176,17 @@ def _build_dock_layout(
         Qt.Orientation.Horizontal,
     )
 
-    # Order here fixes each panel's View -> Panels shortcut: it matches the
-    # stable app's own Ctrl+1..5 assignment (Workflow/Image/Histogram/
-    # Spectra/Sensorgram) so existing muscle memory carries over, plus
-    # Ctrl+6 for ROI / Groups (unbound in the stable app).
+    # Order here fixes each panel's place in the View menu and its Ctrl+1..6
+    # shortcut (2026-10-19, maintainer: ROI / Groups sits right under
+    # Histogram, so Spectra and Sensorgram moved down to Ctrl+5 / Ctrl+6;
+    # this no longer matches the stable app's Ctrl+1..5).
     return {
         "Workflow": workflow_dock,
         "Image": image_dock,
         "Histogram": histogram_dock,
+        "ROI / Groups": roi_table_dock,
         "Spectra": spectra_dock,
         "Sensorgram": sensorgram_dock,
-        "ROI / Groups": roi_table_dock,
     }
 
 
@@ -1298,8 +1300,8 @@ def _log_ring() -> tuple[RingBufferHandler, LogSystem | None]:
 def _wire_log_console(window: QMainWindow, ui_state: UiStateStore, image_panel: ImagePanel | None = None) -> PanelContainer:
     """Help -> Log Console (Ctrl+Shift+L) and Help -> Open Log Folder (2026-10-14,
     docs/logging_design_2026-10-14.md). The Log panel is a normal dock, created floating
-    and hidden, and deliberately not part of the workspace panels: it is not in View ->
-    Panels, Show/Hide all, or the layout presets (those take explicit dicts of docks).
+    and hidden, and deliberately not part of the workspace panels: it is not among the View
+    menu's panel entries, Show/Hide all, or the layout presets (those take explicit dicts of docks).
     Created before the window state is restored so its saved position comes back too."""
     ring, system = _log_ring()
     panel = LogPanel(ring, system, ui_state)
@@ -1411,12 +1413,7 @@ def build_main_window(
     # AllowTabbedDocks out means dropping a panel onto another's center now
     # simply isn't offered as a target - only the split zones are.
     window.setDockOptions(QMainWindow.DockOption.AnimatedDocks | QMainWindow.DockOption.AllowNestedDocks)
-    edit_menu, view_menu, options_menu = _build_menu_bar(window)
-    _wire_theme_menu(
-        view_menu, window, image_panel,
-        initial_theme=settings.theme,
-        on_theme_changed=lambda name: writer.persist(theme=name),
-    )
+    edit_menu, view_menu = _build_menu_bar(window)
     _build_status_bar(window, m, workflow, image_panel, roi_table_panel)
     _wire_edit_menu(edit_menu, window, m.analysis_engine)
     panel_docks = _build_dock_layout(
@@ -1428,11 +1425,13 @@ def build_main_window(
     for dock_name, hidden_aware_panel in (("Histogram", histogram_panel), ("ROI / Groups", roi_table_panel)):
         panel_docks[dock_name].visibilityChanged.connect(hidden_aware_panel.set_panel_visible)
 
-    # View -> Panels: Show/Hide all + one checkable, Ctrl+1..6-shortcut
-    # toggleViewAction() per dock (panels/panel_visibility.py) - the
-    # recovery path a closed-and-lost panel had no way back from before
-    # this (found 2026-09-27: undocking Workflow, then losing it, had no
-    # fix short of restarting).
+    # View menu, top to bottom (the order of these calls is the menu order):
+    # Show/Hide all + one checkable, Ctrl+1..6-shortcut toggleViewAction()
+    # per dock (panels/panel_visibility.py) - the recovery path a
+    # closed-and-lost panel had no way back from before this (found
+    # 2026-09-27: undocking Workflow, then losing it, had no fix short of
+    # restarting) - then Panel Presets (wire_view_menu below), then Theme.
+    # Until 2026-10-19 the panels sat in a "Panels" submenu under Theme.
     wire_panel_visibility_menu(view_menu, panel_docks)
 
     # Named panel presets (design doc §5). A never-customized preset is
@@ -1449,7 +1448,6 @@ def build_main_window(
     # last explicitly saved, possibly older.
     layout_preset_manager = wire_view_menu(
         view_menu,
-        options_menu,
         window,
         workflow,
         panel_docks["Workflow"],
@@ -1461,32 +1459,19 @@ def build_main_window(
             "Sensorgram": panel_docks["Sensorgram"],
         },
         initial_auto_apply=settings.auto_apply_preset_on_stage_change,
-        on_auto_apply_changed=lambda checked: writer.persist(auto_apply_preset_on_stage_change=bool(checked)),
         state_version=_DOCK_LAYOUT_STATE_VERSION,
+    )
+    _wire_theme_menu(
+        view_menu, window, image_panel,
+        initial_theme=settings.theme,
+        on_theme_changed=lambda name: writer.persist(theme=name),
     )
     _restore_window_state(window, settings, panel_docks, layout_preset_manager)
     ensure_floating_panels_on_screen({"Log": log_dock}, window)
 
-    # "Reopen Last Dataset on Launch" (2026-09-26) - stands in for a real
-    # Preferences dialog exactly like the auto-apply-preset toggle above
-    # (neither has one yet).
-    reopen_action = options_menu.addAction("Reopen Last Dataset on Launch")
-    reopen_action.setCheckable(True)
-    reopen_action.setChecked(settings.auto_reopen_last_dataset)
-    reopen_action.toggled.connect(lambda checked: writer.persist(auto_reopen_last_dataset=bool(checked)))
-
-    _wire_roi_fill_opacity_menu(options_menu, image_panel)
-    _wire_overlay_cache_menu(options_menu, image_panel)
-    round_action = options_menu.addAction("Round ROI Positions to 0.1 px")
-    round_action.setCheckable(True)
-    m.roi_toolbox.round_positions = read(ui_state, ROI_ROUND_POSITIONS) is not False
-    round_action.setChecked(m.roi_toolbox.round_positions)
-
-    def _on_round_positions(checked: bool) -> None:
-        m.roi_toolbox.round_positions = bool(checked)
-        ui_state.set(ROI_ROUND_POSITIONS.key, bool(checked))
-
-    round_action.toggled.connect(_on_round_positions)
+    # Edit -> Preferences...: reopen-last-dataset, the preset auto-apply toggle and the overlay cache size (2026-10-19;
+    # they were in the Options menu, which is gone).
+    _wire_preferences(edit_menu, window, image_panel, writer, layout_preset_manager)
 
     _wire_quit_persistence(window, m, writer, ui_state, layout_preset_manager)
     _auto_reopen_last_dataset(m.dataset, settings)
@@ -1494,59 +1479,67 @@ def build_main_window(
     return window
 
 
-_ROI_FILL_OPACITY_CHOICES = (0.1, 0.2, 0.3, 0.5, 0.75, 1.0)
+def _wire_preferences(
+    edit_menu: QMenu,
+    window: QMainWindow,
+    image_panel: ImagePanel,
+    writer: _SettingsWriter,
+    layout_preset_manager: LayoutPresetManager,
+) -> QAction:
+    """Edit -> Preferences... (Ctrl+, anywhere in the app): the app-wide settings that belong to no panel
+    (`panels/preferences_dialog.py`; replaced the Options menu on 2026-10-19).
 
+    - The dialog is shown with `open()` (window-modal, does not block the event loop) and applies nothing until OK. OK
+      applies only what changed, through the setters the Options menu used: `AppSettings` via the writer (reopen last dataset;
+      the preset auto-apply toggle, also kept on `LayoutPresetManager.auto_apply`, which `wire_view_menu` reads) and
+      `ImagePanel.set_overlay_cache_mb` (applied at once, saved with the other UI state).
+    - A second press of Ctrl+, while the dialog is open just brings it forward."""
+    edit_menu.addSeparator()
+    action = edit_menu.addAction("Preferences...")
+    action.setShortcut(QKeySequence("Ctrl+,"))
+    action.setShortcutContext(Qt.ShortcutContext.ApplicationShortcut)
 
-def _wire_roi_fill_opacity_menu(options_menu, image_panel: ImagePanel) -> None:
-    """Options -> "ROI Fill Maximum Opacity": how opaque a ROI fill is when its
-    Transparency slider (Image ribbon, ROIs tab) is at 100 %. The slider then
-    runs 0 to this value. Saved by the panel (`ui_state`)."""
-    submenu = options_menu.addMenu("ROI Fill Maximum Opacity")
-    group = QActionGroup(submenu)
-    group.setExclusive(True)
-    current = image_panel.roi_fill_max_opacity
-    for choice in _ROI_FILL_OPACITY_CHOICES:
-        action = submenu.addAction(f"{round(choice * 100)} %")
-        action.setCheckable(True)
-        action.setChecked(abs(choice - current) < 1e-6)
-        group.addAction(action)
-        action.triggered.connect(lambda _checked=False, value=choice: image_panel.set_roi_fill_max_opacity(value))
+    def current() -> Preferences:
+        return Preferences(
+            reopen_last_dataset=bool(writer.settings.auto_reopen_last_dataset),
+            auto_apply_layout_preset=layout_preset_manager.auto_apply,
+            overlay_cache_mb=image_panel.overlay_cache_mb,
+        )
 
+    def apply(old: Preferences, new: Preferences) -> None:
+        changed: list[str] = []
+        if new.reopen_last_dataset != old.reopen_last_dataset:
+            writer.persist(auto_reopen_last_dataset=new.reopen_last_dataset)
+            changed.append("reopen_last_dataset")
+        if new.auto_apply_layout_preset != old.auto_apply_layout_preset:
+            layout_preset_manager.auto_apply = new.auto_apply_layout_preset
+            writer.persist(auto_apply_preset_on_stage_change=new.auto_apply_layout_preset)
+            changed.append("auto_apply_layout_preset")
+        if new.overlay_cache_mb != old.overlay_cache_mb:
+            image_panel.set_overlay_cache_mb(new.overlay_cache_mb)
+            changed.append("overlay_cache_mb")
+        if changed:
+            log_event(logger, "app.preferences_changed", logging.INFO, changed=",".join(changed))
 
-def _wire_overlay_cache_menu(options_menu, image_panel: ImagePanel) -> None:
-    """Options -> "ROI Overlay Cache": how much memory the Image panel may use to keep a picture of the ROI overlay for each
-    wavelength, so Play does not repaint it on every frame (`panels/image/overlay_cache.py`). Off = paint directly. The first
-    line says what the cache holds right now (refreshed when the menu opens). Saved by the panel (`ui_state`)."""
-    submenu = options_menu.addMenu("ROI Overlay Cache")
-    submenu.setToolTipsVisible(True)
-    submenu.menuAction().setToolTip(
-        "Keeps a picture of the ROI overlay for every wavelength, so Play does not repaint it on each frame. "
-        "Faster with many ROIs; uses memory (about 8 MB per wavelength at a 1500 x 850 view). Off paints the overlay directly."
-    )
-    info = submenu.addAction("")
-    info.setEnabled(False)
-    submenu.addSeparator()
-    group = QActionGroup(submenu)
-    group.setExclusive(True)
-    actions: dict[int, object] = {}
-    for megabytes in BUDGET_CHOICES_MB:
-        label = "Off" if megabytes == 0 else f"{megabytes} MB"
-        if megabytes == DEFAULT_BUDGET_MB:
-            label += " (default)"
-        action = submenu.addAction(label)
-        action.setCheckable(True)
-        group.addAction(action)
-        actions[megabytes] = action
-        action.triggered.connect(lambda _checked=False, value=megabytes: image_panel.set_overlay_cache_mb(value))
+    def open_dialog() -> None:
+        shown = window.findChild(PreferencesDialog)
+        if shown is not None and shown.isVisible():
+            shown.raise_()
+            shown.activateWindow()
+            return
+        old = current()
+        dialog = PreferencesDialog(
+            old,
+            overlay_cache_status=image_panel.overlay_cache_status(),
+            cache_set_by_environment=environment_budget_mb() is not None,
+            parent=window,
+        )
+        dialog.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+        dialog.accepted.connect(lambda: apply(old, dialog.values()))
+        dialog.open()
 
-    def refresh() -> None:
-        info.setText(image_panel.overlay_cache_status())
-        current = image_panel.overlay_cache_mb
-        for megabytes, action in actions.items():
-            action.setChecked(megabytes == current)  # a size set by LSPR_OVERLAY_CACHE_MB that is not a choice: none checked
-
-    refresh()
-    submenu.aboutToShow.connect(refresh)
+    action.triggered.connect(open_dialog)
+    return action
 
 
 _GC_SUMMARY_MS = 5000

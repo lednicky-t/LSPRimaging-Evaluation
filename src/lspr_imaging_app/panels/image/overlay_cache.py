@@ -19,7 +19,7 @@ group-label settings, line width, detection ring sizes): when it changes, every 
 picture made for another view. A picture is only kept once the epoch has been stable for a frame (a drag that changes it
 at every step caches nothing).
 
-**Memory policy.** A byte budget (default 256 MB; 0 switches the cache off). Chosen in the Options menu ("ROI Overlay Cache",
+**Memory policy.** A byte budget (default 256 MB; 0 switches the cache off). Chosen in Edit -> Preferences ("ROI overlay cache",
 saved with the other UI state); ``LSPR_OVERLAY_CACHE_MB`` overrides the saved value at start-up (for comparing runs). Pictures are
 **admitted until the budget is full and never evicted**: playback visits the states in a cycle, and a least-recently-used
 cache smaller than the cycle gets *no* hits at all (measured: 11 of 27 pictures with LRU = 0 hits and slower than no
@@ -48,7 +48,7 @@ logger = logging.getLogger(__name__)
 
 ENV_BUDGET_MB = "LSPR_OVERLAY_CACHE_MB"
 DEFAULT_BUDGET_MB = 256
-BUDGET_CHOICES_MB = (0, 128, 256, 512, 1024)  # the Options menu's choices
+BUDGET_CHOICES_MB = (0, 128, 256, 512, 1024)  # the Preferences dialog's choices
 USELESS_AFTER_MISSES = 60  # this many misses in a row without one hit: the states do not repeat, stop making pictures
 _LAYER_SCREEN_Z = 900.0  # the label items' own z values (900, 901) are relative to their parent: same stacking as before
 
@@ -233,7 +233,7 @@ class OverlayLayers:
         return self._budget.limit / (1024 * 1024)
 
     def set_budget_bytes(self, limit_bytes: int) -> None:
-        """Change the memory budget at run time (the Options menu). 0 switches the cache off; a budget below what is
+        """Change the memory budget at run time (Edit -> Preferences). 0 switches the cache off; a budget below what is
         already used drops the pictures. The caller re-draws the overlay items afterwards (they may be out of date
         relative to what the dropped pictures showed)."""
         self._budget.limit = max(int(limit_bytes), 0)
@@ -244,7 +244,7 @@ class OverlayLayers:
             self.clear()
 
     def status_text(self) -> str:
-        """One line for the Options menu: what the cache holds right now."""
+        """One line for the Preferences dialog: what the cache holds right now."""
         if not self.enabled:
             return "Off: the overlay is painted directly"
         if self._paused:

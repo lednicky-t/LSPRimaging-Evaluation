@@ -167,7 +167,8 @@ flip, crop - never a scale change), so there is nothing else to do for them."""
 
 
 POSITION_DECIMALS = 1
-"""ROI centres are stored to 0.1 px when `RoiToolbox.round_positions` is on."""
+"""ROI centres are always stored to 0.1 px. (Until 2026-10-19 this was an Options-menu preference, on by default;
+the preference was removed, the rounding stayed.)"""
 
 
 @dataclass(frozen=True)
@@ -276,13 +277,11 @@ class RoiToolbox(QObject):
         self._detection_settings = AreaRoiDetectionSettings()
         self._roi_id_counter = itertools.count(1)
         self._group_id_counter = itertools.count(1)
-        self.round_positions = True
-        """Options preference: store ROI centres rounded to `POSITION_DECIMALS`
-        decimals (0.1 px). Applies to positions set from now on, not to ROIs
-        already stored."""
 
-    def _rounded(self, value: float) -> float:
-        return round(float(value), POSITION_DECIMALS) if self.round_positions else float(value)
+    @staticmethod
+    def _rounded(value: float) -> float:
+        """A ROI centre coordinate as stored: rounded to `POSITION_DECIMALS` (0.1 px)."""
+        return round(float(value), POSITION_DECIMALS)
 
     # -- query interface ------------------------------------------------
 

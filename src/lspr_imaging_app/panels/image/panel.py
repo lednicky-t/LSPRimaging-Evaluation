@@ -171,7 +171,6 @@ from ...storage.ui_state_keys import (
     IMAGE_CURSOR_READOUT,
     IMAGE_MASK_EDIT_TOOL,
     IMAGE_OVERLAY_CACHE_MB,
-    IMAGE_ROI_FILL_MAX_OPACITY,
     IMAGE_ROI_LABELS,
     IMAGE_SCALE_BAR_COLOR,
     MASK_ROWS_VISIBLE,
@@ -565,7 +564,6 @@ class ImagePanel(QWidget):
         labels = store.get(IMAGE_ROI_LABELS.key)
         if isinstance(labels, bool):
             self._roi_overlay.labels_visible = labels
-        self._roi_overlay.fill_max_opacity = float(read(store, IMAGE_ROI_FILL_MAX_OPACITY))
         env_mb = environment_budget_mb()  # LSPR_OVERLAY_CACHE_MB, if set, wins over the saved choice for this run
         cache_mb = env_mb if env_mb is not None else int(read(store, IMAGE_OVERLAY_CACHE_MB))
         self._roi_overlay.layers.set_budget_bytes(int(max(cache_mb, 0) * 1024 * 1024))
@@ -2318,24 +2316,12 @@ class ImagePanel(QWidget):
             self._roi_overlay_store.set(ROI_OVERLAY_KEYS[kind][field].key, value)
 
     @property
-    def roi_fill_max_opacity(self) -> float:
-        """Opacity (0..1) of the ROI fills when their Transparency slider is at 100 %."""
-        return self._roi_overlay.fill_max_opacity
-
-    def set_roi_fill_max_opacity(self, value: float) -> None:
-        """Options menu: set how opaque the ROI fills get at slider 100 % (remembered)."""
-        self._roi_overlay.fill_max_opacity = max(0.0, min(1.0, float(value)))
-        self._apply_roi_overlay_style()
-        if self._roi_overlay_store is not None:
-            self._roi_overlay_store.set(IMAGE_ROI_FILL_MAX_OPACITY.key, self._roi_overlay.fill_max_opacity)
-
-    @property
     def overlay_cache_mb(self) -> int:
         """Size of the ROI overlay cache in MB (0 = off). See `overlay_cache.py`."""
         return int(round(self._roi_overlay.layers.budget_megabytes))
 
     def set_overlay_cache_mb(self, megabytes: int) -> None:
-        """Options menu: how much memory the ROI overlay cache may use (0 = off; remembered). Takes effect at once: the
+        """Preferences: how much memory the ROI overlay cache may use (0 = off; remembered). Takes effect at once: the
         overlay is re-drawn for the frame on screen, so nothing out of date stays visible."""
         megabytes = max(int(megabytes), 0)
         changed = megabytes != self.overlay_cache_mb

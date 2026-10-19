@@ -92,6 +92,9 @@ class LayoutPresetManager:
         self._custom_blobs: dict[str, QByteArray] = {}
         self._current: str | None = None
         self._on_applied: list = []
+        self.auto_apply = False
+        """Apply a stage's preset whenever the Workflow stage changes (Edit -> Preferences; `wire_view_menu` acts on it).
+        Plain state: persisting it is the caller's job."""
         # Passed through to every saveState()/restoreState() call below - a
         # saved preset blob is exactly as vulnerable to a dock-topology
         # change as the plain main-window layout state is (see
@@ -173,30 +176,24 @@ class LayoutPresetManager:
 
 def wire_view_menu(
     view_menu: QMenu,
-    options_menu: QMenu,
     window: QMainWindow,
     workflow_panel,
     workflow_dock: PanelContainer,
     docks_by_name: dict[str, PanelContainer],
     *,
     initial_auto_apply: bool = False,
-    on_auto_apply_changed=None,
     state_version: int = 0,
 ) -> LayoutPresetManager:
     """Builds View -> Panel Presets (apply/save/reset, Ctrl+Shift+1-4) and
-    the Options menu's auto-apply-on-stage-change toggle (design doc §5).
+    acts on the auto-apply-on-stage-change toggle (design doc §5).
 
-    The toggle lives in Options rather than a Preferences dialog because
-    the rewrite has no Preferences dialog yet - stands in for one until it
-    exists, flagged here rather than silently placed as if this were the
-    final location.
-
-    `initial_auto_apply`/`on_auto_apply_changed` (2026-09-26): this toggle's
-    checked state is now persisted by `storage/app_settings.py` - the
-    caller reads the saved value in and gets told about every change so it
-    can write it back out; this function still owns no persistence itself,
-    same "chrome, not storage" split every other module here follows."""
+    The toggle is `LayoutPresetManager.auto_apply`; the user changes it in
+    Edit -> Preferences (until 2026-10-19: the Options menu), and the caller
+    (`app_rewrite.py`) saves it in `storage/app_settings.py`. This function
+    owns no persistence itself, same "chrome, not storage" split every other
+    module here follows. `initial_auto_apply` is the saved value."""
     manager = LayoutPresetManager(window, workflow_dock, docks_by_name, state_version=state_version)
+    manager.auto_apply = initial_auto_apply
 
     presets_menu = view_menu.addMenu("Panel Presets")
     group = QActionGroup(window)
@@ -222,22 +219,15 @@ def wire_view_menu(
 
     manager.on_applied(sync_checked_action)
 
-    auto_apply_action = options_menu.addAction("Automatically Apply Layout Preset on Stage Change")
-    auto_apply_action.setCheckable(True)
     # Off by default on a truly fresh settings file (design doc §5) - never
     # surprises a new user; a returning one gets back whatever they last set.
-    auto_apply_action.setChecked(initial_auto_apply)
-
     def on_stage_changed(stage: WorkflowStage) -> None:
-        if not auto_apply_action.isChecked():
+        if not manager.auto_apply:
             return
         preset_name = STAGE_TO_PRESET.get(stage)
         if preset_name is not None:
             manager.apply(preset_name)
 
     workflow_panel.stage_changed.connect(on_stage_changed)
-
-    if on_auto_apply_changed is not None:
-        auto_apply_action.toggled.connect(on_auto_apply_changed)
 
     return manager

@@ -50,9 +50,6 @@ SAMPLE_WIDTH_FAST = 1.0
 REFERENCE_WIDTH = 1.0
 SELECTED_COLOR = "#f8fafc"
 SELECTED_WIDTH = 3.5
-DEFAULT_FILL_MAX_OPACITY = 1.0
-"""Opacity of a ROI fill when its Transparency slider is at 100 %. The slider
-scales between 0 and this value; the maximum is an Options-menu preference."""
 
 
 def add_curve(plot: pg.PlotItem, color_hex: str, *, width: float, dashed: bool = False) -> pg.PlotDataItem:
@@ -140,12 +137,11 @@ class RoiOverlay:
         self.reference = shared.reference
         self.labels_visible = False
         self.label_placement = DEFAULT_ROI_PLACEMENT  # where the ROI labels sit around their circles (label_placement.py)
-        self.fill_max_opacity = DEFAULT_FILL_MAX_OPACITY
         # Every sample circle, each in its ROI's own colour (a group tints its members), with its
         # translucent fill - one item, see `sample_circles_item.py`.
         self.sample_circles = SampleCirclesItem(SAMPLE_WIDTH)
         plot.addItem(self.sample_circles)
-        self.sample_circles.set_style(self.sample.alpha, self.sample.alpha * self._fill_max())
+        self.sample_circles.set_style(self.sample.alpha, self.sample.alpha)
         self.sample_circles.setVisible(self.sample.visible)
         self.reference_curve = add_curve(plot, DEFAULT_REFERENCE_COLOR, width=REFERENCE_WIDTH)
         self.reference_fill = add_fill(plot, self.reference_curve)
@@ -189,7 +185,7 @@ class RoiOverlay:
         return (
             self.sample.visible, self.sample.color, self.sample.alpha,
             self.reference.visible, self.reference.color, self.reference.alpha,
-            self.labels_visible, self.label_placement, self.fill_max_opacity, self.sample_circles.width,
+            self.labels_visible, self.label_placement, self.sample_circles.width,
             group.visible, group.angle, group.position, group.side, group.box_percent, group.min_point_size,
         )
 
@@ -209,7 +205,7 @@ class RoiOverlay:
         or hidden. A hidden sample overlay hides the selection highlight too
         (they are the same circles). Does not redraw."""
         self.layers.invalidate()
-        self.sample_circles.set_style(self.sample.alpha, self.sample.alpha * self._fill_max())
+        self.sample_circles.set_style(self.sample.alpha, self.sample.alpha)
         self.sample_circles.setVisible(self.sample.visible)
         self.selection_curve.setVisible(self.sample.visible)
         self._style_curve(self.reference_curve, self.reference.color, self.reference.alpha, REFERENCE_WIDTH)
@@ -223,12 +219,9 @@ class RoiOverlay:
         color.setAlphaF(max(0.0, min(1.0, float(alpha))))
         curve.setPen(pg.mkPen(color, width=width))
 
-    def _fill_max(self) -> float:
-        return max(0.0, min(1.0, self.fill_max_opacity))
-
     def _style_fill(self, item: QGraphicsPathItem, color_hex: str, alpha: float) -> None:
         color = QColor(color_hex)
-        color.setAlphaF(max(0.0, min(1.0, float(alpha))) * self._fill_max())
+        color.setAlphaF(max(0.0, min(1.0, float(alpha))))
         item.setBrush(QBrush(color))
 
     # -- drawing -------------------------------------------------------------------

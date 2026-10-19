@@ -1,5 +1,6 @@
-"""Panel show/hide recovery - a View -> Panels menu (Show all / Hide all,
-one checkable, shortcut-bound toggle per dock) plus an off-screen safety net
+"""Panel show/hide recovery - panel entries at the top of the View menu (Show
+all / Hide all, one checkable, shortcut-bound toggle per dock; a "Panels"
+submenu until 2026-10-19) plus an off-screen safety net
 for a floating panel restored onto a monitor that's since gone.
 
 **Why this exists** (2026-09-27, found via the maintainer undocking the
@@ -35,34 +36,38 @@ from PyQt6.QtWidgets import QMainWindow, QMenu
 
 from .dock_container import PanelContainer
 
-# Order + shortcuts matter: Ctrl+1..5 here match the stable app's own
-# assignment exactly (Workflow/Image/Histogram/Spectra/Sensorgram, in that
-# order - gui/main_window_icons.py) so a maintainer's existing muscle memory
-# carries over. ROI / Groups gets Ctrl+6, unbound in the stable app for no
-# documented reason - no reason to leave the same gap here.
+# Order + shortcuts: Ctrl+1..6 follow the order of the docks dict
+# (Workflow / Image / Histogram / ROI / Groups / Spectra / Sensorgram, built
+# in app_rewrite._build_dock_layout). Until 2026-10-19 Ctrl+1..5 matched the
+# stable app's (gui/main_window_icons.py) and ROI / Groups was Ctrl+6; the
+# maintainer moved ROI / Groups up under Histogram, so Spectra and
+# Sensorgram are now Ctrl+5 / Ctrl+6.
 _PANEL_SHORTCUTS: tuple[str, ...] = ("Ctrl+1", "Ctrl+2", "Ctrl+3", "Ctrl+4", "Ctrl+5", "Ctrl+6")
 
 
 def wire_panel_visibility_menu(view_menu: QMenu, docks: dict[str, PanelContainer]) -> None:
-    """Builds View -> Panels. *docks* must be given in the order its panels
-    should appear in the menu / receive Ctrl+1.. shortcuts (six entries
-    expected - one per ``_PANEL_SHORTCUTS`` slot; a shorter dict just leaves
-    the remaining shortcuts unused, not an error)."""
-    panels_menu = view_menu.addMenu("Panels")
-
-    show_all_action = panels_menu.addAction("Show all panels")
+    """Adds the panel show/hide entries straight into the View menu (since
+    2026-10-19, no "Panels" submenu): Show all / Hide all, a separator, one
+    checkable toggle per dock, then a closing separator so the next group
+    (Panel Presets) is visually apart. Call this first so the panels sit at
+    the top. *docks* must be given in the order its panels should appear in
+    the menu / receive Ctrl+1.. shortcuts (six entries expected - one per
+    ``_PANEL_SHORTCUTS`` slot; a shorter dict just leaves the remaining
+    shortcuts unused, not an error)."""
+    show_all_action = view_menu.addAction("Show all panels")
     show_all_action.setToolTip("Show every workspace panel.")
     show_all_action.triggered.connect(lambda: _set_all_visible(docks, True))
 
-    hide_all_action = panels_menu.addAction("Hide all panels")
+    hide_all_action = view_menu.addAction("Hide all panels")
     hide_all_action.setToolTip("Hide every workspace panel.")
     hide_all_action.triggered.connect(lambda: _set_all_visible(docks, False))
 
-    panels_menu.addSeparator()
+    view_menu.addSeparator()
     for (_name, dock), shortcut in zip(docks.items(), _PANEL_SHORTCUTS):
         action = dock.toggleViewAction()
         action.setShortcut(QKeySequence(shortcut))
-        panels_menu.addAction(action)
+        view_menu.addAction(action)
+    view_menu.addSeparator()
 
 
 def _set_all_visible(docks: dict[str, PanelContainer], visible: bool) -> None:

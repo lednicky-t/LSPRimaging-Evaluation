@@ -13,7 +13,7 @@ circle vertices as two arrays and a colour per circle, and paints them itself:
   polygon, one pen / brush switch per colour run. Outlines stay above fills, as before.
 
 Look is unchanged: 1.5 px cosmetic outline in the ROI's colour at the style's transparency,
-fill at that transparency times the Options-menu maximum fill opacity. (Qt strokes a
+fill at the same transparency. (Qt strokes a
 1.5 px pen ~5x slower than a 1.0 px one: 8 ms vs 1.6 ms for 160 circles; `SAMPLE_WIDTH` in
 `roi_overlay.py` is the one number to change if that is ever worth a thinner line.)
 
@@ -87,7 +87,7 @@ class SampleCirclesItem(pg.GraphicsObject):
         return self._width
 
     def set_style(self, outline_alpha: float, fill_alpha: float) -> None:
-        """Transparency of the outlines, and of the fills (the caller multiplies in the maximum fill opacity)."""
+        """Transparency of the outlines, and of the fills (the overlay passes the same value for both)."""
         self._outline_alpha = max(0.0, min(1.0, float(outline_alpha)))
         self._fill_alpha = max(0.0, min(1.0, float(fill_alpha)))
         self._pens.clear()
