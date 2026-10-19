@@ -374,11 +374,8 @@ a handful of files per dataset.
 Decisions: spread = plain STD of the valid pixels, SEM derived (same for every method), the 4-sector ring coverage number is
 dropped, `n_valid` / `n_nominal` kept; **the first stored value is the mean (with its STD), nothing else** (median,
 trimmed mean, plane fit stay available in the code as optional layers later). The maintainer first wrote "median" and
-then corrected it to "mean" the same day; mean is the default throughout. Worker processes are fine. float64 is approved
-for the mean, **not yet applied**: the mean is still `np.mean` on float32 pixels (float32 pairwise accumulation), so it
-equals the old code bit for bit; float64 accumulation would differ by about 1e-7 relative (roughly 0.004 intensity units at
-40,000) and, being a sum, could be vectorised for all ROIs without a Python loop. Per `.claude/rules/numerics.md` it
-waits for a real-data before/after comparison, which needs the machine free. Commit of the plan and the two tools approved (commit `c6dfca6` in LSPRi/eva, not pushed, no umbrella pointer bump).
+then corrected it to "mean" the same day; mean is the default throughout. Worker processes are fine. **The mean is accumulated in float64: applied the same day**
+(subsection "The mean in float64" below). Commit of the plan and the two tools approved (commit `c6dfca6` in LSPRi/eva, not pushed, no umbrella pointer bump).
 
 Built, not committed:
 
@@ -408,3 +405,196 @@ slower on every stage and is discarded.
 
 Next: re-verify + re-time on real data when the machine is free; then the recipe from a session (Qt-free, one route for the
 GUI and the shell), the scan runner (processes), the backbone file, the command line.
+
+### The mean in float64 (numeric change, applied 2026-10-19)
+
+Maintainer: "float64 is ok", then "mean has to be applied". `segment_mean_std` in `analysis/frame_reduce.py` now computes the
+mean (and the STD) of all ROIs at once in float64, where the old code (`reduce_mean` = `np.mean` of float32 pixels)
+accumulates in float32. This is the one place where step 1 is not bit-identical to `compute_cell`; the pixel sets, the counts
+and the values of median / trimmed mean / plane fit still are. Section 11's "bit for bit" statements were measured on the
+prototype, which still used the float32 mean; read them with this exception.
+
+Before / after (`.claude/rules/numerics.md`), on 19,998 synthetic pixel sets with the real scan's sizes (154 to 944 px) and
+intensity range (16,000 to 65,000), in three patterns (noise, gradient + noise, sorted ascending as the worst case for a running
+sum):
+
+| | old (float32 accumulation) | new (float64) |
+|---|---|---|
+| relative difference old vs new | median 3.3e-8, 99 % 1.3e-7, max 2.1e-7 | |
+| error against an extended-precision sum | median 3.3e-8, max 2.1e-7 | 0 (exactly rounded) |
+
+The float64 mean is exactly the correctly rounded mean here: the sum of about 900 float32 values fits exactly in the 53 bits of
+a float64, so the result also no longer depends on the order of summation (reproducible across machines and implementations).
+Size of the change: at most 0.008 intensity units at 40,000; on an absorbance log10(reference / sample) at most about 2e-7,
+against a measurement noise of about 4e-4 (the real scan's relative SEM, 3e-4 reference and 8e-4 sample).
+
+**Real data (VM closed, 2026-10-19) - confirmed.** Whole dataset, before (prototype scan, float32 mean) against after
+(`analysis/frame_reduce.py`, float64 mean), all 2,612,480 mean values (160 ROIs x 314 cubes x 26 wavelengths x sample /
+reference):
+
+| | result |
+|---|---|
+| `n_valid`, `n_nominal`, NaN pattern | identical everywhere |
+| STD | identical everywhere (relative difference 0) |
+| mean, relative difference | median 3.2e-8, 99 % 1.2e-7, max 2.17e-7; **none above 1e-6**; 0.1 % of values bit-identical |
+| largest intensity change | 0.011 units (at a value of 55,559) |
+| absorbance log10(reference / sample) | at most 1.3e-7 (median 1.9e-8), against a noise of about 4e-4 |
+
+This matches the synthetic prediction (max 2.1e-7). The lab's `verify` (19 frames x 160 ROIs): pixel counts identical; median,
+trimmed mean and plane fit bit for bit identical; mean equal to a float64 mean of the same pixels to 1e-12 and within 1.71e-7 of the
+old float32 mean; STD equal to the old per-ROI formula. The scan's spot check (6 random frames, 960 ROI values) is within 1e-6 of
+today's code (largest 1.5e-7). Two full 4-process runs of the module are bit-identical to each other (mean, STD, counts), so
+the result does not depend on scheduling. An earlier lab run printed "0 of 960 identical": that was the lab's spot check still
+demanding exact equality with the old float32 mean; fixed to a tolerance, not a data problem.
+
+Speed of the new mean + STD in isolation (same process, same data, interleaved): 5.8 ms per frame of 160 ROIs against 11.8 ms
+for the old per-ROI loop (2.0x). In the whole scan this is about 5 ms of ~66 ms per frame and is **not visible above the
+run-to-run variation**.
+
+Timings of the module on the real dataset, machine at about 12 % background load (a quieter run than the one that gave
+section 11's 56.6 ms; frame preparation and reading were ~25 % slower this time, so compare ratios, not absolutes):
+
+| | per frame, 160 ROIs | whole dataset |
+|---|---|---|
+| 1 thread, 20 cubes scaled | 65.9 ms (read 17.0, prepare 20.5, ROI stage 27.6) | 9.0 min |
+| 4 worker processes, **all 314 cubes, measured** | 32.9 ms wall | **268.8 s = 4.5 min** (30.4 frames/s), 37.9 MB |
+
+The 4-process full scan took 268.8 s here and 268.2 s with the prototype (section 11): the module did not slow the scan
+down and the float64 mean did not visibly speed it up. ROI stage by part (bench, same run): find pixels 13.6 ms, exclude +
+gather + validity 6.3, mean + std 5.9, total 25.8.
+
+## 13. Speed-up round 2 (2026-10-19): pixel-layout cache, bincount mean/STD
+
+Finding: a real run has only **26 distinct chromatic affines** (one per wavelength, identical in every cube; 314 of them
+identity) and **4 distinct ROI layouts** over the timeline. Pixel membership therefore has at most 104 distinct answers for
+8,164 frames. `frame_reduce.PixelLayout` / `build_layout` / `LayoutCache` (key: ROI geometry digest `RoiSet.key`, affine
+bytes, shape, exclusion mode; LRU, ~4.6 MB per layout) reuse it: identical inputs, so identical pixels by construction.
+Mean/STD moved to `group_mean_std` (`np.bincount`, float64); the float64 sum is exact, so the mean is unchanged bit for bit.
+The background's ROI exclusion mask is cached per ROI layout, not per cube (setup 4.4 s -> 1.6 s).
+
+Checks: 19 unit tests (layout reuse bit-identical for all methods/modes/masks; cache key reacts to a 0.01 px move, the ring
+default and a free-form mask; LRU bound; a layout for other inputs is refused). Whole dataset vs the previous run: mean,
+`n_valid`, `n_nominal` bit-identical; STD within 3.5e-14 relative (summation order). Spot check vs old code within 1.6e-7.
+
+| | before (section 12) | after |
+|---|---|---|
+| ROI stage, single thread (bench) | 25.8 ms | **9.5 ms** (find pixels 0, gather 3.6, mean+std 5.8) |
+| 1 thread, per frame | 65.9 ms | 47.1 ms (read 15.1, prepare 19.4, ROI 11.8) -> 6.4 min |
+| 4 processes, full dataset, measured | 268.8 s | **182.0 s = 3.0 min** |
+| 8 processes, full dataset, measured | | 160.0 s = 2.7 min (hyper-threads add ~12 %) |
+
+Remaining time is now **read (~32 %) and frame preparation (~41 %)**. Options, none applied:
+
+1. Background estimate: the validity weights (binned and blurred) are the same for every frame without an ignore mask; cache
+   them (~3 ms of 19 estimated). Touches `_background_and_baseline` (scientific core): needs a bit-identity proof.
+2. Divide by the background only at the ~30 % of pixels the ROIs read, instead of the whole frame (~2 ms estimated; same
+   elementwise arithmetic, so it can stay bit-identical). Couples the reducer to the background step.
+3. Read: LZW decode is ~12-15 ms per plane; decoding only the strips inside the crop saves ~15 %. A faster storage (the
+   OME-Zarr export reads in 9.8 ms; uncompressed would be faster still) is a data-format decision, set aside for now.
+4. Fixed costs: worker start-up 7-12 s (the lab imports the whole app incl. Qt; a lean runner imports only `analysis/`),
+   ~5 s saving.
+5. Hardware: per-frame work roughly doubles with 4 busy cores (15 W laptop CPU); 8 processes help only 12 %.
+
+Estimate if 1, 2 and 4 are done: ~2.3-2.5 min with 4 processes on this laptop.
+
+## 14. Speed-up round 3, background experiment, OME-Zarr / smart-cache design (2026-10-19)
+
+### Built (maintainer: "do 1, 2, 4")
+
+1. **Background weights cache** (`background/estimate.py` `BackgroundWeightsCache`, `_weights_part`): the valid-mask half of
+   the estimate (weights downsample + blur, support, baseline selection) is reused between frames with the same valid mask.
+   Keyed by mask *content* (blake2b of the packed mask, then an equality check), never by a label. Real run: 518 hits / 2
+   misses in 520 frames.
+2. **Divide only at the ROI pixels** (`apply.apply_background_at`, `estimate.flatten_background_at`,
+   `preprocess.apply_preprocessing_at`; `PixelLayout.needed_flat`, 30 % of the frame here). Same elementwise float32
+   formula, bit-identical (tests). `reduce_frame(..., layout=, layout_values=)` takes those values directly.
+4. **Lean workers**: `analysis/scan.py` (`ScanSettings`, `FrameJob`, `CubeJob`, `scan_cubes`): worker processes,
+   progress + cancel between cubes (`progress.Cancelled`), 4 neighbouring cubes per task (see below). The package
+   `__init__` files of `analysis`, `image_tools` (+ background, chromatic, geometry, mask), `roi` and `dataset` now load
+   their Qt classes lazily (PEP 562), so a worker imports no Qt. Before, every pure import pulled in PyQt6 through
+   `analysis/__init__.py` -> `engine.py`, which also broke CLAUDE.md's "pure files import without Qt" rule.
+
+Regression found and fixed on the way: the first `build_layout` with `needed_flat` used `np.unique` + `searchsorted`
+(137 ms per build), and workers got single cubes in any order, so they evicted and rebuilt layouts; that ate the whole gain
+(prepare 26.9 ms per frame). Now a marker array (21 ms per build) and contiguous cube tasks. int32 index arrays were tried
+to halve layout memory and dropped: numpy converts them back on every gather (+4 ms per frame).
+
+Checks: `test_lspri_rewrite_frame_reduce.py` (22 tests) and the new integration `test_lspri_rewrite_scan.py` (3: in-process
+and 2 worker processes equal the plain full-frame path exactly; cancel). After the lazy-import change the whole LSPRi unit
+suite (110 files, 1,374 tests) and integration suite (84 files, 1,331 tests) pass. Whole dataset: 4- and 8-process scans
+bit-identical to the previous run (mean, STD, counts).
+
+| full dataset, real data | 4 processes | 8 processes | 1 process, per frame |
+|---|---|---|---|
+| section 11 (prototype) | 268 s | | 56.6 ms |
+| section 13 (layout cache) | 182 s | 160 s | 47.1 ms |
+| **now** | **170.2 s (2.8 min)** | **149.1 s (2.5 min)** | 40.6 ms (read 15.4, prepare 15.4, reduce 9.8) |
+| background off (for comparison) | 137.4 s | | |
+
+With 4 busy cores every stage takes about twice as long as alone (15 W laptop CPU): per-frame busy time at 4 processes is
+read 30, prepare 30, reduce 20 ms. Reading (LZW decode) is now as large as the whole background step.
+
+### Experiment: what does background removal change in the output?
+
+Whole dataset, 160 ROIs x 314 cubes x 26 wavelengths, mean; background off, the session's sigma 39 / bin 4, and
+sigma 24 / bin 4 (`tools/bg_study/scan_compare.py`; A = log10(reference / sample); centroid = sum(wl A) / sum(A), a stand-in
+for the fitted peak until step 3 exists):
+
+| metric (median over ROIs and wavelengths) | off | sigma 39 | sigma 24 |
+|---|---|---|---|
+| A short-term noise, cube to cube (mA) | 0.888 | 0.879 | 0.878 |
+| A vs across-ROI median, std over cubes (mA) | 0.788 | 0.789 | 0.795 |
+| A spread across ROIs (mA) | 6.59 | 6.80 | 6.84 |
+| reference ring vs across-ROI median, std over cubes (%) | 0.154 | 0.094 | 0.070 |
+| centroid short-term noise (nm) | 0.166 | 0.165 | 0.166 |
+| centroid vs across-ROI median, std over cubes (nm) | 0.111 | 0.102 | 0.102 |
+| centroid spread across ROIs (nm) | 1.338 | 1.375 | 1.357 |
+
+A (sigma 39) - A (off): median +0.001 mA, robust spread 0.24 mA, largest 35 mA (a few cells; not yet looked at which).
+
+Reading: the background flattens the rings (drift 0.154 -> 0.094 / 0.070 %), but with a ring centred on each ROI that
+illumination shape cancels in reference / sample. On the absorbance, removal does not reduce noise (within 1 %), does not
+reduce the ROI-specific drift of A, makes the ROIs about 3 % less uniform, and reduces the ROI-specific drift of the
+centroid by about 8 %. Same picture as the 2026-10-06 study (136 ROIs, 53 cubes). Not covered: the fitted peak (step 3),
+other datasets, references not centred on the sample (the 2026-10-06 displaced-reference test showed a large benefit
+there: 7.9 -> 1.6 % error at 240 px), other reduction methods. **Decision for the maintainer:** whether the default stays on
+for centred rings; it costs about 20 % of the scan.
+
+### Design (not built): OME-Zarr chunk reads and a smarter preparation
+
+**When partial reads help.** Processed pixel p needs only the raw pixels around G^-1(p) (rotation is bilinear, 2x2
+neighbours; crop and flip are exact). With 160 ROIs of ~60 px rings on a ~75 px lattice, the 78 px chunks of
+`images_1300x900_..._f32.ome.zarr` around them are almost the whole plane: no gain. With a few ROIs (a selection, a sweep on
+a subset) the chunk set is small, e.g. 5 ROIs ~ 10-20 of ~220 chunks.
+
+1. Per (ROI layout, affine, geometry): chunk set = chunks covering G^-1(needed_flat) dilated by 1 px; cached like layouts.
+2. Read those chunks through the shard index directly (byte ranges + blosc decode), as `dataset.io._fast_read_zarr_plane`
+   already does for whole planes; not through the zarr array API (measured ~1 ms per ROI window, its per-chunk dispatch).
+3. Fill a raw plane (NaN elsewhere), rotate / crop, take the needed pixels. Bit-identical as long as every 2x2 source
+   neighbour was read (a test would pin it).
+
+**Background with partial reads.** The Gaussian estimate is local (cv2 kernel radius ~3-4 sigma, ~120-160 px at sigma 39),
+but the baseline is the median of the whole-frame estimate. A window of (ROI reach + kernel radius), aligned to the binning
+grid, gives the same estimate inside the ROI; the baseline needs the whole frame. The baseline multiplies sample and
+reference alike, so A = log10(R / S) does not depend on it (except where 65,535 clipping acts); the stored S and R do.
+Options: (a) background off for partial reads (fastest; per the experiment, little is lost with centred rings);
+(b) windowed estimate + a fixed per-run baseline (A unchanged, stored S and R change scale: a format / semantics decision);
+(c) whole frame (no read saving). A window for one ROI is ~400 px square ~ 30 chunks (14 %), so (b) pays off only for a
+handful of ROIs.
+
+**Using the labels (maintainer's point).** Already used, keyed by content rather than by label: one pixel layout per (ROI
+layout, affine) - the chromatic models are per wavelength, the ROI timeline has 4 layouts here; one background-weights entry
+per distinct valid mask - the masks are few; one ROI exclusion mask per ROI layout. Still per frame and unavoidable while the
+background is on: decode, rotation, the background numerator (it depends on the pixels), the upsample, the divide at the ROI
+pixels, the reduction. Labels could also save the setup's per-frame mask warp (1.7 s per run) and the valid-mask hashing
+(0.5 ms per frame); small.
+
+**Next steps if wanted, by expected gain:** a faster input format or partial reads (reading is ~1/3 of the time; the zarr
+export already reads in 9.8 vs 12-15 ms for TIFF); background off for centred rings (-20 %); partial reads for small ROI
+selections (a 5-ROI run in well under a minute, estimated, unmeasured).
+
+### Maintainer decisions on section 14 (2026-10-19)
+
+1. **Background removal stays the user's choice**, one state: `BackgroundSettings.flatten_background_enabled` (the Image ribbon's Background tab). The Analysis section, when built, gets a second toggle bound to the *same* state (not a copy). Its tooltip, for ROIs with a centred reference ring, says removal is usually not needed and points to a short summary of the experiment above (example dataset: absorbance noise and drift unchanged, ROI spread 3 % better without, centroid ROI-drift 8 % better with, ~20 % of the scan time). The scan already follows that state; nothing to change in `analysis/scan.py`.
+2. **OME-Zarr with the background on reads whole planes, exactly as TIFF** (results 1:1 with the TIFF path). Partial chunk reads (design above) apply only when the background is off. A *regional* background for partial reads may come later as a second, user-chosen mode next to "full" - to be discussed and designed properly first (windowing, baseline, what is stored), not slipped in.
+3. Commit approved.

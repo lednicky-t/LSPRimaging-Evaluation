@@ -60,3 +60,16 @@ def apply_background(image: np.ndarray, background: np.ndarray, baseline: float)
     np.divide(image_f32, background_f32, out=flattened, where=background_f32 > 0.0)
     flattened *= np.float32(baseline)
     return np.clip(flattened, 0.0, 65535.0)
+
+
+def apply_background_at(image: np.ndarray, background: np.ndarray, baseline: float, flat_index: np.ndarray) -> np.ndarray:
+    """`apply_background` evaluated only at the pixels ``flat_index`` (row-major indices into ``image``): returns
+    ``apply_background(image, background, baseline).reshape(-1)[flat_index]`` without computing the other pixels. Same
+    elementwise float32 operations in the same order, so the values are bit-identical (pinned by a test); keep the two in
+    step if the formula ever changes. For analysis runs, which read only the ~30 % of a frame that lies inside ROIs."""
+    image_f32 = image.reshape(-1)[flat_index].astype(np.float32, copy=False)
+    background_f32 = background.reshape(-1)[flat_index].astype(np.float32, copy=False)
+    flattened = np.full(image_f32.shape, np.nan, dtype=np.float32)
+    np.divide(image_f32, background_f32, out=flattened, where=background_f32 > 0.0)
+    flattened *= np.float32(baseline)
+    return np.clip(flattened, 0.0, 65535.0)

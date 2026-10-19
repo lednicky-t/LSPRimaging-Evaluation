@@ -15,13 +15,6 @@ during the 2026-09-20 ``preprocess.py`` port - see the rewrite build log's
 "preprocess.py scope-check" entry for the field-by-field reasoning.
 """
 
-from .active_tool import ActiveToolModule, ImageTool
-from .background import BackgroundModule
-from .chromatic import ChromaticModule
-from .geometry import GeometryModule
-from .mask import MaskModule
-from .mask_edit_tool import MaskEditTool, MaskEditToolModule
-from .mask_scope import MaskScope, MaskScopeModule
 
 __all__ = [
     "GeometryModule",
@@ -35,3 +28,27 @@ __all__ = [
     "MaskEditTool",
     "MaskEditToolModule",
 ]
+
+# Qt classes load lazily (2026-10-19): importing a pure sub-module of this package (settings, geometry maths) must not
+# load Qt, so analysis worker processes start fast and the pure files stay testable without Qt. Names stay importable
+# from here exactly as before.
+_LAZY = {
+    "ActiveToolModule": ".active_tool",
+    "ImageTool": ".active_tool",
+    "BackgroundModule": ".background",
+    "ChromaticModule": ".chromatic",
+    "GeometryModule": ".geometry",
+    "MaskModule": ".mask",
+    "MaskEditTool": ".mask_edit_tool",
+    "MaskEditToolModule": ".mask_edit_tool",
+    "MaskScope": ".mask_scope",
+    "MaskScopeModule": ".mask_scope",
+}
+
+
+def __getattr__(name: str):
+    if name in _LAZY:
+        from importlib import import_module
+
+        return getattr(import_module(_LAZY[name], __name__), name)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

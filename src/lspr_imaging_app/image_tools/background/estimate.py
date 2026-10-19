@@ -23,13 +23,18 @@ No Qt import allowed in this file (CLAUDE.md testing rule).
 
 from __future__ import annotations
 
+import hashlib
+import threading
+from collections import OrderedDict
+from dataclasses import dataclass
+
 import cv2
 import numpy as np
 from scipy import ndimage
 
 from ...roi.detection import ignored_pixel_mask
 from ...roi.model import AreaRoi, AreaRoiDetectionSettings
-from .apply import apply_background
+from .apply import apply_background, apply_background_at
 
 
 def flatten_background(
@@ -43,13 +48,16 @@ def flatten_background(
     region: tuple[int, int, int, int] | None = None,
     exclusion_dilation_px: int = 0,
     roi_exclusion: np.ndarray | None = None,
+    weights_cache: "BackgroundWeightsCache | None" = None,
 ) -> np.ndarray:
     """Background-flatten `image` (divide by the background estimate, see
     `apply.apply_background`).
 
     `roi_exclusion`, if given, is the ROI part of the exclusion mask worked out beforehand with `roi_exclusion_mask`
     (same shape as `image`); it replaces `rois`. Passing it gives the same result as passing the ROIs, without
-    rebuilding the mask for every frame.
+    rebuilding the mask for every frame. `weights_cache` (a `BackgroundWeightsCache`) reuses the part of the estimate
+    that depends only on which pixels are valid; same result with or without it.
+
     The background estimate is always computed from the *whole* image (same
     cost/accuracy for TIFF and zarr - nothing about the estimate itself is
     scoped). When `region` (x0, y0, x1, y1) is given, only that region of the
@@ -70,11 +78,36 @@ def flatten_background(
         image_f32, rois=rois, mask_settings=mask_settings, external_mask=external_mask,
         dilation_px=max(int(exclusion_dilation_px), 0), roi_exclusion=roi_exclusion,
     )
-    background, baseline = _background_and_baseline(image_f32, valid_mask, sigma_px, binning)
+    background, baseline = _background_and_baseline(image_f32, valid_mask, sigma_px, binning, weights_cache=weights_cache)
     if region is not None:
         x0, y0, x1, y1 = region
         return apply_background(image_f32[y0:y1, x0:x1], background[y0:y1, x0:x1], baseline)
     return apply_background(image_f32, background, baseline)
+
+
+def flatten_background_at(
+    image: np.ndarray,
+    flat_index: np.ndarray,
+    *,
+    sigma_px: float,
+    binning: int = 1,
+    rois: list[AreaRoi] | None = None,
+    mask_settings: AreaRoiDetectionSettings | None = None,
+    external_mask: np.ndarray | None = None,
+    exclusion_dilation_px: int = 0,
+    roi_exclusion: np.ndarray | None = None,
+    weights_cache: "BackgroundWeightsCache | None" = None,
+) -> np.ndarray:
+    """`flatten_background(...)` at the pixels ``flat_index`` only (row-major indices): the estimate is still made from
+    the whole frame (it needs it), only the final divide is skipped elsewhere. Bit-identical to
+    ``flatten_background(...).reshape(-1)[flat_index]`` (pinned by a test)."""
+    image_f32 = image.astype(np.float32, copy=False)
+    valid_mask = ~_combined_exclusion_mask(
+        image_f32, rois=rois, mask_settings=mask_settings, external_mask=external_mask,
+        dilation_px=max(int(exclusion_dilation_px), 0), roi_exclusion=roi_exclusion,
+    )
+    background, baseline = _background_and_baseline(image_f32, valid_mask, sigma_px, binning, weights_cache=weights_cache)
+    return apply_background_at(image_f32, background, baseline, flat_index)
 
 
 def estimate_background_profile(
@@ -110,12 +143,70 @@ def _profile_from_mask(image_f32: np.ndarray, valid_mask: np.ndarray, sigma_px: 
     return _background_and_baseline(image_f32, valid_mask, sigma_px, binning, want_baseline=False)[0]
 
 
+@dataclass(frozen=True)
+class _WeightsPart:
+    """The part of the estimate that depends only on the valid mask (and the shape, sigma, binning), not on the pixels."""
+
+    denominator: np.ndarray  # blurred (binned) validity weights
+    has_support: np.ndarray
+    all_support: bool
+    baseline_select: object  # what the baseline median is taken over (bool array, or slice(None))
+
+
+def _weights_part(valid_mask: np.ndarray, shape: tuple[int, int], sigma: float, factor: int) -> _WeightsPart:
+    weights = valid_mask.astype(np.float32, copy=False)
+    if factor > 1:
+        height, width = shape
+        small_shape = (-(-width // factor), -(-height // factor))
+        binned_weights = cv2.resize(weights, small_shape, interpolation=cv2.INTER_AREA)
+        denominator = cv2.GaussianBlur(binned_weights, (0, 0), max(sigma / float(factor), 1.0), borderType=cv2.BORDER_REPLICATE)
+        binned_valid = binned_weights > 0.5
+        select: object = binned_valid if np.any(binned_valid) else slice(None)
+    else:
+        denominator = cv2.GaussianBlur(weights, (0, 0), sigma, borderType=cv2.BORDER_REPLICATE)
+        select = valid_mask if np.any(valid_mask) else slice(None)
+    has_support = denominator > 1e-6
+    return _WeightsPart(denominator, has_support, bool(has_support.all()), select)
+
+
+class BackgroundWeightsCache:
+    """Reuses `_WeightsPart` between frames whose valid mask is the same: in an analysis run, every frame without an
+    ignore mask has the same one (the ROI exclusion and the rotation's NaN corners do not change between frames). Keyed by
+    the mask's *content* (a digest, then confirmed by comparing the masks), never by a label, so a wrong label cannot give
+    a wrong result. Saves the weights' downsample and blur (~3 ms per 1 MP frame). Thread-safe; small LRU."""
+
+    def __init__(self, max_entries: int = 8) -> None:
+        self._max = max(int(max_entries), 1)
+        self._items: OrderedDict = OrderedDict()
+        self._lock = threading.Lock()
+        self.hits = 0
+        self.misses = 0
+
+    def part(self, valid_mask: np.ndarray, sigma: float, factor: int) -> _WeightsPart:
+        digest = hashlib.blake2b(np.packbits(valid_mask, axis=None).tobytes(), digest_size=16).digest()
+        key = (digest, valid_mask.shape, float(sigma), int(factor))
+        with self._lock:
+            entry = self._items.get(key)
+            if entry is not None and np.array_equal(entry[0], valid_mask):
+                self._items.move_to_end(key)
+                self.hits += 1
+                return entry[1]
+            self.misses += 1
+        part = _weights_part(valid_mask, valid_mask.shape[:2], sigma, factor)
+        with self._lock:
+            self._items[key] = (valid_mask.copy(), part)
+            while len(self._items) > self._max:
+                self._items.popitem(last=False)
+        return part
+
+
 def _background_and_baseline(
     image_f32: np.ndarray,
     valid_mask: np.ndarray,
     sigma_px: float,
     binning: int,
     want_baseline: bool = True,
+    weights_cache: BackgroundWeightsCache | None = None,
 ) -> tuple[np.ndarray, float]:
     """The full-resolution background estimate and the scalar baseline (the
     median background level over the valid pixels - the "typical white" that
@@ -135,41 +226,29 @@ def _background_and_baseline(
     The baseline comes from the already-computed small grid (the estimate has
     no structure finer than one bin, so this equals the full-resolution
     median to within noise) - no full-resolution median needed.
+
+    The weights half (2026-10-19, `_weights_part`) depends only on the valid mask and may come from `weights_cache`;
+    the operations are the same either way, so the result is identical.
     """
     sigma = max(float(sigma_px), 1.0)
     factor = max(int(binning), 1)
+    height, width = image_f32.shape[:2]
+    part = weights_cache.part(valid_mask, sigma, factor) if weights_cache is not None else _weights_part(valid_mask, (height, width), sigma, factor)
+    masked = np.where(valid_mask, image_f32, 0.0).astype(np.float32, copy=False)
     if factor > 1:
-        height, width = image_f32.shape[:2]
         small_shape = (-(-width // factor), -(-height // factor))  # cv2 wants (w, h); ceil division
-        weights = valid_mask.astype(np.float32, copy=False)
-        binned_weighted = cv2.resize(np.where(valid_mask, image_f32, 0.0).astype(np.float32, copy=False), small_shape, interpolation=cv2.INTER_AREA)
-        binned_weights = cv2.resize(weights, small_shape, interpolation=cv2.INTER_AREA)
-        binned_sigma = max(sigma / float(factor), 1.0)
-        numerator = cv2.GaussianBlur(binned_weighted, (0, 0), binned_sigma, borderType=cv2.BORDER_REPLICATE)
-        denominator = cv2.GaussianBlur(binned_weights, (0, 0), binned_sigma, borderType=cv2.BORDER_REPLICATE)
-        has_support = denominator > 1e-6
-        background_small = np.empty_like(numerator)
-        np.divide(numerator, denominator, out=background_small, where=has_support)
-        if not has_support.all():  # rare: only then is the (8 ms) median fallback needed
-            background_small[~has_support] = _fallback_level(image_f32, valid_mask)
-        background = cv2.resize(background_small, (width, height), interpolation=cv2.INTER_LINEAR)
-        if not want_baseline:
-            return background, float("nan")
-        binned_valid = binned_weights > 0.5
-        baseline = float(np.median(background_small[binned_valid if np.any(binned_valid) else slice(None)]))
-        return background, baseline
-
-    weights = valid_mask.astype(np.float32, copy=False)
-    numerator = cv2.GaussianBlur(np.where(valid_mask, image_f32, 0.0).astype(np.float32, copy=False), (0, 0), sigma, borderType=cv2.BORDER_REPLICATE)
-    denominator = cv2.GaussianBlur(weights, (0, 0), sigma, borderType=cv2.BORDER_REPLICATE)
-    has_support = denominator > 1e-6
-    background = np.empty_like(image_f32)
-    np.divide(numerator, denominator, out=background, where=has_support)
-    if not has_support.all():
-        background[~has_support] = _fallback_level(image_f32, valid_mask)
+        binned_weighted = cv2.resize(masked, small_shape, interpolation=cv2.INTER_AREA)
+        numerator = cv2.GaussianBlur(binned_weighted, (0, 0), max(sigma / float(factor), 1.0), borderType=cv2.BORDER_REPLICATE)
+    else:
+        numerator = cv2.GaussianBlur(masked, (0, 0), sigma, borderType=cv2.BORDER_REPLICATE)
+    estimate = np.empty_like(numerator)
+    np.divide(numerator, part.denominator, out=estimate, where=part.has_support)
+    if not part.all_support:  # rare: only then is the (8 ms) median fallback needed
+        estimate[~part.has_support] = _fallback_level(image_f32, valid_mask)
+    background = cv2.resize(estimate, (width, height), interpolation=cv2.INTER_LINEAR) if factor > 1 else estimate
     if not want_baseline:
         return background, float("nan")
-    baseline = float(np.median(background[valid_mask])) if np.any(valid_mask) else float(np.median(background))
+    baseline = float(np.median(estimate[part.baseline_select]))
     return background, baseline
 
 

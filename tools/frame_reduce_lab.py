@@ -25,7 +25,6 @@ import random
 import statistics
 import sys
 import time
-from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 from pathlib import Path
 
 TOOLS_DIR = Path(__file__).resolve().parent
@@ -36,7 +35,7 @@ import analysis_stage_timing as st  # noqa: E402  (also puts the app sources on 
 import numpy as np  # noqa: E402
 from PyQt6.QtWidgets import QApplication  # noqa: E402
 
-from lspr_imaging_app.analysis.frame_reduce import EXCLUDE_ALL_SAMPLE_ROIS, build_roi_set, reduce_frame  # noqa: E402
+from lspr_imaging_app.analysis.frame_reduce import EXCLUDE_ALL_SAMPLE_ROIS, LayoutCache, build_roi_set, reduce_frame  # noqa: E402
 from lspr_imaging_app.analysis.reduction import REDUCTION_METHODS, reduce_sample_and_reference  # noqa: E402
 from lspr_imaging_app.dataset import io  # noqa: E402
 from lspr_imaging_app.image_tools import preprocess as pp  # noqa: E402
@@ -64,6 +63,7 @@ class Context:
         self.mode = self.engine._reference_exclusion_mode()
         self.timeline = bool(modules.roi_toolbox.has_timeline())
         self._cube_cache: dict[int, tuple] = {}
+        self._exclusion_by_key: dict[str, np.ndarray] = {}
         self._processed_shape: tuple[int, int] | None = None
 
     def rois_for(self, cube: int):
@@ -80,8 +80,10 @@ class Context:
         key = cube if self.timeline else -1
         if key not in self._cube_cache:
             rois = self.rois_for(cube)
-            roi_exclusion = roi_exclusion_mask(self.processed_shape(), rois)
-            self._cube_cache[key] = (rois, build_roi_set(rois, self.inner, self.outer), roi_exclusion)
+            rs = build_roi_set(rois, self.inner, self.outer)
+            if rs.key not in self._exclusion_by_key:  # the timeline has few distinct layouts (4 in 314 cubes here)
+                self._exclusion_by_key[rs.key] = roi_exclusion_mask(self.processed_shape(), rois)
+            self._cube_cache[key] = (rois, rs, self._exclusion_by_key[rs.key])
         return self._cube_cache[key]
 
 
@@ -129,6 +131,8 @@ def section_verify(ctx: Context, frames) -> bool:
     methods = REDUCTION_METHODS
     tot = {"frames": 0, "rois": 0, "counts": 0, "values": 0, "std": 0}
     worst_std = 0.0
+    worst_mean_rel = 0.0  # largest |new mean - old float32 mean| / old, over every ROI-frame and both sides
+    mean_is_float64 = True  # the new mean equals a float64 mean of the same pixels to 1e-12
     for cube, wl, raw, processed, affine, ignore in frames:
         rois, rs, roi_exclusion = ctx.cube_context(cube)
         # (a) frame preparation
@@ -171,7 +175,18 @@ def section_verify(ctx: Context, frames) -> bool:
                     if not (np.isfinite(expected[0]) and np.isfinite(expected[1])):
                         expected = (np.nan, np.nan)
                 got = new.values[m][i]
-                if not all(x == y or (np.isnan(x) and np.isnan(y)) for x, y in zip(expected, got)):
+                if m == "mean":
+                    # Float64 accumulation (maintainer, 2026-10-19): compare with the old float32 mean by tolerance and
+                    # with a float64 mean of the same pixels almost exactly.
+                    if sp.size and rp.size:
+                        exact = (float(np.mean(sp.astype(np.float64))), float(np.mean(rp.astype(np.float64))))
+                        mean_is_float64 &= bool(np.allclose(got, exact, rtol=1e-12, atol=0.0))
+                        worst_mean_rel = max(worst_mean_rel, *(abs(g - e) / abs(e) for g, e in zip(got, expected)))
+                        if not np.allclose(got, expected, rtol=1e-6, atol=0.0):
+                            bad_values += 1
+                    elif not (np.isnan(got[0]) and np.isnan(got[1])):
+                        bad_values += 1
+                elif not all(x == y or (np.isnan(x) and np.isnan(y)) for x, y in zip(expected, got)):
                     bad_values += 1
         tot["frames"] += 1
         tot["rois"] += len(rois)
@@ -184,22 +199,27 @@ def section_verify(ctx: Context, frames) -> bool:
         ok &= not (bad_counts or bad_values or bad_std)
     print(f"\n  total: {tot['frames']} frames x {tot['rois'] // max(tot['frames'], 1)} ROIs = {tot['rois']} ROI-frames; "
           f"different pixel counts {tot['counts']}, values {tot['values']} (x4 methods), std {tot['std']}")
-    print("  RESULT: " + ("IDENTICAL to today's code" if ok else "DIFFERENCES FOUND"))
+    ok &= mean_is_float64
+    print(f"  mean (float64) vs the old float32 mean: largest relative difference {worst_mean_rel:.2e}; "
+          f"equals a float64 mean of the same pixels to 1e-12: {mean_is_float64}")
+    print("  RESULT: " + ("SAME as today's code (pixel counts, median / trimmed mean / plane fit bit for bit, mean to float64 accuracy, std)" if ok else "DIFFERENCES FOUND"))
     return ok
 
 
 def section_bench(ctx: Context, frames, methods: tuple[str, ...]) -> dict:
     timers: dict[str, float] = {}
     prep_ms, full_ms = [], []
+    cache = LayoutCache()
     for cube, wl, raw, processed, affine, ignore in frames:
         rois, rs, roi_exclusion = ctx.cube_context(cube)
         _, t = st.timed(pp.apply_preprocessing, raw, ctx.geometry, ctx.background, rois=rois, mask_settings=ctx.det, external_mask=ignore)
         full_ms.append(t)
         _, t = st.timed(pp.apply_preprocessing, raw, ctx.geometry, ctx.background, mask_settings=ctx.det, external_mask=ignore, roi_exclusion=roi_exclusion)
         prep_ms.append(t)
-        reduce_frame(rs, processed, ignore, affine, methods, trimmed_fraction=ctx.trimmed, exclusion_mode=ctx.mode, timers=timers)
+        layout = cache.get(rs, affine, processed.shape[:2], ctx.mode)
+        reduce_frame(rs, processed, ignore, affine, methods, trimmed_fraction=ctx.trimmed, exclusion_mode=ctx.mode, timers=timers, layout=layout)
     n = len(frames)
-    print(f"  frames timed: {n}   methods: {', '.join(methods)}")
+    print(f"  frames timed: {n}   methods: {', '.join(methods)}   layout cache: {cache.misses} built, {cache.hits} reused (a full run reuses 98.7 %)")
     print(f"  frame preparation, today (apply_preprocessing)             {statistics.mean(full_ms):7.2f} ms")
     print(f"  frame preparation, ROI exclusion mask cached               {statistics.mean(prep_ms):7.2f} ms")
     total = 0.0
@@ -210,54 +230,9 @@ def section_bench(ctx: Context, frames, methods: tuple[str, ...]) -> dict:
     return {"prepare_today_ms": statistics.mean(full_ms), "prepare_cached_ms": statistics.mean(prep_ms), "roi_stage_ms": 1000 * total / n}
 
 
-_W: dict = {}  # per worker process (multiprocessing path)
-
-
-def _scan_one(path, affine, ignore, rs, roi_exclusion, geometry, background, det, mode, trimmed, methods):
-    """One frame: read -> prepare -> every ROI. Touches no module; safe in a thread or a process."""
-    t0 = time.perf_counter()
-    raw = io.load_image_array_uncached(path)
-    t1 = time.perf_counter()
-    processed = pp.apply_preprocessing(raw, geometry, background, mask_settings=det, external_mask=ignore, roi_exclusion=roi_exclusion)
-    t2 = time.perf_counter()
-    res = reduce_frame(rs, processed, ignore, affine, methods, trimmed_fraction=trimmed, exclusion_mode=mode)
-    t3 = time.perf_counter()
-    return res, (t1 - t0, t2 - t1, t3 - t2)
-
-
-def _mp_init(geometry, background, det, mode, trimmed, shape, methods, switch_interval) -> None:
-    io.use_fast_tiff_decoder(True)
-    if switch_interval:
-        sys.setswitchinterval(switch_interval)
-    _W.update(geometry=geometry, background=background, det=det, mode=mode, trimmed=trimmed, shape=shape, methods=methods)
-
-
-def _mp_cube(task):
-    """One cube in a worker process: all its frames, sequentially. Returns plain arrays."""
-    cube_pos, rs, frames = task
-    w = _W
-    roi_exclusion = roi_exclusion_mask(w["shape"], list(rs.rois))
-    n_wl = len(frames)
-    values = {m: np.full((rs.n, n_wl, 2), np.nan) for m in w["methods"]}
-    std = np.full((rs.n, n_wl, 2), np.nan)
-    n_valid = np.zeros((rs.n, n_wl, 2), dtype=np.int32)
-    n_nominal = np.zeros((rs.n, n_wl, 2), dtype=np.int32)
-    stage = np.zeros(3)
-    for k, (path, affine, ignore) in enumerate(frames):
-        res, timing = _scan_one(path, affine, ignore, rs, roi_exclusion, w["geometry"], w["background"], w["det"], w["mode"], w["trimmed"], w["methods"])
-        for m in w["methods"]:
-            values[m][:, k, :] = res.values[m]
-        std[:, k, :] = res.std
-        n_valid[:, k, :] = res.n_valid
-        n_nominal[:, k, :] = res.n_nominal
-        stage += timing
-    return cube_pos, values, std, n_valid, n_nominal, stage
-
-
 def section_scan(ctx: Context, cubes: list[int], threads: int, processes: int, methods: tuple[str, ...], save: Path | None,
                  switch_interval: float = 0.0) -> None:
     geometry, background, det = ctx.geometry, ctx.background, ctx.det
-    shape = ctx.processed_shape()
     # Everything that touches a module is resolved here, on this thread; the workers see plain data only.
     t_setup = time.perf_counter()
     jobs = []  # (cube_pos, wl_pos, path, affine, ignore, rs, roi_exclusion)
@@ -278,43 +253,30 @@ def section_scan(ctx: Context, cubes: list[int], threads: int, processes: int, m
         sys.setswitchinterval(switch_interval)
 
     started = time.perf_counter()
-    if processes > 0:
-        by_cube: dict[int, list] = {}
-        for cube_pos, wl_pos, path, affine, ignore, rs, _roi_exclusion in jobs:
-            by_cube.setdefault(cube_pos, []).append((path, affine, ignore))
-        tasks = [(cube_pos, jobs[next(i for i, j in enumerate(jobs) if j[0] == cube_pos)][5], frames) for cube_pos, frames in by_cube.items()]
-        initargs = (geometry, background, det, ctx.mode, ctx.trimmed, shape, methods, switch_interval)
-        with ProcessPoolExecutor(max_workers=processes, initializer=_mp_init, initargs=initargs) as pool:
-            first_result_at = None
-            for cube_pos, values, std, n_valid, n_nominal, stage_here in pool.map(_mp_cube, tasks):
-                if first_result_at is None:
-                    first_result_at = time.perf_counter() - started
-                k = std.shape[1]
-                for m in methods:
-                    out[m][:, cube_pos, :k, :] = values[m]
-                out_std[:, cube_pos, :k, :] = std
-                out_n[:, cube_pos, :k, :] = n_valid
-                out_nom[:, cube_pos, :k, :] = n_nominal
-                stage += stage_here
-        label = f"{processes} worker process(es)" + f" (first result after {first_result_at:.1f} s: process start-up included in the wall time)"
-    else:
-        def init_worker() -> None:
-            io.use_fast_tiff_decoder(True)
+    # The real runner (analysis/scan.py): worker processes, layout / background-weights / exclusion caches, divide only at
+    # the ROI pixels. processes <= 1 runs in this process; the old thread path is gone (threads gave ~1.3x, section 11).
+    from lspr_imaging_app.analysis.scan import CubeJob, FrameJob, ScanSettings, scan_cubes
 
-        def work(job):
-            cube_pos, wl_pos, path, affine, ignore, rs, roi_exclusion = job
-            res, timing = _scan_one(path, affine, ignore, rs, roi_exclusion, geometry, background, det, ctx.mode, ctx.trimmed, methods)
-            for m in methods:
-                out[m][:, cube_pos, wl_pos, :] = res.values[m]
-            out_std[:, cube_pos, wl_pos, :] = res.std
-            out_n[:, cube_pos, wl_pos, :] = res.n_valid
-            out_nom[:, cube_pos, wl_pos, :] = res.n_nominal
-            return timing
-
-        with ThreadPoolExecutor(max_workers=threads, initializer=init_worker) as pool:
-            for timing in pool.map(work, jobs):
-                stage += timing
-        label = f"{threads} worker thread(s)"
+    settings = ScanSettings(geometry, background, det, methods, ctx.mode, ctx.trimmed, fast_tiff_decoder=True)
+    by_cube: dict[int, list] = {}
+    rs_of: dict[int, object] = {}
+    for cube_pos, wl_pos, path, affine, ignore, rs, _roi_exclusion in jobs:
+        by_cube.setdefault(cube_pos, []).append(FrameJob(path, affine, ignore))
+        rs_of[cube_pos] = rs
+    cube_jobs = [CubeJob(cube_pos, rs_of[cube_pos], tuple(frames)) for cube_pos, frames in by_cube.items()]
+    first_result_at = None
+    for result in scan_cubes(cube_jobs, settings, processes=max(processes, 1)):
+        if first_result_at is None:
+            first_result_at = time.perf_counter() - started
+        k = result.std.shape[1]
+        for m in methods:
+            out[m][:, result.cube_pos, :k, :] = result.values[m]
+        out_std[:, result.cube_pos, :k, :] = result.std
+        out_n[:, result.cube_pos, :k, :] = result.n_valid
+        out_nom[:, result.cube_pos, :k, :] = result.n_nominal
+        stage += [result.seconds["read"], result.seconds["prepare"], result.seconds["reduce"]]
+    label = (f"{processes} worker process(es) (first result after {first_result_at:.1f} s, start-up included)" if processes > 1
+             else "1 process (in this process)")
     wall = time.perf_counter() - started
     frames = len(jobs)
     total_cubes = len(list(ctx.m.dataset.spectral_cubes()))
@@ -333,6 +295,7 @@ def section_scan(ctx: Context, cubes: list[int], threads: int, processes: int, m
     # Spot check against today's code path (apply_preprocessing + full-frame masks + reduce) on random scanned frames.
     rng = random.Random(1)
     checked = differ = 0
+    worst = 0.0
     for job in rng.sample(jobs, min(6, len(jobs))):
         cube_pos, wl_pos, path, affine, ignore, rs, _ = job
         rois = list(rs.rois)
@@ -346,11 +309,16 @@ def section_scan(ctx: Context, cubes: list[int], threads: int, processes: int, m
             old = st.roi_values_full(roi, processed, valid, affine, ignore, union, ctx.inner, ctx.outer, methods[0], ctx.trimmed)
             new = out[methods[0]][i, cube_pos, wl_pos]
             checked += 1
-            if not all(x == y or (np.isnan(x) and np.isnan(y)) for x, y in zip(old, new)):
+            if methods[0] == "mean":  # float64 mean on purpose: it may differ from the old float32 mean by ~1e-7 relative
+                worst = max(worst, *(abs(x - y) / abs(x) for x, y in zip(old, new)))
+                if not np.allclose(new, old, rtol=1e-6, atol=0.0):
+                    differ += 1
+            elif not all(x == y or (np.isnan(x) and np.isnan(y)) for x, y in zip(old, new)):
                 differ += 1
-    print(f"  spot check against today's code: {checked - differ} of {checked} ROI values identical (6 random frames)")
+    kind = f"within 1e-6 of today's code (largest relative difference {worst:.2e})" if methods[0] == "mean" else "identical to today's code"
+    print(f"  spot check against today's code: {checked - differ} of {checked} ROI values {kind} (6 random frames)")
     if save is not None:
-        np.savez_compressed(save, cubes=np.array(cubes), **{f"value_{m}": out[m] for m in methods}, std=out_std, n_valid=out_n, n_nominal=out_nom)
+        np.savez_compressed(save, cubes=np.array(cubes), wavelengths=np.array(st.spectral_wavelengths(ctx.m, cubes[0])), **{f"value_{m}": out[m] for m in methods}, std=out_std, n_valid=out_n, n_nominal=out_nom)
         print(f"  saved: {save} ({save.stat().st_size / 1e6:.1f} MB)")
 
 
@@ -370,6 +338,8 @@ def main() -> int:
     parser.add_argument("--scan-cubes", type=int, default=20, help="cubes for the scan, spread over the run")
     parser.add_argument("--scan-all", action="store_true", help="scan every cube")
     parser.add_argument("--save", type=Path, default=None, help="write the scan's numbers to this .npz")
+    parser.add_argument("--background", type=str, default="session",
+                        help="session (as saved) | off | SIGMA:BINNING, e.g. 24:4 (background experiments)")
     args = parser.parse_args()
     sections = {s.strip() for s in args.sections.split(",")}
     methods = tuple(m.strip() for m in args.methods.split(","))
@@ -379,6 +349,17 @@ def main() -> int:
     dataset = st.load_one(args.tiff)
     modules, _state = st.build_modules(dataset, args.session)
     ctx = Context(modules, dataset)
+    if args.background != "session":
+        from dataclasses import replace
+
+        if args.background == "off":
+            ctx.background = replace(ctx.background, flatten_background_enabled=False)
+        else:
+            sigma, binning = args.background.split(":")
+            ctx.background = replace(ctx.background, flatten_background_enabled=True, flatten_background_sigma_px=float(sigma),
+                                     flatten_background_binning=int(binning))
+    print(f"background: enabled={ctx.background.flatten_background_enabled}, sigma {ctx.background.flatten_background_sigma_px}, "
+          f"bin {ctx.background.flatten_background_binning}")
     print(f"{len(ctx.m.roi_toolbox.rois())} ROIs, exclusion mode {ctx.mode}, timeline {ctx.timeline}, {args.threads} threads")
     cubes = [int(c) for c in args.cube_list.split(",")]
     frames = pick_frames(ctx, cubes) if sections & {"profile", "verify", "bench"} else []

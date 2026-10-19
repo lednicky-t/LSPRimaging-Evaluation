@@ -8,8 +8,12 @@ deviation** of the pixels, the number of **valid** pixels and the number of **no
 (formula, spectra, fits, metrics) works on these stored numbers and never reads an image again.
 
 How it differs from ``tasks.compute_cell`` (which stays the reference): the pixels of all ROIs are found in one
-vectorised pass instead of one mask per ROI, and each ROI's pixels are then handed to the unchanged ``reduce_*``
-functions, so the values are the ones ``compute_cell`` produces (checked bit for bit on real data, see the plan doc).
+vectorised pass instead of one mask per ROI. The pixel sets, counts and the values of ``median``, ``trimmed_mean`` and
+``plane_fit`` are the ones ``compute_cell`` produces (each ROI's pixels go to the unchanged ``reduce_*`` functions).
+**The ``mean`` is the one deliberate numeric difference** (maintainer, 2026-10-19): it is accumulated in float64, where
+``compute_cell`` takes ``np.mean`` of float32 pixels, which accumulates in float32. The float64 value is the more
+accurate one; the two differ by about 1e-7 relative (measured: plan doc, section 12). The standard deviation is float64
+too (it has no older counterpart).
 
 Rules it follows, taken from ``compute_cell`` and the invariants in ``apps/LSPRi/eva/CLAUDE.md``:
 
@@ -34,8 +38,11 @@ Not here: reading images, the recipe, the store file, running many frames (``sca
 
 from __future__ import annotations
 
+import hashlib
+import threading
 import time
-from dataclasses import dataclass
+from collections import OrderedDict
+from dataclasses import dataclass, field
 
 import numpy as np
 
@@ -73,6 +80,9 @@ class RoiSet:
     vectorised: np.ndarray
     inner_default_px: float  # reference-ring diameters used for a ROI without its own, see rasterize.effective_reference_diameters
     outer_default_px: float
+    key: str = field(default="", compare=False)
+    """A digest of everything above that decides which pixels a ROI covers (also free-form masks). Two RoiSets with the
+    same key cover the same pixels; used only to find a cached `PixelLayout`, never stored."""
 
     @property
     def n(self) -> int:
@@ -103,9 +113,21 @@ def build_roi_set(rois, default_inner_diameter_px: float, default_outer_diameter
                 ring_in[i] = inner_r
                 ring_out[i] = max(outer_d / 2.0, inner_r)
                 ring_on[i] = True
+    digest = hashlib.sha256()
+    for array in (cx, cy, sample_r, ring_in, ring_out, ring_on, vectorised):
+        digest.update(np.ascontiguousarray(array).tobytes())
+    digest.update(np.array([default_inner_diameter_px, default_outer_diameter_px], dtype=np.float64).tobytes())
+    for i in np.flatnonzero(~vectorised):  # a free-form mask ROI: its masks and geometry types decide its pixels
+        roi = rois[i]
+        digest.update(repr((i, roi.center_x, roi.center_y, roi.sample_diameter_px, roi.sample_geometry_type, roi.reference_geometry_type,
+                            roi.reference_inner_diameter_px, roi.reference_outer_diameter_px)).encode())
+        for mask in (roi.sample_mask, roi.reference_mask):
+            if mask is not None:
+                digest.update(repr((mask.x0, mask.y0, mask.mask.shape)).encode())
+                digest.update(np.ascontiguousarray(mask.mask, dtype=bool).tobytes())
     return RoiSet(
         rois, cx, cy, sample_r, ring_in, ring_out, sample_r > 0.0, ring_on, vectorised,
-        float(default_inner_diameter_px), float(default_outer_diameter_px),
+        float(default_inner_diameter_px), float(default_outer_diameter_px), digest.hexdigest(),
     )
 
 
@@ -192,22 +214,125 @@ def locate_pixels(
     return out["s_roi"], out["s_flat"], out["r_roi"], out["r_flat"]
 
 
-def segment_std(values: np.ndarray, offsets: np.ndarray, counts: np.ndarray) -> np.ndarray:
-    """Sample standard deviation (ddof=1, float64) of each ROI's contiguous block of ``values`` (block ``i`` is
-    ``values[offsets[i]:offsets[i + 1]]``), for all ROIs at once. NaN for a block of fewer than 2 values. Two passes (the
-    mean first), so there is no cancellation."""
-    out = np.full(counts.size, np.nan)
-    ok = counts > 1
-    if not ok.any():
-        return out
+def group_mean_std(values: np.ndarray, roi: np.ndarray, n: int) -> tuple[np.ndarray, np.ndarray]:
+    """Mean and sample standard deviation (ddof=1) of the values of each ROI (``roi[k]`` is the ROI of ``values[k]``), for
+    ``n`` ROIs at once, **accumulated in float64** (the pixels are float32). Mean is NaN for a ROI without values, standard
+    deviation for fewer than 2. Two-pass (the mean first), so there is no cancellation.
+
+    The float64 sum of up to ~1000 float32 intensities is exact (it needs ~36 of float64's 53 bits), so the mean is the
+    correctly rounded mean whatever the order of summation: this ``bincount`` version and an ``add.reduceat`` version
+    give the same mean bit for bit (2026-10-19). ``bincount`` is used because it is one fast pass per sum."""
+    counts = np.bincount(roi, minlength=n)
+    mean = np.full(n, np.nan)
+    std = np.full(n, np.nan)
+    has_any = counts > 0
+    if not has_any.any():
+        return mean, std
     v = values.astype(np.float64)
-    starts = offsets[:-1]
-    sums = np.add.reduceat(np.append(v, 0.0), starts)  # the sentinel keeps the start of a trailing empty block in range
-    mean = sums / np.maximum(counts, 1)
-    dev = v - np.repeat(mean, counts)
-    ss = np.add.reduceat(np.append(dev * dev, 0.0), starts)
-    out[ok] = np.sqrt(ss[ok] / (counts[ok] - 1))
-    return out
+    sums = np.bincount(roi, weights=v, minlength=n)
+    mean[has_any] = sums[has_any] / counts[has_any]
+    has_two = counts > 1
+    if has_two.any():
+        dev = v - mean[roi]
+        ss = np.bincount(roi, weights=dev * dev, minlength=n)
+        std[has_two] = np.sqrt(ss[has_two] / (counts[has_two] - 1))
+    return mean, std
+
+
+def segment_mean_std(values: np.ndarray, offsets: np.ndarray, counts: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """:func:`group_mean_std` for values stored as contiguous blocks (block ``i`` is ``values[offsets[i]:offsets[i + 1]]``)."""
+    del offsets  # the blocks are contiguous and in ROI order, so the counts alone give each value's ROI
+    return group_mean_std(values, np.repeat(np.arange(counts.size), counts), int(counts.size))
+
+
+def segment_std(values: np.ndarray, offsets: np.ndarray, counts: np.ndarray) -> np.ndarray:
+    """The standard-deviation half of :func:`segment_mean_std`."""
+    return segment_mean_std(values, offsets, counts)[1]
+
+
+@dataclass(frozen=True)
+class PixelLayout:
+    """Where every ROI's pixels are, for one (ROI geometry, chromatic affine, image shape, exclusion mode): the output of
+    :func:`locate_pixels` with the sample-aperture exclusion already applied. It depends on nothing else (not on pixel
+    values, not on the ignore mask), so a run builds it once per distinct affine (in a real run one per wavelength, the
+    same for every cube: 26 layouts for 8,164 frames) and reuses it. Reusing it never changes a result."""
+
+    shape: tuple[int, int]
+    n_rois: int
+    exclusion_mode: str
+    sample_roi: np.ndarray  # intp, sorted by ROI then pixel
+    sample_flat: np.ndarray
+    ring_roi: np.ndarray
+    ring_flat: np.ndarray
+    sample_count: np.ndarray  # pixels per ROI before the ignore mask and the validity test
+    ring_count: np.ndarray
+    needed_flat: np.ndarray  # every pixel any ROI reads, sorted, unique: what `apply_preprocessing_at` must compute
+    sample_pos: np.ndarray  # position of each sample pixel in `needed_flat`
+    ring_pos: np.ndarray
+
+    @property
+    def nbytes(self) -> int:
+        return sum(a.nbytes for a in (self.sample_roi, self.sample_flat, self.ring_roi, self.ring_flat, self.needed_flat, self.sample_pos, self.ring_pos))
+
+
+def build_layout(
+    rs: RoiSet, affine: np.ndarray, shape: tuple[int, int],
+    exclusion_mode: str = DEFAULT_REFERENCE_EXCLUSION_MODE, block: int = DEFAULT_BLOCK_ROIS,
+) -> PixelLayout:
+    if exclusion_mode not in REFERENCE_EXCLUSION_MODES:
+        raise ValueError(f"unknown reference exclusion mode {exclusion_mode!r}; known: {REFERENCE_EXCLUSION_MODES}")
+    shape = (int(shape[0]), int(shape[1]))
+    s_roi, s_flat, r_roi, r_flat = locate_pixels(rs, affine, shape, block)
+    if exclusion_mode == EXCLUDE_ALL_SAMPLE_ROIS:
+        union = np.zeros(shape[0] * shape[1], dtype=bool)
+        union[s_flat] = True  # every ROI's sample aperture, before the ignore mask (as tasks._sample_exclusion_union)
+        keep = ~union[r_flat]
+        r_roi, r_flat = r_roi[keep], r_flat[keep]
+    # Every pixel any ROI reads, and where each sample / ring pixel sits in that list. A marker array over the image is
+    # linear time; np.unique + searchsorted (sorting ~570 k indices) made a build 137 ms instead of ~15 (2026-10-19).
+    mark = np.zeros(shape[0] * shape[1], dtype=bool)
+    mark[s_flat] = True
+    mark[r_flat] = True
+    needed = np.flatnonzero(mark)
+    where = np.empty(mark.size, dtype=np.intp)
+    where[needed] = np.arange(needed.size, dtype=np.intp)
+    # Native index type throughout: int32 halved the memory but numpy converts it back on every gather and bincount,
+    # +4 ms per frame of 160 ROIs (measured 2026-10-19).
+    return PixelLayout(
+        shape, rs.n, exclusion_mode, s_roi, s_flat, r_roi, r_flat,
+        np.bincount(s_roi, minlength=rs.n), np.bincount(r_roi, minlength=rs.n),
+        needed, where[s_flat], where[r_flat],
+    )
+
+
+class LayoutCache:
+    """Recently used :class:`PixelLayout` objects, keyed by (ROI geometry key, affine, shape, exclusion mode). Safe to share
+    between threads. ``max_entries`` bounds the memory: one layout of 160 ROIs is ~9 MB, and a run needs one per
+    wavelength per ROI layout in use (26 here), so the default holds one ROI layout's set with room to spare."""
+
+    def __init__(self, max_entries: int = 40) -> None:
+        self._max = max(int(max_entries), 1)
+        self._items: OrderedDict = OrderedDict()
+        self._lock = threading.Lock()
+        self.hits = 0
+        self.misses = 0
+
+    def get(self, rs: RoiSet, affine: np.ndarray, shape: tuple[int, int],
+            exclusion_mode: str = DEFAULT_REFERENCE_EXCLUSION_MODE, block: int = DEFAULT_BLOCK_ROIS) -> PixelLayout:
+        key = (rs.key, np.ascontiguousarray(affine, dtype=np.float64).tobytes(), (int(shape[0]), int(shape[1])), exclusion_mode)
+        with self._lock:
+            layout = self._items.get(key)
+            if layout is not None:
+                self._items.move_to_end(key)
+                self.hits += 1
+                return layout
+            self.misses += 1
+        layout = build_layout(rs, affine, shape, exclusion_mode, block)  # outside the lock; a rare duplicate build is harmless
+        with self._lock:
+            self._items[key] = layout
+            while len(self._items) > self._max:
+                self._items.popitem(last=False)
+        return layout
 
 
 @dataclass(frozen=True)
@@ -223,7 +348,7 @@ class FrameReduction:
 
 def reduce_frame(
     rs: RoiSet,
-    processed: np.ndarray,
+    processed: np.ndarray | None,
     ignore: np.ndarray | None,
     affine: np.ndarray,
     methods: tuple[str, ...] = ("mean",),
@@ -232,12 +357,21 @@ def reduce_frame(
     exclusion_mode: str = DEFAULT_REFERENCE_EXCLUSION_MODE,
     block: int = DEFAULT_BLOCK_ROIS,
     timers: dict[str, float] | None = None,
+    layout: PixelLayout | None = None,
+    layout_values: np.ndarray | None = None,
 ) -> FrameReduction:
     """Step 1 for one frame and all ROIs; see the module docstring for the rules.
 
     ``processed``: the frame after ``apply_preprocessing`` (2-D float, NaN where there is no measurement).
     ``ignore``: bool image of the same shape, True = leave out; ignored when ``None`` or of another shape (as in
-    ``compute_cell``). ``timers``, if given, accumulates seconds per stage (diagnostics only)."""
+    ``compute_cell``). ``timers``, if given, accumulates seconds per stage (diagnostics only). ``layout``: a
+    :class:`PixelLayout` for this ROI set, affine, shape and mode (from a :class:`LayoutCache`), so the pixels are not
+    located again; the result is the same with or without it. ``layout_values`` (with ``processed=None`` and a
+    ``layout``): the processed values at ``layout.needed_flat`` only, as `apply_preprocessing_at` returns them, instead
+    of a whole processed frame; same result.
+
+    ``mean`` is float64 (the one numeric difference from ``compute_cell``, see the module docstring); every other method
+    gives the values ``compute_cell`` gives."""
     unknown = [m for m in methods if m not in REDUCTION_METHODS]
     if unknown:
         raise ValueError(f"unknown reduction method(s) {unknown}; known: {REDUCTION_METHODS}")
@@ -245,32 +379,47 @@ def reduce_frame(
         raise ValueError(f"unknown reference exclusion mode {exclusion_mode!r}; known: {REFERENCE_EXCLUSION_MODES}")
     clock = time.perf_counter
     t0 = clock()
-    shape = processed.shape[:2]
+    if processed is None:
+        if layout is None or layout_values is None:
+            raise ValueError("without a processed frame, a layout and its layout_values are needed")
+        if layout_values.shape != layout.needed_flat.shape:
+            raise ValueError("layout_values must hold one value per pixel of layout.needed_flat")
+        shape = layout.shape
+    else:
+        shape = processed.shape[:2]
     n = rs.n
     if n == 0:
         empty = np.zeros((0, 2))
         return FrameReduction(tuple(methods), {m: empty.copy() for m in methods}, empty.copy(),
                               np.zeros((0, 2), dtype=np.int32), np.zeros((0, 2), dtype=np.int32))
-    s_roi, s_flat, r_roi, r_flat = locate_pixels(rs, affine, shape, block)
+    if layout is None:
+        layout = build_layout(rs, affine, shape, exclusion_mode, block)
+    elif layout.shape != (int(shape[0]), int(shape[1])) or layout.n_rois != n or layout.exclusion_mode != exclusion_mode:
+        raise ValueError("the pixel layout was built for another image shape, ROI count or exclusion mode")
+    s_roi, s_flat, r_roi, r_flat = layout.sample_roi, layout.sample_flat, layout.ring_roi, layout.ring_flat
     t1 = clock()
-    flat_image = processed.reshape(-1)
-    s_ok = np.ones(s_flat.size, dtype=bool)
-    r_ok = np.ones(r_flat.size, dtype=bool)
-    if exclusion_mode == EXCLUDE_ALL_SAMPLE_ROIS:
-        union = np.zeros(flat_image.size, dtype=bool)
-        union[s_flat] = True  # every ROI's sample aperture, before the ignore mask (as tasks._sample_exclusion_union)
-        r_ok &= ~union[r_flat]
+    if processed is None:
+        s_val = layout_values[layout.sample_pos]
+        r_val = layout_values[layout.ring_pos]
+    else:
+        flat_image = processed.reshape(-1)
+        s_val = flat_image[s_flat]
+        r_val = flat_image[r_flat]
+    s_ok = np.isfinite(s_val)
+    r_ok = np.isfinite(r_val)
     if ignore is not None and ignore.shape == shape:
         flat_ignore = ignore.reshape(-1)
-        s_ok &= ~flat_ignore[s_flat]
-        r_ok &= ~flat_ignore[r_flat]
-    n_nominal = np.stack((np.bincount(s_roi[s_ok], minlength=n), np.bincount(r_roi[r_ok], minlength=n)), axis=1)
-    s_val = flat_image[s_flat]
-    s_ok &= np.isfinite(s_val)
-    r_val = flat_image[r_flat]
-    r_ok &= np.isfinite(r_val)
-    s_roi, s_val = s_roi[s_ok], s_val[s_ok]
-    r_roi, r_val, r_flat = r_roi[r_ok], r_val[r_ok], r_flat[r_ok]
+        s_in = ~flat_ignore[s_flat]
+        r_in = ~flat_ignore[r_flat]
+        n_nominal = np.stack((np.bincount(s_roi[s_in], minlength=n), np.bincount(r_roi[r_in], minlength=n)), axis=1)
+        s_ok &= s_in
+        r_ok &= r_in
+    else:
+        n_nominal = np.stack((layout.sample_count, layout.ring_count), axis=1)
+    if not s_ok.all():  # skip the copies in the common case where every pixel counts
+        s_roi, s_val = s_roi[s_ok], s_val[s_ok]
+    if not r_ok.all():
+        r_roi, r_val, r_flat = r_roi[r_ok], r_val[r_ok], r_flat[r_ok]
     n_valid = np.stack((np.bincount(s_roi, minlength=n), np.bincount(r_roi, minlength=n)), axis=1)
     s_off = np.concatenate(([0], np.cumsum(n_valid[:, SAMPLE])))
     r_off = np.concatenate(([0], np.cumsum(n_valid[:, REFERENCE])))
@@ -280,11 +429,18 @@ def reduce_frame(
         r_yy = (r_flat // shape[1]).astype(np.float64)
     t2 = clock()
 
-    std = np.stack((segment_std(s_val, s_off, n_valid[:, SAMPLE]), segment_std(r_val, r_off, n_valid[:, REFERENCE])), axis=1)
+    s_mean, s_std = group_mean_std(s_val, s_roi, n)
+    r_mean, r_std = group_mean_std(r_val, r_roi, n)
+    std = np.stack((s_std, r_std), axis=1)
     t3 = clock()
     values = {m: np.full((n, 2), np.nan) for m in methods}
     for method in methods:
         out = values[method]
+        if method == "mean":  # float64, all ROIs at once (see the module docstring); no per-ROI loop
+            both = (n_valid[:, SAMPLE] > 0) & (n_valid[:, REFERENCE] > 0)
+            out[both, SAMPLE] = s_mean[both]
+            out[both, REFERENCE] = r_mean[both]
+            continue
         for i in range(n):
             if n_valid[i, SAMPLE] == 0 or n_valid[i, REFERENCE] == 0:
                 continue
@@ -299,7 +455,7 @@ def reduce_frame(
     t4 = clock()
     if timers is not None:
         for key, seconds in (
-            ("find pixels", t1 - t0), ("exclude + gather + validity", t2 - t1), ("std", t3 - t2),
+            ("find pixels (or cached layout)", t1 - t0), ("exclude + gather + validity", t2 - t1), ("mean + std", t3 - t2),
             (f"reduce {'+'.join(methods)}", t4 - t3),
         ):
             timers[key] = timers.get(key, 0.0) + seconds

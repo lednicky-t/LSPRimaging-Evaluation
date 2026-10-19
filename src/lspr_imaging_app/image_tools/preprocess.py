@@ -29,7 +29,7 @@ from collections import OrderedDict
 import numpy as np
 
 from ..roi.model import AreaRoi, AreaRoiDetectionSettings
-from .background.estimate import estimate_background_profile, flatten_background
+from .background.estimate import BackgroundWeightsCache, estimate_background_profile, flatten_background, flatten_background_at
 from .background.model import BackgroundSettings
 from .chromatic.warp import warp_boolean_mask_affine
 from .geometry.model import GeometrySettings
@@ -237,6 +237,7 @@ def apply_preprocessing(
     skip_crop: bool = False,
     log_stage_timing: bool = False,
     roi_exclusion: np.ndarray | None = None,
+    weights_cache: BackgroundWeightsCache | None = None,
 ) -> np.ndarray:
     """Rotate/flip/crop, then optionally flatten the background.
 
@@ -244,6 +245,7 @@ def apply_preprocessing(
     `background.estimate.roi_exclusion_mask(processed_shape, rois)` instead of once per frame. It stands in for `rois`
     (same result, 5-6 ms less per 1.2 MP frame) and is used under the same condition as `rois`: only when
     `flatten_background_exclude_area_rois` is on. Its shape must be the processed (rotated, flipped, cropped) image's.
+    `weights_cache` (analysis runs): reuses the valid-mask part of the background estimate between frames; same result.
 
     **Never writes a number into a pixel it did not measure.** Pixels the
     rotation creates are NaN (see `geometry/transform.py`) and stay NaN
@@ -304,6 +306,7 @@ def apply_preprocessing(
             region=region,
             exclusion_dilation_px=int(getattr(background_settings, "flatten_background_exclusion_dilation_px", 0)),
             roi_exclusion=roi_exclusion if background_settings.flatten_background_exclude_area_rois else None,
+            weights_cache=weights_cache,
         )
         if log_stage_timing:
             flatten_elapsed = time.perf_counter() - stage_started_at
@@ -322,3 +325,40 @@ def apply_preprocessing(
         x0, y0, x1, y1 = region
         return processed[y0:y1, x0:x1]
     return processed
+
+
+def apply_preprocessing_at(
+    image: np.ndarray,
+    flat_index: np.ndarray,
+    geometry_settings: GeometrySettings,
+    background_settings: BackgroundSettings,
+    rois: list[AreaRoi] | None = None,
+    mask_settings: AreaRoiDetectionSettings | None = None,
+    external_mask: np.ndarray | None = None,
+    roi_exclusion: np.ndarray | None = None,
+    weights_cache: BackgroundWeightsCache | None = None,
+) -> np.ndarray:
+    """`apply_preprocessing(...)` at the processed-image pixels ``flat_index`` only (row-major indices into the processed
+    image): bit-identical to ``apply_preprocessing(...).reshape(-1)[flat_index]`` (pinned by a test). Rotation and the
+    background estimate still use the whole frame; only the final divide is limited to the pixels asked for. For
+    analysis runs, which read ~30 % of a frame."""
+    processed = apply_spatial_preprocessing(image, geometry_settings)
+    if not background_settings.flatten_background_enabled:
+        return processed.reshape(-1)[flat_index]
+    processed_exclusion_mask = None
+    if external_mask is not None:
+        candidate = np.asarray(external_mask, dtype=bool)
+        if candidate.shape == processed.shape[:2]:
+            processed_exclusion_mask = candidate
+    return flatten_background_at(
+        processed,
+        flat_index,
+        sigma_px=float(background_settings.flatten_background_sigma_px),
+        binning=max(int(getattr(background_settings, "flatten_background_binning", 2)), 1),
+        rois=rois if background_settings.flatten_background_exclude_area_rois else None,
+        mask_settings=mask_settings if background_settings.flatten_background_exclude_mask else None,
+        external_mask=processed_exclusion_mask if background_settings.flatten_background_exclude_mask else None,
+        exclusion_dilation_px=int(getattr(background_settings, "flatten_background_exclusion_dilation_px", 0)),
+        roi_exclusion=roi_exclusion if background_settings.flatten_background_exclude_area_rois else None,
+        weights_cache=weights_cache,
+    )
