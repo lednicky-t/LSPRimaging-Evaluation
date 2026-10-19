@@ -66,8 +66,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from PyQt6.QtGui import QFontMetrics
-from PyQt6.QtWidgets import QAbstractSpinBox, QButtonGroup, QDoubleSpinBox, QHBoxLayout, QSpinBox, QToolButton, QWidget
+from PyQt6.QtWidgets import QButtonGroup, QDoubleSpinBox, QHBoxLayout, QSpinBox, QToolButton, QWidget
 
 from lspr_ui import make_compact_spinbox
 
@@ -84,6 +83,7 @@ from ..mask_edit_common import (
     resolve_mask_edit_base,
 )
 from ..mask_highlight_editor import HistogramHighlightMaskEditor
+from ..ribbon_fields import style_ribbon_number_field
 
 if TYPE_CHECKING:
     # Deferred - see mask_highlight_actions.py's own identical note for why
@@ -94,45 +94,6 @@ _DISABLED_TOOLTIP_SUFFIX = " Not wired yet - needs a background worker (see mask
 _MORPHOLOGY_COLOR = "#f8fafc"  # GuiTheme.text_primary - 2026-10-02 maintainer request: white, since these are real, active actions
 _DRAW_MODE_ACTIVE_COLOR = "#38bdf8"  # GuiTheme.accent_blue - matches MaskScopeToggle's own "selected" convention
 _DRAW_MODE_INACTIVE_COLOR = "#8b95a3"  # GuiTheme.text_dim
-
-
-def _narrow_spinbox(spinbox: QAbstractSpinBox, sample_text: str) -> None:
-    """Narrows a `make_compact_spinbox`-prepared spinbox to fit
-    `sample_text` (e.g. `"99 px"`) instead of the full numeric range -
-    maintainer request, 2026-10-02: "make the boxes for the controls wide
-    only as much as possible... there will be just 2 digit number". Without
-    this, `make_compact_spinbox`'s own deferred auto-sizing reserves room
-    for the *technical* max (e.g. `relative_profile_sigma_px`'s range goes
-    to 2000, so "2000 px" worth of width) even though every realistic value
-    here is 1-2 digits. This must run after `make_compact_spinbox`, not
-    before.
-
-    **A bare `setFixedWidth` did not hold** (found 2026-10-16, measured
-    offscreen: the boxes were 56 px wide around 34 px of text). The theme's
-    `QSpinBox { min-width: 0px }` rule makes Qt reset `minimumWidth()` to 0
-    every time the widget is polished, which defeats the "already past the
-    threshold" back-off in `_apply_content_based_minimum_width`, so the
-    deferred auto-sizing then set the minimum to the width of "2000 px" /
-    "500.0 %" anyway. The width is therefore also written into the box's own
-    `min-width`/`max-width` style rules, which beat the theme's rule, so the
-    minimum survives every polish. `ensurePolished()` comes first so the text
-    is measured in the font the box is drawn with (Segoe UI 9 pt from the
-    theme), not the application default it has before its style sheet applies.
-
-    Also drops the field's frame (2026-10-16, maintainer request: "number
-    controls... without field frame so it is more compact"): no border or
-    background, 2 px side padding instead of the theme's 5 px. The width is
-    the text plus 10 px: 4 px padding, 4 px that `QLineEdit` keeps free
-    inside itself, 2 px spare. The local stylesheet wins over the app-wide one
-    for conflicts and leaves the theme's text colour and font alone."""
-    spinbox.setStyleSheet("QAbstractSpinBox { border: none; background: transparent; padding: 2px 2px; }")
-    spinbox.ensurePolished()
-    width = QFontMetrics(spinbox.font()).horizontalAdvance(sample_text) + 10
-    spinbox.setStyleSheet(
-        "QAbstractSpinBox { border: none; background: transparent; padding: 2px 2px; "
-        f"min-width: {width}px; max-width: {width}px; }}"
-    )
-    spinbox.setFixedWidth(width)
 
 
 _PAIR_BUTTON_WIDTH = ICON_SIZE + 2  # 1 px of air each side of the icon (the lone-icon buttons are BUTTON_SIZE wide)
@@ -303,7 +264,7 @@ class ThresholdEditPanel(_TwoSpinToolSettingsPanel):
         self._threshold_spin.setSuffix(" %")
         self._threshold_spin.setToolTip("Relative threshold - how far a pixel must deviate from its local background.")
         self._threshold_spin.valueChanged.connect(self._on_spin_changed)
-        _narrow_spinbox(self._threshold_spin, "99.9 %")
+        style_ribbon_number_field(self._threshold_spin, "99.9 %")
 
         self._sigma_spin = make_compact_spinbox(QSpinBox(self))
         self._sigma_spin.setRange(3, 2000)
@@ -311,7 +272,7 @@ class ThresholdEditPanel(_TwoSpinToolSettingsPanel):
         self._sigma_spin.setKeyboardTracking(False)
         self._sigma_spin.setToolTip("Relative profile sigma - the local-background blur radius.")
         self._sigma_spin.valueChanged.connect(self._on_spin_changed)
-        _narrow_spinbox(self._sigma_spin, "99 px")
+        style_ribbon_number_field(self._sigma_spin, "99 px")
         return self._threshold_spin, self._sigma_spin
 
     def _sync_from_settings(self, settings: MaskSettings) -> None:
@@ -347,7 +308,7 @@ class LocalContrastEditPanel(_TwoSpinToolSettingsPanel):
         self._sigma_spin.setKeyboardTracking(False)
         self._sigma_spin.setToolTip("Local contrast sigma - the local-neighborhood blur radius.")
         self._sigma_spin.valueChanged.connect(self._on_spin_changed)
-        _narrow_spinbox(self._sigma_spin, "99 px")
+        style_ribbon_number_field(self._sigma_spin, "99 px")
 
         self._z_spin = make_compact_spinbox(QDoubleSpinBox(self))
         self._z_spin.setRange(0.1, 20.0)
@@ -355,7 +316,7 @@ class LocalContrastEditPanel(_TwoSpinToolSettingsPanel):
         self._z_spin.setSingleStep(0.1)
         self._z_spin.setToolTip("Local contrast z-threshold - how many local standard deviations count as an outlier.")
         self._z_spin.valueChanged.connect(self._on_spin_changed)
-        _narrow_spinbox(self._z_spin, "19.9")
+        style_ribbon_number_field(self._z_spin, "19.9")
         return self._sigma_spin, self._z_spin
 
     def _sync_from_settings(self, settings: MaskSettings) -> None:
@@ -424,7 +385,7 @@ class MorphologyEditPanel(QWidget):
         self._radius_spin.setSuffix(" px")
         self._radius_spin.setToolTip("Morphology radius.")
         self._radius_spin.valueChanged.connect(self._on_radius_changed)
-        _narrow_spinbox(self._radius_spin, "99 px")
+        style_ribbon_number_field(self._radius_spin, "99 px")
 
         layout = QHBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -522,7 +483,7 @@ class DrawEditPanel(QWidget):
         self._size_spin.setSuffix(" px")
         self._size_spin.setToolTip("Brush size.")
         self._size_spin.valueChanged.connect(self._on_size_changed)
-        _narrow_spinbox(self._size_spin, "99 px")
+        style_ribbon_number_field(self._size_spin, "99 px")
 
         _no_canvas_gesture = " Not wired yet - no canvas drawing gesture exists (see mask_edit_panels.py)."
         self._add_mode_button = action_button(

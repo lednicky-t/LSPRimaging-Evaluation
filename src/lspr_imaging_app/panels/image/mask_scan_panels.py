@@ -52,7 +52,7 @@ from ...image_tools.mask.transient_scan import ScanParams
 from ...image_tools.mask_auto_task import AutoMaskSummary, MaskAutoTask
 from ...image_tools.mask_scan_task import ScanSummary, TransientScanTask
 from ..mask_edit_common import action_button, disabled_safe_icon, plan_mask_edit_base
-from .mask_edit_panels import _narrow_spinbox
+from ..ribbon_fields import style_ribbon_number_field
 from .mask_rows import EVENT_COLOR, MASK_COLOR
 
 _ICON_PLAIN = "#f8fafc"  # GuiTheme.text_primary, like the other real, active actions of this ribbon
@@ -295,7 +295,7 @@ class MaskAutoControls(QWidget):
             "How far the contour of a particle is grown before it is masked (the feathering). The contour itself is the half-depth "
             "edge the scan found: halfway down the particle's own dip."
         )
-        _narrow_spinbox(self._dilate_spin, "99 px")
+        style_ribbon_number_field(self._dilate_spin, "99 px")
 
         layout = QHBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)

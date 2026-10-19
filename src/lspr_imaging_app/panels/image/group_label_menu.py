@@ -66,20 +66,22 @@ _POSITION_CHOICES = (
 
 
 def label_menu_icon(color: str) -> QIcon:
-    """The ROI-label icon over three dots in a row."""
+    """The ROI-label icon over three dots in a row. Its visible part fills the same 30 x 30 of the 36 x 36
+    canvas that a Tabler icon does (measured 2026-10-19: it was 24 wide, the dots spanning only 0.26-0.74 of
+    the canvas and the label drawn at 62 %, so it read smaller than the icons beside it)."""
     pixmap = QPixmap(_RENDER_SIZE, _RENDER_SIZE)
     pixmap.fill(Qt.GlobalColor.transparent)
     painter = QPainter(pixmap)
     painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-    label_size = int(_RENDER_SIZE * 0.62)
+    label_size = round(_RENDER_SIZE * 0.72)
     label = load_tabler_icon("label-important", color=color, size=label_size, stroke_width=2.1).pixmap(label_size, label_size)
-    painter.drawPixmap((_RENDER_SIZE - label_size) // 2, 0, label)
+    painter.drawPixmap((_RENDER_SIZE - label_size) // 2, round(_RENDER_SIZE * 0.028), label)
     painter.setPen(Qt.PenStyle.NoPen)
     painter.setBrush(QColor(color))
-    radius = _RENDER_SIZE * 0.075
-    y = _RENDER_SIZE * 0.84
-    for i in range(3):
-        x = _RENDER_SIZE * (0.26 + 0.24 * i)
+    radius = _RENDER_SIZE * 0.07
+    y = _RENDER_SIZE * 0.845
+    for x_fraction in (0.16, 0.5, 0.84):
+        x = _RENDER_SIZE * x_fraction
         painter.drawEllipse(QRectF(x - radius, y - radius, 2 * radius, 2 * radius))
     painter.end()
     return QIcon(pixmap)

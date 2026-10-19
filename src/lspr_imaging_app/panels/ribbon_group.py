@@ -101,6 +101,14 @@ def labeled_icon_group(parent: QWidget, content: QWidget, label_text: str) -> tu
     and reads as a caption, which is why it needs to stay quieter (smaller,
     `text_dim`, no bold) rather than reusing that style verbatim.
 
+    The content and the caption are both pinned to the top at their own natural height, with the spare
+    room of the (taller) ribbon row left empty below (2026-10-19). Before that the content was only
+    centred, so a content widget that is free to grow (`ROIs` tab, `Groups`: a plain `QWidget` row) took
+    the whole spare 8 px, which put its caption 8 px lower than every other group's and its buttons 4 px
+    off the neighbours' line. Now a caption sits `content height + 2 px` below the top, whatever the
+    content is: that is what lines the captions up across groups and tabs, provided each content is one
+    icon-button high (`BUTTON_SIZE`; the number fields get that height from `ribbon_fields.py`).
+
     Returns the wrapping group widget and the label itself - callers keep
     the label reference only to restyle it on a live theme switch; nothing
     reads its text back."""
@@ -108,9 +116,11 @@ def labeled_icon_group(parent: QWidget, content: QWidget, label_text: str) -> tu
     layout = QVBoxLayout(group)
     layout.setContentsMargins(0, 0, 0, 0)
     layout.setSpacing(2)
-    layout.addWidget(content, 0, Qt.AlignmentFlag.AlignHCenter)
+    top_centre = Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop
+    layout.addWidget(content, 0, top_centre)
     label = QLabel(label_text, group)
     label.setAlignment(Qt.AlignmentFlag.AlignHCenter)
     label.setStyleSheet(group_label_style())
-    layout.addWidget(label, 0, Qt.AlignmentFlag.AlignHCenter)
+    layout.addWidget(label, 0, top_centre)
+    layout.addStretch(1)
     return group, label

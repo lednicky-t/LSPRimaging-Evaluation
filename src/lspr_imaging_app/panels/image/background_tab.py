@@ -45,6 +45,7 @@ from lspr_ui import GuiTheme, get_active_theme, load_tabler_icon
 
 from ...image_tools import BackgroundModule
 from ...image_tools.background.model import BackgroundComputationalChange, BackgroundSettings, max_binning_for_sigma
+from ..ribbon_fields import style_ribbon_combo, style_ribbon_number_field
 from ..ribbon_group import labeled_icon_group, ribbon_separator
 from .general_group import ICON_SIZE, style_general_icon_button
 from .roi_icons import spot_icon
@@ -52,15 +53,12 @@ from .roi_icons import spot_icon
 _RENDER_SIZE = ICON_SIZE * 2
 _STROKE_WIDTH = 2.1
 _ACTIVE_COLOR = "#38bdf8"  # the ribbon's tool blue
-# Content height of the number fields and the drop-down. Set through a widget
-# stylesheet, not `setFixedHeight`: the app theme's own `min-height: 18px` rule
-# (lspr_ui `startup_app_stylesheet`) wins over a fixed height, which left the
-# drop-down 2 px shorter than the spin boxes.
-_FIELD_CONTENT_HEIGHT_PX = 20
-_SIGMA_WIDTH_PX = 64  # fits "2000 px"
+# The widest text each number field can show (its range's top), which sets its width: `ribbon_fields.py`.
+_SIGMA_WIDEST_TEXT = "99 px"  # two digits: sigma is about 25-50 px; a 3-digit entry is clipped (the range still allows 2000)
+_DILATION_WIDEST_TEXT = "100 px"
 _BIN_POPUP_WIDTH_PX = 72
-_DILATION_WIDTH_PX = 48  # two digits + " px" (a 3-digit entry would be clipped)
 _FLASH_MS = 1400  # the binning hint's fade
+_FLASH_MAX_ALPHA = 0.45  # how strongly the accent tints the drop-down at the peak of the fade
 _EXCLUDE_COLOR = "#ef4444"  # red: this is being excluded from the estimate
 _ROI_COLOR = _EXCLUDE_COLOR  # red, like the mask: excluded from the estimate
 _ON_COLOR = "#22c55e"  # "excluded"/"applied" green, as the stable app's exclusion icons
@@ -88,12 +86,6 @@ BACKGROUND_INFO_HTML = (
     "&bull; Needs enough free substrate around the ROIs.<br>"
     "&bull; With a reference ring centred on the sample the gain already cancels, so the benefit is small."
 )
-
-
-def _match_field_height(widget: QWidget, class_name: str) -> None:
-    widget.setStyleSheet(
-        f"{class_name} {{ min-height: {_FIELD_CONTENT_HEIGHT_PX}px; max-height: {_FIELD_CONTENT_HEIGHT_PX}px; }}"
-    )
 
 
 def _roi_icon(excluded: bool, dim: str) -> QIcon:
@@ -132,8 +124,7 @@ class BackgroundTab(QWidget):
         self._sigma_spin.setRange(3, 2000)
         self._sigma_spin.setSuffix(" px")
         self._sigma_spin.setKeyboardTracking(False)
-        self._sigma_spin.setFixedWidth(_SIGMA_WIDTH_PX)
-        _match_field_height(self._sigma_spin, "QSpinBox")
+        style_ribbon_number_field(self._sigma_spin, _SIGMA_WIDEST_TEXT)
         self._sigma_spin.setToolTip(
             "Width of the Gaussian blur that estimates the smooth background.\n"
             "About the size of an ROI's excluded zone works best (roughly 25-50 px): much smaller cannot\n"
@@ -150,8 +141,7 @@ class BackgroundTab(QWidget):
             "Average this many pixels per side before blurring: faster, and just as accurate while\n"
             "Sigma stays at least 6 binned cells wide. Lowered automatically when Sigma gets too small for it."
         )
-        _match_field_height(self._binning_combo, "QComboBox")
-        self._binning_combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToContents)
+        self._binning_combo_style = style_ribbon_combo(self._binning_combo)
         self._binning_combo.view().setMinimumWidth(_BIN_POPUP_WIDTH_PX)  # the drop-down list was narrower than its items
         self._binning_combo.currentIndexChanged.connect(self._push_settings)
 
@@ -159,8 +149,7 @@ class BackgroundTab(QWidget):
         self._dilation_spin.setRange(0, 100)
         self._dilation_spin.setSuffix(" px")
         self._dilation_spin.setKeyboardTracking(False)
-        self._dilation_spin.setFixedWidth(_DILATION_WIDTH_PX)
-        _match_field_height(self._dilation_spin, "QSpinBox")
+        style_ribbon_number_field(self._dilation_spin, _DILATION_WIDEST_TEXT)
         self._dilation_spin.setToolTip("Exclusion dilatation: grow the excluded zone by this many pixels before estimating.")
         self._dilation_spin.valueChanged.connect(self._push_settings)
 
@@ -282,7 +271,7 @@ class BackgroundTab(QWidget):
 
     def _enforce_binning_limit(self) -> None:
         """Lower the binning when Sigma is too small for it (`bin <= sigma/6`),
-        and fade the control's border so the change is noticed, not silent."""
+        and fade an accent tint behind the control so the change is noticed, not silent."""
         limit = max_binning_for_sigma(float(self._sigma_spin.value()))
         if int(self._binning_combo.currentData()) <= limit:
             return
@@ -291,25 +280,29 @@ class BackgroundTab(QWidget):
             self._binning_combo.setCurrentIndex(max(self._binning_combo.findData(limit), 0))
         finally:
             self._binning_combo.blockSignals(blocked)
-        self._flash(self._binning_combo)
+        self._flash(self._binning_combo, self._binning_combo_style)
 
-    def _flash(self, widget: QWidget) -> None:
-        """A short fade-in/fade-out of an accent border on `widget`."""
+    def _flash(self, widget: QComboBox, base_style: str) -> None:
+        """A short fade-in/fade-out of an accent tint behind `widget`. A tint, not a border: the field has no
+        frame, and a border would add 2 px of height (and push the group's caption down) while it fades.
+        ``base_style`` is the field's own style sheet, put back when the fade ends."""
         animation = QVariantAnimation(widget)
         animation.setDuration(_FLASH_MS)
         animation.setKeyValueAt(0.0, 0.0)
         animation.setKeyValueAt(0.25, 1.0)
         animation.setKeyValueAt(1.0, 0.0)
         accent = QColor(_ACTIVE_COLOR)
-        class_name = type(widget).__name__
 
-        def paint(alpha: float) -> None:
+        def paint(strength: float) -> None:
+            alpha = _FLASH_MAX_ALPHA * float(strength)
+            # Later in the sheet, same selector: this `background` replaces the transparent one of `base_style`.
             widget.setStyleSheet(
-                f"{class_name} {{ border: 1px solid rgba({accent.red()}, {accent.green()}, {accent.blue()}, {int(255 * float(alpha))}); border-radius: 3px; }}"
+                f"{base_style} QComboBox {{ background: rgba({accent.red()}, {accent.green()}, {accent.blue()}, {alpha:.2f}); "
+                "border-radius: 3px; }"
             )
 
         animation.valueChanged.connect(paint)
-        animation.finished.connect(lambda: widget.setStyleSheet(""))
+        animation.finished.connect(lambda: widget.setStyleSheet(base_style))
         animation.start(QVariantAnimation.DeletionPolicy.DeleteWhenStopped)
 
     def _push_settings(self, *_args: object) -> None:

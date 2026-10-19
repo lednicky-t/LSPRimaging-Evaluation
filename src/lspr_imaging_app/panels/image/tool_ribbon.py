@@ -96,14 +96,14 @@ _CANVAS_TOOLS_ROW_HEIGHT = _BUTTON_SIZE + 2 * _BAR_MARGIN
 # `QLabel.sizeHint()`, not guessed). Both tabs land on the same height, so
 # one constant covers both: `ribbon_icon_size.CAPTIONED_GROUP_HEIGHT`, which
 # follows the icon size (it was a 42px literal while the icons were 28px).
-# The tallest of the real categories' own natural heights - today that's
-# the "Image tools" tab's `TransformsSection` (50px, since its own
-# "Calibrate" group - 2026-10-02 - is a captioned group too, plus
-# `TransformsSection`'s own 4px top/bottom margin) over the "Mask"/
-# "Histogram" captioned-group height (42px) over the "ROIs" tab's
-# `CanvasToolsBar` (26px). Shorter content just sits centered in the extra
-# room - see module docstring for why one fixed height for every category,
-# not a per-category one, is the point.
+# The tallest of the real categories' own natural heights. Since 2026-10-19
+# every tab's content is a captioned group row (38 px with 24 px icons), the
+# "Image tools" tab's `TransformsSection` included: it used to add a 4 px margin
+# on every side (50 px then 46 px), which made it the tallest and left every
+# other tab 8 px of empty room below its captions. `CanvasToolsBar` (26 px) is
+# shorter. Shorter content sits at the top of the extra room - see module
+# docstring for why one fixed height for every category, not a per-category
+# one, is the point.
 _ROW_HEIGHT = max(_CANVAS_TOOLS_ROW_HEIGHT, _TRANSFORMS_ROW_HEIGHT, _CAPTIONED_GROUP_ROW_HEIGHT)
 ROI_TAB = "ROIs"  # the ROI tab: the canvas ROI gestures (rubber-band, right-drag move, right-click menu) are live only here
 VIEW_TAB = "View"  # the display-options tab (was "Histogram" until 2026-10-06); the Histogram plot keys off it

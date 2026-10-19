@@ -113,17 +113,17 @@ _CROP_ACTIVE_COLOR = "#38bdf8"
 _FLIP_H_ACTIVE_COLOR = "#22c55e"
 _FLIP_V_ACTIVE_COLOR = "#2dd4bf"
 _MEASURE_ACTIVE_COLOR = "#38bdf8"  # same blue as Crop's - maintainer's preferred tool color (2026-09-29, was green)
-_ROW_MARGIN = 4
 # The "Calibrate" group (Measure, captioned - see module docstring) is
 # taller than a plain icon button: icon row + 2px spacing + 12px
 # single-line 9px-font caption, the same height `ribbon_group.py`'s other
 # captioned groups land on (`ribbon_icon_size.CAPTIONED_GROUP_HEIGHT`).
-# The row's total height - the tallest child (now the Calibrate group, not
-# a plain button) plus this row's own top/bottom layout margin
-# (`_ROW_MARGIN`) on each side. Exposed so `panels/image/tool_ribbon.py`
-# can size its fixed-height stack to fit this section without guessing at
-# or duplicating these numbers.
-ROW_HEIGHT = max(_BUTTON_SIZE, _CALIBRATE_GROUP_HEIGHT) + 2 * _ROW_MARGIN
+# The row's total height is that tallest child. No margin round the row
+# (2026-10-19): it used to have 4 px on every side, which put this tab's icons
+# and captions 4 px lower (and 4 px further right) than every other tab's, and
+# made this tab, and so the whole ribbon, 8 px taller than any content needs.
+# Exposed so `panels/image/tool_ribbon.py` can size its fixed-height stack to
+# fit this section without guessing at or duplicating these numbers.
+ROW_HEIGHT = max(_BUTTON_SIZE, _CALIBRATE_GROUP_HEIGHT)
 # Extra gap between the rotation | flip | crop | measure groups (on top of the 6px spacing).
 _GROUP_GAP = 6
 # Rendered at 2x and scaled down by Qt, so the smaller icon stays crisp
@@ -265,7 +265,7 @@ class TransformsSection(QWidget):
         calibrate_group, self._calibrate_label = labeled_icon_group(self, self._measure_button, "Calibrate")
 
         layout = QHBoxLayout(self)
-        layout.setContentsMargins(_ROW_MARGIN, _ROW_MARGIN, _ROW_MARGIN, _ROW_MARGIN)
+        layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(_GROUP_GAP)
         layout.addWidget(rotation_group)
         layout.addWidget(ribbon_separator(self))
