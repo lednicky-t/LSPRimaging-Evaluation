@@ -236,8 +236,14 @@ def apply_preprocessing(
     region: tuple[int, int, int, int] | None = None,
     skip_crop: bool = False,
     log_stage_timing: bool = False,
+    roi_exclusion: np.ndarray | None = None,
 ) -> np.ndarray:
     """Rotate/flip/crop, then optionally flatten the background.
+
+    `roi_exclusion` (analysis runs): the ROI part of the background exclusion mask, built once with
+    `background.estimate.roi_exclusion_mask(processed_shape, rois)` instead of once per frame. It stands in for `rois`
+    (same result, 5-6 ms less per 1.2 MP frame) and is used under the same condition as `rois`: only when
+    `flatten_background_exclude_area_rois` is on. Its shape must be the processed (rotated, flipped, cropped) image's.
 
     **Never writes a number into a pixel it did not measure.** Pixels the
     rotation creates are NaN (see `geometry/transform.py`) and stay NaN
@@ -297,6 +303,7 @@ def apply_preprocessing(
             external_mask=processed_exclusion_mask if background_settings.flatten_background_exclude_mask else None,
             region=region,
             exclusion_dilation_px=int(getattr(background_settings, "flatten_background_exclusion_dilation_px", 0)),
+            roi_exclusion=roi_exclusion if background_settings.flatten_background_exclude_area_rois else None,
         )
         if log_stage_timing:
             flatten_elapsed = time.perf_counter() - stage_started_at

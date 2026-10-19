@@ -368,3 +368,43 @@ The backbone file carries: the recipe as one JSON (all global settings, algorith
 A cell is current if the recipe digest, its ROI digest and its cube's frame digests match the current ones: a numpy
 comparison over ~30 k numbers, milliseconds, no per-frame files. The recipe JSON is deduplicated by content as before, so
 a handful of files per dataset.
+
+## 12. Status after the maintainer's answers (2026-10-19, later the same day)
+
+Decisions: spread = plain STD of the valid pixels, SEM derived (same for every method), the 4-sector ring coverage number is
+dropped, `n_valid` / `n_nominal` kept; **the first stored value is the mean (with its STD), nothing else** (median,
+trimmed mean, plane fit stay available in the code as optional layers later). The maintainer first wrote "median" and
+then corrected it to "mean" the same day; mean is the default throughout. Worker processes are fine. float64 is approved
+for the mean, **not yet applied**: the mean is still `np.mean` on float32 pixels (float32 pairwise accumulation), so it
+equals the old code bit for bit; float64 accumulation would differ by about 1e-7 relative (roughly 0.004 intensity units at
+40,000) and, being a sum, could be vectorised for all ROIs without a Python loop. Per `.claude/rules/numerics.md` it
+waits for a real-data before/after comparison, which needs the machine free. Commit of the plan and the two tools approved (commit `c6dfca6` in LSPRi/eva, not pushed, no umbrella pointer bump).
+
+Built, not committed:
+
+* `src/lspr_imaging_app/analysis/frame_reduce.py`: the prototype moved into the package as pure functions (`RoiSet`,
+  `build_roi_set`, `locate_pixels`, `segment_std`, `reduce_frame` -> `FrameReduction`). New compared with the lab: a ROI
+  with a free-form mask falls back to the existing rasteriser instead of being refused; an unknown reduction method or
+  exclusion mode raises instead of silently becoming `mean`; default method is `("mean",)`.
+* `image_tools/background/estimate.py` (`roi_exclusion_mask` public, `roi_exclusion=` on `flatten_background`) and
+  `image_tools/preprocess.py` (`apply_preprocessing(..., roi_exclusion=)`): the cached ROI part of the background exclusion
+  mask, optional, default behaviour unchanged. This replaces the lab's duplicate `prepare_frame_fast`. A wrong-shaped mask
+  raises.
+* `tests/unit/test_lspri_rewrite_frame_reduce.py` (umbrella repo, 13 tests, 18 sub-tests, 3 s): pixel sets equal the
+  existing rasterisers' masks (identity and chromatic affine, blocks of 1 to 64 ROIs); counts, values of all four methods
+  and STD equal a plain per-ROI reference for both exclusion modes, with and without an ignore mask and NaN pixels; ROIs at
+  the image corners, overlapping ROIs, no ring, empty sample, free-form mask; the cached exclusion equals passing the ROIs.
+  Mutation check: a 0.4 px larger sample, the wrong exclusion mode, the wrong affine and the ignore mask applied wrongly are
+  each caught. Neighbouring suites still pass (background estimate, analysis core, preprocess, image refresh speed-ups,
+  mask resolve cache, analysis-engine integration: 86 tests).
+* `tools/frame_reduce_lab.py` now calls the module instead of carrying its own copy.
+
+**Not yet re-verified on real data:** the identity-to-the-old-code results in section 11 were measured on the prototype
+copy in the lab. The moved module is covered by the synthetic tests above only. To close that: run the lab's `verify`
+section and a scan on the real dataset (`--sections verify,scan`), which the maintainer asked to hold until their VM is off.
+The timings in section 11 were taken with the mean, which is the default again, and describe the prototype; the module's own
+timing has not been re-measured. A bench run made while a VM loaded the machine (briefly with `median`) came out about 3x
+slower on every stage and is discarded.
+
+Next: re-verify + re-time on real data when the machine is free; then the recipe from a session (Qt-free, one route for the
+GUI and the shell), the scan runner (processes), the backbone file, the command line.

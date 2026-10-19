@@ -26,7 +26,6 @@ import statistics
 import sys
 import time
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
-from dataclasses import dataclass
 from pathlib import Path
 
 TOOLS_DIR = Path(__file__).resolve().parent
@@ -36,235 +35,16 @@ if str(TOOLS_DIR) not in sys.path:
 import analysis_stage_timing as st  # noqa: E402  (also puts the app sources on sys.path)
 import numpy as np  # noqa: E402
 from PyQt6.QtWidgets import QApplication  # noqa: E402
-from scipy import ndimage  # noqa: E402
 
+from lspr_imaging_app.analysis.frame_reduce import EXCLUDE_ALL_SAMPLE_ROIS, build_roi_set, reduce_frame  # noqa: E402
 from lspr_imaging_app.analysis.reduction import REDUCTION_METHODS, reduce_sample_and_reference  # noqa: E402
 from lspr_imaging_app.dataset import io  # noqa: E402
 from lspr_imaging_app.image_tools import preprocess as pp  # noqa: E402
-from lspr_imaging_app.image_tools.background import estimate as bg_estimate  # noqa: E402
-from lspr_imaging_app.image_tools.chromatic.affine import apply_affine_to_points, invert_affine_matrix  # noqa: E402
+from lspr_imaging_app.image_tools.background.estimate import roi_exclusion_mask  # noqa: E402
 from lspr_imaging_app.roi import rasterize as rz  # noqa: E402
-from lspr_imaging_app.roi.detection import ignored_pixel_mask  # noqa: E402
 
-EXCLUDE_ALL = "exclude_all_sample_rois"
+EXCLUDE_ALL = EXCLUDE_ALL_SAMPLE_ROIS
 _QT_APP = None
-
-
-# -- ROI geometry as arrays ----------------------------------------------------------------------------------
-
-
-@dataclass(frozen=True)
-class RoiSet:
-    """The circle / annulus geometry of a list of ROIs as plain arrays, in the radii the existing rasteriser uses."""
-
-    rois: tuple
-    cx: np.ndarray
-    cy: np.ndarray
-    sample_r: np.ndarray  # outer radius of the sample disk
-    ring_in_r: np.ndarray
-    ring_out_r: np.ndarray
-    sample_on: np.ndarray  # False: empty sample (radius 0)
-    ring_on: np.ndarray  # False: no reference ring ("none" or outer diameter 0)
-
-    @property
-    def n(self) -> int:
-        return len(self.rois)
-
-
-def build_roi_set(rois, inner_default: float, outer_default: float) -> RoiSet:
-    n = len(rois)
-    cx = np.array([float(r.center_x) for r in rois], dtype=np.float64)
-    cy = np.array([float(r.center_y) for r in rois], dtype=np.float64)
-    sample_r = np.zeros(n)
-    ring_in = np.zeros(n)
-    ring_out = np.zeros(n)
-    ring_on = np.zeros(n, dtype=bool)
-    for i, roi in enumerate(rois):
-        if (roi.sample_geometry_type == "mask" and roi.sample_mask is not None) or (
-            roi.reference_geometry_type == "mask" and roi.reference_mask is not None
-        ):
-            raise NotImplementedError(f"ROI {roi.area_roi_id} has a free-form mask; the lab handles circle/annulus only")
-        sample_r[i] = max(float(roi.sample_diameter_px) / 2.0, 0.0)
-        if roi.reference_geometry_type != "none":
-            inner_d, outer_d = rz.effective_reference_diameters(roi, inner_default, outer_default)
-            if outer_d > 0.0:
-                inner_r = max(inner_d, 0.0) / 2.0
-                ring_in[i] = inner_r
-                ring_out[i] = max(outer_d / 2.0, inner_r)
-                ring_on[i] = True
-    return RoiSet(tuple(rois), cx, cy, sample_r, ring_in, ring_out, sample_r > 0.0, ring_on)
-
-
-# -- finding every ROI's pixels in one pass -------------------------------------------------------------------
-
-
-def locate_pixels(rs: RoiSet, affine: np.ndarray, shape: tuple[int, int], chunk: int = 16):
-    """Flat pixel indices (row-major, into an HxW image) of every ROI's sample disk and reference ring, as
-    (roi_index, flat_index) pairs sorted by ROI and, within a ROI, by pixel. Same test as
-    `rasterize._annulus_mask_in_box`: map the pixel back through the inverse affine and compare squared distance from the
-    ROI centre with the radii (inclusive at both ends). One uniform window per ROI, so the arithmetic is a few array passes
-    for all ROIs together instead of a Python call per ROI."""
-    height, width = shape
-    inv = invert_affine_matrix(affine)
-    linear = np.asarray(affine[:, :2], dtype=np.float64)
-    max_scale = max(float(np.max(np.linalg.svd(linear, compute_uv=False))), 1e-6)
-    centres = apply_affine_to_points(np.column_stack((rs.cx, rs.cy)), affine)
-    # The region of a ROI lies within (largest stretch of the affine) x (outer radius) of its transformed centre, so +1 px
-    # is a safe margin (the existing code adds 3). A wider window never changes which pixels are members.
-    reach = float(max(rs.sample_r.max(), rs.ring_out_r.max())) * max_scale + 1.0
-    x0 = np.floor(centres[:, 0] - reach).astype(np.int64)
-    y0 = np.floor(centres[:, 1] - reach).astype(np.int64)
-    side = int(np.ceil(2.0 * reach)) + 2
-    step = np.arange(side, dtype=np.float64)
-    a, b, c = (float(v) for v in inv[0])
-    d, e, f = (float(v) for v in inv[1])
-    cells = side * side
-    s_roi, s_flat, r_roi, r_flat = [], [], [], []
-    s_rad2 = np.where(rs.sample_on, rs.sample_r * rs.sample_r, -1.0)  # -1: no pixel can match (squared distance >= 0)
-    r_out2 = np.where(rs.ring_on, rs.ring_out_r * rs.ring_out_r, -1.0)
-    r_in2 = rs.ring_in_r * rs.ring_in_r
-    for start in range(0, rs.n, chunk):
-        sl = slice(start, min(start + chunk, rs.n))
-        xf = x0[sl].astype(np.float64)[:, None, None] + step[None, None, :]  # (m, 1, side)
-        yf = y0[sl].astype(np.float64)[:, None, None] + step[None, :, None]  # (m, side, 1)
-        sx = xf * a + yf * b
-        sx += c
-        sy = xf * d + yf * e
-        sy += f
-        sx -= rs.cx[sl][:, None, None]
-        sy -= rs.cy[sl][:, None, None]
-        sx *= sx
-        sy *= sy
-        sx += sy  # squared distance from the ROI centre in source space
-        in_s = sx <= s_rad2[sl][:, None, None]
-        in_r = (sx <= r_out2[sl][:, None, None]) & (sx >= r_in2[sl][:, None, None])
-        if x0[sl].min() < 0 or y0[sl].min() < 0 or x0[sl].max() + side > width or y0[sl].max() + side > height:
-            inside = ((xf >= 0) & (xf < width)) & ((yf >= 0) & (yf < height))  # only a window that leaves the image needs this
-            in_s &= inside
-            in_r &= inside
-        # (np.nonzero returning row/column directly was tried and is slower than flatnonzero + division: 20.7 vs 14.7 ms)
-        for flat_hits, roi_out, flat_out in ((np.flatnonzero(in_s), s_roi, s_flat), (np.flatnonzero(in_r), r_roi, r_flat)):
-            local = flat_hits // cells
-            rem = flat_hits - local * cells
-            row = rem // side
-            col = rem - row * side
-            roi = local + start
-            roi_out.append(roi)
-            flat_out.append((y0[roi] + row) * width + (x0[roi] + col))
-    return (np.concatenate(s_roi), np.concatenate(s_flat), np.concatenate(r_roi), np.concatenate(r_flat))
-
-
-def segment_std(values: np.ndarray, offsets: np.ndarray, counts: np.ndarray) -> np.ndarray:
-    """Sample standard deviation (ddof=1, float64) of each ROI's contiguous block of `values`, for all ROIs at once.
-    NaN where a ROI has fewer than 2 pixels. Two-pass (mean first), so no cancellation."""
-    out = np.full(counts.size, np.nan)
-    ok = counts > 1
-    if not ok.any():
-        return out
-    v = values.astype(np.float64)
-    starts = offsets[:-1]
-    sums = np.add.reduceat(np.append(v, 0.0), starts)  # sentinel keeps a trailing empty block's start in range
-    mean = sums / np.maximum(counts, 1)
-    dev = v - np.repeat(mean, counts)
-    ss = np.add.reduceat(np.append(dev * dev, 0.0), starts)
-    out[ok] = np.sqrt(ss[ok] / (counts[ok] - 1))
-    return out
-
-
-def reduce_frame(
-    rs: RoiSet, processed: np.ndarray, ignore: np.ndarray | None, affine: np.ndarray, methods: tuple[str, ...],
-    *, trimmed_fraction: float, exclusion_mode: str = EXCLUDE_ALL, chunk: int = 16, timers: dict | None = None,
-) -> dict:
-    """Step 1 for one frame and all ROIs: -> per method (n, 2) arrays [sample, reference] of value, plus std, n_valid and
-    n_nominal. Pixels are found in bulk; each ROI's pixels are then handed to the unchanged `reduce_*` functions, so the
-    values are the ones today's code produces."""
-    clock = time.perf_counter
-    t0 = clock()
-    shape = processed.shape[:2]
-    n = rs.n
-    s_roi, s_flat, r_roi, r_flat = locate_pixels(rs, affine, shape, chunk)
-    t1 = clock()
-    flat_image = processed.reshape(-1)
-    s_ok = np.ones(s_flat.size, dtype=bool)
-    r_ok = np.ones(r_flat.size, dtype=bool)
-    if exclusion_mode == EXCLUDE_ALL:
-        union = np.zeros(flat_image.size, dtype=bool)
-        union[s_flat] = True  # every ROI's sample aperture, before the ignore mask (as `_sample_exclusion_union`)
-        r_ok &= ~union[r_flat]
-    if ignore is not None and ignore.shape == shape:
-        flat_ignore = ignore.reshape(-1)
-        s_ok &= ~flat_ignore[s_flat]
-        r_ok &= ~flat_ignore[r_flat]
-    n_nominal = np.stack((np.bincount(s_roi[s_ok], minlength=n), np.bincount(r_roi[r_ok], minlength=n)), axis=1)
-    s_val = flat_image[s_flat]
-    s_ok &= np.isfinite(s_val)
-    r_val = flat_image[r_flat]
-    r_ok &= np.isfinite(r_val)
-    s_roi, s_val = s_roi[s_ok], s_val[s_ok]
-    r_roi, r_val, r_flat = r_roi[r_ok], r_val[r_ok], r_flat[r_ok]
-    n_valid = np.stack((np.bincount(s_roi, minlength=n), np.bincount(r_roi, minlength=n)), axis=1)
-    s_off = np.concatenate(([0], np.cumsum(n_valid[:, 0])))
-    r_off = np.concatenate(([0], np.cumsum(n_valid[:, 1])))
-    width = shape[1]
-    r_xx = r_yy = None
-    if "plane_fit" in methods:
-        r_xx = (r_flat % width).astype(np.float64)
-        r_yy = (r_flat // width).astype(np.float64)
-    t2 = clock()
-
-    std = np.stack((segment_std(s_val, s_off, n_valid[:, 0]), segment_std(r_val, r_off, n_valid[:, 1])), axis=1)
-    t3 = clock()
-    values = {m: np.full((n, 2), np.nan) for m in methods}
-    for m in methods:
-        out = values[m]
-        for i in range(n):
-            if n_valid[i, 0] == 0 or n_valid[i, 1] == 0:
-                continue  # today: coverage flag "insufficient", both NaN
-            a0, a1, b0, b1 = s_off[i], s_off[i + 1], r_off[i], r_off[i + 1]
-            sample_value, reference_value = reduce_sample_and_reference(
-                s_val[a0:a1], r_val[b0:b1], m, trimmed_mean_fraction=trimmed_fraction,
-                reference_xx=None if r_xx is None else r_xx[b0:b1], reference_yy=None if r_yy is None else r_yy[b0:b1],
-                sample_x=rs.cx[i], sample_y=rs.cy[i],
-            )
-            if np.isfinite(sample_value) and np.isfinite(reference_value):
-                out[i, 0], out[i, 1] = sample_value, reference_value
-    t4 = clock()
-    if timers is not None:
-        for key, value in (("find pixels (all ROIs, vectorised)", t1 - t0), ("exclude + gather + validity", t2 - t1),
-                           ("std per ROI", t3 - t2), (f"reduce {'+'.join(methods)} per ROI", t4 - t3)):
-            timers[key] = timers.get(key, 0.0) + value
-    return {"values": values, "std": std, "n_valid": n_valid, "n_nominal": n_nominal,
-            "_pixels": (s_val, r_val, s_off, r_off, r_xx, r_yy)}
-
-
-# -- frame preparation with a cached ROI exclusion mask ---------------------------------------------------------
-
-
-def prepare_frame_fast(raw, geometry, background, det, roi_exclusion, ignore_processed):
-    """`apply_preprocessing` with the ROI part of the background exclusion mask supplied (it depends only on the ROI
-    geometry and the image shape, so a run computes it once, not once per frame)."""
-    processed = pp.apply_spatial_preprocessing(raw, geometry)
-    if not background.flatten_background_enabled:
-        return processed
-    exclude_mask = background.flatten_background_exclude_mask
-    external = None
-    if ignore_processed is not None:
-        candidate = np.asarray(ignore_processed, dtype=bool)
-        if candidate.shape == processed.shape[:2]:
-            external = candidate
-    image = processed.astype(np.float32, copy=False)
-    excluded = roi_exclusion.copy() if (background.flatten_background_exclude_area_rois and roi_exclusion is not None) \
-        else np.zeros(image.shape[:2], dtype=bool)
-    if exclude_mask:
-        excluded |= ignored_pixel_mask(image, det, external_mask=external)
-    excluded |= ~np.isfinite(image)
-    dilation = max(int(getattr(background, "flatten_background_exclusion_dilation_px", 0)), 0)
-    if dilation > 0 and np.any(excluded):
-        excluded = ndimage.binary_dilation(excluded, iterations=dilation)
-    estimate, baseline = bg_estimate._background_and_baseline(
-        image, ~excluded, float(background.flatten_background_sigma_px), max(int(background.flatten_background_binning), 1)
-    )
-    return bg_estimate.apply_background(image, estimate, baseline)
 
 
 # -- shared context --------------------------------------------------------------------------------------------
@@ -300,7 +80,7 @@ class Context:
         key = cube if self.timeline else -1
         if key not in self._cube_cache:
             rois = self.rois_for(cube)
-            roi_exclusion = bg_estimate._roi_exclusion_mask(self.processed_shape(), rois)
+            roi_exclusion = roi_exclusion_mask(self.processed_shape(), rois)
             self._cube_cache[key] = (rois, build_roi_set(rois, self.inner, self.outer), roi_exclusion)
         return self._cube_cache[key]
 
@@ -347,20 +127,19 @@ def section_profile(ctx: Context, frames) -> None:
 def section_verify(ctx: Context, frames) -> bool:
     ok = True
     methods = REDUCTION_METHODS
-    tot = {"frames": 0, "rois": 0, "pixel_sets": 0, "counts": 0, "values": 0, "std": 0}
+    tot = {"frames": 0, "rois": 0, "counts": 0, "values": 0, "std": 0}
     worst_std = 0.0
     for cube, wl, raw, processed, affine, ignore in frames:
         rois, rs, roi_exclusion = ctx.cube_context(cube)
         # (a) frame preparation
-        fast = prepare_frame_fast(raw, ctx.geometry, ctx.background, ctx.det, roi_exclusion, ignore)
+        fast = pp.apply_preprocessing(raw, ctx.geometry, ctx.background, mask_settings=ctx.det, external_mask=ignore, roi_exclusion=roi_exclusion)
         same_image = np.array_equal(fast, processed, equal_nan=True)
         ok &= same_image
         # (b) ROI stage
         new = reduce_frame(rs, processed, ignore, affine, methods, trimmed_fraction=ctx.trimmed, exclusion_mode=ctx.mode)
-        s_val, r_val, s_off, r_off, r_xx, r_yy = new["_pixels"]
         valid = np.isfinite(processed)
         union = st._incremental_union(rois, processed.shape[:2], affine) if ctx.mode == EXCLUDE_ALL else None
-        bad_sets = bad_counts = bad_values = bad_std = 0
+        bad_counts = bad_values = bad_std = 0
         for i, roi in enumerate(rois):
             shape = processed.shape[:2]
             sm = rz.rasterize_sample(roi, shape, affine)
@@ -373,17 +152,14 @@ def section_verify(ctx: Context, frames) -> bool:
             nominal = (int(sm.sum()), int(rm.sum()))
             sp, rp = processed[sm & valid], processed[rm & valid]
             yy, xx = np.nonzero(rm & valid)
-            mine_s, mine_r = s_val[s_off[i]:s_off[i + 1]], r_val[r_off[i]:r_off[i + 1]]
-            if not (np.array_equal(sp, mine_s) and np.array_equal(rp, mine_r)):
-                bad_sets += 1
-                continue
-            if (nominal[0], nominal[1]) != (int(new["n_nominal"][i, 0]), int(new["n_nominal"][i, 1])):
+            if (nominal[0], nominal[1]) != (int(new.n_nominal[i, 0]), int(new.n_nominal[i, 1])) or (sp.size, rp.size) != (int(new.n_valid[i, 0]), int(new.n_valid[i, 1])):
                 bad_counts += 1
+                continue
             if sp.size > 1 and rp.size > 1:
                 ref_std = (sp.astype(np.float64).std(ddof=1), rp.astype(np.float64).std(ddof=1))
-                if not (np.isclose(ref_std[0], new["std"][i, 0], rtol=1e-12, atol=0.0) and np.isclose(ref_std[1], new["std"][i, 1], rtol=1e-12, atol=0.0)):
+                if not (np.isclose(ref_std[0], new.std[i, 0], rtol=1e-12, atol=0.0) and np.isclose(ref_std[1], new.std[i, 1], rtol=1e-12, atol=0.0)):
                     bad_std += 1
-                    worst_std = max(worst_std, abs(ref_std[0] - new["std"][i, 0]))
+                    worst_std = max(worst_std, abs(ref_std[0] - new.std[i, 0]))
             for m in methods:
                 if sp.size == 0 or rp.size == 0:
                     expected = (np.nan, np.nan)
@@ -394,21 +170,20 @@ def section_verify(ctx: Context, frames) -> bool:
                     )
                     if not (np.isfinite(expected[0]) and np.isfinite(expected[1])):
                         expected = (np.nan, np.nan)
-                got = new["values"][m][i]
+                got = new.values[m][i]
                 if not all(x == y or (np.isnan(x) and np.isnan(y)) for x, y in zip(expected, got)):
                     bad_values += 1
         tot["frames"] += 1
         tot["rois"] += len(rois)
-        tot["pixel_sets"] += bad_sets
         tot["counts"] += bad_counts
         tot["values"] += bad_values
         tot["std"] += bad_std
-        flag = "" if (same_image and not (bad_sets or bad_counts or bad_values or bad_std)) else "   <-- DIFFERENT"
+        flag = "" if (same_image and not (bad_counts or bad_values or bad_std)) else "   <-- DIFFERENT"
         print(f"  cube {cube:3d} wl {wl:5.0f} {'mask' if ignore is not None else '    '}: processed image identical={same_image}, "
-              f"ROIs with different pixel sets={bad_sets}, counts={bad_counts}, values(4 methods)={bad_values}, std={bad_std}{flag}")
-        ok &= not (bad_sets or bad_counts or bad_values or bad_std)
+              f"ROIs with different pixel counts={bad_counts}, values(4 methods)={bad_values}, std={bad_std}{flag}")
+        ok &= not (bad_counts or bad_values or bad_std)
     print(f"\n  total: {tot['frames']} frames x {tot['rois'] // max(tot['frames'], 1)} ROIs = {tot['rois']} ROI-frames; "
-          f"different pixel sets {tot['pixel_sets']}, counts {tot['counts']}, values {tot['values']} (x4 methods), std {tot['std']}")
+          f"different pixel counts {tot['counts']}, values {tot['values']} (x4 methods), std {tot['std']}")
     print("  RESULT: " + ("IDENTICAL to today's code" if ok else "DIFFERENCES FOUND"))
     return ok
 
@@ -420,7 +195,7 @@ def section_bench(ctx: Context, frames, methods: tuple[str, ...]) -> dict:
         rois, rs, roi_exclusion = ctx.cube_context(cube)
         _, t = st.timed(pp.apply_preprocessing, raw, ctx.geometry, ctx.background, rois=rois, mask_settings=ctx.det, external_mask=ignore)
         full_ms.append(t)
-        _, t = st.timed(prepare_frame_fast, raw, ctx.geometry, ctx.background, ctx.det, roi_exclusion, ignore)
+        _, t = st.timed(pp.apply_preprocessing, raw, ctx.geometry, ctx.background, mask_settings=ctx.det, external_mask=ignore, roi_exclusion=roi_exclusion)
         prep_ms.append(t)
         reduce_frame(rs, processed, ignore, affine, methods, trimmed_fraction=ctx.trimmed, exclusion_mode=ctx.mode, timers=timers)
     n = len(frames)
@@ -443,7 +218,7 @@ def _scan_one(path, affine, ignore, rs, roi_exclusion, geometry, background, det
     t0 = time.perf_counter()
     raw = io.load_image_array_uncached(path)
     t1 = time.perf_counter()
-    processed = prepare_frame_fast(raw, geometry, background, det, roi_exclusion, ignore)
+    processed = pp.apply_preprocessing(raw, geometry, background, mask_settings=det, external_mask=ignore, roi_exclusion=roi_exclusion)
     t2 = time.perf_counter()
     res = reduce_frame(rs, processed, ignore, affine, methods, trimmed_fraction=trimmed, exclusion_mode=mode)
     t3 = time.perf_counter()
@@ -461,7 +236,7 @@ def _mp_cube(task):
     """One cube in a worker process: all its frames, sequentially. Returns plain arrays."""
     cube_pos, rs, frames = task
     w = _W
-    roi_exclusion = bg_estimate._roi_exclusion_mask(w["shape"], list(rs.rois))
+    roi_exclusion = roi_exclusion_mask(w["shape"], list(rs.rois))
     n_wl = len(frames)
     values = {m: np.full((rs.n, n_wl, 2), np.nan) for m in w["methods"]}
     std = np.full((rs.n, n_wl, 2), np.nan)
@@ -471,10 +246,10 @@ def _mp_cube(task):
     for k, (path, affine, ignore) in enumerate(frames):
         res, timing = _scan_one(path, affine, ignore, rs, roi_exclusion, w["geometry"], w["background"], w["det"], w["mode"], w["trimmed"], w["methods"])
         for m in w["methods"]:
-            values[m][:, k, :] = res["values"][m]
-        std[:, k, :] = res["std"]
-        n_valid[:, k, :] = res["n_valid"]
-        n_nominal[:, k, :] = res["n_nominal"]
+            values[m][:, k, :] = res.values[m]
+        std[:, k, :] = res.std
+        n_valid[:, k, :] = res.n_valid
+        n_nominal[:, k, :] = res.n_nominal
         stage += timing
     return cube_pos, values, std, n_valid, n_nominal, stage
 
@@ -530,10 +305,10 @@ def section_scan(ctx: Context, cubes: list[int], threads: int, processes: int, m
             cube_pos, wl_pos, path, affine, ignore, rs, roi_exclusion = job
             res, timing = _scan_one(path, affine, ignore, rs, roi_exclusion, geometry, background, det, ctx.mode, ctx.trimmed, methods)
             for m in methods:
-                out[m][:, cube_pos, wl_pos, :] = res["values"][m]
-            out_std[:, cube_pos, wl_pos, :] = res["std"]
-            out_n[:, cube_pos, wl_pos, :] = res["n_valid"]
-            out_nom[:, cube_pos, wl_pos, :] = res["n_nominal"]
+                out[m][:, cube_pos, wl_pos, :] = res.values[m]
+            out_std[:, cube_pos, wl_pos, :] = res.std
+            out_n[:, cube_pos, wl_pos, :] = res.n_valid
+            out_nom[:, cube_pos, wl_pos, :] = res.n_nominal
             return timing
 
         with ThreadPoolExecutor(max_workers=threads, initializer=init_worker) as pool:

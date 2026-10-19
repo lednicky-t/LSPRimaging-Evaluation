@@ -42,9 +42,14 @@ def flatten_background(
     external_mask: np.ndarray | None = None,
     region: tuple[int, int, int, int] | None = None,
     exclusion_dilation_px: int = 0,
+    roi_exclusion: np.ndarray | None = None,
 ) -> np.ndarray:
     """Background-flatten `image` (divide by the background estimate, see
     `apply.apply_background`).
+
+    `roi_exclusion`, if given, is the ROI part of the exclusion mask worked out beforehand with `roi_exclusion_mask`
+    (same shape as `image`); it replaces `rois`. Passing it gives the same result as passing the ROIs, without
+    rebuilding the mask for every frame.
     The background estimate is always computed from the *whole* image (same
     cost/accuracy for TIFF and zarr - nothing about the estimate itself is
     scoped). When `region` (x0, y0, x1, y1) is given, only that region of the
@@ -63,7 +68,7 @@ def flatten_background(
     image_f32 = image.astype(np.float32, copy=False)
     valid_mask = ~_combined_exclusion_mask(
         image_f32, rois=rois, mask_settings=mask_settings, external_mask=external_mask,
-        dilation_px=max(int(exclusion_dilation_px), 0),
+        dilation_px=max(int(exclusion_dilation_px), 0), roi_exclusion=roi_exclusion,
     )
     background, baseline = _background_and_baseline(image_f32, valid_mask, sigma_px, binning)
     if region is not None:
@@ -178,10 +183,13 @@ def _fallback_level(image_f32: np.ndarray, valid_mask: np.ndarray) -> float:
     return float(np.median(finite)) if finite.size else float("nan")
 
 
-def _roi_exclusion_mask(
+def roi_exclusion_mask(
     image_shape: tuple[int, int],
     rois: list[AreaRoi] | None = None,
 ) -> np.ndarray:
+    """Pixels near any ROI's sample aperture that the background estimate must not use. Depends only on the ROI geometry
+    and the image shape (not on the pixel values or on the wavelength), so a run that analyses many frames can compute it
+    once and pass it to `flatten_background` / `apply_preprocessing` as ``roi_exclusion``."""
     exclusion_mask = np.zeros(image_shape, dtype=bool)
     if not rois:
         return exclusion_mask
@@ -202,6 +210,9 @@ def _roi_exclusion_mask(
     return exclusion_mask
 
 
+_roi_exclusion_mask = roi_exclusion_mask  # the old private name, still used in docs and tools
+
+
 def _combined_exclusion_mask(
     image: np.ndarray,
     *,
@@ -209,8 +220,16 @@ def _combined_exclusion_mask(
     mask_settings: AreaRoiDetectionSettings | None = None,
     external_mask: np.ndarray | None = None,
     dilation_px: int = 0,
+    roi_exclusion: np.ndarray | None = None,
 ) -> np.ndarray:
-    exclusion_mask = _roi_exclusion_mask(image.shape[:2], rois)
+    if roi_exclusion is not None:
+        # Already worked out by the caller (see `roi_exclusion_mask`); `rois` is then not looked at. A wrong-sized mask
+        # must fail loudly: broadcasting it silently would exclude the wrong pixels.
+        if roi_exclusion.shape != image.shape[:2]:
+            raise ValueError(f"roi_exclusion has shape {roi_exclusion.shape}, the image {image.shape[:2]}")
+        exclusion_mask = np.array(roi_exclusion, dtype=bool, copy=True)  # modified below, so never the caller's array
+    else:
+        exclusion_mask = roi_exclusion_mask(image.shape[:2], rois)
     if mask_settings is not None:
         exclusion_mask |= ignored_pixel_mask(
             image.astype(np.float32, copy=False),
