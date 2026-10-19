@@ -135,7 +135,7 @@ def _narrow_spinbox(spinbox: QAbstractSpinBox, sample_text: str) -> None:
     spinbox.setFixedWidth(width)
 
 
-_PAIR_BUTTON_WIDTH = ICON_SIZE + 2  # 1 px of air each side of the 22 px icon (the lone-icon buttons are 28 wide)
+_PAIR_BUTTON_WIDTH = ICON_SIZE + 2  # 1 px of air each side of the icon (the lone-icon buttons are BUTTON_SIZE wide)
 
 
 def _add_icon_pair(layout: QHBoxLayout, first: QToolButton, second: QToolButton) -> None:

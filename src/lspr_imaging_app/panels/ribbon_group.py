@@ -17,11 +17,52 @@ be reached into from there.
 from __future__ import annotations
 
 from PyQt6.QtCore import Qt
+from PyQt6.QtGui import QPainter, QPalette, QPen
 from PyQt6.QtWidgets import QFrame, QLabel, QSizePolicy, QVBoxLayout, QWidget
 
 from lspr_ui import get_active_theme
 
+from .ribbon_icon_size import BUTTON_SIZE
+
 _GROUP_LABEL_FONT_SIZE_PX = 9
+
+
+class RibbonSeparator(QFrame):
+    """The thin divider between two captioned groups in the tool ribbon (the tabs under the Image panel's top
+    bar). The widget fills the row's height like any layout child, but the line is drawn only as tall as an
+    icon button (`BUTTON_SIZE`, the same proportion as the dividers of the slider ribbon below the image) and
+    starts `top_offset` px from the top: that is where the icon row of a group is (its caption is under the
+    icons), so the line spans the icons and shares their centre. Before 2026-10-18 it ran the full row height,
+    caption included, which put its centre about 11 px below the icons'.
+
+    A `QFrame` so a stylesheet `color:` still sets its colour (taken from the palette's foreground, the usual
+    trick for line frames), as for `vertical_separator`."""
+
+    def __init__(self, parent: QWidget | None = None, *, top_offset: int = 0) -> None:
+        super().__init__(parent)
+        self.setFrameShape(QFrame.Shape.VLine)
+        self.setFrameShadow(QFrame.Shadow.Plain)
+        self.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Expanding)
+        self.setStyleSheet(f"color: {get_active_theme().control_border};")  # a theme switch restyles it, as before
+        self._top_offset = top_offset
+
+    def line_span(self) -> tuple[int, int]:
+        """``(top, bottom)`` of the drawn line in this widget's coordinates."""
+        return self._top_offset, self._top_offset + BUTTON_SIZE
+
+    def paintEvent(self, event) -> None:  # type: ignore[override]  # noqa: N802 - Qt naming
+        top, bottom = self.line_span()
+        painter = QPainter(self)
+        painter.setPen(QPen(self.palette().color(QPalette.ColorRole.WindowText), 1))
+        x = self.width() // 2
+        painter.drawLine(x, top, x, bottom - 1)
+        painter.end()
+
+
+def ribbon_separator(parent: QWidget | None = None, *, top_offset: int = 0) -> RibbonSeparator:
+    """A divider for a row of captioned groups in the tool ribbon: see `RibbonSeparator`. `top_offset`: px
+    from the top of the row to the top of the icon row (0 when the groups start at the row's top)."""
+    return RibbonSeparator(parent, top_offset=top_offset)
 
 
 def vertical_separator(parent: QWidget) -> QFrame:

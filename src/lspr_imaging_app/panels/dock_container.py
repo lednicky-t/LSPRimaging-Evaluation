@@ -30,16 +30,23 @@ floating safety, the paintEvent-drawn floating border, the subtitle label):
 
 - The optional ``collapsible`` constructor flag (design doc §4) -
   click-to-collapse to a thin strip, not the source's static title bar.
-- The optional ``fixed_width`` constructor flag (design doc §4, updated
-  2026-09-24): unlike the source's panels (and every other rewrite panel),
-  the Workflow panel is a *tool* panel, not a data-display panel - it should
-  not be draggable down to a width that clips its own controls. When set,
-  the expanded (non-collapsed) width is clamped exactly, not just given as
-  an initial ``resizeDocks`` size the user can still drag away from.
+  The width the panel had is remembered and given back on expand.
+- The optional ``min_width`` constructor flag: a floor for the *expanded*
+  width, so the panel cannot be dragged (or restored from a saved layout
+  that was taken while it was collapsed) to a sliver. It is a floor, not a
+  clamp - the panel is freely resizable above it.
 
 Both are used only by the Workflow panel today (``app_rewrite.
 build_main_window``); every other panel passes the defaults
-(``collapsible=False``, ``fixed_width=None``) and is unaffected.
+(``collapsible=False``, ``min_width=None``) and is unaffected.
+
+**History (2026-10-18, maintainer decision):** Workflow used to be locked to
+an exact ``fixed_width`` (340 px), with the dock separator beside it made
+inert, on the reasoning that a tool panel should never be squeezed until its
+controls clip. The maintainer reversed that: Workflow is resizable like every
+other panel. What replaced the clamp is a horizontal scroll bar inside the
+Workflow panel (``panels/workflow/panel.py``) that appears whenever a row needs
+more room than the dock has, so narrowing it hides nothing.
 """
 
 from __future__ import annotations
@@ -47,7 +54,7 @@ from __future__ import annotations
 import re
 from collections.abc import Sequence
 
-from PyQt6.QtCore import QByteArray, QRect, QRectF, QSize, Qt, pyqtSignal
+from PyQt6.QtCore import QByteArray, QRect, QRectF, QSize, Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import QColor, QFontMetrics, QIcon, QPainter, QPen, QPixmap
 from PyQt6.QtSvg import QSvgRenderer
 from PyQt6.QtWidgets import (
@@ -55,6 +62,7 @@ from PyQt6.QtWidgets import (
     QDockWidget,
     QHBoxLayout,
     QLabel,
+    QMainWindow,
     QMessageBox,
     QSizePolicy,
     QToolButton,
@@ -96,6 +104,9 @@ _CARD_RADIUS_PX = 6
 # fields, and a few spare pixels on a fixed-width field so its widest text never touches the edge.
 _SUBTITLE_COLUMN_GAP_PX = 14
 _SUBTITLE_COLUMN_SLACK_PX = 3
+
+_QWIDGETSIZE_MAX = 16777215  # Qt's "no maximum"
+_RESTORE_WIDTH_MAX_STEPS = 8  # see `PanelContainer._apply_width_after_collapse`
 
 
 def _widest_text_width(label: QLabel, widest: str) -> int:
@@ -226,7 +237,7 @@ class PanelContainer(QDockWidget):
         *,
         help_text: str | None = None,
         collapsible: bool = False,
-        fixed_width: int | None = None,
+        min_width: int | None = None,
     ) -> None:
         super().__init__(title, parent)
         self._title = title
@@ -253,12 +264,16 @@ class PanelContainer(QDockWidget):
         self._collapsible = collapsible
         self._collapsed = False
         self._collapsed_width = 36
-        # Real width clamp while expanded (design doc §4, tool-panel vs.
-        # display-panel distinction) - see class docstring.
-        self._fixed_width = fixed_width
+        # Floor for the expanded width (a floor, not a clamp) - see module
+        # docstring. `_width_before_collapse` is what `_set_collapsed(False)`
+        # gives the panel back: Qt does not regrow a dock by itself once its
+        # fixed collapsed width is released.
+        self._min_width = min_width
+        self._width_before_collapse: int | None = None
+        self._restore_tries_left = 0
         self.setWidget(content)
-        if self._fixed_width is not None:
-            self.setFixedWidth(self._fixed_width)
+        if self._min_width is not None:
+            self.setMinimumWidth(self._min_width)
         self.setFeatures(
             QDockWidget.DockWidgetFeature.DockWidgetMovable
             | QDockWidget.DockWidgetFeature.DockWidgetFloatable
@@ -606,22 +621,21 @@ class PanelContainer(QDockWidget):
         outgoing_widget = self.widget()
         self._collapsed = collapsed
         if collapsed:
+            if self.width() > self._collapsed_width:  # not while a pending expand has yet to widen the dock
+                self._width_before_collapse = self.width()
             self.setWidget(self._build_collapsed_strip(theme))
             self.setTitleBarWidget(self._build_collapsed_title_bar(theme))
             self.setFixedWidth(self._collapsed_width)
         else:
-            # Undoes setFixedWidth's implicit max-width clamp - Qt has no
-            # single call to "unfix" a width once fixed.
-            self.setMinimumWidth(0)
-            self.setMaximumWidth(16777215)
+            # Undoes setFixedWidth's implicit clamp - Qt has no single call
+            # to "unfix" a width once fixed. The minimum goes back to the
+            # panel's own floor, not to 0.
+            self.setMinimumWidth(self._min_width or 0)
+            self.setMaximumWidth(_QWIDGETSIZE_MAX)
             self.setWidget(self._content)
             self._content.show()
             self.setTitleBarWidget(self._build_title_bar(self._title, theme))
-            if self._fixed_width is not None:
-                # Re-clamp to the panel's own fixed width, not left
-                # unlimited - the line above only undoes the *collapsed*
-                # width's clamp.
-                self.setFixedWidth(self._fixed_width)
+            self._restore_width_after_collapse()
         # Explicitly hidden before the event loop can repaint: a widget
         # QDockWidget.setWidget() just displaced becomes parentless, and a
         # visible parentless widget is a real top-level OS window for
@@ -632,6 +646,36 @@ class PanelContainer(QDockWidget):
         # it.
         if outgoing_widget is not None and outgoing_widget is not self.widget():
             outgoing_widget.hide()
+
+    def _restore_width_after_collapse(self) -> None:
+        """Give back the width the panel had when it was collapsed. Releasing the
+        collapsed width's clamp leaves the dock at the strip's 36 px; only an
+        explicit resize makes it wide again."""
+        if self._width_before_collapse is None:
+            return
+        if self.isFloating():
+            width, self._width_before_collapse = self._width_before_collapse, None
+            self.resize(width, self.height())
+            return
+        self._restore_tries_left = _RESTORE_WIDTH_MAX_STEPS
+        QTimer.singleShot(0, self._apply_width_after_collapse)
+
+    def _apply_width_after_collapse(self) -> None:
+        """One step of giving the width back. `QMainWindow.resizeDocks` closes only part of the gap
+        per call (measured: asked 357 from a 36 px strip, got 313; asked again, 357), so this repeats
+        once per event-loop turn until the dock is within a pixel or `_RESTORE_WIDTH_MAX_STEPS` is
+        used up (the width may be unreachable, e.g. the window shrank meanwhile). A bound-method slot
+        is dropped by Qt if the dock is deleted first."""
+        width = self._width_before_collapse
+        window = self.parentWidget()
+        if width is None or self._collapsed or not isinstance(window, QMainWindow):
+            return  # collapsed again in the meantime: keep the width for the next expand
+        if abs(self.width() - width) <= 1 or self._restore_tries_left <= 0:
+            self._width_before_collapse = None
+            return
+        self._restore_tries_left -= 1
+        window.resizeDocks([self], [width], Qt.Orientation.Horizontal)
+        QTimer.singleShot(0, self._apply_width_after_collapse)
 
     def _build_collapsed_strip(self, theme) -> QWidget:
         """The entire collapsed dock is one big clickable area - deliberately

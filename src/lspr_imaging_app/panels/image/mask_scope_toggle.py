@@ -21,8 +21,9 @@ from lspr_ui import GuiTheme, get_active_theme, load_tabler_icon, transparent_ic
 
 from ...image_tools.mask_scope import MaskScope, MaskScopeModule
 
-_BUTTON_SIZE = 28
-_ICON_SIZE = 22
+from .general_group import BUTTON_SIZE as _BUTTON_SIZE
+from .general_group import ICON_SIZE as _ICON_SIZE
+
 _RENDER_SIZE = _ICON_SIZE * 2  # rendered at 2x, scaled down - crisper than a native bitmap
 _STROKE_WIDTH = 2.1
 _ACTIVE_COLOR = "#38bdf8"  # Crop/Measure's own "tool active" blue, reused for "scope selected"

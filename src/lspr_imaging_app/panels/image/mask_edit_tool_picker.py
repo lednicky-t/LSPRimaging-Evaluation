@@ -28,8 +28,8 @@ from lspr_ui import GuiTheme, transparent_icon_button_stylesheet
 from ...image_tools import MaskEditTool, MaskEditToolModule
 from . import mask_edit_tool_icons as icons
 
-_BUTTON_SIZE = 28  # matches this ribbon's other icon buttons (MaskScopeToggle, MaskOverlayControls)
-_ICON_SIZE = 22
+from .general_group import BUTTON_SIZE as _BUTTON_SIZE  # the ribbon's one icon-button size
+from .general_group import ICON_SIZE as _ICON_SIZE
 
 # Ordered exactly as the maintainer listed them. Each entry: the icon
 # function (mask_edit_tool_icons.py) and the label shown in the menu and as

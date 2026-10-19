@@ -101,7 +101,10 @@ from PyQt6.QtWidgets import QHBoxLayout, QToolButton, QWidget
 from lspr_ui import get_active_theme, load_tabler_icon, tabler_icon_svg, transparent_icon_button_stylesheet
 
 from ...image_tools import ActiveToolModule, GeometryModule, ImageTool
-from ..ribbon_group import labeled_icon_group, vertical_separator
+from ..ribbon_group import labeled_icon_group, ribbon_separator
+from ..ribbon_icon_size import CAPTIONED_GROUP_HEIGHT as _CALIBRATE_GROUP_HEIGHT
+from .general_group import BUTTON_SIZE as _BUTTON_SIZE  # the ribbon's one icon-button size
+from .general_group import ICON_SIZE as _ICON_SIZE
 
 logger = logging.getLogger(__name__)
 
@@ -110,15 +113,11 @@ _CROP_ACTIVE_COLOR = "#38bdf8"
 _FLIP_H_ACTIVE_COLOR = "#22c55e"
 _FLIP_V_ACTIVE_COLOR = "#2dd4bf"
 _MEASURE_ACTIVE_COLOR = "#38bdf8"  # same blue as Crop's - maintainer's preferred tool color (2026-09-29, was green)
-_BUTTON_SIZE = 28
 _ROW_MARGIN = 4
 # The "Calibrate" group (Measure, captioned - see module docstring) is
-# taller than a plain icon button: 28px icon row + 2px spacing + 12px
-# single-line 9px-font caption, the same 42px `ribbon_group.py`'s other
-# captioned groups land on (`panels/image/panel.py`'s
-# `_CAPTIONED_GROUP_ROW_HEIGHT`) - literal here rather than imported, same
-# "would be a real cycle" reasoning as the `ribbon_group` import itself.
-_CALIBRATE_GROUP_HEIGHT = 42
+# taller than a plain icon button: icon row + 2px spacing + 12px
+# single-line 9px-font caption, the same height `ribbon_group.py`'s other
+# captioned groups land on (`ribbon_icon_size.CAPTIONED_GROUP_HEIGHT`).
 # The row's total height - the tallest child (now the Calibrate group, not
 # a plain button) plus this row's own top/bottom layout margin
 # (`_ROW_MARGIN`) on each side. Exposed so `panels/image/tool_ribbon.py`
@@ -127,9 +126,8 @@ _CALIBRATE_GROUP_HEIGHT = 42
 ROW_HEIGHT = max(_BUTTON_SIZE, _CALIBRATE_GROUP_HEIGHT) + 2 * _ROW_MARGIN
 # Extra gap between the rotation | flip | crop | measure groups (on top of the 6px spacing).
 _GROUP_GAP = 6
-_ICON_SIZE = 22
 # Rendered at 2x and scaled down by Qt, so the smaller icon stays crisp
-# rather than being a 24px bitmap squeezed into 22.
+# rather than being a double-size bitmap squeezed into the icon size.
 _RENDER_SIZE = _ICON_SIZE * 2
 _STROKE_WIDTH = 2.1
 
@@ -270,11 +268,11 @@ class TransformsSection(QWidget):
         layout.setContentsMargins(_ROW_MARGIN, _ROW_MARGIN, _ROW_MARGIN, _ROW_MARGIN)
         layout.setSpacing(_GROUP_GAP)
         layout.addWidget(rotation_group)
-        layout.addWidget(vertical_separator(self))
+        layout.addWidget(ribbon_separator(self))
         layout.addWidget(flip_group)
-        layout.addWidget(vertical_separator(self))
+        layout.addWidget(ribbon_separator(self))
         layout.addWidget(crop_group)
-        layout.addWidget(vertical_separator(self))
+        layout.addWidget(ribbon_separator(self))
         layout.addWidget(calibrate_group)
         layout.addStretch(1)
 

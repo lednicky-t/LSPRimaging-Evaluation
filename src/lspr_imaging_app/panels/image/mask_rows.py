@@ -112,7 +112,6 @@ class MaskRows(QObject):
             strip.set_color(MASK_COLOR)
             strip.set_event_color(EVENT_COLOR)
         self.titles: list[QLabel] = []  # the panel gives them the width of the slider titles
-        self.spacers: list[QWidget] = []  # and these the width of the number fields, so the strips end where the sliders end
         self.cube_row = self._make_row(self.cube_strip, title_style, "Mask: where the Cube axis has a mask of its own.")
         self.wavelength_row = self._make_row(
             self.wavelength_strip, title_style, "Mask: the wavelengths of the cube shown that have an individual mask."
@@ -143,12 +142,9 @@ class MaskRows(QObject):
             tooltip + " > holds from there on, a line is single wavelengths, a filled > is both. Right-click a mark for more. "
             "Pink ticks above them are the scan's pointers (not masks)."
         )
-        spacer = QWidget(row)
         layout.addWidget(title)
         layout.addWidget(strip, 1)
-        layout.addWidget(spacer)
         self.titles.append(title)
-        self.spacers.append(spacer)
         return row
 
     # -- showing / hiding ------------------------------------------------------------------------

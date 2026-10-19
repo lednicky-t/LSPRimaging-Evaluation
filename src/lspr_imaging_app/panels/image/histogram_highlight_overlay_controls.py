@@ -48,8 +48,8 @@ from lspr_ui import CompactWedgeSlider, GuiTheme, get_active_theme, transparent_
 
 from .mask_edit_tool_icons import histogram_selection_icon
 
-_BUTTON_SIZE = 28  # matches MaskOverlayControls's own icon buttons, same row shape
-_ICON_SIZE = 22
+from .general_group import BUTTON_SIZE as _BUTTON_SIZE  # the ribbon's one icon-button size
+from .general_group import ICON_SIZE as _ICON_SIZE
 _SWATCH_SIZE = 14
 _SLIDER_WIDTH = 18  # matches MaskOverlayControls's own narrowed wedge - see that module's docstring
 

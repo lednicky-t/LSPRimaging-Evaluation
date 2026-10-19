@@ -109,8 +109,16 @@ class LayoutPresetManager:
         if name not in PRESET_PANELS:
             raise ValueError(f"Unknown layout preset: {name!r}")
         blob = self._custom_blobs.get(name)
+        if blob is not None and not self._window.restoreState(blob, self._state_version):
+            # Qt rejects a blob saved under another dock-layout version (the
+            # panel arrangement changed since - app_rewrite's
+            # _DOCK_LAYOUT_STATE_VERSION) and applies nothing. Without this the
+            # preset would silently do nothing; it can never restore again, so
+            # drop it and show/hide the panels like a never-customized preset.
+            logger.warning("Layout preset %r was saved with an older panel arrangement; resetting it", name)
+            del self._custom_blobs[name]
+            blob = None
         if blob is not None:
-            self._window.restoreState(blob, self._state_version)
             # restoreState() restores whatever visibility the blob was
             # saved with - re-assert Workflow visible regardless, since
             # it's meant to survive independently of preset choice (§4).

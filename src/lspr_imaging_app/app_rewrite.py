@@ -62,7 +62,6 @@ from .image_tools import (
     MaskScopeModule,
 )
 from .panels.dock_container import PanelContainer
-from .panels.fixed_width_separator_guard import FixedWidthSeparatorGuard
 from .panels.histogram import HistogramPanel
 from .panels.log import LogPanel
 from .panels.image import ImagePanel
@@ -156,7 +155,24 @@ logger = logging.getLogger(__name__)
 # drag instead of a code change - restoreState() reconstructs whatever
 # topology a saved blob describes (including tab groups) regardless of
 # what setDockOptions currently allows *creating* interactively.
-_DOCK_LAYOUT_STATE_VERSION = 3
+# Bumped to 4 (2026-10-18): Workflow moved from its own LeftDockWidgetArea into
+# the shared split tree (see `_build_dock_layout`). A version-3 blob puts it in
+# the left area; restoring that onto the new tree is exactly the silent
+# mis-mapping described above, so it is rejected instead. Cost, once: a window
+# layout and any custom layout presets saved before this are dropped (the
+# default layout is built, and a preset falls back to showing/hiding panels).
+_DOCK_LAYOUT_STATE_VERSION = 4
+
+# Workflow dock widths (2026-10-18): where a fresh layout starts it, and the floor
+# below which it cannot be dragged. The floor is what the widest stage needs, as
+# measured with all its sections open (Dataset: the page wants 213 px, plus 6 px of
+# dock frame and ~15 px if a vertical scroll bar shows), not a guess; the ROI table's
+# own floor is 212 px. Below it nothing is clipped, the panel scrolls sideways instead.
+_WORKFLOW_DEFAULT_WIDTH_PX = 340
+_WORKFLOW_MIN_WIDTH_PX = 240
+# What the ROI table column is expected to take on a fresh layout; used only to size Image's share
+# in the starting `resizeDocks` call (Qt ends up giving the ROI table its own share anyway).
+_ROI_TABLE_START_WIDTH_PX = 300
 
 
 def _build_menu_bar(window: QMainWindow) -> tuple[QMenu, QMenu, QMenu]:
@@ -1052,13 +1068,16 @@ def _build_dock_layout(
     app already docks every panel. This default arrangement is just a
     starting point, not a preset: named, user-editable presets (design doc
     §5) are applied on top of it.
-    Workflow gets collapsible=True and a real fixed_width (design doc §4):
-    unlike the five display panels, it's a tool panel (settings ordered by
-    workflow stage), not a data view - not draggable down to a width that
-    clips its own controls. 340px matches the stable app's own
-    workflow_panel minimum width (layout_builder.py:1744), reused here
-    rather than inventing a new number."""
-    workflow_dock = PanelContainer("Workflow", workflow, window, collapsible=True, fixed_width=340)
+    Workflow is collapsible and, since 2026-10-18 (maintainer decision), freely
+    resizable like every other panel: it starts at `_WORKFLOW_DEFAULT_WIDTH_PX`
+    (the stable app's own workflow_panel width, layout_builder.py:1744) and
+    cannot be dragged below `_WORKFLOW_MIN_WIDTH_PX`. A row that needs more room
+    than the dock has gets a horizontal scroll bar inside the Workflow panel, so
+    narrowing it hides nothing. It still starts as the only panel of the left
+    area, i.e. full height; the user can dock it anywhere, like the others."""
+    workflow_dock = PanelContainer(
+        "Workflow", workflow, window, collapsible=True, min_width=_WORKFLOW_MIN_WIDTH_PX
+    )
     image_dock = PanelContainer("Image", image_panel, window)
     histogram_dock = PanelContainer("Histogram", histogram_panel, window)
     roi_table_dock = PanelContainer("ROI / Groups", roi_table_panel, window)
@@ -1077,22 +1096,27 @@ def _build_dock_layout(
     image_panel.frame_columns_changed.connect(image_dock.set_subtitle_columns)
     image_dock.set_subtitle_columns(image_panel.frame_columns())
 
-    # Workflow is added to LeftDockWidgetArea *alone* - every other panel
-    # goes into RightDockWidgetArea/BottomDockWidgetArea instead of being
-    # split off from workflow_dock, so Workflow's column is a Qt dock area
-    # of its own rather than sharing one with Image/Histogram. That
-    # separation is what setCorner (below) needs to give Workflow real full
-    # -height without also forcing Image/Histogram/ROI table to reserve
-    # full height and pushing Spectra/Sensorgram out from under them.
+    # Every panel, Workflow included, lives in ONE nested split tree inside
+    # RightDockWidgetArea (changed 2026-10-18, maintainer: Workflow is "as the
+    # other panels", no longer fixed in place). Until then Workflow was the
+    # only occupant of LeftDockWidgetArea - which kept it full height through
+    # `setCorner`, but made Qt hand 100% of any extra window width to that
+    # area once Workflow was no longer clamped to 340 px (measured: a 1900 px
+    # window gave Workflow 798 px, and every further px of widening went to it),
+    # and made `resizeDocks` on it a no-op. Inside the tree, a window resize is
+    # shared out with Image first, `resizeDocks` is exact, and the separator
+    # next to Workflow drags like every other.
     #
-    # Found and fixed 2026-09-24: an earlier version of this function added
-    # both workflow_dock and image_dock to LeftDockWidgetArea, which made Qt
-    # stack them vertically in one shared column (Workflow/Image/Histogram
-    # on top of each other, each getting only a sliver of the window's
-    # height) instead of side by side - confirmed by inspecting real dock
-    # geometries headlessly, not just reading the code (see design doc §4).
-    window.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, workflow_dock)
-    window.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, image_dock)
+    # Workflow is the first column, split off *before* Spectra so that, by
+    # default, it still runs the full window height (Spectra/Sensorgram sit
+    # beside it, under Image/ROI table). Dragging it elsewhere is up to the user.
+    #
+    # Found 2026-09-24 (when Workflow still had its own area): adding both
+    # workflow_dock and image_dock to the *same area* with `addDockWidget` and
+    # no split between them makes Qt stack them vertically instead of side by
+    # side - hence the explicit `splitDockWidget(..., Horizontal)` below.
+    window.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, workflow_dock)
+    window.splitDockWidget(workflow_dock, image_dock, Qt.Orientation.Horizontal)
     # Split order matters here, found 2026-09-27 debugging a "can't resize
     # the docks' height" report: this establishes the top-row/Spectra
     # split *before* subdividing the top row into columns, not after.
@@ -1135,28 +1159,20 @@ def _build_dock_layout(
     # rather than only showing one at a time (maintainer's explicit choice
     # over rebuilding this as one merged panel with a custom tab strip).
     window.splitDockWidget(spectra_dock, sensorgram_dock, Qt.Orientation.Vertical)
-    # Qt's default BottomLeftCorner ownership belongs to BottomDockWidgetArea,
-    # which is what let Spectra/Sensorgram extend under the left column in
-    # the first place (confirmed headlessly). Reassigning it to
-    # LeftDockWidgetArea makes Workflow's column - and only Workflow's,
-    # since nothing else lives in that area - reserve the full window
-    # height; Spectra/Sensorgram still extend under Image/Histogram/ROI
-    # table exactly as before. Still needed even though Spectra no longer
-    # goes through `addDockWidget(Bottom, ...)` above - corner ownership
-    # governs how the *outer* Left/Right/Bottom areas relate to each other
-    # regardless of how a dock ended up nested within one of them.
-    window.setCorner(Qt.Corner.BottomLeftCorner, Qt.DockWidgetArea.LeftDockWidgetArea)
+    # (A `setCorner(BottomLeft, Left)` call used to follow, to keep Workflow's
+    # own left area full height; with Workflow in the shared tree it has
+    # nothing to do and was removed, 2026-10-18.)
 
-    # Workflow's separator to Image can never actually resize anything
-    # (Workflow is fixed_width=340 above) - without this, Qt's own hover
-    # highlight/drag still activate there anyway, since QMainWindow::
-    # separator has no notion of "this segment is a no-op" (see
-    # panels/fixed_width_separator_guard.py for why an event filter, not a
-    # painted overlay, is what fixes this). Kept alive on the window
-    # itself - installEventFilter does not keep the Python wrapper alive
-    # on its own.
-    window._workflow_separator_guard = FixedWidthSeparatorGuard(window, workflow_dock, window)
-    window.installEventFilter(window._workflow_separator_guard)
+    # Only a starting width (a restored layout overrides it). Naming Image
+    # as well is what makes Qt move the separator between the two, instead of
+    # ignoring the request. Until 2026-10-18 Workflow was clamped to a fixed
+    # 340 px and the separator beside it was made inert by an event filter
+    # (`FixedWidthSeparatorGuard`, deleted; see git history).
+    window.resizeDocks(
+        [workflow_dock, image_dock],
+        [_WORKFLOW_DEFAULT_WIDTH_PX, window.width() - _WORKFLOW_DEFAULT_WIDTH_PX - _ROI_TABLE_START_WIDTH_PX],
+        Qt.Orientation.Horizontal,
+    )
 
     # Order here fixes each panel's View -> Panels shortcut: it matches the
     # stable app's own Ctrl+1..5 assignment (Workflow/Image/Histogram/

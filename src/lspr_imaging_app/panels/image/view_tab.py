@@ -31,7 +31,7 @@ from PyQt6.QtWidgets import QHBoxLayout, QWidget
 from lspr_ui import get_active_theme
 
 from ...image_tools import GeometryModule
-from ..ribbon_group import group_label_style, labeled_icon_group, vertical_separator
+from ..ribbon_group import group_label_style, labeled_icon_group, ribbon_separator
 from .background_tab import BackgroundTab
 from .chromatic_tab import ChromaticCorrectionTab
 from .display_range_controls import DisplayRangeControls
@@ -161,7 +161,7 @@ class ViewTab(QWidget):
             display_range_group, all_group, highlight_group, mask_group, chromatic_group, background_group,
             roi_group, group_labels_group, scale_bar_group,
         )
-        self._separators = [vertical_separator(self) for _ in groups[1:]]
+        self._separators = [ribbon_separator(self) for _ in groups[1:]]
         layout = QHBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(6)

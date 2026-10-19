@@ -32,7 +32,7 @@ from ...roi import RoiToolbox
 from ...roi.array_task import ArrayAction
 from ...roi.scope import RoiEditTarget, RoiScopeModule
 from ...selection import SelectionModule
-from ..ribbon_group import group_label_style, labeled_icon_group, vertical_separator
+from ..ribbon_group import group_label_style, labeled_icon_group, ribbon_separator
 from ..ui_state import UiStateStore
 from .array_actions import ArrayActions
 from .array_controls import ArrayControls
@@ -143,7 +143,7 @@ class RoiTab(QWidget):
 
         # Sections left to right, a thin separator between neighbours (restyled on a theme switch).
         sections = (display_group, scope_group, shape_group, array_group, groups_group)
-        self._separators = [vertical_separator(self) for _ in sections[1:]]
+        self._separators = [ribbon_separator(self) for _ in sections[1:]]
         layout = QHBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(6)

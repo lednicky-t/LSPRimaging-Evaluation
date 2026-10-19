@@ -86,13 +86,11 @@ from dataclasses import replace
 
 import numpy as np
 import pyqtgraph as pg
-from PyQt6.QtCore import QEvent, QObject, QPointF, QStringListModel, Qt, QTimer, pyqtSignal
+from PyQt6.QtCore import QEvent, QObject, QPointF, Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import QColor, QFontMetrics
 from PyQt6.QtWidgets import (
-    QAbstractSpinBox,
     QMenu,
     QApplication,
-    QCompleter,
     QGraphicsView,
     QHBoxLayout,
     QLabel,
@@ -130,7 +128,6 @@ from ...selection import (
 )
 from ...selection.cube_display_module import MODE_CUBE, MODE_TIME, format_elapsed_seconds
 from ...selection.frame_roles_module import ROLE_DARK, ROLE_IGNORED, ROLE_REFERENCE, FrameRolesModule
-from .cube_spin_box import CubeSpinBox
 from ..cursor_overlay import CursorOverlay
 from ..subtitle_column import SubtitleColumn
 from .landmark_overlay import draw_landmarks
@@ -154,7 +151,6 @@ from .crop_tool import CropTool
 from .data_axis_slider import DataAxisSlider
 from .frame_tools import FrameToolsState, FrameToolsWidget
 from .general_group import AreaSelectionPicker, style_general_icon_button
-from .guided_value_spinbox import GuidedValueSpinBox
 from .image_controls import ImageViewBox, controls_text
 from .interaction import CanvasInteraction
 from .mask_tab import MaskTab
@@ -1055,19 +1051,17 @@ class ImagePanel(QWidget):
     def _build_navigation_bar(self) -> None:
         # Cube and Wavelength navigation - ported from the stable app's
         # tick/axis-style redesign (docs/image_area_slider_redesign.md):
-        # each axis gets its own full-width row (title -> slider -> spin ->
-        # one trailing icon button) rather than splitting one row, so each
-        # slider gets the full available width and the two axes read as
-        # parallel strips. The Cube/Time toggle title-button and the
+        # each axis gets its own full-width row (title -> slider) rather than
+        # splitting one row, so each slider gets the full available width and
+        # the two axes read as parallel strips. The number fields that used to
+        # sit right of each slider (a typed cube / wavelength, with a
+        # wavelength autocomplete) were removed 2026-10-18 (maintainer request):
+        # the current cube, wavelength and time are in the dock title bar.
+        # The Cube/Time toggle title-button and the
         # "exclude this image" icon button are *not* ported - see this
         # panel's module docstring "Not built here, deliberately" note for
         # why (no elapsed-time mapping / no exclusions subsystem exists on
         # this branch yet).
-        self._cube_spin = CubeSpinBox(self)
-        self._cube_spin.set_label_provider(self._cube_display.label_for)
-        self._cube_spin.setEnabled(False)
-        self._cube_spin.valueChanged.connect(self._on_cube_spin_changed)
-
         self._cube_slider = DataAxisSlider(Qt.Orientation.Horizontal, self)
         self._cube_slider.setEnabled(False)
         self._cube_slider.set_accent_color(cube_color())
@@ -1082,25 +1076,6 @@ class ImagePanel(QWidget):
         cube_row.setSpacing(5)
         cube_row.addWidget(cube_title)
         cube_row.addWidget(self._cube_slider, 1)
-        cube_row.addWidget(self._cube_spin)
-
-        self._wavelength_spin = GuidedValueSpinBox(self)
-        # No decimal point (2026-09-30, maintainer request) - the dataset's
-        # wavelengths are whole nanometers in practice, and a bare integer
-        # reads faster in a field this narrow.
-        self._wavelength_spin.setDecimals(0)
-        self._wavelength_spin.setSingleStep(1.0)
-        self._wavelength_spin.setEnabled(False)
-        self._wavelength_spin.valueChanged.connect(self._on_wavelength_spin_changed)
-
-        self._wavelength_completer = QCompleter(self)
-        self._wavelength_completer.setCompletionMode(QCompleter.CompletionMode.PopupCompletion)
-        self._wavelength_completer.setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
-        self._wavelength_completer.setFilterMode(Qt.MatchFlag.MatchStartsWith)
-        self._wavelength_completer.setModel(QStringListModel([], self))
-        self._wavelength_spin.lineEdit().setCompleter(self._wavelength_completer)
-        self._wavelength_completer.activated[str].connect(self._on_wavelength_completion_activated)
-        self._wavelength_spin.lineEdit().textEdited.connect(self._on_wavelength_text_edited)
 
         self._wavelength_slider = DataAxisSlider(Qt.Orientation.Horizontal, self)
         self._wavelength_slider.setEnabled(False)
@@ -1115,11 +1090,10 @@ class ImagePanel(QWidget):
         wavelength_row.setSpacing(5)
         wavelength_row.addWidget(wavelength_title)
         wavelength_row.addWidget(self._wavelength_slider, 1)
-        wavelength_row.addWidget(self._wavelength_spin)
 
         # The ROI row (2026-10-16): a thin strip under the Cube slider, on the Cube axis, with a mark wherever the
-        # ROI layout changes (`timeline_strip.py`). Its title and right-hand spacer take the width of the other two
-        # rows' (below, `_fit_spin_widths`), so the strip's ticks line up with the Cube slider's.
+        # ROI layout changes (`timeline_strip.py`). Its title takes the width of the other rows' titles (below),
+        # so the strip's ticks line up with the Cube slider's.
         self._roi_strip = TimelineStrip(self)
         self._roi_strip.index_requested.connect(self._cube_slider.setValue)
         # One zoom window for the Cube slider and the ROI row (their marks must stay under their ticks); λ has its own.
@@ -1132,13 +1106,11 @@ class ImagePanel(QWidget):
             "ROI layout. A mark wherever the ROIs change (position or size): > holds from that cube on, "
             "a line is that cube only."
         )
-        self._roi_row_spacer = QWidget(self)
         roi_row = QHBoxLayout()
         roi_row.setContentsMargins(0, 0, 0, 0)
         roi_row.setSpacing(5)
         roi_row.addWidget(roi_title)
         roi_row.addWidget(self._roi_strip, 1)
-        roi_row.addWidget(self._roi_row_spacer)
         self._roi_row = QWidget(self)
         self._roi_row.setLayout(roi_row)
         self._roi_row_selected_only = False
@@ -1150,7 +1122,7 @@ class ImagePanel(QWidget):
         self._roi_marks_timer.timeout.connect(self._update_roi_marks)
 
         # The two Mask rows (2026-10-16): one under the Cube slider, one under the wavelength slider (`mask_rows.py`).
-        # Each shares its slider's zoom window; titles and right-hand spacers are sized with the other rows' below.
+        # Each shares its slider's zoom window; titles are sized with the other rows' below.
         self._mask_rows = MaskRows(
             self, self._mask, self._dataset, self._selection, self._cube_display.label_for,
             cube_window=self._cube_slider.axis_window(),
@@ -1163,11 +1135,9 @@ class ImagePanel(QWidget):
         self._mask_rows.cube_strip.index_requested.connect(self._cube_slider.setValue)
         self._mask_rows.wavelength_strip.index_requested.connect(self._wavelength_slider.setValue)
 
-        # Both rows' titles and number fields share one width each (2026-09-
-        # 30, maintainer request) - without this, "Cube" and "λ (nm)" size
-        # to their own text and "197"/"470.0" size to their own digits, so
-        # the two sliders started at slightly different x positions and the
-        # two number fields didn't line up on the right either.
+        # All the rows' titles share one width (2026-09-30, maintainer request) -
+        # without this, "Cube" and "λ (nm)" size to their own text, so the two
+        # sliders started at slightly different x positions.
         # Wide enough for either unit ("Cube #" / "Cube time"), so toggling never shifts the sliders.
         title_metrics = QFontMetrics(cube_title.font())
         title_width = max(
@@ -1180,22 +1150,6 @@ class ImagePanel(QWidget):
         roi_title.setFixedWidth(title_width)
         for title in self._mask_rows.titles:
             title.setFixedWidth(title_width)
-        # Number fields are sized to their current text (see
-        # `_fit_spin_widths`), both to the same width so they line up on the
-        # right, same as the two titles above.
-        self._fit_spin_widths()
-        self._cube_spin.valueChanged.connect(self._fit_spin_widths)
-        self._wavelength_spin.valueChanged.connect(self._fit_spin_widths)
-        # Free-standing text (2026-10-11, maintainer request): no border,
-        # background or arrow buttons. Typing, Up/Down keys and the mouse
-        # wheel still step the value.
-        for spin in (self._cube_spin, self._wavelength_spin):
-            # Their font can change after the width was measured above (an app stylesheet naming another font reaches
-            # a field when it gets its own stylesheet below; a theme switch later): `eventFilter` re-fits then.
-            spin.installEventFilter(self)
-            spin.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
-            spin.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
-            spin.setStyleSheet("QAbstractSpinBox { border: none; background: transparent; padding: 0px; }")
 
         for slider in (self._cube_slider, self._wavelength_slider):
             slider.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
@@ -1221,11 +1175,13 @@ class ImagePanel(QWidget):
         # request, "small stylish" follow-up - scoped to just this nav bar
         # after an earlier pass put it on the whole panel by mistake): a
         # bare 10px breathing room so the "Cube"/"λ (nm)" titles don't start
-        # flush against the dock's left edge and the number fields don't
-        # end flush against its right edge. Top/bottom stay flush - nothing
-        # else in this bar needs the room.
+        # flush against the dock's left edge. Top/bottom stay flush - nothing
+        # else in this bar needs the room. No right margin since 2026-10-18
+        # (maintainer: the gap between the sliders and the panel edge was too
+        # big): a slider already keeps 14 px inside itself (`SIDE_INSET`, room
+        # for half of an end tick label), and the dock's card gap adds 3 more.
         controls = QVBoxLayout()
-        controls.setContentsMargins(10, 0, 10, 0)
+        controls.setContentsMargins(10, 0, 0, 0)
         controls.setSpacing(4)
         # The slider ribbon (2026-10-13): frame icon controls, Play, slideshow settings, slider colours.
         self._slider_colors = SliderColors()
@@ -1435,13 +1391,13 @@ class ImagePanel(QWidget):
         self._controls_bar.setStyleSheet("#imageNavigationBar { border: none; }")
 
     def _refresh_top_bar_theme(self) -> None:
-        """A single-pixel seam along the bottom edge, where this bar meets
-        the canvas below it (2026-09-30, maintainer request - "make there a
-        bo[r]der on the bottom to separate it from the image area") - same
-        convention as `_refresh_controls_bar_theme`'s old border (only the
-        edge that actually touches the canvas is bordered)."""
-        theme = get_active_theme()
-        self._top_bar.setStyleSheet(f"#imageTopBar {{ border: none; border-bottom: 1px solid {theme.toolbar_border}; }}")
+        """No border. A single-pixel seam along the bottom edge, where this bar
+        meets the canvas below it, was added 2026-09-30 (maintainer request -
+        "make there a bo[r]der on the bottom to separate it from the image
+        area") and taken away again 2026-10-18 (maintainer request: remove the
+        edge line under the top ribbon). Kept as the live-theme-switch hook
+        (see `_refresh_controls_bar_theme`, which is in the same position)."""
+        self._top_bar.setStyleSheet("#imageTopBar { border: none; }")
 
     # -- dataset lifecycle --------------------------------------------------
 
@@ -1500,11 +1456,6 @@ class ImagePanel(QWidget):
         doesn't emit a spurious "the user changed the wavelength"."""
         cubes = self._dataset.spectral_cubes()
         self._cube_slider.axis_window().reset()  # a dataset was loaded or cleared: the whole Cube axis again
-        with _blocked(self._cube_spin):
-            self._cube_spin.setEnabled(bool(cubes))
-            self._cube_spin.setRange(min(cubes) if cubes else 0, max(cubes) if cubes else 0)
-            if cubes:
-                self._cube_spin.setValue(self._current_cube())
         with _blocked(self._cube_slider):
             self._cube_slider.setEnabled(bool(cubes))
             self._cube_slider.setMinimum(0)
@@ -1517,7 +1468,6 @@ class ImagePanel(QWidget):
         self._roi_strip.set_axis_count(len(cubes))
         self._mask_rows.refresh_cube_row()
         self._roi_states_key = None  # another dataset: the ROI states are looked up again
-        self._cube_spin.refresh_display()
         self._refresh_wavelength_range()
         self._update_all_slider_marks()
 
@@ -1531,13 +1481,6 @@ class ImagePanel(QWidget):
         hold here)."""
         wavelengths = self._dataset.wavelengths_for_cube(self._current_cube())
         wavelength = self._current_wavelength(wavelengths)
-        with _blocked(self._wavelength_spin):
-            self._wavelength_spin.setEnabled(bool(wavelengths))
-            if wavelengths:
-                self._wavelength_spin.setRange(min(wavelengths), max(wavelengths))
-                self._wavelength_spin.setValue(wavelength)
-            else:
-                self._wavelength_spin.setRange(0.0, 0.0)
         with _blocked(self._wavelength_slider):
             self._wavelength_slider.setEnabled(bool(wavelengths))
             self._wavelength_slider.setMinimum(0)
@@ -1558,7 +1501,6 @@ class ImagePanel(QWidget):
             if wavelengths and wavelength in wavelengths:
                 self._wavelength_slider.setValue(wavelengths.index(wavelength))
         self._mask_rows.update_wavelength_row(wavelengths, wavelength)
-        self._refresh_wavelength_completer_model(wavelengths)
 
     def _current_cube(self) -> int:
         return int(self._selection.current_cube())
@@ -1579,23 +1521,17 @@ class ImagePanel(QWidget):
         return float(min(wavelengths, key=lambda wl: abs(wl - selected)))
 
     # -- navigation ---------------------------------------------------------
-    # Two ways to change the same value (slider drag, spin box edit) both go
-    # through `SelectionModule.set_cube`/`set_wavelength` - never straight to
-    # the other widget - so the module stays the single source of truth
-    # (module docstring's one-way flow) and `_on_selection_*_changed` below
-    # is the only place either widget's *displayed* value is set.
-
-    def _on_cube_spin_changed(self, value: int) -> None:
-        self._selection.set_cube(int(value))
+    # The sliders change the value through `SelectionModule.set_cube`/
+    # `set_wavelength` - never straight to anything else - so the module stays
+    # the single source of truth (module docstring's one-way flow) and
+    # `_on_selection_*_changed` below is the only place a slider's *displayed*
+    # value is set.
 
     def _on_cube_slider_changed(self, index: int) -> None:
         cubes = self._dataset.spectral_cubes()
         if not cubes or index >= len(cubes):
             return
         self._selection.set_cube(int(cubes[index]))
-
-    def _on_wavelength_spin_changed(self, value: float) -> None:
-        self._selection.set_wavelength(float(value))
 
     def _on_wavelength_slider_changed(self, index: int) -> None:
         wavelengths = self._dataset.wavelengths_for_cube(self._current_cube())
@@ -1607,8 +1543,6 @@ class ImagePanel(QWidget):
         # The wavelength set can differ per cube, so a cube change must
         # re-range the wavelength controls too, not just re-display the
         # cube controls' new value.
-        with _blocked(self._cube_spin):
-            self._cube_spin.setValue(self._current_cube())
         cubes = self._dataset.spectral_cubes()
         with _blocked(self._cube_slider):
             if self._current_cube() in cubes:
@@ -1616,7 +1550,6 @@ class ImagePanel(QWidget):
         cursor = cubes.index(self._current_cube()) if self._current_cube() in cubes else None
         self._roi_strip.set_cursor(cursor)
         self._mask_rows.set_cube_cursor(cursor)
-        self._cube_spin.refresh_display()
         self._refresh_wavelength_range()
         self._update_slider_marks()
         self._refresh_frame_tools()
@@ -1624,40 +1557,12 @@ class ImagePanel(QWidget):
     def _on_selection_wavelength_changed(self, _wavelength: float) -> None:
         wavelengths = self._dataset.wavelengths_for_cube(self._current_cube())
         wavelength = self._current_wavelength(wavelengths)
-        with _blocked(self._wavelength_spin):
-            if wavelengths:
-                self._wavelength_spin.setValue(wavelength)
         with _blocked(self._wavelength_slider):
             if wavelengths and wavelength in wavelengths:
                 self._wavelength_slider.setValue(wavelengths.index(wavelength))
         self._mask_rows.set_wavelength_cursor(wavelength)
         self._update_slider_marks()
         self._refresh_frame_tools()
-
-    # -- wavelength jump field (QCompleter) ----------------------------------
-
-    def _refresh_wavelength_completer_model(self, wavelengths: tuple[float, ...]) -> None:
-        decimals = self._wavelength_spin.decimals()
-        texts = [f"{value:.{decimals}f}" for value in wavelengths]
-        self._wavelength_completer.setModel(QStringListModel(texts, self))
-
-    def _on_wavelength_completion_activated(self, text: str) -> None:
-        line_edit = self._wavelength_spin.lineEdit()
-        line_edit.setStyleSheet("")
-        line_edit.setText(text)
-        self._wavelength_spin.interpretText()
-
-    def _on_wavelength_text_edited(self, text: str) -> None:
-        line_edit = self._wavelength_spin.lineEdit()
-        stripped = text.strip()
-        if not stripped or not self._dataset.wavelengths_for_cube(self._current_cube()):
-            line_edit.setStyleSheet("")
-            return
-        self._wavelength_completer.setCompletionPrefix(stripped)
-        if self._wavelength_completer.completionCount() == 0:
-            line_edit.setStyleSheet(f"border: 1px solid {get_active_theme().accent_red};")
-        else:
-            line_edit.setStyleSheet("")
 
     # -- reference-frame highlight (ReferenceFrameModule) --------------------
 
@@ -1881,10 +1786,9 @@ class ImagePanel(QWidget):
         """Highlights the slider handle (in the reference colour) whenever the
         currently-displayed cube/wavelength is the
         reference - ported from the stable app's
-        `_update_reference_navigation_styles` (spin-box background recolor
-        omitted: this panel's spin boxes are plain `QSpinBox`/
-        `GuidedValueSpinBox`, and the slider handle color already carries
-        the same information without a second, redundant cue)."""
+        `_update_reference_navigation_styles` (the stable app also recolored
+        the spin boxes next to the sliders; this panel has none since
+        2026-10-18, and the slider handle color carries the information)."""
         reference = self._resolve_reference_frame()
         if reference is None:
             self._cube_slider.set_reference_highlight(None)
@@ -2884,32 +2788,12 @@ class ImagePanel(QWidget):
         self._refresh_frame_tools()
         self._refresh_frame_status()
 
-    def _fit_spin_widths(self, *_args: object) -> None:
-        """Both borderless number fields share one width, just wide enough for
-        the longer of the two current texts (never narrower than "0:00:00"), so the sliders get all the rest
-        and still end at the same x. (Changes by a character only when a
-        value gains a digit, e.g. 0:59 -> 1:00:00 or 99 -> 100.)"""
-        metrics = QFontMetrics(self._cube_spin.font())
-        width = max(
-            metrics.horizontalAdvance(self._cube_spin.text()),
-            metrics.horizontalAdvance(self._wavelength_spin.text()),
-            metrics.horizontalAdvance("0:00:00"),  # the time field must always fit H:MM:SS
-        ) + 6
-        for spin in (self._cube_spin, self._wavelength_spin):
-            if spin.width() != width:
-                spin.setFixedWidth(width)
-        for spacer in (self._roi_row_spacer, *self._mask_rows.spacers):
-            if spacer.width() != width:
-                spacer.setFixedWidth(width)  # the rows under the sliders end where the sliders end
-
     def _on_cube_display_changed(self, _mode: str) -> None:
         """The cube unit (number / start time) changed anywhere in the app."""
         self._frame_widest = None  # "Cube 314" and "Cube 1:23:45" are not equally wide
         self._cube_title.setText(self._cube_display.axis_title())
         cubes = self._dataset.spectral_cubes()
         self._cube_slider.set_ticks(list(cubes), self._cube_slider_major_ticks(cubes))
-        self._cube_spin.refresh_display()
-        self._fit_spin_widths()
         self._update_roi_marks()  # the mark tooltips name cubes in the new unit
         self._refresh_frame_tools()
         if self._frame_key is not None:
@@ -3035,8 +2919,6 @@ class ImagePanel(QWidget):
         if watched is self._cube_title and event.type() == QEvent.Type.MouseButtonDblClick:
             self._toggle_cube_unit()  # same as the unit icon in the ribbon and the right-click menu
             return True
-        if event.type() == QEvent.Type.FontChange and (watched is self._cube_spin or watched is self._wavelength_spin):
-            self._fit_spin_widths()  # same text in another font is another width
         return super().eventFilter(watched, event)
 
     # -- canvas interaction: routed by `CanvasInteraction` (interaction.py) ---------------

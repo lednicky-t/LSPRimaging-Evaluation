@@ -12,8 +12,8 @@ from lspr_ui import GuiTheme, get_active_theme, load_tabler_icon, transparent_ic
 
 from ...roi.scope import SCOPE_INDIVIDUAL, SCOPE_PERSISTENT, RoiScopeModule
 
-_BUTTON_SIZE = 28
-_ICON_SIZE = 22
+from .general_group import BUTTON_SIZE as _BUTTON_SIZE
+from .general_group import ICON_SIZE as _ICON_SIZE
 _ACTIVE_COLOR = "#38bdf8"
 
 _ICON = {SCOPE_PERSISTENT: "stack-3", SCOPE_INDIVIDUAL: "focus-2"}

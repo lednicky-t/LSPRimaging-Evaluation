@@ -39,9 +39,10 @@ from PyQt6.QtWidgets import QColorDialog, QHBoxLayout, QToolButton, QWidget
 
 from lspr_ui import CompactWedgeSlider, GuiTheme, get_active_theme, load_tabler_icon, transparent_icon_button_stylesheet
 
-_BUTTON_SIZE = 28  # matches TransformsSection's own icon buttons, same row
-_ICON_SIZE = 22
-_RENDER_SIZE = _ICON_SIZE * 2  # rendered at 2x, scaled down - crisper than a native 22px bitmap
+from .general_group import BUTTON_SIZE as _BUTTON_SIZE  # the ribbon's one icon-button size
+from .general_group import ICON_SIZE as _ICON_SIZE
+
+_RENDER_SIZE = _ICON_SIZE * 2  # rendered at 2x, scaled down - crisper than a native bitmap
 _STROKE_WIDTH = 2.1
 _ACTIVE_COLOR = "#38bdf8"  # GuiTheme.accent_blue - same "active" blue as MaskScopeToggle
 _SWATCH_SIZE = 14

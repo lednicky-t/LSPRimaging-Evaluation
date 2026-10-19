@@ -343,7 +343,10 @@ class WorkflowPanel(QWidget):
         scroll = QScrollArea(self)
         scroll.setFrameShape(QFrame.Shape.NoFrame)
         scroll.setWidgetResizable(True)
-        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        # As needed (2026-10-18): the dock is no longer fixed at 340 px, so a row can be wider than the
+        # panel. "Always off" would hide the overflow without a way to reach it; this shows a sideways
+        # scroll bar only while something does not fit.
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         scroll.setWidget(page)
 
         layout = QVBoxLayout(self)

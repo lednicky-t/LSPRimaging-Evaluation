@@ -29,9 +29,10 @@ from lspr_ui import GuiTheme, get_active_theme, load_tabler_icon, transparent_ic
 
 from ...image_tools import ActiveToolModule, ImageTool
 from ...selection import AreaSelectionMode, AreaSelectionModule
+from ..ribbon_icon_size import BUTTON_SIZE, ICON_SIZE  # also what the other ribbon files import from here
 
-BUTTON_SIZE = 28  # same as the Mask tab's icon buttons (MaskEditToolPicker, MaskScopeToggle)
-ICON_SIZE = 22
+# The ribbon's one icon-button size lives in `panels/ribbon_icon_size.py` (change it there); the other
+# ribbon files import it from here.
 _RENDER_SIZE = ICON_SIZE * 2
 _STROKE_WIDTH = 2.1
 _ACTIVE_COLOR = "#38bdf8"  # the ribbon's tool blue (canvas_tools._ADD_ROI_ACTIVE_COLOR)
@@ -44,7 +45,7 @@ _SPECS: tuple[tuple[AreaSelectionMode, str, str], ...] = (
 
 
 def style_general_icon_button(button: QToolButton) -> None:
-    """The ribbon's 28px icon-button look, for any button in this group (the
+    """The ribbon's icon-button look (`BUTTON_SIZE`), for any button in this group (the
     cursor toggle is restyled through it so it matches the picker)."""
     button.setAutoRaise(True)
     button.setFixedSize(BUTTON_SIZE, BUTTON_SIZE)

@@ -43,6 +43,7 @@ from lspr_ui import load_tabler_icon, transparent_icon_button_stylesheet
 
 from ..image_tools import ChromaticModule, MaskModule
 from ..image_tools.mask.transient_masks import BaseMask
+from .ribbon_icon_size import BUTTON_SIZE, ICON_SIZE
 
 ADD_COLOR = "#38bdf8"  # GuiTheme.accent_blue
 # Tailwind's "orange-500", not a GuiTheme token - chosen specifically to read
@@ -50,8 +51,7 @@ ADD_COLOR = "#38bdf8"  # GuiTheme.accent_blue
 # of GuiTheme.accent_red (#ef4444), per the maintainer's own framing.
 SUBTRACT_COLOR = "#f97316"
 
-BUTTON_SIZE = 28
-ICON_SIZE = 22
+# BUTTON_SIZE / ICON_SIZE: the ribbon's one icon-button size, `panels/ribbon_icon_size.py`.
 _RENDER_SIZE = ICON_SIZE * 2  # rendered at 2x, scaled down - crisper than a native bitmap
 _STROKE_WIDTH = 2.1
 

@@ -83,20 +83,19 @@ from PyQt6.QtWidgets import (
 
 from lspr_ui import GuiTheme, get_active_theme
 
+from ..ribbon_group import ribbon_separator
+from ..ribbon_icon_size import CAPTIONED_GROUP_HEIGHT as _CAPTIONED_GROUP_ROW_HEIGHT
 from .transforms_settings import ROW_HEIGHT as _TRANSFORMS_ROW_HEIGHT
 from .canvas_tools import _BAR_MARGIN, _BUTTON_SIZE
 
 _CANVAS_TOOLS_ROW_HEIGHT = _BUTTON_SIZE + 2 * _BAR_MARGIN
 # The "Mask" and "Histogram" tabs' captioned icon groups (`ribbon_group.py`'s
 # `labeled_icon_group`, 2026-10-02) each carry a small caption under their
-# icons now - 28px icon row (`MaskScopeToggle`/`MaskOverlayControls`/
-# `HistogramHighlightOverlayControls`'s own button size) + 2px group spacing
-# + 12px for one line of 9px-font caption text (measured via
-# `QLabel.sizeHint()`, not guessed - font rendering isn't just the pixel
-# size). Both tabs land on the same 42px, so one constant covers both. Kept
-# as a literal here rather than imported from `panel.py` - `panel.py`
-# imports this module, so the reverse would be a real cycle.
-_CAPTIONED_GROUP_ROW_HEIGHT = 42
+# icons: icon row (the ribbon's one icon-button size) + 2px group spacing +
+# 12px for one line of 9px-font caption text (measured via
+# `QLabel.sizeHint()`, not guessed). Both tabs land on the same height, so
+# one constant covers both: `ribbon_icon_size.CAPTIONED_GROUP_HEIGHT`, which
+# follows the icon size (it was a 42px literal while the icons were 28px).
 # The tallest of the real categories' own natural heights - today that's
 # the "Image tools" tab's `TransformsSection` (50px, since its own
 # "Calibrate" group - 2026-10-02 - is a captioned group too, plus
@@ -247,8 +246,9 @@ class ImageToolRibbon(QWidget):
             pinned_column.addWidget(pinned, 0, Qt.AlignmentFlag.AlignTop)
             pinned_column.addStretch(1)
             outer.addLayout(pinned_column)
-            self._pinned_separator = QFrame(self)
-            self._pinned_separator.setFrameShape(QFrame.Shape.VLine)
+            # Its line spans the General icons only (2026-10-18): they start below the "General" caption
+            # in the tab-strip slot (`_TAB_HEIGHT`) plus the column's 1 px spacing. It used to run the full height.
+            self._pinned_separator = ribbon_separator(self, top_offset=_TAB_HEIGHT + 1)
             outer.addWidget(self._pinned_separator)
         outer.addLayout(layout)
 

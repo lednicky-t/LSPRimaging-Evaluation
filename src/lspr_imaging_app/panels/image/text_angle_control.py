@@ -20,7 +20,7 @@ from .group_label_icons import SIZE as _PICTURE_SIZE
 from .group_label_icons import orientation_pixmap
 from .group_label_overlay import ANGLE_STEP_DEG, LEGACY_DIRECTION_ANGLES
 
-_BUTTON_SIZE = 28
+from .general_group import BUTTON_SIZE as _BUTTON_SIZE  # the ribbon's one icon-button size
 _ICON_RENDER = 44
 
 

@@ -161,7 +161,7 @@ class FrameToolsWidget(QWidget):
                 (("Reference", reference, "reference"), ("Ignore", ignore, "ignored"), ("Dark", dark, "dark"))
             ):
                 if index:
-                    row_layout.addWidget(self._separator())
+                    self.add_separator(row_layout)
                 swatch = swatches.get(role)
                 row_layout.addWidget(captioned_group(self, caption, group + ((swatch,) if swatch is not None else ())))
         self.refresh(self._state)
@@ -185,9 +185,15 @@ class FrameToolsWidget(QWidget):
     def _separator(self) -> QFrame:
         line = QFrame(self)
         line.setFrameShape(QFrame.Shape.VLine)
-        line.setFixedHeight(_BUTTON_SIZE - 6)
+        line.setFixedHeight(_BUTTON_SIZE)  # as tall as the icon buttons (was 6 px less, 2026-10-18)
         line.setStyleSheet(f"color: {get_active_theme().toolbar_border};")
         return line
+
+    def add_separator(self, layout: QHBoxLayout) -> None:
+        """Add a divider to a row of captioned groups. It is aligned to the bottom of the row, where the icon
+        row of a group sits (the caption is above it), so the divider's centre is the icons' centre. Centred
+        on the whole group height, the caption pulled it up (2026-10-18, maintainer)."""
+        layout.addWidget(self._separator(), 0, Qt.AlignmentFlag.AlignBottom)
 
     def _buttons(self) -> tuple[QToolButton, ...]:
         return (

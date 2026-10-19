@@ -33,7 +33,7 @@ from ...image_tools.mask_auto_task import MaskAutoTask
 from ...image_tools.mask_export_task import MaskExportTask
 from ...image_tools.mask_scan_task import TransientScanTask
 from ...selection import HighlightRangeModule
-from ..ribbon_group import group_label_style, labeled_icon_group, vertical_separator
+from ..ribbon_group import group_label_style, labeled_icon_group, ribbon_separator
 from .mask_edit_panels import (
     DrawEditPanel,
     HistogramSelectionEditPanel,
@@ -143,7 +143,7 @@ class MaskTab(QWidget):
         self._auto_controls = MaskAutoControls(dataset, mask, chromatic, events, auto, scan, status, self)
         auto_group, self._auto_label = labeled_icon_group(self, self._auto_controls, "Auto mask")
 
-        self._separators = [vertical_separator(self) for _ in range(6)]
+        self._separators = [ribbon_separator(self) for _ in range(6)]
         layout = QHBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(6)

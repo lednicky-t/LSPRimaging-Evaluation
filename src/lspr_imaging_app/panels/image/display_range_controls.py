@@ -5,7 +5,7 @@ range (black point = about its lowest value, white point = about its highest), s
 bright looks like a dim one and brightness changes between frames or wavelengths are hidden. A **fixed** range
 uses the same black and white point for every frame, so equal values look equal in every frame.
 
-Layout: two 28 px ribbon buttons, the same size as every other icon in the ribbon,
+Layout: two ribbon buttons (`BUTTON_SIZE`), the same size as every other icon in the ribbon,
 
     [pin] [...]
 

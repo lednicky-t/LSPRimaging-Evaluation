@@ -45,7 +45,7 @@ from lspr_ui import GuiTheme, get_active_theme, load_tabler_icon
 
 from ...image_tools import BackgroundModule
 from ...image_tools.background.model import BackgroundComputationalChange, BackgroundSettings, max_binning_for_sigma
-from ..ribbon_group import labeled_icon_group, vertical_separator
+from ..ribbon_group import labeled_icon_group, ribbon_separator
 from .general_group import ICON_SIZE, style_general_icon_button
 from .roi_icons import spot_icon
 
@@ -192,7 +192,7 @@ class BackgroundTab(QWidget):
         layout.setSpacing(6)
         for index, group in enumerate((view_group, (sigma_group, bin_group), (exclude_group, dilation_group), removal_group)):
             if index:
-                separator = vertical_separator(self)
+                separator = ribbon_separator(self)
                 self._separators.append(separator)
                 layout.addWidget(separator)
             for widget in group if isinstance(group, tuple) else (group,):

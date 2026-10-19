@@ -110,6 +110,12 @@ itself, closer to a tool palette (Inkscape's left tool panel, or a
 Photoshop-style docked toolbox) than to a data view. That difference in kind
 is why it gets different rules, not just different defaults:
 
+> **Superseded 2026-10-18 (maintainer decision): the first two rules below, "always
+> full window height, docked left" and "real fixed width", no longer hold.** Workflow
+> is resizable and movable like every other panel (default arrangement unchanged: left,
+> full height, 340 px; floor 240 px). Record, measurements and the Qt reasons:
+> `panel_layout_workflow_resizable_2026-10-18.md`. The text below is kept as history.
+
 - **Always full window height, docked left.** Not negotiated away by
   splitting with another dock or by the bottom (Spectra/Sensorgram) dock
   area intruding under it — it owns its own column top to bottom.

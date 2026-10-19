@@ -73,7 +73,7 @@ from ...image_tools import ChromaticModule
 from ...image_tools.chromatic.auto_landmarks import grid_for_count, sample_count_for_stride, snap_landmark_count
 from ...image_tools.chromatic_auto_task import TASK_ID, AutoDetectSummary, ChromaticAutoDetect
 from ...image_tools.geometry import GeometryModule
-from ..ribbon_group import group_label_style, labeled_icon_group, vertical_separator
+from ..ribbon_group import group_label_style, labeled_icon_group, ribbon_separator
 from .general_group import ICON_SIZE, style_general_icon_button
 
 DEFAULT_PRESET = (15, 3)  # (landmark count, track every Nth wavelength)
@@ -466,8 +466,10 @@ class ChromaticCorrectionTab(QWidget):
         detect_layout.addWidget(self._run_button)
         detect_layout.addWidget(self._gear_button)
         detect_group, self._detect_caption = labeled_icon_group(self, detect_row, "Detect")
-        layout.addWidget(detect_group, 0, Qt.AlignmentFlag.AlignVCenter)
-        self._group_separators = [vertical_separator(self)]
+        # AlignTop (was AlignVCenter, 2026-10-18): the groups start at the row's top like those of every other
+        # tab, which is also where the dividers' lines are drawn (they span the icon row, not the caption).
+        layout.addWidget(detect_group, 0, Qt.AlignmentFlag.AlignTop)
+        self._group_separators = [ribbon_separator(self)]
         layout.addWidget(self._group_separators[0])
 
         # View group: what the overlay shows.
@@ -488,8 +490,8 @@ class ChromaticCorrectionTab(QWidget):
         view_layout.addWidget(self._show_button)
         view_layout.addWidget(self._scope_button)
         view_group, self._view_caption = labeled_icon_group(self, view_row, "View")
-        layout.addWidget(view_group, 0, Qt.AlignmentFlag.AlignVCenter)
-        self._group_separators.append(vertical_separator(self))
+        layout.addWidget(view_group, 0, Qt.AlignmentFlag.AlignTop)
+        self._group_separators.append(ribbon_separator(self))
         layout.addWidget(self._group_separators[-1])
 
         # Correction group: always visible (not in the popover).
@@ -507,7 +509,7 @@ class ChromaticCorrectionTab(QWidget):
         for button in (self._apply_button, self._clear_button):
             correction_layout.addWidget(button)
         correction_group, self._correction_caption = labeled_icon_group(self, correction_row, "Correction")
-        layout.addWidget(correction_group, 0, Qt.AlignmentFlag.AlignVCenter)
+        layout.addWidget(correction_group, 0, Qt.AlignmentFlag.AlignTop)
 
         self._separator = QFrame(self)
         self._separator.setFrameShape(QFrame.Shape.VLine)
