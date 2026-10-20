@@ -73,6 +73,31 @@ Real session, as suggested:
 - Columns 80 x 900 give 1.14 chunks per ROI as is, and 1.00 after removing the 1.42 deg tilt (tolerance +-5 px).
 - Size with lz4: about 12.2 GB lossless, against 22 GB uncompressed and 13.2 GB for the TIFF stack.
 
+## Export frame and rectangular chunks (backend, 2026-10-20)
+
+The maintainer said backwards compatibility of the export format is not required. `dataset/io.export_ome_zarr_dataset`
+gained two inputs: `chunk_shape=(h, w)` and `frame=(x0, y0, width, height)`. The frame is in the exported image's
+space, after the image tools. `chunk_plan.ExportFrame` gives it as `(origin_x, origin_y, width, height)`.
+
+How the worker applies the frame: `_zarr_export_worker._place_in_frame` cuts or pads each plane after the image
+tools. The new `ShardWriteSpec.frame_x0/y0` fields default to 0, so the stable app is unchanged.
+
+What gets written:
+- An NGFF `translation` after `scale` (in um when calibrated), only when the origin is not (0, 0).
+- `lspr.chunk_shape_px` = [h, w].
+- `lspr.chunk_size_px` = the size for square chunks, 0 for rectangular ones. With 0, the stable app's fast reader
+  falls back to plain zarr reads, which handle any chunk shape.
+- `lspr.export_frame` = origin, size, source size, `valid_region` (the stored pixels that hold source data), `lossless`.
+
+Readers and helpers:
+- The new app's fast reader understands rectangular chunks.
+- The summary, compare and folder name know about chunk shape and frame (folder tag `c<w>x<h>`).
+
+Tests: `tests/integration/test_lspri_rewrite_ome_zarr_export_frame.py`.
+
+Padding uses the fill value: 0 for uint16, NaN for float32. For uint16, 0 cannot be told apart from a real 0, so use
+`valid_region`. Not yet wired to the UI.
+
 ## Open for Phase 2
 
 - `suggest_layouts` takes 40-210 ms on 160 ROIs (plus compression sampling): a worker thread is still advisable.

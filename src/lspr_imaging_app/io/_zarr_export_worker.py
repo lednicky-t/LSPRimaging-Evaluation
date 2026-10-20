@@ -75,6 +75,24 @@ class ShardWriteSpec:
     compression_cname: str | None   # 'lz4', or None to disable compression
     apply_image_tools: bool
     preprocessing: object | None    # PreprocessingSettings dataclass, or None
+    # Export frame (2026-10-20): source x/y (after image tools) of stored pixel (0, 0). Negative = that many fill
+    # columns/rows in front (lossless padding that moves the chunk grid onto the ROIs); positive = trimmed border
+    # (lossy). The stored plane is image_height x image_width from there; source pixels outside it are not stored.
+    frame_x0: int = 0
+    frame_y0: int = 0
+
+
+def _place_in_frame(plane: np.ndarray, x0: int, y0: int, height: int, width: int, fill: float) -> np.ndarray:
+    """The ``height x width`` window of ``plane`` that starts at source (x0, y0); fill where it has no source pixel."""
+    if (x0, y0) == (0, 0) and plane.shape[:2] == (height, width):
+        return plane
+    out = np.full((height, width), fill, dtype=plane.dtype)
+    src_h, src_w = plane.shape[:2]
+    sx0, sy0 = max(x0, 0), max(y0, 0)
+    sx1, sy1 = min(x0 + width, src_w), min(y0 + height, src_h)
+    if sx1 > sx0 and sy1 > sy0:
+        out[sy0 - y0 : sy1 - y0, sx0 - x0 : sx1 - x0] = plane[sy0:sy1, sx0:sx1]
+    return out
 
 
 @dataclass
@@ -180,6 +198,7 @@ def write_shard(spec: ShardWriteSpec) -> ShardWriteResult:
             else:
                 from lspr_imaging_app.processing.preprocess import apply_spatial_preprocessing_export
             plane = np.asarray(apply_spatial_preprocessing_export(plane, spec.preprocessing), dtype=dtype)
+        plane = _place_in_frame(plane, spec.frame_x0, spec.frame_y0, spec.image_height, spec.image_width, fill)
 
         # Pad to exact shard dimensions so every tile is a full inner_chunk
         h, w = plane.shape[:2]

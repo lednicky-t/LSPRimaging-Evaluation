@@ -584,8 +584,12 @@ def _ome_zarr_fast_read_metadata(root_str: str) -> dict | None:
             return None
         array = group[OME_ZARR_ARRAY_DIRNAME]
         _n_spectral_cubes, n_wl, height, width = array.shape
-        chunk_size_px = int(lspr_attrs.get("chunk_size_px", 0))
-        if chunk_size_px <= 0:
+        chunk_shape = lspr_attrs.get("chunk_shape_px")  # (h, w), 2026-10-20; older exports have square chunk_size_px only
+        if chunk_shape is not None:
+            ich, icw = int(chunk_shape[0]), int(chunk_shape[1])
+        else:
+            ich = icw = int(lspr_attrs.get("chunk_size_px", 0))
+        if ich <= 0 or icw <= 0:
             return None
         shard_mode = str(lspr_attrs.get("shard_mode", "per_image"))
         if shard_mode == "per_frame":  # legacy value from before the frame -> spectral cube rename
@@ -594,7 +598,6 @@ def _ome_zarr_fast_read_metadata(root_str: str) -> dict | None:
         compression_cname = None if compression == "none" else compression.split("+")[0]
         dtype = np.dtype(str(lspr_attrs.get("dtype") or array.dtype))
         fill_value = 0.0 if np.issubdtype(dtype, np.integer) else float("nan")
-        ich = icw = chunk_size_px
         n_cy = (int(height) + ich - 1) // ich
         n_cx = (int(width) + icw - 1) // icw
         return {
@@ -862,6 +865,7 @@ def build_ome_zarr_export_folder_name(
     shard_mode: str,
     compression_enabled: bool,
     dtype: np.dtype,
+    chunk_shape: tuple[int, int] | None = None,
 ) -> str:
     """Compact, human-scannable folder name: name + the parameters that most
     affect what the dataset actually contains (size, spectral_cube_index/wavelength count,
@@ -873,9 +877,14 @@ def build_ome_zarr_export_folder_name(
     shard_tag = "F" if shard_mode == "per_spectral_cube" else "I"
     compression_tag = "Z" if compression_enabled else "N"
     dtype_tag = format_ome_zarr_dtype_tag(dtype)
+    chunk_tag = (
+        f"{int(chunk_shape[1])}x{int(chunk_shape[0])}"
+        if chunk_shape is not None and chunk_shape[0] != chunk_shape[1]
+        else f"{int(chunk_size_px)}"
+    )
     return (
         f"{safe_name}_{int(width)}x{int(height)}_{int(spectral_cube_count)}x{int(wavelength_count)}"
-        f"_c{int(chunk_size_px)}{shard_tag}{compression_tag}_{dtype_tag}.ome.zarr"
+        f"_c{chunk_tag}{shard_tag}{compression_tag}_{dtype_tag}.ome.zarr"
     )
 
 
@@ -896,13 +905,22 @@ class OmeZarrExportSummary:
     crop: tuple[int, int, int, int] | None = None
     pixel_size_um: tuple[float, float] | None = None
     source_folder: str | None = None
+    chunk_shape: tuple[int, int] | None = None
+    """(height, width) of a chunk; ``None`` = square `chunk_size_px`."""
+    frame: tuple[int, int, int, int] | None = None
+    """Stored window (x0, y0, width, height) of the exported image; ``None`` = the whole image."""
+
+    @property
+    def chunk_hw(self) -> tuple[int, int]:
+        return self.chunk_shape if self.chunk_shape is not None else (self.chunk_size_px, self.chunk_size_px)
 
     def field_lines(self) -> list[tuple[str, str]]:
         shard_label = "1 spectral cube per file" if self.shard_mode == "per_spectral_cube" else "1 image per file"
+        ch, cw = self.chunk_hw
         lines = [
             ("Image size", f"{self.width} x {self.height} px"),
             ("Spectral cubes x wavelengths", f"{self.spectral_cube_count} x {self.wavelength_count}"),
-            ("Chunk / shard", f"{self.chunk_size_px}px, {shard_label}"),
+            ("Chunk / shard", f"{cw}px, {shard_label}" if cw == ch else f"{cw} x {ch}px, {shard_label}"),
             ("Compression", "lz4 + bitshuffle" if self.compression_enabled else "none"),
             ("Dtype", self.dtype_str),
             ("Image tools", "applied (linked)" if self.image_tools_applied else "not applied (raw pixels)"),
@@ -912,6 +930,9 @@ class OmeZarrExportSummary:
             flips = [label for enabled, label in ((self.flip_horizontal, "horizontal"), (self.flip_vertical, "vertical")) if enabled]
             lines.append(("Flip", ", ".join(flips) if flips else "none"))
             lines.append(("Crop", f"x={self.crop[0]}, y={self.crop[1]}, w={self.crop[2]}, h={self.crop[3]}" if self.crop else "none"))
+        if self.frame is not None:
+            x0, y0, fw, fh = self.frame
+            lines.append(("Export frame", f"from x={x0}, y={y0} (negative = padded), {fw} x {fh} px"))
         if self.pixel_size_um is not None:
             lines.append(("Pixel size", f"{self.pixel_size_um[0]:.4f} x {self.pixel_size_um[1]:.4f} um/px"))
         if self.source_folder:
@@ -926,8 +947,14 @@ def describe_new_ome_zarr_export(
     chunk_size_px: int,
     compression_enabled: bool,
     shard_mode: str,
+    chunk_shape: tuple[int, int] | None = None,
+    frame: tuple[int, int, int, int] | None = None,
 ) -> OmeZarrExportSummary:
     height, width, target_dtype = probe_ome_zarr_export_shape(dataset, preprocessing)
+    if frame is not None:
+        width, height = int(frame[2]), int(frame[3])
+    if chunk_shape is not None and chunk_shape[0] == chunk_shape[1]:
+        chunk_size_px, chunk_shape = int(chunk_shape[0]), None
     apply_image_tools = preprocessing is not None and bool(getattr(preprocessing, "image_tools_enabled", False))
     crop_tuple = None
     rotation_angle_deg = 0.0
@@ -959,6 +986,8 @@ def describe_new_ome_zarr_export(
         crop=crop_tuple,
         pixel_size_um=pixel_size_um,
         source_folder=str(dataset.folder),
+        chunk_shape=(int(chunk_shape[0]), int(chunk_shape[1])) if chunk_shape is not None else None,
+        frame=tuple(int(v) for v in frame) if frame is not None else None,
     )
 
 
@@ -985,7 +1014,16 @@ def read_existing_ome_zarr_summary(destination: Path) -> OmeZarrExportSummary | 
         shard_mode = str(lspr_attrs.get("shard_mode", "per_image"))
         if shard_mode == "per_frame":  # legacy value from before the frame -> spectral cube rename
             shard_mode = "per_spectral_cube"
+        shape_attr = lspr_attrs.get("chunk_shape_px")
+        chunk_shape = (int(shape_attr[0]), int(shape_attr[1])) if shape_attr and shape_attr[0] != shape_attr[1] else None
+        frame_attr = lspr_attrs.get("export_frame")
+        frame = (
+            (int(frame_attr["origin_x"]), int(frame_attr["origin_y"]), int(frame_attr["width"]), int(frame_attr["height"]))
+            if frame_attr else None
+        )
         return OmeZarrExportSummary(
+            chunk_shape=chunk_shape,
+            frame=frame,
             width=int(width),
             height=int(height),
             spectral_cube_count=int(spectral_cube_count),
@@ -1304,6 +1342,8 @@ def export_ome_zarr_dataset(
     adaptive_workers_enabled: bool = True,
     adaptive_batch_mb: int = 1024,
     pixel_size_um: tuple[float, float] | None = None,
+    chunk_shape: tuple[int, int] | None = None,
+    frame: tuple[int, int, int, int] | None = None,
 ) -> Path:
     """Export `dataset` to `destination` as OME-Zarr - see
     `_export_ome_zarr_dataset_to_path` for what actually writes it.
@@ -1335,6 +1375,8 @@ def export_ome_zarr_dataset(
         adaptive_workers_enabled=adaptive_workers_enabled,
         adaptive_batch_mb=adaptive_batch_mb,
         pixel_size_um=pixel_size_um,
+        chunk_shape=chunk_shape,
+        frame=frame,
     )
     if not normalized_destination.exists():
         return _export_ome_zarr_dataset_to_path(dataset, destination, **kwargs)
@@ -1393,6 +1435,8 @@ def _export_ome_zarr_dataset_to_path(
     adaptive_workers_enabled: bool = True,
     adaptive_batch_mb: int = 1024,
     pixel_size_um: tuple[float, float] | None = None,
+    chunk_shape: tuple[int, int] | None = None,
+    frame: tuple[int, int, int, int] | None = None,
 ) -> Path:
     """Export `dataset` (a TIFF stack or another OME-Zarr dataset) as a new
     OME-Zarr v3 dataset at `destination`, using zarr's sharding codec (Zarr
@@ -1420,6 +1464,13 @@ def _export_ome_zarr_dataset_to_path(
     physical pixel-size calibration, meaningful only in that same processed
     coordinate space) are baked into the exported pixel data rather than
     left for a reader to apply -- see `docs/image_tools_coordinate_spaces.md`.
+
+    `chunk_shape` (height, width) overrides the square `chunk_size_px` (rectangular chunks). `frame` (x0, y0, width,
+    height), in the exported image's own space (after image tools), is the window that is stored: a negative x0/y0
+    pads the left/top with the fill value (lossless; moves the chunk grid onto the ROIs), a window inside the image
+    trims it (lossy). See `dataset/chunk_plan.export_frame`. The origin is written as an OME-NGFF `translation`
+    (after `scale`, so in um when calibrated), and as `lspr.export_frame` with the stored pixels that have a source
+    pixel behind them (`valid_region`).
     """
     zarr, _, _, write_multiscales_metadata = _require_ome_zarr_support()
     try:
@@ -1436,13 +1487,22 @@ def _export_ome_zarr_dataset_to_path(
     # they are "applied/linked" in the GUI. Calibration (um/px) is only meaningful
     # in that same processed coordinate space, so it rides along with the same flag.
     apply_image_tools = preprocessing is not None and bool(getattr(preprocessing, "image_tools_enabled", False))
-    height, width, target_dtype = probe_ome_zarr_export_shape(dataset, preprocessing)
+    source_height, source_width, target_dtype = probe_ome_zarr_export_shape(dataset, preprocessing)
     spectral_cubes = dataset.spectral_cube_indices
     wavelengths = dataset.wavelengths_nm
     record_map = dataset_record_map(dataset)
 
+    frame_x0, frame_y0, width, height = (0, 0, source_width, source_height) if frame is None else (int(v) for v in frame)
+    if width <= 0 or height <= 0:
+        raise ValueError(f"Export frame must have a positive size, got {width} x {height} px.")
+    if not (frame_x0 < source_width and frame_y0 < source_height and frame_x0 + width > 0 and frame_y0 + height > 0):
+        raise ValueError("Export frame does not overlap the image.")
+
     # Inner chunk (logical, what readers see).
-    ich = icw = max(int(chunk_size_px), 4)
+    if chunk_shape is not None:
+        ich, icw = max(int(chunk_shape[0]), 4), max(int(chunk_shape[1]), 4)
+    else:
+        ich = icw = max(int(chunk_size_px), 4)
     # Shard dimensions must be exact multiples of inner chunk.
     sh = ((height + ich - 1) // ich) * ich
     sw = ((width  + icw - 1) // icw) * icw
@@ -1511,6 +1571,7 @@ def _export_ome_zarr_dataset_to_path(
             fill_value=fill_value, compression_cname=compression_cname,
             apply_image_tools=apply_image_tools,
             preprocessing=preprocessing if apply_image_tools else None,
+            frame_x0=frame_x0, frame_y0=frame_y0,
         )
 
     def _build_per_spectral_cube_spec(fp: int, fi: int) -> ShardWriteSpec:
@@ -1529,6 +1590,7 @@ def _export_ome_zarr_dataset_to_path(
             fill_value=fill_value, compression_cname=compression_cname,
             apply_image_tools=apply_image_tools,
             preprocessing=preprocessing if apply_image_tools else None,
+            frame_x0=frame_x0, frame_y0=frame_y0,
         )
 
     if per_spectral_cube:
@@ -1664,9 +1726,15 @@ def _export_ome_zarr_dataset_to_path(
     else:
         pixel_size = None
 
+    scale = build_scale(pixel_size)
+    transforms: list[dict] = [{"type": "scale", "scale": scale}]
+    if (frame_x0, frame_y0) != (0, 0):
+        # NGFF applies the translation after the scale, so it is in physical units: stored pixel (0, 0) sits at
+        # source pixel (frame_x0, frame_y0) of the exported (image-tools) space.
+        transforms.append({"type": "translation", "translation": [0.0, 0.0, frame_y0 * scale[2], frame_x0 * scale[3]]})
     write_multiscales_metadata(
         group,
-        datasets=[{"path": OME_ZARR_ARRAY_DIRNAME, "coordinateTransformations": [{"type": "scale", "scale": build_scale(pixel_size)}]}],
+        datasets=[{"path": OME_ZARR_ARRAY_DIRNAME, "coordinateTransformations": transforms}],
         axes=build_axes(pixel_size),
         name="LSPR image stack",
     )
@@ -1675,7 +1743,10 @@ def _export_ome_zarr_dataset_to_path(
         "spectral_cube_indices": [int(value) for value in spectral_cubes],
         "wavelengths_nm": [float(value) for value in wavelengths],
         "source_folder": str(dataset.folder),
-        "chunk_size_px": int(chunk_size_px),
+        # `chunk_size_px` stays for square chunks; 0 for rectangular ones, which makes readers that only know a
+        # square size (the stable app's fast reader) fall back to the standard zarr reader instead of misreading.
+        "chunk_size_px": int(ich) if ich == icw else 0,
+        "chunk_shape_px": [int(ich), int(icw)],
         "shard_mode": shard_mode,
         "compression": "lz4+bitshuffle" if compression_enabled else "none",
         "dtype": str(target_dtype),
@@ -1692,6 +1763,24 @@ def _export_ome_zarr_dataset_to_path(
                 if crop.enabled and crop.width > 0 and crop.height > 0
                 else None
             ),
+        }
+    if frame is not None:
+        vx0, vy0 = max(-frame_x0, 0), max(-frame_y0, 0)
+        lspr_attrs["export_frame"] = {
+            "origin_x": frame_x0,
+            "origin_y": frame_y0,
+            "width": width,
+            "height": height,
+            "source_width": int(source_width),
+            "source_height": int(source_height),
+            # Stored pixels that hold source pixels; everything else is fill (padding).
+            "valid_region": {
+                "x": vx0,
+                "y": vy0,
+                "width": min(frame_x0 + width, source_width) - max(frame_x0, 0),
+                "height": min(frame_y0 + height, source_height) - max(frame_y0, 0),
+            },
+            "lossless": frame_x0 <= 0 and frame_y0 <= 0 and frame_x0 + width >= source_width and frame_y0 + height >= source_height,
         }
     plane_times = _write_plane_times(group, dataset, spectral_cubes, wavelengths)
     if plane_times is not None:
