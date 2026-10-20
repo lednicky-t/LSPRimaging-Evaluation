@@ -198,7 +198,10 @@ def write_shard(spec: ShardWriteSpec) -> ShardWriteResult:
                     plane[cy * ich : (cy + 1) * ich, cx * icw : (cx + 1) * icw], dtype=dtype
                 )
                 _t0 = time.perf_counter()
-                encoded = codec.encode(tile.tobytes()) if codec else tile.tobytes()
+                # Encode the array, not its bytes: Blosc takes the element size from it (2 for uint16, 4 for
+                # float32), which bit-shuffle needs. From bytes it used 1, and real data did not compress at
+                # all (measured 2026-10-20: 100 % vs 66 % of raw). The stored format is the same either way.
+                encoded = codec.encode(tile) if codec else tile.tobytes()
                 compress_s += time.perf_counter() - _t0
                 ci = base_ci + cy * n_cx + cx
                 all_offs[ci] = byte_offset
