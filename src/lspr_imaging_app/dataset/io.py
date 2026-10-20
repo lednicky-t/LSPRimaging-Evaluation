@@ -57,7 +57,13 @@ from lspr_imaging_app.storage.workspace import (
     save_acquisition_metadata_sidecar,
 )
 from lspr_imaging_app.image_tools.geometry.model import GeometrySettings
-from lspr_imaging_app.image_tools.geometry.transform import apply_spatial_preprocessing
+from lspr_imaging_app.image_tools.geometry.transform import (
+    _combined_export_transform,
+    _outside_source_mask,
+    _rotation_active,
+    apply_spatial_mask,
+    apply_spatial_preprocessing,
+)
 
 from lspr_imaging_app.applog.events import emit_timing, log_event
 from .model import ImageDataset, ImageKey, ImageRecord, compact_dataset_image_timings
@@ -66,6 +72,7 @@ from .ome_metadata import (
     build_omero_channels,
     build_scale,
     PLANE_TIMES_ARRAY,
+    VALID_MASK_ARRAY,
     display_window,
     plane_times_s,
     valid_pixel_size,
@@ -510,7 +517,8 @@ def dataset_load_plane_roi(
             y1 = min(int(y_end), h) if h is not None else int(y_end)
             x0 = max(int(x_start), 0)
             x1 = min(int(x_end), w) if w is not None else int(x_end)
-            return np.asarray(array[fi, wi, y0:y1, x0:x1], dtype=np.float32)
+            # Pixels without a source (rotated export: `valid_mask`) become NaN, never the stored 0.
+            return _apply_valid_mask(np.asarray(array[fi, wi, y0:y1, x0:x1], dtype=np.float32), str(ome_root), y0, x0)
     # Fallback: full load then crop (TIFF or unrecognised zarr layout)
     full = load_image_array(str(path))
     h, w = int(full.shape[0]), int(full.shape[1])
@@ -823,21 +831,26 @@ def probe_ome_zarr_export_shape(
     would produce, without running the full export. Used both by the exporter
     itself and by the GUI to name/compare a destination folder before export
     actually starts, so the two must stay in exact agreement.
+
+    The dtype is the source's (2026-10-20): a rotated export of uint16 data stays uint16 (rounded; the pixels the
+    rotation creates are stored as 0 and listed in the `valid_mask` array) instead of float32, which doubled the
+    file for the sake of NaN corners. Rounding adds 0.29 counts RMS against a pixel noise of ~490
+    (docs/rotated_zarr_export_interpolation_2026-10-20.md).
     """
     records = sorted(dataset.records, key=lambda record: (int(record.key.spectral_cube_index), float(record.key.wavelength_nm)))
     if not records:
         raise ValueError("No images are available for OME-Zarr export.")
     apply_image_tools = preprocessing is not None and bool(getattr(preprocessing, "image_tools_enabled", False))
     first_image = _load_image_array_native(str(records[0].path))
-    if apply_image_tools:
-        first_image = apply_spatial_preprocessing(first_image, preprocessing)
     if first_image.ndim != 2:
         raise ValueError("OME-Zarr export expects 2D image planes.")
-    height, width = first_image.shape[:2]
     if np.issubdtype(first_image.dtype, np.integer):
         target_dtype = np.dtype(np.uint16 if first_image.dtype.itemsize <= 2 else first_image.dtype)
     else:
         target_dtype = np.dtype(np.float32)
+    if apply_image_tools:
+        first_image = apply_spatial_preprocessing(first_image, preprocessing)
+    height, width = first_image.shape[:2]
     return int(height), int(width), target_dtype
 
 
@@ -1497,6 +1510,18 @@ def _export_ome_zarr_dataset_to_path(
         raise ValueError(f"Export frame must have a positive size, got {width} x {height} px.")
     if not (frame_x0 < source_width and frame_y0 < source_height and frame_x0 + width > 0 and frame_y0 + height > 0):
         raise ValueError("Export frame does not overlap the image.")
+    valid_mask = _export_valid_mask(
+        dataset, str(records[0].path), preprocessing if apply_image_tools else None,
+        (frame_x0, frame_y0, width, height), target_dtype,
+    )
+    # Rotated integer values are rounded onto the camera's value step (16 for 12-bit data in 16-bit files;
+    # maintainer decision 2026-10-20, see `_zarr_export_worker._to_stored`). Detected on the first plane; every plane
+    # is checked against it in the worker. Flip and crop alone copy values, so nothing is rounded then.
+    from lspr_imaging_app.io._zarr_export_worker import value_step as _detect_value_step
+
+    rounds_values = apply_image_tools and _rotation_active(preprocessing) and np.issubdtype(target_dtype, np.integer)
+    value_step = _detect_value_step(_load_image_array_native(str(records[0].path))) if rounds_values else 1
+    off_step_planes = 0
 
     # Inner chunk (logical, what readers see).
     if chunk_shape is not None:
@@ -1572,6 +1597,7 @@ def _export_ome_zarr_dataset_to_path(
             apply_image_tools=apply_image_tools,
             preprocessing=preprocessing if apply_image_tools else None,
             frame_x0=frame_x0, frame_y0=frame_y0,
+            value_step=value_step,
         )
 
     def _build_per_spectral_cube_spec(fp: int, fi: int) -> ShardWriteSpec:
@@ -1591,6 +1617,7 @@ def _export_ome_zarr_dataset_to_path(
             apply_image_tools=apply_image_tools,
             preprocessing=preprocessing if apply_image_tools else None,
             frame_x0=frame_x0, frame_y0=frame_y0,
+            value_step=value_step,
         )
 
     if per_spectral_cube:
@@ -1662,6 +1689,7 @@ def _export_ome_zarr_dataset_to_path(
                 result = future.result()
                 with progress_lock:
                     completed_units = min(total_units, completed_units + result.n_inner)
+                off_step_planes += int(getattr(result, "off_step_planes", 0))
                 report_progress()
 
                 if adaptive_workers_enabled:
@@ -1713,6 +1741,11 @@ def _export_ome_zarr_dataset_to_path(
             ex.shutdown(wait=True)
     if cancel_event is not None and cancel_event.is_set():
         raise RuntimeError("OME-Zarr export cancelled.")
+    if off_step_planes:
+        _LOGGER.warning(
+            "OME-Zarr export: %d plane(s) had values off the camera step %d and were rounded to whole counts instead",
+            off_step_planes, value_step,
+        )
 
     # Physical pixel size (um/px, x then y) for the y/x axes. `pixel_size_um` is
     # the calibration passed by the caller and is valid for the raw pixels
@@ -1752,9 +1785,25 @@ def _export_ome_zarr_dataset_to_path(
         "dtype": str(target_dtype),
         "image_tools_applied": bool(apply_image_tools),
     }
+    if valid_mask is not None:
+        mask_array = group.create_array(VALID_MASK_ARRAY, shape=valid_mask.shape, dtype=np.uint8, fill_value=0)
+        mask_array[:] = valid_mask
+        lspr_attrs["valid_mask"] = {
+            "array": VALID_MASK_ARRAY,
+            "applies_to": "every plane",
+            "measured": 1,
+            "no_source_pixel": 0,
+            "stored_value_without_source": 0,
+        }
     if apply_image_tools and preprocessing is not None:
         crop = preprocessing.crop
         lspr_attrs["image_tools"] = {
+            # Rotation resamples the raw pixels (Lanczos4, `geometry/transform.py` `_cv2_affine`); flip and crop do not.
+            "interpolation": "lanczos4" if _rotation_active(preprocessing) else "none",
+            # Rotated values rounded onto this step (the camera's; 1 = whole counts). Planes whose source was not on
+            # it were rounded to whole counts instead: `planes_not_on_value_step`.
+            "value_step": int(value_step),
+            "planes_not_on_value_step": int(off_step_planes),
             "rotation_angle_deg": float(preprocessing.rotation_angle_deg),
             "flip_horizontal": bool(preprocessing.flip_horizontal),
             "flip_vertical": bool(preprocessing.flip_vertical),
@@ -1806,6 +1855,82 @@ def _export_ome_zarr_dataset_to_path(
 
     _export_experimental_data(dataset, destination)
     return destination
+
+
+def _export_valid_mask(
+    dataset: ImageDataset,
+    first_record_path: str,
+    preprocessing: GeometrySettings | None,
+    frame: tuple[int, int, int, int],
+    target_dtype: np.dtype,
+) -> np.ndarray | None:
+    """The `valid_mask` of an integer export (uint8, stored height x width; 1 = measured), or None when every
+    stored pixel has a source pixel (nothing to write) or the export is float (NaN marks those pixels itself).
+
+    Geometry only, so one mask serves every plane: the pixels a rotation creates (`_outside_source_mask`, the same
+    test the image warp uses for its NaN pixels), then the frame (lossless padding is 0). A source that is itself
+    an export with a mask carries it over through flip/crop (exact array operations). Rotating such a source again
+    is refused: its stored 0 corners would be interpolated into the pixels next to them."""
+    from lspr_imaging_app.io._zarr_export_worker import _place_in_frame
+
+    if not np.issubdtype(np.dtype(target_dtype), np.integer):
+        return None
+    source_mask = None
+    if dataset.is_ome_zarr:
+        root = _ome_zarr_root(Path(dataset.folder))
+        source_mask = _ome_zarr_valid_mask_cached(str(root)) if root is not None else None
+    raw_shape = tuple(int(v) for v in load_image_shape(first_record_path)[:2])
+    if preprocessing is not None and _rotation_active(preprocessing):
+        if source_mask is not None and not source_mask.all():
+            raise ValueError(
+                "This dataset is already a rotated export (it has pixels without a source). Rotating it again would "
+                "mix those empty pixels into their neighbours: switch 'Apply rotation/crop' off, or export from the "
+                "original images."
+            )
+        matrix, offset, shape = _combined_export_transform(raw_shape, preprocessing)
+        valid = ~_outside_source_mask(matrix, offset, shape, raw_shape)
+    else:
+        valid = source_mask if source_mask is not None else np.ones(raw_shape, dtype=bool)
+        if preprocessing is not None:
+            valid = apply_spatial_mask(valid, preprocessing)
+    x0, y0, width, height = frame
+    framed = _place_in_frame(valid.astype(np.uint8), x0, y0, height, width, 0)
+    return None if bool(framed.all()) else framed
+
+
+@lru_cache(maxsize=16)
+def _ome_zarr_valid_mask_cached(root_str: str) -> np.ndarray | None:
+    """The export's `valid_mask` as a read-only bool array (True = measured), or None when it has none. A mask the
+    attributes announce but that cannot be read is logged as a warning (its pixels would then show the stored 0)."""
+    try:
+        group = _ome_zarr_group_cached(root_str)
+        info = dict(group.attrs.get(OME_ZARR_LSPR_KEY, {}) or {}).get("valid_mask")
+    except Exception:  # noqa: BLE001 - not an export of this app: no mask
+        return None
+    if not info:
+        return None
+    try:
+        mask = np.asarray(group[str(info.get("array", VALID_MASK_ARRAY))][:]) != 0
+    except Exception:  # noqa: BLE001
+        _LOGGER.warning("OME-Zarr %s announces a valid_mask that cannot be read: pixels without a source show 0", root_str, exc_info=True)
+        return None
+    mask.setflags(write=False)
+    return mask
+
+
+def _apply_valid_mask(plane: np.ndarray, root_str: str, y0: int = 0, x0: int = 0) -> np.ndarray:
+    """``plane`` (float32, a window of the stored plane starting at row y0, column x0) with NaN where the export's
+    `valid_mask` says no pixel was measured. Unchanged when the export has no mask."""
+    mask = _ome_zarr_valid_mask_cached(root_str)
+    if mask is None:
+        return plane
+    window = mask[y0 : y0 + plane.shape[0], x0 : x0 + plane.shape[1]]
+    if window.shape != plane.shape[:2] or bool(window.all()):
+        return plane
+    if not plane.flags.writeable:
+        plane = plane.copy()
+    plane[~window] = np.nan
+    return plane
 
 
 def _write_plane_times(group, dataset: ImageDataset, spectral_cubes, wavelengths) -> int | None:
@@ -2031,7 +2156,8 @@ def _load_image_array_uncached(path_str: str) -> np.ndarray:
     path = Path(path_str)
     ome_root = _ome_zarr_root(path.parent.parent if path.parent.name == OME_ZARR_ARRAY_DIRNAME else path.parent)
     if ome_root is not None and path.parent == _ome_zarr_array_dir(ome_root):
-        return np.asarray(_read_ome_zarr_plane_by_path(path, ome_root), dtype=np.float32)
+        # Pixels without a source (rotated export: `valid_mask`) become NaN, never the stored 0.
+        return _apply_valid_mask(np.asarray(_read_ome_zarr_plane_by_path(path, ome_root), dtype=np.float32), str(ome_root))
     if path.suffix.lower() in {".tif", ".tiff"} and _tifffile_imread is not None and fast_tiff_decoder_active():
         fast = _read_tiff_fast(path_str)
         if fast is not None:

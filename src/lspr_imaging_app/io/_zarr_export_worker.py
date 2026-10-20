@@ -80,6 +80,9 @@ class ShardWriteSpec:
     # (lossy). The stored plane is image_height x image_width from there; source pixels outside it are not stored.
     frame_x0: int = 0
     frame_y0: int = 0
+    # The camera's value step (`value_step`, detected once by the coordinator): rotated values are rounded onto it.
+    # A plane whose source values are not all on it is rounded to whole counts instead and counted in the result.
+    value_step: int = 1
 
 
 def _place_in_frame(plane: np.ndarray, x0: int, y0: int, height: int, width: int, fill: float) -> np.ndarray:
@@ -93,6 +96,44 @@ def _place_in_frame(plane: np.ndarray, x0: int, y0: int, height: int, width: int
     if sx1 > sx0 and sy1 > sy0:
         out[sy0 - y0 : sy1 - y0, sx0 - x0 : sx1 - x0] = plane[sy0:sy1, sx0:sx1]
     return out
+
+
+def _to_stored(plane: np.ndarray, dtype: np.dtype, fill: float, step: int = 1) -> np.ndarray:
+    """``plane`` in the stored dtype. Float -> integer: NaN (no source pixel) becomes ``fill``, values are rounded to
+    the nearest multiple of ``step`` and clipped to the dtype's range (Lanczos rings slightly past the source range;
+    ~+-40 counts at the extremes of 16-bit data).
+
+    ``step`` (2026-10-20, maintainer decision): the camera's value step. 12-bit cameras deliver multiples of 16 in a
+    16-bit file; rounding the rotated values back onto that step keeps the low bits zero, so the export compresses
+    like the raw data (04_Bulk: 49.7 % vs 74.0 % rounded to whole counts, raw 50.2 %), for 4.5 counts RMS of extra
+    error against ~490 counts of pixel noise (docs/rotated_zarr_export_interpolation_2026-10-20.md)."""
+    dtype = np.dtype(dtype)
+    if not (np.issubdtype(dtype, np.integer) and np.issubdtype(plane.dtype, np.floating)):
+        return np.asarray(plane, dtype=dtype)
+    info = np.iinfo(dtype)
+    step = max(int(step), 1)
+    out = np.where(np.isfinite(plane), plane, fill)
+    if step > 1:
+        out /= step
+    np.rint(out, out=out)
+    if step > 1:
+        out *= step
+    np.clip(out, info.min, (info.max // step) * step, out=out)
+    return out.astype(dtype)
+
+
+def value_step(values: np.ndarray, limit: int = 4096) -> int:
+    """The largest step every value of an integer image is a multiple of (16 for a 12-bit camera writing 16-bit
+    files), 1 when there is none, for float data or a step above ``limit`` (e.g. an all-zero or near-empty image)."""
+    values = np.asarray(values)
+    if not np.issubdtype(values.dtype, np.integer):
+        return 1
+    distinct = np.unique(values).astype(np.int64)
+    distinct = distinct[distinct != 0]
+    if distinct.size < 2:
+        return 1
+    step = int(np.gcd.reduce(distinct))
+    return step if 1 < step <= limit else 1
 
 
 @dataclass
@@ -109,6 +150,7 @@ class ShardWriteResult:
     read_s: float         # image read + decode + optional preprocessing
     compress_s: float     # Blosc tile encode (pure CPU)
     write_s: float         # shard file write
+    off_step_planes: int = 0  # planes rounded to whole counts because their source was not on `value_step`
 
 
 def _load_image(path_str: str) -> np.ndarray:
@@ -176,28 +218,34 @@ def write_shard(spec: ShardWriteSpec) -> ShardWriteResult:
     byte_offset = 0
     read_s = 0.0
     compress_s = 0.0
+    off_step_planes = 0
 
     for wl_idx, record_path in enumerate(spec.record_paths):
         if not record_path:
             continue  # missing record — index entry stays MISSING; reader uses fill value
 
         _t0 = time.perf_counter()
-        plane = np.asarray(_load_image(record_path), dtype=dtype)
+        source = np.asarray(_load_image(record_path))
 
-        if spec.apply_image_tools and spec.preprocessing is not None:
-            # The rewrite's export passes a GeometrySettings: rotation-created
-            # pixels are NaN and the target dtype is float32 (decided by
-            # dataset.io.probe_ome_zarr_export_shape). The stable app still
-            # passes its own PreprocessingSettings and keeps its own transform.
-            # (Duck-typed: only the stable settings class has `rotation_fill_dark`.
-            # Importing the rewrite transform pulls in the image_tools package,
-            # which imports Qt - acceptable here, but not worth doing for the
-            # stable path.)
-            if not hasattr(spec.preprocessing, "rotation_fill_dark"):
-                from lspr_imaging_app.image_tools.geometry.transform import apply_spatial_preprocessing_export
-            else:
-                from lspr_imaging_app.processing.preprocess import apply_spatial_preprocessing_export
-            plane = np.asarray(apply_spatial_preprocessing_export(plane, spec.preprocessing), dtype=dtype)
+        if spec.apply_image_tools and spec.preprocessing is not None and not hasattr(spec.preprocessing, "rotation_fill_dark"):
+            # The rewrite's export passes a GeometrySettings (duck-typed: only the stable app's settings class has
+            # `rotation_fill_dark`). The rotation (Lanczos4) works on the source values and returns float32 with NaN
+            # where it created pixels; `_to_stored` then rounds into the stored dtype (2026-10-20: uint16 stays
+            # uint16, the NaN pixels are stored as the fill value and listed in the export's `valid_mask`).
+            from lspr_imaging_app.image_tools.geometry.transform import apply_spatial_preprocessing_export
+
+            step = int(spec.value_step)
+            if step > 1 and not bool(np.all(source % step == 0)):
+                step = 1  # this plane is not on the step: whole counts (reported, never silently forced onto it)
+                off_step_planes += 1
+            plane = _to_stored(apply_spatial_preprocessing_export(source, spec.preprocessing), dtype, fill, step)
+        elif spec.apply_image_tools and spec.preprocessing is not None:
+            # The stable app: its own PreprocessingSettings and transform, unchanged.
+            from lspr_imaging_app.processing.preprocess import apply_spatial_preprocessing_export
+
+            plane = np.asarray(apply_spatial_preprocessing_export(np.asarray(source, dtype=dtype), spec.preprocessing), dtype=dtype)
+        else:
+            plane = np.asarray(source, dtype=dtype)
         plane = _place_in_frame(plane, spec.frame_x0, spec.frame_y0, spec.image_height, spec.image_width, fill)
 
         # Pad to exact shard dimensions so every tile is a full inner_chunk
@@ -247,5 +295,5 @@ def write_shard(spec: ShardWriteSpec) -> ShardWriteResult:
     bytes_written = byte_offset + len(index_bytes) + 4
     return ShardWriteResult(
         n_inner=n_inner, bytes_written=bytes_written,
-        read_s=read_s, compress_s=compress_s, write_s=write_s,
+        read_s=read_s, compress_s=compress_s, write_s=write_s, off_step_planes=off_step_planes,
     )

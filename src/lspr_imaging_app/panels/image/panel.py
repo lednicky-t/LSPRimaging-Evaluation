@@ -168,6 +168,7 @@ from .roi_tab import RoiTab
 from .rotate_line_tool import RotateLineTool
 from .display_range_controls import FULL_16BIT_RANGE
 from .view_tab import ViewTab
+from .export_tab import ExportTab
 from ...storage.ui_state_keys import (
     IMAGE_CURSOR_READOUT,
     IMAGE_MASK_EDIT_TOOL,
@@ -255,6 +256,7 @@ _WIDEST_ROLE_WORD = max((word for _color, word in _ROLE_WORDS.values()), key=len
 _WIDEST_FRAME_TIME = "00:00:00.00"  # H:MM:SS.ss with a two-digit hour (the dock measures every digit as the widest)
 CHROMATIC_TAB = "Chromatic"  # ribbon tab label (full name "Chromatic Corrections" is its tooltip)
 BACKGROUND_TAB = "Background"  # ribbon tab label; green while background removal is applied
+EXPORT_TAB = "Export"  # OME-Zarr export (moved here from the Workflow panel 2026-10-20); its "i" text is live (`info_html`)
 # The "i" icon's text per ribbon tab ("Image tools" and "ROIs" show the active tool's canvas controls instead).
 _TAB_INFO: dict[str, str] = {
     VIEW_TAB: (
@@ -584,6 +586,7 @@ class ImagePanel(QWidget):
         self._apply_roi_overlay_style()
         self._sync_roi_overlay_controls()
         self._roi_tab.bind_ui_state(store)
+        self._export_tab.bind_ui_state(store)
         self._mask_tab.scan_controls.bind_ui_state(store)
         self._mask_tab.auto_controls.bind_ui_state(store)
         self._on_group_labels_changed()
@@ -941,6 +944,11 @@ class ImagePanel(QWidget):
             self._background, show_background=self._show_background, parent=self
         )
         self._background_tab.show_background_changed.connect(self._on_show_background_changed)
+        self._export_tab = ExportTab(
+            self._dataset, self, geometry=self._geometry, roi_toolbox=self._roi_toolbox, chromatic=self._chromatic,
+            status=self._on_tool_status,
+        )
+        self._export_tab.info_changed.connect(self._on_export_info_changed)
 
     def _build_top_bar(
         self, view_content: QWidget, image_tools_content: QWidget, mask_content: QWidget, roi_content: QWidget
@@ -969,6 +977,7 @@ class ImagePanel(QWidget):
                 # the Workflow panel (maintainer's plan for chromatic correction).
                 (CHROMATIC_TAB, self._chromatic_tab),
                 (BACKGROUND_TAB, self._background_tab),
+                (EXPORT_TAB, self._export_tab),
             ],
             self,
             pinned=self._general_row,
@@ -1336,6 +1345,8 @@ class ImagePanel(QWidget):
             self._area_picker.refresh_theme(get_active_theme())
         if hasattr(self, "_background_tab"):
             self._background_tab.refresh_theme(get_active_theme())
+        if hasattr(self, "_export_tab"):
+            self._export_tab.refresh_theme()
         if hasattr(self, "_cursor_readout"):
             self._style_cursor_readout()
         if hasattr(self, "_controls_bar"):
@@ -1925,6 +1936,8 @@ class ImagePanel(QWidget):
                 detection=self._roi_toolbox.detection_settings(),
                 serial=self._latest_serial,
                 show_background=self._show_background,
+                # Fast while moving, exact at rest: `_on_playback_changed` redraws exactly when Play stops.
+                fast_rotation=hasattr(self, "_slideshow") and self._slideshow.is_playing(),
                 display_levels=self._fixed_levels(),
             )
         )
@@ -2004,6 +2017,10 @@ class ImagePanel(QWidget):
             return
         self._view.paint_listener = None
         self._image_item.paint_listener = None
+        # The frames shown while playing were rotated the fast way (`RenderRequest.fast_rotation`): show the frame
+        # Play stopped on again, rotated exactly, so the Histogram, Mask tools and readout work on the exact image.
+        if self._geometry.settings().image_tools_enabled and abs(self._geometry.settings().rotation_angle_deg) > 1e-9:
+            self._schedule_redraw()
         if stats.active:
             stats.stop()
             summary = stats.summary(time.perf_counter())
@@ -2618,12 +2635,22 @@ class ImagePanel(QWidget):
         across the raw frame and are mapped onto the displayed image, so with a rotation they appear tilted and with
         a crop shifted - exactly where the exported chunks will fall."""
         preview = self._dataset.chunk_grid_preview()
-        raw_shape = self._dataset.raw_plane_shape() if preview.enabled else None
+        if preview.processed:
+            # The export applies rotation/flip/crop (2026-10-20): the grid lies on the processed image itself, drawn
+            # straight. Hidden while a preview tool shows the uncropped canvas (another coordinate space, as the ROIs).
+            hidden = self._active_tool.active() in _PREVIEW_TOOLS
+            raw_shape = None if hidden else self._last_image_shape
+        else:
+            raw_shape = self._dataset.raw_plane_shape() if preview.enabled else None
         if not preview.enabled or raw_shape is None or preview.chunk_w <= 0 or preview.chunk_h <= 0:
             self._chunk_grid_curve.clear()
             return
         raw_h, raw_w = float(raw_shape[0]), float(raw_shape[1])
-        to_display = raw_to_processed_affine_xy((int(raw_h), int(raw_w)), self._geometry.settings())
+        to_display = (
+            np.array([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]])
+            if preview.processed
+            else raw_to_processed_affine_xy((int(raw_h), int(raw_w)), self._geometry.settings())
+        )
         xs: list[float] = []
         ys: list[float] = []
 
@@ -2881,7 +2908,14 @@ class ImagePanel(QWidget):
         canvas controls of the active tool on the tool tabs ("Image tools",
         "ROIs"), a short explanation of the tab on the others."""
         category = self._tool_ribbon.current_category() if hasattr(self, "_tool_ribbon") else None
+        if category == EXPORT_TAB:
+            return self._export_tab.info_html()
         return _TAB_INFO.get(category) or controls_text(tool)
+
+    def _on_export_info_changed(self) -> None:
+        """The Export tab's "i" text carries live chunk counts: re-read it while that tab is open."""
+        if hasattr(self, "_tool_ribbon") and self._tool_ribbon.current_category() == EXPORT_TAB:
+            self._refresh_tool_info(self._active_tool.active())
 
     def _refresh_tool_info(self, tool: ImageTool | None) -> None:
         """Point the info icon's tooltip at the open tab's help (see

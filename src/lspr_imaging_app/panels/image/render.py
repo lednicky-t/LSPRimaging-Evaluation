@@ -101,6 +101,10 @@ class RenderRequest:
     submitted_while_prefetching: bool = False
     """The plane this request needs was being read ahead (by a reader thread) when the request arrived, so the
     render waits for that read (diagnostics only: the Play stats' "behind a read-ahead")."""
+    fast_rotation: bool = False
+    """Rotate with bilinear instead of Lanczos4 (2026-10-20, "fast while moving, exact at rest"): set while the
+    slideshow plays; the panel asks for the frame again, exact, when Play stops. The Histogram, Mask tools and the
+    cursor readout read the frame at rest, so they always work on the exact image."""
     display_levels: tuple[float, float] | None = None
     """The fixed display range ``(black point, white point)`` from the View tab, or None = every frame at its own
     automatic range. Display only: it changes how the frame is shown, never a pixel value."""
@@ -382,6 +386,7 @@ class ImageRenderer(QObject):
                 external_mask=resolve_external_mask(
                     request.authored_mask, request.geometry, request.mask_warp_affine
                 ) if request_uses_ignore_mask(request) else None,
+                fast_rotation=request.fast_rotation,
             )
         except Exception as exc:  # noqa: BLE001 - a render must never kill the thread
             logger.exception("Image render failed for cube=%s wl=%s", request.cube_index, request.wavelength_nm)

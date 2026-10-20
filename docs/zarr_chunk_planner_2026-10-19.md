@@ -137,3 +137,21 @@ Rows to 1.46. The headers now say "Chunks / ROI" (they are counts; they were rea
 - Time-dependent geometry (`RoiTimeline`) is not in the boxes.
 - Check the export dtype (uint16 when no image tools; float32 with NaN fill after rotation) before passing `bytes_per_pixel`.
 - UI: Find best popup, square/rectangle toggle, pad/trim plus `translation` in the export. Then Auto adjust.
+
+## Moved to the Image panel's Export ribbon tab (2026-10-20)
+
+Maintainer request: the Workflow Dataset -> Export section is gone. The export now lives in the Image panel ribbon
+tab **Export** (`panels/image/export_tab.py`, `ExportTab`). `chunk_layout_dialog.py` and `export_roi_layout.py`
+moved to `panels/image/` with it. The layout logic is unchanged. Sections:
+Chunk grid (grid toggle, W x H, Find best), Position, Shard, Compress, Skip excl., Export.
+
+Decisions (maintainer, 2026-10-20):
+- Progress goes on the status bar's task indicator: `DatasetModule.task_progress` / `task_finished`, task id
+  `zarr_export`, wired in `app_rewrite.py` (Cancel there too). The tab's Export button also turns into Cancel
+  while an export runs.
+- The live text lines have no room on a ribbon row. Chunk counts, the pad/trim line and the warnings are shown in
+  the W x H fields' tooltip and in the panel's "i" icon (`ExportTab.info_html`). The fields turn amber while a
+  warning applies.
+- The remembered-state keys are the same as before (`export/*`), so saved settings carry over. The compression and
+  skip-excluded checkboxes became icon toggles under the same keys.
+- One-off messages (Find best without ROIs, an export that cannot start) go to the panel's tool status.

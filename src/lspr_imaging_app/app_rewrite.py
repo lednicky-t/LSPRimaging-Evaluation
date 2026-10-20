@@ -50,6 +50,7 @@ from .image_tools.chromatic_auto_task import TASK_ID as CHROMATIC_TASK_ID, Chrom
 from .image_tools.mask.transient_events import TransientEventsModule
 from .image_tools.mask_auto_task import TASK_ID as AUTO_MASK_TASK_ID
 from .image_tools.mask_export_task import TASK_ID as MASK_EXPORT_TASK_ID
+from .dataset.module import EXPORT_TASK_ID as ZARR_EXPORT_TASK_ID
 from .image_tools.mask_scan_task import TASK_ID as SCAN_TASK_ID, TransientScanTask
 from .roi.array_task import TASK_ID as ARRAY_TASK_ID
 from .panels.image.chromatic_tab import ChromaticUiValues
@@ -978,12 +979,8 @@ def _build_workflow_panel(m: _Modules, writer: _SettingsWriter, ui_state: UiStat
         m.session_coordinator,
         initial_stage=initial_stage,
         initial_subsections=settings.expanded_subsections,
-        geometry=m.geometry,
-        ui_state=ui_state,
         cube_display=m.cube_display,
         frame_roles=m.frame_roles,
-        roi_toolbox=m.roi_toolbox,
-        chromatic=m.chromatic,
     )
     # Immediate persist-on-change, same pattern as theme/auto_apply - switching
     # the open stage is a deliberate, occasional click, not a continuous drag
@@ -1027,7 +1024,10 @@ def _build_status_bar(
     image_panel.mask_auto.task_finished.connect(task_indicator.finish)
     image_panel.array_action.task_progress.connect(task_indicator.report)
     image_panel.array_action.task_finished.connect(task_indicator.finish)
+    m.dataset.task_progress.connect(task_indicator.report)  # OME-Zarr export (Image panel, Export tab)
+    m.dataset.task_finished.connect(task_indicator.finish)
     cancel_by_task = {
+        ZARR_EXPORT_TASK_ID: m.dataset.cancel_export,
         CHROMATIC_TASK_ID: m.chromatic_auto.cancel,
         SCAN_TASK_ID: m.transient_scan.cancel,
         AUTO_MASK_TASK_ID: image_panel.mask_auto.cancel,

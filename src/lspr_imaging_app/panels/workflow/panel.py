@@ -56,13 +56,10 @@ from PyQt6.QtWidgets import QFrame, QLabel, QScrollArea, QVBoxLayout, QWidget
 from lspr_ui import get_active_theme
 
 from ...dataset import DatasetModule
-from ...image_tools import GeometryModule
 from ...selection import CubeDisplayModule, FrameRolesModule, ReferenceFrameModule, SelectionModule
 from ...storage.session_coordinator import SessionCoordinator
-from ..ui_state import UiStateStore
 from .collapsible_section import CollapsibleSection
 from .dataset_experimental_plan import ExperimentalPlanSection
-from .dataset_export import DatasetExportSection
 from .dataset_folder_row import DatasetFolderRow
 from .dataset_summary import DatasetSummarySection
 from .frame_roles_rows import FrameRolesRows
@@ -125,12 +122,8 @@ def _build_dataset_section(
     selection: SelectionModule,
     reference_frame: ReferenceFrameModule,
     session_coordinator: SessionCoordinator,
-    geometry: GeometryModule | None = None,
-    ui_state: UiStateStore | None = None,
     cube_display: CubeDisplayModule | None = None,
     frame_roles: FrameRolesModule | None = None,
-    roi_toolbox: object | None = None,
-    chromatic: object | None = None,
 ) -> tuple[CollapsibleSection, list[tuple[str, CollapsibleSection]]]:
     """Ported from the source's ``dataset_section`` + its top row (folder
     field + browse/explorer icons, *outside* the nested sections) + its
@@ -176,18 +169,11 @@ def _build_dataset_section(
         header_extra=experimental_plan_content.header_stats_label,
         parent=parent,
     )
-    export_section = CollapsibleSection(
-        "Export",
-        DatasetExportSection(dataset, parent, geometry=geometry, ui_state=ui_state, roi_toolbox=roi_toolbox, chromatic=chromatic),
-        expanded=False,
-        title_color=_nested_title_color(),
-        parent=parent,
-    )
-    children = _nested_children(parent, experimental_plan_section, summary_section, export_section)
+    # The "Export" section moved to the Image panel's Export ribbon tab (2026-10-20, `panels/image/export_tab.py`).
+    children = _nested_children(parent, experimental_plan_section, summary_section)
     subsections = [
         ("Experimental plan", experimental_plan_section),
         ("Summary", summary_section),
-        ("Export", export_section),
     ]
 
     dataset_inner = QWidget(parent)
@@ -282,12 +268,8 @@ class WorkflowPanel(QWidget):
         initial_stage: WorkflowStage | None = None,
         initial_subsections: dict[str, bool] | None = None,
         parent: QWidget | None = None,
-        geometry: GeometryModule | None = None,
-        ui_state: UiStateStore | None = None,
         cube_display: CubeDisplayModule | None = None,
         frame_roles: FrameRolesModule | None = None,
-        roi_toolbox: object | None = None,
-        chromatic: object | None = None,
     ) -> None:
         super().__init__(parent)
         # Order fixes the on-screen stacking order.
@@ -295,8 +277,7 @@ class WorkflowPanel(QWidget):
             (
                 WorkflowStage.DATASET,
                 *_build_dataset_section(
-                    self, dataset, selection, reference_frame, session_coordinator, geometry, ui_state, cube_display,
-                    frame_roles, roi_toolbox, chromatic,
+                    self, dataset, selection, reference_frame, session_coordinator, cube_display, frame_roles,
                 ),
             ),
             (WorkflowStage.ANALYSIS, *_build_analysis_section(self)),

@@ -202,14 +202,15 @@ def estimate_background_image(
     rois: list[AreaRoi] | None = None,
     mask_settings: AreaRoiDetectionSettings | None = None,
     external_mask: np.ndarray | None = None,
+    fast_rotation: bool = False,
 ) -> np.ndarray:
     """The smooth background estimate itself (what `apply_preprocessing`
     subtracts), for display: same rotate/flip/crop, same exclusion gating,
     same `estimate_background_profile` call as the flatten path - so the
     picture shows exactly the surface that would be removed. Works whether or
     not flattening is switched on (the sigma/bin/exclusion settings are all
-    that matter), matching the stable app's "Profile" view."""
-    processed = apply_spatial_preprocessing(image, geometry_settings)
+    that matter), matching the stable app's "Profile" view. `fast_rotation`: as in `apply_preprocessing`."""
+    processed = apply_spatial_preprocessing(image, geometry_settings, fast=fast_rotation)
     processed_exclusion_mask = None
     if external_mask is not None:
         candidate = np.asarray(external_mask, dtype=bool)
@@ -238,8 +239,12 @@ def apply_preprocessing(
     log_stage_timing: bool = False,
     roi_exclusion: np.ndarray | None = None,
     weights_cache: BackgroundWeightsCache | None = None,
+    fast_rotation: bool = False,
 ) -> np.ndarray:
     """Rotate/flip/crop, then optionally flatten the background.
+
+    `fast_rotation` (display while the slideshow plays, nothing else): bilinear rotation
+    instead of Lanczos4 (`geometry/transform.py` `apply_spatial_preprocessing`).
 
     `roi_exclusion` (analysis runs): the ROI part of the background exclusion mask, built once with
     `background.estimate.roi_exclusion_mask(processed_shape, rois)` instead of once per frame. It stands in for `rois`
@@ -282,7 +287,7 @@ def apply_preprocessing(
     """
     stage_started_at = time.perf_counter() if log_stage_timing else 0.0
 
-    processed = apply_spatial_preprocessing(image, geometry_settings, skip_crop=skip_crop)
+    processed = apply_spatial_preprocessing(image, geometry_settings, skip_crop=skip_crop, fast=fast_rotation)
 
     processed_exclusion_mask = None
     if external_mask is not None:

@@ -95,6 +95,9 @@ from .model import (
 
 logger = logging.getLogger(__name__)
 
+EXPORT_TASK_ID = "zarr_export"
+EXPORT_TASK_LABEL = "Export to OME-Zarr"
+
 
 @dataclass(frozen=True)
 class ChunkGridPreview:
@@ -105,6 +108,9 @@ class ChunkGridPreview:
     chunk_h: int = 64
     offset_x: int = 0
     offset_y: int = 0
+    processed: bool = False
+    """True: the grid lies in processed space (the export applies rotation/flip/crop, 2026-10-20), so it is drawn
+    straight on the displayed image; False: in raw pixels, mapped onto the displayed image (tilted under rotation)."""
 
 
 class DatasetModule(QObject):
@@ -122,8 +128,12 @@ class DatasetModule(QObject):
     export_finished = pyqtSignal(object)  # Path
     export_failed = pyqtSignal(str)  # also covers a cancelled export - see
     # export_to_ome_zarr's docstring for why there's no separate signal
+    # The status bar's task indicator (2026-10-20, with the move of the export to the Image panel's Export tab):
+    # same shapes as the other tasks (CLAUDE.md "Heavy work reports progress"); `export_*` above stay for the tab.
+    task_progress = pyqtSignal(str, str, float, str)  # task_id, label, fraction 0..1, message
+    task_finished = pyqtSignal(str, str, str)  # task_id, outcome, message; once per run
     # Added 2026-09-26 for the Export section's chunk-grid preview toggle
-    # (`panels/workflow/dataset_export.py`): lives here, not on the section
+    # (since 2026-10-20 the Image panel's Export tab, `panels/image/export_tab.py`): lives here, not on the section
     # itself, because `ImagePanel` (the only thing that can draw it) may
     # only read state from a module, never from a sibling panel - see
     # module docstring's "no other module may read dataset state any other
@@ -487,19 +497,31 @@ class DatasetModule(QObject):
         if self._export_worker.is_running():
             raise RuntimeError("An export is already running.")
         dataset = self._dataset
+        cancel_event = self._export_worker.cancel_event
+
+        def progress(percent: int, message: str) -> None:
+            self.export_progress.emit(percent, message)
+            self.task_progress.emit(EXPORT_TASK_ID, EXPORT_TASK_LABEL, max(0.0, min(1.0, percent / 100.0)), message)
 
         def task() -> None:
+            self.task_progress.emit(EXPORT_TASK_ID, EXPORT_TASK_LABEL, 0.0, "Starting export...")
             try:
                 result = export_ome_zarr_dataset(
                     dataset,
                     destination,
-                    progress_callback=lambda percent, message: self.export_progress.emit(percent, message),
-                    cancel_event=self._export_worker.cancel_event,
+                    progress_callback=progress,
+                    cancel_event=cancel_event,
                     **kwargs,
                 )
             except Exception as exc:  # noqa: BLE001 - reported via signal, not re-raised
+                if cancel_event.is_set():
+                    self.task_finished.emit(EXPORT_TASK_ID, "cancelled", "")
+                else:
+                    logger.error("The OME-Zarr export failed", exc_info=exc)
+                    self.task_finished.emit(EXPORT_TASK_ID, "failed", str(exc))
                 self.export_failed.emit(str(exc))
                 return
+            self.task_finished.emit(EXPORT_TASK_ID, "completed", f"written to {Path(result).name}")
             self.export_finished.emit(result)
 
         self._export_worker.submit(task)
@@ -583,14 +605,16 @@ class DatasetModule(QObject):
 
     def chunk_grid_preview(self) -> ChunkGridPreview:
         """The Export section's chunk-grid preview overlay. `ImagePanel` reads this to decide whether/how to draw the
-        grid; it never reads the Export section's widgets directly. The grid is in **raw** pixels (the export writes
-        raw pixels); the panel maps it onto the displayed (rotated/cropped) image."""
+        grid; it never reads the Export section's widgets directly. The grid is in raw pixels, or in processed space
+        when the export applies rotation/flip/crop (`ChunkGridPreview.processed`)."""
         return self._chunk_grid_preview
 
-    def set_chunk_grid_preview(self, enabled: bool, chunk_w: int, chunk_h: int, offset_x: int = 0, offset_y: int = 0) -> None:
+    def set_chunk_grid_preview(
+        self, enabled: bool, chunk_w: int, chunk_h: int, offset_x: int = 0, offset_y: int = 0, processed: bool = False
+    ) -> None:
         """Set by the Export section on toggle, and again on every chunk-size or grid-position change while the
         preview is on. No-op-skip if nothing actually changed, matching this module's other setters."""
-        preview = ChunkGridPreview(bool(enabled), int(chunk_w), int(chunk_h), int(offset_x), int(offset_y))
+        preview = ChunkGridPreview(bool(enabled), int(chunk_w), int(chunk_h), int(offset_x), int(offset_y), bool(processed))
         if preview == self._chunk_grid_preview:
             return
         self._chunk_grid_preview = preview

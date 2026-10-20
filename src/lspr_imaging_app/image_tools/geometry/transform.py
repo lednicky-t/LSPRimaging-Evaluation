@@ -28,6 +28,7 @@ def apply_spatial_preprocessing(
     settings: GeometrySettings,
     *,
     skip_crop: bool = False,
+    fast: bool = False,
 ) -> np.ndarray:
     """Rotate -> flip -> crop. Pixels the rotation creates (the corners
     outside the original image) have no measurement behind them and are
@@ -37,12 +38,17 @@ def apply_spatial_preprocessing(
 
     **Rotation runs through OpenCV (2026-10-11)**: one `cv2.warpAffine` straight
     at the final size instead of scipy's full-canvas `ndimage.rotate` plus a
-    slice (~5 ms against ~200 ms on a 900x1300 frame). Same shape, same NaN
-    pixels; values differ by OpenCV's 1/32-pixel interpolation step (see
-    `_cv2_affine` and the 2026-10-11 build-log entry for the measurement).
-    Without rotation, flip and crop are exact array views and need no resampling."""
+    slice. Same shape, same NaN pixels. Since 2026-10-20 the warp is Lanczos4
+    (~19 ms per 900x1300 frame), not bilinear: see `_cv2_affine` for why and
+    the measurement.
+    Without rotation, flip and crop are exact array views and need no resampling.
+
+    `fast` (2026-10-20, maintainer decision "fast while moving, exact at rest"): bilinear
+    instead of Lanczos4, ~4 ms instead of ~10-25 ms per 1300x900 frame (audit in
+    docs/rotated_zarr_export_interpolation_2026-10-20.md). Only for frames shown while the
+    slideshow plays; the panel re-renders the frame exactly when Play stops. Same NaN pixels."""
     if _cv2_geometry_usable(image, settings):
-        return _warp_geometry_cv2(image, settings, skip_crop=skip_crop)
+        return _warp_geometry_cv2(image, settings, skip_crop=skip_crop, fast=fast)
     if _rotation_active(settings) and not np.issubdtype(image.dtype, np.floating):
         image = image.astype(np.float32)
     return _apply_spatial_transform(image, settings, order=1, mode="constant", cval=np.nan, skip_crop=skip_crop)
@@ -81,15 +87,16 @@ def _warp_geometry_cv2(
     skip_crop: bool = False,
     nearest: bool = False,
     border_value: float = float("nan"),
+    fast: bool = False,
 ) -> np.ndarray:
     """Rotate + flip (+ crop) in one `cv2.warpAffine` at the output size.
     `nearest` is for masks (no blending of 0/1); `border_value` fills pixels
-    the rotation creates (NaN for images, 0 for masks)."""
+    the rotation creates (NaN for images, 0 for masks); `fast`: bilinear (see `apply_spatial_preprocessing`)."""
     effective = replace(settings, crop=CropDefinition()) if skip_crop else settings
     matrix, offset, out_shape = _combined_export_transform(image.shape[:2], effective)
     if out_shape[0] <= 0 or out_shape[1] <= 0:
         return np.zeros(out_shape, dtype=image.dtype)
-    return _cv2_affine(image, matrix, offset, out_shape, nearest=nearest, border_value=border_value)
+    return _cv2_affine(image, matrix, offset, out_shape, nearest=nearest, border_value=border_value, fast=fast)
 
 
 def apply_spatial_mask(
@@ -390,13 +397,9 @@ def resample_raw_patch_to_processed_box(
     already-cropped-to-the-needed-region raw patch instead of the full raw
     array.
 
-    The cv2 path introduces a tiny, deterministic difference from scipy's
-    continuous bilinear interpolation (OpenCV rounds the sub-pixel offset to
-    one of 32 discrete steps internally) - measured at up to ~0.4 counts on
-    real 16-bit sensor data, ~30,000x below that same data's own Poisson
-    shot-noise floor (~200 counts). See
-    docs/roi_scoped_resample_cv2_fast_path.md for the full measurement
-    writeup and why this is treated as scientifically negligible.
+    The cv2 path resamples with Lanczos4 since 2026-10-20 (see `_cv2_affine`);
+    the scipy fallback (no OpenCV) is bilinear. Earlier bilinear measurement:
+    docs/roi_scoped_resample_cv2_fast_path.md.
     """
     matrix, offset, out_shape = combined_transform_for_box(in_shape, settings, box)
     if out_shape[0] <= 0 or out_shape[1] <= 0:
@@ -456,10 +459,10 @@ def apply_spatial_preprocessing_export(
     if out_shape[0] <= 0 or out_shape[1] <= 0:
         return np.zeros(out_shape, dtype=image.dtype)
 
-    # OpenCV's warpAffine is ~15-30x faster than scipy's generic interpolation
-    # loop. With a NaN border it marks exactly the same pixels as outside the
-    # source as scipy does (verified 2026-10-03 at 3/15/33 deg: identical NaN
-    # sets, finite values within 0.04 counts), so the fast path is safe here.
+    # OpenCV's warpAffine (Lanczos4 since 2026-10-20, see `_cv2_affine`) marks
+    # exactly the same pixels as outside the source as scipy does (re-verified
+    # 2026-10-20 at 1.4/-7.3/33 deg: identical NaN sets). The scipy fallback
+    # below is bilinear and only runs without OpenCV.
     cv2_result = _cv2_affine(image, matrix, offset, out_shape)
     if cv2_result is not None:
         return cv2_result
@@ -484,6 +487,7 @@ def _cv2_affine(
     *,
     nearest: bool = False,
     border_value: float = float("nan"),
+    fast: bool = False,
 ) -> np.ndarray | None:
     """Apply the same output[y,x] = image[matrix @ [y,x] + offset] mapping as
     ndimage.affine_transform, via cv2.warpAffine, with `border_value` (NaN by
@@ -491,10 +495,26 @@ def _cv2_affine(
     uint8) input; anything else is converted to float32. Returns None if cv2
     is unavailable so the caller can fall back to the scipy path.
 
-    OpenCV rounds the sub-pixel position to one of 32 steps (1/32 px) for
-    bilinear sampling, so values differ slightly from scipy's continuous
-    interpolation: measured below ~0.4 counts on real 16-bit frames, far under
-    the shot-noise floor (docs/roi_scoped_resample_cv2_fast_path.md)."""
+    **Images are resampled with Lanczos4 (2026-10-20, maintainer decision)**, masks
+    (`nearest`) with nearest neighbour. Measured on real frames (1.4 deg, 144 ROIs;
+    docs/rotated_zarr_export_interpolation_2026-10-20.md, tools/rotation_interpolation_lab.py):
+    bilinear, used before, averaged neighbouring pixels - it kept only 72 % of the
+    pixel noise (60-80 % depending on the sub-pixel phase, a moire in the noise) and
+    moved ROI sample/reference ratios by ~720 ppm RMS, close to one frame's own ROI
+    noise (~890 ppm). Lanczos4 keeps 94 % of the noise and moves the ratios by
+    ~140 ppm, as close as cubic/quintic splines and an FFT (sinc) rotation, at
+    19 ms instead of 7 ms per 1300x900 frame. OpenCV's 1/32 px position step does not
+    limit it (it equals the quintic spline there).
+
+    Which pixels are NaN does not change with the method: the Lanczos warp runs with
+    a replicated border (its 8x8 kernel would otherwise carry the NaN border 3-4 px
+    into the image), then exactly the pixels whose source position lies outside the
+    raw image get `border_value` (`_outside_source_mask`). NaN inside the source (none
+    in practice: masks never write into the image) is kept to the footprint bilinear
+    gives, never grown to the kernel's.
+
+    `fast`: the bilinear warp used before 2026-10-20 (NaN border, same NaN pixels), for the
+    slideshow preview only."""
     if nearest and image.dtype == np.uint8:
         src = image
     else:
@@ -509,14 +529,55 @@ def _cv2_affine(
          [matrix[0, 1], matrix[0, 0], offset[0]]],
         dtype=np.float64,
     )
-    return cv2.warpAffine(
-        src,
-        cv2_matrix,
-        (out_w, out_h),
-        flags=(cv2.INTER_NEAREST if nearest else cv2.INTER_LINEAR) | cv2.WARP_INVERSE_MAP,
-        borderMode=cv2.BORDER_CONSTANT,
-        borderValue=border_value,
+    if nearest or fast:
+        return cv2.warpAffine(
+            src, cv2_matrix, (out_w, out_h), flags=(cv2.INTER_NEAREST if nearest else cv2.INTER_LINEAR) | cv2.WARP_INVERSE_MAP,
+            borderMode=cv2.BORDER_CONSTANT, borderValue=border_value,
+        )
+    # Integer input cannot hold NaN (it is converted to float32 above): skip the ~1 ms scan.
+    source_nan = np.isnan(src) if np.issubdtype(image.dtype, np.floating) else None
+    has_source_nan = source_nan is not None and bool(source_nan.any())
+    if has_source_nan:
+        src = np.where(source_nan, np.nanmean(src), src).astype(src.dtype, copy=False)
+    result = cv2.warpAffine(
+        src, cv2_matrix, (out_w, out_h), flags=cv2.INTER_LANCZOS4 | cv2.WARP_INVERSE_MAP,
+        borderMode=cv2.BORDER_REPLICATE,
     )
+    result[_outside_source_mask(matrix, offset, out_shape, src.shape[:2])] = border_value
+    if has_source_nan:
+        footprint = cv2.warpAffine(
+            source_nan.astype(np.float32), cv2_matrix, (out_w, out_h), flags=cv2.INTER_LINEAR | cv2.WARP_INVERSE_MAP,
+            borderMode=cv2.BORDER_CONSTANT, borderValue=0.0,
+        )
+        result[footprint > 0] = np.nan
+    return result
+
+
+def _outside_source_mask(
+    matrix: np.ndarray, offset: np.ndarray, out_shape: tuple[int, int], src_shape: tuple[int, int]
+) -> np.ndarray:
+    """True for every output pixel whose source position (`matrix @ [r, c] + offset`) lies outside the source image
+    ([0, size - 1] on both axes) - the pixels a rotation creates. Per row the inside part is one interval of columns
+    (the map is affine), so this compares column indices against two bounds per row instead of building the full
+    coordinate maps."""
+    out_h, out_w = out_shape
+    rows = np.arange(out_h, dtype=np.float64)
+    lo = np.full(out_h, -np.inf)
+    hi = np.full(out_h, np.inf)
+    eps = 1e-9
+    for axis, size in ((0, src_shape[0]), (1, src_shape[1])):
+        base = matrix[axis, 0] * rows + offset[axis]  # source coordinate at column 0
+        slope = float(matrix[axis, 1])
+        if abs(slope) < 1e-12:
+            outside = (base < -eps) | (base > size - 1 + eps)
+            lo[outside], hi[outside] = np.inf, -np.inf
+            continue
+        a = (-eps - base) / slope
+        b = (size - 1 + eps - base) / slope
+        lo = np.maximum(lo, np.minimum(a, b))
+        hi = np.minimum(hi, np.maximum(a, b))
+    cols = np.arange(out_w, dtype=np.float64)[None, :]
+    return (cols < lo[:, None]) | (cols > hi[:, None])
 
 
 def _apply_spatial_transform(
