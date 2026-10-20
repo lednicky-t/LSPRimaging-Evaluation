@@ -61,6 +61,7 @@ subscriber, not assumed correct.
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
@@ -95,6 +96,17 @@ from .model import (
 logger = logging.getLogger(__name__)
 
 
+@dataclass(frozen=True)
+class ChunkGridPreview:
+    """The export chunk grid to draw on the Image panel: lines at ``offset + k * chunk`` in raw pixels."""
+
+    enabled: bool = False
+    chunk_w: int = 64
+    chunk_h: int = 64
+    offset_x: int = 0
+    offset_y: int = 0
+
+
 class DatasetModule(QObject):
     """Owns dataset load/convert and acquisition metadata."""
 
@@ -126,8 +138,7 @@ class DatasetModule(QObject):
         self._time_anchor_ms_value: int | None = None
         self._time_anchor_known = False
         self._mean_interval_cache: tuple[ImageDataset, object, int, float | None] | None = None
-        self._chunk_grid_preview_enabled = False
-        self._chunk_grid_preview_chunk_px = 64
+        self._chunk_grid_preview = ChunkGridPreview()
         self._worker = AnalysisWorker()
         # Separate from `_worker` (load) rather than shared - a load and an
         # export are independent operations with no reason to serialize
@@ -570,19 +581,17 @@ class DatasetModule(QObject):
 
     # -- chunk-grid preview (Export section <-> Image panel) ----------------
 
-    def chunk_grid_preview(self) -> tuple[bool, int]:
-        """Current (enabled, chunk_size_px) for the Export section's
-        chunk-grid preview overlay. `ImagePanel` reads this to decide
-        whether/how to draw the grid; it never reads the Export section's
-        widgets directly."""
-        return self._chunk_grid_preview_enabled, self._chunk_grid_preview_chunk_px
+    def chunk_grid_preview(self) -> ChunkGridPreview:
+        """The Export section's chunk-grid preview overlay. `ImagePanel` reads this to decide whether/how to draw the
+        grid; it never reads the Export section's widgets directly. The grid is in **raw** pixels (the export writes
+        raw pixels); the panel maps it onto the displayed (rotated/cropped) image."""
+        return self._chunk_grid_preview
 
-    def set_chunk_grid_preview(self, enabled: bool, chunk_size_px: int) -> None:
-        """Set by the Export section on toggle, and again on every chunk-size
-        edit while the preview is on. No-op-skip if nothing actually
-        changed, matching this module's other setters."""
-        if enabled == self._chunk_grid_preview_enabled and chunk_size_px == self._chunk_grid_preview_chunk_px:
+    def set_chunk_grid_preview(self, enabled: bool, chunk_w: int, chunk_h: int, offset_x: int = 0, offset_y: int = 0) -> None:
+        """Set by the Export section on toggle, and again on every chunk-size or grid-position change while the
+        preview is on. No-op-skip if nothing actually changed, matching this module's other setters."""
+        preview = ChunkGridPreview(bool(enabled), int(chunk_w), int(chunk_h), int(offset_x), int(offset_y))
+        if preview == self._chunk_grid_preview:
             return
-        self._chunk_grid_preview_enabled = enabled
-        self._chunk_grid_preview_chunk_px = chunk_size_px
+        self._chunk_grid_preview = preview
         self.chunk_grid_preview_changed.emit()

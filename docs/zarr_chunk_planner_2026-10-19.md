@@ -98,6 +98,39 @@ Tests: `tests/integration/test_lspri_rewrite_ome_zarr_export_frame.py`.
 Padding uses the fill value: 0 for uint16, NaN for float32. For uint16, 0 cannot be told apart from a real 0, so use
 `valid_region`. Not yet wired to the UI.
 
+## Export section UI (2026-10-20)
+
+Maintainer decisions:
+- **The export stays raw pixels.** Auto adjust (rotation) moves to the parked TIFF->Zarr session work. A rotated
+  export needs float32 or a validity mask, and interpolated pixels (`rotation_nan_phase1_inventory_2026-10-03.md`).
+- **Chunks are always W x H.** There is no square/rectangle switch.
+
+Built:
+- `panels/workflow/dataset_export.py`:
+  - Chunk W x H fields with live `chunk_warnings`.
+  - Grid position: Image corner / Aligned to ROIs, lossless / Aligned to ROIs, lossy.
+  - Chunk counts, plus the pad/trim line.
+  - The Find best magnifier button.
+  - Remembered state: `export/chunk_size` (width, old key; height defaults to it), `export/chunk_h`,
+    `export/grid_position`.
+- `panels/workflow/export_roi_layout.py`: ROI read boxes in raw pixels. Chromatic affines are included when the
+  correction is on. Boxes are mapped through the inverse image tools (`image_tools.geometry.transform.
+  raw_to_processed_affine_xy`, new).
+- `panels/workflow/chunk_layout_dialog.py`: the Find best popup. `suggest_layouts` and the compression sampling (3
+  cubes x up to 5 wavelengths) run on an `AnalysisWorker`.
+- Grid preview: `DatasetModule.ChunkGridPreview` (W, H, offsets) is in raw pixels. The Image panel maps the lines
+  onto the displayed image, so they appear tilted or shifted under rotation or crop.
+
+Tests: `tests/integration/test_lspri_rewrite_export_chunk_tools.py`.
+
+**Fixed the same day, after the maintainer's first look:** the table showed Columns at 2.00 chunks per ROI. The
+cause: with the chromatic shift, a column of ROIs spans up to 87 px, wider than an 80 px chunk, so every grid offset
+tied at 2 chunks per column. The tie-break then took the widest run of offsets, which put a grid line through every
+column. Ties now go to the fewest chunks per single ROI (`_best_offset(tie_units=...)`). Columns went to 1.29 and
+Rows to 1.46. The headers now say "Chunks / ROI" (they are counts; they were read as ms).
+
+**Not checked visually yet:** the width of the "Grid position" + "Shard" row (the panel has a width budget).
+
 ## Open for Phase 2
 
 - `suggest_layouts` takes 40-210 ms on 160 ROIs (plus compression sampling): a worker thread is still advisable.

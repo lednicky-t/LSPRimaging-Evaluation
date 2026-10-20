@@ -982,6 +982,8 @@ def _build_workflow_panel(m: _Modules, writer: _SettingsWriter, ui_state: UiStat
         ui_state=ui_state,
         cube_display=m.cube_display,
         frame_roles=m.frame_roles,
+        roi_toolbox=m.roi_toolbox,
+        chromatic=m.chromatic,
     )
     # Immediate persist-on-change, same pattern as theme/auto_apply - switching
     # the open stage is a deliberate, occasional click, not a continuous drag

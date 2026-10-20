@@ -129,6 +129,8 @@ def _build_dataset_section(
     ui_state: UiStateStore | None = None,
     cube_display: CubeDisplayModule | None = None,
     frame_roles: FrameRolesModule | None = None,
+    roi_toolbox: object | None = None,
+    chromatic: object | None = None,
 ) -> tuple[CollapsibleSection, list[tuple[str, CollapsibleSection]]]:
     """Ported from the source's ``dataset_section`` + its top row (folder
     field + browse/explorer icons, *outside* the nested sections) + its
@@ -175,7 +177,11 @@ def _build_dataset_section(
         parent=parent,
     )
     export_section = CollapsibleSection(
-        "Export", DatasetExportSection(dataset, parent, geometry=geometry, ui_state=ui_state), expanded=False, title_color=_nested_title_color(), parent=parent
+        "Export",
+        DatasetExportSection(dataset, parent, geometry=geometry, ui_state=ui_state, roi_toolbox=roi_toolbox, chromatic=chromatic),
+        expanded=False,
+        title_color=_nested_title_color(),
+        parent=parent,
     )
     children = _nested_children(parent, experimental_plan_section, summary_section, export_section)
     subsections = [
@@ -280,13 +286,18 @@ class WorkflowPanel(QWidget):
         ui_state: UiStateStore | None = None,
         cube_display: CubeDisplayModule | None = None,
         frame_roles: FrameRolesModule | None = None,
+        roi_toolbox: object | None = None,
+        chromatic: object | None = None,
     ) -> None:
         super().__init__(parent)
         # Order fixes the on-screen stacking order.
         built = [
             (
                 WorkflowStage.DATASET,
-                *_build_dataset_section(self, dataset, selection, reference_frame, session_coordinator, geometry, ui_state, cube_display, frame_roles),
+                *_build_dataset_section(
+                    self, dataset, selection, reference_frame, session_coordinator, geometry, ui_state, cube_display,
+                    frame_roles, roi_toolbox, chromatic,
+                ),
             ),
             (WorkflowStage.ANALYSIS, *_build_analysis_section(self)),
             (WorkflowStage.OUTPUTS, *_build_outputs_section(self)),

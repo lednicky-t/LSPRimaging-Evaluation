@@ -49,6 +49,7 @@ __all__ = [
     "estimate_pitch",
     "export_frame",
     "lattice_groups",
+    "map_boxes",
     "roi_read_boxes",
     "score_layout",
     "suggest_layouts",
@@ -193,6 +194,31 @@ def roi_read_boxes(
     return out
 
 
+def map_boxes(boxes: np.ndarray, affine: np.ndarray, image_shape: tuple[int, int]) -> np.ndarray:
+    """Read boxes moved through a 2x3 affine (e.g. processed -> raw space for a raw-pixel export): the axis-aligned
+    box around each mapped rectangle, clipped to ``image_shape``. A rotation makes the boxes a little larger (the
+    corners of the rotated rectangle); empty boxes stay empty."""
+    boxes = np.asarray(boxes, dtype=np.int64).reshape(-1, 4)
+    m = np.asarray(affine, dtype=np.float64)[:2, :3]
+    height, width = int(image_shape[0]), int(image_shape[1])
+    out = np.zeros_like(boxes)
+    valid = (boxes[:, 2] > boxes[:, 0]) & (boxes[:, 3] > boxes[:, 1])
+    if not valid.any():
+        return out
+    b = boxes[valid].astype(np.float64)
+    # Pixel edges: the box covers [x0, x1) x [y0, y1); its corners are the outer pixel edges.
+    xs = np.stack((b[:, 0], b[:, 2], b[:, 0], b[:, 2]), axis=1)
+    ys = np.stack((b[:, 1], b[:, 1], b[:, 3], b[:, 3]), axis=1)
+    tx = m[0, 0] * xs + m[0, 1] * ys + m[0, 2]
+    ty = m[1, 0] * xs + m[1, 1] * ys + m[1, 2]
+    eps = 1e-6  # so floating-point noise (cos 90 deg = 6e-17) never adds a whole pixel
+    out[valid, 0] = np.clip(np.floor(tx.min(axis=1) + eps), 0, width)
+    out[valid, 1] = np.clip(np.floor(ty.min(axis=1) + eps), 0, height)
+    out[valid, 2] = np.clip(np.ceil(tx.max(axis=1) - eps), 0, width)
+    out[valid, 3] = np.clip(np.ceil(ty.max(axis=1) - eps), 0, height)
+    return out
+
+
 def _mask_rect(mask) -> tuple[float, float, float, float]:
     h, w = mask.mask.shape[:2]
     return float(mask.x0), float(mask.y0), float(mask.x0 + w - 1), float(mask.y0 + h - 1)
@@ -282,11 +308,19 @@ def _axis_counts(lo: np.ndarray, hi: np.ndarray, units: _Units, c: int, offsets:
     return out
 
 
-def _best_offset(lo: np.ndarray, hi: np.ndarray, units: _Units, c: int) -> tuple[int, int]:
-    """Offset (middle of the widest run of best offsets) and its tolerance (px of shift that stays as good)."""
-    members = np.concatenate(units.members)
+def _best_offset(lo: np.ndarray, hi: np.ndarray, units: _Units, c: int, tie_units: _Units | None = None) -> tuple[int, int]:
+    """Offset (middle of the widest run of best offsets) and its tolerance (px of shift that stays as good).
+
+    ``tie_units`` (normally the single ROIs) decide between offsets that are equally good for ``units``. Without
+    it a saturated group count chose blindly: on 2026-10-20 a column of ROIs (87 px wide with the chromatic shift)
+    could not fit one 80 px chunk at any offset, every offset tied at 2 chunks per column, and the widest run put
+    a grid line through the middle of every column (2.00 chunks per ROI instead of 1.27)."""
+    members = np.concatenate(units.members + (tie_units.members if tie_units is not None else ()))
     starts = np.unique(np.concatenate(((lo[members] + 1) % c, hi[members] % c)))  # where any count can change
     total = _axis_counts(lo, hi, units, c, starts).sum(axis=1)
+    if tie_units is not None:
+        tie = _axis_counts(lo, hi, tie_units, c, starts).sum(axis=1)
+        total = total * (int(tie.max()) + 1) + tie  # lexicographic: units first, then tie_units
     widths = np.diff(np.append(starts, starts[0] + c))
     best = np.flatnonzero(total == total.min())
     j = best[np.argmax(widths[best])]
@@ -309,8 +343,9 @@ def align_grid(
     units = _make_units(valid, pattern, groups)
     if units is None:
         return None
-    ox, tx = _best_offset(boxes[:, 0], boxes[:, 2], _sorted_units(units, boxes[:, 0]), int(chunk_w))
-    oy, ty = _best_offset(boxes[:, 1], boxes[:, 3], _sorted_units(units, boxes[:, 1]), int(chunk_h))
+    tie = None if pattern == "single" else _make_units(valid, "single", None)  # ties go to the fewest chunks per ROI
+    ox, tx = _best_offset(boxes[:, 0], boxes[:, 2], _sorted_units(units, boxes[:, 0]), int(chunk_w), tie)
+    oy, ty = _best_offset(boxes[:, 1], boxes[:, 3], _sorted_units(units, boxes[:, 1]), int(chunk_h), tie)
     return ChunkLayout(int(chunk_w), int(chunk_h), ox, oy, tx, ty)
 
 

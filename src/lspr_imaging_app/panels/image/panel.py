@@ -114,6 +114,7 @@ from ...image_tools import (
     MaskScopeModule,
 )
 from ...image_tools.geometry.model import CropDefinition, GeometrySettings
+from ...image_tools.geometry.transform import raw_to_processed_affine_xy
 from ...diagnostics.thread_times import thread_cpu_times
 from ...image_tools.preprocess import area_selection_to_raw, resolve_external_mask
 from ...roi import RoiToolbox
@@ -2609,22 +2610,29 @@ class ImagePanel(QWidget):
         the maintainer can see how the chosen chunk size will actually
         divide up the image before exporting. Reads `DatasetModule` only
         (see its `chunk_grid_preview` docstring) - never touches the Export
-        section's widgets."""
-        enabled, chunk_px = self._dataset.chunk_grid_preview()
-        if not enabled or self._last_image_shape is None or chunk_px <= 0:
+        section's widgets.
+
+        The grid lives in raw pixels (the export writes raw pixels, 2026-10-20): its lines run from the grid offset
+        across the raw frame and are mapped onto the displayed image, so with a rotation they appear tilted and with
+        a crop shifted - exactly where the exported chunks will fall."""
+        preview = self._dataset.chunk_grid_preview()
+        raw_shape = self._dataset.raw_plane_shape() if preview.enabled else None
+        if not preview.enabled or raw_shape is None or preview.chunk_w <= 0 or preview.chunk_h <= 0:
             self._chunk_grid_curve.clear()
             return
-        height, width = self._last_image_shape
+        raw_h, raw_w = float(raw_shape[0]), float(raw_shape[1])
+        to_display = raw_to_processed_affine_xy((int(raw_h), int(raw_w)), self._geometry.settings())
         xs: list[float] = []
         ys: list[float] = []
-        x = 0.0
-        while x <= width:
-            _append_polyline(xs, ys, np.array([x, x]), np.array([0.0, float(height)]))
-            x += chunk_px
-        y = 0.0
-        while y <= height:
-            _append_polyline(xs, ys, np.array([0.0, float(width)]), np.array([y, y]))
-            y += chunk_px
+
+        def segment(x0: float, y0: float, x1: float, y1: float) -> None:
+            pts = to_display @ np.array([[x0, x1], [y0, y1], [1.0, 1.0]])
+            _append_polyline(xs, ys, pts[0], pts[1])
+
+        for x in np.arange(preview.offset_x % preview.chunk_w, raw_w + 0.5, preview.chunk_w, dtype=np.float64):
+            segment(x, 0.0, x, raw_h)
+        for y in np.arange(preview.offset_y % preview.chunk_h, raw_h + 0.5, preview.chunk_h, dtype=np.float64):
+            segment(0.0, y, raw_w, y)
         self._chunk_grid_curve.setData(xs, ys)
 
     # -- interaction --------------------------------------------------------

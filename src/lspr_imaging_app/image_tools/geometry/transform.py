@@ -261,6 +261,23 @@ def combined_geometry_affine_xy(
     )
 
 
+def raw_to_processed_affine_xy(raw_shape: tuple[int, int], settings: GeometrySettings) -> np.ndarray:
+    """2x3 affine from raw pixel (x, y) to processed-space (x, y) under ``settings`` (identity when the image tools
+    are off). The inverse direction is `invert_affine_matrix` of this. Used where something lives in raw pixels but
+    is drawn or compared in processed space (the OME-Zarr export writes raw pixels; ROIs are in processed space).
+    Same machinery as `combined_geometry_affine_xy`, with "no rotation/flip/crop" as the old settings."""
+    if not bool(getattr(settings, "image_tools_enabled", False)):
+        return np.array([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]])
+    raw_settings = replace(
+        settings,
+        rotation_angle_deg=0.0,
+        flip_horizontal=False,
+        flip_vertical=False,
+        crop=replace(settings.crop, enabled=False),
+    )
+    return combined_geometry_affine_xy(raw_shape, raw_settings, settings)
+
+
 def remap_point_for_geometry_change(
     point_xy: tuple[float, float],
     raw_shape: tuple[int, int],
