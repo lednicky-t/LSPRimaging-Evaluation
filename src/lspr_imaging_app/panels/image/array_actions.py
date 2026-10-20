@@ -10,6 +10,10 @@ Rules (maintainer, 2026-10-08)
 - A tilt above 1 degree: after the detection the user is asked whether to rotate the image (yes: rotate and
   detect again; the existing ROIs follow the rotation through the geometry sync).
 - Refused while an analysis runs (renumbering ROIs under a running analysis would corrupt it), like Undo.
+- **Auto rotate** (2026-10-20, maintainer request; button in the Image tools tab, Rotation group): the same
+  detection as Detect, then the image is rotated by the measured tilt, however small (no 1 degree threshold, no
+  question), and **no ROIs are placed or changed** (existing ROIs follow the rotation through the geometry sync).
+  One pass: the tilt is measured on the image as it is now shown, so it adds to the current rotation.
 - Scope toggle (Persistent / Individual, like the Mask): not built yet; every edit is Persistent, as ROIs always were.
 
 Positions: the thread works on the displayed image of that frame; results are mapped back to the reference
@@ -88,6 +92,7 @@ class ArrayActions(QObject):
         self._ask = ask or (lambda title, text: _ask(dialog_parent, title, text))
         self._tell = tell or (lambda title, text: _tell(dialog_parent, title, text))
         self._rotated_once = False
+        self._auto_rotate = False  # the running Detect only measures the tilt for Auto rotate
         self._last_request: dict | None = None
         self._edit_target = edit_target
 
@@ -100,11 +105,21 @@ class ArrayActions(QObject):
         action.running_changed.connect(controls.set_running)
         action.completed.connect(self._on_completed)
         action.failed.connect(self._on_failed)
-        action.cancelled.connect(lambda: self.status.emit("Array: cancelled."))
+        action.cancelled.connect(self._on_cancelled)
 
     # -- start --------------------------------------------------------------------------
 
+    def auto_rotate(self) -> None:
+        """Detect the array and rotate the image by its tilt, however small. Places no ROIs."""
+        if self._action.is_running():
+            return
+        self._auto_rotate = True
+        self._begin(DETECT)
+        if not self._action.is_running():  # refused before starting (no dataset, analysis running, ...)
+            self._auto_rotate = False
+
     def _on_run(self, mode: str) -> None:
+        self._auto_rotate = False
         self._rotated_once = False
         if mode == "manual":
             grid = self._controls.grid()
@@ -206,12 +221,34 @@ class ArrayActions(QObject):
 
     def _on_failed(self, message: str) -> None:
         self._fail_message(message)
+        self._auto_rotate = False
+
+    def _on_cancelled(self) -> None:
+        was_auto, self._auto_rotate = self._auto_rotate, False
+        self.status.emit("Auto rotate: cancelled." if was_auto else "Array: cancelled.")
 
     def _fail_message(self, message: str) -> None:
-        self.status.emit(f"Array: {message}")
-        self._tell("Array", message)
+        title = "Auto rotate" if self._auto_rotate else "Array"  # a refusal before an Auto rotate run starts
+        self.status.emit(f"{title}: {message}")
+        self._tell(title, message)
+
+    def _finish_auto_rotate(self, outcome: ArrayOutcome) -> None:
+        tilt = float(outcome.result.tilt_deg)
+        if not np.isfinite(tilt):
+            self.status.emit("Auto rotate: no tilt could be measured; the rotation was not changed.")
+            return
+        current = float(self._geometry.settings().rotation_angle_deg)
+        if abs(tilt) < 0.005:  # below what the rotation field shows (2 decimals)
+            self.status.emit(f"Auto rotate: the array is already level (tilt {tilt:+.3f}°); rotation stays {current:.2f}°.")
+            return
+        self._geometry.set_rotation(current + tilt)
+        self.status.emit(f"Auto rotate: levelled the array, tilt {tilt:+.2f}° (rotation now {current + tilt:.2f}°).")
 
     def _on_completed(self, outcome: ArrayOutcome) -> None:
+        if self._auto_rotate:
+            self._auto_rotate = False
+            self._finish_auto_rotate(outcome)
+            return
         result = outcome.result
         if outcome.kind == DETECT and result.rotate_suggestion_deg is not None and not self._rotated_once:
             tilt = float(result.rotate_suggestion_deg)

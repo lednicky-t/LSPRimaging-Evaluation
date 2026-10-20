@@ -153,6 +153,10 @@ class RoiTab(QWidget):
             layout.addWidget(section)
         layout.addStretch(1)
 
+    def auto_rotate(self) -> None:
+        """Image tools tab's Auto rotate: level the image by the detected array's tilt (`ArrayActions.auto_rotate`)."""
+        self._array_actions.auto_rotate()
+
     # -- what the View tab copies ------------------------------------------
 
     @property

@@ -900,6 +900,8 @@ class ImagePanel(QWidget):
         self._roi_tab.label_placement_changed.connect(self._on_roi_label_placement_changed)
         self._roi_tab.group_labels_changed.connect(self._on_group_labels_changed)
         self._roi_tab.status.connect(self._on_tool_status)
+        # Auto rotate (Image tools tab, Rotation group) runs the ROI tab's array detection; built before this tab.
+        self._transforms_section.auto_rotate_requested.connect(self._roi_tab.auto_rotate)
         return self._roi_tab
 
     def _build_view_tab(self) -> QWidget:

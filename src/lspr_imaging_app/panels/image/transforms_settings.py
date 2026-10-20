@@ -93,7 +93,7 @@ from __future__ import annotations
 
 import logging
 
-from PyQt6.QtCore import QByteArray, QRectF, QSize, Qt
+from PyQt6.QtCore import QByteArray, QRectF, QSize, Qt, pyqtSignal
 from PyQt6.QtGui import QIcon, QPainter, QPixmap
 from PyQt6.QtSvg import QSvgRenderer
 from PyQt6.QtWidgets import QHBoxLayout, QToolButton, QWidget
@@ -144,10 +144,21 @@ def _slashed_icon(name: str, color: str) -> QIcon:
     inserting one extra `<path>` into the vendored SVG (rather than
     vendoring a second icon file) so the slashed and plain icons can never
     drift apart in stroke width or geometry."""
+    return _glyph_with_paths(name, color, '<path d="M21 3l-18 18" />')
+
+
+def _auto_rotate_icon(color: str) -> QIcon:
+    """The rotate glyph with a small "A" (auto) inside its arc - same insert-a-path approach as `_slashed_icon`
+    (maintainer's request 2026-10-20: "icon of rotation and A in the middle")."""
+    return _glyph_with_paths("rotate-clockwise-2", color, '<path d="M9.6 15.2l2.4 -6.4l2.4 6.4m-3.5 -2.3h2.2" />')
+
+
+def _glyph_with_paths(name: str, color: str, extra_paths: str) -> QIcon:
+    """A vendored tabler glyph with extra SVG paths drawn in the same stroke (colour and width)."""
     svg = tabler_icon_svg(name, color=color, stroke_width=_STROKE_WIDTH)
     if not svg:
         return QIcon()
-    svg = svg.replace("</svg>", '  <path d="M21 3l-18 18" />\n</svg>')
+    svg = svg.replace("</svg>", f"  {extra_paths}\n</svg>")
     renderer = QSvgRenderer(QByteArray(svg.encode("utf-8")))
     if not renderer.isValid():
         return QIcon()
@@ -206,7 +217,11 @@ def _cluster(parent: QWidget, *widgets: QWidget) -> QWidget:
 
 
 class TransformsSection(QWidget):
-    """Rotate/crop/measure tool toggles, reset rotation/crop, flip H/V."""
+    """Rotate/crop/measure tool toggles, auto rotate, reset rotation/crop, flip H/V."""
+
+    # Auto rotate clicked: the owner (Image panel) runs the array detection (`ArrayActions.auto_rotate`), which
+    # lives with the ROI tools; this widget owns no state and never computes.
+    auto_rotate_requested = pyqtSignal()
 
     def __init__(self, geometry: GeometryModule, active_tool: ActiveToolModule, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -218,6 +233,15 @@ class TransformsSection(QWidget):
             "Manual rotation tool. Arrow keys adjust angle: default 0.1 deg, Ctrl = 1 deg, Shift = 5 deg."
         )
         self._rotate_button.toggled.connect(self._on_rotate_toggled)
+
+        self._auto_rotate_button = _icon_button(self, checkable=False)
+        self._auto_rotate_button.setToolTip(
+            "Auto rotate: find the spot array (as ROIs > Array > Detect does, on the reference wavelength) and "
+            "rotate the image by its tilt, however small, so the rows run level. No ROIs are placed; existing "
+            "ROIs follow the rotation."
+        )
+        self._auto_rotate_button.setIcon(_auto_rotate_icon(get_active_theme().text_primary))
+        self._auto_rotate_button.clicked.connect(self.auto_rotate_requested)
 
         self._reset_button = _icon_button(self, checkable=False)
         self._reset_button.setToolTip("Reset image rotation to 0 degrees.")
@@ -254,7 +278,7 @@ class TransformsSection(QWidget):
         # plain row before handing it to `labeled_icon_group`, since that
         # takes one content widget, not several.
         rotation_group, self._rotation_label = labeled_icon_group(
-            self, _cluster(self, self._rotate_button, self._reset_button), "Rotation"
+            self, _cluster(self, self._rotate_button, self._auto_rotate_button, self._reset_button), "Rotation"
         )
         flip_group, self._flip_label = labeled_icon_group(
             self, _cluster(self, self._flip_h_button, self._flip_v_button), "Flip"
