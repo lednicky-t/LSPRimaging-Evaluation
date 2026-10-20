@@ -13,9 +13,10 @@ All lengths are diameters or pitches in pixels, floats (resolution 0.1 px or bet
 Method
 1. Contrast map (`image_features.contrast_map`): spots become positive whatever the
    illumination; `bright=True` flips the sign for bright spots.
-2. Spot size prior (`ArrayPrior.diameter_px` or the scale-space estimate) then candidate
-   spots: Laplacian-of-Gaussian peaks at that size, on a reduced copy (positions only need
-   to be good to a pixel or two here).
+2. Spot size: `ArrayPrior.diameter_px`, or a scan over diameters 6-120 px scored by how many
+   candidates fit one lattice (`_scan_spot_radius`, 2026-10-20; replaced a single scale-space
+   guess that failed on 97 of 156 real images). Then candidate spots: Laplacian-of-Gaussian
+   peaks at that size, on a reduced copy (positions only need to be good to a pixel or two here).
 3. Lattice: the two shortest strong neighbour vectors give the lattice vectors a1 (mostly
    along x) and a2 (mostly along y); every candidate is given integer indices (i, j); origin
    and both vectors are then fitted by least squares on the inliers (repeated with the
@@ -42,7 +43,7 @@ import numpy as np
 from scipy import ndimage
 from scipy.spatial import cKDTree
 
-from ..image_features import FeatureSearchError, contrast_map, estimate_feature_radius, fill_invalid, odd_size
+from ..image_features import FeatureSearchError, contrast_map, fill_invalid, odd_size
 from ..progress import Cancelled, ProgressCallback, StageProgress
 
 __all__ = [
@@ -56,11 +57,21 @@ __all__ = [
     "refine_centers",
 ]
 
-STAGE_WEIGHTS = {"contrast": 0.25, "candidates": 0.20, "lattice": 0.10, "refine": 0.45}
-"""Share of the progress bar per stage. Placeholder until measured on the real dataset."""
+STAGE_WEIGHTS = {"size": 0.75, "contrast": 0.0625, "candidates": 0.03125, "lattice": 0.03125, "refine": 0.125}
+"""Share of the progress bar per stage. Measured 2026-10-20 on a 1300 x 900 image with 160 spots: the size scan
+~1.7 s of ~2.0 s (with a diameter given the scan is skipped and the bar jumps past it). Binary fractions on purpose:
+they sum to exactly 1.0, so the bar ends at 1.0 (0.8 + 0.05 + ... ends at 1.0000000000000002)."""
 
 MIN_SPOTS = 6
 MIN_OCCUPANCY = 0.5
+
+SIZE_SCAN_RADII_PX = np.geomspace(3.0, 60.0, 27)
+"""Spot radii tried when no diameter is given: diameter 6-120 px in ~12 % steps. The isolated-disk test accepts a
+search radius within about +-25 % of the true one (measured 2026-10-20: diameter 34-44 px found every spot of a
+17 px-radius array, 26 and 54 px none), so a 12 % ladder cannot step over the true size."""
+SIZE_SCAN_GOOD_FRACTION = 0.9
+"""Radii scoring at least this fraction of the best lattice count count as equally good; the middle of the longest
+run of them is taken (the most margin on both sides of that +-25 % window)."""
 
 
 @dataclass(frozen=True)
@@ -152,7 +163,7 @@ def find_array(
     image = np.asarray(image, dtype=np.float32)
     if image.ndim != 2 or image.size == 0:
         return fail("The image is empty or not 2-D.")
-    step("contrast", 0.0, "Array: preparing the image...")
+    step("size", 0.0, "Array: preparing the image...")
     if bright:
         # contrast_map wants dark spots: mirror the intensity range (stays positive, keeps the scale)
         finite_values = image[np.isfinite(image)]
@@ -167,14 +178,16 @@ def find_array(
         return fail("No valid (unmasked) pixels to search.")
     # Light smoothing: the matched filter and the LoG do the real averaging. The background size is tied
     # to the spot size once known; a first coarse pass needs one for the size estimate.
-    coarse = contrast_map(filled, 101, 1.0)
-    step("contrast", 0.6, "Array: measuring the spot size...")
-    try:
-        radius = 0.5 * float(prior.diameter_px) if prior.diameter_px else estimate_feature_radius(coarse)
-    except FeatureSearchError as error:
-        return fail(str(error))
+    if prior.diameter_px:
+        radius = 0.5 * float(prior.diameter_px)
+        step("size", 1.0, "Array: spot size given.")
+    else:
+        radius = _scan_spot_radius(filled, valid, step, diagnostics)
+        if radius is None:
+            return None  # diagnostics["reason"] set
     if radius < 2.0:
         return fail(f"Spots are too small to search for (radius {radius:.1f} px).")
+    step("contrast", 0.0, "Array: contrast map...")
     background_px = int(np.clip(odd_size(6.0 * radius), 31, 251))
     contrast = contrast_map(filled, background_px, 1.0)
     diagnostics["rough_diameter_px"] = 2.0 * radius
@@ -293,6 +306,56 @@ def refine_centers(
     return _refine_nodes(_matched_filter(contrast, radius_px), np.asarray(centers_xy, dtype=np.float64), float(window_px), usable)
 
 
+# -- spot size -------------------------------------------------------------------------
+
+
+def _scan_spot_radius(filled: np.ndarray, valid: np.ndarray, step: StageProgress, diagnostics: dict) -> float | None:
+    """The search radius when no diameter is given: every radius of `SIZE_SCAN_RADII_PX` runs the candidate search
+    and the lattice fit on a half-size copy, and is scored by how many candidates fit one common lattice (debris and
+    small features do not form a lattice, so they cannot win). The middle of the longest run of near-best radii is
+    returned; ``None`` (with ``diagnostics["reason"]``) when no radius gives a lattice.
+
+    Replaces a single scale-space guess (`image_features.estimate_feature_radius`) that jumped between coarse steps
+    and, on 2026-10-20, put a 17 px-radius array at 27-34 px (long wavelengths) or 6 px (another cube): the
+    isolated-disk test then rejected every spot. Before / after on that dataset (26 wavelengths x 3 cubes x with /
+    without background removal, 156 images): whole array found in 59 / 156 -> 156 / 156, chosen radius 17.9-19.0 px."""
+    half = cv2.resize(filled, (filled.shape[1] // 2, filled.shape[0] // 2), interpolation=cv2.INTER_AREA)
+    valid_half = cv2.resize(valid.astype(np.float32), (half.shape[1], half.shape[0]), interpolation=cv2.INTER_AREA) > 0.999
+    all_valid = bool(valid_half.all())
+    distance = None if all_valid else ndimage.distance_transform_edt(valid_half)
+    scores: list[int] = []
+    for k, radius in enumerate(SIZE_SCAN_RADII_PX):
+        step("size", k / len(SIZE_SCAN_RADII_PX), f"Array: trying spot size {2.0 * radius:.0f} px...")
+        r = float(radius) / 2.0  # on the half-size copy
+        usable = np.ones(half.shape, dtype=bool) if distance is None else distance > r
+        contrast = contrast_map(half, int(np.clip(odd_size(6.0 * r), 15, 251)), 0.5)
+        points = _find_spots(contrast, r, usable)
+        if len(points) >= MIN_SPOTS:
+            points = points[_is_isolated_disk(contrast, points, r)]
+        lattice = _fit_lattice(points, r, ArrayPrior(), {}) if len(points) >= MIN_SPOTS else None
+        scores.append(0 if lattice is None else int(len(lattice[3])))
+    step("size", 1.0, "Array: spot size found.")
+    diagnostics["size_scan"] = [(round(2.0 * float(r), 1), s) for r, s in zip(SIZE_SCAN_RADII_PX, scores)]
+    best = max(scores)
+    if best < MIN_SPOTS:
+        diagnostics["reason"] = (
+            f"No regular array of round spots found at any spot size from {2 * SIZE_SCAN_RADII_PX[0]:.0f} to "
+            f"{2 * SIZE_SCAN_RADII_PX[-1]:.0f} px. If the spots are there, set their diameter (Array settings, Semi)."
+        )
+        return None
+    good = [i for i, s in enumerate(scores) if s >= SIZE_SCAN_GOOD_FRACTION * best]
+    runs: list[list[int]] = [[good[0]]]
+    for i in good[1:]:
+        if i == runs[-1][-1] + 1:
+            runs[-1].append(i)
+        else:
+            runs.append([i])
+    longest = max(runs, key=len)
+    radius = float(np.sqrt(SIZE_SCAN_RADII_PX[longest[0]] * SIZE_SCAN_RADII_PX[longest[-1]]))  # geometric middle
+    diagnostics["size_scan_radius_px"] = radius
+    return radius
+
+
 # -- candidates ------------------------------------------------------------------------
 
 
@@ -387,12 +450,17 @@ def _fit_lattice(points: np.ndarray, radius: float, prior: ArrayPrior, diagnosti
         a2 = -a2
     origin = points[int(np.argmin(np.hypot(*(points - np.median(points, axis=0)).T)))]
     indices = None
-    for _ in range(4):
+    try:
+        for _ in range(4):
+            indices = _assign_indices(points, origin, a1, a2)
+            if len(indices) < MIN_SPOTS:
+                return fail(f"Only {len(indices)} spots fit a common lattice (need at least {MIN_SPOTS}).")
+            origin, a1, a2 = _lsq(points, indices, origin, a1, a2)
         indices = _assign_indices(points, origin, a1, a2)
-        if len(indices) < MIN_SPOTS:
-            return fail(f"Only {len(indices)} spots fit a common lattice (need at least {MIN_SPOTS}).")
-        origin, a1, a2 = _lsq(points, indices, origin, a1, a2)
-    indices = _assign_indices(points, origin, a1, a2)
+    except np.linalg.LinAlgError:
+        # The two lattice vectors became (nearly) parallel during the fit - found 2026-10-20 while scanning sizes,
+        # where a wrong size gives a few scattered candidates. Without this it surfaced as an unexpected error.
+        return fail("The candidate spots do not form a two-dimensional grid.")
     if len(indices) < MIN_SPOTS:
         return fail(f"Only {len(indices)} spots fit a common lattice (need at least {MIN_SPOTS}).")
     i_min, j_min = int(indices[:, 1].min()), int(indices[:, 2].min())
