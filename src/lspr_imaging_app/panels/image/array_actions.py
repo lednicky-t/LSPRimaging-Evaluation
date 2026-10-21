@@ -14,6 +14,18 @@ Rules (maintainer, 2026-10-08)
   detection as Detect, then the image is rotated by the measured tilt, however small (no 1 degree threshold, no
   question), and **no ROIs are placed or changed** (existing ROIs follow the rotation through the geometry sync).
   One pass: the tilt is measured on the image as it is now shown, so it adds to the current rotation.
+- **Auto crop** (2026-10-21, maintainer request; button in the Image tools tab, Crop group): crops to the ROI
+  lattice - half a lattice constant of border beyond the outermost ROI centres
+  (`dataset.chunk_plan.lattice_crop`; that docstring says why half a pitch is the number). Goal (maintainer): a
+  smaller export whose chunk grid lines up with the ROI array.
+
+  It **does the crop and nothing else** (maintainer, 2026-10-21, after a first version that levelled and detected
+  too): levelling the image, placing the ROIs and fitting the chromatic correction are its three **dependencies**,
+  which the user runs themselves. `auto_crop_readiness()` reports which are met; the button is green when all
+  three are and amber otherwise, and an amber click opens a menu of the missing steps instead of cropping
+  (`transforms_settings.py`). Each dependency is measured, never remembered: the lattice tilt from the ROI centres
+  as they are now (`chunk_plan.lattice_tilt_deg`, within `LEVEL_TOLERANCE_DEG`), the ROIs from the toolbox, the
+  chromatic correction from its fitted models. So all three survive a session reload and follow later edits.
 - Scope toggle (Persistent / Individual, like the Mask): not built yet; every edit is Persistent, as ROIs always were.
 
 Positions: the thread works on the displayed image of that frame; results are mapped back to the reference
@@ -24,17 +36,21 @@ stored.
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
+from dataclasses import dataclass, replace
 
 import numpy as np
-from PyQt6.QtCore import QObject, pyqtSignal
+from PyQt6.QtCore import QObject, QTimer, pyqtSignal
 from PyQt6.QtWidgets import QMessageBox, QWidget
 
+from ...dataset import chunk_plan as cp
 from ...dataset.model import is_dark_frame_wavelength
 from ...image_tools.background.module import BackgroundModule
 from ...image_tools.chromatic.affine import apply_affine_to_points
 from ...image_tools.chromatic.module import ChromaticModule
+from ...image_tools.geometry.model import GeometrySettings
 from ...image_tools.geometry.module import GeometryModule
+from ...image_tools.geometry.transform import spatial_output_shape
 from ...roi import RoiToolbox
 from ...roi.ordering import grid_band_px, order_by_grid
 from ...roi.array_task import DETECT, PLACE, REFINE, ArrayAction, ArrayOutcome
@@ -43,6 +59,32 @@ from ...selection import SelectionModule
 from .array_controls import ArrayControls
 
 logger = logging.getLogger(__name__)
+
+_LEVEL_EPS_DEG = 0.005
+"""A tilt below this is not worth a rotation: it is below what the rotation field shows (2 decimals)."""
+_READINESS_DEBOUNCE_MS = 150
+"""Auto crop's checklist waits this long after the last ROI/geometry edit before it is recomputed."""
+LEVEL_TOLERANCE_DEG = 0.2
+"""Auto crop calls the lattice straight within this. Not tighter: Auto rotate leaves ~0.1 deg of residual tilt
+(the detection's own accuracy), and over a 1200 px array 0.2 deg moves a centre by about 4 px - small against a
+~40 px margin, so the crop and the chunk grid are still right."""
+
+
+@dataclass(frozen=True)
+class AutoCropReadiness:
+    """Which of Auto crop's three dependencies are met (`ArrayActions.auto_crop_readiness`). ``levelled=None`` =
+    it cannot be judged, which counts as not met but reads differently to the user - ``level_note`` says why in
+    words, so the button's checklist never has to guess."""
+
+    levelled: bool | None
+    rois: bool
+    chromatic: bool
+    tilt_deg: float | None = None
+    level_note: str = ""
+
+    @property
+    def ready(self) -> bool:
+        return bool(self.levelled) and self.rois and self.chromatic
 
 
 def _ask(parent: QWidget | None, title: str, text: str) -> bool:
@@ -56,6 +98,9 @@ def _tell(parent: QWidget | None, title: str, text: str) -> None:
 
 class ArrayActions(QObject):
     status = pyqtSignal(str)
+    # `AutoCropReadiness`, whenever anything it is measured from changes (the ROIs, the image geometry the ROIs
+    # are positioned in, the chromatic correction). The Image panel passes it on to the Auto crop button.
+    auto_crop_readiness_changed = pyqtSignal(object)
 
     def __init__(
         self,
@@ -69,6 +114,7 @@ class ArrayActions(QObject):
         chromatic: ChromaticModule,
         load_plane: Callable[[int, float], np.ndarray],
         has_dataset: Callable[[], bool],
+        raw_plane_shape: Callable[[], tuple[int, int] | None] | None = None,
         resolve_reference: Callable[[], tuple[int, float] | None],
         analysis_running: Callable[[], bool],
         dialog_parent: QWidget | None = None,
@@ -87,12 +133,21 @@ class ArrayActions(QObject):
         self._chromatic = chromatic
         self._load_plane = load_plane
         self._has_dataset = has_dataset
+        # Auto crop needs the raw (height, width) to work out the levelled canvas; a header read, never a plane
+        # (`DatasetModule.raw_plane_shape`), so nothing is loaded on the GUI thread.
+        self._raw_plane_shape = raw_plane_shape
         self._resolve_reference = resolve_reference
         self._analysis_running = analysis_running
         self._ask = ask or (lambda title, text: _ask(dialog_parent, title, text))
         self._tell = tell or (lambda title, text: _tell(dialog_parent, title, text))
         self._rotated_once = False
         self._auto_rotate = False  # the running Detect only measures the tilt for Auto rotate
+        # The rotation Auto rotate left behind. Auto crop's "levelled" tick is normally measured from the ROI
+        # lattice, but the maintainer's flow is Auto rotate *first*, when there are no ROIs to measure yet
+        # (2026-10-21 report: "the leveling array is still present even though I run it"). Auto rotate did
+        # measure the tilt on the image, so its result stands in until a lattice can confirm it - and only while
+        # the rotation is still the one it set.
+        self._levelled_at: float | None = None
         self._last_request: dict | None = None
         self._edit_target = edit_target
 
@@ -106,6 +161,17 @@ class ArrayActions(QObject):
         action.completed.connect(self._on_completed)
         action.failed.connect(self._on_failed)
         action.cancelled.connect(self._on_cancelled)
+        # Auto crop's dependency state: the same inputs the Export tab's ROI layout watches (`export_tab.py`).
+        # Debounced, because `geometry_changed` fires on every sample of a ROI drag and this only feeds a button's
+        # colour and its tooltip - nobody reads either mid-drag (2026-10-21).
+        self._readiness_timer = QTimer(self)
+        self._readiness_timer.setSingleShot(True)
+        self._readiness_timer.setInterval(_READINESS_DEBOUNCE_MS)
+        self._readiness_timer.timeout.connect(self._emit_auto_crop_readiness)
+        toolbox.geometry_changed.connect(self._schedule_auto_crop_readiness)
+        toolbox.roi_ids_renumbered.connect(self._schedule_auto_crop_readiness)
+        geometry.geometry_changed.connect(self._schedule_auto_crop_readiness)
+        chromatic.chromatic_model_changed.connect(self._schedule_auto_crop_readiness)
 
     # -- start --------------------------------------------------------------------------
 
@@ -131,6 +197,7 @@ class ArrayActions(QObject):
             self._begin(DETECT)
 
     def _on_refine(self) -> None:
+        self._auto_rotate = False
         self._rotated_once = False
         if not self._selection.selected_roi_ids():
             self._fail_message("Select the ROIs to refine first.")
@@ -238,11 +305,156 @@ class ArrayActions(QObject):
             self.status.emit("Auto rotate: no tilt could be measured; the rotation was not changed.")
             return
         current = float(self._geometry.settings().rotation_angle_deg)
-        if abs(tilt) < 0.005:  # below what the rotation field shows (2 decimals)
+        # Either way the array is now level as far as this measurement can tell: remember at which rotation, so
+        # Auto crop's checklist can tick "Level the array" before any ROI exists (`_levelled_at`).
+        if abs(tilt) < _LEVEL_EPS_DEG:
+            self._levelled_at = current
             self.status.emit(f"Auto rotate: the array is already level (tilt {tilt:+.3f}°); rotation stays {current:.2f}°.")
+        else:
+            self._levelled_at = current + tilt
+            self._geometry.set_rotation(current + tilt)
+            self.status.emit(f"Auto rotate: levelled the array, tilt {tilt:+.2f}° (rotation now {current + tilt:.2f}°).")
+        self._emit_auto_crop_readiness()
+
+    # -- Auto crop (Image tools tab, Crop group) -----------------------------------------
+
+    def _chromatic_on(self) -> bool:
+        """The correction is switched on and something is fitted - the cheap question (`has_fitted_models`), the
+        only one the readiness check needs."""
+        return (
+            self._chromatic is not None
+            and bool(self._chromatic.settings().chromatic_correction_enabled)
+            and bool(self._chromatic.has_fitted_models)
+        )
+
+    @staticmethod
+    def _centers_of(rois: Sequence) -> np.ndarray:
+        return np.array([(float(roi.center_x), float(roi.center_y)) for roi in rois], dtype=np.float64)
+
+    def _lattice(self) -> tuple[np.ndarray, np.ndarray] | None:
+        """The ROI centres and their read boxes in processed space, for the crop itself (not for the readiness
+        check, which must stay cheap). ``None`` without ROIs.
+
+        The boxes are deliberately **not** clipped to the image: a ring already reaching past the current crop has
+        to widen the new one, not be cut to it. The chromatic correction is added as one conservative pair of
+        numbers (`chunk_plan.affine_reach`, which says why that is not a box union).
+        """
+        rois = tuple(self._toolbox.rois())
+        if not rois:
+            return None
+        settings = self._toolbox.detection_settings()
+        huge = (1 << 30, 1 << 30)
+        boxes = cp.roi_read_boxes(
+            rois, huge,
+            default_inner_diameter_px=settings.reference_inner_diameter_px,
+            default_outer_diameter_px=settings.reference_outer_diameter_px,
+        )
+        centers = self._centers_of(rois)
+        reach = cp.affine_reach(centers, self._chromatic.fitted_affines() if self._chromatic is not None else None)
+        return centers, cp.grow_boxes(boxes, centers, *reach)
+
+    def _schedule_auto_crop_readiness(self, *_args: object) -> None:
+        """Coalesce a burst of ROI edits (a drag) into one readiness check once it goes quiet."""
+        self._readiness_timer.start()
+
+    def _emit_auto_crop_readiness(self, *_args: object) -> None:
+        self.auto_crop_readiness_changed.emit(self.auto_crop_readiness())
+
+    def _levelled_by_auto_rotate(self) -> bool:
+        """Auto rotate levelled the array and the rotation has not been touched since."""
+        return (
+            self._levelled_at is not None
+            and abs(float(self._geometry.settings().rotation_angle_deg) - self._levelled_at) < _LEVEL_EPS_DEG
+        )
+
+    def auto_crop_readiness(self) -> AutoCropReadiness:
+        """Which of Auto crop's dependencies are met.
+
+        The tilt is **measured** from the ROI lattice whenever there is one to measure - that is the authoritative
+        answer, it survives a session reload and it follows later rotation edits. Before the ROIs exist (the
+        maintainer's order of work: Auto rotate, then the ROIs, then the chromatic correction) there is nothing to
+        measure, so Auto rotate's own measurement stands in until the rotation moves again.
+        """
+        chromatic = self._chromatic_on()
+        # Centres only, no read boxes and no chromatic affines: this runs on every ROI edit, a drag's every
+        # sample included (2026-10-21, after walking the fitted models here cost 300 ms per sample).
+        centers = self._centers_of(self._toolbox.rois())
+        rois = bool(len(centers))
+        tilt = cp.lattice_tilt_deg(centers) if rois else None
+        if tilt is not None:
+            return AutoCropReadiness(
+                levelled=abs(tilt) <= LEVEL_TOLERANCE_DEG, rois=rois, chromatic=chromatic, tilt_deg=tilt,
+                level_note=f"tilt {tilt:+.2f}°",
+            )
+        if self._levelled_by_auto_rotate():
+            return AutoCropReadiness(
+                levelled=True, rois=rois, chromatic=chromatic,
+                level_note="levelled by Auto rotate" + ("; the ROIs are not a lattice to re-measure it on" if rois else ""),
+            )
+        return AutoCropReadiness(
+            levelled=None, rois=rois, chromatic=chromatic,
+            level_note=("the ROIs are not a lattice, so the tilt cannot be measured" if rois
+                        else "run Auto rotate, or place the ROIs to measure it"),
+        )
+
+    def auto_crop(self) -> None:
+        """Crop to the ROI lattice: half a lattice constant of border beyond the outermost ROI centres. One undo
+        step, nothing else changed - the levelling, the ROIs and the chromatic correction are dependencies the
+        user runs themselves (`auto_crop_readiness`). Synchronous: integer arithmetic on the ROIs already placed,
+        no image is read.
+
+        The crop is computed on the **rotated + flipped canvas**, because that is the space
+        `GeometrySettings.crop` is measured against (`transform.py`: rotate -> flip -> crop), while the ROIs are
+        in processed space - i.e. relative to the crop in force now. Since Auto crop changes no rotation or flip,
+        the two spaces differ by exactly the current crop's origin, the same shift `transform.py` applies.
+        """
+        raw_shape = self._raw_plane_shape() if self._raw_plane_shape is not None else None
+        if raw_shape is None:
+            self.status.emit("Auto crop: no dataset is loaded.")
             return
-        self._geometry.set_rotation(current + tilt)
-        self.status.emit(f"Auto rotate: levelled the array, tilt {tilt:+.2f}° (rotation now {current + tilt:.2f}°).")
+        lattice = self._lattice()
+        if lattice is None:
+            self.status.emit("Auto crop: place the ROIs first - the crop is built from the ROI lattice.")
+            return
+        centers, boxes = lattice
+        settings = self._geometry.settings()
+        uncropped = replace(settings, image_tools_enabled=True, crop=replace(settings.crop, enabled=False))
+        canvas = spatial_output_shape((int(raw_shape[0]), int(raw_shape[1])), uncropped)
+        origin = self._crop_origin(settings, canvas)
+        crop = cp.lattice_crop(centers + origin, canvas, boxes=boxes + np.tile(origin, 2))
+        if crop is None:
+            self.status.emit("Auto crop: the ROIs are not a lattice (at least two rows and two columns are needed).")
+            return
+        self._geometry.set_crop(crop.x, crop.y, crop.width, crop.height)
+        self.status.emit(self._auto_crop_report(crop, canvas, settings.image_tools_enabled))
+
+    @staticmethod
+    def _crop_origin(settings: GeometrySettings, canvas: tuple[int, int]) -> np.ndarray:
+        """Where processed pixel (0, 0) sits on the canvas - the current crop's clamped origin, clamped exactly as
+        `transform.py`'s `_combined_export_transform` does, or (0, 0) with no crop in force."""
+        crop = settings.crop
+        if not (bool(settings.image_tools_enabled) and crop.enabled and crop.width > 0 and crop.height > 0):
+            return np.zeros(2)
+        return np.array([max(0, min(int(crop.x), int(canvas[1]) - 1)), max(0, min(int(crop.y), int(canvas[0]) - 1))],
+                        dtype=np.float64)
+
+    @staticmethod
+    def _auto_crop_report(crop: cp.LatticeCrop, canvas: tuple[int, int], image_tools_enabled: bool) -> str:
+        text = (
+            f"Auto crop: kept {crop.width} x {crop.height} px of {canvas[1]} x {canvas[0]} "
+            f"({100.0 * crop.kept_fraction:.0f}% of the pixels) - {crop.cols} x {crop.rows} ROIs at pitch "
+            f"{crop.pitch_x:.1f} x {crop.pitch_y:.1f} px, margin {crop.margin_x} x {crop.margin_y} px."
+        )
+        if crop.widened:
+            text += (" The margin is wider than half the pitch: a reference ring (with the chromatic shift) reaches "
+                     "further, and cropping at half the pitch would have cut into the edge ROIs.")
+        if crop.clamped:
+            text += " One or more sides hit the image edge, so that margin is narrower than asked."
+        if not bool(image_tools_enabled):
+            text += " Image tools are switched off, so the crop is stored but not applied yet."
+        return text
+
+    # -- finish (array runs) -------------------------------------------------------------
 
     def _on_completed(self, outcome: ArrayOutcome) -> None:
         if self._auto_rotate:

@@ -29,7 +29,9 @@ the cursor.
 
 from __future__ import annotations
 
+import logging
 import math
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
 
@@ -39,6 +41,7 @@ from PyQt6.QtCore import QObject, QRectF, Qt, pyqtSignal
 from PyQt6.QtGui import QBrush, QColor, QPen
 from PyQt6.QtWidgets import QGraphicsRectItem
 
+from ...applog.events import emit_timing
 from ...roi import RoiToolbox
 from ...roi.model import SCOPE_PERSISTENT
 from ...roi.scope import RoiEditTarget
@@ -46,6 +49,8 @@ from ...roi.rasterize import effective_reference_diameters
 from ...roi.toolbox import MIN_SAMPLE_DIAMETER_PX
 from ...selection import SelectionModule
 from ...undo import undo_manager
+
+logger = logging.getLogger(__name__)
 
 _BAND_COLOR = "#38bdf8"
 _Z_VALUE = 60  # above the ROI curves, as the area-selection outline is
@@ -298,9 +303,20 @@ class RoiGestures(QObject):
         step = reference_delta - self._move_applied
         if not step.any():
             return
+        # Stage timing, DEBUG only, one line per mouse step: the 2026-10-21 "GUI slow while moving ROIs" report
+        # needed the toolbox write and the overlay draw told apart (and a drag step is the hot path here).
+        started = time.perf_counter()
         self._toolbox.translate_rois(self._edit_ids, float(step[0]), float(step[1]), **self._edit_kwargs)
         self._move_applied = reference_delta
+        written = time.perf_counter()
         self._redraw_now()
+        done = time.perf_counter()
+        emit_timing(
+            logger, "roi.drag_step", (done - started) * 1000.0,
+            write_ms=round((written - started) * 1000.0, 2),
+            overlay_ms=round((done - written) * 1000.0, 2),
+            n=len(self._edit_ids),
+        )
 
     def _update_resize(self, x: float, y: float) -> None:
         if self._inverse is None or not self._edit_ids:

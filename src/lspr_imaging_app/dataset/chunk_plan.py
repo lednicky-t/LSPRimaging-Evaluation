@@ -23,6 +23,10 @@ image tools, raw space when it does not). Grid alignment: for one axis the numbe
 changes where a grid line crosses a box edge, so only those offsets are evaluated (exact); of the equally good ones the
 middle of the widest run is taken, which leaves the most room (``tolerance``) for drift.
 
+Also here, because it is the same lattice arithmetic: `lattice_crop` - the rectangle the Image tools' **Auto crop**
+keeps (half a lattice constant of border beyond the outermost ROI centres, 2026-10-21). That crop is what lets a
+chunk size of one pitch, or a whole multiple of it, line up with the ROI lattice straight from the image corner.
+
 Known limits: one box per ROI (base geometry united over the chromatic affines; per-cube `RoiTimeline` edits are not
 included); the suggestions were tuned on one dataset (pitch 79 px, 160 ROIs).
 """
@@ -40,15 +44,20 @@ __all__ = [
     "SMALL_CHUNK_PX",
     "ChunkLayout",
     "ExportFrame",
+    "LatticeCrop",
     "PatternScore",
     "Suggestion",
+    "affine_reach",
     "align_grid",
     "chunk_warnings",
     "compresses",
     "estimate_compression_ratio",
     "estimate_pitch",
     "export_frame",
+    "grow_boxes",
+    "lattice_crop",
     "lattice_groups",
+    "lattice_tilt_deg",
     "map_boxes",
     "roi_read_boxes",
     "score_layout",
@@ -194,6 +203,44 @@ def roi_read_boxes(
     return out
 
 
+def affine_reach(centers_xy: np.ndarray, affines: Sequence[np.ndarray] | None) -> tuple[float, float]:
+    """``(shift_px, stretch)``: the worst centre displacement and the largest stretch over ``affines`` (the fitted
+    chromatic models), as two numbers for all the ROIs together. ``(0.0, 1.0)`` for no affines.
+
+    Why two numbers instead of a read box per affine (2026-10-21): the box union loops over every affine doing an
+    SVD and an all-ROI transform, which cost **1.3 s** at the 8478 fitted affines of a 314-cube session - and it
+    ran on every ROI edit. This is vectorised over the affines at once and is slightly generous, which is the safe
+    direction for a crop margin: a wider margin never cuts into a ROI. `grow_boxes` applies it."""
+    if not affines:
+        return 0.0, 1.0
+    mats = np.asarray([np.asarray(a, dtype=np.float64)[:2, :3] for a in affines], dtype=np.float64)
+    points = np.asarray(centers_xy, dtype=np.float64).reshape(-1, 2)
+    if not len(mats) or not len(points):
+        return 0.0, 1.0
+    moved = np.einsum("kij,nj->kni", mats[:, :, :2], points) + mats[:, None, :, 2]
+    shift = float(np.abs(moved - points[None, :, :]).max(initial=0.0))
+    stretch = float(np.linalg.svd(mats[:, :, :2], compute_uv=False).max(initial=1.0))
+    return shift, max(stretch, 1.0)
+
+
+def grow_boxes(boxes: np.ndarray, centers_xy: np.ndarray, shift: float, stretch: float) -> np.ndarray:
+    """Each read box stretched about its own ROI's centre and then widened by ``shift`` px on every side, rounded
+    outwards (`affine_reach`). Empty boxes stay empty."""
+    boxes = np.asarray(boxes, dtype=np.int64).reshape(-1, 4)
+    if (not float(shift)) and float(stretch) <= 1.0:
+        return boxes
+    centers = np.asarray(centers_xy, dtype=np.float64).reshape(-1, 2)
+    if len(centers) != len(boxes):
+        return boxes
+    valid = (boxes[:, 2] > boxes[:, 0]) & (boxes[:, 3] > boxes[:, 1])
+    out = boxes.copy()
+    lo = (boxes[valid, :2] - centers[valid]) * float(stretch) - float(shift)
+    hi = (boxes[valid, 2:] - centers[valid]) * float(stretch) + float(shift)
+    out[valid, :2] = np.floor(centers[valid] + lo).astype(np.int64)
+    out[valid, 2:] = np.ceil(centers[valid] + hi).astype(np.int64)
+    return out
+
+
 def map_boxes(boxes: np.ndarray, affine: np.ndarray, image_shape: tuple[int, int]) -> np.ndarray:
     """Read boxes moved through a 2x3 affine (e.g. processed -> raw space for a raw-pixel export): the axis-aligned
     box around each mapped rectangle, clipped to ``image_shape``. A rotation makes the boxes a little larger (the
@@ -259,6 +306,126 @@ def estimate_pitch(centers_xy: np.ndarray) -> tuple[float, float] | None:
         means = np.array([pts[g, dim].mean() for g in groups])
         pitch.append(float(np.median(np.diff(means))))
     return pitch[0], pitch[1]
+
+
+@dataclass(frozen=True)
+class LatticeCrop:
+    """A crop rectangle that puts the ROI lattice in the middle of the image, with half a lattice constant of
+    border beyond the outermost ROI centres (`lattice_crop`)."""
+
+    x: int
+    y: int
+    width: int
+    height: int
+    pitch_x: float
+    pitch_y: float
+    cols: int
+    rows: int
+    margin_x: int
+    """Border kept beyond the outermost ROI centre, in px (half the pitch unless it had to be widened)."""
+    margin_y: int
+    widened: bool
+    """The margin had to grow past half the pitch to keep the edge ROIs' read area inside the crop."""
+    clamped: bool
+    """The image edge was closer than the margin on at least one side, so that side is narrower than asked."""
+    source_px: int
+    kept_px: int
+
+    @property
+    def kept_fraction(self) -> float:
+        return self.kept_px / self.source_px if self.source_px else 1.0
+
+
+def lattice_tilt_deg(centers_xy: np.ndarray, *, pitch: tuple[float, float] | None = None) -> float | None:
+    """How far the ROI lattice is from running straight, in degrees (positive = the rows slope downwards to the
+    right), or ``None`` when there is no lattice to measure.
+
+    The median over the lattice rows of the straight-line slope through that row's centres; rows with a single
+    ROI are skipped, and if no row has two the columns are used instead. What Auto crop needs to know: a tilted
+    lattice makes an axis-aligned half-pitch margin wrong (the box around the centres grows by about
+    ``span x sin(tilt)``) and no chunk grid lines up with it. Measured from the centres as they are now, so it
+    follows a rotation edit instead of going stale like a stored detection angle."""
+    pts = np.asarray(centers_xy, dtype=np.float64).reshape(-1, 2)
+    if pitch is None:
+        pitch = estimate_pitch(pts)
+        if pitch is None:
+            return None
+    slopes: list[float] = []
+    # A lattice turned by `t` has its rows along (cos t, sin t) and its columns along (-sin t, cos t): fitting a
+    # column gives dx/dy = -tan t, hence the sign.
+    for axis, tol, free, fitted, sign in (("rows", pitch[1], 0, 1, 1.0), ("columns", pitch[0], 1, 0, -1.0)):
+        for group in lattice_groups(pts, axis=axis, tolerance_px=float(tol) / 2.0):
+            if len(group) < 2 or np.ptp(pts[group, free]) <= 0.0:
+                continue
+            slope = float(np.polyfit(pts[group, free], pts[group, fitted], 1)[0])
+            slopes.append(sign * float(np.degrees(np.arctan(slope))))
+        if slopes:  # rows are enough; only a row-less layout falls through to the columns
+            break
+    return float(np.median(slopes)) if slopes else None
+
+
+def lattice_crop(
+    centers_xy: np.ndarray,
+    image_shape: tuple[int, int],
+    *,
+    boxes: np.ndarray | None = None,
+    pitch: tuple[float, float] | None = None,
+) -> LatticeCrop | None:
+    """The crop that keeps the ROI lattice plus half a lattice constant of border (maintainer's rule, 2026-10-21).
+
+    Everything is in one pixel space - the space ``centers_xy`` and ``image_shape`` are given in (for the Image
+    tools' Auto crop: the rotated/flipped canvas, which is what `GeometrySettings.crop` is measured against).
+
+    Why half a pitch: the chunk grid of a Zarr export always starts at stored pixel (0, 0), so with this crop a
+    chunk size of one lattice constant (or a whole multiple of it) has its grid lines halfway between the ROI
+    columns and rows - the ROIs sit in the middle of their chunks with no grid offset, nothing padded and nothing
+    trimmed. The width then comes out as about ``cols * pitch_x`` on its own.
+
+    ``boxes``: each ROI's read box (`roi_read_boxes`, united over the chromatic affines - unclipped, so a ring
+    already reaching past the current crop still counts), in the same space as ``centers_xy``. Half a pitch is
+    **not** always enough to hold them: at the measured 79 px pitch a reference ring reaches ~43 px, so the
+    margin is widened to that reach rather than quietly cutting pixels off the edge ROIs (``widened``).
+    ``pitch``: when it is already known; without it the pitch is estimated from the centres (`estimate_pitch`,
+    needs at least two columns and two rows).
+
+    The margin is axis-aligned, so it is only the right shape for a lattice that runs straight - see
+    `lattice_tilt_deg`, which the caller checks first.
+
+    ``None`` when there is no lattice to crop to (no centres, or no pitch could be estimated)."""
+    pts = np.asarray(centers_xy, dtype=np.float64).reshape(-1, 2)
+    if len(pts) == 0:
+        return None
+    if pitch is None:
+        pitch = estimate_pitch(pts)
+        if pitch is None:
+            return None
+    pitch_x, pitch_y = abs(float(pitch[0])), abs(float(pitch[1]))
+    if not (np.isfinite(pitch_x) and np.isfinite(pitch_y)) or min(pitch_x, pitch_y) <= 0.0:
+        return None
+    height, width = int(image_shape[0]), int(image_shape[1])
+    reach_x = reach_y = 0.0
+    if boxes is not None:
+        b = np.asarray(boxes, dtype=np.float64).reshape(-1, 4)
+        if len(b) == len(pts):
+            keep = (b[:, 2] > b[:, 0]) & (b[:, 3] > b[:, 1])
+            if keep.any():  # how far the read box reaches from its own ROI's centre, worst case per axis
+                reach_x = float(np.maximum(pts[keep, 0] - b[keep, 0], b[keep, 2] - pts[keep, 0]).max())
+                reach_y = float(np.maximum(pts[keep, 1] - b[keep, 1], b[keep, 3] - pts[keep, 1]).max())
+    margin_x, margin_y = max(pitch_x / 2.0, reach_x), max(pitch_y / 2.0, reach_y)
+    x0, x1 = math.floor(pts[:, 0].min() - margin_x), math.ceil(pts[:, 0].max() + margin_x)
+    y0, y1 = math.floor(pts[:, 1].min() - margin_y), math.ceil(pts[:, 1].max() + margin_y)
+    clamped = x0 < 0 or y0 < 0 or x1 > width or y1 > height
+    x0, y0 = max(0, x0), max(0, y0)
+    x1, y1 = min(width, x1), min(height, y1)
+    return LatticeCrop(
+        x=int(x0), y=int(y0), width=max(1, int(x1 - x0)), height=max(1, int(y1 - y0)),
+        pitch_x=pitch_x, pitch_y=pitch_y,
+        cols=len(lattice_groups(pts, axis="columns", tolerance_px=pitch_x / 2.0)),
+        rows=len(lattice_groups(pts, axis="rows", tolerance_px=pitch_y / 2.0)),
+        margin_x=int(round(margin_x)), margin_y=int(round(margin_y)),
+        widened=reach_x > pitch_x / 2.0 or reach_y > pitch_y / 2.0, clamped=clamped,
+        source_px=width * height, kept_px=max(1, int(x1 - x0)) * max(1, int(y1 - y0)),
+    )
 
 
 # -- grid alignment -------------------------------------------------------------------------

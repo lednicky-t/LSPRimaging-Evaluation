@@ -174,6 +174,22 @@ class ChromaticModule(QObject):
             if mark.spectral_cube_index == cube_index and mark.wavelength_nm == wavelength_nm
         )
 
+    @property
+    def has_fitted_models(self) -> bool:
+        """Whether anything is fitted at all, without building the list. `models()` sorts every key and copies the
+        records - 8478 of them in a 314-cube session - which is far too much for a question asked on every ROI
+        edit (2026-10-21: Auto crop's readiness check did exactly that and cost 300 ms per drag sample)."""
+        return bool(self._models)
+
+    def fitted_affines(self) -> list[np.ndarray] | None:
+        """Every fitted frame's 2x3 affine, or ``None`` when the correction is off or nothing is fitted - the one
+        place that rule lives, for callers that need to know how far the correction can move a point (the ROI read
+        boxes of the export's chunk layout and of Auto crop). Building this walks every model, so ask
+        `has_fitted_models` instead when a yes/no answer will do."""
+        if not (bool(self._settings.chromatic_correction_enabled) and self._models):
+            return None
+        return [np.asarray(model.affine_matrix, dtype=np.float64)[:2, :3] for model in self._models.values()]
+
     def settings(self) -> ChromaticSettings:
         """A defensive copy - the caller's own; mutating it has no effect
         on this module's state, since command methods are the only way to

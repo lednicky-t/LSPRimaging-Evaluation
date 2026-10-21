@@ -58,6 +58,7 @@ class RoiTab(QWidget):
     labels_icon_refreshed = pyqtSignal()
     group_labels_changed = pyqtSignal()
     status = pyqtSignal(str)  # a one-line result from the Array / Groups actions
+    auto_crop_readiness_changed = pyqtSignal(object)  # re-emitted from `ArrayActions` for the Image tools tab
 
     def __init__(
         self,
@@ -121,6 +122,7 @@ class RoiTab(QWidget):
             chromatic=chromatic,
             load_plane=dataset.load_plane,
             has_dataset=lambda: bool(dataset.spectral_cubes()),
+            raw_plane_shape=dataset.raw_plane_shape,
             resolve_reference=resolve_reference,
             analysis_running=analysis_running,
             dialog_parent=self,
@@ -128,6 +130,7 @@ class RoiTab(QWidget):
             parent=self,
         )
         self._array_actions.status.connect(self.status)
+        self._array_actions.auto_crop_readiness_changed.connect(self.auto_crop_readiness_changed)
         self._group_controls = GroupControls(self)
         groups_group, self._groups_caption = labeled_icon_group(self, self._group_controls, "Groups")
         self._group_actions = GroupActions(
@@ -156,6 +159,16 @@ class RoiTab(QWidget):
     def auto_rotate(self) -> None:
         """Image tools tab's Auto rotate: level the image by the detected array's tilt (`ArrayActions.auto_rotate`)."""
         self._array_actions.auto_rotate()
+
+    def auto_crop(self) -> None:
+        """Image tools tab's Auto crop: crop to the ROI lattice (`ArrayActions.auto_crop`)."""
+        self._array_actions.auto_crop()
+
+    def auto_crop_readiness(self):
+        """Which of Auto crop's dependencies are met right now (`ArrayActions.auto_crop_readiness`) - for the
+        Image tools tab's button, which this tab only forwards for (it owns the array tools, that tab owns the
+        button)."""
+        return self._array_actions.auto_crop_readiness()
 
     # -- what the View tab copies ------------------------------------------
 

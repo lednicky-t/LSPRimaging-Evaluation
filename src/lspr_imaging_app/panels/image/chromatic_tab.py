@@ -626,7 +626,7 @@ class ChromaticCorrectionTab(QWidget):
 
     def _refresh_correction_buttons(self) -> None:
         theme = get_active_theme()
-        has_model = bool(self._chromatic.models())
+        has_model = self._chromatic.has_fitted_models
         enabled = self._chromatic.settings().chromatic_correction_enabled
         self._apply_button.blockSignals(True)
         self._apply_button.setChecked(enabled)
@@ -735,7 +735,7 @@ class ChromaticCorrectionTab(QWidget):
     def _refresh(self, *_args: object) -> None:
         running = self._auto.is_running()
         has_dataset = bool(self._dataset.wavelengths())
-        has_model = bool(self._chromatic.models())
+        has_model = self._chromatic.has_fitted_models
         enabled = self._chromatic.settings().chromatic_correction_enabled
         self._refresh_correction_buttons()
         self._refresh_spread_hint()

@@ -164,6 +164,7 @@ from .prefetch import prefetch_order
 from .render import ImageRenderer, RenderRequest, RenderResult
 from .roi_gestures import RoiGestures, SelectedApertures
 from .roi_overlay import SAMPLE_WIDTH, SAMPLE_WIDTH_FAST, RoiOverlay, add_curve
+from .array_actions import AutoCropReadiness
 from .roi_tab import RoiTab
 from .rotate_line_tool import RotateLineTool
 from .display_range_controls import FULL_16BIT_RANGE
@@ -200,7 +201,7 @@ from .mark_colors import cube_color, roi_color, wavelength_color
 from .mask_rows import MaskRows
 from .timeline_strip import TimelineStrip, StripMark
 from .slider_colors import SliderColors
-from ...applog.events import log_event
+from ...applog.events import log_event, timed
 from .playback_stats import PlaybackStats
 from .timed_canvas import TimedImageItem, TimedLayoutWidget
 from .ribbon_drawer import RibbonDrawer
@@ -522,6 +523,12 @@ class ImagePanel(QWidget):
         self._redraw_timer.setSingleShot(True)
         self._redraw_timer.setInterval(_REDRAW_COALESCE_MS)
         self._redraw_timer.timeout.connect(self._redraw)
+
+        # Overlay-only redraws (a ROI moved, the selection changed): the same coalescing, none of the renderer.
+        self._overlay_timer = QTimer(self)
+        self._overlay_timer.setSingleShot(True)
+        self._overlay_timer.setInterval(_REDRAW_COALESCE_MS)
+        self._overlay_timer.timeout.connect(self._redraw_overlay_only)
 
         self._view_range_persist_timer = QTimer(self)
         self._view_range_persist_timer.setSingleShot(True)
@@ -903,9 +910,25 @@ class ImagePanel(QWidget):
         self._roi_tab.label_placement_changed.connect(self._on_roi_label_placement_changed)
         self._roi_tab.group_labels_changed.connect(self._on_group_labels_changed)
         self._roi_tab.status.connect(self._on_tool_status)
-        # Auto rotate (Image tools tab, Rotation group) runs the ROI tab's array detection; built before this tab.
+        # Auto rotate and Auto crop (Image tools tab) act through the ROI tab, which owns the array tools; that
+        # tab is built before this one. Auto crop also shows which of its dependencies are still missing, and its
+        # menu rows lead to the tab that fixes them.
         self._transforms_section.auto_rotate_requested.connect(self._roi_tab.auto_rotate)
+        self._transforms_section.auto_crop_requested.connect(self._roi_tab.auto_crop)
+        self._transforms_section.navigate_requested.connect(self._on_transforms_navigate)
+        self._roi_tab.auto_crop_readiness_changed.connect(self._on_auto_crop_readiness)
+        self._on_auto_crop_readiness(self._roi_tab.auto_crop_readiness())
         return self._roi_tab
+
+    def _on_transforms_navigate(self, key: str) -> None:
+        """A row of Auto crop's pick-up menu that lives in another ribbon tab: show that tab."""
+        self._tool_ribbon.set_category(ROI_TAB if key == "rois" else CHROMATIC_TAB)
+
+    def _on_auto_crop_readiness(self, readiness: AutoCropReadiness) -> None:
+        self._transforms_section.set_auto_crop_state(
+            levelled=readiness.levelled, rois=readiness.rois, chromatic=readiness.chromatic,
+            level_note=readiness.level_note,
+        )
 
     def _build_view_tab(self) -> QWidget:
         self._view_tab = ViewTab(
@@ -1271,15 +1294,14 @@ class ImagePanel(QWidget):
         self._background.background_model_changed.connect(self._update_background_tab_state)
         self._update_background_tab_state()
 
-        # ROI/selection changes only move the overlay, never the pixels - but
-        # they still go through the same path. Splitting "redraw overlay only"
-        # out is a real optimization once there is a dataset big enough to
-        # measure it against; guessing at it now would be the premature kind
-        # CLAUDE.md's performance rules warn about.
+        # ROI/selection changes normally only move the overlay, never the pixels, so they take the overlay-only
+        # redraw (`_schedule_roi_redraw`, 2026-10-21 - the optimization this comment used to defer "until there is
+        # a dataset big enough to measure it against"; that dataset arrived: 314 cubes, 160 ROIs, and a full
+        # re-render of 50-180 ms per ROI edit for pixels that had not changed).
         self._roi_toolbox.geometry_changed.connect(self._bump_roi_revision)
         self._roi_toolbox.cosmetic_changed.connect(self._bump_roi_revision)
-        self._roi_toolbox.geometry_changed.connect(self._schedule_redraw)
-        self._roi_toolbox.cosmetic_changed.connect(self._schedule_redraw)
+        self._roi_toolbox.geometry_changed.connect(self._schedule_roi_redraw)
+        self._roi_toolbox.cosmetic_changed.connect(self._schedule_roi_redraw)
         # The ROI row's marks depend on the ROI timelines only, never on the cube shown: they are not part of the
         # redraw above (which runs on every Play step) and wait for quiet after an edit.
         self._roi_toolbox.geometry_changed.connect(self._schedule_roi_marks)
@@ -1287,7 +1309,9 @@ class ImagePanel(QWidget):
         self._selection.roi_selection_changed.connect(self._on_roi_selection_for_marks)
         self._selection.cube_changed.connect(self._schedule_redraw)
         self._selection.wavelength_changed.connect(self._schedule_redraw)
-        self._selection.roi_selection_changed.connect(self._schedule_redraw)
+        # Which ROIs are selected changes their outline, never a pixel: the background estimate's exclusion uses
+        # *every* ROI (`_redraw`'s request), not the selection, so this one is always overlay-only.
+        self._selection.roi_selection_changed.connect(self._schedule_overlay_redraw)
 
         # Keeps the nav widgets truthful for *any* source of a selection
         # change, not just this panel's own spin/slider handlers - e.g. the
@@ -1869,6 +1893,43 @@ class ImagePanel(QWidget):
             return
         self._redraw_timer.start()
 
+    def _rois_change_pixels(self) -> bool:
+        """Whether moving a ROI changes the **rendered pixels**, not just the overlay.
+
+        It does in exactly one case: the background estimate leaves the ROIs out
+        (`flatten_background_exclude_area_rois`) and that estimate is being used - either flattening is on, or the
+        estimate itself is what is shown. Nothing else in `RenderRequest` depends on a ROI (see the `rois=` note
+        in `_redraw`), and the exclusion uses every ROI, so the *selection* never matters.
+        """
+        background = self._background.settings()
+        return bool(background.flatten_background_exclude_area_rois) and (
+            bool(background.flatten_background_enabled) or bool(self._show_background)
+        )
+
+    def _schedule_roi_redraw(self, *_args: object) -> None:
+        """A ROI edit: redraw the overlay, and the pixels only if the ROIs feed them."""
+        if self._rois_change_pixels():
+            self._schedule_redraw()
+        else:
+            self._schedule_overlay_redraw()
+
+    def _schedule_overlay_redraw(self, *_args: object) -> None:
+        """Coalesce overlay-only redraws the way `_schedule_redraw` coalesces full ones (2026-10-21).
+
+        Skipped while a full redraw is already queued: `_redraw` draws the overlay itself (and stops this
+        timer), so queueing both would draw it twice. During a drag the gesture draws the circles directly every
+        sample (`roi_gestures._redraw_now`); this is what catches up afterwards, and what every non-drag edit
+        (the ROI table, Undo, Detect) goes through."""
+        if self._redraw_timer.isActive():
+            return
+        self._overlay_timer.start()
+
+    def _redraw_overlay_only(self) -> None:
+        """The ROI overlay, with the rendered frame left alone. 2-6 ms on 160 ROIs, against 50-180 ms for a
+        re-render of pixels that cannot have changed."""
+        with timed(logger, "render.overlay_only"):
+            self._draw_roi_overlay()
+
     def _redraw(self) -> None:
         """Snapshot every module's current state and hand it to the renderer.
 
@@ -1883,6 +1944,7 @@ class ImagePanel(QWidget):
         frame) made every request wait for work that does not feed it. Nothing below the submit changes what
         the request contains."""
         redraw_started = time.perf_counter()
+        self._overlay_timer.stop()  # this draws the overlay too: no need for the overlay-only pass as well
         cubes = self._dataset.spectral_cubes()
         if not cubes:
             self._draw_overlays()
@@ -2410,7 +2472,7 @@ class ImagePanel(QWidget):
         """Green "Chromatic" tab while a fitted correction is switched on, so
         it is visible even when another tab is open."""
         settings = self._chromatic.settings()
-        applied = bool(settings.chromatic_correction_enabled and self._chromatic.models())
+        applied = bool(settings.chromatic_correction_enabled) and self._chromatic.has_fitted_models
         self._tool_ribbon.set_tab_applied(CHROMATIC_TAB, applied)
 
     def _update_background_tab_state(self, *_args: object) -> None:

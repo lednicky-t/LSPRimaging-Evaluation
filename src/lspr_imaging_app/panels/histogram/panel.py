@@ -535,6 +535,12 @@ class HistogramPanel(QWidget):
     def _on_roi_geometry_changed(self, _change: object) -> None:
         self._roi_masks.invalidate()
         self._selected_masks.invalidate()
+        # Redraw on our own (2026-10-21): the ROI curves used to come back because a ROI edit re-rendered the
+        # image and `_on_image_rendered` redrew this panel. The Image panel now redraws only its overlay when the
+        # pixels cannot have changed, so nothing else would ask for these curves again. The plane counts are
+        # recomputed with them - wasted work in principle, but it happens on this panel's worker thread, not the
+        # GUI thread, and it keeps one redraw path instead of two.
+        self._schedule_redraw()
 
     def _apply_roi_curves(
         self, context: "_CurveContext", masks: tuple[np.ndarray | None, np.ndarray | None]

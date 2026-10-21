@@ -49,7 +49,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 import numpy as np
-from PyQt6.QtCore import QSize, pyqtSignal
+from PyQt6.QtCore import QSize, QTimer, pyqtSignal
 from PyQt6.QtWidgets import QComboBox, QFileDialog, QFrame, QHBoxLayout, QLabel, QSpinBox, QToolButton, QWidget
 
 from lspr_ui import get_active_theme, load_tabler_icon
@@ -80,6 +80,8 @@ _CANCEL_COLOR = "#ef4444"
 _CHUNK_WIDEST_TEXT = "8192"
 _CHUNK_TIP = "Chunk {axis} in pixels (4 to 8192)."
 _CHUNK_H_KEY = "export/chunk_h"  # read once (is a height saved yet?) and bound: one spelling for both
+_REFRESH_DEBOUNCE_MS = 150
+"""How long the counts/alignment recompute waits after the last ROI or geometry edit (`_schedule_refresh`)."""
 
 logger = logging.getLogger(__name__)
 
@@ -114,6 +116,9 @@ class ExportTab(QWidget):
         self._image_count = 0
         self._has_dataset = False
         self._roi_layout: ExportRoiLayout | None = None  # cached; dropped when ROIs/geometry/chromatic change
+        # The chromatic `(shift, stretch)` the read boxes are widened by: measured from the fitted models, which
+        # a ROI move does not touch, so it is kept until the correction itself changes (`_on_chromatic_changed`).
+        self._chromatic_reach: tuple[float, float] | None = None
         self._applied: cp.ChunkLayout | None = None  # from Find best, kept while the size is unchanged
         self._dialog: ChunkLayoutDialog | None = None
         self._exporting = False
@@ -217,6 +222,11 @@ class ExportTab(QWidget):
                 layout.addWidget(widget)
         layout.addStretch(1)
 
+        self._refresh_timer = QTimer(self)
+        self._refresh_timer.setSingleShot(True)
+        self._refresh_timer.setInterval(_REFRESH_DEBOUNCE_MS)
+        self._refresh_timer.timeout.connect(self._refresh_estimates)
+
         self._dataset_module.dataset_loaded.connect(self._on_dataset_loaded)
         self._dataset_module.dataset_cleared.connect(self._on_dataset_cleared)
         self._dataset_module.export_progress.connect(self._on_export_progress)
@@ -229,7 +239,7 @@ class ExportTab(QWidget):
         if geometry is not None:
             geometry.geometry_changed.connect(self._on_geometry_changed)
         if chromatic is not None:
-            chromatic.chromatic_model_changed.connect(self._on_roi_layout_changed)
+            chromatic.chromatic_model_changed.connect(self._on_chromatic_changed)
 
         if ui_state is not None:
             self.bind_ui_state(ui_state)
@@ -331,6 +341,7 @@ class ExportTab(QWidget):
         self._image_width = self._image_height = None
         self._image_dtype = None
         self._roi_layout = None
+        self._chromatic_reach = None  # another dataset's correction says nothing about this one's
         self._image_count = sum(
             len(self._dataset_module.wavelengths_for_cube(cube)) for cube in self._dataset_module.spectral_cubes()
         )
@@ -347,6 +358,7 @@ class ExportTab(QWidget):
         self._image_dtype = None
         self._image_count = 0
         self._roi_layout = None
+        self._chromatic_reach = None
         self._refresh_icons()
         self._refresh_estimates()
 
@@ -354,13 +366,25 @@ class ExportTab(QWidget):
         self._roi_layout = None
         self._applied = None  # its offsets were for the old layout
         if self._grid_mode() != GRID_CORNER:
-            self._refresh_estimates()
+            self._schedule_refresh()
 
     def _on_geometry_changed(self, *_args: object) -> None:
         # Moves the ROIs relative to the raw pixels, and (when the export applies it) changes the exported image size.
         self._roi_layout = None
         self._applied = None
-        self._refresh_estimates()
+        self._schedule_refresh()
+
+    def _on_chromatic_changed(self, *_args: object) -> None:
+        """The correction was refitted or switched: the reach has to be measured again (nothing else does)."""
+        self._chromatic_reach = None
+        self._on_roi_layout_changed()
+
+    def _schedule_refresh(self, *_args: object) -> None:
+        """Coalesce the recompute (2026-10-21). `geometry_changed` fires on every sample of a ROI drag or a
+        rotation drag, and with the grid aligned to the ROIs this recompute walked the ROI layout and the fitted
+        chromatic models: 267 ms per sample at 3000 fitted models, 755 ms at 8478. What it feeds - the counts in
+        the fields' tooltip, the "i" text and the grid preview - nobody reads mid-drag."""
+        self._refresh_timer.start()
 
     def _on_apply_tools_toggled(self, _checked: bool) -> None:
         self._roi_layout = None  # the layout lives in the other pixel space now
@@ -399,10 +423,13 @@ class ExportTab(QWidget):
             # ROIs are in processed space: with the image tools applied that *is* the export's space (no mapping).
             geometry = None if self._applies_image_tools() else self._geometry
             try:
-                self._roi_layout = gather_export_roi_layout(self._roi_toolbox, geometry, self._chromatic, raw_shape)
+                self._roi_layout = gather_export_roi_layout(
+                    self._roi_toolbox, geometry, self._chromatic, raw_shape, reach=self._chromatic_reach
+                )
             except Exception:
                 logger.exception("Could not gather the ROI layout for the export")
                 return None
+            self._chromatic_reach = self._roi_layout.reach  # measured once per chromatic change, not per ROI edit
         return self._roi_layout
 
     def current_layout(self) -> tuple[cp.ChunkLayout, ExportRoiLayout | None]:

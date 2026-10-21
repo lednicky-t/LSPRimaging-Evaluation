@@ -108,12 +108,14 @@ import copy
 import itertools
 import logging
 import math
+import time
 from collections.abc import Callable, Collection, Sequence
 from dataclasses import dataclass, fields, replace
 
 import numpy as np
 from PyQt6.QtCore import QObject, pyqtSignal
 
+from ..applog.events import emit_timing
 from ..change_events import RoiComputationalChange, RoiCosmeticChange
 from ..diagnostics import instrumented
 from ..image_tools.chromatic.affine import apply_affine_to_points
@@ -631,9 +633,15 @@ class RoiToolbox(QObject):
           have its later cubes change: the layout at this cube is what carries on."""
         if scope not in GEOMETRY_SCOPES:
             raise ValueError(f"scope must be one of {GEOMETRY_SCOPES}, got {scope!r}")
+        # Stage timing, DEBUG only, one line per write (CLAUDE.md's performance rule: instrument the hot path,
+        # aggregate, never log per ROI). A geometry write is the hot path of a ROI drag - one per mouse step - and
+        # the 2026-10-21 "GUI slow while moving ROIs" report could not be told apart from its listeners without
+        # this split: `emit_ms` is every listener on `geometry_changed`, `states_ms` the timeline arithmetic.
+        started = time.perf_counter()
         refusal = self.edit_refusal(cube, scope)
         if refusal is not None:
             raise ValueError(refusal)
+        refusal_seconds = time.perf_counter() - started
         states: list[tuple[AreaRoi, tuple[RoiGeometry, RoiTimeline | None], tuple[RoiGeometry, RoiTimeline | None]]] = []
         for roi, new in changes:
             if geometry_at(roi, cube) == new:
@@ -655,7 +663,19 @@ class RoiToolbox(QObject):
                 states.append(
                     (roi, (base_geometry(roi), roi.timeline), (base_geometry(roi), roi.timeline.individual_made_persistent(cube)))
                 )
-        self._write_states(states, label, reason)
+        states_seconds = time.perf_counter() - started - refusal_seconds
+        emit_seconds = self._write_states(states, label, reason)
+        if not states:
+            return  # nothing changed: no undo entry, no signal, and nothing worth a timing line either
+        total = time.perf_counter() - started
+        emit_timing(
+            logger, "roi.geometry_write", total * 1000.0,
+            refusal_ms=round(refusal_seconds * 1000.0, 2),
+            states_ms=round(states_seconds * 1000.0, 2),
+            emit_ms=round(emit_seconds * 1000.0, 2),
+            write_ms=round((total - refusal_seconds - states_seconds - emit_seconds) * 1000.0, 2),
+            n=len(states), rois=len(self._rois), cube=-1 if cube is None else int(cube), scope=scope, reason=reason,
+        )
 
     def _set_positions(
         self, positions: dict[int, tuple[float, float]], label: str, *, cube: int | None = None, scope: str = SCOPE_PERSISTENT
@@ -855,11 +875,15 @@ class RoiToolbox(QObject):
                 states.append((roi, (base_geometry(roi), roi.timeline), (base_geometry(roi), roi.timeline.without_cube(cube))))
         self._write_states(states, "Remove cube edit", "resized")
 
-    def _write_states(self, states: list, label: str, reason: str) -> None:
+    def _write_states(self, states: list, label: str, reason: str) -> float:
+        """Apply `states`, emit one `geometry_changed`, push one undo entry. Returns how long that emit took, in
+        seconds - every listener runs inside it, which is what `_write_geometry`'s timing line reports."""
         if not states:
-            return
+            return 0.0
+        emit_seconds = 0.0
 
         def write(which: int) -> None:
+            nonlocal emit_seconds
             for roi, old_state, new_state in states:
                 base, timeline = (old_state, new_state)[which]
                 roi.center_x, roi.center_y = base.center_x, base.center_y
@@ -867,12 +891,18 @@ class RoiToolbox(QObject):
                 roi.reference_inner_diameter_px = base.reference_inner_diameter_px
                 roi.reference_outer_diameter_px = base.reference_outer_diameter_px
                 roi.timeline = timeline if timeline else None
+            # `emit` runs every listener synchronously, so its time is part of the command the user sees in the
+            # log (a 2026-10-21 drag report measured 300-660 ms on `translate_rois`, of which the write itself
+            # was ~1 ms - everything else was in here). `_write_geometry` logs the split.
+            emit_started = time.perf_counter()
             self.geometry_changed.emit(
                 RoiComputationalChange(roi_ids=tuple(sorted(roi.area_roi_id for roi, _o, _n in states)), reason=reason)
             )
+            emit_seconds = time.perf_counter() - emit_started
 
         write(1)
         undo_manager.push(FunctionCommand(label, undo_fn=lambda: write(0), redo_fn=lambda: write(1)))
+        return emit_seconds
 
     @instrumented("RoiToolbox.delete_roi")
     def delete_roi(self, roi_id: int) -> None:
