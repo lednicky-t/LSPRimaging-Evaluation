@@ -42,8 +42,10 @@ from PyQt6.QtCore import QObject, pyqtSignal
 from ...applog.events import emit_timing
 from ...dataset.io import use_fast_tiff_decoder
 from .display_picture import FrameDisplay, prepare_frame_display
+from ...image_tools.background.estimate import BackgroundWeightsCache, roi_exclusion_mask
 from ...image_tools.background.model import BackgroundSettings
 from ...image_tools.geometry.model import GeometrySettings
+from ...image_tools.geometry.transform import spatial_output_shape
 from ...image_tools.preprocess import apply_preprocessing, estimate_background_image, resolve_external_mask
 from ...roi.model import AreaRoi, AreaRoiDetectionSettings
 
@@ -190,6 +192,10 @@ class ImageRenderer(QObject):
         self._prefetch_not_before = 0.0
         self._reading: dict[tuple[int, float], threading.Event] = {}
         self._reader_threads: list[threading.Thread] = []
+        # Per-frame work that is the same for every frame of a Play (2026-10-21, see `_frame_caches`). Only the render
+        # thread touches `_roi_exclusion_cache`; `BackgroundWeightsCache` has its own lock.
+        self._weights_cache = BackgroundWeightsCache()
+        self._roi_exclusion_cache: tuple[tuple, np.ndarray] | None = None
         self._thread = threading.Thread(target=self._loop, name="ImageRenderer", daemon=True)
         self._thread.start()
 
@@ -357,6 +363,35 @@ class ImageRenderer(QObject):
         result = self._render_inner(request, started)
         return replace(result, started_at=started, finished_at=time.perf_counter())
 
+    def _frame_caches(self, request: RenderRequest, raw_shape: tuple[int, int]) -> dict:
+        """The two per-frame results of the background flatten that do not depend on the frame's pixels, so Play
+        works them out once instead of for every frame (2026-10-21, Play at 12-15 instead of 20-25 frames/s: with
+        160 ROIs the flatten cost ~50 ms of every ~55 ms render, ~14 ms of it the ROI exclusion mask built by a
+        Python loop over the ROIs and ~5 ms the valid-mask weights).
+
+        * `roi_exclusion`: the ROI part of the background's exclusion mask. It depends only on the ROIs'
+          centres/diameters and the processed image's shape, so it is rebuilt only when one of those changes.
+        * `weights_cache`: the valid-mask half of the estimate, keyed by the mask's content (see
+          `BackgroundWeightsCache`), so a changed ignore mask can never reuse a stale entry.
+
+        Same output as without them, bit for bit (`apply_preprocessing`'s documented contract, pinned by a test);
+        render thread only. Nothing is passed when flattening is off, so that path is exactly as before."""
+        background = request.background
+        if not background.flatten_background_enabled:
+            return {}
+        caches: dict = {"weights_cache": self._weights_cache}
+        if background.flatten_background_exclude_area_rois and request.rois:
+            shape = spatial_output_shape(raw_shape, request.geometry)
+            key = (shape, tuple((roi.center_x, roi.center_y, roi.sample_diameter_px) for roi in request.rois))
+            cached = self._roi_exclusion_cache
+            if cached is None or cached[0] != key:
+                mask = roi_exclusion_mask(shape, list(request.rois))
+                mask.setflags(write=False)  # shared between frames; the flatten copies it before it adds to it
+                cached = (key, mask)
+                self._roi_exclusion_cache = cached
+            caches["roi_exclusion"] = cached[1]
+        return caches
+
     def _render_inner(self, request: RenderRequest, started: float) -> RenderResult:
         try:
             raw = self._load_plane_after_read_ahead(request.cube_index, request.wavelength_nm)
@@ -369,6 +404,8 @@ class ImageRenderer(QObject):
 
         processed_started = time.perf_counter()
         build = estimate_background_image if request.show_background else apply_preprocessing
+        # Only `apply_preprocessing` takes these; the background-estimate view is not a Play view.
+        caches = {} if request.show_background else self._frame_caches(request, raw.shape[:2])
         try:
             processed = build(
                 raw,
@@ -387,6 +424,7 @@ class ImageRenderer(QObject):
                     request.authored_mask, request.geometry, request.mask_warp_affine
                 ) if request_uses_ignore_mask(request) else None,
                 fast_rotation=request.fast_rotation,
+                **caches,
             )
         except Exception as exc:  # noqa: BLE001 - a render must never kill the thread
             logger.exception("Image render failed for cube=%s wl=%s", request.cube_index, request.wavelength_nm)
