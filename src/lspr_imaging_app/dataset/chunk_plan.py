@@ -665,8 +665,13 @@ def suggest_layouts(
     groups: Sequence[Sequence[int]] | None = None,
     bytes_per_pixel: int = 2,
     compression: bool = True,
+    only: str | None = None,
 ) -> list[Suggestion]:
     """A short list of good layouts for this ROI layout, recommended one first.
+
+    ``only`` (a ``Suggestion.key``, for the Export tab's chunk-style menu) builds just that one entry,
+    without ``scores`` (empty dict): the menu applies the layout and shows no numbers, and scoring was 80% of the time
+    (2.3 of 2.8 s at 6000 ROIs, 2026-10-21).
 
     With a lattice (pitch found from ``centers_xy``, or the box centres): columns (pitch wide, whole height), square of
     about two pitches, square 256, rows, one chunk per ROI. Without one: squares 256 and 128. Every grid is aligned to
@@ -711,6 +716,8 @@ def suggest_layouts(
         specs.append(("square_256", "Square 256 px", "Simple general-purpose size.", 256, 256, "single", None))
         specs.append(("square_128", "Square 128 px", "Smaller reads for single ROIs.", 128, 128, "single", None))
 
+    if only is not None:
+        specs = [spec for spec in specs if spec[0] == only]
     out = []
     for i, (key, name, description, cw, ch, pattern, align_groups) in enumerate(specs):
         layout = align_grid(boxes, cw, ch, pattern=pattern, groups=align_groups) or ChunkLayout(cw, ch)
@@ -720,10 +727,10 @@ def suggest_layouts(
             layout = ChunkLayout(cw, ch, 0, layout.offset_y, 0, layout.tolerance_y)
         out.append(Suggestion(
             key=key, name=name, description=description, layout=layout,
-            scores=score_layout(boxes, layout, groups=score_groups),
+            scores={} if only is not None else score_layout(boxes, layout, groups=score_groups),
             lossless=export_frame(layout, boxes, image_shape, lossless=True, bytes_per_pixel=bytes_per_pixel),
             lossy=export_frame(layout, boxes, image_shape, lossless=False, bytes_per_pixel=bytes_per_pixel),
             warnings=chunk_warnings(cw, ch, compression=compression),
-            recommended=(i == 0),
+            recommended=(i == 0 and only is None),
         ))
     return out

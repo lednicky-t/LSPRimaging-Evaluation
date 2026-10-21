@@ -231,7 +231,7 @@ _PLAY_READ_AHEAD = 3  # frames read ahead while Play runs
 # `app_rewrite.py`), not a redraw, so there is no reason to pay disk I/O on
 # every intermediate frame of a drag/zoom the way a 100ms redraw would.
 _VIEW_RANGE_PERSIST_DEBOUNCE_MS = 600
-_CHUNK_GRID_COLOR = "#a3a3a3"
+_CHUNK_GRID_COLOR = "#84cc16"  # the lime of the Export tab's grid icon (`export_tab._GRID_ON_COLOR`)
 _CROP_OUTLINE_COLOR = "#38bdf8"  # the crop button's active blue
 
 # Cube/Wavelength navigation rows (ported from the stable app's
@@ -2713,6 +2713,9 @@ class ImagePanel(QWidget):
             raw_shape = self._dataset.raw_plane_shape() if preview.enabled else None
         if not preview.enabled or raw_shape is None or preview.chunk_w <= 0 or preview.chunk_h <= 0:
             self._chunk_grid_curve.clear()
+            # Nothing else re-renders on a toggle, so without this the removed lines stay painted until the mouse
+            # moves over the image.
+            self._view.viewport().update()
             return
         raw_h, raw_w = float(raw_shape[0]), float(raw_shape[1])
         to_display = (
@@ -2732,6 +2735,7 @@ class ImagePanel(QWidget):
         for y in np.arange(preview.offset_y % preview.chunk_h, raw_h + 0.5, preview.chunk_h, dtype=np.float64):
             segment(0.0, y, raw_w, y)
         self._chunk_grid_curve.setData(xs, ys)
+        self._view.viewport().update()
 
     # -- interaction --------------------------------------------------------
 

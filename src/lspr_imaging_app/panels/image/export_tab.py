@@ -5,26 +5,30 @@ Screen purpose: export the loaded dataset to OME-Zarr, choosing the chunk grid i
 
 Layout (one ribbon row):
 
-    [rot]        |  [grid] [W] x [H] [search]  |  [Position v] [Shard v]  |  [zip]     [ban]       |  [export]
-    Rotate/crop          Chunk grid               Position     Shard        Compress  Skip excl.     Export
+    [grid] [W] x [H] [style v]  |  [Shard v]  |  [zip]     [ban]       |  [export]
+          Chunk grid                   Shard        Compress  Skip excl.     Export
 
-- **Rotate/crop (2026-10-20, maintainer decision; default on):** export the image as shown - rotated (Lanczos4),
+- **Rotate/crop (2026-10-20; always on since 2026-10-21, the on/off icon was removed):** export the image as shown - rotated (Lanczos4),
   flipped and cropped (`GeometryModule` settings, passed as `preprocessing`) - in the source's bit depth. Pixels the
   rotation creates are stored as 0 and listed in the file's `valid_mask`; readers load them as NaN
   (`dataset/io.py`, docs/rotated_zarr_export_interpolation_2026-10-20.md). The chunk grid, the ROI alignment and
-  the size estimates then work in that processed space (the grid is drawn straight). Off: the raw pixels; the grid
-  lies in raw pixels and is drawn tilted under a rotation. A session started on a rotated export needs no rotation:
+  the size estimates then work in that processed space (the grid is drawn straight). Only when the Image tools
+  are switched off does the export fall back to the raw pixels. A session started on a rotated export needs no rotation:
   its pixels are this session's processed image, so ROI positions carry over 1:1.
 
 - **Chunk grid:** show the grid on the image (state on `DatasetModule.chunk_grid_preview`, drawn by `ImagePanel`;
-  this tab and the panel never read each other's state), chunk width x height in px, and Find best
-  (`chunk_layout_dialog.py`; Apply sets width, height, grid position and the exact grid offsets of the chosen
-  suggestion, kept until the size is edited by hand). Chunks are always W x H (no square/rectangle switch). The
+  this tab and the panel never read each other's state), chunk width x height in px, and the chunk-style menu
+  (`chunk_style_picker.py`, 2026-10-21, replaced the Find best dialog: 1 ROI / column / row per chunk; a
+  pick applies at once - width, height, grid position and the exact grid offsets of that
+  `chunk_plan.suggest_layouts` entry, kept until the size is edited by hand; no scores or compression sample any
+  more, `chunk_layout_dialog.py` is no longer used). Chunks are always W x H (no square/rectangle switch). The
   width field keeps the old `export/chunk_size` key, so a saved square size restores as width; the height
   defaults to the width until it is saved itself.
-- **Position:** where the grid starts - image corner, or aligned to the ROIs, lossless (pads the left/top edge)
-  or lossy (keeps only the chunk-aligned part around the ROIs). The alignment is computed from the ROI read
-  boxes in the export's pixel space (`export_roi_layout.py`, `dataset.chunk_plan.align_grid`) whenever the size or position
+- **Grid position (no field since 2026-10-21):** always aligned to the ROIs, so each ROI touches as few chunks as
+  possible; the left/top edge is padded with empty pixels (less than one chunk, nothing is lost). Without ROIs the grid
+  starts at the image corner. The old Corner and lossy-trim choices were removed: auto crop leaves a border, and parts
+  of the image are left out by cropping in the Image tools. The alignment is computed from the ROI read
+  boxes in the export's pixel space (`export_roi_layout.py`, `dataset.chunk_plan.align_grid`) whenever the size
   changes, or the ROIs/geometry/chromatic correction change (cheap integer arithmetic; the preview follows).
 - **Shard:** one wavelength frame or one whole cube per shard file.
 - **Compress / Skip excl.:** lz4 + bitshuffle on/off; leave out excluded images.
@@ -34,7 +38,7 @@ Layout (one ribbon row):
 The Workflow section's live text lines have no room on a ribbon row: the chunk counts, the grid alignment and
 the warnings (`chunk_plan.chunk_warnings`: chunks that will not compress or are small) are in the W x H fields'
 tooltip and the panel's "i" icon (`info_html`), and the fields turn amber while a warning applies. One-off
-messages (Find best without ROIs, an export that cannot start) go to the panel's status (`status` callback).
+messages (a chunk style without ROIs, an export that cannot start) go to the panel's status (`status` callback).
 
 Scoped down from the stable
 app, flagged rather than silently dropped: no name prompt (the dataset's folder name), no destination-collision
@@ -49,7 +53,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 import numpy as np
-from PyQt6.QtCore import QSize, QTimer, pyqtSignal
+from PyQt6.QtCore import QSize, Qt, QTimer, pyqtSignal
 from PyQt6.QtWidgets import QComboBox, QFileDialog, QFrame, QHBoxLayout, QLabel, QSpinBox, QToolButton, QWidget
 
 from lspr_ui import get_active_theme, load_tabler_icon
@@ -59,18 +63,14 @@ from ...dataset import chunk_plan as cp
 from ...dataset.io import build_ome_zarr_export_folder_name, probe_ome_zarr_export_shape, sanitize_ome_zarr_export_name
 from ...dataset.model import ImageDataset
 from ...image_tools import GeometryModule
-from ...image_tools.geometry.transform import apply_spatial_preprocessing, spatial_output_shape
-from ...io._zarr_export_worker import _to_stored, value_step
+from ...image_tools.geometry.transform import spatial_output_shape
 from ..ribbon_fields import style_ribbon_combo, style_ribbon_number_field
 from ..ribbon_group import labeled_icon_group, ribbon_separator
 from ..ui_state import UiStateStore
-from .chunk_layout_dialog import ChunkLayoutDialog
+from .chunk_style_picker import ChunkStylePicker
 from .export_roi_layout import ExportRoiLayout, gather_export_roi_layout
 from .general_group import ICON_SIZE, style_general_icon_button
 
-GRID_CORNER, GRID_LOSSLESS, GRID_LOSSY = "corner", "lossless", "lossy"
-_SAMPLE_CUBES = 3
-_SAMPLE_WAVELENGTHS = 5
 _RENDER_SIZE = ICON_SIZE * 2
 _STROKE_WIDTH = 2.1
 _ACTIVE_COLOR = "#38bdf8"  # the ribbon's tool blue
@@ -119,23 +119,13 @@ class ExportTab(QWidget):
         # The chromatic `(shift, stretch)` the read boxes are widened by: measured from the fitted models, which
         # a ROI move does not touch, so it is kept until the correction itself changes (`_on_chromatic_changed`).
         self._chromatic_reach: tuple[float, float] | None = None
-        self._applied: cp.ChunkLayout | None = None  # from Find best, kept while the size is unchanged
-        self._dialog: ChunkLayoutDialog | None = None
+        self._applied: cp.ChunkLayout | None = None  # from the chunk-style menu, kept while the size is unchanged
         self._exporting = False
         self._export_percent = 0
         # What `info_html` and the fields' tooltip show (the Workflow section had a label for each).
         self._warning_text = ""
         self._estimate_text = ""
         self._layout_text = ""
-
-        self._apply_tools_button = self._icon_button(
-            "Apply rotation/crop: export the image as shown - rotated (Lanczos4), flipped and cropped - instead of the "
-            "raw camera pixels. Pixels the rotation creates are stored as 0 and marked in the file's valid mask, so "
-            "they load as empty (NaN). Off: the raw pixels, unchanged.",
-            checkable=True,
-        )
-        self._apply_tools_button.setChecked(True)
-        self._apply_tools_button.toggled.connect(self._on_apply_tools_toggled)
 
         self._chunk_grid_button = self._icon_button("Show the export chunk grid on top of the image.", checkable=True)
         self._chunk_grid_button.toggled.connect(self._on_chunk_grid_toggled)
@@ -148,23 +138,15 @@ class ExportTab(QWidget):
             spin.setKeyboardTracking(False)
             style_ribbon_number_field(spin, _CHUNK_WIDEST_TEXT)
             spin.valueChanged.connect(self._on_chunk_size_changed)
+        # Both numbers hug the "×": width right-aligned (the default), height left-aligned. Right-aligned, a 3-digit
+        # height left a digit-wide gap after the "×" because the box is sized for 4 digits (8192).
+        self._chunk_h_spin.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
         self._field_style = self._chunk_spin.styleSheet()  # put back when a warning's amber goes away
         times = QLabel("×", self)
 
-        self._find_best_button = self._icon_button("")
-        self._find_best_button.clicked.connect(self._on_find_best_clicked)
-
-        self._grid_combo = QComboBox(self)
-        self._grid_combo.addItem("Corner", GRID_CORNER)
-        self._grid_combo.addItem("ROIs, lossless", GRID_LOSSLESS)
-        self._grid_combo.addItem("ROIs, lossy", GRID_LOSSY)
-        self._grid_combo.setToolTip(
-            "Where the chunk grid starts. Corner: at pixel (0, 0). ROIs: shifted so each ROI touches as few "
-            "chunks as possible - lossless pads the left/top edge with empty pixels (nothing is lost), lossy "
-            "keeps only the part of the image around the ROIs (the rest is not exported)."
-        )
-        style_ribbon_combo(self._grid_combo)
-        self._grid_combo.currentIndexChanged.connect(self._on_grid_mode_changed)
+        self._find_best_button = ChunkStylePicker(self)  # the chunk-style pick-up menu (was the Find best dialog)
+        self._find_best_button.setIconSize(QSize(ICON_SIZE, ICON_SIZE))
+        self._find_best_button.style_picked.connect(self._on_style_picked)
 
         self._shard_combo = QComboBox(self)
         self._shard_combo.addItem("WL frame", "per_image")
@@ -199,9 +181,7 @@ class ExportTab(QWidget):
         chunk_layout.addWidget(times)
         chunk_layout.addWidget(self._chunk_h_spin)
         chunk_layout.addWidget(self._find_best_button)
-        apply_group, _ = labeled_icon_group(self, self._apply_tools_button, "Rotate/crop")
         chunk_group, _ = labeled_icon_group(self, chunk_row, "Chunk grid")
-        position_group, _ = labeled_icon_group(self, self._grid_combo, "Position")
         shard_group, _ = labeled_icon_group(self, self._shard_combo, "Shard")
         compression_group, _ = labeled_icon_group(self, self._compression_button, "Compress")
         skip_group, _ = labeled_icon_group(self, self._skip_excluded_button, "Skip excl.")
@@ -212,7 +192,7 @@ class ExportTab(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(6)
         for index, group in enumerate(
-            (apply_group, chunk_group, (position_group, shard_group), (compression_group, skip_group), export_group)
+            (chunk_group, shard_group, (compression_group, skip_group), export_group)
         ):
             if index:
                 separator = ribbon_separator(self)
@@ -232,7 +212,7 @@ class ExportTab(QWidget):
         self._dataset_module.export_progress.connect(self._on_export_progress)
         self._dataset_module.export_finished.connect(self._on_export_finished)
         self._dataset_module.export_failed.connect(self._on_export_failed)
-        # What moves a ROI's read box. Group edits (cosmetic) only matter to Find best, which re-reads the layout.
+        # What moves a ROI's read box. Group edits (cosmetic) only matter to the chunk-style menu, which re-reads the layout.
         if roi_toolbox is not None:
             roi_toolbox.geometry_changed.connect(self._on_roi_layout_changed)
             roi_toolbox.roi_ids_renumbered.connect(self._on_roi_layout_changed)
@@ -251,12 +231,10 @@ class ExportTab(QWidget):
     def bind_ui_state(self, store: UiStateStore) -> None:
         """Restore the settings as last left and keep saving them (`panels/ui_state.py`). Same keys as the
         Workflow section had, so saved settings carry over. Sizes before the grid toggle."""
-        store.bind("export/apply_image_tools", self._apply_tools_button)
         store.bind("export/chunk_size", self._chunk_spin)
         if store.get(_CHUNK_H_KEY) is None:
             self._chunk_h_spin.setValue(self._chunk_spin.value())  # a saved square size restores as W x W
         store.bind(_CHUNK_H_KEY, self._chunk_h_spin)
-        store.bind("export/grid_position", self._grid_combo)
         store.bind("export/chunk_grid_preview", self._chunk_grid_button)
         store.bind("export/shard", self._shard_combo)
         store.bind("export/compression", self._compression_button)
@@ -266,10 +244,10 @@ class ExportTab(QWidget):
         """The "i" icon's text while this tab is open: what the tab does, then the current counts and warnings."""
         lines = [
             "<b>Export to OME-Zarr</b><br>"
-            "Writes the images in chunks of W&nbsp;&times;&nbsp;H pixels. Rotate/crop on: as shown - rotated "
-            "(Lanczos4), flipped and cropped, same bit depth; pixels the rotation creates load as empty. Off: the raw "
-            "camera pixels. Grid icon: show the chunk grid on the image. Magnifier: suggest chunk layouts that suit the ROIs. "
-            "Position: start the grid at the image corner or align it to the ROIs. "
+            "Writes the images in chunks of W&nbsp;&times;&nbsp;H pixels, as shown: rotated "
+            "(Lanczos4), flipped and cropped, same bit depth; pixels the rotation creates load as empty. "
+            "Grid icon: show the chunk grid on the image. Magnifier menu: set the chunk to hold 1 ROI, a column or a row of ROIs. "
+            "The grid is always aligned to the ROIs (the left/top edge is padded with empty pixels). "
             "Shard: images per file on disk."
         ]
         for text in (self._estimate_text, self._layout_text):
@@ -283,6 +261,7 @@ class ExportTab(QWidget):
     def refresh_theme(self) -> None:
         for button in self._buttons():
             style_general_icon_button(button)
+        self._find_best_button.refresh_menu_icons()
         self._refresh_icons()
         self._refresh_estimates()
         for separator in self._separators:
@@ -299,7 +278,7 @@ class ExportTab(QWidget):
         return button
 
     def _buttons(self) -> tuple[QToolButton, ...]:
-        return (self._apply_tools_button, self._chunk_grid_button, self._find_best_button, self._compression_button,
+        return (self._chunk_grid_button, self._find_best_button, self._compression_button,
                 self._skip_excluded_button, self._export_button)
 
     def _icon(self, name: str, color: str):
@@ -308,8 +287,6 @@ class ExportTab(QWidget):
     def _refresh_icons(self, *_args: object) -> None:
         theme = get_active_theme()
         dim = theme.text_dim
-        self._apply_tools_button.setIcon(
-            self._icon("rotate-clockwise-2", _ACTIVE_COLOR if self._apply_tools_button.isChecked() else dim))
         self._chunk_grid_button.setIcon(
             self._icon("grid-4x4", _GRID_ON_COLOR if self._chunk_grid_button.isChecked() else dim))
         self._find_best_button.setIcon(self._icon("search", dim))
@@ -365,8 +342,7 @@ class ExportTab(QWidget):
     def _on_roi_layout_changed(self, *_args: object) -> None:
         self._roi_layout = None
         self._applied = None  # its offsets were for the old layout
-        if self._grid_mode() != GRID_CORNER:
-            self._schedule_refresh()
+        self._schedule_refresh()
 
     def _on_geometry_changed(self, *_args: object) -> None:
         # Moves the ROIs relative to the raw pixels, and (when the export applies it) changes the exported image size.
@@ -386,21 +362,11 @@ class ExportTab(QWidget):
         the fields' tooltip, the "i" text and the grid preview - nobody reads mid-drag."""
         self._refresh_timer.start()
 
-    def _on_apply_tools_toggled(self, _checked: bool) -> None:
-        self._roi_layout = None  # the layout lives in the other pixel space now
-        self._applied = None
-        self._refresh_icons()
-        self._refresh_estimates()
-
     # -- layout -----------------------------------------------------------------
 
     def _applies_image_tools(self) -> bool:
-        """Whether the export applies rotation/flip/crop: the toggle is on and the image tools are switched on."""
-        return (
-            self._apply_tools_button.isChecked()
-            and self._geometry is not None
-            and bool(self._geometry.settings().image_tools_enabled)
-        )
+        """Whether the export applies rotation/flip/crop: always, as long as the image tools are switched on."""
+        return self._geometry is not None and bool(self._geometry.settings().image_tools_enabled)
 
     def _export_shape(self) -> tuple[int, int] | None:
         """(height, width) of the image the export stores before any frame: the processed image when it applies the
@@ -411,9 +377,6 @@ class ExportTab(QWidget):
         if self._applies_image_tools():
             return tuple(int(v) for v in spatial_output_shape(raw, self._geometry.settings()))
         return raw
-
-    def _grid_mode(self) -> str:
-        return str(self._grid_combo.currentData() or GRID_CORNER)
 
     def _export_roi_layout(self) -> ExportRoiLayout | None:
         raw_shape = self._export_shape()
@@ -433,10 +396,8 @@ class ExportTab(QWidget):
         return self._roi_layout
 
     def current_layout(self) -> tuple[cp.ChunkLayout, ExportRoiLayout | None]:
-        """The chunk layout the export would use now (size from the fields, grid offsets from the grid position)."""
+        """The chunk layout the export would use now (size from the fields, grid offsets aligned to the ROIs)."""
         w, h = self._chunk_spin.value(), self._chunk_h_spin.value()
-        if self._grid_mode() == GRID_CORNER:
-            return cp.ChunkLayout(w, h), None
         roi_layout = self._export_roi_layout()
         if roi_layout is None or roi_layout.empty:
             return cp.ChunkLayout(w, h), None
@@ -458,8 +419,7 @@ class ExportTab(QWidget):
         if roi_layout is None:
             return None
         bpp = int(self._image_dtype.itemsize) if self._image_dtype is not None else 2
-        return cp.export_frame(layout, roi_layout.boxes, raw_shape, lossless=self._grid_mode() == GRID_LOSSLESS,
-                               bytes_per_pixel=bpp)
+        return cp.export_frame(layout, roi_layout.boxes, raw_shape, lossless=True, bytes_per_pixel=bpp)
 
     def _refresh_estimates(self, *_args: object) -> None:
         w, h = self._chunk_spin.value(), self._chunk_h_spin.value()
@@ -467,9 +427,10 @@ class ExportTab(QWidget):
         raw_shape = self._export_shape()
         self._find_best_button.setEnabled(raw_shape is not None and self._roi_toolbox is not None)
         self._find_best_button.setToolTip(
-            "Find best: suggest chunk layouts that suit the ROI layout."
+            "Chunk style: pick what one chunk holds (1 ROI, a column or a row of ROIs); sets the chunk size and "
+            "aligns the grid to the ROIs."
             if self._roi_toolbox is not None and raw_shape is not None
-            else "Find best: load a dataset and place ROIs first - the suggestions are built from the ROI layout."
+            else "Chunk style: load a dataset and place ROIs first - the sizes are built from the ROI layout."
         )
         if raw_shape is None:
             self._estimate_text = self._layout_text = ""
@@ -477,18 +438,11 @@ class ExportTab(QWidget):
             frame = self._current_frame()
             if frame is None:
                 per_plane = -(-raw_shape[1] // w) * -(-raw_shape[0] // h)
-                self._layout_text = (
-                    "No ROIs to align to: the grid stays at the image corner." if self._grid_mode() != GRID_CORNER else ""
-                )
+                self._layout_text = "No ROIs to align to: the grid starts at the image corner."
             else:
                 per_plane = frame.chunks_per_plane
-                if frame.lossless:
-                    self._layout_text = (f"Grid aligned to the ROIs: pads {-frame.origin_x} px left, {-frame.origin_y} px "
-                                         f"top (stored {frame.width} x {frame.height} px, nothing lost).")
-                else:
-                    drop = 100.0 * frame.discarded_px / (raw_shape[0] * raw_shape[1])
-                    self._layout_text = (f"Grid aligned to the ROIs: keeps {frame.width} x {frame.height} px from "
-                                         f"({frame.origin_x}, {frame.origin_y}); {drop:.0f}% of the image is not exported.")
+                self._layout_text = (f"Grid aligned to the ROIs: pads {-frame.origin_x} px left, {-frame.origin_y} px "
+                                     f"top (stored {frame.width} x {frame.height} px, nothing lost).")
             self._estimate_text = (
                 f"-> {per_plane} chunks/plane, {per_plane * self._image_count:,} chunks total ({self._image_count:,} images)"
             )
@@ -512,9 +466,6 @@ class ExportTab(QWidget):
     def _on_chunk_size_changed(self, _value: int) -> None:
         self._refresh_estimates()
 
-    def _on_grid_mode_changed(self, _index: int) -> None:
-        self._refresh_estimates()
-
     def _on_chunk_grid_toggled(self, _checked: bool) -> None:
         self._update_preview()
         self._refresh_icons()
@@ -527,62 +478,37 @@ class ExportTab(QWidget):
             processed=self._applies_image_tools(),
         )
 
-    # -- Find best ----------------------------------------------------------------
+    # -- Chunk style ----------------------------------------------------------------
 
     def _report(self, text: str) -> None:
         if self._status is not None:
             self._status(text)
 
-    def _on_find_best_clicked(self) -> None:
+    def _on_style_picked(self, key: str) -> None:
+        """Apply a chunk style from the menu straight away: chunk W x H and the grid aligned to the ROIs."""
         self._roi_layout = None  # fresh: picks up group edits, which do not invalidate the cache
         roi_layout = self._export_roi_layout()
         if roi_layout is None or roi_layout.empty:
-            self._report("Find best: place ROIs first - the suggestions are built from the ROI layout.")
+            self._report("Chunk style: place ROIs first - the sizes are built from the ROI layout.")
             return
-        if self._dialog is not None:
-            self._dialog.close()
-        dataset = self._dataset_module
-        cubes = dataset.spectral_cubes()
-        pick_cubes = [cubes[i] for i in sorted({0, len(cubes) // 2, len(cubes) - 1})][:_SAMPLE_CUBES] if cubes else []
-        # Compression is sampled on what the export stores: rotated/cropped when it applies the image tools, in the
-        # stored dtype (`load_plane` is float32; float32 tiles compress differently from uint16 ones).
-        settings = self._geometry.settings() if self._applies_image_tools() else None
-        stored_dtype = self._image_dtype if self._image_dtype is not None else np.dtype(np.float32)
-
-        def load_sample_planes() -> list[np.ndarray]:  # runs on the dialog's worker thread
-            planes = []
-            for cube in pick_cubes:
-                wls = dataset.wavelengths_for_cube(cube)
-                for i in sorted({round(k * (len(wls) - 1) / max(_SAMPLE_WAVELENGTHS - 1, 1)) for k in range(_SAMPLE_WAVELENGTHS)}):
-                    if wls:
-                        plane = np.asarray(dataset.load_plane(cube, wls[int(i)]))
-                        step = 1
-                        if settings is not None:
-                            # The export rounds rotated values onto the camera's step: sample the same values.
-                            if np.issubdtype(stored_dtype, np.integer):
-                                step = value_step(plane.astype(stored_dtype))
-                            plane = apply_spatial_preprocessing(plane, settings)
-                        planes.append(_to_stored(plane, stored_dtype, 0.0, step))
-            return planes
-
-        self._dialog = ChunkLayoutDialog(
-            roi_layout,
-            load_sample_planes,
-            planes=self._image_count,
+        suggestions = cp.suggest_layouts(
+            roi_layout.boxes, roi_layout.raw_shape, centers_xy=roi_layout.centers,
+            groups=[list(g) for g in roi_layout.groups] or None,
             bytes_per_pixel=int(self._image_dtype.itemsize) if self._image_dtype is not None else 2,
-            compression=self._compression_button.isChecked(),
-            lossless=self._grid_mode() != GRID_LOSSY,
-            parent=self,
+            compression=self._compression_button.isChecked(), only=key,
         )
-        self._dialog.layout_chosen.connect(self._on_layout_chosen)
-        self._dialog.show()
+        chosen = next((s for s in suggestions if s.key == key), None)
+        if chosen is None:
+            self._report("Chunk style: no regular ROI array found (needs at least two rows and two columns of ROIs).")
+            return
+        self._on_layout_chosen(chosen)
+        self._report(f"Chunk style: {chosen.name}, grid aligned to the ROIs.")
 
-    def _on_layout_chosen(self, suggestion: cp.Suggestion, lossless: bool) -> None:
+    def _on_layout_chosen(self, suggestion: cp.Suggestion) -> None:
         layout = suggestion.layout
         self._applied = layout  # first: the refreshes the setters below trigger use its exact offsets
         self._chunk_spin.setValue(layout.chunk_w)
         self._chunk_h_spin.setValue(layout.chunk_h)
-        self._grid_combo.setCurrentIndex(self._grid_combo.findData(GRID_LOSSLESS if lossless else GRID_LOSSY))
         self._refresh_estimates()
 
     # -- export -----------------------------------------------------------------
