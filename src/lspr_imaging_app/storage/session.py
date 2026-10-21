@@ -83,6 +83,8 @@ import json
 import logging
 import os
 import tempfile
+from collections.abc import Mapping
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass, field, fields, replace
 from pathlib import Path
 
@@ -140,6 +142,9 @@ to their defaults, which is the correct reading of a session written before
 they could be configured at all."""
 
 _MASK_SCOPES = ("persistent", "individual")
+_MASK_READ_WORKERS = min(8, (os.cpu_count() or 4))
+"""Threads that decode a session's mask PNGs (`_decode_mask_changes`). Capped: beyond a handful the decode is
+waiting on the disk, and this runs while the user is waiting for the window."""
 
 # MaskSettings' two np.ndarray fields are deliberately never persisted - see
 # image_tools/mask/module.py's finding 1: they are the old app's inert "New
@@ -412,6 +417,10 @@ class SessionState:
     selected_roi_ids: tuple[int, ...] = ()
     frame_roles: FrameRolesState = field(default_factory=FrameRolesState)
     transient_events: TransientEventsState = field(default_factory=TransientEventsState)
+    mask_versions: dict[MaskChange, int] = field(default_factory=dict)
+    """Only filled by `load_session`: which file version each mask change was read from, for
+    `SessionWriter.seed`. Not part of the saved format, and empty in a state captured from the modules (it says
+    "this writer knows nothing about what is on disk", which is where the writer starts anyway)."""
 
 
 def session_dir(root: Path) -> Path:
@@ -479,6 +488,17 @@ class SessionWriter:
         self._known: dict[MaskChange, int] = {}  # mask change -> version of its file in <root>/session/masks
         self.last_stats = MaskWriteStats()
 
+    def seed(self, root: Path, naming: FrameNamingScheme, known: Mapping[MaskChange, int]) -> None:
+        """Start from what a **load** found on disk (`SessionState.mask_versions`) instead of from nothing.
+
+        Without this, the first save after opening a session read every mask PNG back to work out which version
+        each change already is - 411 masks cost 5 s on a fast disk and 11 s on the maintainer's (measured
+        2026-10-21, `docs/session_write_cost_2026-10-21.md`), on the autosave thread but contending with the GUI
+        for the GIL the whole time. The versions were in the JSON that load just read, so nothing has to be
+        re-derived; a file that has since gone missing is still caught, because `_encode_mask_changes` checks the
+        directory listing before trusting a remembered version."""
+        self._root, self._naming, self._known = Path(root), naming, dict(known)
+
     def write(self, root: Path, prepared: PreparedSession) -> Path:
         """Write `prepared` under ``root/session/``, returning the JSON's path."""
         root = Path(root)
@@ -531,9 +551,11 @@ class SessionWriter:
                 mask_8bit = change.plane_uncached().astype(np.uint8) * 255  # not through the GUI's shared decode cache
                 ref, is_new = persist_mask_snapshot_with_status(
                     masks_dir, mask_8bit, cube_index=cube_index, wavelength_nm=wavelength_nm, tag=tag, naming=naming,
+                    present=present,  # already listed above: no directory scan per mask
                 )
                 version = int(ref.version)
                 if is_new:
+                    present.add(ref.filename(naming))  # so a later change in the same group sees this version
                     stats.written += 1
                 else:
                     stats.verified += 1
@@ -548,12 +570,21 @@ class SessionWriter:
         return encoded, stats
 
 
-def _decode_mask_changes(root: Path, raw: object, naming: FrameNamingScheme) -> tuple[MaskChange, ...]:
-    if not isinstance(raw, list) or not raw:
-        return ()
-    import cv2  # local import, same convention analysis/provenance.py uses
+def _decode_mask_changes(
+    root: Path, raw: object, naming: FrameNamingScheme
+) -> tuple[tuple[MaskChange, ...], dict[MaskChange, int]]:
+    """The changes, plus which file version each one came from - `SessionWriter.seed` uses that so the first save
+    after a load does not read all those PNGs back to work out what it already knows (2026-10-21).
 
-    decoded: list[MaskChange] = []
+    **The PNGs are read on a small thread pool** (2026-10-21): one per mask, and a mask-heavy session has
+    hundreds (411 in the maintainer's), which cost 4-8 s of a frozen window because `load_session` runs on the
+    GUI thread. Both heavy steps release the GIL - OpenCV's decode and the zlib compression `MaskChange` does on
+    construction - so the reads overlap instead of queueing. The order of the returned changes is the file's
+    order either way; a missing or undecodable entry is still skipped with a warning, as before."""
+    if not isinstance(raw, list) or not raw:
+        return (), {}
+
+    specs: list[tuple[int, float, str, MaskSnapshotRef]] = []
     for entry in raw:
         if not isinstance(entry, dict):
             continue
@@ -563,26 +594,47 @@ def _decode_mask_changes(root: Path, raw: object, naming: FrameNamingScheme) -> 
             scope = str(entry["scope"])
             if scope not in _MASK_SCOPES:
                 raise ValueError(f"unknown mask scope {scope!r}")
-            ref = MaskSnapshotRef(
+            specs.append((cube_index, wavelength_nm, scope, MaskSnapshotRef(
                 cube_index=cube_index, wavelength_nm=wavelength_nm,
                 tag=mask_scope_tag(scope), version=int(entry["version"]),
-            )
-            path = _masks_dir(root) / ref.filename(naming)
-            image = cv2.imread(str(path), cv2.IMREAD_UNCHANGED)
-            if image is None:
-                # The JSON references a PNG that isn't there. Dropping just
-                # that change is better than refusing the whole session:
-                # the rest of the timeline, the ROIs and every setting are
-                # still perfectly restorable.
-                logger.warning("Session mask file missing, skipping that change: %s", path)
-                continue
-            decoded.append(MaskChange(
-                frame=(cube_index, wavelength_nm), scope=scope,
-                mask=np.asarray(image, dtype=bool),
-            ))
+            )))
         except (KeyError, TypeError, ValueError):
             logger.warning("Skipping an undecodable mask change in the session file", exc_info=True)
-    return tuple(decoded)
+
+    masks_dir = _masks_dir(root)
+
+    def read(spec: tuple[int, float, str, MaskSnapshotRef]) -> tuple[MaskChange, int] | Path:
+        """Worker: decode one mask into a `MaskChange`, or return the path that could not be read."""
+        import cv2  # local import, same convention analysis/provenance.py uses
+
+        cube_index, wavelength_nm, scope, ref = spec
+        path = masks_dir / ref.filename(naming)
+        image = cv2.imread(str(path), cv2.IMREAD_UNCHANGED)
+        if image is None:
+            return path
+        return MaskChange(
+            frame=(cube_index, wavelength_nm), scope=scope, mask=np.asarray(image, dtype=bool)
+        ), ref.version
+
+    workers = max(1, min(len(specs), _MASK_READ_WORKERS))
+    if workers > 1:
+        with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="session-masks") as pool:
+            results = list(pool.map(read, specs))
+    else:
+        results = [read(spec) for spec in specs]
+
+    decoded: list[MaskChange] = []
+    versions: dict[MaskChange, int] = {}
+    for result in results:
+        if isinstance(result, Path):
+            # The JSON references a PNG that isn't there. Dropping just that change is better than refusing the
+            # whole session: the rest of the timeline, the ROIs and every setting are still perfectly restorable.
+            logger.warning("Session mask file missing, skipping that change: %s", result)
+            continue
+        change, version = result
+        decoded.append(change)
+        versions[change] = version
+    return tuple(decoded), versions
 
 
 def prepare_session(state: SessionState, naming: FrameNamingScheme) -> PreparedSession:
@@ -672,6 +724,7 @@ def load_session(root: Path) -> SessionState | None:
     )
 
     mask_block = payload.get("mask") or {}
+    mask_changes, mask_versions = _decode_mask_changes(Path(root), mask_block.get("changes"), naming)
     chromatic_block = payload.get("chromatic") or {}
     roi_block = payload.get("roi") or {}
     analysis_block = payload.get("analysis") or {}
@@ -681,7 +734,8 @@ def load_session(root: Path) -> SessionState | None:
         geometry=_decode_settings(payload.get("geometry"), GeometrySettings(), {"crop": CropDefinition}),
         background=_decode_settings(payload.get("background"), BackgroundSettings()),
         mask_settings=_decode_settings(mask_block.get("settings"), MaskSettings()),
-        mask_changes=_decode_mask_changes(Path(root), mask_block.get("changes"), naming),
+        mask_changes=mask_changes,
+        mask_versions=mask_versions,
         chromatic_settings=_decode_settings(
             chromatic_block.get("settings"), ChromaticSettings(),
             {"chromatic_grid_bounds": GridBoundsDefinition},

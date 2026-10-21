@@ -189,7 +189,10 @@ class SessionAutosave(QObject):
         super().__init__(parent)
         self._capture = capture
         self._naming = naming
-        self._write = write if write is not None else SessionWriter().write
+        # Kept, not just its bound `write`: `seed_mask_versions` needs the writer itself. A test or another
+        # caller that injects its own `write` gets no writer here, and seeding is then a no-op.
+        self._writer = SessionWriter() if write is None else None
+        self._write = write if write is not None else self._writer.write
         self._root: Path | None = None
         self._enabled = True
         self._dirty = False
@@ -230,6 +233,14 @@ class SessionAutosave(QObject):
         self._root = None if root is None else Path(root)
         self._enabled = enabled
         self._dirty = False
+
+    def seed_mask_versions(self, root: Path, state: SessionState) -> None:
+        """Tell the writer which mask file each change in `state` was loaded from, so the first save after a load
+        does not read all of them back (`SessionWriter.seed`: 5-11 s with 411 masks). Call it right after
+        applying a loaded session; a state with no `mask_versions` (one captured from the modules) seeds nothing,
+        which leaves the writer exactly as it was."""
+        if self._writer is not None and state.mask_versions:
+            self._writer.seed(root, self._naming(), state.mask_versions)
 
     # -- the debounce ------------------------------------------------------
 

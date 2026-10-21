@@ -19,7 +19,7 @@ every ROI's coordinates are already defined against.
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping
+from collections.abc import Collection, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
@@ -166,28 +166,44 @@ class ChromaticSnapshotRef:
         return f"chromatic_{naming.frame_tag(self.cube_index, self.wavelength_nm)}_v{self.version}.json"
 
 
-def _existing_mask_versions(masks_dir: Path, cube_index: int, wavelength_nm: float, tag: str, naming: FrameNamingScheme) -> dict[int, np.ndarray]:
+def _existing_mask_versions(
+    masks_dir: Path,
+    cube_index: int,
+    wavelength_nm: float,
+    tag: str,
+    naming: FrameNamingScheme,
+    present: Collection[str] | None = None,
+) -> dict[int, np.ndarray]:
     """Reads back whatever mask versions already exist on disk for this
     exact (cube, wavelength, tag) group, for `next_version` to compare
     against. Local import of `cv2` (this app's existing dependency for
     16-bit-safe PNG I/O - see the design doc's "Formats" section) kept
     inside the function so this module stays importable without it in
     contexts that never touch the filesystem (e.g. unit tests that only
-    exercise `compute_fingerprint`)."""
+    exercise `compute_fingerprint`).
+
+    ``present``: the directory's filenames, when the caller has already
+    listed them. Saving a session with 411 masks called this 411 times and
+    each call globbed the whole directory again - quadratic in the number of
+    masks (2026-10-21)."""
     import cv2
 
     prefix = f"mask_{naming.frame_tag(cube_index, wavelength_nm)}_{tag}_v"
     found: dict[int, np.ndarray] = {}
     if not masks_dir.is_dir():
         return found
-    for path in masks_dir.glob(f"{prefix}*.png"):
-        suffix = path.stem[len(prefix):]
+    names = (
+        [name for name in present if name.startswith(prefix) and name.endswith(".png")]
+        if present is not None
+        else [path.name for path in masks_dir.glob(f"{prefix}*.png")]
+    )
+    for name in names:
+        suffix = name[len(prefix):-len(".png")]
         if not suffix.isdigit():
             continue
-        version = int(suffix)
-        image = cv2.imread(str(path), cv2.IMREAD_UNCHANGED)
+        image = cv2.imread(str(masks_dir / name), cv2.IMREAD_UNCHANGED)
         if image is not None:
-            found[version] = image
+            found[int(suffix)] = image
     return found
 
 
@@ -199,6 +215,7 @@ def resolve_mask_snapshot_ref(
     wavelength_nm: float,
     tag: str,
     naming: FrameNamingScheme,
+    present: Collection[str] | None = None,
 ) -> tuple[MaskSnapshotRef, bool]:
     """Work out which version this exact mask content *is* (or would be),
     reading existing files but **writing nothing**. Returns the ref plus
@@ -223,11 +240,14 @@ def resolve_mask_snapshot_ref(
 
     Cost: planning now reads back the existing mask PNGs for each frame
     instead of skipping them. That is the same I/O `compute_cell` already
-    does, and it buys a `preview_recompute` that tells the truth."""
+    does, and it buys a `preview_recompute` that tells the truth.
+
+    ``present``: the mask directory's filenames if the caller has them
+    already (see `_existing_mask_versions`)."""
     if tag not in ("persi", "indiv"):
         raise ValueError(f"tag must be 'persi' or 'indiv', got {tag!r}")
     mask_8bit = np.asarray(mask_8bit, dtype=np.uint8)
-    existing = _existing_mask_versions(masks_dir, cube_index, wavelength_nm, tag, naming)
+    existing = _existing_mask_versions(masks_dir, cube_index, wavelength_nm, tag, naming, present)
     version, is_new = next_version(existing, mask_8bit, equal=_arrays_equal)
     ref = MaskSnapshotRef(cube_index=cube_index, wavelength_nm=wavelength_nm, tag=tag, version=version)
     return ref, is_new
@@ -263,11 +283,14 @@ def persist_mask_snapshot_with_status(
     wavelength_nm: float,
     tag: str,
     naming: FrameNamingScheme,
+    present: Collection[str] | None = None,
 ) -> tuple[MaskSnapshotRef, bool]:
     """`persist_mask_snapshot`, also saying whether a file was written (``True``) or an identical one was already on disk
-    (``False``). The session writer counts these for its log line (2026-10-17)."""
+    (``False``). The session writer counts these for its log line (2026-10-17), and passes the directory listing
+    it already has as ``present``."""
     ref, is_new = resolve_mask_snapshot_ref(
         masks_dir, mask_8bit, cube_index=cube_index, wavelength_nm=wavelength_nm, tag=tag, naming=naming,
+        present=present,
     )
     if is_new:
         import cv2

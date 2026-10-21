@@ -673,6 +673,10 @@ def _wire_session_coordinator(
                 roi_toolbox, selection, analysis_settings, frame_roles, transient_events,
             )
         autosave.set_root(root)
+        # The loaded masks are already on disk, in known file versions: hand those to the writer so the first
+        # save does not read every PNG back to find that out (2026-10-21).
+        if state is not None:
+            autosave.seed_mask_versions(root, state)
 
     coordinator.active_session_changed.connect(restore)
 
