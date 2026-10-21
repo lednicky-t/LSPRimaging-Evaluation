@@ -5,7 +5,7 @@ Screen purpose: export the loaded dataset to OME-Zarr, choosing the chunk grid i
 
 Layout (one ribbon row):
 
-    [grid] [W] x [H] [style v]  |  [Shard v]  |  [zip]     [ban]       |  [export]
+    [grid] [W] x [H] [style v]  |  [Shard v]  [zip]     [ban]       |  [export]
           Chunk grid                   Shard        Compress  Skip excl.     Export
 
 - **Rotate/crop (2026-10-20; always on since 2026-10-21, the on/off icon was removed):** export the image as shown - rotated (Lanczos4),
@@ -54,7 +54,8 @@ from pathlib import Path
 
 import numpy as np
 from PyQt6.QtCore import QSize, Qt, QTimer, pyqtSignal
-from PyQt6.QtWidgets import QComboBox, QFileDialog, QFrame, QHBoxLayout, QLabel, QSpinBox, QToolButton, QWidget
+from PyQt6.QtGui import QAction, QIcon
+from PyQt6.QtWidgets import QFileDialog, QFrame, QHBoxLayout, QLabel, QMenu, QSpinBox, QToolButton, QWidget
 
 from lspr_ui import get_active_theme, load_tabler_icon
 
@@ -64,12 +65,13 @@ from ...dataset.io import build_ome_zarr_export_folder_name, probe_ome_zarr_expo
 from ...dataset.model import ImageDataset
 from ...image_tools import GeometryModule
 from ...image_tools.geometry.transform import spatial_output_shape
-from ..ribbon_fields import style_ribbon_combo, style_ribbon_number_field
+from ..ribbon_fields import style_ribbon_number_field
 from ..ribbon_group import labeled_icon_group, ribbon_separator
 from ..ui_state import UiStateStore
-from .chunk_style_picker import ChunkStylePicker
+from .chunk_style_picker import ChunkStylePicker, style_icon
 from .export_roi_layout import ExportRoiLayout, gather_export_roi_layout
 from .general_group import ICON_SIZE, style_general_icon_button
+from .mark_colors import cube_color, wavelength_color
 
 _RENDER_SIZE = ICON_SIZE * 2
 _STROKE_WIDTH = 2.1
@@ -84,6 +86,51 @@ _REFRESH_DEBOUNCE_MS = 150
 """How long the counts/alignment recompute waits after the last ROI or geometry edit (`_schedule_refresh`)."""
 
 logger = logging.getLogger(__name__)
+
+
+# key (the `shard_mode` the export takes), Tabler icon, menu text
+_SHARD_MODES = (
+    ("per_image", "lambda", "WL frame: one wavelength frame per shard file"),
+    ("per_spectral_cube", "cube", "Cube: one whole spectral cube per shard file"),
+)
+
+
+class ShardPicker(QToolButton):
+    """Icon button with a pick-up menu, like the chunk-style button; its icon shows the mode in effect."""
+
+    mode_changed = pyqtSignal(str)
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        style_general_icon_button(self)
+        self.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        self._mode = _SHARD_MODES[0][0]
+        self._menu = QMenu(self)
+        self._actions: dict[str, QAction] = {}
+        for key, _icon, text in _SHARD_MODES:
+            action = QAction(text, self._menu)
+            action.triggered.connect(lambda _checked=False, picked=key: self.set_mode(picked))
+            self._menu.addAction(action)
+            self._actions[key] = action
+        self.setMenu(self._menu)
+
+    def mode(self) -> str:
+        return self._mode
+
+    def set_mode(self, key: str) -> None:
+        if key not in self._actions or key == self._mode:
+            return
+        self._mode = key
+        self.mode_changed.emit(key)
+
+    def refresh_icons(self, make_icon: Callable[[str, str], QIcon]) -> None:
+        """Each icon wears the colour of its slider (`mark_colors`): lambda = wavelength slider, cube = Cube slider."""
+        colors = {"per_image": wavelength_color(), "per_spectral_cube": cube_color()}
+        for key, icon_name, _text in _SHARD_MODES:
+            icon = make_icon(icon_name, colors[key])
+            self._actions[key].setIcon(icon)
+            if key == self._mode:
+                self.setIcon(icon)
 
 
 class ExportTab(QWidget):
@@ -120,6 +167,7 @@ class ExportTab(QWidget):
         # a ROI move does not touch, so it is kept until the correction itself changes (`_on_chromatic_changed`).
         self._chromatic_reach: tuple[float, float] | None = None
         self._applied: cp.ChunkLayout | None = None  # from the chunk-style menu, kept while the size is unchanged
+        self._applied_style: str | None = None  # the menu key behind `_applied`; the button's icon shows it
         self._exporting = False
         self._export_percent = 0
         # What `info_html` and the fields' tooltip show (the Workflow section had a label for each).
@@ -148,13 +196,13 @@ class ExportTab(QWidget):
         self._find_best_button.setIconSize(QSize(ICON_SIZE, ICON_SIZE))
         self._find_best_button.style_picked.connect(self._on_style_picked)
 
-        self._shard_combo = QComboBox(self)
-        self._shard_combo.addItem("WL frame", "per_image")
-        self._shard_combo.addItem("Cube", "per_spectral_cube")
-        self._shard_combo.setToolTip(
-            "How many images are packed into a single shard file on disk: one wavelength frame, or a whole spectral cube."
+        self._shard_button = ShardPicker(self)  # icon = lambda (one wavelength frame per file) or cube (a whole cube)
+        self._shard_button.setToolTip(
+            "Shard: how many images are packed into a single shard file on disk - one wavelength frame (lambda), "
+            "or a whole spectral cube (cube)."
         )
-        style_ribbon_combo(self._shard_combo)
+        self._shard_button.setIconSize(QSize(ICON_SIZE, ICON_SIZE))
+        self._shard_button.mode_changed.connect(lambda _key: self._refresh_icons())
 
         self._compression_button = self._icon_button(
             "Compression (lz4 + bitshuffle) on or off.", checkable=True
@@ -182,7 +230,7 @@ class ExportTab(QWidget):
         chunk_layout.addWidget(self._chunk_h_spin)
         chunk_layout.addWidget(self._find_best_button)
         chunk_group, _ = labeled_icon_group(self, chunk_row, "Chunk grid")
-        shard_group, _ = labeled_icon_group(self, self._shard_combo, "Shard")
+        shard_group, _ = labeled_icon_group(self, self._shard_button, "Shard")
         compression_group, _ = labeled_icon_group(self, self._compression_button, "Compress")
         skip_group, _ = labeled_icon_group(self, self._skip_excluded_button, "Skip excl.")
         export_group, self._export_caption = labeled_icon_group(self, self._export_button, "Export")
@@ -192,7 +240,7 @@ class ExportTab(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(6)
         for index, group in enumerate(
-            (chunk_group, shard_group, (compression_group, skip_group), export_group)
+            (chunk_group, (shard_group, compression_group, skip_group), export_group)
         ):
             if index:
                 separator = ribbon_separator(self)
@@ -236,7 +284,8 @@ class ExportTab(QWidget):
             self._chunk_h_spin.setValue(self._chunk_spin.value())  # a saved square size restores as W x W
         store.bind(_CHUNK_H_KEY, self._chunk_h_spin)
         store.bind("export/chunk_grid_preview", self._chunk_grid_button)
-        store.bind("export/shard", self._shard_combo)
+        self._shard_button.set_mode(str(store.get("export/shard") or ""))  # ignored if unknown
+        self._shard_button.mode_changed.connect(lambda key: store.set("export/shard", key))
         store.bind("export/compression", self._compression_button)
         store.bind("export/skip_excluded", self._skip_excluded_button)
 
@@ -278,7 +327,7 @@ class ExportTab(QWidget):
         return button
 
     def _buttons(self) -> tuple[QToolButton, ...]:
-        return (self._chunk_grid_button, self._find_best_button, self._compression_button,
+        return (self._chunk_grid_button, self._find_best_button, self._shard_button, self._compression_button,
                 self._skip_excluded_button, self._export_button)
 
     def _icon(self, name: str, color: str):
@@ -289,7 +338,10 @@ class ExportTab(QWidget):
         dim = theme.text_dim
         self._chunk_grid_button.setIcon(
             self._icon("grid-4x4", _GRID_ON_COLOR if self._chunk_grid_button.isChecked() else dim))
-        self._find_best_button.setIcon(self._icon("search", dim))
+        self._shard_button.refresh_icons(self._icon)
+        active_style = self._active_style()
+        self._find_best_button.setIcon(
+            style_icon(active_style, _ACTIVE_COLOR) if active_style is not None else self._icon("search", dim))
         self._compression_button.setIcon(
             self._icon("file-zip", _ACTIVE_COLOR if self._compression_button.isChecked() else dim))
         self._skip_excluded_button.setIcon(
@@ -447,6 +499,7 @@ class ExportTab(QWidget):
                 f"-> {per_plane} chunks/plane, {per_plane * self._image_count:,} chunks total ({self._image_count:,} images)"
             )
         self._refresh_fields()
+        self._refresh_icons()
         self._update_preview()
         self.info_changed.emit()
 
@@ -507,9 +560,18 @@ class ExportTab(QWidget):
     def _on_layout_chosen(self, suggestion: cp.Suggestion) -> None:
         layout = suggestion.layout
         self._applied = layout  # first: the refreshes the setters below trigger use its exact offsets
+        self._applied_style = suggestion.key
         self._chunk_spin.setValue(layout.chunk_w)
         self._chunk_h_spin.setValue(layout.chunk_h)
         self._refresh_estimates()
+
+    def _active_style(self) -> str | None:
+        """The chunk style in effect: the picked one, until the ROIs change or the chunk size is edited by hand."""
+        if self._applied is None:
+            return None
+        if (self._applied.chunk_w, self._applied.chunk_h) != (self._chunk_spin.value(), self._chunk_h_spin.value()):
+            return None
+        return self._applied_style
 
     # -- export -----------------------------------------------------------------
 
@@ -534,7 +596,7 @@ class ExportTab(QWidget):
                 chunk_shape=(layout.chunk_h, layout.chunk_w),
                 frame=(frame.origin_x, frame.origin_y, frame.width, frame.height) if frame is not None else None,
                 compression_enabled=self._compression_button.isChecked(),
-                shard_mode=self._shard_combo.currentData(),
+                shard_mode=self._shard_button.mode(),
                 skip_excluded=self._skip_excluded_button.isChecked(),
                 pixel_size_um=self._calibrated_pixel_size_um(),
                 preprocessing=self._geometry.settings() if self._applies_image_tools() else None,
@@ -567,7 +629,7 @@ class ExportTab(QWidget):
             spectral_cube_count=len(self._dataset_module.spectral_cubes()),
             wavelength_count=len(self._dataset_module.wavelengths()),
             chunk_size_px=self._chunk_spin.value(),
-            shard_mode=self._shard_combo.currentData(),
+            shard_mode=self._shard_button.mode(),
             compression_enabled=self._compression_button.isChecked(),
             dtype=self._image_dtype,
             chunk_shape=(self._chunk_h_spin.value(), self._chunk_spin.value()),
