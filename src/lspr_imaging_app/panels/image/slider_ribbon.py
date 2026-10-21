@@ -4,7 +4,7 @@
 Left to right: the frame icon controls (`FrameToolsWidget`, inline: unit,
 Reference, Ignore, Dark background), Play-Pause, the mode menu (what the show steps through: cubes,
 wavelengths, ROI changes, Mask changes, scan pointers; the wheel at a slider's end steps through the same thing), the
-speed as text (1x ... 10x; both in `slideshow_ribbon_controls.py`), a settings pop-out for the rest of the slideshow
+speed as text (1x ... 20x; both in `slideshow_ribbon_controls.py`), a settings pop-out for the rest of the slideshow
 (end, skip, faster, repeat), the "ROIs"
 section (show the ROIs row under the Cube slider, only the selected ROIs; the row's
 marks are always the theme's blue) and the "Mask" section (show the two Mask rows, under the

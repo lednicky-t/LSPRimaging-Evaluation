@@ -104,9 +104,11 @@ class RenderRequest:
     """The plane this request needs was being read ahead (by a reader thread) when the request arrived, so the
     render waits for that read (diagnostics only: the Play stats' "behind a read-ahead")."""
     fast_rotation: bool = False
-    """Rotate with bilinear instead of Lanczos4 (2026-10-20, "fast while moving, exact at rest"): set while the
-    slideshow plays; the panel asks for the frame again, exact, when Play stops. The Histogram, Mask tools and the
-    cursor readout read the frame at rest, so they always work on the exact image."""
+    """Fast preview (2026-10-20, "fast while moving, exact at rest"): set while the slideshow plays; the panel asks
+    for the frame again, exact, when Play stops. Two things are done the cheap way: the rotation is bilinear instead
+    of Lanczos4, and (2026-10-21) the grey picture is built in one rounding pass (`prepare_frame_display(fast=True)`,
+    at most one grey level off). The Histogram, Mask tools and the cursor readout read the frame at rest, so they
+    always work on the exact image. (Name kept from when rotation was the only thing it switched.)"""
     display_levels: tuple[float, float] | None = None
     """The fixed display range ``(black point, white point)`` from the View tab, or None = every frame at its own
     automatic range. Display only: it changes how the frame is shown, never a pixel value."""
@@ -437,7 +439,7 @@ class ImageRenderer(QObject):
         display_started = time.perf_counter()
         if not request.show_background:  # the background estimate is drawn with the data's levels instead
             try:
-                display = prepare_frame_display(processed, request.display_levels)
+                display = prepare_frame_display(processed, request.display_levels, fast=request.fast_rotation)
             except Exception:  # noqa: BLE001 - the panel then prepares the frame itself, as before
                 logger.exception("Preparing the display picture failed for cube=%s wl=%s", request.cube_index, request.wavelength_nm)
         display_seconds = time.perf_counter() - display_started

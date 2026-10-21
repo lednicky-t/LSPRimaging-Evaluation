@@ -45,6 +45,8 @@ import numpy as np
 # `pyqtgraph.ImageItem.setImage(autoLevels=True)` looks at (about) this many pixels to find the levels.
 LEVEL_SAMPLES = 65536
 _FLT_MAX = float(np.finfo(np.float32).max)
+MAX_FAST_GREY_DIFFERENCE = 1
+"""The most a grey value of the `fast` picture may differ from the exact one (rounded instead of truncated)."""
 
 
 @dataclass(frozen=True)
@@ -61,9 +63,18 @@ class FrameDisplay:
     "from this frame" button), whether or not a fixed range is in use; None when it has no finite range."""
 
 
-def prepare_frame_display(image: np.ndarray, fixed_levels: tuple[float, float] | None = None) -> FrameDisplay | None:
+def prepare_frame_display(
+    image: np.ndarray, fixed_levels: tuple[float, float] | None = None, *, fast: bool = False
+) -> FrameDisplay | None:
     """The `FrameDisplay` of one frame, or None when it is not a plain 2-D float32 image
     (the panel then does everything itself, as before).
+
+    `fast` (display while the slideshow plays, nothing else; 2026-10-21): build the grey picture in one saturating
+    OpenCV pass that *rounds* to the nearest grey level instead of truncating, so it costs 3 native calls instead of
+    7. Reason: each native call hands the GIL back and waits for it again, up to one switch interval (5 ms) while
+    the GUI thread is busy, so during Play the picture cost ~40 ms instead of ~9. Grey values differ from the exact
+    picture by at most one level, on about 0.002 % of the pixels (`MAX_FAST_GREY_DIFFERENCE`, pinned by a test); the
+    value range, levels and alpha are identical. Play re-renders the frame it stopped on with `fast=False`.
 
     `fixed_levels` = (low, high): the maintainer's fixed display range, the same black and white point for every
     frame. The picture (frames with NaN pixels) is then built with it; without it, with pyqtgraph's automatic ones.
@@ -107,12 +118,19 @@ def prepare_frame_display(image: np.ndarray, fixed_levels: tuple[float, float] |
     minimum, maximum = levels
     span = maximum - minimum
     span = 1 if span == 0 else span
-    work = cv2.subtract(image, float(minimum))
-    cv2.multiply(work, float(numerator / span), dst=work)
-    cv2.min(work, 255.0, dst=work)
-    cv2.max(work, 0.0, dst=work)
-    with np.errstate(invalid="ignore"):  # NaN pixels cast to something harmless; zeroed just below
-        grey = work.astype(np.uint8)  # truncates, like pyqtgraph
+    if fast:
+        # One pass: grey = saturate_u8(value * scale + (-minimum * scale - 0.5)). The -0.5 turns OpenCV's
+        # round-to-nearest into (almost always) the exact path's truncation. NaN pixels saturate to some value
+        # (not guaranteed to be 0), so the mask below still zeroes them.
+        scale = float(numerator / span)
+        grey = cv2.addWeighted(image, scale, image, 0.0, -float(minimum) * scale - 0.5, dtype=cv2.CV_8U)
+    else:
+        work = cv2.subtract(image, float(minimum))
+        cv2.multiply(work, float(numerator / span), dst=work)
+        cv2.min(work, 255.0, dst=work)
+        cv2.max(work, 0.0, dst=work)
+        with np.errstate(invalid="ignore"):  # NaN pixels cast to something harmless; zeroed just below
+            grey = work.astype(np.uint8)  # truncates, like pyqtgraph
     cv2.bitwise_and(grey, has_value, dst=grey)  # NaN pixels: black and (below) transparent, like pyqtgraph's
     picture = cv2.merge([grey, grey, grey, has_value])
     return FrameDisplay(data_range=data_range, levels=levels, picture=picture, auto_levels=auto_levels)

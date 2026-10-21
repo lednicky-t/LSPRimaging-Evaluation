@@ -1240,6 +1240,7 @@ class ImagePanel(QWidget):
         self._slider_ribbon.mask_rows_toggled.connect(self._mask_rows.set_shown)
         self._slider_ribbon.settings_changed.connect(self._slideshow.set_settings)
         self._slider_ribbon.settings_changed.connect(self._apply_play_outline)
+        self._slider_ribbon.settings_changed.connect(self._on_slideshow_speed_for_stats)  # after set_settings: new interval
         self._slideshow.playing_changed.connect(self._slider_ribbon.set_playing)
         # Where the time goes while Play runs (status bar + one log line at the end).
         self._playback_stats = PlaybackStats()
@@ -2067,6 +2068,10 @@ class ImagePanel(QWidget):
             self._calm_histogram = calm
             self.calm_histogram_changed.emit(calm)
 
+    def _on_slideshow_speed_for_stats(self, _settings: object = None) -> None:
+        """A speed change while Play runs: the "of N fps" in the status bar follows it (it was fixed at Play start)."""
+        self._playback_stats.set_target(time.perf_counter(), self._slideshow.interval_seconds())
+
     def _on_playback_changed(self, playing: bool) -> None:
         self._apply_play_outline()
         self.playback_changed.emit(playing)
@@ -2079,10 +2084,11 @@ class ImagePanel(QWidget):
             return
         self._view.paint_listener = None
         self._image_item.paint_listener = None
-        # The frames shown while playing were rotated the fast way (`RenderRequest.fast_rotation`): show the frame
-        # Play stopped on again, rotated exactly, so the Histogram, Mask tools and readout work on the exact image.
-        if self._geometry.settings().image_tools_enabled and abs(self._geometry.settings().rotation_angle_deg) > 1e-9:
-            self._schedule_redraw()
+        # The frames shown while playing were built the fast way (`RenderRequest.fast_rotation`: bilinear rotation,
+        # one-pass grey picture): show the frame Play stopped on again, exactly, so the Histogram, Mask tools and
+        # readout work on the exact image. Always, not only with a rotation: the fast grey picture is used for any
+        # frame with no-data pixels (rotation corners, chromatic edges).
+        self._schedule_redraw()
         if stats.active:
             stats.stop()
             summary = stats.summary(time.perf_counter())
@@ -2202,6 +2208,7 @@ class ImagePanel(QWidget):
             line = self._playback_stats.note_rendered(
                 result.request.serial, arrived, time.perf_counter(),
                 load_s=result.load_seconds, prep_s=result.preprocess_seconds, listeners_s=listeners_s,
+                picture_s=result.display_seconds,
                 submitted_at=result.request.submitted_at, started_at=result.started_at,
                 finished_at=result.finished_at, blocked_by_prefetch=result.request.submitted_while_prefetching,
             )

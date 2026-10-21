@@ -5,7 +5,7 @@ before, both lived in the settings pop-out):
   steps through cubes) - a cube, a lambda, the ROI display icon, a mask and a warning triangle (the Mask scan's pointers).
   The button's face is the icon of the chosen mode. Each icon wears the colour of what it steps through
   (`mark_colors.py`: the same colour as the slider handle / row marks).
-- ``SlideshowSpeedButton``: the speed as plain text (``1x``, ``2x``, ``5x``, ``10x``). A click goes to the next speed
+- ``SlideshowSpeedButton``: the speed as plain text (``1x``, ``2x``, ``5x``, ``10x``, ``20x``). A click goes to the next speed
   and from the fastest back to 1x; the wheel goes faster (up) or slower (down) and stops at both ends.
 
 Display only: a choice leaves as a signal; the ribbon stores it in its ``SlideshowSettings`` and announces it.
@@ -130,7 +130,7 @@ class SlideshowSpeedButton(QToolButton):
         self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
         self.setFixedHeight(_BUTTON_SIZE)
-        self.setFixedWidth(max(_BUTTON_SIZE, self.fontMetrics().horizontalAdvance("10x") + 14))
+        self.setFixedWidth(max(_BUTTON_SIZE, self.fontMetrics().horizontalAdvance("20x") + 14))
         self.setToolTip(
             "Speed. Click: the next speed, from the fastest back to 1x. Scroll: faster (up) or slower (down), "
             "it stops at both ends. 1x is the average time between two wavelengths in the experiment data, or 0.5 s without it."

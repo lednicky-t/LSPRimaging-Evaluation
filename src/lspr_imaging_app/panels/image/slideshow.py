@@ -13,7 +13,7 @@ Two parts:
 
 Settings (``SlideshowSettings``):
 
-- **speed**: 1x, 2x, 5x, 10x. 1x is the dataset's average time between two
+- **speed**: 1x, 2x, 5x, 10x, 20x. 1x is the dataset's average time between two
   consecutive wavelengths when it has acquisition timing, else 0.5 s.
 - **mode** ``MODE_ALL``: every wavelength of a cube, then the next cube.
   ``MODE_ONE_WAVELENGTH``: stay on the wavelength shown and step through the
@@ -62,9 +62,9 @@ MODE_ROW_MARKS = "row_marks"  # the wheel over the Mask row under the Cube slide
 STATE_MODES = (MODE_ROI_STATES, MODE_MASK_STATES, MODE_EVENTS, MODE_ROW_MARKS)  # modes whose cubes are handed in by the owner of the marks
 END_CUBE = "cube"
 END_DATASET = "dataset"
-SPEEDS = (1, 2, 5, 10)
+SPEEDS = (1, 2, 5, 10, 20)
 DEFAULT_INTERVAL_S = 0.5  # 1x when the dataset has no timing
-MIN_INTERVAL_S = 0.02  # a show faster than this only piles up renders
+MIN_INTERVAL_S = 0.01  # 100 steps/s: only a cap for absurdly short 1x intervals (20x of a 0.34 s dataset is 17 ms); the real rate is set by the render, see `frame_displayed`
 MAX_WAIT_FOR_FRAME_S = 2.0  # never wait longer than this for a frame to appear (a step that shows nothing)
 _POLL_MS = 10
 

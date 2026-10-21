@@ -16,9 +16,11 @@ One frame's trip, and the stage each gap measures:
 3. **redraw**: the GUI-thread snapshot of the module state, up to the moment the render request leaves.
    (Until 2026-10-14 this included the overlay drawing; the overlays are now drawn right after the request
    is sent, while the render thread works, and show up only in the `overlays` detail.)
-4. **queue**: the render thread was busy (or prefetching) when the request arrived.
-5. **load** / **prep**: reading the plane (disk, or the plane cache) / geometry,
-   background flattening on the render thread.
+4. **queue**: what is left of the request's trip after load, prep and pic: the render thread was busy (or
+   prefetching) when the request arrived, or the finished result waited for the GUI thread.
+   (Until 2026-10-21 the picture time was not subtracted and showed up here.)
+5. **load** / **prep** / **pic**: reading the plane (disk, or the plane cache) / geometry,
+   background flattening / the grey picture (`prepare_frame_display`), all on the render thread.
 6. **gui**: applying the result on the GUI thread (`setImage`, levels, overlays,
    and `listeners` = the `image_rendered` subscribers such as the Histogram).
 
@@ -51,6 +53,8 @@ class _Window:
     queue_s: float = 0.0
     load_s: float = 0.0
     prep_s: float = 0.0
+    pic_s: float = 0.0  # the grey picture built on the render thread (`prepare_frame_display`)
+    expected: float = 0.0  # frames the speed setting asked for in this window (seconds / interval, summed over speed changes)
     gui_s: float = 0.0
     listeners_s: float = 0.0
     lag_s: float = 0.0
@@ -80,6 +84,7 @@ class PlaybackStats:
     _window_start: float = 0.0
     _run_start: float = 0.0
     _target_interval_s: float = 0.0
+    _target_since: float = 0.0  # up to here the window's `expected` frames are counted
     _last_done: float = 0.0
     _last_step_start: float | None = None
     _last_gui_clock: tuple[float, float, float] | None = None
@@ -97,6 +102,22 @@ class PlaybackStats:
         self._total = _Window()
         self._window_start = self._run_start = now
         self._target_interval_s = target_interval_s
+        self._target_since = now
+
+    def set_target(self, now: float, target_interval_s: float) -> None:
+        """The speed changed while the show plays: from now on the frames asked for come at *target_interval_s*.
+        The target shown is the time-weighted mean, so a window in which the speed changed is judged fairly."""
+        if self.active:
+            self._count_expected(now)
+        self._target_interval_s = target_interval_s
+
+    def _count_expected(self, now: float) -> None:
+        """Add the frames the current target asked for since the last call to the window and to the whole run."""
+        if self._target_interval_s > 0 and now > self._target_since:
+            asked = (now - self._target_since) / self._target_interval_s
+            self._window.expected += asked
+            self._total.expected += asked
+        self._target_since = max(now, self._target_since)
 
     def stop(self) -> None:
         self.active = False
@@ -142,6 +163,7 @@ class PlaybackStats:
         load_s: float,
         prep_s: float,
         listeners_s: float,
+        picture_s: float = 0.0,
         submitted_at: float = 0.0,
         started_at: float = 0.0,
         finished_at: float = 0.0,
@@ -164,9 +186,10 @@ class PlaybackStats:
             "redraw": frame.redraw_s,
             "load": load_s,
             "prep": prep_s,
+            "pic": picture_s,
             "gui": done - arrived,
             "listeners": listeners_s,
-            "queue": max((arrived - frame.submit_t) - load_s - prep_s, 0.0),
+            "queue": max((arrived - frame.submit_t) - load_s - prep_s - picture_s, 0.0),
             "lag": done - frame.step_t,
         }
         # The queue time, split: the request waiting for the render thread, and the finished
@@ -183,11 +206,13 @@ class PlaybackStats:
             window.redraw_s += parts["redraw"]
             window.load_s += load_s
             window.prep_s += prep_s
+            window.pic_s += picture_s
             window.gui_s += parts["gui"]
             window.listeners_s += listeners_s
             window.queue_s += parts["queue"]
             window.lag_s += parts["lag"]
         if done - self._window_start >= 1.0:
+            self._count_expected(done)
             line = self._format(self._window, done - self._window_start)
             self._last_window, self._last_window_seconds = self._window, done - self._window_start
             self._window = _Window()
@@ -237,6 +262,7 @@ class PlaybackStats:
             "redraw_ms": round(w.redraw_s / n * 1000, 1), "queue_ms": round(w.queue_s / n * 1000, 1),
             "thread_ms": round(w.thread_s / n * 1000, 1), "deliver_ms": round(w.deliver_s / n * 1000, 1),
             "load_ms": round(w.load_s / n * 1000, 1), "prep_ms": round(w.prep_s / n * 1000, 1),
+            "pic_ms": round(w.pic_s / n * 1000, 1), "target_fps": round(w.expected / seconds, 1),
             "gui_ms": round(w.gui_s / n * 1000, 1), "listeners_ms": round(w.listeners_s / n * 1000, 1),
             "blocked": w.blocked,
             "gui_cpu_ms": round(w.gui_cpu_s / max(w.gui_cycles, 1) * 1000, 1),
@@ -250,6 +276,7 @@ class PlaybackStats:
 
     def summary(self, now: float) -> str:
         """The whole run, for when the show stops."""
+        self._count_expected(now)
         return self._format(self._total, max(now - self._run_start, 1e-9), finished=True)
 
     def _format(self, w: _Window, seconds: float, *, finished: bool = False) -> str:
@@ -257,6 +284,6 @@ class PlaybackStats:
         (2026-10-15: the stage breakdown that used to fill the bar is in the log: `total_fields()`)."""
         if w.shown == 0:
             return "Slideshow: no frame was shown"
-        target = f"{1.0 / self._target_interval_s:.1f}" if self._target_interval_s > 0 else "?"
+        target = f"{w.expected / seconds:.1f}" if w.expected > 0 else "?"
         fps = f"{w.shown / seconds:.1f} of {target} fps"
         return f"Slideshow finished: {fps} on average" if finished else f"Slideshow: {fps}"
