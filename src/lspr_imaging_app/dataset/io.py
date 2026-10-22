@@ -68,7 +68,7 @@ from lspr_imaging_app.image_tools.geometry.transform import (
 
 from lspr_imaging_app.applog.events import emit_timing, log_event
 from .export_stats import ExportStats
-from .model import ImageDataset, ImageKey, ImageRecord, compact_dataset_image_timings
+from .model import ImageDataset, ImageKey, ImageRecord, compact_dataset_image_timings, rehydrated_acquisition_metadata
 from .ome_metadata import (
     build_axes,
     build_omero_channels,
@@ -1888,8 +1888,11 @@ def _export_ome_zarr_dataset_to_path(
     # (`storage/workspace.py`'s `build_acquisition_metadata_payload`), so
     # `load_ome_zarr_dataset` can restore it on a later re-import without
     # needing the original legacy files or native HDF5 nearby.
-    if dataset.acquisition_metadata is not None:
-        group.attrs[OME_ZARR_ACQUISITION_METADATA_KEY] = build_acquisition_metadata_payload(dataset.acquisition_metadata)
+    # `rehydrated_...`, not `dataset.acquisition_metadata`: the live object has its per-image timings moved out into
+    # `compact_image_timings` (and `_write_plane_times` above forces that), so the live one would be saved without times.
+    metadata = rehydrated_acquisition_metadata(dataset)
+    if metadata is not None:
+        group.attrs[OME_ZARR_ACQUISITION_METADATA_KEY] = build_acquisition_metadata_payload(metadata)
 
     _export_experimental_data(dataset, destination)
     return destination
@@ -2058,10 +2061,11 @@ def _export_experimental_data(dataset: ImageDataset, destination: Path) -> None:
                 for path in source_files:
                     shutil.copy2(path, dest_dir / path.name)
 
-        if dataset.acquisition_metadata is not None:
+        metadata = rehydrated_acquisition_metadata(dataset)  # with the per-image times, see the zarr attrs write above
+        if metadata is not None:
             sidecar_path = acquisition_metadata_sidecar_path(destination)
             sidecar_path.parent.mkdir(parents=True, exist_ok=True)
-            save_acquisition_metadata_sidecar(sidecar_path, dataset.acquisition_metadata)
+            save_acquisition_metadata_sidecar(sidecar_path, metadata)
     except OSError as exc:
         _LOGGER.warning("Could not copy experimental data/metadata sidecar into %s: %s", destination, exc)
 
