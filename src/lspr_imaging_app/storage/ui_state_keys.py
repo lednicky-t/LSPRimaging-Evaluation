@@ -133,6 +133,7 @@ ROI_ROW_VISIBLE = UiKey("image/roi_row_visible", True, bool)
 ROI_ROW_SELECTED_ONLY = UiKey("image/roi_row_selected_only", False, bool)
 # The two Mask rows under the Cube and wavelength sliders (panels/image/mask_rows.py): shown
 MASK_ROWS_VISIBLE = UiKey("image/mask_rows_visible", True, bool)
+EXPORT_SHARD = UiKey("export/shard", "", str)  # Export tab Shard menu: a chunk-style key; "" = none (an unknown one is ignored)
 ARRAY_KEYS = {  # ROIs tab, "Array" group (panels/image/array_controls.py); lengths are stored in pixels
     "mode": UiKey("array/mode", "auto", str),
     "rows": UiKey("array/rows", 0, int),
@@ -162,7 +163,7 @@ HAND_WIRED_KEYS: tuple[UiKey, ...] = (
     HISTOGRAM_CURSOR_READOUT, HISTOGRAM_CURVE_STYLES, IMAGE_CURSOR_READOUT, IMAGE_MASK_EDIT_TOOL, IMAGE_SCALE_BAR_COLOR, IMAGE_ROI_LABELS,
     IMAGE_OVERLAY_CACHE_MB,
     *(key for keys_for_kind in ROI_OVERLAY_KEYS.values() for key in keys_for_kind.values()),
-    CUBE_DISPLAY_MODE, MASK_SCOPE, ROI_SCOPE, ROI_ROW_VISIBLE, ROI_ROW_SELECTED_ONLY, MASK_ROWS_VISIBLE,
+    CUBE_DISPLAY_MODE, MASK_SCOPE, ROI_SCOPE, ROI_ROW_VISIBLE, ROI_ROW_SELECTED_ONLY, MASK_ROWS_VISIBLE, EXPORT_SHARD,
     *ARRAY_KEYS.values(), *SLIDER_COLOR_KEYS.values(),
 )
 

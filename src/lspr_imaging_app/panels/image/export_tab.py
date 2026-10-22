@@ -65,6 +65,7 @@ from ...dataset.io import build_ome_zarr_export_folder_name, probe_ome_zarr_expo
 from ...dataset.model import ImageDataset
 from ...image_tools import GeometryModule
 from ...image_tools.geometry.transform import spatial_output_shape
+from ...storage.ui_state_keys import EXPORT_SHARD, read
 from ..ribbon_fields import style_ribbon_number_field
 from ..ribbon_group import labeled_icon_group, ribbon_separator
 from ..ui_state import UiStateStore
@@ -284,8 +285,8 @@ class ExportTab(QWidget):
             self._chunk_h_spin.setValue(self._chunk_spin.value())  # a saved square size restores as W x W
         store.bind(_CHUNK_H_KEY, self._chunk_h_spin)
         store.bind("export/chunk_grid_preview", self._chunk_grid_button)
-        self._shard_button.set_mode(str(store.get("export/shard") or ""))  # ignored if unknown
-        self._shard_button.mode_changed.connect(lambda key: store.set("export/shard", key))
+        self._shard_button.set_mode(str(read(store, EXPORT_SHARD)))  # ignored if unknown
+        self._shard_button.mode_changed.connect(lambda key: store.set(EXPORT_SHARD.key, key))
         store.bind("export/compression", self._compression_button)
         store.bind("export/skip_excluded", self._skip_excluded_button)
 
