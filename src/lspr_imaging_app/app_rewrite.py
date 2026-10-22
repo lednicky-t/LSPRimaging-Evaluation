@@ -33,7 +33,7 @@ from pathlib import Path
 
 from PyQt6.QtCore import Qt, QByteArray, QTimer
 from PyQt6.QtGui import QAction, QActionGroup, QKeySequence
-from PyQt6.QtWidgets import QApplication, QMainWindow, QMenu, QStatusBar
+from PyQt6.QtWidgets import QApplication, QMainWindow, QMenu, QMessageBox, QStatusBar
 
 from lspr_ui import app_icon, set_active_theme
 
@@ -47,7 +47,7 @@ from .gui.app_theme import LSPRI_BRIGHT_THEME, LSPRI_DARK_THEME, apply_app_theme
 from .gui.windows_titlebar import apply_windows_titlebar_color
 from .image_tools.mask_scope import MaskScope
 from .image_tools.chromatic_auto_task import TASK_ID as CHROMATIC_TASK_ID, ChromaticAutoDetect
-from .image_tools.mask.transient_events import TransientEventsModule
+from .image_tools.mask.mask_pointers import MaskPointersModule
 from .image_tools.mask_auto_task import TASK_ID as AUTO_MASK_TASK_ID
 from .image_tools.mask_export_task import TASK_ID as MASK_EXPORT_TASK_ID
 from .dataset.module import EXPORT_TASK_ID as ZARR_EXPORT_TASK_ID
@@ -118,6 +118,7 @@ from .storage.ui_state_keys import (
 from .storage.session import SessionState, load_session
 from .storage.session_autosave import SessionAutosave
 from .storage.session_coordinator import SessionCoordinator
+from .storage.session_carry_task import TASK_ID as SESSION_CARRY_TASK_ID, CarriedResult, SessionCarry
 from .undo import UndoManager, undo_manager
 from .version_rewrite import rewrite_version_string
 
@@ -419,7 +420,7 @@ def capture_session(
     selection: SelectionModule,
     analysis_settings: AnalysisSettingsModule,
     frame_roles: FrameRolesModule | None = None,
-    transient_events: TransientEventsModule | None = None,
+    mask_pointers: MaskPointersModule | None = None,
 ) -> SessionState:
     """Read every module's current state into a plain, Qt-free
     :class:`SessionState` (2026-09-23).
@@ -453,7 +454,7 @@ def capture_session(
         selected_wavelength=selection.current_wavelength(),
         selected_roi_ids=tuple(sorted(selection.selected_roi_ids())),
         **({} if frame_roles is None else {"frame_roles": frame_roles.state()}),
-        **({} if transient_events is None else {"transient_events": transient_events.state()}),
+        **({} if mask_pointers is None else {"mask_pointers": mask_pointers.state()}),
     )
 
 
@@ -467,7 +468,7 @@ def apply_session(
     selection: SelectionModule,
     analysis_settings: AnalysisSettingsModule,
     frame_roles: FrameRolesModule | None = None,
-    transient_events: TransientEventsModule | None = None,
+    mask_pointers: MaskPointersModule | None = None,
 ) -> None:
     """Push a loaded :class:`SessionState` into every module.
 
@@ -489,8 +490,8 @@ def apply_session(
     analysis_settings.restore_state(state.metric_settings, state.statistics_settings)
     if frame_roles is not None:
         frame_roles.restore_state(state.frame_roles)
-    if transient_events is not None:
-        transient_events.restore_state(state.transient_events)
+    if mask_pointers is not None:
+        mask_pointers.restore_state(state.mask_pointers)
 
     selection.set_cube(state.selected_cube)
     selection.set_wavelength(state.selected_wavelength)
@@ -545,7 +546,7 @@ def _build_session_autosave(
     selection: SelectionModule,
     analysis_settings: AnalysisSettingsModule,
     frame_roles: FrameRolesModule | None = None,
-    transient_events: TransientEventsModule | None = None,
+    mask_pointers: MaskPointersModule | None = None,
 ) -> SessionAutosave:
     """Build the debounce, and wire every module's own change signal to
     ``schedule()`` it (2026-09-23).
@@ -571,7 +572,7 @@ def _build_session_autosave(
     autosave = SessionAutosave(
         capture=lambda: capture_session(
             geometry, mask, chromatic, background, roi_toolbox, selection, analysis_settings, frame_roles,
-            transient_events,
+            mask_pointers,
         ),
         naming=_cached_frame_naming(dataset),
     )
@@ -592,8 +593,8 @@ def _build_session_autosave(
     ]
     if frame_roles is not None:
         signals.append(frame_roles.roles_changed)
-    if transient_events is not None:
-        signals.append(transient_events.events_changed)  # cosmetic for the analysis, but part of the session
+    if mask_pointers is not None:
+        signals.append(mask_pointers.pointers_changed)  # cosmetic for the analysis, but part of the session
     for signal in signals:
         signal.connect(autosave.schedule)
 
@@ -612,7 +613,7 @@ def _wire_session_coordinator(
     selection: SelectionModule,
     analysis_settings: AnalysisSettingsModule,
     frame_roles: FrameRolesModule | None = None,
-    transient_events: TransientEventsModule | None = None,
+    mask_pointers: MaskPointersModule | None = None,
 ) -> None:
     """Restore into every module whenever the *active session* changes -
     on a dataset load, an explicit session switch, or a new session's
@@ -670,7 +671,7 @@ def _wire_session_coordinator(
         with autosave.suspended():
             apply_session(
                 state or SessionState(), geometry, mask, chromatic, background,
-                roi_toolbox, selection, analysis_settings, frame_roles, transient_events,
+                roi_toolbox, selection, analysis_settings, frame_roles, mask_pointers,
             )
         autosave.set_root(root)
         # The loaded masks are already on disk, in known file versions: hand those to the writer so the first
@@ -708,8 +709,9 @@ class _Modules:
     analysis_engine: AnalysisEngine
     session_autosave: SessionAutosave
     chromatic_auto: ChromaticAutoDetect
-    transient_events: TransientEventsModule
+    mask_pointers: MaskPointersModule
     transient_scan: TransientScanTask
+    session_carry: SessionCarry
 
 
 class _SettingsWriter:
@@ -752,7 +754,7 @@ def _build_modules() -> _Modules:
     frame_roles = FrameRolesModule(dataset, reference_frame)
     highlight_range = HighlightRangeModule()
     # The pointers a Mask-tab scan finds (cosmetic: never a mask, never a recompute); part of the session.
-    transient_events = TransientEventsModule()
+    mask_pointers = MaskPointersModule()
     # Rectangle/lasso area selection limiting the Image panel's editing tools
     # and the Histogram plot (transient, not persisted); lives in displayed
     # pixel space, so it is dropped when rotate/flip/crop changes the grid.
@@ -781,12 +783,12 @@ def _build_modules() -> _Modules:
     # ImageDataset.home).
     session_autosave = _build_session_autosave(
         dataset, geometry, mask, chromatic, background, roi_toolbox, selection, analysis_settings, frame_roles,
-        transient_events,
+        mask_pointers,
     )
     _wire_session_coordinator(
         session_coordinator, session_autosave, analysis_engine,
         geometry, mask, chromatic, background, roi_toolbox, selection, analysis_settings, frame_roles,
-        transient_events,
+        mask_pointers,
     )
     dataset.dataset_loaded.connect(lambda ds: session_coordinator.bind_dataset(ds.home))
     dataset.dataset_cleared.connect(session_coordinator.unbind)
@@ -799,6 +801,20 @@ def _build_modules() -> _Modules:
     selection.roi_selection_changed.connect(
         lambda roi_ids: analysis_engine.set_selected_rois(tuple(sorted(roi_ids)))
     )
+
+    # An OME-Zarr export can take the session with it, moved into the exported pixels' coordinates (2026-10-22,
+    # `storage/session_carry.py`). The Export tab calls `prepare` when the user starts an export; a finished export
+    # starts the carry, a failed or cancelled one drops it.
+    session_carry = SessionCarry(
+        capture=lambda: capture_session(
+            geometry, mask, chromatic, background, roi_toolbox, selection, analysis_settings, frame_roles, mask_pointers
+        ),
+        naming=_cached_frame_naming(dataset),
+        source=lambda: (dataset.dataset_home(), session_coordinator.active_session_id()),
+    )
+    dataset.export_stats_ready.connect(session_carry.set_export_stats)  # emitted just before export_finished
+    dataset.export_finished.connect(session_carry.start)
+    dataset.export_failed.connect(lambda _message: session_carry.discard())
     return _Modules(
         dataset=dataset, geometry=geometry, active_tool=active_tool, mask=mask, mask_scope=mask_scope,
         chromatic=chromatic, background=background, roi_toolbox=roi_toolbox,
@@ -806,7 +822,7 @@ def _build_modules() -> _Modules:
         highlight_range=highlight_range, area_selection=area_selection, analysis_settings=analysis_settings,
         session_coordinator=session_coordinator, analysis_engine=analysis_engine,
         session_autosave=session_autosave, chromatic_auto=ChromaticAutoDetect(chromatic),
-        transient_events=transient_events, transient_scan=TransientScanTask(transient_events),
+        mask_pointers=mask_pointers, transient_scan=TransientScanTask(mask_pointers), session_carry=session_carry,
         reference_auto=ReferenceAutoFind(dataset, selection, reference_frame, frame_roles),
         frame_roles=frame_roles,
         cube_display=CubeDisplayModule(dataset),
@@ -880,8 +896,9 @@ def _build_image_panel(m: _Modules, ui_state: UiStateStore, theme_obj) -> ImageP
         mask_scope=m.mask_scope,
         area_selection=m.area_selection,
         chromatic_auto=m.chromatic_auto,
-        transient_events=m.transient_events,
+        mask_pointers=m.mask_pointers,
         transient_scan=m.transient_scan,
+        session_carry=m.session_carry,
         cube_display=m.cube_display,
         analysis_running=m.analysis_engine.is_running,
         frame_roles=m.frame_roles,
@@ -1030,8 +1047,11 @@ def _build_status_bar(
     image_panel.array_action.task_finished.connect(task_indicator.finish)
     m.dataset.task_progress.connect(task_indicator.report)  # OME-Zarr export (Image panel, Export tab)
     m.dataset.task_finished.connect(task_indicator.finish)
+    m.session_carry.task_progress.connect(task_indicator.report)  # the session that goes with that export
+    m.session_carry.task_finished.connect(task_indicator.finish)
     cancel_by_task = {
         ZARR_EXPORT_TASK_ID: m.dataset.cancel_export,
+        SESSION_CARRY_TASK_ID: m.session_carry.cancel,
         CHROMATIC_TASK_ID: m.chromatic_auto.cancel,
         SCAN_TASK_ID: m.transient_scan.cancel,
         AUTO_MASK_TASK_ID: image_panel.mask_auto.cancel,
@@ -1056,6 +1076,33 @@ def _build_status_bar(
     # the *static* controls; the *live* per-gesture text belongs here, on
     # the same bar every other panel's transient status already uses.
     image_panel.tool_status_changed.connect(status_bar.showMessage)
+
+
+def _wire_session_carry_prompt(window: QMainWindow, m: _Modules) -> None:
+    """When a session has been carried into an exported dataset, offer to open that dataset (2026-10-22). Opening it loads the
+    Zarr and makes the carried session the active one, the same as choosing it by hand; the dataset that is open now, and its
+    session, are left exactly as they are. The box does not block (``open``, not ``exec``): the user may keep working."""
+
+    def _ask(result: CarriedResult) -> None:
+        box = QMessageBox(window)
+        box.setIcon(QMessageBox.Icon.Question)
+        box.setWindowTitle("Session carried")
+        box.setText(f"The export is finished, and your session was carried into {result.destination.name}.")
+        lines = [] if result.export_stats is None else [result.export_stats.describe(), ""]
+        lines += [f"Session ({result.seconds:.1f} s): {result.report.summary()}", "", "Open the exported dataset now?"]
+        box.setInformativeText("\n".join(lines))
+        box.setStandardButtons(QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+        box.setDefaultButton(QMessageBox.StandardButton.Yes)
+        box.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+
+        def _answered(button: int) -> None:
+            if button == QMessageBox.StandardButton.Yes.value:
+                m.dataset.load_dataset_from_folder(result.destination)
+
+        box.finished.connect(_answered)
+        box.open()
+
+    m.session_carry.carried.connect(_ask)
 
 
 def _build_dock_layout(
@@ -1421,6 +1468,7 @@ def build_main_window(
     window.setDockOptions(QMainWindow.DockOption.AnimatedDocks | QMainWindow.DockOption.AllowNestedDocks)
     edit_menu, view_menu = _build_menu_bar(window)
     _build_status_bar(window, m, workflow, image_panel, roi_table_panel)
+    _wire_session_carry_prompt(window, m)
     _wire_edit_menu(edit_menu, window, m.analysis_engine)
     panel_docks = _build_dock_layout(
         window, workflow, image_panel, histogram_panel, roi_table_panel, spectra_panel, sensorgram_panel

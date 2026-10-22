@@ -32,7 +32,8 @@ a schema change, but no UI or method sets it yet - this pass is
 create + switch only, per the maintainer's explicit scope decision
 (2026-09-26). Cloning a session's settings into a new one was also declined
 (new sessions always start blank) - don't add a "duplicate" path without
-checking that decision again first.
+checking that decision again first. (One approved exception, 2026-10-22: `session_carry_task.py` creates a session in an
+*exported* dataset and fills it from the source session the user exported from; it reuses `create_session` and adds no clone path.)
 
 **No importer for the stable app's pre-existing `analysis/roi_table.json`/
 `measurement_backup.h5`/`processing_profile.json`** (which stay exactly

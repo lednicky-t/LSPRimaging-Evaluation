@@ -28,7 +28,7 @@ from lspr_ui import get_active_theme
 
 from ...dataset import DatasetModule
 from ...image_tools import ChromaticModule, GeometryModule, MaskEditTool, MaskEditToolModule, MaskModule, MaskScopeModule
-from ...image_tools.mask.transient_events import TransientEventsModule
+from ...image_tools.mask.mask_pointers import MaskPointersModule
 from ...image_tools.mask_auto_task import MaskAutoTask
 from ...image_tools.mask_export_task import MaskExportTask
 from ...image_tools.mask_scan_task import TransientScanTask
@@ -70,7 +70,7 @@ class MaskTab(QWidget):
         image_panel: ImagePanel,
         parent: QWidget | None = None,
         *,
-        events: TransientEventsModule,
+        events: MaskPointersModule,
         scan: TransientScanTask,
         auto: MaskAutoTask,
         export: MaskExportTask,

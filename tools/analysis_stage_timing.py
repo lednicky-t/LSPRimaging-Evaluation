@@ -91,7 +91,7 @@ def build_modules(dataset, session_root: Path):
         raise SystemExit(f"No session found in {session_root}")
     app_rewrite.apply_session(
         state, modules.geometry, modules.mask, modules.chromatic, modules.background, modules.roi_toolbox,
-        modules.selection, modules.analysis_settings, modules.frame_roles, modules.transient_events,
+        modules.selection, modules.analysis_settings, modules.frame_roles, modules.mask_pointers,
     )
     # A module reacting to the restore (e.g. ROI geometry sync) must not have moved a ROI: a different ROI position would
     # silently change every number below.

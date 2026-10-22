@@ -66,6 +66,7 @@ from lspr_imaging_app.image_tools.geometry.transform import (
 )
 
 from lspr_imaging_app.applog.events import emit_timing, log_event
+from .export_stats import ExportStats
 from .model import ImageDataset, ImageKey, ImageRecord, compact_dataset_image_timings
 from .ome_metadata import (
     build_axes,
@@ -1357,6 +1358,7 @@ def export_ome_zarr_dataset(
     pixel_size_um: tuple[float, float] | None = None,
     chunk_shape: tuple[int, int] | None = None,
     frame: tuple[int, int, int, int] | None = None,
+    export_stats: ExportStats | None = None,
 ) -> Path:
     """Export `dataset` to `destination` as OME-Zarr - see
     `_export_ome_zarr_dataset_to_path` for what actually writes it.
@@ -1370,6 +1372,9 @@ def export_ome_zarr_dataset(
     the old data was destroyed the instant the new export opened
     `destination` in write mode, before a single shard of the replacement
     was written - see whole_app_bug_audit_2026-09.md finding 1.1.
+
+    `export_stats`, when given, is filled in as the export runs (`dataset/export_stats.py`: images written, bytes on disk, workers);
+    the caller times the whole run.
     """
     normalized_destination = (
         destination
@@ -1390,6 +1395,7 @@ def export_ome_zarr_dataset(
         pixel_size_um=pixel_size_um,
         chunk_shape=chunk_shape,
         frame=frame,
+        export_stats=export_stats,
     )
     if not normalized_destination.exists():
         return _export_ome_zarr_dataset_to_path(dataset, destination, **kwargs)
@@ -1450,6 +1456,7 @@ def _export_ome_zarr_dataset_to_path(
     pixel_size_um: tuple[float, float] | None = None,
     chunk_shape: tuple[int, int] | None = None,
     frame: tuple[int, int, int, int] | None = None,
+    export_stats: ExportStats | None = None,
 ) -> Path:
     """Export `dataset` (a TIFF stack or another OME-Zarr dataset) as a new
     OME-Zarr v3 dataset at `destination`, using zarr's sharding codec (Zarr
@@ -1659,6 +1666,8 @@ def _export_ome_zarr_dataset_to_path(
     window_read_s = 0.0
     window_write_s = 0.0
     window_compress_s = 0.0
+    planes_written = 0
+    shard_bytes_written = 0
 
     report_progress(force=True)
     executor = ProcessPoolExecutor(max_workers=worker_count, initializer=_worker_init)
@@ -1669,8 +1678,9 @@ def _export_ome_zarr_dataset_to_path(
             args = next(task_iter)
         except StopIteration:
             return False
-        future = executor.submit(write_shard, make_spec(*args))
-        pending[future] = True
+        spec = make_spec(*args)
+        future = executor.submit(write_shard, spec)
+        pending[future] = sum(1 for record_path in spec.record_paths if record_path)  # images this task writes
         return True
 
     try:
@@ -1685,8 +1695,9 @@ def _export_ome_zarr_dataset_to_path(
                 raise RuntimeError("OME-Zarr export cancelled.")
             done, _ = wait(list(pending.keys()), return_when=FIRST_COMPLETED)
             for future in done:
-                pending.pop(future, None)
+                planes_written += pending.pop(future, 0)
                 result = future.result()
+                shard_bytes_written += int(result.bytes_written)
                 with progress_lock:
                     completed_units = min(total_units, completed_units + result.n_inner)
                 off_step_planes += int(getattr(result, "off_step_planes", 0))
@@ -1741,6 +1752,11 @@ def _export_ome_zarr_dataset_to_path(
             ex.shutdown(wait=True)
     if cancel_event is not None and cancel_event.is_set():
         raise RuntimeError("OME-Zarr export cancelled.")
+    if export_stats is not None:
+        export_stats.planes = planes_written
+        export_stats.bytes_written = shard_bytes_written
+        export_stats.stored_plane_bytes = int(height) * int(width) * int(target_dtype.itemsize)
+        export_stats.workers = worker_count
     if off_step_planes:
         _LOGGER.warning(
             "OME-Zarr export: %d plane(s) had values off the camera step %d and were rounded to whole counts instead",
@@ -2093,10 +2109,16 @@ def _read_ome_zarr_plane_by_path(path: Path, ome_root: Path) -> np.ndarray:
 # dependency) decodes the whole file in ONE native call: identical pixels, 2-3x faster (43 -> 16 ms for
 # 16-bit data, 72 -> 34 ms for float32, still ~2x faster while the GUI thread is busy).
 #
-# Guards, because it is a different decoder: used only on threads that opt in (`use_fast_tiff_decoder`:
-# the render thread; analysis keeps its measured tifffile path), only for plain 2-D images (anything else,
-# or any error, falls back to tifffile), and the first FAST_TIFF_VERIFY_FILES files are also read with
-# tifffile and compared pixel by pixel: on any difference the fast path is switched off for the session.
+# **On for every thread since 2026-10-22** (maintainer decision; until then only the render thread, the Scan and the export
+# workers opted in, and the analysis workers, the auto-detects and the GUI thread stayed on tifffile "because of an
+# earlier measurement"). Re-measured 2026-10-22 on the same LZW files, warm cache, files/s with tifffile -> libtiff:
+# 1 thread 43 -> 81, 2 threads 41 -> 102, 4 threads 41 -> 182, 8 threads 38 -> 252, identical pixels on all 120 files.
+# tifffile does not scale with threads at all (its per-strip Python work holds the GIL), libtiff does (one native call
+# per file), so the analysis pools gain the most. `use_fast_tiff_decoder(False)` still opts one thread out.
+#
+# Guards, because it is a different decoder: only for plain 2-D images (anything else, or any error, falls back to
+# tifffile), and the first FAST_TIFF_VERIFY_FILES files read in the process are also read with tifffile and compared
+# pixel by pixel: on any difference the fast path is switched off for the session.
 # `LSPR_TIFF_DECODER=tifffile` switches it off from the outside. (libtiff returns only the first page of a
 # multi-page TIFF where tifffile returns the stack: the verification catches that.)
 FAST_TIFF_VERIFY_FILES = 3
@@ -2114,13 +2136,13 @@ if _imagecodecs is None or not getattr(getattr(_imagecodecs, "TIFF", None), "ava
 
 
 def use_fast_tiff_decoder(enabled: bool) -> None:
-    """Opt the CALLING thread in (or out of) the fast native TIFF decoder."""
+    """Opt the CALLING thread in (or out of) the fast native TIFF decoder. Every thread starts opted in (2026-10-22)."""
     _fast_tiff.enabled = bool(enabled)
 
 
 def fast_tiff_decoder_active() -> bool:
-    """Whether the calling thread would use it right now (opted in, available, not switched off)."""
-    return bool(getattr(_fast_tiff, "enabled", False)) and _imagecodecs is not None and not _fast_tiff_disabled
+    """Whether the calling thread would use it right now (not opted out, available, not switched off)."""
+    return bool(getattr(_fast_tiff, "enabled", True)) and _imagecodecs is not None and not _fast_tiff_disabled
 
 
 def _read_tiff_fast(path_str: str) -> np.ndarray | None:
@@ -2205,6 +2227,10 @@ def _load_image_array_native(path_str: str) -> np.ndarray:
     ome_root = _ome_zarr_root(path.parent.parent if path.parent.name == OME_ZARR_ARRAY_DIRNAME else path.parent)
     if ome_root is not None and path.parent == _ome_zarr_array_dir(ome_root):
         return _read_ome_zarr_plane_by_path(path, ome_root)
+    if path.suffix.lower() in {".tif", ".tiff"} and _tifffile_imread is not None and fast_tiff_decoder_active():
+        fast = _read_tiff_fast(path_str)  # the same native decoder as the float32 reader above, dtype kept
+        if fast is not None:
+            return fast
     if path.suffix.lower() in {".tif", ".tiff"} and _tifffile_imread is not None:
         try:
             # maxworkers=2: inter-file parallelism comes from the export worker pool;

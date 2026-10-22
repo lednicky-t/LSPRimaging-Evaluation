@@ -65,6 +65,8 @@ from ...dataset.io import build_ome_zarr_export_folder_name, probe_ome_zarr_expo
 from ...dataset.model import ImageDataset
 from ...image_tools import GeometryModule
 from ...image_tools.geometry.transform import spatial_output_shape
+from ...storage.session_carry import ExportTransform
+from ...storage.session_carry_task import SessionCarry
 from ...storage.ui_state_keys import EXPORT_SHARD, read
 from ..ribbon_fields import style_ribbon_number_field
 from ..ribbon_group import labeled_icon_group, ribbon_separator
@@ -82,6 +84,12 @@ _SKIP_ON_COLOR = "#ef4444"  # red: those images are left out
 _CANCEL_COLOR = "#ef4444"
 _CHUNK_WIDEST_TEXT = "8192"
 _CHUNK_TIP = "Chunk {axis} in pixels (4 to 8192)."
+_CARRY_ON_COLOR = "#a78bfa"  # violet: the session goes with the export
+_CARRY_TIP = (
+    "Session: take the session with the export. ROIs, masks, chromatic correction and mask pointers are moved into the "
+    "exported pixels' coordinates (rotation, crop and the grid padding are already in the pixels) and saved as a session "
+    "of the exported dataset. Nothing is recalculated, and this dataset's session is not touched."
+)
 _CHUNK_H_KEY = "export/chunk_h"  # read once (is a height saved yet?) and bound: one spelling for both
 _REFRESH_DEBOUNCE_MS = 150
 """How long the counts/alignment recompute waits after the last ROI or geometry edit (`_schedule_refresh`)."""
@@ -148,9 +156,11 @@ class ExportTab(QWidget):
         roi_toolbox: object | None = None,
         chromatic: object | None = None,
         status: Callable[[str], None] | None = None,
+        session_carry: SessionCarry | None = None,
     ) -> None:
         super().__init__(parent)
         self._dataset_module = dataset
+        self._session_carry = session_carry  # moves the session into the exported pixels' coordinates (`storage/session_carry.py`)
         # Geometry: the calibration (um/px) written into the export's metadata, and the raw <-> processed map for the
         # ROI layout. The export never applies rotation/flip/crop to the pixels.
         self._geometry = geometry
@@ -218,6 +228,11 @@ class ExportTab(QWidget):
         )
         self._skip_excluded_button.toggled.connect(self._refresh_icons)
 
+        self._carry_button = self._icon_button(_CARRY_TIP, checkable=True)
+        self._carry_button.setChecked(True)
+        self._carry_button.setEnabled(session_carry is not None)
+        self._carry_button.toggled.connect(self._refresh_icons)
+
         self._export_button = self._icon_button("")
         self._export_button.clicked.connect(self._on_export_clicked)
 
@@ -234,6 +249,7 @@ class ExportTab(QWidget):
         shard_group, _ = labeled_icon_group(self, self._shard_button, "Shard")
         compression_group, _ = labeled_icon_group(self, self._compression_button, "Compress")
         skip_group, _ = labeled_icon_group(self, self._skip_excluded_button, "Skip excl.")
+        carry_group, _ = labeled_icon_group(self, self._carry_button, "Session")
         export_group, self._export_caption = labeled_icon_group(self, self._export_button, "Export")
 
         self._separators: list[QFrame] = []
@@ -241,7 +257,7 @@ class ExportTab(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(6)
         for index, group in enumerate(
-            (chunk_group, (shard_group, compression_group, skip_group), export_group)
+            (chunk_group, (shard_group, compression_group, skip_group), (carry_group, export_group))
         ):
             if index:
                 separator = ribbon_separator(self)
@@ -289,6 +305,7 @@ class ExportTab(QWidget):
         self._shard_button.mode_changed.connect(lambda key: store.set(EXPORT_SHARD.key, key))
         store.bind("export/compression", self._compression_button)
         store.bind("export/skip_excluded", self._skip_excluded_button)
+        store.bind("export/carry_session", self._carry_button)
 
     def info_html(self) -> str:
         """The "i" icon's text while this tab is open: what the tab does, then the current counts and warnings."""
@@ -298,7 +315,9 @@ class ExportTab(QWidget):
             "(Lanczos4), flipped and cropped, same bit depth; pixels the rotation creates load as empty. "
             "Grid icon: show the chunk grid on the image. Magnifier menu: set the chunk to hold 1 ROI, a column or a row of ROIs. "
             "The grid is always aligned to the ROIs (the left/top edge is padded with empty pixels). "
-            "Shard: images per file on disk."
+            "Shard: images per file on disk. "
+            "Session icon: take the session along - ROIs, masks, chromatic correction and mask pointers are moved into the "
+            "exported pixels' coordinates and saved as a session of the exported dataset (nothing is recalculated)."
         ]
         for text in (self._estimate_text, self._layout_text):
             if text:
@@ -329,7 +348,7 @@ class ExportTab(QWidget):
 
     def _buttons(self) -> tuple[QToolButton, ...]:
         return (self._chunk_grid_button, self._find_best_button, self._shard_button, self._compression_button,
-                self._skip_excluded_button, self._export_button)
+                self._skip_excluded_button, self._carry_button, self._export_button)
 
     def _icon(self, name: str, color: str):
         return load_tabler_icon(name, color=color, size=_RENDER_SIZE, stroke_width=_STROKE_WIDTH)
@@ -347,6 +366,8 @@ class ExportTab(QWidget):
             self._icon("file-zip", _ACTIVE_COLOR if self._compression_button.isChecked() else dim))
         self._skip_excluded_button.setIcon(
             self._icon("ban", _SKIP_ON_COLOR if self._skip_excluded_button.isChecked() else dim))
+        self._carry_button.setIcon(
+            self._icon("copy", _CARRY_ON_COLOR if self._carry_button.isChecked() else dim))
         if self._exporting:
             self._export_button.setIcon(self._icon("player-stop", _CANCEL_COLOR))
             self._export_button.setToolTip(f"Cancel the export ({self._export_percent}% done).")
@@ -590,6 +611,7 @@ class ExportTab(QWidget):
         destination = Path(parent_dir) / self._build_export_folder_name(home)
         layout, _roi_layout = self.current_layout()
         frame = self._current_frame()
+        carrying = self._prepare_session_carry(frame)
         try:
             self._dataset_module.export_to_ome_zarr(
                 destination,
@@ -603,9 +625,34 @@ class ExportTab(QWidget):
                 preprocessing=self._geometry.settings() if self._applies_image_tools() else None,
             )
         except RuntimeError as exc:
+            if carrying:
+                self._session_carry.discard()
             self._report(f"Export: {exc}")
             return
         self._set_exporting(True)
+
+    def _prepare_session_carry(self, frame: cp.ExportFrame | None) -> bool:
+        """Remember the session as it is now, if it is to go with this export. The transform is what the export itself applies:
+        the geometry (only when the image tools are on, which is when it rotates / flips / crops) and the frame."""
+        if (
+            self._session_carry is None
+            or self._geometry is None
+            or not self._carry_button.isChecked()
+            or self._image_width is None
+            or self._image_height is None
+        ):
+            return False
+        transform = ExportTransform(
+            geometry=self._geometry.settings(),
+            raw_shape=(int(self._image_height), int(self._image_width)),
+            frame=(frame.origin_x, frame.origin_y, frame.width, frame.height) if frame is not None else None,
+        )
+        try:
+            self._session_carry.prepare(transform)
+        except RuntimeError as exc:  # the previous carry is still writing: export without a session rather than not at all
+            self._report(f"Session not carried: {exc}")
+            return False
+        return True
 
     def _calibrated_pixel_size_um(self) -> tuple[float, float] | None:
         """(x, y) um/px when a calibration is switched on, else None. Valid for

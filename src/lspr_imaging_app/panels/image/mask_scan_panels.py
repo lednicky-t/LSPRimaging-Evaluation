@@ -45,8 +45,8 @@ from ...dataset import io as dataset_io
 from ...thread_priority import lower_current_thread_priority
 from ...image_tools import ChromaticModule, MaskModule
 from ...image_tools.mask.transient_detection import DetectionParams
-from ...image_tools.mask.transient_events import TransientEventsModule
-from ...image_tools.mask.transient_events_state import EventRecord
+from ...image_tools.mask.mask_pointers import MaskPointersModule
+from ...image_tools.mask.mask_pointers_state import MaskPointer
 from ...image_tools.mask.transient_masks import group_by_frame, maskable
 from ...image_tools.mask.transient_scan import ScanParams
 from ...image_tools.mask_auto_task import AutoMaskSummary, MaskAutoTask
@@ -112,7 +112,7 @@ class MaskScanControls(QWidget):
     def __init__(
         self,
         dataset: DatasetModule,
-        events: TransientEventsModule,
+        events: MaskPointersModule,
         scan: TransientScanTask,
         status: Callable[[str], None],
         parent: QWidget | None = None,
@@ -170,7 +170,7 @@ class MaskScanControls(QWidget):
         scan.completed.connect(self._on_completed)
         scan.failed.connect(lambda message: self._status(f"Scan failed: {message}"))
         scan.cancelled.connect(lambda: self._status("Scan cancelled; the pointers were not changed."))
-        events.events_changed.connect(lambda _change: self._refresh_enabled())
+        events.pointers_changed.connect(lambda _change: self._refresh_enabled())
         dataset.dataset_loaded.connect(lambda _ds: self._refresh_enabled())
         dataset.dataset_cleared.connect(self._refresh_enabled)
         self._refresh_enabled()
@@ -213,7 +213,7 @@ class MaskScanControls(QWidget):
         self._settings_button.setEnabled(not running)
         for widget in (self._sigma_spin, self._stride_spin, self._fill_button, self._range_button):
             widget.setEnabled(not running)
-        self._clear_button.setEnabled(self._events.has_events() and not running)
+        self._clear_button.setEnabled(self._events.has_pointers() and not running)
         self._scan_button.setToolTip(
             self._scan_button.toolTip().split("\n")[0]
             + ("" if loaded else "\nLoad a dataset first.")
@@ -269,7 +269,7 @@ class MaskAutoControls(QWidget):
         dataset: DatasetModule,
         mask: MaskModule,
         chromatic: ChromaticModule,
-        events: TransientEventsModule,
+        events: MaskPointersModule,
         task: MaskAutoTask,
         scan: TransientScanTask,
         status: Callable[[str], None],
@@ -309,7 +309,7 @@ class MaskAutoControls(QWidget):
         task.completed.connect(self._on_completed)
         task.failed.connect(lambda message: self._status(message))
         task.cancelled.connect(lambda: self._status("Auto mask cancelled; no mask was changed."))
-        events.events_changed.connect(lambda _change: self._refresh_enabled())
+        events.pointers_changed.connect(lambda _change: self._refresh_enabled())
         dataset.dataset_loaded.connect(lambda _ds: self._refresh_enabled())
         dataset.dataset_cleared.connect(self._refresh_enabled)
         self._refresh_enabled()
@@ -340,7 +340,7 @@ class MaskAutoControls(QWidget):
             tip += " A scan or an Auto mask run is going on."
         self._apply_button.setToolTip(tip)
 
-    def start(self, records: Sequence[EventRecord] | None = None) -> None:
+    def start(self, records: Sequence[MaskPointer] | None = None) -> None:
         """Make the masks of `records` (default: every pointer of the list) with the feathering shown (the wand's action; the
         pointer menus call it for one cube or one frame)."""
         raw_shape = self._dataset.raw_plane_shape()

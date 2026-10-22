@@ -479,6 +479,79 @@ def apply_spatial_preprocessing_export(
     )
 
 
+_EXPORT_PLAN_CACHE: dict = {}
+_EXPORT_PLAN_CACHE_MAX = 4
+
+
+def _export_plan(shape: tuple[int, int], settings: GeometrySettings) -> tuple[np.ndarray, tuple[int, int], np.ndarray]:
+    """What every plane of one export shares (the warp matrix, the output size and the outside-source mask), worked out once per
+    image shape and geometry instead of once per plane (the mask alone is 4.5 ms of a ~170 ms plane). The mask is 1 MB; a handful
+    are kept, so a worker that sees one shape holds exactly one. Never modify the returned arrays."""
+    key = (tuple(int(v) for v in shape), geometry_cache_key(settings))
+    plan = _EXPORT_PLAN_CACHE.get(key)
+    if plan is None:
+        matrix, offset, out_shape = _combined_export_transform(shape, settings)
+        cv2_matrix = np.array(
+            [[matrix[1, 1], matrix[1, 0], offset[1]], [matrix[0, 1], matrix[0, 0], offset[0]]], dtype=np.float64
+        )
+        plan = (cv2_matrix, out_shape, _outside_source_mask(matrix, offset, out_shape, shape))
+        if len(_EXPORT_PLAN_CACHE) >= _EXPORT_PLAN_CACHE_MAX:
+            _EXPORT_PLAN_CACHE.pop(next(iter(_EXPORT_PLAN_CACHE)))
+        _EXPORT_PLAN_CACHE[key] = plan
+    return plan
+
+
+def apply_spatial_preprocessing_export_stored(
+    image: np.ndarray,
+    settings: GeometrySettings,
+    dtype: np.dtype | type,
+    step: int = 1,
+) -> np.ndarray | None:
+    """Rotate / flip / crop an integer plane straight into the export's stored integer dtype (2026-10-22), or ``None`` when this
+    shortcut does not apply and the caller must take the general route (`apply_spatial_preprocessing_export`, then
+    `_zarr_export_worker._to_stored`).
+
+    **The same numbers as the general route, bit for bit** (pinned by a test over angles, flips, crops and steps, and by identical
+    shard files on the maintainer's data): the plane is Lanczos4-resampled in float32 exactly as `_cv2_affine` does, pixels with no
+    source pixel become 0, values are rounded (half to even) onto the camera's value ``step`` and clipped to the dtype. What differs
+    is only how much work it takes (measured 2026-10-22, 1300 x 900 uint16, one thread):
+
+    - the values are divided by ``step`` *before* the warp, not after. A power of two scales every float32 product and sum exactly,
+      so the warp sees the same numbers, only smaller, and the rounding to the step becomes a plain rint: no ``np.where`` /
+      divide / multiply passes over a 4 MB float array;
+    - the outside-source mask and the matrix come from `_export_plan` (once per export, not per plane);
+    - there is no NaN round trip: an integer plane has no NaN, and the pixels with no source are zeroed directly.
+
+    Applies only to a plain 2-D integer plane that a rotation changes, stored in an unsigned dtype, with a power-of-two ``step``
+    (16 for a 12-bit camera): anything else returns ``None``."""
+    dtype = np.dtype(dtype)
+    step = max(int(step), 1)
+    if (
+        not np.issubdtype(image.dtype, np.integer)
+        or not np.issubdtype(dtype, np.unsignedinteger)
+        or step & (step - 1)
+        or not _cv2_geometry_usable(image, settings)
+    ):
+        return None
+    cv2_matrix, out_shape, outside = _export_plan(image.shape[:2], settings)
+    out_h, out_w = out_shape
+    if out_h <= 0 or out_w <= 0:
+        return None
+    scaled = np.ascontiguousarray(image, dtype=np.float32)
+    if step > 1:
+        scaled *= np.float32(1.0 / step)
+    result = cv2.warpAffine(
+        scaled, cv2_matrix, (out_w, out_h), flags=cv2.INTER_LANCZOS4 | cv2.WARP_INVERSE_MAP, borderMode=cv2.BORDER_REPLICATE
+    )
+    result[outside] = 0.0
+    np.rint(result, out=result)
+    np.clip(result, 0, np.iinfo(dtype).max // step, out=result)
+    stored = result.astype(dtype)
+    if step > 1:
+        stored *= dtype.type(step)
+    return stored
+
+
 def _cv2_affine(
     image: np.ndarray,
     matrix: np.ndarray,

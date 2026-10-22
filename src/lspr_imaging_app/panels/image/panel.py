@@ -135,10 +135,11 @@ from .landmark_overlay import draw_landmarks
 from .slider_ticks import cube_slider_major_ticks, wavelength_slider_major_ticks
 from .transforms_settings import TransformsSection
 from ...image_tools.chromatic_auto_task import ChromaticAutoDetect
-from ...image_tools.mask.transient_events import TransientEventsModule
+from ...image_tools.mask.mask_pointers import MaskPointersModule
 from ...image_tools.mask_auto_task import MaskAutoTask
 from ...image_tools.mask_export_task import MaskExportTask
 from ...image_tools.mask_scan_task import TransientScanTask
+from ...storage.session_carry_task import SessionCarry
 from ...roi.array_task import ArrayAction
 from ...roi.display_style import RoiDisplayStyle
 from ...roi.model import SCOPE_PERSISTENT
@@ -377,8 +378,9 @@ class ImagePanel(QWidget):
         mask_scope: MaskScopeModule,
         area_selection: AreaSelectionModule | None = None,
         chromatic_auto: ChromaticAutoDetect | None = None,
-        transient_events: TransientEventsModule | None = None,
+        mask_pointers: MaskPointersModule | None = None,
         transient_scan: TransientScanTask | None = None,
+        session_carry: SessionCarry | None = None,
         cube_display: CubeDisplayModule | None = None,
         initial_chromatic_values: ChromaticUiValues | None = None,
         initial_chromatic_view: tuple[bool, bool] = (True, False),
@@ -393,6 +395,7 @@ class ImagePanel(QWidget):
         frame_roles: FrameRolesModule | None = None,
     ) -> None:
         super().__init__(parent)
+        self._session_carry = session_carry  # handed to the Export tab, which asks it to take the session along
         self._frame_roles = frame_roles
         self._show_background = bool(initial_show_background)
         # Whether an analysis run is in flight (the ROI menu's Delete waits for it); tests omit it.
@@ -423,8 +426,8 @@ class ImagePanel(QWidget):
         # Optional like `area_selection`: tests build the panel without the app shell.
         self._chromatic_auto = chromatic_auto if chromatic_auto is not None else ChromaticAutoDetect(chromatic, self)
         # The pointers of the Mask-tab scan and the task that makes them; optional like the ones above (tests build the panel alone).
-        self._transient_events = transient_events if transient_events is not None else TransientEventsModule(self)
-        self._transient_scan = transient_scan if transient_scan is not None else TransientScanTask(self._transient_events, self)
+        self._mask_pointers = mask_pointers if mask_pointers is not None else MaskPointersModule(self)
+        self._transient_scan = transient_scan if transient_scan is not None else TransientScanTask(self._mask_pointers, self)
         self._mask_auto = MaskAutoTask(self._mask, self)  # Mask tab, Auto mask group (pointers -> masks, one undo step)
         self._mask_export = MaskExportTask(self)  # Mask tab, PNG group: export every mask
         self._array_action = ArrayAction(self)  # ROIs tab, Array group (panels/image/array_actions.py)
@@ -891,7 +894,7 @@ class ImagePanel(QWidget):
         self._mask_tab = MaskTab(
             self._mask, self._geometry, self._chromatic, self._dataset, self._highlight_range,
             self._mask_scope, self._mask_tint, self, self,
-            events=self._transient_events, scan=self._transient_scan, auto=self._mask_auto, export=self._mask_export,
+            events=self._mask_pointers, scan=self._transient_scan, auto=self._mask_auto, export=self._mask_export,
             status=self._on_tool_status, visible_cubes=self._visible_cube_range,
         )
         self._mask_tab.overlay_visibility_changed.connect(self._on_mask_overlay_visibility_changed)
@@ -969,7 +972,7 @@ class ImagePanel(QWidget):
         self._background_tab.show_background_changed.connect(self._on_show_background_changed)
         self._export_tab = ExportTab(
             self._dataset, self, geometry=self._geometry, roi_toolbox=self._roi_toolbox, chromatic=self._chromatic,
-            status=self._on_tool_status,
+            status=self._on_tool_status, session_carry=self._session_carry,
         )
         self._export_tab.info_changed.connect(self._on_export_info_changed)
 
@@ -1162,7 +1165,7 @@ class ImagePanel(QWidget):
             wavelength_window=self._wavelength_slider.axis_window(),
             title_style=_slider_axis_title_style(get_active_theme().text_muted),
             status=self._on_tool_status,
-            events=self._transient_events,
+            events=self._mask_pointers,
             auto_mask=lambda records: self._mask_tab.auto_controls.start(records),
         )
         self._mask_rows.cube_strip.index_requested.connect(self._cube_slider.setValue)

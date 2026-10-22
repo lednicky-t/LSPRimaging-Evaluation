@@ -1,7 +1,7 @@
 """From the scan's pointers to masks (2026-10-17): which events the "Auto mask" step masks and what mask each frame gets. Pure numpy,
 no Qt. Plan: `docs/auto_transient_scan_and_mask_plan_2026-10-16.md`.
 
-The scan only *points* (`TransientEventsModule`); this is the separate step that makes masks. For every frame that has a particle
+The scan only *points* (`MaskPointersModule`); this is the separate step that makes masks. For every frame that has a particle
 event that is still standing, the mask is
 
     the mask already in effect at that frame   (merged by default: the persistent mask, warped into the frame, or the frame's own
@@ -23,12 +23,12 @@ import numpy as np
 
 from .model import MaskChange
 from .transient_detection import KIND_PARTICLE
-from .transient_events_state import EventRecord
+from .mask_pointers_state import MaskPointer
 
 Frame = tuple[int, float]
 
 
-def maskable(records: Iterable[EventRecord], include_inferred: bool = True) -> list[EventRecord]:
+def maskable(records: Iterable[MaskPointer], include_inferred: bool = True) -> list[MaskPointer]:
     """The events the Auto mask step masks: particles that are not dismissed and still have their contour (and, if
     `include_inferred` is false, were not found by gap filling)."""
     return [
@@ -41,9 +41,9 @@ def maskable(records: Iterable[EventRecord], include_inferred: bool = True) -> l
     ]
 
 
-def group_by_frame(records: Iterable[EventRecord]) -> dict[Frame, list[EventRecord]]:
+def group_by_frame(records: Iterable[MaskPointer]) -> dict[Frame, list[MaskPointer]]:
     """Records grouped by frame, in acquisition order."""
-    grouped: dict[Frame, list[EventRecord]] = {}
+    grouped: dict[Frame, list[MaskPointer]] = {}
     for record in records:
         grouped.setdefault(record.event.frame, []).append(record)
     return dict(sorted(grouped.items()))
@@ -97,7 +97,7 @@ def materialize_base(
 
 
 def frame_mask(
-    records: Sequence[EventRecord],
+    records: Sequence[MaskPointer],
     shape: tuple[int, int],
     dilate_px: int,
     base: np.ndarray | None = None,
@@ -119,7 +119,7 @@ def frame_mask(
 
 
 def build_masks(
-    records: Iterable[EventRecord],
+    records: Iterable[MaskPointer],
     shape: tuple[int, int],
     dilate_px: int,
     resolve_base: Callable[[Frame], np.ndarray | None],

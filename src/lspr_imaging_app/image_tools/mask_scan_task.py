@@ -1,4 +1,4 @@
-"""Runs the transient scan off the GUI thread and installs the result in `TransientEventsModule` (2026-10-17).
+"""Runs the transient scan off the GUI thread and installs the result in `MaskPointersModule` (2026-10-17).
 
 The pure computation is `mask/transient_scan.scan_transients`; this QObject is only the thread/signal wrapper the rule in CLAUDE.md
 asks for ("Heavy work reports progress and can be cancelled"). It copies the shape of `chromatic_auto_task.ChromaticAutoDetect`:
@@ -30,7 +30,7 @@ from PyQt6.QtCore import QObject, pyqtSignal
 
 from ..progress import Cancelled, throttled
 from .mask.transient_detection import KIND_ARTEFACT, KIND_GLOBAL, KIND_PARTICLE
-from .mask.transient_events import EventsChange, TransientEventsModule
+from .mask.mask_pointers import MaskPointersChange, MaskPointersModule
 from .mask.transient_scan import ScanParams, ScanResult, scan_transients
 
 logger = logging.getLogger(__name__)
@@ -65,7 +65,7 @@ class TransientScanTask(QObject):
     # Internal: thread -> GUI thread hand-off (result or error, never both).
     _finished = pyqtSignal(object, object)
 
-    def __init__(self, events: TransientEventsModule, parent: QObject | None = None) -> None:
+    def __init__(self, events: MaskPointersModule, parent: QObject | None = None) -> None:
         super().__init__(parent)
         self._events = events
         self._thread: threading.Thread | None = None
@@ -73,7 +73,7 @@ class TransientScanTask(QObject):
         self._generation = 0  # bumped by `invalidate`; a run whose number is not the current one has lost its place
         self._run_generation = 0
         self._finished.connect(self._on_finished)
-        events.events_changed.connect(self._on_events_changed)
+        events.pointers_changed.connect(self._on_events_changed)
 
     def is_running(self) -> bool:
         return self._thread is not None
@@ -139,7 +139,7 @@ class TransientScanTask(QObject):
             self._cancel_event.set()
 
     def _on_events_changed(self, change: object) -> None:
-        if isinstance(change, EventsChange) and change.reason == "session_restored":
+        if isinstance(change, MaskPointersChange) and change.reason == "session_restored":
             self.invalidate()
 
     def shutdown(self) -> None:

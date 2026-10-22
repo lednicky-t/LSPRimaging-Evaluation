@@ -32,7 +32,7 @@ from ..progress import Cancelled, throttled
 from .chromatic.warp import warp_boolean_mask_affine
 from .mask.model import MaskChange
 from .mask.module import MaskComputationalChange, MaskModule
-from .mask.transient_events_state import EventRecord
+from .mask.mask_pointers_state import MaskPointer
 from .mask.transient_masks import BaseDecoder, BaseMask, frame_mask, group_by_frame, materialize_base, maskable
 
 logger = logging.getLogger(__name__)
@@ -83,7 +83,7 @@ class MaskAutoTask(QObject):
 
     def start(
         self,
-        records: Sequence[EventRecord],
+        records: Sequence[MaskPointer],
         shape: tuple[int, int],
         dilate_px: int,
         plan_base: Callable[[Frame], BaseMask | None],
@@ -217,7 +217,7 @@ class _Work:
 
     def __init__(
         self,
-        groups: list[tuple[Frame, list[EventRecord]]],
+        groups: list[tuple[Frame, list[MaskPointer]]],
         plans: list[BaseMask | None],
         shape: tuple[int, int],
         dilate_px: int,

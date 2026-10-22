@@ -107,9 +107,9 @@ from ..image_tools.chromatic.model import (
 )
 from ..image_tools.geometry.model import CropDefinition, GeometrySettings
 from ..image_tools.mask.model import MaskChange, MaskSettings
-from ..image_tools.mask.transient_events_state import TransientEventsState
-from ..image_tools.mask.transient_events_state import from_payload as transient_events_from_payload
-from ..image_tools.mask.transient_events_state import to_payload as transient_events_to_payload
+from ..image_tools.mask.mask_pointers_state import MaskPointersState
+from ..image_tools.mask.mask_pointers_state import from_payload as mask_pointers_from_payload
+from ..image_tools.mask.mask_pointers_state import to_payload as mask_pointers_to_payload
 from ..selection.frame_roles_state import FrameRolesState
 from ..roi.model import (
     AreaRoi,
@@ -126,7 +126,7 @@ logger = logging.getLogger(__name__)
 
 SESSION_SCHEMA_NAME = "lspri_rewrite_session"
 SESSION_SCHEMA_VERSION = "1.4"
-# 1.4 (2026-10-17): optional "transient_events" block - the pointers a Mask-tab scan found (image_tools/mask/transient_events_state.py).
+# 1.4 (2026-10-17): optional "mask_pointers" block - the pointers a Mask-tab scan found (image_tools/mask/mask_pointers_state.py).
 # 1.3 (2026-10-13): optional "frames" block - frame roles (dark, ignored wavelengths/cubes, reference), selection/frame_roles_state.py.
 # 1.2 (2026-10-08): optional per-ROI "timeline" (geometry changes by cube, docs/roi_timeline_design_2026-10-08.md).
 # 1.1: the analysis block. 1.0: first release. Older files load: a missing "timeline" means one geometry for every cube.
@@ -416,7 +416,7 @@ class SessionState:
     selected_wavelength: float = 0.0
     selected_roi_ids: tuple[int, ...] = ()
     frame_roles: FrameRolesState = field(default_factory=FrameRolesState)
-    transient_events: TransientEventsState = field(default_factory=TransientEventsState)
+    mask_pointers: MaskPointersState = field(default_factory=MaskPointersState)
     mask_versions: dict[MaskChange, int] = field(default_factory=dict)
     """Only filled by `load_session`: which file version each mask change was read from, for
     `SessionWriter.seed`. Not part of the saved format, and empty in a state captured from the modules (it says
@@ -448,15 +448,15 @@ class PreparedSession:
     """A session ready to be written: everything is plain data nobody else can change any more (2026-10-17).
 
     ``payload`` is the JSON-ready dict **except** ``payload["mask"]["changes"]``, which the writer fills in because the
-    version numbers depend on what is already on disk, and ``payload["transient_events"]``, which the writer encodes from
-    ``transient_events`` (an immutable list of up to hundreds of events with their contours: 4 ms of work that does not
+    version numbers depend on what is already on disk, and ``payload["mask_pointers"]``, which the writer encodes from
+    ``mask_pointers`` (an immutable list of up to hundreds of events with their contours: 4 ms of work that does not
     belong on the GUI thread, 2026-10-17). ``mask_changes`` are immutable (`MaskChange` keeps compressed pixels).
     Do not modify ``payload`` after `prepare_session` returned it."""
 
     payload: dict
     mask_changes: tuple[MaskChange, ...]
     naming: FrameNamingScheme
-    transient_events: TransientEventsState = field(default_factory=TransientEventsState)
+    mask_pointers: MaskPointersState = field(default_factory=MaskPointersState)
 
 
 @dataclass
@@ -510,7 +510,7 @@ class SessionWriter:
             payload = {
                 **prepared.payload,
                 "mask": mask_block,
-                "transient_events": transient_events_to_payload(prepared.transient_events),
+                "mask_pointers": mask_pointers_to_payload(prepared.mask_pointers),
             }
             path = session_path(root)
             characters = write_json_file(path, payload)
@@ -673,7 +673,7 @@ def prepare_session(state: SessionState, naming: FrameNamingScheme) -> PreparedS
             "arrays": [asdict(array_group) for array_group in state.arrays],
         },
         "frames": asdict(state.frame_roles),
-        "transient_events": None,  # filled in by `SessionWriter.write` from `PreparedSession.transient_events`
+        "mask_pointers": None,  # filled in by `SessionWriter.write` from `PreparedSession.mask_pointers`
         "selection": {
             "cube_index": int(state.selected_cube),
             "wavelength_nm": float(state.selected_wavelength),
@@ -681,7 +681,7 @@ def prepare_session(state: SessionState, naming: FrameNamingScheme) -> PreparedS
         },
     }
     return PreparedSession(
-        payload=payload, mask_changes=tuple(state.mask_changes), naming=naming, transient_events=state.transient_events
+        payload=payload, mask_changes=tuple(state.mask_changes), naming=naming, mask_pointers=state.mask_pointers
     )
 
 
@@ -759,5 +759,5 @@ def load_session(root: Path) -> SessionState | None:
         selected_wavelength=float(selection_block.get("wavelength_nm", 0.0)),
         selected_roi_ids=tuple(int(roi_id) for roi_id in selection_block.get("selected_roi_ids", ())),
         frame_roles=FrameRolesState.from_payload(payload.get("frames")),
-        transient_events=transient_events_from_payload(payload.get("transient_events")),
+        mask_pointers=mask_pointers_from_payload(payload.get("mask_pointers")),
     )

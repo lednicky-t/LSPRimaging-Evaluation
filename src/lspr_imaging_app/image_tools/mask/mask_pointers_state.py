@@ -1,6 +1,6 @@
-"""The saved shape of a scan's event list (2026-10-17): plain dataclasses and their JSON payload, no Qt. `TransientEventsModule`
-(`transient_events.py`) owns the live list and hands this out for the session file (`storage/session.py`, schema 1.4, key
-``"transient_events"``). Plan: `docs/auto_transient_scan_and_mask_plan_2026-10-16.md`.
+"""The saved shape of a scan's event list (2026-10-17): plain dataclasses and their JSON payload, no Qt. `MaskPointersModule`
+(`mask_pointers.py`) owns the live list and hands this out for the session file (`storage/session.py`, schema 1.4, key
+``"mask_pointers"``). Plan: `docs/auto_transient_scan_and_mask_plan_2026-10-16.md`.
 
 An event is only a **pointer**: the scan marks suspicious frames, it never touches a mask. What is kept per event is what the
 rows, the tooltips and the later Auto mask step need: where and when (frame, centroid, box), how big and how deep, which passage
@@ -25,7 +25,7 @@ SCAN_ALGORITHM_VERSION = 1  # bump when the detection maths changes in a way tha
 
 
 @dataclass(frozen=True)
-class EventRecord:
+class MaskPointer:
     """One event in the list, with a stable id (the list's own numbering) and whether the user dismissed it."""
 
     id: int
@@ -47,9 +47,9 @@ class ScanInfo:
 
 
 @dataclass(frozen=True)
-class TransientEventsState:
+class MaskPointersState:
     info: ScanInfo | None = None
-    records: tuple[EventRecord, ...] = ()
+    records: tuple[MaskPointer, ...] = ()
 
 
 # -- payload ---------------------------------------------------------------------------------------------------------
@@ -78,7 +78,7 @@ def _decode_contour(payload: object) -> ContourMask | None:
         return None
 
 
-def to_payload(state: TransientEventsState) -> dict:
+def to_payload(state: MaskPointersState) -> dict:
     """The JSON-ready dict of `state` (only particles keep their contour: nothing masks the other kinds)."""
     info = state.info
     return {
@@ -119,10 +119,10 @@ def to_payload(state: TransientEventsState) -> dict:
     }
 
 
-def from_payload(payload: object) -> TransientEventsState:
+def from_payload(payload: object) -> MaskPointersState:
     """The state in `payload` (a missing or unreadable block is an empty list, an unreadable event is skipped and logged)."""
     if not isinstance(payload, dict):
-        return TransientEventsState()
+        return MaskPointersState()
     raw_info = payload.get("info")
     info = None
     if isinstance(raw_info, dict):
@@ -135,7 +135,7 @@ def from_payload(payload: object) -> TransientEventsState:
             seconds=float(raw_info.get("seconds", 0.0)),
             unreadable_frames=int(raw_info.get("unreadable_frames", 0)),
         )
-    records: list[EventRecord] = []
+    records: list[MaskPointer] = []
     for raw in payload.get("events") or []:
         try:
             x0, y0, x1, y1 = (int(v) for v in raw["bbox"])
@@ -155,7 +155,7 @@ def from_payload(payload: object) -> TransientEventsState:
                 step_px=None if step is None else float(step),
                 inferred=bool(raw.get("inferred", False)),
             )
-            records.append(EventRecord(id=int(raw["id"]), event=event, dismissed=bool(raw.get("dismissed", False))))
+            records.append(MaskPointer(id=int(raw["id"]), event=event, dismissed=bool(raw.get("dismissed", False))))
         except (KeyError, TypeError, ValueError):
             logger.warning("Skipping an unreadable event in the saved scan events", exc_info=True)
-    return TransientEventsState(info=info, records=tuple(records))
+    return MaskPointersState(info=info, records=tuple(records))

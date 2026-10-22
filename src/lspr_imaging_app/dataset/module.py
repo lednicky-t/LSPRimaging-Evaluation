@@ -61,6 +61,7 @@ subscriber, not assumed correct.
 from __future__ import annotations
 
 import logging
+import time
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -73,6 +74,7 @@ from ..analysis.worker import AnalysisWorker
 from ..applog.events import log_event, timed
 from ..diagnostics import instrumented
 from ..storage.workspace import save_acquisition_metadata_sidecar
+from .export_stats import ExportStats
 from .io import (
     DatasetLoadChoice,
     acquisition_metadata_sidecar_path,
@@ -126,6 +128,9 @@ class DatasetModule(QObject):
     # docstring.
     export_progress = pyqtSignal(int, str)  # percent, message
     export_finished = pyqtSignal(object)  # Path
+    # What the export did (`dataset/export_stats.py`: time, images, bytes, workers), emitted just BEFORE `export_finished` from the
+    # same thread, so a receiver of both sees the numbers first (2026-10-22).
+    export_stats_ready = pyqtSignal(object)  # ExportStats
     export_failed = pyqtSignal(str)  # also covers a cancelled export - see
     # export_to_ome_zarr's docstring for why there's no separate signal
     # The status bar's task indicator (2026-10-20, with the move of the export to the Image panel's Export tab):
@@ -505,12 +510,15 @@ class DatasetModule(QObject):
 
         def task() -> None:
             self.task_progress.emit(EXPORT_TASK_ID, EXPORT_TASK_LABEL, 0.0, "Starting export...")
+            stats = ExportStats()
+            started = time.perf_counter()
             try:
                 result = export_ome_zarr_dataset(
                     dataset,
                     destination,
                     progress_callback=progress,
                     cancel_event=cancel_event,
+                    export_stats=stats,
                     **kwargs,
                 )
             except Exception as exc:  # noqa: BLE001 - reported via signal, not re-raised
@@ -521,7 +529,13 @@ class DatasetModule(QObject):
                     self.task_finished.emit(EXPORT_TASK_ID, "failed", str(exc))
                 self.export_failed.emit(str(exc))
                 return
-            self.task_finished.emit(EXPORT_TASK_ID, "completed", f"written to {Path(result).name}")
+            stats.seconds = time.perf_counter() - started
+            log_event(
+                logger, "dataset.export_done", logging.INFO, seconds=round(stats.seconds, 1), planes=stats.planes,
+                mb_written=round(stats.bytes_written / 1e6, 1), planes_per_s=round(stats.planes_per_second, 1), workers=stats.workers,
+            )
+            self.export_stats_ready.emit(stats)
+            self.task_finished.emit(EXPORT_TASK_ID, "completed", f"written to {Path(result).name} in {stats.headline()}")
             self.export_finished.emit(result)
 
         self._export_worker.submit(task)

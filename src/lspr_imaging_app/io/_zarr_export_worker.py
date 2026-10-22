@@ -122,6 +122,19 @@ def _to_stored(plane: np.ndarray, dtype: np.dtype, fill: float, step: int = 1) -
     return out.astype(dtype)
 
 
+def on_value_step(values: np.ndarray, step: int) -> bool:
+    """Whether every value is a multiple of ``step``. For an integer plane and a power-of-two step (16 for a 12-bit camera) the
+    OR of all values has its low bits clear exactly when each value does: one pass instead of a modulo and a comparison over
+    the whole plane (4 ms instead of 12 ms on 1300 x 900). Any other case takes the plain modulo."""
+    step = int(step)
+    if step <= 1:
+        return True
+    values = np.asarray(values)
+    if np.issubdtype(values.dtype, np.integer) and not step & (step - 1):
+        return (int(np.bitwise_or.reduce(values, axis=None)) & (step - 1)) == 0
+    return bool(np.all(values % step == 0))
+
+
 def value_step(values: np.ndarray, limit: int = 4096) -> int:
     """The largest step every value of an integer image is a multiple of (16 for a 12-bit camera writing 16-bit
     files), 1 when there is none, for float data or a step above ``limit`` (e.g. an all-zero or near-empty image)."""
@@ -167,12 +180,30 @@ def _load_image(path_str: str) -> np.ndarray:
     # otherwise stays free of zarr/dataset.io imports at module scope so
     # worker startup stays fast); the underlying store reads are plain
     # stateless file I/O, safe from a separate process.
-    from lspr_imaging_app.dataset.io import OME_ZARR_ARRAY_DIRNAME, _ome_zarr_array_dir, _ome_zarr_root, _read_ome_zarr_plane_by_path
+    from lspr_imaging_app.dataset.io import (
+        OME_ZARR_ARRAY_DIRNAME,
+        _ome_zarr_array_dir,
+        _ome_zarr_root,
+        _read_ome_zarr_plane_by_path,
+        _read_tiff_fast,
+        fast_tiff_decoder_active,
+        use_fast_tiff_decoder,
+    )
 
     ome_root = _ome_zarr_root(path.parent.parent if path.parent.name == OME_ZARR_ARRAY_DIRNAME else path.parent)
     if ome_root is not None and path.parent == _ome_zarr_array_dir(ome_root):
         return _read_ome_zarr_plane_by_path(path, ome_root)
     if path.suffix.lower() in {".tif", ".tiff"}:
+        # libtiff decodes the whole file in ONE native call, the decoder the Image panel's render thread already uses
+        # (`dataset/io.py`, "fast TIFF decoding"): the same pixels, 2x faster on LZW files with hundreds of strips
+        # (measured 2026-10-22 on the 04_Bulk set: 27 ms against 56 ms a plane, 28 % of an export's CPU time). Each worker
+        # process checks its own first files against tifffile before it trusts it, falls back to tifffile for anything but a
+        # plain 2-D image, and `LSPR_TIFF_DECODER=tifffile` switches it off.
+        use_fast_tiff_decoder(True)
+        if fast_tiff_decoder_active():
+            fast = _read_tiff_fast(path_str)
+            if fast is not None:
+                return fast
         try:
             from tifffile import imread as _tif_read
             try:
@@ -232,13 +263,22 @@ def write_shard(spec: ShardWriteSpec) -> ShardWriteResult:
             # `rotation_fill_dark`). The rotation (Lanczos4) works on the source values and returns float32 with NaN
             # where it created pixels; `_to_stored` then rounds into the stored dtype (2026-10-20: uint16 stays
             # uint16, the NaN pixels are stored as the fill value and listed in the export's `valid_mask`).
-            from lspr_imaging_app.image_tools.geometry.transform import apply_spatial_preprocessing_export
+            from lspr_imaging_app.image_tools.geometry.transform import (
+                apply_spatial_preprocessing_export,
+                apply_spatial_preprocessing_export_stored,
+            )
 
             step = int(spec.value_step)
-            if step > 1 and not bool(np.all(source % step == 0)):
+            if step > 1 and not on_value_step(source, step):
                 step = 1  # this plane is not on the step: whole counts (reported, never silently forced onto it)
                 off_step_planes += 1
-            plane = _to_stored(apply_spatial_preprocessing_export(source, spec.preprocessing), dtype, fill, step)
+            # The shortcut gives the general route's numbers bit for bit (see its docstring) in less work; it declines
+            # (None) for anything it does not cover, and then the general route runs unchanged.
+            plane = (
+                apply_spatial_preprocessing_export_stored(source, spec.preprocessing, dtype, step) if fill == 0 else None
+            )
+            if plane is None:
+                plane = _to_stored(apply_spatial_preprocessing_export(source, spec.preprocessing), dtype, fill, step)
         elif spec.apply_image_tools and spec.preprocessing is not None:
             # The stable app: its own PreprocessingSettings and transform, unchanged.
             from lspr_imaging_app.processing.preprocess import apply_spatial_preprocessing_export

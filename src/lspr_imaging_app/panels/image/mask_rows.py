@@ -17,7 +17,7 @@ wavelength row hops between the marked wavelengths of the cube shown and, past t
 (earlier) cube that has one, to its first (last) marked wavelength. A row with nowhere to go leaves the wheel alone.
 There is no selection filter: there is only one ignore mask.
 
-**The scan's pointers** (2026-10-17, `TransientEventsModule`): both rows also show where the Mask-tab scan found something (a
+**The scan's pointers** (2026-10-17, `MaskPointersModule`): both rows also show where the Mask-tab scan found something (a
 particle, a hair, a bubble crossing the field). They are short ticks of their own colour (pink) in the *upper half* of the row, so
 they never hide a mask mark; they are pointers, not masks, and change nothing. The Cube row has a tick at every cube with an event,
 the wavelength row at the wavelengths of the cube shown that have one. A right click in the upper half opens their menu (go to,
@@ -39,8 +39,8 @@ from PyQt6.QtWidgets import QHBoxLayout, QLabel, QWidget
 from ...dataset import DatasetModule
 from ...image_tools import MaskModule
 from ...image_tools.mask.transient_detection import KIND_ARTEFACT, KIND_GLOBAL, KIND_PARTICLE, is_resting
-from ...image_tools.mask.transient_events import TransientEventsModule
-from ...image_tools.mask.transient_events_state import EventRecord
+from ...image_tools.mask.mask_pointers import MaskPointersModule
+from ...image_tools.mask.mask_pointers_state import MaskPointer
 from ...image_tools.mask.transient_masks import group_by_frame, maskable
 from ...roi.model import SCOPE_INDIVIDUAL, SCOPE_PERSISTENT
 from ...selection import SelectionModule
@@ -86,8 +86,8 @@ class MaskRows(QObject):
         wavelength_window: AxisWindow,
         title_style: str,
         status: Callable[[str], None],
-        events: TransientEventsModule | None = None,
-        auto_mask: Callable[[Sequence[EventRecord]], None] | None = None,
+        events: MaskPointersModule | None = None,
+        auto_mask: Callable[[Sequence[MaskPointer]], None] | None = None,
     ) -> None:
         """``cube_label(cube)``: the name of a cube in the unit shown (number or start time). ``status(text)``: where a sentence
         for the user goes (the status line). The two windows are the sliders' own (`DataAxisSlider.axis_window`)."""
@@ -127,7 +127,7 @@ class MaskRows(QObject):
         self.wavelength_strip.mark_menu_requested.connect(self._on_wavelength_menu)
         self.wavelength_strip.step_requested.connect(self._hop_wavelength)
         if events is not None:
-            events.events_changed.connect(self._schedule)
+            events.pointers_changed.connect(self._schedule)
             self.cube_strip.event_menu_requested.connect(self._on_cube_event_menu)
             self.wavelength_strip.event_menu_requested.connect(self._on_wavelength_event_menu)
 
@@ -213,7 +213,7 @@ class MaskRows(QObject):
         if self._events is None:
             return []
         marks: list[StripMark] = []
-        for cube, (standing, dismissed) in self._events.event_cubes().items():
+        for cube, (standing, dismissed) in self._events.pointer_cubes().items():
             index = position.get(cube)
             if index is None:
                 continue  # an event of a cube this dataset does not have
@@ -229,7 +229,7 @@ class MaskRows(QObject):
         head = f"{self._phrase(cube)} - scan: {', '.join(parts) if parts else 'nothing left standing'}"
         if dismissed:
             head += f" ({dismissed} dismissed)"
-        passages: dict[int, list[EventRecord]] = {}
+        passages: dict[int, list[MaskPointer]] = {}
         for record in records:
             if record.event.kind == KIND_PARTICLE and record.event.passage_id is not None:
                 passages.setdefault(record.event.passage_id, []).append(record)
@@ -284,7 +284,7 @@ class MaskRows(QObject):
     def _wavelength_event_marks(self, cube: int, wavelengths: tuple[float, ...]) -> list[StripMark]:
         if self._events is None:
             return []
-        by_wavelength: dict[float, list[EventRecord]] = {}
+        by_wavelength: dict[float, list[MaskPointer]] = {}
         for record in self._events.records_in_cube(cube):
             by_wavelength.setdefault(record.event.frame[1], []).append(record)
         marks: list[StripMark] = []
@@ -297,7 +297,7 @@ class MaskRows(QObject):
         return marks
 
     @staticmethod
-    def _wavelength_event_tip(wavelength: float, cube: int, records: list[EventRecord]) -> str:
+    def _wavelength_event_tip(wavelength: float, cube: int, records: list[MaskPointer]) -> str:
         lines = [f"{wavelength:g} nm, cube {cube} - scan:"]
         for record in records:
             event = record.event
@@ -319,7 +319,7 @@ class MaskRows(QObject):
         if self._events is None:
             return ()
         known = set(self._dataset.spectral_cubes())
-        return tuple(cube for cube in self._events.active_event_cubes() if cube in known)
+        return tuple(cube for cube in self._events.active_pointer_cubes() if cube in known)
 
     def state_cubes(self) -> tuple[int, ...]:
         """The cubes with a mark on the Cube row, ascending: what the slideshow's "Mask states" mode steps through."""
@@ -332,7 +332,7 @@ class MaskRows(QObject):
         known = set(self._dataset.spectral_cubes())
         marked = set(self._mask.persistent_points()) | set(self._mask.individual_cubes())
         if self._events is not None:
-            marked |= set(self._events.active_event_cubes())
+            marked |= set(self._events.active_pointer_cubes())
         return tuple(sorted(marked & known))
 
     # -- the wheel over the wavelength row ---------------------------------------------------------------
@@ -348,7 +348,7 @@ class MaskRows(QObject):
     def _cubes_with_marked_wavelengths(self) -> set[int]:
         candidates = set(self._mask.individual_cubes())
         if self._events is not None:
-            candidates |= set(self._events.active_event_cubes())
+            candidates |= set(self._events.active_pointer_cubes())
         return candidates & set(self._dataset.spectral_cubes())
 
     def _hop_wavelength(self, direction: int) -> None:
@@ -375,7 +375,7 @@ class MaskRows(QObject):
 
     # -- right click on a scan pointer ---------------------------------------------------------------------
 
-    def _mask_entry(self, to_mask: list[EventRecord], where: str) -> list[MenuEntry]:
+    def _mask_entry(self, to_mask: list[MaskPointer], where: str) -> list[MenuEntry]:
         """The "Mask ..." menu entry (none without an Auto mask step to call): enabled when a particle pointer is standing there."""
         if self._auto_mask is None:
             return []
