@@ -35,6 +35,7 @@ from PyQt6.QtCore import Qt, QByteArray, QTimer
 from PyQt6.QtGui import QAction, QActionGroup, QKeySequence
 from PyQt6.QtWidgets import QApplication, QMainWindow, QMenu, QMessageBox, QStatusBar
 
+from lspr_core.perf import get_runtime
 from lspr_ui import app_icon, set_active_theme
 
 from .analysis import AnalysisEngine, AnalysisSettingsModule
@@ -71,6 +72,11 @@ from .panels.image.overlay_style import OverlayStyle
 from .panels.layout_presets import LayoutPresetManager, wire_view_menu
 from .panels.panel_visibility import ensure_floating_panels_on_screen, wire_panel_visibility_menu
 from .panels.preferences_dialog import Preferences, PreferencesDialog
+from .perf_setup import apply_saved_preferences as apply_saved_perf_preferences
+from .perf_setup import saved_count as perf_saved_count
+from .perf_setup import install_runtime as install_perf_runtime
+from .perf_setup import status_text as perf_status_text
+from .perf_setup import write_perf_preferences
 from .panels.roi_table import RoiTablePanel
 from .panels.sensorgram import SensorgramPanel
 from .panels.spectra import SpectraPanel
@@ -1415,6 +1421,7 @@ def build_main_window(
 
     # Small UI choices (toggles, picks, Export options...) - panels/ui_state.py.
     ui_state = UiStateStore(settings.ui_state, on_changed=lambda values: writer.persist(ui_state=values))
+    apply_saved_perf_preferences(ui_state)  # parallel work: automatic / fixed number, cores kept free, low priority (perf_setup.py)
 
     m = _build_modules()
     # The cube unit (number / start time) is one app-wide display choice, remembered across restarts.
@@ -1525,7 +1532,7 @@ def build_main_window(
 
     # Edit -> Preferences...: reopen-last-dataset, the preset auto-apply toggle and the overlay cache size (2026-10-19;
     # they were in the Options menu, which is gone).
-    _wire_preferences(edit_menu, window, image_panel, writer, layout_preset_manager)
+    _wire_preferences(edit_menu, window, image_panel, writer, layout_preset_manager, ui_state)
 
     _wire_quit_persistence(window, m, writer, ui_state, layout_preset_manager)
     _auto_reopen_last_dataset(m.dataset, settings)
@@ -1539,6 +1546,7 @@ def _wire_preferences(
     image_panel: ImagePanel,
     writer: _SettingsWriter,
     layout_preset_manager: LayoutPresetManager,
+    ui_state: UiStateStore,
 ) -> QAction:
     """Edit -> Preferences... (Ctrl+, anywhere in the app): the app-wide settings that belong to no panel
     (`panels/preferences_dialog.py`; replaced the Options menu on 2026-10-19).
@@ -1546,7 +1554,8 @@ def _wire_preferences(
     - The dialog is shown with `open()` (window-modal, does not block the event loop) and applies nothing until OK. OK
       applies only what changed, through the setters the Options menu used: `AppSettings` via the writer (reopen last dataset;
       the preset auto-apply toggle, also kept on `LayoutPresetManager.auto_apply`, which `wire_view_menu` reads) and
-      `ImagePanel.set_overlay_cache_mb` (applied at once, saved with the other UI state).
+      `ImagePanel.set_overlay_cache_mb` (applied at once, saved with the other UI state). The parallel-work choices
+      (2026-10-22) go to the `lspr_core.perf` runtime, which the next export or scan reads, and into the UI-state store.
     - A second press of Ctrl+, while the dialog is open just brings it forward."""
     edit_menu.addSeparator()
     action = edit_menu.addAction("Preferences...")
@@ -1558,6 +1567,7 @@ def _wire_preferences(
             reopen_last_dataset=bool(writer.settings.auto_reopen_last_dataset),
             auto_apply_layout_preset=layout_preset_manager.auto_apply,
             overlay_cache_mb=image_panel.overlay_cache_mb,
+            perf=get_runtime().preferences,
         )
 
     def apply(old: Preferences, new: Preferences) -> None:
@@ -1572,8 +1582,15 @@ def _wire_preferences(
         if new.overlay_cache_mb != old.overlay_cache_mb:
             image_panel.set_overlay_cache_mb(new.overlay_cache_mb)
             changed.append("overlay_cache_mb")
+        if new.perf != old.perf:
+            get_runtime().set_preferences(new.perf)  # takes effect for the next export or scan; a running one keeps its own
+            changed.extend(f"perf_{name}" for name in write_perf_preferences(ui_state, new.perf))
         if changed:
             log_event(logger, "app.preferences_changed", logging.INFO, changed=",".join(changed))
+
+    def forget_saved_counts() -> None:
+        removed = get_runtime().forget_learned()
+        log_event(logger, "app.perf_saved_counts_forgotten", logging.INFO, removed=removed)
 
     def open_dialog() -> None:
         shown = window.findChild(PreferencesDialog)
@@ -1586,10 +1603,14 @@ def _wire_preferences(
             old,
             overlay_cache_status=image_panel.overlay_cache_status(),
             cache_set_by_environment=environment_budget_mb() is not None,
+            perf_status=perf_status_text(),
+            core_count=get_runtime().last_system().logical_cores,
+            perf_saved_count=perf_saved_count(),
             parent=window,
         )
         dialog.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
         dialog.accepted.connect(lambda: apply(old, dialog.values()))
+        dialog.accepted.connect(lambda: forget_saved_counts() if dialog.forget_saved_requested else None)
         dialog.open()
 
     action.triggered.connect(open_dialog)
@@ -1620,6 +1641,8 @@ def main() -> None:
     app.setWindowIcon(app_icon())
 
     initial_settings = load_app_settings()
+    runtime = install_perf_runtime(initial_settings.ui_state)  # learned worker counts + saved choices; never in tests (perf_setup.py)
+    log_event(logger, "perf.machine", logging.INFO, machine=runtime.probe().describe(), fingerprint=runtime.last_system().fingerprint())
     window = build_main_window(initial_settings, on_settings_changed=save_app_settings)
     window.show()
     sys.exit(app.exec())

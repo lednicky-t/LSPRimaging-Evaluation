@@ -26,6 +26,7 @@ from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field
 
 import numpy as np
+from lspr_core.perf import get_runtime
 
 from ...applog import timed
 from ...progress import ProgressCallback, StageProgress
@@ -67,7 +68,10 @@ class ScanParams:
     stride: int = 3  # check every n-th wavelength
     stride_offset: int = 0
     cube_range: tuple[int, int] | None = None  # (first, last) cube, inclusive; None = every cube
-    workers: int = field(default_factory=lambda: _default_workers())  # threads per pool (reading, screening); see `_default_workers`
+    workers: int | None = None
+    """Threads per pool (reading, screening). None (the default) = automatic: `lspr_core.perf` measures the screening stage and tunes
+    the number of reading threads, starting from `_default_workers()` (docs/performance_tuning.md). A number = exactly that many, as
+    before (tests, the command-line tool). The scan finds the same events at any count."""
     expand: bool = True
     fill_gaps: bool = True  # search the frames a passage predicts at a lower threshold (`transient_gaps.py`)
     fill_extend_frames: int = 2  # how far beyond each end of a passage the filling may follow it
@@ -95,13 +99,12 @@ def scan_transients(
 ) -> ScanResult:
     """Scan the frames of `frame_index` (cube -> wavelengths; a wavelength <= 0 is a dark frame and is never scanned).
 
-    `load_plane` is called from `params.workers` threads at once; `worker_init` runs once in each thread of both pools, the
+    `load_plane` is called from several threads at once (`params.workers`, or the automatic count); `worker_init` runs once in each thread of both pools, the
     reading one and the screening one (the app opts the thread into the fast TIFF decoder and lowers its priority there, so the
     window keeps its turn). Raises `progress.Cancelled` when `cancelled()` turns true."""
     params = params or ScanParams()
     det = params.detection
     stride = max(int(params.stride), 1)
-    workers = max(int(params.workers), 1)
     report = StageProgress(_STAGE_WEIGHTS, progress, cancelled)
     started = time.perf_counter()
 
@@ -113,6 +116,15 @@ def scan_transients(
     for c, w in order:
         cubes_with.setdefault(w, []).append(c)
     checked = sorted(cubes_with)[int(params.stride_offset) % stride :: stride]
+    total = sum(len(cubes_with[w]) for w in checked)  # frames the screening stage looks at
+
+    # How many reading threads work at once. Fixed: exactly `params.workers`. Automatic: both pools are created at the largest size
+    # `lspr_core.perf` allows, a gate (a counting semaphore whose limit the tuner moves) lets only the tuned number of readers
+    # run, and the screening stage reports each finished frame so the tuner can settle on the best count (2026-10-22). Only the
+    # entry points submitted to the pool are gated; the calls inside them are not, or a task holding a slot would wait for a second.
+    perf_run = None if params.workers is not None else get_runtime().begin("mask.scan.screen", total_units=total, start_hint=_default_workers())
+    workers = max(int(params.workers), 1) if perf_run is None else perf_run.maximum
+    gated: Callable[[Callable], Callable] = (lambda fn: fn) if perf_run is None else perf_run.gate.wrap
 
     failed: list[Frame] = []
     plane_shape: list[tuple[int, int]] = []  # (height, width) of the first plane read
@@ -163,7 +175,6 @@ def scan_transients(
         with ThreadPoolExecutor(workers, initializer=worker_init) as pool, ThreadPoolExecutor(workers, initializer=worker_init) as compute:
             # -- 1. screen the checked frames, one wavelength at a time -----------------------------------------------
             stage_started = time.perf_counter()
-            total = sum(len(cubes_with[w]) for w in checked)
             done = 0
             pending: list[tuple[Frame, Future]] = []
 
@@ -178,8 +189,10 @@ def scan_transients(
             for w in checked:
                 frames = [(c, w) for c in cubes_with[w]]
                 previous: tuple[Frame, Binned | None] | None = None
-                for frame, item in zip(frames, _ordered(pool, read_binned, frames, ahead=workers * 3)):
+                for frame, item in zip(frames, _ordered(pool, gated(read_binned), frames, ahead=workers * 3)):
                     report("screen", done / max(total, 1), f"cube {frame[0]}, {frame[1]:g} nm")
+                    if perf_run is not None:
+                        perf_run.unit_done(1)
                     done += 1
                     screened.add(frame)
                     if previous is None:
@@ -193,6 +206,10 @@ def scan_transients(
                 settle(0)
             stage_seconds["screen"] = time.perf_counter() - stage_started
             report("screen", 1.0, "screened")
+            tuning = None
+            if perf_run is not None:  # the later stages are not tuned; they keep the count the screening settled on
+                tuning = perf_run.finish()
+                perf_run.gate.set_limit(tuning.workers)
 
             # -- 2. the neighbours of the hits ------------------------------------------------------------------------
             stage_started = time.perf_counter()
@@ -217,7 +234,7 @@ def scan_transients(
                     rounds += 1
                     report("expand", 1.0 - 1.0 / (rounds + 1), f"neighbours of hits, round {rounds}")
                     frontier = []
-                    for frame, found in pool.map(screen_one, batch):
+                    for frame, found in pool.map(gated(screen_one), batch):
                         if found is not None:
                             hits[frame] = found
                             frontier.append(frame)
@@ -240,7 +257,7 @@ def scan_transients(
                     return found
                 return found + contour_objects(own, confirmation_reference(*around), hits[frame], det, frame)
 
-            for index, found in enumerate(_ordered(pool, confirm, hit_frames, ahead=workers * 2)):
+            for index, found in enumerate(_ordered(pool, gated(confirm), hit_frames, ahead=workers * 2)):
                 report("confirm", (index + 1) / max(len(hit_frames), 1), f"contours {index + 1}/{len(hit_frames)}")
                 events.extend(found)
             stage_seconds["confirm"] = time.perf_counter() - stage_started
@@ -268,7 +285,7 @@ def scan_transients(
                         break
                     report("fill", round_index / (params.fill_extend_frames + 1), f"gap filling, round {round_index + 1}")
                     tried.update(t.key for t in targets)
-                    added = [e for e in _ordered(pool, fill_one, targets, ahead=workers * 2) if e is not None]
+                    added = [e for e in _ordered(pool, gated(fill_one), targets, ahead=workers * 2) if e is not None]
                     if not added:
                         break
                     events.extend(added)
@@ -277,6 +294,8 @@ def scan_transients(
             stage_seconds["fill"] = time.perf_counter() - stage_started
             report("fill", 1.0, "done")
             timing.set(screened=len(screened), compared=len(compared), hits=len(hits), events=len(events), filled=filled, failed=len(failed))
+            if tuning is not None:
+                timing.set(workers=tuning.workers, worker_mode=tuning.mode)
 
     linked.sort(key=lambda e: (position.get(e.frame, 0), -e.area_px))
     return ScanResult(

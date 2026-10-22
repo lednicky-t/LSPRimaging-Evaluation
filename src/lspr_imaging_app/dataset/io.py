@@ -33,6 +33,7 @@ except Exception:  # pragma: no cover - optional acceleration path
     _zarrs = None
 
 from lspr_core import ImagingAcquisitionMetadata
+from lspr_core.perf import get_runtime, lower_process_priority
 from lspr_io import is_imaging_measurement_file, read_imaging_acquisition_metadata
 
 # ImageDataset/ImageKey/ImageRecord: the rewrite's own copy (ported verbatim
@@ -89,12 +90,12 @@ OME_ZARR_ACQUISITION_METADATA_KEY = "lspr_acquisition_metadata"
 EXPERIMENTAL_DATA_DIRNAME = "Experimental_data"
 _OME_ZARR_IMPORT_ERROR: ImportError | None = None
 
-# Adaptive worker-count tuning for export_ome_zarr_dataset (module-level so tests
-# can monkeypatch them for deterministic flip behavior instead of depending on
-# real disk-timing noise). See export_ome_zarr_dataset's coordinator loop.
-ADAPTIVE_MAX_FACTOR = 2.0          # never exceed 2x cpu_count
-ADAPTIVE_IO_FLIP_UP = 0.5          # >=50% time in read+write -> add workers
-ADAPTIVE_IO_FLIP_DOWN = 0.2        # <=20% time in read+write -> remove workers
+# Memory one export worker process needs, for `lspr_core.perf`'s worker limit (free memory / this = most workers): the interpreter
+# with numpy, numcodecs and the TIFF decoder loaded, plus _EXPORT_WORKER_PLANE_BUFFERS float32 planes (decode, rotate, round,
+# compress) and the shard being built. Checked against the measured resident size of real workers (docs/performance_tuning.md);
+# on the safe side, because a worker that does not fit costs far more than one worker too few.
+_EXPORT_WORKER_BASE_BYTES = 250 * 1024 * 1024
+_EXPORT_WORKER_PLANE_BUFFERS = 6
 
 
 _ZARR_CODEC_PIPELINE_CONFIGURED = False
@@ -1341,6 +1342,15 @@ def compare_ome_zarr_summaries(
     return all_match, rows
 
 
+def _export_worker_init_low_priority() -> None:
+    """Worker-process initializer when the user keeps background work at low priority (Preferences, default on): the export's
+    usual start-up (single-threaded Blosc), then below-normal process priority so the window keeps its turn."""
+    from lspr_imaging_app.io._zarr_export_worker import _worker_init
+
+    _worker_init()
+    lower_process_priority()
+
+
 def export_ome_zarr_dataset(
     dataset: ImageDataset,
     destination: Path,
@@ -1375,6 +1385,11 @@ def export_ome_zarr_dataset(
 
     `export_stats`, when given, is filled in as the export runs (`dataset/export_stats.py`: images written, bytes on disk, workers);
     the caller times the whole run.
+
+    `adaptive_workers_enabled`: True lets `lspr_core.perf` tune the number of worker processes while the export runs; False runs
+    at its starting count (every core but the reserved ones). The user's Preferences (automatic / a fixed count, cores kept free,
+    low priority) apply either way. `adaptive_batch_mb` is no longer used (the old tuner's window size) and is kept only so existing
+    callers keep working. Neither changes the exported files.
     """
     normalized_destination = (
         destination
@@ -1642,36 +1657,36 @@ def _export_ome_zarr_dataset_to_path(
 
     # ProcessPoolExecutor: each worker runs in a separate Python interpreter with
     # its own GIL, so the main Qt thread stays responsive at any CPU count.
-    # Baseline is plain cpu_count (no oversubscription) -- adaptive tuning below
-    # is what decides whether to go higher, based on real measurement instead of
-    # a guess.
-    cpu_count = int(os.cpu_count() or 4)
-    worker_count = max(1, min(cpu_count, n_tasks))
-    prefetch_window = max(worker_count * 2, worker_count + 2)
+    #
+    # How many workers run at once is decided by `lspr_core.perf` (2026-10-22; replaces the earlier "adaptive" tuner that guessed
+    # from the share of time spent in I/O, which on the development laptop counted decoding and rotation as disk time). The
+    # limits come from the machine (cores minus the ones kept free for the window, free memory, one worker per task at most); the
+    # tuner then measures planes per second while the export runs and settles on the cheapest count within noise of the best.
+    # The pool is created ONCE at the largest size and the number of tasks in flight is the worker count: a ProcessPoolExecutor
+    # starts a process only when a task has no idle one to take it, so raising the count starts processes (once) and lowering it
+    # just stops submitting; the old design re-created the whole pool on every change (seconds of process start-up each time).
+    # Only scheduling changes: every shard is written by one task, independently, so the files are identical at any count.
+    plane_bytes_f32 = max(int(source_height) * int(source_width), int(height) * int(width)) * 4
+    shard_bytes = (n_wl if per_spectral_cube else 1) * int(height) * int(width) * int(target_dtype.itemsize)
+    perf_run = get_runtime().begin(
+        "export.ome_zarr",
+        total_units=total_planes,
+        per_worker_bytes=_EXPORT_WORKER_BASE_BYTES + _EXPORT_WORKER_PLANE_BUFFERS * plane_bytes_f32 + shard_bytes,
+        max_useful=n_tasks,
+        destination=destination,
+        allow_tuning=adaptive_workers_enabled,
+        on_change=lambda old, new, why: _LOGGER.debug("OME-Zarr export: %d -> %d workers (%s)", old, new, why),
+    )
     task_iter = iter(task_args)
     pending: dict = {}
-
-    # Adaptive worker tuning: each export task mixes disk I/O (image read, shard
-    # write) with CPU work (Blosc compress). Periodically check, from real timing
-    # of the export itself, which one dominates -- if the export is spending most
-    # of its time waiting on disk, add worker processes so other workers' CPU
-    # work can fill that gap; if it's CPU-bound, stay at cpu_count (adding
-    # workers wouldn't help -- there's no idle core to fill). Bounded to
-    # [cpu_count, 2x cpu_count]: never go *below* cpu_count, only compensate for
-    # I/O wait above it. Off (adaptive_workers_enabled=False) skips this entirely
-    # so it can serve as a true, reproducible baseline. See the Preferences >
-    # "OME-Zarr export: adaptive worker tuning" menu for the user-facing controls.
-    batch_bytes_threshold = max(int(adaptive_batch_mb), 1) * 1024 * 1024
-    window_bytes = 0
-    window_read_s = 0.0
-    window_write_s = 0.0
-    window_compress_s = 0.0
     planes_written = 0
     shard_bytes_written = 0
 
     report_progress(force=True)
-    executor = ProcessPoolExecutor(max_workers=worker_count, initializer=_worker_init)
-    executors_to_close = [executor]
+    executor = ProcessPoolExecutor(
+        max_workers=perf_run.maximum,
+        initializer=_export_worker_init_low_priority if perf_run.low_priority else _worker_init,
+    )
 
     def submit_next() -> bool:
         try:
@@ -1683,80 +1698,41 @@ def _export_ome_zarr_dataset_to_path(
         pending[future] = sum(1 for record_path in spec.record_paths if record_path)  # images this task writes
         return True
 
-    try:
-        for _ in range(min(prefetch_window, n_tasks)):
-            if not submit_next():
-                break
+    def fill_pipeline() -> None:
+        """Keep exactly `perf_run.workers` tasks in flight (fewer only when the work is running out)."""
+        while len(pending) < perf_run.workers and submit_next():
+            pass
 
+    try:
+        fill_pipeline()
         while pending:
             if cancel_event is not None and cancel_event.is_set():
-                for ex in executors_to_close:
-                    ex.shutdown(wait=False, cancel_futures=True)
+                executor.shutdown(wait=False, cancel_futures=True)
                 raise RuntimeError("OME-Zarr export cancelled.")
             done, _ = wait(list(pending.keys()), return_when=FIRST_COMPLETED)
             for future in done:
-                planes_written += pending.pop(future, 0)
+                images = pending.pop(future, 0)
+                planes_written += images
                 result = future.result()
                 shard_bytes_written += int(result.bytes_written)
                 with progress_lock:
                     completed_units = min(total_units, completed_units + result.n_inner)
                 off_step_planes += int(getattr(result, "off_step_planes", 0))
                 report_progress()
-
-                if adaptive_workers_enabled:
-                    window_bytes += result.bytes_written
-                    window_read_s += result.read_s
-                    window_write_s += result.write_s
-                    window_compress_s += result.compress_s
-                    if window_bytes >= batch_bytes_threshold:
-                        io_total = window_read_s + window_write_s
-                        denom = io_total + window_compress_s
-                        if denom > 0:
-                            io_fraction = io_total / denom
-                            step = max(1, cpu_count // 4)
-                            if io_fraction >= ADAPTIVE_IO_FLIP_UP and worker_count < round(cpu_count * ADAPTIVE_MAX_FACTOR):
-                                new_worker_count = min(round(cpu_count * ADAPTIVE_MAX_FACTOR), worker_count + step)
-                            elif io_fraction <= ADAPTIVE_IO_FLIP_DOWN and worker_count > cpu_count:
-                                new_worker_count = max(cpu_count, worker_count - step)
-                            else:
-                                new_worker_count = worker_count
-                            new_worker_count = max(1, min(new_worker_count, n_tasks))
-                            if new_worker_count != worker_count:
-                                old_worker_count = worker_count
-                                old_executor = executor
-                                executor = ProcessPoolExecutor(max_workers=new_worker_count, initializer=_worker_init)
-                                executors_to_close.append(executor)
-                                old_executor.shutdown(wait=False)
-                                prefetch_window = max(new_worker_count * 2, new_worker_count + 2)
-                                if progress_callback is not None:
-                                    progress_callback(
-                                        last_percent if last_percent >= 0 else 0,
-                                        f"ADAPTIVE_FLIP: {worker_count} -> {new_worker_count} workers "
-                                        f"({io_fraction:.0%} I/O wait over last {adaptive_batch_mb}MB)",
-                                    )
-                                worker_count = new_worker_count
-                                if worker_count > old_worker_count:
-                                    # Top up in-flight work so the added workers have
-                                    # something to do immediately, instead of waiting
-                                    # for the next one-in-one-out submission.
-                                    target_pending = min(prefetch_window, n_tasks)
-                                    while len(pending) < target_pending:
-                                        if not submit_next():
-                                            break
-                        window_bytes = 0
-                        window_read_s = window_write_s = window_compress_s = 0.0
-
-                submit_next()
+                perf_run.unit_done(max(images, 1))
+            fill_pipeline()
     finally:
-        for ex in executors_to_close:
-            ex.shutdown(wait=True)
+        executor.shutdown(wait=True)
     if cancel_event is not None and cancel_event.is_set():
         raise RuntimeError("OME-Zarr export cancelled.")
+    tuning = perf_run.finish()  # remembers the count this run settled on (automatic mode only)
+    log_event(_LOGGER, "perf.run", logging.INFO, **tuning.as_fields())
     if export_stats is not None:
         export_stats.planes = planes_written
         export_stats.bytes_written = shard_bytes_written
         export_stats.stored_plane_bytes = int(height) * int(width) * int(target_dtype.itemsize)
-        export_stats.workers = worker_count
+        export_stats.workers = tuning.workers
+        export_stats.worker_mode = tuning.mode
     if off_step_planes:
         _LOGGER.warning(
             "OME-Zarr export: %d plane(s) had values off the camera step %d and were rounded to whole counts instead",

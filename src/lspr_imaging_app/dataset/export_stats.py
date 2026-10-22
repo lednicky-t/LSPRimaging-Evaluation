@@ -23,7 +23,10 @@ class ExportStats:
     stored_plane_bytes: int = 0
     """One stored image uncompressed: height x width x bytes per pixel."""
     workers: int = 0
-    """Worker processes at the end of the run (the adaptive tuning may have changed the number)."""
+    """Worker processes the export settled on (the tuning may have changed the number during the run)."""
+    worker_mode: str = ""
+    """How that number was chosen: ``auto`` (tuned while running), ``manual`` (the user's count in Preferences) or ``fixed``
+    (a job too short to tune). Empty: not recorded."""
     seconds: float = 0.0
     """Wall time of the whole export, from start to the last file."""
 
@@ -62,6 +65,8 @@ class ExportStats:
             ) + f" ({format_bytes(self.gb_per_minute * 1e9)}/min of image data)."
         else:
             first += "."
+        if self.workers > 0 and self.worker_mode:
+            first += f" Used {self.workers} worker{'s' if self.workers != 1 else ''} ({self.worker_mode})."
         if self.bytes_written > 0 and self.uncompressed_bytes > 0:
             return (
                 f"{first}\nWrote {format_bytes(self.bytes_written)} to disk, {100 * self.size_ratio:.0f} % of the "

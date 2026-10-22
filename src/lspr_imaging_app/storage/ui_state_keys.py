@@ -112,6 +112,12 @@ ROI_OVERLAY_KEYS = {
     for kind in ("sample", "reference")
 }
 IMAGE_OVERLAY_CACHE_MB = UiKey("image/overlay_cache_mb", 256, int)  # Edit -> Preferences: ROI overlay cache size in MB; 0 = off
+# Edit -> Preferences: parallel work (lspr_core.perf; read by perf_setup.py). Mode "standard" (default) | "auto" (tune) | "manual";
+# 0 workers = not chosen.
+PERF_MODE = UiKey("perf/mode", "standard", str)
+PERF_MANUAL_WORKERS = UiKey("perf/manual_workers", 0, int)
+PERF_RESERVED_CORES = UiKey("perf/reserved_cores", 1, int)
+PERF_LOW_PRIORITY = UiKey("perf/low_priority", True, bool)
 CUBE_DISPLAY_MODE = UiKey("app/cube_display_mode", "cube", str)  # "cube" (number) | "time" (start time of the first frame)
 MASK_SCOPE = UiKey("mask/scope", None, str)  # a `MaskScope` value
 # Image panel slider ribbon, slideshow settings (panels/image/slideshow.py)
@@ -161,7 +167,7 @@ ARRAY_KEYS = {  # ROIs tab, "Array" group (panels/image/array_controls.py); leng
 }
 HAND_WIRED_KEYS: tuple[UiKey, ...] = (
     HISTOGRAM_CURSOR_READOUT, HISTOGRAM_CURVE_STYLES, IMAGE_CURSOR_READOUT, IMAGE_MASK_EDIT_TOOL, IMAGE_SCALE_BAR_COLOR, IMAGE_ROI_LABELS,
-    IMAGE_OVERLAY_CACHE_MB,
+    IMAGE_OVERLAY_CACHE_MB, PERF_MODE, PERF_MANUAL_WORKERS, PERF_RESERVED_CORES, PERF_LOW_PRIORITY,
     *(key for keys_for_kind in ROI_OVERLAY_KEYS.values() for key in keys_for_kind.values()),
     CUBE_DISPLAY_MODE, MASK_SCOPE, ROI_SCOPE, ROI_ROW_VISIBLE, ROI_ROW_SELECTED_ONLY, MASK_ROWS_VISIBLE, EXPORT_SHARD,
     *ARRAY_KEYS.values(), *SLIDER_COLOR_KEYS.values(),

@@ -532,7 +532,7 @@ class DatasetModule(QObject):
             stats.seconds = time.perf_counter() - started
             log_event(
                 logger, "dataset.export_done", logging.INFO, seconds=round(stats.seconds, 1), planes=stats.planes,
-                mb_written=round(stats.bytes_written / 1e6, 1), planes_per_s=round(stats.planes_per_second, 1), workers=stats.workers,
+                mb_written=round(stats.bytes_written / 1e6, 1), planes_per_s=round(stats.planes_per_second, 1), workers=stats.workers, worker_mode=stats.worker_mode,
             )
             self.export_stats_ready.emit(stats)
             self.task_finished.emit(EXPORT_TASK_ID, "completed", f"written to {Path(result).name} in {stats.headline()}")

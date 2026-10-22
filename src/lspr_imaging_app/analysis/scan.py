@@ -26,6 +26,7 @@ from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, wait
 from dataclasses import dataclass, field
 
 import numpy as np
+from lspr_core.perf import get_runtime, lower_process_priority
 
 from ..dataset import io
 from ..image_tools.background.estimate import BackgroundWeightsCache, roi_exclusion_mask
@@ -140,10 +141,13 @@ class _Worker:
 
 
 _WORKER: _Worker | None = None  # the worker of this process (multiprocessing path)
+_SCAN_WORKER_BYTES = 600 * 1024 * 1024  # memory one scan worker process may need, for the automatic worker limit
 
 
-def _init_process(settings: ScanSettings) -> None:
+def _init_process(settings: ScanSettings, low_priority: bool = False) -> None:
     global _WORKER
+    if low_priority:
+        lower_process_priority()  # the window and the rest of the computer keep their turn (Preferences, default on)
     io.use_fast_tiff_decoder(settings.fast_tiff_decoder)
     _WORKER = _Worker(settings)
 
@@ -157,14 +161,16 @@ def scan_cubes(
     jobs: Sequence[CubeJob],
     settings: ScanSettings,
     *,
-    processes: int = 4,
+    processes: int | None = None,
     cubes_per_task: int = 4,
     progress: Callable[[float, str], None] | None = None,
     cancelled: Callable[[], bool] | None = None,
 ) -> Iterator[CubeResult]:
     """Run step 1 over ``jobs``, yielding one :class:`CubeResult` per cube **in completion order** (use ``cube_pos``).
 
-    ``processes`` <= 1 runs in this process (useful for tests and debugging). Workers get ``cubes_per_task`` neighbouring
+    ``processes``: None (the default) = automatic: ``lspr_core.perf`` picks the number of worker processes and tunes it while the
+    scan runs (the pool is created once at the largest size; the number of tasks in flight is the tuned count). A number = exactly
+    that many (<= 1 runs in this process: tests and debugging). The results are identical at any count. Workers get ``cubes_per_task`` neighbouring
     cubes at a time: neighbours mostly share a ROI layout, so each worker builds a pixel layout once and keeps reusing it
     (handing out single cubes in any order made workers rebuild layouts). ``progress(fraction, message)`` is called
     once per finished cube; ``cancelled()`` is checked as often, and on True the remaining cubes are dropped and
@@ -172,7 +178,7 @@ def scan_cubes(
     total = len(jobs)
     if total == 0:
         return
-    if processes <= 1:
+    if processes is not None and processes <= 1:
         io.use_fast_tiff_decoder(settings.fast_tiff_decoder)
         worker = _Worker(settings)
         for done, job in enumerate(jobs, start=1):
@@ -182,22 +188,49 @@ def scan_cubes(
             if progress is not None:
                 progress(done / total, f"cube {done} of {total}")
         return
-    with ProcessPoolExecutor(max_workers=processes, initializer=_init_process, initargs=(settings,)) as pool:
-        step = max(int(cubes_per_task), 1)
-        pending = {pool.submit(_run_in_process, tuple(jobs[i:i + step])) for i in range(0, total, step)}
+    step = max(int(cubes_per_task), 1)
+    tasks = [tuple(jobs[i:i + step]) for i in range(0, total, step)]
+    # Per-process memory: the interpreter with numpy/cv2 and the three caches, plus a few float32 planes (a guess to bound the pool, not a
+    # promise; checked in docs/performance_tuning.md).
+    run = None if processes is not None else get_runtime().begin(
+        "analysis.scan", total_units=len(tasks), per_worker_bytes=_SCAN_WORKER_BYTES, max_useful=len(tasks),
+    )
+    pool_size = max(int(processes), 1) if run is None else run.maximum
+    in_flight = (lambda: pool_size) if run is None else (lambda: run.workers)
+    low_priority = True if run is None else run.low_priority
+    with ProcessPoolExecutor(max_workers=pool_size, initializer=_init_process, initargs=(settings, low_priority)) as pool:
+        queue = iter(tasks)
+        pending: set = set()
+
+        def top_up() -> None:
+            while len(pending) < in_flight():
+                chunk = next(queue, None)
+                if chunk is None:
+                    return
+                pending.add(pool.submit(_run_in_process, chunk))
+
         done = 0
         try:
+            top_up()
             while pending:
-                finished, pending = wait(pending, return_when=FIRST_COMPLETED)
+                finished, still = wait(pending, return_when=FIRST_COMPLETED)
+                pending.clear()
+                pending.update(still)
                 for future in finished:
-                    for result in future.result():
+                    results = future.result()
+                    for result in results:
                         done += 1
                         yield result
                         if progress is not None:
                             progress(done / total, f"cube {done} of {total}")
+                    if run is not None:
+                        run.unit_done(1)
                 if cancelled is not None and cancelled():
                     raise Cancelled()
+                top_up()
         except BaseException:
             for future in pending:
                 future.cancel()
             raise
+    if run is not None:
+        run.finish()
