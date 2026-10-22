@@ -6,8 +6,8 @@ ROIs), so a change on either copy shows on the other.
 
 Layout (one ribbon row, captioned groups, thin separators between them):
 
-    [display range] | [show all, hide all] | [histogram overlay] | [mask overlay] | [landmarks] | [background] | [ROI display menu] | [group labels menu] | [scale bar]
-     Display range           All                  Histogram             Mask           Chromatic     Background         ROIs             Group labels        Scale bar
+    [display range] | [show all, hide all] | [histogram overlay] | [mask overlay] | [landmarks] | [background] | [ROI display menu] | [group labels menu] | [scale bar] | [chunk grid]
+     Display range           All                  Histogram             Mask           Chromatic     Background         ROIs             Group labels        Scale bar     Chunk grid
 
 Display only (CLAUDE.md "panels/"): the copies report through this tab's
 signals and the panel applies the change, exactly as for the original control.
@@ -30,10 +30,12 @@ from PyQt6.QtWidgets import QHBoxLayout, QWidget
 
 from lspr_ui import get_active_theme
 
+from ...dataset import DatasetModule
 from ...image_tools import GeometryModule
 from ..ribbon_group import group_label_style, labeled_icon_group, ribbon_separator
 from .background_tab import BackgroundTab
 from .chromatic_tab import ChromaticCorrectionTab
+from .chunk_grid_controls import ChunkGridControls
 from .display_range_controls import DisplayRangeControls
 from .general_group import mirror_icon_button
 from .group_label_menu import GroupLabelMenu
@@ -71,6 +73,7 @@ class ViewTab(QWidget):
         background_tab: BackgroundTab,
         roi_tab: RoiTab,
         scale_bar_color: QColor,
+        dataset: DatasetModule,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
@@ -157,9 +160,13 @@ class ViewTab(QWidget):
         self._scale_bar_controls.color_changed.connect(self.scale_bar_color_changed)
         scale_bar_group, self._scale_bar_label = labeled_icon_group(self, self._scale_bar_controls, "Scale bar")
 
+        # The loaded OME-Zarr's own chunk grid (disabled for a TIFF stack); not an overlay of the All buttons.
+        self._chunk_grid_controls = ChunkGridControls(dataset, self)
+        chunk_grid_group, self._chunk_grid_label = labeled_icon_group(self, self._chunk_grid_controls, "Chunk grid")
+
         groups = (
             display_range_group, all_group, highlight_group, mask_group, chromatic_group, background_group,
-            roi_group, group_labels_group, scale_bar_group,
+            roi_group, group_labels_group, scale_bar_group, chunk_grid_group,
         )
         self._separators = [ribbon_separator(self) for _ in groups[1:]]
         layout = QHBoxLayout(self)
@@ -170,6 +177,14 @@ class ViewTab(QWidget):
             layout.addWidget(separator)
             layout.addWidget(group)
         layout.addStretch(1)
+
+        # Last group and its separator: hidden while no OME-Zarr is loaded (a TIFF stack has no chunks).
+        def show_chunk_grid_group(available: bool) -> None:
+            chunk_grid_group.setVisible(available)
+            self._separators[-1].setVisible(available)
+
+        self._chunk_grid_controls.availability_changed.connect(show_chunk_grid_group)
+        show_chunk_grid_group(self._chunk_grid_controls.source_chunk_available())
 
     def _copy_roi_controls(self, kind: str, source: RoiOverlayControls) -> RoiOverlayControls:
         """A second instance of a ROIs-tab control, kept equal to it both ways."""
@@ -190,6 +205,10 @@ class ViewTab(QWidget):
     @property
     def scale_bar_controls(self) -> ScaleBarControls:
         return self._scale_bar_controls
+
+    @property
+    def chunk_grid_controls(self) -> ChunkGridControls:
+        return self._chunk_grid_controls
 
     @property
     def display_range_controls(self) -> DisplayRangeControls:
@@ -226,6 +245,7 @@ class ViewTab(QWidget):
         self._roi_placement_copy.refresh_theme(theme)
         self._roi_display_menu.refresh_theme(theme)
         self._group_label_menu.refresh_theme()
+        self._chunk_grid_controls.refresh_theme()
         for separator in self._separators:
             separator.setStyleSheet(f"color: {theme.control_border};")
         for label in (
@@ -238,5 +258,6 @@ class ViewTab(QWidget):
             self._roi_label,
             self._group_labels_label,
             self._scale_bar_label,
+            self._chunk_grid_label,
         ):
             label.setStyleSheet(group_label_style())

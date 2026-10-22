@@ -63,6 +63,7 @@ from .image_tools import (
     MaskModule,
     MaskScopeModule,
 )
+from .panels.dataset_info_bar import attach_to_menu_bar
 from .panels.dock_container import PanelContainer
 from .panels.histogram import HistogramPanel
 from .panels.log import LogPanel
@@ -1474,6 +1475,7 @@ def build_main_window(
     # simply isn't offered as a target - only the split zones are.
     window.setDockOptions(QMainWindow.DockOption.AnimatedDocks | QMainWindow.DockOption.AllowNestedDocks)
     edit_menu, view_menu = _build_menu_bar(window)
+    attach_to_menu_bar(window.menuBar(), m.dataset)  # dataset path, type / size / cubes, and the Time / Plan checks
     _build_status_bar(window, m, workflow, image_panel, roi_table_panel)
     _wire_session_carry_prompt(window, m)
     _wire_edit_menu(edit_menu, window, m.analysis_engine)

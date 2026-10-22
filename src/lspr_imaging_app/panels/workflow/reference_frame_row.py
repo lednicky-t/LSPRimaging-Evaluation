@@ -1,4 +1,4 @@
-"""Dataset stage - the "Define reference frame:" row.
+"""Dataset stage - the reference-frame indicator row.
 
 Replaces the stable app's standalone "Reference" section (`gui/
 layout_builder.py`'s `reference_section`) with a compact, non-collapsible
@@ -8,34 +8,24 @@ content, alongside the folder row (`dataset_folder_row.py`) - both are
 "always visible regardless of which nested section is open" controls, not
 inside any one of them.
 
-Real icon toggle buttons this time (not free-standing labels - the source
-uses checkable `QToolButton`s here, in a `QButtonGroup`, matching
-`reference_auto_button`/`reference_manual_button` exactly): "Find reference"
-(Auto) = tabler `focus-2`, "Set reference" (Manual) = tabler `pin` (renamed and
-re-iconed 2026-10-11), both lime `#84cc16` when active
-- same literal color the source hardcodes, no `lspr_ui` theme token for it.
+An indicator only (2026-10-22): the Set / Find reference buttons that used to sit here live in the Image panel's
+slider ribbon (`image/frame_tools.py`), so this row just shows which frame is the reference.
 
 Backed by the new `ReferenceFrameModule` + the existing `SelectionModule`
-(see `reference_frame_module.py`'s docstring: Auto = best-contrast wavelength
-of the viewed cube, found in the background by `ReferenceAutoFind`).
+(see `reference_frame_module.py`'s docstring).
 """
 
 from __future__ import annotations
 
 import logging
 
-from PyQt6.QtCore import QSize
-from PyQt6.QtWidgets import QButtonGroup, QHBoxLayout, QLabel, QToolButton, QVBoxLayout, QWidget
+from PyQt6.QtWidgets import QLabel, QVBoxLayout, QWidget
 
-from lspr_ui import get_active_theme, transparent_icon_button_stylesheet
+from lspr_ui import get_active_theme
 
 from ...selection import CubeDisplayModule, ReferenceFrameModule, SelectionModule
-from ...selection.reference_frame_module import MODE_MANUAL
-from ..dock_container import _render_tabler_icon
 
 logger = logging.getLogger(__name__)
-
-_ACTIVE_COLOR = "#84cc16"
 
 
 class ReferenceFrameRow(QWidget):
@@ -52,32 +42,6 @@ class ReferenceFrameRow(QWidget):
         self._cube_display = cube_display
         theme = get_active_theme()
 
-        label = QLabel("Define reference frame:", self)
-
-        self._auto_button = QToolButton(self)
-        self._auto_button.setAutoRaise(True)
-        self._auto_button.setFixedSize(24, 24)
-        self._auto_button.setIconSize(QSize(18, 18))
-        self._auto_button.setStyleSheet(transparent_icon_button_stylesheet())
-        self._auto_button.setToolTip(
-            "Find reference: score every wavelength of the cube being viewed and keep the best-contrast one as the "
-            "reference frame (runs only when clicked; the result stays fixed, like Set reference)."
-        )
-        self._auto_button.clicked.connect(self._reference_frame_module.request_find)
-
-        self._manual_button = QToolButton(self)
-        self._manual_button.setCheckable(True)
-        self._manual_button.setAutoRaise(True)
-        self._manual_button.setFixedSize(24, 24)
-        self._manual_button.setIconSize(QSize(18, 18))
-        self._manual_button.setStyleSheet(transparent_icon_button_stylesheet())
-        self._manual_button.setToolTip("Set reference: store the current spectral cube and wavelength as the reference frame.")
-        self._manual_button.clicked.connect(self._on_manual_clicked)
-
-        self._mode_group = QButtonGroup(self)
-        self._mode_group.setExclusive(True)
-        self._mode_group.addButton(self._manual_button)
-
         self._status_label = QLabel("[Ref.frame: -]", self)
         self._status_label.setStyleSheet(f"color: {theme.text_dim};")
         # Word-wrap, not just a bounded number format (2026-09-25) - a
@@ -87,25 +51,13 @@ class ReferenceFrameRow(QWidget):
         # instead of sideways regardless of how wide the numbers get,
         # rather than chasing another "is this text short enough" bound.
         self._status_label.setWordWrap(True)
-
-        # Title + both icons share one row (2026-09-27, maintainer's
-        # explicit call) - re-measured for real at the Workflow panel's
-        # fixed 340px width and it fits within the 320px budget (see
-        # test_lspri_workflow_panel_width_budget.py), unlike an earlier
-        # 2026-09-25 measurement that put the label alone at ~276px; that
-        # number doesn't reproduce against the actual themed widget.
-        title_row = QHBoxLayout()
-        title_row.setContentsMargins(0, 0, 0, 0)
-        title_row.setSpacing(6)
-        title_row.addWidget(label)
-        title_row.addWidget(self._auto_button)
-        title_row.addWidget(self._manual_button)
-        title_row.addStretch(1)
+        self._status_label.setToolTip(
+            "The reference frame. Set or find it with the Reference buttons in the Image panel's slider ribbon."
+        )
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(4, 2, 4, 2)
         layout.setSpacing(2)
-        layout.addLayout(title_row)
         layout.addWidget(self._status_label)
 
         self._reference_frame_module.reference_frame_changed.connect(self._refresh)
@@ -116,22 +68,11 @@ class ReferenceFrameRow(QWidget):
             cube_display.mode_changed.connect(lambda _mode: self._refresh())
         self._refresh()
 
-    def _on_manual_clicked(self) -> None:
-        self._reference_frame_module.set_manual_frame(
-            self._selection_module.current_cube(), self._selection_module.current_wavelength()
-        )
-
     def _on_selection_changed(self, _value: object) -> None:
         # The reference is one fixed frame; nothing to redraw when the view moves.
         return
 
     def _refresh(self) -> None:
-        mode = self._reference_frame_module.mode()
-        self._manual_button.setChecked(mode == MODE_MANUAL)
-        self._auto_button.setIcon(_render_tabler_icon("search", get_active_theme().text_primary))
-        self._manual_button.setIcon(
-            _render_tabler_icon("pin", _ACTIVE_COLOR if mode == MODE_MANUAL else get_active_theme().text_primary)
-        )
         frame = self._reference_frame_module.resolve(self._selection_module.current_cube())
         cube, wavelength = frame if frame is not None else (None, None)
         if cube is None:

@@ -631,6 +631,52 @@ def _ome_zarr_fast_read_metadata(root_str: str) -> dict | None:
         return None
 
 
+def dataset_file_stats(dataset: ImageDataset) -> tuple[int, float | None]:
+    """(total size in bytes, oldest file modification time or None) of the files a dataset is made of: every file under
+    the folder for an OME-Zarr (its records are synthetic paths, not files), the image files for a TIFF stack.
+    Unreadable files are skipped. One stat per file, so call it once per dataset (`DatasetModule.dataset_file_stats`)."""
+    size_bytes = 0
+    mtimes: list[float] = []
+    if dataset.is_ome_zarr:
+        try:
+            paths = (entry for entry in dataset.folder.rglob("*") if entry.is_file())
+            for path in paths:
+                try:
+                    stat_result = path.stat()
+                except OSError:
+                    continue
+                size_bytes += int(stat_result.st_size)
+                mtimes.append(stat_result.st_mtime)
+        except OSError:
+            pass
+    else:
+        for record in dataset.records:
+            try:
+                stat_result = record.path.stat()
+            except OSError:
+                continue
+            size_bytes += int(stat_result.st_size)
+            mtimes.append(stat_result.st_mtime)
+    return size_bytes, (min(mtimes) if mtimes else None)
+
+
+def ome_zarr_chunk_shape(dataset: ImageDataset | None) -> tuple[int, int] | None:
+    """The (height, width) of the loaded OME-Zarr's chunks (the inner chunks when the array is sharded), or None for a
+    TIFF stack, no dataset, or metadata that cannot be read. The grid starts at stored pixel (0, 0)."""
+    if dataset is None or not dataset.is_ome_zarr:
+        return None
+    root_str = str(dataset.folder)
+    meta = _ome_zarr_fast_read_metadata(root_str)
+    if meta is not None:
+        return int(meta["ich"]), int(meta["icw"])
+    try:
+        chunks = _ome_zarr_array_cached(root_str).chunks
+        return int(chunks[-2]), int(chunks[-1])
+    except Exception:
+        _LOGGER.debug("OME-Zarr chunk shape unavailable.", exc_info=True)
+        return None
+
+
 def _fast_read_zarr_plane(meta: dict, spectral_cube_pos: int, wavelength_pos: int) -> np.ndarray | None:
     """Read one (spectral_cube_pos, wavelength_pos) plane straight from its shard
     file's raw bytes. Returns None on any surprise (missing shard, size

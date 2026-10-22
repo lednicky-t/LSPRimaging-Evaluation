@@ -53,8 +53,8 @@ from collections.abc import Callable
 from pathlib import Path
 
 import numpy as np
-from PyQt6.QtCore import QSize, Qt, QTimer, pyqtSignal
-from PyQt6.QtGui import QAction, QIcon
+from PyQt6.QtCore import QRectF, QSize, Qt, QTimer, pyqtSignal
+from PyQt6.QtGui import QAction, QIcon, QPainter, QPixmap
 from PyQt6.QtWidgets import QFileDialog, QFrame, QHBoxLayout, QLabel, QMenu, QSpinBox, QToolButton, QWidget
 
 from lspr_ui import get_active_theme, load_tabler_icon
@@ -353,11 +353,27 @@ class ExportTab(QWidget):
     def _icon(self, name: str, color: str):
         return load_tabler_icon(name, color=color, size=_RENDER_SIZE, stroke_width=_STROKE_WIDTH)
 
+    def _grid_export_icon(self, color: str) -> QIcon:
+        """The grid icon with a small arrow up in its top-right corner: the grid of the *export* (the View tab's plain grid is the dataset's own)."""
+        grid = self._icon("grid-4x4", color).pixmap(_RENDER_SIZE, _RENDER_SIZE)
+        arrow = load_tabler_icon("arrow-up", color=color, size=_RENDER_SIZE, stroke_width=3.6).pixmap(_RENDER_SIZE, _RENDER_SIZE)
+        u = _RENDER_SIZE / 24  # the Tabler icons are drawn on a 24-unit grid
+        corner = QRectF(12.5 * u, 0, 11.5 * u, 11.5 * u)
+        pixmap = QPixmap(grid)
+        painter = QPainter(pixmap)
+        painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+        painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_Clear)
+        painter.fillRect(corner, Qt.GlobalColor.transparent)  # clear the grid lines under the arrow so it reads
+        painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceOver)
+        painter.drawPixmap(corner, arrow, QRectF(0, 0, _RENDER_SIZE, _RENDER_SIZE))
+        painter.end()
+        return QIcon(pixmap)
+
     def _refresh_icons(self, *_args: object) -> None:
         theme = get_active_theme()
         dim = theme.text_dim
         self._chunk_grid_button.setIcon(
-            self._icon("grid-4x4", _GRID_ON_COLOR if self._chunk_grid_button.isChecked() else dim))
+            self._grid_export_icon(_GRID_ON_COLOR if self._chunk_grid_button.isChecked() else dim))
         self._shard_button.refresh_icons(self._icon)
         active_style = self._active_style()
         self._find_best_button.setIcon(

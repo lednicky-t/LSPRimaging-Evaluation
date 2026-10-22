@@ -233,6 +233,7 @@ _PLAY_READ_AHEAD = 3  # frames read ahead while Play runs
 # every intermediate frame of a drag/zoom the way a 100ms redraw would.
 _VIEW_RANGE_PERSIST_DEBOUNCE_MS = 600
 _CHUNK_GRID_COLOR = "#84cc16"  # the lime of the Export tab's grid icon (`export_tab._GRID_ON_COLOR`)
+_SOURCE_GRID_COLOR = "#38bdf8"  # the blue of the View tab's grid icon (the loaded OME-Zarr's own chunks)
 _CROP_OUTLINE_COLOR = "#38bdf8"  # the crop button's active blue
 
 # Cube/Wavelength navigation rows (ported from the stable app's
@@ -597,6 +598,7 @@ class ImagePanel(QWidget):
         self._sync_roi_overlay_controls()
         self._roi_tab.bind_ui_state(store)
         self._export_tab.bind_ui_state(store)
+        store.bind("view/source_chunk_grid", self._view_tab.chunk_grid_controls)
         self._mask_tab.scan_controls.bind_ui_state(store)
         self._mask_tab.auto_controls.bind_ui_state(store)
         self._on_group_labels_changed()
@@ -720,6 +722,7 @@ class ImagePanel(QWidget):
         self._roi_overlay = RoiOverlay(self._plot, self._roi_display)
         self._roi_overlay_store: UiStateStore | None = None
         self._chunk_grid_curve = self._add_curve(_CHUNK_GRID_COLOR, width=1.0, dashed=True)
+        self._source_grid_curve = self._add_curve(_SOURCE_GRID_COLOR, width=1.0, dashed=True)
         # Chromatic landmark overlay (2026-10-04): crosses = *estimated* (tracked
         # on the image) positions, dots = *fitted* positions (what the correction
         # model says), lines connect them, each in its wavelength's own colour
@@ -936,7 +939,8 @@ class ImagePanel(QWidget):
     def _build_view_tab(self) -> QWidget:
         self._view_tab = ViewTab(
             self._geometry, self._highlight_tint, self._mask_tint, self._mask_tab.overlay_controls,
-            self._chromatic_tab, self._background_tab, self._roi_tab, self._scale_bar_item.color(), self,
+            self._chromatic_tab, self._background_tab, self._roi_tab, self._scale_bar_item.color(),
+            self._dataset, self,
         )
         self._view_tab.highlight_visibility_changed.connect(self._on_highlight_overlay_visibility_changed)
         self._view_tab.highlight_color_changed.connect(self._on_highlight_overlay_color_changed)
@@ -995,7 +999,6 @@ class ImagePanel(QWidget):
 
         self._tool_ribbon = ImageToolRibbon(
             [
-                (VIEW_TAB, view_content),
                 ("Image tools", image_tools_content),
                 ("Mask", mask_content),
                 (ROI_TAB, roi_content),
@@ -1003,6 +1006,7 @@ class ImagePanel(QWidget):
                 # the Workflow panel (maintainer's plan for chromatic correction).
                 (CHROMATIC_TAB, self._chromatic_tab),
                 (BACKGROUND_TAB, self._background_tab),
+                (VIEW_TAB, view_content),
                 (EXPORT_TAB, self._export_tab),
             ],
             self,
@@ -1282,6 +1286,7 @@ class ImagePanel(QWidget):
         # already-cached last render shape, so redrawing it shouldn't wait on
         # (or trigger) a full coalesced image re-render.
         self._dataset.chunk_grid_preview_changed.connect(self._update_chunk_grid)
+        self._dataset.source_chunk_grid_changed.connect(self._update_source_grid)
 
         self._active_tool.active_tool_changed.connect(self._on_active_tool_changed)
 
@@ -1480,6 +1485,7 @@ class ImagePanel(QWidget):
         self._current_display_image = None
         self._roi_overlay.clear()
         self._chunk_grid_curve.clear()
+        self._source_grid_curve.clear()
         self._crop_outline_curve.clear()
         self._last_image_shape = None
         self._area_tool.set_image_shape(None)
@@ -2206,6 +2212,7 @@ class ImagePanel(QWidget):
         self._crop_tool.set_frame_size(result.image.shape[1], result.image.shape[0])
         stage = time.perf_counter()
         self._update_chunk_grid()
+        self._update_source_grid()
         self._playback_stats.note_detail("chunkgrid", time.perf_counter() - stage)
         if self._playback_stats.active:
             line = self._playback_stats.note_rendered(
@@ -2720,12 +2727,37 @@ class ImagePanel(QWidget):
             # moves over the image.
             self._view.viewport().update()
             return
-        raw_h, raw_w = float(raw_shape[0]), float(raw_shape[1])
         to_display = (
             np.array([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]])
             if preview.processed
-            else raw_to_processed_affine_xy((int(raw_h), int(raw_w)), self._geometry.settings())
+            else raw_to_processed_affine_xy((int(raw_shape[0]), int(raw_shape[1])), self._geometry.settings())
         )
+        xs, ys = self._grid_polyline(raw_shape, to_display, preview.chunk_w, preview.chunk_h, preview.offset_x, preview.offset_y)
+        self._chunk_grid_curve.setData(xs, ys)
+        self._view.viewport().update()
+
+    def _update_source_grid(self) -> None:
+        """Draw (or clear) the loaded OME-Zarr's own chunk grid (the View tab's blue toggle): lines at every stored chunk
+        boundary from pixel (0, 0), in raw pixels and mapped onto the displayed image like the export preview's raw
+        branch (tilted under a rotation, shifted by a crop). A TIFF stack has no chunks, so nothing is drawn."""
+        module = self._dataset
+        chunk = module.source_chunk_shape() if module.source_chunk_grid_visible() else None
+        raw_shape = module.raw_plane_shape() if chunk is not None else None
+        if chunk is None or raw_shape is None or chunk[0] <= 0 or chunk[1] <= 0:
+            self._source_grid_curve.clear()
+            self._view.viewport().update()  # nothing else re-renders on a toggle (see `_update_chunk_grid`)
+            return
+        to_display = raw_to_processed_affine_xy((int(raw_shape[0]), int(raw_shape[1])), self._geometry.settings())
+        xs, ys = self._grid_polyline(raw_shape, to_display, chunk[1], chunk[0], 0, 0)
+        self._source_grid_curve.setData(xs, ys)
+        self._view.viewport().update()
+
+    @staticmethod
+    def _grid_polyline(
+        raw_shape: tuple[int, int], to_display: np.ndarray, chunk_w: int, chunk_h: int, offset_x: int, offset_y: int
+    ) -> tuple[list[float], list[float]]:
+        """Grid lines at ``offset + k * chunk`` across the raw frame, mapped to the displayed image by ``to_display``."""
+        raw_h, raw_w = float(raw_shape[0]), float(raw_shape[1])
         xs: list[float] = []
         ys: list[float] = []
 
@@ -2733,12 +2765,11 @@ class ImagePanel(QWidget):
             pts = to_display @ np.array([[x0, x1], [y0, y1], [1.0, 1.0]])
             _append_polyline(xs, ys, pts[0], pts[1])
 
-        for x in np.arange(preview.offset_x % preview.chunk_w, raw_w + 0.5, preview.chunk_w, dtype=np.float64):
+        for x in np.arange(offset_x % chunk_w, raw_w + 0.5, chunk_w, dtype=np.float64):
             segment(x, 0.0, x, raw_h)
-        for y in np.arange(preview.offset_y % preview.chunk_h, raw_h + 0.5, preview.chunk_h, dtype=np.float64):
+        for y in np.arange(offset_y % chunk_h, raw_h + 0.5, chunk_h, dtype=np.float64):
             segment(0.0, y, raw_w, y)
-        self._chunk_grid_curve.setData(xs, ys)
-        self._view.viewport().update()
+        return xs, ys
 
     # -- interaction --------------------------------------------------------
 

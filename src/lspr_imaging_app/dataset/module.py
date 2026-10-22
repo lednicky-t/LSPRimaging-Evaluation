@@ -84,6 +84,8 @@ from .io import (
     load_image_array,
     load_image_array_uncached,
     load_image_shape,
+    dataset_file_stats,
+    ome_zarr_chunk_shape,
 )
 from .model import (
     CubeIntervalStats,
@@ -145,6 +147,9 @@ class DatasetModule(QObject):
     # way" rule. Cosmetic-only, like `MaskModule.cosmetic_changed` - it
     # never touches `_dataset` itself.
     chunk_grid_preview_changed = pyqtSignal()
+    # The View tab's grid of the loaded OME-Zarr's own chunks (2026-10-22), cosmetic like the export preview above.
+    # Independent of it: both grids can be shown at once.
+    source_chunk_grid_changed = pyqtSignal()
 
     def __init__(self, parent: QObject | None = None) -> None:
         super().__init__(parent)
@@ -154,6 +159,8 @@ class DatasetModule(QObject):
         self._time_anchor_known = False
         self._mean_interval_cache: tuple[ImageDataset, object, int, float | None] | None = None
         self._chunk_grid_preview = ChunkGridPreview()
+        self._source_chunk_grid_visible = False
+        self._file_stats_cache: tuple[ImageDataset, tuple[int, float | None]] | None = None
         self._worker = AnalysisWorker()
         # Separate from `_worker` (load) rather than shared - a load and an
         # export are independent operations with no reason to serialize
@@ -202,6 +209,31 @@ class DatasetModule(QObject):
         evict the frames the Image panel is showing. Safe to call from a worker thread."""
         record = self.current_image(cube_index, wavelength)
         return load_image_array_uncached(str(record.path))
+
+    def dataset_file_stats(self, dataset: ImageDataset | None = None) -> tuple[int, float | None] | None:
+        """(total bytes, oldest file mtime) of `dataset` (default: the loaded one), or None without one. Scanned once
+        per dataset (the Dataset summary and the menu bar's info row both ask on every load or metadata import)."""
+        target = dataset if dataset is not None else self._dataset
+        if target is None:
+            return None
+        if self._file_stats_cache is None or self._file_stats_cache[0] is not target:
+            self._file_stats_cache = (target, dataset_file_stats(target))
+        return self._file_stats_cache[1]
+
+    def timed_image_count(self) -> int:
+        """How many images have an acquisition time recorded (0 without metadata). Does not compact the timings: the
+        Experimental plan section counts `metadata.image_timings` itself and compaction empties that list."""
+        metadata = None if self._dataset is None else self._dataset.acquisition_metadata
+        if metadata is None:
+            return 0
+        if metadata.image_timings:
+            return len(metadata.image_timings)
+        return len(compact_dataset_image_timings(self._dataset))
+
+    def comment_event_count(self) -> int:
+        """How many comment / pump-plan step events the loaded acquisition metadata holds (0 without any)."""
+        metadata = None if self._dataset is None else self._dataset.acquisition_metadata
+        return 0 if metadata is None else len(metadata.comment_events)
 
     def raw_plane_shape(self) -> tuple[int, int] | None:
         """The raw (height, width) every frame in the loaded dataset shares -
@@ -613,6 +645,7 @@ class DatasetModule(QObject):
         self._dataset = None
         self._time_anchor_known = False
         self._mean_interval_cache = None
+        self._file_stats_cache = None
         self.dataset_cleared.emit()
 
     # -- chunk-grid preview (Export section <-> Image panel) ----------------
@@ -633,3 +666,20 @@ class DatasetModule(QObject):
             return
         self._chunk_grid_preview = preview
         self.chunk_grid_preview_changed.emit()
+
+    # -- the loaded OME-Zarr's own chunk grid (View tab <-> Image panel) ----
+
+    def source_chunk_shape(self) -> tuple[int, int] | None:
+        """(height, width) of the loaded OME-Zarr's chunks; None for a TIFF stack (no chunks) or no dataset."""
+        return ome_zarr_chunk_shape(self._dataset)
+
+    def source_chunk_grid_visible(self) -> bool:
+        """The View tab's toggle. Stays True across a TIFF load (nothing to draw then) so the remembered choice survives."""
+        return self._source_chunk_grid_visible
+
+    def set_source_chunk_grid_visible(self, visible: bool) -> None:
+        visible = bool(visible)
+        if visible == self._source_chunk_grid_visible:
+            return
+        self._source_chunk_grid_visible = visible
+        self.source_chunk_grid_changed.emit()

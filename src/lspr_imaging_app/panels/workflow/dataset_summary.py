@@ -147,42 +147,10 @@ class DatasetSummarySection(QWidget):
                 resolution_text = "Unknown"
 
         is_ome_zarr = dataset_is_ome_zarr(dataset)
-        if is_ome_zarr:
-            # OME-Zarr records carry synthetic per-plane "paths" (keys into
-            # the zarr array, not real files) - the real, statable files
-            # are the shard/metadata files under the dataset's actual
-            # .ome.zarr folder instead. Same reasoning as the source's
-            # _update_dataset_summary_labels.
-            size_bytes = 0
-            mtimes: list[float] = []
-            try:
-                for entry in dataset.folder.rglob("*"):
-                    if not entry.is_file():
-                        continue
-                    try:
-                        stat_result = entry.stat()
-                    except OSError:
-                        continue
-                    size_bytes += int(stat_result.st_size)
-                    mtimes.append(stat_result.st_mtime)
-            except OSError:
-                pass
-            dataset_date = datetime.fromtimestamp(min(mtimes)).strftime("%Y-%m-%d") if mtimes else "Unknown"
-        else:
-            size_bytes = 0
-            for record in records:
-                try:
-                    size_bytes += int(record.path.stat().st_size)
-                except OSError:
-                    continue
-            try:
-                dataset_date = (
-                    datetime.fromtimestamp(min(record.path.stat().st_mtime for record in records)).strftime("%Y-%m-%d")
-                    if records
-                    else "Unknown"
-                )
-            except Exception:
-                dataset_date = "Unknown"
+        # Size and date: one scan per dataset, shared with the menu bar's info row (`DatasetModule.dataset_file_stats`;
+        # an OME-Zarr's records are synthetic paths, so it stats the files under the .ome.zarr folder instead).
+        size_bytes, oldest_mtime = self._dataset_module.dataset_file_stats(dataset) or (0, None)
+        dataset_date = datetime.fromtimestamp(oldest_mtime).strftime("%Y-%m-%d") if oldest_mtime is not None else "Unknown"
 
         cube_text = str(len(spectral_cube_values))
         wavelength_text = str(len(wavelength_values))
