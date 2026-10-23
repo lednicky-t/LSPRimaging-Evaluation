@@ -122,7 +122,8 @@ from .storage.ui_state_keys import (
     read_highlight_range,
     read_view_range,
 )
-from .storage.session import SessionState, load_session
+from .storage.session import SessionState, session_path
+from .storage.session_load_task import TASK_ID as SESSION_LOAD_TASK_ID, LoadedSession, SessionLoadTask
 from .storage.session_autosave import SessionAutosave
 from .storage.session_coordinator import SessionCoordinator
 from .storage.session_carry_task import TASK_ID as SESSION_CARRY_TASK_ID, CarriedResult, SessionCarry
@@ -621,6 +622,7 @@ def _wire_session_coordinator(
     analysis_settings: AnalysisSettingsModule,
     frame_roles: FrameRolesModule | None = None,
     mask_pointers: MaskPointersModule | None = None,
+    session_load: SessionLoadTask | None = None,
 ) -> None:
     """Restore into every module whenever the *active session* changes -
     on a dataset load, an explicit session switch, or a new session's
@@ -636,32 +638,11 @@ def _wire_session_coordinator(
     directly to `dataset_loaded` in `build_main_window`), so the engine and
     the session always agree on which folder is active."""
 
-    def restore(root: Path | None) -> None:
-        # Flush whatever the *previous* session still had pending first,
-        # while its root is still the current one - matches the ordering
-        # `restore_for` used before sessions existed, for the same reason
-        # (a late-arriving write must land in the session it belongs to,
-        # not the new one).
-        autosave.set_root(None)
-        if root is None:
-            analysis_engine.set_storage_root(None)
-            return
-        analysis_engine.set_storage_root(root)
-        # The flush above is written in the background (2026-10-17). Reading `root` back before a write *to that same
-        # root* has landed (reloading the session just edited) would restore the previous save; for any other root this
-        # returns at once.
-        autosave.wait_until_written(root)
-        try:
-            state = load_session(root)
-        except Exception:
-            # `load_session` raises on a file it cannot read or does not
-            # recognise, deliberately (see its docstring) - starting from
-            # defaults silently would look exactly like a session that was
-            # never set up. Autosave stays off for this root so the app
-            # cannot overwrite a recoverable file with blank state.
-            logger.exception("Could not read the session for %s - continuing with defaults", root)
-            autosave.set_root(root, enabled=False)
-            return
+    if session_load is None:
+        session_load = SessionLoadTask()
+    wanted: dict[str, Path | None] = {"root": None}  # the session whose load we are waiting for (None: none)
+
+    def apply(state: SessionState | None, root: Path) -> None:
         # `state or SessionState()`, never skipped on `None`: a session with
         # no `session.json` yet is not only the harmless "first ever load"
         # case (modules already start out empty then) - it is also what a
@@ -680,11 +661,60 @@ def _wire_session_coordinator(
                 state or SessionState(), geometry, mask, chromatic, background,
                 roi_toolbox, selection, analysis_settings, frame_roles, mask_pointers,
             )
-        autosave.set_root(root)
+
+    def restore(root: Path | None) -> None:
+        # A load still running belongs to the session being left: stop it, and drop its result if it arrives anyway.
+        session_load.discard()
+        wanted["root"] = None
+        # Flush whatever the *previous* session still had pending first,
+        # while its root is still the current one - matches the ordering
+        # `restore_for` used before sessions existed, for the same reason
+        # (a late-arriving write must land in the session it belongs to,
+        # not the new one).
+        autosave.set_root(None)
+        if root is None:
+            analysis_engine.set_storage_root(None)
+            return
+        analysis_engine.set_storage_root(root)
+        # The flush above is written in the background (2026-10-17). Reading `root` back before a write *to that same
+        # root* has landed (reloading the session just edited) would restore the previous save; for any other root this
+        # returns at once.
+        autosave.wait_until_written(root)
+        if not session_path(root).is_file():
+            # Nothing to read (a fresh dataset, a brand-new session): blank, and saving may start now.
+            apply(None, root)
+            autosave.set_root(root)
+            return
+        # Reading the session takes seconds when it holds hundreds of masks, so it happens off the GUI thread (2026-10-22,
+        # `storage/session_load_task.py`): the modules are blank for now, autosave stays OFF for this root (a blank state must
+        # never be written over the saved one), and `loaded` below fills everything in and switches autosave on.
+        apply(None, root)
+        wanted["root"] = root
+        session_load.load(root)
+
+    def loaded(result: LoadedSession) -> None:
+        if result.root != wanted["root"]:  # the session was left meanwhile (the task drops those itself; belt and braces)
+            return
+        wanted["root"] = None
+        apply(result.state, result.root)
+        autosave.set_root(result.root)
         # The loaded masks are already on disk, in known file versions: hand those to the writer so the first
         # save does not read every PNG back to find that out (2026-10-21).
-        if state is not None:
-            autosave.seed_mask_versions(root, state)
+        if result.state is not None:
+            autosave.seed_mask_versions(result.root, result.state)
+
+    def ended(root: Path, outcome: str) -> None:
+        if outcome == "completed" or root != wanted["root"]:
+            return
+        # `load_session` raises on a file it cannot read or does not recognise, deliberately (see its docstring) - starting
+        # from defaults silently would look exactly like a session that was never set up. Autosave stays off for this root
+        # so the app cannot overwrite a recoverable file with blank state; the status bar shows why (a cancel does the same).
+        wanted["root"] = None
+        logger.warning("The session in %s was not loaded (%s); autosave is off for it", root, outcome)
+        autosave.set_root(root, enabled=False)
+
+    session_load.completed.connect(loaded)
+    session_load.ended.connect(ended)
 
     coordinator.active_session_changed.connect(restore)
 
@@ -719,6 +749,7 @@ class _Modules:
     mask_pointers: MaskPointersModule
     transient_scan: TransientScanTask
     session_carry: SessionCarry
+    session_load: SessionLoadTask
 
 
 class _SettingsWriter:
@@ -792,10 +823,11 @@ def _build_modules() -> _Modules:
         dataset, geometry, mask, chromatic, background, roi_toolbox, selection, analysis_settings, frame_roles,
         mask_pointers,
     )
+    session_load = SessionLoadTask()
     _wire_session_coordinator(
         session_coordinator, session_autosave, analysis_engine,
         geometry, mask, chromatic, background, roi_toolbox, selection, analysis_settings, frame_roles,
-        mask_pointers,
+        mask_pointers, session_load,
     )
     dataset.dataset_loaded.connect(lambda ds: session_coordinator.bind_dataset(ds.home))
     dataset.dataset_cleared.connect(session_coordinator.unbind)
@@ -830,6 +862,7 @@ def _build_modules() -> _Modules:
         session_coordinator=session_coordinator, analysis_engine=analysis_engine,
         session_autosave=session_autosave, chromatic_auto=ChromaticAutoDetect(chromatic),
         mask_pointers=mask_pointers, transient_scan=TransientScanTask(mask_pointers), session_carry=session_carry,
+        session_load=session_load,
         reference_auto=ReferenceAutoFind(dataset, selection, reference_frame, frame_roles),
         frame_roles=frame_roles,
         cube_display=CubeDisplayModule(dataset),
@@ -1056,7 +1089,10 @@ def _build_status_bar(
     m.dataset.task_finished.connect(task_indicator.finish)
     m.session_carry.task_progress.connect(task_indicator.report)  # the session that goes with that export
     m.session_carry.task_finished.connect(task_indicator.finish)
+    m.session_load.task_progress.connect(task_indicator.report)  # reading the session when a dataset opens
+    m.session_load.task_finished.connect(task_indicator.finish)
     cancel_by_task = {
+        SESSION_LOAD_TASK_ID: m.session_load.cancel,
         ZARR_EXPORT_TASK_ID: m.dataset.cancel_export,
         SESSION_CARRY_TASK_ID: m.session_carry.cancel,
         CHROMATIC_TASK_ID: m.chromatic_auto.cancel,

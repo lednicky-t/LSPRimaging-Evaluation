@@ -83,7 +83,7 @@ import json
 import logging
 import os
 import tempfile
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass, field, fields, replace
 from pathlib import Path
@@ -110,6 +110,7 @@ from ..image_tools.mask.model import MaskChange, MaskSettings
 from ..image_tools.mask.mask_pointers_state import MaskPointersState
 from ..image_tools.mask.mask_pointers_state import from_payload as mask_pointers_from_payload
 from ..image_tools.mask.mask_pointers_state import to_payload as mask_pointers_to_payload
+from ..progress import Cancelled, ProgressCallback
 from ..selection.frame_roles_state import FrameRolesState
 from ..roi.model import (
     AreaRoi,
@@ -571,7 +572,11 @@ class SessionWriter:
 
 
 def _decode_mask_changes(
-    root: Path, raw: object, naming: FrameNamingScheme
+    root: Path,
+    raw: object,
+    naming: FrameNamingScheme,
+    progress: Callable[[int, int], None] | None = None,
+    cancelled: Callable[[], bool] | None = None,
 ) -> tuple[tuple[MaskChange, ...], dict[MaskChange, int]]:
     """The changes, plus which file version each one came from - `SessionWriter.seed` uses that so the first save
     after a load does not read all those PNGs back to work out what it already knows (2026-10-21).
@@ -580,7 +585,11 @@ def _decode_mask_changes(
     hundreds (411 in the maintainer's), which cost 4-8 s of a frozen window because `load_session` runs on the
     GUI thread. Both heavy steps release the GIL - OpenCV's decode and the zlib compression `MaskChange` does on
     construction - so the reads overlap instead of queueing. The order of the returned changes is the file's
-    order either way; a missing or undecodable entry is still skipped with a warning, as before."""
+    order either way; a missing or undecodable entry is still skipped with a warning, as before.
+
+    ``progress(done, total)`` is called as each mask arrives (in the file's order), and ``cancelled`` is checked at each: the
+    load then stops with `Cancelled` and the masks not yet started are never read (2026-10-22, the load runs off the GUI
+    thread, `storage/session_load_task.py`)."""
     if not isinstance(raw, list) or not raw:
         return (), {}
 
@@ -617,11 +626,20 @@ def _decode_mask_changes(
         ), ref.version
 
     workers = max(1, min(len(specs), _MASK_READ_WORKERS))
-    if workers > 1:
-        with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="session-masks") as pool:
-            results = list(pool.map(read, specs))
-    else:
-        results = [read(spec) for spec in specs]
+    results: list[tuple[MaskChange, int] | Path] = []
+    with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="session-masks") as pool:
+        futures = [pool.submit(read, spec) for spec in specs]
+        try:
+            for done, future in enumerate(futures, start=1):
+                if cancelled is not None and cancelled():
+                    raise Cancelled()
+                results.append(future.result())
+                if progress is not None:
+                    progress(done, len(futures))
+        except BaseException:
+            for future in futures:
+                future.cancel()  # the ones not started yet; the pool's exit waits only for those already running
+            raise
 
     decoded: list[MaskChange] = []
     versions: dict[MaskChange, int] = {}
@@ -691,8 +709,13 @@ def save_session(root: Path, state: SessionState, naming: FrameNamingScheme) -> 
     return SessionWriter().write(root, prepare_session(state, naming))
 
 
-def load_session(root: Path) -> SessionState | None:
+def load_session(
+    root: Path, progress: ProgressCallback | None = None, cancelled: Callable[[], bool] | None = None
+) -> SessionState | None:
     """Read `root/session/session.json`, or `None` if there isn't one.
+
+    ``progress(fraction, message)`` and ``cancelled()`` are for a caller that loads off the GUI thread (the Qt-free
+    `progress` convention: cancelling raises `Cancelled`); the masks are almost all of the time, so they own most of the bar.
 
     A missing file is the ordinary fresh-dataset case, not an error - the
     same contract `analysis/store.read_all_cells` follows. A file that is
@@ -700,9 +723,16 @@ def load_session(root: Path) -> SessionState | None:
     silently starting from defaults would look identical to "this dataset
     was never set up", and the difference matters when the alternative is
     losing an afternoon of ROI placement."""
+    def report(fraction: float, message: str) -> None:
+        if cancelled is not None and cancelled():
+            raise Cancelled()
+        if progress is not None:
+            progress(fraction, message)
+
     path = session_path(Path(root))
     if not path.is_file():
         return None
+    report(0.0, "Reading the session file")
     payload = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(payload, dict):
         raise ValueError(f"{path} is not a session file (expected a JSON object)")
@@ -724,7 +754,13 @@ def load_session(root: Path) -> SessionState | None:
     )
 
     mask_block = payload.get("mask") or {}
-    mask_changes, mask_versions = _decode_mask_changes(Path(root), mask_block.get("changes"), naming)
+    report(0.03, "Loading masks")
+    mask_changes, mask_versions = _decode_mask_changes(
+        Path(root), mask_block.get("changes"), naming,
+        progress=lambda done, total: report(min(0.95, 0.03 + 0.92 * done / total), f"Loading masks: {done} of {total}"),
+        cancelled=cancelled,
+    )
+    report(0.95, "Reading ROIs, chromatic correction and settings")
     chromatic_block = payload.get("chromatic") or {}
     roi_block = payload.get("roi") or {}
     analysis_block = payload.get("analysis") or {}
