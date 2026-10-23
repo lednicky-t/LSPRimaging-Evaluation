@@ -180,6 +180,7 @@ class ExportTab(QWidget):
         self._applied: cp.ChunkLayout | None = None  # from the chunk-style menu, kept while the size is unchanged
         self._applied_style: str | None = None  # the menu key behind `_applied`; the button's icon shows it
         self._exporting = False
+        self._icon_cache: dict[tuple[str, str], QIcon] = {}  # (name, colour) -> icon; every refresh asks for the same dozen
         self._export_percent = 0
         # What `info_html` and the fields' tooltip show (the Workflow section had a label for each).
         self._warning_text = ""
@@ -351,10 +352,20 @@ class ExportTab(QWidget):
                 self._skip_excluded_button, self._carry_button, self._export_button)
 
     def _icon(self, name: str, color: str):
-        return load_tabler_icon(name, color=color, size=_RENDER_SIZE, stroke_width=_STROKE_WIDTH)
+        key = (name, color)
+        icon = self._icon_cache.get(key)
+        if icon is None:
+            icon = self._icon_cache[key] = load_tabler_icon(name, color=color, size=_RENDER_SIZE, stroke_width=_STROKE_WIDTH)
+        return icon
 
     def _grid_export_icon(self, color: str) -> QIcon:
         """The grid icon with a small arrow up in its top-right corner: the grid of the *export* (the View tab's plain grid is the dataset's own)."""
+        cached = self._icon_cache.get(("<grid-export>", color))
+        if cached is None:
+            cached = self._icon_cache[("<grid-export>", color)] = self._draw_grid_export_icon(color)
+        return cached
+
+    def _draw_grid_export_icon(self, color: str) -> QIcon:
         grid = self._icon("grid-4x4", color).pixmap(_RENDER_SIZE, _RENDER_SIZE)
         arrow = load_tabler_icon("arrow-up", color=color, size=_RENDER_SIZE, stroke_width=3.6).pixmap(_RENDER_SIZE, _RENDER_SIZE)
         u = _RENDER_SIZE / 24  # the Tabler icons are drawn on a 24-unit grid

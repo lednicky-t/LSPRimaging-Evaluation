@@ -13,6 +13,7 @@ from __future__ import annotations
 import struct
 import time
 from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
 
 import numpy as np
@@ -32,13 +33,16 @@ def _worker_init() -> None:
         pass
 
 
-def _crc32c(data: bytes) -> int:
-    """CRC32C (Castagnoli) checksum — required by the zarr v3 shard index format."""
-    try:
-        import crc32c as _lib  # type: ignore[import-untyped]
-        return _lib.crc32c(data)
-    except ImportError:
-        pass
+@lru_cache(maxsize=8)
+def _source_ome_root(folder: Path) -> Path | None:
+    """`dataset.io._ome_zarr_root`, asked once per source folder instead of once per plane (it costs up to five file-system checks,
+    and an export reads thousands of planes from the same folder; the folder's layout does not change while it runs)."""
+    from lspr_imaging_app.dataset.io import _ome_zarr_root
+
+    return _ome_zarr_root(folder)
+
+
+def _build_crc32c_table() -> list[int]:
     poly = 0x82F63B78
     table: list[int] = []
     for i in range(256):
@@ -46,9 +50,22 @@ def _crc32c(data: bytes) -> int:
         for _ in range(8):
             crc = (crc >> 1) ^ poly if crc & 1 else crc >> 1
         table.append(crc)
+    return table
+
+
+_CRC32C_TABLE = _build_crc32c_table()
+
+
+def _crc32c(data: bytes) -> int:
+    """CRC32C (Castagnoli) checksum — required by the zarr v3 shard index format."""
+    try:
+        import crc32c as _lib  # type: ignore[import-untyped]
+        return _lib.crc32c(data)
+    except ImportError:
+        pass
     crc = 0xFFFFFFFF
     for byte in data:
-        crc = (crc >> 8) ^ table[(crc ^ byte) & 0xFF]
+        crc = (crc >> 8) ^ _CRC32C_TABLE[(crc ^ byte) & 0xFF]
     return crc ^ 0xFFFFFFFF
 
 
@@ -183,14 +200,13 @@ def _load_image(path_str: str) -> np.ndarray:
     from lspr_imaging_app.dataset.io import (
         OME_ZARR_ARRAY_DIRNAME,
         _ome_zarr_array_dir,
-        _ome_zarr_root,
         _read_ome_zarr_plane_by_path,
         _read_tiff_fast,
         fast_tiff_decoder_active,
         use_fast_tiff_decoder,
     )
 
-    ome_root = _ome_zarr_root(path.parent.parent if path.parent.name == OME_ZARR_ARRAY_DIRNAME else path.parent)
+    ome_root = _source_ome_root(path.parent.parent if path.parent.name == OME_ZARR_ARRAY_DIRNAME else path.parent)
     if ome_root is not None and path.parent == _ome_zarr_array_dir(ome_root):
         return _read_ome_zarr_plane_by_path(path, ome_root)
     if path.suffix.lower() in {".tif", ".tiff"}:

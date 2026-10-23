@@ -30,9 +30,12 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
+from functools import cached_property
 from pathlib import Path
 
 import numpy as np
@@ -59,6 +62,9 @@ ORIGIN_SCHEMA_NAME = "lspri_session_origin"
 ORIGIN_SCHEMA_VERSION = "1.0"
 
 _IDENTITY_TOLERANCE = 1e-9
+_CARRY_MASK_WORKERS = min(8, os.cpu_count() or 4)
+"""Threads that warp a session's masks (`carry_masks`). A small fixed pool, like the session's mask reads
+(`session._MASK_READ_WORKERS`, `docs/performance_tuning.md`, "deliberately not wired"): hundreds of few-millisecond jobs."""
 
 
 # -- the transform ---------------------------------------------------------------------------------------------------------
@@ -74,7 +80,10 @@ class ExportTransform:
     raw_shape: tuple[int, int]
     frame: tuple[int, int, int, int] | None = None
 
-    @property
+    # The derived values below are read once per mask / pointer (hundreds of each in a carry) and never change, so each is worked
+    # out once per transform. `cached_property` writes straight into the instance dict, which a frozen dataclass allows.
+
+    @cached_property
     def processed_shape(self) -> tuple[int, int]:
         """(height, width) after rotation / flip / crop (the raw shape when the image tools are off)."""
         if not self.geometry.image_tools_enabled:
@@ -87,24 +96,36 @@ class ExportTransform:
         """Where the stored grid's (0, 0) sits in processed space."""
         return (0, 0) if self.frame is None else (int(self.frame[0]), int(self.frame[1]))
 
-    @property
+    @cached_property
     def stored_shape(self) -> tuple[int, int]:
         """(height, width) of the stored image."""
         if self.frame is None:
             return self.processed_shape
         return (int(self.frame[3]), int(self.frame[2]))
 
-    def raw_to_processed(self) -> np.ndarray:
-        return raw_to_processed_affine_xy(self.raw_shape, self.geometry)
-
-    def raw_to_stored(self) -> np.ndarray:
-        """2x3 affine from a raw pixel (x, y) to the stored grid."""
-        matrix = np.array(self.raw_to_processed(), dtype=np.float64)
-        matrix[0, 2] -= self.origin[0]
-        matrix[1, 2] -= self.origin[1]
+    @cached_property
+    def _raw_to_processed(self) -> np.ndarray:
+        matrix = np.array(raw_to_processed_affine_xy(self.raw_shape, self.geometry), dtype=np.float64)
+        matrix.setflags(write=False)  # shared by every caller
         return matrix
 
-    @property
+    @cached_property
+    def _raw_to_stored(self) -> np.ndarray:
+        matrix = np.array(self._raw_to_processed, dtype=np.float64)  # a writable copy
+        matrix[0, 2] -= self.origin[0]
+        matrix[1, 2] -= self.origin[1]
+        matrix.setflags(write=False)
+        return matrix
+
+    def raw_to_processed(self) -> np.ndarray:
+        """2x3 affine from a raw pixel (x, y) to the processed image (read-only; copy it to change it)."""
+        return self._raw_to_processed
+
+    def raw_to_stored(self) -> np.ndarray:
+        """2x3 affine from a raw pixel (x, y) to the stored grid (read-only; copy it to change it)."""
+        return self._raw_to_stored
+
+    @cached_property
     def moves_pixels(self) -> bool:
         """True when rotation / flip / crop actually change the raw grid (so a raw mask has to be resampled); False for a pure
         shift by the frame origin."""
@@ -334,21 +355,38 @@ def carry_masks(
     cancelled: Callable[[], bool] | None = None,
 ) -> tuple[tuple[MaskChange, ...], CarryReport]:
     """Every mask change on the stored grid, same frame, same scope, same order. A change whose shape is not the raw plane's (a
-    session restored over another dataset) is left out and counted. Progress per mask; `cancelled` is checked at each."""
+    session restored over another dataset) is left out and counted. Progress per mask; `cancelled` is checked at each.
+
+    The masks are warped on a small thread pool (2026-10-22; each one is a few ms of OpenCV and zlib, both of which release the GIL,
+    and a mask-heavy session has hundreds). The results are taken **in the order of ``changes``**, so the output is the same as
+    one at a time at any pool size."""
     stages = StageProgress({"masks": 1.0}, progress, cancelled)
     report = CarryReport()
-    carried: list[MaskChange] = []
-    total = max(len(changes), 1)
-    for index, change in enumerate(changes):
-        stages("masks", index / total, f"Mask {index + 1} of {len(changes)}")
-        if tuple(change.shape) != tuple(transform.raw_shape):
-            report.masks_dropped += 1
-            continue
+    usable = [change for change in changes if tuple(change.shape) == tuple(transform.raw_shape)]
+    report.masks_dropped = len(changes) - len(usable)
+    total = max(len(usable), 1)
+
+    def carry_one(change: MaskChange) -> tuple[MaskChange, bool]:
         warped = transform.warp_raw_mask(change.plane_uncached())
-        if not warped.any():
-            report.masks_emptied += 1
-        carried.append(MaskChange(change.frame, change.scope, warped))
-        report.masks_carried += 1
+        return MaskChange(change.frame, change.scope, warped), not warped.any()
+
+    # Worked out once here, not raced for by the workers.
+    _ = transform.moves_pixels, transform.stored_shape
+    carried: list[MaskChange] = []
+    workers = max(1, min(len(usable), _CARRY_MASK_WORKERS))
+    with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="carry-masks") as pool:
+        futures = [pool.submit(carry_one, change) for change in usable]
+        try:
+            for index, future in enumerate(futures):
+                stages("masks", index / total, f"Mask {index + 1} of {len(usable)}")  # the cancellation checkpoint
+                carried_change, emptied = future.result()
+                carried.append(carried_change)
+                report.masks_carried += 1
+                report.masks_emptied += int(emptied)
+        except BaseException:
+            for future in futures:
+                future.cancel()  # the ones not started yet; the pool's exit waits only for those already running
+            raise
     return tuple(carried), report
 
 

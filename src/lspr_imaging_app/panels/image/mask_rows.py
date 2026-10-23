@@ -156,9 +156,6 @@ class MaskRows(QObject):
         if self._shown:
             self.refresh_now()
 
-    def is_shown(self) -> bool:
-        return self._shown
-
     # -- the marks -------------------------------------------------------------------------------
 
     def _schedule(self, *_args: object) -> None:

@@ -638,17 +638,25 @@ def dataset_file_stats(dataset: ImageDataset) -> tuple[int, float | None]:
     size_bytes = 0
     mtimes: list[float] = []
     if dataset.is_ome_zarr:
-        try:
-            paths = (entry for entry in dataset.folder.rglob("*") if entry.is_file())
-            for path in paths:
-                try:
-                    stat_result = path.stat()
-                except OSError:
-                    continue
-                size_bytes += int(stat_result.st_size)
-                mtimes.append(stat_result.st_mtime)
-        except OSError:
-            pass
+        # os.scandir hands over each file's size and time with the directory listing (free on Windows); `rglob` + `is_file()` +
+        # `stat()` asked the file system two more times per file, and an OME-Zarr holds ten thousand or more chunk files.
+        pending = [str(dataset.folder)]
+        while pending:
+            try:
+                listing = os.scandir(pending.pop())
+            except OSError:
+                continue
+            with listing:
+                for entry in listing:
+                    try:
+                        if entry.is_dir(follow_symlinks=False):
+                            pending.append(entry.path)
+                        elif entry.is_file():
+                            stat_result = entry.stat()
+                            size_bytes += int(stat_result.st_size)
+                            mtimes.append(stat_result.st_mtime)
+                    except OSError:
+                        continue
     else:
         for record in dataset.records:
             try:

@@ -20,13 +20,12 @@ loaded or cleared). Cancel and a failure change nothing either.
 
 from __future__ import annotations
 
-import logging
 import threading
 import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 
-from PyQt6.QtCore import QObject, pyqtSignal
+from PyQt6.QtCore import QObject
 
 from ..progress import Cancelled, throttled
 from .chromatic.warp import warp_boolean_mask_affine
@@ -34,8 +33,7 @@ from .mask.model import MaskChange
 from .mask.module import MaskComputationalChange, MaskModule
 from .mask.mask_pointers_state import MaskPointer
 from .mask.transient_masks import BaseDecoder, BaseMask, frame_mask, group_by_frame, materialize_base, maskable
-
-logger = logging.getLogger(__name__)
+from ..threaded_task import TaskRefused, ThreadedTask
 
 TASK_ID = "mask_auto"
 TASK_LABEL = "Auto mask"
@@ -52,34 +50,23 @@ class AutoMaskSummary:
     seconds: float
 
 
-class MaskAutoTask(QObject):
-    task_progress = pyqtSignal(str, str, float, str)  # task_id, label, fraction 0..1, message
-    completed = pyqtSignal(object)  # AutoMaskSummary
-    failed = pyqtSignal(str)  # readable message
-    cancelled = pyqtSignal()
-    running_changed = pyqtSignal(bool)
-    task_finished = pyqtSignal(str, str, str)  # task_id, outcome, message; once per run
-
-    # Internal: thread -> GUI thread hand-off (the finished masks or an error, never both).
-    _finished = pyqtSignal(object, object)
+class MaskAutoTask(ThreadedTask):
+    task_id = TASK_ID
+    task_label = TASK_LABEL
+    thread_name = "mask-auto"
+    crash_log = "Auto mask failed"
+    stopped_message = "stopped: the dataset changed"
 
     def __init__(self, mask: MaskModule, parent: QObject | None = None) -> None:
         super().__init__(parent)
         self._mask = mask
-        self._running = False
-        self._thread: threading.Thread | None = None
-        self._cancel_event = threading.Event()
-        self._generation = 0  # bumped by `invalidate`
-        self._run_generation = 0
+        self._work: _Work | None = None
+        self._frame_reached: Frame | None = None  # where the worker was when it stopped (for the failure message)
         self._mask_moved = False  # the mask timeline changed while the run was going on
         self._events_used = 0
         self._dilate_px = 0
         self._frames = 0
         self._started = 0.0
-        self._finished.connect(self._on_finished)
-
-    def is_running(self) -> bool:
-        return self._running
 
     def start(
         self,
@@ -102,102 +89,44 @@ class MaskAutoTask(QObject):
         self._dilate_px = max(int(dilate_px), 0)
         self._events_used = len(selected)
         self._frames = len(groups)
-        self._cancel_event.clear()
         self._mask_moved = False
-        self._run_generation = self._generation
         self._started = time.perf_counter()
-        self._running = True
-        self.running_changed.emit(True)
+        self._begin_run()
+        self._mask.mask_changed.connect(self._on_mask_changed)
         plans: list[BaseMask | None] = []
         try:
             for frame, _group in groups:
                 plans.append(plan_base(frame))
         except Exception as exc:  # noqa: BLE001 - a failing lookup (a chromatic model) must not leave a half-done run
-            self._fail(groups[len(plans)][0], exc)
+            self._frame_reached = groups[len(plans)][0]
+            self._stop_running()
+            self._report_crash(exc, self._failure_message(exc))
             return
-        self._mask.mask_changed.connect(self._on_mask_changed)
-        work = _Work(groups, plans, shape, self._dilate_px, self._cancel_event, self._emit_progress)
-        self._thread = threading.Thread(target=self._run, args=(work,), name="mask-auto", daemon=True)
-        self._thread.start()
-
-    def cancel(self) -> None:
-        self._cancel_event.set()
-
-    def invalidate(self) -> None:
-        """The dataset was loaded or cleared under a running Auto mask: the frames it is making masks for may not exist any more. Stops
-        it, and makes sure nothing is written even if it finishes first."""
-        self._generation += 1
-        if self._running:
-            logger.info("Auto mask is stopped: the dataset changed")
-            self._cancel_event.set()
-
-    def shutdown(self) -> None:
-        """Application is quitting: stop the thread and wait briefly, so it never emits into a widget Qt is tearing down."""
-        self._cancel_event.set()
-        thread = self._thread
-        if thread is not None:
-            thread.join(timeout=5.0)
-
-    # -- the worker thread -----------------------------------------------------------------------------------
-
-    def _emit_progress(self, fraction: float, message: str) -> None:
-        self.task_progress.emit(TASK_ID, TASK_LABEL, fraction, message)
-
-    def _run(self, work: _Work) -> None:
-        masks: list[tuple[Frame, str, MaskChange]] | None = None
-        error: BaseException | None = None
-        try:
-            masks = work.make_masks()
-        except BaseException as exc:  # noqa: BLE001 - nothing may escape a thread silently
-            error = exc
-        self._finished.emit(masks, (error, work.current_frame) if error is not None else None)
+        self._work = _Work(groups, plans, shape, self._dilate_px, self._cancel_event, self._emit_progress)
+        self._start_thread(self._work.make_masks)
 
     # -- back on the GUI thread ------------------------------------------------------------------------------
 
     def _on_mask_changed(self, _change: MaskComputationalChange) -> None:
         self._mask_moved = True
 
-    def _fail(self, frame: Frame, exc: BaseException) -> None:
-        logger.error("Auto mask failed at frame %s", frame, exc_info=exc)
-        message = f"Auto mask stopped at cube {frame[0]}, {frame[1]:g} nm: {exc}"
-        self._finish("failed", message)
-        self.failed.emit(message)
+    def _release(self) -> None:
+        # Also what keeps the commit below from flagging its own change as "the mask moved".
+        self._mask.mask_changed.disconnect(self._on_mask_changed)
+        if self._work is not None:
+            self._frame_reached = self._work.current_frame
+            self._work = None
 
-    def _finish(self, outcome: str, message: str) -> None:
-        self._running = False
-        self._thread = None
-        try:
-            self._mask.mask_changed.disconnect(self._on_mask_changed)
-        except (TypeError, RuntimeError):  # never connected (a failure while planning)
-            pass
-        self.running_changed.emit(False)
-        self.task_finished.emit(TASK_ID, outcome, message)
+    def _failure_message(self, error: BaseException) -> str:
+        frame = self._frame_reached
+        assert frame is not None
+        return f"Auto mask stopped at cube {frame[0]}, {frame[1]:g} nm: {error}"
 
-    def _on_finished(self, masks: object, failure: object) -> None:
-        thread = self._thread
-        if thread is not None:
-            thread.join(timeout=1.0)
-        moved = self._mask_moved
-        if self._run_generation != self._generation:
-            self._finish("cancelled", "stopped: the dataset changed")
-            self.cancelled.emit()
-            return
-        if failure is not None:
-            error, frame = failure  # type: ignore[misc]
-            if isinstance(error, Cancelled):
-                self._finish("cancelled", "")
-                self.cancelled.emit()
-            else:
-                self._fail(frame, error)
-            return
-        if moved:
-            message = "Auto mask was stopped: the mask was changed while it ran, so nothing was written. Run it again."
-            self._finish("failed", message)
-            self.failed.emit(message)
-            return
-        assert isinstance(masks, list)
-        self._mask.mask_changed.disconnect(self._on_mask_changed)  # the commit below is our own change
-        written = self._mask.set_mask_changes(masks, label=f"Auto mask ({self._frames} frames)")
+    def _on_result(self, result: object) -> tuple[str, object]:
+        if self._mask_moved:
+            raise TaskRefused("Auto mask was stopped: the mask was changed while it ran, so nothing was written. Run it again.")
+        assert isinstance(result, list)
+        written = self._mask.set_mask_changes(result, label=f"Auto mask ({self._frames} frames)")
         summary = AutoMaskSummary(
             frames_masked=written,
             frames_unchanged=self._frames - written,
@@ -208,8 +137,7 @@ class MaskAutoTask(QObject):
         text = f"{written} masks from {self._events_used} particle events (+{self._dilate_px} px)"
         if summary.frames_unchanged:
             text += f"; {summary.frames_unchanged} already as they would be"
-        self._finish("completed", text)
-        self.completed.emit(summary)
+        return text, summary
 
 
 class _Work:
