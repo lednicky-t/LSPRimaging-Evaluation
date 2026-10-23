@@ -85,6 +85,9 @@ def load_one(folder: Path):
 
 def build_modules(dataset, session_root: Path):
     modules = app_rewrite._build_modules()
+    # These tools only read: the modules carry the app's autosave, which would write any edit a tool makes (the golden check moves ROIs
+    # in memory on purpose) into the real session file. Found 2026-10-23, when a ROI moved by a test script was saved.
+    modules.session_autosave._suspended = True
     modules.dataset.load_dataset(dataset)
     state = load_session(session_root)
     if state is None:

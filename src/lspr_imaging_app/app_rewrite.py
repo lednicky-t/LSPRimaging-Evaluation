@@ -39,6 +39,11 @@ from lspr_core.perf import get_runtime
 from lspr_ui import app_icon, set_active_theme
 
 from .analysis import AnalysisEngine, AnalysisSettingsModule
+from .analysis.scan_jobs import ScanSource, source_from_modules
+from .analysis.scan_results import ScanResultsModule
+from .storage.session_index import session_dir_for
+from .analysis.scan_store import FILE_NAME as SCAN_FILE_NAME, describe_file as describe_scan_file
+from .analysis.scan_task import TASK_ID as ANALYSIS_SCAN_TASK_ID, ScanTask
 from .applog import LogSystem, RingBufferHandler, configure_logging, log_event
 from .applog import current as current_log_system
 from .analysis.provenance import FrameNamingScheme
@@ -326,6 +331,10 @@ def _wire_theme_menu(
             table.refresh_theme()
         for log_panel in window.findChildren(LogPanel):
             log_panel.refresh_theme()
+        for spectra in window.findChildren(SpectraPanel):
+            spectra.refresh_theme()
+        for sensorgram in window.findChildren(SensorgramPanel):
+            sensorgram.refresh_theme()
         for dock in window.findChildren(PanelContainer):
             dock.refresh_theme()
         for section in window.findChildren(CollapsibleSection):
@@ -336,6 +345,15 @@ def _wire_theme_menu(
 
     dark_action.triggered.connect(lambda checked: switch_theme(LSPRI_DARK_THEME, "dark") if checked else None)
     bright_action.triggered.connect(lambda checked: switch_theme(LSPRI_BRIGHT_THEME, "bright") if checked else None)
+
+
+def analysis_scan_source(m: _Modules) -> ScanSource:
+    """What an analysis scan reads from the live modules (``analysis/scan_jobs.py``). Call on the GUI thread and hand the result to
+    ``m.analysis_scan.start(...)``, which snapshots it before the task thread starts."""
+    return source_from_modules(
+        dataset=m.dataset, frame_roles=m.frame_roles, roi_toolbox=m.roi_toolbox, geometry=m.geometry, background=m.background,
+        chromatic=m.chromatic, mask=m.mask, records=m.dataset.record_map(),
+    )
 
 
 def _build_analysis_engine(
@@ -748,6 +766,8 @@ class _Modules:
     chromatic_auto: ChromaticAutoDetect
     mask_pointers: MaskPointersModule
     transient_scan: TransientScanTask
+    analysis_scan: ScanTask
+    scan_results: ScanResultsModule
     session_carry: SessionCarry
     session_load: SessionLoadTask
 
@@ -852,21 +872,34 @@ def _build_modules() -> _Modules:
         source=lambda: (dataset.dataset_home(), session_coordinator.active_session_id()),
     )
     dataset.export_stats_ready.connect(session_carry.set_export_stats)  # emitted just before export_finished
+    # The analysis scan belongs to the dataset and session it was started in: a dataset opened or cleared, or a session switched, stops it.
+    analysis_scan = ScanTask()
+    modules_holder: list[_Modules] = []  # the results module needs the finished module set to read the app (analysis_scan_source)
+    scan_results = ScanResultsModule(lambda: analysis_scan_source(modules_holder[0]), scan_running=analysis_scan.is_running)
+    dataset.dataset_loaded.connect(lambda _dataset: analysis_scan.invalidate())
+    dataset.dataset_cleared.connect(analysis_scan.invalidate)
+    session_coordinator.active_session_changed.connect(lambda _root: analysis_scan.invalidate())
+    app = QApplication.instance()
+    if app is not None:  # the thread must be stopped where the application ends, not in a widget's destructor (sip crash-on-close)
+        app.aboutToQuit.connect(analysis_scan.shutdown)
+        app.aboutToQuit.connect(scan_results.shutdown)
     dataset.export_finished.connect(session_carry.start)
     dataset.export_failed.connect(lambda _message: session_carry.discard())
-    return _Modules(
+    modules = _Modules(
         dataset=dataset, geometry=geometry, active_tool=active_tool, mask=mask, mask_scope=mask_scope,
         chromatic=chromatic, background=background, roi_toolbox=roi_toolbox,
         roi_geometry_sync=roi_geometry_sync, selection=selection, reference_frame=reference_frame,
         highlight_range=highlight_range, area_selection=area_selection, analysis_settings=analysis_settings,
         session_coordinator=session_coordinator, analysis_engine=analysis_engine,
         session_autosave=session_autosave, chromatic_auto=ChromaticAutoDetect(chromatic),
-        mask_pointers=mask_pointers, transient_scan=TransientScanTask(mask_pointers), session_carry=session_carry,
+        mask_pointers=mask_pointers, transient_scan=TransientScanTask(mask_pointers), analysis_scan=analysis_scan, scan_results=scan_results, session_carry=session_carry,
         session_load=session_load,
         reference_auto=ReferenceAutoFind(dataset, selection, reference_frame, frame_roles),
         frame_roles=frame_roles,
         cube_display=CubeDisplayModule(dataset),
     )
+    modules_holder.append(modules)
+    return modules
 
 
 def _wire_highlight_range_persistence(m: _Modules, ui_state: UiStateStore, settings: AppSettings) -> None:
@@ -1058,6 +1091,69 @@ def _build_workflow_panel(m: _Modules, writer: _SettingsWriter, ui_state: UiStat
     return workflow
 
 
+def _wire_analysis_scan(m: _Modules, workflow: WorkflowPanel, ui_state: UiStateStore) -> None:
+    """The Workflow > Analysis scan row (Run / Stop) and the scan task: the row only emits requests and shows text; this decides where
+    the file goes, starts the task on the GUI thread and turns its outcome into the row's status line."""
+    row = workflow.analysis_scan_row
+    ui_state.bind("analysis/scan_every_cube_again", row.rescan_all_checkbox)
+
+    def scan_file() -> Path | None:
+        home, session_id = m.dataset.dataset_home(), m.session_coordinator.active_session_id()
+        if home is None or session_id is None:
+            return None
+        return session_dir_for(home, session_id) / "analysis" / SCAN_FILE_NAME
+
+    def show_saved_scan(*_args: object) -> None:
+        path = scan_file()
+        line = describe_scan_file(path) if path is not None else None
+        row.set_status(line or "No scan yet.")
+
+    def run() -> None:
+        path = scan_file()
+        if path is None:
+            row.set_status("Open a dataset first: the scan is saved in its session.")
+            return
+        if m.session_load.is_running():
+            row.set_status("The session is still loading; run the scan when it has finished.")
+            return
+        try:
+            source = analysis_scan_source(m)
+        except RuntimeError as exc:
+            row.set_status(str(exc))
+            return
+        row.set_status("Starting...")
+        m.analysis_scan.start(source, store_path=path, only_stale=not row.rescan_all(), dataset_label=m.dataset.dataset_home().name)
+
+    def finished(_task_id: str, outcome: str, message: str) -> None:
+        if outcome == "cancelled":
+            row.set_status(message or "Stopped. Cubes that were finished are saved; run again to continue.")
+        else:
+            row.set_status(message)
+
+    results = m.scan_results
+    results.set_scan_file(scan_file())
+    m.session_coordinator.active_session_changed.connect(lambda _root: results.set_scan_file(scan_file()))
+    m.dataset.dataset_cleared.connect(lambda: results.set_scan_file(None))
+    # The file changed under the results module: a scan finished (also a stopped or failed one: the finished cubes are saved).
+    m.analysis_scan.completed.connect(lambda summary: results.reload() if summary.cubes else results.request_check())
+    m.analysis_scan.cancelled.connect(results.reload)
+    m.analysis_scan.failed.connect(lambda _message: results.reload())
+    # Anything that can change a stored number: look again at which cubes are out of date (debounced, off the GUI thread).
+    # Formula / fit / metric settings are deliberately not here: they never make a stored cell stale.
+    for changed in (
+        m.geometry.geometry_changed, m.mask.mask_changed, m.chromatic.chromatic_model_changed, m.background.background_model_changed,
+        m.roi_toolbox.geometry_changed, m.roi_toolbox.roi_ids_renumbered, m.frame_roles.roles_changed,
+    ):
+        changed.connect(lambda *_args: results.request_check())
+    row.run_requested.connect(run)
+    row.stop_requested.connect(m.analysis_scan.cancel)
+    m.analysis_scan.running_changed.connect(row.set_running)
+    m.analysis_scan.task_finished.connect(finished)
+    m.analysis_scan.failed.connect(row.set_status)
+    m.session_coordinator.active_session_changed.connect(show_saved_scan)
+    show_saved_scan()
+
+
 def _build_status_bar(
     window: QMainWindow,
     m: _Modules,
@@ -1079,6 +1175,8 @@ def _build_status_bar(
     m.chromatic_auto.task_finished.connect(task_indicator.finish)
     m.transient_scan.task_progress.connect(task_indicator.report)
     m.transient_scan.task_finished.connect(task_indicator.finish)
+    m.analysis_scan.task_progress.connect(task_indicator.report)
+    m.analysis_scan.task_finished.connect(task_indicator.finish)
     image_panel.mask_export.task_progress.connect(task_indicator.report)
     image_panel.mask_export.task_finished.connect(task_indicator.finish)
     image_panel.mask_auto.task_progress.connect(task_indicator.report)
@@ -1097,6 +1195,7 @@ def _build_status_bar(
         SESSION_CARRY_TASK_ID: m.session_carry.cancel,
         CHROMATIC_TASK_ID: m.chromatic_auto.cancel,
         SCAN_TASK_ID: m.transient_scan.cancel,
+        ANALYSIS_SCAN_TASK_ID: m.analysis_scan.cancel,
         AUTO_MASK_TASK_ID: image_panel.mask_auto.cancel,
         MASK_EXPORT_TASK_ID: image_panel.mask_export.cancel,
         ARRAY_TASK_ID: image_panel.array_action.cancel,
@@ -1493,8 +1592,9 @@ def build_main_window(
         display_style=image_panel.roi_display,
     )
     roi_table_panel.restore_ui_state(ui_state)
-    spectra_panel = SpectraPanel(m.analysis_engine, m.roi_toolbox, m.selection)
-    sensorgram_panel = SensorgramPanel(m.analysis_engine, m.roi_toolbox, m.dataset, m.selection)
+    spectra_panel = SpectraPanel(m.scan_results, m.roi_toolbox, m.selection, m.analysis_settings)
+    spectra_panel.restore_ui_state(ui_state)
+    sensorgram_panel = SensorgramPanel(m.scan_results, m.roi_toolbox, m.dataset, m.selection, m.analysis_settings, m.cube_display)
     workflow = _build_workflow_panel(m, writer, ui_state)
 
     window = QMainWindow()
@@ -1513,6 +1613,7 @@ def build_main_window(
     edit_menu, view_menu = _build_menu_bar(window)
     attach_to_menu_bar(window.menuBar(), m.dataset)  # dataset path, type / size / cubes, and the Time / Plan checks
     _build_status_bar(window, m, workflow, image_panel, roi_table_panel)
+    _wire_analysis_scan(m, workflow, ui_state)
     _wire_session_carry_prompt(window, m)
     _wire_edit_menu(edit_menu, window, m.analysis_engine)
     panel_docks = _build_dock_layout(
@@ -1521,7 +1622,8 @@ def build_main_window(
     log_dock = _wire_log_console(window, ui_state, image_panel)
     # A display panel does no work while its dock is hidden (closed, behind a tab, window minimised) and
     # catches up once when it is shown again (panels/visibility_gate.py).
-    for dock_name, hidden_aware_panel in (("Histogram", histogram_panel), ("ROI / Groups", roi_table_panel)):
+    for dock_name, hidden_aware_panel in (("Histogram", histogram_panel), ("ROI / Groups", roi_table_panel), ("Spectra", spectra_panel),
+                                             ("Sensorgram", sensorgram_panel)):
         panel_docks[dock_name].visibilityChanged.connect(hidden_aware_panel.set_panel_visible)
 
     # View menu, top to bottom (the order of these calls is the menu order):

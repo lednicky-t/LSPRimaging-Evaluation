@@ -598,3 +598,266 @@ selections (a 5-ROI run in well under a minute, estimated, unmeasured).
 1. **Background removal stays the user's choice**, one state: `BackgroundSettings.flatten_background_enabled` (the Image ribbon's Background tab). The Analysis section, when built, gets a second toggle bound to the *same* state (not a copy). Its tooltip, for ROIs with a centred reference ring, says removal is usually not needed and points to a short summary of the experiment above (example dataset: absorbance noise and drift unchanged, ROI spread 3 % better without, centroid ROI-drift 8 % better with, ~20 % of the scan time). The scan already follows that state; nothing to change in `analysis/scan.py`.
 2. **OME-Zarr with the background on reads whole planes, exactly as TIFF** (results 1:1 with the TIFF path). Partial chunk reads (design above) apply only when the background is off. A *regional* background for partial reads may come later as a second, user-chosen mode next to "full" - to be discussed and designed properly first (windowing, baseline, what is stored), not slipped in.
 3. Commit approved.
+
+## 15. Output file layout (maintainer decisions, 2026-10-23)
+
+Supersedes section 5 (and the "Provenance, lean" proposal in section 11) for step 1. Not built yet.
+
+**File:** `<dataset>/sessions/<id>/analysis/scan.h5`, schema `lspri_scan` 1.0, all `hdf_standard.md` identity fields. The old
+`analysis/data.h5` (schema `lspri_rewrite_analysis_store` 1.1) is left alone until the cut-over (no UI ever wrote it, so no
+migration). Code: new `analysis/scan_store.py` (h5py, no Qt).
+
+```
+/processed/scan/
+  value/mean     float64 [cube, roi, wavelength, side]   side = sample | reference
+  std            float64 [same]     spread of the valid pixels (SEM = std / sqrt(n_valid), derived later)
+  n_valid        uint32  [same]     pixels with a value
+  n_nominal      uint32  [same]     pixels in the aperture after exclusions
+  (later, optional: value/median, value/trimmed_mean, value/plane_fit)
+/axes/   wavelength_nm float64 [wl]; cube_index int32 [cube]; acquired_at_unix_ms int64 [cube, wl]; side and roi_id labels
+         (HDF5 dimension scales, so xarray / pandas read it directly)
+/metadata/ recipes/<n> (readable JSON: geometry, background + estimator version, mask settings, exclusion mode, trimmed fraction,
+           ring defaults, algorithm version); roi_layouts/<n> (readable JSON ROI tables); dataset identity
+/state/  cell_hash uint64 [cube, roi]   0 = never computed;  recipe_id int32 [cube, roi]  which recipe JSON produced the cell
+```
+
+- Chunk = one cube, gzip + shuffle. About 38 MB for 314 cubes x 160 ROIs x 26 wl. Written create-via-temp-and-rename, then one
+  cube at a time (open, write values, flush, write `/state` last, close), so a crash leaves at most one cube "not computed".
+- Absorbance, fits and metrics are never stored. The 4-sector ring coverage and the dark frame are not stored.
+- **Staleness = one combined hash per cell** (maintainer's choice; recipe + the cube's ROI layout + the cube's frame mask and
+  chromatic inputs, hashed together). Known cost: the hash alone cannot say *why* a cell is stale. `recipe_id` and the readable
+  recipe JSON are kept anyway (the HDF5 rule: save analysis parameters with the data), so a "why" can be approximated by diffing the
+  current recipe against the stored one. The expected hash is computed from the current session when needed; per-frame digests
+  are not stored.
+- **ROI delete / reorder (ids renumber):** every stored cell becomes stale, rescan (~3 min here). No code edits stored rows in
+  place. Revisit only if it hurts.
+- Sweeps later: same datasets with a leading `variant` axis in `sweep.h5`.
+- **Mask identity in the hash: by content** (maintainer, 2026-10-23), not by version number.
+- **Cubes with different wavelength sets: not expected** (maintainer, 2026-10-23), but a fallback so it can never go wrong silently:
+  the `wavelength_nm` axis is the sorted union over all cubes (wavelengths compared after rounding to 0.01 nm, so float noise does not
+  create a second column); a frame a cube does not have stays NaN with `n_valid` = `n_nominal` = 0 and `acquired_at_unix_ms` = 0; the job
+  builder logs one WARNING (how many cubes differ) and the scan's result summary shows it. It never stops the scan and never drops a frame.
+
+## 16. Job builder built (2026-10-23): `analysis/scan_jobs.py`
+
+Session state -> `ScanPlan` (settings, `CubeJob`s, cube list, wavelength axis, per-cube column positions, ROI ids, warnings). Pure (no
+Qt), takes **callables** like `AnalysisEngine` does (`ScanSource`; `source_from_modules(...)` builds one from the live modules). Rules in
+the file docstring: dark / set-aside frames left out; wavelength axis = union over cubes (0.01 nm rounding) with one WARNING when cubes
+differ (section 15 fallback); two frames on one rounded wavelength = `ValueError`; every cube must have the same ROI ids in the same
+order; the chromatic affine is copied; ignore masks are resolved to processed space here and shared per (authored frame, scope, warp);
+all ROIs are always reduced (the ring exclusion uses all of them). Not wired to anything yet.
+
+Checks:
+
+* `tests/unit/test_lspri_rewrite_scan_jobs.py`, 16 tests (no Qt, no files): frames and axis, union fallback, float noise, duplicates, cube
+  subset, affine copy, ROI layouts (shared without a timeline, one per cube with it, id mismatch refused), ignore masks (no warp when authored
+  at the frame, warped equals `resolve_external_mask`, sharing, no mix-up).
+* `tools/scan_golden_check.py` (read-only): the new route (builder + `scan_cubes`) against `AnalysisEngine._gather_wavelength_inputs` +
+  `compute_cell` on the real dataset. Result, with an **in-memory synthetic timeline** (`--synthetic-timeline`: all ROIs move from cube 100 on, 20
+  ROIs on cube 200 alone, never saved): 6 cubes (0, 100, 104, 200, 208, 313; three ROI layouts; masks in cubes 0 and 200), 6 ROIs each, 1,872
+  (ROI, cube, wavelength, side) values: **pixel counts identical 1872 of 1872; mean within 1.56e-7 relative** (float32 vs float64 mean, as in
+  section 12). Without the timeline: 3 cubes, 936 values, identical counts, 1.44e-7. Not covered: free-form mask ROIs, persistent masks, a
+  dataset with different wavelength sets, a mutation check of this tool (the unit tests and the earlier lab checks cover those kinds of fault).
+
+Measured on the real dataset (all 314 cubes), calling thread: **plan setup 2.2-2.6 s**; 411 frames carry an ignore mask, **417 MB** of arrays
+(1.17 MB each; individual masks are all distinct, nothing to share here). A session with a persistent mask would share arrays per wavelength.
+Both matter for the next step (see below).
+
+Findings for the next steps:
+
+1. **Setup runs on the thread that owns the modules.** 2.4 s on the GUI thread is too long for a click handler (GUI-thread rule). The scan task
+   must either resolve in slices, or take an immutable snapshot on the GUI thread and resolve off-thread (`MaskChange` is immutable and compressed).
+   Decide in the task step.
+2. **Ignore-mask memory is per distinct mask and held for the whole run**, and every array is pickled to a worker with its task. 417 MB here; many
+   individual masks on a bigger dataset would grow. `IGNORE_MASK_WARN_BYTES` (2 GB) logs a warning. A compact hand-over (the compressed mask +
+   warp, resolved in the worker) would remove both the memory and the setup time; not built, because it changes `FrameJob`.
+3. **The test session `2026-09-27_143549` has no ROI timeline any more** (session.json saved 2026-10-22 19:09: 0 of 160 ROIs carry one; my notes
+   from 2026-10-19 say 4 layouts). Either it was cleared on purpose or something dropped it on a save. Unconfirmed which.
+
+## 17. Scan task, status row and logging built (2026-10-23)
+
+`analysis/scan_task.py` `ScanTask(ThreadedTask)`: task id `analysis_scan`, label "Analysis scan". Wired in `app_rewrite.py` (`_Modules.analysis_scan`):
+progress and finish into the status-bar `TaskIndicator`, Cancel in `cancel_by_task`, stopped by a dataset load / clear and a session switch
+(`invalidate()`), stopped at application quit (`aboutToQuit`). `app_rewrite.analysis_scan_source(m)` builds the `ScanSource` from the live
+modules. **There is still no button that starts it** (the Workflow > Analysis section is placeholders): the next step.
+
+Decisions taken (the two open points of section 16):
+
+* **Snapshot on the GUI thread, mask decoding off it.** `snapshot_source` (`scan_jobs.py`) reads all lookups into plain tables, copies the ROIs, and
+  keeps ignore masks compressed (`MaskRef.load` decodes later). `ScanTask.start()` takes it; the task thread then builds the plan and runs the scan,
+  and touches no module. Measured on the real dataset, all 314 cubes: **snapshot 80-170 ms on the GUI thread** (was 2.2-2.6 s for the old
+  all-in-one setup; single readings up to 0.9 s while another process loaded the machine), plan build **1.9-2.7 s on the task thread**.
+  `start()` with 12 cubes returned in 6-24 ms.
+* **Compact mask hand-over: not built.** Ignore masks (417 MB here) are still decoded in the task thread and pickled to the workers. With the setup
+  off the GUI thread, the remaining cost is memory only; the 2 GB warning stays. Revisit if a session with many more individual masks appears.
+
+Progress: first 2 % = preparing the plan (measured ~2 s of ~3 min), then "Starting the worker processes", then one report per finished task of
+4 cubes (throttled to 20/s). Cancel is checked as often, so it acts within one task.
+
+Logging (logger `lspr_imaging_app.analysis.scan_task`, `applog` helpers): INFO `analysis.scan_prepared` (build time, cubes, frames, ignore-mask MB),
+`analysis.scan_start`, `analysis.scan_done` (wall seconds, frames/s, busy seconds per stage read / prepare / reduce, warnings, and the
+`lspr_core.perf` report as `perf_*` fields: workers, mode, rate, limits, machine), `analysis.scan_cancelled`; DEBUG `analysis.scan_cube` per cube.
+Worker processes have no logging of their own; their timings travel back in `CubeResult.seconds`. `scan_cubes(on_finished=)` now hands over the
+perf `RunReport`.
+
+`analysis/scan_arrays.py`: `ScanArrays` / `new_arrays` / `place`: finished cubes placed into `[cube, roi, wavelength, side]` arrays (mean, std,
+n_valid, n_nominal as uint32, `done[cube]`), independent of completion order; a frame a cube lacks stays NaN / 0. The task holds them in memory and
+hands them to `on_result(plan, arrays, summary)` on the GUI thread: **the file writer plugs in there** (next after the button).
+
+Tests: `tests/unit/test_lspri_rewrite_scan_jobs.py` (21: + snapshot), `tests/unit/test_lspri_rewrite_scan_arrays.py` (3),
+`tests/integration/test_lspri_analysis_scan_task.py` (12: completes with progress and log events, per-cube DEBUG events, 2 worker processes equal 1,
+automatic worker count and mode in the log, cube subset, an edit after `start()` cannot change the result, Cancel, stale run dropped, ROI ids
+differing between cubes refused with a message, no ROIs refused, unknown cubes fail without a run, second start refused). Fault injection: a
+snapshot without ROI copies fails 3 tests; a task that ignores Cancel fails 1. Neighbouring suites pass (scan, frame_reduce, edit menu, autosave,
+preferences, analysis engine, log panel, export workers).
+
+Real data (`2026-09-27_143549`): the task ran 12 cubes x 160 ROIs x 26 wavelengths in 19 s with 3 workers (Standard on this 4-core / 8-thread
+laptop), all 99,840 means finite, log line complete. **That is not a speed measurement**: pool start-up (7-12 s) is most of a 12-cube run, and
+a first attempt was spoiled by my own test script lacking the `if __name__ == "__main__"` guard (spawned workers re-ran it). A timed full-dataset run
+through the task (expected ~3 min, section 14) is still to do when the machine is free.
+
+## 18. `scan.h5` writer, cell hash, Run / Stop row (2026-10-23)
+
+Built, following section 15 (layout) with the maintainer's decisions (one combined hash per cell; mask by content; ROI delete = everything stale).
+
+**Files** (all pure, no Qt, except the task and the row):
+
+* `analysis/scan_fingerprint.py`: `recipe_of(settings)` (readable dict), `recipe_json`, `cell_hashes(plan)` -> `uint64 [cube, roi]`. A cell's hash covers the
+  recipe (geometry, background, detection settings, methods, exclusion mode, trimmed fraction, `SCAN_ALGORITHM_VERSION`), the cube's ROI layout key, every
+  frame's wavelength column + **file name** + chromatic affine + ignore-mask **content** (blake2b of the packed bits), and the ROI's id and position. Not in
+  the hash: app version, TIFF decoder, worker count, folder (a moved dataset stays current), and the detection fields that belong to other steps
+  (`formula_key`, `reduction_method`, `array_*`; changing the formula must never make a scan stale). **Bump `SCAN_ALGORITHM_VERSION` whenever a change to
+  `frame_reduce`, the background estimate, the rotation or the reduction can change a stored number.**
+* `analysis/scan_store.py`: the file (layout in section 15; `/state/layout_id [cube]` added next to `recipe_id`, so every cube names the ROI table it was
+  scanned with). `ScanStore.prepare(plan)` (create / reuse / replace, returns the stored hashes of the plan's cubes), `write_cube(...)`, `read_scan(path)`,
+  `describe_file(path)`, `stale_cube_positions(stored, current)`. Axes are the whole dataset's (all spectral cubes, the wavelength union, the ROI ids), so a
+  partial run and a full run share a file. Created under a temporary name and renamed. **Write order per cube: hash row to 0, values, flush, recipe / layout ids,
+  real hash, flush** (a failure leaves the cube "never computed", never a stale hash on new values; tested by making the last write fail). A file that does not
+  fit (other ROI ids, wavelengths, cubes or methods; unknown schema; not HDF5) is moved to `scan.previous.h5` (one backup slot) and a new one is made.
+  `prepare` opens the file read-only unless a recipe or layout has to be added, so a run with nothing to do does not touch it (tested by modification time).
+  Readers reject an unknown `schema_name` or a different major version; a newer minor reads.
+* `analysis/scan_jobs.py`: the plan now carries `dataset_cubes` and `acquired_at_unix_ms [cube, wavelength]` (from the new `DatasetModule.frame_times_unix_ms()`), the
+  wavelength axis is computed over **all** cubes, `subset_plan(plan, cubes)`.
+* `analysis/scan_task.py`: writes each finished cube at once; `only_stale` (default) scans only cubes with a stale or missing cell (the unit of work is the cube: the
+  frame stage dominates, so one stale ROI costs almost as much as all); "up to date" ends in ~2 s without touching the file; Cancel keeps every finished cube and a
+  later run resumes; an `OSError` becomes "Could not save the scan file: ...". Log events as section 17, plus `analysis.scan_current` and `write_s`, `file_mb`.
+* `panels/workflow/analysis_scan_row.py` + `app_rewrite._wire_analysis_scan`: **Workflow > Analysis, top row**: [Run scan] [Stop], a checkbox "Scan every cube again"
+  (remembered via `ui_state`, key `analysis/scan_every_cube_again`) and a status line (what the last run did; on opening a session, what `scan.h5` holds).
+  The file is `<dataset>/sessions/<id>/analysis/scan.h5`. Run refuses with a message when no dataset is open or the session is still loading.
+
+**Not built / still open:** the second background toggle in the Analysis section (decision of section 14: one shared state); a cube range / ROI selection for Run;
+the "N cells out of date" preview without running (the plan build costs ~2 s, so it is possible, but nothing shows it yet); the command line; reading the file
+back into the Spectra panel (step 2); `AnalysisSettingsModule` / old engine removal. The recipe stores the detection settings except the five fields listed
+above; `mask_*` threshold fields therefore stale a scan even when ignore-by-intensity is off (conservative on purpose: priority 1, correctness).
+
+Tests: `tests/unit/test_lspri_analysis_scan_store.py` (17: file contents and dimension scales, exact read-back, partial runs, unknown schema / newer major / newer minor /
+damaged file, crash-safe order, reuse and recipe de-duplication, replacement keeps a backup, what the hash reacts to and what it ignores),
+`tests/unit/test_lspri_rewrite_scan_jobs.py` (21), `tests/integration/test_lspri_analysis_scan_task.py` (19: + saving, up to date, only changed cubes,
+run-all, Cancel then resume, unwritable file, partial then full), `tests/integration/test_lspri_analysis_scan_row.py` (8: the real buttons on a real small dataset).
+The Workflow panel suites (stage / subsection restore, width budget, dock resizable) pass with the new row.
+
+**Timings through the task, whole real dataset (2026-10-23, 314 cubes x 160 ROIs x 26 wavelengths, i7-10510U 4 cores / 8 threads; machine otherwise idle but with Firefox / VS Code open, 7 GB of 31.8 GB free, i.e. not a clean benchmark):**
+
+| run | wall | frames/s | busy ms per frame: read / prepare / reduce |
+|---|---|---|---|
+| first full run, saved to `scan.h5`, Standard = 7 workers, background off (the session's setting now) | 227 s | 36 | 75 / 77 / 30 |
+| A: 4 processes, background off, in memory | 240 s | 34 | 44 / 43 / 25 |
+| B: 4 processes, background ON (sigma 39, bin 4, as on 2026-10-19), in memory | 282 s | 29 | 40 / 67 / 26 |
+| C: Standard (6 workers), background ON, in memory | 279 s | 29 | 58 / 102 / 36 |
+| 2026-10-19 reference for B (section 14) | 170 s | 48 | 30 / 30 / 20 |
+
+* Writing `scan.h5` cost 10 s in total on the consuming thread (38.4 MB, 314 cubes); reading it back 0.45 s; a run on an unchanged session 2.0 s ("up to date").
+* Background removal costs 17 % (A vs B), as on 2026-10-19 (20 %). More workers than 4 gain nothing on this laptop (B vs C), matching the earlier finding.
+* **B is 1.66x slower than the same configuration on 2026-10-19.** One known cause: rotation became Lanczos4 on 2026-10-20 (single thread, one frame:
+  rotate / crop 12.2 ms against 1.4 ms bilinear, read 12.9 ms; `docs/rotated_zarr_export_interpolation_2026-10-20.md`). That is ~11 ms of ~40 ms per frame, so about
+  a third of the busy-time difference; **the rest is not explained** (machine state during the runs is the other suspect). Not isolated yet: a bilinear run and a run on a
+  freshly rebooted machine would separate the two.
+* The 10-19 target (< 10 min for everything) still holds with margin: 4 to 4.7 min.
+
+**Correction and the rotated export (2026-10-23, same machine, same session ROIs, background off).** The runs above scanned the *raw TIFF* dataset, so the session's
+rotation (1.46 deg) and crop were applied to every frame during the scan; nothing was chosen on purpose, it is what the session's geometry says. On the rotated and
+cropped OME-Zarr export (`images_1275x799_314x27_c80IZ_u16.ome.zarr`, carried session `2026-10-22_172035`: rotation 0, crop off, 160 ROIs, 314 cubes) the same scan took:
+
+| dataset | wall | frames/s | busy ms per frame: read / prepare / reduce |
+|---|---|---|---|
+| raw TIFF + rotation / crop, 4 processes (run A) | 240 s | 34 | 44 / 43 / 25 |
+| rotated zarr, 4 processes | 111 s | 75 | 26 / 3 / 22 |
+| rotated zarr, Standard (6 workers) | 108 s | 77 | 35 / 4 / 30 |
+
+All 2,612,480 means finite. So **a scan of the rotated export is 2.2x faster than a scan of the raw TIFFs**: no rotation in the scan (prepare 43 -> 3 ms) and a faster read.
+This also means the "1.66x slower than 2026-10-19" finding is about raw TIFF scans only; the rotated export, the intended input for analysis, is not affected. Numbers of the
+two datasets are not comparable value for value (the export rounds to uint16 and was resampled once at export time); not checked here.
+
+## 19. Spectra panel and the scan-results module (2026-10-23)
+
+**Screen.** Spectra dock: a strip of controls on top (formula, fit method, polynomial order, metric, "Fit window", "Error bars"), the plot, one status line. It follows
+the selected ROIs and the current cube. It reads `scan.h5` (never the old `AnalysisEngine`) and starts no analysis.
+
+New files (pure unless noted):
+
+* `analysis/spectrum_errors.py`: standard error `STD / sqrt(n_valid)` and its first-order propagation through the four formulas (checked against numerical derivatives).
+  The bars mean "how well the aperture's pixels determine the mean value", **not** reproducibility between measurements, and sample / reference are treated as independent
+  (they share the illumination): the tooltip says so. Off by default (remembered).
+* `analysis/scan_view.py`: `compute_spectra(stored, SpectraRequest)` -> per ROI: formula spectrum, errors, fit curve, metric (via `query.py`, unchanged). Each ROI alone; a
+  wavelength without a valid pixel is left out and counted (`n_missing`); a cube never scanned, a ROI added after the scan and a failed fit are explained in `note`, never faked.
+* `scan_store.stale_cube_indices(stored, plan, hashes)`: which cubes are out of date; a changed ROI list / wavelength axis / cube list makes **all** cubes stale and says why.
+* `analysis/scan_results.py` `ScanResultsModule` (Qt): holds the loaded file (read on a plain thread, 0.45 s for 38 MB) and the stale set. A check = snapshot of the app's
+  inputs on the GUI thread (~0.1 s), then on a thread: plan, `cell_hashes`, compare. Triggered (debounced 1.5 s) by geometry, mask, chromatic, background, ROI and frame-role
+  changes, and by a loaded file; not while a scan runs (the finished scan reloads and checks again). **Formula / fit / metric changes never trigger it** (they cannot make a
+  cell stale; pinned by a test that puts the formula key into the hash and watches it fail).
+* `panels/spectra/{panel,plot}.py`: compute off the GUI thread (newest request wins, 100 ms coalescing, result from an older file dropped), `HiddenPanelGate` (hidden = no work,
+  one catch-up when shown), theme refresh, error-bar choice via `ui_state` (`spectra/error_bars`). The formula goes to `AreaRoiDetectionSettings.formula_key` through
+  `RoiToolbox.set_detection_settings`; fit, order, metric and window to `AnalysisSettingsModule` (saved with the session). The fit window is "set" iff
+  `fit_wl_min/max` are set: checking the box sets the middle 80 % of the plotted wavelengths, dragging the band updates the settings, unchecking clears them.
+  Results of an out-of-date cube are **drawn dimmed with "OUT OF DATE (...); run the scan again"**, not hidden.
+* Wiring: `_Modules.scan_results`, `_wire_analysis_scan` (the file follows the session; reload after a scan finished, was stopped or failed), `SpectraPanel(m.scan_results, ...)`.
+
+Measured on the real dataset (scan file of the whole-dataset run, TIFF session): file loaded and "0 of 314 cubes out of date" known after **1.8-3.1 s**; 160 ROIs of one cube:
+no fit 9 ms, polynomial 124 ms (0.8 ms per ROI), Gaussian 111 ms (0.7 ms). Fine on a worker; it is why a fit must not run on the GUI thread when many ROIs are selected.
+
+Tests: `tests/unit/test_lspri_analysis_scan_view.py` (14), `tests/integration/test_lspri_spectra_panel.py` (13: nothing-yet and no-selection states; drawn from the file on a worker thread
+and equal to the formula of the stored pair; follows the cube; error bars; controls edit the modules and follow outside changes; fit window set, dragged and cleared; hidden = no work
+and one catch-up; a moved ROI -> dimmed + status while a formula change leaves it current; an added ROI is explained; a new scan -> current again; a damaged file is reported). Fault
+injection: without the gate, and with the formula key in the hash, the matching test fails. Neighbouring suites (scan row and task, Workflow panel suites, autosave, session, edit menu,
+log panel which builds the whole main window) pass. **Not looked at on screen**: no screenshot was taken (ask first).
+
+**Incident (2026-10-23), a lesson for the tools.** `tools/analysis_stage_timing.py` `build_modules` (used by the lab, the golden check and my timing scripts) builds the app's modules
+*with their autosave*. A test script that moved ROI 1 by +1 px twice (its "move back" moved nothing, because the ROI object had already changed) had the edit **saved into the real
+test session** (`...\images\sessions\2026-09-27_143549\session\session.json`: ROI 1 `center_x` 40.6 -> 42.6). Found because the staleness check reported every cube out of date; the scan
+file's stored ROI table proved that this was the only difference (and that the golden check's in-memory timeline had not been saved). **Fixed in the tool**: `build_modules` now
+suspends the autosave (verified in a temp folder: an edit is written without it, not with it). The session file itself still needs the one value put back (40.6): left to the
+maintainer, because writing it was denied.
+
+## 20. Sensorgram panel (2026-10-23)
+
+**Screen.** Sensorgram dock: a strip of controls on top (display mode, centre and band for averages, smoothing method + window, "Remove spikes", "Baseline"), the plot,
+one status line. For the selected ROIs it plots the **metric of the Spectra panel** (position of the fitted maximum or centroid, nm) at every scanned cube. x = time (s) or cube
+number, following the app-wide Cube / Time choice. A dashed line marks the current cube; a left click on the plot moves the cube slider to the nearest cube.
+
+New / changed (pure unless noted):
+
+* `analysis/scan_trace.py`: `metric_trace` (one ROI, every cube; NaN where the cube was never scanned, has no usable wavelength or the fit failed), `compute_traces` (only the
+  ROIs not already known; cancelled between ROIs, keeps what it finished), `build_series` (statistics **per ROI** with `statistics.apply_statistics`: spike removal, smoothing,
+  baseline, in that order; then, for "Average all" / "Average by group", `aggregate_traces` of the finished traces: mean or median, band SD or SEM), `compute_sensorgram`,
+  `trace_key` (what a cached trace depends on: the scan object, formula, fit method / order / window, metric). Averaging fitted values, never spectra: a test shows the mean of the
+  traces differs from the trace of the pooled spectrum.
+* `analysis/scan_view.py`: `fit_and_metric(spectrum, metric)` factored out, so the Spectra panel (one cube) and the Sensorgram (all cubes) use one function and cannot disagree
+  (a test pins the equality with the query layer's own `metric_value`).
+* `panels/sensorgram/{panel,plot}.py`: compute on a worker thread; the fitted traces are cached by `trace_key` (a statistics change, another selection of fitted ROIs, a cube move and a
+  display-mode change recompute nothing; a changed formula / fit / metric does); a new request sets the running job's cancel flag, keeps its finished traces and starts the next one;
+  100 ms coalescing; result from an older file dropped; `HiddenPanelGate`. Out-of-date cubes: **hollow rings** over the points and a status note, never hidden. Statistics controls
+  edit `AnalysisSettingsModule` (saved with the session); the display mode / centre / band / smoothing / spike / baseline fields already existed in `StatisticsSettings`.
+  Spike rejection uses the Hampel defaults (window 5, 3.5 MADs) of `StatisticsSettings`; there is no control for them yet.
+* The baseline window is in axis units (seconds or cube number). Switching Cube / Time re-places it at its default (first tenth of the axis), because the old numbers would mean something else.
+* Wiring: `SensorgramPanel(m.scan_results, m.roi_toolbox, m.dataset, m.selection, m.analysis_settings, m.cube_display)`, dock visibility, theme refresh. The old pump-plan-step overlay
+  idea (sketch §7) is not built.
+
+**Cost, measured on the real scan file** (TIFF session, polynomial order 3, maximum): **1.3-1.4 ms per ROI and cube**: 5 ROIs = 2.2 s, all 160 ROIs x 314 cubes = **66 s** once (status line "Fitting ROI n of N",
+cancellable by selecting something else; the finished traces stay cached). The panel shows the selected ROIs only; "select all" is the 66 s case. A faster all-ROI path (worker processes through
+`lspr_core.perf`, or a vectorised polynomial fit) is possible and not built. Real values: peak positions 590-605 nm, spread across ROIs ~5 nm per cube (this dataset's ROIs).
+
+Tests: `tests/unit/test_lspri_analysis_scan_trace.py` (15: a drifting peak is followed; equality with the query layer; gaps stay NaN; cache key; only missing ROIs computed; cancel keeps partial;
+statistics per ROI; mean of traces vs trace of pooled spectrum; groups, ungrouped, ROI in two groups; gaps do not blank an average), `tests/integration/test_lspri_sensorgram_panel.py` (13: drifting
+band on a real small dataset, worker thread, click and cursor, time axis, average all / by group, controls and settings, cache reuse, changed fit recomputes, baseline band, cancel between ROIs,
+hidden panel, ringed out-of-date cubes). Fault injection: no cancel of the running job, and no reuse of traces, each fail their tests. Neighbouring suites pass. **Not looked at on screen** (ask first).
+Click handling uses pyqtgraph's scene click signal and is tested through the handler / signal, not with a real mouse.

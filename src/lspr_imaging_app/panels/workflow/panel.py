@@ -58,6 +58,7 @@ from lspr_ui import get_active_theme
 from ...dataset import DatasetModule
 from ...selection import CubeDisplayModule, FrameRolesModule, ReferenceFrameModule, SelectionModule
 from ...storage.session_coordinator import SessionCoordinator
+from .analysis_scan_row import AnalysisScanRow
 from .collapsible_section import CollapsibleSection
 from .dataset_experimental_plan import ExperimentalPlanSection
 from .dataset_folder_row import DatasetFolderRow
@@ -201,7 +202,7 @@ def _build_dataset_section(
     return top_section, subsections
 
 
-def _build_analysis_section(parent: QWidget) -> tuple[CollapsibleSection, list[tuple[str, CollapsibleSection]]]:
+def _build_analysis_section(parent: QWidget, scan_row: AnalysisScanRow) -> tuple[CollapsibleSection, list[tuple[str, CollapsibleSection]]]:
     """Ported from the source's ``analysis_section`` + its nested ROI's
     math/Metric trace/Statistics children (the range/scope controls that
     sat above them there, and the Run/Stop/Live-preview header controls,
@@ -223,7 +224,13 @@ def _build_analysis_section(parent: QWidget) -> tuple[CollapsibleSection, list[t
         ("Metric trace", metric_trace_section),
         ("Statistics", statistics_section),
     ]
-    top_section = CollapsibleSection("Analysis", children, expanded=False, parent=parent)
+    analysis_inner = QWidget(parent)
+    analysis_inner_layout = QVBoxLayout(analysis_inner)
+    analysis_inner_layout.setContentsMargins(0, 0, 0, 0)
+    analysis_inner_layout.setSpacing(4)
+    analysis_inner_layout.addWidget(scan_row)  # Run / Stop for the scan (2026-10-23); the sections below are still placeholders
+    analysis_inner_layout.addWidget(children)
+    top_section = CollapsibleSection("Analysis", analysis_inner, expanded=False, parent=parent)
     return top_section, subsections
 
 
@@ -272,6 +279,7 @@ class WorkflowPanel(QWidget):
         frame_roles: FrameRolesModule | None = None,
     ) -> None:
         super().__init__(parent)
+        self.analysis_scan_row = AnalysisScanRow(self)  # Run / Stop; the owner (app_rewrite) wires it to the scan task
         # Order fixes the on-screen stacking order.
         built = [
             (
@@ -280,7 +288,7 @@ class WorkflowPanel(QWidget):
                     self, dataset, selection, reference_frame, session_coordinator, cube_display, frame_roles,
                 ),
             ),
-            (WorkflowStage.ANALYSIS, *_build_analysis_section(self)),
+            (WorkflowStage.ANALYSIS, *_build_analysis_section(self, self.analysis_scan_row)),
             (WorkflowStage.OUTPUTS, *_build_outputs_section(self)),
         ]
         self._sections: list[tuple[WorkflowStage, CollapsibleSection]] = [

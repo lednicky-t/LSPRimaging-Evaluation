@@ -26,7 +26,7 @@ from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, wait
 from dataclasses import dataclass, field
 
 import numpy as np
-from lspr_core.perf import get_runtime, lower_process_priority
+from lspr_core.perf import RunReport, get_runtime, lower_process_priority
 
 from ..dataset import io
 from ..image_tools.background.estimate import BackgroundWeightsCache, roi_exclusion_mask
@@ -165,6 +165,7 @@ def scan_cubes(
     cubes_per_task: int = 4,
     progress: Callable[[float, str], None] | None = None,
     cancelled: Callable[[], bool] | None = None,
+    on_finished: Callable[[RunReport | None], None] | None = None,
 ) -> Iterator[CubeResult]:
     """Run step 1 over ``jobs``, yielding one :class:`CubeResult` per cube **in completion order** (use ``cube_pos``).
 
@@ -174,7 +175,8 @@ def scan_cubes(
     cubes at a time: neighbours mostly share a ROI layout, so each worker builds a pixel layout once and keeps reusing it
     (handing out single cubes in any order made workers rebuild layouts). ``progress(fraction, message)`` is called
     once per finished cube; ``cancelled()`` is checked as often, and on True the remaining cubes are dropped and
-    :class:`~..progress.Cancelled` is raised (cubes already yielded stay valid: each is complete)."""
+    :class:`~..progress.Cancelled` is raised (cubes already yielded stay valid: each is complete). ``on_finished`` is called once after the
+    last cube of a run that completed, with the ``lspr_core.perf`` report (workers, mode, rate) or None when ``processes`` was given."""
     total = len(jobs)
     if total == 0:
         return
@@ -187,6 +189,8 @@ def scan_cubes(
             yield worker.run_cube(job)
             if progress is not None:
                 progress(done / total, f"cube {done} of {total}")
+        if on_finished is not None:
+            on_finished(None)
         return
     step = max(int(cubes_per_task), 1)
     tasks = [tuple(jobs[i:i + step]) for i in range(0, total, step)]
@@ -232,5 +236,6 @@ def scan_cubes(
             for future in pending:
                 future.cancel()
             raise
-    if run is not None:
-        run.finish()
+    report = run.finish() if run is not None else None
+    if on_finished is not None:
+        on_finished(report)

@@ -76,6 +76,7 @@ from ..diagnostics import instrumented
 from ..storage.workspace import save_acquisition_metadata_sidecar
 from .export_stats import ExportStats
 from .io import (
+    dataset_record_map,
     DatasetLoadChoice,
     acquisition_metadata_sidecar_path,
     dataset_get_record,
@@ -185,6 +186,13 @@ class DatasetModule(QObject):
         if record is None:
             raise KeyError(f"No record found for spectral_cube_index={cube_index}, wavelength={wavelength}")
         return record
+
+    def record_map(self) -> dict[tuple[int, float], ImageRecord]:
+        """``(cube, wavelength) -> record`` for every image, built in one pass. For a caller that looks up many frames:
+        ``current_image`` searches the record list for each call, which is quadratic over a whole dataset."""
+        if self._dataset is None:
+            raise RuntimeError("No dataset is loaded.")
+        return dataset_record_map(self._dataset)
 
     def load_plane(self, cube_index: int, wavelength: float) -> np.ndarray:
         """Load the full (cube_index, wavelength) plane's pixel data -
@@ -399,6 +407,13 @@ class DatasetModule(QObject):
         if frame_ms is None or anchor_ms is None:
             return None
         return (frame_ms - anchor_ms) / 1000.0
+
+    def frame_times_unix_ms(self) -> dict[tuple[int, float], int]:
+        """``(cube, wavelength) -> acquisition time`` in absolute Unix milliseconds for every timed frame; empty without a dataset or
+        without acquisition timing. A copy: the caller may keep it (the analysis scan stores it with its results)."""
+        if self._dataset is None or self._dataset.acquisition_metadata is None:
+            return {}
+        return dict(compact_dataset_image_timings(self._dataset).per_frame_ms)
 
     def _time_anchor_ms(self) -> int | None:
         """t = 0 of the experimental time, in unix ms: the recorded `started_at_utc` if parseable, else the
