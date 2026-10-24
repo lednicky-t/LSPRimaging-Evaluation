@@ -43,7 +43,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
-from PyQt6.QtCore import QItemSelection, QItemSelectionModel, QModelIndex, QPoint, Qt, QTimer, pyqtSignal
+from PyQt6.QtCore import QItemSelection, QItemSelectionModel, QModelIndex, QPersistentModelIndex, QPoint, Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import QAction, QActionGroup, QColor, QIcon, QLinearGradient, QPainter
 from PyQt6.QtWidgets import (
     QAbstractItemView,
@@ -67,7 +67,13 @@ from ...roi import RoiToolbox
 from ...roi.display_style import RoiDisplayStyle
 from ...roi.scope import RoiEditTarget
 from ...selection import SelectionModule
-from ...storage.ui_state_keys import ROI_TABLE_COLLAPSED, ROI_TABLE_COLUMN_WIDTHS, ROI_TABLE_SORT, ROI_TABLE_VIEW_MODE
+from ...storage.ui_state_keys import (
+    ROI_TABLE_COLLAPSED,
+    ROI_TABLE_COLUMN_WIDTHS,
+    ROI_TABLE_GROUP_ONLY,
+    ROI_TABLE_SORT,
+    ROI_TABLE_VIEW_MODE,
+)
 from ..image.general_group import ICON_SIZE, style_general_icon_button
 from ..ui_state import UiStateStore
 from ..visibility_gate import HiddenPanelGate
@@ -108,6 +114,10 @@ _NOTICE_MS = 8000
 _ERROR_NOTICE_MS = 15000
 NUMERIC_COLUMNS = (COLUMN_X, COLUMN_Y, *DIAMETER_COLUMNS)
 _UNGROUPED_KEY = "__ungrouped__"
+_GROUP_ONLY_TIP = (
+    "Groups-only view: every group stays collapsed, so the table lists the groups. Click again to show the ROIs "
+    "(double-click Groups in the title bar does the same)."
+)
 _RENDER_SIZE = ICON_SIZE * 2  # icons are drawn at twice the size and scaled down, as the ribbon does
 _STROKE_WIDTH = 2.1
 
@@ -123,6 +133,8 @@ def _message(exc: Exception) -> str:
 class RoiTablePanel(QWidget):
     status_message = pyqtSignal(str)
     """A one-line result for the app's status bar (also shown in the footer)."""
+    group_only_changed = pyqtSignal(bool)
+    """The Groups-only view was switched on / off (the dock's title highlights ``Groups`` or ``ROI`` to match)."""
 
     def __init__(
         self,
@@ -145,6 +157,7 @@ class RoiTablePanel(QWidget):
         self._geometry = geometry
         self._engine = analysis_engine
         self._collapsed: set[str] = set()
+        self._group_only = False  # every group stays collapsed; `_collapsed` (what the user left open) is kept for the way back
         self._syncing = False  # the view and SelectionModule are being brought into line
         self._restoring_view = False
         self._store: UiStateStore | None = None
@@ -180,6 +193,8 @@ class RoiTablePanel(QWidget):
             and saved_sort[0] in VIEW_MODE_COLUMNS[self._view_mode] and isinstance(saved_sort[1], bool)
         ):
             self._rebuild(lambda: self._model.set_sort(saved_sort[0], saved_sort[1]))
+        if store.get(ROI_TABLE_GROUP_ONLY) is True:
+            self.set_group_only(True)
         collapsed = store.get(ROI_TABLE_COLLAPSED)
         if isinstance(collapsed, list) and all(isinstance(item, str) for item in collapsed):
             self._collapsed = set(collapsed)
@@ -219,6 +234,8 @@ class RoiTablePanel(QWidget):
 
         self._group_button = self._tool_button("group-rois", self._group_selected_or_new)
         self._ungroup_button = self._tool_button("ungroup-rois", self._ungroup_selected)
+        self._group_only_button = self._tool_button("folder", self._on_group_only_button, checkable=True)
+        self._group_only_button.setToolTip(_GROUP_ONLY_TIP)
         self._color_button = self._tool_button("droplet", self._color_selected)
         self._up_button = self._tool_button("arrow-up", lambda: self._move_selected(-1))
         self._down_button = self._tool_button("arrow-down", lambda: self._move_selected(1))
@@ -247,6 +264,7 @@ class RoiTablePanel(QWidget):
         self._group_slot.addWidget(self._group_button)
         self._group_slot.addWidget(self._ungroup_button)
         toolbar.addWidget(self._group_slot)
+        toolbar.addWidget(self._group_only_button)
         toolbar.addWidget(self._color_button)
         toolbar.addSpacing(8)
         for button in (self._up_button, self._down_button):
@@ -421,7 +439,7 @@ class RoiTablePanel(QWidget):
             self._tree.expandAll()
             for header in self._model.group_headers():
                 self._tree.setFirstColumnSpanned(header.row(), QModelIndex(), True)
-                if _group_key(self._model.group_id(header)) in self._collapsed:
+                if self._group_only or _group_key(self._model.group_id(header)) in self._collapsed:
                     self._tree.collapse(header)
         finally:
             self._restoring_view = False
@@ -520,6 +538,10 @@ class RoiTablePanel(QWidget):
             self._syncing = False
         if reveal and indexes:
             first = min(indexes, key=lambda index: self._model.roi_id(index) or 0)
+            if self._group_only:  # scrolling to a row inside a collapsed group would open it: show its header instead
+                parent = self._model.parent(first)
+                self._tree.scrollTo(parent if parent.isValid() else first, QAbstractItemView.ScrollHint.EnsureVisible)
+                return
             if self._model.parent(first).isValid() and not self._tree.isExpanded(self._model.parent(first)):
                 self._tree.expand(self._model.parent(first))
             self._tree.scrollTo(first, QAbstractItemView.ScrollHint.EnsureVisible)
@@ -532,10 +554,34 @@ class RoiTablePanel(QWidget):
     def _on_expansion_changed(self, index: QModelIndex, expanded: bool) -> None:
         if self._restoring_view or not self._model.is_group(index):
             return
+        if self._group_only:  # the lock: a group that gets opened (chevron, arrow key, double click) is closed again
+            if expanded:
+                header = QPersistentModelIndex(index)
+                QTimer.singleShot(0, lambda: self._tree.collapse(QModelIndex(header)) if header.isValid() else None)
+            return
         key = _group_key(self._model.group_id(index))
         (self._collapsed.discard if expanded else self._collapsed.add)(key)
         if self._store is not None:
             self._store.set(ROI_TABLE_COLLAPSED, sorted(self._collapsed))
+
+    def group_only(self) -> bool:
+        return self._group_only
+
+    def set_group_only(self, on: bool) -> None:
+        """Switch the Groups-only view: on, every group collapses (the ones the user had open are remembered); off, they open as they were."""
+        if on == self._group_only:
+            return
+        self._group_only = on
+        self._tree.setAutoExpandDelay(-1 if on else 500)  # no opening a group by hovering a drag over it
+        self._group_only_button.setChecked(on)
+        self._style_tool_button(self._group_only_button, "folder")
+        self._rebuild(lambda: None, reveal=not on)
+        if self._store is not None:
+            self._store.set(ROI_TABLE_GROUP_ONLY, on)
+        self.group_only_changed.emit(on)
+
+    def _on_group_only_button(self) -> None:
+        self.set_group_only(self._group_only_button.isChecked())
 
     def _on_header_clicked(self, column: int) -> None:
         current, descending = self._model.sort_state()
@@ -998,7 +1044,12 @@ class RoiTablePanel(QWidget):
                 self._selection.set_roi_selection({roi_id})
             self._fill_roi_menu(menu)
         if not menu.isEmpty():
-            menu.exec(self._tree.viewport().mapToGlobal(pos))
+            menu.addSeparator()
+        lock = menu.addAction("Groups-only view (groups stay collapsed)")
+        lock.setCheckable(True)
+        lock.setChecked(self._group_only)
+        lock.triggered.connect(lambda _checked=False: self.set_group_only(not self._group_only))
+        menu.exec(self._tree.viewport().mapToGlobal(pos))
 
     def _group_selected_or_new_empty(self) -> None:
         name, accepted = QInputDialog.getText(
@@ -1046,7 +1097,7 @@ class RoiTablePanel(QWidget):
         targets = selected if group_id in selected else ([group_id] if group_id is not None else [])
         _rois, headers = self._view_selection()
         shown = headers if any(header == index for header in headers) else [index]  # the headers this menu acts on
-        menu.addAction("Expand", lambda: self._set_groups_expanded(shown, True))
+        menu.addAction("Expand", lambda: self._set_groups_expanded(shown, True)).setEnabled(not self._group_only)
         menu.addAction("Collapse", lambda: self._set_groups_expanded(shown, False))
         menu.addSeparator()
         if group_id is None:

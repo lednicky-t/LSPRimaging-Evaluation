@@ -22,9 +22,10 @@ floating safety, the paintEvent-drawn floating border, the subtitle label):
    this class already uses for its close/float/maximize icons - no new icon
    or dependency added.
 2. The source's ``title_options`` clickable-segment title (e.g. "ROI" /
-   "Group") and its ``_make_chevron_icon``/``_make_apply_icon`` helpers are
-   left out - nothing in the rewrite's six fixed panels needs a toggleable
-   title yet.
+   "Group") is back in a small form (2026-10-24, ``set_title_choices``): the
+   ROI / Groups panel's title is two words, the one in effect highlighted, the
+   other picked by a click or a double-click. Its ``_make_chevron_icon`` /
+   ``_make_apply_icon`` helpers are still left out.
 
 **Two additions the source doesn't have at all**:
 
@@ -53,6 +54,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Sequence
+from dataclasses import dataclass
 
 from PyQt6.QtCore import QByteArray, QRect, QRectF, QSize, Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import QColor, QFontMetrics, QIcon, QPainter, QPen, QPixmap
@@ -232,6 +234,33 @@ class _ColumnsHost(QWidget):
         self._on_resize()
 
 
+@dataclass(frozen=True)
+class TitleChoice:
+    """One word of a title that doubles as a switch (``PanelContainer.set_title_choices``)."""
+
+    text: str
+    tooltip: str
+    on_double_click: bool = False  # True: a stray single click does nothing (the pick has a big effect)
+
+
+class _TitleWord(QLabel):
+    """A word in the title bar that reports clicks. It accepts the mouse events itself, because an unaccepted double click on a dock's
+    title bar makes Qt float the dock."""
+
+    clicked = pyqtSignal()
+    double_clicked = pyqtSignal()
+
+    def mousePressEvent(self, event) -> None:  # type: ignore[override]  # noqa: N802 - Qt naming
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.clicked.emit()
+        event.accept()
+
+    def mouseDoubleClickEvent(self, event) -> None:  # type: ignore[override]  # noqa: N802 - Qt naming
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.double_clicked.emit()
+        event.accept()
+
+
 class _ClickableStrip(QWidget):
     """A whole-widget clickable area - `QToolButton` can't lay out an
     icon-above-rotated-text combination the way `_build_collapsed_strip`
@@ -249,6 +278,9 @@ class _ClickableStrip(QWidget):
 
 
 class PanelContainer(QDockWidget):
+    title_choice_picked = pyqtSignal(int)
+    """The user picked word ``i`` of a switch title (``set_title_choices``). Nothing changes until the owner calls ``set_title_current``."""
+
     def __init__(
         self,
         title: str,
@@ -273,6 +305,10 @@ class PanelContainer(QDockWidget):
         self._subtitle_column_labels: list[QLabel] = []
         self._subtitle_column_keys: list[tuple[str, str | None, str]] = []
         self._muted_color = ""
+        self._title_choices: tuple[TitleChoice, ...] = ()
+        self._title_current = 0
+        self._title_words: list[QLabel] = []
+        self._title_separators: list[QLabel] = []
         self.setObjectName(f"{title.replace(' ', '')}Panel")
         self._frame_border_color: str | None = None
         self._frame_fill_color: str | None = None
@@ -444,12 +480,13 @@ class PanelContainer(QDockWidget):
         layout.setSpacing(2)
         outer.addWidget(row)
 
-        label = QLabel(title, row)
+        label = self._build_title_label(title, row, theme)
         # font-weight 400, not 600 (2026-09-27, VS Code style pass) - VS
         # Code's own editor-group/tab titles are regular weight, not
         # semi-bold; the heavier weight was part of what made this read as
         # a generic app chrome rather than VS Code's specific look.
-        label.setStyleSheet(f"color: {theme.text_primary}; font-weight: 400; background: transparent;")
+        if isinstance(label, QLabel):
+            label.setStyleSheet(f"color: {theme.text_primary}; font-weight: 400; background: transparent;")
         layout.addWidget(label)
 
         # Centered between the title and the button row (2026-09-30,
@@ -566,6 +603,56 @@ class PanelContainer(QDockWidget):
         # separately-boxed header.
 
         return bar
+
+    def _build_title_label(self, title: str, parent: QWidget, theme) -> QWidget:
+        """The plain title text, or - with ``set_title_choices`` - the words of the switch title."""
+        self._title_words = []
+        self._title_separators = []
+        if not self._title_choices:
+            return QLabel(title, parent)
+        host = QWidget(parent)
+        layout = QHBoxLayout(host)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(4)
+        for index, choice in enumerate(self._title_choices):
+            if index:
+                separator = QLabel("/", host)
+                layout.addWidget(separator)
+                self._title_separators.append(separator)
+            word = _TitleWord(choice.text, host)
+            word.setToolTip(choice.tooltip)
+            word.setCursor(Qt.CursorShape.PointingHandCursor)
+            signal = word.double_clicked if choice.on_double_click else word.clicked
+            signal.connect(lambda picked=index: self._on_title_word_activated(picked))
+            layout.addWidget(word)
+            self._title_words.append(word)
+        self._style_title_words(theme)
+        return host
+
+    def _style_title_words(self, theme) -> None:
+        for index, word in enumerate(self._title_words):
+            on = index == self._title_current
+            word.setStyleSheet(
+                f"color: {theme.accent_blue if on else theme.text_dim}; font-weight: {600 if on else 400}; background: transparent;"
+            )
+        for separator in self._title_separators:
+            separator.setStyleSheet(f"color: {theme.text_dim}; font-weight: 400; background: transparent;")
+
+    def set_title_choices(self, choices: Sequence[TitleChoice], current: int = 0) -> None:
+        """Turn the title into a switch of words (e.g. ``ROI / Groups``): ``current`` is highlighted, a click (or, for a choice with
+        ``on_double_click``, a double click) on another word emits ``title_choice_picked``."""
+        self._title_choices = tuple(choices)
+        self._title_current = current
+        self.refresh_theme()
+
+    def set_title_current(self, index: int) -> None:
+        """Highlight word ``index`` (no signal)."""
+        self._title_current = index
+        self._style_title_words(get_active_theme())
+
+    def _on_title_word_activated(self, index: int) -> None:
+        if index != self._title_current:
+            self.title_choice_picked.emit(index)
 
     def set_subtitle(self, text: str, tooltip: str = "") -> None:
         """Short status text shown after the panel title, e.g. a live ROI/

@@ -69,7 +69,7 @@ from .image_tools import (
     MaskScopeModule,
 )
 from .panels.dataset_info_bar import attach_to_menu_bar
-from .panels.dock_container import PanelContainer
+from .panels.dock_container import PanelContainer, TitleChoice
 from .panels.histogram import HistogramPanel
 from .panels.log import LogPanel
 from .panels.image import ImagePanel
@@ -1341,6 +1341,16 @@ def _build_dock_layout(
     image_dock = PanelContainer("Image", image_panel, window)
     histogram_dock = PanelContainer("Histogram", histogram_panel, window)
     roi_table_dock = PanelContainer("ROI / Groups", roi_table_panel, window)
+    # The title is a switch (2026-10-24): "Groups" highlighted = the table's Groups-only view (double-click it); "ROI" = every ROI (click it).
+    roi_table_dock.set_title_choices(
+        (
+            TitleChoice("ROI", "Show the ROIs of every group (leaves the Groups-only view)."),
+            TitleChoice("Groups", "Double-click: Groups-only view, every group stays collapsed.", on_double_click=True),
+        ),
+        current=0,
+    )
+    roi_table_dock.title_choice_picked.connect(lambda index: roi_table_panel.set_group_only(index == 1))
+    roi_table_panel.group_only_changed.connect(lambda on: roi_table_dock.set_title_current(1 if on else 0))
     spectra_dock = PanelContainer("Spectra", spectra_panel, window)
     sensorgram_dock = PanelContainer("Sensorgram", sensorgram_panel, window)
 

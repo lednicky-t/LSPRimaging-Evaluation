@@ -39,7 +39,7 @@ from dataclasses import dataclass, replace
 import pyqtgraph as pg
 from PyQt6.QtCore import QTimer, pyqtSignal
 from PyQt6.QtGui import QColor
-from PyQt6.QtWidgets import QApplication, QCheckBox, QComboBox, QHBoxLayout, QLabel, QSpinBox, QVBoxLayout, QWidget
+from PyQt6.QtWidgets import QApplication, QCheckBox, QHBoxLayout, QLabel, QSpinBox, QVBoxLayout, QWidget
 
 from lspr_ui import get_active_theme
 
@@ -53,11 +53,12 @@ from ...applog import timed
 from ...roi import RoiToolbox
 from ...selection import SelectionModule
 from ...storage.ui_state_keys import SPECTRA_RIBBON_OPEN, read
-from ..ribbon_fields import style_ribbon_check, style_ribbon_combo, style_ribbon_number_field
+from ..ribbon_fields import style_ribbon_check, style_ribbon_number_field
 from ..ribbon_row import RibbonRow, rolled_ribbon
 from ..panel_task import PanelTask
 from ..ui_state import UiStateStore
 from ..visibility_gate import HiddenPanelGate
+from .pick_menu import PickMenu, equation_picture, fit_picture, metric_picture
 from .plot import SpectraPlot
 
 logger = logging.getLogger(__name__)
@@ -68,10 +69,31 @@ FORMULA_LABELS = {
     "absorbance": "Absorbance",
     "ratio": "Sample / reference",
     "relative_change": "Relative change",
-    "mod_absorbance": "Modified absorbance",
+}
+# I_s, I_r: the stored sample and reference intensity (matches `analysis/query.py` `apply_formula`; _VALUE_FLOOR aside)
+_IS = "<i>I</i><sub>s</sub>"
+_IR = "<i>I</i><sub>r</sub>"
+FORMULA_EQUATIONS = {
+    "absorbance": f"<i>A</i> = log<sub>10</sub>({_IR} / {_IS})",
+    "ratio": f"{_IS} / {_IR}",
+    "relative_change": f"({_IR} − {_IS}) / {_IR}",
+}
+FORMULA_TIPS = {
+    "absorbance": "Absorbance: log10 of reference over sample.",
+    "ratio": "Sample intensity divided by reference intensity.",
+    "relative_change": "Reference minus sample, divided by reference.",
 }
 FIT_LABELS = {"none": "No fit", "polynomial": "Polynomial", "gaussian": "Gaussian"}
+FIT_TIPS = {
+    "none": "Show the measured points only.",
+    "polynomial": "Fit a polynomial through the points.",
+    "gaussian": "Fit a Gaussian (bell curve) through the points.",
+}
 METRIC_LABELS = {"maximum": "Maximum", "centroid": "Centroid"}
+METRIC_TIPS = {
+    "maximum": "The wavelength of the top of the fitted spectrum.",
+    "centroid": "The intensity-weighted mean wavelength of the fitted spectrum.",
+}
 TASK_ID = "spectra.compute"
 ERROR_BARS_KEY = "spectra/error_bars"
 _RELEVANT_ROI_CHANGES = {"detection_settings", "session_restored", "added", "deleted", "detected"}  # a drag changes no spectrum
@@ -110,25 +132,27 @@ class SpectraPanel(QWidget):
         self._last: tuple[_Job, list[RoiSpectrum]] | None = None
         self._syncing = False
 
-        self._formula = QComboBox(self)
+        self._formula = PickMenu(self, name_on_face=False)  # the equation says it all
         for key in FORMULA_KEYS:
-            self._formula.addItem(FORMULA_LABELS.get(key, key), key)
-        style_ribbon_combo(self._formula)
-        self._formula.setToolTip("How the stored sample and reference values are combined into one value per wavelength.")
-        self._fit = QComboBox(self)
+            if key not in FORMULA_EQUATIONS:  # modified absorbance is absorbance x 1000, a unit change: calculated, not offered
+                continue
+            self._formula.add_choice(key, FORMULA_LABELS.get(key, key), FORMULA_TIPS.get(key, ""), equation_picture(FORMULA_EQUATIONS[key]))
+        self._formula.finish()
+        self._formula.setToolTip("How the stored sample and reference values are combined into one value per wavelength (Is, Ir: sample and reference intensity).")
+        self._fit = PickMenu(self, name_on_face=False)
         for key in FIT_METHODS:
-            self._fit.addItem(FIT_LABELS.get(key, key), key)
-        style_ribbon_combo(self._fit)
+            self._fit.add_choice(key, FIT_LABELS.get(key, key), FIT_TIPS.get(key, ""), fit_picture(key))
+        self._fit.finish()
         self._fit.setToolTip("Curve fitted through the points of each ROI's spectrum (inside the fit window, if one is set).")
         self._order = QSpinBox(self)
         self._order.setRange(1, 8)
         self._order.setPrefix("order ")
         style_ribbon_number_field(self._order, "order 8")
         self._order.setToolTip("Polynomial order (capped at half the number of points).")
-        self._metric = QComboBox(self)
+        self._metric = PickMenu(self, name_on_face=False)
         for key in METRIC_KEYS:
-            self._metric.addItem(METRIC_LABELS.get(key, key), key)
-        style_ribbon_combo(self._metric)
+            self._metric.add_choice(key, METRIC_LABELS.get(key, key), METRIC_TIPS.get(key, ""), metric_picture(key))
+        self._metric.finish()
         self._metric.setToolTip("The number read off each fitted spectrum (marked with a diamond): what the Sensorgram will plot.")
         self._window_box = QCheckBox("Set", self)
         self._window_box.setToolTip("Restrict the fit and the metric to a band of wavelengths. Drag the shaded band to move or resize it.")
@@ -206,6 +230,8 @@ class SpectraPanel(QWidget):
         self._gate.set_visible(visible)
 
     def refresh_theme(self) -> None:
+        for pick in (self._formula, self._fit, self._metric):
+            pick.refresh_theme()
         self._ribbon.refresh_theme()
         self._ribbon_drawer.refresh_theme()
         self._plot.refresh_theme()

@@ -33,6 +33,16 @@ _DIM_ALPHA = 90
 _WINDOW_BRUSH = (120, 160, 255, 40)
 
 
+class _NoLeftPanViewBox(pg.ViewBox):
+    """Left-drag on empty plot does nothing (a left click sets the wavelength); right-drag zoom, middle-drag pan and the wheel still work."""
+
+    def mouseDragEvent(self, ev, axis=None):
+        if ev.button() == Qt.MouseButton.LeftButton:
+            ev.ignore()
+            return
+        super().mouseDragEvent(ev, axis)
+
+
 class SpectraPlot(QWidget):
     """One plot of several ROIs' spectra. ``fit_window_changed(low, high)`` is emitted when the user lets go of the dragged window."""
 
@@ -41,7 +51,7 @@ class SpectraPlot(QWidget):
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
-        self._widget = pg.PlotWidget(parent=self)
+        self._widget = pg.PlotWidget(parent=self, viewBox=_NoLeftPanViewBox())
         self._widget.setMinimumHeight(100)
         self._item = self._widget.getPlotItem()
         self._item.showGrid(x=True, y=True, alpha=0.15)
