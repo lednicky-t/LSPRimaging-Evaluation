@@ -7,14 +7,15 @@ Spectra panel (the position of the fitted maximum or centroid, in nm: a peak *sh
 cube number, following the app-wide Cube / Time choice. A dashed line marks the current cube; clicking the plot moves the cube slider there.
 
 **Where the numbers come from.** ``analysis/scan.h5`` through :class:`~...analysis.scan_results.ScanResultsModule`; nothing here starts an
-analysis. ``analysis/scan_trace.py`` fits every cube of every selected ROI (~0.8 ms each) and then applies the statistics of
+analysis. ``analysis/scan_trace.py`` fits every cube of every selected ROI (all cubes of a ROI at once, ``trace_fit.py``, in a helper process, ``trace_pool.py``) and then applies the statistics of
 ``AnalysisSettingsModule`` **per ROI** (spike removal, smoothing, baseline, in that order) and only then, for "Average all" / "Average by group",
 combines the finished per-ROI traces (mean or median, band = SD or SEM). Averaging fitted values, never spectra (CLAUDE.md). Points of cubes
 whose results are out of date are marked with a hollow ring, never hidden.
 
-**Threads and pacing.** All of that runs on a plain worker thread, never the GUI thread. The traces already computed are kept (a trace depends on the
+**Threads and pacing.** All of that runs on a plain worker thread, never the GUI thread; the fits themselves run in a helper process, because fits
+in a thread took the interpreter lock from the window and froze it for seconds (``docs/sensorgram_fit_freeze_2026-10-24.md``). The traces already computed are kept (a trace depends on the
 formula, fit settings and metric only, so a statistics change or another ROI selection reuses them); a new request cancels a long one between ROIs
-and keeps what it finished. Selecting all 160 ROIs costs ~40 s once, with a progress line. 100 ms coalescing, newest request wins, a result from an
+and keeps what it finished. Selecting all 160 ROIs costs ~1 s once with the polynomial fit (a Gaussian fit ~2 s with the fast solver, ~87 s with the classic one, with a progress line). 100 ms coalescing, newest request wins, a result from an
 older file is dropped, and nothing happens while the dock is hidden (``HiddenPanelGate``).
 
 **Status bar.** A computation that lasts more than a moment (``panel_task.PanelTask``) appears in the app's task indicator ("Sensorgram: fitting
@@ -58,6 +59,7 @@ from ...analysis.settings import (
     SMOOTHING_METHODS,
 )
 from ...analysis.settings_module import AnalysisSettingsModule
+from ...analysis.trace_pool import TracePool
 from ...applog import timed
 from ...dataset import DatasetModule
 from ...roi import RoiToolbox
@@ -113,8 +115,11 @@ class SensorgramPanel(QWidget):
         parent: QWidget | None = None,
         image_busy: Callable[[], bool] | None = None,
         live: AnalysisLiveModule | None = None,
+        trace_in_process: bool = True,
     ) -> None:
-        """`image_busy`: True while the Image panel has a frame in flight; a computation then waits for it (`ImageFirst`)."""
+        """`image_busy`: True while the Image panel has a frame in flight; a computation then waits for it (`ImageFirst`). `trace_in_process`: the
+        fits run in a helper process (`TracePool`), so they never compete with the window for the interpreter lock; False computes them in the worker
+        thread (tests that spy on the fit, debugging)."""
         super().__init__(parent)
         self._live = live if live is not None else AnalysisLiveModule(self)  # without an owner: always live
         self._dirty_while_paused = False
@@ -129,6 +134,8 @@ class SensorgramPanel(QWidget):
         self._job: _Job | None = None
         self._pending = False
         self._thread: threading.Thread | None = None
+        self._trace_pool: TracePool | None = TracePool() if trace_in_process else None
+        self._pool_warm_started = False
         self._cache_key: tuple | None = None
         self._cache: dict[int, np.ndarray] = {}
         self._x_cache: tuple[tuple, np.ndarray] | None = None
@@ -254,6 +261,8 @@ class SensorgramPanel(QWidget):
         thread = self._thread
         if thread is not None:
             thread.join(timeout=_JOIN_SECONDS)
+        if self._trace_pool is not None:
+            self._trace_pool.shutdown()
 
     # -- controls <-> the statistics settings ---------------------------------------------------------------------------------
 
@@ -442,6 +451,7 @@ class SensorgramPanel(QWidget):
             else:
                 self._clear_with("No scan yet. Run it in Workflow > Analysis.")
             return
+        self._warm_up_pool()
         if not roi_ids:
             self._clear_with("Select one or more ROIs (ROI table or image) to see their sensorgram.")
             return
@@ -467,12 +477,23 @@ class SensorgramPanel(QWidget):
         self._thread = threading.Thread(target=self._compute, args=(job, dict(self._cache)), name="sensorgram-compute", daemon=True)
         self._thread.start()
 
+    def _warm_up_pool(self) -> None:
+        """A scan is loaded and this panel is showing: start the helper process now (it imports numpy / scipy, a few seconds), so the first fit
+        does not wait for that. Off the GUI thread."""
+        if self._trace_pool is None or self._pool_warm_started:
+            return
+        self._pool_warm_started = True
+        threading.Thread(target=self._trace_pool.warm_up, name="sensorgram-pool-warmup", daemon=True).start()
+
     def _compute(self, job: _Job, known: dict[int, np.ndarray]) -> None:
         total_missing = sum(1 for r in job.request.roi_ids if r not in known)
         report = (lambda done, total: self._progress.emit(done, total)) if total_missing >= _PROGRESS_MIN_ROIS else None
         try:
             with timed(logger, "sensorgram.compute", rois=len(job.request.roi_ids), new=total_missing):
-                series, new = compute_sensorgram(job.stored, job.request, known, cancelled=job.cancel.is_set, progress=report)
+                series, new = compute_sensorgram(
+                    job.stored, job.request, known, cancelled=job.cancel.is_set, progress=report,
+                    runner=None if self._trace_pool is None else self._trace_pool.run,
+                )
             self._result_ready.emit(job, series, new, None)
         except BaseException as exc:  # noqa: BLE001 - nothing may escape a thread silently
             logger.exception("Computing the sensorgram failed")

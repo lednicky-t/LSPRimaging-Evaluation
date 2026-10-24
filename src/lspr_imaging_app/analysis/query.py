@@ -31,6 +31,9 @@ from dataclasses import dataclass, field
 import numpy as np
 from scipy.optimize import curve_fit
 
+from .gaussian_fit import solve_gaussian
+from .settings import MetricSettings
+
 FORMULA_KEYS: tuple[str, ...] = ("absorbance", "ratio", "relative_change", "mod_absorbance")
 """A fixed menu, not a user-editable expression - carried over from the old
 app along with the reason: a typo'd free-form formula would silently
@@ -229,30 +232,40 @@ def fit_gaussian(
     wl_min: float | None = None,
     wl_max: float | None = None,
     sample_count: int = 400,
+    fast_first: bool = True,
 ) -> FitResult:
     """`coefficients` holds `[amplitude, center, sigma, offset]`.
 
-    Falls back to an empty `FitResult` - the same shape as the too-few-
-    points case - when there aren't enough points for 4 parameters or when
-    `curve_fit` fails to converge. A stuck, flat or very noisy spectrum
-    should cost that one cube its metric, not kill the run."""
+    Solved by `gaussian_fit.solve_gaussian` (centre and width iterated, amplitude and offset solved directly; the same solver the Sensorgram
+    uses for all cubes at once). Where that does not converge - in practice a fit window of a handful of points around the top, where the width
+    runs away because the data do not determine a bell - scipy's `curve_fit` is tried, as it was before the solver existed, so such a cube still
+    gets a value. `fast_first=False` goes straight to scipy (for a spectrum the solver has just failed on).
+
+    Returns an empty `FitResult` - the same shape as the too-few-points case - when there aren't enough points for 4 parameters or when
+    `curve_fit` fails to converge as well. A stuck, flat or very noisy spectrum should cost that one cube its metric, not kill the run."""
     x, y = _windowed(wavelengths_nm, values, wl_min, wl_max)
     if x.size < 4:
         return FitResult(x.copy(), y.copy())
 
     x_min, x_max = float(np.min(x)), float(np.max(x))
-    offset_guess = float(np.min(y))
-    amplitude_guess = float(np.max(y) - offset_guess)
-    center_guess = float(x[int(np.argmax(y))])
-    sigma_guess = max((x_max - x_min) / 6.0, 1.0e-3)
-    try:
-        coefficients, _covariance = curve_fit(
-            _gaussian_model, x, y,
-            p0=[amplitude_guess, center_guess, sigma_guess, offset_guess],
-            maxfev=10000,
-        )
-    except (RuntimeError, ValueError):
-        return FitResult(x.copy(), y.copy())
+    coefficients = None
+    if fast_first:
+        params, converged = solve_gaussian(x, y[None, :])
+        if converged[0]:
+            coefficients = params[0]
+    if coefficients is None:
+        offset_guess = float(np.min(y))
+        amplitude_guess = float(np.max(y) - offset_guess)
+        center_guess = float(x[int(np.argmax(y))])
+        sigma_guess = max((x_max - x_min) / 6.0, 1.0e-3)
+        try:
+            coefficients, _covariance = curve_fit(
+                _gaussian_model, x, y,
+                p0=[amplitude_guess, center_guess, sigma_guess, offset_guess],
+                maxfev=10000,
+            )
+        except (RuntimeError, ValueError):
+            return FitResult(x.copy(), y.copy())
 
     amplitude, center, sigma, offset = coefficients
     sigma = abs(float(sigma))
@@ -294,6 +307,7 @@ def fit_spectrum(
     poly_order: int = 3,
     wl_min: float | None = None,
     wl_max: float | None = None,
+    gaussian_fast_first: bool = True,
 ) -> FitResult | None:
     """Single dispatch point for "which fit does this method key use" -
     both the spectrum plot and the sensorgram loop go through here rather
@@ -309,7 +323,7 @@ def fit_spectrum(
     if key == "none":
         return None
     if key == "gaussian":
-        return fit_gaussian(spectrum.wavelengths_nm, spectrum.values, wl_min=wl_min, wl_max=wl_max)
+        return fit_gaussian(spectrum.wavelengths_nm, spectrum.values, wl_min=wl_min, wl_max=wl_max, fast_first=gaussian_fast_first)
     return fit_polynomial(
         spectrum.wavelengths_nm, spectrum.values,
         poly_order=poly_order, wl_min=wl_min, wl_max=wl_max,
@@ -381,3 +395,19 @@ def metric_value(
     if fit is None:
         return metric_from_spectrum(spectrum, metric_key, wl_min=wl_min, wl_max=wl_max)
     return metric_from_fit(fit, metric_key)
+
+
+def fit_and_metric(
+    spectrum: FormulaSpectrum, metric: MetricSettings, *, gaussian_fast_first: bool = True
+) -> tuple[FitResult | None, float | None, float | None]:
+    """The fit (None for "no fit") and the metric position and height read off it - or, without a fit, off the measured points. The one place
+    that decides this, so the Spectra panel (one cube) and the Sensorgram (every cube) cannot disagree. May raise what the fit raises."""
+    fit = fit_spectrum(
+        spectrum, metric.fit_method, poly_order=metric.poly_order, wl_min=metric.fit_wl_min, wl_max=metric.fit_wl_max,
+        gaussian_fast_first=gaussian_fast_first,
+    )
+    if fit is None:
+        x, y = metric_from_spectrum(spectrum, metric.metric_key, wl_min=metric.fit_wl_min, wl_max=metric.fit_wl_max)
+    else:
+        x, y = metric_from_fit(fit, metric.metric_key)
+    return fit, x, y

@@ -16,7 +16,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from .query import FitResult, FormulaSpectrum, fit_spectrum, formula_spectrum, metric_from_fit, metric_from_spectrum
+from .query import fit_and_metric, formula_spectrum
 from .scan_store import StoredScan
 from .settings import MetricSettings
 from .spectrum_errors import formula_errors, standard_error
@@ -46,17 +46,6 @@ class RoiSpectrum:
     metric_value: float | None = None
     n_missing: int = 0  # wavelengths of the scan without a value for this ROI on this cube
     note: str = ""  # why there is nothing to draw, or what went wrong with the fit
-
-
-def fit_and_metric(spectrum: FormulaSpectrum, metric: MetricSettings) -> tuple[FitResult | None, float | None, float | None]:
-    """The fit (None for "no fit") and the metric position and height read off it - or, without a fit, off the measured points. The one place
-    that decides this, so the Spectra panel (one cube) and the Sensorgram (every cube) cannot disagree. May raise what the fit raises."""
-    fit = fit_spectrum(spectrum, metric.fit_method, poly_order=metric.poly_order, wl_min=metric.fit_wl_min, wl_max=metric.fit_wl_max)
-    if fit is None:
-        x, y = metric_from_spectrum(spectrum, metric.metric_key, wl_min=metric.fit_wl_min, wl_max=metric.fit_wl_max)
-    else:
-        x, y = metric_from_fit(fit, metric.metric_key)
-    return fit, x, y
 
 
 def _primary_method(stored: StoredScan) -> str:
@@ -106,7 +95,7 @@ def compute_spectra(stored: StoredScan, request: SpectraRequest) -> list[RoiSpec
                 else:
                     result.note = "The fit needs at least two points."
             result.metric_wavelength_nm, result.metric_value = x, y
-        except (RuntimeError, ValueError, FloatingPointError, np.linalg.LinAlgError) as exc:  # curve_fit did not converge, degenerate data
+        except (RuntimeError, ValueError, FloatingPointError, np.linalg.LinAlgError) as exc:  # degenerate data
             result.note = f"The fit failed: {exc}"
         out.append(result)
     return out
