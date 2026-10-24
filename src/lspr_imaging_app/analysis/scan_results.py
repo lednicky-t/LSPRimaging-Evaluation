@@ -65,6 +65,8 @@ class ScanResultsModule(QObject):
         self._paused = False  # `set_paused`: no check starts; one runs when live again if one was wanted
         self._check_wanted = False
         self._threads: list[threading.Thread] = []
+        self._loaded_emitted_at = 0.0  # perf_counter when the loader thread handed the file over (for the "how long did the GUI thread take to get to it" figure)
+        self._loaded_applied_at = 0.0  # ... when the GUI thread applied it
         self._timer = QTimer(self)
         self._timer.setSingleShot(True)
         self._timer.setInterval(CHECK_DELAY_MS)
@@ -174,7 +176,7 @@ class ScanResultsModule(QObject):
         thread.start()
 
     def _load(self, generation: int, path: Path) -> None:
-        started = time.perf_counter()
+        started, cpu_started = time.perf_counter(), time.thread_time()
         try:
             stored = read_scan(path)
         except ScanFileError as exc:
@@ -184,13 +186,16 @@ class ScanResultsModule(QObject):
             logger.exception("Reading the scan file failed")
             self._loaded.emit(generation, None, f"Could not read {path.name}: {exc}")
             return
+        # cpu_ms far below ms = the thread waited (disk, or the interpreter lock held by another thread), not computed
         log_event(logger, "analysis.scan_loaded", logging.INFO, file=path.name, cubes=len(stored.cube_indices), rois=len(stored.roi_ids),
-                  ms=round((time.perf_counter() - started) * 1000))
+                  ms=round((time.perf_counter() - started) * 1000), cpu_ms=round((time.thread_time() - cpu_started) * 1000))
+        self._loaded_emitted_at = time.perf_counter()
         self._loaded.emit(generation, stored, None)
 
     def _on_loaded(self, generation: int, stored: object, error: object) -> None:
         if generation != self._generation:
             return  # the session changed meanwhile
+        self._loaded_applied_at = time.perf_counter()
         self._loading = False
         self._message = str(error) if error else ""
         self._stored = stored if isinstance(stored, StoredScan) else None
@@ -214,6 +219,7 @@ class ScanResultsModule(QObject):
             return
         if self._scan_running():
             return  # the scan reloads the file and asks again when it is done
+        t_start = time.perf_counter()
         try:
             snapshot = snapshot_source(self._source_factory())  # GUI thread: reads the modules, ~0.1 s on the real dataset
         except (ValueError, RuntimeError) as exc:  # no dataset, no ROIs...: nothing to compare
@@ -224,13 +230,23 @@ class ScanResultsModule(QObject):
         stored, generation = self._stored, self._generation
         self._checking = True
         self.staleness_changed.emit()
-        self._start_thread(lambda: self._check(generation, stored, snapshot), "scan-results-check")
+        # GUI-thread part of a check, for the log: how long after the file was applied the check got its turn, and what the snapshot cost
+        waits = {
+            "handover_ms": round((self._loaded_applied_at - self._loaded_emitted_at) * 1000) if self._loaded_applied_at >= self._loaded_emitted_at > 0 else None,
+            "start_wait_ms": round((t_start - self._loaded_applied_at) * 1000) if self._loaded_applied_at else None,
+            "snapshot_ms": round((time.perf_counter() - t_start) * 1000),
+        }
+        self._loaded_applied_at = 0.0  # a later check (a ROI edit) is not "after the load"
+        self._start_thread(lambda: self._check(generation, stored, snapshot, waits), "scan-results-check")
 
-    def _check(self, generation: int, stored: StoredScan, snapshot: ScanSource) -> None:
-        started = time.perf_counter()
+    def _check(self, generation: int, stored: StoredScan, snapshot: ScanSource, waits: dict[str, int | None] | None = None) -> None:
+        started, cpu_started = time.perf_counter(), time.thread_time()
         try:
-            plan = build_scan_plan(snapshot)
-            result = stale_cube_indices(stored, plan, cell_hashes(plan))
+            plan = build_scan_plan(snapshot, resolve_masks=False)  # the check hashes what the masks are made from; it does not build them
+            t_plan = time.perf_counter()
+            hashes = cell_hashes(plan)
+            t_hash = time.perf_counter()
+            result = stale_cube_indices(stored, plan, hashes)
         except ValueError as exc:  # e.g. no ROIs: the whole file is out of date for the current setup
             self._checked.emit(generation, None, str(exc))
             return
@@ -238,8 +254,12 @@ class ScanResultsModule(QObject):
             logger.exception("Checking the scan file failed")
             self._checked.emit(generation, None, f"Could not check the scan: {exc}")
             return
+        t_end = time.perf_counter()
+        # plan_ms / hash_ms / compare_ms add up to ms; cpu_ms far below ms = the thread waited for the interpreter lock (or the disk), not computed
         log_event(logger, "analysis.scan_checked", logging.INFO, stale_cubes=len(result[0]), cubes=len(stored.cube_indices),
-                  reason=result[1] or "-", ms=round((time.perf_counter() - started) * 1000))
+                  reason=result[1] or "-", ms=round((t_end - started) * 1000), cpu_ms=round((time.thread_time() - cpu_started) * 1000),
+                  plan_ms=round((t_plan - started) * 1000), hash_ms=round((t_hash - t_plan) * 1000), compare_ms=round((t_end - t_hash) * 1000),
+                  **(waits or {}))
         self._checked.emit(generation, result, None)
 
     def _on_checked(self, generation: int, result: object, error: object) -> None:

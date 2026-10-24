@@ -12,6 +12,7 @@ state of the histogram-mask-candidate selection (see
 
 from __future__ import annotations
 
+import hashlib
 import zlib
 from dataclasses import dataclass
 from functools import lru_cache
@@ -128,6 +129,13 @@ class MaskChange:
         shared 32-entry cache. For callers that decode hundreds of masks in one go (Auto mask, the session writer, the PNG
         export): through the cache they would push out the masks the Image panel is showing (1.75 ms each to decode again)."""
         return _decode_plane(self._packed, self.shape[0], self.shape[1])
+
+    def content_digest(self) -> bytes:
+        """A 16-byte digest of the pixels (and the shape), computed from the stored bits *without decoding them to a plane* (~0.3 ms, a decode is
+        ~2 ms). Equal pixels give an equal digest wherever the mask came from: it hashes the packed bits themselves (``np.packbits`` of the
+        plane in C order), not the compressed bytes, which a different zlib could write differently. The scan's staleness fingerprint uses it
+        (`analysis/scan_fingerprint.py`, `authored_mask_digest` gives the same value for a plane)."""
+        return hashlib.blake2b(zlib.decompress(self._packed) + str(self.shape).encode(), digest_size=16).digest()
 
     @property
     def stored_bytes(self) -> int:

@@ -58,6 +58,11 @@ class FrameJob:
     path: str  # the plane's record path, as dataset.io.load_image_array_uncached takes it
     affine: np.ndarray  # the frame's 2x3 chromatic matrix (identity when there is none)
     ignore: np.ndarray | None = None  # ignore mask in processed space, already warped to this frame; None = none
+    ignore_key: bytes | None = None
+    """What the ignore mask is made from, for the staleness fingerprint (`scan_fingerprint.cell_hashes`): a digest of the *authored* mask pixels
+    and of the chromatic warp that carries it to this frame (the geometry that rotates / crops it is in the recipe). The processed-space mask is
+    a function of exactly these, so a plan made only to be checked (``build_scan_plan(resolve_masks=False)``) has the key and no array. None =
+    no key was made (a hand-built job): the fingerprint then hashes ``ignore`` itself."""
 
 
 @dataclass(frozen=True)
@@ -180,6 +185,8 @@ def scan_cubes(
     total = len(jobs)
     if total == 0:
         return
+    if any(f.ignore_key is not None and f.ignore is None for job in jobs for f in job.frames):
+        raise ValueError("a frame has an ignore-mask key but no mask: this plan was built to be checked (resolve_masks=False), not to be scanned")
     if processes is not None and processes <= 1:
         io.use_fast_tiff_decoder(settings.fast_tiff_decoder)
         worker = _Worker(settings)

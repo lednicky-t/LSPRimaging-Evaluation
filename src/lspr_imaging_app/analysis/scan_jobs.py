@@ -26,6 +26,7 @@ What is deliberately handled here, not in the scan:
 from __future__ import annotations
 
 import copy
+import hashlib
 import logging
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
@@ -57,6 +58,8 @@ class MaskRef:
     authored_frame: Frame  # the frame the mask was drawn at
     scope: str  # "individual" | "persistent"
     load: Callable[[], np.ndarray]  # the mask as authored (raw image space), read-only
+    digest: Callable[[], bytes] | None = None
+    """Digest of the authored pixels, made without decoding them (`MaskChange.content_digest`). None = hash what ``load()`` returns."""
 
 
 @dataclass(frozen=True)
@@ -97,12 +100,24 @@ class ScanPlan:
     roi_ids: tuple[int, ...]
     warnings: tuple[str, ...] = field(default=())
     ignore_mask_bytes: int = 0  # memory held by the distinct ignore-mask arrays of this plan
+    masks_resolved: bool = True  # False: made by ``build_scan_plan(resolve_masks=False)``: frames carry ``ignore_key`` but no mask array
     dataset_cubes: tuple[int, ...] = ()
     acquired_at_unix_ms: np.ndarray | None = None
 
     @property
     def n_frames(self) -> int:
         return sum(len(job.frames) for job in self.jobs)
+
+
+def authored_mask_digest(mask: np.ndarray) -> bytes:
+    """16-byte digest of a mask's pixels and shape; `MaskChange.content_digest` returns the same value for the same pixels without decoding them."""
+    return hashlib.blake2b(np.packbits(np.ascontiguousarray(mask, dtype=bool)).tobytes() + str(tuple(mask.shape)).encode(), digest_size=16).digest()
+
+
+def ignore_key_of(authored_digest: bytes, warp: np.ndarray | None) -> bytes:
+    """What the processed-space ignore mask at a frame is made from: the authored pixels and the chromatic warp that carries them to the frame
+    (the geometry that rotates and crops them is in the scan recipe). `scan_fingerprint.cell_hashes` hashes this, so the mask need not be built."""
+    return hashlib.blake2b(authored_digest + (b"-" if warp is None else np.ascontiguousarray(warp, dtype=np.float64).tobytes()), digest_size=16).digest()
 
 
 def _wl_key(wavelength_nm: float) -> float:
@@ -130,8 +145,13 @@ def build_scan_plan(
     exclusion_mode: str = DEFAULT_REFERENCE_EXCLUSION_MODE,
     trimmed_fraction: float = DEFAULT_TRIMMED_MEAN_FRACTION,
     fast_tiff_decoder: bool = True,
+    resolve_masks: bool = True,
 ) -> ScanPlan:
     """Resolve the inputs of a scan of ``cubes`` (default: every spectral cube).
+
+    ``resolve_masks=False`` (the staleness check): the ignore masks are not decoded, rotated and warped (that was 3 s of the 3.9 s check on the
+    real dataset, 411 masks, 400 MB); every frame gets its ``ignore_key`` instead, which is all the fingerprint reads. Such a plan can be
+    hashed but not scanned (``scan_cubes`` refuses it).
 
     Always every ROI: the reference-ring exclusion uses **all** ROIs of a cube (a stored value must not depend on what else was
     selected), and the frame stage dominates the cost, so a caller who wants some ROIs keeps those rows of the result."""
@@ -200,6 +220,8 @@ def build_scan_plan(
 
     # -- frames: path, chromatic affine, ignore mask in processed space ----------------------------------------------------
     ignore_cache: dict[tuple, np.ndarray] = {}
+    authored_digests: dict[tuple, bytes] = {}  # (authored frame, scope) -> digest of the authored pixels
+    decoded: dict[tuple, np.ndarray] = {}  # (authored frame, scope) -> pixels, for a MaskRef that cannot make its digest without decoding
     jobs: list[CubeJob] = []
     positions: list[tuple[int, ...]] = []
     for cube_pos, cube in enumerate(chosen):
@@ -209,6 +231,7 @@ def build_scan_plan(
             frame: Frame = (cube, wl)
             affine = np.array(source.chromatic_affine(cube, wl), dtype=np.float64, copy=True)
             ignore = None
+            ignore_key = None
             ref = source.resolve_mask(cube, wl)
             if ref is not None:
                 authored_frame = (int(ref.authored_frame[0]), float(ref.authored_frame[1]))
@@ -217,10 +240,20 @@ def build_scan_plan(
                     # Only when the mask was authored at another frame; same rule as AnalysisEngine._gather_wavelength_inputs.
                     warp = np.asarray(source.chromatic_affine_between(authored_frame, frame), dtype=np.float64)
                 key = (authored_frame, ref.scope, None if warp is None else warp.tobytes())
-                if key not in ignore_cache:
-                    ignore_cache[key] = resolve_external_mask(ref.load(), geometry, warp)
-                ignore = ignore_cache[key]
-            frames.append(FrameJob(str(source.record_path(cube, wl)), affine, ignore))
+                digest_key = (authored_frame, ref.scope)
+                if digest_key not in authored_digests:
+                    if ref.digest is not None:
+                        authored_digests[digest_key] = ref.digest()
+                    else:
+                        decoded[digest_key] = ref.load()
+                        authored_digests[digest_key] = authored_mask_digest(decoded[digest_key])
+                ignore_key = ignore_key_of(authored_digests[digest_key], warp)
+                if resolve_masks:
+                    if key not in ignore_cache:
+                        pixels = decoded.get(digest_key)
+                        ignore_cache[key] = resolve_external_mask(ref.load() if pixels is None else pixels, geometry, warp)
+                    ignore = ignore_cache[key]
+            frames.append(FrameJob(str(source.record_path(cube, wl)), affine, ignore, ignore_key))
             columns.append(axis_index[_wl_key(wl)])
         jobs.append(CubeJob(cube_pos, roi_sets[cube], tuple(frames)))
         positions.append(tuple(columns))
@@ -241,7 +274,7 @@ def build_scan_plan(
     settings = ScanSettings(geometry, background, detection, methods, exclusion_mode, trimmed_fraction, fast_tiff_decoder)
     return ScanPlan(
         settings, tuple(jobs), chosen, axis, tuple(positions), reference_ids, tuple(warnings), ignore_bytes,
-        dataset_cubes=dataset_cubes, acquired_at_unix_ms=acquired,
+        dataset_cubes=dataset_cubes, acquired_at_unix_ms=acquired, masks_resolved=resolve_masks,
     )
 
 
@@ -299,7 +332,7 @@ def _mask_ref(change) -> MaskRef | None:
     """A ``MaskModule`` change (immutable, pixels compressed) as a :class:`MaskRef`; decoding waits for ``load()``."""
     if change is None:
         return None
-    return MaskRef((int(change.frame[0]), float(change.frame[1])), str(change.scope), lambda: change.mask)
+    return MaskRef((int(change.frame[0]), float(change.frame[1])), str(change.scope), lambda: change.mask, change.content_digest)
 
 
 def snapshot_source(source: ScanSource, cubes: Sequence[int] | None = None) -> ScanSource:

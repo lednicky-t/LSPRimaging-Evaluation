@@ -25,6 +25,7 @@ never a stop.
 
 from __future__ import annotations
 
+import time
 from collections.abc import Sequence
 from dataclasses import dataclass
 
@@ -64,9 +65,21 @@ def trace_from_input(data: TraceInput, formula_key: str, metric: MetricSettings)
     return traces_from_inputs([data], formula_key, metric)[0]
 
 
-def traces_from_inputs(inputs: Sequence[TraceInput], formula_key: str, metric: MetricSettings) -> list[np.ndarray]:
+def traces_from_inputs(
+    inputs: Sequence[TraceInput], formula_key: str, metric: MetricSettings, timings: dict[str, float] | None = None
+) -> list[np.ndarray]:
     """``trace_from_input`` for several ROIs: the same numbers, one trace per input, but the cubes of different ROIs that share their wavelengths are
-    fitted in common batches of up to ``BATCH_ROWS`` (each cube is still fitted alone: a row of the batch never sees another)."""
+    fitted in common batches of up to ``BATCH_ROWS`` (each cube is still fitted alone: a row of the batch never sees another).
+
+    ``timings`` (optional, filled in; adds to what it holds, so one dict can total several calls) says where the time went, for the log: ``prep_ms``
+    (formula values and grouping of the cubes), ``fit_ms`` (the batched fits, ``batches`` of them), ``per_cube_ms`` / ``per_cube_cubes`` (cubes fitted
+    one at a time: the "no fit" metric and the cubes the batch could not fit, ``redo_cubes`` of them). Reading the clock changes no result."""
+    clock = time.perf_counter
+    t_start = clock()
+    per_cube_here = 0.0  # seconds of the per-cube path in this call (not part of the preparation)
+    t_ms = timings if timings is not None else {}
+    for key in ("prep_ms", "fit_ms", "per_cube_ms", "per_cube_cubes", "redo_cubes", "batches"):
+        t_ms.setdefault(key, 0.0)
     sizes = [d.sample.shape[0] for d in inputs]
     offsets = np.concatenate([[0], np.cumsum(sizes)]).astype(np.int64)
     flat = np.full(int(offsets[-1]), np.nan)  # the traces of all ROIs one after the other; a cube is addressed by offsets[roi] + cube
@@ -80,7 +93,10 @@ def traces_from_inputs(inputs: Sequence[TraceInput], formula_key: str, metric: M
         if not wanted.any():
             continue
         if per_cube:
+            t0 = clock()
             _fill_per_cube(outs[i], np.flatnonzero(wanted), data, formula_key, metric)
+            per_cube_here += clock() - t0
+            t_ms["per_cube_cubes"] += int(wanted.sum())
             continue
         with np.errstate(all="ignore"):  # unusable entries may be NaN; they are never used
             values = formula_values(data.sample, data.reference, formula_key)
@@ -102,6 +118,9 @@ def traces_from_inputs(inputs: Sequence[TraceInput], formula_key: str, metric: M
             if x.size < 2:
                 continue  # fewer than two points: no fit, no metric (a gap)
             pending.setdefault(x.tobytes(), []).append((offsets[i] + cubes, x, values[np.ix_(cubes, np.flatnonzero(pattern))]))
+    t_fit = clock()
+    t_ms["prep_ms"] += (t_fit - t_start - per_cube_here) * 1e3
+    t_ms["per_cube_ms"] += per_cube_here * 1e3
     redo: list[np.ndarray] = []
     for items in pending.values():
         x = items[0][1]
@@ -110,17 +129,23 @@ def traces_from_inputs(inputs: Sequence[TraceInput], formula_key: str, metric: M
         for start in range(0, rows.shape[0], BATCH_ROWS):
             here = address[start : start + BATCH_ROWS]
             result = group_fit(x, rows[start : start + BATCH_ROWS], metric)
+            t_ms["batches"] += 1
             if result is None:
                 redo.append(here)
                 continue
             good, found = result
             flat[here[good]] = found[good]
             redo.append(here[~good])
+    t_redo = clock()
+    t_ms["fit_ms"] += (t_redo - t_fit) * 1e3
     if redo:
         failed = np.sort(np.concatenate(redo))
         owner = np.searchsorted(offsets, failed, side="right") - 1
         for i in np.unique(owner):
             _fill_per_cube(outs[i], failed[owner == i] - offsets[i], inputs[i], formula_key, metric, gaussian_fast_first=False)
+        t_ms["redo_cubes"] += failed.size
+        t_ms["per_cube_ms"] += (clock() - t_redo) * 1e3
+        t_ms["per_cube_cubes"] += failed.size
     return outs
 
 

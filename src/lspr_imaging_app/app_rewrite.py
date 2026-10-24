@@ -1783,6 +1783,8 @@ def build_main_window(
     _wire_quit_persistence(window, m, writer, ui_state, layout_preset_manager)
     stages.done("preferences and quit wiring", "Opening the last dataset...")
     _auto_reopen_last_dataset(m.dataset, settings, startup)
+    if m.dataset.is_loading():  # a dataset is being reopened, so a Sensorgram fit will be asked for: the helper process starts in parallel
+        sensorgram_panel.start_helper_early()
     apply_windows_titlebar_color(window, theme_obj)
     stages.done("dataset reopen start and title bar")
     stages.finish()

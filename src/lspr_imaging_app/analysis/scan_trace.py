@@ -18,17 +18,22 @@ the dataset.
 
 from __future__ import annotations
 
+import logging
+import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 
 import numpy as np
 
+from ..applog import log_event
 from ..progress import Cancelled
 from .scan_store import StoredScan
 from .scan_view import REFERENCE, SAMPLE, _primary_method
 from .settings import MetricSettings, StatisticsSettings
 from .statistics import aggregate_traces, apply_statistics
 from .trace_fit import TraceInput, trace_from_input
+
+logger = logging.getLogger(__name__)
 
 TraceRunner = Callable[
     [list[tuple[int, TraceInput]], str, MetricSettings, Callable[[], bool] | None, Callable[[int, int], None] | None],
@@ -111,12 +116,15 @@ def compute_traces(
     cancelled: Callable[[], bool] | None = None,
     progress: Callable[[int, int], None] | None = None,
     runner: TraceRunner | None = None,
+    stages: dict[str, float] | None = None,
 ) -> dict[int, np.ndarray]:
     """Compute the metric traces of the ROIs in ``roi_ids`` that are not in ``known`` and return only those (the caller adds them to its
     cache). ``cancelled`` is checked before each ROI; on cancel :class:`_PartialCancel` carries the traces finished so far. ``runner``: do the
-    fits elsewhere (a worker process, so they never compete with the window for the interpreter lock); None = in this thread."""
+    fits elsewhere (a worker process, so they never compete with the window for the interpreter lock); None = in this thread.
+    ``stages`` (optional) receives ``gather_ms`` (the arrays of each ROI cut out of the stored scan) and ``fits_ms`` (the runner, or the in-thread loop)."""
     new: dict[int, np.ndarray] = {}
     missing = [r for r in roi_ids if r not in known]
+    t0 = time.perf_counter()
     if runner is not None and missing:
         n_cube = len(stored.cube_indices)
         jobs: list[tuple[int, TraceInput]] = []
@@ -126,7 +134,10 @@ def compute_traces(
                 new[roi_id] = np.full(n_cube, np.nan)  # not in the file: no values, as metric_trace says
             else:
                 jobs.append((roi_id, data))
+        t1 = time.perf_counter()
         done, was_cancelled = runner(jobs, formula_key, metric, cancelled, progress)
+        if stages is not None:
+            stages["gather_ms"], stages["fits_ms"] = (t1 - t0) * 1e3, (time.perf_counter() - t1) * 1e3
         new.update(done)
         if was_cancelled:
             raise _PartialCancel(new)
@@ -137,6 +148,8 @@ def compute_traces(
         new[roi_id] = metric_trace(stored, roi_id, formula_key, metric)
         if progress is not None:
             progress(done + 1, len(missing))
+    if stages is not None:
+        stages["gather_ms"], stages["fits_ms"] = 0.0, (time.perf_counter() - t0) * 1e3  # no runner: the arrays are cut out inside metric_trace
     return new
 
 
@@ -191,9 +204,19 @@ def compute_sensorgram(
     """Everything the Sensorgram draws: ``(series, newly computed traces)``. If ``cancelled`` becomes true the finished traces are still
     returned (series empty) so the caller can keep them in its cache and start the next request from there."""
     stats = request.statistics
+    stages: dict[str, float] = {}
     try:
-        new = compute_traces(stored, request.roi_ids, request.formula_key, request.metric, known, cancelled=cancelled, progress=progress, runner=runner)
+        new = compute_traces(
+            stored, request.roi_ids, request.formula_key, request.metric, known, cancelled=cancelled, progress=progress, runner=runner, stages=stages
+        )
     except _PartialCancel as partial:
         return [], partial.partial
     traces = {**known, **new}
-    return build_series(request, traces, stats.sensorgram_display_mode, stats.sensorgram_aggregation, stats.sensorgram_band), new
+    t0 = time.perf_counter()
+    series = build_series(request, traces, stats.sensorgram_display_mode, stats.sensorgram_aggregation, stats.sensorgram_band)
+    log_event(
+        logger, "sensorgram.stages", logging.DEBUG, rois=len(request.roi_ids), new=len(new),
+        **{k: round(v, 1) for k, v in stages.items()}, series_ms=round((time.perf_counter() - t0) * 1e3, 1),
+        runner="none" if runner is None else "pool",
+    )
+    return series, new

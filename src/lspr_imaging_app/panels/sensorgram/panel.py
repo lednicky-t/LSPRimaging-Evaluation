@@ -477,6 +477,12 @@ class SensorgramPanel(QWidget):
         self._thread = threading.Thread(target=self._compute, args=(job, dict(self._cache)), name="sensorgram-compute", daemon=True)
         self._thread.start()
 
+    def start_helper_early(self) -> None:
+        """The app is about to open a dataset (launch with "reopen the last dataset"): start the helper process now, while the window is still being
+        built and the dataset read, instead of when the scan is first drawn (2026-10-24: it took 2.1 s to start and the first fit waited ~0.75 s of
+        that). Safe to call at any time and more than once."""
+        self._warm_up_pool()
+
     def _warm_up_pool(self) -> None:
         """A scan is loaded and this panel is showing: start the helper process now (it imports numpy / scipy, a few seconds), so the first fit
         does not wait for that. Off the GUI thread."""

@@ -33,6 +33,7 @@ import platform
 import sys
 import threading
 import time
+import traceback
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -195,6 +196,48 @@ def configure_logging(
     return system
 
 
+BENIGN_QT_WARNINGS = ("QFont::setPointSize: Point size <= 0",)
+"""Qt warnings that change nothing: Qt itself ignores the call (the font keeps its size) and the app has nothing to fix. They are still
+recorded, at DEBUG with their origin, but they no longer show as WARNINGS in the console / Log panel. 2026-10-24: "QFont::setPointSize: Point
+size <= 0 (-1)" appeared about once per session while the pointer was over the ribbon; its origin (logged) is Qt's own event loop, not a Python
+call, and no tooltip, hover or focus change of any widget in the Image panel reproduces it headless (probe in the build log). Add a message here
+only after looking at its origin fields."""
+
+
+def qt_log_level(level: int, message: str) -> int:
+    """The level a Qt message is logged at: its own, except the known-harmless ones in :data:`BENIGN_QT_WARNINGS` (DEBUG)."""
+    if level >= logging.WARNING and message.startswith(BENIGN_QT_WARNINGS):
+        return logging.DEBUG
+    return level
+
+
+def _qt_message_origin(context: Any) -> dict[str, Any]:
+    """Where a Qt warning came from, as far as it can be told: Qt's own context (usually empty in a release build), the Python stack of the thread
+    that logged it (shows the Python call that led into Qt; just the event loop when Qt itself raised it), and on the GUI thread the widget under
+    the mouse pointer, the focused widget and an open popup (a tooltip or menu opening is the usual native source). Never raises."""
+    fields: dict[str, Any] = {}
+    try:
+        frames = traceback.extract_stack()[:-2][-6:]  # not this function and the handler
+        fields["stack"] = " < ".join(f"{Path(f.filename).name}:{f.lineno}:{f.name}" for f in reversed(frames))
+        for name in ("file", "function", "line"):
+            value = getattr(context, name, None)
+            if value:
+                fields[f"qt_{name}"] = value
+        if threading.current_thread() is threading.main_thread():
+            from PyQt6.QtGui import QCursor
+            from PyQt6.QtWidgets import QApplication
+
+            app = QApplication.instance()
+            if app is not None:
+                for key, widget in (("popup", QApplication.activePopupWidget()), ("focus", QApplication.focusWidget()),
+                                    ("under_cursor", QApplication.widgetAt(QCursor.pos()))):
+                    if widget is not None:
+                        fields[key] = f"{type(widget).__name__}({widget.objectName()})"
+    except Exception:  # noqa: BLE001 - a diagnostic must never make a Qt message handler fail
+        pass
+    return fields
+
+
 def _install_hooks(system: LogSystem) -> None:
     unhandled = logging.getLogger(UNHANDLED_LOGGER)
 
@@ -263,7 +306,14 @@ def _install_hooks(system: LogSystem) -> None:
     }
 
     def qt_handler(msg_type, context, message) -> None:
-        qt_logger.log(levels.get(msg_type, logging.WARNING), "%s", message)
+        raw_level = levels.get(msg_type, logging.WARNING)
+        level = qt_log_level(raw_level, message)
+        if raw_level < logging.WARNING:
+            qt_logger.log(level, "%s", message)
+            return
+        # A Qt warning says what, not who (a release Qt build gives no source line): add what we can see of where from (2026-10-24: a
+        # "QFont::setPointSize: Point size <= 0" appeared once with nothing to trace it by)
+        qt_logger.log(level, "%s", message, extra={"lspr_event": "qt.message", "lspr_fields": _qt_message_origin(context)})
 
     previous_qt = qInstallMessageHandler(qt_handler)
     system._restore.append(lambda: qInstallMessageHandler(previous_qt))
