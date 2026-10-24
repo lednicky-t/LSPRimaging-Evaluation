@@ -132,7 +132,11 @@ class ScanTask(ThreadedTask):
         self._emit_progress(0.0, "Preparing the frames")
         try:
             with timed(logger, "analysis.scan_prepared", level=logging.INFO) as t:
-                plan = build_scan_plan(snapshot, methods=methods, exclusion_mode=exclusion_mode, trimmed_fraction=trimmed_fraction)
+                # Two steps: a plan without the ignore masks says (by hash) which cubes are stale; only those cubes get their masks built
+                # (decode, rotate, chromatic warp: ~3 s and 400 MB for all 411 masks of the test dataset, none of it needed for a current cube).
+                plan = build_scan_plan(
+                    snapshot, methods=methods, exclusion_mode=exclusion_mode, trimmed_fraction=trimmed_fraction, resolve_masks=False,
+                )
                 hashes = cell_hashes(plan)
                 store = ScanStore(store_path) if store_path is not None else None
                 positions = list(range(len(plan.jobs)))
@@ -140,7 +144,16 @@ class ScanTask(ThreadedTask):
                     stored = store.prepare(plan, dataset_label=dataset_label)
                     if only_stale:
                         positions = stale_cube_positions(stored, hashes)
-                t.set(cubes=len(plan.jobs), stale_cubes=len(positions), frames=plan.n_frames, ignore_mask_mb=round(plan.ignore_mask_bytes / 1e6, 1))
+                run_plan = None
+                if positions:
+                    run_plan = build_scan_plan(
+                        snapshot, cubes=[plan.cube_indices[p] for p in positions], methods=methods, exclusion_mode=exclusion_mode,
+                        trimmed_fraction=trimmed_fraction,
+                    )
+                t.set(
+                    cubes=len(plan.jobs), stale_cubes=len(positions), frames=plan.n_frames,
+                    ignore_mask_mb=round((run_plan.ignore_mask_bytes if run_plan is not None else 0) / 1e6, 1),
+                )
         except ValueError as exc:  # nothing to scan / inconsistent ROI ids: the user's setup, not a crash
             return _Refused(str(exc))
         settings = plan.settings
@@ -155,13 +168,12 @@ class ScanTask(ThreadedTask):
             )
             return _Outcome(run_plan, new_arrays(run_plan), summary)
 
-        run_plan = plan if len(positions) == len(plan.jobs) else subset_plan(plan, [plan.cube_indices[p] for p in positions])
-        run_hashes = hashes[positions]
+        run_hashes = hashes[positions]  # the same hashes the resolved plan would give: its frames carry the same ignore keys
         log_event(
             logger, "analysis.scan_start", logging.INFO, cubes=len(run_plan.jobs), cubes_current=current, frames=run_plan.n_frames,
             rois=len(plan.roi_ids), wavelengths=len(plan.wavelength_axis_nm), methods=",".join(settings.methods),
             background=settings.background.flatten_background_enabled, exclusion=settings.exclusion_mode,
-            processes=processes if processes is not None else "auto", warnings=len(plan.warnings), store=store is not None,
+            processes=processes if processes is not None else "auto", warnings=len(run_plan.warnings), store=store is not None,
         )
 
         arrays = new_arrays(run_plan)
@@ -205,7 +217,7 @@ class ScanTask(ThreadedTask):
             cubes=len(run_plan.jobs), frames=frames, rois=len(plan.roi_ids), wavelengths=len(plan.wavelength_axis_nm),
             seconds=time.perf_counter() - started, frames_per_second=frames / wall if wall > 0 else 0.0,
             workers=report.workers if report is not None else (processes if processes and processes > 1 else 0),
-            mode=report.mode if report is not None else "explicit", busy_seconds=busy, warnings=plan.warnings, cubes_current=current,
+            mode=report.mode if report is not None else "explicit", busy_seconds=busy, warnings=run_plan.warnings, cubes_current=current,
             store_path=store_path, file_mb=_file_mb(store_path),
         )
         fields = report.as_fields() if report is not None else {}
@@ -213,7 +225,7 @@ class ScanTask(ThreadedTask):
             logger, "analysis.scan_done", logging.INFO, cubes=summary.cubes, cubes_current=current, frames=frames, rois=summary.rois,
             seconds=round(summary.seconds, 1), frames_per_s=round(summary.frames_per_second, 1), busy_read_s=round(busy["read"], 1),
             busy_prepare_s=round(busy["prepare"], 1), busy_reduce_s=round(busy["reduce"], 1), write_s=round(write_seconds, 1),
-            file_mb=round(summary.file_mb, 1), warnings=len(plan.warnings), **{f"perf_{k}": v for k, v in fields.items()},
+            file_mb=round(summary.file_mb, 1), warnings=len(run_plan.warnings), **{f"perf_{k}": v for k, v in fields.items()},
         )
         return _Outcome(run_plan, arrays, summary)
 
