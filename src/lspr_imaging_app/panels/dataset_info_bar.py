@@ -75,11 +75,16 @@ class DatasetInfoBar(QWidget):
 
         dataset.dataset_loaded.connect(self._on_loaded)  # also fires after a metadata import
         dataset.dataset_cleared.connect(self._on_cleared)
+        dataset.file_stats_ready.connect(self._on_file_stats_ready)  # the size is counted in the background (2026-10-24)
         self.refresh()
 
     def _on_loaded(self, loaded: ImageDataset) -> None:
         self._loaded = loaded
         self.refresh()
+
+    def _on_file_stats_ready(self, ready: ImageDataset) -> None:
+        if ready is self._loaded:
+            self._stats_label.setText(self._stats_text(ready))
 
     def _on_cleared(self) -> None:
         self._loaded = None
@@ -125,7 +130,7 @@ class DatasetInfoBar(QWidget):
 
     def _stats_text(self, loaded: ImageDataset) -> str:
         stats = self._dataset.dataset_file_stats(loaded)
-        size_text = _format_bytes(stats[0] if stats is not None else 0)
+        size_text = _format_bytes(stats[0]) if stats is not None else "..."  # None: still being counted in the background
         type_text = "OME-Zarr" if loaded.is_ome_zarr else "TIFF Stack"
         return f"{type_text} · {size_text} · C/WL: {len(loaded.spectral_cube_indices)}/{len(loaded.wavelengths_nm)}"
 

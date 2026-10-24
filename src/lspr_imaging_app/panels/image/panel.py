@@ -2122,6 +2122,11 @@ class ImagePanel(QWidget):
             log_event(logger, "playback.summary", logging.INFO, **stats.total_fields(), **self._play_config_fields())
             self._on_tool_status(summary)
 
+    def render_pending(self) -> bool:
+        """True from a request for a new frame (including the short coalescing pause before it is sent) until that frame has been
+        drawn. Other panels use it to let the image come first (`panels/image_first.py`). Always False without a dataset."""
+        return self._redraw_timer.isActive() or self._latest_serial != self._last_shown_serial
+
     def _on_rendered(self, result: RenderResult) -> None:
         arrived = time.perf_counter()
         serial = result.request.serial

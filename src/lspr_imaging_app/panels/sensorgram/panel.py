@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import logging
 import threading
+from collections.abc import Callable
 from dataclasses import dataclass, replace
 
 import numpy as np
@@ -64,6 +65,7 @@ from ...selection.cube_display_module import MODE_TIME
 from ...storage.ui_state_keys import SENSORGRAM_RIBBON_OPEN, read
 from ..ribbon_fields import style_ribbon_check, style_ribbon_combo, style_ribbon_number_field
 from ..ribbon_row import RibbonRow, rolled_ribbon
+from ..image_first import ImageFirst
 from ..panel_task import PanelTask
 from ..ui_state import UiStateStore
 from ..visibility_gate import HiddenPanelGate
@@ -107,8 +109,11 @@ class SensorgramPanel(QWidget):
         analysis_settings: AnalysisSettingsModule,
         cube_display: CubeDisplayModule,
         parent: QWidget | None = None,
+        image_busy: Callable[[], bool] | None = None,
     ) -> None:
+        """`image_busy`: True while the Image panel has a frame in flight; a computation then waits for it (`ImageFirst`)."""
         super().__init__(parent)
+        self._image_first = ImageFirst(image_busy)
         self._scan = scan_results
         self._roi_toolbox = roi_toolbox
         self._dataset = dataset
@@ -425,6 +430,9 @@ class SensorgramPanel(QWidget):
         if self._job is not None:
             self._job.cancel.set()  # a running (maybe long) computation is stopped between ROIs; what it finished is kept
             self._pending = True
+            return
+        if self._image_first.should_wait():  # the frame the user is waiting for goes first (the fit slows its read down 10-20x)
+            self._schedule_redraw()  # ask again in one coalescing step (and not at all while the dock is hidden)
             return
         job = _Job(self._generation, stored, request, key, threading.Event())
         self._job = job

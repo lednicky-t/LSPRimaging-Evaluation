@@ -115,6 +115,8 @@ class DatasetSummarySection(QWidget):
 
         self._dataset_module.dataset_loaded.connect(self._on_dataset_loaded)
         self._dataset_module.dataset_cleared.connect(self._on_dataset_cleared)
+        self._dataset_module.file_stats_ready.connect(self._on_file_stats_ready)  # size and date are counted in the background (2026-10-24)
+        self._shown: ImageDataset | None = None
 
     @staticmethod
     def _paired_row(left: QLabel, right: QLabel) -> QWidget:
@@ -127,7 +129,32 @@ class DatasetSummarySection(QWidget):
         row_layout.addStretch(1)
         return row
 
+    def _on_file_stats_ready(self, ready: ImageDataset) -> None:
+        if ready is self._shown:
+            self._show_size_and_date(ready)
+
+    def _show_size_and_date(self, dataset: ImageDataset) -> None:
+        """The labels that depend on the dataset's file size / date. Those are counted on a background thread, so right after a
+        load they read "..." and this runs again when `file_stats_ready` arrives."""
+        # An OME-Zarr's records are synthetic paths, so the count stats the files under the .ome.zarr folder instead
+        # (`DatasetModule.dataset_file_stats`, one count per dataset, shared with the menu bar's info row).
+        stats = self._dataset_module.dataset_file_stats(dataset)
+        if stats is None:
+            size_text, date_text = "...", "..."
+        else:
+            size_text = _format_bytes(stats[0])
+            date_text = datetime.fromtimestamp(stats[1]).strftime("%Y-%m-%d") if stats[1] is not None else "Unknown"
+        cube_text = str(len(dataset.spectral_cube_indices))
+        wavelength_text = str(len(dataset.wavelengths_nm))
+        # Images deliberately left out of the header (maintainer's explicit call, 2026-09-25) - kept in the expanded body below.
+        self.header_stats_label.setText(f"Size: {size_text}, Cubes: {cube_text}, WL: {wavelength_text}")
+        type_text = "OME-Zarr" if dataset_is_ome_zarr(dataset) else "TIFF Stack"
+        self.dataset_header_stats_label.setText(f"{type_text} · {size_text} · C/WL: {cube_text}/{wavelength_text}")
+        self._size_label.setText(f"Dataset size: {size_text}")
+        self._date_label.setText(f"Dataset's date: {date_text}")
+
     def _on_dataset_cleared(self) -> None:
+        self._shown = None
         self.header_stats_label.setText("")
         self.dataset_header_stats_label.setText("")
         self._base_rows.setVisible(False)
@@ -147,28 +174,13 @@ class DatasetSummarySection(QWidget):
                 resolution_text = "Unknown"
 
         is_ome_zarr = dataset_is_ome_zarr(dataset)
-        # Size and date: one scan per dataset, shared with the menu bar's info row (`DatasetModule.dataset_file_stats`;
-        # an OME-Zarr's records are synthetic paths, so it stats the files under the .ome.zarr folder instead).
-        size_bytes, oldest_mtime = self._dataset_module.dataset_file_stats(dataset) or (0, None)
-        dataset_date = datetime.fromtimestamp(oldest_mtime).strftime("%Y-%m-%d") if oldest_mtime is not None else "Unknown"
-
-        cube_text = str(len(spectral_cube_values))
-        wavelength_text = str(len(wavelength_values))
-        size_text = _format_bytes(size_bytes)
-
-        # Images deliberately left out here (maintainer's explicit call,
-        # 2026-09-25) - kept in the expanded body below.
-        self.header_stats_label.setText(f"Size: {size_text}, Cubes: {cube_text}, WL: {wavelength_text}")
-
-        type_text = "OME-Zarr" if is_ome_zarr else "TIFF Stack"
-        self.dataset_header_stats_label.setText(f"{type_text} · {size_text} · C/WL: {cube_text}/{wavelength_text}")
+        self._shown = dataset
+        self._show_size_and_date(dataset)
 
         self._images_label.setText(f"Images: {len(records)}")
-        self._size_label.setText(f"Dataset size: {size_text}")
-        self._cubes_label.setText(f"Spectral cubes: {cube_text}")
-        self._wavelengths_label.setText(f"Wavelengths: {wavelength_text}")
+        self._cubes_label.setText(f"Spectral cubes: {len(spectral_cube_values)}")
+        self._wavelengths_label.setText(f"Wavelengths: {len(wavelength_values)}")
         self._resolution_label.setText(f"Resolution: {resolution_text}")
-        self._date_label.setText(f"Dataset's date: {dataset_date}")
         self._base_rows.setVisible(True)
 
         zarr_summary = read_existing_ome_zarr_summary(dataset.folder) if is_ome_zarr else None

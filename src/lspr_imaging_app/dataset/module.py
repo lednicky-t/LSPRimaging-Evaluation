@@ -61,6 +61,7 @@ subscriber, not assumed correct.
 from __future__ import annotations
 
 import logging
+import threading
 import time
 from dataclasses import dataclass
 from datetime import datetime
@@ -151,6 +152,10 @@ class DatasetModule(QObject):
     # The View tab's grid of the loaded OME-Zarr's own chunks (2026-10-22), cosmetic like the export preview above.
     # Independent of it: both grids can be shown at once.
     source_chunk_grid_changed = pyqtSignal()
+    # The size / date of the loaded dataset's files are known (2026-10-24: they are counted on a background thread, an OME-Zarr walk
+    # took ~3.5 s on the GUI thread). Carries the dataset they belong to; emitted on the GUI thread.
+    file_stats_ready = pyqtSignal(object)  # ImageDataset
+    _file_stats_done = pyqtSignal(object, object)  # (dataset, stats | None): thread -> GUI thread hand-off
 
     def __init__(self, parent: QObject | None = None) -> None:
         super().__init__(parent)
@@ -162,6 +167,8 @@ class DatasetModule(QObject):
         self._chunk_grid_preview = ChunkGridPreview()
         self._source_chunk_grid_visible = False
         self._file_stats_cache: tuple[ImageDataset, tuple[int, float | None]] | None = None
+        self._file_stats_wanted: ImageDataset | None = None  # the dataset whose count is running or finished; None after a clear
+        self._file_stats_done.connect(self._on_file_stats_done)
         self._worker = AnalysisWorker()
         # Separate from `_worker` (load) rather than shared - a load and an
         # export are independent operations with no reason to serialize
@@ -219,14 +226,40 @@ class DatasetModule(QObject):
         return load_image_array_uncached(str(record.path))
 
     def dataset_file_stats(self, dataset: ImageDataset | None = None) -> tuple[int, float | None] | None:
-        """(total bytes, oldest file mtime) of `dataset` (default: the loaded one), or None without one. Scanned once
-        per dataset (the Dataset summary and the menu bar's info row both ask on every load or metadata import)."""
+        """(total bytes, oldest file mtime) of `dataset` (default: the loaded one), or **None while they are not known yet**
+        (and without a dataset). Never blocks: the first ask starts the count on a plain `threading.Thread` and `file_stats_ready`
+        (carrying the dataset) is emitted when it is in; every ask after that returns the cached value. Counted once per dataset
+        (the Dataset summary and the menu bar's info row both ask on every load or metadata import).
+
+        2026-10-24: this used to count on the calling (GUI) thread, 3.3-3.7 s for an OME-Zarr of 8905 files
+        (`docs/startup_gui_thread_audit_2026-10-24.md`). Plain thread, not `QThreadPool`: the work is `os.scandir` only, but it
+        is dataset-adjacent (CLAUDE.md invariant)."""
         target = dataset if dataset is not None else self._dataset
         if target is None:
             return None
-        if self._file_stats_cache is None or self._file_stats_cache[0] is not target:
-            self._file_stats_cache = (target, dataset_file_stats(target))
-        return self._file_stats_cache[1]
+        if self._file_stats_cache is not None and self._file_stats_cache[0] is target:
+            return self._file_stats_cache[1]
+        if self._file_stats_wanted is not target:  # not counting it yet (a count of another dataset is dropped when it ends)
+            self._file_stats_wanted = target
+
+            def count() -> None:
+                started = time.perf_counter()
+                try:
+                    stats: tuple[int, float | None] | None = dataset_file_stats(target)
+                except Exception:  # noqa: BLE001 - nothing may escape a thread silently; a size is only displayed
+                    logger.exception("Counting the dataset's files failed")
+                    stats = (0, None)
+                log_event(logger, "dataset.file_stats", logging.INFO, ms=round((time.perf_counter() - started) * 1000))
+                self._file_stats_done.emit(target, stats)
+
+            threading.Thread(target=count, name="dataset-file-stats", daemon=True).start()
+        return None
+
+    def _on_file_stats_done(self, dataset: object, stats: object) -> None:
+        if dataset is not self._file_stats_wanted or not isinstance(stats, tuple):
+            return  # the dataset was cleared or replaced while counting
+        self._file_stats_cache = (dataset, stats)  # type: ignore[assignment]
+        self.file_stats_ready.emit(dataset)
 
     def timed_image_count(self) -> int:
         """How many images have an acquisition time recorded (0 without metadata). Does not compact the timings: the
@@ -661,6 +694,7 @@ class DatasetModule(QObject):
         self._time_anchor_known = False
         self._mean_interval_cache = None
         self._file_stats_cache = None
+        self._file_stats_wanted = None
         self.dataset_cleared.emit()
 
     # -- chunk-grid preview (Export section <-> Image panel) ----------------

@@ -89,7 +89,9 @@ from .panels.sensorgram import SensorgramPanel
 from .panels.sensorgram.panel import TASK_ID as SENSORGRAM_TASK_ID
 from .panels.spectra import SpectraPanel
 from .panels.spectra.panel import TASK_ID as SPECTRA_TASK_ID
+from .launch import LaunchSplash, StageClock
 from .panels.task_indicator import TaskIndicator
+from .startup_tracker import STARTUP_TASK_ID, StartupStep, StartupTracker
 from .panels.ui_state import UiStateStore
 from .panels.workflow import WorkflowPanel, WorkflowStage
 from .panels.workflow.collapsible_section import CollapsibleSection
@@ -1174,6 +1176,35 @@ def _wire_analysis_scan(m: _Modules, row: AnalysisTab, ui_state: UiStateStore) -
     show_saved_scan()
 
 
+def _build_startup_tracker(
+    m: _Modules, image_panel: ImagePanel, spectra_panel: SpectraPanel, sensorgram_panel: SensorgramPanel
+) -> StartupTracker:
+    """The status-bar "Starting up" entry for a launch that reopens the last dataset (2026-10-24, `startup_tracker.py`). Idle until
+    `_auto_reopen_last_dataset` calls `start()`. The steps are asked in this order; each says what the app is waiting for."""
+    first_image = {"drawn": False}
+    image_panel.image_rendered.connect(lambda *_: first_image.update(drawn=True))
+    scan = m.scan_results
+
+    def scan_settled() -> bool:
+        # No file, or a file that has been read *and* compared with the current setup (stale_cubes() is None until that check ran).
+        if scan.is_loading() or scan.is_checking():
+            return False
+        return scan.stored() is None or scan.stale_cubes() is not None or bool(scan.message())
+
+    tracker = StartupTracker([
+        StartupStep("dataset", "opening the dataset", lambda: m.dataset.dataset_home() is not None and not m.dataset.is_loading()),
+        # The autosave root is set only once the session has been applied (or found not to exist), see _wire_session_coordinator.
+        StartupStep("session", "reading the session", lambda: m.session_autosave.root() is not None and not m.session_load.is_running()),
+        StartupStep("first image", "drawing the first image", lambda: first_image["drawn"]),
+        StartupStep("scan results", "reading the scan results", scan_settled),
+        StartupStep("panels", "Spectra / Sensorgram calculating", lambda: not (spectra_panel.task.is_active() or sensorgram_panel.task.is_active())),
+    ])
+    # Both signals come from the loader thread; connecting to the tracker's own slots makes Qt deliver them on the GUI thread.
+    m.dataset.dataset_load_failed.connect(tracker.fail)
+    m.dataset.dataset_choice_needed.connect(tracker.on_choice_needed)
+    return tracker
+
+
 def _build_status_bar(
     window: QMainWindow,
     m: _Modules,
@@ -1182,6 +1213,7 @@ def _build_status_bar(
     roi_table_panel: RoiTablePanel,
     spectra_panel: SpectraPanel,
     sensorgram_panel: SensorgramPanel,
+    startup: StartupTracker,
 ) -> None:
     status_bar = QStatusBar(window)
     window.setStatusBar(status_bar)
@@ -1215,7 +1247,10 @@ def _build_status_bar(
     spectra_panel.task.task_finished.connect(task_indicator.finish)
     sensorgram_panel.task.task_progress.connect(task_indicator.report)  # a Sensorgram recompute that lasts (fitting many ROIs)
     sensorgram_panel.task.task_finished.connect(task_indicator.finish)
+    startup.task_progress.connect(task_indicator.report)  # "Starting up": the launch is not finished until the dataset and all that follows is in
+    startup.task_finished.connect(task_indicator.finish)
     cancel_by_task = {
+        STARTUP_TASK_ID: startup.cancel,  # stops the status-bar entry only; loading is not interrupted
         SPECTRA_TASK_ID: spectra_panel.cancel,
         SENSORGRAM_TASK_ID: sensorgram_panel.cancel,
         SESSION_LOAD_TASK_ID: m.session_load.cancel,
@@ -1485,20 +1520,27 @@ def _wire_quit_persistence(
     app.aboutToQuit.connect(_persist_on_quit)
 
 
-def _auto_reopen_last_dataset(dataset: DatasetModule, settings: AppSettings) -> None:
+def _auto_reopen_last_dataset(dataset: DatasetModule, settings: AppSettings, startup: StartupTracker | None = None) -> None:
     """Auto-reopen the last dataset (2026-09-26, on by default - see the
     "Reopen Last Dataset on Launch" toggle). Safe on a fresh/test
     `AppSettings()` (no `on_settings_changed` given): `last_dataset_folder`
     is `None` until a real settings file has actually recorded one, so
-    this is a no-op for every existing zero-argument caller."""
+    this is a no-op for every existing zero-argument caller.
+
+    `startup` (2026-10-24) is the status-bar "Starting up" entry: started here, only when a
+    dataset is really being reopened, and ended by the tracker itself once everything is loaded."""
     if not (settings.auto_reopen_last_dataset and settings.last_dataset_folder):
         return
     last_folder = Path(settings.last_dataset_folder)
     if last_folder.is_dir():
+        if startup is not None:
+            startup.start()
         try:
             dataset.load_dataset_from_folder(last_folder)
         except RuntimeError:
             logger.exception("Could not auto-reopen the last dataset at %s", last_folder)
+            if startup is not None:
+                startup.fail(f"could not reopen {last_folder.name}")
     else:
         logger.info("Last dataset folder %s no longer exists - skipping auto-reopen", last_folder)
 
@@ -1553,6 +1595,7 @@ def _wire_log_console(window: QMainWindow, ui_state: UiStateStore, image_panel: 
 def build_main_window(
     initial_settings: AppSettings | None = None,
     on_settings_changed: Callable[[AppSettings], None] | None = None,
+    progress: Callable[[str], None] | None = None,
 ) -> QMainWindow:
     """Construct every rewrite module and wire the panels to them, per the
     module boundaries in CLAUDE.md / sketch §7. No module reaches into
@@ -1570,7 +1613,11 @@ def build_main_window(
     existing test that calls `build_main_window()` with no arguments keeps
     doing zero settings-file I/O and no auto-reopen (`AppSettings()`'s
     defaults have `last_dataset_folder=None`, so the auto-reopen guard
-    is always a no-op without a real settings file behind it)."""
+    is always a no-op without a real settings file behind it).
+
+    **`progress` (2026-10-24)**: called with a short message at the main steps (the launch screen shows it, `launch.py`). Every step is
+    also timed (`app.build_stage` DEBUG events, `stages.done(...)` below): add a `done` after a new step that may be slow."""
+    stages = StageClock(progress)
     settings = initial_settings if initial_settings is not None else AppSettings()
     writer = _SettingsWriter(settings, on_settings_changed)
 
@@ -1586,6 +1633,7 @@ def build_main_window(
     # Small UI choices (toggles, picks, Export options...) - panels/ui_state.py.
     ui_state = UiStateStore(settings.ui_state, on_changed=lambda values: writer.persist(ui_state=values))
     apply_saved_perf_preferences(ui_state)  # parallel work: automatic / fixed number, cores kept free, low priority (perf_setup.py)
+    stages.done("theme and saved settings", "Creating the modules...")
 
     m = _build_modules()
     # The cube unit (number / start time) is one app-wide display choice, remembered across restarts.
@@ -1604,13 +1652,16 @@ def build_main_window(
     # highlight-range restore below, which records `last_dataset_folder`
     # alongside the range it puts back.
     m.dataset.dataset_loaded.connect(lambda ds: writer.persist(last_dataset_folder=str(ds.home)))
+    stages.done("modules", "Building the Image panel...")
 
     image_panel = _build_image_panel(m, ui_state, theme_obj)
     _wire_highlight_range_persistence(m, ui_state, settings)
     _wire_display_range_persistence(m, ui_state, settings, image_panel)
+    stages.done("Image panel", "Building the panels...")
     histogram_panel = _build_histogram_panel(m, image_panel, ui_state)
     image_panel.restore_ui_state(ui_state)
     histogram_panel.restore_ui_state(ui_state)
+    stages.done("Histogram panel")
     try:
         m.mask_scope.set_scope(MaskScope(ui_state.get(MASK_SCOPE.key)))
     except ValueError:  # nothing saved yet
@@ -1622,9 +1673,13 @@ def build_main_window(
     roi_table_panel.restore_ui_state(ui_state)
     spectra_panel = SpectraPanel(m.scan_results, m.roi_toolbox, m.selection, m.analysis_settings)
     spectra_panel.restore_ui_state(ui_state)
-    sensorgram_panel = SensorgramPanel(m.scan_results, m.roi_toolbox, m.dataset, m.selection, m.analysis_settings, m.cube_display)
+    sensorgram_panel = SensorgramPanel(
+        m.scan_results, m.roi_toolbox, m.dataset, m.selection, m.analysis_settings, m.cube_display, image_busy=image_panel.render_pending
+    )
     sensorgram_panel.restore_ui_state(ui_state)
+    stages.done("ROI table, Spectra and Sensorgram panels")
     workflow = _build_workflow_panel(m, writer, ui_state)
+    stages.done("Workflow panel", "Assembling the window...")
 
     window = QMainWindow()
     window.setWindowTitle(rewrite_version_string())
@@ -1641,14 +1696,18 @@ def build_main_window(
     window.setDockOptions(QMainWindow.DockOption.AnimatedDocks | QMainWindow.DockOption.AllowNestedDocks)
     edit_menu, view_menu = _build_menu_bar(window)
     attach_to_menu_bar(window.menuBar(), m.dataset)  # dataset path, type / size / cubes, and the Time / Plan checks
-    _build_status_bar(window, m, workflow, image_panel, roi_table_panel, spectra_panel, sensorgram_panel)
+    startup = _build_startup_tracker(m, image_panel, spectra_panel, sensorgram_panel)
+    _build_status_bar(window, m, workflow, image_panel, roi_table_panel, spectra_panel, sensorgram_panel, startup)
     _wire_analysis_scan(m, image_panel.analysis_tab, ui_state)
     _wire_session_carry_prompt(window, m)
     _wire_edit_menu(edit_menu, window, m.analysis_engine)
+    stages.done("menus and status bar")
     panel_docks = _build_dock_layout(
         window, workflow, image_panel, histogram_panel, roi_table_panel, spectra_panel, sensorgram_panel
     )
+    stages.done("dock layout")
     log_dock = _wire_log_console(window, ui_state, image_panel)
+    stages.done("Log console")
     # A display panel does no work while its dock is hidden (closed, behind a tab, window minimised) and
     # catches up once when it is shown again (panels/visibility_gate.py).
     for dock_name, hidden_aware_panel in (("Histogram", histogram_panel), ("ROI / Groups", roi_table_panel), ("Spectra", spectra_panel),
@@ -1696,16 +1755,21 @@ def build_main_window(
         initial_theme=settings.theme,
         on_theme_changed=lambda name: writer.persist(theme=name),
     )
+    stages.done("View menu and layout presets")
     _restore_window_state(window, settings, panel_docks, layout_preset_manager)
     ensure_floating_panels_on_screen({"Log": log_dock}, window)
+    stages.done("saved window layout")
 
     # Edit -> Preferences...: reopen-last-dataset, the preset auto-apply toggle and the overlay cache size (2026-10-19;
     # they were in the Options menu, which is gone).
     _wire_preferences(edit_menu, window, image_panel, writer, layout_preset_manager, ui_state)
 
     _wire_quit_persistence(window, m, writer, ui_state, layout_preset_manager)
-    _auto_reopen_last_dataset(m.dataset, settings)
+    stages.done("preferences and quit wiring", "Opening the last dataset...")
+    _auto_reopen_last_dataset(m.dataset, settings, startup)
     apply_windows_titlebar_color(window, theme_obj)
+    stages.done("dataset reopen start and title bar")
+    stages.finish()
     return window
 
 
@@ -1789,10 +1853,15 @@ def _wire_preferences(
 _GC_SUMMARY_MS = 5000
 
 
-def main() -> None:
+def main(app: QApplication | None = None, splash: LaunchSplash | None = None) -> None:
+    """`app` / `splash`: `main_rewrite.py` creates the QApplication and the launch screen first, so the screen is up while the
+    modules above are imported; `splash` is closed once the window is shown. Both default to None (own QApplication, no screen)."""
     system = configure_logging(app_version=rewrite_version_string())
     apply_switch_interval()  # before any worker thread exists; see gil_tuning.py
-    app = QApplication(sys.argv)
+    if app is None:
+        app = QApplication(sys.argv)
+    if splash is not None:
+        splash.show("Starting...")
     log_event(
         logger, "app.start", logging.INFO,
         version=rewrite_version_string(), log_file=str(system.log_path),
@@ -1812,8 +1881,10 @@ def main() -> None:
     initial_settings = load_app_settings()
     runtime = install_perf_runtime(initial_settings.ui_state)  # learned worker counts + saved choices; never in tests (perf_setup.py)
     log_event(logger, "perf.machine", logging.INFO, machine=runtime.probe().describe(), fingerprint=runtime.last_system().fingerprint())
-    window = build_main_window(initial_settings, on_settings_changed=save_app_settings)
+    window = build_main_window(initial_settings, on_settings_changed=save_app_settings, progress=splash.show if splash is not None else None)
     window.show()
+    if splash is not None:
+        splash.finish(window)
     sys.exit(app.exec())
 
 
