@@ -13,7 +13,7 @@ is 0 on purpose; child rows are indented here instead).
 
 from __future__ import annotations
 
-from PyQt6.QtCore import QModelIndex, QPointF, QRect, QRectF, QSize, Qt
+from PyQt6.QtCore import QModelIndex, QPersistentModelIndex, QPointF, QRect, QRectF, QSize, Qt
 from PyQt6.QtGui import QColor, QFont, QPainter, QPen, QPolygonF
 from PyQt6.QtWidgets import QLineEdit, QStyle, QStyledItemDelegate, QStyleOptionViewItem, QTreeView, QWidget
 
@@ -81,6 +81,10 @@ class _StepLineEdit(QLineEdit):
 
 
 class RoiTableDelegate(QStyledItemDelegate):
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self._editing: QPersistentModelIndex | None = None  # the group header whose name is being edited
+
     def sizeHint(self, option: QStyleOptionViewItem, index: QModelIndex) -> QSize:  # type: ignore[override]
         # Only the height matters: the header sizes every column itself (stretch /
         # interactive, never "resize to contents"), and Qt takes a row's height as
@@ -244,14 +248,14 @@ class RoiTableDelegate(QStyledItemDelegate):
             count_text,
         )
 
+        if self._editing is not None and self._editing == QPersistentModelIndex(index):
+            return  # the editor sits exactly where the name is painted; painting it too would double it
         font = QFont(option.font)
         font.setBold(not ungrouped)
         font.setItalic(ungrouped)
         painter.setFont(font)
         painter.setPen(QColor(theme.text_muted if ungrouped else theme.text_primary))
-        first_column_right = rect.left() + (view.columnWidth(0) if isinstance(view, QTreeView) else 0)
-        name_left = max(int(chip.right()) + 9 + metrics.horizontalAdvance(count_text) + 7, first_column_right + 2)
-        name_rect = QRect(name_left, rect.top(), max(0, rect.right() - name_left - 8), rect.height())
+        name_rect = self._group_name_rect(option, index, count_text)
         text = str(index.data(Qt.ItemDataRole.DisplayRole) or "")
         painter.drawText(
             name_rect,
@@ -259,9 +263,21 @@ class RoiTableDelegate(QStyledItemDelegate):
             metrics.elidedText(text, Qt.TextElideMode.ElideRight, name_rect.width()),
         )
 
+    @staticmethod
+    def _group_name_rect(option: QStyleOptionViewItem, index: QModelIndex, count_text: str) -> QRect:
+        """Where a group header's name is painted (and edited): after the chevron, chip and
+        count, but never left of the end of column 0 (the count sits under the "#/ROIs" title)."""
+        rect = option.rect
+        view = option.widget
+        first_column_right = rect.left() + (view.columnWidth(0) if isinstance(view, QTreeView) else 0)
+        name_left = max(CHEVRON_ZONE + rect.left() + 12 + 9 + option.fontMetrics.horizontalAdvance(count_text) + 7, first_column_right + 2)
+        return QRect(name_left, rect.top(), max(0, rect.right() - name_left - 8), rect.height())
+
     # -- editing --------------------------------------------------------------------
 
     def createEditor(self, parent: QWidget, option: QStyleOptionViewItem, index: QModelIndex) -> QWidget:  # type: ignore[override]
+        if index.data(KIND_ROLE) == "group":
+            self._editing = QPersistentModelIndex(index)
         steps = index.data(KIND_ROLE) != "group" and index.column() in DIAMETER_COLUMNS
         unit = getattr(index.model(), "unit", None)
         editor = _StepLineEdit(parent, unit() if steps and callable(unit) else None)
@@ -270,6 +286,10 @@ class RoiTableDelegate(QStyledItemDelegate):
             f"QLineEdit {{ background: {theme.control_bg}; color: {theme.text_primary}; "
             f"border: 1px solid {theme.control_border_hover}; border-radius: 3px; padding: 0 4px; }}"
         )
+        if index.data(KIND_ROLE) == "group":
+            font = editor.font()
+            font.setBold(True)  # the name is painted bold; the edit keeps its look
+            editor.setFont(font)
         if index.data(KIND_ROLE) != "group" and index.column() not in (COLUMN_ID, 1):
             editor.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         return editor
@@ -279,10 +299,21 @@ class RoiTableDelegate(QStyledItemDelegate):
         if isinstance(editor, QLineEdit):
             editor.selectAll()
 
+    def destroyEditor(self, editor: QWidget, index: QModelIndex) -> None:  # type: ignore[override]
+        if self._editing is not None and self._editing == QPersistentModelIndex(index):
+            self._editing = None
+            view = self.parent()
+            if isinstance(view, QTreeView):
+                view.viewport().update()  # show the name again
+        super().destroyEditor(editor, index)
+
     def updateEditorGeometry(self, editor: QWidget, option: QStyleOptionViewItem, index: QModelIndex) -> None:  # type: ignore[override]
         rect = option.rect
         if index.data(KIND_ROLE) == "group":
-            left = rect.left() + CHEVRON_ZONE + 21
-            editor.setGeometry(left, rect.top() + 3, max(60, rect.width() - (left - rect.left()) - 52), rect.height() - 6)
+            # In place: over the painted name (which paint() skips meanwhile), its text starting
+            # where the name's text did (1 px border + 4 px padding).
+            name_rect = self._group_name_rect(option, index, str(index.data(COUNT_ROLE) or 0))
+            left = name_rect.left() - 5
+            editor.setGeometry(left, rect.top() + 3, max(60, rect.right() - 4 - left), rect.height() - 6)
         else:
             editor.setGeometry(rect.adjusted(2, 2, -2, -2))
