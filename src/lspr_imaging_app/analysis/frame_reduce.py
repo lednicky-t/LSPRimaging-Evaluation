@@ -26,7 +26,8 @@ Rules it follows, taken from ``compute_cell`` and the invariants in ``apps/LSPRi
   built from every ROI passed in, never a selected subset. ``none``: rings overlap sample apertures freely.
 * The ignore mask (processed space) removes pixels from both apertures. It does not change the image.
 * A pixel without a value (NaN, e.g. created by rotation) is never reduced. ``n_nominal`` counts the aperture after
-  exclusions and the ignore mask but before this test; ``n_valid`` counts after it. Keeping both lets a minimum valid
+  exclusions and the ignore mask but before this test; ``n_valid`` counts after it. ``n_masked`` is the part of the aperture the
+  ignore mask removed (what the Sensorgram marks), so a mask and a ROI are linked per cell at no extra cost. Keeping both lets a minimum valid
   fraction be applied later, on the stored numbers, without rereading any image.
 * A ROI whose sample or reference has no valid pixel gets NaN for both values (``compute_cell``'s "insufficient" cell with
   all thresholds at 0). Standard deviations are NaN for fewer than 2 pixels.
@@ -344,6 +345,7 @@ class FrameReduction:
     std: np.ndarray  # float64, standard deviation of the valid pixels, ddof=1
     n_valid: np.ndarray  # int32
     n_nominal: np.ndarray  # int32
+    n_masked: np.ndarray  # int32, aperture pixels the ignore mask removed (pixels before the mask minus n_nominal); 0 without a mask
 
 
 def reduce_frame(
@@ -391,7 +393,7 @@ def reduce_frame(
     if n == 0:
         empty = np.zeros((0, 2))
         return FrameReduction(tuple(methods), {m: empty.copy() for m in methods}, empty.copy(),
-                              np.zeros((0, 2), dtype=np.int32), np.zeros((0, 2), dtype=np.int32))
+                              np.zeros((0, 2), dtype=np.int32), np.zeros((0, 2), dtype=np.int32), np.zeros((0, 2), dtype=np.int32))
     if layout is None:
         layout = build_layout(rs, affine, shape, exclusion_mode, block)
     elif layout.shape != (int(shape[0]), int(shape[1])) or layout.n_rois != n or layout.exclusion_mode != exclusion_mode:
@@ -416,6 +418,7 @@ def reduce_frame(
         r_ok &= r_in
     else:
         n_nominal = np.stack((layout.sample_count, layout.ring_count), axis=1)
+    n_masked = np.stack((layout.sample_count, layout.ring_count), axis=1) - n_nominal  # the link between a mask and a ROI, kept per cell
     if not s_ok.all():  # skip the copies in the common case where every pixel counts
         s_roi, s_val = s_roi[s_ok], s_val[s_ok]
     if not r_ok.all():
@@ -459,4 +462,4 @@ def reduce_frame(
             (f"reduce {'+'.join(methods)}", t4 - t3),
         ):
             timers[key] = timers.get(key, 0.0) + seconds
-    return FrameReduction(tuple(methods), values, std, n_valid.astype(np.int32), n_nominal.astype(np.int32))
+    return FrameReduction(tuple(methods), values, std, n_valid.astype(np.int32), n_nominal.astype(np.int32), n_masked.astype(np.int32))

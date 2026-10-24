@@ -75,6 +75,7 @@ class Series:
     band_high: np.ndarray | None = None
     n_members: int = 1
     baseline: float = float("nan")  # the offset subtracted by the baseline correction (NaN: none)
+    member_ids: tuple[int, ...] = ()  # the ROIs this line is made of (one for an individual line); the mask marks look them up
 
 
 def trace_key(stored: StoredScan, formula_key: str, metric: MetricSettings) -> tuple:
@@ -180,7 +181,7 @@ def build_series(request: SensorgramRequest, traces: Mapping[int, np.ndarray], d
             groups.append(("group:ungrouped", f"{UNGROUPED} (n={len(rest)})", "#9ca3af", rest))
     else:
         return [
-            Series(f"roi:{r}", f"ROI {r}", request.roi_colors.get(r, "#f59e0b"), x, processed[r][0], baseline=processed[r][1])
+            Series(f"roi:{r}", f"ROI {r}", request.roi_colors.get(r, "#f59e0b"), x, processed[r][0], baseline=processed[r][1], member_ids=(r,))
             for r in request.roi_ids
         ]
     series: list[Series] = []
@@ -188,7 +189,7 @@ def build_series(request: SensorgramRequest, traces: Mapping[int, np.ndarray], d
         centre, low, high = aggregate_traces({r: processed[r][0] for r in members}, center=center, band=band)
         baselines = [processed[r][1] for r in members if np.isfinite(processed[r][1])]
         series.append(Series(key, label, color, x, centre, low, high, n_members=len(members),
-                             baseline=float(np.mean(baselines)) if baselines else float("nan")))
+                             baseline=float(np.mean(baselines)) if baselines else float("nan"), member_ids=tuple(members)))
     return series
 
 

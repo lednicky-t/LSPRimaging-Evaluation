@@ -1690,7 +1690,7 @@ def build_main_window(
     spectra_panel.restore_ui_state(ui_state)
     sensorgram_panel = SensorgramPanel(
         m.scan_results, m.roi_toolbox, m.dataset, m.selection, m.analysis_settings, m.cube_display, image_busy=image_panel.render_pending,
-        live=m.analysis_live,
+        live=m.analysis_live, mask=m.mask,
     )
     sensorgram_panel.restore_ui_state(ui_state)
     stages.done("ROI table, Spectra and Sensorgram panels")

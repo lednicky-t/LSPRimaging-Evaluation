@@ -27,6 +27,7 @@ class ScanArrays:
     std: np.ndarray  # float64, spread of the valid pixels
     n_valid: np.ndarray  # uint32, pixels that had a value
     n_nominal: np.ndarray  # uint32, pixels in the aperture after the exclusions
+    n_masked: np.ndarray  # uint32, aperture pixels the ignore mask removed (0 = the mask did not touch this ROI side)
     done: np.ndarray  # bool [cube]
 
     @property
@@ -44,6 +45,7 @@ def new_arrays(plan: ScanPlan) -> ScanArrays:
         std=np.full(shape, np.nan),
         n_valid=np.zeros(shape, dtype=np.uint32),
         n_nominal=np.zeros(shape, dtype=np.uint32),
+        n_masked=np.zeros(shape, dtype=np.uint32),
         done=np.zeros(len(plan.cube_indices), dtype=bool),
     )
 
@@ -59,4 +61,5 @@ def place(arrays: ScanArrays, plan: ScanPlan, result: CubeResult) -> None:
     arrays.std[pos][:, columns, :] = result.std
     arrays.n_valid[pos][:, columns, :] = result.n_valid
     arrays.n_nominal[pos][:, columns, :] = result.n_nominal
+    arrays.n_masked[pos][:, columns, :] = result.n_masked
     arrays.done[pos] = True

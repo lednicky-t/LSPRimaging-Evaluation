@@ -10,7 +10,9 @@ cube number, following the app-wide Cube / Time choice. A dashed line marks the 
 analysis. ``analysis/scan_trace.py`` fits every cube of every selected ROI (all cubes of a ROI at once, ``trace_fit.py``, in a helper process, ``trace_pool.py``) and then applies the statistics of
 ``AnalysisSettingsModule`` **per ROI** (spike removal, smoothing, baseline, in that order) and only then, for "Average all" / "Average by group",
 combines the finished per-ROI traces (mean or median, band = SD or SEM). Averaging fitted values, never spectra (CLAUDE.md). Points of cubes
-whose results are out of date are marked with a hollow ring, never hidden.
+whose results are out of date are marked with a hollow ring, never hidden. The **View** group's mask button (2026-10-24) adds orange marks
+where an ignore mask touched the ROIs of a line: a triangle for a persistent mask, a circle for an individual one. They are read from
+``n_masked`` in the scan file (``analysis/scan_mask_marks.py``), so only masks that really removed pixels of a ROI's disk or ring are marked.
 
 **Threads and pacing.** All of that runs on a plain worker thread, never the GUI thread; the fits themselves run in a helper process, because fits
 in a thread took the interpreter lock from the window and froze it for seconds (``docs/sensorgram_fit_freeze_2026-10-24.md``). The traces already computed are kept (a trace depends on the
@@ -40,6 +42,7 @@ from PyQt6.QtWidgets import QApplication, QCheckBox, QComboBox, QHBoxLayout, QLa
 from lspr_ui import get_active_theme
 
 from ...analysis.live_state import AnalysisLiveModule
+from ...analysis.scan_mask_marks import mask_marks
 from ...analysis.scan_results import ScanResultsModule
 from ...analysis.scan_store import StoredScan
 from ...analysis.scan_trace import (
@@ -62,6 +65,7 @@ from ...analysis.settings_module import AnalysisSettingsModule
 from ...analysis.trace_pool import TracePool
 from ...applog import timed
 from ...dataset import DatasetModule
+from ...image_tools.mask.module import MaskModule
 from ...roi import RoiToolbox
 from ...selection import CubeDisplayModule, SelectionModule
 from ...selection.cube_display_module import MODE_TIME
@@ -73,11 +77,13 @@ from ..image_first import ImageFirst
 from ..panel_task import PanelTask
 from ..ui_state import UiStateStore
 from ..visibility_gate import HiddenPanelGate
+from .mask_marks_toggle import MaskMarksToggle
 from .plot import SensorgramPlot
 
 logger = logging.getLogger(__name__)
 
 TASK_ID = "sensorgram.compute"
+MASK_MARKS_KEY = "sensorgram/mask_marks"
 _REDRAW_COALESCE_MS = 100  # sketch §8
 _JOIN_SECONDS = 5.0
 _PROGRESS_MIN_ROIS = 8  # a status line "Fitting ROI 3 of 160" only for runs long enough to need it
@@ -116,11 +122,13 @@ class SensorgramPanel(QWidget):
         image_busy: Callable[[], bool] | None = None,
         live: AnalysisLiveModule | None = None,
         trace_in_process: bool = True,
+        mask: MaskModule | None = None,
     ) -> None:
         """`image_busy`: True while the Image panel has a frame in flight; a computation then waits for it (`ImageFirst`). `trace_in_process`: the
         fits run in a helper process (`TracePool`), so they never compete with the window for the interpreter lock; False computes them in the worker
-        thread (tests that spy on the fit, debugging)."""
+        thread (tests that spy on the fit, debugging). `mask`: tells which masks are individual (the marks of the View group); without it every mask counts as persistent."""
         super().__init__(parent)
+        self._mask = mask
         self._live = live if live is not None else AnalysisLiveModule(self)  # without an owner: always live
         self._dirty_while_paused = False
         self._image_first = ImageFirst(image_busy)
@@ -177,6 +185,8 @@ class SensorgramPanel(QWidget):
         self._baseline.setToolTip("Subtract the mean of each trace inside the shaded band, so every trace reads as a shift from it. Drag the band.")
         style_ribbon_check(self._spikes)
         style_ribbon_check(self._baseline)
+        self._mask_toggle = MaskMarksToggle(self)
+        self._mask_toggle.setChecked(True)
         self._status = QLabel("", self)
         self._status.setWordWrap(True)
         self._status.setStyleSheet(f"color: {get_active_theme().text_dim};")
@@ -192,6 +202,7 @@ class SensorgramPanel(QWidget):
         self._ribbon.add_group("Smoothing", self._smoothing, self._window)
         self._ribbon.add_group("Spikes", self._spikes)
         self._ribbon.add_group("Baseline", self._baseline)
+        self._ribbon.add_group("View", self._mask_toggle)
         self._ribbon.add_stretch()
         self._ribbon_drawer = rolled_ribbon(self._ribbon, "Show the sensorgram controls.", self)
         controls = QHBoxLayout()
@@ -218,6 +229,7 @@ class SensorgramPanel(QWidget):
         self._window.valueChanged.connect(self._on_controls_changed)
         self._spikes.toggled.connect(self._on_controls_changed)
         self._baseline.toggled.connect(self._on_baseline_toggled)
+        self._mask_toggle.toggled.connect(lambda _on: self._draw_last())
         self._plot.baseline_window_changed.connect(self._on_baseline_dragged)
         self._plot.x_clicked.connect(self._on_plot_clicked)
 
@@ -239,6 +251,7 @@ class SensorgramPanel(QWidget):
     # -- wiring with the owner -------------------------------------------------------------------------------------------------
 
     def restore_ui_state(self, store: UiStateStore) -> None:
+        store.bind(MASK_MARKS_KEY, self._mask_toggle)
         self._ribbon_drawer.set_expanded(read(store, SENSORGRAM_RIBBON_OPEN) is not False, animate=False)
         self._ribbon_drawer.expanded_changed.connect(lambda open_: store.set(SENSORGRAM_RIBBON_OPEN.key, bool(open_)))
 
@@ -249,6 +262,7 @@ class SensorgramPanel(QWidget):
     def refresh_theme(self) -> None:
         self._live_toggle.refresh_theme()
         self._ribbon.refresh_theme()
+        self._mask_toggle.refresh_theme()
         self._ribbon_drawer.refresh_theme()
         self._plot.refresh_theme()
         self._status.setStyleSheet(f"color: {get_active_theme().text_dim};")
@@ -537,6 +551,13 @@ class SensorgramPanel(QWidget):
             return None
         return np.array([c in stale for c in stored.cube_indices], dtype=bool)
 
+    def _mask_marks(self, stored: StoredScan, series: list[Series]) -> dict[str, tuple[np.ndarray, np.ndarray]] | None:
+        """Per line, the cubes a persistent / an individual mask touched (None while the View button is off). Cheap: it reads ``n_masked``."""
+        if not self._mask_toggle.isChecked():
+            return None
+        individual = {} if self._mask is None else self._mask.individual_cubes()
+        return {s.key: mask_marks(stored, s.member_ids, individual) for s in series}
+
     def _draw_last(self) -> None:
         if self._gate.defer() or self._last is None:
             return
@@ -548,7 +569,7 @@ class SensorgramPanel(QWidget):
         if stats.baseline_enabled:
             y_label = y_label.replace("position", "shift")
         self._plot.set_axis_labels(label, y_label)
-        self._plot.show_series(series, stale)
+        self._plot.show_series(series, stale, self._mask_marks(job.stored, series))
         if stats.baseline_enabled and stats.baseline_window_start is not None and stats.baseline_window_end is not None:
             self._plot.set_baseline_window((stats.baseline_window_start, stats.baseline_window_end))
         else:

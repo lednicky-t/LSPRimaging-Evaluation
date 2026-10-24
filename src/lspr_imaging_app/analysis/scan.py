@@ -83,6 +83,7 @@ class CubeResult:
     std: np.ndarray
     n_valid: np.ndarray
     n_nominal: np.ndarray
+    n_masked: np.ndarray
     seconds: dict[str, float] = field(default_factory=dict)  # busy time per stage, this cube
 
 
@@ -116,6 +117,7 @@ class _Worker:
         std = np.full((rs.n, n_frames, 2), np.nan)
         n_valid = np.zeros((rs.n, n_frames, 2), dtype=np.int32)
         n_nominal = np.zeros((rs.n, n_frames, 2), dtype=np.int32)
+        n_masked = np.zeros((rs.n, n_frames, 2), dtype=np.int32)
         seconds = {"read": 0.0, "prepare": 0.0, "reduce": 0.0}
         clock = time.perf_counter
         for k, frame in enumerate(job.frames):
@@ -139,10 +141,11 @@ class _Worker:
             std[:, k, :] = result.std
             n_valid[:, k, :] = result.n_valid
             n_nominal[:, k, :] = result.n_nominal
+            n_masked[:, k, :] = result.n_masked
             seconds["read"] += t1 - t0
             seconds["prepare"] += t2 - t1
             seconds["reduce"] += t3 - t2
-        return CubeResult(job.cube_pos, values, std, n_valid, n_nominal, seconds)
+        return CubeResult(job.cube_pos, values, std, n_valid, n_nominal, n_masked, seconds)
 
 
 _WORKER: _Worker | None = None  # the worker of this process (multiprocessing path)

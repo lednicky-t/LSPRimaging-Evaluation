@@ -1,14 +1,14 @@
 """Sensorgram plot widget - the pyqtgraph-facing half of the Sensorgram panel (sketch §10 "sensorgram/panel.py + plot.py").
 
 Draws what it is handed: a line per series (the metric against time or cube number), a band for averaged series, hollow markers where the
-scan is out of date, a vertical line at the current cube and an optional draggable baseline window. It computes nothing and reads no module.
+scan is out of date, mask marks (a triangle: a persistent mask touched the point's ROIs, a circle: an individual one did), a vertical line at the current cube and an optional draggable baseline window. It computes nothing and reads no module.
 A left click inside the plot emits ``x_clicked`` with the x value (the panel turns it into "go to that cube"); dragging the circle on the x axis
 (the Cube slider's handle, in the same colour) emits it too, for every pointer position.
 """
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 
 import numpy as np
 import pyqtgraph as pg
@@ -20,7 +20,7 @@ from lspr_ui import get_active_theme
 
 from ...analysis.scan_trace import Series
 from ..axis_cursor import AxisCursor
-from ..image.mark_colors import cube_color
+from ..image.mark_colors import MASK_COLOR, cube_color
 
 MAX_LEGEND_SERIES = 6
 _BAND_ALPHA = 55
@@ -94,8 +94,12 @@ class SensorgramPlot(QWidget):
         if self._legend is not None:
             self._legend.clear()
 
-    def show_series(self, series: Sequence[Series], stale: np.ndarray | None = None) -> None:
-        """``stale``: bool per point (same length as the series' x); those points get a hollow marker on top: out-of-date results are still drawn."""
+    def show_series(
+        self, series: Sequence[Series], stale: np.ndarray | None = None, mask_marks: Mapping[str, tuple[np.ndarray, np.ndarray]] | None = None
+    ) -> None:
+        """``stale``: bool per point (same length as the series' x); those points get a hollow marker on top: out-of-date results are still drawn.
+        ``mask_marks``: series key -> (persistent, individual), bool per point; a persistent mask gets a hollow triangle (like a play button),
+        an individual one a hollow circle, both in the mask colour (None draws none)."""
         self.clear()
         if len(series) <= MAX_LEGEND_SERIES:
             if self._legend is None:
@@ -123,6 +127,13 @@ class SensorgramPlot(QWidget):
                 if mask.any():
                     hollow = pg.ScatterPlotItem(s.x[mask], s.y[mask], symbol="o", size=9, brush=None, pen=pg.mkPen(color, width=1.5))
                     self._add(hollow)
+            marks = None if mask_marks is None else mask_marks.get(s.key)
+            if marks is not None:
+                finite = np.isfinite(s.y) & np.isfinite(s.x)
+                for flags, symbol, size in ((marks[0], "t2", 11), (marks[1], "o", 13)):
+                    on = np.asarray(flags, dtype=bool) & finite
+                    if on.any():
+                        self._add(pg.ScatterPlotItem(s.x[on], s.y[on], symbol=symbol, size=size, brush=None, pen=pg.mkPen(MASK_COLOR, width=1.8)))
         self._item.getViewBox().autoRange()
 
     def _add(self, item: pg.GraphicsObject) -> None:

@@ -1,12 +1,13 @@
-"""The scan result file ``analysis/scan.h5`` (schema ``lspri_scan`` 1.0). Layout and decisions: plan doc section 15. No Qt.
+"""The scan result file ``analysis/scan.h5`` (schema ``lspri_scan`` 1.1). Layout and decisions: plan doc section 15. No Qt.
 
-Holds only what step 1 produces: per cube, ROI, wavelength and side the reduced pixel **mean**, **STD**, ``n_valid`` and ``n_nominal``
+Holds only what step 1 produces: per cube, ROI, wavelength and side the reduced pixel **mean**, **STD**, ``n_valid``, ``n_nominal`` and ``n_masked``
 (absorbance, fits and metrics are recomputed from these, never stored). Readable with plain ``h5py`` / ``xarray`` / pandas::
 
     /processed/scan/value/mean  float64 [cube, roi, wavelength, side]    side 0 = sample, 1 = reference; NaN = no value
     /processed/scan/std         float64 [same]      spread of the valid pixels (SEM = std / sqrt(n_valid))
     /processed/scan/n_valid     uint32  [same]      pixels with a value
     /processed/scan/n_nominal   uint32  [same]      pixels in the aperture after the exclusions
+    /processed/scan/n_masked    uint32  [same]      aperture pixels the ignore mask removed (> 0: a mask touched this ROI side; the Sensorgram marks it)
     /axes/   cube_index, roi_id, wavelength_nm, side (HDF5 dimension scales), acquired_at_unix_ms int64 [cube, wavelength] (0 = unknown)
     /metadata/recipes/<n>, /metadata/roi_layouts/<n>   readable JSON (what produced the numbers; see scan_fingerprint)
     /state/  cell_hash uint64 [cube, roi] (0 = never computed), recipe_id int32 [cube, roi], layout_id int32 [cube]
@@ -46,9 +47,9 @@ logger = logging.getLogger(__name__)
 FILE_NAME = "scan.h5"
 BACKUP_NAME = "scan.previous.h5"
 SCHEMA_NAME = "lspri_scan"
-SCHEMA_VERSION = "1.0"
+SCHEMA_VERSION = "1.1"  # 1.1 (2026-10-24): + n_masked; a 1.0 file has none and is replaced like any file that does not fit
 SCHEMA_MAJOR = 1
-SCHEMA_MINOR = 0
+SCHEMA_MINOR = 1
 FORMAT_NAME = "lspri_scan_hdf5"
 FORMAT_VERSION = 1
 SIDE_LABELS = ("sample", "reference")
@@ -74,6 +75,7 @@ class StoredScan:
     std: np.ndarray
     n_valid: np.ndarray
     n_nominal: np.ndarray
+    n_masked: np.ndarray
     cell_hash: np.ndarray
     recipe_id: np.ndarray
     layout_id: np.ndarray
@@ -129,6 +131,8 @@ def read_scan(path: Path) -> StoredScan:
         with h5py.File(path, "r") as f:
             _read_identity(f)
             scan = f["processed/scan"]
+            if "n_masked" not in scan:
+                raise ScanFileError(f"{Path(path).name} is from an older version (no mask counts): scan again to replace it")
             return StoredScan(
                 path=Path(path),
                 attrs={k: (v.item() if hasattr(v, "item") else v) for k, v in f.attrs.items()},
@@ -138,6 +142,7 @@ def read_scan(path: Path) -> StoredScan:
                 acquired_at_unix_ms=f["axes/acquired_at_unix_ms"][()],
                 values={name: scan["value"][name][()] for name in scan["value"]},
                 std=scan["std"][()], n_valid=scan["n_valid"][()], n_nominal=scan["n_nominal"][()],
+                n_masked=scan["n_masked"][()],
                 cell_hash=f["state/cell_hash"][()], recipe_id=f["state/recipe_id"][()], layout_id=f["state/layout_id"][()],
                 recipes=_strings(f["metadata/recipes"]), layouts=_strings(f["metadata/roi_layouts"]),
             )
@@ -236,6 +241,7 @@ class ScanStore:
                     and tuple(int(r) for r in f["axes/roi_id"][()]) == tuple(plan.roi_ids)
                     and _wl_keys(f["axes/wavelength_nm"][()]) == _wl_keys(plan.wavelength_axis_nm)
                     and set(f["processed/scan/value"]) == set(plan.settings.methods)
+                    and "n_masked" in f["processed/scan"]
                 )
         except (OSError, KeyError, ScanFileError) as exc:
             logger.warning("existing scan file cannot be used: %s", exc)
@@ -297,6 +303,7 @@ class ScanStore:
             array(scan, "std", np.float64, np.nan)
             array(scan, "n_valid", np.uint32, 0)
             array(scan, "n_nominal", np.uint32, 0)
+            array(scan, "n_masked", np.uint32, 0)
             f.create_group("metadata/recipes")
             f.create_group("metadata/roi_layouts")
             state = f.create_group("state")
@@ -320,6 +327,7 @@ class ScanStore:
             scan["std"][row] = arrays.std[cube_pos]
             scan["n_valid"][row] = arrays.n_valid[cube_pos]
             scan["n_nominal"][row] = arrays.n_nominal[cube_pos]
+            scan["n_masked"][row] = arrays.n_masked[cube_pos]
             if plan.acquired_at_unix_ms is not None:
                 f["axes/acquired_at_unix_ms"][row] = plan.acquired_at_unix_ms[cube_pos]
             f.flush()
