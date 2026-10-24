@@ -38,6 +38,7 @@ from PyQt6.QtWidgets import QApplication, QCheckBox, QComboBox, QHBoxLayout, QLa
 
 from lspr_ui import get_active_theme
 
+from ...analysis.live_state import AnalysisLiveModule
 from ...analysis.scan_results import ScanResultsModule
 from ...analysis.scan_store import StoredScan
 from ...analysis.scan_trace import (
@@ -63,6 +64,7 @@ from ...roi import RoiToolbox
 from ...selection import CubeDisplayModule, SelectionModule
 from ...selection.cube_display_module import MODE_TIME
 from ...storage.ui_state_keys import SENSORGRAM_RIBBON_OPEN, read
+from ..live_toggle import LiveToggle
 from ..ribbon_fields import style_ribbon_check, style_ribbon_combo, style_ribbon_number_field
 from ..ribbon_row import RibbonRow, rolled_ribbon
 from ..image_first import ImageFirst
@@ -110,9 +112,12 @@ class SensorgramPanel(QWidget):
         cube_display: CubeDisplayModule,
         parent: QWidget | None = None,
         image_busy: Callable[[], bool] | None = None,
+        live: AnalysisLiveModule | None = None,
     ) -> None:
         """`image_busy`: True while the Image panel has a frame in flight; a computation then waits for it (`ImageFirst`)."""
         super().__init__(parent)
+        self._live = live if live is not None else AnalysisLiveModule(self)  # without an owner: always live
+        self._dirty_while_paused = False
         self._image_first = ImageFirst(image_busy)
         self._scan = scan_results
         self._roi_toolbox = roi_toolbox
@@ -171,7 +176,10 @@ class SensorgramPanel(QWidget):
         self._plot = SensorgramPlot(self)
         self.task = PanelTask(TASK_ID, "Sensorgram", self)  # connected to the status bar's task indicator by app_rewrite
 
+        self._live_toggle = LiveToggle(self)
+        self._live_toggle.bind(self._live)
         self._ribbon = RibbonRow(self)
+        self._ribbon.add_group("Live", self._live_toggle)
         self._ribbon.add_group("Display", self._display)
         self._ribbon.add_group("Average", self._center, self._band)
         self._ribbon.add_group("Smoothing", self._smoothing, self._window)
@@ -196,6 +204,7 @@ class SensorgramPanel(QWidget):
         self._redraw_timer.timeout.connect(self._redraw)
 
         self._result_ready.connect(self._on_result)
+        self._live.live_changed.connect(self._on_live_changed)
         self._progress.connect(self._on_progress)
         for combo in (self._display, self._center, self._band, self._smoothing):
             combo.currentIndexChanged.connect(self._on_controls_changed)
@@ -231,6 +240,7 @@ class SensorgramPanel(QWidget):
         self._gate.set_visible(visible)
 
     def refresh_theme(self) -> None:
+        self._live_toggle.refresh_theme()
         self._ribbon.refresh_theme()
         self._ribbon_drawer.refresh_theme()
         self._plot.refresh_theme()
@@ -374,8 +384,22 @@ class SensorgramPanel(QWidget):
 
     # -- computing off the GUI thread --------------------------------------------------------------------------------------------
 
+    # -- live / paused ---------------------------------------------------------------------------------------------------------
+
+    def _held_by_pause(self) -> bool:
+        """Paused: nothing is recomputed. The request is remembered; going live again makes one catch-up redraw."""
+        if self._live.is_live():
+            return False
+        self._dirty_while_paused = True
+        return True
+
+    def _on_live_changed(self, live: bool) -> None:
+        if live and self._dirty_while_paused:
+            self._dirty_while_paused = False
+            self._schedule_redraw()
+
     def _schedule_redraw(self) -> None:
-        if self._gate.defer():
+        if self._gate.defer() or self._held_by_pause():
             return
         self._redraw_timer.start()
 
@@ -406,6 +430,8 @@ class SensorgramPanel(QWidget):
         self._clear_with("Cancelled. Change a setting or the selection to compute the sensorgram again.")
 
     def _redraw(self) -> None:
+        if self._held_by_pause():  # paused after the timer was started
+            return
         stored = self._scan.stored()
         roi_ids = tuple(sorted(self._selection.selected_roi_ids()))
         if stored is None:

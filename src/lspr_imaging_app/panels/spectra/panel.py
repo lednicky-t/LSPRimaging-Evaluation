@@ -43,6 +43,7 @@ from PyQt6.QtWidgets import QApplication, QCheckBox, QHBoxLayout, QLabel, QSpinB
 
 from lspr_ui import get_active_theme
 
+from ...analysis.live_state import AnalysisLiveModule
 from ...analysis.query import FORMULA_KEYS
 from ...analysis.scan_results import ScanResultsModule
 from ...analysis.scan_store import StoredScan
@@ -53,6 +54,7 @@ from ...applog import timed
 from ...roi import RoiToolbox
 from ...selection import SelectionModule
 from ...storage.ui_state_keys import SPECTRA_RIBBON_OPEN, read
+from ..live_toggle import LiveToggle
 from ..ribbon_fields import style_ribbon_check, style_ribbon_number_field
 from ..ribbon_row import RibbonRow, rolled_ribbon
 from ..panel_task import PanelTask
@@ -119,8 +121,11 @@ class SpectraPanel(QWidget):
         selection: SelectionModule,
         analysis_settings: AnalysisSettingsModule,
         parent: QWidget | None = None,
+        live: AnalysisLiveModule | None = None,
     ) -> None:
         super().__init__(parent)
+        self._live = live if live is not None else AnalysisLiveModule(self)  # without an owner: always live
+        self._dirty_while_paused = False
         self._scan = scan_results
         self._roi_toolbox = roi_toolbox
         self._selection = selection
@@ -169,7 +174,10 @@ class SpectraPanel(QWidget):
         self._plot = SpectraPlot(self)
         self.task = PanelTask(TASK_ID, "Spectra", self)  # connected to the status bar's task indicator by app_rewrite
 
+        self._live_toggle = LiveToggle(self)
+        self._live_toggle.bind(self._live)
         self._ribbon = RibbonRow(self)
+        self._ribbon.add_group("Live", self._live_toggle)
         self._ribbon.add_group("Formula", self._formula)
         self._ribbon.add_group("Fit", self._fit, self._order)
         self._ribbon.add_group("Metric", self._metric)
@@ -194,6 +202,7 @@ class SpectraPanel(QWidget):
         self._redraw_timer.timeout.connect(self._redraw)
 
         self._spectra_ready.connect(self._on_ready)
+        self._live.live_changed.connect(self._on_live_changed)
         self._formula.currentIndexChanged.connect(self._on_formula_chosen)
         self._fit.currentIndexChanged.connect(self._on_metric_controls_changed)
         self._order.valueChanged.connect(self._on_metric_controls_changed)
@@ -232,6 +241,7 @@ class SpectraPanel(QWidget):
     def refresh_theme(self) -> None:
         for pick in (self._formula, self._fit, self._metric):
             pick.refresh_theme()
+        self._live_toggle.refresh_theme()
         self._ribbon.refresh_theme()
         self._ribbon_drawer.refresh_theme()
         self._plot.refresh_theme()
@@ -337,12 +347,28 @@ class SpectraPanel(QWidget):
 
     # -- computing off the GUI thread --------------------------------------------------------------------------------------------
 
+    # -- live / paused ---------------------------------------------------------------------------------------------------------
+
+    def _held_by_pause(self) -> bool:
+        """Paused: nothing is recomputed. The request is remembered; going live again makes one catch-up redraw."""
+        if self._live.is_live():
+            return False
+        self._dirty_while_paused = True
+        return True
+
+    def _on_live_changed(self, live: bool) -> None:
+        if live and self._dirty_while_paused:
+            self._dirty_while_paused = False
+            self._schedule_redraw()
+
     def _schedule_redraw(self) -> None:
-        if self._gate.defer():
+        if self._gate.defer() or self._held_by_pause():
             return
         self._redraw_timer.start()
 
     def _redraw(self) -> None:
+        if self._held_by_pause():  # paused after the timer was started
+            return
         stored = self._scan.stored()
         roi_ids = tuple(sorted(self._selection.selected_roi_ids()))
         if stored is None:

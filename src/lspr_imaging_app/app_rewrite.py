@@ -40,6 +40,7 @@ from lspr_ui import app_icon, set_active_theme
 
 from .analysis import AnalysisEngine, AnalysisSettingsModule
 from .analysis.scan_jobs import ScanSource, source_from_modules
+from .analysis.live_state import AnalysisLiveModule
 from .analysis.scan_results import ScanResultsModule
 from .storage.session_index import session_dir_for
 from .analysis.scan_store import FILE_NAME as SCAN_FILE_NAME, describe_file as describe_scan_file
@@ -773,6 +774,7 @@ class _Modules:
     transient_scan: TransientScanTask
     analysis_scan: ScanTask
     scan_results: ScanResultsModule
+    analysis_live: AnalysisLiveModule
     session_carry: SessionCarry
     session_load: SessionLoadTask
 
@@ -881,6 +883,8 @@ def _build_modules() -> _Modules:
     analysis_scan = ScanTask()
     modules_holder: list[_Modules] = []  # the results module needs the finished module set to read the app (analysis_scan_source)
     scan_results = ScanResultsModule(lambda: analysis_scan_source(modules_holder[0]), scan_running=analysis_scan.is_running)
+    analysis_live = AnalysisLiveModule()  # Live / Paused: the Spectra and Sensorgram plots and the out-of-date check stop recomputing while paused
+    analysis_live.live_changed.connect(lambda live: scan_results.set_paused(not live))
     dataset.dataset_loaded.connect(lambda _dataset: analysis_scan.invalidate())
     dataset.dataset_cleared.connect(analysis_scan.invalidate)
     session_coordinator.active_session_changed.connect(lambda _root: analysis_scan.invalidate())
@@ -897,7 +901,7 @@ def _build_modules() -> _Modules:
         highlight_range=highlight_range, area_selection=area_selection, analysis_settings=analysis_settings,
         session_coordinator=session_coordinator, analysis_engine=analysis_engine,
         session_autosave=session_autosave, chromatic_auto=ChromaticAutoDetect(chromatic),
-        mask_pointers=mask_pointers, transient_scan=TransientScanTask(mask_pointers), analysis_scan=analysis_scan, scan_results=scan_results, session_carry=session_carry,
+        mask_pointers=mask_pointers, transient_scan=TransientScanTask(mask_pointers), analysis_scan=analysis_scan, scan_results=scan_results, analysis_live=analysis_live, session_carry=session_carry,
         session_load=session_load,
         reference_auto=ReferenceAutoFind(dataset, selection, reference_frame, frame_roles),
         frame_roles=frame_roles,
@@ -1100,6 +1104,7 @@ def _wire_analysis_scan(m: _Modules, row: AnalysisTab, ui_state: UiStateStore) -
     """The Image panel's Analysis tab (Scan / Fast scan / Scan file) and the scan task: the tab only emits requests and shows text; this
     decides where the file goes, starts the task on the GUI thread and turns its outcome into the tab's status line."""
     ui_state.bind(FAST_SCAN_KEY, row.fast_scan_button)
+    row.bind_live(m.analysis_live)  # not remembered: a pause is a working state, the app always starts live
 
     def scan_file() -> Path | None:
         home, session_id = m.dataset.dataset_home(), m.session_coordinator.active_session_id()
@@ -1681,10 +1686,11 @@ def build_main_window(
         display_style=image_panel.roi_display,
     )
     roi_table_panel.restore_ui_state(ui_state)
-    spectra_panel = SpectraPanel(m.scan_results, m.roi_toolbox, m.selection, m.analysis_settings)
+    spectra_panel = SpectraPanel(m.scan_results, m.roi_toolbox, m.selection, m.analysis_settings, live=m.analysis_live)
     spectra_panel.restore_ui_state(ui_state)
     sensorgram_panel = SensorgramPanel(
-        m.scan_results, m.roi_toolbox, m.dataset, m.selection, m.analysis_settings, m.cube_display, image_busy=image_panel.render_pending
+        m.scan_results, m.roi_toolbox, m.dataset, m.selection, m.analysis_settings, m.cube_display, image_busy=image_panel.render_pending,
+        live=m.analysis_live,
     )
     sensorgram_panel.restore_ui_state(ui_state)
     stages.done("ROI table, Spectra and Sensorgram panels")

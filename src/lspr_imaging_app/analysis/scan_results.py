@@ -62,6 +62,8 @@ class ScanResultsModule(QObject):
         self._checking = False
         self._generation = 0  # bumped by every set_scan_file / invalidate: a load or check from an older one is dropped
         self._recheck = False  # a change arrived while a check was running
+        self._paused = False  # `set_paused`: no check starts; one runs when live again if one was wanted
+        self._check_wanted = False
         self._threads: list[threading.Thread] = []
         self._timer = QTimer(self)
         self._timer.setSingleShot(True)
@@ -114,7 +116,7 @@ class ScanResultsModule(QObject):
         """Drop the file and everything derived from it (dataset cleared, session switched)."""
         self._generation += 1
         self._timer.stop()
-        self._loading = self._checking = self._recheck = False
+        self._loading = self._checking = self._recheck = self._check_wanted = False
         had = self._stored is not None
         self._stored, self._stale, self._reason, self._message = None, None, "", ""
         if had:
@@ -138,7 +140,24 @@ class ScanResultsModule(QObject):
         """Something that can alter a stored number changed: look again at what is out of date, after a short pause."""
         if self._stored is None:
             return
+        if self._paused:
+            self._check_wanted = True
+            return
         self._timer.start()
+
+    def set_paused(self, paused: bool) -> None:
+        """Paused (the analysis displays are paused): no check starts, a wanted one waits; live again: it runs once. A running check finishes."""
+        paused = bool(paused)
+        if paused == self._paused:
+            return
+        self._paused = paused
+        if paused:
+            if self._timer.isActive():
+                self._timer.stop()
+                self._check_wanted = True
+        elif self._check_wanted:
+            self._check_wanted = False
+            self._timer.start()
 
     def shutdown(self) -> None:
         self._generation += 1
@@ -186,6 +205,9 @@ class ScanResultsModule(QObject):
 
     def _start_check(self) -> None:
         if self._stored is None or self._path is None:
+            return
+        if self._paused:
+            self._check_wanted = True
             return
         if self._checking:
             self._recheck = True

@@ -87,7 +87,6 @@ def fit_picture(kind: str) -> PictureFor:
     def draw(color: str) -> QPixmap:
         pixmap, painter = _canvas()
         ink = QColor(color)
-        _dots(painter, QColor(get_active_theme().accent_blue))
         painter.setBrush(Qt.BrushStyle.NoBrush)
         painter.setPen(QPen(ink, 1.6, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
         if kind == "gaussian":
@@ -97,6 +96,7 @@ def fit_picture(kind: str) -> PictureFor:
             wave.cubicTo(5.0, 3.0, 8.5, 19.0, 11.0, 9.0)
             wave.cubicTo(12.5, 3.5, 15.5, 17.0, 18.5, 14.0)
             painter.drawPath(wave)
+        _dots(painter, QColor(get_active_theme().accent_blue))  # last, so the points sit on top of the line
         painter.end()
         return pixmap
 
@@ -220,14 +220,14 @@ class PickMenu(QToolButton):
     def refresh_theme(self) -> None:
         theme = get_active_theme()
         self.setStyleSheet(
-            f"QToolButton {{ background: transparent; border: none; padding: 0 12px 0 6px; color: {theme.text_primary}; }}"
+            f"QToolButton {{ background: transparent; border: none; padding: 0 12px 0 6px; color: {theme.text_primary}; font-weight: 400; }}"
             f"QToolButton:hover {{ background: {theme.control_bg_hover}; }}"
             "QToolButton::menu-indicator { subcontrol-origin: padding; subcontrol-position: center right; right: 2px; }"
         )
         row_style = (
-            f"QToolButton {{ background: transparent; border: none; padding: 0 12px 0 8px; text-align: left; color: {theme.text_primary}; }}"
+            f"QToolButton {{ background: transparent; border: none; padding: 0 12px 0 8px; text-align: left; color: {theme.text_primary}; font-weight: 400; }}"
             f"QToolButton:hover {{ background: {theme.control_bg_hover}; }}"
-            f"QToolButton:checked {{ background: {theme.control_bg}; }}"
+            f"QToolButton:checked {{ background: {theme.control_bg}; font-weight: 400; }}"
         )
         for row, choice in zip(self._rows, self._choices, strict=True):
             picture = choice.picture(theme.text_primary)

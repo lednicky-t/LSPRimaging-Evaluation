@@ -34,6 +34,8 @@ from PyQt6.QtWidgets import QFrame, QHBoxLayout, QToolButton, QWidget
 
 from lspr_ui import get_active_theme, load_tabler_icon
 
+from ...analysis.live_state import AnalysisLiveModule
+from ..live_toggle import LiveToggle
 from ..ribbon_group import labeled_icon_group, ribbon_separator
 from .general_group import ICON_SIZE, style_general_icon_button
 
@@ -66,11 +68,13 @@ class AnalysisTab(QWidget):
         self._status = "No scan yet."
         self._icon_cache: dict[tuple[str, str], QIcon] = {}
 
+        self.live_toggle = LiveToggle(self)  # bound to the shared live / paused flag by `bind_live`
         self.run_button = self._icon_button()
         self.fast_scan_button = self._icon_button(_FAST_TIP, checkable=True)
         self.fast_scan_button.setChecked(True)
         self.folder_button = self._icon_button(_FILE_TIP)
 
+        live_group, _ = labeled_icon_group(self, self.live_toggle, "Live")
         run_group, self._run_caption = labeled_icon_group(self, self.run_button, "Scan")
         fast_group, _ = labeled_icon_group(self, self.fast_scan_button, "Fast scan")
         self._folder_group, _ = labeled_icon_group(self, self.folder_button, "Scan file")
@@ -80,7 +84,7 @@ class AnalysisTab(QWidget):
         layout = QHBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(6)
-        for index, group in enumerate((run_group, fast_group, self._folder_group)):
+        for index, group in enumerate((live_group, run_group, fast_group, self._folder_group)):
             if index:
                 separator = ribbon_separator(self)
                 self._separators.append(separator)
@@ -94,6 +98,10 @@ class AnalysisTab(QWidget):
         self._refresh_icons()
 
     # -- driven by the owner -------------------------------------------------------------------------------------------------
+
+    def bind_live(self, module: AnalysisLiveModule) -> None:
+        """Share the live / paused flag with the Spectra and Sensorgram panels (the owner makes the module)."""
+        self.live_toggle.bind(module)
 
     def set_running(self, running: bool) -> None:
         self._running = bool(running)
@@ -134,6 +142,7 @@ class AnalysisTab(QWidget):
         )
 
     def refresh_theme(self) -> None:
+        self.live_toggle.refresh_theme()
         for button in (self.run_button, self.fast_scan_button, self.folder_button):
             style_general_icon_button(button)
         self._refresh_icons()
