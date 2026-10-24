@@ -1,7 +1,9 @@
-"""The "General" ribbon group (2026-10-03, maintainer request): a small,
-always-visible, left-aligned group beside the ribbon tabs (not inside any
-tab) holding tools that apply whichever tab is open - the cursor-readout
-toggle and the area-selection picker (All / Rectangle / Lasso).
+"""The area-selection picker (All / Rectangle / Lasso) and the ribbon's shared icon-button helpers.
+
+Until 2026-10-23 the picker and the cursor-readout toggle sat in an always-visible "General" group beside the
+ribbon tabs. Now the picker is the first group of the Mask and ROIs tabs and an icon of the View tab's "Image"
+group (`select_group.py`; one picker per place, all on the same modules), and the cursor toggle is the first
+icon of "Image".
 
 `AreaSelectionPicker` copies `MaskEditToolPicker`'s design on purpose
 (maintainer: "design similar to mask tools"): one icon button whose face

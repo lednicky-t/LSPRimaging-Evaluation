@@ -35,7 +35,7 @@ from ...roi.rasterize import effective_reference_diameters
 from .group_label_overlay import GroupLabelItem, GroupLabelSettings, group_label_entries
 from .label_placement import DEFAULT_ROI_PLACEMENT
 from .overlay_cache import OverlayLayers
-from .roi_label_overlay import RoiLabelItem, label_text
+from .roi_label_overlay import DEFAULT_POINT_SIZE, RoiLabelItem, label_text
 from .sample_circles_item import SampleCirclesItem
 
 CIRCLE_POINTS = 48
@@ -137,6 +137,7 @@ class RoiOverlay:
         self.reference = shared.reference
         self.labels_visible = False
         self.label_placement = DEFAULT_ROI_PLACEMENT  # where the ROI labels sit around their circles (label_placement.py)
+        self.label_point_size = DEFAULT_POINT_SIZE  # the ROI labels' text size, pt
         # Every sample circle, each in its ROI's own colour (a group tints its members), with its
         # translucent fill - one item, see `sample_circles_item.py`.
         self.sample_circles = SampleCirclesItem(SAMPLE_WIDTH)
@@ -161,6 +162,7 @@ class RoiOverlay:
         create it, so its stacking order among the other overlay items is unchanged."""
         self.label_item = RoiLabelItem(self._plot.vb)
         self.label_item.set_placement(self.label_placement)
+        self.label_item.set_point_size(self.label_point_size)
         self._plot.vb.sigRangeChanged.connect(lambda *_args: self.label_item.update())
         self._plot.vb.sigResized.connect(lambda *_args: self.label_item.update())
         self.group_label_item = GroupLabelItem(self._plot.vb)
@@ -178,6 +180,13 @@ class RoiOverlay:
         if self.label_item is not None:
             self.label_item.set_placement(placement)
 
+    def set_label_point_size(self, points: float) -> None:
+        """The ROI labels' text size in pt. Only the label item repaints."""
+        self.layers.invalidate()
+        self.label_point_size = float(points)
+        if self.label_item is not None:
+            self.label_item.set_point_size(self.label_point_size)
+
     def appearance_key(self) -> tuple:
         """Everything about *how* the overlay is drawn (not *what*: that is the ROIs, the selection and the affine): style,
         which parts are shown, line width, label settings. Part of the "unchanged" test in the panel and of the cache epoch."""
@@ -185,7 +194,7 @@ class RoiOverlay:
         return (
             self.sample.visible, self.sample.color, self.sample.alpha,
             self.reference.visible, self.reference.color, self.reference.alpha,
-            self.labels_visible, self.label_placement, self.sample_circles.width,
+            self.labels_visible, self.label_placement, self.label_point_size, self.sample_circles.width,
             group.visible, group.angle, group.position, group.side, group.box_percent, group.min_point_size,
         )
 

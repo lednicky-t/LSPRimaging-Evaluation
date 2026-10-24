@@ -43,10 +43,12 @@ from .group_controls import GroupControls
 from .group_label_menu import GroupLabelMenu
 from .label_placement_picker import LabelPlacementPicker
 from .roi_display_menu import RoiDisplayMenu
+from .roi_label_size_box import RoiLabelSizeBox
 from .roi_overlay import RoiOverlay
 from .roi_overlay_controls import RoiOverlayControls
 from .roi_scope_toggle import RoiScopeToggle
 from .roi_shape_picker import RoiShapePicker
+from .select_group import SelectGroup, insert_select_group
 
 
 class RoiTab(QWidget):
@@ -54,6 +56,7 @@ class RoiTab(QWidget):
     overlay_changed = pyqtSignal(str, str, object)
     labels_toggled = pyqtSignal(bool)
     label_placement_changed = pyqtSignal(str)  # one of `label_placement.PLACEMENTS`
+    label_size_changed = pyqtSignal(int)  # the ROI labels' text size, pt
     # The labels button's icon was redrawn (toggle, theme change, restore); the View tab's copy follows it.
     labels_icon_refreshed = pyqtSignal()
     group_labels_changed = pyqtSignal()
@@ -101,9 +104,12 @@ class RoiTab(QWidget):
             "Where each ROI's label sits: the middle centres it on the ROI, the others put it just outside the circle."
         )
         self._label_placement_picker.placement_changed.connect(self.label_placement_changed)
+        self._label_size_box = RoiLabelSizeBox(self)
+        self._label_size_box.valueChanged.connect(self.label_size_changed)
         # One pick-up menu holds the Sample / Reference / Labels rows (roi_display_menu.py).
         self._display_menu = RoiDisplayMenu(
-            self._sample_controls, self._reference_controls, self._labels_button, self._label_placement_picker, self
+            self._sample_controls, self._reference_controls, self._labels_button, self._label_placement_picker,
+            self._label_size_box, self,
         )
         display_group, self._display_caption = labeled_icon_group(self, self._display_menu, "Display")
         self._scope_toggle = RoiScopeToggle(roi_scope, self)
@@ -147,6 +153,7 @@ class RoiTab(QWidget):
         # Sections left to right, a thin separator between neighbours (restyled on a theme switch).
         sections = (display_group, scope_group, shape_group, array_group, groups_group)
         self._separators = [ribbon_separator(self) for _ in sections[1:]]
+        self._select_group: SelectGroup | None = None  # added by `add_select_picker`
         layout = QHBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(6)
@@ -155,6 +162,10 @@ class RoiTab(QWidget):
             layout.addWidget(separator)
             layout.addWidget(section)
         layout.addStretch(1)
+
+    def add_select_picker(self, picker: QWidget) -> None:
+        """The area-selection picker, as this tab's first group (it limits where ROIs may be added and moved)."""
+        self._select_group = insert_select_group(self, picker)
 
     def auto_rotate(self) -> None:
         """Image tools tab's Auto rotate: level the image by the detected array's tilt (`ArrayActions.auto_rotate`)."""
@@ -189,6 +200,10 @@ class RoiTab(QWidget):
         return self._label_placement_picker
 
     @property
+    def label_size_box(self) -> RoiLabelSizeBox:
+        return self._label_size_box
+
+    @property
     def group_label_menu(self) -> GroupLabelMenu:
         return self._group_controls.label_menu
 
@@ -211,6 +226,9 @@ class RoiTab(QWidget):
         self._labels_button.setChecked(overlay.labels_visible)
         self._labels_button.blockSignals(blocked)
         self._label_placement_picker.set_placement(overlay.label_placement, emit=False)
+        blocked = self._label_size_box.blockSignals(True)
+        self._label_size_box.setValue(round(overlay.label_point_size))
+        self._label_size_box.blockSignals(blocked)
         self._refresh_labels_icon()
 
     def set_label_placement(self, placement: str) -> None:
@@ -221,6 +239,7 @@ class RoiTab(QWidget):
         """Remember the Array, ROI-label place and Groups-label settings (see `panels/ui_state.py`)."""
         self._array_controls.bind_ui_state(store)
         self._label_placement_picker.bind_ui_state(store, "image/roi_label_placement")
+        store.bind("image/roi_label_point_size", self._label_size_box)
         self._group_controls.label_menu.bind_ui_state(store)
 
     def _on_labels_toggled(self, shown: bool) -> None:
@@ -247,11 +266,14 @@ class RoiTab(QWidget):
         style_general_icon_button(self._labels_button)
         self._refresh_labels_icon()
         self._label_placement_picker.refresh_theme(theme)
+        self._label_size_box.refresh_theme()
         self._display_menu.refresh_theme(theme)
         self._group_controls.refresh_theme()
         self._shape_picker.refresh_theme()
         self._array_controls.refresh_theme()
         self._scope_toggle.refresh_theme(theme)
+        if self._select_group is not None:
+            self._select_group.refresh_theme(theme.control_border)
         for separator in self._separators:
             separator.setStyleSheet(f"color: {theme.control_border};")
         for caption in (

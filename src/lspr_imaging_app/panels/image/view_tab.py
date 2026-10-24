@@ -6,8 +6,10 @@ ROIs), so a change on either copy shows on the other.
 
 Layout (one ribbon row, captioned groups, thin separators between them):
 
-    [display range] | [show all, hide all] | [histogram overlay] | [mask overlay] | [landmarks] | [background] | [ROI display menu] | [group labels menu] | [scale bar] | [chunk grid]
-     Display range           All                  Histogram             Mask           Chromatic     Background         ROIs             Group labels        Scale bar     Chunk grid
+    [cursor, display range] | [show all, hide all] | [masks menu] | [landmarks] | [background] | [ROI display menu][group labels menu] | [scale bar] | [chunk grid]
+     Image                   All                    Masks         Chromatic     BG             ROIs             Groups                Scale bar     Chunks
+
+The Masks menu holds the histogram-highlight and mask tints (`masks_menu.py`, 2026-10-23).
 
 Display only (CLAUDE.md "panels/"): the copies report through this tab's
 signals and the panel applies the change, exactly as for the original control.
@@ -42,9 +44,11 @@ from .group_label_menu import GroupLabelMenu
 from .histogram_highlight_overlay_controls import HistogramHighlightOverlayControls
 from .label_placement_picker import LabelPlacementPicker
 from .mask_overlay_controls import MaskOverlayControls
+from .masks_menu import MasksMenu
 from .overlay_all_controls import OverlayAllControls
 from .overlay_tint import OverlayTint
 from .roi_display_menu import RoiDisplayMenu
+from .roi_label_size_box import RoiLabelSizeBox
 from .roi_overlay_controls import RoiOverlayControls
 from .roi_tab import RoiTab
 from .scale_bar_controls import ScaleBarControls
@@ -85,13 +89,12 @@ class ViewTab(QWidget):
         self._highlight_controls.visibility_changed.connect(self.highlight_visibility_changed)
         self._highlight_controls.color_changed.connect(self.highlight_color_changed)
         self._highlight_controls.alpha_changed.connect(self.highlight_alpha_changed)
-        highlight_group, self._highlight_label = labeled_icon_group(self, self._highlight_controls, "Histogram")
 
         # Display range: automatic per frame, or one fixed black / white point for every frame.
         self._display_range_controls = DisplayRangeControls(self)
         self._display_range_controls.changed.connect(self.display_range_changed)
         display_range_group, self._display_range_label = labeled_icon_group(
-            self, self._display_range_controls, "Display range"
+            self, self._display_range_controls, "Image"
         )
 
         # All: Show all / Hide all, wired below once every overlay control exists (`set_all_overlays`).
@@ -110,7 +113,9 @@ class ViewTab(QWidget):
         for source, target in ((mask_controls, self._mask_controls), (self._mask_controls, mask_controls)):
             for signal in (source.visibility_changed, source.color_changed, source.alpha_changed):
                 signal.connect(lambda _value, s=source, t=target: t.sync_from(s))
-        mask_group, self._mask_label = labeled_icon_group(self, self._mask_controls, "Mask")
+        # Histogram highlight and Mask tints share one pick-up menu (masks_menu.py).
+        self._masks_menu = MasksMenu(self._highlight_controls, self._mask_controls, self)
+        masks_group, self._masks_label = labeled_icon_group(self, self._masks_menu, "Masks")
 
         # Chromatic and Background: mirrors of those tabs' own View buttons.
         self._chromatic_tab = chromatic_tab
@@ -128,7 +133,7 @@ class ViewTab(QWidget):
         chromatic_tab.view_buttons_refreshed.connect(lambda: [m.sync() for m in chromatic_mirrors])
         background_tab.view_buttons_refreshed.connect(background_mirror.sync)
         chromatic_group, self._chromatic_label = labeled_icon_group(self, chromatic_row, "Chromatic")
-        background_group, self._background_label = labeled_icon_group(self, background_mirror, "Background")
+        background_group, self._background_label = labeled_icon_group(self, background_mirror, "BG")
 
         # ROIs: copies of the ROIs tab's Sample / Reference / Labels controls, in the same pick-up menu.
         self._roi_tab = roi_tab
@@ -142,8 +147,15 @@ class ViewTab(QWidget):
         self._roi_placement_copy.setToolTip(original_picker.toolTip())
         self._roi_placement_copy.placement_changed.connect(roi_tab.set_label_placement)
         roi_tab.label_placement_changed.connect(lambda _placement: self._roi_placement_copy.sync_from(original_picker))
+        # The text size: a second box; each one sets the other, and a change here reaches the panel through the original's signal.
+        original_size = roi_tab.label_size_box
+        self._roi_size_copy = RoiLabelSizeBox(self)
+        self._roi_size_copy.setValue(original_size.value())
+        self._roi_size_copy.valueChanged.connect(original_size.setValue)
+        original_size.valueChanged.connect(self._roi_size_copy.setValue)
         self._roi_display_menu = RoiDisplayMenu(
-            self._roi_sample_controls, self._roi_reference_controls, labels_mirror, self._roi_placement_copy, self
+            self._roi_sample_controls, self._roi_reference_controls, labels_mirror, self._roi_placement_copy,
+            self._roi_size_copy, self,
         )
         roi_group, self._roi_label = labeled_icon_group(self, self._roi_display_menu, "ROIs")
 
@@ -154,7 +166,7 @@ class ViewTab(QWidget):
         self._group_label_menu.sync_from(original_menu)
         self._group_label_menu.changed.connect(lambda: original_menu.sync_from(self._group_label_menu, silent=False))
         original_menu.changed.connect(lambda: self._group_label_menu.sync_from(original_menu))
-        group_labels_group, self._group_labels_label = labeled_icon_group(self, self._group_label_menu, "Group labels")
+        group_labels_group, self._group_labels_label = labeled_icon_group(self, self._group_label_menu, "Groups")
 
         self._scale_bar_controls = ScaleBarControls(geometry, scale_bar_color, self)
         self._scale_bar_controls.color_changed.connect(self.scale_bar_color_changed)
@@ -162,11 +174,19 @@ class ViewTab(QWidget):
 
         # The loaded OME-Zarr's own chunk grid (disabled for a TIFF stack); not an overlay of the All buttons.
         self._chunk_grid_controls = ChunkGridControls(dataset, self)
-        chunk_grid_group, self._chunk_grid_label = labeled_icon_group(self, self._chunk_grid_controls, "Chunk grid")
+        chunk_grid_group, self._chunk_grid_label = labeled_icon_group(self, self._chunk_grid_controls, "Chunks")
+
+        # ROIs and Groups read as one section: side by side, no separator between them.
+        roi_groups_group = QWidget(self)
+        roi_groups_layout = QHBoxLayout(roi_groups_group)
+        roi_groups_layout.setContentsMargins(0, 0, 0, 0)
+        roi_groups_layout.setSpacing(6)
+        roi_groups_layout.addWidget(roi_group)
+        roi_groups_layout.addWidget(group_labels_group)
 
         groups = (
-            display_range_group, all_group, highlight_group, mask_group, chromatic_group, background_group,
-            roi_group, group_labels_group, scale_bar_group, chunk_grid_group,
+            display_range_group, all_group, masks_group, chromatic_group, background_group,
+            roi_groups_group, scale_bar_group, chunk_grid_group,
         )
         self._separators = [ribbon_separator(self) for _ in groups[1:]]
         layout = QHBoxLayout(self)
@@ -185,6 +205,11 @@ class ViewTab(QWidget):
 
         self._chunk_grid_controls.availability_changed.connect(show_chunk_grid_group)
         show_chunk_grid_group(self._chunk_grid_controls.source_chunk_available())
+
+    def add_image_icon(self, button: QWidget, index: int = 0) -> None:
+        """Put ``button`` in the "Image" group at ``index``, before the display-range icons (the cursor readout
+        toggle first, then the area-selection picker)."""
+        self._display_range_controls.insert_leading(button, index)
 
     def _copy_roi_controls(self, kind: str, source: RoiOverlayControls) -> RoiOverlayControls:
         """A second instance of a ROIs-tab control, kept equal to it both ways."""
@@ -232,6 +257,7 @@ class ViewTab(QWidget):
         self._roi_sample_controls.sync_from(self._roi_tab.sample_controls)
         self._roi_reference_controls.sync_from(self._roi_tab.reference_controls)
         self._roi_placement_copy.sync_from(self._roi_tab.label_placement_picker)
+        self._roi_size_copy.sync_from(self._roi_tab.label_size_box)
         self._group_label_menu.sync_from(self._roi_tab.group_label_menu)
 
     def refresh_theme(self) -> None:
@@ -240,19 +266,20 @@ class ViewTab(QWidget):
         self._display_range_controls.refresh_theme(theme)
         self._all_controls.refresh_theme(theme)
         self._mask_controls.refresh_theme(theme)
+        self._masks_menu.refresh_theme(theme)
         self._roi_sample_controls.refresh_theme(theme)
         self._roi_reference_controls.refresh_theme(theme)
         self._roi_placement_copy.refresh_theme(theme)
+        self._roi_size_copy.refresh_theme()
         self._roi_display_menu.refresh_theme(theme)
         self._group_label_menu.refresh_theme()
         self._chunk_grid_controls.refresh_theme()
         for separator in self._separators:
             separator.setStyleSheet(f"color: {theme.control_border};")
         for label in (
-            self._highlight_label,
             self._display_range_label,
             self._all_label,
-            self._mask_label,
+            self._masks_label,
             self._chromatic_label,
             self._background_label,
             self._roi_label,

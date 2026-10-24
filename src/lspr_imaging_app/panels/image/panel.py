@@ -914,6 +914,7 @@ class ImagePanel(QWidget):
         self._roi_tab.overlay_changed.connect(self._on_roi_overlay_changed)
         self._roi_tab.labels_toggled.connect(self._on_roi_labels_toggled)
         self._roi_tab.label_placement_changed.connect(self._on_roi_label_placement_changed)
+        self._roi_tab.label_size_changed.connect(self._roi_overlay.set_label_point_size)
         self._roi_tab.group_labels_changed.connect(self._on_group_labels_changed)
         self._roi_tab.status.connect(self._on_tool_status)
         # Auto rotate and Auto crop (Image tools tab) act through the ROI tab, which owns the array tools; that
@@ -988,14 +989,15 @@ class ImagePanel(QWidget):
         top_bar_layout = QHBoxLayout(self._top_bar)
         top_bar_layout.setContentsMargins(4, 2, 6, 2)
         top_bar_layout.setSpacing(6)
-        # Always-visible leading tab, no caption (2026-10-03). Filled with
-        # the cursor toggle and the area-selection picker just below, once
-        # the cursor overlay exists.
-        self._general_row = QWidget(self)
-        general_row_layout = QHBoxLayout(self._general_row)
-        general_row_layout.setContentsMargins(0, 0, 0, 0)
-        general_row_layout.setSpacing(2)
-        self._area_picker = AreaSelectionPicker(self._area_selection, self._active_tool, self._general_row)
+        # The always-visible "General" group is gone (2026-10-23): the cursor toggle is an icon of the View tab's
+        # "Image" group, and the area-selection picker is the first group of the Mask and ROIs tabs (and an icon
+        # of "Image"), one picker per place, all on the same `AreaSelectionModule`.
+        self._area_pickers = [
+            AreaSelectionPicker(self._area_selection, self._active_tool, parent) for parent in (mask_content, roi_content, view_content)
+        ]
+        self._area_picker = self._area_pickers[0]  # any of them; the Mask tab's
+        self._mask_tab.add_select_picker(self._area_pickers[0])
+        self._roi_tab.add_select_picker(self._area_pickers[1])
 
         self._tool_ribbon = ImageToolRibbon(
             [
@@ -1010,7 +1012,6 @@ class ImagePanel(QWidget):
                 (EXPORT_TAB, self._export_tab),
             ],
             self,
-            pinned=self._general_row,
         )
         if self._initial_ribbon_category:
             # "Histogram" was this tab's name before 2026-10-06 (settings saved then still say so).
@@ -1059,9 +1060,8 @@ class ImagePanel(QWidget):
         # Now a fixed-size ribbon icon in "General" (2026-10-03): its live
         # text goes to the canvas corner, so the button never changes width.
         style_general_icon_button(self._cursor_overlay.icon_label)
-        self._cursor_overlay.icon_label.setParent(self._general_row)
-        general_row_layout.addWidget(self._cursor_overlay.icon_label)
-        general_row_layout.addWidget(self._area_picker)
+        self._view_tab.add_image_icon(self._cursor_overlay.icon_label)  # first icon of the View tab's "Image" group (2026-10-23)
+        self._view_tab.add_image_icon(self._area_pickers[2], 1)  # and the picker right after it
 
         # A permanent "i" icon (2026-09-29, replacing a text row that only
         # appeared while a tool with canvas behavior was active): hovering
@@ -1374,8 +1374,8 @@ class ImagePanel(QWidget):
             self._tool_ribbon.refresh_theme(get_active_theme())
         if hasattr(self, "_top_drawer"):
             self._top_drawer.refresh_theme()
-        if hasattr(self, "_area_picker"):
-            self._area_picker.refresh_theme(get_active_theme())
+        for picker in getattr(self, "_area_pickers", ()):
+            picker.refresh_theme(get_active_theme())
         if hasattr(self, "_background_tab"):
             self._background_tab.refresh_theme(get_active_theme())
         if hasattr(self, "_export_tab"):

@@ -7,9 +7,11 @@ uses the same black and white point for every frame, so equal values look equal 
 
 Layout: two ribbon buttons (`BUTTON_SIZE`), the same size as every other icon in the ribbon,
 
-    [pin] [...]
+    [AR / MR] [...]
 
-* pin (checkable): off = automatic per frame; on = every frame uses the fixed range. Its tooltip names the
+(The View tab's "Image" group puts the cursor-readout toggle before these two.)
+
+* AR / MR (checkable; "auto range" / "manual range", was a pin until 2026-10-23): off = automatic per frame; on = every frame uses the fixed range. Its tooltip names the
   range that is in use.
 * "..." opens a small panel (a `QWidgetAction` in a `QMenu`, like the ROIs tab's display menu) with
 
@@ -37,8 +39,8 @@ falls back to automatic until it is fixed.
 
 from __future__ import annotations
 
-from PyQt6.QtCore import QSize, Qt, pyqtSignal
-from PyQt6.QtGui import QFontMetrics, QIntValidator
+from PyQt6.QtCore import QRectF, QSize, Qt, pyqtSignal
+from PyQt6.QtGui import QColor, QFont, QFontMetrics, QIcon, QIntValidator, QPainter, QPixmap
 from PyQt6.QtWidgets import QGridLayout, QHBoxLayout, QLabel, QLineEdit, QMenu, QToolButton, QWidget, QWidgetAction
 
 from lspr_ui import GuiTheme, get_active_theme, load_tabler_icon
@@ -48,6 +50,23 @@ from .general_group import ICON_SIZE, style_general_icon_button
 VALUE_MAX = 99999  # five digits, like the Histogram's highlight range (a 16-bit sensor tops out at 65535)
 FULL_16BIT_RANGE = (0.0, 65535.0)  # the whole 16-bit scale: where a fixed range starts, and the "full" button
 _FIELD_MARGIN_PX = 6  # on top of the five-digit width, as in the Histogram's range readout
+
+
+def _text_icon(text: str, color: str) -> QIcon:
+    """``text`` in bold, centred in a ribbon icon (drawn at 2x so it stays crisp)."""
+    size = ICON_SIZE * 2
+    pixmap = QPixmap(size, size)
+    pixmap.fill(Qt.GlobalColor.transparent)
+    painter = QPainter(pixmap)
+    painter.setRenderHint(QPainter.RenderHint.TextAntialiasing)
+    font = QFont()
+    font.setBold(True)
+    font.setPixelSize(round(size * 0.46))
+    painter.setFont(font)
+    painter.setPen(QColor(color))
+    painter.drawText(QRectF(0, 0, size, size), Qt.AlignmentFlag.AlignCenter, text)
+    painter.end()
+    return QIcon(pixmap)
 
 
 def _whole(value: float) -> float:
@@ -113,6 +132,11 @@ class DisplayRangeControls(QWidget):
         self._refresh()  # greyed fields, the readout and the icons for the starting (automatic) state
 
     # -- state ----------------------------------------------------------------------
+
+    def insert_leading(self, button: QWidget, index: int = 0) -> None:
+        """Put ``button`` at ``index``, before the range icons (the View tab's cursor toggle and area picker);
+        it is reparented here."""
+        self.layout().insertWidget(index, button)
 
     def state(self) -> tuple[bool, float, float]:
         """(fixed, black point, white point); the pair is the remembered fixed range even while it is off."""
@@ -214,10 +238,8 @@ class DisplayRangeControls(QWidget):
         self._refresh_look(theme)
 
     def _refresh_look(self, theme: GuiTheme) -> None:
-        self._toggle.setIcon(
-            load_tabler_icon("pin", color=theme.accent_blue if self._fixed else theme.text_muted,
-                             size=ICON_SIZE * 2, stroke_width=2.1)
-        )
+        # "AR" (auto range) / "MR" (manual range): drawn text, since no vendored icon says auto vs fixed.
+        self._toggle.setIcon(_text_icon("MR" if self._fixed else "AR", theme.accent_blue if self._fixed else theme.text_muted))
         self._toggle.setToolTip(
             f"Fixed display range ON ({int(self._low)} to {int(self._high)}): every frame uses the same black and "
             "white point, so brightness is comparable between frames. Click to go back to scaling each frame to its "

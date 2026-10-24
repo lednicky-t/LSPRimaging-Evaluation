@@ -37,6 +37,7 @@ from .roi_context_menu import (
     DESELECT,
     GROUP,
     REMOVE_CUBE_EDIT,
+    SELECT_GROUP,
     UNGROUP,
     show_roi_context_menu,
 )
@@ -271,8 +272,11 @@ class CanvasInteraction:
             self._selection.set_roi_selection({roi_id})
         ids = tuple(sorted(self._selection.selected_roi_ids()))
         toolbox = self._roi_toolbox
+        clicked_group = toolbox.group_for_roi(roi_id) if roi_id is not None else None
         choice = show_roi_context_menu(
             self._menu_parent,
+            clicked_group=(clicked_group.name, len(clicked_group.area_roi_ids)) if clicked_group else None,
+            clicked_group_fully_selected=bool(clicked_group) and set(clicked_group.area_roi_ids) <= set(ids),
             selected_count=len(ids),
             groups=[(group.group_id, group.name) for group in toolbox.groups()],
             any_selected_grouped=any(toolbox.group_for_roi(selected) is not None for selected in ids),
@@ -284,7 +288,9 @@ class CanvasInteraction:
         )
         if choice is None:
             return
-        if choice.action == ADD_ROI:
+        if choice.action == SELECT_GROUP and clicked_group is not None:
+            self._selection.set_roi_selection(set(clicked_group.area_roi_ids))
+        elif choice.action == ADD_ROI:
             self._guarded("Add ROI", lambda: self._selection.set_roi_selection({toolbox.add_roi(*self._to_reference(x, y))}))
         elif choice.action == GROUP:
             default = f"Group {len(toolbox.groups()) + 1}"

@@ -47,6 +47,7 @@ from .mask_overlay_controls import MaskOverlayControls
 from .mask_scan_panels import MaskAutoControls, MaskScanControls
 from .mask_scope_toggle import MaskScopeToggle
 from .overlay_tint import OverlayTint
+from .select_group import SelectGroup, insert_select_group
 
 if TYPE_CHECKING:
     from .panel import ImagePanel
@@ -144,6 +145,7 @@ class MaskTab(QWidget):
         auto_group, self._auto_label = labeled_icon_group(self, self._auto_controls, "Auto mask")
 
         self._separators = [ribbon_separator(self) for _ in range(6)]
+        self._select_group: SelectGroup | None = None  # added by `add_select_picker`
         layout = QHBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(6)
@@ -161,6 +163,10 @@ class MaskTab(QWidget):
         layout.addWidget(self._separators[5])
         layout.addWidget(png_group)
         layout.addStretch(1)
+
+    def add_select_picker(self, picker: QWidget) -> None:
+        """The area-selection picker, as this tab's first group (it limits the mask edits)."""
+        self._select_group = insert_select_group(self, picker)
 
     @property
     def overlay_controls(self) -> MaskOverlayControls:
@@ -190,6 +196,8 @@ class MaskTab(QWidget):
         self._overlay_controls.refresh_theme(theme)
         self._scope_toggle.refresh_theme(theme)
         self._edit_picker.refresh_theme(theme)
+        if self._select_group is not None:
+            self._select_group.refresh_theme(theme.control_border)
         for separator in self._separators:
             separator.setStyleSheet(f"color: {theme.control_border};")
         for label in (

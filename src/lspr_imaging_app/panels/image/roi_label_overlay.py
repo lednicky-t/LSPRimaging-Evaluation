@@ -28,6 +28,8 @@ from PyQt6.QtGui import QColor, QFont, QFontMetricsF, QPainter, QPixmap
 
 from .label_placement import DEFAULT_ROI_PLACEMENT, PLACEMENTS, placement_origin
 
+DEFAULT_POINT_SIZE = 9.0  # what the labels were always drawn at
+POINT_SIZE_RANGE = (4, 24)  # what the ribbon's size box offers
 _GAP_PX = 4.0  # between the circle's edge and the text
 _MARGIN_X_PX = 200.0  # a label whose circle is this far (plus its radius) off the view is skipped; a longer name may be cut
 _MARGIN_Y_PX = 40.0
@@ -51,7 +53,7 @@ class RoiLabelItem(pg.GraphicsObject):
         self.setZValue(900)
         self._entries: list[tuple[float, float, float, str]] = []
         self._font = QFont()
-        self._font.setPointSizeF(9.0)
+        self._font.setPointSizeF(DEFAULT_POINT_SIZE)
         self._font.setBold(True)
         self._bitmaps: dict[tuple[str, float], QPixmap] = {}  # (text, device pixel ratio) -> halo + text, transparent
         self._advances: dict[str, float] = {}  # text -> its width in logical px (no halo padding)
@@ -68,6 +70,18 @@ class RoiLabelItem(pg.GraphicsObject):
         if placement != self._placement:
             self._placement = placement
             self.update()
+
+    def point_size(self) -> float:
+        return self._font.pointSizeF()
+
+    def set_point_size(self, points: float) -> None:
+        """The text size in pt (the labels stay this size while you zoom). Drops the cached bitmaps and widths."""
+        if points == self._font.pointSizeF():
+            return
+        self._font.setPointSizeF(points)
+        self._bitmaps.clear()
+        self._advances.clear()
+        self.update()
 
     def _advance(self, text: str) -> float:
         advance = self._advances.get(text)

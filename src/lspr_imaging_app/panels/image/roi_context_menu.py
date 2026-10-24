@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from PyQt6.QtGui import QCursor
 from PyQt6.QtWidgets import QMenu, QWidget
 
+SELECT_GROUP = "select_group"
 ADD_ROI = "add_roi"
 GROUP = "group"
 ADD_TO_GROUP = "add_to_group"
@@ -38,11 +39,21 @@ def show_roi_context_menu(
     can_add: bool,
     can_delete: bool,
     can_remove_cube_edit: bool = False,
+    clicked_group: tuple[str, int] | None = None,
+    clicked_group_fully_selected: bool = False,
 ) -> RoiMenuChoice | None:
     """Pop the menu at the cursor. ``groups`` is ``(group_id, name)`` pairs.
-    Returns the choice, or `None` if dismissed."""
+    ``clicked_group`` is ``(name, member_count)`` when the ROI under the cursor
+    is in a group: it adds "Select whole group" as the first entry (greyed once
+    every member is already selected). Returns the choice, or `None` if dismissed."""
     plural = "" if selected_count == 1 else "s"
     menu = QMenu(parent)
+    select_group = None
+    if clicked_group is not None:
+        group_name, member_count = clicked_group
+        select_group = menu.addAction(f"Select whole group \"{group_name}\" ({member_count} ROIs)")
+        select_group.setEnabled(not clicked_group_fully_selected)
+        menu.addSeparator()
     add = menu.addAction("Add ROI here")
     add.setEnabled(can_add)
     menu.addSeparator()
@@ -68,7 +79,7 @@ def show_roi_context_menu(
         return None
     if chosen in group_actions:
         return RoiMenuChoice(ADD_TO_GROUP, group_actions[chosen])
-    for action, name in ((add, ADD_ROI), (group, GROUP), (ungroup, UNGROUP), (remove_edit, REMOVE_CUBE_EDIT), (delete, DELETE), (deselect, DESELECT)):
+    for action, name in ((select_group, SELECT_GROUP), (add, ADD_ROI), (group, GROUP), (ungroup, UNGROUP), (remove_edit, REMOVE_CUBE_EDIT), (delete, DELETE), (deselect, DESELECT)):
         if chosen is action:
             return RoiMenuChoice(name)
     return None
