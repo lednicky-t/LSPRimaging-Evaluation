@@ -1265,7 +1265,7 @@ def _build_dock_layout(
     app already docks every panel. This default arrangement is just a
     starting point, not a preset: named, user-editable presets (design doc
     §5) are applied on top of it.
-    Workflow is collapsible and, since 2026-10-18 (maintainer decision), freely
+    Workflow is, since 2026-10-18 (maintainer decision), freely
     resizable like every other panel: it starts at `_WORKFLOW_DEFAULT_WIDTH_PX`
     (the stable app's own workflow_panel width, layout_builder.py:1744) and
     cannot be dragged below `_WORKFLOW_MIN_WIDTH_PX`. A row that needs more room
@@ -1273,7 +1273,7 @@ def _build_dock_layout(
     narrowing it hides nothing. It still starts as the only panel of the left
     area, i.e. full height; the user can dock it anywhere, like the others."""
     workflow_dock = PanelContainer(
-        "Workflow", workflow, window, collapsible=True, min_width=_WORKFLOW_MIN_WIDTH_PX
+        "Workflow", workflow, window, min_width=_WORKFLOW_MIN_WIDTH_PX
     )
     image_dock = PanelContainer("Image", image_panel, window)
     histogram_dock = PanelContainer("Histogram", histogram_panel, window)
@@ -1595,6 +1595,7 @@ def build_main_window(
     spectra_panel = SpectraPanel(m.scan_results, m.roi_toolbox, m.selection, m.analysis_settings)
     spectra_panel.restore_ui_state(ui_state)
     sensorgram_panel = SensorgramPanel(m.scan_results, m.roi_toolbox, m.dataset, m.selection, m.analysis_settings, m.cube_display)
+    sensorgram_panel.restore_ui_state(ui_state)
     workflow = _build_workflow_panel(m, writer, ui_state)
 
     window = QMainWindow()

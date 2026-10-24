@@ -26,9 +26,9 @@ from PyQt6.QtWidgets import QHBoxLayout, QMenu, QToolButton, QWidget, QWidgetAct
 
 from lspr_ui import get_active_theme, load_tabler_icon, transparent_icon_button_stylesheet
 
+from ..ribbon_drawer import RibbonDrawer
 from .canvas_tools import _BUTTON_SIZE, _ICON_SIZE
 from .frame_tools import FrameToolsWidget, captioned_group
-from .ribbon_drawer import RibbonDrawer
 from .mask_rows import MASK_COLOR
 from .slideshow import SlideshowSettings
 from .slideshow_ribbon_controls import SlideshowModeButton, SlideshowSpeedButton
@@ -234,4 +234,4 @@ class SliderRibbonDrawer(RibbonDrawer):
 
     def refresh_theme(self) -> None:
         super().refresh_theme()
-        self.ribbon.refresh_theme()
+        self.content.refresh_theme()

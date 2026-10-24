@@ -1,5 +1,6 @@
 """``RibbonDrawer`` - a ribbon that rolls up to a small "..." handle (2026-10-13 for
-the slider ribbon; made general 2026-10-16 so the top tool ribbon uses the same one).
+the slider ribbon; made general 2026-10-16 so the top tool ribbon uses the same one; moved up to
+`panels/` 2026-10-24 so the Spectra and Sensorgram panels use it too).
 
 The ribbon is shown next to a handle. Rolled up, only the handle (three dots) is
 left, as a thin strip, and a click on it rolls the ribbon down again. The handle
@@ -9,6 +10,10 @@ is hidden while the ribbon is shown. The height change is animated
 What triggers the roll-up is the owner's business (a double-click on the empty
 space of the bar): it calls `set_expanded(False)`. The drawer only does the
 rolling and reports `expanded_changed` so the owner can remember the state.
+
+**Scrolling (2026-10-24).** The ribbon sits in a `ScrollingRibbon`, so a panel narrower than the row gets an arrow
+at each edge instead of a minimum width. `drawer.ribbon` is that wrapper (the widget that is shown, hidden and
+animated); `drawer.content` is the ribbon the caller passed in. `scrolling=False` keeps the old behaviour.
 """
 
 from __future__ import annotations
@@ -17,6 +22,8 @@ from PyQt6.QtCore import QEasingCurve, QPropertyAnimation, QSize, Qt, pyqtSignal
 from PyQt6.QtWidgets import QHBoxLayout, QToolButton, QWidget
 
 from lspr_ui import get_active_theme, load_tabler_icon, transparent_icon_button_stylesheet
+
+from .scrolling_ribbon import ScrollingRibbon
 
 _QWIDGETSIZE_MAX = 16777215
 _HANDLE_WIDTH = 18
@@ -39,9 +46,12 @@ class RibbonDrawer(QWidget):
         parent: QWidget | None = None,
         *,
         handle_alignment: Qt.AlignmentFlag = Qt.AlignmentFlag.AlignBottom,
+        scrolling: bool = True,
     ) -> None:
         super().__init__(parent)
-        self.ribbon = ribbon
+        self.content = ribbon
+        self.ribbon: QWidget = ScrollingRibbon(ribbon, self) if scrolling else ribbon
+        ribbon = self.ribbon
         self._handle_tooltip = handle_tooltip
         ribbon.setParent(self)
         self._expanded = True
@@ -62,6 +72,11 @@ class RibbonDrawer(QWidget):
         layout.addWidget(self._handle, 0, Qt.AlignmentFlag.AlignLeft | handle_alignment)
         layout.addWidget(ribbon, 1)
         self.refresh_theme()
+
+    def ensure_visible(self, widget: QWidget) -> None:
+        """Scroll the ribbon (if it scrolls and overflows) so that *widget*, a child of it, is fully in view."""
+        if isinstance(self.ribbon, ScrollingRibbon):
+            self.ribbon.ensure_visible(widget)
 
     def is_expanded(self) -> bool:
         return self._expanded
@@ -99,6 +114,8 @@ class RibbonDrawer(QWidget):
         self._handle.setVisible(not self._expanded)
 
     def refresh_theme(self) -> None:
-        """Restyle the handle. The ribbon is themed by its owner."""
+        """Restyle the handle (and the scroll arrows). The ribbon is themed by its owner."""
         self._handle.setStyleSheet(transparent_icon_button_stylesheet(hover=get_active_theme().control_bg_hover))
+        if isinstance(self.ribbon, ScrollingRibbon):
+            self.ribbon.refresh_theme()
         self._refresh_handle()

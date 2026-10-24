@@ -1,7 +1,8 @@
 """``SensorgramPanel`` (sketch §7 "Display panels" > Sensorgram, §10): the metric of the selected ROIs against time.
 
-**Screen.** A strip of compact controls on top (display mode, centre and band for averages, smoothing, spike removal, baseline), the plot filling
-the rest and one status line below it. For the ROIs selected in the ROI table or on the image it plots, at every scanned cube, the **metric** of the
+**Screen.** A ribbon of compact controls on top (display mode, centre and band for averages, smoothing, spike removal, baseline) in the look of
+the Image panel's ribbon (captioned groups, `ribbon_row.py`): a double-click on its empty space rolls it up to a "..." handle, and a panel
+narrower than the row scrolls it with an arrow at each edge. The plot fills the rest and one status line sits below it. For the ROIs selected in the ROI table or on the image it plots, at every scanned cube, the **metric** of the
 Spectra panel (the position of the fitted maximum or centroid, in nm: a peak *shifting* is the measurement). The x axis is time in seconds or the
 cube number, following the app-wide Cube / Time choice. A dashed line marks the current cube; clicking the plot moves the cube slider there.
 
@@ -56,6 +57,10 @@ from ...dataset import DatasetModule
 from ...roi import RoiToolbox
 from ...selection import CubeDisplayModule, SelectionModule
 from ...selection.cube_display_module import MODE_TIME
+from ...storage.ui_state_keys import SENSORGRAM_RIBBON_OPEN, read
+from ..ribbon_fields import style_ribbon_check, style_ribbon_combo, style_ribbon_number_field
+from ..ribbon_row import RibbonRow, rolled_ribbon
+from ..ui_state import UiStateStore
 from ..visibility_gate import HiddenPanelGate
 from .plot import SensorgramPlot
 
@@ -117,6 +122,7 @@ class SensorgramPanel(QWidget):
         self._display = QComboBox(self)
         for key in SENSORGRAM_DISPLAY_MODES:
             self._display.addItem(DISPLAY_LABELS.get(key, key), key)
+        style_ribbon_combo(self._display)
         self._display.setToolTip(
             "Individual: one line per selected ROI. Average all / by group: each ROI is processed alone first, then the finished traces "
             "are combined (never the spectra)."
@@ -124,35 +130,46 @@ class SensorgramPanel(QWidget):
         self._center = QComboBox(self)
         for key in SENSORGRAM_AGGREGATIONS:
             self._center.addItem(CENTER_LABELS.get(key, key), key)
+        style_ribbon_combo(self._center)
         self._center.setToolTip("How the ROIs of an average are combined at each point.")
         self._band = QComboBox(self)
         for key in SENSORGRAM_BANDS:
             self._band.addItem(BAND_LABELS.get(key, key), key)
+        style_ribbon_combo(self._band)
         self._band.setToolTip("Shaded band around an average: standard deviation of the ROIs, or standard error of the mean (SD / sqrt(n)).")
         self._smoothing = QComboBox(self)
         for key in SMOOTHING_METHODS:
             self._smoothing.addItem(SMOOTHING_LABELS.get(key, key), key)
+        style_ribbon_combo(self._smoothing)
         self._smoothing.setToolTip("Smoothing of each ROI's trace, after spike removal.")
         self._window = QSpinBox(self)
         self._window.setRange(3, 301)
         self._window.setSingleStep(2)
         self._window.setPrefix("window ")
+        style_ribbon_number_field(self._window, "window 301")
         self._window.setToolTip("Smoothing window in points (made odd, never longer than the trace).")
-        self._spikes = QCheckBox("Remove spikes", self)
+        self._spikes = QCheckBox("Remove", self)
         self._spikes.setToolTip("Replace single-point outliers (Hampel filter: 3.5 scaled MADs from the rolling median of 5 points) before smoothing.")
-        self._baseline = QCheckBox("Baseline", self)
+        self._baseline = QCheckBox("Subtract", self)
         self._baseline.setToolTip("Subtract the mean of each trace inside the shaded band, so every trace reads as a shift from it. Drag the band.")
+        style_ribbon_check(self._spikes)
+        style_ribbon_check(self._baseline)
         self._status = QLabel("", self)
         self._status.setWordWrap(True)
         self._status.setStyleSheet(f"color: {get_active_theme().text_dim};")
         self._plot = SensorgramPlot(self)
 
+        self._ribbon = RibbonRow(self)
+        self._ribbon.add_group("Display", self._display)
+        self._ribbon.add_group("Average", self._center, self._band)
+        self._ribbon.add_group("Smoothing", self._smoothing, self._window)
+        self._ribbon.add_group("Spikes", self._spikes)
+        self._ribbon.add_group("Baseline", self._baseline)
+        self._ribbon.add_stretch()
+        self._ribbon_drawer = rolled_ribbon(self._ribbon, "Show the sensorgram controls.", self)
         controls = QHBoxLayout()
-        controls.setContentsMargins(4, 2, 4, 0)
-        controls.setSpacing(6)
-        for widget in (self._display, self._center, self._band, self._smoothing, self._window, self._spikes, self._baseline):
-            controls.addWidget(widget)
-        controls.addStretch(1)
+        controls.setContentsMargins(4, 2, 6, 2)
+        controls.addWidget(self._ribbon_drawer)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(2)
@@ -193,11 +210,17 @@ class SensorgramPanel(QWidget):
 
     # -- wiring with the owner -------------------------------------------------------------------------------------------------
 
+    def restore_ui_state(self, store: UiStateStore) -> None:
+        self._ribbon_drawer.set_expanded(read(store, SENSORGRAM_RIBBON_OPEN) is not False, animate=False)
+        self._ribbon_drawer.expanded_changed.connect(lambda open_: store.set(SENSORGRAM_RIBBON_OPEN.key, bool(open_)))
+
     def set_panel_visible(self, visible: bool) -> None:
         """Connected to the dock's ``visibilityChanged``: a hidden panel does no work and catches up once when shown."""
         self._gate.set_visible(visible)
 
     def refresh_theme(self) -> None:
+        self._ribbon.refresh_theme()
+        self._ribbon_drawer.refresh_theme()
         self._plot.refresh_theme()
         self._status.setStyleSheet(f"color: {get_active_theme().text_dim};")
 

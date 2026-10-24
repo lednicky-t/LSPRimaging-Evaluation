@@ -75,6 +75,7 @@ from PyQt6.QtWidgets import (
     QFrame,
     QHBoxLayout,
     QLabel,
+    QSizePolicy,
     QStackedWidget,
     QToolButton,
     QVBoxLayout,
@@ -216,8 +217,10 @@ class ImageToolRibbon(QWidget):
             self._stack.addWidget(content if content is not None else _category_placeholder(name))
         tab_row.addStretch(1)
 
+        self._page_widths = [self._stack.widget(i).sizePolicy().horizontalPolicy() for i in range(self._stack.count())]
         self._tab_buttons[0].setChecked(True)
         self._stack.setCurrentIndex(0)
+        self._size_to_current_page()
 
         layout = QVBoxLayout()
         layout.setContentsMargins(0, 0, 0, 0)
@@ -278,6 +281,10 @@ class ImageToolRibbon(QWidget):
             tip = f"{tip} - applied" if tip else f"{label} - applied"
         button.setToolTip(tip)
 
+    def tab_button(self, label: str) -> QToolButton:
+        """The tab button of the category *label* (the panel scrolls it into view)."""
+        return self._tab_buttons[self._category_names.index(label)]
+
     def current_category(self) -> str:
         return self._category_names[self._stack.currentIndex()]
 
@@ -292,9 +299,22 @@ class ImageToolRibbon(QWidget):
         self._show_category(index)
         return True
 
+    def _size_to_current_page(self) -> None:
+        """Only the shown page counts for the ribbon's width (2026-10-24). A `QStackedWidget` is as wide as its widest
+        page, shown or not (Mask is the widest), so every tab would scroll as far as Mask does and the short tabs
+        would have an empty stretch to scroll through. A page that is not shown is told to ignore its width."""
+        current = self._stack.currentIndex()
+        for index in range(self._stack.count()):
+            page = self._stack.widget(index)
+            policy = page.sizePolicy()
+            policy.setHorizontalPolicy(self._page_widths[index] if index == current else QSizePolicy.Policy.Ignored)
+            page.setSizePolicy(policy)
+        self._stack.updateGeometry()  # a page that is hidden does not announce its policy change; the layouts above must hear it
+
     def _show_category(self, index: int) -> None:
         changed = index != self._stack.currentIndex()
         self._stack.setCurrentIndex(index)
+        self._size_to_current_page()
         if changed:
             self.category_changed.emit(self._category_names[index])
 

@@ -99,10 +99,14 @@ _TITLE_BAR_ICON_HOVER = "rgba(128, 128, 128, 0.20)"
 # 5px.
 _CARD_GAP_PX = 3
 _CARD_RADIUS_PX = 6
+_CARD_BOTTOM_EXTRA_PX = 1  # content sits one pixel higher at the bottom: its square corners used to nick the rounded border (2026-10-24)
+_CARD_RIGHT_EXTRA_PX = 1  # and one pixel further from the right edge, for the same reason
 
 # The title bar's status fields (`set_subtitle_columns`, 2026-10-16): the gap between two
 # fields, and a few spare pixels on a fixed-width field so its widest text never touches the edge.
 _SUBTITLE_COLUMN_GAP_PX = 14
+_SUBTITLE_TITLE_GAP_PX = 8  # between the title and the first field
+_SUBTITLE_COMMENT_MIN_PX = 40  # the comment field is shown only if at least this much of it fits
 _SUBTITLE_COLUMN_SLACK_PX = 3
 
 _QWIDGETSIZE_MAX = 16777215  # Qt's "no maximum"
@@ -210,6 +214,22 @@ class _VerticalLabel(QWidget):
             self._text,
         )
         painter.end()
+
+
+class _ColumnsHost(QWidget):
+    """The row of the title bar's status fields. Its minimum width is 0 (2026-10-24): a dock narrower than all the fields shows
+    the first ones and drops the rest whole, from the right (`on_resize` decides which), instead of keeping the dock wide."""
+
+    def __init__(self, parent: QWidget, on_resize) -> None:
+        super().__init__(parent)
+        self._on_resize = on_resize
+
+    def minimumSizeHint(self) -> QSize:  # noqa: N802 - Qt naming
+        return QSize(0, super().minimumSizeHint().height())
+
+    def resizeEvent(self, event) -> None:  # type: ignore[override]  # noqa: N802 - Qt naming
+        super().resizeEvent(event)
+        self._on_resize()
 
 
 class _ClickableStrip(QWidget):
@@ -350,7 +370,9 @@ class PanelContainer(QDockWidget):
             self._frame_fill_color = None
             self._frame_radius = 0
         else:
-            self.setContentsMargins(_CARD_GAP_PX, _CARD_GAP_PX, _CARD_GAP_PX, _CARD_GAP_PX)
+            self.setContentsMargins(
+                _CARD_GAP_PX, _CARD_GAP_PX, _CARD_GAP_PX + _CARD_RIGHT_EXTRA_PX, _CARD_GAP_PX + _CARD_BOTTOM_EXTRA_PX
+            )
             self._frame_border_color = theme.toolbar_border
             # theme.toolbar_bg, not theme.window_bg (2026-09-27, follow-up -
             # maintainer screenshot comparison against real VS Code): a
@@ -453,9 +475,9 @@ class PanelContainer(QDockWidget):
 
         # Status fields (`set_subtitle_columns`): left-aligned right after the title, each at a
         # fixed place; the last, unsized one (the comment) takes all the room that is left.
-        columns_host = QWidget(row)
+        columns_host = _ColumnsHost(row, self._fit_subtitle_columns)
         columns_layout = QHBoxLayout(columns_host)
-        columns_layout.setContentsMargins(_SUBTITLE_COLUMN_GAP_PX, 0, 0, 0)
+        columns_layout.setContentsMargins(_SUBTITLE_TITLE_GAP_PX, 0, 0, 0)
         columns_layout.setSpacing(_SUBTITLE_COLUMN_GAP_PX)
         layout.addWidget(columns_host, 1)
         self._subtitle_columns_host = columns_host
@@ -608,6 +630,36 @@ class PanelContainer(QDockWidget):
                     label.setText(column.text)
                 if label.toolTip() != column.tooltip:
                     label.setToolTip(column.tooltip)
+        self._fit_subtitle_columns()
+
+    def _fit_subtitle_columns(self) -> None:
+        """Show the status fields that fit the room the title bar has, from the left, and hide the rest (a field is shown whole
+        or not at all). The comment, which has no fixed width, needs `_SUBTITLE_COMMENT_MIN_PX`."""
+        host = self._subtitle_columns_host
+        if host is None or not self._subtitle_column_labels:
+            return
+        layout = host.layout()
+        labels = self._subtitle_column_labels
+        # A fixed-width field at the very end that is empty takes no room (2026-10-24): nothing comes after it, so
+        # no other field can move, and the comment before it gets the width instead of being cut short beside a blank.
+        empty_tail = 0
+        for label in reversed(labels):
+            if isinstance(label, _ElidedLabel) or label.text():
+                break
+            empty_tail += 1
+        x = layout.contentsMargins().left()
+        fits = True
+        for index, label in enumerate(labels):
+            need = _SUBTITLE_COMMENT_MIN_PX if isinstance(label, _ElidedLabel) else label.minimumWidth()
+            if index >= len(labels) - empty_tail:
+                label.setVisible(False)  # never guarded by isHidden(): a new label is "hidden" without being hidden *explicitly*, and Qt shows it later
+            elif fits and x + need <= host.width():
+                if not label.isVisibleTo(host):
+                    label.setVisible(True)
+                x += need + layout.spacing()
+            else:
+                fits = False
+                label.setVisible(False)
 
     def _set_collapsed(self, collapsed: bool) -> None:
         """Click-to-collapse/expand (design doc §4 - the maintainer chose

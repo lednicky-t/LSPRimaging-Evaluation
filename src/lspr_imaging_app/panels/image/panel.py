@@ -130,6 +130,7 @@ from ...selection import (
 from ...selection.cube_display_module import MODE_CUBE, MODE_TIME, format_elapsed_seconds
 from ...selection.frame_roles_module import ROLE_DARK, ROLE_IGNORED, ROLE_REFERENCE, FrameRolesModule
 from ..cursor_overlay import CursorOverlay
+from ..ribbon_drawer import RibbonDrawer
 from ..subtitle_column import SubtitleColumn
 from .landmark_overlay import draw_landmarks
 from .slider_ticks import cube_slider_major_ticks, wavelength_slider_major_ticks
@@ -205,7 +206,6 @@ from .slider_colors import SliderColors
 from ...applog.events import log_event, timed
 from .playback_stats import PlaybackStats
 from .timed_canvas import TimedImageItem, TimedLayoutWidget
-from .ribbon_drawer import RibbonDrawer
 from .slider_ribbon import SliderRibbon, SliderRibbonDrawer
 from .slideshow import (
     END_CUBE,
@@ -1018,6 +1018,7 @@ class ImagePanel(QWidget):
             restored = VIEW_TAB if self._initial_ribbon_category == "Histogram" else self._initial_ribbon_category
             self._tool_ribbon.set_category(restored)  # before the connect: restoring is not a user change
         self._tool_ribbon.category_changed.connect(self.ribbon_category_changed)
+        self._tool_ribbon.category_changed.connect(lambda _label: self._show_current_tab())  # a tab scrolled half out of view comes into view
         self._tool_ribbon.category_changed.connect(lambda _label: self._refresh_tool_info(self._active_tool.active()))
         # Short tab label, full name in the tooltip; the tab is green while the correction is applied.
         self._tool_ribbon.set_tab_tooltip(CHROMATIC_TAB, "Chromatic Corrections")
@@ -1087,6 +1088,10 @@ class ImagePanel(QWidget):
         self._top_drawer.expanded_changed.connect(self._tool_info.setVisible)  # rolled up: only the handle is left
 
         self._refresh_top_bar_theme()
+
+    def _show_current_tab(self) -> None:
+        """Scroll the tool ribbon (it scrolls when the panel is narrower than its row) so the chosen tab is fully visible."""
+        self._top_drawer.ensure_visible(self._tool_ribbon.tab_button(self._tool_ribbon.current_category()))
 
     def _build_navigation_bar(self) -> None:
         # Cube and Wavelength navigation - ported from the stable app's
@@ -2821,16 +2826,17 @@ class ImagePanel(QWidget):
         comment: str = "",
         tooltip: str = "",
     ) -> tuple[SubtitleColumn, ...]:
-        """The dock fields, left to right: frame role (word, colour), cube, wavelength, the frame's
-        own time, comment. Every field but the comment has the width of the widest thing it can
+        """The dock fields, left to right: cube, wavelength, the frame's own time, comment, frame role
+        (word, colour). The role word is empty on most frames and has a fixed width (the widest role word), so it
+        comes last, at the right end: anywhere before the comment it would be a blank gap (2026-10-24). Every field but the comment has the width of the widest thing it can
         show, so an empty one keeps its place and the ones after it never move."""
         widest_cube, widest_wavelength = self._widest_frame_texts()
         return (
-            SubtitleColumn(role[0] if role else "", _WIDEST_ROLE_WORD, role[1] if role else None),
             SubtitleColumn(cube, widest_cube),
             SubtitleColumn(wavelength, widest_wavelength),
             SubtitleColumn(time, _WIDEST_FRAME_TIME),
             SubtitleColumn(comment, tooltip=tooltip),
+            SubtitleColumn(role[0] if role else "", _WIDEST_ROLE_WORD, role[1] if role else None),
         )
 
     def _widest_frame_texts(self) -> tuple[str, str]:

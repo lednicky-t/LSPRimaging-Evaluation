@@ -1,7 +1,8 @@
 """``SpectraPanel`` (sketch §7 "Display panels" > Spectra, §10): the spectra of the selected ROIs on the current cube.
 
-**Screen.** A strip of compact controls on top (formula, fit, polynomial order, metric, fit window, error bars), the plot filling the rest and
-one status line below it. It follows the selection: the ROIs selected in the ROI table or on the image, and the cube on the Image panel's
+**Screen.** A ribbon of compact controls on top (formula, fit, polynomial order, metric, fit window, error bars) in the look of the Image
+panel's ribbon (captioned groups, `ribbon_row.py`): a double-click on its empty space rolls it up to a "..." handle, and a panel narrower than
+the row scrolls it with an arrow at each edge. The plot fills the rest and one status line sits below it. It follows the selection: the ROIs selected in the ROI table or on the image, and the cube on the Image panel's
 slider. Nothing here starts an analysis (CLAUDE.md): the numbers come from ``analysis/scan.h5`` through
 :class:`~...analysis.scan_results.ScanResultsModule`, which says whether they are current.
 
@@ -43,6 +44,9 @@ from ...analysis.settings_module import AnalysisSettingsModule
 from ...applog import timed
 from ...roi import RoiToolbox
 from ...selection import SelectionModule
+from ...storage.ui_state_keys import SPECTRA_RIBBON_OPEN, read
+from ..ribbon_fields import style_ribbon_check, style_ribbon_combo, style_ribbon_number_field
+from ..ribbon_row import RibbonRow, rolled_ribbon
 from ..ui_state import UiStateStore
 from ..visibility_gate import HiddenPanelGate
 from .plot import SpectraPlot
@@ -99,37 +103,48 @@ class SpectraPanel(QWidget):
         self._formula = QComboBox(self)
         for key in FORMULA_KEYS:
             self._formula.addItem(FORMULA_LABELS.get(key, key), key)
+        style_ribbon_combo(self._formula)
         self._formula.setToolTip("How the stored sample and reference values are combined into one value per wavelength.")
         self._fit = QComboBox(self)
         for key in FIT_METHODS:
             self._fit.addItem(FIT_LABELS.get(key, key), key)
+        style_ribbon_combo(self._fit)
         self._fit.setToolTip("Curve fitted through the points of each ROI's spectrum (inside the fit window, if one is set).")
         self._order = QSpinBox(self)
         self._order.setRange(1, 8)
         self._order.setPrefix("order ")
+        style_ribbon_number_field(self._order, "order 8")
         self._order.setToolTip("Polynomial order (capped at half the number of points).")
         self._metric = QComboBox(self)
         for key in METRIC_KEYS:
             self._metric.addItem(METRIC_LABELS.get(key, key), key)
+        style_ribbon_combo(self._metric)
         self._metric.setToolTip("The number read off each fitted spectrum (marked with a diamond): what the Sensorgram will plot.")
-        self._window_box = QCheckBox("Fit window", self)
+        self._window_box = QCheckBox("Set", self)
         self._window_box.setToolTip("Restrict the fit and the metric to a band of wavelengths. Drag the shaded band to move or resize it.")
-        self._error_box = QCheckBox("Error bars", self)
+        self._error_box = QCheckBox("Show", self)
         self._error_box.setToolTip(
             "Pixel-to-pixel spread inside each aperture divided by the square root of the pixel count (standard error of the mean value), "
             "propagated through the formula. Not the reproducibility between measurements."
         )
+        style_ribbon_check(self._window_box)
+        style_ribbon_check(self._error_box)
         self._status = QLabel("", self)
         self._status.setWordWrap(True)
         self._status.setStyleSheet(f"color: {get_active_theme().text_dim};")
         self._plot = SpectraPlot(self)
 
+        self._ribbon = RibbonRow(self)
+        self._ribbon.add_group("Formula", self._formula)
+        self._ribbon.add_group("Fit", self._fit, self._order)
+        self._ribbon.add_group("Metric", self._metric)
+        self._ribbon.add_group("Fit window", self._window_box)
+        self._ribbon.add_group("Error bars", self._error_box)
+        self._ribbon.add_stretch()
+        self._ribbon_drawer = rolled_ribbon(self._ribbon, "Show the spectra controls.", self)
         controls = QHBoxLayout()
-        controls.setContentsMargins(4, 2, 4, 0)
-        controls.setSpacing(6)
-        for widget in (self._formula, self._fit, self._order, self._metric, self._window_box, self._error_box):
-            controls.addWidget(widget)
-        controls.addStretch(1)
+        controls.setContentsMargins(4, 2, 6, 2)
+        controls.addWidget(self._ribbon_drawer)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(2)
@@ -170,12 +185,16 @@ class SpectraPanel(QWidget):
 
     def restore_ui_state(self, store: UiStateStore) -> None:
         store.bind(ERROR_BARS_KEY, self._error_box)
+        self._ribbon_drawer.set_expanded(read(store, SPECTRA_RIBBON_OPEN) is not False, animate=False)
+        self._ribbon_drawer.expanded_changed.connect(lambda open_: store.set(SPECTRA_RIBBON_OPEN.key, bool(open_)))
 
     def set_panel_visible(self, visible: bool) -> None:
         """Connected to the dock's ``visibilityChanged``: a hidden panel does no work and catches up once when shown."""
         self._gate.set_visible(visible)
 
     def refresh_theme(self) -> None:
+        self._ribbon.refresh_theme()
+        self._ribbon_drawer.refresh_theme()
         self._plot.refresh_theme()
         self._status.setStyleSheet(f"color: {get_active_theme().text_dim};")
 
