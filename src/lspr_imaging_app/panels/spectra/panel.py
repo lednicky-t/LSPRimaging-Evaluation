@@ -12,9 +12,17 @@ spread inside the aperture divided by the square root of the pixel count (``anal
 measurements). A wavelength with no valid pixel is left out and counted in the status line. Results that are out of date (the inputs changed
 since the scan: ``ScanResultsModule.stale_cubes``) are drawn dimmed with a note, never hidden, and never silently recomputed.
 
+**The cursor.** A dashed line at the wavelength shown on the Image panel, with the Wavelength slider's circle on the x axis (``axis_cursor.py``).
+It follows ``SelectionModule.wavelength_changed`` without recomputing (the spectra do not depend on the wavelength), and dragging the circle
+sets the wavelength to the nearest scanned one, as the slider does. Hidden while nothing is plotted or the Image panel shows the 0 nm dark frame.
+
 **Threads and pacing.** The formula, the fit and the metric (``analysis/scan_view.compute_spectra``) run on a plain worker thread, never on the
 GUI thread (CLAUDE.md: no fit on the GUI thread, "live preview" included). A redraw is coalesced for 100 ms, only the newest request is
 computed, a result from before a clear is dropped, and nothing is done while the dock is hidden (``HiddenPanelGate``).
+
+**Status bar.** A computation that lasts more than a moment (``panel_task.PanelTask``) appears in the app's task indicator ("Spectra: fitting
+3 ROIs on cube 5") with a Cancel button; a quick one leaves no trace. Cancel drops the result and clears the plot, so a plot that no longer matches
+the controls is never left standing. The worker itself cannot be interrupted and runs to its end unseen.
 
 **State.** Formula, fit method, order, metric and the fit window belong to modules (``AreaRoiDetectionSettings.formula_key``,
 ``AnalysisSettingsModule``) and are saved with the session; this panel only edits them through those modules. The error-bar choice is a
@@ -47,6 +55,7 @@ from ...selection import SelectionModule
 from ...storage.ui_state_keys import SPECTRA_RIBBON_OPEN, read
 from ..ribbon_fields import style_ribbon_check, style_ribbon_combo, style_ribbon_number_field
 from ..ribbon_row import RibbonRow, rolled_ribbon
+from ..panel_task import PanelTask
 from ..ui_state import UiStateStore
 from ..visibility_gate import HiddenPanelGate
 from .plot import SpectraPlot
@@ -63,6 +72,7 @@ FORMULA_LABELS = {
 }
 FIT_LABELS = {"none": "No fit", "polynomial": "Polynomial", "gaussian": "Gaussian"}
 METRIC_LABELS = {"maximum": "Maximum", "centroid": "Centroid"}
+TASK_ID = "spectra.compute"
 ERROR_BARS_KEY = "spectra/error_bars"
 _RELEVANT_ROI_CHANGES = {"detection_settings", "session_restored", "added", "deleted", "detected"}  # a drag changes no spectrum
 _FALLBACK_HUES = 9
@@ -133,6 +143,7 @@ class SpectraPanel(QWidget):
         self._status.setWordWrap(True)
         self._status.setStyleSheet(f"color: {get_active_theme().text_dim};")
         self._plot = SpectraPlot(self)
+        self.task = PanelTask(TASK_ID, "Spectra", self)  # connected to the status bar's task indicator by app_rewrite
 
         self._ribbon = RibbonRow(self)
         self._ribbon.add_group("Formula", self._formula)
@@ -166,8 +177,10 @@ class SpectraPanel(QWidget):
         self._window_box.toggled.connect(self._on_window_toggled)
         self._error_box.toggled.connect(lambda _on: self._draw_last())
         self._plot.fit_window_changed.connect(self._on_window_dragged)
+        self._plot.wavelength_dragged.connect(self._on_cursor_dragged)
 
         self._selection.cube_changed.connect(lambda _cube: self._schedule_redraw())
+        self._selection.wavelength_changed.connect(lambda _wavelength: self._update_cursor())
         self._selection.roi_selection_changed.connect(lambda _ids: self._schedule_redraw())
         self._settings.settings_changed.connect(lambda _change: self._on_settings_changed())
         self._roi_toolbox.geometry_changed.connect(self._on_roi_changed)
@@ -280,6 +293,22 @@ class SpectraPanel(QWidget):
         self._last = None
         self._schedule_redraw()
 
+    # -- the cursor ------------------------------------------------------------------------------------------------------------------
+
+    def _update_cursor(self) -> None:
+        """The line and the circle follow the wavelength slider; nothing is computed."""
+        if self._gate.defer():
+            return
+        wavelength = float(self._selection.current_wavelength())
+        self._plot.set_current_wavelength(wavelength if self._last is not None and wavelength > 0.0 else None)
+
+    def _on_cursor_dragged(self, wavelength_nm: float) -> None:
+        """The circle was dragged: the nearest scanned wavelength becomes the current one (the Image panel's slider follows)."""
+        stored = self._scan.stored()
+        if stored is None or not stored.wavelength_nm:
+            return
+        self._selection.set_wavelength(min(stored.wavelength_nm, key=lambda wl: abs(wl - wavelength_nm)))
+
     # -- computing off the GUI thread --------------------------------------------------------------------------------------------
 
     def _schedule_redraw(self) -> None:
@@ -295,6 +324,8 @@ class SpectraPanel(QWidget):
             self._last = None
             self._plot.clear()
             self._plot.set_fit_window(None)
+            self._plot.set_current_wavelength(None)
+            self.task.end("cancelled", "nothing to compute")
             if self._scan.message():
                 self._status.setText(self._scan.message())
             elif self._scan.is_loading():
@@ -307,6 +338,8 @@ class SpectraPanel(QWidget):
             self._last = None
             self._plot.clear()
             self._plot.set_fit_window(None)
+            self._plot.set_current_wavelength(None)
+            self.task.end("cancelled", "nothing to compute")
             self._status.setText("Select one or more ROIs (ROI table or image) to see their spectra.")
             return
         request = SpectraRequest(roi_ids, int(self._selection.current_cube()), self._roi_toolbox.detection_settings().formula_key,
@@ -316,8 +349,26 @@ class SpectraPanel(QWidget):
             self._pending = True  # newest request wins: computed when the running one is back
             return
         self._busy = True
+        self.task.begin(self._task_message(request))
         self._thread = threading.Thread(target=self._compute, args=(job,), name="spectra-compute", daemon=True)
         self._thread.start()
+
+    def _task_message(self, request: SpectraRequest) -> str:
+        fit = "" if request.metric.fit_method == "none" else f", {FIT_LABELS.get(request.metric.fit_method, request.metric.fit_method).lower()} fit"
+        return f"{len(request.roi_ids)} ROI{'s' if len(request.roi_ids) != 1 else ''} on cube {request.cube}{fit}"
+
+    def cancel(self) -> None:
+        """Task indicator's Cancel: forget the running (or queued) computation and clear the plot. The worker thread cannot be stopped; its
+        result is dropped when it arrives (it belongs to an older generation)."""
+        self._redraw_timer.stop()
+        self._pending = False
+        self._generation += 1
+        self._last = None
+        self._plot.clear()
+        self._plot.set_fit_window(None)
+        self._plot.set_current_wavelength(None)
+        self._status.setText("Cancelled. Change a setting or the selection to compute the spectra again.")
+        self.task.end("cancelled")
 
     def _compute(self, job: _Job) -> None:
         try:
@@ -337,7 +388,13 @@ class SpectraPanel(QWidget):
             self._draw_last()
         if self._pending:
             self._pending = False
-            self._schedule_redraw()
+            self._schedule_redraw()  # the task stays open: the newer computation continues it
+            if not self._redraw_timer.isActive():  # hidden panel: nothing was started, so nothing continues it
+                self.task.end("cancelled", "superseded while hidden")
+        elif isinstance(results, BaseException):
+            self.task.end("failed", str(results))
+        else:
+            self.task.end("completed")
 
     # -- drawing -------------------------------------------------------------------------------------------------------------------
 
@@ -372,6 +429,7 @@ class SpectraPanel(QWidget):
                                        metric.fit_wl_max if metric.fit_wl_max is not None else wavelengths[1]))
         else:
             self._plot.set_fit_window(None)
+        self._update_cursor()
         self._status.setText(self._status_line(job, spectra, current))
 
     def _status_line(self, job: _Job, spectra: list[RoiSpectrum], current: bool | None) -> str:

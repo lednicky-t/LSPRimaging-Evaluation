@@ -31,8 +31,8 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
-from PyQt6.QtCore import Qt, QByteArray, QTimer
-from PyQt6.QtGui import QAction, QActionGroup, QKeySequence
+from PyQt6.QtCore import Qt, QByteArray, QTimer, QUrl
+from PyQt6.QtGui import QAction, QActionGroup, QDesktopServices, QKeySequence
 from PyQt6.QtWidgets import QApplication, QMainWindow, QMenu, QMessageBox, QStatusBar
 
 from lspr_core.perf import get_runtime
@@ -84,8 +84,11 @@ from .perf_setup import install_runtime as install_perf_runtime
 from .perf_setup import status_text as perf_status_text
 from .perf_setup import write_perf_preferences
 from .panels.roi_table import RoiTablePanel
+from .panels.image.analysis_tab import FAST_SCAN_KEY, AnalysisTab
 from .panels.sensorgram import SensorgramPanel
+from .panels.sensorgram.panel import TASK_ID as SENSORGRAM_TASK_ID
 from .panels.spectra import SpectraPanel
+from .panels.spectra.panel import TASK_ID as SPECTRA_TASK_ID
 from .panels.task_indicator import TaskIndicator
 from .panels.ui_state import UiStateStore
 from .panels.workflow import WorkflowPanel, WorkflowStage
@@ -1091,11 +1094,10 @@ def _build_workflow_panel(m: _Modules, writer: _SettingsWriter, ui_state: UiStat
     return workflow
 
 
-def _wire_analysis_scan(m: _Modules, workflow: WorkflowPanel, ui_state: UiStateStore) -> None:
-    """The Workflow > Analysis scan row (Run / Stop) and the scan task: the row only emits requests and shows text; this decides where
-    the file goes, starts the task on the GUI thread and turns its outcome into the row's status line."""
-    row = workflow.analysis_scan_row
-    ui_state.bind("analysis/scan_every_cube_again", row.rescan_all_checkbox)
+def _wire_analysis_scan(m: _Modules, row: AnalysisTab, ui_state: UiStateStore) -> None:
+    """The Image panel's Analysis tab (Scan / Fast scan / Scan file) and the scan task: the tab only emits requests and shows text; this
+    decides where the file goes, starts the task on the GUI thread and turns its outcome into the tab's status line."""
+    ui_state.bind(FAST_SCAN_KEY, row.fast_scan_button)
 
     def scan_file() -> Path | None:
         home, session_id = m.dataset.dataset_home(), m.session_coordinator.active_session_id()
@@ -1107,28 +1109,43 @@ def _wire_analysis_scan(m: _Modules, workflow: WorkflowPanel, ui_state: UiStateS
         path = scan_file()
         line = describe_scan_file(path) if path is not None else None
         row.set_status(line or "No scan yet.")
+        refresh_file_button()
+
+    def refresh_file_button(*_args: object) -> None:
+        path = scan_file()
+        row.set_scan_file_available(path is not None and path.is_file())
+
+    def open_scan_folder() -> None:
+        path = scan_file()
+        if path is None or not path.is_file():
+            row.set_scan_file_available(False)
+            row.set_status("There is no scan file to show.", announce=True)
+            return
+        if not QDesktopServices.openUrl(QUrl.fromLocalFile(str(path.parent))):
+            row.set_status(f"Could not open the folder {path.parent}.", announce=True)
 
     def run() -> None:
         path = scan_file()
         if path is None:
-            row.set_status("Open a dataset first: the scan is saved in its session.")
+            row.set_status("Open a dataset first: the scan is saved in its session.", announce=True)
             return
         if m.session_load.is_running():
-            row.set_status("The session is still loading; run the scan when it has finished.")
+            row.set_status("The session is still loading; run the scan when it has finished.", announce=True)
             return
         try:
             source = analysis_scan_source(m)
         except RuntimeError as exc:
-            row.set_status(str(exc))
+            row.set_status(str(exc), announce=True)
             return
         row.set_status("Starting...")
-        m.analysis_scan.start(source, store_path=path, only_stale=not row.rescan_all(), dataset_label=m.dataset.dataset_home().name)
+        m.analysis_scan.start(source, store_path=path, only_stale=row.fast_scan(), dataset_label=m.dataset.dataset_home().name)
 
     def finished(_task_id: str, outcome: str, message: str) -> None:
         if outcome == "cancelled":
-            row.set_status(message or "Stopped. Cubes that were finished are saved; run again to continue.")
+            row.set_status(message or "Stopped. Cubes that were finished are saved; run again to continue.", announce=True)
         else:
-            row.set_status(message)
+            row.set_status(message, announce=True)
+        refresh_file_button()
 
     results = m.scan_results
     results.set_scan_file(scan_file())
@@ -1149,7 +1166,10 @@ def _wire_analysis_scan(m: _Modules, workflow: WorkflowPanel, ui_state: UiStateS
     row.stop_requested.connect(m.analysis_scan.cancel)
     m.analysis_scan.running_changed.connect(row.set_running)
     m.analysis_scan.task_finished.connect(finished)
-    m.analysis_scan.failed.connect(row.set_status)
+    m.analysis_scan.failed.connect(lambda message: row.set_status(message, announce=True))
+    row.open_folder_requested.connect(open_scan_folder)
+    results.results_changed.connect(refresh_file_button)  # a scan file came, was reloaded or went
+    m.dataset.dataset_cleared.connect(refresh_file_button)
     m.session_coordinator.active_session_changed.connect(show_saved_scan)
     show_saved_scan()
 
@@ -1160,6 +1180,8 @@ def _build_status_bar(
     workflow: WorkflowPanel,
     image_panel: ImagePanel,
     roi_table_panel: RoiTablePanel,
+    spectra_panel: SpectraPanel,
+    sensorgram_panel: SensorgramPanel,
 ) -> None:
     status_bar = QStatusBar(window)
     window.setStatusBar(status_bar)
@@ -1189,7 +1211,13 @@ def _build_status_bar(
     m.session_carry.task_finished.connect(task_indicator.finish)
     m.session_load.task_progress.connect(task_indicator.report)  # reading the session when a dataset opens
     m.session_load.task_finished.connect(task_indicator.finish)
+    spectra_panel.task.task_progress.connect(task_indicator.report)  # a Spectra recompute that lasts (metric, fit, formula)
+    spectra_panel.task.task_finished.connect(task_indicator.finish)
+    sensorgram_panel.task.task_progress.connect(task_indicator.report)  # a Sensorgram recompute that lasts (fitting many ROIs)
+    sensorgram_panel.task.task_finished.connect(task_indicator.finish)
     cancel_by_task = {
+        SPECTRA_TASK_ID: spectra_panel.cancel,
+        SENSORGRAM_TASK_ID: sensorgram_panel.cancel,
         SESSION_LOAD_TASK_ID: m.session_load.cancel,
         ZARR_EXPORT_TASK_ID: m.dataset.cancel_export,
         SESSION_CARRY_TASK_ID: m.session_carry.cancel,
@@ -1613,8 +1641,8 @@ def build_main_window(
     window.setDockOptions(QMainWindow.DockOption.AnimatedDocks | QMainWindow.DockOption.AllowNestedDocks)
     edit_menu, view_menu = _build_menu_bar(window)
     attach_to_menu_bar(window.menuBar(), m.dataset)  # dataset path, type / size / cubes, and the Time / Plan checks
-    _build_status_bar(window, m, workflow, image_panel, roi_table_panel)
-    _wire_analysis_scan(m, workflow, ui_state)
+    _build_status_bar(window, m, workflow, image_panel, roi_table_panel, spectra_panel, sensorgram_panel)
+    _wire_analysis_scan(m, image_panel.analysis_tab, ui_state)
     _wire_session_carry_prompt(window, m)
     _wire_edit_menu(edit_menu, window, m.analysis_engine)
     panel_docks = _build_dock_layout(

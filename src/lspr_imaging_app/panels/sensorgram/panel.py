@@ -17,6 +17,10 @@ formula, fit settings and metric only, so a statistics change or another ROI sel
 and keeps what it finished. Selecting all 160 ROIs costs ~40 s once, with a progress line. 100 ms coalescing, newest request wins, a result from an
 older file is dropped, and nothing happens while the dock is hidden (``HiddenPanelGate``).
 
+**Status bar.** A computation that lasts more than a moment (``panel_task.PanelTask``) appears in the app's task indicator ("Sensorgram: fitting
+ROI 3 of 160"), with a Cancel button that stops it between ROIs and clears the plot (the traces already fitted are kept for the next request); a
+quick one leaves no trace.
+
 **State.** The statistics settings live in ``AnalysisSettingsModule`` (saved with the session); this panel edits them through it. The x unit of the
 baseline window follows the axis, so switching Cube / Time re-places the window at its default (first tenth of the axis).
 """
@@ -60,12 +64,14 @@ from ...selection.cube_display_module import MODE_TIME
 from ...storage.ui_state_keys import SENSORGRAM_RIBBON_OPEN, read
 from ..ribbon_fields import style_ribbon_check, style_ribbon_combo, style_ribbon_number_field
 from ..ribbon_row import RibbonRow, rolled_ribbon
+from ..panel_task import PanelTask
 from ..ui_state import UiStateStore
 from ..visibility_gate import HiddenPanelGate
 from .plot import SensorgramPlot
 
 logger = logging.getLogger(__name__)
 
+TASK_ID = "sensorgram.compute"
 _REDRAW_COALESCE_MS = 100  # sketch §8
 _JOIN_SECONDS = 5.0
 _PROGRESS_MIN_ROIS = 8  # a status line "Fitting ROI 3 of 160" only for runs long enough to need it
@@ -158,6 +164,7 @@ class SensorgramPanel(QWidget):
         self._status.setWordWrap(True)
         self._status.setStyleSheet(f"color: {get_active_theme().text_dim};")
         self._plot = SensorgramPlot(self)
+        self.task = PanelTask(TASK_ID, "Sensorgram", self)  # connected to the status bar's task indicator by app_rewrite
 
         self._ribbon = RibbonRow(self)
         self._ribbon.add_group("Display", self._display)
@@ -385,6 +392,13 @@ class SensorgramPanel(QWidget):
         self._plot.set_baseline_window(None)
         self._plot.set_current_x(None)
         self._status.setText(text)
+        self.task.end("cancelled", text)
+
+    def cancel(self) -> None:
+        """Task indicator's Cancel: stop the running computation between ROIs (what it fitted is kept) and clear the plot."""
+        self._redraw_timer.stop()
+        self._pending = False
+        self._clear_with("Cancelled. Change a setting or the selection to compute the sensorgram again.")
 
     def _redraw(self) -> None:
         stored = self._scan.stored()
@@ -414,6 +428,8 @@ class SensorgramPanel(QWidget):
             return
         job = _Job(self._generation, stored, request, key, threading.Event())
         self._job = job
+        missing = sum(1 for r in roi_ids if r not in self._cache)
+        self.task.begin(f"fitting {missing} ROI{'s' if missing != 1 else ''}" if missing else "applying the statistics")
         self._thread = threading.Thread(target=self._compute, args=(job, dict(self._cache)), name="sensorgram-compute", daemon=True)
         self._thread.start()
 
@@ -431,6 +447,7 @@ class SensorgramPanel(QWidget):
     def _on_progress(self, done: int, total: int) -> None:
         if self._job is not None and not self._job.cancel.is_set():
             self._status.setText(f"Fitting ROI {done} of {total}...")
+            self.task.update(done / total if total else -1.0, f"fitting ROI {done} of {total}")
 
     def _on_result(self, job: _Job, series: object, new: object, error: object) -> None:
         self._job = None
@@ -443,7 +460,13 @@ class SensorgramPanel(QWidget):
             self._draw_last()
         if self._pending:
             self._pending = False
-            self._schedule_redraw()
+            self._schedule_redraw()  # the task stays open: the newer computation continues it
+            if not self._redraw_timer.isActive():  # hidden panel: nothing was started, so nothing continues it
+                self.task.end("cancelled", "superseded while hidden")
+        elif isinstance(error, BaseException):
+            self.task.end("failed", str(error))
+        else:
+            self.task.end("completed")
 
     # -- drawing ---------------------------------------------------------------------------------------------------------------------
 

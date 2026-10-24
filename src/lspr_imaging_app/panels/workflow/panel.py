@@ -58,7 +58,6 @@ from lspr_ui import get_active_theme
 from ...dataset import DatasetModule
 from ...selection import CubeDisplayModule, FrameRolesModule, ReferenceFrameModule, SelectionModule
 from ...storage.session_coordinator import SessionCoordinator
-from .analysis_scan_row import AnalysisScanRow
 from .collapsible_section import CollapsibleSection
 from .dataset_experimental_plan import ExperimentalPlanSection
 from .dataset_folder_row import DatasetFolderRow
@@ -202,36 +201,16 @@ def _build_dataset_section(
     return top_section, subsections
 
 
-def _build_analysis_section(parent: QWidget, scan_row: AnalysisScanRow) -> tuple[CollapsibleSection, list[tuple[str, CollapsibleSection]]]:
-    """Ported from the source's ``analysis_section`` + its nested ROI's
-    math/Metric trace/Statistics children (the range/scope controls that
-    sat above them there, and the Run/Stop/Live-preview header controls,
-    are real interactive controls tied to ``AnalysisEngine`` - left for
-    when this section gets wired to one, not ported as inert
-    placeholders)."""
-    roi_math_section = CollapsibleSection(
-        "ROI's math", _section_placeholder("ROI's math"), expanded=True, title_color=_nested_title_color(), parent=parent
-    )
-    metric_trace_section = CollapsibleSection(
-        "Metric trace", _section_placeholder("Metric trace"), expanded=True, title_color=_nested_title_color(), parent=parent
-    )
-    statistics_section = CollapsibleSection(
-        "Statistics", _section_placeholder("Statistics"), expanded=False, title_color=_nested_title_color(), parent=parent
-    )
-    children = _nested_children(parent, roi_math_section, metric_trace_section, statistics_section)
-    subsections = [
-        ("ROI's math", roi_math_section),
-        ("Metric trace", metric_trace_section),
-        ("Statistics", statistics_section),
-    ]
-    analysis_inner = QWidget(parent)
-    analysis_inner_layout = QVBoxLayout(analysis_inner)
-    analysis_inner_layout.setContentsMargins(0, 0, 0, 0)
-    analysis_inner_layout.setSpacing(4)
-    analysis_inner_layout.addWidget(scan_row)  # Run / Stop for the scan (2026-10-23); the sections below are still placeholders
-    analysis_inner_layout.addWidget(children)
-    top_section = CollapsibleSection("Analysis", analysis_inner, expanded=False, parent=parent)
-    return top_section, subsections
+def _build_analysis_section(parent: QWidget) -> tuple[CollapsibleSection, list[tuple[str, CollapsibleSection]]]:
+    """The Analysis stage. Its scan controls (Scan / Fast scan / Scan file) moved to the Image panel's Analysis ribbon tab on 2026-10-24
+    (maintainer request: this panel is being phased out), and the "ROI's math" / "Metric trace" / "Statistics" placeholders were removed
+    (the Spectra and Sensorgram ribbons hold those settings). The stage stays, with a note, because opening it still applies the
+    Analysis panel preset (``layout_presets.STAGE_TO_PRESET``)."""
+    note = QLabel("The analysis scan is in the Image panel: Analysis tab of its ribbon.", parent)
+    note.setWordWrap(True)
+    note.setStyleSheet(f"color: {get_active_theme().text_dim};")
+    top_section = CollapsibleSection("Analysis", note, expanded=False, parent=parent)
+    return top_section, []
 
 
 def _build_outputs_section(parent: QWidget) -> tuple[CollapsibleSection, list[tuple[str, CollapsibleSection]]]:
@@ -279,7 +258,6 @@ class WorkflowPanel(QWidget):
         frame_roles: FrameRolesModule | None = None,
     ) -> None:
         super().__init__(parent)
-        self.analysis_scan_row = AnalysisScanRow(self)  # Run / Stop; the owner (app_rewrite) wires it to the scan task
         # Order fixes the on-screen stacking order.
         built = [
             (
@@ -288,7 +266,7 @@ class WorkflowPanel(QWidget):
                     self, dataset, selection, reference_frame, session_coordinator, cube_display, frame_roles,
                 ),
             ),
-            (WorkflowStage.ANALYSIS, *_build_analysis_section(self, self.analysis_scan_row)),
+            (WorkflowStage.ANALYSIS, *_build_analysis_section(self)),
             (WorkflowStage.OUTPUTS, *_build_outputs_section(self)),
         ]
         self._sections: list[tuple[WorkflowStage, CollapsibleSection]] = [

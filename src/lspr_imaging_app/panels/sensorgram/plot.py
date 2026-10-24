@@ -2,7 +2,8 @@
 
 Draws what it is handed: a line per series (the metric against time or cube number), a band for averaged series, hollow markers where the
 scan is out of date, a vertical line at the current cube and an optional draggable baseline window. It computes nothing and reads no module.
-A left click inside the plot emits ``x_clicked`` with the x value (the panel turns it into "go to that cube").
+A left click inside the plot emits ``x_clicked`` with the x value (the panel turns it into "go to that cube"); dragging the circle on the x axis
+(the Cube slider's handle, in the same colour) emits it too, for every pointer position.
 """
 
 from __future__ import annotations
@@ -18,6 +19,8 @@ from PyQt6.QtWidgets import QVBoxLayout, QWidget
 from lspr_ui import get_active_theme
 
 from ...analysis.scan_trace import Series
+from ..axis_cursor import AxisCursor
+from ..image.mark_colors import cube_color
 
 MAX_LEGEND_SERIES = 6
 _BAND_ALPHA = 55
@@ -53,8 +56,9 @@ class SensorgramPlot(QWidget):
         self._item.showGrid(x=True, y=True, alpha=0.15)
         self._legend: pg.LegendItem | None = None
         self._items: list[pg.GraphicsObject] = []
-        self._cursor = pg.InfiniteLine(angle=90, movable=False, pen=pg.mkPen(150, 150, 150, 160, style=Qt.PenStyle.DashLine))
-        self._cursor_in_scene = False
+        self._axis_cursor = AxisCursor(self._item, cube_color(), self)
+        self._axis_cursor.dragged.connect(self.x_clicked)
+        self._cursor = self._axis_cursor.line
         self._window = pg.LinearRegionItem(values=(0.0, 1.0), brush=pg.mkBrush(*_WINDOW_BRUSH), pen=pg.mkPen(120, 160, 255, 160), movable=True)
         self._window.setZValue(-5)
         self._window.sigRegionChangeFinished.connect(self._on_window_finished)
@@ -71,6 +75,7 @@ class SensorgramPlot(QWidget):
         """pyqtgraph draws its own canvas and ignores Qt stylesheets: called at construction and on every live theme switch."""
         theme = get_active_theme()
         self._widget.setBackground(theme.toolbar_bg)
+        self._axis_cursor.set_color(cube_color())
         for name in ("bottom", "left"):
             axis = self._item.getAxis(name)
             axis.setPen(pg.mkPen(theme.text_muted))
@@ -127,16 +132,8 @@ class SensorgramPlot(QWidget):
     # -- the cursor and the baseline window -------------------------------------------------------------------------------------------
 
     def set_current_x(self, x: float | None) -> None:
-        """A dashed vertical line at the current cube (None hides it)."""
-        if x is None or not np.isfinite(x):
-            if self._cursor_in_scene:
-                self._item.removeItem(self._cursor)
-                self._cursor_in_scene = False
-            return
-        if not self._cursor_in_scene:
-            self._item.addItem(self._cursor, ignoreBounds=True)
-            self._cursor_in_scene = True
-        self._cursor.setValue(float(x))
+        """The dashed line and the slider-style circle at the current cube (None hides them)."""
+        self._axis_cursor.set_x(x)
 
     def set_baseline_window(self, window: tuple[float, float] | None) -> None:
         """Show the baseline window (low, high) in x units, or hide it (None). Setting it here never emits ``baseline_window_changed``."""

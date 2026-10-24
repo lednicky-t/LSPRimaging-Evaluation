@@ -171,6 +171,7 @@ from .roi_tab import RoiTab
 from .rotate_line_tool import RotateLineTool
 from .display_range_controls import FULL_16BIT_RANGE
 from .view_tab import ViewTab
+from .analysis_tab import AnalysisTab
 from .export_tab import ExportTab
 from ...storage.ui_state_keys import (
     IMAGE_CURSOR_READOUT,
@@ -259,6 +260,7 @@ _WIDEST_ROLE_WORD = max((word for _color, word in _ROLE_WORDS.values()), key=len
 _WIDEST_FRAME_TIME = "00:00:00.00"  # H:MM:SS.ss with a two-digit hour (the dock measures every digit as the widest)
 CHROMATIC_TAB = "Chromatic"  # ribbon tab label (full name "Chromatic Corrections" is its tooltip)
 BACKGROUND_TAB = "Background"  # ribbon tab label; green while background removal is applied
+ANALYSIS_TAB = "Analysis"  # the scan (moved here from the Workflow panel 2026-10-24); its "i" text is live (`info_html`)
 EXPORT_TAB = "Export"  # OME-Zarr export (moved here from the Workflow panel 2026-10-20); its "i" text is live (`info_html`)
 # The "i" icon's text per ribbon tab ("Image tools" and "ROIs" show the active tool's canvas controls instead).
 _TAB_INFO: dict[str, str] = {
@@ -619,6 +621,11 @@ class ImagePanel(QWidget):
         return self._edit_target
 
     @property
+    def analysis_tab(self) -> AnalysisTab:
+        """The Analysis ribbon tab: Scan / Fast scan / Scan file (the app shell wires it to the scan task)."""
+        return self._analysis_tab
+
+    @property
     def mask_export(self) -> MaskExportTask:
         """The export-all-masks task (the app shell connects it to the task indicator)."""
         return self._mask_export
@@ -975,6 +982,9 @@ class ImagePanel(QWidget):
             self._background, show_background=self._show_background, parent=self
         )
         self._background_tab.show_background_changed.connect(self._on_show_background_changed)
+        self._analysis_tab = AnalysisTab(self)
+        self._analysis_tab.info_changed.connect(self._on_analysis_info_changed)
+        self._analysis_tab.status_message.connect(self._on_tool_status)
         self._export_tab = ExportTab(
             self._dataset, self, geometry=self._geometry, roi_toolbox=self._roi_toolbox, chromatic=self._chromatic,
             status=self._on_tool_status, session_carry=self._session_carry,
@@ -1009,6 +1019,7 @@ class ImagePanel(QWidget):
                 (CHROMATIC_TAB, self._chromatic_tab),
                 (BACKGROUND_TAB, self._background_tab),
                 (VIEW_TAB, view_content),
+                (ANALYSIS_TAB, self._analysis_tab),
                 (EXPORT_TAB, self._export_tab),
             ],
             self,
@@ -1383,6 +1394,8 @@ class ImagePanel(QWidget):
             picker.refresh_theme(get_active_theme())
         if hasattr(self, "_background_tab"):
             self._background_tab.refresh_theme(get_active_theme())
+        if hasattr(self, "_analysis_tab"):
+            self._analysis_tab.refresh_theme()
         if hasattr(self, "_export_tab"):
             self._export_tab.refresh_theme()
         if hasattr(self, "_cursor_readout"):
@@ -3023,7 +3036,14 @@ class ImagePanel(QWidget):
         category = self._tool_ribbon.current_category() if hasattr(self, "_tool_ribbon") else None
         if category == EXPORT_TAB:
             return self._export_tab.info_html()
+        if category == ANALYSIS_TAB:
+            return self._analysis_tab.info_html()
         return _TAB_INFO.get(category) or controls_text(tool)
+
+    def _on_analysis_info_changed(self) -> None:
+        """The Analysis tab's "i" text carries what the last scan did: re-read it while that tab is open."""
+        if hasattr(self, "_tool_ribbon") and self._tool_ribbon.current_category() == ANALYSIS_TAB:
+            self._refresh_tool_info(self._active_tool.active())
 
     def _on_export_info_changed(self) -> None:
         """The Export tab's "i" text carries live chunk counts: re-read it while that tab is open."""

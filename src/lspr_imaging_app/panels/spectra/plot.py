@@ -1,7 +1,8 @@
 """Spectra plot widget - the pyqtgraph-facing half of the Spectra panel (sketch §10 "spectra/panel.py + plot.py").
 
 Draws what it is handed and nothing else: per ROI the measured points (optionally with error bars), the fitted curve and the metric marker,
-and an optional draggable fit window. It computes nothing (no fit, no formula: ``analysis/scan_view.py`` did that on a worker thread) and
+an optional draggable fit window and a cursor at the current wavelength (a dashed line and, on the x axis, the Wavelength slider's circle in
+its colour; dragging the circle or the line, or clicking anywhere else in the plot, emits ``wavelength_dragged``). It computes nothing (no fit, no formula: ``analysis/scan_view.py`` did that on a worker thread) and
 reads no module. A spectrum that is out of date is drawn dimmed, not hidden.
 """
 
@@ -11,13 +12,15 @@ from collections.abc import Sequence
 
 import numpy as np
 import pyqtgraph as pg
-from PyQt6.QtCore import pyqtSignal
+from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtGui import QColor
 from PyQt6.QtWidgets import QVBoxLayout, QWidget
 
 from lspr_ui import get_active_theme
 
 from ...analysis.scan_view import RoiSpectrum
+from ..axis_cursor import AxisCursor
+from ..image.mark_colors import wavelength_color
 
 Y_LABELS = {
     "absorbance": "Absorbance (A)",
@@ -34,6 +37,7 @@ class SpectraPlot(QWidget):
     """One plot of several ROIs' spectra. ``fit_window_changed(low, high)`` is emitted when the user lets go of the dragged window."""
 
     fit_window_changed = pyqtSignal(float, float)
+    wavelength_dragged = pyqtSignal(float)  # nm under the pointer while the cursor circle is dragged (the panel snaps it to a scanned wavelength)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -50,6 +54,9 @@ class SpectraPlot(QWidget):
         self._window.sigRegionChangeFinished.connect(self._on_window_finished)
         self._window_in_scene = False
         self._setting_window = False
+        self._axis_cursor = AxisCursor(self._item, wavelength_color(), self)
+        self._axis_cursor.dragged.connect(self.wavelength_dragged)
+        self._item.scene().sigMouseClicked.connect(self._on_scene_clicked)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.addWidget(self._widget)
@@ -61,6 +68,7 @@ class SpectraPlot(QWidget):
         """pyqtgraph draws its own canvas and ignores Qt stylesheets: called at construction and on every live theme switch."""
         theme = get_active_theme()
         self._widget.setBackground(theme.toolbar_bg)
+        self._axis_cursor.set_color(wavelength_color())
         for name in ("bottom", "left"):
             axis = self._item.getAxis(name)
             axis.setPen(pg.mkPen(theme.text_muted))
@@ -121,7 +129,11 @@ class SpectraPlot(QWidget):
                 self._items.append(marker)
         self._item.getViewBox().autoRange()
 
-    # -- the fit window ---------------------------------------------------------------------------------------------------------
+    # -- the cursor and the fit window ---------------------------------------------------------------------------------------------------------
+
+    def set_current_wavelength(self, wavelength_nm: float | None) -> None:
+        """The dashed line and the slider-style circle at the wavelength shown on the Image panel (None hides them)."""
+        self._axis_cursor.set_x(wavelength_nm)
 
     def set_fit_window(self, window: tuple[float, float] | None) -> None:
         """Show the window (low, high) in nm, or hide it (None). Setting it here never emits ``fit_window_changed``."""
@@ -148,6 +160,14 @@ class SpectraPlot(QWidget):
     def x_range(self) -> tuple[float, float]:
         low, high = self._item.getViewBox().viewRange()[0]
         return float(low), float(high)
+
+    def _on_scene_clicked(self, event) -> None:
+        """A plain left click on the plot area puts the cursor there. Clicks another item handled (the fit window, the cursor) are not ours."""
+        if event.button() != Qt.MouseButton.LeftButton or event.double() or event.isAccepted():
+            return
+        view_box = self._item.getViewBox()
+        if view_box.sceneBoundingRect().contains(event.scenePos()):
+            self.wavelength_dragged.emit(float(view_box.mapSceneToView(event.scenePos()).x()))
 
     def _on_window_finished(self) -> None:
         if self._setting_window:

@@ -96,8 +96,10 @@ def controls_text(tool: ImageTool | None) -> str:
 class ImageViewBox(pg.ViewBox):
     """`pg.ViewBox` with the drag rules above: only the middle button drags
     (pans), unless a tool has claimed the left button for itself (see
-    `set_left_drag_handler`). Wheel zoom is inherited unchanged; clicks are
-    untouched (they reach the scene's ``sigMouseClicked`` as before)."""
+    `set_left_drag_handler`). Wheel zoom is pyqtgraph's, except that Ctrl + wheel zooms in finer steps
+    (`CTRL_WHEEL_FINENESS`, 2026-10-24); clicks are untouched (they reach the scene's ``sigMouseClicked`` as before)."""
+
+    CTRL_WHEEL_FINENESS = 0.2  # Ctrl + wheel zooms this fraction of a plain wheel notch (about 6 % instead of 26 % per notch)
 
     def __init__(self, *args: object, **kwargs: object) -> None:
         super().__init__(*args, **kwargs)
@@ -110,6 +112,17 @@ class ImageViewBox(pg.ViewBox):
         that isn't currently active just declines every event, rather than
         this class needing to know which tool, if any, is on."""
         self._left_drag_handler = handler
+
+    def wheelEvent(self, ev, axis=None):  # noqa: N802 - Qt/pyqtgraph naming
+        if not ev.modifiers() & Qt.KeyboardModifier.ControlModifier:
+            super().wheelEvent(ev, axis)
+            return
+        normal = self.state["wheelScaleFactor"]
+        self.state["wheelScaleFactor"] = normal * self.CTRL_WHEEL_FINENESS
+        try:
+            super().wheelEvent(ev, axis)
+        finally:
+            self.state["wheelScaleFactor"] = normal
 
     def mouseDragEvent(self, ev, axis=None):  # noqa: N802 - Qt/pyqtgraph naming
         if ev.button() == Qt.MouseButton.LeftButton and self._left_drag_handler is not None:
