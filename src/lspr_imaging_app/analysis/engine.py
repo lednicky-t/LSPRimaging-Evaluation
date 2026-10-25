@@ -57,7 +57,7 @@ from ..image_tools.geometry.model import GeometrySettings
 from ..roi.model import AreaRoi, AreaRoiDetectionSettings
 from .planner import AnalysisScope, CurrentInputs, plan_recompute
 from .reduction import DEFAULT_TRIMMED_MEAN_FRACTION
-from .query import FormulaSpectrum, FitResult, fit_spectrum, formula_spectrum, metric_value
+from .query import FormulaSpectrum, FitResult, fit_and_metric, formula_spectrum
 from .settings import MetricSettings
 from .provenance import (
     DEFAULT_REFERENCE_EXCLUSION_MODE,
@@ -414,7 +414,7 @@ class AnalysisEngine(QObject):
         return (
             str(self._detection_settings().formula_key),
             str(metric.fit_method), int(metric.poly_order),
-            metric.fit_wl_min, metric.fit_wl_max, str(metric.metric_key),
+            metric.window_key(), str(metric.metric_key), metric.metric_range_key(),
         )
 
     def formula_spectrum(self, roi_id: int, cube_index: int) -> FormulaSpectrum | None:
@@ -441,10 +441,7 @@ class AnalysisEngine(QObject):
         if spectrum is None:
             return None
         metric = self._metric_settings()
-        return fit_spectrum(
-            spectrum, metric.fit_method, poly_order=metric.poly_order,
-            wl_min=metric.fit_wl_min, wl_max=metric.fit_wl_max,
-        )
+        return fit_and_metric(spectrum, metric)[0]
 
     def get_metric(self, roi_id: int, cube_index: int) -> float | None:
         """Layer 3: one number per (ROI, cube) - the metric *wavelength*,
@@ -465,10 +462,7 @@ class AnalysisEngine(QObject):
         if spectrum is None:
             return None
         metric = self._metric_settings()
-        wavelength, _value = metric_value(
-            spectrum, metric.fit_method, metric.metric_key,
-            poly_order=metric.poly_order, wl_min=metric.fit_wl_min, wl_max=metric.fit_wl_max,
-        )
+        _fit, wavelength, _value = fit_and_metric(spectrum, metric)
         # Not cached if ROI ids were renumbered meanwhile (this can run on the
         # derived worker thread): the value belongs to the old numbering.
         with self._state_lock:

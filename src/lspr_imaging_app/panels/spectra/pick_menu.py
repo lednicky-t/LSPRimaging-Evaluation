@@ -11,9 +11,9 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 
-from PyQt6.QtCore import QPointF, QSize, Qt, pyqtSignal
+from PyQt6.QtCore import QPointF, QRectF, QSize, Qt, pyqtSignal
 from PyQt6.QtGui import QColor, QFont, QIcon, QPainter, QPainterPath, QPen, QPixmap, QTextDocument
-from PyQt6.QtWidgets import QMenu, QToolButton, QWidget, QWidgetAction
+from PyQt6.QtWidgets import QHBoxLayout, QMenu, QToolButton, QWidget, QWidgetAction
 
 from lspr_ui import get_active_theme
 
@@ -133,6 +133,99 @@ def metric_picture(kind: str) -> PictureFor:
     return draw
 
 
+def window_picture(kind: str) -> PictureFor:
+    """The fit window modes. ``off``: a bell struck through; ``manual``: a bell with a shaded band between two edges; ``around_max``: a bell with a diamond on its top and an arrow
+    each way (maximum +/- a width); ``fwhm``: a bell with a line across it at half height."""
+
+    def draw(color: str) -> QPixmap:
+        pixmap, painter = _canvas()
+        ink = QColor(color)
+        marker = QColor(get_active_theme().accent_gold)
+        if kind == "off":  # the whole bell, struck through
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.setPen(QPen(ink, 1.4, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+            painter.drawPath(_bell_path())
+            painter.setPen(QPen(marker, 1.6, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+            painter.drawLine(QPointF(3.0, 18.0), QPointF(17.0, 2.0))
+            painter.end()
+            return pixmap
+        if kind == "manual":
+            band = QColor(get_active_theme().accent_blue)
+            band.setAlpha(70)
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(band)
+            painter.drawRect(QRectF(5.0, 2.0, 10.0, 15.0))
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.setPen(QPen(marker, 1.4))
+            painter.drawLine(QPointF(5.0, 2.0), QPointF(5.0, 17.0))
+            painter.drawLine(QPointF(15.0, 2.0), QPointF(15.0, 17.0))
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.setPen(QPen(ink, 1.4, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+        painter.drawPath(_bell_path())
+        if kind == "around_max":
+            diamond = QPainterPath(QPointF(10.0, 0.8))
+            for x, y in ((12.2, 3.0), (10.0, 5.2), (7.8, 3.0)):
+                diamond.lineTo(x, y)
+            diamond.closeSubpath()
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(marker)
+            painter.drawPath(diamond)
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.setPen(QPen(marker, 1.4, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+            for end, tip in ((1.5, 4.5), (18.5, 15.5)):  # an arrow from the top out to each side
+                painter.drawLine(QPointF(10.0, 9.0), QPointF(end, 9.0))
+                painter.drawLine(QPointF(end, 9.0), QPointF(tip, 7.0))
+                painter.drawLine(QPointF(end, 9.0), QPointF(tip, 11.0))
+        elif kind == "fwhm":
+            painter.setPen(QPen(marker, 1.4, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+            painter.drawLine(QPointF(4.5, 10.0), QPointF(15.5, 10.0))
+            painter.drawLine(QPointF(4.5, 7.5), QPointF(4.5, 12.5))
+            painter.drawLine(QPointF(15.5, 7.5), QPointF(15.5, 12.5))
+        painter.end()
+        return pixmap
+
+    return draw
+
+
+def range_picture(kind: str) -> PictureFor:
+    """The metric range: a bell with the part the centroid is read from shaded. ``off``: all of it; ``top_fraction``: the cap above a level (a line
+    across the bell); ``manual``: the strip between two edges. A dot on the baseline marks the centroid."""
+
+    def draw(color: str) -> QPixmap:
+        pixmap, painter = _canvas()
+        ink = QColor(color)
+        marker = QColor(get_active_theme().accent_gold)
+        shade = QColor(get_active_theme().accent_blue)
+        shade.setAlpha(110)
+        bell = _bell_path()
+        region = QPainterPath(bell)
+        region.lineTo(QPointF(1.5, 17.0))
+        region.closeSubpath()
+        painter.save()
+        if kind == "top_fraction":
+            painter.setClipRect(QRectF(0.0, 0.0, 20.0, 9.5))
+        elif kind == "manual":
+            painter.setClipRect(QRectF(5.5, 0.0, 9.0, 20.0))
+        painter.fillPath(region, shade)
+        painter.restore()
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.setPen(QPen(ink, 1.4, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+        painter.drawPath(bell)
+        painter.setPen(QPen(marker, 1.2, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+        if kind == "top_fraction":
+            painter.drawLine(QPointF(2.5, 9.5), QPointF(17.5, 9.5))
+        elif kind == "manual":
+            painter.drawLine(QPointF(5.5, 3.0), QPointF(5.5, 17.0))
+            painter.drawLine(QPointF(14.5, 3.0), QPointF(14.5, 17.0))
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(marker)
+        painter.drawEllipse(QPointF(10.0, 18.0), 1.5, 1.5)
+        painter.end()
+        return pixmap
+
+    return draw
+
+
 # -- the control -------------------------------------------------------------------------------------------------------------------
 
 
@@ -142,6 +235,7 @@ class _Choice:
     name: str
     tip: str
     picture: PictureFor
+    extra: QWidget | None = None  # a parameter field shown at the right end of this choice's row in the menu
 
 
 class PickMenu(QToolButton):
@@ -156,6 +250,7 @@ class PickMenu(QToolButton):
         self._name_on_face = name_on_face  # False where the picture says everything (an equation)
         self._base_tip = ""
         self._rows: list[QToolButton] = []
+        self._footers: list[QWidget] = []
         self._menu = QMenu(self)
         self.setMenu(self._menu)
         self.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
@@ -166,9 +261,14 @@ class PickMenu(QToolButton):
 
     # -- the part of QComboBox the panel uses ----------------------------------------------------------------------------------
 
-    def add_choice(self, key: str, name: str, tip: str, picture: PictureFor) -> None:
-        """Add a choice. Call ``finish()`` after the last one."""
-        self._choices.append(_Choice(key, name, tip, picture))
+    def add_choice(self, key: str, name: str, tip: str, picture: PictureFor, extra: QWidget | None = None) -> None:
+        """Add a choice. Call ``finish()`` after the last one. ``extra``: a parameter field (a spin box) shown at the right end of the choice's row;
+        the menu stays open while it is edited."""
+        self._choices.append(_Choice(key, name, tip, picture, extra))
+
+    def add_footer(self, widget: QWidget) -> None:
+        """A widget under the last row (an option that belongs to every choice). Call before ``finish()``."""
+        self._footers.append(widget)
 
     def count(self) -> int:
         return len(self._choices)
@@ -207,9 +307,28 @@ class PickMenu(QToolButton):
             row.setFixedHeight(_ROW_HEIGHT)
             row.clicked.connect(lambda _checked=False, picked=choice_index: self._pick(picked))
             action = QWidgetAction(self._menu)
-            action.setDefaultWidget(row)
+            if choice.extra is None:
+                action.setDefaultWidget(row)
+            else:
+                holder = QWidget(self._menu)
+                line = QHBoxLayout(holder)
+                line.setContentsMargins(0, 0, 8, 0)
+                line.setSpacing(4)
+                line.addWidget(row, 1)
+                choice.extra.setParent(holder)
+                line.addWidget(choice.extra)
+                action.setDefaultWidget(holder)
             self._menu.addAction(action)
             self._rows.append(row)
+        for widget in self._footers:
+            action = QWidgetAction(self._menu)
+            holder = QWidget(self._menu)
+            line = QHBoxLayout(holder)
+            line.setContentsMargins(8, 2, 8, 2)
+            widget.setParent(holder)
+            line.addWidget(widget)
+            action.setDefaultWidget(holder)
+            self._menu.addAction(action)
         self.refresh_theme()
 
     def _pick(self, index: int) -> None:
@@ -271,4 +390,4 @@ class PickMenu(QToolButton):
         super().setToolTip(f"{self._base_tip}\n{current}".strip())
 
 
-__all__ = ["PickMenu", "equation_picture", "fit_picture", "metric_picture"]
+__all__ = ["PickMenu", "equation_picture", "fit_picture", "metric_picture", "range_picture", "window_picture"]

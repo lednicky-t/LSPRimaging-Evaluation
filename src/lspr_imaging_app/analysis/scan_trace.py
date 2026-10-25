@@ -82,7 +82,7 @@ def trace_key(stored: StoredScan, formula_key: str, metric: MetricSettings) -> t
     """What a metric trace depends on. A cached trace is reused only for an equal key (the stored scan is compared by identity: a
     reloaded file is a new object)."""
     return (
-        id(stored), str(formula_key), metric.fit_method, int(metric.poly_order), metric.fit_wl_min, metric.fit_wl_max, metric.metric_key,
+        id(stored), str(formula_key), metric.fit_method, int(metric.poly_order), metric.window_key(), metric.metric_key, metric.metric_range_key(),
     )
 
 

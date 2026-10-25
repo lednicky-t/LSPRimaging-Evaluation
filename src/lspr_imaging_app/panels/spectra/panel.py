@@ -26,8 +26,10 @@ the controls is never left standing. The worker itself cannot be interrupted and
 
 **State.** Formula, fit method, order, metric and the fit window belong to modules (``AreaRoiDetectionSettings.formula_key``,
 ``AnalysisSettingsModule``) and are saved with the session; this panel only edits them through those modules. The error-bar choice is a
-remembered UI choice (``ui_state``). The "Fit window" box means "the window is set": checking it sets the middle 80 % of the plotted
-wavelengths, dragging the shaded band moves it, unchecking clears it.
+remembered UI choice (``ui_state``). The fit window is a pick-up menu in the Fit group: no window, a manual range (picking it sets the middle 80 % of the plotted
+wavelengths; dragging the shaded band moves it), each spectrum's maximum +/- a width in nm, or +/- a multiple of its FWHM; the widths are
+fields in the menu, "Same number of points" is its footer. Only the manual range is drawn on the plot (``analysis/fit_window.py``). The Metric group has a second menu,
+the metric range: which part of the fitted curve the centroid is read from (whole window, the top part above a level, or a manual range; ``analysis/metric_range.py``).
 """
 
 from __future__ import annotations
@@ -39,7 +41,7 @@ from dataclasses import dataclass, replace
 import pyqtgraph as pg
 from PyQt6.QtCore import QTimer, pyqtSignal
 from PyQt6.QtGui import QColor
-from PyQt6.QtWidgets import QApplication, QCheckBox, QHBoxLayout, QLabel, QSpinBox, QVBoxLayout, QWidget
+from PyQt6.QtWidgets import QApplication, QCheckBox, QDoubleSpinBox, QHBoxLayout, QLabel, QSpinBox, QVBoxLayout, QWidget
 
 from lspr_ui import get_active_theme
 
@@ -48,7 +50,7 @@ from ...analysis.query import FORMULA_KEYS
 from ...analysis.scan_results import ScanResultsModule
 from ...analysis.scan_store import StoredScan
 from ...analysis.scan_view import RoiSpectrum, SpectraRequest, compute_spectra
-from ...analysis.settings import FIT_METHODS, METRIC_KEYS
+from ...analysis.settings import FIT_METHODS, METRIC_KEYS, MetricSettings
 from ...analysis.settings_module import AnalysisSettingsModule
 from ...applog import timed
 from ...roi import RoiToolbox
@@ -60,7 +62,7 @@ from ..ribbon_row import RibbonRow, rolled_ribbon
 from ..panel_task import PanelTask
 from ..ui_state import UiStateStore
 from ..visibility_gate import HiddenPanelGate
-from .pick_menu import PickMenu, equation_picture, fit_picture, metric_picture
+from .pick_menu import PickMenu, equation_picture, fit_picture, metric_picture, range_picture, window_picture
 from .plot import SpectraPlot
 
 logger = logging.getLogger(__name__)
@@ -96,10 +98,36 @@ METRIC_TIPS = {
     "maximum": "The wavelength of the top of the fitted spectrum.",
     "centroid": "The intensity-weighted mean wavelength of the fitted spectrum.",
 }
+WINDOW_LABELS = {"off": "No window", "manual": "Manual range", "around_max": "Maximum \u00b1 width", "fwhm": "Maximum \u00b1 FWHM"}
+WINDOW_TIPS = {
+    "off": "Fit all the points of the spectrum.",
+    "manual": "One range for every spectrum. Drag the shaded band on the plot to move or resize it.",
+    "around_max": "Each spectrum is fitted around its own maximum, this many nm to each side. The window follows a peak that shifts.",
+    "fwhm": "Each spectrum is fitted around its own maximum, this many times its FWHM (the peak's width at half height) to each side.",
+}
+RANGE_LABELS = {"off": "Whole fit window", "top_fraction": "Top part of the peak", "manual": "Manual range"}
+RANGE_TIPS = {
+    "off": "The centroid of the whole fitted curve, baseline included.",
+    "top_fraction": "The centroid of the part of the fitted curve above a level (a percentage of the peak's height above its baseline). The baseline has no weight and "
+                    "the result does not depend on where the fit window ends.",
+    "manual": "The centroid of the fitted curve between two wavelengths, baseline taken out.",
+}
 TASK_ID = "spectra.compute"
 ERROR_BARS_KEY = "spectra/error_bars"
 _RELEVANT_ROI_CHANGES = {"detection_settings", "session_restored", "added", "deleted", "detected"}  # a drag changes no spectrum
 _FALLBACK_HUES = 9
+
+
+def _window_is_on(metric: MetricSettings) -> bool:
+    """A manual range is on when it has a bound, a per-spectrum window when ``window_on`` is True."""
+    if metric.window_mode == "manual":
+        return metric.fit_wl_min is not None or metric.fit_wl_max is not None
+    return bool(metric.window_on)
+
+
+def _window_choice(metric: MetricSettings) -> str:
+    """The entry of the window menu for these settings: "off", or the mode."""
+    return metric.window_mode if _window_is_on(metric) else "off"
 
 
 @dataclass(frozen=True)
@@ -159,14 +187,75 @@ class SpectraPanel(QWidget):
             self._metric.add_choice(key, METRIC_LABELS.get(key, key), METRIC_TIPS.get(key, ""), metric_picture(key))
         self._metric.finish()
         self._metric.setToolTip("The number read off each fitted spectrum (marked with a diamond): what the Sensorgram will plot.")
-        self._window_box = QCheckBox("Set", self)
-        self._window_box.setToolTip("Restrict the fit and the metric to a band of wavelengths. Drag the shaded band to move or resize it.")
+        self._half_width = QDoubleSpinBox(self)
+        self._half_width.setRange(1.0, 500.0)
+        self._half_width.setDecimals(1)
+        self._half_width.setSingleStep(5.0)
+        self._half_width.setPrefix("\u00b1 ")
+        self._half_width.setSuffix(" nm")
+        self._half_width.setKeyboardTracking(False)  # a value is taken when Enter is pressed or the field is left, not on every digit
+        self._half_width.setFixedWidth(96)
+        self._half_width.setToolTip("Half the width of the window, in nm: the window reaches this far to each side of the maximum.")
+        self._fwhm_factor = QDoubleSpinBox(self)
+        self._fwhm_factor.setRange(0.1, 5.0)
+        self._fwhm_factor.setDecimals(2)
+        self._fwhm_factor.setSingleStep(0.05)
+        self._fwhm_factor.setPrefix("\u00b1 ")
+        self._fwhm_factor.setSuffix(" \u00d7 FWHM")
+        self._fwhm_factor.setKeyboardTracking(False)
+        self._fwhm_factor.setFixedWidth(120)
+        self._fwhm_factor.setToolTip("How far the window reaches to each side of the maximum, in widths of the peak at half its height.")
+        self._same_points = QCheckBox("Same number of points", self)
+        self._same_points.setToolTip(
+            "Every window holds the same number of points (the nearest ones to the maximum), so a point never joins or leaves the fit just because "
+            "the peak moved a few nm. Near the end of the data the window takes points outside its nominal range."
+        )
+        self._top_fraction = QDoubleSpinBox(self)
+        self._top_fraction.setRange(0.0, 95.0)
+        self._top_fraction.setDecimals(0)
+        self._top_fraction.setSingleStep(5.0)
+        self._top_fraction.setPrefix("above ")
+        self._top_fraction.setSuffix(" % of height")
+        self._top_fraction.setKeyboardTracking(False)
+        self._top_fraction.setFixedWidth(150)
+        self._top_fraction.setToolTip("The level, as a percentage of the peak's height above its baseline: 30 % reads the top 70 % of the peak, 90 % only its tip.")
+        self._range_min = QDoubleSpinBox(self)
+        self._range_max = QDoubleSpinBox(self)
+        for box in (self._range_min, self._range_max):
+            box.setRange(0.0, 5000.0)
+            box.setDecimals(1)
+            box.setSingleStep(5.0)
+            box.setSuffix(" nm")
+            box.setKeyboardTracking(False)
+            box.setFixedWidth(84)
+        self._range_min.setToolTip("Lower end of the range the centroid is read from.")
+        self._range_max.setToolTip("Upper end of the range the centroid is read from.")
+        self._range_pair = QWidget(self)
+        pair = QHBoxLayout(self._range_pair)
+        pair.setContentsMargins(0, 0, 0, 0)
+        pair.setSpacing(4)
+        pair.addWidget(self._range_min)
+        pair.addWidget(QLabel("to", self._range_pair))
+        pair.addWidget(self._range_max)
+        self._metric_range = PickMenu(self, name_on_face=False)
+        self._metric_range.add_choice("off", RANGE_LABELS["off"], RANGE_TIPS["off"], range_picture("off"))
+        self._metric_range.add_choice("top_fraction", RANGE_LABELS["top_fraction"], RANGE_TIPS["top_fraction"], range_picture("top_fraction"), self._top_fraction)
+        self._metric_range.add_choice("manual", RANGE_LABELS["manual"], RANGE_TIPS["manual"], range_picture("manual"), self._range_pair)
+        self._metric_range.finish()
+        self._metric_range.setToolTip("Which part of the fitted curve the centroid is read from (the maximum has no range; it needs a fit).")
+        self._window_mode = PickMenu(self, name_on_face=False)
+        self._window_mode.add_choice("off", WINDOW_LABELS["off"], WINDOW_TIPS["off"], window_picture("off"))
+        self._window_mode.add_choice("manual", WINDOW_LABELS["manual"], WINDOW_TIPS["manual"], window_picture("manual"))
+        self._window_mode.add_choice("around_max", WINDOW_LABELS["around_max"], WINDOW_TIPS["around_max"], window_picture("around_max"), self._half_width)
+        self._window_mode.add_choice("fwhm", WINDOW_LABELS["fwhm"], WINDOW_TIPS["fwhm"], window_picture("fwhm"), self._fwhm_factor)
+        self._window_mode.add_footer(self._same_points)
+        self._window_mode.finish()
+        self._window_mode.setToolTip("Which points of each spectrum are fitted (and the metric is read from): all, a fixed range, or a window around each spectrum's own maximum.")
         self._error_box = QCheckBox("Show", self)
         self._error_box.setToolTip(
             "Pixel-to-pixel spread inside each aperture divided by the square root of the pixel count (standard error of the mean value), "
             "propagated through the formula. Not the reproducibility between measurements."
         )
-        style_ribbon_check(self._window_box)
         style_ribbon_check(self._error_box)
         self._status = QLabel("", self)
         self._status.setWordWrap(True)
@@ -179,9 +268,8 @@ class SpectraPanel(QWidget):
         self._ribbon = RibbonRow(self)
         self._ribbon.add_group("Live", self._live_toggle)
         self._ribbon.add_group("Formula", self._formula)
-        self._ribbon.add_group("Fit", self._fit, self._order)
-        self._ribbon.add_group("Metric", self._metric)
-        self._ribbon.add_group("Fit window", self._window_box)
+        self._ribbon.add_group("Fit", self._fit, self._order, self._window_mode)
+        self._ribbon.add_group("Metric", self._metric, self._metric_range)
         self._ribbon.add_group("Error bars", self._error_box)
         self._ribbon.add_stretch()
         self._ribbon_drawer = rolled_ribbon(self._ribbon, "Show the spectra controls.", self)
@@ -207,7 +295,13 @@ class SpectraPanel(QWidget):
         self._fit.currentIndexChanged.connect(self._on_metric_controls_changed)
         self._order.valueChanged.connect(self._on_metric_controls_changed)
         self._metric.currentIndexChanged.connect(self._on_metric_controls_changed)
-        self._window_box.toggled.connect(self._on_window_toggled)
+        self._metric_range.currentIndexChanged.connect(self._on_metric_range_chosen)
+        for field in (self._top_fraction, self._range_min, self._range_max):
+            field.valueChanged.connect(self._on_metric_range_params_changed)
+        self._window_mode.currentIndexChanged.connect(self._on_window_mode_chosen)
+        self._half_width.valueChanged.connect(self._on_window_params_changed)
+        self._fwhm_factor.valueChanged.connect(self._on_window_params_changed)
+        self._same_points.toggled.connect(self._on_window_params_changed)
         self._error_box.toggled.connect(lambda _on: self._draw_last())
         self._plot.fit_window_changed.connect(self._on_window_dragged)
         self._plot.wavelength_dragged.connect(self._on_cursor_dragged)
@@ -239,7 +333,7 @@ class SpectraPanel(QWidget):
         self._gate.set_visible(visible)
 
     def refresh_theme(self) -> None:
-        for pick in (self._formula, self._fit, self._metric):
+        for pick in (self._formula, self._fit, self._metric, self._window_mode, self._metric_range):
             pick.refresh_theme()
         self._live_toggle.refresh_theme()
         self._ribbon.refresh_theme()
@@ -267,8 +361,19 @@ class SpectraPanel(QWidget):
             self._order.setValue(int(metric.poly_order))
             self._order.setEnabled(metric.fit_method == "polynomial")
             self._metric.setCurrentIndex(max(self._metric.findData(metric.metric_key), 0))
-            self._window_box.setEnabled(metric.fit_method != "none")
-            self._window_box.setChecked(metric.fit_wl_min is not None or metric.fit_wl_max is not None)
+            self._window_mode.setEnabled(metric.fit_method != "none")
+            self._metric_range.setEnabled(metric.fit_method != "none" and metric.metric_key == "centroid")
+            self._metric_range.setCurrentIndex(max(self._metric_range.findData(metric.metric_range), 0))
+            self._top_fraction.setValue(round(100.0 * float(metric.metric_top_fraction)))
+            if metric.metric_range_min is not None:
+                self._range_min.setValue(float(metric.metric_range_min))
+            if metric.metric_range_max is not None:
+                self._range_max.setValue(float(metric.metric_range_max))
+            self._window_mode.setCurrentIndex(max(self._window_mode.findData(_window_choice(metric)), 0))
+            self._half_width.setValue(float(metric.window_half_width_nm))
+            self._fwhm_factor.setValue(float(metric.window_fwhm_factor))
+            self._same_points.setChecked(bool(metric.window_same_points))
+            self._same_points.setEnabled(_window_choice(metric) in ("around_max", "fwhm"))
         finally:
             self._syncing = False
 
@@ -288,20 +393,65 @@ class SpectraPanel(QWidget):
             replace(current, fit_method=self._fit.currentData(), poly_order=self._order.value(), metric_key=self._metric.currentData())
         )
 
-    def _on_window_toggled(self, on: bool) -> None:
+    def _on_window_mode_chosen(self, _index: int) -> None:
+        """A choice in the window menu. Picking a mode turns the window on; "No window" turns it off (a manual range is forgotten, as before)."""
         if self._syncing:
             return
         current = self._settings.metric_settings()
-        if not on:
-            self._settings.set_metric_settings(replace(current, fit_wl_min=None, fit_wl_max=None))
-            return
-        wavelengths = self._plotted_wavelengths()
-        if wavelengths is None:
-            low, high = self._plot.x_range()
+        key = self._window_mode.currentData() or "off"
+        if key == "off":
+            changed = replace(current, window_on=False, fit_wl_min=None, fit_wl_max=None)
+        elif key == "manual":
+            manual = replace(current, window_mode="manual")
+            changed = manual if _window_is_on(manual) else self._with_default_range(manual)
         else:
-            low, high = wavelengths
+            changed = replace(current, window_mode=key, window_on=True)
+        self._settings.set_metric_settings(changed)
+
+    def _on_window_params_changed(self, *_args: object) -> None:
+        """A width or the same-points box was edited in the menu. This never turns the window on or off."""
+        if self._syncing:
+            return
+        current = self._settings.metric_settings()
+        self._settings.set_metric_settings(replace(
+            current, window_half_width_nm=self._half_width.value(), window_fwhm_factor=self._fwhm_factor.value(),
+            window_same_points=self._same_points.isChecked(),
+        ))
+
+    def _default_span(self) -> tuple[float, float]:
+        """The middle 80 % of the plotted wavelengths: what a newly set manual range starts as."""
+        wavelengths = self._plotted_wavelengths()
+        low, high = self._plot.x_range() if wavelengths is None else wavelengths
         span = high - low
-        self._settings.set_metric_settings(replace(current, fit_wl_min=low + 0.1 * span, fit_wl_max=high - 0.1 * span))
+        return low + 0.1 * span, high - 0.1 * span
+
+    def _with_default_range(self, metric: MetricSettings) -> MetricSettings:
+        """``metric`` with a manual fit range set (the middle 80 % of the plotted wavelengths)."""
+        low, high = self._default_span()
+        return replace(metric, fit_wl_min=low, fit_wl_max=high)
+
+    def _on_metric_range_chosen(self, _index: int) -> None:
+        """A choice in the metric range menu (which part of the fitted curve the centroid is read from)."""
+        if self._syncing:
+            return
+        current = self._settings.metric_settings()
+        key = self._metric_range.currentData() or "off"
+        changed = replace(current, metric_range=key)
+        if key == "manual" and current.metric_range_min is None and current.metric_range_max is None:
+            low, high = self._default_span()
+            changed = replace(changed, metric_range_min=low, metric_range_max=high)
+        self._settings.set_metric_settings(changed)
+
+    def _on_metric_range_params_changed(self, *_args: object) -> None:
+        """The level or an end of the range was edited in the menu. This never changes which range is chosen."""
+        if self._syncing:
+            return
+        current = self._settings.metric_settings()
+        changed = replace(current, metric_top_fraction=self._top_fraction.value() / 100.0)
+        if current.metric_range == "manual":
+            low, high = self._range_min.value(), self._range_max.value()
+            changed = replace(changed, metric_range_min=min(low, high), metric_range_max=max(low, high))
+        self._settings.set_metric_settings(changed)
 
     def _on_window_dragged(self, low: float, high: float) -> None:
         current = self._settings.metric_settings()
@@ -474,11 +624,12 @@ class SpectraPanel(QWidget):
             [(f"ROI {s.roi_id}", colors[s.roi_id], s) for s in spectra], error_bars=self._error_box.isChecked(), dimmed=stale
         )
         metric = job.request.metric
-        has_window = metric.fit_wl_min is not None or metric.fit_wl_max is not None
+        manual_min, manual_max = metric.manual_bounds()  # a per-spectrum window is not drawn: the ends of each fitted curve show it
+        has_window = manual_min is not None or manual_max is not None
         wavelengths = self._plotted_wavelengths()
         if has_window and wavelengths is not None:
-            self._plot.set_fit_window((metric.fit_wl_min if metric.fit_wl_min is not None else wavelengths[0],
-                                       metric.fit_wl_max if metric.fit_wl_max is not None else wavelengths[1]))
+            self._plot.set_fit_window((manual_min if manual_min is not None else wavelengths[0],
+                                       manual_max if manual_max is not None else wavelengths[1]))
         else:
             self._plot.set_fit_window(None)
         self._update_cursor()

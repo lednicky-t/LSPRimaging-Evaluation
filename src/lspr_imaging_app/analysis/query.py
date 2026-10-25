@@ -31,7 +31,9 @@ from dataclasses import dataclass, field
 import numpy as np
 from scipy.optimize import curve_fit
 
+from .fit_window import spectrum_window
 from .gaussian_fit import solve_gaussian
+from .metric_range import curve_base, range_centroid
 from .settings import MetricSettings
 
 FORMULA_KEYS: tuple[str, ...] = ("absorbance", "ratio", "relative_change", "mod_absorbance")
@@ -344,6 +346,19 @@ def metric_from_fit(fit: FitResult, metric_key: str) -> tuple[float | None, floa
     return None, None
 
 
+def metric_from_fit_in_range(fit: FitResult, fit_method: str, metric: MetricSettings) -> tuple[float | None, float | None]:
+    """``metric_from_fit`` with the metric range applied: when the centroid is to be read from part of the fitted curve only (``metric.ranged_centroid``),
+    it is read from that part (``metric_range.range_centroid``); in every other case it is ``metric_from_fit``. The one place that decides this."""
+    if not metric.ranged_centroid or fit.fitted_wavelengths_nm.size < 2 or fit.fitted_values.size != fit.fitted_wavelengths_nm.size:
+        return metric_from_fit(fit, metric.metric_key)
+    x, y = fit.fitted_wavelengths_nm, fit.fitted_values
+    base = curve_base(str(fit_method), fit.coefficients[None, :] if fit.coefficients is not None else None, y[None, :])
+    centroid = float(range_centroid(x, y[None, :], base, metric)[0])
+    if not np.isfinite(centroid):
+        return None, None
+    return centroid, float(np.interp(centroid, x, y))
+
+
 def metric_from_spectrum(
     spectrum: FormulaSpectrum,
     metric_key: str,
@@ -402,12 +417,13 @@ def fit_and_metric(
 ) -> tuple[FitResult | None, float | None, float | None]:
     """The fit (None for "no fit") and the metric position and height read off it - or, without a fit, off the measured points. The one place
     that decides this, so the Spectra panel (one cube) and the Sensorgram (every cube) cannot disagree. May raise what the fit raises."""
+    wl_min, wl_max = spectrum_window(spectrum.wavelengths_nm, spectrum.values, metric)
     fit = fit_spectrum(
-        spectrum, metric.fit_method, poly_order=metric.poly_order, wl_min=metric.fit_wl_min, wl_max=metric.fit_wl_max,
+        spectrum, metric.fit_method, poly_order=metric.poly_order, wl_min=wl_min, wl_max=wl_max,
         gaussian_fast_first=gaussian_fast_first,
     )
     if fit is None:
-        x, y = metric_from_spectrum(spectrum, metric.metric_key, wl_min=metric.fit_wl_min, wl_max=metric.fit_wl_max)
+        x, y = metric_from_spectrum(spectrum, metric.metric_key, wl_min=wl_min, wl_max=wl_max)
     else:
-        x, y = metric_from_fit(fit, metric.metric_key)
+        x, y = metric_from_fit_in_range(fit, metric.fit_method, metric)
     return fit, x, y

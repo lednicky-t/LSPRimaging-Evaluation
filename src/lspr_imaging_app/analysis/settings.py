@@ -30,6 +30,15 @@ METRIC_KEYS: tuple[str, ...] = ("maximum", "centroid")
 """Which number a fitted (or unfitted) spectrum collapses to - layer 3's
 output, one value per (ROI, cube), which is what a sensorgram plots."""
 
+WINDOW_MODES: tuple[str, ...] = ("manual", "around_max", "fwhm")
+RELATIVE_WINDOW_MODES: tuple[str, ...] = ("around_max", "fwhm")
+"""How the fit window is found. "manual": a fixed range for every spectrum. The other two give each spectrum (each ROI at each cube) its own
+window around its own maximum, so it follows a peak that shifts during the measurement."""
+
+METRIC_RANGE_MODES: tuple[str, ...] = ("off", "top_fraction", "manual")
+RANGE_MODES: tuple[str, ...] = ("top_fraction", "manual")
+"""Which part of the fitted curve the centroid is read from: "off" = all of it; the other two are described at ``MetricSettings``."""
+
 SMOOTHING_METHODS: tuple[str, ...] = ("none", "savgol", "moving_average")
 SPIKE_REJECTION_METHODS: tuple[str, ...] = ("hampel", "running_median")
 
@@ -73,15 +82,67 @@ class MetricSettings:
     """Layers 2-3: how one ROI's stored (sample, reference) pairs become a
     spectrum, a fitted curve, and finally one number per spectral cube.
 
-    `fit_wl_min`/`fit_wl_max` restrict *both* the fit and the metric search
-    to a wavelength window. `None` on either side means "no bound there",
-    not "no window" - a one-sided window is a legitimate setting."""
+    The fit window (``fit_wl_min`` .. ``fit_wl_max``, or one found per spectrum: see the comment below) says which points the fit sees; the
+    metric is read off that fit. The centroid can be read from part of the fitted curve only (the "metric range", below). `None` on either side
+    of the manual window means "no bound there", not "no window" - a one-sided window is a legitimate setting."""
 
     fit_method: str = "polynomial"
     poly_order: int = 3
     fit_wl_min: float | None = None
     fit_wl_max: float | None = None
     metric_key: str = "maximum"
+    window_on: bool = False
+    window_mode: str = "manual"
+    window_half_width_nm: float = 50.0
+    window_fwhm_factor: float = 0.5
+    window_same_points: bool = False
+    metric_range: str = "off"
+    metric_top_fraction: float = 0.3
+    metric_range_min: float | None = None
+    metric_range_max: float | None = None
+
+    # The fit window (2026-10-25). ``window_mode`` says how it is found: "manual" = the range ``fit_wl_min`` .. ``fit_wl_max`` (dragged on the plot;
+    # it is on when a bound is set, as it always was), "around_max" = every spectrum's own maximum +/- ``window_half_width_nm``, "fwhm" = every
+    # spectrum's own maximum +/- ``window_fwhm_factor`` x its FWHM. The two per-spectrum modes are on when ``window_on`` is True (the "Set" box).
+    # ``window_same_points`` makes a per-spectrum window always hold the same number of points. Only these methods may read the window fields, so
+    # every path (Spectra panel, Sensorgram batch, caches) agrees.
+
+    # The metric range (2026-10-25): which part of the FITTED curve the centroid is read from. "off" = the whole fitted curve (the fit window), as it
+    # always was. "top_fraction" = only where the curve is above ``base + f (top - base)``, ``f`` = ``metric_top_fraction``, each point weighted by its
+    # height above that level. "manual" = between ``metric_range_min`` and ``metric_range_max``, weighted by the height above the baseline. Applies to the
+    # centroid of a fitted curve only (the maximum has no range; with "No fit" there is no curve). See ``metric_range.py``.
+
+    def manual_bounds(self) -> tuple[float | None, float | None]:
+        """The fixed range, or (None, None) when the window is found per spectrum."""
+        if self.window_mode == "manual":
+            return self.fit_wl_min, self.fit_wl_max
+        return None, None
+
+    @property
+    def relative_window(self) -> bool:
+        """True when each spectrum gets its own window (``fit_window.window_bounds`` finds it)."""
+        return self.window_on and self.window_mode in RELATIVE_WINDOW_MODES
+
+    @property
+    def ranged_centroid(self) -> bool:
+        """True when the centroid is read from part of the fitted curve."""
+        return self.metric_key == "centroid" and self.metric_range in RANGE_MODES
+
+    def metric_range_key(self) -> tuple:
+        """Everything that decides which part of the fitted curve the metric is read from (cache keys use this)."""
+        if not self.ranged_centroid:
+            return ("whole",)
+        if self.metric_range == "top_fraction":
+            return ("top_fraction", float(self.metric_top_fraction))
+        return ("manual", self.metric_range_min, self.metric_range_max)
+
+    def window_key(self) -> tuple:
+        """Everything that decides which points are fitted, as one comparable tuple (cache keys use this, not the fields)."""
+        low, high = self.manual_bounds()
+        if self.relative_window:
+            amount = self.window_half_width_nm if self.window_mode == "around_max" else self.window_fwhm_factor
+            return (self.window_mode, float(amount), bool(self.window_same_points))
+        return ("manual", low, high)
 
 
 @dataclass(slots=True)

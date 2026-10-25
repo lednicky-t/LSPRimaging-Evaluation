@@ -31,7 +31,9 @@ from dataclasses import dataclass
 
 import numpy as np
 
+from .fit_window import restrict_to_window
 from .gaussian_fit import solve_gaussian
+from .metric_range import range_centroid
 from .query import fit_and_metric, formula_spectrum, formula_values
 from .settings import MetricSettings
 
@@ -103,12 +105,9 @@ def traces_from_inputs(
         valid = data.usable & np.isfinite(values)
         wl = np.asarray(data.wavelengths, dtype=np.float64)
         valid &= np.isfinite(wl)[None, :]
-        if metric.fit_wl_min is not None:
-            valid &= (wl >= float(metric.fit_wl_min))[None, :]
-        if metric.fit_wl_max is not None:
-            valid &= (wl <= float(metric.fit_wl_max))[None, :]
         order = np.argsort(wl, kind="stable")  # the points of every cube are fitted in wavelength order, as _windowed sorts them
         wl, values, valid = wl[order], values[:, order], valid[:, order]
+        valid = restrict_to_window(wl, values, valid, metric)  # the fit window: a fixed range, or each cube's own (fit_window.py)
         wanted_cubes = np.flatnonzero(wanted)
         patterns, inverse = np.unique(valid[wanted_cubes], axis=0, return_inverse=True)  # cubes with the same usable wavelengths fit together
         inverse = np.ravel(inverse)
@@ -195,6 +194,9 @@ def _gaussian_group(x: np.ndarray, y: np.ndarray, metric: MetricSettings) -> tup
         fitted_x = np.linspace(x_min, x_max, max(400, x.size))
         amplitude, centre, sigma, offset = (params[converged, i : i + 1] for i in range(4))
         curve = amplitude * np.exp(-((fitted_x[None, :] - centre) ** 2) / (2.0 * sigma * sigma)) + offset
+        if metric.ranged_centroid:  # part of the fitted curve only; the baseline is the fitted offset (metric_range.py)
+            found[converged] = range_centroid(fitted_x, curve, offset[:, 0], metric)
+            return good, found
         area = np.trapezoid(curve, fitted_x, axis=1)
         with np.errstate(all="ignore"):
             centroid = np.trapezoid(curve * fitted_x[None, :], fitted_x, axis=1) / area
@@ -227,6 +229,13 @@ def _polynomial_group(x: np.ndarray, y: np.ndarray, metric: MetricSettings) -> t
     good = np.all(np.isfinite(coef), axis=0)
     key = str(metric.metric_key).strip().lower()
     found = np.full(y.shape[0], np.nan)
+    if key == "centroid" and metric.ranged_centroid:
+        grid = np.linspace(x_min, x_max, max(400, n))  # the grid the per-spectrum fit samples its curve on
+        curves = (np.polynomial.polynomial.polyvander((grid - middle) / half, degree) @ coef).T  # [cube, grid]
+        has = good & np.all(np.isfinite(curves), axis=1)
+        if has.any():
+            found[has] = range_centroid(grid, curves[has], curves[has].min(axis=1), metric)
+        return good, found
     if key == "centroid":
         i0 = sum(coef[k] * (2.0 / (k + 1)) for k in range(0, degree + 1, 2))  # integral of p over [-1, 1]
         i1 = sum(coef[k] * (2.0 / (k + 2)) for k in range(1, degree + 1, 2))  # integral of t p over [-1, 1] (degree >= 1 here)

@@ -44,13 +44,23 @@ def _finite_runs(*arrays: np.ndarray) -> list[tuple[int, int]]:
     return [(a, b) for a, b in runs if b - a >= 2]
 
 
+class _MiddlePanViewBox(pg.ViewBox):
+    """pyqtgraph pans with the left button by default; here only the middle button pans (the left one is left free for clicking a cube)."""
+
+    def mouseDragEvent(self, ev, axis=None):  # noqa: N802 - pyqtgraph naming
+        if ev.button() == Qt.MouseButton.LeftButton:
+            ev.ignore()
+            return
+        super().mouseDragEvent(ev, axis)
+
+
 class SensorgramPlot(QWidget):
     x_clicked = pyqtSignal(float)
     baseline_window_changed = pyqtSignal(float, float)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
-        self._widget = pg.PlotWidget(parent=self)
+        self._widget = pg.PlotWidget(parent=self, viewBox=_MiddlePanViewBox())
         self._widget.setMinimumHeight(100)
         self._item = self._widget.getPlotItem()
         self._item.showGrid(x=True, y=True, alpha=0.15)
