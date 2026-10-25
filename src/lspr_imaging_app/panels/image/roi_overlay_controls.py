@@ -35,7 +35,11 @@ _SLIDER_WIDTH = 18  # the same narrow, steep wedge as the Mask tab's
 SAMPLE_ON_COLOR = "#c957e8"  # toggle icon while shown: pink-purple
 REFERENCE_ON_COLOR = "#e6f2ff"  # toggle icon while shown: white with a slight glassy blue
 
-_SPECS: dict[str, tuple[Callable[[bool, str, str], QIcon], str, str, str, str, str]] = {
+OverlaySpec = tuple[Callable[[bool, str, str], QIcon], str, str, str, str, str]
+"""(icon, on colour, toggle tip, colour tip, transparency tip, colour dialog title). A caller outside the Image panel (the Sensorgram's baseline
+selector) passes its own instead of a kind."""
+
+_SPECS: dict[str, OverlaySpec] = {
     # kind: (icon, on colour, toggle tip, colour tip, transparency tip, colour dialog title)
     "sample": (
         spot_icon, SAMPLE_ON_COLOR,
@@ -59,9 +63,10 @@ class RoiOverlayControls(QWidget):
     color_changed = pyqtSignal(QColor)
     alpha_changed = pyqtSignal(float)  # 0.0 - 1.0
 
-    def __init__(self, kind: str, *, visible: bool, color: QColor, alpha: float, parent: QWidget | None = None) -> None:
+    def __init__(self, kind: str | OverlaySpec, *, visible: bool, color: QColor, alpha: float, parent: QWidget | None = None) -> None:
         super().__init__(parent)
-        self._icon_for, self._on_color, toggle_tip, color_tip, alpha_tip, self._dialog_title = _SPECS[kind]
+        spec = _SPECS[kind] if isinstance(kind, str) else kind
+        self._icon_for, self._on_color, toggle_tip, color_tip, alpha_tip, self._dialog_title = spec
         self._color = QColor(color)
 
         self._toggle_button = QToolButton(self)

@@ -126,6 +126,9 @@ TOP_RIBBON_OPEN = UiKey("image/top_ribbon_open", True, bool)  # the tool ribbon 
 SPECTRA_RIBBON_OPEN = UiKey("spectra/ribbon_open", True, bool)  # the Spectra panel's control row: rolled down (True) or up
 SPECTRA_LINE_STYLE = UiKey("spectra/line_style", "solid", str)  # the line between the measured points: "solid" | "dash" | "dot" | "dashdot" (View menu)
 SENSORGRAM_RIBBON_OPEN = UiKey("sensorgram/ribbon_open", True, bool)  # the Sensorgram panel's control row: rolled down (True) or up
+SENSORGRAM_BASELINE_BAND_VISIBLE = UiKey("sensorgram/baseline_band_visible", True, bool)  # the draggable baseline band (View group)
+SENSORGRAM_BASELINE_BAND_COLOR = UiKey("sensorgram/baseline_band_color", None, str)  # None = the default blue
+SENSORGRAM_BASELINE_BAND_ALPHA = UiKey("sensorgram/baseline_band_alpha", 0.28, float)  # fill opacity 0 - 1
 SLIDESHOW_SPEED = UiKey("image/slideshow_speed", 1, int)  # 1, 2, 5 or 10 (x)
 SLIDESHOW_MODE = UiKey("image/slideshow_mode", "all", str)  # "all" | "one_wavelength" | "roi_states" | "mask_states" | "events"
 SLIDESHOW_REPEAT = UiKey("image/slideshow_repeat", False, bool)

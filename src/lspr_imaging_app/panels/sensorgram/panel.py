@@ -20,6 +20,11 @@ formula, fit settings and metric only, so a statistics change or another ROI sel
 and keeps what it finished. Selecting all 160 ROIs costs ~1 s once with the polynomial fit (a Gaussian fit ~2 s with the fast solver, ~87 s with the classic one, with a progress line). 100 ms coalescing, newest request wins, a result from an
 older file is dropped, and nothing happens while the dock is hidden (``HiddenPanelGate``).
 
+**Y axis and baseline selector (2026-10-25).** A double-click on the y axis label switches between the absolute position and the shift from the
+baseline (the same switch as the Baseline group's "Subtract"). The baseline selector is the draggable band along the bottom tenth of the plot; the
+View group's baseline button shows or hides it and sets its colour and fill transparency (a pick-up menu like the Image ribbon's ROI display; all
+three remembered). The selector is drawn whether or not the traces are subtracted, and dragging it only stores where it is.
+
 **Status bar.** A computation that lasts more than a moment (``panel_task.PanelTask``) appears in the app's task indicator ("Sensorgram: fitting
 ROI 3 of 160"), with a Cancel button that stops it between ROIs and clears the plot (the traces already fitted are kept for the next request); a
 quick one leaves no trace.
@@ -37,7 +42,8 @@ from dataclasses import dataclass, replace
 
 import numpy as np
 from PyQt6.QtCore import QTimer, pyqtSignal
-from PyQt6.QtWidgets import QApplication, QCheckBox, QComboBox, QHBoxLayout, QLabel, QSpinBox, QVBoxLayout, QWidget
+from PyQt6.QtGui import QColor
+from PyQt6.QtWidgets import QApplication, QHBoxLayout, QLabel, QSpinBox, QVBoxLayout, QWidget
 
 from lspr_ui import get_active_theme
 
@@ -58,7 +64,6 @@ from ...analysis.scan_trace import (
 from ...analysis.settings import (
     SENSORGRAM_AGGREGATIONS,
     SENSORGRAM_BANDS,
-    SENSORGRAM_DISPLAY_MODES,
     SMOOTHING_METHODS,
 )
 from ...analysis.settings_module import AnalysisSettingsModule
@@ -69,28 +74,59 @@ from ...image_tools.mask.module import MaskModule
 from ...roi import RoiToolbox
 from ...selection import CubeDisplayModule, SelectionModule
 from ...selection.cube_display_module import MODE_TIME
-from ...storage.ui_state_keys import SENSORGRAM_RIBBON_OPEN, read
+from ...storage.ui_state_keys import (
+    SENSORGRAM_BASELINE_BAND_ALPHA,
+    SENSORGRAM_BASELINE_BAND_COLOR,
+    SENSORGRAM_BASELINE_BAND_VISIBLE,
+    SENSORGRAM_RIBBON_OPEN,
+    read,
+)
 from ..live_toggle import LiveToggle
-from ..ribbon_fields import style_ribbon_check, style_ribbon_combo, style_ribbon_number_field
+from ..ribbon_fields import style_ribbon_number_field
 from ..ribbon_row import RibbonRow, rolled_ribbon
+from ..image.roi_overlay_controls import RoiOverlayControls
 from ..image_first import ImageFirst
 from ..panel_task import PanelTask
 from ..ui_state import UiStateStore
+from ..spectra.pick_menu import PickMenu
+from ..spectra.view_menu import IconToggle
 from ..visibility_gate import HiddenPanelGate
+from .baseline_selector_menu import DEFAULT_ALPHA, DEFAULT_COLOR, SPEC as BASELINE_BAND_SPEC, BaselineSelectorMenu, make_height_box
 from .mask_marks_toggle import MaskMarksToggle
-from .plot import SensorgramPlot
+from .stat_icons import band_picture, center_picture, display_picture, smoothing_picture, spikes_icon, subtract_icon
+from .plot import SensorgramPlot, snap_window
 
 logger = logging.getLogger(__name__)
 
 TASK_ID = "sensorgram.compute"
 MASK_MARKS_KEY = "sensorgram/mask_marks"
+BAND_HEIGHT_KEY = "sensorgram/baseline_band_height"
 _REDRAW_COALESCE_MS = 100  # sketch §8
 _JOIN_SECONDS = 5.0
 _PROGRESS_MIN_ROIS = 8  # a status line "Fitting ROI 3 of 160" only for runs long enough to need it
 DISPLAY_LABELS = {DISPLAY_INDIVIDUAL: "Individual", DISPLAY_AVERAGE_ALL: "Average all", DISPLAY_BY_GROUP: "Average by group"}
+DISPLAY_ORDER = (DISPLAY_INDIVIDUAL, DISPLAY_BY_GROUP, DISPLAY_AVERAGE_ALL)  # as listed in the menu: one line per ROI, one per group, one for all
 CENTER_LABELS = {"mean": "Mean", "median": "Median"}
 BAND_LABELS = {"sd": "SD band", "sem": "SEM band"}
 SMOOTHING_LABELS = {"none": "No smoothing", "savgol": "Savitzky-Golay", "moving_average": "Moving average"}
+DISPLAY_TIPS = {
+    DISPLAY_INDIVIDUAL: "One line for every selected ROI.",
+    DISPLAY_BY_GROUP: "One line for every ROI group (ROIs in no group form one more): the ROIs of a group are combined at each cube.",
+    DISPLAY_AVERAGE_ALL: "One line for all the selected ROIs, combined at each cube.",
+}
+CENTER_TIPS = {
+    "mean": "The ordinary average of the ROIs at each cube; every ROI counts the same, so a wild ROI pulls it.",
+    "median": "The middle value of the ROIs at each cube; a few wild ROIs hardly move it.",
+}
+BAND_TIPS = {
+    "sd": "SD band: the line plus and minus one standard deviation of the ROIs at each cube. It shows how much the ROIs differ and does not shrink with more ROIs.",
+    "sem": "SEM band: the standard error of the mean, the sample standard deviation divided by the square root of the number of ROIs. It shows how well the average is known and narrows with more ROIs.",
+}
+SMOOTHING_TIPS = {
+    "none": "The traces are drawn as fitted.",
+    "savgol": "Savitzky-Golay: a low-order polynomial fitted in a sliding window; keeps the height and width of peaks better than a plain average.",
+    "moving_average": "Moving average: the mean of the points in a sliding window.",
+}
 _RELEVANT_ROI_CHANGES = {"detection_settings", "session_restored", "added", "deleted", "detected"}  # a drag changes no sensorgram point
 _FALLBACK_COLORS = ("#f59e0b", "#38bdf8", "#34d399", "#f472b6", "#a78bfa", "#fb7185", "#facc15", "#22d3ee", "#a3e635")
 
@@ -150,43 +186,55 @@ class SensorgramPanel(QWidget):
         self._last: tuple[_Job, list[Series]] | None = None
         self._syncing = False
 
-        self._display = QComboBox(self)
-        for key in SENSORGRAM_DISPLAY_MODES:
-            self._display.addItem(DISPLAY_LABELS.get(key, key), key)
-        style_ribbon_combo(self._display)
+        self._display = PickMenu(self, name_on_face=False)  # pick-up menus that answer like the combo boxes they replaced
+        for key in DISPLAY_ORDER:
+            self._display.add_choice(key, DISPLAY_LABELS.get(key, key), DISPLAY_TIPS[key], display_picture(key))
+        self._display.finish()
         self._display.setToolTip(
             "Individual: one line per selected ROI. Average all / by group: each ROI is processed alone first, then the finished traces "
             "are combined (never the spectra)."
         )
-        self._center = QComboBox(self)
+        self._center = PickMenu(self, name_on_face=False)
         for key in SENSORGRAM_AGGREGATIONS:
-            self._center.addItem(CENTER_LABELS.get(key, key), key)
-        style_ribbon_combo(self._center)
+            self._center.add_choice(key, CENTER_LABELS.get(key, key), CENTER_TIPS[key], center_picture(key))
+        self._center.finish()
         self._center.setToolTip("How the ROIs of an average are combined at each point.")
-        self._band = QComboBox(self)
+        self._band = PickMenu(self, name_on_face=False)
         for key in SENSORGRAM_BANDS:
-            self._band.addItem(BAND_LABELS.get(key, key), key)
-        style_ribbon_combo(self._band)
+            self._band.add_choice(key, BAND_LABELS.get(key, key), BAND_TIPS[key], band_picture(key))
+        self._band.finish()
         self._band.setToolTip("Shaded band around an average: standard deviation of the ROIs, or standard error of the mean (SD / sqrt(n)).")
-        self._smoothing = QComboBox(self)
+        self._smoothing = PickMenu(self, name_on_face=False)  # a pick-up menu that answers like the combo box it replaced
         for key in SMOOTHING_METHODS:
-            self._smoothing.addItem(SMOOTHING_LABELS.get(key, key), key)
-        style_ribbon_combo(self._smoothing)
+            self._smoothing.add_choice(key, SMOOTHING_LABELS.get(key, key), SMOOTHING_TIPS[key], smoothing_picture(key))
+        self._smoothing.finish()
         self._smoothing.setToolTip("Smoothing of each ROI's trace, after spike removal.")
         self._window = QSpinBox(self)
         self._window.setRange(3, 301)
         self._window.setSingleStep(2)
-        self._window.setPrefix("window ")
-        style_ribbon_number_field(self._window, "window 301")
-        self._window.setToolTip("Smoothing window in points (made odd, never longer than the trace).")
-        self._spikes = QCheckBox("Remove", self)
-        self._spikes.setToolTip("Replace single-point outliers (Hampel filter: 3.5 scaled MADs from the rolling median of 5 points) before smoothing.")
-        self._baseline = QCheckBox("Subtract", self)
-        self._baseline.setToolTip("Subtract the mean of each trace inside the shaded band, so every trace reads as a shift from it. Drag the band.")
-        style_ribbon_check(self._spikes)
-        style_ribbon_check(self._baseline)
+        style_ribbon_number_field(self._window, "301")
+        self._window.setToolTip("Smoothing window in points (made odd, never longer than the trace). Shown while a smoothing method is chosen.")
+        self._spikes = IconToggle(
+            spikes_icon,
+            "Remove spikes: replace single-point outliers (Hampel filter: 3.5 scaled MADs from the rolling median of 5 points) before smoothing.",
+            self,
+        )
+        self._baseline = IconToggle(
+            subtract_icon,
+            "Subtract the baseline: the mean of each trace inside the baseline selector is taken off, so every trace reads as a shift from it instead of an absolute position. "
+            "The same switch as a double-click on the y axis label. Show the selector with the baseline button next to this one and drag it.",
+            self,
+        )
         self._mask_toggle = MaskMarksToggle(self)
         self._mask_toggle.setChecked(True)
+        self._band_visible = True  # the baseline selector: the controls hold the truth, these copies follow their signals
+        self._band_color = QColor(DEFAULT_COLOR)
+        self._band_alpha = DEFAULT_ALPHA
+        self._band_controls = RoiOverlayControls(
+            BASELINE_BAND_SPEC, visible=self._band_visible, color=self._band_color, alpha=self._band_alpha, parent=self
+        )
+        self._band_height = make_height_box(self)
+        self._band_menu = BaselineSelectorMenu(self._band_controls, self._band_height, self)
         self._status = QLabel("", self)
         self._status.setWordWrap(True)
         self._status.setStyleSheet(f"color: {get_active_theme().text_dim};")
@@ -197,11 +245,9 @@ class SensorgramPanel(QWidget):
         self._live_toggle.bind(self._live)
         self._ribbon = RibbonRow(self)
         self._ribbon.add_group("Live", self._live_toggle)
-        self._ribbon.add_group("Display", self._display)
-        self._ribbon.add_group("Average", self._center, self._band)
-        self._ribbon.add_group("Smoothing", self._smoothing, self._window)
-        self._ribbon.add_group("Spikes", self._spikes)
-        self._ribbon.add_group("Baseline", self._baseline)
+        self._ribbon.add_group("Statistic", self._display, self._center, self._band)  # how the ROIs are shown, and how an average is made
+        self._ribbon.add_group("Smoothing", self._smoothing, self._window, self._spikes)
+        self._ribbon.add_group("Baseline", self._baseline, self._band_menu)
         self._ribbon.add_group("View", self._mask_toggle)
         self._ribbon.add_stretch()
         self._ribbon_drawer = rolled_ribbon(self._ribbon, "Show the sensorgram controls.", self)
@@ -231,6 +277,12 @@ class SensorgramPanel(QWidget):
         self._baseline.toggled.connect(self._on_baseline_toggled)
         self._mask_toggle.toggled.connect(lambda _on: self._draw_last())
         self._plot.baseline_window_changed.connect(self._on_baseline_dragged)
+        self._plot.y_label_double_clicked.connect(self._on_y_label_double_clicked)
+        self._band_height.valueChanged.connect(self._plot.set_baseline_height)
+        self._plot.baseline_range_edited.connect(self._on_baseline_dragged)  # typed values are stored exactly as a dragged band's
+        self._band_controls.visibility_changed.connect(self._on_band_visibility)
+        self._band_controls.color_changed.connect(self._on_band_color)
+        self._band_controls.alpha_changed.connect(self._on_band_alpha)
         self._plot.x_clicked.connect(self._on_plot_clicked)
 
         self._selection.roi_selection_changed.connect(lambda _ids: self._schedule_redraw())
@@ -252,6 +304,19 @@ class SensorgramPanel(QWidget):
 
     def restore_ui_state(self, store: UiStateStore) -> None:
         store.bind(MASK_MARKS_KEY, self._mask_toggle)
+        store.bind(BAND_HEIGHT_KEY, self._band_height)
+        self._plot.set_baseline_height(self._band_height.value())  # a restored value arrives without a signal
+        saved_color = read(store, SENSORGRAM_BASELINE_BAND_COLOR)
+        self._band_visible = read(store, SENSORGRAM_BASELINE_BAND_VISIBLE) is not False
+        self._band_color = QColor(saved_color) if isinstance(saved_color, str) and QColor(saved_color).isValid() else QColor(DEFAULT_COLOR)
+        self._band_alpha = min(max(float(read(store, SENSORGRAM_BASELINE_BAND_ALPHA)), 0.0), 1.0)
+        # not a widget `bind`: three values behind one control
+        self._band_controls.set_state(visible=self._band_visible, color=self._band_color, alpha=self._band_alpha)
+        self._plot.set_baseline_style(self._band_color, self._band_alpha)
+        self._band_controls.visibility_changed.connect(lambda on: store.set(SENSORGRAM_BASELINE_BAND_VISIBLE.key, bool(on)))
+        self._band_controls.color_changed.connect(lambda color: store.set(SENSORGRAM_BASELINE_BAND_COLOR.key, color.name()))
+        self._band_controls.alpha_changed.connect(lambda alpha: store.set(SENSORGRAM_BASELINE_BAND_ALPHA.key, float(alpha)))
+        self._draw_last()
         self._ribbon_drawer.set_expanded(read(store, SENSORGRAM_RIBBON_OPEN) is not False, animate=False)
         self._ribbon_drawer.expanded_changed.connect(lambda open_: store.set(SENSORGRAM_RIBBON_OPEN.key, bool(open_)))
 
@@ -263,6 +328,12 @@ class SensorgramPanel(QWidget):
         self._live_toggle.refresh_theme()
         self._ribbon.refresh_theme()
         self._mask_toggle.refresh_theme()
+        for menu in (self._display, self._center, self._band, self._smoothing):
+            menu.refresh_theme()
+        self._spikes.refresh_theme()
+        self._baseline.refresh_theme()
+        self._band_controls.refresh_theme(get_active_theme())
+        self._band_menu.refresh_theme(get_active_theme())
         self._ribbon_drawer.refresh_theme()
         self._plot.refresh_theme()
         self._status.setStyleSheet(f"color: {get_active_theme().text_dim};")
@@ -292,7 +363,7 @@ class SensorgramPanel(QWidget):
             self._band.setEnabled(averaged)
             self._smoothing.setCurrentIndex(max(self._smoothing.findData(stats.smoothing_method), 0))
             self._window.setValue(int(stats.smoothing_window))
-            self._window.setEnabled(stats.smoothing_method != "none")
+            self._window.setVisible(stats.smoothing_method != "none")  # the window means nothing without a smoothing method
             self._spikes.setChecked(bool(stats.spike_rejection_enabled))
             self._baseline.setChecked(bool(stats.baseline_enabled))
         finally:
@@ -315,7 +386,12 @@ class SensorgramPanel(QWidget):
             low, high = self._plot.x_range()
         else:
             low, high = float(finite.min()), float(finite.max())
-        return low, low + 0.1 * (high - low)
+        return self._snap_window(low, low + 0.1 * (high - low))
+
+    def _snap_window(self, low: float, high: float) -> tuple[float, float]:
+        """The window with both edges on a data point of the x axis (cube number, or the cube's start time)."""
+        x = self._x_axis()[1]
+        return snap_window(np.unique(x[np.isfinite(x)]), low, high)
 
     def _on_baseline_toggled(self, on: bool) -> None:
         if self._syncing:
@@ -330,9 +406,30 @@ class SensorgramPanel(QWidget):
             self._settings.set_statistics_settings(replace(current, baseline_enabled=False))
 
     def _on_baseline_dragged(self, low: float, high: float) -> None:
-        self._settings.set_statistics_settings(replace(
-            self._settings.statistics_settings(), baseline_enabled=True, baseline_window_start=min(low, high), baseline_window_end=max(low, high)
-        ))
+        """The selector was moved: remember where. Whether the traces are shifted by it is the Subtract switch's business (the selector can be
+        dragged before, or without, subtracting)."""
+        low, high = self._snap_window(low, high)  # a typed value is put on a data point as a dragged one is
+        self._settings.set_statistics_settings(replace(self._settings.statistics_settings(), baseline_window_start=low, baseline_window_end=high))
+
+    def _range_decimals(self) -> int:
+        """Decimals of the baseline range readout: whole cubes, or tenths of a second."""
+        return 1 if self._cube_display.effective_mode() == MODE_TIME else 0
+
+    def _on_y_label_double_clicked(self) -> None:
+        """Double-click on the y axis label: absolute position <-> shift from the baseline (the Subtract switch)."""
+        self._on_baseline_toggled(not self._settings.statistics_settings().baseline_enabled)
+
+    def _on_band_visibility(self, on: bool) -> None:
+        self._band_visible = bool(on)
+        self._draw_last()
+
+    def _on_band_color(self, color: QColor) -> None:
+        self._band_color = QColor(color)
+        self._plot.set_baseline_style(self._band_color, self._band_alpha)
+
+    def _on_band_alpha(self, alpha: float) -> None:
+        self._band_alpha = float(alpha)
+        self._plot.set_baseline_style(self._band_color, self._band_alpha)
 
     def _on_settings_changed(self) -> None:
         self._sync_controls()
@@ -356,7 +453,7 @@ class SensorgramPanel(QWidget):
         """The Cube / Time choice changed: the x values change, and so does the unit of the baseline window."""
         self._x_cache = None
         stats = self._settings.statistics_settings()
-        if stats.baseline_enabled:
+        if stats.baseline_window_start is not None:  # a window in the old unit means nothing now, subtracting or not
             low, high = self._default_baseline_window()
             self._settings.set_statistics_settings(replace(stats, baseline_window_start=low, baseline_window_end=high))  # redraws via settings_changed
         else:
@@ -563,7 +660,8 @@ class SensorgramPanel(QWidget):
             return
         job, series = self._last
         stale = self._stale_mask(job.stored)
-        label, _x = self._x_axis()
+        label, x_axis = self._x_axis()
+        self._plot.set_snap_grid(x_axis)
         stats = job.request.statistics
         y_label = "Centroid position (nm)" if job.request.metric.metric_key == "centroid" else "Peak position (nm)"
         if job.request.metric.uses_template:
@@ -572,10 +670,11 @@ class SensorgramPanel(QWidget):
             y_label = y_label.replace("position", "shift")
         self._plot.set_axis_labels(label, y_label)
         self._plot.show_series(series, stale, self._mask_marks(job.stored, series))
-        if stats.baseline_enabled and stats.baseline_window_start is not None and stats.baseline_window_end is not None:
-            self._plot.set_baseline_window((stats.baseline_window_start, stats.baseline_window_end))
+        if stats.baseline_window_start is not None and stats.baseline_window_end is not None:
+            window = (stats.baseline_window_start, stats.baseline_window_end)
         else:
-            self._plot.set_baseline_window(None)
+            window = self._default_baseline_window()  # where Subtract would put it; stored only once dragged, typed or subtracted
+        self._plot.set_baseline_window(window if self._band_visible else None, self._range_decimals())
         self._update_cursor()
         self._status.setText(self._status_line(job, series, stale))
 
