@@ -1,6 +1,6 @@
 """``SpectraPanel`` (sketch §7 "Display panels" > Spectra, §10): the spectra of the selected ROIs on the current cube.
 
-**Screen.** A ribbon of compact controls on top (formula, fit, polynomial order, metric, fit window, error bars) in the look of the Image
+**Screen.** A ribbon of compact controls on top (formula, fit, polynomial order, metric, fit window, View) in the look of the Image
 panel's ribbon (captioned groups, `ribbon_row.py`): a double-click on its empty space rolls it up to a "..." handle, and a panel narrower than
 the row scrolls it with an arrow at each edge. The plot fills the rest and one status line sits below it. It follows the selection: the ROIs selected in the ROI table or on the image, and the cube on the Image panel's
 slider. Nothing here starts an analysis (CLAUDE.md): the numbers come from ``analysis/scan.h5`` through
@@ -25,11 +25,22 @@ computed, a result from before a clear is dropped, and nothing is done while the
 the controls is never left standing. The worker itself cannot be interrupted and runs to its end unseen.
 
 **State.** Formula, fit method, order, metric and the fit window belong to modules (``AreaRoiDetectionSettings.formula_key``,
-``AnalysisSettingsModule``) and are saved with the session; this panel only edits them through those modules. The error-bar choice is a
-remembered UI choice (``ui_state``). The fit window is a pick-up menu in the Fit group: no window, a manual range (picking it sets the middle 80 % of the plotted
+``AnalysisSettingsModule``) and are saved with the session; this panel only edits them through those modules. The View choices (below) are
+remembered UI choices (``ui_state``: ``spectra/show_points``, ``point_size``, ``show_lines``, ``line_style``, ``error_bars``). The fit window is a pick-up menu in the Fit group: no window, a manual range (picking it sets the middle 80 % of the plotted
 wavelengths; dragging the shaded band moves it), each spectrum's maximum +/- a width in nm, or +/- a multiple of its FWHM; the widths are
 fields in the menu, "Same number of points" is its footer. Only the manual range is drawn on the plot (``analysis/fit_window.py``). The Metric group has a second menu,
 the metric range: which part of the fitted curve the centroid is read from (whole window, the top part above a level, or a manual range; ``analysis/metric_range.py``).
+
+**Polynomial order** (2026-10-25, ``order_picker.py``; replaced the number field): a pick-up list 1st to 13th (the cap), also stepped by the mouse wheel over the button, each order with a coloured dot: green = good at every cube, yellow = good here but not at some other cube, amber = over-fitted at the present cube, purple = under-fitted at the present cube, grey = not available or not judged. The verdict is leave-one-out cross-validation on the points inside the fit window for the selected ROIs (``analysis/order_quality.py``, measured in ``docs/poly_order_quality_study_2026-10-25.md``). It is computed on its own worker thread when the selection, formula, fit window or scan changes (not for a cube change: that only re-colours the menu from the stored verdicts).
+
+**View** (2026-10-25, ``view_menu.py``; replaced the "Error bars" check box): one icon button, a pick-up menu in the look of the Image ribbon's "ROI display". Rows: Data points (show / hide the
+dots, their size in px), Lines (show / hide the line that joins the points, its style: solid, dashed, dotted, dash-dot) and Error bars (show / hide). Display only: a change draws the stored result
+again (``_draw_last``), nothing is computed; the fitted curve and the metric marker are not affected. With points and lines both hidden the legend entry moves to the fitted curve.
+
+**Template shift** (2026-10-25, ``analysis/template_shift.py``): the fit menu's fourth choice. The curve drawn through the points is the ROI's reference spectrum (the mean of its
+reference cubes) moved sideways and scaled to the spectrum, over the whole range; the diamond is the reference's peak plus that shift. The two cube fields in the choice's row set the
+reference cubes (first and last, inclusive; default 0 to 9). With this choice the polynomial order, the fit window and the Metric group have no meaning and are disabled. The shift, the
+scale and the tilt (baseline change across the range) of each ROI are kept in ``RoiSpectrum`` for a readout; the status line is not shown (maintainer, 2026-10-23).
 """
 
 from __future__ import annotations
@@ -38,6 +49,7 @@ import logging
 import threading
 from dataclasses import dataclass, replace
 
+import numpy as np
 import pyqtgraph as pg
 from PyQt6.QtCore import QTimer, pyqtSignal
 from PyQt6.QtGui import QColor
@@ -49,21 +61,26 @@ from ...analysis.live_state import AnalysisLiveModule
 from ...analysis.query import FORMULA_KEYS
 from ...analysis.scan_results import ScanResultsModule
 from ...analysis.scan_store import StoredScan
+from ...analysis.order_quality import MAX_ROIS, OrderQuality, evaluate_order_quality
+from ...analysis.scan_trace import trace_input
 from ...analysis.scan_view import RoiSpectrum, SpectraRequest, compute_spectra
 from ...analysis.settings import FIT_METHODS, METRIC_KEYS, MetricSettings
 from ...analysis.settings_module import AnalysisSettingsModule
 from ...applog import timed
 from ...roi import RoiToolbox
 from ...selection import SelectionModule
-from ...storage.ui_state_keys import SPECTRA_RIBBON_OPEN, read
+from ...storage.ui_state_keys import SPECTRA_LINE_STYLE, SPECTRA_RIBBON_OPEN, read
 from ..live_toggle import LiveToggle
-from ..ribbon_fields import style_ribbon_check, style_ribbon_number_field
 from ..ribbon_row import RibbonRow, rolled_ribbon
 from ..panel_task import PanelTask
 from ..ui_state import UiStateStore
 from ..visibility_gate import HiddenPanelGate
+from ..ribbon_fields import style_ribbon_number_field
+from .order_picker import OrderPicker
 from .pick_menu import PickMenu, equation_picture, fit_picture, metric_picture, range_picture, window_picture
-from .plot import SpectraPlot
+from .plot import LINE_STYLES, SpectraPlot
+from .view_icons import error_bars_icon, lines_icon, points_icon
+from .view_menu import IconToggle, LineStylePicker, SpectraViewMenu, make_point_size_box
 
 logger = logging.getLogger(__name__)
 
@@ -87,11 +104,13 @@ FORMULA_TIPS = {
     "ratio": "Sample intensity divided by reference intensity.",
     "relative_change": "Reference minus sample, divided by reference.",
 }
-FIT_LABELS = {"none": "No fit", "polynomial": "Polynomial", "gaussian": "Gaussian"}
+FIT_LABELS = {"none": "No fit", "polynomial": "Polynomial", "gaussian": "Gaussian", "template": "Template shift"}
 FIT_TIPS = {
     "none": "Show the measured points only.",
     "polynomial": "Fit a polynomial through the points.",
     "gaussian": "Fit a Gaussian (bell curve) through the points.",
+    "template": "Move the ROI's reference spectrum (the mean of its reference cubes) sideways until it agrees best with the spectrum, using every point. "
+                "The metric is the reference's peak plus that shift. No fit window, order or maximum / centroid is needed.",
 }
 METRIC_LABELS = {"maximum": "Maximum", "centroid": "Centroid"}
 METRIC_TIPS = {
@@ -114,6 +133,9 @@ RANGE_TIPS = {
 }
 TASK_ID = "spectra.compute"
 ERROR_BARS_KEY = "spectra/error_bars"
+SHOW_POINTS_KEY = "spectra/show_points"
+POINT_SIZE_KEY = "spectra/point_size"
+SHOW_LINES_KEY = "spectra/show_lines"
 _RELEVANT_ROI_CHANGES = {"detection_settings", "session_restored", "added", "deleted", "detected"}  # a drag changes no spectrum
 _FALLBACK_HUES = 9
 
@@ -141,6 +163,7 @@ class SpectraPanel(QWidget):
     """Plots the spectra of the selected ROIs at the current cube from the stored scan."""
 
     _spectra_ready = pyqtSignal(object, object)  # (job, list[RoiSpectrum] | exception) - emitted from the worker thread
+    _quality_ready = pyqtSignal(object, object)  # (generation, OrderQuality | None | exception) - emitted from the order-check thread
 
     def __init__(
         self,
@@ -163,6 +186,12 @@ class SpectraPanel(QWidget):
         self._pending = False
         self._thread: threading.Thread | None = None
         self._last: tuple[_Job, list[RoiSpectrum]] | None = None
+        self._quality: OrderQuality | None = None  # the verdicts of the polynomial orders (analysis/order_quality.py)
+        self._quality_key: tuple | None = None  # what they were computed for (a cube change does not change it)
+        self._quality_generation = 0
+        self._quality_busy = False
+        self._quality_pending: tuple | None = None
+        self._quality_thread: threading.Thread | None = None
         self._syncing = False
 
         self._formula = PickMenu(self, name_on_face=False)  # the equation says it all
@@ -172,16 +201,28 @@ class SpectraPanel(QWidget):
             self._formula.add_choice(key, FORMULA_LABELS.get(key, key), FORMULA_TIPS.get(key, ""), equation_picture(FORMULA_EQUATIONS[key]))
         self._formula.finish()
         self._formula.setToolTip("How the stored sample and reference values are combined into one value per wavelength (Is, Ir: sample and reference intensity).")
+        self._ref_first = QSpinBox(self)
+        self._ref_last = QSpinBox(self)
+        for box in (self._ref_first, self._ref_last):
+            box.setRange(0, 100000)
+            box.setKeyboardTracking(False)  # a value is taken when Enter is pressed or the field is left, not on every digit
+            style_ribbon_number_field(box, "100000")  # frameless, as the Image ribbon's fields
+        self._ref_first.setToolTip("First cube of the reference (the cube numbers the Image panel shows).")
+        self._ref_last.setToolTip("Last cube of the reference (included). The reference of a ROI is the mean of its spectra over these cubes.")
+        self._ref_pair = QWidget(self)
+        ref_line = QHBoxLayout(self._ref_pair)
+        ref_line.setContentsMargins(0, 0, 0, 0)
+        ref_line.setSpacing(4)
+        ref_line.addWidget(QLabel("cubes", self._ref_pair))
+        ref_line.addWidget(self._ref_first)
+        ref_line.addWidget(QLabel("to", self._ref_pair))
+        ref_line.addWidget(self._ref_last)
         self._fit = PickMenu(self, name_on_face=False)
         for key in FIT_METHODS:
-            self._fit.add_choice(key, FIT_LABELS.get(key, key), FIT_TIPS.get(key, ""), fit_picture(key))
+            self._fit.add_choice(key, FIT_LABELS.get(key, key), FIT_TIPS.get(key, ""), fit_picture(key), self._ref_pair if key == "template" else None)
         self._fit.finish()
-        self._fit.setToolTip("Curve fitted through the points of each ROI's spectrum (inside the fit window, if one is set).")
-        self._order = QSpinBox(self)
-        self._order.setRange(1, 8)
-        self._order.setPrefix("order ")
-        style_ribbon_number_field(self._order, "order 8")
-        self._order.setToolTip("Polynomial order (capped at half the number of points).")
+        self._fit.setToolTip("Curve fitted through the points of each ROI's spectrum (inside the fit window, if one is set), or the shift against the ROI's reference spectrum.")
+        self._order = OrderPicker(self)  # 1st to 13th, each marked by how well it suits the spectra (order_picker.py); the mouse wheel steps it
         self._metric = PickMenu(self, name_on_face=False)
         for key in METRIC_KEYS:
             self._metric.add_choice(key, METRIC_LABELS.get(key, key), METRIC_TIPS.get(key, ""), metric_picture(key))
@@ -194,7 +235,7 @@ class SpectraPanel(QWidget):
         self._half_width.setPrefix("\u00b1 ")
         self._half_width.setSuffix(" nm")
         self._half_width.setKeyboardTracking(False)  # a value is taken when Enter is pressed or the field is left, not on every digit
-        self._half_width.setFixedWidth(96)
+        style_ribbon_number_field(self._half_width, "± 500.0 nm")
         self._half_width.setToolTip("Half the width of the window, in nm: the window reaches this far to each side of the maximum.")
         self._fwhm_factor = QDoubleSpinBox(self)
         self._fwhm_factor.setRange(0.1, 5.0)
@@ -203,7 +244,7 @@ class SpectraPanel(QWidget):
         self._fwhm_factor.setPrefix("\u00b1 ")
         self._fwhm_factor.setSuffix(" \u00d7 FWHM")
         self._fwhm_factor.setKeyboardTracking(False)
-        self._fwhm_factor.setFixedWidth(120)
+        style_ribbon_number_field(self._fwhm_factor, "± 5.00 × FWHM")
         self._fwhm_factor.setToolTip("How far the window reaches to each side of the maximum, in widths of the peak at half its height.")
         self._same_points = QCheckBox("Same number of points", self)
         self._same_points.setToolTip(
@@ -217,7 +258,7 @@ class SpectraPanel(QWidget):
         self._top_fraction.setPrefix("above ")
         self._top_fraction.setSuffix(" % of height")
         self._top_fraction.setKeyboardTracking(False)
-        self._top_fraction.setFixedWidth(150)
+        style_ribbon_number_field(self._top_fraction, "above 95 % of height")
         self._top_fraction.setToolTip("The level, as a percentage of the peak's height above its baseline: 30 % reads the top 70 % of the peak, 90 % only its tip.")
         self._range_min = QDoubleSpinBox(self)
         self._range_max = QDoubleSpinBox(self)
@@ -227,7 +268,7 @@ class SpectraPanel(QWidget):
             box.setSingleStep(5.0)
             box.setSuffix(" nm")
             box.setKeyboardTracking(False)
-            box.setFixedWidth(84)
+            style_ribbon_number_field(box, "5000.0 nm")
         self._range_min.setToolTip("Lower end of the range the centroid is read from.")
         self._range_max.setToolTip("Upper end of the range the centroid is read from.")
         self._range_pair = QWidget(self)
@@ -251,12 +292,20 @@ class SpectraPanel(QWidget):
         self._window_mode.add_footer(self._same_points)
         self._window_mode.finish()
         self._window_mode.setToolTip("Which points of each spectrum are fitted (and the metric is read from): all, a fixed range, or a window around each spectrum's own maximum.")
-        self._error_box = QCheckBox("Show", self)
-        self._error_box.setToolTip(
-            "Pixel-to-pixel spread inside each aperture divided by the square root of the pixel count (standard error of the mean value), "
-            "propagated through the formula. Not the reproducibility between measurements."
+        # The View menu (2026-10-25): measured points (show, size), the line between them (show, style) and the error bars (show). The error-bar toggle keeps its old name.
+        self._show_points = IconToggle(points_icon, "Show or hide the dots that mark the measured points.", self)
+        self._show_points.setChecked(True)
+        self._point_size = make_point_size_box(self)
+        self._show_lines = IconToggle(lines_icon, "Show or hide the line that joins the measured points of each spectrum.", self)
+        self._show_lines.setChecked(True)
+        self._line_style = LineStylePicker(self)
+        self._error_box = IconToggle(
+            error_bars_icon,
+            "Show or hide the error bars: the pixel-to-pixel spread inside each aperture divided by the square root of the pixel count (standard error of the mean "
+            "value), propagated through the formula. Not the reproducibility between measurements.",
+            self,
         )
-        style_ribbon_check(self._error_box)
+        self._view_menu = SpectraViewMenu(self._show_points, self._point_size, self._show_lines, self._line_style, self._error_box, self)
         self._status = QLabel("", self)
         self._status.setWordWrap(True)
         self._status.setStyleSheet(f"color: {get_active_theme().text_dim};")
@@ -270,7 +319,7 @@ class SpectraPanel(QWidget):
         self._ribbon.add_group("Formula", self._formula)
         self._ribbon.add_group("Fit", self._fit, self._order, self._window_mode)
         self._ribbon.add_group("Metric", self._metric, self._metric_range)
-        self._ribbon.add_group("Error bars", self._error_box)
+        self._ribbon.add_group("View", self._view_menu)
         self._ribbon.add_stretch()
         self._ribbon_drawer = rolled_ribbon(self._ribbon, "Show the spectra controls.", self)
         controls = QHBoxLayout()
@@ -290,10 +339,13 @@ class SpectraPanel(QWidget):
         self._redraw_timer.timeout.connect(self._redraw)
 
         self._spectra_ready.connect(self._on_ready)
+        self._quality_ready.connect(self._on_quality_ready)
         self._live.live_changed.connect(self._on_live_changed)
         self._formula.currentIndexChanged.connect(self._on_formula_chosen)
         self._fit.currentIndexChanged.connect(self._on_metric_controls_changed)
         self._order.valueChanged.connect(self._on_metric_controls_changed)
+        self._ref_first.valueChanged.connect(self._on_reference_cubes_changed)
+        self._ref_last.valueChanged.connect(self._on_reference_cubes_changed)
         self._metric.currentIndexChanged.connect(self._on_metric_controls_changed)
         self._metric_range.currentIndexChanged.connect(self._on_metric_range_chosen)
         for field in (self._top_fraction, self._range_min, self._range_max):
@@ -302,7 +354,10 @@ class SpectraPanel(QWidget):
         self._half_width.valueChanged.connect(self._on_window_params_changed)
         self._fwhm_factor.valueChanged.connect(self._on_window_params_changed)
         self._same_points.toggled.connect(self._on_window_params_changed)
-        self._error_box.toggled.connect(lambda _on: self._draw_last())
+        for toggle in (self._show_points, self._show_lines, self._error_box):
+            toggle.toggled.connect(lambda _on: self._draw_last())  # a display choice: the stored result is drawn again, nothing is computed
+        self._point_size.valueChanged.connect(lambda _size: self._draw_last())
+        self._line_style.style_changed.connect(self._on_line_style_chosen)
         self._plot.fit_window_changed.connect(self._on_window_dragged)
         self._plot.wavelength_dragged.connect(self._on_cursor_dragged)
 
@@ -325,6 +380,13 @@ class SpectraPanel(QWidget):
 
     def restore_ui_state(self, store: UiStateStore) -> None:
         store.bind(ERROR_BARS_KEY, self._error_box)
+        store.bind(SHOW_POINTS_KEY, self._show_points)
+        store.bind(POINT_SIZE_KEY, self._point_size)
+        store.bind(SHOW_LINES_KEY, self._show_lines)
+        saved_style = read(store, SPECTRA_LINE_STYLE)
+        self._line_style.set_style(saved_style if saved_style in LINE_STYLES else SPECTRA_LINE_STYLE.default)  # not a widget `bind`: a row of buttons
+        self._line_style.style_changed.connect(lambda key: store.set(SPECTRA_LINE_STYLE.key, key))
+        self._draw_last()
         self._ribbon_drawer.set_expanded(read(store, SPECTRA_RIBBON_OPEN) is not False, animate=False)
         self._ribbon_drawer.expanded_changed.connect(lambda open_: store.set(SPECTRA_RIBBON_OPEN.key, bool(open_)))
 
@@ -333,9 +395,13 @@ class SpectraPanel(QWidget):
         self._gate.set_visible(visible)
 
     def refresh_theme(self) -> None:
-        for pick in (self._formula, self._fit, self._metric, self._window_mode, self._metric_range):
+        for pick in (self._formula, self._fit, self._order, self._metric, self._window_mode, self._metric_range):
             pick.refresh_theme()
         self._live_toggle.refresh_theme()
+        for toggle in (self._show_points, self._show_lines, self._error_box):
+            toggle.refresh_theme()
+        self._line_style.refresh_theme()
+        self._view_menu.refresh_theme()
         self._ribbon.refresh_theme()
         self._ribbon_drawer.refresh_theme()
         self._plot.refresh_theme()
@@ -344,9 +410,10 @@ class SpectraPanel(QWidget):
     def shutdown(self) -> None:
         """Application is quitting: let a running computation finish, so it never emits into a widget Qt is tearing down."""
         self._generation += 1
-        thread = self._thread
-        if thread is not None:
-            thread.join(timeout=_JOIN_SECONDS)
+        self._quality_generation += 1
+        for thread in (self._thread, self._quality_thread):
+            if thread is not None:
+                thread.join(timeout=_JOIN_SECONDS)
 
     # -- controls <-> modules ----------------------------------------------------------------------------------------------------
 
@@ -360,9 +427,14 @@ class SpectraPanel(QWidget):
             self._fit.setCurrentIndex(max(self._fit.findData(metric.fit_method), 0))
             self._order.setValue(int(metric.poly_order))
             self._order.setEnabled(metric.fit_method == "polynomial")
+            self._order.setVisible(metric.fit_method == "polynomial")  # an order means something for the polynomial fit only
+            first, last = metric.reference_cube_range()
+            self._ref_first.setValue(first)
+            self._ref_last.setValue(last)
             self._metric.setCurrentIndex(max(self._metric.findData(metric.metric_key), 0))
-            self._window_mode.setEnabled(metric.fit_method != "none")
-            self._metric_range.setEnabled(metric.fit_method != "none" and metric.metric_key == "centroid")
+            self._metric.setEnabled(not metric.uses_template)  # the template shift has its own metric: the reference's peak plus the shift
+            self._window_mode.setEnabled(metric.fit_method not in ("none", "template"))
+            self._metric_range.setEnabled(metric.fit_method not in ("none", "template") and metric.metric_key == "centroid")
             self._metric_range.setCurrentIndex(max(self._metric_range.findData(metric.metric_range), 0))
             self._top_fraction.setValue(round(100.0 * float(metric.metric_top_fraction)))
             if metric.metric_range_min is not None:
@@ -392,6 +464,18 @@ class SpectraPanel(QWidget):
         self._settings.set_metric_settings(
             replace(current, fit_method=self._fit.currentData(), poly_order=self._order.value(), metric_key=self._metric.currentData())
         )
+
+    def _on_line_style_chosen(self, _key: str) -> None:
+        self._draw_last()
+
+    def _on_reference_cubes_changed(self, *_args: object) -> None:
+        """A cube field of the template shift's reference was edited (typed in either order: the range is read as first <= last). Changes nothing unless the range really differs."""
+        if self._syncing:
+            return
+        current = self._settings.metric_settings()
+        first, last = sorted((self._ref_first.value(), self._ref_last.value()))
+        if (first, last) != current.reference_cube_range():
+            self._settings.set_metric_settings(replace(current, template_first_cube=first, template_last_cube=last))
 
     def _on_window_mode_chosen(self, _index: int) -> None:
         """A choice in the window menu. Picking a mode turns the window on; "No window" turns it off (a manual range is forgotten, as before)."""
@@ -477,6 +561,7 @@ class SpectraPanel(QWidget):
     def _on_results_changed(self) -> None:
         self._generation += 1  # what was computed from the old file must not be drawn
         self._last = None
+        self._quality_key = None  # and the verdicts of the orders belong to the old file too
         self._schedule_redraw()
 
     # -- the cursor ------------------------------------------------------------------------------------------------------------------
@@ -534,6 +619,7 @@ class SpectraPanel(QWidget):
                 self._status.setText("Reading the scan...")
             else:
                 self._status.setText("No scan yet. Run it in Workflow > Analysis.")
+            self._clear_quality()
             return
         if not roi_ids:
             self._generation += 1
@@ -543,9 +629,11 @@ class SpectraPanel(QWidget):
             self._plot.set_current_wavelength(None)
             self.task.end("cancelled", "nothing to compute")
             self._status.setText("Select one or more ROIs (ROI table or image) to see their spectra.")
+            self._clear_quality()
             return
         request = SpectraRequest(roi_ids, int(self._selection.current_cube()), self._roi_toolbox.detection_settings().formula_key,
                                  self._settings.metric_settings())
+        self._refresh_quality(stored, roi_ids, request)  # before the busy check: the order menu does not wait for the spectra
         job = _Job(self._generation, stored, request)
         if self._busy:
             self._pending = True  # newest request wins: computed when the running one is back
@@ -554,6 +642,59 @@ class SpectraPanel(QWidget):
         self.task.begin(self._task_message(request))
         self._thread = threading.Thread(target=self._compute, args=(job,), name="spectra-compute", daemon=True)
         self._thread.start()
+
+    # -- the verdicts of the polynomial orders (analysis/order_quality.py) ---------------------------------------------------------
+
+    def _clear_quality(self) -> None:
+        """Nothing to judge (no scan, no ROI selected): the order menu goes grey and a running check is dropped."""
+        self._quality_generation += 1
+        self._quality, self._quality_key, self._quality_pending = None, None, None
+        self._order.apply_quality(None, None)
+
+    def _refresh_quality(self, stored: StoredScan, roi_ids: tuple[int, ...], request: SpectraRequest) -> None:
+        """Keep the order menu's colours right. A change of cube only colours the menu for that cube (a look-up, no work); a new selection, formula, fit window or scan starts the check
+        on a worker thread (never on the GUI thread); other fit methods have no order, so nothing is judged."""
+        if request.metric.fit_method != "polynomial":
+            self._clear_quality()
+            return
+        key = (id(stored), roi_ids, request.formula_key, request.metric.window_key())
+        if key != self._quality_key:
+            self._quality_key = key
+            self._start_quality((key, stored, roi_ids, request.formula_key, request.metric))
+        self._order.apply_quality(self._quality, request.cube)
+
+    def _start_quality(self, job: tuple) -> None:
+        if self._quality_busy:
+            self._quality_pending = job  # newest request wins: computed when the running one is back
+            return
+        self._quality_busy = True
+        self._quality_thread = threading.Thread(
+            target=self._compute_quality, args=(self._quality_generation, job), name="spectra-order-quality", daemon=True
+        )
+        self._quality_thread.start()
+
+    def _compute_quality(self, generation: int, job: tuple) -> None:
+        _key, stored, roi_ids, formula_key, metric = job
+        try:
+            with timed(logger, "spectra.order_quality", rois=len(roi_ids)):
+                chosen = [roi_ids[i] for i in sorted(set(np.linspace(0, len(roi_ids) - 1, min(len(roi_ids), MAX_ROIS)).round().astype(int)))]
+                inputs = [data for data in (trace_input(stored, roi_id) for roi_id in chosen) if data is not None]
+                results: object = evaluate_order_quality(inputs, formula_key, metric)
+        except BaseException as exc:  # noqa: BLE001 - nothing may escape a thread silently
+            logger.exception("Judging the polynomial orders failed")
+            results = exc
+        self._quality_ready.emit(generation, results)
+
+    def _on_quality_ready(self, generation: int, results: object) -> None:
+        self._quality_busy = False
+        if isinstance(results, BaseException):
+            self._quality = None
+        elif generation == self._quality_generation:
+            self._quality = results  # type: ignore[assignment]
+        self._order.apply_quality(self._quality, int(self._selection.current_cube()))
+        pending, self._quality_pending = self._quality_pending, None
+        if pending is not None:
+            self._start_quality(pending)
 
     def _task_message(self, request: SpectraRequest) -> str:
         fit = "" if request.metric.fit_method == "none" else f", {FIT_LABELS.get(request.metric.fit_method, request.metric.fit_method).lower()} fit"
@@ -620,12 +761,15 @@ class SpectraPanel(QWidget):
         current = self._scan.is_cube_current(cube)
         stale = current is False
         self._plot.set_formula(job.request.formula_key)
+        self._plot.set_display(
+            points=self._show_points.isChecked(), point_size=self._point_size.value(), lines=self._show_lines.isChecked(), line_style=self._line_style.style()
+        )
         self._plot.show_spectra(
             [(f"ROI {s.roi_id}", colors[s.roi_id], s) for s in spectra], error_bars=self._error_box.isChecked(), dimmed=stale
         )
         metric = job.request.metric
         manual_min, manual_max = metric.manual_bounds()  # a per-spectrum window is not drawn: the ends of each fitted curve show it
-        has_window = manual_min is not None or manual_max is not None
+        has_window = (manual_min is not None or manual_max is not None) and not metric.uses_template  # the template shift uses every point: no window to show
         wavelengths = self._plotted_wavelengths()
         if has_window and wavelengths is not None:
             self._plot.set_fit_window((manual_min if manual_min is not None else wavelengths[0],

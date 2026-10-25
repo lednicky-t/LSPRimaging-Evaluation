@@ -124,6 +124,7 @@ MASK_SCOPE = UiKey("mask/scope", None, str)  # a `MaskScope` value
 SLIDER_RIBBON_OPEN = UiKey("image/slider_ribbon_open", True, bool)  # rolled down (True) or up
 TOP_RIBBON_OPEN = UiKey("image/top_ribbon_open", True, bool)  # the tool ribbon above the canvas: rolled down (True) or up
 SPECTRA_RIBBON_OPEN = UiKey("spectra/ribbon_open", True, bool)  # the Spectra panel's control row: rolled down (True) or up
+SPECTRA_LINE_STYLE = UiKey("spectra/line_style", "solid", str)  # the line between the measured points: "solid" | "dash" | "dot" | "dashdot" (View menu)
 SENSORGRAM_RIBBON_OPEN = UiKey("sensorgram/ribbon_open", True, bool)  # the Sensorgram panel's control row: rolled down (True) or up
 SLIDESHOW_SPEED = UiKey("image/slideshow_speed", 1, int)  # 1, 2, 5 or 10 (x)
 SLIDESHOW_MODE = UiKey("image/slideshow_mode", "all", str)  # "all" | "one_wavelength" | "roi_states" | "mask_states" | "events"

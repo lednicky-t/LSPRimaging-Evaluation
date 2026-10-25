@@ -83,6 +83,7 @@ def trace_key(stored: StoredScan, formula_key: str, metric: MetricSettings) -> t
     reloaded file is a new object)."""
     return (
         id(stored), str(formula_key), metric.fit_method, int(metric.poly_order), metric.window_key(), metric.metric_key, metric.metric_range_key(),
+        metric.template_key(),
     )
 
 
@@ -94,7 +95,10 @@ def trace_input(stored: StoredScan, roi_id: int) -> TraceInput | None:
     mean = stored.values[_primary_method(stored)]
     sample, reference = mean[:, row, :, SAMPLE], mean[:, row, :, REFERENCE]
     usable = np.isfinite(sample) & np.isfinite(reference) & (stored.n_valid[:, row, :, SAMPLE] > 0) & (stored.n_valid[:, row, :, REFERENCE] > 0)
-    return TraceInput(np.asarray(stored.wavelength_nm, dtype=np.float64), sample, reference, usable, stored.cell_hash[:, row] != 0)
+    return TraceInput(
+        np.asarray(stored.wavelength_nm, dtype=np.float64), sample, reference, usable, stored.cell_hash[:, row] != 0,
+        np.asarray(stored.cube_indices, dtype=np.int64),
+    )
 
 
 def metric_trace(stored: StoredScan, roi_id: int, formula_key: str, metric: MetricSettings) -> np.ndarray:

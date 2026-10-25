@@ -20,6 +20,7 @@ from .query import fit_and_metric, formula_spectrum
 from .scan_store import StoredScan
 from .settings import MetricSettings
 from .spectrum_errors import formula_errors, standard_error
+from .template_shift import MIN_TEMPLATE_POINTS
 
 SAMPLE, REFERENCE = 0, 1
 
@@ -46,6 +47,9 @@ class RoiSpectrum:
     metric_value: float | None = None
     n_missing: int = 0  # wavelengths of the scan without a value for this ROI on this cube
     note: str = ""  # why there is nothing to draw, or what went wrong with the fit
+    shift_nm: float | None = None  # template shift only (template_shift.py): the sideways shift against the ROI's reference spectrum, and what was measured with it
+    scale: float | None = None  # amplitude relative to the reference
+    tilt: float | None = None  # change of the baseline across the range, in the units of the spectrum (not part of the shift)
 
 
 def _primary_method(stored: StoredScan) -> str:
@@ -87,11 +91,29 @@ def compute_spectra(stored: StoredScan, request: SpectraRequest) -> list[RoiSpec
             request.formula_key,
         )
         result = RoiSpectrum(roi_id, spectrum.wavelengths_nm, spectrum.values, errors, n_missing=n_missing)
+        template = None
+        if metric.uses_template:  # the reference of THIS ROI: the mean of its reference cubes (all cubes of the ROI are needed, not only the one shown)
+            from .scan_trace import trace_input  # imported here: scan_trace itself imports this module
+            from .trace_fit import reference_template
+
+            template = reference_template(trace_input(stored, roi_id), request.formula_key, metric)
+            if template is None:
+                first, last = metric.reference_cube_range()
+                if len(wavelengths) < MIN_TEMPLATE_POINTS:
+                    result.note = f"The template shift needs at least {MIN_TEMPLATE_POINTS} scanned wavelengths (this scan has {len(wavelengths)})."
+                else:
+                    result.note = f"The reference cubes {first}-{last} have no usable data for this ROI: choose other reference cubes."
+                out.append(result)
+                continue
         try:
-            fit, x, y = fit_and_metric(spectrum, metric)
+            fit, x, y = fit_and_metric(spectrum, metric, template=template)
             if fit is not None:
                 if fit.fitted_wavelengths_nm.size > 1:
                     result.fit_wavelengths_nm, result.fit_values = fit.fitted_wavelengths_nm, fit.fitted_values
+                    if template is not None:
+                        result.shift_nm, result.scale, _offset, result.tilt = (float(v) for v in fit.coefficients)
+                elif template is not None:
+                    result.note = "No shift could be found for this spectrum (too few points, or a shift beyond 60 nm)."
                 else:
                     result.note = "The fit needs at least two points."
             result.metric_wavelength_nm, result.metric_value = x, y

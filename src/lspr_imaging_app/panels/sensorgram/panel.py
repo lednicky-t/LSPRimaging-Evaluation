@@ -566,6 +566,8 @@ class SensorgramPanel(QWidget):
         label, _x = self._x_axis()
         stats = job.request.statistics
         y_label = "Centroid position (nm)" if job.request.metric.metric_key == "centroid" else "Peak position (nm)"
+        if job.request.metric.uses_template:
+            y_label = "Position by template shift (nm)"  # the reference's peak + the shift (analysis/template_shift.py)
         if stats.baseline_enabled:
             y_label = y_label.replace("position", "shift")
         self._plot.set_axis_labels(label, y_label)
@@ -581,6 +583,9 @@ class SensorgramPanel(QWidget):
         parts = [f"{len(job.request.roi_ids)} ROI{'s' if len(job.request.roi_ids) != 1 else ''}"]
         if job.request.metric.fit_method == "none":
             parts.append("metric read off the measured points (no fit)")
+        elif job.request.metric.uses_template:
+            first, last = job.request.metric.reference_cube_range()
+            parts.append(f"template shift against the mean of cubes {first}-{last}")
         if stale is not None:
             reason = self._scan.stale_reason()
             parts.append(f"{int(stale.sum())} of {len(stale)} cubes OUT OF DATE (hollow rings{': ' + reason if reason else ''}); run the scan again")

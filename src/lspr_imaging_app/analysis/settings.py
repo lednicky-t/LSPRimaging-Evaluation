@@ -21,10 +21,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-FIT_METHODS: tuple[str, ...] = ("none", "polynomial", "gaussian")
+FIT_METHODS: tuple[str, ...] = ("none", "polynomial", "gaussian", "template")
 """How a ROI's formula spectrum becomes a curve before the metric is read
 off it. ``"none"`` reads the metric straight off the measured points - a
-real option, not a disabled state (see `query.metric_from_spectrum`)."""
+real option, not a disabled state (see `query.metric_from_spectrum`).
+``"template"`` (2026-10-25) is not a curve with a top to find: the spectrum is compared, point by point over its whole range, with the reference spectrum
+of the same ROI and the sideways shift that fits best is the metric (`template_shift.py`). It has no fit window, order or maximum / centroid choice."""
 
 METRIC_KEYS: tuple[str, ...] = ("maximum", "centroid")
 """Which number a fitted (or unfitted) spectrum collapses to - layer 3's
@@ -100,6 +102,12 @@ class MetricSettings:
     metric_top_fraction: float = 0.3
     metric_range_min: float | None = None
     metric_range_max: float | None = None
+    template_first_cube: int = 0
+    template_last_cube: int = 9
+
+    # The reference cubes of the template shift (2026-10-25): the cubes ``template_first_cube`` .. ``template_last_cube`` (inclusive, the cube numbers the
+    # Spectra panel and the Image panel show) whose mean spectrum, per ROI, is the reference the others are compared with. Read only when
+    # ``fit_method == "template"``; the default is the first ten cubes. They belong with the dataset (this block is saved with the session).
 
     # The fit window (2026-10-25). ``window_mode`` says how it is found: "manual" = the range ``fit_wl_min`` .. ``fit_wl_max`` (dragged on the plot;
     # it is on when a bound is set, as it always was), "around_max" = every spectrum's own maximum +/- ``window_half_width_nm``, "fwhm" = every
@@ -135,6 +143,23 @@ class MetricSettings:
         if self.metric_range == "top_fraction":
             return ("top_fraction", float(self.metric_top_fraction))
         return ("manual", self.metric_range_min, self.metric_range_max)
+
+    @property
+    def uses_template(self) -> bool:
+        """True when the metric is the shift against a reference spectrum (the window, order and metric choice are not read then)."""
+        return str(self.fit_method).strip().lower() == "template"
+
+    def template_key(self) -> tuple:
+        """The reference cubes when they matter (the template shift), else an empty tuple: part of every cache key, so a changed range never shows a stale trace."""
+        if not self.uses_template:
+            return ()
+        first, last = int(self.template_first_cube), int(self.template_last_cube)
+        return ("template", min(first, last), max(first, last))
+
+    def reference_cube_range(self) -> tuple[int, int]:
+        """The reference cubes as (first, last), in order whatever was typed."""
+        first, last = int(self.template_first_cube), int(self.template_last_cube)
+        return min(first, last), max(first, last)
 
     def window_key(self) -> tuple:
         """Everything that decides which points are fitted, as one comparable tuple (cache keys use this, not the fields)."""

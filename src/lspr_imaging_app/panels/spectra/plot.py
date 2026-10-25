@@ -31,6 +31,13 @@ Y_LABELS = {
 MAX_LEGEND_ROIS = 6
 _DIM_ALPHA = 90
 _WINDOW_BRUSH = (120, 160, 255, 40)
+LINE_STYLES = ("solid", "dash", "dot", "dashdot")  # the styles of the line that joins the measured points (the View menu's picker)
+_PEN_STYLES = {
+    "solid": Qt.PenStyle.SolidLine, "dash": Qt.PenStyle.DashLine, "dot": Qt.PenStyle.DotLine, "dashdot": Qt.PenStyle.DashDotLine,
+}
+_LINE_WIDTH = {"solid": 1.0, "dash": 1.5, "dot": 1.5, "dashdot": 1.5}  # a broken line at one pixel is hard to read
+DEFAULT_POINT_SIZE = 6
+POINT_SIZE_RANGE = (2, 20)
 
 
 class _NoLeftPanViewBox(pg.ViewBox):
@@ -59,6 +66,8 @@ class SpectraPlot(QWidget):
         self._item.setLabel("left", Y_LABELS["absorbance"])
         self._legend: pg.LegendItem | None = None
         self._items: list[pg.GraphicsObject] = []
+        self._show_points, self._point_size = True, DEFAULT_POINT_SIZE
+        self._show_lines, self._line_style = True, "solid"
         self._window = pg.LinearRegionItem(values=(0.0, 1.0), brush=pg.mkBrush(*_WINDOW_BRUSH), pen=pg.mkPen(120, 160, 255, 160), movable=True)
         self._window.setZValue(-5)
         self._window.sigRegionChangeFinished.connect(self._on_window_finished)
@@ -96,6 +105,14 @@ class SpectraPlot(QWidget):
     def set_formula(self, formula_key: str) -> None:
         self._item.setLabel("left", Y_LABELS.get(formula_key, formula_key))
 
+    def set_display(self, *, points: bool, point_size: int, lines: bool, line_style: str) -> None:
+        """How the measured points are drawn at the next ``show_spectra``: the dots (and their size in px) and the line that joins them (and its style, one of ``LINE_STYLES``).
+        Display only; the fitted curve, the metric marker and the error bars are not affected. Nothing is redrawn here."""
+        self._show_points = bool(points)
+        self._point_size = int(min(max(point_size, POINT_SIZE_RANGE[0]), POINT_SIZE_RANGE[1]))
+        self._show_lines = bool(lines)
+        self._line_style = line_style if line_style in _PEN_STYLES else "solid"
+
     def show_spectra(
         self, entries: Sequence[tuple[str, str, RoiSpectrum]], *, error_bars: bool, dimmed: bool
     ) -> None:
@@ -115,9 +132,12 @@ class SpectraPlot(QWidget):
             line = QColor(color)
             line.setAlpha(min(alpha, 150))
             legend_name = name if len(entries) <= MAX_LEGEND_ROIS else None
+            data_drawn = self._show_points or self._show_lines  # with both off the legend entry belongs to the fitted curve (below)
+            pen = pg.mkPen(line, width=_LINE_WIDTH[self._line_style], style=_PEN_STYLES[self._line_style]) if self._show_lines else pg.mkPen(None)
             points = pg.PlotDataItem(
-                spectrum.wavelengths_nm, spectrum.values, pen=pg.mkPen(line, width=1), symbol="o", symbolSize=6,
-                symbolBrush=pg.mkBrush(color), symbolPen=None, name=legend_name,
+                spectrum.wavelengths_nm, spectrum.values, pen=pen,
+                symbol="o" if self._show_points else None, symbolSize=self._point_size, symbolBrush=pg.mkBrush(color), symbolPen=None,
+                name=legend_name if data_drawn else None,
             )
             self._item.addItem(points)
             self._items.append(points)
@@ -127,7 +147,9 @@ class SpectraPlot(QWidget):
                 self._item.addItem(bars)
                 self._items.append(bars)
             if spectrum.fit_values is not None:
-                fit = pg.PlotDataItem(spectrum.fit_wavelengths_nm, spectrum.fit_values, pen=pg.mkPen(color, width=2))
+                fit = pg.PlotDataItem(
+                    spectrum.fit_wavelengths_nm, spectrum.fit_values, pen=pg.mkPen(color, width=2), name=None if data_drawn else legend_name
+                )
                 self._item.addItem(fit)
                 self._items.append(fit)
             if spectrum.metric_wavelength_nm is not None and spectrum.metric_value is not None:

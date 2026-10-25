@@ -21,6 +21,9 @@ time, exactly as before: for the polynomial fit a non-finite coefficient, a vani
 Gaussian fit a cube the solver did not converge on (or whose width ran away: a fit window of a handful of points around the top, where a bell
 cannot be told from a parabola), which goes to scipy's ``curve_fit`` as it did before the solver existed. A fit that fails there is a gap (NaN),
 never a stop.
+
+**The template shift** (``fit_method == "template"``, 2026-10-25, ``template_shift.py``) is not batched across ROIs: each ROI's whole trace is one call (the reference cubes of the ROI are
+part of that trace, so a ROI's cubes must never be split between calls), and that call is already vectorised over cubes and shifts (~5 ms per ROI of 314 cubes).
 """
 
 from __future__ import annotations
@@ -36,6 +39,7 @@ from .gaussian_fit import solve_gaussian
 from .metric_range import range_centroid
 from .query import fit_and_metric, formula_spectrum, formula_values
 from .settings import MetricSettings
+from .template_shift import ReferenceTemplate, TemplateFit, build_template, fit_template_shift, response_law
 
 _FIT_ERRORS = (RuntimeError, ValueError, FloatingPointError, np.linalg.LinAlgError)
 _IMAG_TOLERANCE_NM = 1.0e-8  # a root counts as real when its imaginary part is below this, in nm (as in query.fit_polynomial)
@@ -47,13 +51,15 @@ class TraceInput:
     """Everything the metric of one ROI needs, as plain arrays (cheap to hand to a worker process).
 
     ``sample`` and ``reference`` are ``[cube, wavelength]``; ``usable`` marks the entries that are finite and counted; ``scanned`` is False for a cube
-    that was never scanned (no result there: NaN)."""
+    that was never scanned (no result there: NaN). ``cube_indices`` (the dataset's cube number of each row; None = 0, 1, 2, ...) lets the template shift find
+    its reference cubes."""
 
     wavelengths: np.ndarray
     sample: np.ndarray
     reference: np.ndarray
     usable: np.ndarray
     scanned: np.ndarray
+    cube_indices: np.ndarray | None = None
 
 
 BATCH_ROWS = 2000
@@ -89,10 +95,16 @@ def traces_from_inputs(
     method = str(metric.fit_method).strip().lower()
     group_fit = _gaussian_group if method == "gaussian" else _polynomial_group
     per_cube = method == "none"  # no fit to batch: the metric is read off the measured points, one cube at a time
+    template_here = 0.0  # seconds of the template shift in this call (not part of the preparation)
     pending: dict[bytes, list[tuple[np.ndarray, np.ndarray, np.ndarray]]] = {}  # wavelengths -> (cube addresses, x, rows of values)
     for i, data in enumerate(inputs):
         wanted = data.scanned & data.usable.any(axis=1)
         if not wanted.any():
+            continue
+        if metric.uses_template:
+            t0 = clock()
+            outs[i][:] = template_trace(data, formula_key, metric)
+            template_here += clock() - t0
             continue
         if per_cube:
             t0 = clock()
@@ -118,8 +130,9 @@ def traces_from_inputs(
                 continue  # fewer than two points: no fit, no metric (a gap)
             pending.setdefault(x.tobytes(), []).append((offsets[i] + cubes, x, values[np.ix_(cubes, np.flatnonzero(pattern))]))
     t_fit = clock()
-    t_ms["prep_ms"] += (t_fit - t_start - per_cube_here) * 1e3
+    t_ms["prep_ms"] += (t_fit - t_start - per_cube_here - template_here) * 1e3
     t_ms["per_cube_ms"] += per_cube_here * 1e3
+    t_ms["fit_ms"] += template_here * 1e3
     redo: list[np.ndarray] = []
     for items in pending.values():
         x = items[0][1]
@@ -161,13 +174,14 @@ def _fill_per_cube(
     """The reference path: one spectrum, one fit, one metric per cube (``query.fit_and_metric``). A failed fit leaves NaN.
     ``gaussian_fast_first=False`` for cubes the batch solver has just failed on: straight to scipy, not a second try of the solver."""
     wavelengths = np.asarray(data.wavelengths, dtype=np.float64)
+    template = reference_template(data, formula_key, metric) if metric.uses_template else None
     for cube in cubes:
         usable = data.usable[cube]
         if not usable.any():
             continue
         spectrum = formula_spectrum(wavelengths[usable], data.sample[cube][usable], data.reference[cube][usable], formula_key)
         try:
-            _fit, x, _y = fit_and_metric(spectrum, metric, gaussian_fast_first=gaussian_fast_first)
+            _fit, x, _y = fit_and_metric(spectrum, metric, gaussian_fast_first=gaussian_fast_first, template=template)
         except _FIT_ERRORS:
             continue
         if x is not None and np.isfinite(x):
@@ -295,3 +309,82 @@ def _horner(coef: np.ndarray, t: np.ndarray) -> np.ndarray:
     for k in range(coef.shape[0] - 2, -1, -1):
         result = result * t + coef[k][:, None]
     return result
+
+
+# -- the template shift (template_shift.py) ----------------------------------------------------------------------------------------------
+
+
+def formula_arrays(data: TraceInput, formula_key: str) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """``(wavelengths, values, valid, wanted)`` of one ROI for the whole-trace methods (the template shift, the polynomial order check): wavelengths ascending (non-finite ones dropped), the formula values ``[cube, wavelength]``, which entries
+    may be used, and which cubes have a result at all (scanned and at least one usable wavelength)."""
+    wl = np.asarray(data.wavelengths, dtype=np.float64)
+    keep = np.flatnonzero(np.isfinite(wl))
+    keep = keep[np.argsort(wl[keep], kind="stable")]
+    with np.errstate(all="ignore"):  # unusable entries may be NaN; they are never used
+        values = formula_values(data.sample[:, keep], data.reference[:, keep], formula_key)
+    wanted = data.scanned & data.usable[:, keep].any(axis=1)
+    valid = data.usable[:, keep] & np.isfinite(values) & wanted[:, None]
+    return wl[keep], values, valid, wanted
+
+
+def _reference_cubes(data: TraceInput, metric: MetricSettings, wanted: np.ndarray) -> np.ndarray:
+    """Boolean per cube: in the reference range of the settings and with a result."""
+    index = np.arange(data.sample.shape[0]) if data.cube_indices is None else np.asarray(data.cube_indices)
+    first, last = metric.reference_cube_range()
+    return wanted & (index >= first) & (index <= last)
+
+
+def reference_template(data: TraceInput, formula_key: str, metric: MetricSettings) -> ReferenceTemplate | None:
+    """The reference spectrum of one ROI for these settings (mean of the reference cubes), or None when no reference cube has enough data."""
+    wl, values, valid, wanted = formula_arrays(data, formula_key)
+    if wl.size == 0:
+        return None
+    return build_template(wl, values, valid, _reference_cubes(data, metric, wanted))
+
+
+def template_fit_of_input(
+    data: TraceInput, formula_key: str, metric: MetricSettings, *, diagnostics: bool = True
+) -> tuple[TemplateFit, ReferenceTemplate] | None:
+    """The template shift of every cube of one ROI, with the reference it used; None when the reference cubes hold no usable data (the trace is then a gap)."""
+    wl, values, valid, wanted = formula_arrays(data, formula_key)
+    if wl.size == 0:
+        return None
+    template = build_template(wl, values, valid, _reference_cubes(data, metric, wanted))
+    if template is None:
+        return None
+    return fit_template_shift(template, wl, values, valid, diagnostics=diagnostics), template
+
+
+def template_trace(data: TraceInput, formula_key: str, metric: MetricSettings) -> np.ndarray:
+    """The metric of one ROI at every cube for the template shift: the template's peak + the shift, in nm; NaN where there is none. The tilt diagnostics are not computed here."""
+    found = template_fit_of_input(data, formula_key, metric, diagnostics=False)
+    if found is None:
+        return np.full(data.sample.shape[0], np.nan)
+    return found[0].position_nm
+
+
+@dataclass(frozen=True)
+class TemplateDiagnostics:
+    """What the template shift measured besides the position, per cube of one ROI (see ``template_shift.py``): ``shift_nm``, ``scale`` (amplitude relative to the reference), ``rms`` of the
+    residual, ``tilt`` (change of the baseline across the range, from the joint shift-and-tilt fit whose shift is ``tilt_shift_nm``), ``kappa`` (tilt per nm of that shift over this trace) and
+    ``tilt_beyond`` (``tilt - kappa x tilt_shift``: baseline drift that the shift does not explain)."""
+
+    position_nm: np.ndarray
+    shift_nm: np.ndarray
+    scale: np.ndarray
+    rms: np.ndarray
+    tilt: np.ndarray
+    tilt_shift_nm: np.ndarray
+    kappa: float
+    tilt_beyond: np.ndarray
+    reference_cubes: int
+
+
+def template_diagnostics(data: TraceInput, formula_key: str, metric: MetricSettings) -> TemplateDiagnostics | None:
+    """The diagnostics of the template shift of one ROI; None when there is no reference."""
+    found = template_fit_of_input(data, formula_key, metric, diagnostics=True)
+    if found is None:
+        return None
+    fit, template = found
+    kappa, beyond = response_law(fit.tilt_shift_nm, fit.tilt)
+    return TemplateDiagnostics(fit.position_nm, fit.shift_nm, fit.scale, fit.rms, fit.tilt, fit.tilt_shift_nm, kappa, beyond, template.n_cubes)

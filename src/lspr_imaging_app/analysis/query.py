@@ -35,6 +35,7 @@ from .fit_window import spectrum_window
 from .gaussian_fit import solve_gaussian
 from .metric_range import curve_base, range_centroid
 from .settings import MetricSettings
+from .template_shift import ReferenceTemplate, fit_template_shift, fitted_curve
 
 FORMULA_KEYS: tuple[str, ...] = ("absorbance", "ratio", "relative_change", "mod_absorbance")
 """A fixed menu, not a user-editable expression - carried over from the old
@@ -324,6 +325,8 @@ def fit_spectrum(
     key = str(fit_method).strip().lower()
     if key == "none":
         return None
+    if key == "template":  # not a curve fitted to this spectrum alone: it needs the ROI's reference (fit_and_metric); never fall through to the polynomial
+        raise ValueError("The template shift needs the reference spectrum of the ROI: use fit_and_metric(..., template=...).")
     if key == "gaussian":
         return fit_gaussian(spectrum.wavelengths_nm, spectrum.values, wl_min=wl_min, wl_max=wl_max, fast_first=gaussian_fast_first)
     return fit_polynomial(
@@ -412,11 +415,38 @@ def metric_value(
     return metric_from_fit(fit, metric_key)
 
 
+def template_fit_and_metric(spectrum: FormulaSpectrum, template: ReferenceTemplate) -> tuple[FitResult, float | None, float | None]:
+    """The template shift of one spectrum (``template_shift.py``) as a fit: the curve ``a T(w - d) + b`` through the measured points, the position (template peak + shift) and the
+    curve's height there. ``coefficients`` of the result are ``[shift_nm, scale, offset, tilt]`` for this method. A spectrum with no shift gives an empty curve and no position."""
+    wavelengths = np.asarray(spectrum.wavelengths_nm, dtype=np.float64)
+    order = np.argsort(wavelengths, kind="stable")
+    wavelengths, values = wavelengths[order], np.asarray(spectrum.values, dtype=np.float64)[order]
+    fit = fit_template_shift(template, wavelengths, values[None, :], np.isfinite(values)[None, :])
+    shift = float(fit.shift_nm[0])
+    if not np.isfinite(shift):
+        return FitResult(np.empty(0), np.empty(0), np.array([np.nan, np.nan, np.nan, np.nan])), None, None
+    scale, offset = float(fit.scale[0]), float(fit.offset[0])
+    x, y = fitted_curve(template, wavelengths, shift, scale, offset)
+    position = float(fit.position_nm[0])
+    height = scale * float(template.evaluate(template.spline(), np.array([template.position_nm]))[0]) + offset
+    result = FitResult(
+        x, y, np.array([shift, scale, offset, float(fit.tilt[0])]), peak_wavelength_nm=position, centroid_nm=None, peak_value=height,
+    )
+    return result, position, height
+
+
 def fit_and_metric(
-    spectrum: FormulaSpectrum, metric: MetricSettings, *, gaussian_fast_first: bool = True
+    spectrum: FormulaSpectrum, metric: MetricSettings, *, gaussian_fast_first: bool = True, template: ReferenceTemplate | None = None
 ) -> tuple[FitResult | None, float | None, float | None]:
     """The fit (None for "no fit") and the metric position and height read off it - or, without a fit, off the measured points. The one place
-    that decides this, so the Spectra panel (one cube) and the Sensorgram (every cube) cannot disagree. May raise what the fit raises."""
+    that decides this, so the Spectra panel (one cube) and the Sensorgram (every cube) cannot disagree. May raise what the fit raises.
+
+    The template shift (``metric.fit_method == "template"``) needs ``template``, the reference spectrum of this ROI (``template_shift.build_template``); without it this raises
+    ``ValueError`` rather than quietly using another method. Window, order and maximum / centroid are not read for it."""
+    if metric.uses_template:
+        if template is None:
+            raise ValueError("The template shift needs the reference spectrum of the ROI (no reference cube has data for it).")
+        return template_fit_and_metric(spectrum, template)
     wl_min, wl_max = spectrum_window(spectrum.wavelengths_nm, spectrum.values, metric)
     fit = fit_spectrum(
         spectrum, metric.fit_method, poly_order=metric.poly_order, wl_min=wl_min, wl_max=wl_max,

@@ -55,6 +55,43 @@ def equation_picture(html: str) -> PictureFor:
     return draw
 
 
+def ordinal_suffix(number: int) -> str:
+    """``st``, ``nd``, ``rd`` or ``th`` for 1, 2, 3, 4...: the ending of 1st, 2nd, 3rd, 4th (11, 12 and 13 are ``th``)."""
+    if 10 <= number % 100 <= 20:
+        return "th"
+    return {1: "st", 2: "nd", 3: "rd"}.get(number % 10, "th")
+
+
+def ordinal_picture(number: int, dot_color: str) -> PictureFor:
+    """A coloured dot and the ordinal with a superscript ending (``5`` + raised ``th``), the text in the given colour: the picture of one order in the polynomial-order menu."""
+
+    def draw(color: str) -> QPixmap:
+        document = QTextDocument()
+        font = QFont()
+        font.setPointSizeF(10.5)
+        document.setDefaultFont(font)
+        document.setDocumentMargin(0)
+        document.setHtml(f'<span style="color:{color}; white-space:nowrap;">{number}<sup>{ordinal_suffix(number)}</sup></span>')
+        dot, gap = 9, 5
+        text_width = int(document.idealWidth()) + 2
+        height = max(_EQUATION_HEIGHT, int(document.size().height()))
+        pixmap = QPixmap((dot + gap + text_width) * _SCALE, height * _SCALE)
+        pixmap.setDevicePixelRatio(_SCALE)
+        pixmap.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(pixmap)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setRenderHint(QPainter.RenderHint.TextAntialiasing)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor(dot_color))
+        painter.drawEllipse(QRectF(0.0, (height - dot) / 2.0, dot, dot))
+        painter.translate(dot + gap, (height - document.size().height()) / 2)
+        document.drawContents(painter)
+        painter.end()
+        return pixmap
+
+    return draw
+
+
 def _canvas() -> tuple[QPixmap, QPainter]:
     pixmap = QPixmap(_CURVE_SIZE * _SCALE, _CURVE_SIZE * _SCALE)
     pixmap.setDevicePixelRatio(_SCALE)
@@ -82,12 +119,30 @@ def _dots(painter: QPainter, color: QColor) -> None:
 
 
 def fit_picture(kind: str) -> PictureFor:
-    """``none``: the measured points alone; ``polynomial``: a wavy line through them; ``gaussian``: a bell through them."""
+    """``none``: the measured points alone; ``polynomial``: a wavy line through them; ``gaussian``: a bell through them; ``template``: the reference bell (dashed) and the
+    measured one moved sideways, with an arrow between them (the shift)."""
 
     def draw(color: str) -> QPixmap:
         pixmap, painter = _canvas()
         ink = QColor(color)
         painter.setBrush(Qt.BrushStyle.NoBrush)
+        if kind == "template":
+            ghost = QColor(ink)
+            ghost.setAlpha(110)
+            for dx, style, pen_color in ((-2.0, Qt.PenStyle.DashLine, ghost), (2.0, Qt.PenStyle.SolidLine, ink)):
+                painter.save()
+                painter.translate(10.0 + dx, 0.0)
+                painter.scale(0.8, 1.0)
+                painter.translate(-10.0, 0.0)
+                painter.setPen(QPen(pen_color, 1.6, style, Qt.PenCapStyle.RoundCap))
+                painter.drawPath(_bell_path())
+                painter.restore()
+            painter.setPen(QPen(QColor(get_active_theme().accent_gold), 1.4, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+            painter.drawLine(QPointF(5.5, 19.0), QPointF(14.5, 19.0))
+            painter.drawLine(QPointF(14.5, 19.0), QPointF(12.5, 17.6))
+            painter.drawLine(QPointF(14.5, 19.0), QPointF(12.5, 20.4))
+            painter.end()
+            return pixmap
         painter.setPen(QPen(ink, 1.6, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
         if kind == "gaussian":
             painter.drawPath(_bell_path())
@@ -266,6 +321,32 @@ class PickMenu(QToolButton):
         the menu stays open while it is edited."""
         self._choices.append(_Choice(key, name, tip, picture, extra))
 
+    def set_choice(self, key: object, *, name: str | None = None, tip: str | None = None, picture: PictureFor | None = None) -> None:
+        """Change the label, tooltip or picture of a choice that is already built (the polynomial-order menu does this as its verdicts come in). The size of the menu does not
+        change, so give the longest label when adding the choice."""
+        index = self.findData(key)
+        if index < 0:
+            return
+        choice = self._choices[index]
+        if name is not None:
+            choice.name = name
+        if tip is not None:
+            choice.tip = tip
+        if picture is not None:
+            choice.picture = picture
+        if index < len(self._rows):  # built
+            row = self._rows[index]
+            if name is not None:
+                row.setText(" " + name)
+            if tip is not None:
+                row.setToolTip(tip)
+            if picture is not None:
+                shown = choice.picture(get_active_theme().text_primary)
+                row.setIcon(QIcon(shown))
+                row.setIconSize(QSize(round(shown.width() / _SCALE), round(shown.height() / _SCALE)))
+        if index == self._index:
+            self._refresh()
+
     def add_footer(self, widget: QWidget) -> None:
         """A widget under the last row (an option that belongs to every choice). Call before ``finish()``."""
         self._footers.append(widget)
@@ -390,4 +471,4 @@ class PickMenu(QToolButton):
         super().setToolTip(f"{self._base_tip}\n{current}".strip())
 
 
-__all__ = ["PickMenu", "equation_picture", "fit_picture", "metric_picture", "range_picture", "window_picture"]
+__all__ = ["PickMenu", "equation_picture", "fit_picture", "metric_picture", "ordinal_picture", "ordinal_suffix", "range_picture", "window_picture"]

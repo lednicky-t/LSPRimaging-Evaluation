@@ -414,7 +414,7 @@ class AnalysisEngine(QObject):
         return (
             str(self._detection_settings().formula_key),
             str(metric.fit_method), int(metric.poly_order),
-            metric.window_key(), str(metric.metric_key), metric.metric_range_key(),
+            metric.window_key(), str(metric.metric_key), metric.metric_range_key(), metric.template_key(),
         )
 
     def formula_spectrum(self, roi_id: int, cube_index: int) -> FormulaSpectrum | None:
