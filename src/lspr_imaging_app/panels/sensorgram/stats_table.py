@@ -20,10 +20,9 @@ from PyQt6.QtCore import QPointF, QRectF, Qt
 from PyQt6.QtGui import QColor, QFont, QFontMetricsF, QPainter, QPainterPath, QTransform
 from PyQt6.QtWidgets import QApplication
 
-from ...plan.bar_model import FONT_RANGE, POSITION_TOP
+from ...plan.bar_model import POSITION_TOP
 from ...plan.stats_table import (
     MIN_CELL_WIDTH_PX,
-    PLUS_MINUS,
     StatsColumn,
     StatsTable,
     StatsTableSettings,
@@ -56,7 +55,7 @@ class DrawnCell:
     rect: QRectF
     text: str
     color: str
-    pt: float  # the text size the whole table is drawn at (the chosen size, or smaller so that mean ± SD fits the narrow steps)
+    pt: float  # the text size the whole table is drawn at: the size chosen in the size box
 
 
 @dataclass(frozen=True)
@@ -124,26 +123,6 @@ class StepStatsItem(DeviceSpaceItem):
             return [area.top() + _EDGE_MARGIN_PX + (i + 0.5) * pitch for i in range(count)], -math.inf
         return [area.bottom() - _EDGE_MARGIN_PX - (count - i - 0.5) * pitch for i in range(count)], -math.inf
 
-    def _fit_point_size(self, slots: list[_Slot]) -> float:
-        """One text size for the whole table: the chosen size, or the largest smaller one (down to the smallest the size box allows) at which every cell that can show
-        ``mean ± SD`` at all does show it. A step too narrow for it even at the smallest size is left out of the question (it gets the mean alone, or nothing), so one
-        hopeless step cannot shrink the numbers of all the others."""
-        base, floor = float(self._settings.text_pt), float(FONT_RANGE[0])
-        wide = [s for s in slots if s.available >= MIN_CELL_WIDTH_PX and any(PLUS_MINUS in v for v in s.variants)]
-        if not wide or base <= floor:
-            return base
-        metrics: dict[float, QFontMetricsF] = {}
-
-        def fits(pt: float, slot: _Slot) -> bool:
-            measure = metrics.setdefault(pt, QFontMetricsF(self.font(pt))).horizontalAdvance
-            return fit_variant([v for v in slot.variants if PLUS_MINUS in v], slot.available, measure) != ""
-
-        possible = [s for s in wide if fits(floor, s)]
-        pt = base
-        while pt > floor and not all(fits(pt, s) for s in possible):
-            pt -= 1.0
-        return pt if possible else base
-
     def layout(self, to_device: QTransform, view: QRectF) -> list[DrawnCell]:
         """Every cell that has a number, with the text that fits its step (data -> device transform, visible data rectangle). No painting."""
         table = self._table
@@ -162,7 +141,9 @@ class StepStatsItem(DeviceSpaceItem):
                 mean, sd, _n = table.value(index, column)
                 if math.isfinite(mean):
                     slots.append(_Slot(index, column, left, right, right - left - 2.0 * _SIDE_MARGIN_PX, cell_variants(mean, sd, table.decimals), line.color))
-        pt = self._fit_point_size(slots)
+        # The size is the one in the size box, whatever the numbers: a step too narrow for it gets shorter text (`fit_variant`), never a smaller font. (Until 2026-10-26 the whole
+        # table shrank to fit its narrowest step, so the same box value drew at 6 pt for one selection and 10 pt for another, depending on the digits and signs of the numbers.)
+        pt = float(self._settings.text_pt)
         metrics = QFontMetricsF(self.font(pt))
         height = metrics.height()
         return [

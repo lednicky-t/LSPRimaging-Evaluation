@@ -11,7 +11,7 @@ step. The numbers are computed by ``analysis/step_stats.py`` (`LineStepValues`, 
 - **What the numbers are**: for every line, ROI or average alike, the mean and SD of the line **as drawn** over the cubes of the step (maintainer's choice, 2026-10-26), so
   they follow smoothing, baseline and spike removal like the curve. (The spread *between* the ROIs of a group, which smoothing cannot change, is available in
   `step_stats.group_statistics` and `LineStepValues.between_rois`; the table does not use it now.)
-- **Narrow steps**: the text is made smaller, one size for the whole table down to the smallest the size box allows, before the SD is dropped (`StepStatsItem`).
+- **Narrow steps**: the text is shortened (`fit_variant`: fewer decimals, then the mean alone, then nothing); the font size is always the one in the size box, so it is the same for every selection (`StepStatsItem`).
 """
 
 from __future__ import annotations

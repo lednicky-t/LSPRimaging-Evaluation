@@ -36,9 +36,11 @@ from .stats_table import LegendRows, StepStatsItem
 
 MAX_LEGEND_SERIES = 6  # up to this many lines always have a legend
 MAX_LEGEND_ENTRIES = 24  # more lines carry no names at all (a legend of a hundred ROIs is a wall of text)
-LEGEND_MAX_HEIGHT_FRACTION = 0.5  # between the two: the legend stays while it takes at most this much of the plot height (it is cleared otherwise); a row is ~25 px
+LEGEND_MAX_HEIGHT_FRACTION = 0.5  # between the two: the legend stays while it takes at most this much of the plot height (it is cleared otherwise); a row is ~21 px
 _LEGEND_OFFSET_PX = (8, 8)  # where the legend sits from the top-left corner of the plot when the step statistics table is off
 _STATS_GAP_PX = 4  # between the legend and the plan bar / the edge, and around the rows of the step statistics table
+_LEGEND_TEXT_MARGIN_PX = 2.0  # pyqtgraph's legend label keeps 4 px of document margin above and below its text; half of that halves the gap between rows
+_LEGEND_EDGE_PX = _STATS_GAP_PX + (4.0 - _LEGEND_TEXT_MARGIN_PX)  # legend to the edge / plan bar with the table on: the first row's text sits where it did before the rows were tightened
 _BAND_ALPHA = 55
 BASELINE_BAND_SPAN = (0.0, 0.1)  # the baseline selector fills the bottom tenth of the plot, not its full height
 _WINDOW_EDGE_ALPHA = 160
@@ -248,10 +250,20 @@ class SensorgramPlot(QWidget):
                     on = np.asarray(flags, dtype=bool) & finite
                     if on.any():
                         self._add(pg.ScatterPlotItem(s.x[on], s.y[on], symbol=symbol, size=size, brush=None, pen=pg.mkPen(MASK_COLOR, width=1.8)))
+        self._tighten_legend()
         self._fit_legend(len(series))
         self._place_legend()
         self._item.getViewBox().autoRange()
         self._apply_room()
+
+    def _tighten_legend(self) -> None:
+        """Rows closer together: a legend row is as high as its label (text line + twice the label's document margin, 4 px each by default; the 20 px sample is the floor)."""
+        legend = self._legend
+        if legend is None:
+            return
+        for _sample, label in legend.items:
+            label.item.document().setDocumentMargin(_LEGEND_TEXT_MARGIN_PX)
+            label.updateMin()
 
     def _fit_legend(self, count: int) -> None:
         """Up to `MAX_LEGEND_SERIES` lines the legend stays; with more it stays only while it takes at most `LEGEND_MAX_HEIGHT_FRACTION` of the plot height (a taller
@@ -302,7 +314,7 @@ class SensorgramPlot(QWidget):
         if self._stats.is_shown() and view_height > 0.0:
             width, height = self._legend_size()
             if height > 0.0:  # the rows are the legend's rows
-                rows = (height + 2 * _STATS_GAP_PX) / view_height
+                rows = (height + 2 * _LEGEND_EDGE_PX) / view_height
                 if self._stats.settings().position == POSITION_TOP:
                     top += rows
                 else:
@@ -385,7 +397,7 @@ class SensorgramPlot(QWidget):
                 self._legend_placed_by_table = False
             return
         position = self._stats.settings().position
-        gap = self._bar_height_px(position) + _STATS_GAP_PX
+        gap = self._bar_height_px(position) + _LEGEND_EDGE_PX
         legend.setOffset((_LEGEND_OFFSET_PX[0], gap if position == POSITION_TOP else -gap))  # a negative offset is measured from the bottom
         self._legend_placed_by_table = True
 

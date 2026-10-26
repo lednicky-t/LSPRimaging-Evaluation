@@ -34,11 +34,11 @@ TEXT_PT_KEY = "sensorgram/stats_text_pt"
 SHOW_TIP = (
     "Write the mean and the standard deviation (mean ± SD) of every line in every experiment step, in the line's colour, in the middle of the step and level with the "
     "line's entry in the legend. They are the mean and SD of the line as drawn over the cubes of the step, so they follow smoothing, the baseline and spike removal. "
-    "Narrow steps make the text smaller, down to 6 pt, before the SD is left out. Hover a number for the details."
+    "A step too narrow for it shows fewer decimals, then the mean alone. Hover a number for the details."
 )
 NO_STEPS_TIP = "This dataset has no experiment steps, so there is nothing to write per step."
 POSITION_TIP = "Which edge of the plot the table sits on (the legend moves with it)."
-SIZE_TIP = "Text size of the numbers, in points: the largest size; narrow steps make the text smaller so that mean ± SD still fits (down to 6 pt)."
+SIZE_TIP = "Text size of the numbers, in points. A step too narrow for mean ± SD at this size shows fewer decimals, the mean alone, or nothing (hover the step for the full numbers)."
 
 
 class StatsTableControls(QObject):
@@ -53,8 +53,8 @@ class StatsTableControls(QObject):
         self._show.setChecked(True)
 
         self._position = PickMenu(parent, name_on_face=False)
-        self._position.add_choice(POSITION_TOP, "Top", "The table along the top edge of the plot.", position_picture("top"))
-        self._position.add_choice(POSITION_BOTTOM, "Bottom", "The table along the bottom edge of the plot.", position_picture("bottom"))
+        self._position.add_choice(POSITION_TOP, "Top", "The table along the top edge of the plot.", position_picture("top", steps=True))
+        self._position.add_choice(POSITION_BOTTOM, "Bottom", "The table along the bottom edge of the plot.", position_picture("bottom", steps=True))
         self._position.finish()
         self._position.setToolTip(POSITION_TIP)
 

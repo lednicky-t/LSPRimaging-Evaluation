@@ -4,11 +4,11 @@ Screen purpose: show or hide the bar of experiment steps on the plot and choose 
 
 Layout (left to right, inline for now; the ribbon is to be re-ordered and grouped into pick-up menus later, so the whole group is this one file):
 
-    [show] [top / bottom] [height] [transparency] [text: whole note / solution] [text aligned to: bar / data] [text position] [text size]
+    [show] [height] [top / bottom] [transparency] [step labels menu: text: whole note / solution, text aligned to: bar / data, text position, text size]
 
 - **show**: the bar on or off.
-- **top / bottom**: which edge of the plot it sits on.
 - **height**: 1 - 10 % of the plot height, then "Full" (the bar fills the plot, behind the traces).
+- **top / bottom**: which edge of the plot it sits on. Hidden while the height is Full (a bar that fills the plot has no edge); the choice is kept.
 - **transparency**: the wedge, as on the Image panel's overlays (fill only; the text stays opaque).
 - **text content**: the whole note, or only the text before the separator (the solution). The separators are listed in the menu (default `_-_` and `_--_`).
 - **text aligned to / text position**: a 5-stop slider (low to high). Aligned to the *bar* the stops are positions inside the bar; aligned to the *data* they are distances from
@@ -27,7 +27,7 @@ from PyQt6.QtCore import QObject, Qt, pyqtSignal
 from PyQt6.QtGui import QFontInfo, QValidator
 from PyQt6.QtWidgets import QApplication, QHBoxLayout, QLabel, QLineEdit, QSlider, QSpinBox, QWidget
 
-from lspr_ui import CompactWedgeSlider
+from lspr_ui import CompactWedgeSlider, get_active_theme
 
 from ...plan.bar_model import (
     ALIGN_BAR,
@@ -58,6 +58,7 @@ from ..ui_state import UiStateStore
 from ..spectra.pick_menu import PickMenu
 from ..spectra.view_menu import IconToggle
 from .plan_icons import align_picture, plan_bar_icon, position_picture, text_content_picture
+from .plan_labels_menu import PlanLabelsMenu
 
 VISIBLE_KEY = "sensorgram/plan_visible"
 HEIGHT_KEY = "sensorgram/plan_height"
@@ -73,7 +74,7 @@ ALPHA_TIP = "Transparency of the bar's fill (the text stays opaque)."
 CONTENT_TIP = "Which part of a step's note the bar shows."
 ALIGN_TIP = "What the text position is measured against: the bar itself, or the traces inside each step."
 STOP_TIP = (
-    "Text position, from low (left) to high (right). Aligned to the bar: inside the bar, from its bottom edge to its top edge. "
+    "Text position, from low (bottom) to high (top). Aligned to the bar: inside the bar, from its bottom edge to its top edge. "
     "Aligned to the data: from far below to far above the traces of each step (the middle one sits on their median)."
 )
 SIZE_TIP = "Text size of the step labels, in points."
@@ -165,13 +166,13 @@ class PlanBarControls(QObject):
         self._align.finish()
         self._align.setToolTip(ALIGN_TIP)
 
-        self._stop = QSlider(Qt.Orientation.Horizontal, parent)
+        self._stop = QSlider(Qt.Orientation.Vertical, parent)  # low at the bottom, high at the top, like the text it moves
         self._stop.setRange(STOP_MIN, STOP_MAX)
         self._stop.setValue(self._stops[ALIGN_BAR])
-        self._stop.setTickPosition(QSlider.TickPosition.TicksBelow)
+        self._stop.setTickPosition(QSlider.TickPosition.TicksRight)
         self._stop.setTickInterval(1)
         self._stop.setPageStep(1)
-        self._stop.setFixedWidth(64)
+        self._stop.setFixedSize(24, 52)
 
         self._size = QSpinBox(parent)
         self._size.setRange(*FONT_RANGE)
@@ -180,6 +181,11 @@ class PlanBarControls(QObject):
         self._size.setKeyboardTracking(False)
         style_ribbon_number_field(self._size, f"{FONT_RANGE[1]} pt")
         self._size.setToolTip(SIZE_TIP)
+
+        # the four text controls live in one pick-up menu (they are reparented into its panel)
+        self._labels = PlanLabelsMenu(
+            (("Text", self._content), ("Aligned to", self._align), ("Position", self._stop), ("Size", self._size)), parent
+        )
 
         self._available = True
         self._refresh_stop_tip()
@@ -190,11 +196,12 @@ class PlanBarControls(QObject):
             signal.connect(self._changed)
         self._align.currentIndexChanged.connect(self._on_align_changed)
         self._stop.valueChanged.connect(self._on_stop_changed)
+        self._height.valueChanged.connect(self._refresh_position_visible)
 
     # -- the group ----------------------------------------------------------------------------------------------------------
 
     def widgets(self) -> tuple[QWidget, ...]:
-        return (self._show, self._position, self._height, self._alpha, self._content, self._align, self._stop, self._size)
+        return (self._show, self._height, self._position, self._alpha, self._labels)
 
     def settings(self) -> PlanBarSettings:
         return PlanBarSettings(
@@ -223,12 +230,17 @@ class PlanBarControls(QObject):
         self._show.refresh_theme()
         for menu in (self._position, self._content, self._align):
             menu.refresh_theme()
+        self._labels.refresh_theme(get_active_theme())
 
     # -- changes ------------------------------------------------------------------------------------------------------------
 
     def _changed(self, *_args: object) -> None:
         if not self._syncing:
             self.settings_changed.emit()
+
+    def _refresh_position_visible(self, *_args: object) -> None:
+        """A full-height bar fills the plot and has no edge, so its top / bottom choice is out of the way (and still remembered)."""
+        self._position.setVisible(self._height.value() < HEIGHT_FULL)
 
     def _refresh_stop_tip(self) -> None:
         names = DATA_STOP_NAMES if self._align_key == ALIGN_DATA else BAR_STOP_NAMES
@@ -276,6 +288,7 @@ class PlanBarControls(QObject):
         finally:
             self._syncing = False
         self._refresh_stop_tip()
+        self._refresh_position_visible()
 
         def remember(signal, key, value_of: Callable[[], object]) -> None:
             signal.connect(lambda *_args: store.set(key.key, value_of()))

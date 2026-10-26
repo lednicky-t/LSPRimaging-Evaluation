@@ -2,7 +2,7 @@
 
 Screen purpose: show or hide the draggable band that marks where the baseline is taken, and choose its colour and transparency.
 
-One icon button (a plot frame with a short band along its bottom edge) that opens a small panel in the look of the Image ribbon's "ROI display" menu
+One icon button (the Subtract icon's trace and arrow with the baseline range shaded under its flat start; the same picture is the show / hide toggle in the panel) that opens a small panel in the look of the Image ribbon's "ROI display" menu
 (`image/roi_display_menu.py`): a captioned grid whose row holds the same three-part control as the ROI rows, a toggle, a colour swatch and a transparency
 wedge (`image/roi_overlay_controls.py`, reused through its `OverlaySpec`). The panel is a `QWidgetAction` inside a `QMenu`: it opens on click and closes when
 you click outside it.
@@ -13,8 +13,8 @@ that "Subtract" (or a double-click on the y axis label) applies is read from the
 
 from __future__ import annotations
 
-from PyQt6.QtCore import QLocale, QPointF, QRectF, Qt, pyqtSignal
-from PyQt6.QtGui import QColor, QDoubleValidator, QFont, QFontInfo, QFontMetrics, QIcon, QPainter, QPen, QPixmap
+from PyQt6.QtCore import QLocale, QRectF, Qt, pyqtSignal
+from PyQt6.QtGui import QColor, QDoubleValidator, QFont, QFontInfo, QFontMetrics, QIcon
 from PyQt6.QtWidgets import (
     QApplication,
     QGridLayout,
@@ -34,47 +34,35 @@ from lspr_ui import GuiTheme, get_active_theme
 from ..image.general_group import style_general_icon_button
 from ..image.roi_overlay_controls import OverlaySpec, RoiOverlayControls
 from ..ribbon_fields import style_ribbon_number_field
-from ..ribbon_icon_size import ICON_SIZE
+from .stat_icons import _STROKE, _at, _canvas, _pen, _polyline, _slash
 
 DEFAULT_COLOR = "#78a0ff"  # the band's colour before the user picks one (the blue it always had)
 DEFAULT_ALPHA = 0.28  # its fill opacity before the user moves the wedge (0.16 was too faint on a projector)
 
-_RENDER_SIZE = ICON_SIZE * 2  # drawn at twice the size and scaled down, as the other ribbon icons are
-_STROKE_WIDTH = 2.1
-
-
 def band_icon(on: bool, off_color: str, on_color: str) -> QIcon:
-    """A plot frame with a filled band (and its two edges) along the bottom: in ``on_color``; in ``off_color`` and crossed out when off."""
-    pixmap = QPixmap(_RENDER_SIZE, _RENDER_SIZE)
-    pixmap.fill(Qt.GlobalColor.transparent)
-    painter = QPainter(pixmap)
-    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+    """The look of the Subtract icon (`stat_icons.subtract_icon`: a trace that has risen from its dashed baseline, an arrow down onto it) with the range drawn in: a shaded band
+    with two edges along the flat start of the trace, where the baseline is taken; in ``on_color``; in ``off_color`` and crossed out when off."""
+    pixmap, painter = _canvas()
     color = QColor(on_color if on else off_color)
-    size = float(_RENDER_SIZE)
-    frame = QColor(color)
-    frame.setAlpha(150)
-    pen = QPen(frame, _STROKE_WIDTH)
-    pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
-    painter.setPen(pen)
-    painter.setBrush(Qt.BrushStyle.NoBrush)
-    margin = size * 0.12
-    painter.drawRoundedRect(QRectF(margin, margin, size - 2 * margin, size - 2 * margin), size * 0.08, size * 0.08)
-    left, right = size * 0.30, size * 0.70
-    top, bottom = size * 0.56, size - margin
-    fill = QColor(color)
-    fill.setAlpha(110)
+    shade = QColor(color)
+    shade.setAlpha(110)
     painter.setPen(Qt.PenStyle.NoPen)
-    painter.setBrush(fill)
-    painter.drawRect(QRectF(left, top, right - left, bottom - top))
-    painter.setPen(QPen(color, _STROKE_WIDTH))
-    painter.drawLine(QPointF(left, top), QPointF(left, bottom))
-    painter.drawLine(QPointF(right, top), QPointF(right, bottom))
+    painter.setBrush(shade)
+    painter.drawRect(QRectF(_at(0.08, 0.62), _at(0.38, 0.86)))
+    painter.setBrush(Qt.BrushStyle.NoBrush)
+    painter.setPen(_pen(color, _STROKE * 0.8))
+    painter.drawLine(_at(0.08, 0.56), _at(0.08, 0.86))  # the two edges of the range
+    painter.drawLine(_at(0.38, 0.56), _at(0.38, 0.86))
+    painter.setPen(_pen(color, _STROKE * 0.8, Qt.PenStyle.DashLine))
+    painter.drawLine(_at(0.38, 0.74), _at(0.94, 0.74))  # the baseline, carried on past the range
+    painter.setPen(_pen(color))
+    _polyline(painter, ((0.12, 0.74), (0.38, 0.74), (0.54, 0.30), (0.76, 0.28)))
+    painter.setPen(_pen(color, _STROKE * 0.8))
+    painter.drawLine(_at(0.88, 0.32), _at(0.88, 0.68))  # the arrow: from the plateau down onto the baseline
+    painter.drawLine(_at(0.88, 0.68), _at(0.80, 0.56))
+    painter.drawLine(_at(0.88, 0.68), _at(0.96, 0.56))
     if not on:
-        slash = QPen(color, _STROKE_WIDTH * 1.4)
-        slash.setCapStyle(Qt.PenCapStyle.RoundCap)
-        painter.setPen(slash)
-        edge = size * 0.12
-        painter.drawLine(QPointF(size - edge, edge), QPointF(edge, size - edge))
+        _slash(painter, color)
     painter.end()
     return QIcon(pixmap)
 

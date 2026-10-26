@@ -44,8 +44,9 @@ def _frame(painter: QPainter, ink: QColor) -> None:
     painter.drawRoundedRect(QRectF(2.0, 2.0, 16.0, 16.0), 2.0, 2.0)
 
 
-def position_picture(kind: str) -> PictureFor:
-    """Where the bar sits: a frame with a filled strip along its top or its bottom."""
+def position_picture(kind: str, steps: bool = False) -> PictureFor:
+    """Where the bar (or the table) sits: a frame with a filled strip along its top or its bottom and a slanted trace in the room left. ``steps``: the trace is two steps instead, the
+    second lower than the first (the step statistics table's placement menu)."""
 
     def draw_into(painter: QPainter, ink: QColor, theme) -> None:
         _frame(painter, ink)
@@ -56,7 +57,13 @@ def position_picture(kind: str) -> PictureFor:
         painter.drawRect(QRectF(3.0, 3.0 if kind == "top" else 12.5, 14.0, 4.5))
         painter.setBrush(Qt.BrushStyle.NoBrush)
         painter.setPen(_pen(ink, 1.3))
-        painter.drawLine(QPointF(4.5, 14.0 if kind == "top" else 9.5), QPointF(15.5, 11.0 if kind == "top" else 7.0))
+        if steps:
+            first, second = (11.0, 14.5) if kind == "top" else (5.5, 9.0)
+            painter.drawLine(QPointF(4.5, first), QPointF(9.5, first))
+            painter.drawLine(QPointF(9.5, first), QPointF(9.5, second))
+            painter.drawLine(QPointF(9.5, second), QPointF(15.5, second))
+        else:
+            painter.drawLine(QPointF(4.5, 14.0 if kind == "top" else 9.5), QPointF(15.5, 11.0 if kind == "top" else 7.0))
 
     return _picture(draw_into)
 
