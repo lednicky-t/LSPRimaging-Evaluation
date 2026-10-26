@@ -2,7 +2,7 @@
 
 Draws what it is handed: a line per series (the metric against time or cube number), a band for averaged series, hollow markers where the
 scan is out of date, mask marks (a triangle: a persistent mask touched the point's ROIs, a circle: an individual one did), a vertical line at the current cube and an optional draggable baseline selector (a band along the bottom tenth of the plot, with its own colour and fill opacity). It computes nothing and reads no module.
-A double-click on the y axis label emits ``y_label_double_clicked`` (the panel turns it into "absolute position / shift from the baseline").
+A double-click on the y axis label emits ``y_label_double_clicked`` (the panel turns it into "absolute position / shift from the baseline"); one on the x axis label emits ``x_label_double_clicked`` (time <-> cube number, app-wide).
 A left click inside the plot emits ``x_clicked`` with the x value (the panel turns it into "go to that cube"); dragging the circle on the x axis
 (the Cube slider's handle, in the same colour) emits it too, for every pointer position.
 """
@@ -90,6 +90,7 @@ class SensorgramPlot(QWidget):
     baseline_window_changed = pyqtSignal(float, float)
     baseline_range_edited = pyqtSignal(float, float)  # start / end typed into the fields above the selector (sorted)
     y_label_double_clicked = pyqtSignal()
+    x_label_double_clicked = pyqtSignal()
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -319,6 +320,11 @@ class SensorgramPlot(QWidget):
         rect = label.sceneBoundingRect().adjusted(-_LABEL_HIT_MARGIN, -_LABEL_HIT_MARGIN, _LABEL_HIT_MARGIN, _LABEL_HIT_MARGIN)
         return rect.contains(scene_pos)
 
+    def _on_x_label(self, scene_pos) -> bool:
+        label = self._item.getAxis("bottom").label
+        rect = label.sceneBoundingRect().adjusted(-_LABEL_HIT_MARGIN, -_LABEL_HIT_MARGIN, _LABEL_HIT_MARGIN, _LABEL_HIT_MARGIN)
+        return rect.contains(scene_pos)
+
     def _on_scene_clicked(self, event) -> None:
         """A plain left click on the plot area: report the x it landed on. Clicks another item handled (the baseline band) are not ours."""
         if event.button() != Qt.MouseButton.LeftButton:
@@ -326,6 +332,8 @@ class SensorgramPlot(QWidget):
         if event.double():
             if self._on_y_label(event.scenePos()):
                 self.y_label_double_clicked.emit()
+            elif self._on_x_label(event.scenePos()):
+                self.x_label_double_clicked.emit()
             return
         if event.isAccepted():
             return

@@ -73,7 +73,7 @@ from ...dataset import DatasetModule
 from ...image_tools.mask.module import MaskModule
 from ...roi import RoiToolbox
 from ...selection import CubeDisplayModule, SelectionModule
-from ...selection.cube_display_module import MODE_TIME
+from ...selection.cube_display_module import MODE_CUBE, MODE_TIME
 from ...storage.ui_state_keys import (
     SENSORGRAM_BASELINE_BAND_ALPHA,
     SENSORGRAM_BASELINE_BAND_COLOR,
@@ -278,6 +278,7 @@ class SensorgramPanel(QWidget):
         self._mask_toggle.toggled.connect(lambda _on: self._draw_last())
         self._plot.baseline_window_changed.connect(self._on_baseline_dragged)
         self._plot.y_label_double_clicked.connect(self._on_y_label_double_clicked)
+        self._plot.x_label_double_clicked.connect(self._on_x_label_double_clicked)
         self._band_height.valueChanged.connect(self._plot.set_baseline_height)
         self._plot.baseline_range_edited.connect(self._on_baseline_dragged)  # typed values are stored exactly as a dragged band's
         self._band_controls.visibility_changed.connect(self._on_band_visibility)
@@ -418,6 +419,10 @@ class SensorgramPanel(QWidget):
     def _on_y_label_double_clicked(self) -> None:
         """Double-click on the y axis label: absolute position <-> shift from the baseline (the Subtract switch)."""
         self._on_baseline_toggled(not self._settings.statistics_settings().baseline_enabled)
+
+    def _on_x_label_double_clicked(self) -> None:
+        """Double-click on the x axis label: time <-> cube number, for the whole app (the shared cube display mode)."""
+        self._cube_display.set_mode(MODE_CUBE if self._cube_display.effective_mode() == MODE_TIME else MODE_TIME)
 
     def _on_band_visibility(self, on: bool) -> None:
         self._band_visible = bool(on)
