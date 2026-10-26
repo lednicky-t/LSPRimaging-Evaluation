@@ -129,6 +129,15 @@ SENSORGRAM_RIBBON_OPEN = UiKey("sensorgram/ribbon_open", True, bool)  # the Sens
 SENSORGRAM_BASELINE_BAND_VISIBLE = UiKey("sensorgram/baseline_band_visible", True, bool)  # the draggable baseline band (View group)
 SENSORGRAM_BASELINE_BAND_COLOR = UiKey("sensorgram/baseline_band_color", None, str)  # None = the default blue
 SENSORGRAM_BASELINE_BAND_ALPHA = UiKey("sensorgram/baseline_band_alpha", 0.28, float)  # fill opacity 0 - 1
+# The plan bar (Sensorgram "Experimental plan" group, panels/sensorgram/plan_group.py). The show toggle, the height box and the text size box are widget `bind`s
+# ("sensorgram/plan_visible", "sensorgram/plan_height", "sensorgram/plan_text_pt"); the rest are wired by hand and listed here.
+SENSORGRAM_PLAN_POSITION = UiKey("sensorgram/plan_position", "top", str)  # "top" | "bottom"
+SENSORGRAM_PLAN_ALPHA = UiKey("sensorgram/plan_alpha", 0.55, float)  # fill opacity 0 - 1
+SENSORGRAM_PLAN_TEXT_MODE = UiKey("sensorgram/plan_text_mode", "whole", str)  # "whole" (the whole note) | "solution" (the text before the separator)
+SENSORGRAM_PLAN_SEPARATORS = UiKey("sensorgram/plan_separators", "_-_ _--_", str)  # separators of the "solution" mode, split on spaces
+SENSORGRAM_PLAN_TEXT_ALIGN = UiKey("sensorgram/plan_text_align", "bar", str)  # "bar" | "data": what the text position is measured against
+SENSORGRAM_PLAN_TEXT_STOP_BAR = UiKey("sensorgram/plan_text_stop_bar", 3, int)  # 1 (bottom) - 5 (top) of the bar
+SENSORGRAM_PLAN_TEXT_STOP_DATA = UiKey("sensorgram/plan_text_stop_data", 4, int)  # 1 (far below) - 5 (far above) the data of the step
 SLIDESHOW_SPEED = UiKey("image/slideshow_speed", 1, int)  # 1, 2, 5 or 10 (x)
 SLIDESHOW_MODE = UiKey("image/slideshow_mode", "all", str)  # "all" | "one_wavelength" | "roi_states" | "mask_states" | "events"
 SLIDESHOW_REPEAT = UiKey("image/slideshow_repeat", False, bool)

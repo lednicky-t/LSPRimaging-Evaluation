@@ -55,6 +55,7 @@ from .gui.windows_titlebar import apply_windows_titlebar_color
 from .image_tools.mask_scope import MaskScope
 from .image_tools.chromatic_auto_task import TASK_ID as CHROMATIC_TASK_ID, ChromaticAutoDetect
 from .image_tools.mask.mask_pointers import MaskPointersModule
+from .plan.module import ExperimentPlanModule
 from .image_tools.mask_auto_task import TASK_ID as AUTO_MASK_TASK_ID
 from .image_tools.mask_export_task import TASK_ID as MASK_EXPORT_TASK_ID
 from .dataset.module import EXPORT_TASK_ID as ZARR_EXPORT_TASK_ID
@@ -453,6 +454,7 @@ def capture_session(
     analysis_settings: AnalysisSettingsModule,
     frame_roles: FrameRolesModule | None = None,
     mask_pointers: MaskPointersModule | None = None,
+    experiment_plan: ExperimentPlanModule | None = None,
 ) -> SessionState:
     """Read every module's current state into a plain, Qt-free
     :class:`SessionState` (2026-09-23).
@@ -487,6 +489,7 @@ def capture_session(
         selected_roi_ids=tuple(sorted(selection.selected_roi_ids())),
         **({} if frame_roles is None else {"frame_roles": frame_roles.state()}),
         **({} if mask_pointers is None else {"mask_pointers": mask_pointers.state()}),
+        **({} if experiment_plan is None else {"plan_edits": experiment_plan.state()}),
     )
 
 
@@ -501,6 +504,7 @@ def apply_session(
     analysis_settings: AnalysisSettingsModule,
     frame_roles: FrameRolesModule | None = None,
     mask_pointers: MaskPointersModule | None = None,
+    experiment_plan: ExperimentPlanModule | None = None,
 ) -> None:
     """Push a loaded :class:`SessionState` into every module.
 
@@ -524,6 +528,8 @@ def apply_session(
         frame_roles.restore_state(state.frame_roles)
     if mask_pointers is not None:
         mask_pointers.restore_state(state.mask_pointers)
+    if experiment_plan is not None:
+        experiment_plan.restore_state(state.plan_edits)
 
     selection.set_cube(state.selected_cube)
     selection.set_wavelength(state.selected_wavelength)
@@ -579,6 +585,7 @@ def _build_session_autosave(
     analysis_settings: AnalysisSettingsModule,
     frame_roles: FrameRolesModule | None = None,
     mask_pointers: MaskPointersModule | None = None,
+    experiment_plan: ExperimentPlanModule | None = None,
 ) -> SessionAutosave:
     """Build the debounce, and wire every module's own change signal to
     ``schedule()`` it (2026-09-23).
@@ -604,7 +611,7 @@ def _build_session_autosave(
     autosave = SessionAutosave(
         capture=lambda: capture_session(
             geometry, mask, chromatic, background, roi_toolbox, selection, analysis_settings, frame_roles,
-            mask_pointers,
+            mask_pointers, experiment_plan,
         ),
         naming=_cached_frame_naming(dataset),
     )
@@ -627,6 +634,8 @@ def _build_session_autosave(
         signals.append(frame_roles.roles_changed)
     if mask_pointers is not None:
         signals.append(mask_pointers.pointers_changed)  # cosmetic for the analysis, but part of the session
+    if experiment_plan is not None:
+        signals.append(experiment_plan.steps_changed)  # a dragged boundary, a retyped note, a colour: part of the session
     for signal in signals:
         signal.connect(autosave.schedule)
 
@@ -647,6 +656,7 @@ def _wire_session_coordinator(
     frame_roles: FrameRolesModule | None = None,
     mask_pointers: MaskPointersModule | None = None,
     session_load: SessionLoadTask | None = None,
+    experiment_plan: ExperimentPlanModule | None = None,
 ) -> None:
     """Restore into every module whenever the *active session* changes -
     on a dataset load, an explicit session switch, or a new session's
@@ -683,7 +693,7 @@ def _wire_session_coordinator(
         with autosave.suspended():
             apply_session(
                 state or SessionState(), geometry, mask, chromatic, background,
-                roi_toolbox, selection, analysis_settings, frame_roles, mask_pointers,
+                roi_toolbox, selection, analysis_settings, frame_roles, mask_pointers, experiment_plan,
             )
 
     def restore(root: Path | None) -> None:
@@ -762,6 +772,7 @@ class _Modules:
     reference_frame: ReferenceFrameModule
     reference_auto: ReferenceAutoFind
     frame_roles: FrameRolesModule
+    experiment_plan: ExperimentPlanModule
     cube_display: CubeDisplayModule
     highlight_range: HighlightRangeModule
     area_selection: AreaSelectionModule
@@ -817,6 +828,7 @@ def _build_modules() -> _Modules:
     selection = SelectionModule()
     reference_frame = ReferenceFrameModule()
     frame_roles = FrameRolesModule(dataset, reference_frame)
+    experiment_plan = ExperimentPlanModule(dataset)  # the measured steps with the user's edits on top; the edits are part of the session
     highlight_range = HighlightRangeModule()
     # The pointers a Mask-tab scan finds (cosmetic: never a mask, never a recompute); part of the session.
     mask_pointers = MaskPointersModule()
@@ -848,13 +860,13 @@ def _build_modules() -> _Modules:
     # ImageDataset.home).
     session_autosave = _build_session_autosave(
         dataset, geometry, mask, chromatic, background, roi_toolbox, selection, analysis_settings, frame_roles,
-        mask_pointers,
+        mask_pointers, experiment_plan,
     )
     session_load = SessionLoadTask()
     _wire_session_coordinator(
         session_coordinator, session_autosave, analysis_engine,
         geometry, mask, chromatic, background, roi_toolbox, selection, analysis_settings, frame_roles,
-        mask_pointers, session_load,
+        mask_pointers, session_load, experiment_plan,
     )
     dataset.dataset_loaded.connect(lambda ds: session_coordinator.bind_dataset(ds.home))
     dataset.dataset_cleared.connect(session_coordinator.unbind)
@@ -873,7 +885,8 @@ def _build_modules() -> _Modules:
     # starts the carry, a failed or cancelled one drops it.
     session_carry = SessionCarry(
         capture=lambda: capture_session(
-            geometry, mask, chromatic, background, roi_toolbox, selection, analysis_settings, frame_roles, mask_pointers
+            geometry, mask, chromatic, background, roi_toolbox, selection, analysis_settings, frame_roles, mask_pointers,
+            experiment_plan,
         ),
         naming=_cached_frame_naming(dataset),
         source=lambda: (dataset.dataset_home(), session_coordinator.active_session_id()),
@@ -905,6 +918,7 @@ def _build_modules() -> _Modules:
         session_load=session_load,
         reference_auto=ReferenceAutoFind(dataset, selection, reference_frame, frame_roles),
         frame_roles=frame_roles,
+        experiment_plan=experiment_plan,
         cube_display=CubeDisplayModule(dataset),
     )
     modules_holder.append(modules)
@@ -1690,7 +1704,7 @@ def build_main_window(
     spectra_panel.restore_ui_state(ui_state)
     sensorgram_panel = SensorgramPanel(
         m.scan_results, m.roi_toolbox, m.dataset, m.selection, m.analysis_settings, m.cube_display, image_busy=image_panel.render_pending,
-        live=m.analysis_live, mask=m.mask,
+        live=m.analysis_live, mask=m.mask, experiment_plan=m.experiment_plan,
     )
     sensorgram_panel.restore_ui_state(ui_state)
     stages.done("ROI table, Spectra and Sensorgram panels")

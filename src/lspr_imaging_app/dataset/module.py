@@ -429,6 +429,20 @@ class DatasetModule(QObject):
             return None
         return (cube_ms - anchor_ms) / 1000.0
 
+    def cube_start_unix_ms(self, cube_index: int) -> int | None:
+        """The instant of the cube's *first* frame in unix milliseconds: the clock of the notes and of the experiment steps
+        (`cube_start_seconds` is the same instant counted from t = 0). `None` without a dataset, timing data, or a timing for this cube."""
+        if self._dataset is None or self._dataset.acquisition_metadata is None:
+            return None
+        return compact_dataset_image_timings(self._dataset).earliest_ms_by_cube.get(int(cube_index))
+
+    def data_end_unix_ms(self) -> int | None:
+        """Just after the last recorded frame (unix ms, exclusive end): where a step that runs to the end of the data ends. `None` without timing."""
+        if self._dataset is None or self._dataset.acquisition_metadata is None:
+            return None
+        latest = compact_dataset_image_timings(self._dataset).latest_ms_by_cube
+        return max(latest.values()) + 1 if latest else None
+
     def frame_start_seconds(self, cube_index: int, wavelength: float) -> float | None:
         """Seconds from the acquisition start to *this frame* - the experimental time of one image (a cube's own
         time, `cube_start_seconds`, is only its first frame's). Same t = 0 as the cube time. `None` when the

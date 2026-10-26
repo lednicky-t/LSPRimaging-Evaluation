@@ -111,6 +111,7 @@ from ..image_tools.mask.mask_pointers_state import MaskPointersState
 from ..image_tools.mask.mask_pointers_state import from_payload as mask_pointers_from_payload
 from ..image_tools.mask.mask_pointers_state import to_payload as mask_pointers_to_payload
 from ..progress import Cancelled, ProgressCallback
+from ..plan.state import PlanEditsState
 from ..selection.frame_roles_state import FrameRolesState
 from ..roi.model import (
     AreaRoi,
@@ -126,7 +127,8 @@ from ..roi.model import (
 logger = logging.getLogger(__name__)
 
 SESSION_SCHEMA_NAME = "lspri_rewrite_session"
-SESSION_SCHEMA_VERSION = "1.4"
+SESSION_SCHEMA_VERSION = "1.5"
+# 1.5 (2026-10-26): optional "plan" block - the user's edits to the experiment steps (boundaries, notes, colours), plan/state.py.
 # 1.4 (2026-10-17): optional "mask_pointers" block - the pointers a Mask-tab scan found (image_tools/mask/mask_pointers_state.py).
 # 1.3 (2026-10-13): optional "frames" block - frame roles (dark, ignored wavelengths/cubes, reference), selection/frame_roles_state.py.
 # 1.2 (2026-10-08): optional per-ROI "timeline" (geometry changes by cube, docs/roi_timeline_design_2026-10-08.md).
@@ -418,6 +420,7 @@ class SessionState:
     selected_roi_ids: tuple[int, ...] = ()
     frame_roles: FrameRolesState = field(default_factory=FrameRolesState)
     mask_pointers: MaskPointersState = field(default_factory=MaskPointersState)
+    plan_edits: PlanEditsState = field(default_factory=PlanEditsState)
     mask_versions: dict[MaskChange, int] = field(default_factory=dict)
     """Only filled by `load_session`: which file version each mask change was read from, for
     `SessionWriter.seed`. Not part of the saved format, and empty in a state captured from the modules (it says
@@ -691,6 +694,7 @@ def prepare_session(state: SessionState, naming: FrameNamingScheme) -> PreparedS
             "arrays": [asdict(array_group) for array_group in state.arrays],
         },
         "frames": asdict(state.frame_roles),
+        "plan": state.plan_edits.to_payload(),
         "mask_pointers": None,  # filled in by `SessionWriter.write` from `PreparedSession.mask_pointers`
         "selection": {
             "cube_index": int(state.selected_cube),
@@ -796,4 +800,5 @@ def load_session(
         selected_roi_ids=tuple(int(roi_id) for roi_id in selection_block.get("selected_roi_ids", ())),
         frame_roles=FrameRolesState.from_payload(payload.get("frames")),
         mask_pointers=mask_pointers_from_payload(payload.get("mask_pointers")),
+        plan_edits=PlanEditsState.from_payload(payload.get("plan")),
     )

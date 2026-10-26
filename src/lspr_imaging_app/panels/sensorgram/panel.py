@@ -25,6 +25,12 @@ baseline (the same switch as the Baseline group's "Subtract"). The baseline sele
 View group's baseline button shows or hides it and sets its colour and fill transparency (a pick-up menu like the Image ribbon's ROI display; all
 three remembered). The selector is drawn whether or not the traces are subtracted, and dragging it only stores where it is.
 
+**Experimental plan group (2026-10-26).** The last ribbon group controls the bar of experiment steps along the top or bottom of the plot (``plan_group.py`` the controls,
+``plan_bar.py`` the item, ``plan/bar_model.py`` what is drawn and where the text goes; design ``docs/experimental_plan_bar_design_2026-10-26.md``). The steps come from
+``ExperimentPlanModule`` (the dataset's measured steps with the user's edits); the panel only converts them to the plot's x axis (``plan/axis_map.py``) and hands them to the
+plot. They follow the Cube / Time choice, and are drawn only while traces are (an empty plot has no axis to put them on). The bar's gestures (drag a boundary, double-click to retype a note,
+right-click for colour and reset) are handled by ``plan_actions.PlanBarActions``, which edits the module; this panel only supplies the plot's axis (`_plan_context`).
+
 **Status bar.** A computation that lasts more than a moment (``panel_task.PanelTask``) appears in the app's task indicator ("Sensorgram: fitting
 ROI 3 of 160"), with a Cancel button that stops it between ROIs and clears the plot (the traces already fitted are kept for the next request); a
 quick one leaves no trace.
@@ -71,6 +77,8 @@ from ...analysis.trace_pool import TracePool
 from ...applog import timed
 from ...dataset import DatasetModule
 from ...image_tools.mask.module import MaskModule
+from ...plan.bar_model import build_bar_steps
+from ...plan.module import ExperimentPlanModule
 from ...roi import RoiToolbox
 from ...selection import CubeDisplayModule, SelectionModule
 from ...selection.cube_display_module import MODE_CUBE, MODE_TIME
@@ -93,6 +101,8 @@ from ..spectra.view_menu import IconToggle
 from ..visibility_gate import HiddenPanelGate
 from .baseline_selector_menu import DEFAULT_ALPHA, DEFAULT_COLOR, SPEC as BASELINE_BAND_SPEC, BaselineSelectorMenu, make_font_box, make_height_box
 from .mask_marks_toggle import MaskMarksToggle
+from .plan_actions import PlanAxisContext, PlanBarActions
+from .plan_group import PlanBarControls
 from .stat_icons import band_picture, center_picture, display_picture, smoothing_picture, spikes_icon, subtract_icon
 from .plot import SensorgramPlot, snap_window
 
@@ -160,12 +170,15 @@ class SensorgramPanel(QWidget):
         live: AnalysisLiveModule | None = None,
         trace_in_process: bool = True,
         mask: MaskModule | None = None,
+        experiment_plan: ExperimentPlanModule | None = None,
     ) -> None:
         """`image_busy`: True while the Image panel has a frame in flight; a computation then waits for it (`ImageFirst`). `trace_in_process`: the
         fits run in a helper process (`TracePool`), so they never compete with the window for the interpreter lock; False computes them in the worker
-        thread (tests that spy on the fit, debugging). `mask`: tells which masks are individual (the marks of the View group); without it every mask counts as persistent."""
+        thread (tests that spy on the fit, debugging). `mask`: tells which masks are individual (the marks of the View group); without it every mask counts as persistent.
+        `experiment_plan`: the experiment steps for the plan bar; without it the Experimental plan group stays greyed out."""
         super().__init__(parent)
         self._mask = mask
+        self._experiment_plan = experiment_plan
         self._live = live if live is not None else AnalysisLiveModule(self)  # without an owner: always live
         self._dirty_while_paused = False
         self._image_first = ImageFirst(image_busy)
@@ -237,10 +250,15 @@ class SensorgramPanel(QWidget):
         self._band_height = make_height_box(self)
         self._band_font = make_font_box(self)
         self._band_menu = BaselineSelectorMenu(self._band_controls, self._band_height, self._band_font, self)
+        self._plan_controls = PlanBarControls(self)
+        self._plan_controls.set_available(False)  # until a dataset with steps is open
         self._status = QLabel("", self)
         self._status.setWordWrap(True)
         self._status.setStyleSheet(f"color: {get_active_theme().text_dim};")
         self._plot = SensorgramPlot(self)
+        self._plan_actions = (
+            None if experiment_plan is None else PlanBarActions(experiment_plan, self._plot, self._plan_context, self)
+        )
         self.task = PanelTask(TASK_ID, "Sensorgram", self)  # connected to the status bar's task indicator by app_rewrite
 
         self._live_toggle = LiveToggle(self)
@@ -251,6 +269,7 @@ class SensorgramPanel(QWidget):
         self._ribbon.add_group("Smoothing", self._smoothing, self._window, self._spikes)
         self._ribbon.add_group("Baseline", self._baseline, self._band_menu)
         self._ribbon.add_group("View", self._mask_toggle)
+        self._ribbon.add_group("Experimental plan", *self._plan_controls.widgets())
         self._ribbon.add_stretch()
         self._ribbon_drawer = rolled_ribbon(self._ribbon, "Show the sensorgram controls.", self)
         controls = QHBoxLayout()
@@ -288,6 +307,9 @@ class SensorgramPanel(QWidget):
         self._band_controls.color_changed.connect(self._on_band_color)
         self._band_controls.alpha_changed.connect(self._on_band_alpha)
         self._plot.x_clicked.connect(self._on_plot_clicked)
+        self._plan_controls.settings_changed.connect(self._refresh_plan)
+        if self._experiment_plan is not None:
+            self._experiment_plan.steps_changed.connect(self._on_plan_changed)
 
         self._selection.roi_selection_changed.connect(lambda _ids: self._schedule_redraw())
         self._selection.cube_changed.connect(lambda _cube: self._update_cursor())
@@ -311,6 +333,7 @@ class SensorgramPanel(QWidget):
         store.bind(BAND_HEIGHT_KEY, self._band_height)
         self._plot.set_baseline_height(self._band_height.value())  # a restored value arrives without a signal
         store.bind(BAND_FONT_KEY, self._band_font)
+        self._plan_controls.restore_ui_state(store)
         self._plot.set_readout_font_size(self._band_font.value())
         saved_color = read(store, SENSORGRAM_BASELINE_BAND_COLOR)
         self._band_visible = read(store, SENSORGRAM_BASELINE_BAND_VISIBLE) is not False
@@ -340,6 +363,7 @@ class SensorgramPanel(QWidget):
         self._baseline.refresh_theme()
         self._band_controls.refresh_theme(get_active_theme())
         self._band_menu.refresh_theme(get_active_theme())
+        self._plan_controls.refresh_theme()
         self._ribbon_drawer.refresh_theme()
         self._plot.refresh_theme()
         self._status.setStyleSheet(f"color: {get_active_theme().text_dim};")
@@ -577,6 +601,7 @@ class SensorgramPanel(QWidget):
         self._plot.clear()
         self._plot.set_baseline_window(None)
         self._plot.set_current_x(None)
+        self._refresh_plan()
         self._status.setText(text)
         self.task.end("cancelled", text)
 
@@ -713,7 +738,58 @@ class SensorgramPanel(QWidget):
             window = self._default_baseline_window()  # where Subtract would put it; stored only once dragged, typed or subtracted
         self._plot.set_baseline_window(window if self._band_visible else None, self._range_decimals())
         self._update_cursor()
+        self._refresh_plan()
         self._status.setText(self._status_line(job, series, stale))
+
+    def _on_plan_changed(self, reason: str = "") -> None:
+        """The experiment steps changed (a dataset opened, a session restored, an edit). Another dataset or session means other steps: nothing stays selected."""
+        if reason in ("dataset", "restored"):
+            self._plot.plan_bar().clear_selection()
+        if not self._gate.defer():
+            self._refresh_plan()
+
+    def _plan_axis(self):
+        """(time <-> x map, plotted cubes) for the traces being drawn, or None when nothing is drawn or the cubes have no timing."""
+        plan = self._experiment_plan
+        if plan is None or self._last is None:
+            return None
+        job, _series = self._last
+        _label, x = self._x_axis()
+        cubes = [int(c) for c in job.stored.cube_indices]
+        axis = plan.axis_map(cubes, [float(v) for v in x])
+        return None if axis is None else (axis, cubes)
+
+    def _plan_context(self) -> PlanAxisContext | None:
+        """What a gesture on the plan bar needs: the axis, where a boundary may land, and the unit. None while nothing is drawn."""
+        found = self._plan_axis()
+        if found is None:
+            return None
+        axis, cubes = found
+        return PlanAxisContext(axis, self._experiment_plan.snap_grid_unix_ms(cubes), self._cube_display.effective_mode() == MODE_TIME)
+
+    def _refresh_plan(self) -> None:
+        """Convert the experiment steps to the plot's x axis and hand them to the plot, or hand it none (no steps, no traces, no timing). Cheap: a few steps and the
+        series already drawn; it does not compute anything."""
+        settings = self._plan_controls.settings()
+        plan = self._experiment_plan
+        steps = () if plan is None else plan.steps()
+        self._plan_controls.set_available(bool(steps))
+        found = self._plan_axis() if steps else None
+        if found is None:
+            self._plot.set_plan((), settings)
+            return
+        axis, _cubes = found
+        _job, series = self._last
+        lines: list[tuple[np.ndarray, np.ndarray]] = []
+        for s in series:  # everything drawn counts for the Data text mode: each line and the edges of its band
+            lines.append((s.x, s.y))
+            if s.band_low is not None and s.band_high is not None:
+                lines.extend(((s.x, s.band_low), (s.x, s.band_high)))
+        bars = build_bar_steps(
+            steps, axis, lines, text_mode=settings.text_mode, separators=settings.separators,
+            time_mode=self._cube_display.effective_mode() == MODE_TIME,
+        )
+        self._plot.set_plan(bars, settings)
 
     def _status_line(self, job: _Job, series: list[Series], stale: np.ndarray | None) -> str:
         parts = [f"{len(job.request.roi_ids)} ROI{'s' if len(job.request.roi_ids) != 1 else ''}"]
