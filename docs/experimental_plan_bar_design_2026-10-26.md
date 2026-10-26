@@ -195,10 +195,10 @@ Next: step 3 (the bar item, the ribbon group, the remembered display settings), 
 |---|---|
 | Pure model: `PlanBarSettings`, `section_levels` (2nd / 50th / 98th percentile of everything drawn in a step), `automatic_colors` (Tableau 10 by first appearance of each solution), `contrast_text_color` (judged on the fill blended with the plot background), `describe_devices`, `build_bar_steps`, `text_top_y` (the five stops, both modes), `reserved_range`, `label_headroom_px` | `plan/bar_model.py` |
 | The item: one `pg.GraphicsObject`, z -20, paints in device pixels (transform reset), only the bar strip is its hit area, `layout()` is separate from `paint()` so it can be tested | `panels/sensorgram/plan_bar.py` |
-| Plot: owns the item, `set_plan`, widens the y range after the auto-range (`_apply_plan_room`), sets the item's tooltip on mouse move | `panels/sensorgram/plot.py` |
+| Plot: owns the item, `set_plan`, widens the y range after the auto-range (`_apply_room`, renamed from `_apply_plan_room` 2026-10-26: it also makes the room of the step statistics table), sets the item's tooltip on mouse move | `panels/sensorgram/plot.py` |
 | Ribbon group "Experimental plan" (inline, 8 widgets, about 300 px + gaps) and its remembered state | `panels/sensorgram/plan_group.py`, rows `SENSORGRAM_PLAN_*` in `storage/ui_state_keys.py` |
 | Pictures (toggle icon, top/bottom, whole/solution, bar/data) | `panels/sensorgram/plan_icons.py` |
-| Panel: new optional `experiment_plan` argument, `_refresh_plan` (steps -> axis map -> bar steps -> plot), greys the group out without steps | `panels/sensorgram/panel.py`; `app_rewrite.py` passes `m.experiment_plan` |
+| Panel: new optional `experiment_plan` argument, `StepOverlays.refresh` (was `SensorgramPanel._refresh_plan` until the split into `step_overlays.py`, 2026-10-26; steps -> axis map -> bar steps -> plot), greys the group out without steps | `panels/sensorgram/panel.py`; `app_rewrite.py` passes `m.experiment_plan` |
 | Tests | `tests/unit/test_lspri_plan_bar_model.py` (22), `tests/integration/test_lspri_plan_bar.py` (26: item, controls, panel with a real scan); the caption list in `test_lspri_sensorgram_panel.py` now includes the new group |
 
 Decisions made while building (not asked; say if you want them otherwise):

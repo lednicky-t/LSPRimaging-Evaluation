@@ -184,10 +184,26 @@ def normalize_to_baseline_window(
     return y - baseline, baseline
 
 
+def _smooth_by_runs(values: np.ndarray, smooth, segments: np.ndarray | None) -> np.ndarray:
+    """`smooth(values)` on the whole trace, or, with `segments` (one label per point), on each run of equal labels on its own: the smoother never reads a
+    point from the neighbouring run. A run shorter than the window is smoothed with a window as long as the run (`smooth_savgol` / `smooth_moving_average` clamp it)."""
+    if segments is None:
+        return smooth(values)
+    labels = np.asarray(segments)
+    if labels.shape != values.shape:
+        raise ValueError("segments must have one label per point of the trace")
+    cuts = np.flatnonzero(labels[1:] != labels[:-1]) + 1
+    smoothed = np.empty(values.shape, dtype=np.float64)
+    for low, high in zip(np.concatenate(([0], cuts)), np.concatenate((cuts, [labels.size]))):
+        smoothed[low:high] = smooth(values[low:high])
+    return smoothed
+
+
 def apply_statistics(
     x_values: np.ndarray,
     y_values: np.ndarray,
     settings: StatisticsSettings,
+    segments: np.ndarray | None = None,
 ) -> tuple[np.ndarray, float]:
     """One ROI's trace through the whole of Pillar II, in the fixed order.
 
@@ -204,6 +220,13 @@ def apply_statistics(
     same order, but does it inline in the sensorgram controller, so the
     ordering rule lives in a comment rather than in one callable function.
 
+    `segments` (2026-10-26, optional): one label per point; smoothing is then
+    done on each run of equal labels on its own, so it never blends the points
+    on the two sides of an experiment-step boundary (`step_stats.smoothing_segments`
+    makes the labels). The caller decides whether to pass it (the "smooth inside
+    steps" switch and whether the dataset has steps); None smooths the whole
+    trace. Spike rejection and the baseline are not affected by it.
+
     Returns (trace, baseline_value); the baseline is NaN when correction is
     off or the window selected nothing."""
     y = np.asarray(y_values, dtype=np.float64)
@@ -219,9 +242,9 @@ def apply_statistics(
 
     method = str(settings.smoothing_method).strip().lower()
     if method == "savgol":
-        y = smooth_savgol(y, settings.smoothing_window, settings.smoothing_polyorder)
+        y = _smooth_by_runs(y, lambda part: smooth_savgol(part, settings.smoothing_window, settings.smoothing_polyorder), segments)
     elif method == "moving_average":
-        y = smooth_moving_average(y, settings.smoothing_window)
+        y = _smooth_by_runs(y, lambda part: smooth_moving_average(part, settings.smoothing_window), segments)
 
     if settings.baseline_enabled:
         return normalize_to_baseline_window(

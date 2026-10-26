@@ -31,6 +31,7 @@ from .scan_store import StoredScan
 from .scan_view import REFERENCE, SAMPLE, _primary_method
 from .settings import MetricSettings, StatisticsSettings
 from .statistics import aggregate_traces, apply_statistics
+from .step_stats import LineStepValues, StepMembership, line_step_values, step_statistics
 from .trace_fit import TraceInput, trace_from_input
 
 logger = logging.getLogger(__name__)
@@ -62,6 +63,8 @@ class SensorgramRequest:
     x: np.ndarray  # one value per cube of the file, in the file's cube order; NaN = no x for that cube
     groups: tuple[GroupSpec, ...] = ()  # for "average by group"; a selected ROI in none of them is "Ungrouped"
     roi_colors: Mapping[int, str] = field(default_factory=dict)
+    segments: np.ndarray | None = None  # one label per cube: smooth each run of equal labels on its own (`step_stats.smoothing_segments`); None = the whole trace
+    step_membership: StepMembership | None = None  # which cubes belong to which experiment step (`step_stats.assign_cubes`): each line then also gets its `step_values`
 
 
 @dataclass
@@ -76,6 +79,7 @@ class Series:
     n_members: int = 1
     baseline: float = float("nan")  # the offset subtracted by the baseline correction (NaN: none)
     member_ids: tuple[int, ...] = ()  # the ROIs this line is made of (one for an individual line); the mask marks look them up
+    step_values: LineStepValues | None = None  # mean +/- SD of this line in each experiment step (None: no steps were asked for)
 
 
 def trace_key(stored: StoredScan, formula_key: str, metric: MetricSettings) -> tuple:
@@ -165,11 +169,24 @@ class _PartialCancel(Cancelled):
 
 
 def build_series(request: SensorgramRequest, traces: Mapping[int, np.ndarray], display_mode: str, center: str, band: str) -> list[Series]:
-    """Statistics per ROI, then the display mode. ``traces`` must hold every ROI of the request."""
+    """Statistics per ROI, then the display mode. ``traces`` must hold every ROI of the request.
+
+    With a ``step_membership`` every line also carries its mean +/- SD in each experiment step (`Series.step_values`): of the line **as drawn** (the ROI's processed curve,
+    or the centre line of an average), so the numbers follow the smoothing, the baseline and the spike removal exactly as the curve does (maintainer's choice, 2026-10-26;
+    the spread *between* the ROIs of a group, which smoothing cannot change, is `step_stats.group_statistics`)."""
+    series = _build_lines(request, traces, display_mode, center, band)
+    if request.step_membership is not None and series:
+        stats = step_statistics(list(range(len(series))), np.vstack([line.y for line in series]), request.step_membership)  # rows are the lines, not ROI ids
+        for index, line in enumerate(series):
+            line.step_values = line_step_values(stats, (index,), between_rois=False)
+    return series
+
+
+def _build_lines(request: SensorgramRequest, traces: Mapping[int, np.ndarray], display_mode: str, center: str, band: str) -> list[Series]:
     x = np.asarray(request.x, dtype=np.float64)
     processed: dict[int, tuple[np.ndarray, float]] = {}
     for roi_id in request.roi_ids:
-        processed[roi_id] = apply_statistics(x, traces[roi_id], request.statistics)
+        processed[roi_id] = apply_statistics(x, traces[roi_id], request.statistics, request.segments)
     if display_mode == DISPLAY_AVERAGE_ALL:
         groups = [("average", f"Average of {len(processed)} ROIs", "#e5e7eb", tuple(processed))]
     elif display_mode == DISPLAY_BY_GROUP:

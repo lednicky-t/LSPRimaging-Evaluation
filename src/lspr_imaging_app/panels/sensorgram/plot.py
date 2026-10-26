@@ -6,6 +6,8 @@ A double-click on the y axis label emits ``y_label_double_clicked`` (the panel t
 A left click inside the plot emits ``x_clicked`` with the x value (the panel turns it into "go to that cube"); dragging the circle on the x axis
 (the Cube slider's handle, in the same colour) emits it too, for every pointer position.
 The experiment steps (``plan_bar.PlanBarItem``) sit behind everything; `set_plan` hands them over and makes room for the bar by widening the y range (``plan/bar_model.py``).
+The step statistics table (``stats_table.StepStatsItem``, `set_stats_table`) writes mean +/- SD per line and step level with the legend's rows: the plot moves the legend into the
+table's edge, makes room for it (y at that edge, x on the left for the legend) and decides which lines get a legend at all (`_fit_legend`: up to 6 always, more while it takes at most half the plot height).
 The bar's pointer gestures (drag a boundary, double-click a step, right-click a step) come out as the ``plan_*`` signals; ``plan_text_editor.StepTextEditor`` is the field that opens
 over a step (`open_plan_text_editor`). The plot decides nothing about them: ``plan_actions.PlanBarActions`` turns them into commands.
 """
@@ -24,13 +26,19 @@ from lspr_ui import get_active_theme
 
 from ...analysis.scan_trace import Series
 from ...plan.bar_model import ALIGN_DATA, POSITION_TOP, PlanBarSettings, PlanBarStep, label_headroom_px, reserved_range
+from ...plan.stats_table import StatsTable, StatsTableSettings
 from ..axis_cursor import AxisCursor
 from ..image.mark_colors import MASK_COLOR, cube_color
 from .baseline_selector_menu import DEFAULT_ALPHA, DEFAULT_COLOR, BaselineRangeReadout
 from .plan_bar import PlanBarItem
 from .plan_text_editor import StepTextEditor
+from .stats_table import LegendRows, StepStatsItem
 
-MAX_LEGEND_SERIES = 6
+MAX_LEGEND_SERIES = 6  # up to this many lines always have a legend
+MAX_LEGEND_ENTRIES = 24  # more lines carry no names at all (a legend of a hundred ROIs is a wall of text)
+LEGEND_MAX_HEIGHT_FRACTION = 0.5  # between the two: the legend stays while it takes at most this much of the plot height (it is cleared otherwise); a row is ~25 px
+_LEGEND_OFFSET_PX = (8, 8)  # where the legend sits from the top-left corner of the plot when the step statistics table is off
+_STATS_GAP_PX = 4  # between the legend and the plan bar / the edge, and around the rows of the step statistics table
 _BAND_ALPHA = 55
 BASELINE_BAND_SPAN = (0.0, 0.1)  # the baseline selector fills the bottom tenth of the plot, not its full height
 _WINDOW_EDGE_ALPHA = 160
@@ -122,6 +130,7 @@ class SensorgramPlot(QWidget):
         self._item = self._widget.getPlotItem()
         self._item.showGrid(x=True, y=True, alpha=0.15)
         self._legend: pg.LegendItem | None = None
+        self._legend_placed_by_table = False  # the step statistics table moved the legend (so it is put back when the table goes)
         self._items: list[pg.GraphicsObject] = []
         self._axis_cursor = AxisCursor(self._item, cube_color(), self)
         self._axis_cursor.dragged.connect(self.x_clicked)
@@ -129,6 +138,9 @@ class SensorgramPlot(QWidget):
         self._plan_bar = PlanBarItem()
         self._item.addItem(self._plan_bar, ignoreBounds=True)  # behind the traces; not part of the auto-range
         self._item.getViewBox().claim_right_click = self._plan_bar.claims_scene_pos
+        self._stats = StepStatsItem()  # the mean +/- SD of every line in every step, along the same edge as the legend it follows
+        self._item.addItem(self._stats, ignoreBounds=True)
+        self._stats.set_row_source(self._legend_rows)
         self._plan_bar.edge_drag_started.connect(self.plan_edge_drag_started)
         self._plan_bar.edge_dragged.connect(self.plan_edge_dragged)
         self._plan_bar.edge_drag_finished.connect(self.plan_edge_drag_finished)
@@ -136,7 +148,7 @@ class SensorgramPlot(QWidget):
         self._plan_bar.menu_requested.connect(self.plan_menu_requested)
         self._text_editor = StepTextEditor(self._widget.viewport())  # floats over the plot, like the baseline range box
         self._text_editor.committed.connect(self.plan_text_committed)
-        self._plan_room_applied = (0.0, 0.0)  # (top, bottom) fractions of the plot height the y range was widened by
+        self._room_applied = (0.0, 0.0, 0.0)  # (top, bottom) fractions of the plot height the y range was widened by, and the pixels the x range was widened by on the left
         self._window = pg.LinearRegionItem(values=(0.0, 1.0), movable=True, span=BASELINE_BAND_SPAN)
         self._window.setZValue(-5)
         self.set_baseline_style(QColor(DEFAULT_COLOR), DEFAULT_ALPHA)
@@ -150,6 +162,7 @@ class SensorgramPlot(QWidget):
         self._grid = np.empty(0)  # the x of the data points: the baseline selector's edges snap to them
         self._item.getViewBox().sigRangeChanged.connect(lambda *_args: self._reposition_range_readout())
         self._item.getViewBox().sigResized.connect(lambda *_args: self._reposition_range_readout())
+        self._item.getViewBox().sigResized.connect(lambda *_args: self._place_legend())  # the plan bar is a fraction of the plot height: the legend sits below it
         # The band's rectangle is computed from the visible y range, so it moves whenever the view re-ranges; ask for the repaint of its new place
         # ourselves (an incremental repaint after an auto-range left it unpainted until the pointer touched it).
         self._item.getViewBox().sigRangeChanged.connect(lambda *_args: self._window.update())
@@ -197,16 +210,17 @@ class SensorgramPlot(QWidget):
         ``mask_marks``: series key -> (persistent, individual), bool per point; a persistent mask gets a hollow triangle (like a play button),
         an individual one a hollow circle, both in the mask colour (None draws none)."""
         self.clear()
-        if len(series) <= MAX_LEGEND_SERIES:
+        named = len(series) <= MAX_LEGEND_ENTRIES
+        if named:
             if self._legend is None:
-                self._legend = self._item.addLegend(offset=(8, 8))
+                self._legend = self._item.addLegend(offset=_LEGEND_OFFSET_PX)
         elif self._legend is not None:
             self._legend.clear()
         for s in series:
             color = QColor(s.color)
             line = pg.PlotDataItem(
                 s.x, s.y, pen=pg.mkPen(color, width=1.5), symbol="o", symbolSize=4, symbolBrush=pg.mkBrush(color), symbolPen=None,
-                connect="finite", name=s.label if len(series) <= MAX_LEGEND_SERIES else None,
+                connect="finite", name=s.label if named else None,
             )
             self._add(line)
             if s.band_low is not None and s.band_high is not None:
@@ -234,8 +248,24 @@ class SensorgramPlot(QWidget):
                     on = np.asarray(flags, dtype=bool) & finite
                     if on.any():
                         self._add(pg.ScatterPlotItem(s.x[on], s.y[on], symbol=symbol, size=size, brush=None, pen=pg.mkPen(MASK_COLOR, width=1.8)))
+        self._fit_legend(len(series))
+        self._place_legend()
         self._item.getViewBox().autoRange()
-        self._apply_plan_room()
+        self._apply_room()
+
+    def _fit_legend(self, count: int) -> None:
+        """Up to `MAX_LEGEND_SERIES` lines the legend stays; with more it stays only while it takes at most `LEGEND_MAX_HEIGHT_FRACTION` of the plot height (a taller
+        panel holds more lines). Judged from the laid-out legend, so the font and the number of lines decide, not a guess."""
+        legend = self._legend
+        view_height = float(self._item.getViewBox().height())
+        if legend is None or not legend.items or count <= MAX_LEGEND_SERIES or view_height <= 0.0:
+            return
+        if self._legend_size()[1] > LEGEND_MAX_HEIGHT_FRACTION * view_height:
+            legend.clear()
+
+    def legend_entry_count(self) -> int:
+        """How many lines the legend names right now (0: no legend)."""
+        return 0 if self._legend is None else len(self._legend.items)
 
     def _add(self, item: pg.GraphicsObject, ignore_bounds: bool = False) -> None:
         self._item.addItem(item, ignoreBounds=ignore_bounds)
@@ -249,46 +279,126 @@ class SensorgramPlot(QWidget):
     def set_plan(self, steps: Sequence[PlanBarStep], settings: PlanBarSettings) -> None:
         """Show these steps (an empty sequence hides the bar). When the room the bar needs changed (its height, its side, the text mode), the view is ranged again."""
         self._plan_bar.set_plan(tuple(steps), settings)
-        if self._plan_room() != self._plan_room_applied:
-            self._item.getViewBox().autoRange()
-            self._apply_plan_room()
+        self._place_legend()  # the legend sits just inside the bar when the step statistics table is on
+        self._remake_room_if_changed()
 
-    def _plan_room(self) -> tuple[float, float]:
-        """(top, bottom): the fractions of the plot height the bar, and in the Data text mode the labels, need beyond the traces."""
-        bar = self._plan_bar
-        if not bar.is_shown():
-            return 0.0, 0.0
-        settings = bar.settings()
-        top = bottom = 0.0
-        if not settings.is_full:  # a full-height bar sits behind the traces and needs no room
-            if settings.position == POSITION_TOP:
-                top += settings.height_fraction
-            else:
-                bottom += settings.height_fraction
+    def _room(self) -> tuple[float, float, float]:
+        """(top, bottom, left): the fractions of the plot height the bar, in the Data text mode its labels, and the step statistics table need beyond the traces,
+        and the pixels the table's legend needs on the left (so the first step's numbers do not start under it)."""
+        top = bottom = left = 0.0
         view_height = float(self._item.getViewBox().height())
-        if settings.text_align == ALIGN_DATA and view_height > 0.0:
-            above, below = label_headroom_px(settings, QFontMetricsF(bar.font()).height())
-            top += above / view_height
-            bottom += below / view_height
-        return top, bottom
+        bar = self._plan_bar
+        if bar.is_shown():
+            settings = bar.settings()
+            if not settings.is_full:  # a full-height bar sits behind the traces and needs no room
+                if settings.position == POSITION_TOP:
+                    top += settings.height_fraction
+                else:
+                    bottom += settings.height_fraction
+            if settings.text_align == ALIGN_DATA and view_height > 0.0:
+                above, below = label_headroom_px(settings, QFontMetricsF(bar.font()).height())
+                top += above / view_height
+                bottom += below / view_height
+        if self._stats.is_shown() and view_height > 0.0:
+            width, height = self._legend_size()
+            if height > 0.0:  # the rows are the legend's rows
+                rows = (height + 2 * _STATS_GAP_PX) / view_height
+                if self._stats.settings().position == POSITION_TOP:
+                    top += rows
+                else:
+                    bottom += rows
+                left = width + _LEGEND_OFFSET_PX[0] + 2 * _STATS_GAP_PX
+        return top, bottom, left
 
-    def _apply_plan_room(self) -> None:
-        """Widen the y range the auto-range just set, so the bar (and the Data-mode labels) take free space instead of hiding traces."""
-        self._plan_room_applied = self._plan_room()
-        top, bottom = self._plan_room_applied
-        if top <= 0.0 and bottom <= 0.0:
+    def _remake_room_if_changed(self) -> None:
+        """Range the view again, with the room made, when what the bar, its labels and the table need beyond the traces is not what the view was ranged with."""
+        if self._room() != self._room_applied:
+            self._item.getViewBox().autoRange()
+            self._apply_room()
+
+    def _apply_room(self) -> None:
+        """Widen the ranges the auto-range just set, so the bar (and the Data-mode labels and the step statistics table) take free space instead of hiding traces:
+        the y range at the top and bottom, the x range on the left for the legend that heads the table."""
+        self._room_applied = self._room()
+        top, bottom, left = self._room_applied
+        if top <= 0.0 and bottom <= 0.0 and left <= 0.0:
             return
         view_box = self._item.getViewBox()
-        low, high = view_box.viewRange()[1]
-        view_box.setYRange(*reserved_range(low, high, top, bottom), padding=0.0)
+        if top > 0.0 or bottom > 0.0:
+            low, high = view_box.viewRange()[1]
+            view_box.setYRange(*reserved_range(low, high, top, bottom), padding=0.0)
+        width = float(view_box.width())
+        if left > 0.0 and width > 2.0 * left:
+            low, high = view_box.viewRange()[0]
+            table = self._stats.table()
+            low = min(low, table.columns[0].x_start) if table is not None and table.columns else low  # a first step that starts before the data has room too
+            view_box.setXRange(low - (high - low) * left / (width - left), high, padding=0.0)
+
+    # -- the step statistics table and its legend ---------------------------------------------------------------------------
+
+    def set_stats_table(self, table: StatsTable | None, settings: StatsTableSettings) -> None:
+        """Show this table (None, or `settings.visible` False, hides it). It sits along the edge `settings.position`, the legend moves into it so that the cells are
+        level with the legend's rows, and the plot is ranged again when the room it needs changed."""
+        self._stats.set_table(table, settings)
+        self._place_legend()
+        self._remake_room_if_changed()
+
+    def stats_item(self) -> StepStatsItem:
+        return self._stats
+
+    def _legend_size(self) -> tuple[float, float]:
+        """(width, height) in pixels of the laid-out legend, (0, 0) without one."""
+        legend = self._legend
+        if legend is None or not legend.items:
+            return 0.0, 0.0
+        legend.layout.activate()
+        legend.updateSize()
+        return float(legend.width()), float(legend.height())
+
+    def _legend_rows(self) -> LegendRows | None:
+        """Where the legend's rows are, for the table to follow (None: no legend entries)."""
+        legend = self._legend
+        if legend is None or not legend.items:
+            return None
+        legend.layout.activate()
+        return LegendRows(tuple(float(label.sceneBoundingRect().center().y()) for _sample, label in legend.items), float(legend.sceneBoundingRect().right()))
+
+    def _bar_height_px(self, position: str) -> float:
+        """Pixels the plan bar takes along the edge `position` (0 when it is hidden, full-height, or on the other edge)."""
+        bar = self._plan_bar
+        if not bar.is_shown():
+            return 0.0
+        settings = bar.settings()
+        if settings.is_full or settings.position != position:
+            return 0.0
+        return settings.height_fraction * float(self._item.getViewBox().height())
+
+    def _place_legend(self) -> None:
+        """With the table on, the legend sits at its edge just inside the plan bar, so its rows and the cells line up (the table owns its place). With the table off it is
+        where it always was (top left) and wherever the user dragged it: it is put back only if the table had moved it."""
+        legend = self._legend
+        if legend is None:
+            return
+        if not self._stats.is_shown():
+            if self._legend_placed_by_table:
+                legend.setOffset(_LEGEND_OFFSET_PX)
+                self._legend_placed_by_table = False
+            return
+        position = self._stats.settings().position
+        gap = self._bar_height_px(position) + _STATS_GAP_PX
+        legend.setOffset((_LEGEND_OFFSET_PX[0], gap if position == POSITION_TOP else -gap))  # a negative offset is measured from the bottom
+        self._legend_placed_by_table = True
 
     def _on_scene_moved(self, scene_pos) -> None:
         """The bar's tooltip is the one of the step under the pointer, and the cursor shows a resize arrow over a boundary; set on every move, so they are right when Qt
         asks for them. Not while a button is down (a drag in progress keeps what it has)."""
-        bar = self._plan_bar
-        if not bar.is_shown() or QApplication.mouseButtons() != Qt.MouseButton.NoButton:
+        if QApplication.mouseButtons() != Qt.MouseButton.NoButton:
             return
-        bar.hover_at(bar.mapFromScene(scene_pos))
+        bar = self._plan_bar
+        if bar.is_shown():
+            bar.hover_at(bar.mapFromScene(scene_pos))
+        if self._stats.is_shown():
+            self._stats.hover_at(self._stats.mapFromScene(scene_pos))  # the full numbers of the cell under the pointer
 
     def open_plan_text_editor(self, index: int, text: str) -> None:
         """Open the one-line editor over step `index`, showing `text` (the whole note). It reports through `plan_text_committed`."""

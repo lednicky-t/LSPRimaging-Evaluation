@@ -194,6 +194,7 @@ class StatisticsSettings:
     smoothing_method: str = "none"
     smoothing_window: int = 15
     smoothing_polyorder: int = 2
+    smooth_within_steps: bool = True  # (2026-10-26) smooth each experiment step on its own, so the smoother never mixes two solutions; no steps: the whole trace
     spike_rejection_enabled: bool = False
     spike_rejection_method: str = "hampel"
     spike_rejection_window: int = 5

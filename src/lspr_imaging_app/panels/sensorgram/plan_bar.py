@@ -26,7 +26,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-import pyqtgraph as pg
 from PyQt6.QtCore import QPoint, QPointF, QRectF, Qt, pyqtSignal
 from PyQt6.QtGui import QColor, QFont, QFontMetricsF, QPainter, QPainterPath, QPen, QTransform
 from PyQt6.QtWidgets import QApplication
@@ -42,6 +41,7 @@ from ...plan.bar_model import (
     grab_edge,
     text_top_y,
 )
+from .device_item import DeviceSpaceItem
 
 Z_VALUE = -20  # below the filled bands of an average (-10), the baseline selector (-5) and every trace (0)
 EDGE_TOLERANCE_PX = 5.0  # how close to a boundary the pointer must be to take hold of it
@@ -62,7 +62,7 @@ class DrawnStep:
     text_color: str
 
 
-class PlanBarItem(pg.GraphicsObject):
+class PlanBarItem(DeviceSpaceItem):
     edge_drag_started = pyqtSignal(int, str)  # (step index, "start" | "end")
     edge_dragged = pyqtSignal(int, str, float, bool)  # ... the data x under the pointer, and whether to move the shared boundary with the neighbour (Shift, or both selected)
     edge_drag_finished = pyqtSignal()
@@ -147,18 +147,8 @@ class PlanBarItem(pg.GraphicsObject):
 
     # -- geometry in data coordinates ---------------------------------------------------------------------------------------
 
-    def view_rect(self) -> QRectF:
-        """The visible part of the plot in data coordinates (x range, y range); empty without a view."""
-        view = self.getViewBox()
-        return QRectF() if view is None else QRectF(view.viewRect())
-
     def boundingRect(self) -> QRectF:  # noqa: N802 - Qt naming
         return self.view_rect() if self.is_shown() else QRectF()
-
-    def _device_transform(self) -> QTransform | None:
-        """Data -> viewport pixels, or None when the item is not in a view yet."""
-        widget = self.getViewWidget()
-        return None if widget is None else self.deviceTransform(widget.viewportTransform())
 
     def _pixel_width(self) -> float:
         """Data units per pixel along x (0 without a view)."""
@@ -262,12 +252,6 @@ class PlanBarItem(pg.GraphicsObject):
             self.setCursor(Qt.CursorShape.SizeHorCursor)
         else:
             self.unsetCursor()
-
-    def viewTransformChanged(self) -> None:  # noqa: N802 - pyqtgraph naming
-        self.prepareGeometryChange()  # the bounding rectangle is the visible region
-        self.update()
-
-    viewRangeChanged = viewTransformChanged  # noqa: N815 - both hooks mean the same here
 
     # -- pointer gestures -----------------------------------------------------------------------------------------------------
 
@@ -405,7 +389,7 @@ class PlanBarItem(pg.GraphicsObject):
             painter.setBrush(accent)
             for x in (item.left_edge, item.right_edge):  # solid bars on the left and right edge of every selected step; no frame along the top and bottom
                 if x is not None:
-                    painter.drawRect(QRectF(x - 3.0, item.rect.top(), 6.0, item.rect.height()))
+                    painter.drawRect(QRectF(x - 1.2, item.rect.top(), 2.4, item.rect.height()))  # 2.4 px wide (was 6, 60 % thinner, maintainer 2026-10-26)
         painter.setBrush(Qt.BrushStyle.NoBrush)
         for item in drawn:
             if item.text_rect is not None:

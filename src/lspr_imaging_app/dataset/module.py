@@ -63,6 +63,7 @@ from __future__ import annotations
 import logging
 import threading
 import time
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -442,6 +443,21 @@ class DatasetModule(QObject):
             return None
         latest = compact_dataset_image_timings(self._dataset).latest_ms_by_cube
         return max(latest.values()) + 1 if latest else None
+
+    def cube_spans_unix_ms(self, cubes: Sequence[int]) -> tuple[np.ndarray, np.ndarray]:
+        """The first and the last frame of each cube in unix milliseconds (same clock as `cube_start_unix_ms`), two `float64` arrays in the order of `cubes`.
+        NaN where a cube has no timing (or there is no dataset / timing at all). A cube is a run of frames; a step boundary can fall inside it."""
+        first = np.full(len(cubes), np.nan)
+        last = np.full(len(cubes), np.nan)
+        if self._dataset is None or self._dataset.acquisition_metadata is None:
+            return first, last
+        compact = compact_dataset_image_timings(self._dataset)
+        for i, cube in enumerate(cubes):
+            start = compact.earliest_ms_by_cube.get(int(cube))
+            if start is not None:
+                first[i] = start
+                last[i] = compact.latest_ms_by_cube.get(int(cube), start)
+        return first, last
 
     def frame_start_seconds(self, cube_index: int, wavelength: float) -> float | None:
         """Seconds from the acquisition start to *this frame* - the experimental time of one image (a cube's own

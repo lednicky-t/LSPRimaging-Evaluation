@@ -29,7 +29,13 @@ three remembered). The selector is drawn whether or not the traces are subtracte
 ``plan_bar.py`` the item, ``plan/bar_model.py`` what is drawn and where the text goes; design ``docs/experimental_plan_bar_design_2026-10-26.md``). The steps come from
 ``ExperimentPlanModule`` (the dataset's measured steps with the user's edits); the panel only converts them to the plot's x axis (``plan/axis_map.py``) and hands them to the
 plot. They follow the Cube / Time choice, and are drawn only while traces are (an empty plot has no axis to put them on). The bar's gestures (drag a boundary, double-click to retype a note,
-right-click for colour and reset) are handled by ``plan_actions.PlanBarActions``, which edits the module; this panel only supplies the plot's axis (`_plan_context`).
+right-click for colour and reset) are handled by ``plan_actions.PlanBarActions``, which edits the module; everything that hangs on the steps lives in ``step_overlays.StepOverlays`` (split out of this file 2026-10-26); this panel only gives it the plot, the lines last drawn and the x axis.
+
+**Smoothing inside steps and the Step stats group (2026-10-26).** With the "smooth inside steps" toggle on (Smoothing group) and a dataset that has steps, each step is smoothed on its own, so a
+window never mixes two solutions; without steps the whole trace is smoothed. The Step stats group writes mean +/- SD of every line in every step on the plot, level with the legend's rows
+(``stats_group.py`` the controls, ``stats_table.py`` the item, ``plan/stats_table.py`` what is written). Both need the steps and the cube times, which `StepOverlays.step_inputs` turns into the two extra
+inputs of the request (the pieces to smooth, the cubes of each step); the numbers are computed in the worker with the curves, so they follow smoothing, baseline and spike removal. A moved,
+reset or restored boundary asks for a redraw when either is on (`StepOverlays._on_plan_changed`); a note or colour edit does not. Design and measurements: ``docs/step_statistics_backbone_2026-10-26.md``.
 
 **Status bar.** A computation that lasts more than a moment (``panel_task.PanelTask``) appears in the app's task indicator ("Sensorgram: fitting
 ROI 3 of 160"), with a Cancel button that stops it between ROIs and clears the plot (the traces already fitted are kept for the next request); a
@@ -77,7 +83,6 @@ from ...analysis.trace_pool import TracePool
 from ...applog import timed
 from ...dataset import DatasetModule
 from ...image_tools.mask.module import MaskModule
-from ...plan.bar_model import build_bar_steps
 from ...plan.module import ExperimentPlanModule
 from ...roi import RoiToolbox
 from ...selection import CubeDisplayModule, SelectionModule
@@ -101,9 +106,8 @@ from ..spectra.view_menu import IconToggle
 from ..visibility_gate import HiddenPanelGate
 from .baseline_selector_menu import DEFAULT_ALPHA, DEFAULT_COLOR, SPEC as BASELINE_BAND_SPEC, BaselineSelectorMenu, make_font_box, make_height_box
 from .mask_marks_toggle import MaskMarksToggle
-from .plan_actions import PlanAxisContext, PlanBarActions
-from .plan_group import PlanBarControls
-from .stat_icons import band_picture, center_picture, display_picture, smoothing_picture, spikes_icon, subtract_icon
+from .stat_icons import band_picture, center_picture, display_picture, smoothing_picture, spikes_icon, subtract_icon, within_steps_icon
+from .step_overlays import StepOverlays
 from .plot import SensorgramPlot, snap_window
 
 logger = logging.getLogger(__name__)
@@ -138,6 +142,12 @@ SMOOTHING_TIPS = {
     "savgol": "Savitzky-Golay: a low-order polynomial fitted in a sliding window; keeps the height and width of peaks better than a plain average.",
     "moving_average": "Moving average: the mean of the points in a sliding window.",
 }
+WITHIN_STEPS_TIP = (
+    "Smooth inside each experiment step: every step is smoothed on its own, so the smoothing window never reaches over a step boundary and one solution's level "
+    "is not mixed into the next. A cube that straddles a boundary is left unsmoothed. The statistics of the steps are taken from this same curve. "
+    "Off, or a dataset without steps: the whole trace is smoothed in one piece."
+)
+NO_STEPS_NOTE = " This dataset has no experiment steps, so the whole trace is smoothed."
 _RELEVANT_ROI_CHANGES = {"detection_settings", "session_restored", "added", "deleted", "detected"}  # a drag changes no sensorgram point
 _FALLBACK_COLORS = ("#f59e0b", "#38bdf8", "#34d399", "#f472b6", "#a78bfa", "#fb7185", "#facc15", "#22d3ee", "#a3e635")
 
@@ -178,7 +188,6 @@ class SensorgramPanel(QWidget):
         `experiment_plan`: the experiment steps for the plan bar; without it the Experimental plan group stays greyed out."""
         super().__init__(parent)
         self._mask = mask
-        self._experiment_plan = experiment_plan
         self._live = live if live is not None else AnalysisLiveModule(self)  # without an owner: always live
         self._dirty_while_paused = False
         self._image_first = ImageFirst(image_busy)
@@ -228,6 +237,8 @@ class SensorgramPanel(QWidget):
         self._window.setSingleStep(2)
         style_ribbon_number_field(self._window, "301")
         self._window.setToolTip("Smoothing window in points (made odd, never longer than the trace). Shown while a smoothing method is chosen.")
+        self._within_steps = IconToggle(within_steps_icon, WITHIN_STEPS_TIP + NO_STEPS_NOTE, self)
+        self._within_steps.setEnabled(False)  # until a dataset with steps is open (`_on_steps_available`)
         self._spikes = IconToggle(
             spikes_icon,
             "Remove spikes: replace single-point outliers (Hampel filter: 3.5 scaled MADs from the rolling median of 5 points) before smoothing.",
@@ -250,14 +261,13 @@ class SensorgramPanel(QWidget):
         self._band_height = make_height_box(self)
         self._band_font = make_font_box(self)
         self._band_menu = BaselineSelectorMenu(self._band_controls, self._band_height, self._band_font, self)
-        self._plan_controls = PlanBarControls(self)
-        self._plan_controls.set_available(False)  # until a dataset with steps is open
         self._status = QLabel("", self)
         self._status.setWordWrap(True)
         self._status.setStyleSheet(f"color: {get_active_theme().text_dim};")
         self._plot = SensorgramPlot(self)
-        self._plan_actions = (
-            None if experiment_plan is None else PlanBarActions(experiment_plan, self._plot, self._plan_context, self)
+        self._steps = StepOverlays(
+            self, experiment_plan=experiment_plan, plot=self._plot, dataset=dataset, settings=analysis_settings, cube_display=cube_display, drawn=self._drawn, x_axis=self._x_axis,
+            schedule_redraw=self._schedule_redraw, defer=lambda: self._gate.defer(), on_steps_available=self._on_steps_available,  # the gate is made further down
         )
         self.task = PanelTask(TASK_ID, "Sensorgram", self)  # connected to the status bar's task indicator by app_rewrite
 
@@ -266,10 +276,11 @@ class SensorgramPanel(QWidget):
         self._ribbon = RibbonRow(self)
         self._ribbon.add_group("Live", self._live_toggle)
         self._ribbon.add_group("Statistic", self._display, self._center, self._band)  # how the ROIs are shown, and how an average is made
-        self._ribbon.add_group("Smoothing", self._smoothing, self._window, self._spikes)
+        self._ribbon.add_group("Smoothing", self._smoothing, self._window, self._within_steps, self._spikes)
         self._ribbon.add_group("Baseline", self._baseline, self._band_menu)
         self._ribbon.add_group("View", self._mask_toggle)
-        self._ribbon.add_group("Experimental plan", *self._plan_controls.widgets())
+        self._ribbon.add_group("Experimental plan", *self._steps.plan_controls.widgets())
+        self._ribbon.add_group("Step stats", *self._steps.stats_controls.widgets())
         self._ribbon.add_stretch()
         self._ribbon_drawer = rolled_ribbon(self._ribbon, "Show the sensorgram controls.", self)
         controls = QHBoxLayout()
@@ -294,6 +305,7 @@ class SensorgramPanel(QWidget):
         for combo in (self._display, self._center, self._band, self._smoothing):
             combo.currentIndexChanged.connect(self._on_controls_changed)
         self._window.valueChanged.connect(self._on_controls_changed)
+        self._within_steps.toggled.connect(self._on_controls_changed)
         self._spikes.toggled.connect(self._on_controls_changed)
         self._baseline.toggled.connect(self._on_baseline_toggled)
         self._mask_toggle.toggled.connect(lambda _on: self._draw_last())
@@ -307,9 +319,6 @@ class SensorgramPanel(QWidget):
         self._band_controls.color_changed.connect(self._on_band_color)
         self._band_controls.alpha_changed.connect(self._on_band_alpha)
         self._plot.x_clicked.connect(self._on_plot_clicked)
-        self._plan_controls.settings_changed.connect(self._refresh_plan)
-        if self._experiment_plan is not None:
-            self._experiment_plan.steps_changed.connect(self._on_plan_changed)
 
         self._selection.roi_selection_changed.connect(lambda _ids: self._schedule_redraw())
         self._selection.cube_changed.connect(lambda _cube: self._update_cursor())
@@ -333,7 +342,7 @@ class SensorgramPanel(QWidget):
         store.bind(BAND_HEIGHT_KEY, self._band_height)
         self._plot.set_baseline_height(self._band_height.value())  # a restored value arrives without a signal
         store.bind(BAND_FONT_KEY, self._band_font)
-        self._plan_controls.restore_ui_state(store)
+        self._steps.restore_ui_state(store)
         self._plot.set_readout_font_size(self._band_font.value())
         saved_color = read(store, SENSORGRAM_BASELINE_BAND_COLOR)
         self._band_visible = read(store, SENSORGRAM_BASELINE_BAND_VISIBLE) is not False
@@ -360,10 +369,11 @@ class SensorgramPanel(QWidget):
         for menu in (self._display, self._center, self._band, self._smoothing):
             menu.refresh_theme()
         self._spikes.refresh_theme()
+        self._within_steps.refresh_theme()
         self._baseline.refresh_theme()
         self._band_controls.refresh_theme(get_active_theme())
         self._band_menu.refresh_theme(get_active_theme())
-        self._plan_controls.refresh_theme()
+        self._steps.refresh_theme()
         self._ribbon_drawer.refresh_theme()
         self._plot.refresh_theme()
         self._status.setStyleSheet(f"color: {get_active_theme().text_dim};")
@@ -394,6 +404,8 @@ class SensorgramPanel(QWidget):
             self._smoothing.setCurrentIndex(max(self._smoothing.findData(stats.smoothing_method), 0))
             self._window.setValue(int(stats.smoothing_window))
             self._window.setVisible(stats.smoothing_method != "none")  # the window means nothing without a smoothing method
+            self._within_steps.setChecked(bool(stats.smooth_within_steps))
+            self._within_steps.setVisible(stats.smoothing_method != "none")  # nor does smoothing inside steps
             self._spikes.setChecked(bool(stats.spike_rejection_enabled))
             self._baseline.setChecked(bool(stats.baseline_enabled))
         finally:
@@ -406,7 +418,7 @@ class SensorgramPanel(QWidget):
             self._settings.statistics_settings(),
             sensorgram_display_mode=self._display.currentData(), sensorgram_aggregation=self._center.currentData(),
             sensorgram_band=self._band.currentData(), smoothing_method=self._smoothing.currentData(),
-            smoothing_window=self._window.value(), spike_rejection_enabled=self._spikes.isChecked(),
+            smoothing_window=self._window.value(), smooth_within_steps=self._within_steps.isChecked(), spike_rejection_enabled=self._spikes.isChecked(),
         ))
 
     def _default_baseline_window(self) -> tuple[float, float]:
@@ -601,7 +613,7 @@ class SensorgramPanel(QWidget):
         self._plot.clear()
         self._plot.set_baseline_window(None)
         self._plot.set_current_x(None)
-        self._refresh_plan()
+        self._steps.refresh()
         self._status.setText(text)
         self.task.end("cancelled", text)
 
@@ -632,7 +644,8 @@ class SensorgramPanel(QWidget):
         detection = self._roi_toolbox.detection_settings()
         metric = self._settings.metric_settings()
         groups = tuple(GroupSpec(g.name, g.sample_color_hex, tuple(g.area_roi_ids)) for g in self._roi_toolbox.groups())
-        request = SensorgramRequest(roi_ids, detection.formula_key, metric, self._settings.statistics_settings(), x, groups, self._roi_colors(roi_ids))
+        segments, membership = self._steps.step_inputs(stored)
+        request = SensorgramRequest(roi_ids, detection.formula_key, metric, self._settings.statistics_settings(), x, groups, self._roi_colors(roi_ids), segments, membership)
         key = trace_key(stored, detection.formula_key, metric)
         if key != self._cache_key:
             self._cache, self._cache_key = {}, key  # other formula / fit / metric: the old traces do not apply
@@ -738,58 +751,17 @@ class SensorgramPanel(QWidget):
             window = self._default_baseline_window()  # where Subtract would put it; stored only once dragged, typed or subtracted
         self._plot.set_baseline_window(window if self._band_visible else None, self._range_decimals())
         self._update_cursor()
-        self._refresh_plan()
+        self._steps.refresh()
         self._status.setText(self._status_line(job, series, stale))
 
-    def _on_plan_changed(self, reason: str = "") -> None:
-        """The experiment steps changed (a dataset opened, a session restored, an edit). Another dataset or session means other steps: nothing stays selected."""
-        if reason in ("dataset", "restored"):
-            self._plot.plan_bar().clear_selection()
-        if not self._gate.defer():
-            self._refresh_plan()
+    def _drawn(self) -> tuple[StoredScan, list[Series]] | None:
+        """The scan and the lines last drawn (None before the first draw or after a clear): what the step overlays are laid over."""
+        return None if self._last is None else (self._last[0].stored, self._last[1])
 
-    def _plan_axis(self):
-        """(time <-> x map, plotted cubes) for the traces being drawn, or None when nothing is drawn or the cubes have no timing."""
-        plan = self._experiment_plan
-        if plan is None or self._last is None:
-            return None
-        job, _series = self._last
-        _label, x = self._x_axis()
-        cubes = [int(c) for c in job.stored.cube_indices]
-        axis = plan.axis_map(cubes, [float(v) for v in x])
-        return None if axis is None else (axis, cubes)
-
-    def _plan_context(self) -> PlanAxisContext | None:
-        """What a gesture on the plan bar needs: the axis, where a boundary may land, and the unit. None while nothing is drawn."""
-        found = self._plan_axis()
-        if found is None:
-            return None
-        axis, cubes = found
-        return PlanAxisContext(axis, self._experiment_plan.snap_grid_unix_ms(cubes), self._cube_display.effective_mode() == MODE_TIME)
-
-    def _refresh_plan(self) -> None:
-        """Convert the experiment steps to the plot's x axis and hand them to the plot, or hand it none (no steps, no traces, no timing). Cheap: a few steps and the
-        series already drawn; it does not compute anything."""
-        settings = self._plan_controls.settings()
-        plan = self._experiment_plan
-        steps = () if plan is None else plan.steps()
-        self._plan_controls.set_available(bool(steps))
-        found = self._plan_axis() if steps else None
-        if found is None:
-            self._plot.set_plan((), settings)
-            return
-        axis, _cubes = found
-        _job, series = self._last
-        lines: list[tuple[np.ndarray, np.ndarray]] = []
-        for s in series:  # everything drawn counts for the Data text mode: each line and the edges of its band
-            lines.append((s.x, s.y))
-            if s.band_low is not None and s.band_high is not None:
-                lines.extend(((s.x, s.band_low), (s.x, s.band_high)))
-        bars = build_bar_steps(
-            steps, axis, lines, text_mode=settings.text_mode, separators=settings.separators,
-            time_mode=self._cube_display.effective_mode() == MODE_TIME,
-        )
-        self._plot.set_plan(bars, settings)
+    def _on_steps_available(self, has_steps: bool) -> None:
+        """Told by the step overlays at every refresh whether the dataset has experiment steps: without them there is nothing to smooth step by step, the whole trace is smoothed."""
+        self._within_steps.setEnabled(has_steps)
+        self._within_steps.setToolTip(WITHIN_STEPS_TIP if has_steps else WITHIN_STEPS_TIP + NO_STEPS_NOTE)
 
     def _status_line(self, job: _Job, series: list[Series], stale: np.ndarray | None) -> str:
         parts = [f"{len(job.request.roi_ids)} ROI{'s' if len(job.request.roi_ids) != 1 else ''}"]

@@ -2,6 +2,7 @@
 coloured when "on", grey and crossed out when "off". Not vendored icon files (`lspr_ui/ICONS.md`): a spike on a trace and a trace lowered onto its baseline are not in the icon library,
 and each is a few lines of painter code.
 
+``step_stats_icon`` a bar of two steps with strokes of text under each (the toggle of the table of mean +/- SD per step); ``within_steps_icon`` a dashed step boundary with a separately smoothed curve on each side (the toggle that smooths each experiment step on its own);
 ``spikes_icon`` a trace with one sharp spike (the toggle that removes such outliers); ``subtract_icon`` a dashed baseline, a trace that has risen from it and an arrow down to it
 (the toggle that shows every trace as a shift from its baseline); ``smoothing_picture`` the picture of one smoothing method for the pick-up menu: the letters N/A for no smoothing,
 SG for Savitzky-Golay and MA for the moving average.
@@ -10,7 +11,7 @@ SG for Savitzky-Golay and MA for the moving average.
 from __future__ import annotations
 
 from PyQt6.QtCore import QPointF, QRectF, Qt
-from PyQt6.QtGui import QColor, QIcon, QPainter, QPen, QPixmap
+from PyQt6.QtGui import QColor, QIcon, QPainter, QPainterPath, QPen, QPixmap
 
 from lspr_ui import get_active_theme
 
@@ -77,6 +78,45 @@ def subtract_icon(on: bool, off_color: str, on_color: str) -> QIcon:
     painter.drawLine(_at(0.84, 0.30), _at(0.84, 0.74))  # the arrow: from the plateau down onto the baseline
     painter.drawLine(_at(0.84, 0.74), _at(0.76, 0.62))
     painter.drawLine(_at(0.84, 0.74), _at(0.92, 0.62))
+    if not on:
+        _slash(painter, color)
+    painter.end()
+    return QIcon(pixmap)
+
+
+def within_steps_icon(on: bool, off_color: str, on_color: str) -> QIcon:
+    """The "smooth inside each step" switch: a dashed vertical step boundary with a soft curve on each side that stops at it, the right one at another level (two
+    smoothed pieces, not one curve across the boundary); in ``on_color``; grey and crossed out when off."""
+    pixmap, painter = _canvas()
+    color = QColor(on_color if on else off_color)
+    painter.setPen(_pen(color, _STROKE * 0.8, Qt.PenStyle.DashLine))
+    painter.drawLine(_at(0.50, 0.08), _at(0.50, 0.92))
+    painter.setPen(_pen(color))
+    for start, first, second, end in (
+        ((0.08, 0.72), (0.18, 0.58), (0.30, 0.82), (0.40, 0.66)),  # left of the boundary: lower
+        ((0.60, 0.40), (0.70, 0.26), (0.82, 0.50), (0.92, 0.34)),  # right of it: higher
+    ):
+        curve = QPainterPath(_at(*start))
+        curve.cubicTo(_at(*first), _at(*second), _at(*end))
+        painter.drawPath(curve)
+    if not on:
+        _slash(painter, color)
+    painter.end()
+    return QIcon(pixmap)
+
+
+def step_stats_icon(on: bool, off_color: str, on_color: str) -> QIcon:
+    """The step statistics table: a bar of two steps along the top and, under each step, two short strokes standing for the numbers written there (one row per line);
+    in ``on_color``; grey and crossed out when off."""
+    pixmap, painter = _canvas()
+    color = QColor(on_color if on else off_color)
+    painter.setPen(_pen(color, _STROKE * 0.8))
+    for left, right in ((0.08, 0.48), (0.52, 0.92)):
+        painter.drawRect(QRectF(_at(left, 0.10), _at(right, 0.30)))
+    painter.setPen(_pen(color))
+    for y in (0.55, 0.80):
+        painter.drawLine(_at(0.16, y), _at(0.40, y))
+        painter.drawLine(_at(0.60, y), _at(0.84, y))
     if not on:
         _slash(painter, color)
     painter.end()
@@ -175,4 +215,4 @@ def band_picture(kind: str) -> PictureFor:
     return equation_picture("SEM" if kind == "sem" else "SD")
 
 
-__all__ = ["band_picture", "center_picture", "display_picture", "smoothing_picture", "spikes_icon", "subtract_icon"]
+__all__ = ["band_picture", "center_picture", "display_picture", "smoothing_picture", "spikes_icon", "step_stats_icon", "subtract_icon", "within_steps_icon"]
