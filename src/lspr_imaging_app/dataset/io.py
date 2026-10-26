@@ -51,6 +51,7 @@ from lspr_imaging_app.domain.exclusions import ImageExclusionRule, is_excluded
 from lspr_imaging_app.io.image_naming import IMAGE_PATTERN
 from lspr_imaging_app.io.legacy_metadata import find_and_import_legacy_metadata, find_legacy_metadata_files
 from lspr_imaging_app.io.metadata_import import import_metadata_files
+from lspr_imaging_app.io.pump_plan import attach_pump_plan, find_pump_plan_csv
 from lspr_imaging_app.storage.workspace import (
     acquisition_metadata_from_payload,
     build_acquisition_metadata_payload,
@@ -199,6 +200,28 @@ def experimental_data_dir(dataset_folder: Path) -> Path:
 
 
 def load_acquisition_metadata(dataset_folder: Path) -> ImagingAcquisitionMetadata | None:
+    """`_load_acquisition_metadata_sources` plus the experiment steps (`metadata.plan`): a plan that came with the
+    metadata (a sidecar saved by this version) is kept when it already has its device settings. Otherwise the
+    pump-plan CSV found near the dataset (`find_pump_plan_csv`) is joined to the measured steps, and without one the
+    steps are built from the measured notes alone. A plan file that cannot be read is logged and skipped, the metadata
+    still loads. Nothing is written here; the sidecar picks the plan up the next time the metadata is saved."""
+    metadata = _load_acquisition_metadata_sources(dataset_folder)
+    if metadata is None:
+        return None
+    if metadata.plan is not None and metadata.plan.source_file is not None:
+        return metadata
+    plan_csv = find_pump_plan_csv(dataset_folder)
+    try:
+        metadata, notes = attach_pump_plan(metadata, plan_csv)
+    except (OSError, ValueError) as exc:
+        _LOGGER.warning("Could not read the pump-plan file %s: %s", plan_csv, exc)
+        metadata, notes = attach_pump_plan(metadata, None)
+    for note in notes:
+        (_LOGGER.warning if note.startswith("Plan warning") else _LOGGER.info)("%s", note)
+    return metadata
+
+
+def _load_acquisition_metadata_sources(dataset_folder: Path) -> ImagingAcquisitionMetadata | None:
     """Load whatever camera/illumination/cube-timing metadata is available
     for `dataset_folder`, checking sources in order:
 
@@ -863,7 +886,7 @@ def load_ome_zarr_dataset(folder: Path) -> ImageDataset:
     acquisition_metadata_payload = attrs.get(OME_ZARR_ACQUISITION_METADATA_KEY)
     if isinstance(acquisition_metadata_payload, dict):
         try:
-            acquisition_metadata = acquisition_metadata_from_payload(acquisition_metadata_payload)
+            acquisition_metadata, _notes = attach_pump_plan(acquisition_metadata_from_payload(acquisition_metadata_payload))
         except ValueError:
             _LOGGER.warning("Ignoring malformed acquisition metadata in %s", folder)
     return ImageDataset(folder=root, records=records, source_format="ome_zarr", acquisition_metadata=acquisition_metadata)
@@ -2039,7 +2062,8 @@ def _export_experimental_data(dataset: ImageDataset, destination: Path) -> None:
        hand) - copied forward verbatim. Never re-derived, so re-exporting a
        dataset any number of times never loses or regenerates this.
     2. Otherwise, whichever real file(s) back the source's metadata -
-       a native v6.4 HDF5 file, or the legacy CSV/TXT pair - found nearby
+       a native v6.4 HDF5 file, or the legacy CSV/TXT pair, and the
+       pump-plan CSV (the per-step pump/valve settings) - found nearby
        exactly like `load_acquisition_metadata`'s own discovery, then
        copied in (not moved - the originals stay where they were).
     3. Nothing found in either of the above: no `Experimental_data/` is
@@ -2064,6 +2088,9 @@ def _export_experimental_data(dataset: ImageDataset, destination: Path) -> None:
                 legacy_pair = find_legacy_metadata_files(dataset.folder)
                 if legacy_pair is not None:
                     source_files.extend(legacy_pair)
+            plan_csv = find_pump_plan_csv(dataset.folder)
+            if plan_csv is not None:
+                source_files.append(plan_csv)
             if source_files:
                 dest_dir.mkdir(parents=True, exist_ok=True)
                 for path in source_files:

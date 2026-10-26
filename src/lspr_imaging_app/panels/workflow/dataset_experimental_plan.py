@@ -115,6 +115,11 @@ def _describe_metadata(metadata: ImagingAcquisitionMetadata) -> str:
     lines.append(f"{len(metadata.image_timings)} per-image timing record(s)")
     if metadata.comment_events:
         lines.append(f"{len(metadata.comment_events)} comment event(s)")
+    plan = metadata.plan
+    if plan is not None:
+        source = f"settings from {plan.source_file}" if plan.source_file else "from the measured notes"
+        warnings = f", {len(plan.warnings)} warning(s)" if plan.warnings else ""
+        lines.append(f"{len(plan.steps)} experiment step(s), {source}{warnings}")
     if metadata.notes:
         lines.append(f"Notes: {metadata.notes}")
     return "\n".join(lines)
@@ -207,9 +212,9 @@ class ExperimentalPlanSection(QWidget):
         self._import_button.setIcon(_render_tabler_icon("file-import", "#38bdf8"))
         self._import_button.setStyleSheet(transparent_icon_button_stylesheet())
         self._import_button.setToolTip(
-            "Import acquisition metadata: a measuring-times CSV, metaData.txt, a native measurement file, or a "
-            "previously exported metadata file. You can select multiple files at once - each one is identified "
-            "by its content, not its name."
+            "Import acquisition metadata: a measuring-times CSV, metaData.txt, the pump-plan CSV, a native "
+            "measurement file, or a previously exported metadata file. You can select multiple files at once - "
+            "each one is identified by its content, not its name."
         )
         self._import_button.clicked.connect(self._on_import_clicked)
 
@@ -349,7 +354,8 @@ class ExperimentalPlanSection(QWidget):
             return
         paths = [Path(p) for p in paths_str]
         try:
-            result = import_metadata_files(paths)
+            # The loaded metadata (with its per-image times) lets a pump-plan file be attached on its own.
+            result = import_metadata_files(paths, base_metadata=self._dataset_module.rehydrated_acquisition_metadata())
         except Exception as exc:  # noqa: BLE001 - reported via dialog, not re-raised
             QMessageBox.critical(self, "Metadata import failed", str(exc))
             return

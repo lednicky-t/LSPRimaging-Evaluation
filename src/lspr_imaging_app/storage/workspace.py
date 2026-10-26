@@ -423,6 +423,12 @@ def acquisition_metadata_from_payload(payload: dict) -> ImagingAcquisitionMetada
     (`load_ome_zarr_dataset`), since both store the same payload shape."""
     if not isinstance(payload, dict) or "metadata" not in payload:
         raise ValueError("Invalid acquisition metadata format.")
+    version = payload.get("schema_version", 1)
+    if isinstance(version, int) and version > ACQUISITION_METADATA_VERSION:
+        raise ValueError(
+            f"This acquisition metadata was written by a newer version of the app (format {version}; this version "
+            f"reads up to {ACQUISITION_METADATA_VERSION})."
+        )
     return ImagingAcquisitionMetadata.model_validate(payload["metadata"])
 
 
