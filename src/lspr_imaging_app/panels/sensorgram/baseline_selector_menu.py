@@ -14,8 +14,20 @@ that "Subtract" (or a double-click on the y axis label) applies is read from the
 from __future__ import annotations
 
 from PyQt6.QtCore import QLocale, QPointF, QRectF, Qt, pyqtSignal
-from PyQt6.QtGui import QColor, QDoubleValidator, QFontMetrics, QIcon, QPainter, QPen, QPixmap
-from PyQt6.QtWidgets import QGridLayout, QHBoxLayout, QLabel, QLineEdit, QMenu, QSpinBox, QToolButton, QVBoxLayout, QWidget, QWidgetAction
+from PyQt6.QtGui import QColor, QDoubleValidator, QFont, QFontInfo, QFontMetrics, QIcon, QPainter, QPen, QPixmap
+from PyQt6.QtWidgets import (
+    QApplication,
+    QGridLayout,
+    QHBoxLayout,
+    QLabel,
+    QLineEdit,
+    QMenu,
+    QSpinBox,
+    QToolButton,
+    QVBoxLayout,
+    QWidget,
+    QWidgetAction,
+)
 
 from lspr_ui import GuiTheme, get_active_theme
 
@@ -91,6 +103,25 @@ def make_height_box(parent: QWidget) -> QSpinBox:
     return box
 
 
+FONT_RANGE = (6, 24)  # points
+
+
+def default_font_points() -> int:
+    """The application font's size in whole points: what the range readout shows until a size is chosen (the look it always had)."""
+    return min(max(round(QFontInfo(QApplication.font()).pointSizeF()), FONT_RANGE[0]), FONT_RANGE[1])
+
+
+def make_font_box(parent: QWidget) -> QSpinBox:
+    box = QSpinBox(parent)
+    box.setRange(*FONT_RANGE)
+    box.setValue(default_font_points())
+    box.setSuffix(" pt")
+    box.setKeyboardTracking(False)  # a value is taken when Enter is pressed or the field is left, not on every digit
+    box.setToolTip("Text size of the baseline range (\"Baseline [start, end]\") shown on the plot, in points.")
+    style_ribbon_number_field(box, f"{FONT_RANGE[1]} pt")
+    return box
+
+
 class BaselineRangeReadout(QWidget):
     """The label "Baseline" with "[start, end]" under it, floating on the plot just above the baseline selector (the plot places it); editable, in the look of the Histogram's highlight range (`histogram/highlight_range_controls.py`): two
     frameless, centred fields of one fixed width (sized once for the worst case) between plain bracket labels. The unit is the plot's x axis (cube
@@ -105,16 +136,16 @@ class BaselineRangeReadout(QWidget):
         self.setAutoFillBackground(True)
         validator = QDoubleValidator(-1.0e9, 1.0e9, 3, self)
         validator.setLocale(QLocale(QLocale.Language.C))  # a decimal point, whatever the system language
-        field_width = QFontMetrics(self.font()).boundingRect("9" * 7).width() + 6  # 99999.9 s, plus the same explicit margin the histogram fields have
-        self._low, self._high = (self._field(field_width, validator) for _ in range(2))
+        self._points = default_font_points()
+        self._low, self._high = (self._field(self._field_width(QFontMetrics(self.font())), validator) for _ in range(2))
         column = QVBoxLayout(self)
         column.setContentsMargins(4, 1, 4, 1)
         column.setSpacing(0)
-        heading = QLabel("Baseline", self)
-        heading.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        heading.setContentsMargins(0, 0, 0, 0)
-        heading.setFixedHeight(QFontMetrics(self.font()).height())  # as tall as its text, no more
-        column.addWidget(heading)
+        self._heading = QLabel("Baseline", self)
+        self._heading.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._heading.setContentsMargins(0, 0, 0, 0)
+        self._heading.setFixedHeight(QFontMetrics(self.font()).height())  # as tall as its text, no more
+        column.addWidget(self._heading)
         row = QHBoxLayout()
         row.setSpacing(0)
         for piece in (QLabel("[", self), self._low, QLabel(",", self), self._high, QLabel("]", self)):
@@ -122,6 +153,26 @@ class BaselineRangeReadout(QWidget):
         column.addLayout(row)
         self.adjustSize()
         self.refresh_theme(get_active_theme())
+
+    @staticmethod
+    def _field_width(metrics: QFontMetrics) -> int:
+        return metrics.boundingRect("9" * 7).width() + 6  # 99999.9 s, plus the same explicit margin the histogram fields have
+
+    def set_font_size(self, points: int) -> None:
+        """Text size of the whole box, in points. The heading and the fields are fixed-size from the font's metrics, so they are measured again here."""
+        self._points = int(points)
+        font = QFont(self.font())
+        font.setPointSizeF(float(points))
+        self.setFont(font)
+        metrics = QFontMetrics(font)
+        self._heading.setFixedHeight(metrics.height())
+        for field in (self._low, self._high):
+            field.setFixedWidth(self._field_width(metrics))
+            field.setFixedHeight(metrics.height() + 2)
+        self.refresh_theme(get_active_theme())  # the style sheet carries the size too, so an application-wide rule cannot override it
+        self.layout().invalidate()
+        self.layout().activate()
+        self.adjustSize()
 
     def _field(self, width: int, validator: QDoubleValidator) -> QLineEdit:
         field = QLineEdit(self)
@@ -149,15 +200,15 @@ class BaselineRangeReadout(QWidget):
     def refresh_theme(self, theme: GuiTheme) -> None:
         self.setStyleSheet(
             f"#baselineRangeReadout {{ background: {theme.toolbar_section_bg}; border: 1px solid {theme.toolbar_border}; border-radius: 4px; }} "
-            f"QLineEdit {{ color: {theme.text_primary}; background: transparent; border: none; padding: 0px; margin: 0px; }} "
-            f"QLabel {{ color: {theme.text_primary}; background: transparent; }}"
+            f"QLineEdit {{ color: {theme.text_primary}; background: transparent; border: none; padding: 0px; margin: 0px; font-size: {self._points}pt; }} "
+            f"QLabel {{ color: {theme.text_primary}; background: transparent; font-size: {self._points}pt; }}"
         )
 
 
 class BaselineSelectorMenu(QToolButton):
     """The View button: opens the panel that holds the controls it is given (it adds no state and no signals of its own)."""
 
-    def __init__(self, controls: RoiOverlayControls, height_box: QWidget, parent: QWidget | None = None) -> None:
+    def __init__(self, controls: RoiOverlayControls, height_box: QWidget, font_box: QWidget, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         style_general_icon_button(self)
         self.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
@@ -176,6 +227,9 @@ class BaselineSelectorMenu(QToolButton):
         self._height_caption = QLabel("Height", panel)
         grid.addWidget(self._height_caption, 1, 0)
         grid.addWidget(height_box, 1, 1)
+        self._font_caption = QLabel("Font size", panel)
+        grid.addWidget(self._font_caption, 2, 0)
+        grid.addWidget(font_box, 2, 1)
         self._menu = QMenu(self)
         action = QWidgetAction(self._menu)
         action.setDefaultWidget(panel)

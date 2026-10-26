@@ -31,6 +31,7 @@ _WINDOW_EDGE_ALPHA = 160
 _HOVER_LIFT = 0.08  # how much more opaque the fill gets under the pointer (pyqtgraph's own jump was far larger than the resting fill)
 _INVISIBLE_PEN = pg.mkPen(0, 0, 0, 0)  # a curve with no pen at all is left out of the auto-range; one with a fully transparent pen is not
 _LABEL_HIT_MARGIN = 4.0  # pixels around the y axis label that still count as a double-click on it
+_READOUT_GAP = 0  # pixels between the bottom edge of the "Baseline [start, end]" box and the x axis line (the plot area's bottom edge); it was 2
 
 
 def snap_to_grid(grid: np.ndarray, value: float) -> float:
@@ -268,6 +269,11 @@ class SensorgramPlot(QWidget):
             line.setPen(pg.mkPen(edge, width=1.5))
             line.setHoverPen(pg.mkPen(QColor(color), width=2.5))
 
+    def set_readout_font_size(self, points: int) -> None:
+        """Text size, in points, of the "Baseline [start, end]" box floating over the plot (the box is re-sized and put back on the x axis)."""
+        self._range_readout.set_font_size(points)
+        self._reposition_range_readout()
+
     def baseline_window(self) -> tuple[float, float] | None:
         if not self._window_in_scene:
             return None
@@ -305,7 +311,7 @@ class SensorgramPlot(QWidget):
         left, right = self._widget.mapFromScene(rect.topLeft()).x(), self._widget.mapFromScene(rect.topRight()).x()
         bottom = self._widget.mapFromScene(rect.bottomLeft()).y()
         x = int(min(max(mid_x - self._range_readout.width() / 2.0, left), max(right - self._range_readout.width(), left)))
-        y = int(bottom - self._range_readout.height() - 2)  # on the base of the band, just above the x axis
+        y = int(bottom - self._range_readout.height() - _READOUT_GAP)  # on the base of the band, just above the x axis
         self._range_readout.move(x, y)
         self._range_readout.raise_()
 

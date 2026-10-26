@@ -91,7 +91,7 @@ from ..ui_state import UiStateStore
 from ..spectra.pick_menu import PickMenu
 from ..spectra.view_menu import IconToggle
 from ..visibility_gate import HiddenPanelGate
-from .baseline_selector_menu import DEFAULT_ALPHA, DEFAULT_COLOR, SPEC as BASELINE_BAND_SPEC, BaselineSelectorMenu, make_height_box
+from .baseline_selector_menu import DEFAULT_ALPHA, DEFAULT_COLOR, SPEC as BASELINE_BAND_SPEC, BaselineSelectorMenu, make_font_box, make_height_box
 from .mask_marks_toggle import MaskMarksToggle
 from .stat_icons import band_picture, center_picture, display_picture, smoothing_picture, spikes_icon, subtract_icon
 from .plot import SensorgramPlot, snap_window
@@ -101,6 +101,7 @@ logger = logging.getLogger(__name__)
 TASK_ID = "sensorgram.compute"
 MASK_MARKS_KEY = "sensorgram/mask_marks"
 BAND_HEIGHT_KEY = "sensorgram/baseline_band_height"
+BAND_FONT_KEY = "sensorgram/baseline_readout_font_size"
 _REDRAW_COALESCE_MS = 100  # sketch §8
 _JOIN_SECONDS = 5.0
 _PROGRESS_MIN_ROIS = 8  # a status line "Fitting ROI 3 of 160" only for runs long enough to need it
@@ -234,7 +235,8 @@ class SensorgramPanel(QWidget):
             BASELINE_BAND_SPEC, visible=self._band_visible, color=self._band_color, alpha=self._band_alpha, parent=self
         )
         self._band_height = make_height_box(self)
-        self._band_menu = BaselineSelectorMenu(self._band_controls, self._band_height, self)
+        self._band_font = make_font_box(self)
+        self._band_menu = BaselineSelectorMenu(self._band_controls, self._band_height, self._band_font, self)
         self._status = QLabel("", self)
         self._status.setWordWrap(True)
         self._status.setStyleSheet(f"color: {get_active_theme().text_dim};")
@@ -280,6 +282,7 @@ class SensorgramPanel(QWidget):
         self._plot.y_label_double_clicked.connect(self._on_y_label_double_clicked)
         self._plot.x_label_double_clicked.connect(self._on_x_label_double_clicked)
         self._band_height.valueChanged.connect(self._plot.set_baseline_height)
+        self._band_font.valueChanged.connect(self._plot.set_readout_font_size)
         self._plot.baseline_range_edited.connect(self._on_baseline_dragged)  # typed values are stored exactly as a dragged band's
         self._band_controls.visibility_changed.connect(self._on_band_visibility)
         self._band_controls.color_changed.connect(self._on_band_color)
@@ -307,6 +310,8 @@ class SensorgramPanel(QWidget):
         store.bind(MASK_MARKS_KEY, self._mask_toggle)
         store.bind(BAND_HEIGHT_KEY, self._band_height)
         self._plot.set_baseline_height(self._band_height.value())  # a restored value arrives without a signal
+        store.bind(BAND_FONT_KEY, self._band_font)
+        self._plot.set_readout_font_size(self._band_font.value())
         saved_color = read(store, SENSORGRAM_BASELINE_BAND_COLOR)
         self._band_visible = read(store, SENSORGRAM_BASELINE_BAND_VISIBLE) is not False
         self._band_color = QColor(saved_color) if isinstance(saved_color, str) and QColor(saved_color).isValid() else QColor(DEFAULT_COLOR)
@@ -455,14 +460,41 @@ class SensorgramPanel(QWidget):
         self._schedule_redraw()
 
     def _on_axis_changed(self) -> None:
-        """The Cube / Time choice changed: the x values change, and so does the unit of the baseline window."""
+        """The Cube / Time choice changed: the x values change, and so does the unit of the baseline window. The window keeps its cubes (cubes 2 - 4
+        become the seconds those cubes start at, and back), subtracting or not."""
+        previous = self._x_cache  # (key, x) of the axis the stored window is in
         self._x_cache = None
         stats = self._settings.statistics_settings()
-        if stats.baseline_window_start is not None:  # a window in the old unit means nothing now, subtracting or not
-            low, high = self._default_baseline_window()
-            self._settings.set_statistics_settings(replace(stats, baseline_window_start=low, baseline_window_end=high))  # redraws via settings_changed
-        else:
+        if stats.baseline_window_start is None or stats.baseline_window_end is None:
             self._schedule_redraw()
+            return
+        window = self._window_on_new_axis(previous, stats.baseline_window_start, stats.baseline_window_end)
+        if window is None:  # nothing to carry it over from: where Subtract would put it on the new axis
+            window = self._default_baseline_window()
+        self._settings.set_statistics_settings(replace(stats, baseline_window_start=window[0], baseline_window_end=window[1]))  # redraws via settings_changed
+
+    def _window_on_new_axis(self, previous: tuple | None, low: float, high: float) -> tuple[float, float] | None:
+        """The window (low, high), given in the unit of the axis `previous`, put on the cubes' x values of the current axis: the same two cubes, so
+        a round trip Cube -> Time -> Cube gives the window back. Unchanged when the unit did not change. None when it cannot be carried over (no
+        earlier axis, another scan, a cube without a start time)."""
+        if previous is None:
+            return None
+        (stored_id, was_time), old_x = previous
+        new_x = self._x_axis()[1]
+        if stored_id != id(self._scan.stored()) or old_x.size == 0 or old_x.size != new_x.size:
+            return None
+        if was_time == (self._cube_display.effective_mode() == MODE_TIME):
+            return float(low), float(high)
+        finite = np.flatnonzero(np.isfinite(old_x))
+        if finite.size == 0:
+            return None
+        moved = []
+        for edge in (low, high):
+            cube_position = int(finite[int(np.argmin(np.abs(old_x[finite] - edge)))])  # the data point the edge stands on
+            if not np.isfinite(new_x[cube_position]):
+                return None
+            moved.append(float(new_x[cube_position]))
+        return self._snap_window(moved[0], moved[1])
 
     # -- the x axis -----------------------------------------------------------------------------------------------------------------
 
