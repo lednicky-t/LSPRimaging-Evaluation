@@ -8,6 +8,7 @@ import shutil
 import threading
 import time
 import uuid
+from collections import OrderedDict
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
@@ -807,6 +808,231 @@ def _fast_read_zarr_plane(meta: dict, spectral_cube_pos: int, wavelength_pos: in
         return None
 
     return np.array(plane[:image_height, :image_width], dtype=dtype, copy=True)
+
+
+# -- partial plane reads: only the chunks around some pixels (2026-10-27) -----------------------------------------------------
+#
+# The analysis scan of an unrotated OME-Zarr export needs the pixels of the ROIs it computes, not the whole plane: one ROI of the
+# 50 px test export touches 6 of 442 chunks. `ome_zarr_plane_grid` says whether a record path can be read this way, `partial_read_plan`
+# turns the pixels wanted into the chunks to fetch (made once per ROI layout and kept by the caller), `read_plane_pixels` fetches them.
+#
+# Same bytes, same decoder, same conversion as `_fast_read_zarr_plane` + `_apply_valid_mask` (pinned by
+# tests/integration/test_lspri_zarr_partial_reads.py: bit for bit equal to a whole-plane read on exports of every shard mode,
+# with and without compression and a `valid_mask`). It differs in two ways: it decodes only the chunks asked for, and it reads and checks
+# a shard's index (every chunk's offset and length, 191 KB in the 50 px test export) **once per shard and process**, not once per plane.
+# Anything unexpected returns None and the caller reads the whole plane instead, so this is never the only way to read a dataset.
+
+# KNOWN BOTTLENECK (maintainer, 2026-10-27: "mark it, solve it later"): every shard's index is read and CRC-checked before its first chunk is
+# trusted, and a scan visits every cube's shard once, so this cost is paid once per cube and process and nothing can amortise it. The cost
+# is the file read of the index (191 KB in the 50 px test export) plus the CRC32C of it.
+#   * Without the `crc32c` package `_crc32c` is a pure-Python loop: ~110-180 ms per index, 56 % of the read time of a one-ROI refresh
+#     (measured 2026-10-27, 6.8 -> 3.0 ms per frame when the check was bypassed in an experiment).
+#   * With the package (declared in pyproject.toml since 2026-10-27): ~30 us per index plus a one-time import of ~0.3 s per worker process.
+#     In a 63-cube run (7 workers) the index took 0.8 s of the 22 s read + reduce busy time, the CRC 0.7 s of it (mostly the import): ~4 %.
+# `shard_index_seconds()` reports both and every scan logs them (`busy_index_s`, `busy_crc_s` of `analysis.scan_done`), so the share stays
+# visible on any machine, e.g. one without the package. Cheaper ways to be sure the index is sound, if the remaining share ever matters:
+# read only the index entries of the chunks wanted and check them against the file size and each other instead of checksumming all 11,934
+# entries; or check one shard per dataset and the rest by structure; or store a per-dataset "verified" mark. None is done: the CRC is what makes
+# an uncompressed (otherwise unchecked) chunk read trustworthy.
+_SHARD_INDEX_CACHE_SHARDS = 8
+_SHARD_INDEX_MISSING = np.uint64((1 << 64) - 1)
+_shard_index_cache: "OrderedDict[tuple[str, int, int], tuple[np.ndarray, np.ndarray]]" = OrderedDict()
+_shard_index_lock = threading.Lock()
+_shard_index_seconds = [0.0, 0.0]  # [reading + checking indexes, of which the CRC] in this process, cache misses only
+_blosc_codecs: dict[str, object] = {}
+
+
+def shard_index_seconds() -> tuple[float, float]:
+    """Seconds this process has spent reading and checking shard indexes (cache misses only), and the part of that spent in the CRC32C.
+    Cumulative: take the difference between two calls. See KNOWN BOTTLENECK above."""
+    with _shard_index_lock:
+        return _shard_index_seconds[0], _shard_index_seconds[1]
+
+
+@dataclass(frozen=True)
+class ZarrPlaneGrid:
+    """Size and chunk grid of the planes of one OME-Zarr export (pixels)."""
+
+    height: int
+    width: int
+    chunk_h: int
+    chunk_w: int
+
+    @property
+    def n_cy(self) -> int:
+        return (self.height + self.chunk_h - 1) // self.chunk_h
+
+    @property
+    def n_cx(self) -> int:
+        return (self.width + self.chunk_w - 1) // self.chunk_w
+
+    @property
+    def n_chunks(self) -> int:
+        return self.n_cy * self.n_cx
+
+    @property
+    def padded_width(self) -> int:
+        return self.n_cx * self.chunk_w
+
+
+@dataclass(frozen=True)
+class PartialReadPlan:
+    """Which chunks of a plane to fetch to get the pixels ``flat_index`` (row-major into the stored plane), and where each pixel sits in
+    the padded canvas the chunks are put on. Depends on the pixel list and the grid only (not on the plane), so one serves every plane."""
+
+    grid: ZarrPlaneGrid
+    chunk_ids: np.ndarray  # sorted, unique: chunk (cy, cx) is cy * n_cx + cx
+    gather: np.ndarray  # intp: position of each wanted pixel in the padded canvas, row-major
+    flat_index: np.ndarray  # intp: the wanted pixels in the stored plane (for the valid mask)
+
+
+@lru_cache(maxsize=64)
+def _plane_root_of_dir(directory: str) -> str | None:
+    """The OME-Zarr root whose array folder is ``directory`` (where the synthetic plane paths of a dataset live), or None."""
+    parent = Path(directory)
+    root = _ome_zarr_root(parent.parent if parent.name == OME_ZARR_ARRAY_DIRNAME else parent)
+    return str(root) if root is not None and parent == _ome_zarr_array_dir(root) else None
+
+
+def ome_zarr_plane_grid(path_str: str) -> ZarrPlaneGrid | None:
+    """The plane grid for a record path of an OME-Zarr export this app wrote (the fast shard reader's metadata exists), else None
+    (a TIFF, a foreign Zarr, an export that cannot be read directly): such planes are read whole."""
+    root = _plane_root_of_dir(os.path.dirname(path_str))
+    if root is None:
+        return None
+    meta = _ome_zarr_fast_read_metadata(root)
+    if meta is None:
+        return None
+    return ZarrPlaneGrid(int(meta["image_height"]), int(meta["image_width"]), int(meta["ich"]), int(meta["icw"]))
+
+
+def partial_read_plan(grid: ZarrPlaneGrid, flat_index: np.ndarray, max_share: float = 1.0) -> PartialReadPlan | None:
+    """The chunks that hold the pixels ``flat_index`` of a plane of ``grid``; None when they are more than ``max_share`` of all the plane's
+    chunks (then reading the whole plane is cheaper). ValueError for a pixel outside the plane."""
+    flat = np.ascontiguousarray(flat_index, dtype=np.intp)
+    rows, cols = np.divmod(flat, grid.width)
+    if flat.size and (flat.min() < 0 or rows.max() >= grid.height):
+        raise ValueError("a wanted pixel lies outside the plane")
+    ids = np.unique((rows // grid.chunk_h) * grid.n_cx + cols // grid.chunk_w)
+    if ids.size > max_share * grid.n_chunks:
+        return None
+    return PartialReadPlan(grid, ids, rows * grid.padded_width + cols, flat)
+
+
+def _shard_location(meta: dict, cube_pos: int, wavelength_pos: int) -> tuple[Path, int, int]:
+    """(shard file, inner chunks in it, this wavelength's block of them): the layout `_fast_read_zarr_plane` reads."""
+    array_dir = meta["root"] / OME_ZARR_ARRAY_DIRNAME / "c"
+    per_wavelength = meta["n_cy"] * meta["n_cx"]
+    if meta["shard_mode"] == "per_spectral_cube":
+        return array_dir / str(cube_pos) / "0" / "0" / "0", per_wavelength * meta["n_wl"], wavelength_pos
+    return array_dir / str(cube_pos) / str(wavelength_pos) / "0" / "0", per_wavelength, 0
+
+
+def _shard_index(shard_path: Path, n_inner_total: int) -> tuple[np.ndarray, np.ndarray] | None:
+    """(offsets, lengths) of every inner chunk of a shard, checked against the shard's CRC32C, or None when the file cannot be trusted.
+    Remembered per shard file (size and modification time are part of the key, so a rewritten shard is read again)."""
+    try:
+        stat = shard_path.stat()
+    except OSError:
+        return None
+    key = (str(shard_path), int(stat.st_size), int(stat.st_mtime_ns))
+    with _shard_index_lock:
+        cached = _shard_index_cache.get(key)
+        if cached is not None:
+            _shard_index_cache.move_to_end(key)
+            return cached
+    index_len = n_inner_total * 2 * 8
+    if stat.st_size < index_len + 4:
+        return None
+    started = time.perf_counter()
+    with shard_path.open("rb") as handle:
+        handle.seek(stat.st_size - index_len - 4)
+        trailer = handle.read(index_len + 4)
+    import struct
+
+    from lspr_imaging_app.io._zarr_export_worker import _crc32c
+
+    index_bytes = trailer[:index_len]
+    crc_started = time.perf_counter()
+    crc_ok = _crc32c(index_bytes) == struct.unpack("<I", trailer[index_len:])[0]
+    finished = time.perf_counter()
+    with _shard_index_lock:
+        _shard_index_seconds[0] += finished - started
+        _shard_index_seconds[1] += finished - crc_started
+    if not crc_ok:
+        return None
+    index = np.frombuffer(index_bytes, dtype=np.uint64)
+    entry = (index[0::2].copy(), index[1::2].copy())
+    with _shard_index_lock:
+        _shard_index_cache[key] = entry
+        while len(_shard_index_cache) > _SHARD_INDEX_CACHE_SHARDS:
+            _shard_index_cache.popitem(last=False)
+    return entry
+
+
+def read_plane_pixels(path_str: str, plan: PartialReadPlan) -> np.ndarray | None:
+    """The float32 values at ``plan.flat_index`` of the plane a record path refers to, fetching only ``plan.chunk_ids``: what
+    ``load_image_array(path)`` followed by ``.reshape(-1)[plan.flat_index]`` gives, bit for bit, including NaN where the export's
+    `valid_mask` says no pixel was measured. None whenever anything is unexpected (no shard, bad index, decode error, a grid that is not
+    this export's): read the whole plane then."""
+    try:
+        path = Path(path_str)
+        root = _plane_root_of_dir(os.path.dirname(path_str))
+        meta = _ome_zarr_fast_read_metadata(root) if root is not None else None
+        if meta is None:
+            return None
+        grid = plan.grid
+        if (grid.height, grid.width, grid.chunk_h, grid.chunk_w) != (meta["image_height"], meta["image_width"], meta["ich"], meta["icw"]):
+            return None
+        cube_pos, wavelength_pos, *_ = (int(part) for part in path.name.split("."))
+        shard_path, n_inner_total, wl_local = _shard_location(meta, cube_pos, wavelength_pos)
+        index = _shard_index(shard_path, n_inner_total)
+        if index is None:
+            return None
+        base = wl_local * meta["n_cy"] * meta["n_cx"]
+        offsets, lengths = index[0][base + plan.chunk_ids], index[1][base + plan.chunk_ids]
+        dtype = meta["dtype"]
+        canvas = np.empty((grid.n_cy * grid.chunk_h, grid.padded_width), dtype=dtype)  # only the chunks fetched are ever gathered from
+        codec = None
+        if meta["compression_cname"]:
+            codec = _blosc_codecs.get(meta["compression_cname"])
+            if codec is None:
+                from numcodecs import Blosc
+
+                codec = _blosc_codecs[meta["compression_cname"]] = Blosc(cname=meta["compression_cname"], clevel=1, shuffle=Blosc.BITSHUFFLE)
+        ch, cw, n_cx = grid.chunk_h, grid.chunk_w, grid.n_cx
+        present = offsets != _SHARD_INDEX_MISSING
+        for chunk_id in plan.chunk_ids[~present]:  # a chunk that was never written is the fill value, as in the plane reader
+            cy, cx = divmod(int(chunk_id), n_cx)
+            canvas[cy * ch:(cy + 1) * ch, cx * cw:(cx + 1) * cw] = meta["fill_value"]
+        if present.any():
+            ids, offs, lens = plan.chunk_ids[present], offsets[present].astype(np.int64), lengths[present].astype(np.int64)
+            order = np.argsort(offs, kind="stable")
+            ids, offs, lens = ids[order], offs[order], lens[order]
+            with shard_path.open("rb") as handle:
+                start = 0
+                while start < ids.size:
+                    stop = start + 1
+                    while stop < ids.size and offs[stop] == offs[stop - 1] + lens[stop - 1]:  # neighbours in the file: one read
+                        stop += 1
+                    handle.seek(int(offs[start]))
+                    block = handle.read(int(offs[stop - 1] + lens[stop - 1] - offs[start]))
+                    for k in range(start, stop):
+                        begin = int(offs[k] - offs[start])
+                        raw = block[begin:begin + int(lens[k])]
+                        if codec is not None:
+                            raw = codec.decode(raw)
+                        cy, cx = divmod(int(ids[k]), n_cx)
+                        canvas[cy * ch:(cy + 1) * ch, cx * cw:(cx + 1) * cw] = np.frombuffer(raw, dtype=dtype).reshape(ch, cw)
+                    start = stop
+        values = canvas.reshape(-1)[plan.gather].astype(np.float32)
+        mask = _ome_zarr_valid_mask_cached(root)
+        if mask is not None and mask.shape == (grid.height, grid.width):
+            values[~mask.reshape(-1)[plan.flat_index]] = np.nan
+        return values
+    except Exception:  # noqa: BLE001 - a chunk read must never be the only way to get a pixel
+        _LOGGER.debug("OME-Zarr partial read failed; the caller reads the whole plane.", exc_info=True)
+        return None
 
 
 def _ome_zarr_array_meta(root: Path) -> dict:

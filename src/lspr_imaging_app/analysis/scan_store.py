@@ -19,6 +19,12 @@ hash, ``recipe_id`` and ``layout_id`` are written. A crash at any point leaves a
 hash can never sit on half-written values. The file is created under a temporary name and renamed, so a half-made file is never taken for a
 result. One writer at a time (the scan task's thread); readers open it read-only.
 
+``write_batch`` (2026-10-27) writes several cubes with one opening of the file, in the same order for the whole batch (all their hashes to 0,
+all values, all real hashes); ``ScanWriter`` runs it on a thread of its own so the collector of results never waits for the disk.
+``write_cells`` (2026-10-27) refreshes only some ROI rows of a cube, in the same order (those hashes to 0, values flushed, real hashes last);
+the other rows of the cube are not touched. ``state/layout_id`` of such a cube then names the layout of the latest write: still true for every
+cell, because a cell that was not rewritten depends only on geometry that is identical in the old and the new layout (``scan_fingerprint``).
+
 **When the file does not fit** (other ROI ids, wavelength axis, cube list or reduction methods; or an unknown schema) the old file is
 moved to ``scan.previous.h5`` (one backup slot) and a new one is made: every stored cell is stale then anyway (decision 2026-10-23), and
 nothing is deleted without a copy.
@@ -29,6 +35,9 @@ from __future__ import annotations
 import json
 import logging
 import os
+import queue
+import threading
+import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -167,11 +176,17 @@ def describe_file(path: Path) -> str | None:
     return f"{path.name}: {done} of {n_cube} cubes saved ({n_roi} ROIs, {n_wl} wavelengths, {path.stat().st_size / 1e6:.0f} MB)"
 
 
+def stale_cell_matrix(stored: np.ndarray, current: np.ndarray) -> np.ndarray:
+    """``bool [cube, roi]``: True where the stored cell differs from what the current inputs would give (never computed counts: its hash is 0).
+    Both arguments are ``[cube, roi]`` uint64. Shapes that differ: everything is stale."""
+    if stored.shape != current.shape:
+        return np.ones(current.shape, dtype=bool)
+    return stored != current
+
+
 def stale_cube_positions(stored: np.ndarray, current: np.ndarray) -> list[int]:
     """Positions (rows) of the cubes where any cell differs from what the current inputs would give. Both ``[cube, roi]`` uint64."""
-    if stored.shape != current.shape:
-        return list(range(current.shape[0]))
-    return [int(p) for p in np.flatnonzero((stored != current).any(axis=1))]
+    return [int(p) for p in np.flatnonzero(stale_cell_matrix(stored, current).any(axis=1))]
 
 
 def stale_cube_indices(stored: StoredScan, plan: ScanPlan, hashes: np.ndarray) -> tuple[frozenset[int], str]:
@@ -316,22 +331,138 @@ class ScanStore:
 
     def write_cube(self, plan: ScanPlan, arrays: ScanArrays, cube_pos: int, cell_hash_row: np.ndarray) -> None:
         """Write one finished cube (position ``cube_pos`` in ``plan`` and ``arrays``) in the crash-safe order of the module docstring."""
-        row = self._cube_row[int(plan.cube_indices[cube_pos])]
+        self.write_batch(plan, arrays, [(cube_pos, None, cell_hash_row)])
+
+    def write_cells(self, plan: ScanPlan, arrays: ScanArrays, cube_pos: int, roi_rows, cell_hash_row: np.ndarray) -> None:
+        """Write only the ROI rows ``roi_rows`` (positions on the ROI axis) of one finished cube, in the crash-safe order of the module docstring.
+        ``arrays`` holds those rows at ``[cube_pos, roi_rows]`` (``scan_arrays.place``); ``cell_hash_row`` is the whole row of hashes of the cube,
+        of which only ``roi_rows`` are written. Every other ROI row of the cube stays exactly as it is in the file."""
+        self.write_batch(plan, arrays, [(cube_pos, roi_rows, cell_hash_row)])
+
+    def write_batch(self, plan: ScanPlan, arrays: ScanArrays, items) -> None:
+        """Write several finished cubes with one opening of the file. ``items``: ``(cube_pos, roi_rows, cell_hash_row)`` per cube, ``roi_rows``
+        None for a whole cube (see :meth:`write_cube`) or the ROI rows to refresh (see :meth:`write_cells`). The crash-safe order holds for
+        the whole batch: first the hashes of everything about to be replaced are set to 0 for **all** its cubes, then the values of all of
+        them are written, then the real hashes; a crash leaves every cube of the batch complete or marked "never computed" (a cube is never
+        half of each). Opening the file is 45 % of the cost of writing one cube (7.8 of 17 ms measured 2026-10-27), so batches are cheaper."""
+        batch = []
+        for cube_pos, roi_rows, cell_hash_row in items:
+            idx = None if roi_rows is None else np.asarray(tuple(roi_rows), dtype=np.intp)
+            batch.append((int(cube_pos), self._cube_row[int(plan.cube_indices[cube_pos])], idx, np.asarray(cell_hash_row, dtype=np.uint64)))
+        if not batch:
+            return
+        if len({row for _, row, _, _ in batch}) != len(batch):
+            raise ValueError("a cube appears twice in one batch")
+
+        def put(dataset: h5py.Dataset, row: int, fresh: np.ndarray, idx: np.ndarray | None) -> None:
+            if idx is None:
+                dataset[row] = fresh
+                return
+            block = dataset[row]  # the cube's rows are one chunk: read it, replace the rows, write it back
+            block[idx] = fresh[idx]
+            dataset[row] = block
+
         with h5py.File(self.path, "r+") as f:
-            state = f["state"]
-            state["cell_hash"][row, :] = 0  # first: the old hash must not sit on values that are being replaced
+            state, scan = f["state"], f["processed/scan"]
+            hashes = {}  # row -> the hashes of the cube as they stand while its values are being written
+            for _, row, idx, _ in batch:
+                current = state["cell_hash"][row, :]  # h5py hands over a copy
+                if idx is None:
+                    current[:] = 0
+                else:
+                    current[idx] = 0
+                hashes[row] = current
+                state["cell_hash"][row, :] = current  # first: the old hash must not sit on values that are being replaced
             f.flush()
-            scan = f["processed/scan"]
-            for method, values in arrays.values.items():
-                scan["value"][method][row] = values[cube_pos]
-            scan["std"][row] = arrays.std[cube_pos]
-            scan["n_valid"][row] = arrays.n_valid[cube_pos]
-            scan["n_nominal"][row] = arrays.n_nominal[cube_pos]
-            scan["n_masked"][row] = arrays.n_masked[cube_pos]
-            if plan.acquired_at_unix_ms is not None:
-                f["axes/acquired_at_unix_ms"][row] = plan.acquired_at_unix_ms[cube_pos]
+            for cube_pos, row, idx, _ in batch:
+                for method, values in arrays.values.items():
+                    put(scan["value"][method], row, values[cube_pos], idx)
+                put(scan["std"], row, arrays.std[cube_pos], idx)
+                put(scan["n_valid"], row, arrays.n_valid[cube_pos], idx)
+                put(scan["n_nominal"], row, arrays.n_nominal[cube_pos], idx)
+                put(scan["n_masked"], row, arrays.n_masked[cube_pos], idx)
+                if plan.acquired_at_unix_ms is not None:
+                    f["axes/acquired_at_unix_ms"][row] = plan.acquired_at_unix_ms[cube_pos]
             f.flush()
-            state["recipe_id"][row, :] = self._recipe_id
-            state["layout_id"][row] = self._layout_ids[plan.jobs[cube_pos].rois.key]
-            state["cell_hash"][row, :] = cell_hash_row  # last: from here the cube counts as computed
+            for cube_pos, row, idx, new_hashes in batch:
+                recipe = state["recipe_id"][row, :]
+                final = hashes[row]
+                if idx is None:
+                    recipe[:] = self._recipe_id
+                    final[:] = new_hashes
+                else:
+                    recipe[idx] = self._recipe_id
+                    final[idx] = new_hashes[idx]
+                state["recipe_id"][row, :] = recipe
+                state["layout_id"][row] = self._layout_ids[plan.jobs[cube_pos].rois.key]
+                state["cell_hash"][row, :] = final  # last: from here these cells count as computed
             f.flush()
+
+
+class ScanWriter:
+    """Writes finished cubes to the scan file on a thread of its own (2026-10-27).
+
+    Why: the thread that collects results from the worker processes used to write each cube itself, and ``scan_cubes`` hands the pool new work
+    only when its consumer comes back, so every write (17 ms idle, ~50 ms with the workers busy) left the workers waiting; in the 63-cube
+    one-ROI refresh of the test export the writes were 3.2 s of 12.5 s. Now the collector only ``submit``s (a queue put) and carries on; the
+    writer takes whatever is waiting, up to ``MAX_BATCH`` cubes, and writes it with one opening of the file (:meth:`ScanStore.write_batch`).
+
+    Rules: the cubes of ``arrays`` handed to ``submit`` must be complete (``place`` done) and are not touched again; ``finish`` waits until
+    everything submitted is on disk, also after a Cancel (finished cubes stay saved); an error of the writer (a disk that is full) is raised by
+    the next ``submit`` or by ``finish``, in the collector's thread, and stops the writer. One writer per file at a time.
+    """
+
+    MAX_BATCH = 16
+
+    def __init__(self, store: ScanStore, plan: ScanPlan, arrays: ScanArrays) -> None:
+        self._store, self._plan, self._arrays = store, plan, arrays
+        self._queue: queue.Queue = queue.Queue()
+        self._error: BaseException | None = None
+        self.busy_seconds = 0.0  # time spent inside the file, summed over the batches
+        self.batches = 0
+        self.cubes = 0
+        self._thread = threading.Thread(target=self._run, name="analysis-scan-writer", daemon=True)
+        self._thread.start()
+
+    @property
+    def error(self) -> BaseException | None:
+        return self._error
+
+    def submit(self, cube_pos: int, roi_rows, cell_hash_row: np.ndarray) -> None:
+        """Queue a finished cube (``roi_rows`` None = the whole cube). Returns at once; raises the writer's error if it has failed."""
+        if self._error is not None:
+            raise self._error
+        self._queue.put((int(cube_pos), None if roi_rows is None else tuple(roi_rows), cell_hash_row))
+
+    def finish(self) -> None:
+        """Wait until everything submitted is written and the thread has ended; raise the writer's error, if it had one."""
+        self._queue.put(None)
+        self._thread.join()
+        if self._error is not None:
+            raise self._error
+
+    def _run(self) -> None:
+        stop = False
+        while not stop:
+            item = self._queue.get()
+            if item is None:
+                return
+            batch = [item]
+            while len(batch) < self.MAX_BATCH:
+                try:
+                    more = self._queue.get_nowait()
+                except queue.Empty:
+                    break
+                if more is None:  # write this batch, then stop
+                    stop = True
+                    break
+                batch.append(more)
+            started = time.perf_counter()
+            try:
+                self._store.write_batch(self._plan, self._arrays, batch)
+            except BaseException as exc:  # noqa: BLE001 - handed to the collector's thread, which decides what to do
+                self._error = exc
+                return
+            self.busy_seconds += time.perf_counter() - started
+            self.batches += 1
+            self.cubes += len(batch)

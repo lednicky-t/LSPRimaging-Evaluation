@@ -14,5 +14,6 @@ lucide
 lspr-ui>=0.1.0
 lspr-core>=0.1.0
 numcodecs
+crc32c
 zarr
 ome-zarr

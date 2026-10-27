@@ -44,6 +44,7 @@ from .analysis.live_state import AnalysisLiveModule
 from .analysis.scan_results import ScanResultsModule
 from .storage.session_index import session_dir_for
 from .analysis.scan_store import FILE_NAME as SCAN_FILE_NAME, describe_file as describe_scan_file
+from .analysis.scan_pool import MODE_NORMAL, MODE_PERFORMANCE, MODES
 from .analysis.scan_task import TASK_ID as ANALYSIS_SCAN_TASK_ID, ScanTask
 from .applog import LogSystem, RingBufferHandler, configure_logging, log_event
 from .applog import current as current_log_system
@@ -86,7 +87,7 @@ from .perf_setup import install_runtime as install_perf_runtime
 from .perf_setup import status_text as perf_status_text
 from .perf_setup import write_perf_preferences
 from .panels.roi_table import RoiTablePanel
-from .panels.image.analysis_tab import FAST_SCAN_KEY, AnalysisTab
+from .panels.image.analysis_tab import AnalysisTab
 from .panels.sensorgram import SensorgramPanel
 from .panels.sensorgram.panel import TASK_ID as SENSORGRAM_TASK_ID
 from .panels.spectra import SpectraPanel
@@ -110,6 +111,7 @@ from .selection.frame_roles_module import FrameRolesModule
 from .selection.reference_auto_task import TASK_ID as REFERENCE_TASK_ID, ReferenceAutoFind
 from .storage.app_settings import AppSettings, load_app_settings, save_app_settings
 from .storage.ui_state_keys import (
+    ANALYSIS_MODE,
     CHROMATIC_ALL_WAVELENGTHS,
     CUBE_DISPLAY_MODE,
     CHROMATIC_BORDER_PERCENT,
@@ -184,6 +186,10 @@ logger = logging.getLogger(__name__)
 # layout and any custom layout presets saved before this are dropped (the
 # default layout is built, and a preset falls back to showing/hiding panels).
 _DOCK_LAYOUT_STATE_VERSION = 4
+
+LAUNCH_POOL_FALLBACK_MS = 20_000
+"""A remembered Performance mode starts its worker processes when the startup tracker says the app has loaded, or this long after launch if
+nothing was being loaded (analysis/scan_pool.py): seven processes importing at once would slow down the dataset that is still opening."""
 
 # Workflow dock widths (2026-10-18): where a fresh layout starts it, and the floor
 # below which it cannot be dragged. The floor is what the widest stage needs, as
@@ -1114,11 +1120,28 @@ def _build_workflow_panel(m: _Modules, writer: _SettingsWriter, ui_state: UiStat
     return workflow
 
 
-def _wire_analysis_scan(m: _Modules, row: AnalysisTab, ui_state: UiStateStore) -> None:
+def _wire_analysis_scan(m: _Modules, row: AnalysisTab, ui_state: UiStateStore, startup: StartupTracker | None = None) -> None:
     """The Image panel's Analysis tab (Scan / Fast scan / Scan file) and the scan task: the tab only emits requests and shows text; this
-    decides where the file goes, starts the task on the GUI thread and turns its outcome into the tab's status line."""
-    ui_state.bind(FAST_SCAN_KEY, row.fast_scan_button)
+    decides where the file goes, starts the task on the GUI thread and turns its outcome into the tab's status line.
+    `ui_state` holds the remembered analysis mode (Normal / Performance, 2026-10-27); a remembered Performance mode starts its worker processes
+    once the application has finished starting up (`startup`; or 20 s after launch when nothing is being loaded), not while the dataset loads."""
     row.bind_live(m.analysis_live)  # not remembered: a pause is a working state, the app always starts live
+
+    remembered = read(ui_state, ANALYSIS_MODE)
+    mode = remembered if remembered in MODES else MODE_NORMAL
+    row.set_mode(mode)  # shown, not announced
+    m.analysis_scan.set_mode(mode, start_pool=False)
+
+    def mode_picked(picked: str) -> None:
+        ui_state.set(ANALYSIS_MODE.key, picked)
+        m.analysis_scan.set_mode(picked)  # Performance: the workers start now, on a thread of their own
+
+    row.mode_changed.connect(mode_picked)
+    m.analysis_scan.pool_state_changed.connect(row.set_pool_state)  # a bound method of the tab: delivered on the GUI thread
+    if mode == MODE_PERFORMANCE:
+        if startup is not None:
+            startup.task_finished.connect(lambda *_args: m.analysis_scan.start_pool())
+        QTimer.singleShot(LAUNCH_POOL_FALLBACK_MS, m.analysis_scan.start_pool)  # idempotent; for a launch that opens no dataset
 
     def scan_file() -> Path | None:
         home, session_id = m.dataset.dataset_home(), m.session_coordinator.active_session_id()
@@ -1145,7 +1168,7 @@ def _wire_analysis_scan(m: _Modules, row: AnalysisTab, ui_state: UiStateStore) -
         if not QDesktopServices.openUrl(QUrl.fromLocalFile(str(path.parent))):
             row.set_status(f"Could not open the folder {path.parent}.", announce=True)
 
-    def run() -> None:
+    def run(only_stale: bool) -> None:  # True = the Fast scan button, False = the Scan button (every cube)
         path = scan_file()
         if path is None:
             row.set_status("Open a dataset first: the scan is saved in its session.", announce=True)
@@ -1159,7 +1182,7 @@ def _wire_analysis_scan(m: _Modules, row: AnalysisTab, ui_state: UiStateStore) -
             row.set_status(str(exc), announce=True)
             return
         row.set_status("Starting...")
-        m.analysis_scan.start(source, store_path=path, only_stale=row.fast_scan(), dataset_label=m.dataset.dataset_home().name)
+        m.analysis_scan.start(source, store_path=path, only_stale=only_stale, dataset_label=m.dataset.dataset_home().name)
 
     def finished(_task_id: str, outcome: str, message: str) -> None:
         if outcome == "cancelled":
@@ -1728,7 +1751,7 @@ def build_main_window(
     attach_to_menu_bar(window.menuBar(), m.dataset)  # dataset path, type / size / cubes, and the Time / Plan checks
     startup = _build_startup_tracker(m, image_panel, spectra_panel, sensorgram_panel)
     _build_status_bar(window, m, workflow, image_panel, roi_table_panel, spectra_panel, sensorgram_panel, startup)
-    _wire_analysis_scan(m, image_panel.analysis_tab, ui_state)
+    _wire_analysis_scan(m, image_panel.analysis_tab, ui_state, startup)
     _wire_session_carry_prompt(window, m)
     _wire_edit_menu(edit_menu, window, m.analysis_engine)
     stages.done("menus and status bar")

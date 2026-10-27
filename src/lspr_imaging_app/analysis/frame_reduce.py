@@ -89,6 +89,78 @@ class RoiSet:
     def n(self) -> int:
         return len(self.rois)
 
+    def subset(self, indices) -> RoiSet:
+        """The ROIs at ``indices`` (positions in this set, in the order given) as a RoiSet of their own: row ``k`` of every result for
+        it belongs to ``rois[indices[k]]``. Its ``key`` is made from this set's key and the indices, so it never equals another set's."""
+        idx = np.asarray(tuple(indices), dtype=np.intp)
+        key = hashlib.sha256(self.key.encode("ascii") + b"|subset|" + idx.astype(np.int64).tobytes()).hexdigest()
+        return RoiSet(
+            tuple(self.rois[i] for i in idx), self.cx[idx], self.cy[idx], self.sample_r[idx], self.ring_in_r[idx], self.ring_out_r[idx],
+            self.sample_on[idx], self.ring_on[idx], self.vectorised[idx], self.inner_default_px, self.outer_default_px, key,
+        )
+
+
+NEIGHBOUR_REACH_MARGIN_PX = 2.0
+"""Safety margin when asking whether one ROI's sample disk can touch another ROI's reference ring (`local_roi_keys`). The geometric test is exact
+(two discs that do not overlap share no pixel), so this only covers floating-point edge cases; a larger margin costs a few needless re-reads,
+never a wrong number."""
+
+_UNBOUNDED_REACH_PX = 1.0e18  # a free-form (mask) ROI has no radius: it is treated as reaching everything
+
+
+def roi_row_digests(rs: RoiSet) -> list[bytes]:
+    """One digest per ROI of everything that decides which pixels that ROI covers: the per-ROI part of ``RoiSet.key`` (centre, radii, which
+    parts exist, and for a free-form ROI its masks), plus the shared default ring diameters (a free-form ROI is rasterised with them)."""
+    defaults = np.array([rs.inner_default_px, rs.outer_default_px], dtype=np.float64).tobytes()
+    rows: list[bytes] = []
+    for i in range(rs.n):
+        digest = hashlib.blake2b(digest_size=16)
+        digest.update(np.array([rs.cx[i], rs.cy[i], rs.sample_r[i], rs.ring_in_r[i], rs.ring_out_r[i]], dtype=np.float64).tobytes())
+        digest.update(bytes((int(rs.ring_on[i]), int(rs.vectorised[i]))))
+        digest.update(defaults)
+        if not rs.vectorised[i]:
+            roi = rs.rois[i]
+            digest.update(repr((roi.sample_geometry_type, roi.reference_geometry_type, roi.sample_diameter_px,
+                                roi.reference_inner_diameter_px, roi.reference_outer_diameter_px)).encode())
+            for mask in (roi.sample_mask, roi.reference_mask):
+                if mask is not None:
+                    digest.update(repr((mask.x0, mask.y0, mask.mask.shape)).encode())
+                    digest.update(np.ascontiguousarray(mask.mask, dtype=bool).tobytes())
+        rows.append(digest.digest())
+    return rows
+
+
+def local_roi_keys(rs: RoiSet, exclusion_mode: str = DEFAULT_REFERENCE_EXCLUSION_MODE, margin_px: float = NEIGHBOUR_REACH_MARGIN_PX) -> list[bytes]:
+    """One key per ROI that changes exactly when the *pixels that ROI reads* can change: its own geometry, and the geometry of the other ROIs
+    whose sample disk can touch its reference ring (``exclude_all_sample_rois`` leaves those pixels out of the ring). Moving a ROI far from
+    every ring changes only its own key; moving it into reach of a neighbour's ring changes the neighbour's key too.
+
+    The test is made in the ROIs' own (source) space, where the discs are defined: a pixel is in both ring j and disc k only if its source
+    position is within ``ring_out_j`` of ROI j's centre and within ``sample_r_k`` of ROI k's, so ``distance <= ring_out_j + sample_r_k`` is
+    necessary, whatever the chromatic affine of the frame (it maps both discs alike). A free-form ROI has no radius and counts as reaching
+    everything; a ROI without a ring (``reference_geometry_type == "none"``) is affected by no neighbour; ``exclusion_mode == "none"`` has
+    no neighbours at all.
+
+    Pure; O(n squared) arithmetic for n ROIs (160 ROIs: a few milliseconds)."""
+    rows = roi_row_digests(rs)
+    if exclusion_mode != EXCLUDE_ALL_SAMPLE_ROIS or rs.n < 2:
+        return rows
+    ring_reach = np.where(rs.vectorised, rs.ring_out_r, _UNBOUNDED_REACH_PX)
+    sample_reach = np.where(rs.vectorised, rs.sample_r, _UNBOUNDED_REACH_PX)
+    has_ring = rs.ring_on | ~rs.vectorised
+    has_sample = rs.sample_on | ~rs.vectorised
+    distance = np.hypot(rs.cx[:, None] - rs.cx[None, :], rs.cy[:, None] - rs.cy[None, :])
+    near = (distance <= ring_reach[:, None] + sample_reach[None, :] + float(margin_px)) & has_ring[:, None] & has_sample[None, :]
+    np.fill_diagonal(near, False)
+    keys: list[bytes] = []
+    for j in range(rs.n):
+        digest = hashlib.blake2b(digest_size=16)
+        digest.update(rows[j])
+        for k in np.flatnonzero(near[j]):  # in ROI order, so the key does not depend on anything but the geometry
+            digest.update(rows[int(k)])
+        keys.append(digest.digest())
+    return keys
+
 
 def build_roi_set(rois, default_inner_diameter_px: float, default_outer_diameter_px: float) -> RoiSet:
     rois = tuple(rois)
@@ -275,6 +347,48 @@ class PixelLayout:
     def nbytes(self) -> int:
         return sum(a.nbytes for a in (self.sample_roi, self.sample_flat, self.ring_roi, self.ring_flat, self.needed_flat, self.sample_pos, self.ring_pos))
 
+    def restrict(self, indices) -> PixelLayout:
+        """The layout of only the ROIs at ``indices`` (row ``k`` of the result is ROI ``indices[k]``), cut out of this one, so the pixels each of
+        them reads, and in the same order, are exactly the ones this layout holds: the reference-ring exclusion was already applied with every
+        ROI's sample disk, so a restricted layout still leaves out the neighbours' pixels. ``needed_flat`` shrinks to what these ROIs read."""
+        idx = np.asarray(tuple(indices), dtype=np.intp)
+        if idx.size != np.unique(idx).size or (idx.size and (idx.min() < 0 or idx.max() >= self.n_rois)):
+            raise ValueError(f"indices must be distinct ROI positions in 0..{self.n_rois - 1}")
+        s_flat, s_count = _blocks(self.sample_flat, self.sample_count, idx)
+        r_flat, r_count = _blocks(self.ring_flat, self.ring_count, idx)
+        positions = np.arange(idx.size, dtype=np.intp)
+        return _assemble_layout(
+            self.shape, int(idx.size), self.exclusion_mode, np.repeat(positions, s_count), s_flat, np.repeat(positions, r_count), r_flat
+        )
+
+
+def _blocks(flat: np.ndarray, counts: np.ndarray, indices: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """The pixels of the ROIs at ``indices`` from arrays that hold each ROI's pixels as one block, ROI after ROI, ``counts[i]`` long."""
+    offsets = np.concatenate(([0], np.cumsum(counts)))
+    parts = [flat[offsets[i]:offsets[i + 1]] for i in indices]
+    return (np.concatenate(parts) if parts else np.zeros(0, dtype=flat.dtype)), counts[indices]
+
+
+def _assemble_layout(
+    shape: tuple[int, int], n_rois: int, exclusion_mode: str, s_roi: np.ndarray, s_flat: np.ndarray, r_roi: np.ndarray, r_flat: np.ndarray
+) -> PixelLayout:
+    """A :class:`PixelLayout` from the final pixel lists (exclusion already applied): the pixels any ROI reads and where each sits in them."""
+    # A marker array over the image is linear time; np.unique + searchsorted (sorting ~570 k indices) made a build 137 ms instead of ~15
+    # (2026-10-19).
+    mark = np.zeros(shape[0] * shape[1], dtype=bool)
+    mark[s_flat] = True
+    mark[r_flat] = True
+    needed = np.flatnonzero(mark)
+    where = np.empty(mark.size, dtype=np.intp)
+    where[needed] = np.arange(needed.size, dtype=np.intp)
+    # Native index type throughout: int32 halved the memory but numpy converts it back on every gather and bincount,
+    # +4 ms per frame of 160 ROIs (measured 2026-10-19).
+    return PixelLayout(
+        shape, n_rois, exclusion_mode, s_roi, s_flat, r_roi, r_flat,
+        np.bincount(s_roi, minlength=n_rois), np.bincount(r_roi, minlength=n_rois),
+        needed, where[s_flat], where[r_flat],
+    )
+
 
 def build_layout(
     rs: RoiSet, affine: np.ndarray, shape: tuple[int, int],
@@ -289,21 +403,7 @@ def build_layout(
         union[s_flat] = True  # every ROI's sample aperture, before the ignore mask (as tasks._sample_exclusion_union)
         keep = ~union[r_flat]
         r_roi, r_flat = r_roi[keep], r_flat[keep]
-    # Every pixel any ROI reads, and where each sample / ring pixel sits in that list. A marker array over the image is
-    # linear time; np.unique + searchsorted (sorting ~570 k indices) made a build 137 ms instead of ~15 (2026-10-19).
-    mark = np.zeros(shape[0] * shape[1], dtype=bool)
-    mark[s_flat] = True
-    mark[r_flat] = True
-    needed = np.flatnonzero(mark)
-    where = np.empty(mark.size, dtype=np.intp)
-    where[needed] = np.arange(needed.size, dtype=np.intp)
-    # Native index type throughout: int32 halved the memory but numpy converts it back on every gather and bincount,
-    # +4 ms per frame of 160 ROIs (measured 2026-10-19).
-    return PixelLayout(
-        shape, rs.n, exclusion_mode, s_roi, s_flat, r_roi, r_flat,
-        np.bincount(s_roi, minlength=rs.n), np.bincount(r_roi, minlength=rs.n),
-        needed, where[s_flat], where[r_flat],
-    )
+    return _assemble_layout(shape, rs.n, exclusion_mode, s_roi, s_flat, r_roi, r_flat)
 
 
 class LayoutCache:
@@ -311,15 +411,34 @@ class LayoutCache:
     between threads. ``max_entries`` bounds the memory: one layout of 160 ROIs is ~9 MB, and a run needs one per
     wavelength per ROI layout in use (26 here), so the default holds one ROI layout's set with room to spare."""
 
-    def __init__(self, max_entries: int = 40) -> None:
+    def __init__(self, max_entries: int = 40, max_subset_entries: int = 64) -> None:
         self._max = max(int(max_entries), 1)
+        self._max_subsets = max(int(max_subset_entries), 1)
         self._items: OrderedDict = OrderedDict()
+        self._subsets: OrderedDict = OrderedDict()  # restricted layouts, kept apart so they never push the full ones out
         self._lock = threading.Lock()
         self.hits = 0
         self.misses = 0
 
     def get(self, rs: RoiSet, affine: np.ndarray, shape: tuple[int, int],
-            exclusion_mode: str = DEFAULT_REFERENCE_EXCLUSION_MODE, block: int = DEFAULT_BLOCK_ROIS) -> PixelLayout:
+            exclusion_mode: str = DEFAULT_REFERENCE_EXCLUSION_MODE, block: int = DEFAULT_BLOCK_ROIS,
+            subset: tuple[int, ...] | None = None) -> PixelLayout:
+        """The layout of ``rs`` for this affine and shape. With ``subset`` (positions in ``rs``): the layout of just those ROIs, cut out of the
+        full one (:meth:`PixelLayout.restrict`), cached per subset."""
+        if subset is not None:
+            affine_bytes = np.ascontiguousarray(affine, dtype=np.float64).tobytes()
+            sub_key = (rs.key, affine_bytes, (int(shape[0]), int(shape[1])), exclusion_mode, tuple(int(i) for i in subset))
+            with self._lock:
+                cached = self._subsets.get(sub_key)
+                if cached is not None:
+                    self._subsets.move_to_end(sub_key)
+                    return cached
+            restricted = self.get(rs, affine, shape, exclusion_mode, block).restrict(subset)
+            with self._lock:
+                self._subsets[sub_key] = restricted
+                while len(self._subsets) > self._max_subsets:
+                    self._subsets.popitem(last=False)
+            return restricted
         key = (rs.key, np.ascontiguousarray(affine, dtype=np.float64).tobytes(), (int(shape[0]), int(shape[1])), exclusion_mode)
         with self._lock:
             layout = self._items.get(key)

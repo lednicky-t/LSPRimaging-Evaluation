@@ -4,8 +4,13 @@ A cell is the scan of one ROI on one cube (all wavelengths, both sides). Its has
 
 * the **recipe**: the settings that reach the pixels (geometry, background, detection settings, reduction methods, exclusion mode,
   trimmed fraction) and :data:`SCAN_ALGORITHM_VERSION`;
-* the cube's **ROI layout** (``RoiSet.key``: every ROI's geometry and the ring defaults; the reference ring of a ROI excludes the sample
-  apertures of *all* ROIs, so one ROI moving changes every cell of that cube);
+* the **ROI geometry that decides the cell's pixels** (since 2026-10-27, ``frame_reduce.local_roi_keys``): the ROI's own geometry and that of
+  the other ROIs whose sample disk can touch its reference ring (the ring leaves out the sample apertures of all ROIs). Moving one ROI changes
+  its own cells, and a neighbour's only if the two came within reach; on a lattice with a ring smaller than the pitch, one ROI. **Exception:**
+  when background removal is on *and* excludes the ROIs from its estimate (``flatten_background_exclude_area_rois``), the background of the
+  whole frame depends on every ROI's position, so the hash covers the whole layout (``RoiSet.key``) exactly as before 2026-10-27 and a moved
+  ROI makes every cell stale. Changing from the whole-layout hash to the local one changed every hash once: files written before read as out
+  of date until a Fast scan refreshes them (same numbers, new hashes); sessions under the exception above kept their hashes;
 * every frame of the cube: its wavelength column, the file *name* (not the folder, so moving a dataset does not invalidate anything), the
   chromatic affine and the **content** of the ignore mask (not a version number). The mask enters as what the processed-space mask is made
   from: a digest of the *authored* pixels plus the chromatic warp to this frame (``FrameJob.ignore_key``; the rotation and crop are in the
@@ -34,6 +39,7 @@ from dataclasses import asdict
 
 import numpy as np
 
+from .frame_reduce import local_roi_keys
 from .scan import ScanSettings
 from .scan_jobs import ScanPlan
 
@@ -70,15 +76,27 @@ def _ignore_digest(mask: np.ndarray) -> bytes:
     return hashlib.blake2b(np.packbits(np.ascontiguousarray(mask, dtype=bool)).tobytes() + str(mask.shape).encode(), digest_size=16).digest()
 
 
+def layout_is_global(settings: ScanSettings) -> bool:
+    """True when the numbers of a ROI depend on where *every* ROI is, whatever the distances: background removal on, with the ROIs cut out of
+    its estimate. Then a moved ROI changes the background of the whole frame (the estimate and its whole-frame baseline), so no cell can be
+    called current after any ROI moved."""
+    return bool(settings.background.flatten_background_enabled and settings.background.flatten_background_exclude_area_rois)
+
+
 def cell_hashes(plan: ScanPlan) -> np.ndarray:
     """``uint64 [cube, roi]`` for the cubes of ``plan`` (0 is never returned: it means "never computed" in the file)."""
     base = recipe_digest(recipe_of(plan.settings))
     ignore_cache: dict[int, bytes] = {}  # one digest per distinct mask array (they are shared between frames)
+    global_layout = layout_is_global(plan.settings)
+    local_keys: dict[str, list[bytes]] = {}  # per ROI layout (cubes share one unless there is a ROI timeline)
     out = np.zeros((len(plan.jobs), len(plan.roi_ids)), dtype=np.uint64)
     for p, job in enumerate(plan.jobs):
         cube = hashlib.blake2b(digest_size=16)
         cube.update(base)
-        cube.update(job.rois.key.encode("ascii"))
+        if global_layout:
+            cube.update(job.rois.key.encode("ascii"))
+        elif job.rois.key not in local_keys:
+            local_keys[job.rois.key] = local_roi_keys(job.rois, plan.settings.exclusion_mode)
         for column, frame in zip(plan.axis_positions[p], job.frames):
             cube.update(np.int64(column).tobytes())
             cube.update(frame.path.replace("\\", "/").rsplit("/", 1)[-1].encode("utf-8"))
@@ -93,8 +111,10 @@ def cell_hashes(plan: ScanPlan) -> np.ndarray:
                     ignore_cache[key] = _ignore_digest(frame.ignore)
                 cube.update(ignore_cache[key])
         digest = cube.digest()
+        keys = None if global_layout else local_keys[job.rois.key]
         for r, roi_id in enumerate(plan.roi_ids):
-            h = hashlib.blake2b(digest + np.int64(roi_id).tobytes() + np.int64(r).tobytes(), digest_size=8).digest()
+            own = b"" if keys is None else keys[r]
+            h = hashlib.blake2b(digest + own + np.int64(roi_id).tobytes() + np.int64(r).tobytes(), digest_size=8).digest()
             value = int.from_bytes(h, "little") or 1
             out[p, r] = value
     return out

@@ -29,6 +29,10 @@ dependencies = [
     "imagecodecs>=2026.6.6,<2027",
     "ome-zarr>=0.17,<0.18",
     "numcodecs>=0.16,<0.17",
+    # CRC32C of a zarr v3 shard's index (io/_zarr_export_worker.py `_crc32c`, checked on every read of an OME-Zarr plane). Soft-imported:
+    # without it the check is a pure-Python loop, ~110-180 ms per 186 KB index (once per cube) = more than half of the read time of an analysis
+    # scan of an OME-Zarr export; with it 27 us and the identical checksum (checked against the stored one of the test export, 2026-10-27).
+    "crc32c>=2.9,<3",
     "pyqtgraph>=0.14,<0.15",
     "scikit-image>=0.26,<0.27",
     "scipy>=1.17,<2",

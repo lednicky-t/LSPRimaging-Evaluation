@@ -51,15 +51,22 @@ def new_arrays(plan: ScanPlan) -> ScanArrays:
 
 
 def place(arrays: ScanArrays, plan: ScanPlan, result: CubeResult) -> None:
-    """Put one finished cube into ``arrays``. A cube is placed once; placing it again is a bug and raises."""
+    """Put one finished cube into ``arrays``. A cube is placed once; placing it again is a bug and raises.
+
+    A result with a ``roi_subset`` fills only those ROI rows of the cube (the other rows stay NaN / 0 here: they were not computed in this run,
+    and the file keeps what it holds for them); ``done[cube]`` then means "this cube was processed", not "every ROI is in the arrays"."""
     pos = result.cube_pos
     if arrays.done[pos]:
         raise ValueError(f"cube position {pos} (cube {plan.cube_indices[pos]}) was placed twice")
     columns = list(plan.axis_positions[pos])
+    if result.roi_subset is None:
+        where = (slice(None), columns, slice(None))
+    else:
+        where = (np.asarray(result.roi_subset, dtype=np.intp)[:, None], np.asarray(columns, dtype=np.intp)[None, :], slice(None))
     for method, values in result.values.items():
-        arrays.values[method][pos][:, columns, :] = values
-    arrays.std[pos][:, columns, :] = result.std
-    arrays.n_valid[pos][:, columns, :] = result.n_valid
-    arrays.n_nominal[pos][:, columns, :] = result.n_nominal
-    arrays.n_masked[pos][:, columns, :] = result.n_masked
+        arrays.values[method][pos][where] = values
+    arrays.std[pos][where] = result.std
+    arrays.n_valid[pos][where] = result.n_valid
+    arrays.n_nominal[pos][where] = result.n_nominal
+    arrays.n_masked[pos][where] = result.n_masked
     arrays.done[pos] = True

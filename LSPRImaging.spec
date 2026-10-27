@@ -15,6 +15,7 @@ a = Analysis(
         'lucide',
         'zarr',
         'numcodecs',
+        'crc32c',
         'ome_zarr',
         'imagecodecs',
     ],

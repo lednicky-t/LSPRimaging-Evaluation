@@ -159,6 +159,17 @@ def _rotation_active(settings: GeometrySettings) -> bool:
     return bool(getattr(settings, "image_tools_enabled", True)) and abs(float(settings.rotation_angle_deg)) > 1e-9
 
 
+def spatial_transform_is_identity(settings: GeometrySettings) -> bool:
+    """True when rotate -> flip -> crop (`apply_spatial_preprocessing`) hands the image back exactly as it is: image tools off, or no
+    rotation, no flip and no crop. Then processed pixel (y, x) is raw pixel (y, x), so a reader may fetch just the pixels it needs
+    (the analysis scan's chunk reads, `analysis/scan.py`). Mirrors the conditions of `_apply_spatial_transform`."""
+    if not bool(getattr(settings, "image_tools_enabled", True)):
+        return True
+    crop = settings.crop
+    cropped = bool(crop.enabled and crop.width > 0 and crop.height > 0)
+    return not (abs(float(settings.rotation_angle_deg)) > 1e-9 or settings.flip_horizontal or settings.flip_vertical or cropped)
+
+
 def _rotation_geometry(
     in_shape: tuple[int, int],
     angle_deg: float,
