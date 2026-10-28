@@ -49,7 +49,7 @@ from .provenance import DEFAULT_REFERENCE_EXCLUSION_MODE
 from .reduction import DEFAULT_TRIMMED_MEAN_FRACTION
 from .scan import _SCAN_WORKER_BYTES, scan_cubes
 from .scan_arrays import ScanArrays, new_arrays, place
-from .scan_fingerprint import cell_hashes
+from .scan_fingerprint import cell_hashes, stamped_by_previous_formula
 from .scan_pool import MODE_NORMAL, MODES, WarmPool, uses_warm_pool
 from .scan_jobs import ScanPlan, ScanSource, build_scan_plan, snapshot_source, subset_plan
 from .scan_store import ScanStore, ScanWriter, stale_cell_matrix
@@ -236,10 +236,18 @@ class ScanTask(ThreadedTask):
                 store = ScanStore(store_path) if store_path is not None else None
                 positions = list(range(len(plan.jobs)))
                 stale = None  # bool [cube, roi] of the stale cells; None = every cell is to be computed
+                restamped = 0  # cells given a new stamp without being scanned (their inputs are unchanged, see below)
                 if store is not None:
                     stored = store.prepare(plan, dataset_label=dataset_label)
                     if only_stale:
                         stale = stale_cell_matrix(stored, hashes)
+                        if stale.any():
+                            # Cells stamped with the previous hash formula (the whole ignore mask in every cell) whose inputs have not changed are
+                            # current: give them the new stamp and leave their numbers alone (a cube with masks would otherwise be scanned again).
+                            old_stamp = stamped_by_previous_formula(stored, hashes, plan)
+                            if old_stamp.any():
+                                restamped = store.restamp(plan, old_stamp, hashes)
+                                stale &= ~old_stamp
                         positions = [int(p) for p in np.flatnonzero(stale.any(axis=1))]
                 run_plan = None
                 if positions:
@@ -252,7 +260,7 @@ class ScanTask(ThreadedTask):
                 t.set(
                     cubes=len(plan.jobs), stale_cubes=len(positions), frames=plan.n_frames,
                     ignore_mask_mb=round((run_plan.ignore_mask_bytes if run_plan is not None else 0) / 1e6, 1),
-                    stale_cells=int(stale.sum()) if stale is not None else len(plan.jobs) * len(plan.roi_ids),
+                    stale_cells=int(stale.sum()) if stale is not None else len(plan.jobs) * len(plan.roi_ids), restamped_cells=restamped,
                 )
         except ValueError as exc:  # nothing to scan / inconsistent ROI ids: the user's setup, not a crash
             return _Refused(str(exc))

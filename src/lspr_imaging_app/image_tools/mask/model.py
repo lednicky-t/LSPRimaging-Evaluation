@@ -72,7 +72,14 @@ class MaskCosmeticChange:
 
 def _decode_plane(packed: bytes, height: int, width: int) -> np.ndarray:
     bits = np.unpackbits(np.frombuffer(zlib.decompress(packed), dtype=np.uint8), count=height * width)
-    return bits.astype(bool).reshape((height, width))
+    return bits.view(bool).reshape((height, width))  # unpackbits gives only 0 and 1: the same array as ``astype(bool)`` without the copy (0.85 ms per 1 MP mask)
+
+
+@lru_cache(maxsize=2048)
+def _content_digest(packed: bytes, shape: tuple[int, int]) -> bytes:
+    """Digest of a mask's pixels from its stored bits (cached: the scan hashes the same few hundred masks on every run; ``packed`` is immutable and
+    its hash is cached on the bytes object, so a hit costs a dictionary lookup)."""
+    return hashlib.blake2b(zlib.decompress(packed) + str(shape).encode(), digest_size=16).digest()
 
 
 @lru_cache(maxsize=32)
@@ -134,8 +141,9 @@ class MaskChange:
         """A 16-byte digest of the pixels (and the shape), computed from the stored bits *without decoding them to a plane* (~0.3 ms, a decode is
         ~2 ms). Equal pixels give an equal digest wherever the mask came from: it hashes the packed bits themselves (``np.packbits`` of the
         plane in C order), not the compressed bytes, which a different zlib could write differently. The scan's staleness fingerprint uses it
-        (`analysis/scan_fingerprint.py`, `authored_mask_digest` gives the same value for a plane)."""
-        return hashlib.blake2b(zlib.decompress(self._packed) + str(self.shape).encode(), digest_size=16).digest()
+        (`analysis/scan_fingerprint.py`, `authored_mask_digest` gives the same value for a plane). Memoised (2026-10-28): 0.28 ms x 411 masks was 0.12 s
+        of every plan build, and a Fast scan builds two."""
+        return _content_digest(self._packed, self.shape)
 
     @property
     def stored_bytes(self) -> int:

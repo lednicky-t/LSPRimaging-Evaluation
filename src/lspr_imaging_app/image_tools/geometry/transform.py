@@ -105,6 +105,11 @@ def apply_spatial_mask(
 ) -> np.ndarray | None:
     if mask is None:
         return None
+    if mask.dtype == np.bool_ and spatial_transform_is_identity(settings):
+        # Nothing moves, so the general path below hands back this very mask (a bool survives the float32 round trip and the ``>= 0.5``
+        # test) after two full-plane conversions, ~3 ms per 1 MP mask. A copy, because the general path always returns a new array.
+        # Only bool: for another dtype the threshold is not the same as ``bool()``, so those keep the general path.
+        return mask.copy(order="K")
     if _cv2_geometry_usable(mask, settings):
         # uint8 0/1 with nearest-neighbour sampling: stays an exact 0/1 mask.
         warped = _warp_geometry_cv2(mask.astype(np.uint8, copy=False), settings, nearest=True, border_value=0.0)

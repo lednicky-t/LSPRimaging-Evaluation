@@ -62,6 +62,8 @@ def resolve_external_mask(
     authored_mask: np.ndarray | None,
     geometry_settings: GeometrySettings,
     warp_affine: np.ndarray | None = None,
+    *,
+    content_key: bytes | None = None,
 ) -> np.ndarray | None:
     """Turn an ignore mask **as authored** (raw image space, per
     `MaskModule.resolve_mask_source`) into the processed-space mask that
@@ -89,13 +91,18 @@ def resolve_external_mask(
     **Cached by content (2026-10-11)** and returned read-only: the same mask
     is resolved up to three times per displayed frame, twice on the GUI thread
     (~120 ms each with a rotation before the OpenCV rotation, ~7 ms after).
-    Copy before writing to the result."""
+    Copy before writing to the result.
+
+    ``content_key`` (2026-10-28): a digest of exactly these pixels that the caller already has (the scan plan has one for each of its few hundred
+    masks), used as the cache key instead of hashing the plane again (~0.25 ms per 1 MP mask). Only a key that identifies the pixels may be passed;
+    it names the entry in the same cache, so a caller that passes one and a caller that does not never find each other's entries (a repeat is
+    only a miss, never a wrong mask)."""
     if authored_mask is None:
         return None
     authored = np.ascontiguousarray(authored_mask, dtype=bool)
     spatial_key = (
         authored.shape,
-        hashlib.blake2b(np.packbits(authored), digest_size=16).digest(),  # 8x fewer bytes to hash
+        content_key if content_key is not None else hashlib.blake2b(np.packbits(authored), digest_size=16).digest(),  # 8x fewer bytes to hash
         geometry_cache_key(geometry_settings),
     )
     key = (*spatial_key, None if warp_affine is None else np.asarray(warp_affine, dtype=np.float64).tobytes())

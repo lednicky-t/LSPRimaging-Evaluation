@@ -25,6 +25,13 @@ all values, all real hashes); ``ScanWriter`` runs it on a thread of its own so t
 the other rows of the cube are not touched. ``state/layout_id`` of such a cube then names the layout of the latest write: still true for every
 cell, because a cell that was not rewritten depends only on geometry that is identical in the old and the new layout (``scan_fingerprint``).
 
+**No compression (2026-10-28, maintainer's choice).** The big arrays are stored plain, in one chunk per cube. A refresh that rewrites some ROI
+rows of every cube made each gzip chunk a different size, HDF5 put the new chunk at the end and lost the old space when the file was closed: a
+one-ROI refresh of 314 cubes added 3-7 MB (the test session's file was 96 MB where the same numbers written fresh take 38.5 MB), and the writer spent
+half its time compressing. Plain chunks never change size and are rewritten in place: constant file size (74 MB for 314 cubes x 160 ROIs x 26
+wavelengths, 28 bytes per value slot), a one-ROI refresh writes in 1.3 s instead of 3.3-3.8 s. A file written before this change (gzip) is converted
+once by ``prepare`` (:meth:`ScanStore._convert_to_uncompressed`): copied into a new file, compared array for array, and only then swapped in.
+
 **When the file does not fit** (other ROI ids, wavelength axis, cube list or reduction methods; or an unknown schema) the old file is
 moved to ``scan.previous.h5`` (one backup slot) and a new one is made: every stored cell is stale then anyway (decision 2026-10-23), and
 nothing is deleted without a copy.
@@ -48,7 +55,7 @@ import numpy as np
 from ..version_rewrite import APP_VERSION, REWRITE_APP_NAME
 from .frame_reduce import RoiSet
 from .scan_arrays import ScanArrays
-from .scan_fingerprint import recipe_digest, recipe_json, recipe_of
+from .scan_fingerprint import recipe_digest, recipe_json, recipe_of, stamped_by_previous_formula
 from .scan_jobs import WAVELENGTH_KEY_DECIMALS, ScanPlan
 
 logger = logging.getLogger(__name__)
@@ -203,8 +210,63 @@ def stale_cube_indices(stored: StoredScan, plan: ScanPlan, hashes: np.ndarray) -
     if tuple(plan.dataset_cubes) != stored.cube_indices:
         return everything, "the cubes changed"
     rows = [stored.cube_indices.index(int(c)) for c in plan.cube_indices]
-    positions = stale_cube_positions(stored.cell_hash[rows], hashes)
-    return frozenset(int(plan.cube_indices[p]) for p in positions), ""
+    stored_hashes = stored.cell_hash[rows]
+    stale = stale_cell_matrix(stored_hashes, hashes)
+    if stale.any():
+        stale &= ~stamped_by_previous_formula(stored_hashes, hashes, plan)  # an old stamp on unchanged inputs is current
+    return frozenset(int(plan.cube_indices[p]) for p in np.flatnonzero(stale.any(axis=1))), ""
+
+
+_ROWS_PER_COPY = 16
+_STATE_PATHS = ("state/cell_hash", "state/recipe_id", "state/layout_id")
+_METADATA_GROUPS = ("metadata/recipes", "metadata/roi_layouts")
+
+
+def _array_paths(f: h5py.File) -> list[str]:
+    """The large datasets of a scan file (everything that used to be compressed)."""
+    return [f"processed/scan/value/{m}" for m in f["processed/scan/value"]] + [
+        "processed/scan/std", "processed/scan/n_valid", "processed/scan/n_nominal", "processed/scan/n_masked", "axes/acquired_at_unix_ms",
+    ]
+
+
+def _copy_scan_content(old: h5py.File, new: h5py.File) -> None:
+    """Everything an ``old`` scan file holds into the empty skeleton ``new`` (same axes): attributes, arrays, state and metadata."""
+    for key, value in old.attrs.items():
+        new.attrs[key] = value
+    for path in _array_paths(old) + list(_STATE_PATHS):
+        source, target = old[path], new[path]
+        if source.ndim == 0 or source.shape[0] == 0:
+            continue
+        for start in range(0, source.shape[0], _ROWS_PER_COPY):
+            target[start:start + _ROWS_PER_COPY] = source[start:start + _ROWS_PER_COPY]
+    for group in _METADATA_GROUPS:
+        for name in old[group]:
+            old.copy(f"{group}/{name}", new[group], name=name)
+
+
+def _same_scan_content(old: h5py.File, new: h5py.File) -> bool:
+    """True when ``new`` holds exactly what ``old`` holds: every array (NaN equal to NaN), the state, the metadata entries and their attributes."""
+    for path in _array_paths(old) + list(_STATE_PATHS):
+        source, target = old[path], new[path]
+        if source.shape != target.shape or source.dtype != target.dtype:
+            return False
+        if source.ndim == 0 or source.shape[0] == 0:
+            continue
+        for start in range(0, source.shape[0], _ROWS_PER_COPY):
+            if not np.array_equal(source[start:start + _ROWS_PER_COPY], target[start:start + _ROWS_PER_COPY], equal_nan=source.dtype.kind == "f"):
+                return False
+    for group in _METADATA_GROUPS:
+        if set(old[group]) != set(new[group]):
+            return False
+        for name in old[group]:
+            a, b = old[f"{group}/{name}"], new[f"{group}/{name}"]
+            if a[()] != b[()] or dict(a.attrs) != dict(b.attrs):
+                return False
+    return {k: _plain(v) for k, v in old.attrs.items()} == {k: _plain(v) for k, v in new.attrs.items()}
+
+
+def _plain(value):
+    return value.tolist() if isinstance(value, np.ndarray) else value
 
 
 class ScanStore:
@@ -229,10 +291,15 @@ class ScanStore:
             logger.warning("scan file does not fit this dataset or session any more; the old one is kept as %s", backup.name)
         if not self.path.exists():
             self._create(plan, dataset_label)
+        elif self._is_compressed():
+            self._convert_to_uncompressed(plan, dataset_label)
         self._cube_row = {int(c): i for i, c in enumerate(plan.dataset_cubes)}
         recipe = recipe_of(plan.settings)
         recipe_text, recipe_hex = recipe_json(recipe), recipe_digest(recipe).hex()
-        layouts = {job.rois.key: layout_json(job.rois) for job in plan.jobs}
+        layouts: dict[str, str] = {}
+        for job in plan.jobs:  # most plans share one ROI set between all their cubes: describe each distinct layout once (314 x 1 ms before)
+            if job.rois.key not in layouts:
+                layouts[job.rois.key] = layout_json(job.rois)
         rows = [self._cube_row[int(c)] for c in plan.cube_indices]
         with h5py.File(self.path, "r") as f:  # read-only first: a run with nothing to do must not touch the file
             self._recipe_id = self._find(f["metadata/recipes"], "digest", recipe_hex)
@@ -279,10 +346,16 @@ class ScanStore:
         return new_id
 
     def _create(self, plan: ScanPlan, dataset_label: str) -> None:
+        tmp = self.path.with_name(self.path.name + ".tmp")
+        self._write_skeleton(plan, dataset_label, tmp)
+        os.replace(tmp, self.path)
+
+    @staticmethod
+    def _write_skeleton(plan: ScanPlan, dataset_label: str, tmp: Path) -> None:
+        """A new, empty scan file (every cell "never computed") at ``tmp``."""
         n_cube, n_roi, n_wl = len(plan.dataset_cubes), len(plan.roi_ids), len(plan.wavelength_axis_nm)
         shape = (n_cube, n_roi, n_wl, 2)
         chunks = (1, n_roi, n_wl, 2)  # one cube per chunk: the unit that is written
-        tmp = self.path.with_name(self.path.name + ".tmp")
         if tmp.exists():
             tmp.unlink()
         now = _utc_now()
@@ -303,11 +376,11 @@ class ScanStore:
             ]
             for scale, name in zip(scales, DIM_LABELS):
                 scale.make_scale(name)
-            axes.create_dataset("acquired_at_unix_ms", shape=(n_cube, n_wl), dtype=np.int64, fillvalue=0, chunks=(1, n_wl), compression="gzip")
+            axes.create_dataset("acquired_at_unix_ms", shape=(n_cube, n_wl), dtype=np.int64, fillvalue=0, chunks=(1, n_wl))
             scan = f.create_group("processed/scan")
 
             def array(group: h5py.Group, name: str, dtype, fill) -> None:
-                ds = group.create_dataset(name, shape=shape, dtype=dtype, fillvalue=fill, chunks=chunks, compression="gzip", compression_opts=4, shuffle=True)
+                ds = group.create_dataset(name, shape=shape, dtype=dtype, fillvalue=fill, chunks=chunks)  # plain: see the module docstring
                 for i, (scale, label) in enumerate(zip(scales, DIM_LABELS)):
                     ds.dims[i].attach_scale(scale)
                     ds.dims[i].label = label
@@ -325,9 +398,64 @@ class ScanStore:
             state.create_dataset("cell_hash", shape=(n_cube, n_roi), dtype=np.uint64, fillvalue=0, chunks=(1, n_roi))
             state.create_dataset("recipe_id", shape=(n_cube, n_roi), dtype=np.int32, fillvalue=0, chunks=(1, n_roi))
             state.create_dataset("layout_id", shape=(n_cube,), dtype=np.int32, fillvalue=0)
-        os.replace(tmp, self.path)
+
+    # -- a file written with compression (before 2026-10-28) -------------------------------------------------------------------
+
+    def _is_compressed(self) -> bool:
+        try:
+            with h5py.File(self.path, "r") as f:
+                return any(f[path].compression is not None for path in _array_paths(f))
+        except (OSError, KeyError):
+            return False  # unreadable: the other checks of `prepare` have already dealt with it
+
+    def _convert_to_uncompressed(self, plan: ScanPlan, dataset_label: str) -> None:
+        """Replace a gzip file by an uncompressed one with exactly the same content. The copy is compared array for array before it is swapped
+        in; on any problem (a reader holds the file open, the disk is full, a difference) the original stays as it is and the run goes on with it."""
+        tmp = self.path.with_name(self.path.name + ".convert.tmp")
+        started = time.perf_counter()
+        try:
+            self._write_skeleton(plan, dataset_label, tmp)
+            with h5py.File(self.path, "r") as old, h5py.File(tmp, "r+") as new:
+                _copy_scan_content(old, new)
+                same = _same_scan_content(old, new)
+            if not same:
+                raise ScanFileError("the converted copy differs from the original")
+            os.replace(tmp, self.path)
+        except (OSError, KeyError, ScanFileError) as exc:
+            logger.warning("could not convert the scan file to the uncompressed layout (%s); it stays as it is", exc)
+            try:
+                tmp.unlink(missing_ok=True)
+            except OSError:
+                pass
+            return
+        logger.info("scan file converted to the uncompressed layout in %.1f s", time.perf_counter() - started)
 
     # -- writing ---------------------------------------------------------------------------------------------------------------
+
+    def restamp(self, plan: ScanPlan, cells: np.ndarray, hashes: np.ndarray) -> int:
+        """Give the cells flagged in ``cells`` (``bool [cube of plan, roi]``) the hashes ``hashes`` (``uint64``, the same shape), leaving their numbers
+        alone: for cells whose inputs are known to be unchanged but whose stamp was made with an earlier hash formula
+        (`scan_fingerprint.stamped_by_previous_formula`). Only the hash dataset is written. A torn write could at worst leave a wrong hash, which reads as
+        "out of date" and is scanned again: never a wrong number shown as current. Returns the number of cells."""
+        positions = [int(p) for p in np.flatnonzero(cells.any(axis=1))]
+        if not positions:
+            return 0
+        entries = sorted((self._cube_row[int(plan.cube_indices[p])], p) for p in positions)
+        with h5py.File(self.path, "r+") as f:
+            dataset = f["state/cell_hash"]
+            start = 0
+            while start < len(entries):
+                stop = start + 1
+                while stop < len(entries) and entries[stop][0] == entries[stop - 1][0] + 1:
+                    stop += 1
+                lo, hi = entries[start][0], entries[stop - 1][0] + 1
+                slab = dataset[lo:hi]
+                for row, p in entries[start:stop]:
+                    slab[row - lo, cells[p]] = hashes[p][cells[p]]
+                dataset[lo:hi] = slab
+                start = stop
+            f.flush()
+        return int(cells.sum())
 
     def write_cube(self, plan: ScanPlan, arrays: ScanArrays, cube_pos: int, cell_hash_row: np.ndarray) -> None:
         """Write one finished cube (position ``cube_pos`` in ``plan`` and ``arrays``) in the crash-safe order of the module docstring."""
@@ -354,48 +482,69 @@ class ScanStore:
         if len({row for _, row, _, _ in batch}) != len(batch):
             raise ValueError("a cube appears twice in one batch")
 
-        def put(dataset: h5py.Dataset, row: int, fresh: np.ndarray, idx: np.ndarray | None) -> None:
-            if idx is None:
-                dataset[row] = fresh
-                return
-            block = dataset[row]  # the cube's rows are one chunk: read it, replace the rows, write it back
-            block[idx] = fresh[idx]
-            dataset[row] = block
+        # One read-patch-write per dataset and per run of neighbouring cubes (the results of a task are four neighbours), not twenty small h5py calls per
+        # cube (2026-10-28: 4.5 s of writer time for 314 cubes in the app). Only rows that are in the batch are ever rewritten, never the gaps between
+        # runs: those cubes are current and a torn write must not be able to reach them.
+        batch.sort(key=lambda item: item[1])
+        runs: list[tuple[int, int]] = []  # [first, stop) positions in ``batch`` whose file rows are consecutive
+        first = 0
+        for k in range(1, len(batch) + 1):
+            if k == len(batch) or batch[k][1] != batch[k - 1][1] + 1:
+                runs.append((first, k))
+                first = k
+
+        def patch(dataset: h5py.Dataset, fresh_of) -> None:
+            """Replace the batch's rows in ``dataset``: the whole cube, or only the ROI rows of ``idx`` (``fresh_of(cube_pos)`` gives the new numbers)."""
+            for a, b in runs:
+                lo, hi = batch[a][1], batch[b - 1][1] + 1
+                slab = dataset[lo:hi]  # a copy
+                for cube_pos, row, idx, _ in batch[a:b]:
+                    fresh = fresh_of(cube_pos)
+                    if idx is None:
+                        slab[row - lo] = fresh
+                    else:
+                        slab[row - lo, idx] = fresh[idx]
+                dataset[lo:hi] = slab
 
         with h5py.File(self.path, "r+") as f:
             state, scan = f["state"], f["processed/scan"]
             hashes = {}  # row -> the hashes of the cube as they stand while its values are being written
-            for _, row, idx, _ in batch:
-                current = state["cell_hash"][row, :]  # h5py hands over a copy
-                if idx is None:
-                    current[:] = 0
-                else:
-                    current[idx] = 0
-                hashes[row] = current
-                state["cell_hash"][row, :] = current  # first: the old hash must not sit on values that are being replaced
+            for a, b in runs:
+                lo, hi = batch[a][1], batch[b - 1][1] + 1
+                block = state["cell_hash"][lo:hi]  # h5py hands over a copy
+                for _, row, idx, _ in batch[a:b]:
+                    if idx is None:
+                        block[row - lo] = 0
+                    else:
+                        block[row - lo, idx] = 0
+                    hashes[row] = block[row - lo].copy()
+                state["cell_hash"][lo:hi] = block  # first: the old hash must not sit on values that are being replaced
             f.flush()
-            for cube_pos, row, idx, _ in batch:
-                for method, values in arrays.values.items():
-                    put(scan["value"][method], row, values[cube_pos], idx)
-                put(scan["std"], row, arrays.std[cube_pos], idx)
-                put(scan["n_valid"], row, arrays.n_valid[cube_pos], idx)
-                put(scan["n_nominal"], row, arrays.n_nominal[cube_pos], idx)
-                put(scan["n_masked"], row, arrays.n_masked[cube_pos], idx)
-                if plan.acquired_at_unix_ms is not None:
-                    f["axes/acquired_at_unix_ms"][row] = plan.acquired_at_unix_ms[cube_pos]
+            for method, values in arrays.values.items():
+                patch(scan["value"][method], lambda cube_pos, values=values: values[cube_pos])
+            patch(scan["std"], lambda cube_pos: arrays.std[cube_pos])
+            patch(scan["n_valid"], lambda cube_pos: arrays.n_valid[cube_pos])
+            patch(scan["n_nominal"], lambda cube_pos: arrays.n_nominal[cube_pos])
+            patch(scan["n_masked"], lambda cube_pos: arrays.n_masked[cube_pos])
+            if plan.acquired_at_unix_ms is not None:
+                for a, b in runs:
+                    lo, hi = batch[a][1], batch[b - 1][1] + 1
+                    f["axes/acquired_at_unix_ms"][lo:hi] = np.stack([plan.acquired_at_unix_ms[cube_pos] for cube_pos, _, _, _ in batch[a:b]])
             f.flush()
-            for cube_pos, row, idx, new_hashes in batch:
-                recipe = state["recipe_id"][row, :]
-                final = hashes[row]
-                if idx is None:
-                    recipe[:] = self._recipe_id
-                    final[:] = new_hashes
-                else:
-                    recipe[idx] = self._recipe_id
-                    final[idx] = new_hashes[idx]
-                state["recipe_id"][row, :] = recipe
-                state["layout_id"][row] = self._layout_ids[plan.jobs[cube_pos].rois.key]
-                state["cell_hash"][row, :] = final  # last: from here these cells count as computed
+            for a, b in runs:
+                lo, hi = batch[a][1], batch[b - 1][1] + 1
+                recipe = state["recipe_id"][lo:hi]
+                final = np.stack([hashes[row] for _, row, _, _ in batch[a:b]])
+                for k, (cube_pos, row, idx, new_hashes) in enumerate(batch[a:b]):
+                    if idx is None:
+                        recipe[k] = self._recipe_id
+                        final[k] = new_hashes
+                    else:
+                        recipe[k, idx] = self._recipe_id
+                        final[k, idx] = new_hashes[idx]
+                state["recipe_id"][lo:hi] = recipe
+                state["layout_id"][lo:hi] = [self._layout_ids[plan.jobs[cube_pos].rois.key] for cube_pos, _, _, _ in batch[a:b]]
+                state["cell_hash"][lo:hi] = final  # last: from here these cells count as computed
             f.flush()
 
 

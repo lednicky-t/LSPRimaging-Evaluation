@@ -103,6 +103,10 @@ class ScanPlan:
     masks_resolved: bool = True  # False: made by ``build_scan_plan(resolve_masks=False)``: frames carry ``ignore_key`` but no mask array
     dataset_cubes: tuple[int, ...] = ()
     acquired_at_unix_ms: np.ndarray | None = None
+    mask_resolver: Callable[[bytes], np.ndarray] | None = field(default=None, compare=False, repr=False)
+    """``ignore_key`` of a frame -> its ignore mask in processed space (decoded, rotated and warped on demand, read-only). Lets the cell hash look at
+    the part of a mask a ROI can see (`scan_fingerprint`) without the plan holding 400 MB of masks; None for a plan made without masks to resolve.
+    Not sent to workers (only the jobs are) and not part of a plan's identity."""
 
     @property
     def n_frames(self) -> int:
@@ -222,6 +226,7 @@ def build_scan_plan(
     ignore_cache: dict[tuple, np.ndarray] = {}
     authored_digests: dict[tuple, bytes] = {}  # (authored frame, scope) -> digest of the authored pixels
     decoded: dict[tuple, np.ndarray] = {}  # (authored frame, scope) -> pixels, for a MaskRef that cannot make its digest without decoding
+    mask_table: dict[bytes, tuple] = {}  # ignore_key -> (MaskRef, chromatic warp, digest of the authored pixels): what `mask_resolver` needs
     jobs: list[CubeJob] = []
     positions: list[tuple[int, ...]] = []
     for cube_pos, cube in enumerate(chosen):
@@ -248,10 +253,14 @@ def build_scan_plan(
                         decoded[digest_key] = ref.load()
                         authored_digests[digest_key] = authored_mask_digest(decoded[digest_key])
                 ignore_key = ignore_key_of(authored_digests[digest_key], warp)
+                if ignore_key not in mask_table:
+                    mask_table[ignore_key] = (ref, warp, authored_digests[digest_key])
                 if resolve_masks:
                     if key not in ignore_cache:
                         pixels = decoded.get(digest_key)
-                        ignore_cache[key] = resolve_external_mask(ref.load() if pixels is None else pixels, geometry, warp)
+                        ignore_cache[key] = resolve_external_mask(
+                            ref.load() if pixels is None else pixels, geometry, warp, content_key=authored_digests[digest_key]
+                        )
                     ignore = ignore_cache[key]
             frames.append(FrameJob(str(source.record_path(cube, wl)), affine, ignore, ignore_key))
             columns.append(axis_index[_wl_key(wl)])
@@ -275,7 +284,19 @@ def build_scan_plan(
     return ScanPlan(
         settings, tuple(jobs), chosen, axis, tuple(positions), reference_ids, tuple(warnings), ignore_bytes,
         dataset_cubes=dataset_cubes, acquired_at_unix_ms=acquired, masks_resolved=resolve_masks,
+        mask_resolver=_mask_resolver(mask_table, geometry) if mask_table else None,
     )
+
+
+def _mask_resolver(table: dict[bytes, tuple], geometry: GeometrySettings) -> Callable[[bytes], np.ndarray]:
+    """The plan's ``mask_resolver``: the processed-space ignore mask of a frame, made from its ``ignore_key`` (authored pixels, chromatic warp and
+    the plan's geometry), the same way ``build_scan_plan`` makes the masks of a plan that resolves them."""
+
+    def resolve(key: bytes) -> np.ndarray:
+        ref, warp, digest = table[key]
+        return resolve_external_mask(ref.load(), geometry, warp, content_key=digest)
+
+    return resolve
 
 
 def subset_plan(plan: ScanPlan, cube_indices: Sequence[int]) -> ScanPlan:
