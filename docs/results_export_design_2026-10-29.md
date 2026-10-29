@@ -1,5 +1,12 @@
 # Results export ("Outputs"): design proposal (2026-10-29)
 
+**Maintainer's answers (2026-10-29), which override the proposal where they differ:**
+
+- The old LSPRi Evaluation app **is not used**, so there is no old format to stay compatible with. The export is ours to shape.
+- **The file format is not decided and will be decided later**, once all functions are in. It is too early to settle tables and layout. Do not build before that discussion.
+- Already decided: the most useful content is the **Sensorgram and the statistics from it**; the export is available **from any plot area**, both as a **figure** and as **data**; out-of-date numbers are **warned about**, not refused; the folder is **picked each time**, with a default in a dedicated export folder inside the session.
+- Consequence for the screen: section 3 assumed one *Outputs* section. With export available from every plot, the main control is one shared export control on each plot (section 10). The *Outputs* section can stay for bulk export or be dropped.
+
 **Status: proposal. Nothing is built.** It is the design for item P1 / decision C1 of `old_generation_cutover_plan_2026-10-29.md`: the rewrite cannot yet get numbers out, and the Workflow panel's *Outputs* section is an empty "Outputs - not built yet." label. Section 9 lists what I need you to decide before any code is written.
 
 ## 1. What an export has to carry
@@ -118,11 +125,26 @@ Reproducibility check for the maintainer: export the same session twice with unc
 
 An export builds its numbers with the panel's own functions; it marks out-of-date cubes and never hides them; it never overwrites a file; the settings record is always written; the table builders are pure.
 
-## 9. What I need from you (before any code)
+## 9. Questions and the maintainer's answers (2026-10-29)
 
 1. **What do you export from the old app today, and into what?** Origin, Excel, Python, a report? This decides wide versus long tables, units in the headers, and one more thing: **if you open the files in Excel on a Czech (or other non-English) setup, a comma-separated file with decimal points opens wrongly.** Do you want an "Excel" variant (semicolon, decimal comma) as a choice?
+   **Answer:** the old app is not used. Format later.
 2. **Which tables do you really need?** Sensorgram per ROI and per group; step statistics (mean, SD, SEM, slope, noise); spectra of the current cube; spectra of all cubes. And do you want the new **response table** (Delta, SNR per baseline / signal step pair, same formulas as ROI tuning)? Anything missing?
+   **Answer:** not worth discussing now. Most useful: the Sensorgram and the statistics from it.
 3. **Do you want figures** (PNG / SVG) in version 1?
+   **Answer:** yes, figures and data, both from any plot area.
 4. **Stale numbers:** mark and warn (my proposal), or refuse until the scan is current?
+   **Answer:** warn.
 5. **One folder per export under the session** (proposal) or a place you choose each time?
+   **Answer:** choose each time; the default can be a dedicated export folder inside the session.
 6. **Is there a downstream script or colleague that needs the old schema-7 file?** (C2.) If yes, I need a sample of how it is read.
+   **Answer:** the maintainer asked what that file is (explained 2026-10-29: the old app's results and backup file); no known use, see C2 in the cut-over plan.
+
+## 10. What the answers change in the design (apply when the format is discussed and the export is built)
+
+- **One shared export control on every plot area** (today: Sensorgram, Spectra, Histogram), built once as a small shared component and wired to each plot, with two actions: **Save figure** (the plot as drawn; pyqtgraph can write PNG and SVG; to be confirmed when built) and **Save data** (the numbers behind that plot). "Export what is drawn" stays the rule, so the data of a plot is the data of that plot, and a test pins it.
+- **First content:** Sensorgram data and the statistics shown with it (the step-statistics table of the Sensorgram). Spectra data through the same control later. The response table (Delta, SNR) and all-cubes spectra wait for the format discussion.
+- **Folder:** a dialog each time, opening in `sessions/<id>/exports/` (created on first use), where a file is never overwritten silently.
+- **Warning:** the message after an export, and the file itself, say how many cubes were out of date.
+- **Dropped:** compatibility with the old schema-7 file and any old export.
+- **Still open for the format discussion:** CSV versus other formats, wide versus long tables, units in headers, the Excel locale question, what the settings record contains.

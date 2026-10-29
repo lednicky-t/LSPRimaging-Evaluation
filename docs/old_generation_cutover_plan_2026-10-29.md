@@ -12,6 +12,13 @@ Words used here. *Old generation*: the original app (`gui/`, `io/dataset.py`, `p
 - **Real work sits in three places:** the export feature (P1), sorting about 71 test files into delete / port (Phase 2b), and small, careful changes to the Suite launcher (Phase 1b).
 - **Safety net:** a git tag on the old app's last commit, and the launcher already supports pointing at a legacy checkout (`LSPR_LEGACY_IMAGING_ROOT`).
 
+**Update (maintainer, 2026-10-29): the old LSPRi Evaluation app is not used.** Consequences, to be confirmed by you (the one thing to check is that no colleague or older analysis still needs it):
+
+- Results export is **not a parity gap**: nobody loses an export they use. P1 no longer blocks the cut-over; export stays a feature of the rewrite, to be designed later (`results_export_design_2026-10-29.md`, which now holds your answers).
+- P2 (old session / profile files cannot be opened) and the schema-7 measurement file (C2) stop mattering: nobody produces it, nothing in this repo reads it. My recommendation for C2 becomes **retire it** (the two writer files go with the old generation in Phase 2a).
+- C5 shrinks to the git tag; the staged approach (C8) is less about safety than about keeping the commits reviewable.
+- What still gates the cut-over: your own checklist on a real dataset (P5), the decision on UI scale / shortcuts dialog / workflow notes (C3), the version number (C4), and the launcher changes (Phase 1b).
+
 ## 2. What was checked (facts the plan stands on)
 
 | Fact | Evidence |
@@ -127,7 +134,7 @@ Phase 0 small. 1a **large** (a feature). 1b small to medium. 2a, 2c, 2d small (s
 
 ## 8. Ready to cut over when
 
-1. Results can be exported from the rewrite (or you accept the gap in writing, C1).
+1. ~~Results can be exported from the rewrite~~ (no longer a condition: the old app is not used, see the update at the top).
 2. You worked one real dataset through the rewrite without needing the old app.
 3. `legacy-final` is tagged and pushed.
 4. Launcher card, settings backup and start-menu entry point at the rewrite and their tests pass.
