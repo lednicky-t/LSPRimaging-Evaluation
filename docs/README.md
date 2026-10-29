@@ -9,7 +9,7 @@ Titles below are read from the files. Date in a file name = when it was written 
 Rules, structure, and the records every other doc builds on.
 
 - [`whole_app_audit_2026-10-29.md`](whole_app_audit_2026-10-29.md): LSPRi Evaluation: whole-app audit (clean-up, maintenance, documentation), 2026-10-29 *(latest audit: start here for clean-up and cut-over questions)*
-- [`old_generation_cutover_plan_2026-10-29.md`](old_generation_cutover_plan_2026-10-29.md): Cut-over plan: replacing the old LSPRi Evaluation app with the rewrite (2026-10-29) *(plan only, not executed: replacing the old app with the rewrite)*
+- [`old_generation_cutover_plan_2026-10-29.md`](old_generation_cutover_plan_2026-10-29.md): Cut-over plan: replacing the old LSPRi Evaluation app with the rewrite (2026-10-29) *(done 2026-10-29 except phase 3, the module renames: entry points, old code, old engine, dead functions)*
 - [`whole_app_audit_2026-10-07.md`](whole_app_audit_2026-10-07.md): LSPRi Evaluation rewrite: whole-app audit and fix plan (2026-10-07)
 - [`rewrite_status_by_feature_2026-10-29.md`](rewrite_status_by_feature_2026-10-29.md): Where the rewrite stands: feature-by-feature record (moved out of CLAUDE.md, 2026-10-29) *(per-feature record moved out of CLAUDE.md: search it by feature name, never read it whole)*
 - [`rewrite_rules_and_decisions_2026-09.md`](rewrite_rules_and_decisions_2026-09.md): Rewrite rules and decisions (design record) - LSPRi Evaluation
@@ -116,6 +116,7 @@ Layout, ribbons, preferences, and what runs on the GUI thread.
 - [`ribbon_alignment_and_field_style_2026-10-19.md`](ribbon_alignment_and_field_style_2026-10-19.md): Ribbon alignment and field style (2026-10-19)
 - [`scrolling_ribbons_plan_2026-10-24.md`](scrolling_ribbons_plan_2026-10-24.md): Panels narrower than their control rows: scrolling ribbons (analysis, 2026-10-24)
 - [`preferences_dialog_2026-10-19.md`](preferences_dialog_2026-10-19.md): Edit -> Preferences (2026-10-19)
+- [`keyboard_shortcut_registry_design_2026-10-30.md`](keyboard_shortcut_registry_design_2026-10-30.md): Keyboard shortcut registry: one table that binds the keys and builds the list (2026-10-30) *(proposal, no code: waits for the maintainer's go)*
 - [`startup_gui_thread_audit_2026-10-24.md`](startup_gui_thread_audit_2026-10-24.md): Startup: what runs on the GUI thread (2026-10-24)
 - [`startup_time_2026-10-24.md`](startup_time_2026-10-24.md): Startup time, 2026-10-24: 44.7 s -> 7.1 s, and what is left
 
