@@ -163,6 +163,14 @@ class RoiTab(QWidget):
             layout.addWidget(section)
         layout.addStretch(1)
 
+    def add_tuning(self, tuning: QWidget) -> None:
+        """ROI position tuning (the `TuningTab` row, whole) as this tab's last section, after Groups (2026-10-29: it was a ribbon tab of its own)."""
+        separator = ribbon_separator(self)
+        self._separators.append(separator)
+        at = self.layout().count() - 1  # before the trailing stretch
+        self.layout().insertWidget(at, separator)
+        self.layout().insertWidget(at + 1, tuning)
+
     def add_select_picker(self, picker: QWidget) -> None:
         """The area-selection picker, as this tab's first group (it limits where ROIs may be added and moved)."""
         self._select_group = insert_select_group(self, picker)

@@ -113,6 +113,8 @@ from ...image_tools import (
     MaskModule,
     MaskScopeModule,
 )
+from ...analysis.roi_tuning_module import TuningView
+from ...image_tools.chromatic.affine import apply_affine_to_points
 from ...image_tools.geometry.model import CropDefinition, GeometrySettings
 from ...image_tools.geometry.transform import raw_to_processed_affine_xy
 from ...diagnostics.thread_times import thread_cpu_times
@@ -172,6 +174,8 @@ from .rotate_line_tool import RotateLineTool
 from .display_range_controls import FULL_16BIT_RANGE
 from .view_tab import ViewTab
 from .analysis_tab import AnalysisTab
+from .tuning_overlay import TuningOverlay
+from .tuning_tab import TuningTab
 from .export_tab import ExportTab
 from ...storage.ui_state_keys import (
     IMAGE_CURSOR_READOUT,
@@ -626,6 +630,11 @@ class ImagePanel(QWidget):
         return self._analysis_tab
 
     @property
+    def tuning_tab(self) -> TuningTab:
+        """The Tuning ribbon tab: try other ROI centres, rank them, show the best (the app shell wires it to `RoiTuningModule`)."""
+        return self._tuning_tab
+
+    @property
     def mask_export(self) -> MaskExportTask:
         """The export-all-masks task (the app shell connects it to the task indicator)."""
         return self._mask_export
@@ -728,6 +737,9 @@ class ImagePanel(QWidget):
         # this panel owns the values, no other module does.
         self._roi_overlay = RoiOverlay(self._plot, self._roi_display)
         self._roi_overlay_store: UiStateStore | None = None
+        # ROI position tuning (2026-10-29): the crosses of the tried centres, and the ROIs drawn at their best centres (`set_tuning_view`).
+        self._tuning_overlay = TuningOverlay(self._plot)
+        self._tuning_view: TuningView | None = None
         self._chunk_grid_curve = self._add_curve(_CHUNK_GRID_COLOR, width=1.0, dashed=True)
         self._source_grid_curve = self._add_curve(_SOURCE_GRID_COLOR, width=1.0, dashed=True)
         # Chromatic landmark overlay (2026-10-04): crosses = *estimated* (tracked
@@ -818,6 +830,7 @@ class ImagePanel(QWidget):
         mask_content = self._build_mask_tab()
         self._build_chromatic_and_background_tabs()
         roi_content = self._build_roi_tab()  # before the View tab, which carries copies of its controls
+        self._roi_tab.add_tuning(self._tuning_tab)  # ROI position tuning is the last section of the ROIs tab
         view_content = self._build_view_tab()
         self._build_top_bar(view_content, image_tools_content, mask_content, roi_content)
         self._build_navigation_bar()
@@ -985,6 +998,8 @@ class ImagePanel(QWidget):
         self._analysis_tab = AnalysisTab(self)
         self._analysis_tab.info_changed.connect(self._on_analysis_info_changed)
         self._analysis_tab.status_message.connect(self._on_tool_status)
+        self._tuning_tab = TuningTab(self)  # a section of the ROIs tab (it was a tab of its own until 2026-10-29), attached in `_build_toolbar_and_layout`
+        self._tuning_tab.status_message.connect(self._on_tool_status)
         self._export_tab = ExportTab(
             self._dataset, self, geometry=self._geometry, roi_toolbox=self._roi_toolbox, chromatic=self._chromatic,
             status=self._on_tool_status, session_carry=self._session_carry,
@@ -1040,8 +1055,9 @@ class ImagePanel(QWidget):
             self._tool_ribbon, "Show the tool ribbon.", self._top_bar, handle_alignment=Qt.AlignmentFlag.AlignTop
         )
         self._top_bar.installEventFilter(self)
-        top_bar_layout.addWidget(self._top_drawer)
-        top_bar_layout.addStretch(1)
+        # The drawer (and so the ribbon) takes all the room the bar has (2026-10-29): with a plain stretch after it the ribbon got only its natural width, so a page whose
+        # minimum width is a little more than its natural one scrolled with half the bar empty. The ribbon now scrolls only when the panel is really too narrow.
+        top_bar_layout.addWidget(self._top_drawer, 1)
 
         # Cursor-crosshair toggle (maintainer's request, 2026-09-29 - "copy
         # all functions, as hiding, showing values" from the stable app's
@@ -1396,6 +1412,8 @@ class ImagePanel(QWidget):
             self._background_tab.refresh_theme(get_active_theme())
         if hasattr(self, "_analysis_tab"):
             self._analysis_tab.refresh_theme()
+        if hasattr(self, "_tuning_tab"):
+            self._tuning_tab.refresh_theme()
         if hasattr(self, "_export_tab"):
             self._export_tab.refresh_theme()
         if hasattr(self, "_cursor_readout"):
@@ -2347,11 +2365,13 @@ class ImagePanel(QWidget):
             # ROI positions are in cropped/processed space; over the
             # uncropped preview they would be drawn in the wrong place.
             self._roi_overlay.clear()
+            self._tuning_overlay.clear()
             self._roi_draw_key = None
             return
 
         frame = (self._current_cube(), self._current_wavelength())
         affine = self._chromatic.affine_for(frame)
+        self._tuning_overlay.update(self._tuning_view, affine)  # the tuning crosses: not part of the ROI layer cache, a comparison when nothing changed
         # `only_if_changed` (the per-frame redraw, i.e. every wavelength step): ~40 ms of the GUI thread
         # per frame on 100+ ROIs (measured 2026-10-14), and nothing the overlay draws changes between two
         # wavelengths unless the ROIs, the selection, the cube or this frame's chromatic shift did. Every
@@ -2363,7 +2383,9 @@ class ImagePanel(QWidget):
             self._roi_toolbox.geometry_segment(frame[0]),  # the cubes between two ROI-timeline changes look the same
             np.asarray(affine, dtype=np.float64).tobytes(),
         )
-        epoch = (self._roi_revision, frozenset(self._selection.selected_roi_ids()), self._roi_overlay.appearance_key())
+        epoch = (
+            self._roi_revision, frozenset(self._selection.selected_roi_ids()), self._roi_overlay.appearance_key(), self._tuning_best_key(),
+        )
         key = (state, epoch)
         if only_if_changed and key == self._roi_draw_key:
             return
@@ -2388,7 +2410,7 @@ class ImagePanel(QWidget):
         detection = self._roi_toolbox.detection_settings()
         self._roi_overlay.draw(
             rois,
-            self._roi_toolbox.display_positions(frame, affine),
+            self._with_tuning_best(rois, self._roi_toolbox.display_positions(frame, affine), affine),
             self._selection.selected_roi_ids(),
             affine,
             detection.reference_inner_diameter_px,
@@ -2396,6 +2418,41 @@ class ImagePanel(QWidget):
             self._roi_toolbox.groups(),
         )
         self._roi_overlay.layers.mark_drawn(state)
+
+    # -- ROI position tuning (2026-10-29) --------------------------------------------------------------------------------
+
+    def set_tuning_view(self, view: TuningView | None) -> None:
+        """Show the trial in hand (None: none): the crosses of the tried centres and, when the view says so, the ROIs at their best centres. A drawing only:
+        no ROI moves. The app shell hands over `RoiTuningModule.view()` whenever it changes."""
+        before = self._tuning_best_key()
+        self._tuning_view = view
+        if self._last_image_shape is None:
+            return
+        if self._tuning_best_key() != before:
+            self._draw_roi_overlay()  # the ROIs move on the screen (forced: the layer cache holds the old picture)
+        else:
+            self._tuning_overlay.update(view, self._chromatic.affine_for((self._current_cube(), self._current_wavelength())))
+
+    def _tuning_best_key(self) -> int | None:
+        """What the ROI overlay must know about the tuning view: None while the ROIs are drawn where they are, else the view's revision."""
+        view = self._tuning_view
+        return view.revision if view is not None and view.show_best and view.moves_any else None
+
+    def _with_tuning_best(self, rois, centers: np.ndarray, affine: np.ndarray) -> np.ndarray:
+        """``centers`` (display positions of ``rois``) with the tuned ROIs moved to their best centres when the view shows them there. A shift of ``(dx, dy)`` in
+        processed pixels moves a display centre by the affine's image of the shift, as the chromatic correction carries a shifted ROI to every wavelength."""
+        view = self._tuning_view
+        if self._tuning_best_key() is None or view is None:
+            return centers
+        column_of = {roi_id: column for column, roi_id in enumerate(view.roi_ids)}
+        rows = [row for row, roi in enumerate(rois) if roi.area_roi_id in column_of and view.best_offsets[column_of[roi.area_roi_id]].any()]
+        if not rows:
+            return centers
+        columns = [column_of[rois[row].area_roi_id] for row in rows]
+        start = view.roi_xy[columns]
+        moved = centers.copy()
+        moved[rows] += apply_affine_to_points(start + view.best_offsets[columns], affine) - apply_affine_to_points(start, affine)
+        return moved
 
     def _refresh_overlay_items(self) -> None:
         """The layer cache's refresher (`OverlayLayers.set_refresher`): the view changed while the items still hold an earlier

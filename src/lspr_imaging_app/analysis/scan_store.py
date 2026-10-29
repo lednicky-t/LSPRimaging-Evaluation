@@ -280,10 +280,17 @@ class ScanStore:
 
     # -- preparing a run -------------------------------------------------------------------------------------------------------
 
-    def prepare(self, plan: ScanPlan, *, dataset_label: str = "") -> np.ndarray:
+    def prepare(self, plan: ScanPlan, *, dataset_label: str = "", create: bool = True) -> np.ndarray:
         """Make the file ready for a run of ``plan`` and return the cell hashes it holds for the plan's cubes (``uint64 [cube, roi]``, 0 =
         never computed). Creates the file (or replaces an incompatible one, see the module docstring) and records the plan's recipe and ROI
-        layouts. Call on the task thread, never while another writer has the file open."""
+        layouts. Call on the task thread, never while another writer has the file open.
+
+        ``create=False`` is for a caller that only wants to add to a file that is already there and fits (ROI position tuning seeding the cells of the ROIs it
+        moved): a missing or incompatible file raises :class:`ScanFileError` and is left exactly as it is (it is never replaced, backed up or created)."""
+        if not create and not (self.path.exists() and self._compatible(plan)):
+            raise ScanFileError(
+                "there is no scan file that fits this dataset and these ROIs" if not self.path.exists() else "the scan file does not fit these ROIs or this dataset"
+            )
         self.path.parent.mkdir(parents=True, exist_ok=True)
         if self.path.exists() and not self._compatible(plan):
             backup = self.path.with_name(BACKUP_NAME)

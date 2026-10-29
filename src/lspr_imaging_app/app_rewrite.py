@@ -33,7 +33,7 @@ from pathlib import Path
 
 from PyQt6.QtCore import Qt, QByteArray, QTimer, QUrl
 from PyQt6.QtGui import QAction, QActionGroup, QDesktopServices, QKeySequence
-from PyQt6.QtWidgets import QApplication, QMainWindow, QMenu, QMessageBox, QStatusBar
+from PyQt6.QtWidgets import QApplication, QFileDialog, QMainWindow, QMenu, QMessageBox, QStatusBar, QWidget
 
 from lspr_core.perf import get_runtime
 from lspr_ui import app_icon, set_active_theme
@@ -41,6 +41,8 @@ from lspr_ui import app_icon, set_active_theme
 from .analysis import AnalysisEngine, AnalysisSettingsModule
 from .analysis.scan_jobs import ScanSource, source_from_modules
 from .analysis.live_state import AnalysisLiveModule
+from .analysis.roi_tuning_module import RoiTuningModule, TuningView
+from .analysis.roi_tuning_task import TASK_ID as ROI_TUNING_TASK_ID
 from .analysis.scan_results import ScanResultsModule
 from .storage.session_index import session_dir_for
 from .analysis.scan_store import FILE_NAME as SCAN_FILE_NAME, describe_file as describe_scan_file
@@ -88,6 +90,7 @@ from .perf_setup import status_text as perf_status_text
 from .perf_setup import write_perf_preferences
 from .panels.roi_table import RoiTablePanel
 from .panels.image.analysis_tab import AnalysisTab
+from .panels.image.tuning_tab import TuningTab
 from .panels.sensorgram import SensorgramPanel
 from .panels.sensorgram.panel import TASK_ID as SENSORGRAM_TASK_ID
 from .panels.spectra import SpectraPanel
@@ -791,6 +794,7 @@ class _Modules:
     transient_scan: TransientScanTask
     analysis_scan: ScanTask
     scan_results: ScanResultsModule
+    roi_tuning: RoiTuningModule
     analysis_live: AnalysisLiveModule
     session_carry: SessionCarry
     session_load: SessionLoadTask
@@ -901,16 +905,28 @@ def _build_modules() -> _Modules:
     # The analysis scan belongs to the dataset and session it was started in: a dataset opened or cleared, or a session switched, stops it.
     analysis_scan = ScanTask()
     modules_holder: list[_Modules] = []  # the results module needs the finished module set to read the app (analysis_scan_source)
-    scan_results = ScanResultsModule(lambda: analysis_scan_source(modules_holder[0]), scan_running=analysis_scan.is_running)
+    # No look at the scan file while it is being written: by a scan, or by ROI position tuning (a trial reads a lot; Accept writes the file).
+    scan_results = ScanResultsModule(
+        lambda: analysis_scan_source(modules_holder[0]),
+        scan_running=lambda: analysis_scan.is_running() or (bool(modules_holder) and modules_holder[0].roi_tuning.task.is_running()),
+    )
     analysis_live = AnalysisLiveModule()  # Live / Paused: the Spectra and Sensorgram plots and the out-of-date check stop recomputing while paused
     analysis_live.live_changed.connect(lambda live: scan_results.set_paused(not live))
     dataset.dataset_loaded.connect(lambda _dataset: analysis_scan.invalidate())
     dataset.dataset_cleared.connect(analysis_scan.invalidate)
     session_coordinator.active_session_changed.connect(lambda _root: analysis_scan.invalidate())
+    # ROI position tuning (2026-10-29): its result lives in RAM and belongs to the dataset and session it was made in.
+    roi_tuning = RoiTuningModule(
+        lambda: analysis_scan_source(modules_holder[0]), experiment_plan, selection, analysis_settings, dataset, roi_toolbox
+    )
+    dataset.dataset_loaded.connect(lambda _dataset: roi_tuning.invalidate())
+    dataset.dataset_cleared.connect(roi_tuning.invalidate)
+    session_coordinator.active_session_changed.connect(lambda _root: roi_tuning.invalidate())
     app = QApplication.instance()
     if app is not None:  # the thread must be stopped where the application ends, not in a widget's destructor (sip crash-on-close)
         app.aboutToQuit.connect(analysis_scan.shutdown)
         app.aboutToQuit.connect(scan_results.shutdown)
+        app.aboutToQuit.connect(roi_tuning.task.shutdown)
     dataset.export_finished.connect(session_carry.start)
     dataset.export_failed.connect(lambda _message: session_carry.discard())
     modules = _Modules(
@@ -920,7 +936,7 @@ def _build_modules() -> _Modules:
         highlight_range=highlight_range, area_selection=area_selection, analysis_settings=analysis_settings,
         session_coordinator=session_coordinator, analysis_engine=analysis_engine,
         session_autosave=session_autosave, chromatic_auto=ChromaticAutoDetect(chromatic),
-        mask_pointers=mask_pointers, transient_scan=TransientScanTask(mask_pointers), analysis_scan=analysis_scan, scan_results=scan_results, analysis_live=analysis_live, session_carry=session_carry,
+        mask_pointers=mask_pointers, transient_scan=TransientScanTask(mask_pointers), analysis_scan=analysis_scan, scan_results=scan_results, roi_tuning=roi_tuning, analysis_live=analysis_live, session_carry=session_carry,
         session_load=session_load,
         reference_auto=ReferenceAutoFind(dataset, selection, reference_frame, frame_roles),
         frame_roles=frame_roles,
@@ -1218,6 +1234,97 @@ def _wire_analysis_scan(m: _Modules, row: AnalysisTab, ui_state: UiStateStore, s
     show_saved_scan()
 
 
+def _ask_tuning_export_path(parent: QWidget, default: Path) -> Path | None:
+    chosen, _filter = QFileDialog.getSaveFileName(parent, "Export the tuning numbers", str(default), "CSV table (*.csv)")
+    return Path(chosen) if chosen else None
+
+
+def _wire_roi_tuning(
+    m: _Modules,
+    tab: TuningTab,
+    ui_state: UiStateStore,
+    show_view: Callable[[TuningView | None], None] | None = None,
+    choose_export_path: Callable[[QWidget, Path], Path | None] = _ask_tuning_export_path,
+) -> None:
+    """The Image panel's Tuning tab and the ROI position tuning module (2026-10-29): the tab only emits requests and shows text; this restores its remembered
+    controls (and hands the values to the module), starts a trial on the GUI thread, tells the tab what to say, hands the module's drawing data to the Image
+    panel (`show_view` = `ImagePanel.set_tuning_view`: crosses, ROIs at their best centres), and marks a result out of date when something it was made from
+    changes (the same signals that make a scan cell stale). `choose_export_path` is the file dialog (a test passes its own)."""
+    tuning = m.roi_tuning
+    for key, widget in (
+        ("tuning/lattice_size", tab.size_combo), ("tuning/pitch_px", tab.pitch_spin), ("tuning/objective", tab.objective_combo),
+        ("tuning/show_crosses", tab.crosses_button), ("tuning/show_best", tab.best_button), ("tuning/interpolate", tab.interpolate_button),
+    ):
+        ui_state.bind(key, widget)
+    tuning.set_lattice(tab.lattice_size(), tab.pitch_px())  # restored values go to the module before the tab can announce changes
+    tuning.set_objective(tab.objective_key())
+    tuning.set_show_crosses(tab.crosses_button.isChecked())
+    tuning.set_show_best(tab.best_button.isChecked())
+    tuning.set_interpolate(tab.interpolate_button.isChecked())
+
+    def refresh(*_args: object) -> None:
+        tab.set_state(tuning.state(), tuning.preview(), tuning.can_accept())
+        tab.set_status(tuning.message() or "No trial yet.")
+
+    def run() -> None:
+        if m.analysis_scan.is_running():
+            tab.set_status("An analysis scan is running; try positions when it has finished.", announce=True)
+        elif m.session_load.is_running():
+            tab.set_status("The session is still loading; try positions when it has finished.", announce=True)
+        elif not tuning.run():
+            tab.set_status(tuning.message(), announce=True)
+
+    def accept() -> None:
+        if m.analysis_scan.is_running():  # both write the scan file
+            tab.set_status("An analysis scan is running; accept when it has finished.", announce=True)
+            return
+        if m.session_load.is_running():
+            tab.set_status("The session is still loading; accept when it has finished.", announce=True)
+            return
+        home, session_id = m.dataset.dataset_home(), m.session_coordinator.active_session_id()
+        store_path = session_dir_for(home, session_id) / "analysis" / SCAN_FILE_NAME if home is not None and session_id is not None else None
+        tuning.accept(store_path, home.name if home is not None else "")
+        tab.set_status(tuning.message(), announce=True)  # a refusal, or "Moved n ROIs ..." (the outcome of saving their numbers follows from the task)
+
+    def export() -> None:
+        home, session_id = m.dataset.dataset_home(), m.session_coordinator.active_session_id()
+        folder = session_dir_for(home, session_id) / "analysis" if home is not None and session_id is not None else Path.home()
+        path = choose_export_path(tab, folder / "roi_tuning.csv")
+        if path is not None:
+            tuning.export_csv(path)
+
+    tab.run_requested.connect(run)
+    tab.stop_requested.connect(tuning.cancel)
+    tab.lattice_changed.connect(lambda size, pitch: tuning.set_lattice(size, pitch))
+    tab.objective_changed.connect(tuning.set_objective)
+    tab.crosses_toggled.connect(tuning.set_show_crosses)
+    tab.best_toggled.connect(tuning.set_show_best)
+    tab.interpolate_toggled.connect(tuning.set_interpolate)
+    tab.accept_requested.connect(accept)
+    tab.clear_requested.connect(tuning.clear)
+    tab.export_requested.connect(export)
+    # Accept wrote cells into scan.h5 (or could not): the scan results module reads the file again and compares it with the moved ROIs.
+    tuning.seeded.connect(lambda report: m.scan_results.reload() if report.written else m.scan_results.request_check())
+    tuning.export_finished.connect(
+        lambda path, error: tab.set_status(f"Could not write {path}: {error}" if error else f"Wrote the tuning numbers to {path}.", announce=True)
+    )
+    tuning.task.task_finished.connect(lambda _task_id, _outcome, _message: tab.set_status(tuning.message() or "No trial yet.", announce=True))
+    # Anything that can alter a scan number: the result no longer says where the best centres are (the scan results module watches the same signals).
+    for changed in (
+        m.geometry.geometry_changed, m.mask.mask_changed, m.chromatic.chromatic_model_changed, m.background.background_model_changed,
+        m.roi_toolbox.geometry_changed, m.roi_toolbox.roi_ids_renumbered, m.frame_roles.roles_changed,
+    ):
+        changed.connect(lambda *_args: tuning.mark_stale())
+    # What a press of Try would do depends on the selection, the two plan steps and the lattice: keep the tab's tooltip current.
+    for changed in (m.selection.roi_selection_changed, m.experiment_plan.steps_changed, tuning.state_changed):
+        changed.connect(refresh)
+    refresh()
+    if show_view is not None:
+        for changed in (tuning.matrix_changed, tuning.view_changed):
+            changed.connect(lambda: show_view(tuning.view()))
+        show_view(tuning.view())
+
+
 def _build_startup_tracker(
     m: _Modules, image_panel: ImagePanel, spectra_panel: SpectraPanel, sensorgram_panel: SensorgramPanel
 ) -> StartupTracker:
@@ -1273,6 +1380,8 @@ def _build_status_bar(
     m.transient_scan.task_finished.connect(task_indicator.finish)
     m.analysis_scan.task_progress.connect(task_indicator.report)
     m.analysis_scan.task_finished.connect(task_indicator.finish)
+    m.roi_tuning.task.task_progress.connect(task_indicator.report)
+    m.roi_tuning.task.task_finished.connect(task_indicator.finish)
     image_panel.mask_export.task_progress.connect(task_indicator.report)
     image_panel.mask_export.task_finished.connect(task_indicator.finish)
     image_panel.mask_auto.task_progress.connect(task_indicator.report)
@@ -1301,6 +1410,7 @@ def _build_status_bar(
         CHROMATIC_TASK_ID: m.chromatic_auto.cancel,
         SCAN_TASK_ID: m.transient_scan.cancel,
         ANALYSIS_SCAN_TASK_ID: m.analysis_scan.cancel,
+        ROI_TUNING_TASK_ID: m.roi_tuning.cancel,
         AUTO_MASK_TASK_ID: image_panel.mask_auto.cancel,
         MASK_EXPORT_TASK_ID: image_panel.mask_export.cancel,
         ARRAY_TASK_ID: image_panel.array_action.cancel,
@@ -1752,6 +1862,7 @@ def build_main_window(
     startup = _build_startup_tracker(m, image_panel, spectra_panel, sensorgram_panel)
     _build_status_bar(window, m, workflow, image_panel, roi_table_panel, spectra_panel, sensorgram_panel, startup)
     _wire_analysis_scan(m, image_panel.analysis_tab, ui_state, startup)
+    _wire_roi_tuning(m, image_panel.tuning_tab, ui_state, show_view=image_panel.set_tuning_view)
     _wire_session_carry_prompt(window, m)
     _wire_edit_menu(edit_menu, window, m.analysis_engine)
     stages.done("menus and status bar")

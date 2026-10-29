@@ -109,7 +109,7 @@ import itertools
 import logging
 import math
 import time
-from collections.abc import Callable, Collection, Sequence
+from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass, fields, replace
 
 import numpy as np
@@ -692,6 +692,14 @@ class RoiToolbox(QObject):
     @instrumented("RoiToolbox.move_roi")
     def move_roi(self, roi_id: int, x: float, y: float, *, cube: int | None = None, scope: str = SCOPE_PERSISTENT) -> None:
         self._set_positions({roi_id: (x, y)}, "Move ROI", cube=cube, scope=scope)
+
+    @instrumented("RoiToolbox.move_rois")
+    def move_rois(self, positions: Mapping[int, tuple[float, float]], *, label: str = "Move ROIs") -> None:
+        """Put each ROI in ``positions`` (id -> (x, y), processed px) at its own new centre: one undo step and one signal, however many ROIs, each centre
+        rounded to ``POSITION_DECIMALS`` like every position edit. All or nothing: an unknown id or a position that is not finite raises before anything
+        changes. A ROI that is already there is left alone; if nothing differs there is no undo entry and no signal. (``translate_rois`` shifts ROIs by
+        one common vector; this is for different positions, e.g. the answer of ROI position tuning.)"""
+        self._set_positions({int(roi_id): (float(x), float(y)) for roi_id, (x, y) in positions.items()}, label)
 
     @instrumented("RoiToolbox.translate_rois")
     def translate_rois(

@@ -40,6 +40,7 @@ from dataclasses import dataclass, replace
 import numpy as np
 
 from ..plan.edits import EffectiveStep
+from ..roi.toolbox import POSITION_DECIMALS
 from . import frame_reduce as fr
 from .settings import StatisticsSettings
 from .step_stats import StepMembership, StepStats, membership_segments, step_statistics, trace_matrix
@@ -90,15 +91,26 @@ class Lattice:
         return np.column_stack([dx.ravel(), dy.ravel()])
 
 
+def moved_centre(x: float, y: float, dx: float, dy: float) -> tuple[float, float]:
+    """The centre a ROI at ``(x, y)`` has after it is moved by ``(dx, dy)``: **as the ROI toolbox stores it**, both coordinates rounded to
+    ``roi.toolbox.POSITION_DECIMALS`` (0.1 px). A trial must scan exactly this position, or accepting it would store a centre other than the one that was measured.
+    A shift of ``(0, 0)`` is no move: the centre is returned as it is (an unmoved ROI is never rewritten, so never rounded)."""
+    if dx == 0.0 and dy == 0.0:
+        return float(x), float(y)
+    return round(float(x) + float(dx), POSITION_DECIMALS), round(float(y) + float(dy), POSITION_DECIMALS)
+
+
 def shifted_roi_set(rs: fr.RoiSet, indices: Sequence[int], dx: float, dy: float) -> fr.RoiSet:
-    """``rs`` with the ROIs at ``indices`` moved by ``(dx, dy)`` pixels (processed space). Radii, rings and every other ROI are untouched; ``rs`` is not changed.
+    """``rs`` with the ROIs at ``indices`` moved by ``(dx, dy)`` pixels (processed space; the new centres are :func:`moved_centre`). Radii, rings and every other ROI
+    are untouched; ``rs`` is not changed.
 
     Raises ``ValueError`` for a free-form (mask) ROI: moving its centre does not move its masks."""
     rois = list(rs.rois)
     for i in indices:
         if not rs.vectorised[i]:
             raise ValueError(f"ROI at position {i} has a free-form mask; its position cannot be tuned by shifting the centre")
-        rois[i] = replace(rois[i], center_x=float(rois[i].center_x) + float(dx), center_y=float(rois[i].center_y) + float(dy))
+        x, y = moved_centre(rois[i].center_x, rois[i].center_y, dx, dy)
+        rois[i] = replace(rois[i], center_x=x, center_y=y)
     return fr.build_roi_set(rois, rs.inner_default_px, rs.outer_default_px)
 
 
