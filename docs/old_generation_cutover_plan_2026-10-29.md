@@ -55,7 +55,7 @@ Each phase ends with an exit check, and each can be undone by reverting its comm
 
 ### Phase 1. Make the rewrite the app (reversible; the old code stays in the tree, unused)
 
-**1a. Close P1** (results export). A separate feature with its own design doc; the cut-over does not start before it is done, unless you decide otherwise (C1).
+**1a. Close P1** (results export). A separate feature; the design proposal is `results_export_design_2026-10-29.md` (CSV plus a settings record, one new folder per export inside the session; its section 9 holds the questions only you can answer); the cut-over does not start before it is done, unless you decide otherwise (C1).
 
 **1b. Switch the entry points** (small):
 - eva: `src/main.py` and `run.py` start what `main_rewrite.py` starts (launch screen first); console script `lspri-evaluation` points at `lspr_imaging_app.app_rewrite:main`; drop `lspri-evaluation-rewrite`; fold `version_rewrite.py` into `version.py` (one version, C4). Its users are `app_rewrite.py` (window title, log header, `QApplication` version), `analysis/scan_store.py` and `analysis/store.py` (they stamp the app name and version into the files they write) and the launcher's `version_file`; no test imports it. The name "LSPR Imaging (Rewrite Preview)" is written into new `scan.h5` files as provenance text (`app_name`, `created_by`); nothing reads those fields back as a compatibility key (checked), so older files stay valid and new ones simply carry the new name.

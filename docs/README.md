@@ -53,6 +53,7 @@ From pixels to numbers, and how the numbers are shown.
 - [`sensorgram_baseline_selector_2026-10-25.md`](sensorgram_baseline_selector_2026-10-25.md): Sensorgram: y-axis switch, baseline selector, y-range fix (2026-10-25)
 - [`sensorgram_reentrancy_and_cube_slider_cache_indicator.md`](sensorgram_reentrancy_and_cube_slider_cache_indicator.md): Sensorgram Start/Stop reentrancy fix, and the Cube/Time slider cache indicator
 - [`step_statistics_backbone_2026-10-26.md`](step_statistics_backbone_2026-10-26.md): Step statistics: the backbone (2026-10-26)
+- [`results_export_design_2026-10-29.md`](results_export_design_2026-10-29.md): Results export ("Outputs"): design proposal (2026-10-29) *(proposal, nothing built: exporting results (the blocker of the cut-over))*
 - [`step_stats_size_cap_2026-10-26.md`](step_stats_size_cap_2026-10-26.md): Step stats table: the size box seems dead (2026-10-26)
 - [`experimental_plan_steps_inventory_2026-10-25.md`](experimental_plan_steps_inventory_2026-10-25.md): Experimental plan steps - what exists, what is missing, what can be reused (2026-10-25)
 - [`experimental_plan_bar_design_2026-10-26.md`](experimental_plan_bar_design_2026-10-26.md): Sensorgram "Experimental plan" bar - design proposal (2026-10-26)
