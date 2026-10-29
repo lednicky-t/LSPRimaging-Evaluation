@@ -9,9 +9,9 @@ future diff against the source stays obvious) and
 ``ChromaticSettings``/``GridBoundsDefinition`` added 2026-09-20: split out of
 the old app's ``PreprocessingSettings`` grab-bag (its ``chromatic_*``/
 ``reference_*`` fields) - see ``image_tools/geometry/model.py``'s docstring
-for the full reasoning. Chromatic's own pure math (``affine.py``/``warp.py``/
-``landmark_autotrack.py`` - originally one ``fitting.py``, split 2026-09-21)
-never actually reads these - registration parameters are consumed by
+for the full reasoning. Chromatic's own pure math (``affine.py``/``warp.py`` -
+originally one ``fitting.py``, split 2026-09-21; the landmark finder is
+``auto_landmarks.py``) never actually reads these - registration parameters are consumed by
 ``ChromaticModule``'s ``add_landmark``/not-yet-implemented ``refit``.
 
 ``ChromaticModelChange`` added 2026-09-21, alongside ``ChromaticModule``'s

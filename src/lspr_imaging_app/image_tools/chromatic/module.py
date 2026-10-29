@@ -6,13 +6,11 @@ Owns landmarks + fitted model. Exposes ``affine_for()``/``warp_mask()``/
 "Module boundaries"; sketch §7). Emits ``chromatic_model_changed``
 (:class:`~.model.ChromaticModelChange`).
 
-The math this module calls lives in four sibling files, split out of a
+The math this module calls lives in sibling files, split out of a
 single former ``fitting.py`` (2026-09-21, maintainer's request - see the
 rewrite build log for the full reasoning): ``affine.py`` (point-based
 fit/apply, the actually-simple core), ``warp.py`` (apply a matrix to
-pixels instead of points), ``landmark_autotrack.py`` (the automatic
-landmark detection/tracking feature, kept deliberately independent of
-this module - see that file's own docstring), and
+pixels instead of points), and
 ``wavelength_interpolation.py`` (fit at a few sampled wavelengths,
 interpolate the rest - extracted from the old app's ``gui/analysis_
 tasks.py`` as part of building `refit()`, not speculatively beforehand).

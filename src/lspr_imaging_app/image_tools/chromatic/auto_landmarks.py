@@ -7,7 +7,7 @@ space: rotated/flipped/cropped, possibly with NaN where rotation created
 pixels), results go out as plain arrays. Progress and cancellation follow the
 rule in CLAUDE.md through `lspr_imaging_app.progress`.
 
-Why this replaces `landmark_autotrack.py` for the rewrite (evidence:
+Why this replaced the earlier `landmark_autotrack.py` (removed 2026-10-29, still in git history and, as `processing/chromatic.py`, in the old app) (evidence:
 `docs/chromatic_landmark_lab_findings_2026-10-04.md`, script
 `tools/chromatic_landmark_lab.py`): on the real bulk-sensitivity dataset it
 tracks 15 landmarks over 26 wavelengths with a leave-one-out error of about

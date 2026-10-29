@@ -9,7 +9,7 @@ processed space (after rotation/flip/crop). This gathers, from the modules' publ
 - the ROI centres in raw pixels (pitch estimate), and the ROI-table groups as index lists.
 
 Gathered on the GUI thread (cheap: integer box arithmetic, ~10 ms for 160 ROIs); the suggestions and the
-compression sampling that use it run on a worker (`chunk_layout_dialog.py`).
+compression sampling that use it run on a worker (this was `chunk_layout_dialog.py`, removed 2026-10-29).
 
 **The chromatic correction is two numbers here, not one box per fitted frame** (2026-10-21): the union over every
 affine cost 1.3 s at the 8478 fitted models of a 314-cube session, and this runs on every ROI edit whenever the

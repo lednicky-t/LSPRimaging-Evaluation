@@ -21,7 +21,7 @@ Layout (one ribbon row):
   (`chunk_style_picker.py`, 2026-10-21, replaced the Find best dialog: 1 ROI / column / row per chunk; a
   pick applies at once - width, height, grid position and the exact grid offsets of that
   `chunk_plan.suggest_layouts` entry, kept until the size is edited by hand; no scores or compression sample any
-  more, `chunk_layout_dialog.py` is no longer used). Chunks are always W x H (no square/rectangle switch). The
+  more, `chunk_layout_dialog.py` was removed 2026-10-29). Chunks are always W x H (no square/rectangle switch). The
   width field keeps the old `export/chunk_size` key, so a saved square size restores as width; the height
   defaults to the width until it is saved itself.
 - **Grid position (no field since 2026-10-21):** always aligned to the ROIs, so each ROI touches as few chunks as

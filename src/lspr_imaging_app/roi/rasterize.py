@@ -338,7 +338,7 @@ def _blit(out: np.ndarray, roi_mask: RoiMask, *, offset_x: int, offset_y: int) -
 # -- circle/annulus geometry: reach-box-limited affine rasterization --------
 # Moved verbatim from image_tools/chromatic/fitting.py (itself a verbatim
 # port of processing/chromatic.py, before fitting.py was later split into
-# affine.py/warp.py/landmark_autotrack.py) - only this module's docstring
+# affine.py/warp.py/landmark_autotrack.py, the last since removed) - only this module's docstring
 # context changed, the math did not.
 
 

@@ -298,7 +298,7 @@ class RoiToolbox(QObject):
         nothing owned `AreaRoiDetectionSettings` anywhere in the rewrite -
         every module took it as a function *parameter* (`roi/detection.py`,
         `image_tools/background/estimate.py`, `image_tools/preprocess.py`,
-        `image_tools/chromatic/landmark_autotrack.py`), so there was no
+        `image_tools/chromatic/landmark_autotrack.py`, removed 2026-10-29), so there was no
         module to read it from when the engine needed
         `reference_inner/outer_diameter_px` (its default reference-ring radii
         for ROIs that don't override them) and `reduction_method`. Put here

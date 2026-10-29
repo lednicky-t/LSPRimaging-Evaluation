@@ -4,7 +4,7 @@ out" math the whole Chromatic correction feature is built on.
 Deliberately dependency-free (only `numpy` + `roi.model.AreaRoi`'s type):
 no image registration, no landmark detection, no Qt. Given a handful of
 matched `(source, target)` point pairs (however they were obtained - a
-human clicking landmarks, or `landmark_autotrack.py`'s automatic finder),
+human clicking landmarks, or `auto_landmarks.py`'s automatic finder),
 these functions fit, apply, invert, and chain the 2x3 affine transform that
 maps one wavelength's pixel space onto another's, and move `AreaRoi`
 centers through it. `warp.py` is the pixel-array counterpart (apply the
