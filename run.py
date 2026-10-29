@@ -16,5 +16,5 @@ from run_bootstrap import bootstrap_app_environment  # noqa: E402 - must follow 
 bootstrap_app_environment("apps/LSPRi/eva/src")
 
 if __name__ == "__main__":
-    from lspr_imaging_app.app import main
-    main()
+    from main import run
+    run()

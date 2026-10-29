@@ -52,7 +52,7 @@ from pathlib import Path
 import h5py
 import numpy as np
 
-from ..version_rewrite import APP_VERSION, REWRITE_APP_NAME
+from ..version import APP_NAME, APP_VERSION
 from .frame_reduce import RoiSet
 from .scan_arrays import ScanArrays
 from .scan_fingerprint import recipe_digest, recipe_json, recipe_of, stamped_by_previous_formula
@@ -369,8 +369,8 @@ class ScanStore:
         with h5py.File(tmp, "w") as f:
             f.attrs.update({
                 "schema_name": SCHEMA_NAME, "schema_version": SCHEMA_VERSION, "schema_major": SCHEMA_MAJOR, "schema_minor": SCHEMA_MINOR,
-                "format_name": FORMAT_NAME, "format_version": FORMAT_VERSION, "app_name": REWRITE_APP_NAME, "app_version": APP_VERSION,
-                "created_by": f"{REWRITE_APP_NAME} analysis scan", "created_at_utc": now, "started_at_utc": now,
+                "format_name": FORMAT_NAME, "format_version": FORMAT_VERSION, "app_name": APP_NAME, "app_version": APP_VERSION,
+                "created_by": f"{APP_NAME} analysis scan", "created_at_utc": now, "started_at_utc": now,
                 "dataset": dataset_label, "dims": ",".join(DIM_LABELS), "side_labels": json.dumps(list(SIDE_LABELS)),
                 "methods": json.dumps(list(plan.settings.methods)),
             })

@@ -25,9 +25,10 @@ APP_ROOT = Path(__file__).resolve().parent.parent
 SRC = APP_ROOT / "src"
 PKG = "lspr_imaging_app"
 
-# Entry modules. The old pair disappears at the cut-over; a root that no longer exists is skipped.
-REWRITE_ROOTS = ["main_rewrite", f"{PKG}.app_rewrite"]
-OLD_ROOTS = ["main", f"{PKG}.app"]
+# Entry modules. Since the cut-over (2026-10-29) the app starts from src/main.py -> app_rewrite; the old app's ``app`` module is only
+# listed so that a leftover of it would show up as "only the old app". A root that does not exist is skipped.
+REWRITE_ROOTS = ["main", f"{PKG}.app_rewrite"]
+OLD_ROOTS = [f"{PKG}.app"]
 
 
 def _collect_modules() -> dict[str, Path]:

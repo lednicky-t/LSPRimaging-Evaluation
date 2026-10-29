@@ -41,7 +41,7 @@ from pathlib import Path
 import h5py
 import numpy as np
 
-from ..version_rewrite import APP_VERSION, REWRITE_APP_NAME
+from ..version import APP_NAME, APP_VERSION
 from .provenance import ProvenanceRecord
 from .tasks import CellResult, WavelengthCoverage
 
@@ -89,7 +89,7 @@ def _ensure_identity(handle: h5py.File) -> None:
         return
     handle.attrs["schema_name"] = STORE_SCHEMA_NAME
     handle.attrs["schema_version"] = STORE_SCHEMA_VERSION
-    handle.attrs["app_name"] = REWRITE_APP_NAME
+    handle.attrs["app_name"] = APP_NAME
     handle.attrs["app_version"] = APP_VERSION
     handle.attrs["created_at_utc"] = datetime.now(timezone.utc).isoformat()
 

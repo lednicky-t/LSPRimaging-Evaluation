@@ -40,18 +40,11 @@ lspr-suite            # suite launcher (recommended entry point)
 
 For VS Code "Run Python File", use [`run.py`](run.py) in this directory.
 
-## The rewrite (in development)
+## History: the rewrite
 
-LSPRi Evaluation is being rebuilt from scratch on the `rewrite` branch. The app
-described above keeps working until the rewrite replaces it, so the rewrite has
-its own entry point:
-
-```powershell
-lspri-evaluation-rewrite                    # console script
-python apps/LSPRi/eva/src/main_rewrite.py   # same, with the launch screen
-```
-
-`run.py` and `lspri-evaluation` still start the **old** app. What the rewrite
+LSPRi Evaluation was rebuilt from scratch on the `rewrite` branch (2026-09 to
+2026-10) and replaced the original app (2026-10-29). The original is kept as the
+git tag `legacy-final`. What the app
 can do today, the rules for working on it, and the open decisions are in
 [`CLAUDE.md`](CLAUDE.md); every design record and measurement is indexed in
 [`docs/README.md`](docs/README.md). The latest whole-app audit is

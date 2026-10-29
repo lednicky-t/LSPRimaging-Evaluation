@@ -1,16 +1,15 @@
-"""Entry point and wiring of the rewrite (``lspri-evaluation-rewrite`` console
-script, ``src/main_rewrite.py``).
+"""Entry point and wiring of the app (``lspri-evaluation`` console script,
+``src/main.py``).
 
-The rewrite is built next to the stable app (``app.py`` / ``lspri-evaluation``,
-which ``run.py`` still starts); CLAUDE.md says what is built, and
-``docs/rewrite_architecture_sketch_2026-09.md`` describes the structure. This
-file creates the modules (:mod:`lspr_imaging_app.dataset`, ``image_tools``,
+CLAUDE.md says what is built, and ``docs/rewrite_architecture_sketch_2026-09.md``
+describes the structure. This file creates the modules (:mod:`lspr_imaging_app.dataset`, ``image_tools``,
 ``roi``, ``analysis``, ``selection``, ``plan``, ``storage``), creates the
 panels, and connects them with signals: ``build_main_window`` is the one place
 where that happens. Session restore, autosave, the panel layout and the
 remembered UI state are all wired from here. ``main`` adds logging and the
-QApplication; ``main_rewrite.py`` creates the QApplication and the launch screen
-first, so the screen is up while this module is imported.
+QApplication; ``src/main.py`` (used by ``run.py`` and the Suite launcher) creates the
+QApplication and the launch screen first, so the screen is up while this module is
+imported. The console script calls ``main`` directly, without the launch screen.
 """
 
 from __future__ import annotations
@@ -28,7 +27,7 @@ from PyQt6.QtGui import QAction, QActionGroup, QDesktopServices, QKeySequence
 from PyQt6.QtWidgets import QApplication, QFileDialog, QMainWindow, QMenu, QMessageBox, QStatusBar, QWidget
 
 from lspr_core.perf import get_runtime
-from lspr_ui import app_icon, set_active_theme
+from lspr_ui import APP_ID_LSPRI_EVALUATION, app_icon, set_active_theme, set_windows_app_user_model_id
 
 from .analysis import AnalysisEngine, AnalysisSettingsModule
 from .analysis.scan_jobs import ScanSource, source_from_modules
@@ -138,7 +137,7 @@ from .storage.session_autosave import SessionAutosave
 from .storage.session_coordinator import SessionCoordinator
 from .storage.session_carry_task import TASK_ID as SESSION_CARRY_TASK_ID, CarriedResult, SessionCarry
 from .undo import UndoManager, undo_manager
-from .version_rewrite import rewrite_version_string
+from .version import APP_NAME, version_string
 
 logger = logging.getLogger(__name__)
 
@@ -1841,7 +1840,7 @@ def build_main_window(
     stages.done("Workflow panel", "Assembling the window...")
 
     window = QMainWindow()
-    window.setWindowTitle(rewrite_version_string())
+    window.setWindowTitle(version_string())
     window.resize(1400, 900)
     # Qt's default dock options include AllowTabbedDocks, which is what let
     # a plain drag of one panel's title bar onto another's create a tab
@@ -2016,17 +2015,18 @@ _GC_SUMMARY_MS = 5000
 
 
 def main(app: QApplication | None = None, splash: LaunchSplash | None = None) -> None:
-    """`app` / `splash`: `main_rewrite.py` creates the QApplication and the launch screen first, so the screen is up while the
+    """`app` / `splash`: `src/main.py` creates the QApplication and the launch screen first, so the screen is up while the
     modules above are imported; `splash` is closed once the window is shown. Both default to None (own QApplication, no screen)."""
-    system = configure_logging(app_version=rewrite_version_string())
+    system = configure_logging(app_version=version_string())
     apply_switch_interval()  # before any worker thread exists; see gil_tuning.py
     if app is None:
+        set_windows_app_user_model_id(APP_ID_LSPRI_EVALUATION)  # before any window; `src/main.py` does it for the launch-screen start
         app = QApplication(sys.argv)
     if splash is not None:
         splash.show("Starting...")
     log_event(
         logger, "app.start", logging.INFO,
-        version=rewrite_version_string(), log_file=str(system.log_path),
+        version=version_string(), log_file=str(system.log_path),
         screens=len(app.screens()), platform=sys.platform,
     )
     app.aboutToQuit.connect(lambda: log_event(logger, "app.quit", logging.INFO))
@@ -2036,8 +2036,9 @@ def main(app: QApplication | None = None, splash: LaunchSplash | None = None) ->
         gc_timer.timeout.connect(system.gc_trace.flush)
         gc_timer.start()
         app.aboutToQuit.connect(system.gc_trace.flush)
-    app.setApplicationName("LSPR Imaging (Rewrite Preview)")
-    app.setApplicationVersion(rewrite_version_string())
+    app.setApplicationName(APP_NAME)
+    app.setApplicationDisplayName("LSPRi Evaluation")
+    app.setApplicationVersion(version_string())
     app.setWindowIcon(app_icon())
 
     initial_settings = load_app_settings()
