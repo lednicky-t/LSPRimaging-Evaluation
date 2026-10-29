@@ -12,6 +12,11 @@ commands below; they keep no step state of their own.
   `FrameRolesModule` does not: the session restore runs after the load and must not be undone by a second reset. `dataset_cleared` does reset.
 - The steps are computed on demand and cached against the measured plan object and the state, so a dataset replaced or re-imported is picked up without
   any other wiring.
+- **Structure and evaluation roles (2026-10-29).** `remove_steps`, `restore_removed`, `unify_steps` and `add_step` change which steps exist (reason ``"structure"``: the bar's
+  selection is by index, so a view clears it, and the smoothing pieces and the step statistics are made from the steps, so they are redrawn like after a moved boundary).
+  `set_role` names the baseline or the signal step of an evaluation pair (reason ``"roles"``, cosmetic). **Other panels read the steps and the roles from here**: `steps()` (each
+  has ``order``, the number the user sees, and ``ref``, which stays the same when steps are added or removed), `step_by_ref`, `baseline_step(pair)` / `signal_step(pair)`, and
+  `cubes_of(step)`, the whole cubes of a step. A role whose step is removed is cleared and `notice(text)` says so.
 """
 
 from __future__ import annotations
@@ -28,11 +33,13 @@ from ..diagnostics import instrumented
 from ..undo import FunctionCommand, undo_manager
 from . import edits
 from .axis_map import AxisMap
-from .edits import AppliedPlan, Edge, EffectiveStep
-from .state import PlanEditsState
+from .edits import AppliedPlan, Edge, EffectiveStep, Role, Side
+from .state import PlanEditsState, StepRef
 
 logger = logging.getLogger(__name__)
 
+REASON_STRUCTURE = "structure"
+REASON_ROLES = "roles"
 REASON_BOUNDARY = "boundary"
 REASON_LABEL = "label"
 REASON_COLOR = "color"
@@ -43,6 +50,7 @@ REASON_DATASET = "dataset"
 
 class ExperimentPlanModule(QObject):
     steps_changed = pyqtSignal(str)  # reason, see the module docstring
+    notice = pyqtSignal(str)  # a plain sentence for the user: a role was cleared, a step could not be added
 
     def __init__(self, dataset: DatasetModule, parent: QObject | None = None) -> None:
         super().__init__(parent)
@@ -80,6 +88,35 @@ class ExperimentPlanModule(QObject):
 
     def state(self) -> PlanEditsState:
         return self._state
+
+    def step_by_ref(self, ref: StepRef | None) -> EffectiveStep | None:
+        """The step a reference names (None: no reference, or that step does not exist any more)."""
+        if ref is None:
+            return None
+        return next((step for step in self.steps() if step.ref == ref), None)
+
+    def baseline_step(self, pair: int = 1) -> EffectiveStep | None:
+        found = self._state.pair(pair)
+        return None if found is None else self.step_by_ref(found.baseline)
+
+    def signal_step(self, pair: int = 1) -> EffectiveStep | None:
+        found = self._state.pair(pair)
+        return None if found is None else self.step_by_ref(found.signal)
+
+    def has_removed(self) -> bool:
+        return bool(self._state.removed)
+
+    def cubes_of(self, step: EffectiveStep) -> tuple[int, ...]:
+        """The whole cubes of `step` in cube order (a cube that straddles the step's edge belongs to neither step; `analysis.step_stats.assign_cubes`). Empty without a
+        dataset or timing."""
+        from ..analysis.step_stats import assign_cubes  # here, not at the top: that module imports this package
+
+        cubes = self._dataset.spectral_cubes()
+        if not cubes:
+            return ()
+        first, last = self._dataset.cube_spans_unix_ms(cubes)
+        used = assign_cubes((step,), first, last).used[0]
+        return tuple(int(c) for c in np.asarray(cubes)[used])
 
     def axis_map(self, cubes: list[int], x: list[float]) -> AxisMap | None:
         """The time <-> x map of the cubes the Sensorgram plots (`x`: the plot's x of each, same order). None when it cannot be built (no timing)."""
@@ -179,4 +216,60 @@ class ExperimentPlanModule(QObject):
 
     @instrumented("ExperimentPlanModule.reset_all")
     def reset_all(self) -> bool:
-        return self._commit("Reset all steps", REASON_RESET, edits.reset_all())
+        """Every measured step as measured: no edits, none removed, none added."""
+        new = edits.reset_all(self._state)
+        changes_structure = bool(self._state.removed or self._state.added)  # then the steps are numbered differently afterwards: a view clears its selection
+        return self._commit("Reset all steps", REASON_STRUCTURE if changes_structure else REASON_RESET, new)
+
+    # -- structure: remove, restore, unify, add -------------------------------------------------------------------------------
+
+    def _commit_structure(self, label: str, new: PlanEditsState) -> bool:
+        """Commit a change of which steps exist, and say which roles it cleared."""
+        lost = edits.roles_lost(self._state, new)
+        changed = self._commit(label, REASON_STRUCTURE, new)
+        if changed and lost:
+            self.notice.emit(f"Cleared the {' and the '.join(lost)}: that step is gone.")
+        return changed
+
+    @instrumented("ExperimentPlanModule.remove_steps")
+    def remove_steps(self, indices: list[int] | tuple[int, ...]) -> bool:
+        """Take these steps away (by index into `steps()`): a measured step is hidden and can be restored, a step the user added is deleted."""
+        new = edits.remove_steps(self.steps(), self._state, indices)
+        return self._commit_structure("Remove steps" if len(indices) > 1 else "Remove step", new)
+
+    @instrumented("ExperimentPlanModule.restore_removed")
+    def restore_removed(self) -> bool:
+        return self._commit("Restore removed steps", REASON_STRUCTURE, edits.restore_removed(self._state))
+
+    def can_unify(self, indices: list[int] | tuple[int, ...]) -> bool:
+        return edits.can_unify(self.steps(), indices)
+
+    @instrumented("ExperimentPlanModule.unify_steps")
+    def unify_steps(self, indices: list[int] | tuple[int, ...]) -> bool:
+        """One step from the first to the last of these, which must lie next to each other in time (False otherwise)."""
+        return self._commit_structure("Unify steps", edits.unify(self.steps(), self._state, indices))
+
+    @instrumented("ExperimentPlanModule.add_step")
+    def add_step(self, index: int, side: Side, grid_unix_ms: np.ndarray) -> StepRef | None:
+        """A new empty step in front of or behind step `index`, snapped to `grid_unix_ms` (`snap_grid_unix_ms`). Returns its reference, or None when there is no room."""
+        steps = self.steps()
+        grid = np.asarray(grid_unix_ms, dtype=np.float64)
+        spacing = np.diff(grid) if grid.size > 1 else np.empty(0)
+        min_length = max(edits.MIN_LENGTH_MS, int(np.median(spacing))) if spacing.size else edits.MIN_LENGTH_MS  # a step keeps at least one cube
+        new, ref = edits.add_step(steps, self._state, index, side, grid, min_length_ms=min_length)
+        if ref is None:
+            self.notice.emit("There is no room for a new step there: the step is too short to share.")
+            return None
+        self._commit("Add step", REASON_STRUCTURE, new)
+        return ref
+
+    # -- evaluation roles ---------------------------------------------------------------------------------------------------
+
+    @instrumented("ExperimentPlanModule.set_role")
+    def set_role(self, role: Role, index: int | None, pair: int = 1) -> bool:
+        """Make step `index` the baseline or the signal of evaluation pair `pair`; None clears that role. Naming the pair's other step moves it (a step is not both)."""
+        step = self._step(index) if index is not None else None
+        if index is not None and step is None:
+            return False
+        label = f"{'Baseline' if role == 'baseline' else 'Signal'} step"
+        return self._commit(label, REASON_ROLES, edits.set_role(self._state, pair, role, None if step is None else step.ref))

@@ -126,6 +126,7 @@ SLIDER_RIBBON_OPEN = UiKey("image/slider_ribbon_open", True, bool)  # rolled dow
 TOP_RIBBON_OPEN = UiKey("image/top_ribbon_open", True, bool)  # the tool ribbon above the canvas: rolled down (True) or up
 SPECTRA_RIBBON_OPEN = UiKey("spectra/ribbon_open", True, bool)  # the Spectra panel's control row: rolled down (True) or up
 SPECTRA_LINE_STYLE = UiKey("spectra/line_style", "solid", str)  # the line between the measured points: "solid" | "dash" | "dot" | "dashdot" (View menu)
+SENSORGRAM_RIBBON_TAB = UiKey("sensorgram/ribbon_tab", "Plot", str)  # the tab of the Sensorgram's control row that was shown: "Plot" or "Experimental plan"
 SENSORGRAM_RIBBON_OPEN = UiKey("sensorgram/ribbon_open", True, bool)  # the Sensorgram panel's control row: rolled down (True) or up
 SENSORGRAM_BASELINE_BAND_VISIBLE = UiKey("sensorgram/baseline_band_visible", True, bool)  # the draggable baseline band (View group)
 SENSORGRAM_BASELINE_BAND_COLOR = UiKey("sensorgram/baseline_band_color", None, str)  # None = the default blue

@@ -99,6 +99,8 @@ class PlanBarStep:
     tooltip: str
     levels: SectionLevels | None
     edited: bool = False
+    roles: tuple[str, ...] = ()  # "B1", "S1" ...: the evaluation roles this step plays, drawn as small chips on the bar
+    added: bool = False  # a step the user made
 
 
 # -- the data inside a step -----------------------------------------------------------------------------------------------
@@ -178,13 +180,17 @@ def describe_devices(devices: Mapping[str, object] | None) -> list[str]:
 
 
 def _tooltip(step: EffectiveStep, x_start: float, x_end: float, time_mode: bool) -> str:
-    lines = [f"Step {step.step}: {step.label}"]
+    lines = [f"Step {step.order}: {step.label}" if step.label else f"Step {step.order}"]
     if time_mode:
         lines.append(f"{x_start:.1f} s to {x_end:.1f} s ({step.duration_s:.1f} s)")
     else:
         lines.append(f"cube {x_start:.1f} to cube {x_end:.1f} ({step.duration_s:.1f} s)")
     lines.extend(describe_devices(step.devices))
-    if step.edited:
+    for role in step.roles:
+        lines.append(f"{'Baseline' if role.startswith('B') else 'Signal'} step of evaluation pair {role[1:]} ({role}).")
+    if step.is_added:
+        lines.append("Added by you (not in the dataset).")
+    elif step.edited:
         lines.append("Edited (the measured step is kept in the dataset).")
     return "\n".join(lines)
 
@@ -207,7 +213,7 @@ def build_bar_steps(
             PlanBarStep(
                 index=index, x_start=x_start, x_end=x_end, text=shown_label(step.label, text_mode, separators),
                 color=step.color or automatic[index], tooltip=_tooltip(step, x_start, x_end, time_mode),
-                levels=section_levels(lines, x_start, x_end), edited=step.edited,
+                levels=section_levels(lines, x_start, x_end), edited=step.edited, roles=step.roles, added=step.is_added,
             )
         )
     return out

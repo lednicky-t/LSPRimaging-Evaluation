@@ -395,4 +395,38 @@ class PlanBarItem(DeviceSpaceItem):
             if item.text_rect is not None:
                 painter.setPen(QColor(item.text_color))
                 painter.drawText(item.text_rect, int(Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignVCenter), item.text)
+        self._paint_role_chips(painter, drawn, area)
         painter.restore()
+
+    def _paint_role_chips(self, painter: QPainter, drawn: list[DrawnStep], area: QRectF) -> None:
+        """The evaluation roles of each step (``B1`` baseline of pair 1, ``S1`` signal ...) as small chips hanging from the bar's free edge (inside it when the bar fills the plot),
+        so they never cover the step's text. The baseline chip is neutral, the signal chip in the accent colour."""
+        font = self.font()
+        font.setPointSizeF(max(6.0, font.pointSizeF() * 0.85))
+        font.setBold(True)
+        painter.setFont(font)
+        metrics = QFontMetricsF(font)
+        height = metrics.height() + 2.0
+        for item in drawn:
+            if not item.step.roles:
+                continue
+            x = max(item.rect.left(), area.left()) + 2.0
+            if self._settings.is_full:
+                y = item.rect.top() + 2.0
+            elif self._settings.position == POSITION_TOP:
+                y = item.rect.bottom() + 2.0
+            else:
+                y = item.rect.top() - 2.0 - height
+            for role in item.step.roles:
+                width = metrics.horizontalAdvance(role) + 8.0
+                chip = QRectF(x, y, width, height)
+                signal = role.startswith("S")
+                fill = QColor(self._accent if signal else self._text_color)
+                fill.setAlpha(235 if signal else 110)
+                painter.setPen(Qt.PenStyle.NoPen)
+                painter.setBrush(fill)
+                painter.drawRoundedRect(chip, 3.0, 3.0)
+                painter.setPen(QColor(contrast_text_color(fill.name(), fill.alphaF(), self._background)))
+                painter.drawText(chip, int(Qt.AlignmentFlag.AlignCenter), role)
+                x += width + 3.0
+        painter.setBrush(Qt.BrushStyle.NoBrush)

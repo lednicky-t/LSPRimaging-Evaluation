@@ -2,7 +2,9 @@
 
 The steps come from ``ExperimentPlanModule`` (the dataset's measured steps with the user's edits). This object owns what hangs on them:
 
-- the **bar of steps** on the plot and its ribbon group "Experimental plan" (`PlanBarControls`), and the bar's gestures (`PlanBarActions`, which edits the module);
+- the **bar of steps** on the plot and its ribbon group "View" on the Experimental plan tab (`PlanBarControls`), and the bar's gestures (`PlanBarActions`, which edits the module);
+  the bar's structure tools (remove, add, unify, the roles) are offered only while that tab is the active one (`set_structure_tools`);
+- the group "Evaluation" (`EvaluationControls`): the pickers of the baseline and the signal step, which write the plan module's roles;
 - the **table of mean +/- SD per step** and its ribbon group "Step stats" (`StatsTableControls`);
 - the two inputs the steps add to a Sensorgram request: the **pieces to smooth on their own** ("smooth inside steps") and **which cubes belong to which step** (`step_inputs`).
 
@@ -25,17 +27,19 @@ from ...analysis.settings_module import AnalysisSettingsModule
 from ...analysis.step_stats import StepMembership, assign_cubes, membership_segments
 from ...dataset import DatasetModule
 from ...plan.bar_model import PlanBarStep, build_bar_steps
-from ...plan.module import REASON_BOUNDARY, REASON_DATASET, REASON_RESET, REASON_RESTORED, ExperimentPlanModule
+from ...plan.module import REASON_BOUNDARY, REASON_DATASET, REASON_RESET, REASON_RESTORED, REASON_STRUCTURE, ExperimentPlanModule
 from ...plan.stats_table import StatsLine, build_stats_table
 from ...selection import CubeDisplayModule
 from ...selection.cube_display_module import MODE_TIME
 from ..ui_state import UiStateStore
 from .plan_actions import PlanAxisContext, PlanBarActions
+from .evaluation_group import EvaluationControls
 from .plan_group import PlanBarControls
 from .plot import LEGEND_MAX_HEIGHT_FRACTION, MAX_LEGEND_ENTRIES, MAX_LEGEND_SERIES, SensorgramPlot
 from .stats_group import StatsTableControls
 
-_STEP_TIME_CHANGES = (REASON_BOUNDARY, REASON_RESET, REASON_RESTORED, REASON_DATASET)  # a step edit that moves where a step starts or ends (not its note or colour)
+# a step edit that moves where a step starts or ends, or changes which steps exist (not its note, colour or role)
+_STEP_TIME_CHANGES = (REASON_BOUNDARY, REASON_RESET, REASON_RESTORED, REASON_DATASET, REASON_STRUCTURE)
 
 Drawn = tuple[StoredScan, list[Series]]  # the scan and the lines last drawn
 
@@ -74,7 +78,10 @@ class StepOverlays(QObject):
         self.plan_controls.set_available(False)  # until a dataset with steps is open
         self.stats_controls = StatsTableControls(parent)
         self.stats_controls.set_available(False)
+        self.evaluation = EvaluationControls(parent)
+        self.evaluation.role_chosen.connect(self._on_role_chosen)
         self.actions = None if experiment_plan is None else PlanBarActions(experiment_plan, plot, self.plan_context, self)
+        self.set_structure_tools(False)  # until the Experimental plan tab is shown
         self.plan_controls.settings_changed.connect(self.refresh)
         self.stats_controls.settings_changed.connect(self._on_stats_settings_changed)
         if experiment_plan is not None:
@@ -89,6 +96,19 @@ class StepOverlays(QObject):
     def refresh_theme(self) -> None:
         self.plan_controls.refresh_theme()
         self.stats_controls.refresh_theme()
+        self.evaluation.refresh_theme()
+
+    def set_structure_tools(self, active: bool) -> None:
+        """The right-click menu offers remove / add / unify steps and the baseline / signal roles only while the Experimental plan tab is the active one."""
+        if self.actions is not None:
+            self.actions.set_structure_tools(active)
+
+    def _on_role_chosen(self, role: str, ref: object) -> None:
+        """The user picked a step in the Evaluation group (or none): the plan module keeps it."""
+        if self._plan is None:
+            return
+        step = self._plan.step_by_ref(ref) if ref is not None else None
+        self._plan.set_role(role, None if step is None else step.order - 1)
 
     # -- what the steps add to a request ------------------------------------------------------------------------------------
 
@@ -114,8 +134,9 @@ class StepOverlays(QObject):
     # -- reacting to changes ------------------------------------------------------------------------------------------------
 
     def _on_plan_changed(self, reason: str = "") -> None:
-        """The experiment steps changed (a dataset opened, a session restored, an edit). Another dataset or session means other steps: nothing stays selected."""
-        if reason in ("dataset", "restored"):
+        """The experiment steps changed (a dataset opened, a session restored, an edit). Another dataset or session means other steps, and a step added, removed or unified
+        renumbers the rest (the selection is by index): nothing stays selected."""
+        if reason in ("dataset", "restored", REASON_STRUCTURE):
             self._plot.plan_bar().clear_selection()
         if not self._defer():
             self.refresh()
@@ -162,6 +183,7 @@ class StepOverlays(QObject):
         self._on_steps_available(bool(steps))
         found = self._plan_axis() if steps else None
         if found is None:
+            self._show_evaluation(steps, None)
             self._plot.set_plan((), settings)
             self.show_stats_table((), [], bool(steps))
             return
@@ -177,7 +199,13 @@ class StepOverlays(QObject):
             time_mode=self._cube_display.effective_mode() == MODE_TIME,
         )
         self._plot.set_plan(bars, settings)
+        self._show_evaluation(steps, [bar.color for bar in bars])
         self.show_stats_table(bars, series, True)
+
+    def _show_evaluation(self, steps, colours: list[str] | None) -> None:
+        """The Evaluation pickers: the plan's steps (in the bar's colours when the bar is drawn) and the roles of pair 1."""
+        pair = None if self._plan is None else self._plan.state().pair(1)
+        self.evaluation.set_steps(steps, colours, None if pair is None else pair.baseline, None if pair is None else pair.signal)
 
     def show_stats_table(self, bars: Sequence[PlanBarStep], series: list[Series], has_steps: bool) -> None:
         """The table of mean +/- SD per step and line, from the numbers the lines carry (computed with them, in the worker), or none: no steps, nothing drawn, the numbers

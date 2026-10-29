@@ -53,7 +53,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, replace
 
 import numpy as np
-from PyQt6.QtCore import QTimer, pyqtSignal
+from PyQt6.QtCore import Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import QColor
 from PyQt6.QtWidgets import QApplication, QHBoxLayout, QLabel, QSpinBox, QVBoxLayout, QWidget
 
@@ -92,11 +92,14 @@ from ...storage.ui_state_keys import (
     SENSORGRAM_BASELINE_BAND_COLOR,
     SENSORGRAM_BASELINE_BAND_VISIBLE,
     SENSORGRAM_RIBBON_OPEN,
+    SENSORGRAM_RIBBON_TAB,
     read,
 )
 from ..live_toggle import LiveToggle
 from ..ribbon_fields import style_ribbon_number_field
-from ..ribbon_row import RibbonRow, rolled_ribbon
+from ..image.tool_ribbon import ImageToolRibbon
+from ..ribbon_drawer import RibbonDrawer
+from ..ribbon_row import RibbonRow
 from ..image.roi_overlay_controls import RoiOverlayControls
 from ..image_first import ImageFirst
 from ..panel_task import PanelTask
@@ -113,6 +116,8 @@ from .plot import SensorgramPlot, snap_window
 logger = logging.getLogger(__name__)
 
 TASK_ID = "sensorgram.compute"
+PLOT_TAB = "Plot"  # the control row's first tab: how the traces are made and drawn
+PLAN_TAB = "Experimental plan"  # its second: the plan bar, the baseline / signal steps, the numbers per step; the plan bar's structure tools are live only here
 MASK_MARKS_KEY = "sensorgram/mask_marks"
 BAND_HEIGHT_KEY = "sensorgram/baseline_band_height"
 BAND_FONT_KEY = "sensorgram/baseline_readout_font_size"
@@ -279,10 +284,19 @@ class SensorgramPanel(QWidget):
         self._ribbon.add_group("Smoothing", self._smoothing, self._window, self._within_steps, self._spikes)
         self._ribbon.add_group("Baseline", self._baseline, self._band_menu)
         self._ribbon.add_group("View", self._mask_toggle)
-        self._ribbon.add_group("Experimental plan", *self._steps.plan_controls.widgets())
-        self._ribbon.add_group("Step stats", *self._steps.stats_controls.widgets())
         self._ribbon.add_stretch()
-        self._ribbon_drawer = rolled_ribbon(self._ribbon, "Show the sensorgram controls.", self)
+        # The experimental plan has a tab of its own (2026-10-29): the bar's controls, the baseline / signal steps, the table of numbers per step. The plan bar's structure tools
+        # (remove, add, unify, the roles) are live only while it is the active tab, as the ROI gestures are only live on the Image ribbon's ROIs tab.
+        self._plan_ribbon = RibbonRow(self)
+        self._plan_ribbon.add_group("View", *self._steps.plan_controls.widgets())
+        self._plan_ribbon.add_group("Evaluation", *self._steps.evaluation.widgets())
+        self._plan_ribbon.add_group("Step stats", *self._steps.stats_controls.widgets())
+        self._plan_ribbon.add_stretch()
+        self._ribbon_tabs = ImageToolRibbon([(PLOT_TAB, self._ribbon), (PLAN_TAB, self._plan_ribbon)], self)
+        self._ribbon_drawer = RibbonDrawer(self._ribbon_tabs, "Show the sensorgram controls.", self, handle_alignment=Qt.AlignmentFlag.AlignTop)
+        for row in (self._ribbon, self._plan_ribbon):
+            row.roll_up_requested.connect(lambda: self._ribbon_drawer.set_expanded(False))
+        self._ribbon_tabs.category_changed.connect(self._on_ribbon_tab)
         controls = QHBoxLayout()
         controls.setContentsMargins(4, 2, 6, 2)
         controls.addWidget(self._ribbon_drawer)
@@ -357,6 +371,10 @@ class SensorgramPanel(QWidget):
         self._draw_last()
         self._ribbon_drawer.set_expanded(read(store, SENSORGRAM_RIBBON_OPEN) is not False, animate=False)
         self._ribbon_drawer.expanded_changed.connect(lambda open_: store.set(SENSORGRAM_RIBBON_OPEN.key, bool(open_)))
+        saved_tab = read(store, SENSORGRAM_RIBBON_TAB)
+        if isinstance(saved_tab, str) and self._ribbon_tabs.set_category(saved_tab):
+            self._on_ribbon_tab(saved_tab)  # a restored tab is not a user change, but the tools of the tab must follow it
+        self._ribbon_tabs.category_changed.connect(lambda label: store.set(SENSORGRAM_RIBBON_TAB.key, label))
 
     def set_panel_visible(self, visible: bool) -> None:
         """Connected to the dock's ``visibilityChanged``: a hidden panel does no work and catches up once when shown."""
@@ -365,6 +383,8 @@ class SensorgramPanel(QWidget):
     def refresh_theme(self) -> None:
         self._live_toggle.refresh_theme()
         self._ribbon.refresh_theme()
+        self._plan_ribbon.refresh_theme()
+        self._ribbon_tabs.refresh_theme(get_active_theme())
         self._mask_toggle.refresh_theme()
         for menu in (self._display, self._center, self._band, self._smoothing):
             menu.refresh_theme()
@@ -434,6 +454,14 @@ class SensorgramPanel(QWidget):
         """The window with both edges on a data point of the x axis (cube number, or the cube's start time)."""
         x = self._x_axis()[1]
         return snap_window(np.unique(x[np.isfinite(x)]), low, high)
+
+    def _on_ribbon_tab(self, label: str) -> None:
+        """Another control tab is shown: the plan bar's structure tools (remove / add / unify steps, the baseline and signal roles in the right-click menu) are live only on the
+        Experimental plan tab, so nothing structural happens by accident while working on the traces."""
+        self._steps.set_structure_tools(label == PLAN_TAB)
+
+    def current_ribbon_tab(self) -> str:
+        return self._ribbon_tabs.current_category()
 
     def _on_baseline_toggled(self, on: bool) -> None:
         if self._syncing:

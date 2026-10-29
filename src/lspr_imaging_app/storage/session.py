@@ -127,7 +127,9 @@ from ..roi.model import (
 logger = logging.getLogger(__name__)
 
 SESSION_SCHEMA_NAME = "lspri_rewrite_session"
-SESSION_SCHEMA_VERSION = "1.5"
+SESSION_SCHEMA_VERSION = "1.6"
+# 1.6 (2026-10-29): the "plan" block may also hold "removed" (measured steps taken away), "added" (steps the user made), "next_uid" and "pairs" (which step is the baseline and which the
+# signal of evaluation pair 1, 2, ...), plan/state.py. All optional: a 1.5 file has none of them, and a session without such changes is written exactly as before.
 # 1.5 (2026-10-26): optional "plan" block - the user's edits to the experiment steps (boundaries, notes, colours), plan/state.py.
 # 1.4 (2026-10-17): optional "mask_pointers" block - the pointers a Mask-tab scan found (image_tools/mask/mask_pointers_state.py).
 # 1.3 (2026-10-13): optional "frames" block - frame roles (dark, ignored wavelengths/cubes, reference), selection/frame_roles_state.py.
