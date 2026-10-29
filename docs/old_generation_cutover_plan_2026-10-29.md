@@ -12,7 +12,7 @@ Words used here. *Old generation*: the original app (`gui/`, `io/dataset.py`, `p
 - **Real work sits in three places:** the export feature (P1), sorting about 71 test files into delete / port (Phase 2b), and small, careful changes to the Suite launcher (Phase 1b).
 - **Safety net:** a git tag on the old app's last commit, and the launcher already supports pointing at a legacy checkout (`LSPR_LEGACY_IMAGING_ROOT`).
 
-**Update (maintainer, 2026-10-29): the old LSPRi Evaluation app is not used.** Consequences, to be confirmed by you (the one thing to check is that no colleague or older analysis still needs it):
+**Update (maintainer, 2026-10-29): the old LSPRi Evaluation app is not used.** **Confirmed by the maintainer the same day: nothing needs the old app.** Consequences:
 
 - Results export is **not a parity gap**: nobody loses an export they use. P1 no longer blocks the cut-over; export stays a feature of the rewrite, to be designed later (`results_export_design_2026-10-29.md`, which now holds your answers).
 - P2 (old session / profile files cannot be opened) and the schema-7 measurement file (C2) stop mattering: nobody produces it, nothing in this repo reads it. My recommendation for C2 becomes **retire it** (the two writer files go with the old generation in Phase 2a).
