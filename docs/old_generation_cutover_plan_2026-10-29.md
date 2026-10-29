@@ -161,3 +161,49 @@ Phase 0 small. 1a **large** (a feature). 1b small to medium. 2a, 2c, 2d small (s
 - **`io/dataset.py` 1,794; `app.py` 605; `win_job_object.py` 123; `domain/roi_editor_tools.py` 59; `main.py` 5.**
 
 The tool prints these groups and totals at any time and is the exit check of every phase: `python tools/import_reachability.py`.
+
+## 10. Execution log
+
+### Decisions (maintainer, 2026-10-29)
+
+Nothing needs the old app. Version **0.3.0**. UI scale, shortcuts dialog and workflow notes: drop, **but keep the idea of one central place that lists all keyboard shortcuts** (see "Follow-ups" below). Scope: switch the entry points, then delete the old code.
+
+### Phase 1b: the rewrite is the app (eva commit 63d4645; umbrella commit with the launcher)
+
+- `src/main.py` and `run.py` start the rewrite with the launch screen (`src/main_rewrite.py` is gone); console script `lspri-evaluation` points at `app_rewrite:main`, `lspri-evaluation-rewrite` is removed.
+- One version file (`version.py`, "LSPR Imaging", **0.3.0**); `version_rewrite.py` removed. `scan.h5` and the old store stamp the new name as provenance text only.
+- **Found on the way:** only the old app set the Windows taskbar identity (`APP_ID_LSPRI_EVALUATION`), so the Suite's Start-menu shortcut would not have matched the rewrite's window. `src/main.py` and `app_rewrite.main` now set it.
+- Launcher: the "Rewrite Preview" card is removed, the main card's text is updated, its settings backup / reset points at `lspri_eva_rewrite_settings.json` (it pointed at the old app's Windows registry key), `tests/integration/test_launcher.py` expects four cards.
+
+### Phase 2a: old generation removed (eva commit 5be5593)
+
+56 modules, 44,771 lines (list: the reachability tool before the commit). Afterwards the tool reports 0 modules reachable only from the old app, ruff is clean, and all 353 remaining modules import. `src/` is 356 modules / 85,286 lines (131,848 lines at the start of the audit).
+
+### Phase 2b: tests (umbrella)
+
+- 261 LSPRi test files before, **200 after**: 61 deleted (tests of the old window, the old results file, the old fit / array / landmark implementations; the rewrite has its own tests for each of those: `*_trace_fit`, `*_gaussian_fit`, `*_roi_array_*`, `*_rewrite_chromatic_auto`, ...).
+- **10 ported** (import path changed, the test kept): `test_lspri_acq_zarr_compat` (the cross-app guard), `dataset_folder_discovery`, `ome_zarr_incomplete_export`, `ome_zarr_acquisition_metadata`, `ome_zarr_export_compression`, `ome_zarr_shard_crc`, `mask_wavelength_diffs`, `roi_histogram`, `roi_math`, `trace_statistics`. Three needed a content change: `dataset_folder_discovery` takes `ImageDataset` from `dataset.model`; `roi_math` lost one assertion that pinned the old "too few points falls back to the mean" (the rewrite returns NaN by decision, pinned by `test_lspri_rewrite_nan_handling`); `trace_statistics` tests `aggregate_traces` (renamed twin).
+- A script classified every file by what its imports resolve to; "does the behaviour still exist in the rewrite" was the question, not the directory.
+
+### Phase 2c, 2d
+
+- Tools: `tools/array_lab.py` (measured the removed array-geometry code; results are in `array_spot_size_scan_2026-10-20.md`) and `tools/detect_spectral_outliers.py` (read the retired `measurement_backup.h5`; findings in `spectral_outlier_detection_investigation.md`) removed; both are in git history. Umbrella `tools/dark_frame_analysis.py` now imports the rewrite's loader.
+- Packaging: `LSPRImaging.spec`, the app's `requirements.txt` (audit D6) and the old-app `TODO.md` removed; `lucide` dropped from `pyproject.toml` (only the old window imported it).
+
+### Phase 2e (old analysis engine): NOT done, needs a decision
+
+Looked at in detail and stopped, for three reasons found only now:
+1. `AnalysisEngine` is wired into more than `app_rewrite.py`: the Edit menu (undo refused while an analysis runs), `RoiTablePanel`, the array / group / mask-row / ROI-gesture actions (a callable `analysis_running`), session storage root, ROI renumbering and selection. In the app `is_running()` is always false (no UI starts a run), so these guards are dead logic, but removing them changes the constructor signatures of about six panel classes and touches 18 test files.
+2. `tasks.compute_cell` is still used as a reference: `test_lspri_rewrite_rotation_fill_phase0.py` imports it, `tools/analysis_stage_timing.py` compares the scan with it, and the scan's code and tests call it "the golden reference". Removing it would remove an independent check of the scan's numbers.
+3. `analysis/worker.py` (`AnalysisWorker`) is **not** part of the engine path: the Histogram panel, the image renderer and `DatasetModule` use it. (The estimate of "about 1,900 lines" earlier counted it; the engine, tasks, store and planner are about 1,750.)
+
+Proposal for the decision: keep `tasks.compute_cell` and `reduction.py` as an explicit *reference implementation* for tests and tools (moved under `tests/` or `analysis/reference/`), remove `engine.py`, `store.py`, `planner.py` and every `analysis_running` guard, in one commit with the 18 tests updated.
+
+### Phase 2f (dead functions in shared modules): NOT done
+
+The vulture list (audit, section 7, "D9") was made before the old code was removed; it has to be repeated on the new tree and each item checked against tests first. Candidates with the largest size: `storage/workspace.py` old profile / ROI-table functions (about 500 lines), three copies of `detect_rois`, five helpers in `dataset/io.py`.
+
+### Follow-ups
+
+- **Keyboard shortcuts in one place** (maintainer, 2026-10-29): keep the idea of one place that lists all shortcuts. The old implementation is in the tag `legacy-final`: `gui/shortcut_registry.py` (125 lines: sections of hand-written text lines such as "Ctrl+Z: Undo last recorded edit", shown with F1), `gui/shortcut_manager.py` (33 lines) and `gui/panel_help_registry.py` (101 lines). Its weakness: the list was text kept separately from the code that binds each shortcut (`setShortcut(QKeySequence(...))` in `main_window.py`), so the two could disagree. Proposal for the rewrite: one registry of shortcut entries (name, key, scope, text) that both **binds** the actions and **generates** the list, so they cannot drift; the shortcuts that exist today are scattered (Edit -> Undo / Redo, Ctrl+Shift+L for the log console, Play controls, tool keys). Needs a short screen description (GUI rules) and the maintainer's go before any code.
+- Phase 3 (renames) and the remaining documentation of phase 4 (root docs, BRIEFING section 4).

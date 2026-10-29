@@ -9,7 +9,7 @@ This file is the authoritative LSPRi rule set. Root rules still apply, except wh
 - `docs/whole_app_audit_2026-10-29.md`: the latest whole-app audit: dead code, what only the old generation still uses (the cut-over inventory), documentation drift, and the decisions still open. Start here for clean-up and cut-over questions.
 - `docs/whole_app_audit_2026-10-07.md`: the earlier audit (where the rewrite stood, section 2b; known issues). Supersedes the 2026-09-30 status doc below, which is out of date. Its dead-file list (D5) is partly done: `mask_settings.py` and `mask_highlight_actions.py` are gone.
 - `docs/README.md`: index of all docs by topic.
-- `docs/old_generation_cutover_plan_2026-10-29.md`: the plan (not executed) for replacing the old app with the rewrite: what blocks it, the phases, the open questions. Read it before touching `run.py`, `src/main.py`, `app.py`, `gui/`, or the launcher cards.
+- `docs/old_generation_cutover_plan_2026-10-29.md`: how the old app was replaced by the rewrite (done 2026-10-29: phases 1b and 2a-2d); phase 2e (the old analysis engine) and 2f (dead functions in shared modules) are still open.
 - `docs/rewrite_status_by_feature_2026-10-29.md`: the full per-feature record that used to be the "Where the rewrite stands" section of this file (25 KB, moved verbatim). Search it by feature name; never read it whole.
 - `docs/rewrite_status_and_plan_2026-09-30.md`: the original stage-by-stage plan (history; its "what is built" claims are stale).
 - `docs/spectra_analysis_methods.md`: the maths from the stored scan to the metric (formula, fit window, fit, maximum / centroid), where each is in the code, and what the tests showed. Read it before changing any of those.
@@ -17,7 +17,7 @@ This file is the authoritative LSPRi rule set. Root rules still apply, except wh
 
 ## Status and scope: the rewrite exception
 
-LSPRi is being rebuilt from scratch on the `rewrite` branch. This is an approved exception to the root "do not rewrite the architecture" rule. Scope is LSPRi Evaluation only: no hardware control, and no shared infrastructure for a future acquisition app. Evidence: `docs/rewrite_feature_inventory_2026-09.md`. Structure and event design: `docs/rewrite_architecture_sketch_2026-09.md`. Read it before any structural decision this file does not cover.
+LSPRi was rebuilt from scratch on the `rewrite` branch, and on 2026-10-29 it replaced the original app (git tag `legacy-final`; nobody used the original, the maintainer confirmed). The rebuild was an approved exception to the root "do not rewrite the architecture" rule; the exception ended with the cut-over, so further large restructuring needs a new approval. Scope is LSPRi Evaluation only: no hardware control, and no shared infrastructure for a future acquisition app. Evidence: `docs/rewrite_feature_inventory_2026-09.md`. Structure and event design: `docs/rewrite_architecture_sketch_2026-09.md`. Read it before any structural decision this file does not cover.
 
 ### Where the rewrite stands (summary, kept current to 2026-10-29; open decisions: `docs/whole_app_audit_2026-10-29.md`)
 
@@ -70,11 +70,9 @@ Extracted from the moved paragraphs; the record explains why. Each is a rule, no
 **ROI position tuning**
 - Accept copies the trial's numbers into `scan.h5` **bit-identical to a real scan of the moved ROIs** (pinned by a test): only when the trial's inputs are unchanged, only into a file that fits (`ScanStore.prepare(create=False)`), and not for ROIs next to another ROI or whose new centre is interpolated between lattice points. A trial scans the centre the toolbox stores (0.1 px rounding, `roi_tuning.moved_centre`).
 
-## Which generation to edit
+## Where the app starts
 
-**GUI work targets the new generation:** `src/lspr_imaging_app/panels/`, `roi/`, `analysis/`, `undo/`, `selection/`, `storage/session*`, started from `src/main_rewrite.py` (`app_rewrite.py`). Edit the old `gui/` package only if the maintainer asks.
-
-Open question: `run.py` and `src/main.py` still start the **old** app. Changes to the new panels will not show when you run `run.py`. Whether that is intended is not yet confirmed; ask before changing the launcher.
+There is one app. `src/main.py` (used by `run.py` and the Suite launcher) shows the launch screen and calls `app_rewrite.main` (the console script `lspri-evaluation` calls it directly); `app_rewrite.build_main_window` wires everything. The old `gui/`, `io/dataset.py`, `processing/` (except `preprocess`, `reference_selection`, `roi_detection`) and `app.py` are gone; `gui/`, `io/` and `processing/` still hold a few shared modules under their old names (renaming them is phase 3 of the cut-over plan). Check what is reachable with `python tools/import_reachability.py`.
 
 ## Non-negotiable invariants
 
@@ -109,7 +107,7 @@ These come from real incidents. Violating any of them will likely reproduce a bu
   - be a pure function (no Qt) taking `progress: Callable[[float, str], None] | None` (overall fraction 0..1 plus a short message) and `cancelled: Callable[[], bool] | None`; check cancellation at every progress call and stop with a `Cancelled` exception;
   - report per unit of work (image, step, ROI), never per pixel, and split the 0..1 range into stages weighted by *measured* stage times (reference implementation: `tools/chromatic_landmark_lab.py`, `StageProgress`);
   - be wrapped by its owning module, which re-emits progress as a typed signal; panels only display it (progress bar or busy indicator, plus a Cancel button) and never compute.
-  - Launch screen and stage timing (2026-10-24): `launch.py` (`LaunchSplash`, `StageClock`); `main_rewrite.py` shows the card before the heavy imports, so **`launch.py` may import only PyQt6 and `applog`**. `build_main_window` logs `app.build_stage` per step: add `stages.done(...)` after a new step that may be slow. Record: `docs/startup_gui_thread_audit_2026-10-24.md`.
+  - Launch screen and stage timing (2026-10-24): `launch.py` (`LaunchSplash`, `StageClock`); `src/main.py` shows the card before the heavy imports, so **`launch.py` may import only PyQt6 and `applog`**. `build_main_window` logs `app.build_stage` per step: add `stages.done(...)` after a new step that may be slow. Record: `docs/startup_gui_thread_audit_2026-10-24.md`.
   - Launch: when the last dataset is reopened, `startup_tracker.py` `StartupTracker` shows "Starting up: step N of 5: ..." in that same row until the dataset, session, first image, scan results and Spectra / Sensorgram are all settled (2026-10-24; steps in `app_rewrite._build_startup_tracker`). A new thing that loads at launch adds a `StartupStep` there.
   - App-wide indicator: `panels/task_indicator.py` `TaskIndicator`, a permanent status-bar row (spinner, progress bar, start time, elapsed/ETA, Cancel; keeps the last result until dismissed; History popup; every finished run is logged). A task joins it by emitting `task_progress(task_id, label, fraction, message)` (fraction < 0 = unknown) and `task_finished(task_id, outcome, message)` (always, once per run; outcome `completed`/`failed`/`cancelled`), then three connects in `app_rewrite.py` (report, finish, cancel). Reference: `ChromaticAutoDetect`. `analysis_progress(float)` and `export_progress(int, str)` are older ad-hoc shapes; migrate them when touched.
 - Each display panel has its own ~100 ms redraw-coalescing timer. Reacting to every event immediately is not the same as reacting promptly.
@@ -182,7 +180,7 @@ A **dataset** is raw images plus acquisition metadata, never written to. A **ses
 - Don't use `QThreadPool` for anything touching the dataset/zarr layer, even indirectly.
 - Don't design shared infrastructure for a future acquisition app.
 - Don't make a new session copy a prior session's settings or ROIs. New sessions start blank (maintainer decision, 2026-09-26). **One approved exception (2026-10-22):** the OME-Zarr export's Session button carries the session into the exported dataset (`storage/session_carry.py`, `docs/session_carry_export_2026-10-22.md`): a user-started derivation, written once into the exported dataset's own `sessions/` folder, with `derived_from.json` recording the source. There is still no duplicate / clone command.
-- Don't build session rename, duplicate, or delete, or an importer for the stable app's pre-existing `analysis/roi_table.json`, `measurement_backup.h5`, or `processing_profile.json`.
+- Don't build session rename, duplicate, or delete, or an importer for the former app's pre-existing `analysis/roi_table.json`, `measurement_backup.h5`, or `processing_profile.json`.
 - Don't wire more of `MaskModule` to undo than the Mask rows' commands and the Auto mask batch without checking in (painting needs stroke batching).
 
 ## References
