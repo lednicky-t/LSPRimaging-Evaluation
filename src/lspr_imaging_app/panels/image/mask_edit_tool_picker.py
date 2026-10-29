@@ -1,7 +1,8 @@
 """The "Edit" group's tool picker (2026-10-02, maintainer request):
 "something like dropdown menu but without scroll feature... a pickup menu"
-offering the five `MaskEditTool` kinds. A plain `QToolButton` +
-`QMenu(InstantPopup)` *is* exactly that in Qt terms - a menu with five
+offering the `MaskEditTool` kinds (five at first, seven since 2026-10-29's ROI
+features and Eraser). A plain `QToolButton` +
+`QMenu(InstantPopup)` *is* exactly that in Qt terms - a menu with seven
 entries never needs to scroll, so no extra "no-scroll" handling is needed;
 asking for one is really asking not to reach for a scrollable list widget
 (`QComboBox`) for a five-item choice.
@@ -39,7 +40,9 @@ _TOOL_SPECS: tuple[tuple[MaskEditTool, str, str], ...] = (
     (MaskEditTool.THRESHOLD, "Threshold", "threshold_icon"),
     (MaskEditTool.LOCAL_CONTRAST, "Local contrast", "local_contrast_icon"),
     (MaskEditTool.MORPHOLOGY, "Morphology", "morphology_icon"),
+    (MaskEditTool.ROI_FEATURES, "ROI features", "roi_features_icon"),
     (MaskEditTool.DRAW, "Draw", "draw_icon"),
+    (MaskEditTool.ERASER, "Eraser", "eraser_icon"),
 )
 
 
@@ -58,7 +61,7 @@ def _label_for(tool: MaskEditTool) -> str:
 
 
 class MaskEditToolPicker(QToolButton):
-    """A five-option icon picker for `MaskEditToolModule` - the Edit group's
+    """A seven-option icon picker for `MaskEditToolModule` - the Edit group's
     "which mask-editing tool is active" selector."""
 
     def __init__(self, tool_module: MaskEditToolModule, parent: QWidget | None = None) -> None:

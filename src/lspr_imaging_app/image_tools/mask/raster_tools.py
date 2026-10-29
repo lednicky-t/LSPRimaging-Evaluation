@@ -140,6 +140,26 @@ def apply_morphology_to_mask(mask: np.ndarray, operation: str, radius_px: int) -
         return mask
 
 
+def morphology_changed_pixels(mask: np.ndarray, operation: str, radius_px: int) -> np.ndarray:
+    """The pixels `apply_morphology_to_mask` would flip: the ring a dilation / closing adds, the rim an erosion / opening
+    strips (2026-10-29, for the Mask tab's hover preview). A plain "result differs from mask", so it is the same pixels the
+    operation really changes, whichever way it goes."""
+    mask = np.asarray(mask, dtype=bool)
+    return apply_morphology_to_mask(mask, operation, radius_px) != mask
+
+
+def connected_grain(mask: np.ndarray, row: int, col: int, *, diagonal: bool = True) -> np.ndarray | None:
+    """The "grain" of `mask` that contains pixel (`row`, `col`): all the masked pixels connected to it through masked neighbours
+    (2026-10-29, for the Mask tab's Eraser). ``diagonal=True`` (the default) counts the four diagonal neighbours too (8-connected),
+    so two squares touching only at a corner are one grain; ``False`` needs a shared edge (4-connected). ``None`` when the pixel is
+    not masked or lies outside the array. The result is a new boolean array of the same shape; `mask` is not changed."""
+    mask = np.asarray(mask, dtype=bool)
+    if not (0 <= row < mask.shape[0] and 0 <= col < mask.shape[1]) or not mask[row, col]:
+        return None
+    labels, _count = ndimage.label(mask, structure=np.ones((3, 3), dtype=bool) if diagonal else ndimage.generate_binary_structure(2, 1))
+    return labels == labels[row, col]
+
+
 def brush_stamp_bounds(
     canvas_shape: tuple[int, int],
     center_xy: tuple[float, float],

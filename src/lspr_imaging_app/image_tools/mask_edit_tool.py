@@ -38,7 +38,9 @@ class MaskEditTool(enum.Enum):
     THRESHOLD = "threshold"
     LOCAL_CONTRAST = "local_contrast"
     MORPHOLOGY = "morphology"
+    ROI_FEATURES = "roi_features"  # added 2026-10-29: small features on the ROIs found from the image (docs/roi_feature_detection_2026-10-29.md)
     DRAW = "draw"
+    ERASER = "eraser"  # added 2026-10-29: a click on the image removes the connected blob of mask pixels under it
 
 
 class MaskEditToolModule(QObject):

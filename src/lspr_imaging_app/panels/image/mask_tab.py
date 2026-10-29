@@ -32,13 +32,18 @@ from ...image_tools.mask.mask_pointers import MaskPointersModule
 from ...image_tools.mask_auto_task import MaskAutoTask
 from ...image_tools.mask_export_task import MaskExportTask
 from ...image_tools.mask_scan_task import TransientScanTask
+from ...image_tools.roi_feature_task import RoiFeatureTask
 from ...selection import HighlightRangeModule
+from ..mask_edit_preview import MaskEditPreview
+from ..mask_grain_eraser import MaskGrainEraser
 from ..ribbon_group import group_label_style, labeled_icon_group, ribbon_separator
 from .mask_edit_panels import (
     DrawEditPanel,
     HistogramSelectionEditPanel,
+    EraserEditPanel,
     LocalContrastEditPanel,
     MorphologyEditPanel,
+    RoiFeaturesEditPanel,
     ThresholdEditPanel,
 )
 from .mask_edit_tool_picker import MaskEditToolPicker
@@ -75,6 +80,7 @@ class MaskTab(QWidget):
         scan: TransientScanTask,
         auto: MaskAutoTask,
         export: MaskExportTask,
+        features: RoiFeatureTask,
         status: Callable[[str], None],
         visible_cubes: Callable[[], tuple[int, int] | None] | None = None,
     ) -> None:
@@ -100,21 +106,47 @@ class MaskTab(QWidget):
         # that module's docstring for why nothing else shares it).
         self._edit_tool = MaskEditToolModule(self)
         self._edit_picker = MaskEditToolPicker(self._edit_tool, self)
+        # What the picked tool would select or change, previewed on the image (the panel draws it: `EditPreviewLayer`).
+        # The frame on screen comes from the same signal the editors use; whether this tab is the open one and whether Play
+        # runs are told by the panel (`ImagePanel` owns the ribbon and the slideshow).
+        self._edit_preview = MaskEditPreview(mask, chromatic, dataset, parent=self, features=features)
+        self._edit_preview.status.connect(status)
+        image_panel.image_rendered.connect(lambda _image, cube, wavelength: self._edit_preview.set_frame((cube, wavelength)))
+        image_panel.image_cleared.connect(lambda: self._edit_preview.set_frame(None))
+        self._edit_preview.set_tool(self._edit_tool.tool())
+        self._edit_tool.tool_changed.connect(self._edit_preview.set_tool)
         self._edit_stack = QStackedWidget(self)
         self._edit_panel_order: tuple[MaskEditTool, ...] = (
             MaskEditTool.HISTOGRAM_SELECTION,
             MaskEditTool.THRESHOLD,
             MaskEditTool.LOCAL_CONTRAST,
             MaskEditTool.MORPHOLOGY,
+            MaskEditTool.ROI_FEATURES,
             MaskEditTool.DRAW,
+            MaskEditTool.ERASER,
         )
         self._edit_stack.addWidget(
             HistogramSelectionEditPanel(mask, geometry, chromatic, dataset, highlight_range, image_panel, mask_scope)
         )
-        self._edit_stack.addWidget(ThresholdEditPanel(mask))
-        self._edit_stack.addWidget(LocalContrastEditPanel(mask))
-        self._edit_stack.addWidget(MorphologyEditPanel(mask, chromatic, dataset, image_panel, mask_scope))
+        self._threshold_panel = ThresholdEditPanel(
+            mask, chromatic, dataset, image_panel, mask_scope, self._edit_preview, status
+        )
+        self._local_contrast_panel = LocalContrastEditPanel(
+            mask, chromatic, dataset, image_panel, mask_scope, self._edit_preview, status
+        )
+        self._morphology_panel = MorphologyEditPanel(mask, chromatic, dataset, image_panel, mask_scope, self._edit_preview)
+        self._edit_stack.addWidget(self._threshold_panel)
+        self._edit_stack.addWidget(self._local_contrast_panel)
+        self._edit_stack.addWidget(self._morphology_panel)
+        self._features_panel = RoiFeaturesEditPanel(
+            mask, chromatic, dataset, image_panel, mask_scope, self._edit_preview, features, status
+        )
+        self._edit_stack.addWidget(self._features_panel)
         self._edit_stack.addWidget(DrawEditPanel(mask))
+        # The Eraser is a click on the image (the panel routes it to `erase_at`); its row only says so.
+        self._grain_eraser = MaskGrainEraser(mask, geometry, chromatic, dataset, image_panel, mask_scope, status)
+        self._eraser_panel = EraserEditPanel(self)
+        self._edit_stack.addWidget(self._eraser_panel)
         self._on_edit_tool_changed(self._edit_tool.tool())
         self._edit_tool.tool_changed.connect(self._on_edit_tool_changed)
 
@@ -188,6 +220,21 @@ class MaskTab(QWidget):
         """Which manual-edit tool is picked (the panel remembers it across restarts)."""
         return self._edit_tool
 
+    @property
+    def grain_eraser(self) -> MaskGrainEraser:
+        """The Eraser's logic (the Image panel hands it the clicks it gets while the Eraser is armed)."""
+        return self._grain_eraser
+
+    @property
+    def features_panel(self) -> RoiFeaturesEditPanel:
+        """The ROI features tool's panel (the Image panel remembers its numbers across restarts)."""
+        return self._features_panel
+
+    @property
+    def edit_preview(self) -> MaskEditPreview:
+        """The preview of what the picked tool would select (the panel draws it and remembers the eye toggle)."""
+        return self._edit_preview
+
     def _on_edit_tool_changed(self, tool: MaskEditTool) -> None:
         self._edit_stack.setCurrentIndex(self._edit_panel_order.index(tool))
 
@@ -196,6 +243,10 @@ class MaskTab(QWidget):
         self._overlay_controls.refresh_theme(theme)
         self._scope_toggle.refresh_theme(theme)
         self._edit_picker.refresh_theme(theme)
+        for panel in (
+            self._threshold_panel, self._local_contrast_panel, self._morphology_panel, self._features_panel, self._eraser_panel
+        ):
+            panel.refresh_theme()
         if self._select_group is not None:
             self._select_group.refresh_theme(theme.control_border)
         for separator in self._separators:

@@ -1,4 +1,4 @@
-"""The "Edit" group's five per-tool control panels (2026-10-02, maintainer
+"""The "Edit" group's seven per-tool control panels (five 2026-10-02, ROI features and Eraser 2026-10-29; maintainer
 request) - one per `MaskEditTool`, swapped by `MaskEditToolPicker` via a
 `QStackedWidget` (`panel.py`'s `_build_ui`). Reorganizes the stable app's
 always-all-visible Mask section (Histogram masking / Relative threshold /
@@ -22,24 +22,26 @@ show the edits".
   method's own docstring for the 2026-10-02 OR/AND-merge-vs-plain-replace
   correctness fix made alongside this file) directly against the resolved
   base mask (`mask_edit_common.resolve_mask_edit_base`). Each click commits
-  immediately - no live preview before commit, since there is no drag/slider
-  driving a continuous candidate the way the Histogram-range selection has;
-  the four buttons are instant actions, matching the maintainer's own "4
-  icons" framing (not a +/- pair).
-- **Threshold / Local contrast**: settings-only. The two tuning spinboxes
-  each panel shows are real and already push to `MaskModule.set_tool_
-  settings` (the same fields `workflow/mask_settings.py`'s
-  `MaskSettingsSection` already owns - both forms read/write the same
-  `MaskSettings`, so editing either one updates the other). The Add/Subtract
-  buttons are present but disabled, with a tooltip explaining why: both
-  tools need a raw-plane reload plus `scipy` Gaussian filtering against the
-  *raw* image (not the already-in-memory displayed one, unlike Histogram
-  selection), explicitly flagged as "genuinely slow" and not-yet-worker-
-  backed in `MaskModule`'s own module docstring ("Still not built"). Wiring
-  these for real needs a background worker (this codebase's established
-  `threading.Thread` pattern, never `QThreadPool` - see the zarr-crash
-  invariant) plus a live candidate-preview overlay, each its own follow-up
-  piece of work, not guessed at here.
+  immediately, matching the maintainer's own "4 icons" framing (not a +/-
+  pair). **Preview (2026-10-29)**: resting the mouse on a button tints the
+  pixels that operation would change (`panels/mask_edit_preview.py`), with
+  the radius in the ribbon; the eye button at the left switches the preview.
+- **Threshold / Local contrast**: the two tuning spinboxes each panel shows
+  are real and push to `MaskModule.set_tool_settings` (the same fields
+  `workflow/mask_settings.py`'s `MaskSettingsSection` already owns - both
+  forms read/write the same `MaskSettings`, so editing either one updates the
+  other). **Wired 2026-10-29**: Add/Subtract merge the pixels the tool selects
+  (`panels/mask_candidate_editor.py`), and the same pixels are previewed on the
+  image while the tool is picked (eye button). Both need the *raw* image plus
+  `scipy` Gaussian filtering (0.2-4 s), so the candidate is made on a worker
+  thread (`image_tools/mask_candidates.py`; `threading.Thread`, never
+  `QThreadPool` - see the zarr-crash invariant) and shared by the preview and
+  the buttons.
+- **ROI features** (2026-10-29): `RoiFeaturesEditPanel`. Not a live preview but a Process button (3-16 s, worker processes, progress
+  and Cancel in the status bar), a settings popup and an Apply button that adds the found pixels at the Persistent / Individual
+  scope. Record: `docs/roi_feature_detection_2026-10-29.md`.
+- **Eraser** (2026-10-29): `EraserEditPanel` is only a hint icon; the tool is a click on the image (`panels/mask_grain_eraser.py`,
+  routed by `CanvasInteraction`), which removes the connected blob of mask pixels under it.
 - **Draw**: settings-only. The brush-size spinbox is real (same
   `MaskSettings.brush_size_px` field `MaskModule.paint_brush` already
   consumes). The Add/Erase mode toggle is plain local widget state, not yet
@@ -64,33 +66,52 @@ already fits inside.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import TYPE_CHECKING
 
-from PyQt6.QtWidgets import QButtonGroup, QDoubleSpinBox, QHBoxLayout, QSpinBox, QToolButton, QWidget
+from PyQt6.QtCore import QEvent, QObject, Qt, pyqtSignal
+from PyQt6.QtWidgets import (
+    QButtonGroup,
+    QDoubleSpinBox,
+    QFormLayout,
+    QHBoxLayout,
+    QLabel,
+    QMenu,
+    QPushButton,
+    QSpinBox,
+    QToolButton,
+    QWidget,
+    QWidgetAction,
+)
 
-from lspr_ui import make_compact_spinbox
+from lspr_ui import get_active_theme, load_tabler_icon, make_compact_spinbox
 
 from ...dataset import DatasetModule
 from ...image_tools import ChromaticModule, GeometryModule, MaskModule, MaskScopeModule
 from ...image_tools.mask.model import MaskSettings
+from ...image_tools.mask.roi_feature_run import FeatureParams
+from ...image_tools.roi_feature_task import FeatureSummary, RoiFeatureTask
 from ...selection import HighlightRangeModule
+from ..mask_candidate_editor import MaskCandidateEditor
 from ..mask_edit_common import (
     ADD_COLOR,
+    BUTTON_SIZE,
     ICON_SIZE,
     SUBTRACT_COLOR,
     action_button,
     disabled_safe_icon,
     resolve_mask_edit_base,
 )
+from ..mask_edit_preview import KIND_LOCAL_CONTRAST, KIND_ROI_FEATURES, KIND_THRESHOLD, MaskEditPreview
 from ..mask_highlight_editor import HistogramHighlightMaskEditor
 from ..ribbon_fields import style_ribbon_number_field
+from .edit_preview_toggle import EditPreviewToggle
 
 if TYPE_CHECKING:
     # Deferred - see mask_highlight_actions.py's own identical note for why
     # a plain top-level import here would close a real import cycle.
     from .panel import ImagePanel
 
-_DISABLED_TOOLTIP_SUFFIX = " Not wired yet - needs a background worker (see mask_edit_panels.py)."
 _MORPHOLOGY_COLOR = "#f8fafc"  # GuiTheme.text_primary - 2026-10-02 maintainer request: white, since these are real, active actions
 _DRAW_MODE_ACTIVE_COLOR = "#38bdf8"  # GuiTheme.accent_blue - matches MaskScopeToggle's own "selected" convention
 _DRAW_MODE_INACTIVE_COLOR = "#8b95a3"  # GuiTheme.text_dim
@@ -187,32 +208,46 @@ class HistogramSelectionEditPanel(QWidget):
 
 
 class _TwoSpinToolSettingsPanel(QWidget):
-    """Shared shape for Threshold/Local-contrast: two tuning spinboxes
-    (real, pushed to `MaskModule`) plus a disabled Add/Subtract pair (not
-    wired yet - see module docstring). Subclassed rather than parameterized
+    """Shared shape for Threshold/Local-contrast: an eye button (preview of
+    the selected pixels on the image), two tuning spinboxes (pushed to
+    `MaskModule`) and an Add/Subtract pair (2026-10-29: wired - they merge the
+    same pixels the preview shows, computed on a worker thread; the buttons are
+    off while that runs). Subclassed rather than parameterized
     with a dict of field specs - each subclass's spinbox ranges/suffixes
     differ enough (a percentage vs. a plain float vs. a pixel count) that a
     generic field-spec table would need as much code as just writing the
     two spinboxes out."""
 
-    def __init__(self, mask: MaskModule, parent: QWidget | None = None) -> None:
+    _kind = ""  # which candidate the buttons merge: `KIND_THRESHOLD` / `KIND_LOCAL_CONTRAST`
+
+    def __init__(
+        self,
+        mask: MaskModule,
+        chromatic: ChromaticModule,
+        dataset: DatasetModule,
+        image_panel: ImagePanel,
+        mask_scope: MaskScopeModule,
+        preview: MaskEditPreview,
+        status: Callable[[str], None],
+        parent: QWidget | None = None,
+    ) -> None:
         super().__init__(parent)
         self._mask = mask
         self._syncing = False
+        self._busy = False  # a candidate is being computed for a button press
+        self._editor = MaskCandidateEditor(mask, chromatic, dataset, image_panel, mask_scope, preview, status)
 
+        self._toggle = EditPreviewToggle(preview, self)
         self._spin_a, self._spin_b = self._build_spinboxes()
-        self._add_button = action_button(
-            self, "square-rounded-plus", ADD_COLOR, self._add_tooltip(),
-            enabled=False, disabled_tooltip_suffix=_DISABLED_TOOLTIP_SUFFIX,
-        )
-        self._subtract_button = action_button(
-            self, "square-rounded-minus", SUBTRACT_COLOR, self._subtract_tooltip(),
-            enabled=False, disabled_tooltip_suffix=_DISABLED_TOOLTIP_SUFFIX,
-        )
+        self._add_button = action_button(self, "square-rounded-plus", ADD_COLOR, self._add_tooltip())
+        self._add_button.clicked.connect(lambda: self._apply(subtract=False))
+        self._subtract_button = action_button(self, "square-rounded-minus", SUBTRACT_COLOR, self._subtract_tooltip())
+        self._subtract_button.clicked.connect(lambda: self._apply(subtract=True))
 
         layout = QHBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(2)
+        layout.addWidget(self._toggle)
         layout.addWidget(self._spin_a)
         layout.addWidget(self._spin_b)
         layout.addSpacing(4)
@@ -222,6 +257,28 @@ class _TwoSpinToolSettingsPanel(QWidget):
         self._sync_from_settings(mask.settings())
         mask.cosmetic_changed.connect(self._on_model_changed)
         mask.mask_changed.connect(self._on_model_changed)
+        image_panel.image_rendered.connect(self._refresh_enabled)
+        image_panel.image_cleared.connect(self._refresh_enabled)
+        self._refresh_enabled()
+
+    def refresh_theme(self) -> None:
+        self._toggle.refresh_theme()
+
+    def _refresh_enabled(self, *_args: object) -> None:
+        enabled = self._editor.is_ready() and not self._busy
+        self._add_button.setEnabled(enabled)
+        self._subtract_button.setEnabled(enabled)
+
+    def _apply(self, *, subtract: bool) -> None:
+        if self._busy:
+            return
+        self._busy = True
+        self._refresh_enabled()
+        self._editor.apply(self._kind, subtract=subtract, done=self._on_apply_done)
+
+    def _on_apply_done(self) -> None:
+        self._busy = False
+        self._refresh_enabled()
 
     # -- subclass hooks ---------------------------------------------------
 
@@ -255,6 +312,8 @@ class ThresholdEditPanel(_TwoSpinToolSettingsPanel):
     """Relative threshold (%) + profile sigma (px) - same two fields
     `MaskSettingsSection` already owns, `create_relative_contrast_mask`'s
     own two parameters."""
+
+    _kind = KIND_THRESHOLD
 
     def _build_spinboxes(self) -> tuple[QWidget, QWidget]:
         self._threshold_spin = make_compact_spinbox(QDoubleSpinBox(self))
@@ -300,6 +359,8 @@ class ThresholdEditPanel(_TwoSpinToolSettingsPanel):
 class LocalContrastEditPanel(_TwoSpinToolSettingsPanel):
     """Local contrast sigma (px) + z-threshold - `create_local_contrast_
     mask`'s own two parameters."""
+
+    _kind = KIND_LOCAL_CONTRAST
 
     def _build_spinboxes(self) -> tuple[QWidget, QWidget]:
         self._sigma_spin = make_compact_spinbox(QSpinBox(self))
@@ -357,10 +418,34 @@ _MORPHOLOGY_OPERATIONS: tuple[tuple[str, str, str], ...] = (
 )
 
 
+class _HoverWatcher(QObject):
+    """Tells `on_enter(watched)` / `on_leave(watched)` when the mouse enters or leaves a widget it is installed on (a plain event
+    filter: it never consumes the event, so the button behaves as before)."""
+
+    def __init__(
+        self,
+        on_enter: Callable[[QObject], None],
+        on_leave: Callable[[QObject], None],
+        parent: QObject | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self._on_enter = on_enter
+        self._on_leave = on_leave
+
+    def eventFilter(self, watched: QObject | None, event: QEvent | None) -> bool:  # noqa: N802 - Qt's name
+        if watched is not None and event is not None:
+            if event.type() == QEvent.Type.Enter:
+                self._on_enter(watched)
+            elif event.type() == QEvent.Type.Leave:
+                self._on_leave(watched)
+        return False
+
+
 class MorphologyEditPanel(QWidget):
-    """Radius (px) + four operation buttons (erode/dilate/open/close), each
+    """Eye button + radius (px) + four operation buttons (erode/dilate/open/close), each
     an instant action against the mask already in effect at the current
-    frame - see module docstring for why there's no +/- pair here."""
+    frame - see module docstring for why there's no +/- pair here. Resting the mouse on
+    a button previews the pixels it would change (2026-10-29)."""
 
     def __init__(
         self,
@@ -369,6 +454,7 @@ class MorphologyEditPanel(QWidget):
         dataset: DatasetModule,
         image_panel: ImagePanel,
         mask_scope: MaskScopeModule,
+        preview: MaskEditPreview,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
@@ -377,8 +463,11 @@ class MorphologyEditPanel(QWidget):
         self._dataset = dataset
         self._mask_scope = mask_scope
         self._image_panel = image_panel
+        self._preview = preview
         self._syncing = False
         self._last_frame: tuple[int, float] | None = None
+
+        self._toggle = EditPreviewToggle(preview, self)
 
         self._radius_spin = make_compact_spinbox(QSpinBox(self))
         self._radius_spin.setRange(1, 100)
@@ -390,13 +479,16 @@ class MorphologyEditPanel(QWidget):
         layout = QHBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(2)
+        layout.addWidget(self._toggle)
         layout.addWidget(self._radius_spin)
         layout.addSpacing(4)
 
         self._operation_buttons: dict[str, QToolButton] = {}
+        self._hover = _HoverWatcher(self._on_button_entered, self._on_button_left, self)
         for operation, icon_name, tooltip in _MORPHOLOGY_OPERATIONS:
             button = action_button(self, icon_name, _MORPHOLOGY_COLOR, tooltip)
             button.clicked.connect(lambda _checked=False, op=operation: self._apply(op))
+            button.installEventFilter(self._hover)
             self._operation_buttons[operation] = button
             layout.addWidget(button)
         layout.addStretch(1)
@@ -432,10 +524,23 @@ class MorphologyEditPanel(QWidget):
         self._last_frame = None
         self._refresh_enabled()
 
+    def refresh_theme(self) -> None:
+        self._toggle.refresh_theme()
+
     def _refresh_enabled(self) -> None:
         enabled = self._last_frame is not None
         for button in self._operation_buttons.values():
             button.setEnabled(enabled)
+
+    def _on_button_entered(self, watched: QObject) -> None:
+        for operation, button in self._operation_buttons.items():
+            if button is watched:
+                self._preview.set_morphology_hover(operation)
+                return
+
+    def _on_button_left(self, watched: QObject) -> None:
+        if watched in self._operation_buttons.values():
+            self._preview.set_morphology_hover(None)
 
     def _apply(self, operation: str) -> None:
         if self._last_frame is None:
@@ -452,6 +557,299 @@ class MorphologyEditPanel(QWidget):
             scope=self._mask_scope.scope().value,
             restrict_to=self._image_panel.selection_raw_mask(raw_shape),
         )
+
+
+_PLAIN_ICON_COLOR = "#f8fafc"  # GuiTheme.text_primary, like the other real, active actions of this ribbon
+
+
+class _FeatureParamsPopover(QWidget):
+    """The finder's numbers, in the popup of the settings button (the ribbon row has no room for five fields). The widgets are the
+    panel's own (it reads and remembers them); `changed` fires when any of them does."""
+
+    changed = pyqtSignal()
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        defaults = FeatureParams()
+        self.strength_spin = QDoubleSpinBox(self)
+        self.strength_spin.setRange(2.0, 20.0)
+        self.strength_spin.setDecimals(1)
+        self.strength_spin.setSingleStep(0.5)
+        self.strength_spin.setToolTip(
+            "How strongly a feature must stand out from what the other ROIs of the array look like (a score; about 1 is the ordinary "
+            "pixel-to-pixel scatter, 5 is clearly different). Lower finds fainter features and more false alarms."
+        )
+        self.extent_spin = QDoubleSpinBox(self)
+        self.extent_spin.setRange(1.0, 10.0)
+        self.extent_spin.setDecimals(1)
+        self.extent_spin.setSingleStep(0.5)
+        self.extent_spin.setToolTip(
+            "Where a feature ends: the pixels next to a found feature that reach this score belong to it. Lower makes the features "
+            "bigger (and lets neighbouring ones merge). Never higher than the strength."
+        )
+        self.width_spin = QSpinBox(self)
+        self.width_spin.setRange(4, 60)
+        self.width_spin.setSuffix(" px")
+        self.width_spin.setToolTip("Features wider than this are not small and are left alone (the sample disk is about 34 px across).")
+        self.margin_spin = QSpinBox(self)
+        self.margin_spin.setRange(0, 10)
+        self.margin_spin.setSuffix(" px")
+        self.margin_spin.setToolTip("The mask is the feature grown by this much (the edges of a feature are blurred by the optics).")
+        self.share_spin = QSpinBox(self)
+        self.share_spin.setRange(5, 100)
+        self.share_spin.setSuffix(" %")
+        self.share_spin.setToolTip(
+            "A ROI whose features would cover more than this share of its sample disk or its reference ring is left unmasked (too "
+            "little would be left to measure with). The status line lists it."
+        )
+        self.reset_button = QPushButton("Defaults", self)
+        self.reset_button.setToolTip("Put the five numbers back to their starting values.")
+        for spin in (self.strength_spin, self.extent_spin, self.width_spin, self.margin_spin, self.share_spin):
+            spin.setKeyboardTracking(False)
+        self._set_defaults(defaults)
+        form = QFormLayout(self)
+        form.setContentsMargins(10, 8, 10, 8)
+        form.setSpacing(6)
+        form.addRow("Strength", self.strength_spin)
+        form.addRow("Extent", self.extent_spin)
+        form.addRow("Largest feature", self.width_spin)
+        form.addRow("Margin", self.margin_spin)
+        form.addRow("Skip ROIs above", self.share_spin)
+        form.addRow(self.reset_button)
+        for spin in (self.strength_spin, self.extent_spin):
+            spin.valueChanged.connect(lambda _v: self.changed.emit())
+        for spin in (self.width_spin, self.margin_spin, self.share_spin):
+            spin.valueChanged.connect(lambda _v: self.changed.emit())
+        self.reset_button.clicked.connect(lambda: self._set_defaults(FeatureParams()))
+
+    def _set_defaults(self, defaults: FeatureParams) -> None:
+        self.strength_spin.setValue(defaults.strength)
+        self.extent_spin.setValue(defaults.extent)
+        self.width_spin.setValue(int(defaults.max_width_px))
+        self.margin_spin.setValue(int(defaults.margin_px))
+        self.share_spin.setValue(int(round(defaults.max_share * 100.0)))
+
+    def params(self) -> FeatureParams:
+        return FeatureParams(
+            strength=float(self.strength_spin.value()),
+            extent=float(self.extent_spin.value()),
+            max_width_px=float(self.width_spin.value()),
+            margin_px=int(self.margin_spin.value()),
+            max_share=self.share_spin.value() / 100.0,
+        )
+
+
+def _ids_text(ids: tuple[int, ...], limit: int = 8) -> str:
+    shown = ", ".join(str(i) for i in ids[:limit])
+    return shown + (f" and {len(ids) - limit} more" if len(ids) > limit else "")
+
+
+class RoiFeaturesEditPanel(QWidget):
+    """The ROI features tool: eye, settings, Process, Apply (2026-10-29).
+
+    Screen purpose: find the small features (dust, scratches, notches at the rim) that lie on the sample disks or reference rings of
+    the ROIs, look at them on the image, and add them to the mask. Layout (one row, like the other tools):
+
+        [eye] [settings v] [process] [apply +]
+
+    - **eye**: show or hide the found pixels on the image (the one switch of the three other tools too).
+    - **settings**: strength, extent, largest feature, margin and the share of a ROI above which it is left out (a popup; its tooltip
+      always shows the numbers). Remembered.
+    - **process**: look at the image on screen. Off the GUI thread (`RoiFeatureTask`); progress and Cancel are in the status bar.
+      A second run with other numbers on the same image takes a fraction of the first (the fit is kept).
+    - **apply**: add the found pixels to the mask in effect at this frame, at the scope the State group says (Persistent or
+      Individual), in one mask change, cut to the area selection if there is one. Like the other tools' Add it is not on the undo
+      stack (mask edits are not, see `MaskModule`'s docstring). Enabled only while the image on screen is the one the result was made
+      for; the tooltip says why it is not.
+
+    The finder looks at the picture only, never at the mask, so what it finds does not change when the mask is edited."""
+
+    def __init__(
+        self,
+        mask: MaskModule,
+        chromatic: ChromaticModule,
+        dataset: DatasetModule,
+        image_panel: ImagePanel,
+        mask_scope: MaskScopeModule,
+        preview: MaskEditPreview,
+        features: RoiFeatureTask,
+        status: Callable[[str], None],
+        parent: QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self._features = features
+        self._dataset = dataset
+        self._status = status
+        self._editor = MaskCandidateEditor(mask, chromatic, dataset, image_panel, mask_scope, preview, status)
+
+        self._toggle = EditPreviewToggle(preview, self)
+
+        # The numbers are in a popup: the Mask ribbon row is already ~800 px wide.
+        self._pop = _FeatureParamsPopover(self)
+        self._settings_button = QToolButton(self)
+        self._settings_button.setAutoRaise(True)
+        self._process_button = action_button(self, "player-play", _PLAIN_ICON_COLOR, "")
+        self._process_button.clicked.connect(self.start)
+        self._settings_button.setFixedSize(self._process_button.size())
+        self._settings_button.setIconSize(self._process_button.iconSize())
+        self._settings_button.setStyleSheet(self._process_button.styleSheet())
+        self._settings_button.setIcon(disabled_safe_icon("settings", _PLAIN_ICON_COLOR))
+        self._settings_button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        menu = QMenu(self._settings_button)
+        action = QWidgetAction(menu)
+        action.setDefaultWidget(self._pop)
+        menu.addAction(action)
+        self._settings_button.setMenu(menu)
+        self._pop.changed.connect(self._refresh_state)
+
+        self._apply_button = action_button(self, "square-rounded-plus", ADD_COLOR, "")
+        self._apply_button.clicked.connect(self.apply)
+
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(2)
+        layout.addWidget(self._toggle)
+        layout.addWidget(self._settings_button)
+        layout.addWidget(self._process_button)
+        layout.addWidget(self._apply_button)
+        layout.addStretch(1)
+
+        features.running_changed.connect(lambda _running: self._refresh_state())
+        features.result_changed.connect(self._refresh_state)
+        features.completed.connect(self._on_completed)
+        features.failed.connect(status)
+        features.cancelled.connect(lambda: status("ROI features cancelled; nothing was changed."))
+        self._frame_state: tuple[bool, bool] = (False, False)  # (an image is shown, the result belongs to it) at the last full refresh
+        image_panel.image_rendered.connect(self._on_frame_changed)
+        image_panel.image_cleared.connect(self._on_frame_changed)
+        dataset.dataset_loaded.connect(lambda _ds: self._refresh_state())
+        dataset.dataset_cleared.connect(self._refresh_state)
+        self._refresh_state()
+
+    # -- remembered state ---------------------------------------------------------------------------------
+
+    def bind_ui_state(self, store) -> None:
+        """Remember the five numbers across restarts (`panels/ui_state.py`)."""
+        store.bind("image/mask_features/strength", self._pop.strength_spin)
+        store.bind("image/mask_features/extent", self._pop.extent_spin)
+        store.bind("image/mask_features/max_width_px", self._pop.width_spin)
+        store.bind("image/mask_features/margin_px", self._pop.margin_spin)
+        store.bind("image/mask_features/max_share_percent", self._pop.share_spin)
+
+    def refresh_theme(self) -> None:
+        self._toggle.refresh_theme()
+
+    def params(self) -> FeatureParams:
+        """The numbers the popup holds now."""
+        return self._pop.params()
+
+    # -- the buttons ----------------------------------------------------------------------------------------
+
+    def start(self) -> None:
+        """Process the image on screen with the numbers shown (the button's action; also callable by tests)."""
+        frame = self._editor.frame()
+        if frame is None or self._features.is_running():
+            return
+        self._status("Looking for small features on the ROIs of this image... (progress and Cancel in the status bar)")
+        self._features.start(frame, self.params())
+
+    def apply(self) -> None:
+        """Add the found pixels to the mask (the button's action; also callable by tests)."""
+        if self._features.pixels_for(self._editor.frame()) is None:
+            return
+        self._editor.apply(KIND_ROI_FEATURES, subtract=False, done=self._refresh_state)
+
+    # -- state ------------------------------------------------------------------------------------------------
+
+    def _on_frame_changed(self, *_args: object) -> None:
+        """An image was rendered (every step of Play): O(1) unless the answer to "is there an image, and is the result its own" changed
+        - the tooltips and button states are rebuilt only then."""
+        frame = self._editor.frame()
+        if (frame is not None, self._features.pixels_for(frame) is not None) != self._frame_state:
+            self._refresh_state()
+
+    def _refresh_state(self, *_args: object) -> None:
+        frame = self._editor.frame()
+        running = self._features.is_running()
+        loaded = frame is not None
+        result = self._features.result()
+        shown = self._features.pixels_for(frame)
+        self._frame_state = (loaded, shown is not None)
+        self._process_button.setEnabled(loaded and not running)
+        self._settings_button.setEnabled(not running)
+        self._apply_button.setEnabled(shown is not None and not running)
+        params = self.params()
+        self._settings_button.setToolTip(
+            f"ROI feature settings: strength {params.strength:.1f}, extent {params.extent:.1f}, largest {params.max_width_px:.0f} px, "
+            f"margin {params.margin_px} px, skip ROIs above {params.max_share * 100:.0f} %. Click to change."
+        )
+        process_tip = (
+            "Find the small features (dust, scratches, notches at the rim) on the sample disks and reference rings of all ROIs of "
+            "this image. It looks at the picture only, takes a few seconds and changes no mask; progress and Cancel are in the status bar."
+        )
+        if not loaded:
+            process_tip += "\nShow an image first."
+        if running:
+            process_tip += "\nIt is running."
+        elif result is not None and result.params != params:
+            process_tip += "\nThe settings changed since the last run: press to update the result."
+        self._process_button.setToolTip(process_tip)
+        if shown is not None:
+            count = int(shown.sum())
+            self._apply_button.setToolTip(
+                f"Add the {count:,} pixels found ({sum(f.features for f in result.findings)} features on {len(result.findings)} ROIs) "
+                "to the mask, at the scope chosen under State (Persistent or Individual)."
+            )
+        elif result is not None:
+            cube, wavelength = result.frame
+            self._apply_button.setToolTip(
+                f"The features were found on cube {cube}, {wavelength:g} nm. Go back to that image to add them, or press Process here."
+            )
+        else:
+            self._apply_button.setToolTip("Nothing to add yet: press Process first.")
+
+    def _on_completed(self, summary: FeatureSummary) -> None:
+        if summary.features == 0:
+            text = f"ROI features: no features found on the {summary.rois_judged} ROIs compared ({summary.seconds:.1f} s)."
+        else:
+            text = (
+                f"ROI features: {summary.features} features on {summary.rois_with_features} of {summary.rois_judged} ROIs "
+                f"({summary.pixels:,} px, {summary.seconds:.1f} s{', fit reused' if summary.fit_kept else ''}). "
+            )
+            if summary.left_out:
+                text += f"ROIs {_ids_text(summary.left_out)} left out (more than the set share of the disk or ring would go). "
+            text += "The eye shows them; the + button adds them to the mask."
+        self._status(text)
+
+
+class EraserEditPanel(QWidget):
+    """The Eraser's row (2026-10-29): nothing to set, so one passive "click on the image" icon whose tooltip says what the tool does.
+
+    The tool itself is not here: while it is picked and the Mask tab is open, a left click on the image goes to
+    `MaskGrainEraser.erase_at` (`CanvasInteraction`, which also shows a cross cursor). Screen purpose: remove one blob of the mask by
+    clicking it. Main action: click a masked pixel. States: armed (this row is shown and the Mask tab is open) / not. Error messages
+    (status line): no mask pixel under the click; the click is outside the area selection."""
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._hint = QLabel(self)
+        self._hint.setFixedSize(BUTTON_SIZE, BUTTON_SIZE)
+        self._hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._hint.setToolTip(
+            "Eraser: click a mask pixel on the image and the whole blob of connected mask pixels (a grain; touching at a corner "
+            "counts) leaves the mask. It acts at the scope chosen under State (Persistent or Individual) and stays inside the area "
+            "selection, if there is one."
+        )
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(2)
+        layout.addWidget(self._hint)
+        layout.addStretch(1)
+        self.refresh_theme()
+
+    def refresh_theme(self) -> None:
+        icon = load_tabler_icon("pointer", color=get_active_theme().text_dim, size=ICON_SIZE * 2, stroke_width=2.1)
+        self._hint.setPixmap(icon.pixmap(ICON_SIZE, ICON_SIZE))
 
 
 class DrawEditPanel(QWidget):

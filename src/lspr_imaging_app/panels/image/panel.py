@@ -142,6 +142,7 @@ from ...image_tools.mask.mask_pointers import MaskPointersModule
 from ...image_tools.mask_auto_task import MaskAutoTask
 from ...image_tools.mask_export_task import MaskExportTask
 from ...image_tools.mask_scan_task import TransientScanTask
+from ...image_tools.roi_feature_task import RoiFeatureTask
 from ...storage.session_carry_task import SessionCarry
 from ...roi.array_task import ArrayAction
 from ...roi.display_style import RoiDisplayStyle
@@ -158,6 +159,7 @@ from .frame_tools import FrameToolsState, FrameToolsWidget
 from .general_group import AreaSelectionPicker, style_general_icon_button
 from .image_controls import ImageViewBox, controls_text
 from .interaction import CanvasInteraction
+from .edit_preview_layer import EditPreviewLayer
 from .mask_tab import MaskTab
 from .measure_controls import MeasureCalibrationControls
 from .measure_line_tool import MeasureLineTool
@@ -179,6 +181,7 @@ from .tuning_tab import TuningTab
 from .export_tab import ExportTab
 from ...storage.ui_state_keys import (
     IMAGE_CURSOR_READOUT,
+    IMAGE_MASK_EDIT_PREVIEW,
     IMAGE_MASK_EDIT_TOOL,
     IMAGE_OVERLAY_CACHE_MB,
     IMAGE_ROI_LABELS,
@@ -262,6 +265,7 @@ def _count_phrase(count: int, noun: str) -> str:
 _ROLE_WORDS = {ROLE_DARK: ("dark", "Dark background"), ROLE_REFERENCE: ("reference", "Reference"), ROLE_IGNORED: ("ignored", "Ignored")}
 _WIDEST_ROLE_WORD = max((word for _color, word in _ROLE_WORDS.values()), key=len)
 _WIDEST_FRAME_TIME = "00:00:00.00"  # H:MM:SS.ss with a two-digit hour (the dock measures every digit as the widest)
+MASK_TAB = "Mask"  # ribbon tab label; the edit preview (the pixels the picked tool would change) is drawn only while it is open
 CHROMATIC_TAB = "Chromatic"  # ribbon tab label (full name "Chromatic Corrections" is its tooltip)
 BACKGROUND_TAB = "Background"  # ribbon tab label; green while background removal is applied
 ANALYSIS_TAB = "Analysis"  # the scan (moved here from the Workflow panel 2026-10-24); its "i" text is live (`info_html`)
@@ -437,6 +441,7 @@ class ImagePanel(QWidget):
         self._transient_scan = transient_scan if transient_scan is not None else TransientScanTask(self._mask_pointers, self)
         self._mask_auto = MaskAutoTask(self._mask, self)  # Mask tab, Auto mask group (pointers -> masks, one undo step)
         self._mask_export = MaskExportTask(self)  # Mask tab, PNG group: export every mask
+        self._roi_features = RoiFeatureTask(geometry, background, chromatic, roi_toolbox, dataset, self)  # Mask tab, Manual edit: ROI features
         self._array_action = ArrayAction(self)  # ROIs tab, Array group (panels/image/array_actions.py)
         # Persistent / Individual ROI edit scope, shared with the ROI table (optional so tests build the panel alone).
         self._roi_scope = roi_scope if roi_scope is not None else RoiScopeModule(self)
@@ -527,6 +532,7 @@ class ImagePanel(QWidget):
             app.aboutToQuit.connect(self._transient_scan.shutdown)
             app.aboutToQuit.connect(self._mask_export.shutdown)
             app.aboutToQuit.connect(self._mask_auto.shutdown)
+            app.aboutToQuit.connect(self._roi_features.shutdown)
             app.aboutToQuit.connect(self._array_action.shutdown)
 
         self._redraw_timer = QTimer(self)
@@ -564,6 +570,9 @@ class ImagePanel(QWidget):
         except ValueError:  # nothing saved yet, or a tool that no longer exists
             pass
         self._mask_tab.edit_tool.tool_changed.connect(lambda tool: store.set(IMAGE_MASK_EDIT_TOOL.key, tool.value))
+        edit_preview = self._mask_tab.edit_preview
+        edit_preview.set_shown(read(store, IMAGE_MASK_EDIT_PREVIEW) is not False)
+        edit_preview.shown_changed.connect(lambda on: store.set(IMAGE_MASK_EDIT_PREVIEW.key, bool(on)))
         saved_color = QColor(str(store.get(IMAGE_SCALE_BAR_COLOR.key) or ""))
         if saved_color.isValid():
             self._scale_bar_item.set_color(saved_color)
@@ -607,6 +616,7 @@ class ImagePanel(QWidget):
         store.bind("view/source_chunk_grid", self._view_tab.chunk_grid_controls)
         self._mask_tab.scan_controls.bind_ui_state(store)
         self._mask_tab.auto_controls.bind_ui_state(store)
+        self._mask_tab.features_panel.bind_ui_state(store)
         self._on_group_labels_changed()
         saved_scope = store.get(ROI_SCOPE.key)
         if saved_scope in ("persistent", "individual"):
@@ -643,6 +653,20 @@ class ImagePanel(QWidget):
     def mask_auto(self) -> MaskAutoTask:
         """The Auto mask task (the app shell connects it to the task indicator)."""
         return self._mask_auto
+
+    def _eraser_armed(self) -> bool:
+        """The Mask tab is the open ribbon tab and its Eraser is the picked tool: a left click on the image erases the blob under it."""
+        mask_tab = getattr(self, "_mask_tab", None)  # the tab is built after the canvas router that asks
+        return (
+            mask_tab is not None
+            and self._tool_ribbon.current_category() == MASK_TAB
+            and mask_tab.edit_tool.tool() is MaskEditTool.ERASER
+        )
+
+    @property
+    def roi_features(self) -> RoiFeatureTask:
+        """The ROI features task (the app shell connects it to the task indicator)."""
+        return self._roi_features
 
     @property
     def array_action(self) -> ArrayAction:
@@ -731,6 +755,13 @@ class ImagePanel(QWidget):
         # shape as `_mask_tint.item` just above, a separate item so the
         # two tints can be shown/hidden/recolored independently.
         self._highlight_tint.attach(self._plot)
+
+        # The Mask tab's edit preview (2026-10-29): the pixels the picked tool would select or change, one more tint above
+        # the two above and below the ROI curves. Fed by `MaskTab.edit_preview`, which exists once the tab is built.
+        self._edit_preview_layer = EditPreviewLayer(
+            self._plot, self._geometry, self._area_selection,
+            hidden=lambda: self._active_tool.active() in _PREVIEW_TOOLS,
+        )
 
         # The ROI circles, reference rings, selection highlight and labels (roi_overlay.py).
         # How they are drawn is the "ROIs" ribbon tab (`roi_overlay_controls.py`); display-only:
@@ -888,6 +919,8 @@ class ImagePanel(QWidget):
             to_reference=self._display_to_reference,
             analysis_running=self._analysis_running,
             notify=self._on_tool_status,
+            eraser_armed=self._eraser_armed,
+            erase_at=lambda x, y: self._mask_tab.grain_eraser.erase_at(x, y),
         )
         scene.sigMouseClicked.connect(self._on_scene_clicked)
         scene.sigMouseMoved.connect(self._on_scene_moved)
@@ -918,11 +951,12 @@ class ImagePanel(QWidget):
             self._mask, self._geometry, self._chromatic, self._dataset, self._highlight_range,
             self._mask_scope, self._mask_tint, self, self,
             events=self._mask_pointers, scan=self._transient_scan, auto=self._mask_auto, export=self._mask_export,
-            status=self._on_tool_status, visible_cubes=self._visible_cube_range,
+            features=self._roi_features, status=self._on_tool_status, visible_cubes=self._visible_cube_range,
         )
         self._mask_tab.overlay_visibility_changed.connect(self._on_mask_overlay_visibility_changed)
         self._mask_tab.overlay_color_changed.connect(self._on_mask_overlay_color_changed)
         self._mask_tab.overlay_alpha_changed.connect(self._on_mask_overlay_alpha_changed)
+        self._edit_preview_layer.set_preview(self._mask_tab.edit_preview)
         return self._mask_tab
 
     def _build_roi_tab(self) -> QWidget:
@@ -1027,7 +1061,7 @@ class ImagePanel(QWidget):
         self._tool_ribbon = ImageToolRibbon(
             [
                 ("Image tools", image_tools_content),
-                ("Mask", mask_content),
+                (MASK_TAB, mask_content),
                 (ROI_TAB, roi_content),
                 # Empty on purpose (2026-10-03): filled directly here, not in
                 # the Workflow panel (maintainer's plan for chromatic correction).
@@ -1044,6 +1078,10 @@ class ImagePanel(QWidget):
             restored = VIEW_TAB if self._initial_ribbon_category == "Histogram" else self._initial_ribbon_category
             self._tool_ribbon.set_category(restored)  # before the connect: restoring is not a user change
         self._tool_ribbon.category_changed.connect(self.ribbon_category_changed)
+        # The Mask tab's edit preview is drawn only while that tab is the open one.
+        edit_preview = self._mask_tab.edit_preview
+        edit_preview.set_tab_active(self._tool_ribbon.current_category() == MASK_TAB)
+        self._tool_ribbon.category_changed.connect(lambda label: edit_preview.set_tab_active(label == MASK_TAB))
         self._tool_ribbon.category_changed.connect(lambda _label: self._show_current_tab())  # a tab scrolled half out of view comes into view
         self._tool_ribbon.category_changed.connect(lambda _label: self._refresh_tool_info(self._active_tool.active()))
         # Short tab label, full name in the tooltip; the tab is green while the correction is applied.
@@ -1334,6 +1372,11 @@ class ImagePanel(QWidget):
         self._update_chromatic_tab_state()
         self._background.background_model_changed.connect(self._update_background_tab_state)
         self._update_background_tab_state()
+        # What the ROI features tool found describes the picture and the ROIs as they were: any change of them drops it (O(1)).
+        self._geometry.geometry_changed.connect(self._roi_features.forget_result)
+        self._background.background_model_changed.connect(self._roi_features.forget_result)
+        self._chromatic.chromatic_model_changed.connect(self._roi_features.forget_result)
+        self._roi_toolbox.geometry_changed.connect(self._roi_features.forget_result)
 
         # ROI/selection changes normally only move the overlay, never the pixels, so they take the overlay-only
         # redraw (`_schedule_roi_redraw`, 2026-10-21 - the optimization this comment used to defer "until there is
@@ -1491,6 +1534,7 @@ class ImagePanel(QWidget):
         otherwise go on into the new dataset and install its result in the new session)."""
         self._transient_scan.invalidate()
         self._mask_auto.invalidate()
+        self._roi_features.invalidate()
 
     def _on_dataset_loaded(self, _dataset: object) -> None:
         self._stop_dataset_bound_tasks()
@@ -1997,6 +2041,7 @@ class ImagePanel(QWidget):
             self._update_mask_overlay(None, None, None, hidden=True)
             self._current_display_image = None
             self._highlight_tint.item.hide()
+            self._edit_preview_layer.refresh()
             return
         cube_index = self._current_cube()
         wavelength_nm = self._current_wavelength()
@@ -2065,6 +2110,7 @@ class ImagePanel(QWidget):
         # for, so it hides then, the same "wrong coordinate space" reasoning
         # `_draw_overlays` already applies to the ROI overlay.
         self._update_mask_overlay(authored_mask, geometry, warp_affine, hidden=preview_active)
+        self._edit_preview_layer.refresh()  # a geometry change moves where the previewed raw pixels land
         self._playback_stats.note_detail("mask", time.perf_counter() - mask_started)
 
     def _play_config_fields(self) -> dict[str, float | int | bool]:
@@ -2119,6 +2165,7 @@ class ImagePanel(QWidget):
 
     def _on_playback_changed(self, playing: bool) -> None:
         self._apply_play_outline()
+        self._mask_tab.edit_preview.set_playing(playing)  # no preview is computed for frames that fly past
         self.playback_changed.emit(playing)
         stats = self._playback_stats
         self._redraw_timer.setInterval(_REDRAW_COALESCE_PLAYING_MS if playing else _REDRAW_COALESCE_MS)

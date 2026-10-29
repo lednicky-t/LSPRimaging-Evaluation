@@ -1,4 +1,4 @@
-"""Five bespoke pictograms for the "Edit" tool picker's menu
+"""Seven pictograms for the "Edit" tool picker's menu
 (`mask_edit_tool_picker.py`) - one per `MaskEditTool` member, each meant to
 show *what the tool does* at a glance, not just label it.
 
@@ -200,8 +200,37 @@ def morphology_icon() -> QIcon:
 
 
 @functools.lru_cache(maxsize=None)
+def roi_features_icon() -> QIcon:
+    """A ROI as it is drawn on the image - a solid disk inside a dashed reference ring - with two small coloured spots, one on the
+    disk and one on the ring: "what is found on top of the ROI" (the ROI features tool, 2026-10-29). The spots are in the colour
+    every icon of this picker uses for "the region a tool would add"."""
+    pixmap = QPixmap(_RENDER_SIZE, _RENDER_SIZE)
+    painter = _new_painter(pixmap)
+    centre = _DESIGN_SIZE / 2.0
+    ring = QPen(QColor(_MUTED), 1.4)
+    ring.setStyle(Qt.PenStyle.DashLine)
+    painter.setPen(ring)
+    painter.setBrush(Qt.BrushStyle.NoBrush)
+    painter.drawEllipse(QRectF(2.0, 2.0, 20.0, 20.0))
+    painter.setPen(Qt.PenStyle.NoPen)
+    painter.setBrush(QColor(_MUTED))
+    painter.drawEllipse(QRectF(centre - 5.5, centre - 5.5, 11.0, 11.0))
+    painter.setBrush(QColor(_SELECTED))
+    painter.drawEllipse(QRectF(centre + 0.5, centre - 4.5, 4.0, 4.0))  # a spot on the disk
+    painter.drawEllipse(QRectF(centre - 8.0, centre + 5.0, 3.5, 3.5))  # and one on the ring
+    painter.end()
+    return QIcon(pixmap)
+
+
+@functools.lru_cache(maxsize=None)
 def draw_icon() -> QIcon:
     """Plain pencil - the one tool kind with an obvious, already-vendored
     Tabler equivalent (`icon_assets/pencil.svg`), so this wraps
     `load_tabler_icon` instead of hand-painting, unlike the other four."""
     return load_tabler_icon("pencil", color=_MUTED, size=_RENDER_SIZE, stroke_width=2.0)
+
+
+@functools.lru_cache(maxsize=None)
+def eraser_icon() -> QIcon:
+    """Plain eraser (2026-10-29) - like `draw_icon`, the vendored Tabler shape (`icon_assets/eraser.svg`) says it all."""
+    return load_tabler_icon("eraser", color=_MUTED, size=_RENDER_SIZE, stroke_width=2.0)

@@ -92,6 +92,8 @@ class CanvasInteraction:
         to_reference: Callable[[float, float], tuple[float, float]],
         analysis_running: Callable[[], bool],
         notify: Callable[[str], None],
+        eraser_armed: Callable[[], bool] | None = None,
+        erase_at: Callable[[float, float], object] | None = None,
     ) -> None:
         self._plot = plot
         self._view = view
@@ -112,6 +114,9 @@ class CanvasInteraction:
         self._to_reference = to_reference
         self._analysis_running = analysis_running
         self._notify = notify
+        self._eraser_armed = eraser_armed or (lambda: False)  # the Mask tab is open and its Eraser is picked
+        self._erase_at = erase_at
+        self._eraser_cursor = False  # whether the cursor on the canvas is the Eraser's cross
         self._roi_cursor: Qt.CursorShape | None | object = _NO_CURSOR_YET  # what the ROI hover last set
 
     def handle_key(self, key: int, modifiers: Qt.KeyboardModifier) -> bool:
@@ -137,12 +142,23 @@ class CanvasInteraction:
 
     def on_scene_moved(self, scene_pos: object) -> None:
         if self._roi_gestures_enabled():
+            self._eraser_cursor = False  # the ROI hover sets (or clears) the cursor from here on
             self._update_roi_hover_cursor(scene_pos)
             return
         if self._roi_cursor is not _NO_CURSOR_YET:  # left the ROI gestures: drop the cursor they set
             self._roi_cursor = _NO_CURSOR_YET
             self._set_view_cursor(None)
         tool = self._active_tool.active()
+        if tool is None and self._eraser_armed():
+            # A cross over the image: "click a mask pixel". Set when the mouse moves, dropped when it stops being armed.
+            cross = self._in_view(scene_pos)
+            if cross != self._eraser_cursor:
+                self._eraser_cursor = cross
+                self._set_view_cursor(Qt.CursorShape.CrossCursor if cross else None)
+            return
+        if self._eraser_cursor:
+            self._eraser_cursor = False
+            self._set_view_cursor(None)
         rotate_pending = self._rotate_tool.first_point() is not None
         measure_pending = self._measure_tool.first_point() is not None
         # Cheap early-out: this fires on every mouse move over the scene, and with no tool
@@ -187,6 +203,8 @@ class CanvasInteraction:
         handler = handlers.get(tool) if tool is not None else None
         if handler is not None:
             handler(scene_pos, button)
+        elif tool is None and self._erase_at is not None and self._eraser_armed():
+            self._click_erase(scene_pos, button)
         else:
             self._click_select(event, scene_pos, button)
 
@@ -233,6 +251,18 @@ class CanvasInteraction:
                 self._roi_toolbox.add_roi(float(p.x()), float(p.y()))
         elif button == Qt.MouseButton.RightButton:
             self._show_add_roi_context_menu(scene_pos)
+
+    def _click_erase(self, scene_pos: object, button: object) -> None:
+        """Mask tab with the Eraser picked: a left click on the image removes the blob of mask pixels under it. It does not also select
+        the ROI under the cursor (the click belongs to the Eraser); the other buttons are left to the menus below as before."""
+        if button == Qt.MouseButton.LeftButton:
+            if self._in_view(scene_pos):
+                point = self._plot.vb.mapSceneToView(scene_pos)
+                assert self._erase_at is not None
+                self._erase_at(float(point.x()), float(point.y()))
+            return
+        if button == Qt.MouseButton.RightButton and self._point_in_selection(scene_pos):
+            self._context_menu([], scene_pos)  # the plain Invert/Deselect menu, as with no tool
 
     def _click_select(self, event: object, scene_pos: object, button: object) -> None:
         """No tool active: select the ROI under the cursor. On the ROIs tab a
