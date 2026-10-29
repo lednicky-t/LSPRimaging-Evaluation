@@ -190,6 +190,10 @@ Nothing needs the old app. Version **0.3.0**. UI scale, shortcuts dialog and wor
 - Tools: `tools/array_lab.py` (measured the removed array-geometry code; results are in `array_spot_size_scan_2026-10-20.md`) and `tools/detect_spectral_outliers.py` (read the retired `measurement_backup.h5`; findings in `spectral_outlier_detection_investigation.md`) removed; both are in git history. Umbrella `tools/dark_frame_analysis.py` now imports the rewrite's loader.
 - Packaging: `LSPRImaging.spec`, the app's `requirements.txt` (audit D6) and the old-app `TODO.md` removed; `lucide` dropped from `pyproject.toml` (only the old window imported it).
 
+### Verification (2026-10-29)
+
+All 200 remaining LSPRi test files plus the 2 launcher test files, one pytest process per file: **3,662 passed, 1 skipped, 609 subtests passed, 1 failed**. The one failure, `test_lspri_workflow_panel_subsection_restore.py`, **already failed before the cut-over** (all 6 tests in it): they used the Workflow panel's Analysis subsections "ROI's math" and "Statistics", which were removed on 2026-10-24 when the Analysis tab moved into the Image panel. The panel is unchanged by the cut-over apart from the deleted orphan `form_rows.py`. The tests now use the two nested sections that exist (Dataset: "Summary", "Experimental plan"); 6 passed after the repair. The umbrella's CI (`python -m unittest discover -s tests`) also runs every other app's tests; those were not run here because nothing outside LSPRi eva and the launcher changed.
+
 ### Phase 2e (old analysis engine): NOT done, needs a decision
 
 Looked at in detail and stopped, for three reasons found only now:
