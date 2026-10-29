@@ -40,6 +40,23 @@ lspr-suite            # suite launcher (recommended entry point)
 
 For VS Code "Run Python File", use [`run.py`](run.py) in this directory.
 
+## The rewrite (in development)
+
+LSPRi Evaluation is being rebuilt from scratch on the `rewrite` branch. The app
+described above keeps working until the rewrite replaces it, so the rewrite has
+its own entry point:
+
+```powershell
+lspri-evaluation-rewrite                    # console script
+python apps/LSPRi/eva/src/main_rewrite.py   # same, with the launch screen
+```
+
+`run.py` and `lspri-evaluation` still start the **old** app. What the rewrite
+can do today, the rules for working on it, and the open decisions are in
+[`CLAUDE.md`](CLAUDE.md); every design record and measurement is indexed in
+[`docs/README.md`](docs/README.md). The latest whole-app audit is
+[`docs/whole_app_audit_2026-10-29.md`](docs/whole_app_audit_2026-10-29.md).
+
 ## Data layout
 
 See [`DATA.md`](DATA.md) for where the app looks for dataset folders and
@@ -54,6 +71,9 @@ the umbrella repo's `tests/unit/` folder, not here:
 ```powershell
 python -m pytest tests/unit/test_lspri_*.py
 ```
+
+The Qt and HDF5 tests are in `tests/integration/test_lspri_*.py`. Run those one
+file per pytest process: all files in one process stalls.
 
 ## Further reading
 

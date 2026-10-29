@@ -39,15 +39,14 @@ dependencies = [
     "opencv-python-headless>=5.0,<6",
     "tifffile>=2026.5.15,<2027",
     "lucide>=1.1,<2",
-    # Diagnostic only - see gui/analysis_tasks.py's _sensorgram_metric_task
-    # ("SG cpu freq" debug log line). Soft-imported (falls back to no-op if
-    # missing, mirroring the tifffile/zarrs optional-import pattern below),
-    # but still declared here per this repo's pinning policy: every
-    # dependency gets a floor+ceiling even when the code tolerates its
-    # absence. Added to help root-cause a still-open, previously-observed
-    # mid-run per-cube slowdown (see bulk_analysis_performance_
-    # investigation.md's Follow-up #11 "leading hypothesis: CPU frequency
-    # throttling", never confirmed for lack of exactly this instrumentation).
+    # Soft-imported where it is used (a missing psutil only switches that
+    # feature off, mirroring the tifffile/zarrs optional-import pattern below),
+    # but still declared here per this repo's pinning policy: every dependency
+    # gets a floor+ceiling even when the code tolerates its absence. Rewrite:
+    # analysis/scan.py - the scan's worker processes end by themselves when the
+    # application is gone (a pool kept warm between scans would otherwise stay
+    # as idle processes); without psutil there is no such watch. Old app: a
+    # CPU-frequency debug line in gui/analysis_tasks.py.
     "psutil>=7.2,<8",
     # Resolves the shared per-user suite config directory for the rewrite's
     # app-level settings file (storage/app_settings.py) - same convention
@@ -65,7 +64,7 @@ dependencies = [
     # 3.2.1 vs ~37ms on 3.3.0 for the exact same file. Fixed upstream by
     # zarr-python PR #3004 ("Optimize partial shard reads"), released in 3.3.0.
     "zarr>=3.3,<4",
-    # Rust-backed codec pipeline (see io/dataset.py's _configure_zarr_codec_pipeline).
+    # Rust-backed codec pipeline (see dataset/io.py's _configure_zarr_codec_pipeline).
     # Even with the 3.3.0 fix above, decoding the fetched chunks still happens
     # one-at-a-time by default (codec_pipeline.batch_size=1) - each dispatched
     # through its own asyncio task/thread-pool round trip regardless of chunk
@@ -75,13 +74,12 @@ dependencies = [
     # ~23ms (~7.5x) - verified byte-identical output against the default
     # pipeline. Pre-1.0, so ceiling is next minor per the pinning policy above.
     #
-    # DISABLED as of 2026-09-07 - _configure_zarr_codec_pipeline no longer
-    # activates it (kept installed, and importable for that check, so
-    # re-enabling later is a one-line change once root-caused). A real run
-    # crashed the whole process with Windows STATUS_HEAP_CORRUPTION shortly
-    # after startup's first image load; see the docstring there and
-    # apps/LSPRi/eva/docs/bulk_analysis_performance_investigation.md's
-    # "Follow-up #7" for detail.
+    # ACTIVE: _configure_zarr_codec_pipeline switches zarr to it when the first
+    # OME-Zarr is opened (an import failure falls back to zarr's own pipeline).
+    # It was switched off on 2026-09-07 after a Windows STATUS_HEAP_CORRUPTION
+    # crash and re-enabled on 2026-09-08, once the crash was traced to
+    # QThreadPool workers touching zarr, not to zarrs: see the docstring there
+    # and apps/LSPRi/eva/docs/qthreadpool_zarr_crash_investigation.md.
     "zarrs>=0.2.3,<0.3",
 ]
 

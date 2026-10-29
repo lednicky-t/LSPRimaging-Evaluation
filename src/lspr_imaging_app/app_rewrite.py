@@ -1,24 +1,16 @@
-"""Entry point for the rewrite-preview build (``lspri-evaluation-rewrite``
-console script, ``src/main_rewrite.py``).
+"""Entry point and wiring of the rewrite (``lspri-evaluation-rewrite`` console
+script, ``src/main_rewrite.py``).
 
-**Not the real app.** This exists so the maintainer can open a real window
-and watch the rewrite's module/panel skeleton take shape while it's being
-built, alongside the still-fully-functional stable app (``app.py`` /
-``lspri-evaluation``) - see CLAUDE.md and
-``docs/rewrite_architecture_sketch_2026-09.md``. Every panel currently
-shows an empty placeholder: the modules behind them
-(:mod:`lspr_imaging_app.dataset`, :mod:`lspr_imaging_app.image_tools`,
-:mod:`lspr_imaging_app.roi`, :mod:`lspr_imaging_app.analysis`,
-:mod:`lspr_imaging_app.selection`) construct without error, but every
-method that would actually load data, render an image, or compute anything
-still raises ``NotImplementedError`` - this window exists to prove the
-pieces wire together, not to be used for real evaluation work.
-
-Deliberately skips almost everything ``app.py`` does (startup splash,
-dataset restore flow, panel-layout persistence, window-state restore) -
-none of that exists yet in the new architecture, and reproducing it here
-would just be more code to throw away once the real shell (sketch §7
-"Workflow shell") replaces this file.
+The rewrite is built next to the stable app (``app.py`` / ``lspri-evaluation``,
+which ``run.py`` still starts); CLAUDE.md says what is built, and
+``docs/rewrite_architecture_sketch_2026-09.md`` describes the structure. This
+file creates the modules (:mod:`lspr_imaging_app.dataset`, ``image_tools``,
+``roi``, ``analysis``, ``selection``, ``plan``, ``storage``), creates the
+panels, and connects them with signals: ``build_main_window`` is the one place
+where that happens. Session restore, autosave, the panel layout and the
+remembered UI state are all wired from here. ``main`` adds logging and the
+QApplication; ``main_rewrite.py`` creates the QApplication and the launch screen
+first, so the screen is up while this module is imported.
 """
 
 from __future__ import annotations

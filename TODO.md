@@ -1,5 +1,7 @@
 # TODO - LSPRimaging Evaluation App
 
+> **Scope (checked 2026-10-29):** every item below describes the **old app** (`gui/`, `io/dataset.py`; started by `run.py` / `lspri-evaluation`). None of it is tracked for the rewrite. Open items of the rewrite are in `CLAUDE.md` ("Where the rewrite stands", "Not built yet") and in the dated design records under `docs/` (index: `docs/README.md`). The old app's files go at the cut-over (`docs/whole_app_audit_2026-10-29.md`), and so do these items unless they are carried over first.
+
 Priority levels: `[high]` `[medium]` `[low]`
 
 ---
