@@ -41,15 +41,21 @@ def entry_text(step: EffectiveStep, prefix: str = "") -> str:
 class StepPicker(QComboBox):
     step_chosen = pyqtSignal(object)  # a step reference, or None
 
-    def __init__(self, none_text: str, parent: QWidget | None = None, *, prefix: str = "") -> None:
+    def __init__(self, none_text: str, parent: QWidget | None = None, *, prefix: str = "", ribbon: bool = True) -> None:
+        """`ribbon`: the frameless, fixed-size look of a ribbon field (sized once for the widest entry it can ever show). False: an ordinary bordered drop-down for a pop-up
+        panel, as wide as its widest entry (the owner lays it out)."""
         super().__init__(parent)
         self._none_text = none_text
         self._prefix = prefix
+        self._ribbon = ribbon
         self._refs: list[StepRef | None] = [None]
         self.setIconSize(QSize(_SWATCH_PX, _SWATCH_PX))
-        self.addItem(f"{prefix}00 · {'W' * MAX_NOTE_CHARS}")  # the widest entry the picker will ever show: the ribbon look is sized from it, once
-        style_ribbon_combo(self)
-        self.clear()
+        if ribbon:
+            self.addItem(f"{prefix}00 · {'W' * MAX_NOTE_CHARS}")  # the widest entry the picker will ever show: the ribbon look is sized from it, once
+            style_ribbon_combo(self)
+            self.clear()
+        else:
+            self.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToContents)
         self.addItem(none_text)
         self.activated.connect(self._on_activated)
 
@@ -71,6 +77,8 @@ class StepPicker(QComboBox):
 
     def refresh_theme(self) -> None:
         """Re-apply the ribbon look for the active theme, keeping the size it was given at the start (the entries change, the picker's width does not)."""
+        if not self._ribbon:
+            return
         size = self.size()
         style_ribbon_combo(self)
         self.setFixedSize(size)

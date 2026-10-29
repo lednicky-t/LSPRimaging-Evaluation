@@ -4,7 +4,8 @@ The steps come from ``ExperimentPlanModule`` (the dataset's measured steps with 
 
 - the **bar of steps** on the plot and its ribbon group "View" on the Experimental plan tab (`PlanBarControls`), and the bar's gestures (`PlanBarActions`, which edits the module);
   the bar's structure tools (remove, add, unify, the roles) are offered only while that tab is the active one (`set_structure_tools`);
-- the group "Evaluation" (`EvaluationControls`): the pickers of the baseline and the signal step, which write the plan module's roles;
+- the group "Evaluation" (`EvaluationControls`): one icon whose pop-up holds a picker per baseline / signal step of each evaluation pair (B1, S1, B2, S2 ...), which write the plan
+  module's roles; taking the last pair out clears its roles in the module;
 - the **table of mean +/- SD per step** and its ribbon group "Step stats" (`StatsTableControls`);
 - the two inputs the steps add to a Sensorgram request: the **pieces to smooth on their own** ("smooth inside steps") and **which cubes belong to which step** (`step_inputs`).
 
@@ -80,6 +81,7 @@ class StepOverlays(QObject):
         self.stats_controls.set_available(False)
         self.evaluation = EvaluationControls(parent)
         self.evaluation.role_chosen.connect(self._on_role_chosen)
+        self.evaluation.pair_removed.connect(self._on_pair_removed)
         self.actions = None if experiment_plan is None else PlanBarActions(experiment_plan, plot, self.plan_context, self)
         self.set_structure_tools(False)  # until the Experimental plan tab is shown
         self.plan_controls.settings_changed.connect(self.refresh)
@@ -92,6 +94,7 @@ class StepOverlays(QObject):
     def restore_ui_state(self, store: UiStateStore) -> None:
         self.plan_controls.restore_ui_state(store)
         self.stats_controls.restore_ui_state(store)
+        self.evaluation.restore_ui_state(store)
 
     def refresh_theme(self) -> None:
         self.plan_controls.refresh_theme()
@@ -103,12 +106,17 @@ class StepOverlays(QObject):
         if self.actions is not None:
             self.actions.set_structure_tools(active)
 
-    def _on_role_chosen(self, role: str, ref: object) -> None:
-        """The user picked a step in the Evaluation group (or none): the plan module keeps it."""
+    def _on_role_chosen(self, role: str, ref: object, pair: int) -> None:
+        """The user picked a step for a pair's baseline or signal in the Evaluation pop-up (or none): the plan module keeps it."""
         if self._plan is None:
             return
         step = self._plan.step_by_ref(ref) if ref is not None else None
-        self._plan.set_role(role, None if step is None else step.order - 1)
+        self._plan.set_role(role, None if step is None else step.order - 1, pair)
+
+    def _on_pair_removed(self, pair: int) -> None:
+        """The user took the last pair out of the Evaluation pop-up: its roles are cleared in the plan (one undo step)."""
+        if self._plan is not None:
+            self._plan.clear_pair(pair)
 
     # -- what the steps add to a request ------------------------------------------------------------------------------------
 
@@ -203,9 +211,8 @@ class StepOverlays(QObject):
         self.show_stats_table(bars, series, True)
 
     def _show_evaluation(self, steps, colours: list[str] | None) -> None:
-        """The Evaluation pickers: the plan's steps (in the bar's colours when the bar is drawn) and the roles of pair 1."""
-        pair = None if self._plan is None else self._plan.state().pair(1)
-        self.evaluation.set_steps(steps, colours, None if pair is None else pair.baseline, None if pair is None else pair.signal)
+        """The Evaluation pop-up: the plan's steps (in the bar's colours when the bar is drawn) and the roles of every pair."""
+        self.evaluation.set_steps(steps, colours, () if self._plan is None else self._plan.state().pairs)
 
     def show_stats_table(self, bars: Sequence[PlanBarStep], series: list[Series], has_steps: bool) -> None:
         """The table of mean +/- SD per step and line, from the numbers the lines carry (computed with them, in the worker), or none: no steps, nothing drawn, the numbers

@@ -14,7 +14,7 @@ commands below; they keep no step state of their own.
   any other wiring.
 - **Structure and evaluation roles (2026-10-29).** `remove_steps`, `restore_removed`, `unify_steps` and `add_step` change which steps exist (reason ``"structure"``: the bar's
   selection is by index, so a view clears it, and the smoothing pieces and the step statistics are made from the steps, so they are redrawn like after a moved boundary).
-  `set_role` names the baseline or the signal step of an evaluation pair (reason ``"roles"``, cosmetic). **Other panels read the steps and the roles from here**: `steps()` (each
+  `set_role` names the baseline or the signal step of an evaluation pair (reason ``"roles"``, cosmetic); `clear_pair` empties both roles of a pair in one undo step. **Other panels read the steps and the roles from here**: `steps()` (each
   has ``order``, the number the user sees, and ``ref``, which stays the same when steps are added or removed), `step_by_ref`, `baseline_step(pair)` / `signal_step(pair)`, and
   `cubes_of(step)`, the whole cubes of a step. A role whose step is removed is cleared and `notice(text)` says so.
 """
@@ -273,3 +273,8 @@ class ExperimentPlanModule(QObject):
             return False
         label = f"{'Baseline' if role == 'baseline' else 'Signal'} step"
         return self._commit(label, REASON_ROLES, edits.set_role(self._state, pair, role, None if step is None else step.ref))
+
+    @instrumented("ExperimentPlanModule.clear_pair")
+    def clear_pair(self, pair: int) -> bool:
+        """Clear both the baseline and the signal of evaluation pair `pair` as one undo step. False when that pair had nothing set."""
+        return self._commit(f"Remove evaluation pair {pair}", REASON_ROLES, edits.clear_pair(self._state, pair))

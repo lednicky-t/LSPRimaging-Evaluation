@@ -416,3 +416,9 @@ def set_role(state: PlanEditsState, pair_number: int, role: Role, ref: StepRef |
         pairs[pair_number] = pair
     new = tuple(sorted(pairs.values(), key=lambda p: p.number))
     return state if new == state.pairs else replace(state, pairs=new)
+
+
+def clear_pair(state: PlanEditsState, pair_number: int) -> PlanEditsState:
+    """Both roles of pair `pair_number` cleared, so the pair disappears. Returns `state` itself when that pair has nothing set."""
+    new = tuple(p for p in state.pairs if p.number != pair_number)
+    return state if new == state.pairs else replace(state, pairs=new)

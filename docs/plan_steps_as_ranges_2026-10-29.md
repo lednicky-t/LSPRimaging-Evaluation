@@ -102,7 +102,7 @@ are on: Remove step(s), Add step > In front of / Behind this step, Unify selecte
 step table (a `structure` change is a time change).
 
 **P3, the tab.** The Sensorgram's control row is an `ImageToolRibbon` (the Image panel's tabs) with the tabs **Plot** (Live, Statistic, Smoothing, Baseline, View) and **Experimental plan** (View = the plan bar's
-controls, Evaluation = two `StepPicker`s for B1 and S1, Step stats). The structure tools are on only while the Experimental plan tab is shown (`SensorgramPanel._on_ribbon_tab` -> `StepOverlays.set_structure_tools`);
+controls, Evaluation = one icon with a pop-up of step pickers, see "Evaluation pop-up" below, Step stats). The structure tools are on only while the Experimental plan tab is shown (`SensorgramPanel._on_ribbon_tab` -> `StepOverlays.set_structure_tools`);
 select, drag, retype and colour work on every tab, as before. The shown tab is remembered (`sensorgram/ribbon_tab`). `panels/step_picker.py` `StepPicker` is the shared pick-up other panels can use: it lists the
 steps by number, note and colour and reports a step reference.
 
@@ -112,3 +112,21 @@ Tests: `tests/unit/test_lspri_plan_structure.py` (42), `tests/integration/test_l
 lives in `panels/image/` and is now also used by the Sensorgram (a move to `panels/` is a clean-up for later). Unify and Remove act on the selection; Add and the roles on the clicked step only. Not built: more than
 one pair in the UI (the model has them), an evaluation window inside a step (skip the first / last seconds: `step_stats.StepWindow` has it, no UI), the first consumer (ROI position tuning takes `baseline_step()` and
 `signal_step()` and `cubes_of(...)`).
+
+## Evaluation pop-up: several pairs (2026-10-30, uncommitted; the look is unseen by eye)
+
+The maintainer's redesign of the Evaluation group: **one icon** (`panels/sensorgram/evaluation_group.py`, picture `plan_icons.evaluation_picture`: a baseline bar and a signal bar over a stepped trace) that opens a
+pop-up (`QWidgetAction` in a `QMenu`, like the other pick-up menus). The pop-up is a two-column table, the role in column 1 (`B1`, `S1`, `B2`, `S2` ..., the signal's in the accent colour like its chip on the bar), a
+`StepPicker` in column 2 (new `ribbon=False` look: an ordinary bordered drop-down as wide as its widest entry, no `B1:` prefix in the entries), and under it two icons, **+** (adds B*n* + S*n*) and **-** (takes
+the last pair out). Decisions made unasked (change on request):
+
+- **Limits**: 1 pair minimum (B1 + S1 always stay), 8 maximum (`MAX_PAIRS`; 16 rows is already a tall pop-up). Both icons grey out at their limit, the tooltip says why.
+- **How many pairs are shown is UI state**, not plan state: remembered as `sensorgram/eval_pairs` (`ui_state_keys.SENSORGRAM_EVAL_PAIRS`). The plan model still drops a pair with nothing set (unchanged, session schema
+  unchanged), so an empty B2 + S2 exists only on screen. A pair that is *set* in the plan is always shown (the count rises to meet it: a session, an undo, the right-click menu), never the other way round.
+- **"-" on a pair with steps set** clears them with the new `ExperimentPlanModule.clear_pair(n)` (`edits.clear_pair`): one undo step, and Ctrl+Z brings the roles back and the rows with them. It asks nothing, because it is undoable.
+- The pop-up stays open while picking (a QMenu does not close for a widget inside it), and grows or shrinks when a pair is added or removed: a QMenu lays itself out again when one of its actions changes, so
+  `_rebuild` ends with `QAction.setData(<new tick>)`; pinned by `test_an_open_popup_grows_when_a_pair_is_added...`.
+- `StepOverlays` passes every pair of the plan to the pop-up (`_show_evaluation`) and `role_chosen` now carries the pair number. The right-click menu still sets pair 1 only ("Use as baseline (B1)" / "Use as signal (S1)");
+  pairs 2+ are set from the pop-up. Open: a right-click item per pair.
+
+Tests: `tests/integration/test_lspri_evaluation_menu.py` (11, the pop-up on its own), a second-pair test in `test_lspri_plan_bar.py`, `clear_pair` in `test_lspri_plan_structure.py` and `test_lspri_plan_structure_module.py`.

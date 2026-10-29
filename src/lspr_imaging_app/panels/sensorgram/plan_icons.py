@@ -2,7 +2,8 @@
 not vendored icon files (``lspr_ui/ICONS.md``), a plot frame with a bar of steps is not in the icon library.
 
 ``plan_bar_icon`` the toggle: a plot frame with a bar of three steps along its top and a trace under it; ``position_picture`` where the bar sits (top / bottom);
-``text_content_picture`` the whole note or only the solution before the separator; ``align_picture`` what the text position is measured against (the bar, or the data of the step).
+``text_content_picture`` the whole note or only the solution before the separator; ``align_picture`` what the text position is measured against (the bar, or the data of the step);
+``evaluation_picture`` the Evaluation menu (a baseline bar and a signal bar over a stepped trace).
 """
 
 from __future__ import annotations
@@ -68,6 +69,30 @@ def position_picture(kind: str, steps: bool = False) -> PictureFor:
     return _picture(draw_into)
 
 
+def evaluation_picture() -> PictureFor:
+    """The Evaluation menu: a frame with a step in the trace and, above its two levels, two bars: the baseline's neutral, the signal's in the accent colour (as the chips B1 / S1
+    on the plan bar)."""
+
+    def draw_into(painter: QPainter, ink: QColor, theme) -> None:
+        _frame(painter, ink)
+        painter.setPen(Qt.PenStyle.NoPen)
+        baseline = QColor(ink)
+        baseline.setAlpha(120)
+        painter.setBrush(baseline)
+        painter.drawRect(QRectF(3.5, 3.5, 6.0, 3.5))
+        signal = QColor(theme.accent_blue)
+        signal.setAlpha(220)
+        painter.setBrush(signal)
+        painter.drawRect(QRectF(10.5, 3.5, 6.0, 3.5))
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.setPen(_pen(ink, 1.3))
+        painter.drawLine(QPointF(4.5, 14.5), QPointF(9.5, 14.5))
+        painter.drawLine(QPointF(9.5, 14.5), QPointF(9.5, 10.5))
+        painter.drawLine(QPointF(9.5, 10.5), QPointF(15.5, 10.5))
+
+    return _picture(draw_into)
+
+
 def text_content_picture(kind: str) -> PictureFor:
     """Which part of a note is shown: ``whole`` one long line of text, ``solution`` a short solid piece, a divider and the rest faded."""
 
@@ -111,4 +136,4 @@ def align_picture(kind: str) -> PictureFor:
     return _picture(draw_into)
 
 
-__all__ = ["align_picture", "plan_bar_icon", "position_picture", "text_content_picture"]
+__all__ = ["align_picture", "evaluation_picture", "plan_bar_icon", "position_picture", "text_content_picture"]
