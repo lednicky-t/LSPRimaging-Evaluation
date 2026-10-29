@@ -66,13 +66,6 @@ def apply_affine_to_points(points_xy: np.ndarray, affine_matrix: np.ndarray) -> 
     return design @ affine_matrix.T
 
 
-def affine_residuals(source_points_xy: np.ndarray, target_points_xy: np.ndarray, affine_matrix: np.ndarray) -> np.ndarray:
-    """Per-point distance (px) between `affine_matrix @ source` and `target` -- the
-    fit-quality/outlier-rejection metric used throughout this module."""
-    predicted = apply_affine_to_points(source_points_xy, affine_matrix)
-    return np.sqrt(np.sum((predicted - target_points_xy) ** 2, axis=1))
-
-
 def invert_affine_matrix(affine_matrix: np.ndarray) -> np.ndarray:
     """Invert a 2x3 affine matrix (linear part + translation), so
     `apply_affine_to_points(apply_affine_to_points(p, m), invert_affine_matrix(m)) == p`.

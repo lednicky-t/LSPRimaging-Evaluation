@@ -192,10 +192,6 @@ class RoiRemapReport:
     (rectangle/polygon - not a shape any ROI can have today, see
     `_remap_roi_shape`'s docstring) - left entirely at their old position."""
 
-    @property
-    def needs_attention(self) -> bool:
-        return bool(self.mask_shapes_lost or self.unsupported_shapes_skipped)
-
 
 def _highest_group_number(groups: dict[str, AreaRoiGroup]) -> int:
     """The largest `n` among `"group_<n>"` ids, or 0 if there are none.

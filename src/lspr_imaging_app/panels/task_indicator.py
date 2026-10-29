@@ -301,9 +301,6 @@ class TaskIndicator(QWidget):
         )
         self._refresh()
 
-    def running_task_ids(self) -> list[str]:
-        return list(self._running)
-
     def history(self) -> list[TaskRecord]:
         """Finished runs, oldest first (capped)."""
         return list(self._history)

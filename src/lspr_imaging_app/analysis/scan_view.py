@@ -11,7 +11,6 @@ A wavelength without a value (no valid pixel on either side) is left out of the 
 
 from __future__ import annotations
 
-from collections.abc import Sequence
 from dataclasses import dataclass
 
 import numpy as np
@@ -121,9 +120,3 @@ def compute_spectra(stored: StoredScan, request: SpectraRequest) -> list[RoiSpec
             result.note = f"The fit failed: {exc}"
         out.append(result)
     return out
-
-
-def roi_ids_in(stored: StoredScan, roi_ids: Sequence[int]) -> tuple[int, ...]:
-    """The requested ROI ids that are in the file, in the order requested."""
-    known = set(stored.roi_ids)
-    return tuple(r for r in roi_ids if r in known)

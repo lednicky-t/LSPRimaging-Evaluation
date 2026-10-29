@@ -144,16 +144,6 @@ class CollapsibleSection(QWidget):
     def set_expanded(self, expanded: bool) -> None:
         self._toggle.setChecked(expanded)
 
-    def has_apply_toggle(self) -> bool:
-        return self._apply_button is not None
-
-    def is_applied(self) -> bool:
-        return False if self._apply_button is None else self._apply_button.isChecked()
-
-    def set_applied(self, applied: bool) -> None:
-        if self._apply_button is not None:
-            self._apply_button.setChecked(bool(applied))
-
     def refresh_theme(self) -> None:
         """Re-applies theme-dependent styling - call on every
         ``CollapsibleSection`` after a live theme switch, matching

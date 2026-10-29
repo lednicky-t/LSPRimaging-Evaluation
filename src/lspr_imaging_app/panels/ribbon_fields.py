@@ -28,7 +28,7 @@ from __future__ import annotations
 
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QFontMetrics
-from PyQt6.QtWidgets import QAbstractSpinBox, QCheckBox, QComboBox
+from PyQt6.QtWidgets import QAbstractSpinBox, QComboBox
 
 from .ribbon_icon_size import BUTTON_SIZE
 
@@ -70,8 +70,3 @@ def style_ribbon_combo(combo: QComboBox) -> str:
     widest = max((metrics.horizontalAdvance(combo.itemText(i)) for i in range(combo.count())), default=0)
     combo.setFixedSize(widest + _TOTAL_EXTRA_PX, BUTTON_SIZE)
     return style
-
-
-def style_ribbon_check(box: QCheckBox) -> None:
-    """A check box one icon button high (`BUTTON_SIZE`), so the caption of its group sits at the same height as under a field or an icon."""
-    box.setFixedHeight(BUTTON_SIZE)

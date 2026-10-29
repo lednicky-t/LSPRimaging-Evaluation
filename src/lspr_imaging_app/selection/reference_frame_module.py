@@ -71,16 +71,6 @@ class ReferenceFrameModule(QObject):
         not been found yet."""
         return self._auto_wavelengths.get(int(cube_index))
 
-    def auto_wavelengths(self) -> dict[int, float]:
-        """A copy of the per-cube Auto cache."""
-        return dict(self._auto_wavelengths)
-
-    def discard_auto_wavelength(self, cube_index: int) -> None:
-        """Forget a cube's cached best wavelength so it is found again (its
-        frame was ignored or made the dark since it was scored)."""
-        if self._auto_wavelengths.pop(int(cube_index), None) is not None:
-            self.reference_frame_changed.emit()
-
     def set_auto_wavelength(self, cube_index: int, wavelength: float) -> None:
         cube_index, wavelength = int(cube_index), float(wavelength)
         if self._auto_wavelengths.get(cube_index) == wavelength:

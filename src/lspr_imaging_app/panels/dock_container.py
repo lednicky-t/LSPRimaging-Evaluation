@@ -959,13 +959,3 @@ class PanelContainer(QDockWidget):
     def _make_help_icon(theme=None) -> QIcon:
         theme = theme or get_active_theme()
         return _render_tabler_icon("info-circle", theme.text_primary)
-
-    @staticmethod
-    def _make_pin_icon(pinned: bool) -> QIcon:
-        """Not used by this class yet - kept available for the Workflow
-        panel's planned auto-hide-to-strip collapse
-        (``docs/rewrite_gui_shell_design_2026-09.md`` §4), which needs a
-        pin/unpin glyph of exactly this shape."""
-        theme = get_active_theme()
-        color = theme.accent_green if pinned else theme.text_primary
-        return _render_tabler_icon("pin-filled" if pinned else "pin", color)

@@ -122,7 +122,7 @@ Ruff clean; 261 test files import only existing modules and names; all docs, sou
 | D6 | `apps/LSPRi/eva/requirements.txt` | Delete it (the root file already installs the app from `pyproject.toml`), or sync it. I prefer deleting. |
 | D7 | Split `ImagePanel` (B1) | **After D4**; first a short design of the seams. |
 | D8 | Versioning: `version_rewrite.py` still says 0.1.0 after 316 commits since the tag; `CHANGELOG.md` has no rewrite entry | Decide the rewrite's version scheme before the cut-over. |
-| D9 | Advisory tools | **`vulture` run 2026-10-29** (section 7, results below). `RUF100` auto-fix (121 useless `noqa`) still open: low value, touches many files. |
+| D9 | Advisory tools | **`vulture` run 2026-10-29** (section 7, results below); **run again on the new tree and acted on the same day** (cut-over phase 2f: `storage/workspace.py` 1,067 -> 85 lines, 17 unreferenced definitions; `docs/old_generation_cutover_plan_2026-10-29.md`). `RUF100` auto-fix (121 useless `noqa`) still open: low value, touches many files. |
 | D10 | Umbrella-level drift (E6) | Fix root CLAUDE.md (LSPRi acq exists), move or delete `TASK_rotation_fill_handling.md`, refresh or retire the AI briefing. Lands in the umbrella repo. |
 | D11 | Which known performance item (D2) to take up first | Your call; none is urgent. |
 

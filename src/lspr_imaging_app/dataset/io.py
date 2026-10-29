@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import logging
 import re
 import shutil
@@ -160,6 +159,7 @@ def _require_ome_zarr_support():
         ) from exc
     _configure_zarr_codec_pipeline(zarr)
     return zarr, Blosc, _blosc, write_multiscales_metadata
+
 
 _LOGGER = logging.getLogger("lspr_imaging_app.workflow")
 
@@ -479,10 +479,6 @@ def dataset_get_record(dataset: ImageDataset, spectral_cube_index: int, waveleng
         if int(record.key.spectral_cube_index) == int(spectral_cube_index) and float(record.key.wavelength_nm) == float(wavelength_nm):
             return record
     return None
-
-
-def dataset_get_record_map(dataset: ImageDataset) -> dict[tuple[int, float], ImageRecord]:
-    return dataset_record_map(dataset)
 
 
 def dataset_load_plane(dataset: ImageDataset, spectral_cube_index: int, wavelength_nm: float) -> np.ndarray:
@@ -1032,16 +1028,6 @@ def read_plane_pixels(path_str: str, plan: PartialReadPlan) -> np.ndarray | None
     except Exception:  # noqa: BLE001 - a chunk read must never be the only way to get a pixel
         _LOGGER.debug("OME-Zarr partial read failed; the caller reads the whole plane.", exc_info=True)
         return None
-
-
-def _ome_zarr_array_meta(root: Path) -> dict:
-    array_meta_path = _ome_zarr_array_dir(root) / OME_ZARR_ARRAY_META_FILENAME
-    if not array_meta_path.exists():
-        raise FileNotFoundError(f"Missing OME-Zarr array metadata: {array_meta_path}")
-    payload = json.loads(array_meta_path.read_text(encoding="utf-8"))
-    if not isinstance(payload, dict):
-        raise ValueError(f"Invalid OME-Zarr array metadata in {array_meta_path}")
-    return payload
 
 
 def _ome_zarr_plane_path(root: Path, spectral_cube_index: int, wavelength_index: int) -> Path:

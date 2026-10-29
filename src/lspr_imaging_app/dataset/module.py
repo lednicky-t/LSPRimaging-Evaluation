@@ -581,9 +581,6 @@ class DatasetModule(QObject):
 
         self._worker.submit(task)
 
-    def is_exporting(self) -> bool:
-        return self._export_worker.is_running()
-
     @instrumented("DatasetModule.export_to_ome_zarr")
     def export_to_ome_zarr(self, destination: Path, **kwargs: object) -> None:
         """Export the currently loaded dataset to `destination` as OME-Zarr

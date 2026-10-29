@@ -206,9 +206,6 @@ class BackgroundTab(QWidget):
     def view_button(self) -> QToolButton:
         return self._show_button
 
-    def is_background_applied(self) -> bool:
-        return self._apply_button.isChecked()
-
     def refresh_theme(self, _theme: GuiTheme) -> None:
         for button in self._buttons():
             style_general_icon_button(button)

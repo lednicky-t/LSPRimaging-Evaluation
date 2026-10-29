@@ -74,7 +74,7 @@ class ShardWriteSpec:
     """Everything a worker process needs to write one zarr v3 shard.
 
     All fields must be picklable: stdlib types, numpy dtype-as-string, and
-    lspr_imaging_app.domain.models dataclasses (which have no Qt or zarr deps).
+    lspr_imaging_app.dataset.model dataclasses (which have no Qt or zarr deps).
     """
     record_paths: list[str]      # one path per wavelength; '' = missing → fill value in index
     shard_path: str
@@ -91,7 +91,7 @@ class ShardWriteSpec:
     fill_value: float            # 0.0 for integer types, nan for float types
     compression_cname: str | None   # 'lz4', or None to disable compression
     apply_image_tools: bool
-    preprocessing: object | None    # PreprocessingSettings dataclass, or None
+    preprocessing: object | None    # GeometrySettings (image_tools/geometry/model.py), or None
     # Export frame (2026-10-20): source x/y (after image tools) of stored pixel (0, 0). Negative = that many fill
     # columns/rows in front (lossless padding that moves the chunk grid onto the ROIs); positive = trimmed border
     # (lossy). The stored plane is image_height x image_width from there; source pixels outside it are not stored.
@@ -274,9 +274,8 @@ def write_shard(spec: ShardWriteSpec) -> ShardWriteResult:
         _t0 = time.perf_counter()
         source = np.asarray(_load_image(record_path))
 
-        if spec.apply_image_tools and spec.preprocessing is not None and not hasattr(spec.preprocessing, "rotation_fill_dark"):
-            # The rewrite's export passes a GeometrySettings (duck-typed: only the stable app's settings class has
-            # `rotation_fill_dark`). The rotation (Lanczos4) works on the source values and returns float32 with NaN
+        if spec.apply_image_tools and spec.preprocessing is not None:
+            # `spec.preprocessing` is a GeometrySettings. The rotation (Lanczos4) works on the source values and returns float32 with NaN
             # where it created pixels; `_to_stored` then rounds into the stored dtype (2026-10-20: uint16 stays
             # uint16, the NaN pixels are stored as the fill value and listed in the export's `valid_mask`).
             from lspr_imaging_app.image_tools.geometry.transform import (
@@ -295,11 +294,6 @@ def write_shard(spec: ShardWriteSpec) -> ShardWriteResult:
             )
             if plane is None:
                 plane = _to_stored(apply_spatial_preprocessing_export(source, spec.preprocessing), dtype, fill, step)
-        elif spec.apply_image_tools and spec.preprocessing is not None:
-            # The stable app: its own PreprocessingSettings and transform, unchanged.
-            from lspr_imaging_app.processing.preprocess import apply_spatial_preprocessing_export
-
-            plane = np.asarray(apply_spatial_preprocessing_export(np.asarray(source, dtype=dtype), spec.preprocessing), dtype=dtype)
         else:
             plane = np.asarray(source, dtype=dtype)
         plane = _place_in_frame(plane, spec.frame_x0, spec.frame_y0, spec.image_height, spec.image_width, fill)

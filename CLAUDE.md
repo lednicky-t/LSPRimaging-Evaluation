@@ -9,7 +9,7 @@ This file is the authoritative LSPRi rule set. Root rules still apply, except wh
 - `docs/whole_app_audit_2026-10-29.md`: the latest whole-app audit: dead code, what only the old generation still uses (the cut-over inventory), documentation drift, and the decisions still open. Start here for clean-up and cut-over questions.
 - `docs/whole_app_audit_2026-10-07.md`: the earlier audit (where the rewrite stood, section 2b; known issues). Supersedes the 2026-09-30 status doc below, which is out of date. Its dead-file list (D5) is partly done: `mask_settings.py` and `mask_highlight_actions.py` are gone.
 - `docs/README.md`: index of all docs by topic.
-- `docs/old_generation_cutover_plan_2026-10-29.md`: how the old app was replaced by the rewrite (done 2026-10-29: phases 1b and 2a-2e, the old analysis engine included); phase 2f (dead functions in shared modules) is still open.
+- `docs/old_generation_cutover_plan_2026-10-29.md`: how the old app was replaced by the rewrite (done 2026-10-29: phases 1b and 2a-2f: the old generation, the old analysis engine and the dead functions in shared modules). Still open there: phase 3 (renaming the shared `io/`, `processing/`, `gui/` modules; `processing/` now holds only `reference_selection.py`).
 - `docs/rewrite_status_by_feature_2026-10-29.md`: the full per-feature record that used to be the "Where the rewrite stands" section of this file (25 KB, moved verbatim). Search it by feature name; never read it whole.
 - `docs/rewrite_status_and_plan_2026-09-30.md`: the original stage-by-stage plan (history; its "what is built" claims are stale).
 - `docs/spectra_analysis_methods.md`: the maths from the stored scan to the metric (formula, fit window, fit, maximum / centroid), where each is in the code, and what the tests showed. Read it before changing any of those.
@@ -72,7 +72,7 @@ Extracted from the moved paragraphs; the record explains why. Each is a rule, no
 
 ## Where the app starts
 
-There is one app. `src/main.py` (used by `run.py` and the Suite launcher) shows the launch screen and calls `app_rewrite.main` (the console script `lspri-evaluation` calls it directly); `app_rewrite.build_main_window` wires everything. The old `gui/`, `io/dataset.py`, `processing/` (except `preprocess`, `reference_selection`, `roi_detection`) and `app.py` are gone; `gui/`, `io/` and `processing/` still hold a few shared modules under their old names (renaming them is phase 3 of the cut-over plan). Check what is reachable with `python tools/import_reachability.py`.
+There is one app. `src/main.py` (used by `run.py` and the Suite launcher) shows the launch screen and calls `app_rewrite.main` (the console script `lspri-evaluation` calls it directly); `app_rewrite.build_main_window` wires everything. The old `gui/`, `io/dataset.py`, `processing/` (except `reference_selection`), `domain/models.py` and `app.py` are gone; `gui/`, `io/` and `processing/` still hold a few shared modules under their old names (renaming them is phase 3 of the cut-over plan). Check what is reachable with `python tools/import_reachability.py`.
 
 ## Non-negotiable invariants
 
